@@ -1,0 +1,1 @@
+"""Search-stage agent placeholders."""

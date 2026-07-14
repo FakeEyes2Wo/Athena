@@ -1,0 +1,1 @@
+"""Git-native workspace adapters."""

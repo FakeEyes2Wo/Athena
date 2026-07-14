@@ -1,1 +1,52 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments (uv uses .venv by default)
+.venv/
+venv/
+env/
+
+# Python build and packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Node tooling
+node_modules/
+npm-debug.log*
+
+# Project-local generated or private files
 XH-202619.pdf
+/docs/open-design/*
+/data_analyze/*
+!/data_analyze/.gitkeep
+!/data_analyze/EDA.md/
+!/data_analyze/EDA.md/.gitkeep
