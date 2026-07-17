@@ -5,6 +5,11 @@ description = "Skeleton for the Athena automated AI4S system."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "langchain>=1.3.14",
+    "langchain-anthropic>=1.4.8",
+    "langchain-core>=1.4.9",
+    "langchain-openai>=1.3.5",
+    "langgraph>=1.2.9",
     "pydantic>=2.0",
 ]
 

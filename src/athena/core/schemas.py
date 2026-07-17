@@ -70,6 +70,11 @@ class Hypothesis(RecordNode):
     intervention: str = Field(description="Minimal change to test.")
     expected_effect: str = Field(description="Expected measurable effect.")
     evidence_refs: list[ArtifactRef] = Field(default_factory=list, description="Supporting and opposing evidence references.")
+    package_ref: ArtifactRef = Field(
+        description="Full HypothesisPackage payload reference. P0 (task4) has no ArtifactStore yet, "
+                     "so callers pass a placeholder 'inline://<idea_id>' string here until a real "
+                     "ArtifactStore lands."
+    )
 
 
 class ExperimentPlan(BaseModel):

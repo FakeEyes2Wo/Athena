@@ -50,3 +50,8 @@ XH-202619.pdf
 !/data_analyze/.gitkeep
 !/data_analyze/EDA.md/
 !/data_analyze/EDA.md/.gitkeep
+
+CLAUDE.md
+
+# Local planning artifacts (superpowers skill specs/plans), not shipped in repo
+/docs/superpowers/
