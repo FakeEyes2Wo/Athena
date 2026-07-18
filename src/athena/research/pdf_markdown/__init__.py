@@ -11,12 +11,16 @@ from athena.research.pdf_markdown.schemas import (
     FloatRef,
     Heading,
     PageSpan,
+    PaperContent,
+    PaperIndex,
     PaperMarkdown,
 )
 
 __all__ = [
     "pdf_to_markdown",
     "PaperMarkdown",
+    "PaperContent",
+    "PaperIndex",
     "PageSpan",
     "Heading",
     "FloatRef",

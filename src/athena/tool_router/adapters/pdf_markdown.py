@@ -3,8 +3,11 @@
 与 codex、qoder 等适配器一样，本适配器只按单一 capability 执行受控请求，并以
 artifact 交接请求与结果，不自行推进实验、选择指标或绕过 Supervisor：
 
-    请求 artifact(JSON: MarkdownifyRequest)         结果 artifact(JSON: PaperMarkdown)
-        pdf_ref ──► get_bytes ──► markitdown 逐页转换 ──► put_text ──► 返回结果引用
+    请求 artifact(JSON: MarkdownifyRequest)              结果 artifact(JSON: PaperContent)
+        pdf_ref ─► get_bytes ─► markitdown 逐页转换 ─► persist ─► put_text ─► 返回结果引用
+
+结果为 ``PaperContent``：整篇 markdown 单独落为一份 artifact（``markdown_ref``），可寻址
+索引（页码/章节/图表）内联，**持久化后即可直接查询**；逐章节文本按需切片重建，不重复落盘。
 
 markitdown 为 CPU/阻塞型同步计算，故在工作线程中执行（asyncio.to_thread），避免阻塞
 事件循环。工具权限、并发优先级、重试与审批仍由 Scheduler、ThreadManager 与 Supervisor
@@ -51,13 +54,15 @@ class PdfMarkdownAdapter:
         self._artifacts = artifacts
 
     async def invoke(self, request_ref: ArtifactRef) -> ArtifactRef:
-        """执行一次 PDF->Markdown 转换，返回 PaperMarkdown artifact 的引用。
+        """执行一次 PDF->Markdown 转换并落库，返回 PaperContent artifact 的引用。
 
         示例：
             result_ref = await adapter.invoke(request_ref)
-            paper = PaperMarkdown.model_validate_json(await store.get_text(result_ref))
+            content = PaperContent.model_validate_json(await store.get_text(result_ref))
+            markdown = await content.load_markdown(store)   # 整篇；索引可直接查询
         """
         request = MarkdownifyRequest.model_validate_json(await self._artifacts.get_text(request_ref))
         pdf_bytes = await self._artifacts.get_bytes(request.pdf_ref)
         paper = await asyncio.to_thread(pdf_bytes_to_markdown, pdf_bytes)
-        return await self._artifacts.put_text(paper.model_dump_json())
+        content = await paper.persist(self._artifacts)
+        return await self._artifacts.put_text(content.model_dump_json())

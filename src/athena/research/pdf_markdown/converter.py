@@ -32,6 +32,7 @@ from athena.research.pdf_markdown.schemas import (
     Heading,
     PageSpan,
     PaperMarkdown,
+    build_sections,
     page_of_offset,
 )
 
@@ -164,25 +165,6 @@ def convert_pdf_pages(pdf_path: str) -> list[str]:
         buffer.seek(0)
         page_texts.append(engine.convert_stream(buffer, file_extension=PDF_EXTENSION).markdown)
     return page_texts
-
-
-def build_sections(markdown: str, headings: list[Heading]) -> dict[str, str]:
-    """按标题偏移把整篇 markdown 切成逐章节文本，供下游 RAG 分块。
-
-    首个标题之前的内容（标题页/摘要等）归入键 "(preamble)"；无任何标题时整篇归入
-    键 "(document)"。
-    示例：build_sections(md, headings) 的键包含各标题的 path。
-    """
-    sections: dict[str, str] = {}
-    if headings and headings[0].char_offset > 0:
-        sections["(preamble)"] = markdown[: headings[0].char_offset].strip()
-    for index, head in enumerate(headings):
-        end = headings[index + 1].char_offset if index + 1 < len(headings) else len(markdown)
-        key = head.path if head.path not in sections else f"{head.path} [{head.anchor}]"
-        sections[key] = markdown[head.char_offset : end].strip()
-    if not headings:
-        sections["(document)"] = markdown.strip()
-    return sections
 
 
 def find_cross_references(
