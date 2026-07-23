@@ -12,8 +12,8 @@
 import argparse
 import asyncio
 
-from athena.workflows.search.idea_generation_service import run_pre_gate
 from athena.workflows.search.idea_schemas import ResearchProblemInput
+from athena.workflows.search.workflow import run_pre_gate
 
 
 def parse_args(argv: list[str] | None = None) -> tuple[ResearchProblemInput, bool]:
