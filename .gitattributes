@@ -1,0 +1,13 @@
+# 所有文本文件统一使用 LF，避免 Windows CRLF 混入
+* text=auto eol=lf
+
+# 二进制文件
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar.gz binary
+*.whl binary

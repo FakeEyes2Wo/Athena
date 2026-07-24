@@ -98,7 +98,7 @@
 CODE
     -> qoder
     -> codex
-    
+
 PREPARE
     TaskParser
     -> DatasetService
@@ -197,38 +197,18 @@ class DataCard(BaseModel):
 
 
 
-class RecordNode(BaseModel):
-    node_id: str = Field(description="Unique node identifier.")
-    parent_ids: list[str] = Field(
-        default_factory=list,
-        description="Parent node identifiers."
-    )
-    status: str = Field(description="Node lifecycle status.")
-    payload_ref: ArtifactRef = Field(description="Immutable node payload reference.")
-
-
-
-
-NodeStatus = Literal[
-    "draft",
-    "active",
-    "completed",
-    "rejected",
-    "archived",
-]
-
-ExperimentKind = Literal[
-    "prototype",
-    "optimize",
-    "ablate",
-    "replicate",
-    "aggregate",
-    "debug",
+HypothesisStatus = Literal[
+    "PROPOSED", "SELECTED", "SUPPORTED", "PATIENCE",
+    "REFUTED", "FAILED", "REJECTED",
 ]
 
 
-class Hypothesis(RecordNode):
-    id
+class Hypothesis(BaseModel):
+    node_type: Literal["hypothesis"] = "hypothesis"
+    id: str = Field(description="Unique hypothesis identifier.")
+    parent_id: str = Field(description="Parent experiment identifier.")
+    status: HypothesisStatus = "PROPOSED"
+    payload_ref: ArtifactRef = Field(description="Immutable hypothesis payload reference.")
     statement: str = Field(description="Falsifiable hypothesis statement.")
     intervention: str = Field(description="Minimal change to test.")
     expected_effect: str = Field(description="Expected measurable effect.")
@@ -236,6 +216,8 @@ class Hypothesis(RecordNode):
         default_factory=list,
         description="Supporting and opposing evidence references."
     )
+    patience_grant: int = Field(default=0, ge=0)
+    patience_evidence_ref: ArtifactRef | None = None
 
 class ExperimentPlan(BaseModel):
     hypothesis_id: str | None = Field(
@@ -315,7 +297,7 @@ Kaggle 交互的Agent 工具
 可以查看[文档](https://www.kaggle.com/docs/mcp)
 
 这里面的tools太多，我们连接这个过后挑选里面部分tool即可
-如 
+如
 get_competition等
 可以使用model inspector来进行这部分的挑选。
 
@@ -353,137 +335,84 @@ get_competition等
 我们需要能够单轮对话的 不保存对话历史的function
 
 
-### 实验记录树
+### 统一研究树与 Git worktree
+
+假设树和实验树只描述同一条研究因果链，因此不再维护 `RecordTree`、`HypoTree`
+和 `ExpCkptTree` 三套抽象。`ResearchTree` 直接保存两种交替节点：
+
+```text
+成功 baseline(ExpCkpt)
+    └── Hypothesis
+          └── ExpCkpt
+                └── Hypothesis
+                      └── ExpCkpt
+```
+
+允许导入多个成功 baseline 根，但整棵树只有一个由主指标决定的全局 SOTA。每个
+Hypothesis 必须挂在成功实验下，并且只能产生一个直接实验。普通非改进分支停止生长；
+有证据的架构假设可以授予 `patience_grant`，允许该分支再执行有限个
+`Hypothesis -> ExpCkpt` 步骤。
+
 ```python
-from abc import ABC, abstractmethod
-from typing import Literal
-from pydantic import BaseModel, Field
+class ExperimentOutcome(BaseModel):
+    result_ref: ArtifactRef
+    metric_name: str
+    metric_value: float
+    is_sota_at_completion: bool
+    remaining_patience: int
 
 
 class ExpCkpt(BaseModel):
-    id: str = Field(
-        description="Unique experiment identifier."
-    )
-    parent_id: str | None = Field(
-        default=None,
-        description="Parent experiment identifier."
-    )
-    change: str = Field(
-        description="The main change relative to the parent experiment."
-    )
-    commit: str = Field(
-        description="Git commit used by the experiment."
-    )
-    run_ref: str = Field(
-        description="Reference to the immutable run configuration."
-    )
-    result_ref: str | None = Field(
-        default=None,
-        description="Reference to the evaluated experiment result."
-    )
-    status: Literal[
-        "PENDING",
-        "RUNNING",
-        "SUCCEEDED",
-        "FAILED",
-        "CANCELLED",
-    ] = "PENDING"
+    node_type: Literal["experiment"] = "experiment"
+    id: str
+    parent_id: str | None       # 仅 baseline 为 None
+    change: str
+    commit: CommitHash
+    run_ref: ArtifactRef
+    diff_ref: ArtifactRef | None
+    outcome: ExperimentOutcome | None
+    status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
 
 
+class ResearchTree(ABC):
+    async def add_baseline(self, node: ExpCkpt) -> None: ...
+    async def add_hypothesis(self, node: Hypothesis) -> None: ...
+    async def update_hypothesis(self, node_id: str, status: str) -> Hypothesis: ...
 
-class ExpCkptTree(ABC):
-    """
-    这里希望的是能从根节点 把所有实验使用的措施提取出来
+    async def prepare_experiment(...) -> ExperimentWorkspace: ...
+    async def diff_experiment(self, experiment_id: str) -> ArtifactRef: ...
+    async def checkpoint_experiment(...) -> ExpCkpt: ...
+    async def update_experiment(...) -> ExpCkpt: ...
 
-    每个实验都有一个baseline。这个baseline是一套可以使用，评估的代码。
-    """
-    @abstractmethod
-    async def add(self, node: ExpCkpt) -> None:
-        """Add an experiment node."""
-    @abstractmethod
-    async def get(self, node_id: str) -> ExpCkpt:
-        """Get an experiment node."""
-    @abstractmethod
-    async def get_children(self, node_id: str) -> list[ExpCkpt]:
-        """Get direct child experiments."""
-    @abstractmethod
-    async def path(self, node_id: str) -> list[ExpCkpt]:
-        """Get the path from the baseline to the experiment."""
-    @abstractmethod
-    async def reverse()
-    """
-    这个函数的功能是回退失败的实验，然后重新分支
-    """
-
-    # 同时这里还应该有一个机制，能够取得之前所有实验的措施，和当前的
-    @abstractmethod
-    async def update(
-        self,
-        node_id: str,
-        *,
-        status: str | None = None,
-        result_ref: str | None = None,
-    ) -> None:
-        """Update experiment execution state."""
-    @abstractmethod
-    async def find_by_run_ref(
-        self,
-        run_ref: str,
-    ) -> ExpCkpt | None:
-        """Find an equivalent experiment run."""
-
-## 代码 snapshot 使用 Git，不设计自定义格式。
-## 这里又有一个问题，如何做到多个实验多个分支同时进行，在使用git的情况下？
-## A:Git 原生支持一个仓库关联多个 worktree。每个 worktree 有独立的工作目录、HEAD 和 index，但共享同一个 Git 对象库
-## 这里还需要细致的锁机制防止错误。
-class GitWorktree(BaseModel):
-    path: str = Field(
-        description="Absolute path of the experiment worktree."
-    )
-    branch: str = Field(
-        description="Unique temporary branch used by the experiment."
-    )
-    base_commit: CommitHash = Field(
-        description="Commit from which the experiment was created."
-    )
-
-class GitWorkspace:
-    async def create(
-        self,
-        base_commit: CommitHash,
-        branch: str,
-    ) -> GitWorktree:
-        """
-        Create an isolated branch and worktree from the base commit.
-        """
-
-    async def diff(
-        self,
-        workspace: GitWorktree,
-    ) -> ArtifactRef:
-        """
-        Save the diff between the workspace and its base commit.
-        """
-
-    async def commit(
-        self,
-        workspace: GitWorktree,
-        message: str,
-    ) -> CommitHash:
-        """
-        Commit all approved changes and return the commit hash.
-        """
-
-    async def remove(
-        self,
-        workspace: GitWorktree,
-        *,
-        delete_branch: bool = False,
-    ) -> None:
-        """
-        Remove the worktree and optionally delete its temporary branch.
-        """
+    async def path(self, node_id: str) -> list[Hypothesis | ExpCkpt]: ...
+    async def hypotheses_path(self, node_id: str) -> list[Hypothesis]: ...
+    async def best_experiment(self) -> ExpCkpt | None: ...
 ```
+
+`outcome` 只在 `SUCCEEDED` 后存在；其余状态保持 `None`，避免在检查点顶层重复堆放
+只属于评估完成阶段的字段。
+
+`hypotheses_path(node_id)` 从所属 baseline 开始回溯，并按根到当前节点的顺序只返回
+Hypothesis。这是后续把完整假设链输入 Agent 的稳定接口；调用方不需要读取树的内部
+字典，也不需要自行拼接父节点。
+
+实验代码快照只使用 Git，不设计自定义格式。具体流程如下：
+
+1. `prepare_experiment` 从父实验 commit 创建唯一分支和独立 worktree。
+2. CodeAgent、Codex 或 Qoder 只修改该 worktree。
+3. `diff_experiment` 执行 `git add -A`，生成包含二进制文件的完整 diff，并写入 ArtifactStore。
+4. Supervisor 审查该 `diff_ref`；`checkpoint_experiment` 只接受最后一次生成的同一引用。
+5. `LocalGitWorkspace.commit(workspace, approved_diff_ref, message)` 再校验工作区与 HEAD，
+   并以已审 Git tree 创建 commit；空 diff 复用当前 HEAD。
+6. 实验终态后调用 `release_workspace`；放弃未提交实验则显式调用 `discard_experiment`。
+
+`InMemoryResearchTree` 只用一把短时状态锁维护节点、索引和 SOTA，Git 子进程均在锁外
+运行。`LocalGitWorkspace` 对仓库管理操作使用一把锁、对每个 worktree 使用独立锁，
+所以不同实验可并行，同一实验的 diff/commit 不会竞争。实现分别位于
+`src/athena/core/experiment_models.py`、`src/athena/core/research_tree.py` 与
+`src/athena/core/gitutils/workspace.py`。`src/athena/core/experiments.py` 只保留稳定
+导入入口和可通过 `python -m athena.core.experiments` 运行的完整使用示例。
+对于 commit/remove 这类不可回滚副作用，取消会在 Git 与树状态都到达一致点后再传播。
 
 
 我们在进行实验的时候应该可以接入Qcoder，让Qcoder来完成代码。为了方便调试，
@@ -540,22 +469,10 @@ Supervisor的方式进行设计。
 **这里再进行RAG的时候，需要将PDF转成markdown**
 
 
-这个需要生成HypoTree
-
-```python
-from pydantic import BaseModel
-class Hypothesis(BaseModel):
-    def __init__(self):
-
-
-class HypoTree(RecordTree,ABC):
-    def __init(self):
-
-
-```
-这里的HypoTree和上面的ExpCkptTree有相似
-所以应该使用多态，需要创建一个Tree的基类。记录树 RecordTree。
-这个基类需要传入的是MetaData。如Hypothesis，ExpCkpt
+Paper Reading 生成可证伪的 `Hypothesis`，并通过 `ResearchTree.add_hypothesis`
+挂到当前 SOTA 或仍有 patience 的实验。实验完成后，假设状态由主指标确定性更新；
+需要恢复研究上下文时调用 `ResearchTree.hypotheses_path(current_node_id)`，把根到当前
+节点的完整假设链交给 Agent。这里不再创建独立的 HypoTree。
 
 同时这个代理需要进行RAG查询。
 他需要查看的是
@@ -589,5 +506,3 @@ ELO为每个候选假设进行一个排序，最后做出最好的假设
 ### evaluate
 
 这部分用来评估
-
-
