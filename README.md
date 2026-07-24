@@ -30,3 +30,15 @@ uv build
 ```
 
 The generated virtual environment and build artifacts are excluded from Git.
+
+## Paper Markdown Tool
+
+Athena includes a TeX-first paper ingestion pipeline for RAG. The upstream search stage
+provides a TeX source package, a PDF, or both as artifacts. TeX is authoritative when
+present; otherwise the tool falls back to PyMuPDF. Figures, tables, and image-only pages
+are interpreted through an injected vision/base-model interface. Model-derived
+interpretations become separate retrieval units; unavailable fallback evidence remains in
+its body chunk to avoid duplicate indexing.
+
+See [docs/paper_markdown_tool.md](docs/paper_markdown_tool.md) for the source contract,
+ToolRegistry integration, persistence model, and quality behavior.
