@@ -1,4 +1,5 @@
-use protocol::{ClientMessage, EventNotification, ServerControlMessage};
+use athena_protocol::{ClientMessage, EventNotification, ServerControlMessage};
+use athena_protocol::error::RpcError;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -68,7 +69,7 @@ pub struct TransportClientHalf {
 
 impl TransportClientHalf {
     /// Send a request to the server with timeout. Returns WouldBlock-style error on full.
-    pub async fn send_request(&self, msg: protocol::RequestEnvelope) -> Result<(), TransportError> {
+    pub async fn send_request(&self, msg: athena_protocol::RequestEnvelope) -> Result<(), TransportError> {
         self.c2s_tx
             .send(ClientMessage::Request(msg))
             .await
@@ -76,14 +77,14 @@ impl TransportClientHalf {
     }
 
     /// Send a notification to the server (fire-and-forget; drops on full).
-    pub fn send_notification(&self, msg: protocol::ClientNotification) {
+    pub fn send_notification(&self, msg: athena_protocol::ClientNotification) {
         let _ = self.c2s_tx.try_send(ClientMessage::Notification(msg));
     }
 
     /// Send a reply to a server-initiated request.
     pub async fn send_server_request_reply(
         &self,
-        msg: protocol::ServerRequestReply,
+        msg: athena_protocol::ServerRequestReply,
     ) -> Result<(), TransportError> {
         self.c2s_tx
             .send(ClientMessage::ServerRequestReply(msg))
@@ -117,7 +118,7 @@ impl TransportServerHalf {
     }
 
     /// Send a response to the client.
-    pub async fn send_response(&self, msg: protocol::ResponseEnvelope) -> Result<(), TransportError> {
+    pub async fn send_response(&self, msg: athena_protocol::ResponseEnvelope) -> Result<(), TransportError> {
         self.s2c_control_tx
             .send(ServerControlMessage::Response(msg))
             .await
@@ -127,7 +128,7 @@ impl TransportServerHalf {
     /// Send a server-initiated request to the client.
     pub async fn send_server_request(
         &self,
-        msg: protocol::ServerRequest,
+        msg: athena_protocol::ServerRequest,
     ) -> Result<(), TransportError> {
         self.s2c_control_tx
             .send(ServerControlMessage::ServerRequest(msg))
@@ -155,7 +156,7 @@ mod tests {
             let mut s = server;
             if let Some(ClientMessage::Request(req)) = s.recv().await {
                 assert_eq!(req.request_id, 1);
-                let resp = protocol::ResponseEnvelope {
+                let resp = athena_protocol::ResponseEnvelope {
                     request_id: req.request_id,
                     result: Some(serde_json::json!({"status": "ok"})),
                     error: None,
@@ -165,7 +166,7 @@ mod tests {
         });
 
         // Client sends
-        let req = protocol::RequestEnvelope {
+        let req = athena_protocol::RequestEnvelope {
             request_id: 1,
             method: "test".into(),
             params: None,
@@ -185,10 +186,10 @@ mod tests {
         let (mut client, server) = transport.split();
 
         // Fill control channel first, then send event — event must not be blocked
-        server.send_response(protocol::ResponseEnvelope {
+        server.send_response(athena_protocol::ResponseEnvelope {
             request_id: 0, result: Some(serde_json::json!({})), error: None,
         }).await.unwrap();
-        server.send_response(protocol::ResponseEnvelope {
+        server.send_response(athena_protocol::ResponseEnvelope {
             request_id: 1, result: Some(serde_json::json!({})), error: None,
         }).await.unwrap();
 
@@ -212,7 +213,7 @@ mod tests {
         let transport = Transport::new(2, 2);
         let (client, mut server) = transport.split();
 
-        client.send_notification(protocol::ClientNotification {
+        client.send_notification(athena_protocol::ClientNotification {
             method: "initialized".into(),
             params: None,
         });

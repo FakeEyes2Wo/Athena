@@ -1,13 +1,52 @@
 [workspace]
 resolver = "2"
 members = [
-    "core",
-    "protocol",
-    "transport",
-    "events",
-    "tool",
-    "memory",
-    "agent",
-    "runtime",
-    "server",
+    "crates/athena-types",
+    "crates/athena-protocol",
+    "crates/athena-tools",
+    "crates/athena-memory",
+    "crates/athena-runtime",
+    "crates/athena-agent",
+    "crates/athena-server",
+    "crates/athena-workspace",
+    "crates/athena-research",
 ]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+chrono = "0.4"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+futures = "0.3"
+tokio-stream = "0.1"
+
+# Internal crates
+athena-types = { path = "crates/athena-types" }
+athena-protocol = { path = "crates/athena-protocol" }
+athena-tools = { path = "crates/athena-tools" }
+athena-memory = { path = "crates/athena-memory" }
+athena-runtime = { path = "crates/athena-runtime" }
+athena-agent = { path = "crates/athena-agent" }
+athena-server = { path = "crates/athena-server" }
+athena-workspace = { path = "crates/athena-workspace" }
+athena-research = { path = "crates/athena-research" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"

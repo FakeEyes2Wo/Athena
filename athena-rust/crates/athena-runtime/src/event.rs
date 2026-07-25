@@ -134,11 +134,11 @@ impl Subscription {
 /// Round-robin multiplexer — prevents starvation across subscriptions.
 pub struct FairMux {
     subs: Arc<RwLock<HashMap<String, Arc<Subscription>>>>,
-    outgoing: mpsc::Sender<protocol::EventNotification>,
+    outgoing: mpsc::Sender<athena_protocol::EventNotification>,
 }
 
 impl FairMux {
-    pub fn new(outgoing: mpsc::Sender<protocol::EventNotification>) -> Self {
+    pub fn new(outgoing: mpsc::Sender<athena_protocol::EventNotification>) -> Self {
         Self {
             subs: Arc::new(RwLock::new(HashMap::new())),
             outgoing,
@@ -186,7 +186,7 @@ impl FairMux {
             // Scope the MutexGuard so it is dropped before any .await below.
             let recv_result = sub.rx.lock().expect("poisoned").try_recv();
             let notification = match recv_result {
-                Ok(event) => Some(protocol::EventNotification {
+                Ok(event) => Some(athena_protocol::EventNotification {
                     subscription_id: sub.subscription_id.clone(),
                     thread_id: event.thread_id.clone(),
                     turn_id: event.turn_id.clone(),
