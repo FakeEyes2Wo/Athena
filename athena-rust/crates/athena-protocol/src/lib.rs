@@ -1,200 +1,31 @@
+pub mod envelope;
 pub mod error;
+pub mod method;
+pub mod operations;
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
+pub use envelope::{
+    ClientMessage, ClientNotification, EventNotification, RequestEnvelope, ResponseEnvelope,
+    ServerControlMessage, ServerRequest, ServerRequestReply,
+};
 pub use error::{ErrorCode, RpcError, RpcException};
-
-// ── Method name constants ──
-
-pub mod method {
-    pub const INITIALIZE: &str = "initialize";
-    pub const INITIALIZED: &str = "initialized";
-    pub const THREAD_START: &str = "thread/start";
-    pub const THREAD_FORK: &str = "thread/fork";
-    pub const TURN_START: &str = "turn/start";
-    pub const TURN_INTERRUPT: &str = "turn/interrupt";
-    pub const THREAD_SUBSCRIBE: &str = "thread/subscribe";
-    pub const THREAD_UNSUBSCRIBE: &str = "thread/unsubscribe";
-    pub const SERVER_SHUTDOWN: &str = "server/shutdown";
-    pub const ITEM_APPROVAL_REQUEST: &str = "item/approval/request";
-
-    pub fn is_control_method(m: &str) -> bool {
-        matches!(m, INITIALIZE | SERVER_SHUTDOWN)
-    }
-}
-
-// ── Request / Response envelopes ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RequestEnvelope {
-    pub request_id: u64,
-    pub method: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResponseEnvelope {
-    pub request_id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<RpcError>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientNotification {
-    pub method: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub params: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerRequest {
-    pub server_call_id: String,
-    pub method: String,
-    pub params: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerRequestReply {
-    pub server_call_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<RpcError>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EventNotification {
-    pub subscription_id: String,
-    pub thread_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
-    pub sequence: u64,
-    pub kind: String,
-    pub event_ref: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-}
-
-// ── Parameter DTOs ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadStartParams {
-    pub session_id: String,
-    pub context_ref: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TurnStartParams {
-    pub thread_id: String,
-    pub request_ref: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TurnInterruptParams {
-    pub thread_id: String,
-    pub turn_id: String,
-    #[serde(default)]
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadForkParams {
-    pub thread_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after_turn_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadSubscribeParams {
-    pub thread_id: String,
-    #[serde(default)]
-    pub after_sequence: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadUnsubscribeParams {
-    pub subscription_id: String,
-}
-
-// ── Result DTOs ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadStartedResult {
-    pub thread_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TurnStartedResult {
-    pub turn_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadForkedResult {
-    pub thread_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubscribedResult {
-    pub subscription_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InterruptedResult {
-    pub turn_id: String,
-    #[serde(default = "default_interrupted_status")]
-    pub status: String,
-}
-
-fn default_interrupted_status() -> String {
-    "interrupted".into()
-}
-
-// ── Client/Server message union ──
-
-#[derive(Debug, Clone)]
-pub enum ClientMessage {
-    Request(RequestEnvelope),
-    Notification(ClientNotification),
-    ServerRequestReply(ServerRequestReply),
-}
-
-#[derive(Debug, Clone)]
-pub enum ServerControlMessage {
-    Response(ResponseEnvelope),
-    ServerRequest(ServerRequest),
-}
+pub use operations::{
+    InterruptedResult, SubscribedResult, ThreadForkParams, ThreadForkedResult,
+    ThreadStartParams, ThreadStartedResult, ThreadSubscribeParams, ThreadUnsubscribeParams,
+    TurnInterruptParams, TurnStartParams, TurnStartedResult,
+};
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_request_serialize_roundtrip() {
         let req = RequestEnvelope {
             request_id: 42,
             method: "turn/start".into(),
-            params: Some(serde_json::json!({"thread_id": "t1"})),
+            params: Some(json!({"thread_id": "t1"})),
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: RequestEnvelope = serde_json::from_str(&json).unwrap();
@@ -249,5 +80,83 @@ mod tests {
         assert_eq!(ErrorCode::InvalidArgument.code(), -32602);
         assert_eq!(ErrorCode::Internal.code(), -32603);
         assert_eq!(ErrorCode::DuplicateRequestId.code(), -32004);
+    }
+
+    #[test]
+    fn test_method_constants_exist() {
+        // Verify all method constants from the Python fixture exist
+        assert_eq!(method::INITIALIZE, "initialize");
+        assert_eq!(method::INITIALIZED, "initialized");
+        assert_eq!(method::THREAD_START, "thread/start");
+        assert_eq!(method::THREAD_FORK, "thread/fork");
+        assert_eq!(method::TURN_START, "turn/start");
+        assert_eq!(method::TURN_INTERRUPT, "turn/interrupt");
+        assert_eq!(method::THREAD_SUBSCRIBE, "thread/subscribe");
+        assert_eq!(method::THREAD_UNSUBSCRIBE, "thread/unsubscribe");
+        assert_eq!(method::SERVER_SHUTDOWN, "server/shutdown");
+        assert_eq!(method::ITEM_APPROVAL_REQUEST, "item/approval/request");
+        assert_eq!(method::ITEM_USER_INPUT_REQUEST, "item/userInput/request");
+        assert_eq!(method::TOOL_CALL_REQUEST, "tool/call/request");
+    }
+
+    #[test]
+    fn test_request_id_zero_is_valid() {
+        let req = RequestEnvelope {
+            request_id: 0,
+            method: "test".into(),
+            params: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: RequestEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.request_id, 0);
+    }
+
+    #[test]
+    fn test_request_id_negative_is_rejected() {
+        let json = r#"{"request_id":-1,"method":"test"}"#;
+        let err = serde_json::from_str::<RequestEnvelope>(json);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_thread_start_params_deserialize() {
+        let json = json!({
+            "session_id": "sess-1",
+            "context_ref": "artifact://ctx/init"
+        });
+        let params: ThreadStartParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.session_id, "sess-1");
+        assert_eq!(params.context_ref.as_str(), "artifact://ctx/init");
+    }
+
+    #[test]
+    fn test_turn_interrupt_params_default_reason() {
+        let json = json!({
+            "thread_id": "t1",
+            "turn_id": "turn-1"
+        });
+        let params: TurnInterruptParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.reason, "user_requested");
+    }
+
+    #[test]
+    fn test_turn_interrupt_params_explicit_reason() {
+        let json = json!({
+            "thread_id": "t1",
+            "turn_id": "turn-1",
+            "reason": "timeout"
+        });
+        let params: TurnInterruptParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.reason, "timeout");
+    }
+
+    #[test]
+    fn test_response_envelope_both_null() {
+        // The protocol allows both result and error to be null/absent
+        let json = r#"{"request_id":42}"#;
+        let resp: ResponseEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.request_id, 42);
+        assert!(resp.result.is_none());
+        assert!(resp.error.is_none());
     }
 }
