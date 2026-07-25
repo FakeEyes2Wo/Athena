@@ -58,3 +58,6 @@ XH-202619.pdf
 
 # AI Agent Skills
 .claude/skills/
+
+# Rust build artifacts
+athena-rust/target/

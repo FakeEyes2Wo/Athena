@@ -1,0 +1,105 @@
+{
+  "compaction_checkpoint": {
+    "summary": "User asked about Rust. Assistant provided hello world code.",
+    "type": "compaction",
+    "version": 3
+  },
+  "conversation": {
+    "messages": [
+      [
+        {
+          "conversation_id": null,
+          "instructions": null,
+          "kind": "request",
+          "metadata": null,
+          "parts": [
+            {
+              "content": "You are a coding assistant.",
+              "dynamic_ref": null,
+              "part_kind": "system-prompt",
+              "timestamp": "2026-07-25T07:29:01.436402Z"
+            }
+          ],
+          "run_id": null,
+          "state": "complete",
+          "timestamp": null
+        }
+      ],
+      [
+        {
+          "conversation_id": null,
+          "instructions": null,
+          "kind": "request",
+          "metadata": null,
+          "parts": [
+            {
+              "content": "Write a hello world in Rust.",
+              "part_kind": "user-prompt",
+              "timestamp": "2026-07-25T07:29:01.436402Z"
+            }
+          ],
+          "run_id": null,
+          "state": "complete",
+          "timestamp": null
+        }
+      ],
+      [
+        {
+          "conversation_id": null,
+          "finish_reason": null,
+          "kind": "response",
+          "metadata": null,
+          "model_name": null,
+          "parts": [
+            {
+              "content": "fn main() {\n    println!(\"Hello, world!\");\n}",
+              "id": null,
+              "part_kind": "text",
+              "provider_details": null,
+              "provider_name": null
+            }
+          ],
+          "provider_details": null,
+          "provider_name": null,
+          "provider_response_id": null,
+          "provider_url": null,
+          "run_id": null,
+          "state": "complete",
+          "timestamp": "2026-07-25T07:29:01.436402Z",
+          "usage": {
+            "cache_audio_read_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "details": {},
+            "input_audio_tokens": 0,
+            "input_tokens": 0,
+            "output_audio_tokens": 0,
+            "output_tokens": 0
+          }
+        }
+      ]
+    ]
+  },
+  "message_record": {
+    "msg": [
+      {
+        "conversation_id": null,
+        "instructions": null,
+        "kind": "request",
+        "metadata": null,
+        "parts": [
+          {
+            "content": "Write a hello world in Rust.",
+            "part_kind": "user-prompt",
+            "timestamp": "2026-07-25T07:29:01.436402Z"
+          }
+        ],
+        "run_id": null,
+        "state": "complete",
+        "timestamp": null
+      }
+    ],
+    "seq": 7,
+    "ts": "2026-07-25T10:00:00+00:00"
+  }
+}
