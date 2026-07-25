@@ -327,6 +327,13 @@ dependencies = [
 [[package]]
 name = "transport"
 version = "0.1.0"
+dependencies = [
+ "protocol",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "unicode-ident"
