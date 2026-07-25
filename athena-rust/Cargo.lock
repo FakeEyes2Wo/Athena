@@ -133,6 +133,11 @@ dependencies = [
 [[package]]
 name = "protocol"
 version = "0.1.0"
+dependencies = [
+ "core",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "quote"
