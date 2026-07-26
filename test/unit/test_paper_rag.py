@@ -14,6 +14,7 @@ from athena.research.paper_markdown.schemas import (
 from athena.research.paper_rag.contextual import contextualize_entries
 from athena.research.paper_rag.index import (
     build_corpus_index,
+    display_math_close,
     is_indexable,
     split_sentences,
 )
@@ -174,6 +175,34 @@ class SentenceSplitTest(unittest.TestCase):
             ],
             [text[start:end] for start, end in spans],
         )
+
+    def test_bare_math_environments_are_kept_whole(self) -> None:
+        text = (
+            "First we state\n"
+            "\\begin{equation}\n"
+            "E = mc^2\n"
+            "\\end{equation}\n"
+            "\\begin{align*}\n"
+            "a &= b \\\\\n"
+            "c &= d\n"
+            "\\end{align*}\n"
+            "Done."
+        )
+        spans = split_sentences(text)
+        blocks = [text[start:end] for start, end in spans]
+
+        self.assertEqual(4, len(blocks))
+        self.assertEqual("\\begin{equation}\nE = mc^2\n\\end{equation}", blocks[1])
+        self.assertTrue(blocks[2].startswith("\\begin{align*}"))
+        self.assertTrue(blocks[2].endswith("\\end{align*}"))
+
+    def test_inner_only_environments_do_not_open_a_block(self) -> None:
+        # aligned 只能嵌套在数学模式内，顶层出现时不应吞掉后面的正文
+        self.assertIsNone(display_math_close("\\begin{aligned}"))
+        self.assertIsNone(display_math_close("\\begin{cases}"))
+        self.assertEqual("\\end{equation}", display_math_close("\\begin{equation}"))
+        self.assertEqual("\\end{gather*}", display_math_close("  \\begin{gather*}  "))
+        self.assertEqual("$$", display_math_close("$$"))
 
     def test_unclosed_math_fence_does_not_swallow_the_rest_of_the_chunk(self) -> None:
         text = "$$\nx = 1\nA sentence that must stay retrievable on its own."

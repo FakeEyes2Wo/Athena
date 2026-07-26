@@ -27,6 +27,19 @@ WORD_BOUNDARY = re.compile(r"[\s(\[]")
 HEADING_PATH_PREFIX = "> Section:"
 TABLE_DELIMITER = re.compile(r"^\|[\s\-:|]+\|?$")
 DISPLAY_MATH_FENCES = {"$$": "$$", "\\[": "\\]"}
+DISPLAY_MATH_ENVIRONMENTS = frozenset(
+    {
+        "align",
+        "alignat",
+        "displaymath",
+        "eqnarray",
+        "equation",
+        "flalign",
+        "gather",
+        "multline",
+    }
+)
+MATH_ENVIRONMENT_BEGIN = re.compile(r"\\begin\{([a-zA-Z]+\*?)\}")
 # [^\W\d_] 是"任意语言的字母"，因此 Gómez 这类作者名不会被当成无内容片段丢掉
 LETTER_RUN = re.compile(r"[^\W\d_]{2,}")
 ABBREVIATIONS = frozenset(
@@ -106,12 +119,29 @@ def line_sentence_spans(line: str) -> list[tuple[int, int]]:
     return spans
 
 
+def display_math_close(line: str) -> str | None:
+    """返回该行开启的展示公式块所对应的结束定界符；不是起始行时返回 ``None``。
+
+    除 ``$$`` 与 ``\\[`` 外还认顶层数学环境：换一个上游转换器就可能直接产出
+    ``\\begin{equation}``。``aligned``、``cases`` 这类只能嵌套在数学模式内部的环境不在
+    此列，它们总是被外层定界符一并吃掉。
+    """
+    stripped = line.strip()
+    fence = DISPLAY_MATH_FENCES.get(stripped)
+    if fence is not None:
+        return fence
+    match = MATH_ENVIRONMENT_BEGIN.fullmatch(stripped)
+    if match is None or match.group(1).rstrip("*") not in DISPLAY_MATH_ENVIRONMENTS:
+        return None
+    return f"\\end{{{match.group(1)}}}"
+
+
 def display_math_end(lines: list[str], start: int) -> int:
     """返回展示公式块最后一行的下标；不是公式起始行或块未闭合时返回 ``start``。
 
     未闭合的块退化成普通行处理，避免一个漏写的定界符把后面整篇正文吞进同一个单元。
     """
-    closing = DISPLAY_MATH_FENCES.get(lines[start].strip())
+    closing = display_math_close(lines[start])
     if closing is None:
         return start
     for index in range(start + 1, len(lines)):
