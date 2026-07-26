@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Notify, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Notify, RwLock, mpsc};
 
 // ── Event ──
 
@@ -164,10 +164,7 @@ impl FairMux {
             let ready: Vec<Arc<Subscription>> = {
                 let subs = self.subs.read().await;
                 subs.values()
-                    .filter(|s| {
-                        s.active.load(Ordering::SeqCst)
-                            && !s.rx.lock().expect("poisoned").is_closed()
-                    })
+                    .filter(|s| s.active.load(Ordering::SeqCst) && !lock_recover(&s.rx).is_closed())
                     .cloned()
                     .collect()
             };
@@ -178,13 +175,13 @@ impl FairMux {
                 continue;
             }
 
-            index = index % ready.len();
+            index %= ready.len();
             let sub = &ready[index];
             index += 1;
 
             // Try to receive from this subscription's channel.
             // Scope the MutexGuard so it is dropped before any .await below.
-            let recv_result = sub.rx.lock().expect("poisoned").try_recv();
+            let recv_result = lock_recover(&sub.rx).try_recv();
             let notification = match recv_result {
                 Ok(event) => Some(athena_protocol::EventNotification {
                     subscription_id: sub.subscription_id.clone(),
@@ -203,15 +200,25 @@ impl FairMux {
                 Err(mpsc::error::TryRecvError::Disconnected) => None,
             };
 
-            if let Some(n) = notification {
-                if self.outgoing.send(n).await.is_err() {
-                    break;
-                }
+            if let Some(n) = notification
+                && self.outgoing.send(n).await.is_err()
+            {
+                break;
             }
         }
     }
 }
+
+/// Lock a `std::sync::Mutex`, recovering the guard if a previous holder panicked.
+///
+/// The fair-mux must keep draining other subscriptions even if one thread
+/// poisoned a receiver lock, so poison is recovered rather than propagated as a
+/// panic (production code forbids `unwrap`/`expect`).
+fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::time::Duration;
@@ -309,17 +316,11 @@ mod tests {
 
         // Create 3 subscriptions with independent channels
         let (tx1, rx1) = mpsc::channel(256);
-        let sub1 = Arc::new(Subscription::new(
-            "sub:1".into(), "t1".into(), 0, rx1,
-        ));
+        let sub1 = Arc::new(Subscription::new("sub:1".into(), "t1".into(), 0, rx1));
         let (tx2, rx2) = mpsc::channel(256);
-        let sub2 = Arc::new(Subscription::new(
-            "sub:2".into(), "t1".into(), 0, rx2,
-        ));
+        let sub2 = Arc::new(Subscription::new("sub:2".into(), "t1".into(), 0, rx2));
         let (tx3, rx3) = mpsc::channel(256);
-        let sub3 = Arc::new(Subscription::new(
-            "sub:3".into(), "t1".into(), 0, rx3,
-        ));
+        let sub3 = Arc::new(Subscription::new("sub:3".into(), "t1".into(), 0, rx3));
 
         // Register subscriptions
         mux.add(sub1).await;
@@ -348,8 +349,7 @@ mod tests {
 
         // Collect 3 notifications from outgoing — round-robin order depends on
         // HashMap iteration, but each subscription must deliver exactly once.
-        let mut seen: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for _ in 0..3 {
             let notif = tokio::time::timeout(Duration::from_secs(5), outgoing_rx.recv())
                 .await
@@ -382,23 +382,20 @@ mod tests {
         };
 
         let json = serde_json::to_string(&event).expect("serialize");
-        let deserialized: Event =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: Event = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(deserialized.thread_id, "t1");
         assert_eq!(deserialized.turn_id, Some("turn-1".to_string()));
         assert_eq!(deserialized.sequence, 42);
         assert_eq!(deserialized.kind, "ping");
         assert_eq!(deserialized.event_ref, "ref:abc");
-        assert_eq!(
-            deserialized.data,
-            Some(serde_json::json!({"key": "value"}))
-        );
+        assert_eq!(deserialized.data, Some(serde_json::json!({"key": "value"})));
     }
 
     #[test]
     fn test_event_deny_unknown_fields() {
-        let json = r#"{"thread_id":"t1","sequence":1,"kind":"x","event_ref":"","unknown":"should_fail"}"#;
+        let json =
+            r#"{"thread_id":"t1","sequence":1,"kind":"x","event_ref":"","unknown":"should_fail"}"#;
         let result: Result<Event, _> = serde_json::from_str(json);
         assert!(result.is_err(), "unknown fields should be denied");
     }

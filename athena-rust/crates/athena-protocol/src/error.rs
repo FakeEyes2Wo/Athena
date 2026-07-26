@@ -44,7 +44,11 @@ pub struct RpcError {
 
 impl RpcError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code: code.code(), message: message.into(), data: None }
+        Self {
+            code: code.code(),
+            message: message.into(),
+            data: None,
+        }
     }
 
     pub fn invalid_argument(msg: impl Into<String>) -> Self {
@@ -90,6 +94,10 @@ impl Error for RpcException {}
 
 impl From<RpcError> for RpcException {
     fn from(e: RpcError) -> Self {
-        Self { code: e.code, message: e.message, data: e.data }
+        Self {
+            code: e.code,
+            message: e.message,
+            data: e.data,
+        }
     }
 }

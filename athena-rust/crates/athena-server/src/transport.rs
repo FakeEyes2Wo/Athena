@@ -1,5 +1,4 @@
 use athena_protocol::{ClientMessage, EventNotification, ServerControlMessage};
-use athena_protocol::error::RpcError;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -36,7 +35,14 @@ impl Transport {
         let (c2s_tx, c2s_rx) = mpsc::channel(cap_c);
         let (s2c_control_tx, s2c_control_rx) = mpsc::channel(cap_c);
         let (s2c_event_tx, s2c_event_rx) = mpsc::channel(cap_e);
-        Self { c2s_tx, c2s_rx, s2c_control_tx, s2c_control_rx, s2c_event_tx, s2c_event_rx }
+        Self {
+            c2s_tx,
+            c2s_rx,
+            s2c_control_tx,
+            s2c_control_rx,
+            s2c_event_tx,
+            s2c_event_rx,
+        }
     }
 
     pub fn with_defaults() -> Self {
@@ -69,7 +75,10 @@ pub struct TransportClientHalf {
 
 impl TransportClientHalf {
     /// Send a request to the server with timeout. Returns WouldBlock-style error on full.
-    pub async fn send_request(&self, msg: athena_protocol::RequestEnvelope) -> Result<(), TransportError> {
+    pub async fn send_request(
+        &self,
+        msg: athena_protocol::RequestEnvelope,
+    ) -> Result<(), TransportError> {
         self.c2s_tx
             .send(ClientMessage::Request(msg))
             .await
@@ -118,7 +127,10 @@ impl TransportServerHalf {
     }
 
     /// Send a response to the client.
-    pub async fn send_response(&self, msg: athena_protocol::ResponseEnvelope) -> Result<(), TransportError> {
+    pub async fn send_response(
+        &self,
+        msg: athena_protocol::ResponseEnvelope,
+    ) -> Result<(), TransportError> {
         self.s2c_control_tx
             .send(ServerControlMessage::Response(msg))
             .await
@@ -143,6 +155,7 @@ impl TransportServerHalf {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -186,12 +199,22 @@ mod tests {
         let (mut client, server) = transport.split();
 
         // Fill control channel first, then send event — event must not be blocked
-        server.send_response(athena_protocol::ResponseEnvelope {
-            request_id: 0, result: Some(serde_json::json!({})), error: None,
-        }).await.unwrap();
-        server.send_response(athena_protocol::ResponseEnvelope {
-            request_id: 1, result: Some(serde_json::json!({})), error: None,
-        }).await.unwrap();
+        server
+            .send_response(athena_protocol::ResponseEnvelope {
+                request_id: 0,
+                result: Some(serde_json::json!({})),
+                error: None,
+            })
+            .await
+            .unwrap();
+        server
+            .send_response(athena_protocol::ResponseEnvelope {
+                request_id: 1,
+                result: Some(serde_json::json!({})),
+                error: None,
+            })
+            .await
+            .unwrap();
 
         // Event should still go through (separate channel)
         server.send_event(EventNotification {

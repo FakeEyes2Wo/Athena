@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use athena_protocol::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const PROTOCOL_JSON: &str = include_str!("../../../tests/fixtures/protocol/protocol.json");
 
@@ -15,17 +15,43 @@ fn load_fixture() -> Value {
 #[test]
 fn test_all_error_code_values_match_python() {
     let fixture = load_fixture();
-    let codes = fixture["error_codes"].as_object().expect("error_codes should be an object");
+    let codes = fixture["error_codes"]
+        .as_object()
+        .expect("error_codes should be an object");
 
-    assert_eq!(ErrorCode::InvalidArgument.code(), codes["INVALID_ARGUMENT"].as_i64().unwrap());
-    assert_eq!(ErrorCode::NotFound.code(), codes["NOT_FOUND"].as_i64().unwrap());
-    assert_eq!(ErrorCode::FailedPrecondition.code(), codes["FAILED_PRECONDITION"].as_i64().unwrap());
-    assert_eq!(ErrorCode::NotInitialized.code(), codes["NOT_INITIALIZED"].as_i64().unwrap());
-    assert_eq!(ErrorCode::AlreadyInitialized.code(), codes["ALREADY_INITIALIZED"].as_i64().unwrap());
-    assert_eq!(ErrorCode::DuplicateRequestId.code(), codes["DUPLICATE_REQUEST_ID"].as_i64().unwrap());
-    assert_eq!(ErrorCode::Overloaded.code(), codes["OVERLOADED"].as_i64().unwrap());
+    assert_eq!(
+        ErrorCode::InvalidArgument.code(),
+        codes["INVALID_ARGUMENT"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ErrorCode::NotFound.code(),
+        codes["NOT_FOUND"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ErrorCode::FailedPrecondition.code(),
+        codes["FAILED_PRECONDITION"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ErrorCode::NotInitialized.code(),
+        codes["NOT_INITIALIZED"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ErrorCode::AlreadyInitialized.code(),
+        codes["ALREADY_INITIALIZED"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ErrorCode::DuplicateRequestId.code(),
+        codes["DUPLICATE_REQUEST_ID"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ErrorCode::Overloaded.code(),
+        codes["OVERLOADED"].as_i64().unwrap()
+    );
     assert_eq!(ErrorCode::Closed.code(), codes["CLOSED"].as_i64().unwrap());
-    assert_eq!(ErrorCode::Internal.code(), codes["INTERNAL"].as_i64().unwrap());
+    assert_eq!(
+        ErrorCode::Internal.code(),
+        codes["INTERNAL"].as_i64().unwrap()
+    );
 }
 
 #[test]
@@ -41,7 +67,9 @@ fn test_all_error_code_variants_covered() {
 #[test]
 fn test_all_method_constants_match_python() {
     let fixture = load_fixture();
-    let methods = fixture["method_values"].as_object().expect("method_values should be an object");
+    let methods = fixture["method_values"]
+        .as_object()
+        .expect("method_values should be an object");
 
     assert_eq!(method::INITIALIZE, methods["INITIALIZE"]);
     assert_eq!(method::INITIALIZED, methods["INITIALIZED"]);
@@ -52,8 +80,14 @@ fn test_all_method_constants_match_python() {
     assert_eq!(method::THREAD_SUBSCRIBE, methods["THREAD_SUBSCRIBE"]);
     assert_eq!(method::THREAD_UNSUBSCRIBE, methods["THREAD_UNSUBSCRIBE"]);
     assert_eq!(method::SERVER_SHUTDOWN, methods["SERVER_SHUTDOWN"]);
-    assert_eq!(method::ITEM_APPROVAL_REQUEST, methods["ITEM_APPROVAL_REQUEST"]);
-    assert_eq!(method::ITEM_USER_INPUT_REQUEST, methods["ITEM_USER_INPUT_REQUEST"]);
+    assert_eq!(
+        method::ITEM_APPROVAL_REQUEST,
+        methods["ITEM_APPROVAL_REQUEST"]
+    );
+    assert_eq!(
+        method::ITEM_USER_INPUT_REQUEST,
+        methods["ITEM_USER_INPUT_REQUEST"]
+    );
     assert_eq!(method::TOOL_CALL_REQUEST, methods["TOOL_CALL_REQUEST"]);
 }
 
@@ -69,8 +103,8 @@ fn test_method_count_matches_python() {
 #[test]
 fn test_request_envelope_matches_fixture() {
     let fixture = load_fixture();
-    let req: RequestEnvelope =
-        serde_json::from_value(fixture["request_envelope"].clone()).expect("deserialize request_envelope");
+    let req: RequestEnvelope = serde_json::from_value(fixture["request_envelope"].clone())
+        .expect("deserialize request_envelope");
 
     assert_eq!(req.request_id, 42);
     assert_eq!(req.method, method::TURN_START);
@@ -97,9 +131,8 @@ fn test_request_envelope_roundtrip() {
 #[test]
 fn test_response_envelope_error_matches_fixture() {
     let fixture = load_fixture();
-    let resp: ResponseEnvelope =
-        serde_json::from_value(fixture["response_envelope_error"].clone())
-            .expect("deserialize response_envelope_error");
+    let resp: ResponseEnvelope = serde_json::from_value(fixture["response_envelope_error"].clone())
+        .expect("deserialize response_envelope_error");
 
     assert_eq!(resp.request_id, 42);
     assert!(resp.result.is_none());
@@ -126,9 +159,8 @@ fn test_response_envelope_success_matches_fixture() {
 #[test]
 fn test_event_notification_matches_fixture() {
     let fixture = load_fixture();
-    let ev: EventNotification =
-        serde_json::from_value(fixture["event_notification"].clone())
-            .expect("deserialize event_notification");
+    let ev: EventNotification = serde_json::from_value(fixture["event_notification"].clone())
+        .expect("deserialize event_notification");
 
     assert_eq!(ev.subscription_id, "sub:abc123");
     assert_eq!(ev.thread_id, "t1");
@@ -159,8 +191,8 @@ fn test_event_notification_roundtrip() {
 #[test]
 fn test_server_request_matches_fixture() {
     let fixture = load_fixture();
-    let sr: ServerRequest =
-        serde_json::from_value(fixture["server_request"].clone()).expect("deserialize server_request");
+    let sr: ServerRequest = serde_json::from_value(fixture["server_request"].clone())
+        .expect("deserialize server_request");
 
     assert_eq!(sr.server_call_id, "call-1");
     assert_eq!(sr.method, method::ITEM_APPROVAL_REQUEST);
@@ -236,9 +268,8 @@ fn test_thread_unsubscribe_params_matches_fixture() {
 #[test]
 fn test_client_notification_matches_fixture() {
     let fixture = load_fixture();
-    let notif: ClientNotification =
-        serde_json::from_value(fixture["client_notification"].clone())
-            .expect("deserialize client_notification");
+    let notif: ClientNotification = serde_json::from_value(fixture["client_notification"].clone())
+        .expect("deserialize client_notification");
 
     assert_eq!(notif.method, method::INITIALIZED);
     assert!(notif.params.is_some());

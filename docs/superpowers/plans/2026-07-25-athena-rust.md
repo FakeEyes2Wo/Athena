@@ -1,7 +1,7 @@
 # Athena Rust 迁移实施计划（审校版）
 
 > 设计依据：`docs/superpowers/specs/2026-07-25-athena-rust-design.md`
-> 状态：待实施。本文中的任务默认均未完成；只有通过对应验收命令后才能勾选。
+> 状态：实施中。本文 checkbox 是验收清单；实时任务状态与提交证据记录在 `.superpowers/sdd/progress.md`。只有通过对应验收命令后才能勾选。
 > 范围：仅迁移 `src/athena` 中当前已经存在可执行行为的模块。
 
 ## 1. 问题摘要
@@ -298,6 +298,7 @@ cargo test -p athena-protocol
 - `ContextSnapshot`
 - `Summarizer` trait
 - `Compactor`
+- `CompactionPlan`
 - `Compaction`
 - `RolloutRecord`
 - `RolloutRecorder`
@@ -310,8 +311,8 @@ cargo test -p athena-protocol
 - [ ] 3.3 所有写操作维护 token 总和不变量。
 - [ ] 3.4 工具结果截断保留头尾，不修改调用方原对象。
 - [ ] 3.5 实现 Compactor 的 recent-token 切分。
-- [ ] 3.6 摘要调用期间不持有 Context 锁。
-- [ ] 3.7 提交摘要前验证 source version。
+- [ ] 3.6 `prepare` 冻结 source version、split index 和待摘要消息；摘要调用期间不借用或持有 Context 锁。
+- [ ] 3.7 `commit` 重新验证 source version；版本变化时拒绝提交且不修改 Context。
 - [ ] 3.8 Rollout 以结构化 JSON 写 message，不进行双重 JSON 编码。
 - [ ] 3.9 最新 compaction checkpoint 重置恢复状态。
 - [ ] 3.10 跳过崩溃产生的最后一条 torn record。
@@ -698,6 +699,8 @@ cargo test -p athena-research
 
 证明所有纳入范围的 Rust 行为可交付，并保留 Python 回滚路径。
 
+本任务交付 Rust crate、兼容性证据和文档，不切换真实 Python 调用入口。`python`/`rust` 引擎选择及默认引擎切换属于后续独立接入计划；在该计划完成前，Python 保持唯一生产入口。
+
 ### 文件
 
 - Modify: `README.md`
@@ -716,6 +719,7 @@ cargo test -p athena-research
 - [ ] 10.6 在 `athena-rust/README.md` 记录构建、测试、示例运行和环境变量。
 - [ ] 10.7 明确 Rust 尚未覆盖的“待实现”模块，不把它们写成 Rust 缺陷或已完成能力。
 - [ ] 10.8 只有全部证据存在时，才更新本计划相应 checkbox。
+- [ ] 10.9 明确记录本计划未修改生产调用入口，后续接入必须保留显式 `python`/`rust` 引擎选择与回滚测试。
 
 ### 最终验收命令
 
@@ -801,9 +805,10 @@ uv run pytest -q `
 
 1. Python 在整个迁移期保持可运行。
 2. Rust 只读取兼容 fixture，不修改 Python rollout。
-3. 上层调用方在 Rust 全部验收前继续使用 Python。
-4. 切换后如出现问题，恢复 Python 调用入口即可。
-5. 不删除 Python 代码、不转换历史数据，直到另有经批准的清理计划。
+3. 本计划不修改生产调用入口；上层调用方继续使用 Python。
+4. 后续独立接入计划必须提供显式 `python`/`rust` 引擎选择，并在切换默认值前验证回滚。
+5. Rust 接入后如出现问题，通过引擎选择恢复 Python。
+6. 不删除 Python 代码、不转换历史数据，直到另有经批准的清理计划。
 
 ## 9. 开放问题
 

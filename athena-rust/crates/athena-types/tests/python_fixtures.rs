@@ -13,15 +13,18 @@ fn load_fixture() -> Value {
 #[test]
 fn test_hypothesis_proposed_serialization_matches_python() {
     let fixture = load_fixture();
-    let hyp: Hypothesis =
-        serde_json::from_value(fixture["hypothesis_proposed"].clone()).expect("deserialize proposed");
+    let hyp: Hypothesis = serde_json::from_value(fixture["hypothesis_proposed"].clone())
+        .expect("deserialize proposed");
 
     // Verify status is SCREAMING_SNAKE
     let serialized = serde_json::to_value(&hyp).unwrap();
     assert_eq!(serialized["status"], "PROPOSED");
 
     // Verify field names match Python (all snake_case in JSON)
-    assert_eq!(hyp.statement, "Adding a batch-norm layer improves convergence");
+    assert_eq!(
+        hyp.statement,
+        "Adding a batch-norm layer improves convergence"
+    );
     assert_eq!(hyp.status, HypothesisStatus::Proposed);
     assert_eq!(hyp.patience_grant, 0);
     assert!(hyp.patience_evidence_ref.is_none());
@@ -30,12 +33,15 @@ fn test_hypothesis_proposed_serialization_matches_python() {
 #[test]
 fn test_hypothesis_supported_deserialize() {
     let fixture = load_fixture();
-    let hyp: Hypothesis =
-        serde_json::from_value(fixture["hypothesis_supported"].clone()).expect("deserialize supported");
+    let hyp: Hypothesis = serde_json::from_value(fixture["hypothesis_supported"].clone())
+        .expect("deserialize supported");
 
     assert_eq!(hyp.status, HypothesisStatus::Supported);
     assert_eq!(hyp.evidence_refs.len(), 1);
-    assert_eq!(hyp.evidence_refs[0].as_str(), "artifact://exp/run-42/results");
+    assert_eq!(
+        hyp.evidence_refs[0].as_str(),
+        "artifact://exp/run-42/results"
+    );
     assert_eq!(hyp.patience_grant, 0);
     assert!(hyp.patience_evidence_ref.is_none());
 }
@@ -43,8 +49,9 @@ fn test_hypothesis_supported_deserialize() {
 #[test]
 fn test_hypothesis_refuted_with_patience() {
     let fixture = load_fixture();
-    let hyp: Hypothesis = serde_json::from_value(fixture["hypothesis_refuted_with_patience"].clone())
-        .expect("deserialize refuted with patience");
+    let hyp: Hypothesis =
+        serde_json::from_value(fixture["hypothesis_refuted_with_patience"].clone())
+            .expect("deserialize refuted with patience");
 
     assert_eq!(hyp.status, HypothesisStatus::Refuted);
     assert_eq!(hyp.patience_grant, 1);
@@ -70,7 +77,10 @@ fn test_hypothesis_positive_patience_without_evidence_is_rejected() {
     });
 
     let err = serde_json::from_value::<Hypothesis>(json);
-    assert!(err.is_err(), "should reject positive patience without evidence");
+    assert!(
+        err.is_err(),
+        "should reject positive patience without evidence"
+    );
     let err_msg = err.unwrap_err().to_string();
     assert!(
         err_msg.contains("positive patience grant"),
@@ -81,8 +91,8 @@ fn test_hypothesis_positive_patience_without_evidence_is_rejected() {
 #[test]
 fn test_athena_thread_deserialize_from_fixture() {
     let fixture = load_fixture();
-    let thread: AthenaThread =
-        serde_json::from_value(fixture["athena_thread"].clone()).expect("deserialize athena_thread");
+    let thread: AthenaThread = serde_json::from_value(fixture["athena_thread"].clone())
+        .expect("deserialize athena_thread");
 
     assert_eq!(thread.thread_id.as_str(), "t-001");
     assert_eq!(thread.session_id.as_str(), "sess-2026-07-25");
