@@ -1,15 +1,17 @@
-use super::context::Message;
+use crate::context::ContextManager;
+use crate::message::{MessagePart, MessageRole, ModelMessage};
 use chrono::Datelike;
 use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 
 /// Records messages to a JSONL file for rollout/playback.
 ///
-/// Each line has the form:
-/// ```json
-/// {"seq": 0, "ts": "2026-07-25T12:00:00+00:00", "msg": "{\"role\":\"user\",\"content\":\"...\"}"}
-/// ```
+/// Each line is a structured JSON record — messages are **not** double-encoded.
+///
+/// Record types:
+/// - **Message**: `{"seq":N, "ts":"...", "msg":<ModelMessage>}`
+/// - **Compaction**: `{"seq":N, "ts":"...", "type":"compaction", "version":V, "summary":"..."}`
 pub struct RolloutRecorder {
     project_root: PathBuf,
     path: Option<PathBuf>,
@@ -19,7 +21,12 @@ pub struct RolloutRecorder {
 
 impl RolloutRecorder {
     pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root, path: None, fd: None, seq: 0 }
+        Self {
+            project_root,
+            path: None,
+            fd: None,
+            seq: 0,
+        }
     }
 
     /// Return the current output file path, if open.
@@ -30,7 +37,8 @@ impl RolloutRecorder {
     /// Open (or reuse) a JSONL file for the given `thread_id`.
     ///
     /// Creates the day directory under `<project_root>/.athena/sessions/...`
-    /// and generates a unique file name.
+    /// and generates a unique file name. Idempotent — returns the already-open
+    /// path on subsequent calls.
     pub async fn open(&mut self, thread_id: &str) -> Result<PathBuf, std::io::Error> {
         if let Some(ref p) = self.path {
             return Ok(p.clone());
@@ -49,7 +57,13 @@ impl RolloutRecorder {
         let short_id: String = thread_id
             .chars()
             .take(12)
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let short_id = if short_id.is_empty() {
             "thread".to_string()
@@ -75,30 +89,30 @@ impl RolloutRecorder {
         Ok(full_path)
     }
 
-    /// Record a single message as a JSONL line.
-    pub async fn record(&mut self, msg: &Message) -> Result<(), std::io::Error> {
+    /// Write a structured message record.
+    ///
+    /// The message is embedded directly as a JSON object — it is **not**
+    /// serialized to a string and then wrapped.
+    pub async fn record(&mut self, msg: &ModelMessage) -> Result<(), std::io::Error> {
         let fd = match &mut self.fd {
             Some(f) => f,
             None => return Ok(()),
         };
 
-        let payload = serde_json::to_string(msg)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let line = serde_json::json!({
             "seq": self.seq,
             "ts": chrono::Utc::now().to_rfc3339(),
-            "msg": payload,
+            "msg": msg,
         });
-        let line_bytes = serde_json::to_string(&line)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        fd.write_all(line_bytes.as_bytes()).await?;
+        let line_bytes = serde_json::to_vec(&line).map_err(std::io::Error::other)?;
+        fd.write_all(&line_bytes).await?;
         fd.write_all(b"\n").await?;
         fd.flush().await?;
         self.seq += 1;
         Ok(())
     }
 
-    /// Record a compaction event.
+    /// Write a compaction checkpoint record.
     pub async fn record_compaction(
         &mut self,
         version: u64,
@@ -111,41 +125,121 @@ impl RolloutRecorder {
 
         let line = serde_json::json!({
             "seq": self.seq,
+            "ts": chrono::Utc::now().to_rfc3339(),
             "type": "compaction",
             "version": version,
             "summary": summary,
         });
-        let line_bytes = serde_json::to_string(&line)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        fd.write_all(line_bytes.as_bytes()).await?;
+        let line_bytes = serde_json::to_vec(&line).map_err(std::io::Error::other)?;
+        fd.write_all(&line_bytes).await?;
         fd.write_all(b"\n").await?;
         fd.flush().await?;
         self.seq += 1;
         Ok(())
     }
 
-    /// Flush and close the output file.
+    /// Flush and close the output file. Idempotent.
     pub async fn close(&mut self) -> Result<(), std::io::Error> {
         if let Some(mut fd) = self.fd.take() {
             fd.flush().await?;
         }
         Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // Recovery
+    // ------------------------------------------------------------------
+
+    /// Stream-read a JSONL rollout file and reconstruct a [`ContextManager`].
+    ///
+    /// * The latest compaction checkpoint resets the context (all earlier
+    ///   messages are replaced by the summary).
+    /// * Messages after the latest compaction are replayed on top.
+    /// * A torn (incomplete) last record is silently skipped.
+    pub async fn resume_context(
+        path: &Path,
+        context_limit: usize,
+    ) -> Result<ContextManager, std::io::Error> {
+        let file = File::open(path).await?;
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+
+        let mut ctx = ContextManager::new(context_limit);
+
+        while let Some(line) = lines.next_line().await? {
+            let trimmed = line.trim().to_owned();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let value: serde_json::Value = match serde_json::from_str(&trimmed) {
+                Ok(v) => v,
+                Err(_) => {
+                    // Torn / corrupt record — skip silently.
+                    continue;
+                }
+            };
+
+            if Self::try_apply_compaction(&mut ctx, &value) {
+                continue;
+            }
+
+            Self::try_apply_message(&mut ctx, &value);
+        }
+
+        Ok(ctx)
+    }
+
+    /// If `value` describes a compaction checkpoint, reset `ctx` to just
+    /// the summary message and return `true`.
+    fn try_apply_compaction(ctx: &mut ContextManager, value: &serde_json::Value) -> bool {
+        let record_type = match value.get("type").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => return false,
+        };
+        if record_type != "compaction" {
+            return false;
+        }
+        let summary = value.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+        let n = ctx.items().len();
+        let summary_msg = ModelMessage {
+            role: MessageRole::System,
+            parts: vec![MessagePart::SystemPrompt {
+                content: format!("[HISTORY SUMMARY]\n{}", summary),
+            }],
+        };
+        ctx.replace_range(0, n, vec![summary_msg]);
+        true
+    }
+
+    /// If `value` carries a `msg` field, deserialize it and append to `ctx`.
+    fn try_apply_message(ctx: &mut ContextManager, value: &serde_json::Value) {
+        let msg_val = match value.get("msg") {
+            Some(v) => v,
+            None => return,
+        };
+        if let Ok(model_msg) = serde_json::from_value::<ModelMessage>(msg_val.clone()) {
+            ctx.append(model_msg);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::context::Role;
 
-    fn test_msg(content: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: content.into(),
-            tool_calls: vec![],
-            tool_call_id: None,
-            tool_name: None,
+    fn user_msg(content: &str) -> ModelMessage {
+        ModelMessage {
+            role: MessageRole::User,
+            parts: vec![MessagePart::UserPrompt {
+                content: content.into(),
+            }],
         }
+    }
+
+    fn test_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("rollout-test-{}", uuid::Uuid::new_v4()))
     }
 
     #[test]
@@ -160,26 +254,29 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let dir = std::env::temp_dir().join(format!(
-                "rollout-test-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let dir = test_dir();
             let mut recorder = RolloutRecorder::new(dir.clone());
 
             let path = recorder.open("thread-abc").await.unwrap();
             assert!(path.exists());
             assert!(path.to_string_lossy().contains("rollout-thread-abc-"));
 
-            let msg = test_msg("hello world");
+            let msg = user_msg("hello world");
             recorder.record(&msg).await.unwrap();
 
-            // Read back and verify format
+            // Read back and verify the msg field is an object, not a string.
             let content = tokio::fs::read_to_string(&path).await.unwrap();
             let line = content.trim();
             let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
             assert_eq!(parsed["seq"], 0);
             assert!(parsed["ts"].is_string());
-            assert!(parsed["msg"].is_string());
+            // Msg should be an object with role + parts, NOT a string.
+            assert!(
+                parsed["msg"].is_object(),
+                "msg should be a JSON object, not a string"
+            );
+            assert_eq!(parsed["msg"]["role"], "user");
+            assert!(parsed["msg"]["parts"].is_array());
 
             recorder.close().await.unwrap();
 
@@ -196,8 +293,8 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let mut recorder = RolloutRecorder::new(PathBuf::from("/tmp"));
-            // Should be a no-op, not an error
-            recorder.record(&test_msg("nope")).await.unwrap();
+            // Should be a no-op, not an error.
+            recorder.record(&user_msg("nope")).await.unwrap();
         });
     }
 
@@ -207,10 +304,7 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let dir = std::env::temp_dir().join(format!(
-                "rollout-test-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let dir = test_dir();
             let mut recorder = RolloutRecorder::new(dir.clone());
             recorder.open("test-thread").await.unwrap();
 
@@ -219,7 +313,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Read back to verify format
             let path = recorder.path().unwrap().to_path_buf();
             let content = tokio::fs::read_to_string(&path).await.unwrap();
             let line = content.trim();
@@ -242,14 +335,11 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let dir = std::env::temp_dir().join(format!(
-                "rollout-test-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let dir = test_dir();
             let mut recorder = RolloutRecorder::new(dir.clone());
             recorder.open("test").await.unwrap();
             recorder.close().await.unwrap();
-            // Second close should be safe
+            // Second close should be safe.
             recorder.close().await.unwrap();
             let _ = std::fs::remove_dir_all(&dir);
         });
@@ -261,15 +351,167 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let dir = std::env::temp_dir().join(format!(
-                "rollout-test-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let dir = test_dir();
             let mut recorder = RolloutRecorder::new(dir.clone());
             let path1 = recorder.open("test").await.unwrap();
             let path2 = recorder.open("test").await.unwrap();
-            // Second open returns same path (reuses existing fd)
+            // Second open returns same path (reuses existing fd).
             assert_eq!(path1, path2);
+            recorder.close().await.unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn test_resume_context_basic() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = test_dir();
+            let mut recorder = RolloutRecorder::new(dir.clone());
+            let path = recorder.open("test").await.unwrap();
+
+            recorder.record(&user_msg("first")).await.unwrap();
+            recorder.record(&user_msg("second")).await.unwrap();
+
+            recorder.close().await.unwrap();
+
+            // Read back
+            let ctx = RolloutRecorder::resume_context(&path, 10_000)
+                .await
+                .unwrap();
+            assert_eq!(ctx.items().len(), 2);
+            assert_eq!(
+                ctx.items()[0].parts[0],
+                MessagePart::UserPrompt {
+                    content: "first".into()
+                }
+            );
+            assert_eq!(
+                ctx.items()[1].parts[0],
+                MessagePart::UserPrompt {
+                    content: "second".into()
+                }
+            );
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn test_resume_context_with_compaction() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = test_dir();
+            let mut recorder = RolloutRecorder::new(dir.clone());
+            let path = recorder.open("test").await.unwrap();
+
+            recorder.record(&user_msg("old message")).await.unwrap();
+            recorder
+                .record_compaction(2, "compacted old messages")
+                .await
+                .unwrap();
+            recorder.record(&user_msg("after compact")).await.unwrap();
+
+            recorder.close().await.unwrap();
+
+            // Read back — only the message after the compaction survives
+            // alongside the summary.
+            let ctx = RolloutRecorder::resume_context(&path, 10_000)
+                .await
+                .unwrap();
+            assert_eq!(ctx.items().len(), 2);
+            assert_eq!(ctx.items()[0].role, MessageRole::System);
+            assert!(match &ctx.items()[0].parts[0] {
+                MessagePart::SystemPrompt { content } => content.contains("compacted old messages"),
+                _ => false,
+            });
+            assert_eq!(
+                ctx.items()[1].parts[0],
+                MessagePart::UserPrompt {
+                    content: "after compact".into()
+                }
+            );
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn test_resume_context_torn_last_record() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = test_dir();
+            let mut recorder = RolloutRecorder::new(dir.clone());
+            let path = recorder.open("test").await.unwrap();
+
+            recorder.record(&user_msg("good message")).await.unwrap();
+
+            // Flush and then manually append a torn line
+            recorder.close().await.unwrap();
+
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f, "{{truncated incomplete line").unwrap();
+
+            // Read back — torn line should be skipped, good message recovered.
+            let ctx = RolloutRecorder::resume_context(&path, 10_000)
+                .await
+                .unwrap();
+            assert_eq!(ctx.items().len(), 1);
+            assert_eq!(
+                ctx.items()[0].parts[0],
+                MessagePart::UserPrompt {
+                    content: "good message".into()
+                }
+            );
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn test_sanitize_thread_id() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = test_dir();
+            let mut recorder = RolloutRecorder::new(dir.clone());
+
+            let path = recorder
+                .open("dirty/../thread:name with spaces!")
+                .await
+                .unwrap();
+            let filename = path.file_name().unwrap().to_string_lossy().to_string();
+
+            // Unsafe chars should be replaced with '_'
+            assert!(
+                !filename.contains('/'),
+                "path separators should be sanitized"
+            );
+            assert!(!filename.contains(':'), "colons should be sanitized");
+            assert!(!filename.contains(' '), "spaces should be sanitized");
+            assert!(!filename.contains('!'), "exclamation should be sanitized");
+            // First 12 of "dirty/../thread:name with spaces!" = "dirty/../thr"
+            // Sanitized: / → _, . → _, . → _, / → _ => "dirty____thr"
+            assert!(
+                filename.starts_with("rollout-dirty____thr"),
+                "expected prefix 'rollout-dirty____thr' but filename was: {}",
+                filename
+            );
+
             recorder.close().await.unwrap();
             let _ = std::fs::remove_dir_all(&dir);
         });

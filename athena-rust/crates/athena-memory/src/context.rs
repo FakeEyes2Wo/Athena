@@ -1,38 +1,17 @@
-use serde::{Deserialize, Serialize};
+use crate::message::{MAX_TOOL_RESULT_CHARS, MessagePart, ModelMessage};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
+/// Opaque token-invariant snapshot used for rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextSnapshot {
+    pub index: usize,
+    pub version: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCallRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallRef {
-    pub call_id: String,
-    pub name: String,
-    /// JSON string of arguments.
-    pub arguments: String,
-}
-
-const MAX_TOOL_RESULT_CHARS: usize = 50_000;
-
+/// Manages a sequence of [`ModelMessage`]s while maintaining the invariant:
+///
+/// `self.token_count == sum(Self::estimate_tokens(m) for m in self.items)`
 pub struct ContextManager {
-    items: Vec<Message>,
+    items: Vec<ModelMessage>,
     token_count: usize,
     context_limit: usize,
     version: u64,
@@ -40,11 +19,17 @@ pub struct ContextManager {
 
 impl ContextManager {
     pub fn new(context_limit: usize) -> Self {
-        Self { items: Vec::new(), token_count: 0, context_limit, version: 0 }
+        Self {
+            items: Vec::new(),
+            token_count: 0,
+            context_limit,
+            version: 0,
+        }
     }
 
-    pub fn items(&self) -> &[Message] {
-        &self.items
+    /// Deep-clone all items. External callers cannot mutate the internal store.
+    pub fn items(&self) -> Vec<ModelMessage> {
+        self.items.clone()
     }
 
     pub fn token_count(&self) -> usize {
@@ -59,13 +44,16 @@ impl ContextManager {
         self.context_limit
     }
 
-    /// Return snapshot of (item_count, version).
-    pub fn snapshot(&self) -> (usize, u64) {
-        (self.items.len(), self.version)
+    /// Return a snapshot of the current item count and version.
+    pub fn snapshot(&self) -> ContextSnapshot {
+        ContextSnapshot {
+            index: self.items.len(),
+            version: self.version,
+        }
     }
 
-    /// Return items starting from index `idx`.
-    pub fn items_since(&self, idx: usize) -> &[Message] {
+    /// Return a reference to items starting at index `idx`.
+    pub fn items_since(&self, idx: usize) -> &[ModelMessage] {
         if idx >= self.items.len() {
             &[]
         } else {
@@ -73,8 +61,9 @@ impl ContextManager {
         }
     }
 
-    /// Append a message and update token count.
-    pub fn append(&mut self, msg: Message) {
+    /// Append a message (after preparing/truncating tool results) and update
+    /// the token count.
+    pub fn append(&mut self, msg: ModelMessage) {
         let prepared = Self::prepare(msg);
         let tokens = Self::estimate_tokens(&prepared);
         self.items.push(prepared);
@@ -82,7 +71,8 @@ impl ContextManager {
         self.version += 1;
     }
 
-    /// Roll back to item count `idx`, discarding later items.
+    /// Roll back to the given item count, discarding later items.
+    /// No-op when `idx` is past the end.
     pub fn rollback(&mut self, idx: usize) {
         if idx > self.items.len() {
             return;
@@ -93,66 +83,131 @@ impl ContextManager {
         self.version += 1;
     }
 
-    /// Replace items in [start..end) with `new` messages.
-    pub fn replace_range(&mut self, start: usize, end: usize, new: Vec<Message>) {
-        let removed: usize = self.items[start..end].iter().map(Self::estimate_tokens).sum();
-        let added: usize = new.iter().map(Self::estimate_tokens).sum();
-        let prepared: Vec<Message> = new.into_iter().map(Self::prepare).collect();
+    /// Replace items in `[start..end)` with `new` messages.
+    pub fn replace_range(&mut self, start: usize, end: usize, new: Vec<ModelMessage>) {
+        let removed: usize = self.items[start..end]
+            .iter()
+            .map(Self::estimate_tokens)
+            .sum();
+        let prepared: Vec<ModelMessage> = new.into_iter().map(Self::prepare).collect();
+        let added: usize = prepared.iter().map(Self::estimate_tokens).sum();
         self.items.splice(start..end, prepared);
         self.token_count = self.token_count.saturating_sub(removed) + added;
         self.version += 1;
     }
 
-    /// Truncate tool-result content that exceeds MAX_TOOL_RESULT_CHARS.
-    fn prepare(msg: Message) -> Message {
-        if msg.role != Role::Tool {
-            return msg;
-        }
-        if msg.content.len() <= MAX_TOOL_RESULT_CHARS {
-            return msg;
-        }
-        let budget = MAX_TOOL_RESULT_CHARS - 50;
-        let head = budget / 2;
-        let tail = budget - head;
-        let truncated = format!(
-            "{}...\n...[TRUNCATED]...\n{}",
-            &msg.content[..head],
-            &msg.content[msg.content.len() - tail..]
-        );
-        Message { content: truncated, ..msg }
+    // ------------------------------------------------------------------
+    // Internal helpers
+    // ------------------------------------------------------------------
+
+    /// Truncate `ToolReturn` content that exceeds `MAX_TOOL_RESULT_CHARS`.
+    /// Non-`ToolReturn` parts are left untouched.
+    fn prepare(msg: ModelMessage) -> ModelMessage {
+        let parts: Vec<MessagePart> = msg
+            .parts
+            .into_iter()
+            .map(|part| {
+                if let MessagePart::ToolReturn {
+                    content,
+                    tool_call_id,
+                    tool_name,
+                } = part
+                {
+                    if content.len() > MAX_TOOL_RESULT_CHARS {
+                        let budget = MAX_TOOL_RESULT_CHARS - 50;
+                        let head = budget / 2;
+                        let tail = budget - head;
+                        let truncated = format!(
+                            "{}...\n...[TRUNCATED]...\n{}",
+                            &content[..head],
+                            &content[content.len() - tail..]
+                        );
+                        MessagePart::ToolReturn {
+                            content: truncated,
+                            tool_call_id,
+                            tool_name,
+                        }
+                    } else {
+                        MessagePart::ToolReturn {
+                            content,
+                            tool_call_id,
+                            tool_name,
+                        }
+                    }
+                } else {
+                    part
+                }
+            })
+            .collect();
+        ModelMessage { parts, ..msg }
     }
 
-    /// Rough token estimate: (content_len + tool_call_args_len) / 4, minimum 1.
-    pub fn estimate_tokens(msg: &Message) -> usize {
-        let mut total = msg.content.len();
-        for tc in &msg.tool_calls {
-            total += tc.arguments.len();
-        }
+    /// Rough token estimate: `(total chars of all part payloads) / 4`, minimum 1.
+    /// This aligns with the Python `char_count / 4` heuristic.
+    pub fn estimate_tokens(msg: &ModelMessage) -> usize {
+        let total: usize = msg
+            .parts
+            .iter()
+            .map(|part| match part {
+                MessagePart::SystemPrompt { content }
+                | MessagePart::UserPrompt { content }
+                | MessagePart::Text { content } => content.len(),
+                MessagePart::ToolCall { arguments, .. } => arguments.len(),
+                MessagePart::ToolReturn { content, .. } => content.len(),
+            })
+            .sum();
         (total / 4).max(1)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::message::MessageRole;
 
-    fn user_msg(content: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: content.to_string(),
-            tool_calls: vec![],
-            tool_call_id: None,
-            tool_name: None,
+    fn user_msg(content: &str) -> ModelMessage {
+        ModelMessage {
+            role: MessageRole::User,
+            parts: vec![MessagePart::UserPrompt {
+                content: content.into(),
+            }],
         }
     }
 
-    fn tool_msg(content: &str) -> Message {
-        Message {
-            role: Role::Tool,
-            content: content.to_string(),
-            tool_calls: vec![],
-            tool_call_id: Some("call_1".into()),
-            tool_name: Some("test_tool".into()),
+    fn assistant_text(content: &str) -> ModelMessage {
+        ModelMessage {
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                content: content.into(),
+            }],
+        }
+    }
+
+    fn tool_msg(content: &str) -> ModelMessage {
+        ModelMessage {
+            role: MessageRole::Tool,
+            parts: vec![MessagePart::ToolReturn {
+                tool_call_id: "call_1".into(),
+                tool_name: "test_tool".into(),
+                content: content.into(),
+            }],
+        }
+    }
+
+    fn assistant_with_tool_calls() -> ModelMessage {
+        ModelMessage {
+            role: MessageRole::Assistant,
+            parts: vec![
+                MessagePart::Text {
+                    content: "calling tools".into(),
+                },
+                MessagePart::ToolCall {
+                    tool_call_id: "call_1".into(),
+                    tool_name: "search".into(),
+                    arguments: r#"{"q":"test"}"#.into(),
+                },
+            ],
         }
     }
 
@@ -172,25 +227,41 @@ mod tests {
         assert_eq!(ctx.items().len(), 1);
         assert_eq!(ctx.version(), 1);
         assert!(ctx.token_count() > 0);
-        assert_eq!(ctx.items()[0].content, "hello");
+        assert_eq!(
+            ctx.items()[0].parts[0],
+            MessagePart::UserPrompt {
+                content: "hello".into()
+            }
+        );
     }
 
     #[test]
     fn test_snapshot_and_items_since() {
         let mut ctx = ContextManager::new(100);
-        assert_eq!(ctx.snapshot(), (0, 0));
+        assert_eq!(
+            ctx.snapshot(),
+            ContextSnapshot {
+                index: 0,
+                version: 0
+            }
+        );
         ctx.append(user_msg("a"));
         ctx.append(user_msg("b"));
-        let (len, ver) = ctx.snapshot();
-        assert_eq!(len, 2);
-        assert_eq!(ver, 2);
+        let snap = ctx.snapshot();
+        assert_eq!(snap.index, 2);
+        assert_eq!(snap.version, 2);
 
         let since = ctx.items_since(1);
         assert_eq!(since.len(), 1);
-        assert_eq!(since[0].content, "b");
+        assert_eq!(
+            since[0].parts[0],
+            MessagePart::UserPrompt {
+                content: "b".into()
+            }
+        );
 
-        let since_empty = ctx.items_since(5);
-        assert!(since_empty.is_empty());
+        let empty = ctx.items_since(5);
+        assert!(empty.is_empty());
     }
 
     #[test]
@@ -202,7 +273,12 @@ mod tests {
         let before = ctx.token_count();
         ctx.rollback(1);
         assert_eq!(ctx.items().len(), 1);
-        assert_eq!(ctx.items()[0].content, "a");
+        assert_eq!(
+            ctx.items()[0].parts[0],
+            MessagePart::UserPrompt {
+                content: "a".into()
+            }
+        );
         assert!(ctx.token_count() < before);
         assert_eq!(ctx.version(), 4);
     }
@@ -227,9 +303,24 @@ mod tests {
         let replacement = vec![user_msg("x"), user_msg("y")];
         ctx.replace_range(1, 3, replacement);
         assert_eq!(ctx.items().len(), 3);
-        assert_eq!(ctx.items()[0].content, "a");
-        assert_eq!(ctx.items()[1].content, "x");
-        assert_eq!(ctx.items()[2].content, "y");
+        assert_eq!(
+            ctx.items()[0].parts[0],
+            MessagePart::UserPrompt {
+                content: "a".into()
+            }
+        );
+        assert_eq!(
+            ctx.items()[1].parts[0],
+            MessagePart::UserPrompt {
+                content: "x".into()
+            }
+        );
+        assert_eq!(
+            ctx.items()[2].parts[0],
+            MessagePart::UserPrompt {
+                content: "y".into()
+            }
+        );
         assert_eq!(ctx.version(), 4);
     }
 
@@ -238,8 +329,13 @@ mod tests {
         let long = "A".repeat(60_000);
         let msg = tool_msg(&long);
         let prepared = ContextManager::prepare(msg);
-        assert!(prepared.content.len() < 60_000);
-        assert!(prepared.content.contains("[TRUNCATED]"));
+        // Only the ToolReturn part should be truncated
+        let content = match &prepared.parts[0] {
+            MessagePart::ToolReturn { content, .. } => content,
+            _ => panic!("expected ToolReturn"),
+        };
+        assert!(content.len() < 60_000);
+        assert!(content.contains("[TRUNCATED]"));
     }
 
     #[test]
@@ -247,7 +343,11 @@ mod tests {
         let short = "short result";
         let msg = tool_msg(short);
         let prepared = ContextManager::prepare(msg);
-        assert_eq!(prepared.content, "short result");
+        let content = match &prepared.parts[0] {
+            MessagePart::ToolReturn { content, .. } => content,
+            _ => panic!("expected ToolReturn"),
+        };
+        assert_eq!(content, "short result");
     }
 
     #[test]
@@ -255,87 +355,89 @@ mod tests {
         let long = "A".repeat(60_000);
         let msg = user_msg(&long);
         let prepared = ContextManager::prepare(msg);
-        assert_eq!(prepared.content.len(), 60_000);
+        let content = match &prepared.parts[0] {
+            MessagePart::UserPrompt { content } => content,
+            _ => panic!("expected UserPrompt"),
+        };
+        assert_eq!(content.len(), 60_000);
     }
 
     #[test]
     fn test_estimate_tokens() {
         let msg = user_msg("hello world");
-        let tokens = ContextManager::estimate_tokens(&msg);
         // "hello world" = 11 chars / 4 = 2, min 1
-        assert_eq!(tokens, 2);
+        assert_eq!(ContextManager::estimate_tokens(&msg), 2);
     }
 
     #[test]
     fn test_estimate_tokens_min_one() {
         let msg = user_msg("ab");
-        let tokens = ContextManager::estimate_tokens(&msg);
-        assert_eq!(tokens, 1);
+        assert_eq!(ContextManager::estimate_tokens(&msg), 1);
     }
 
     #[test]
     fn test_estimate_tokens_with_tool_calls() {
-        let msg = Message {
-            role: Role::Assistant,
-            content: "call".into(),
-            tool_calls: vec![ToolCallRef {
-                call_id: "1".into(),
-                name: "get".into(),
-                arguments: r#"{"url":"http://example.com"}"#.into(),
-            }],
-            tool_call_id: None,
-            tool_name: None,
-        };
-        let tokens = ContextManager::estimate_tokens(&msg);
-        // content=4, args=30, total=34, /4=8
-        assert_eq!(tokens, 8);
+        let msg = assistant_with_tool_calls();
+        // Text "calling tools" = 13 chars
+        // arguments "{\"q\":\"test\"}" = 12 chars
+        // total = 25, /4 = 6
+        assert_eq!(ContextManager::estimate_tokens(&msg), 6);
     }
 
     #[test]
-    fn test_serialize_role() {
-        let json = serde_json::to_string(&Role::User).unwrap();
-        assert_eq!(json, "\"user\"");
-        let json = serde_json::to_string(&Role::Assistant).unwrap();
-        assert_eq!(json, "\"assistant\"");
-        let json = serde_json::to_string(&Role::System).unwrap();
-        assert_eq!(json, "\"system\"");
-        let json = serde_json::to_string(&Role::Tool).unwrap();
-        assert_eq!(json, "\"tool\"");
+    fn test_token_invariant_after_append() {
+        let mut ctx = ContextManager::new(100);
+        ctx.append(user_msg("hello world"));
+        let expected: usize = ctx
+            .items()
+            .iter()
+            .map(ContextManager::estimate_tokens)
+            .sum();
+        assert_eq!(ctx.token_count(), expected);
     }
 
     #[test]
-    fn test_role_partial_eq() {
-        assert_eq!(Role::User, Role::User);
-        assert_ne!(Role::User, Role::Assistant);
+    fn test_token_invariant_after_replace_range() {
+        let mut ctx = ContextManager::new(100);
+        ctx.append(user_msg("a"));
+        ctx.append(assistant_text("longer text here for testing"));
+        ctx.replace_range(0, 2, vec![user_msg("replacement")]);
+        let expected: usize = ctx
+            .items()
+            .iter()
+            .map(ContextManager::estimate_tokens)
+            .sum();
+        assert_eq!(ctx.token_count(), expected);
     }
 
     #[test]
-    fn test_message_roundtrip() {
-        let msg = Message {
-            role: Role::Assistant,
-            content: "Hello!".into(),
-            tool_calls: vec![ToolCallRef {
-                call_id: "call_abc".into(),
-                name: "get_weather".into(),
-                arguments: r#"{"city":"Tokyo"}"#.into(),
-            }],
-            tool_call_id: None,
-            tool_name: None,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let back: Message = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.role, Role::Assistant);
-        assert_eq!(back.content, "Hello!");
-        assert_eq!(back.tool_calls.len(), 1);
-        assert_eq!(back.tool_calls[0].name, "get_weather");
+    fn test_token_invariant_after_rollback() {
+        let mut ctx = ContextManager::new(100);
+        ctx.append(user_msg("msg1"));
+        ctx.append(user_msg("msg2 longer content"));
+        ctx.append(user_msg("msg3"));
+        ctx.rollback(1);
+        let expected: usize = ctx
+            .items()
+            .iter()
+            .map(ContextManager::estimate_tokens)
+            .sum();
+        assert_eq!(ctx.token_count(), expected);
     }
 
     #[test]
-    fn test_message_deserialize_defaults() {
-        let json = r#"{"role":"user","content":"hi"}"#;
-        let msg: Message = serde_json::from_str(json).unwrap();
-        assert!(msg.tool_calls.is_empty());
-        assert!(msg.tool_call_id.is_none());
-        assert!(msg.tool_name.is_none());
+    fn test_items_deep_clone() {
+        let mut ctx = ContextManager::new(100);
+        ctx.append(user_msg("original"));
+        let cloned = ctx.items();
+        // Mutating the clone should not affect the original
+        let mut mutated = cloned[0].clone();
+        mutated.parts = vec![];
+        assert_eq!(ctx.items()[0].parts.len(), 1);
+        drop(mutated);
+        drop(cloned);
+        // Still intact
+        assert_eq!(ctx.items().len(), 1);
+        assert_eq!(ctx.token_count(), 2);
     }
 }
