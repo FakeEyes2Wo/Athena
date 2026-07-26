@@ -9,9 +9,8 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+thiserror.workspace = true
 async-trait.workspace = true
-tracing.workspace = true
-uuid.workspace = true
 
 [lints]
 workspace = true
