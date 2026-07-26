@@ -122,11 +122,14 @@ dependencies = [
 name = "athena-workspace"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "athena-types",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

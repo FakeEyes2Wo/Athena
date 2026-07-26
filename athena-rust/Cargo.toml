@@ -29,6 +29,7 @@ chrono = "0.4"
 reqwest = { version = "0.12", features = ["stream", "json"] }
 futures = "0.3"
 tokio-stream = "0.1"
+tempfile = "3"
 
 # Internal crates
 athena-types = { path = "crates/athena-types" }
