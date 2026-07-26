@@ -21,13 +21,13 @@ depends on protocol + runtime; `athena-agent` implements the runtime
 | `athena-agent` | Provider stream, tool-call loop, sub-agents, `AgentRunner` | `core/agent/*` | ✅ done |
 | `athena-workspace` | `LocalGitWorkspace` (worktree/diff/commit) | `core/gitutils/workspace.py` | ✅ done |
 | `athena-research` | `ResearchTree`, experiment nodes, prompt aggregation | `core/research/research_tree.py` | ✅ done |
-| `athena-server` | Transport, message processor, execution, subscriptions, lifecycle | `app_server/{transport,server,execution,client,lifecycle}.py` | 🚧 transport only |
+| `athena-server` | Transport, message processor, execution, subscriptions, lifecycle | `app_server/{transport,server,execution,client,lifecycle}.py` | ✅ done |
 
 ## Build & test
 
 ```bash
 cargo check --workspace
-cargo test  --workspace          # 186 tests currently pass
+cargo test  --workspace          # 188 tests currently pass
 
 # quality gates (must all pass)
 cargo fmt --all --check

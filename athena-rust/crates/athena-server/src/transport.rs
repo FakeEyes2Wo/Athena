@@ -1,6 +1,9 @@
-use athena_protocol::{ClientMessage, EventNotification, ServerControlMessage};
+use athena_protocol::{
+    ClientMessage, ClientNotification, EventNotification, RequestEnvelope, ResponseEnvelope,
+    ServerControlMessage, ServerRequest, ServerRequestReply,
+};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 const DEFAULT_CONTROL_CAPACITY: usize = 64;
 const DEFAULT_EVENT_CAPACITY: usize = 256;
@@ -19,6 +22,8 @@ pub enum TransportError {
 /// - c2s (client→server): requests, notifications, server-request-replies
 /// - s2c_control (server→client): responses, ServerRequests
 /// - s2c_event (server→client): EventNotifications (independent, never blocked by control)
+///
+/// A `watch` ready barrier lets the client await the `initialized` handshake.
 pub struct Transport {
     c2s_tx: mpsc::Sender<ClientMessage>,
     c2s_rx: mpsc::Receiver<ClientMessage>,
@@ -26,6 +31,8 @@ pub struct Transport {
     s2c_control_rx: mpsc::Receiver<ServerControlMessage>,
     s2c_event_tx: mpsc::Sender<EventNotification>,
     s2c_event_rx: mpsc::Receiver<EventNotification>,
+    ready_tx: watch::Sender<bool>,
+    ready_rx: watch::Receiver<bool>,
 }
 
 impl Transport {
@@ -35,6 +42,7 @@ impl Transport {
         let (c2s_tx, c2s_rx) = mpsc::channel(cap_c);
         let (s2c_control_tx, s2c_control_rx) = mpsc::channel(cap_c);
         let (s2c_event_tx, s2c_event_rx) = mpsc::channel(cap_e);
+        let (ready_tx, ready_rx) = watch::channel(false);
         Self {
             c2s_tx,
             c2s_rx,
@@ -42,6 +50,8 @@ impl Transport {
             s2c_control_rx,
             s2c_event_tx,
             s2c_event_rx,
+            ready_tx,
+            ready_rx,
         }
     }
 
@@ -55,11 +65,13 @@ impl Transport {
             c2s_tx: self.c2s_tx,
             s2c_control_rx: self.s2c_control_rx,
             s2c_event_rx: self.s2c_event_rx,
+            ready_rx: self.ready_rx,
         };
         let server = TransportServerHalf {
             c2s_rx: self.c2s_rx,
             s2c_control_tx: self.s2c_control_tx,
             s2c_event_tx: self.s2c_event_tx,
+            ready_tx: self.ready_tx,
         };
         (client, server)
     }
@@ -71,29 +83,48 @@ pub struct TransportClientHalf {
     c2s_tx: mpsc::Sender<ClientMessage>,
     s2c_control_rx: mpsc::Receiver<ServerControlMessage>,
     s2c_event_rx: mpsc::Receiver<EventNotification>,
+    ready_rx: watch::Receiver<bool>,
 }
 
 impl TransportClientHalf {
-    /// Send a request to the server with timeout. Returns WouldBlock-style error on full.
-    pub async fn send_request(
-        &self,
-        msg: athena_protocol::RequestEnvelope,
-    ) -> Result<(), TransportError> {
+    /// A cloneable sender for the client→server channel.
+    pub fn sender(&self) -> mpsc::Sender<ClientMessage> {
+        self.c2s_tx.clone()
+    }
+
+    /// A receiver that flips to `true` once the server is ready.
+    pub fn ready(&self) -> watch::Receiver<bool> {
+        self.ready_rx.clone()
+    }
+
+    /// Decompose into the control and event receivers (for a reader task that
+    /// must poll both channels independently).
+    pub fn into_receivers(
+        self,
+    ) -> (
+        mpsc::Receiver<ServerControlMessage>,
+        mpsc::Receiver<EventNotification>,
+    ) {
+        (self.s2c_control_rx, self.s2c_event_rx)
+    }
+
+    /// Send a request to the server (reliable; waits for capacity).
+    pub async fn send_request(&self, msg: RequestEnvelope) -> Result<(), TransportError> {
         self.c2s_tx
             .send(ClientMessage::Request(msg))
             .await
             .map_err(|_| TransportError::Closed)
     }
 
-    /// Send a notification to the server (fire-and-forget; drops on full).
-    pub fn send_notification(&self, msg: athena_protocol::ClientNotification) {
+    /// Send a notification (fire-and-forget; drops on full).
+    pub fn send_notification(&self, msg: ClientNotification) {
         let _ = self.c2s_tx.try_send(ClientMessage::Notification(msg));
     }
 
     /// Send a reply to a server-initiated request.
     pub async fn send_server_request_reply(
         &self,
-        msg: athena_protocol::ServerRequestReply,
+        msg: ServerRequestReply,
     ) -> Result<(), TransportError> {
         self.c2s_tx
             .send(ClientMessage::ServerRequestReply(msg))
@@ -114,10 +145,33 @@ impl TransportClientHalf {
 
 // ── Server half ──
 
+/// A cloneable control-plane responder for spawned request handlers.
+#[derive(Clone)]
+pub struct ServerResponder {
+    control_tx: mpsc::Sender<ServerControlMessage>,
+}
+
+impl ServerResponder {
+    pub async fn send_response(&self, msg: ResponseEnvelope) -> Result<(), TransportError> {
+        self.control_tx
+            .send(ServerControlMessage::Response(msg))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    pub async fn send_server_request(&self, msg: ServerRequest) -> Result<(), TransportError> {
+        self.control_tx
+            .send(ServerControlMessage::ServerRequest(msg))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+}
+
 pub struct TransportServerHalf {
     c2s_rx: mpsc::Receiver<ClientMessage>,
     s2c_control_tx: mpsc::Sender<ServerControlMessage>,
     s2c_event_tx: mpsc::Sender<EventNotification>,
+    ready_tx: watch::Sender<bool>,
 }
 
 impl TransportServerHalf {
@@ -126,11 +180,25 @@ impl TransportServerHalf {
         self.c2s_rx.recv().await
     }
 
+    /// A cloneable responder for the control plane.
+    pub fn responder(&self) -> ServerResponder {
+        ServerResponder {
+            control_tx: self.s2c_control_tx.clone(),
+        }
+    }
+
+    /// A reliable sender for the independent event lane (used by FairMux).
+    pub fn event_sender(&self) -> mpsc::Sender<EventNotification> {
+        self.s2c_event_tx.clone()
+    }
+
+    /// Signal that the server is ready (after the `initialized` handshake).
+    pub fn set_ready(&self) {
+        let _ = self.ready_tx.send(true);
+    }
+
     /// Send a response to the client.
-    pub async fn send_response(
-        &self,
-        msg: athena_protocol::ResponseEnvelope,
-    ) -> Result<(), TransportError> {
+    pub async fn send_response(&self, msg: ResponseEnvelope) -> Result<(), TransportError> {
         self.s2c_control_tx
             .send(ServerControlMessage::Response(msg))
             .await
@@ -138,10 +206,7 @@ impl TransportServerHalf {
     }
 
     /// Send a server-initiated request to the client.
-    pub async fn send_server_request(
-        &self,
-        msg: athena_protocol::ServerRequest,
-    ) -> Result<(), TransportError> {
+    pub async fn send_server_request(&self, msg: ServerRequest) -> Result<(), TransportError> {
         self.s2c_control_tx
             .send(ServerControlMessage::ServerRequest(msg))
             .await
@@ -162,14 +227,13 @@ mod tests {
     #[tokio::test]
     async fn test_request_response_roundtrip() {
         let transport = Transport::new(4, 4);
-        let (mut client, server) = transport.split();
+        let (client, server) = transport.split();
 
-        // Server task
         let server_handle = tokio::spawn(async move {
             let mut s = server;
             if let Some(ClientMessage::Request(req)) = s.recv().await {
                 assert_eq!(req.request_id, 1);
-                let resp = athena_protocol::ResponseEnvelope {
+                let resp = ResponseEnvelope {
                     request_id: req.request_id,
                     result: Some(serde_json::json!({"status": "ok"})),
                     error: None,
@@ -178,18 +242,19 @@ mod tests {
             }
         });
 
-        // Client sends
-        let req = athena_protocol::RequestEnvelope {
-            request_id: 1,
-            method: "test".into(),
-            params: None,
-        };
-        client.send_request(req).await.unwrap();
+        let mut client = client;
+        client
+            .send_request(RequestEnvelope {
+                request_id: 1,
+                method: "test".into(),
+                params: None,
+            })
+            .await
+            .unwrap();
         if let Some(ServerControlMessage::Response(resp)) = client.recv_control().await {
             assert_eq!(resp.request_id, 1);
             assert_eq!(resp.result.unwrap()["status"], "ok");
         }
-
         server_handle.await.unwrap();
     }
 
@@ -198,9 +263,8 @@ mod tests {
         let transport = Transport::new(2, 2);
         let (mut client, server) = transport.split();
 
-        // Fill control channel first, then send event — event must not be blocked
         server
-            .send_response(athena_protocol::ResponseEnvelope {
+            .send_response(ResponseEnvelope {
                 request_id: 0,
                 result: Some(serde_json::json!({})),
                 error: None,
@@ -208,7 +272,7 @@ mod tests {
             .await
             .unwrap();
         server
-            .send_response(athena_protocol::ResponseEnvelope {
+            .send_response(ResponseEnvelope {
                 request_id: 1,
                 result: Some(serde_json::json!({})),
                 error: None,
@@ -216,7 +280,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Event should still go through (separate channel)
         server.send_event(EventNotification {
             subscription_id: "s1".into(),
             thread_id: "t1".into(),
@@ -232,19 +295,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_notification_is_fire_and_forget() {
+    async fn test_ready_barrier() {
         let transport = Transport::new(2, 2);
-        let (client, mut server) = transport.split();
-
-        client.send_notification(athena_protocol::ClientNotification {
-            method: "initialized".into(),
-            params: None,
-        });
-
-        if let Some(ClientMessage::Notification(n)) = server.recv().await {
-            assert_eq!(n.method, "initialized");
-        } else {
-            panic!("expected notification");
-        }
+        let (client, server) = transport.split();
+        let mut ready = client.ready();
+        assert!(!*ready.borrow());
+        server.set_ready();
+        ready.changed().await.unwrap();
+        assert!(*ready.borrow());
     }
 }
