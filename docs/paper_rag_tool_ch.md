@@ -1,0 +1,163 @@
+# Paper RAG Tool
+
+`paper_rag` 是 `paper_markdown` 的下游检索层，把若干篇已转换的论文构建成语料，并向模型
+暴露 A-RAG 的三个分层检索接口：关键词检索、语义检索、整篇读取。
+
+## 定位
+
+`paper_source` 取源、`paper_markdown` 转换、`paper_rag` 检索，三层各自只做一件事。
+
+Agent loop 不在本模块内实现——Athena 的 `core/agent` 已经是一个带工具调用的 ReAct 循环，
+A-RAG 论文的贡献本就在"给模型什么样的检索接口"，而不在循环本身。本模块只提供接口。
+
+### 协作边界
+
+- 上游契约是 `PaperContent.load_retrieval_units()` 返回的 `RetrievalUnit`，不是
+  `PaperChunk`。选它有两个理由：模块只依赖一个上游契约；`interpretation_status` 为
+  `unavailable` 的视觉单元由上游自动排除，本模块不需要理解视觉策略。
+- 不重新切分 chunk。上游的结构化切分不会从元素中间截断，重切只会丢掉 locator 溯源，
+  而两者的粒度本就在同一量级。
+- 建索引是库函数 `build_corpus_index`，不是工具。编码有真金白银的成本，不能让模型自己
+  决定何时触发。
+
+## 索引构建
+
+语料索引拆成两个 artifact：`PaperCorpusIndex` 本体与句向量。关键词检索和整篇读取永远不
+需要加载向量，拆开后这两条路径不必为语义检索的体积买单。
+
+句子不存文本，只存指向父 chunk 正文的字符区间（`CorpusSentence.char_start/char_end`），
+因此不存在正文的第二份副本，chunk 全文与句子视图永远一致。
+
+### 结构感知切句
+
+切句分两步：先按行切分，让 Markdown 表格行与展示公式各自成为独立单元；再在行内按句末
+标点切分，跳过缩写与姓名首字母处的句点。
+
+第三步是结构过滤（`index.is_indexable`）。以下片段不进入句子索引：
+
+| 片段 | 理由 |
+| --- | --- |
+| `> Section: 章节 / 路径` | paper_markdown 为 retrieval_text 添加的前缀，信息已结构化在 `SearchHit.heading_path` 里 |
+| `## 标题行` | 同上 |
+| `\| --- \| :-: \|` 表格分隔行 | 不含任何可检索内容 |
+| 不含任何字母词的片段（`$$`、`\[`、`[1]`） | 同上 |
+
+表格**数据**行与参考文献条目一律保留：方法名、数据集名、数字、被引作者，正是检索最该
+命中的东西。
+
+**为什么必须过滤。** 三个各自正确的设计叠在一起会产生系统性偏置：
+
+1. 按行切分让每个结构行都成为与正文句平权的检索单元；
+2. 余弦相似度对短文本有系统性偏置——只有一个词的向量"方向纯粹"，命中查询里任意一个
+   词就能拿到接近上界的相似度，且不必覆盖查询的其余部分；
+3. chunk 得分取其最高句得分（A-RAG 的设计，用平均会让长 chunk 被稀释），于是一个 chunk
+   的排名由它最极端的那个句子决定。
+
+问题不在第 3 步，而在"什么才配当一个可检索单元"。A-RAG 论文在 HotpotQA / MuSiQue 这类
+维基段落上评测，语料是干净散文，没有这一层；把它搬到论文全文才出现。
+
+过滤只按结构判定，不按长度判定：表格数据行常常只有数字与方法名，长度阈值会把它们一并
+误删。
+
+**实测（3 篇论文：2602.03442 / 2005.11401 / 1706.03762，273 chunk）**
+
+| | 过滤前 | 过滤后 |
+| --- | --- | --- |
+| 索引句数 | 1775 | 1430（−19.4%） |
+| 短于 40 字符的占比 | 28% | 14% |
+| 句长中位数 | 70 | 88 |
+
+同一条查询 `how are retrieved passages combined with the generator during training`：
+
+- 过滤前前四名：`##### Baselines.` / `### Training` / `## References` / `## Training`，
+  并列 0.378，全部是标题行。
+- 过滤后前三名：`we run ablations where we freeze the retriever during training` /
+  `We employ three types of regularization during training:` /
+  `During training, we retrieve the top $k$ documents for each query.`
+
+区间指向的仍是未经改动的 chunk 正文，因此 `paper_chunk_read` 返回的全文不受影响。
+
+## 检索语义
+
+### paper_keyword_search
+
+按 `Σ 词频 × 关键词长度` 给 chunk 打分，长关键词更具体因而权重更高。匹配不区分大小写，
+以便实体名在正文与标题的不同写法下都能命中。返回 chunk id 与**只包含命中句**的片段。
+
+### paper_semantic_search
+
+句级余弦检索后按父 chunk 聚合，chunk 得分取其最高句得分。先取全局最高分的一批句子再
+聚合，因此一个 chunk 只有真正命中的句子会进入片段，而不是整段正文。相似度非正的句子
+一律排除。
+
+语料未建向量、或建索引与查询用的模型标识不一致时明确报错，不返回一批无意义的相似度。
+
+### paper_chunk_read
+
+检索工具只给片段，全文必须显式读取。本会话内重复读取只返回一句提示，既省上下文也促使
+Agent 去探索新的 chunk。`include_adjacent` 连同同一篇论文内的相邻 chunk 一并返回，越过
+论文边界的邻居会被排除。
+
+### 会话状态
+
+三个工具共享一个 `RetrievalSession`：按 `corpus_ref` 缓存已解码的语料，并记录已读集合。
+两个检索工具是纯读取因而 `concurrency_safe`；`paper_chunk_read` 会更新已读集合，故声明
+为不可并发，由 agent loop 串行化。
+
+## 与论文的差异
+
+1. 不重新切分 chunk（保留 locator 溯源）。
+2. 关键词匹配不区分大小写。
+3. 片段有 600 字符上限——Athena 的 chunk 可达数千字符，不设上限会让"只返回片段"失效。
+4. 语义检索排除相似度非正的句子，避免小语料下无关句被凑进片段。
+5. 结构感知切句（见上），论文的维基语料不存在这个问题。
+6. 不移植论文实验设定里"禁止并行工具调用"的约束——那是评测控制变量，不是接口契约。
+
+## 备选方案：Contextual Retrieval
+
+结构感知切句解决的是"结构片段不该参与检索"。它解决不了另一半问题：**正文 chunk 本身也
+可能缺少自足语境**。"该变体在两个数据集上均下降 1.2 分"这样的句子，脱离所属实验设置后
+既检索不到也读不懂。
+
+Contextual Retrieval（Anthropic, 2024）的做法是在编码之前，由一个模型为每个 chunk 生成
+一段说明它在全文中位置与角色的前缀，前缀与正文拼接后再嵌入；配合稀疏检索与重排使用。
+公开结果显示它能明显降低检索失败率，代价是每篇论文额外的模型调用（可用 prompt caching
+摊薄全文重复输入的成本）。
+
+**当前状态：只保留契约，不接入链路。**
+
+- `interfaces.ChunkContextualizer`——生成上下文前缀的供应商无关协议，与 `TextEmbedder`
+  同级。
+- `contextual.contextualize_entries`——保留的入口，调用会抛 `NotImplementedError`，而不
+  是悄悄返回原样条目（后者会让调用方以为语料已经过上下文增强）。
+
+Athena 目前没有配置任何 `ChunkContextualizer`，把半成品接进 `build_corpus_index` 只会让
+语料在无声中分裂成两种不兼容的形态。真正落地前需要一并决定：
+
+1. **前缀写到哪里。** 若并入 `CorpusEntry.text`，句子的字符区间与 `paper_chunk_read`
+   返回的全文都会随之改变，模型会读到并非原文的内容；若只用于编码而不落进正文，则需要
+   在 schema 里为编码文本单开一份来源。
+2. **语料标识。** `embedding_model` 之外还需要记录是否经过上下文增强，否则两种语料混用
+   时无法在查询期发现不一致——这正是 `embedding_model` 守卫要解决的同一类问题。
+3. **成本归属。** 建索引已经是显式的库函数调用，增强属于同一次离线成本，但需要向调用方
+   暴露可预估的用量。
+4. **收益验证。** 需要一组论文级检索评测来确认增益，否则无法判断它是否值回模型调用。
+
+更远的选项还有句长归一（pivoted length normalization 的简化版，纯打分层改动）与
+cross-encoder 重排（对残留的短单元噪声最有效，但每次检索都要一次模型调用）。
+
+## 已知限制
+
+- 仓库内没有任何 `TextEmbedder` 实现。与 `paper_markdown` 的 `VisualInterpreter` 一致，
+  只给协议不给具体适配器；未配置编码器时语料照常构建，语义检索明确报错。
+- `paper_keyword_search` 在 chunk 全文上算原始词频，既没有 IDF 也没有长度归一，因此偏好
+  长 chunk——与语义检索偏好短单元恰好相反。若要动打分，直接换 BM25 能一次解决这两点。
+- 结构过滤不修复上游遗留的 LaTeX 残片（`\bibliography{custom}`、`acl_natbib`、`[!htbp]`
+  等）。它们含字母词因而被保留，正确的修复位置在 `paper_markdown` 的 tex 解析。
+
+## 验收状态
+
+- 单元测试覆盖切句、结构过滤、语料构建、两种检索、读取去重、相邻扩展、模型不一致守卫、
+  top-k 夹紧与保留入口的拒绝行为。
+- 端到端实跑：arXiv 取源 → Markdown 转换 → 语料构建 → 三个工具经 `ToolRegistry.adispatch`
+  派发，覆盖 3 篇论文 / 273 chunk / 1430 句，含取消与失败路径。

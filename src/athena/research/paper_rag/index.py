@@ -2,6 +2,10 @@
 
 索引只做两件事：把 ``RetrievalUnit`` 收成 chunk、把 chunk 切成句子并编码。这里不重新
 切分 chunk——上游的结构化切分不会从元素中间截断，重切只会丢掉 locator 溯源。
+
+切句是结构感知的：标题行、``> Section:`` 前缀、表格分隔行这类纯结构片段不进入句子索
+引（见 ``is_indexable``）。语料是论文全文而非维基段落，Markdown 结构行占了相当比例，
+放任它们与正文句平权参与检索会系统性地劣化排序。
 """
 
 import json
@@ -20,6 +24,10 @@ from athena.storage.artifact_store import ArtifactStore
 
 SENTENCE_END = re.compile(r"[.!?](?=\s)")
 WORD_BOUNDARY = re.compile(r"[\s(\[]")
+HEADING_PATH_PREFIX = "> Section:"
+TABLE_DELIMITER = re.compile(r"^\|[\s\-:|]+\|?$")
+# [^\W\d_] 是"任意语言的字母"，因此 Gómez 这类作者名不会被当成无内容片段丢掉
+LETTER_RUN = re.compile(r"[^\W\d_]{2,}")
 ABBREVIATIONS = frozenset(
     {
         "al",
@@ -62,6 +70,25 @@ def is_abbreviation(fragment: str) -> bool:
     return len(word) <= 1 or word in ABBREVIATIONS
 
 
+def is_indexable(span: str) -> bool:
+    """判断一个片段是否值得作为独立检索单元；``"## Abstract"`` 返回 False。
+
+    标题行与 ``> Section:`` 前缀承载的信息已经结构化在 ``SearchHit.heading_path`` 里，
+    表格分隔行与孤立的公式定界符则不含任何可检索内容。它们一旦成为独立句子，就会以
+    "向量方向纯粹"的优势在余弦检索里挤掉真正命中查询的正文句——短片段只要命中查询里
+    的任意一个词就能拿到接近上界的相似度，却不必覆盖查询的其余部分。
+
+    只按结构判定，不按长度判定：表格数据行常常只有数字与方法名，却正是最该被检索到的
+    内容，用长度阈值会把它们一并误删。
+    """
+    stripped = span.strip()
+    if stripped.startswith(HEADING_PATH_PREFIX) or stripped.startswith("#"):
+        return False
+    if stripped.startswith("|"):
+        return TABLE_DELIMITER.match(stripped) is None
+    return LETTER_RUN.search(stripped) is not None
+
+
 def line_sentence_spans(line: str) -> list[tuple[int, int]]:
     """在单行内按句末标点切分，返回行内字符区间，跳过缩写处的句点。"""
     spans: list[tuple[int, int]] = []
@@ -79,17 +106,20 @@ def line_sentence_spans(line: str) -> list[tuple[int, int]]:
 
 
 def split_sentences(text: str) -> list[tuple[int, int]]:
-    """把 chunk 正文切成句子区间 ``[start, end)``。
+    """把 chunk 正文切成可检索的句子区间 ``[start, end)``。
 
     先按行切分，让 Markdown 表格行与公式行各自成为独立单元，再在行内按句末标点切
-    分。``split_sentences("Hello there. Next one.")`` 返回 ``[(0, 12), (13, 22)]``。
+    分，最后按 ``is_indexable`` 剔除纯结构片段。区间指向的仍是未经改动的 chunk 正文，
+    因此 ``paper_chunk_read`` 返回的全文不受影响。
+    ``split_sentences("Hello there. Next one.")`` 返回 ``[(0, 12), (13, 22)]``。
     """
     spans: list[tuple[int, int]] = []
     offset = 0
     for line in text.splitlines(keepends=True):
+        stripped = line.strip()
         indent = len(line) - len(line.lstrip())
-        for start, end in line_sentence_spans(line.strip()):
-            if end - start >= MIN_SENTENCE_CHARS:
+        for start, end in line_sentence_spans(stripped):
+            if end - start >= MIN_SENTENCE_CHARS and is_indexable(stripped[start:end]):
                 spans.append((offset + indent + start, offset + indent + end))
         offset += len(line)
     return spans

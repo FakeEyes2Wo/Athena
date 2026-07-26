@@ -11,7 +11,12 @@ from athena.research.paper_markdown.schemas import (
     PaperContent,
     PaperProvenance,
 )
-from athena.research.paper_rag.index import build_corpus_index, split_sentences
+from athena.research.paper_rag.contextual import contextualize_entries
+from athena.research.paper_rag.index import (
+    build_corpus_index,
+    is_indexable,
+    split_sentences,
+)
 from athena.research.paper_rag.schemas import PaperCorpusIndex
 from athena.research.paper_rag.search import (
     ALREADY_READ_NOTICE,
@@ -105,13 +110,43 @@ class SentenceSplitTest(unittest.TestCase):
         text = "| Method | Acc |\n| --- | --- |\n| A-RAG | 74.1 |"
         spans = split_sentences(text)
 
-        self.assertEqual(3, len(spans))
-        self.assertEqual("| A-RAG | 74.1 |", text[spans[2][0] : spans[2][1]])
+        self.assertEqual(
+            ["| Method | Acc |", "| A-RAG | 74.1 |"],
+            [text[start:end] for start, end in spans],
+        )
 
     def test_decimals_do_not_split(self) -> None:
         spans = split_sentences("Accuracy reached 74.1 percent overall.")
 
         self.assertEqual(1, len(spans))
+
+    def test_structural_lines_do_not_become_retrieval_units(self) -> None:
+        text = (
+            "> Section: Experiments / Ablation\n"
+            "## Ablation Study\n"
+            "$$\n"
+            "Removing chunk read costs 3.1 points.\n"
+            "| Variant | Acc |\n"
+            "| :-- | --: |\n"
+            "| w/o read | 71.0 |"
+        )
+        spans = split_sentences(text)
+
+        self.assertEqual(
+            [
+                "Removing chunk read costs 3.1 points.",
+                "| Variant | Acc |",
+                "| w/o read | 71.0 |",
+            ],
+            [text[start:end] for start, end in spans],
+        )
+
+    def test_numeric_table_rows_survive_while_delimiters_do_not(self) -> None:
+        self.assertTrue(is_indexable("| 74.1 | 66.2 |"))
+        self.assertFalse(is_indexable("| --- | :---: |"))
+        self.assertFalse(is_indexable("$$"))
+        self.assertFalse(is_indexable("\\["))
+        self.assertTrue(is_indexable("Gómez proposed the variant."))
 
 
 class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
@@ -349,3 +384,11 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(2, len(result.data["hits"]))
+
+
+class ContextualSkeletonTest(unittest.IsolatedAsyncioTestCase):
+    async def test_reserved_entry_point_refuses_instead_of_silently_passing_through(
+        self,
+    ) -> None:
+        with self.assertRaises(NotImplementedError):
+            await contextualize_entries([], "document", None)
