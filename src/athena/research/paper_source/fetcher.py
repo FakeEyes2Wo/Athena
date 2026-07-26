@@ -327,9 +327,12 @@ class PaperSourceFetcher:
         paper_key = paper.identity.paper_key()
         identity = paper.identity.model_copy(deep=True)
         resolved = resolution.metadata.get(identity.arxiv_id or "")
-        version = resolved.latest_version if resolved else None
         if policy.fetch_license and identity.arxiv_id:
             resolved = await self._merge_license(identity.arxiv_id, resolved)
+        # 版本号在合并 OAI 记录之后才定。批量元数据端点被限流时（429/503）整批都解析不出
+        # 版本，而 OAI 记录自带完整版本历史：取它兜底，一次瞬时抖动才不会让整批论文因
+        # version_unresolved 全部跳过。Atom 已解析出版本时 _merge_license 会保留原值。
+        version = resolved.latest_version if resolved else None
         metadata = self._build_metadata(
             paper, identity, resolved, paper_key, diagnostics
         )

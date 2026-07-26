@@ -37,6 +37,7 @@ from athena.storage import LocalArtifactStore
 
 ZERO_INTERVALS = {bucket: 0.0 for bucket in DEFAULT_BUCKET_INTERVALS}
 QUERY_URL = "https://export.arxiv.org/api/query"
+OAI_URL = "https://oaipmh.arxiv.org/oai"
 SRC_URL = "https://arxiv.org/src/2501.10120v2"
 PDF_URL = "https://arxiv.org/pdf/2501.10120v2"
 
@@ -445,6 +446,29 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
             "paper_source.arxiv_lookup_failed",
             [item.code for item in result.diagnostics],
         )
+
+    async def test_oai_record_pins_the_version_when_the_batch_query_is_rate_limited(
+        self,
+    ) -> None:
+        fetcher, transport = self.build(
+            {
+                QUERY_URL: HttpResponse(status=429, url="", body=b"Rate exceeded."),
+                OAI_URL: ok(OAI_RECORD),
+                SRC_URL: ok(self.source),
+            }
+        )
+
+        result = await fetcher.fetch(self.pasa_request(fetch_license=True))
+        record = result.records[0]
+        codes = [item.code for item in record.diagnostics]
+
+        self.assertEqual("fetched", record.status)
+        self.assertEqual("v2", record.version)
+        self.assertTrue(record.version_pinned)
+        self.assertEqual("arxiv:2501.10120v2/src", record.source_locator)
+        self.assertEqual("http://creativecommons.org/licenses/by/4.0/", record.license)
+        self.assertNotIn("paper_source.version_unresolved", codes)
+        self.assertEqual(1, transport.count(SRC_URL))
 
     async def test_unpinned_download_is_allowed_with_a_warning(self) -> None:
         fetcher, transport = self.build(
