@@ -66,6 +66,8 @@ ABBREVIATIONS = frozenset(
 )
 MIN_SENTENCE_CHARS = 2
 EMBED_BATCH = 128
+SENTENCE_TERMINATORS = (".", "!", "?")
+DISPLAY_MATH_CLOSERS = ("$$", "\\]")
 
 
 def normalize(vector: list[float]) -> list[float]:
@@ -150,6 +152,32 @@ def display_math_end(lines: list[str], start: int) -> int:
     return start
 
 
+def closes_display_math(fragment: str) -> bool:
+    """判断片段是否以展示公式的结束定界符收尾。"""
+    return fragment.endswith(DISPLAY_MATH_CLOSERS) or bool(
+        re.search(r"\\end\{[a-zA-Z]+\*?\}$", fragment)
+    )
+
+
+def continues_across_math(
+    text: str, previous: tuple[int, int], span: tuple[int, int]
+) -> bool:
+    """判断两个相邻片段是否属于同一个被展示公式夹断的句子。
+
+    数学写作里"我们得到 [公式] 而 [公式]"是一句话，按行切之后会留下 ``Therefore``、
+    ``and`` 这类没有独立意义的残片。只在与展示公式相邻时接合：表格行同样没有句末标点，
+    但它们本来就该各自独立成检索单元。
+    """
+    left = text[previous[0] : previous[1]].rstrip()
+    if left.endswith(SENTENCE_TERMINATORS):
+        return False
+    right = text[span[0] : span[1]].lstrip()
+    if display_math_close(right.splitlines()[0]) is not None:
+        return True
+    # 公式之后另起大写字母多半是新句子，只接合 and / where 这类明显的续写
+    return closes_display_math(left) and right[:1].islower()
+
+
 def split_sentences(text: str) -> list[tuple[int, int]]:
     """把 chunk 正文切成可检索的句子区间 ``[start, end)``。
 
@@ -185,7 +213,14 @@ def split_sentences(text: str) -> list[tuple[int, int]]:
                 position = offsets[index] + indent
                 spans.append((position + start, position + end))
         index += 1
-    return spans
+
+    joined: list[tuple[int, int]] = []
+    for span in spans:
+        if joined and continues_across_math(text, joined[-1], span):
+            joined[-1] = (joined[-1][0], span[1])
+            continue
+        joined.append(span)
+    return joined
 
 
 async def embed_sentences(

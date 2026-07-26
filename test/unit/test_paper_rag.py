@@ -143,7 +143,7 @@ class SentenceSplitTest(unittest.TestCase):
             [text[start:end] for start, end in spans],
         )
 
-    def test_display_math_block_stays_one_retrieval_unit(self) -> None:
+    def test_sentence_broken_by_display_math_is_rejoined(self) -> None:
         text = (
             "We obtain the identity\n"
             "$$\n"
@@ -152,36 +152,58 @@ class SentenceSplitTest(unittest.TestCase):
             "&= \\frac{\\Gamma(m/2)}{\\Gamma(m)}\n"
             "\\end{aligned}\n"
             "$$\n"
-            "and conclude the proof."
+            "and conclude the proof.\n"
+            "A separate sentence stands alone."
         )
         spans = split_sentences(text)
         blocks = [text[start:end] for start, end in spans]
 
-        self.assertEqual(3, len(blocks))
-        self.assertEqual("We obtain the identity", blocks[0])
-        self.assertTrue(blocks[1].startswith("$$\n\\begin{aligned}"))
-        self.assertTrue(blocks[1].endswith("\\end{aligned}\n$$"))
-        self.assertEqual("and conclude the proof.", blocks[2])
+        self.assertEqual(2, len(blocks))
+        self.assertTrue(blocks[0].startswith("We obtain the identity\n$$"))
+        self.assertTrue(blocks[0].endswith("and conclude the proof."))
+        self.assertIn("\\end{aligned}", blocks[0])
+        self.assertEqual("A separate sentence stands alone.", blocks[1])
 
-    def test_bracket_display_math_is_also_kept_whole(self) -> None:
+    def test_chained_equations_join_into_one_unit(self) -> None:
         text = "\\[\nQ_\\lambda(u)=S_{\\lambda,k}(M)\n\\]\nand\n\\[\nR(u)=0\n\\]"
         spans = split_sentences(text)
 
+        self.assertEqual([(0, len(text))], spans)
+
+    def test_a_terminated_sentence_before_math_is_not_absorbed(self) -> None:
+        text = "The setup is fixed.\n$$\nx = 1 + y\n$$"
+        spans = split_sentences(text)
+
         self.assertEqual(
-            [
-                "\\[\nQ_\\lambda(u)=S_{\\lambda,k}(M)\n\\]",
-                "and",
-                "\\[\nR(u)=0\n\\]",
-            ],
+            ["The setup is fixed.", "$$\nx = 1 + y\n$$"],
+            [text[start:end] for start, end in spans],
+        )
+
+    def test_new_sentence_after_math_is_not_absorbed(self) -> None:
+        text = "We define\n$$\nf(x) = 0\n$$\nThe proof is immediate."
+        spans = split_sentences(text)
+        blocks = [text[start:end] for start, end in spans]
+
+        self.assertEqual(2, len(blocks))
+        self.assertTrue(blocks[0].startswith("We define\n$$"))
+        self.assertEqual("The proof is immediate.", blocks[1])
+
+    def test_table_rows_are_never_joined_to_each_other(self) -> None:
+        text = "| Method | Acc |\n| --- | --- |\n| A-RAG | 74.1 |\n| Naive | 66.2 |"
+        spans = split_sentences(text)
+
+        self.assertEqual(
+            ["| Method | Acc |", "| A-RAG | 74.1 |", "| Naive | 66.2 |"],
             [text[start:end] for start, end in spans],
         )
 
     def test_bare_math_environments_are_kept_whole(self) -> None:
         text = (
-            "First we state\n"
+            "First we state the identity.\n"
             "\\begin{equation}\n"
             "E = mc^2\n"
             "\\end{equation}\n"
+            "That is the mass energy relation.\n"
             "\\begin{align*}\n"
             "a &= b \\\\\n"
             "c &= d\n"
@@ -191,10 +213,10 @@ class SentenceSplitTest(unittest.TestCase):
         spans = split_sentences(text)
         blocks = [text[start:end] for start, end in spans]
 
-        self.assertEqual(4, len(blocks))
+        self.assertEqual(5, len(blocks))
         self.assertEqual("\\begin{equation}\nE = mc^2\n\\end{equation}", blocks[1])
-        self.assertTrue(blocks[2].startswith("\\begin{align*}"))
-        self.assertTrue(blocks[2].endswith("\\end{align*}"))
+        self.assertTrue(blocks[3].startswith("\\begin{align*}"))
+        self.assertTrue(blocks[3].endswith("\\end{align*}"))
 
     def test_inner_only_environments_do_not_open_a_block(self) -> None:
         # aligned 只能嵌套在数学模式内，顶层出现时不应吞掉后面的正文
