@@ -8,22 +8,38 @@ import json
 from dataclasses import dataclass
 
 from athena.core.schemas import ArtifactRef
-from athena.research.paper_rag.index import normalize
+from athena.research.paper_rag.index import LETTER_RUN, normalize
 from athena.research.paper_rag.schemas import ChunkRead, PaperCorpusIndex, SearchHit
 from athena.storage.artifact_store import ArtifactStore
 
 MAX_SNIPPET_CHARS = 600
 SENTENCE_POOL_FACTOR = 8
+SELF_CONTAINED_TOKENS = 5
 ALREADY_READ_NOTICE = "This chunk has been read before."
 
 
 @dataclass(slots=True)
 class LoadedCorpus:
-    """解码后的语料：索引本体、句向量、以及 chunk_id 到位置的映射。"""
+    """解码后的语料：索引本体、句向量、自足度权重、以及 chunk_id 到位置的映射。"""
 
     index: PaperCorpusIndex
     vectors: list[list[float]]
+    weights: list[float]
     positions: dict[str, int]
+
+
+def self_contained_weight(text: str) -> float:
+    """按实词数给句子一个 0..1 的自足度权重；``"$t = $ chunk_read"`` 返回 0.4。
+
+    结构感知切句去掉的是纯结构片段，剩下的仍有一类噪声：实词寥寥的正文片段——公式行、
+    数字表格行、参考文献条目的姓名部分。它们在余弦检索里占便宜，因为向量集中在少数维
+    度上，命中查询里任意一个词就能逼近相似度上界，却不必覆盖查询的其余部分。按实词数
+    线性降权，等于要求一个检索单元先足够自足，再谈相似度。
+
+    只作用于语义检索：这类片段恰恰是关键词检索的正当目标（按公式名或作者名定位），
+    因此 ``keyword_search`` 与索引本身都不受影响。
+    """
+    return min(1.0, len(LETTER_RUN.findall(text)) / SELF_CONTAINED_TOKENS)
 
 
 class RetrievalSession:
@@ -38,17 +54,23 @@ class RetrievalSession:
         self._read: set[str] = set()
 
     async def load(self, store: ArtifactStore, corpus_ref: ArtifactRef) -> LoadedCorpus:
-        """载入并缓存语料；未建向量的语料不会去读句向量 artifact。"""
+        """载入并缓存语料；未建向量的语料不会去读句向量，也不会算自足度权重。"""
         cached = self._corpora.get(corpus_ref)
         if cached is not None:
             return cached
         index = PaperCorpusIndex.model_validate_json(await store.get_text(corpus_ref))
         vectors: list[list[float]] = []
+        weights: list[float] = []
         if index.embedding_ref is not None:
             vectors = json.loads(await store.get_text(index.embedding_ref))
+            weights = [
+                self_contained_weight(index.sentence_text(position))
+                for position in range(len(index.sentences))
+            ]
         loaded = LoadedCorpus(
             index=index,
             vectors=vectors,
+            weights=weights,
             positions={
                 entry.chunk_id: position for position, entry in enumerate(index.entries)
             },
@@ -129,11 +151,15 @@ def semantic_search(
 
     先取全局最高分的一批句子再聚合，因此一个 chunk 只有真正命中的句子会进入 snippet，
     而不是整段正文。相似度非正的句子一律排除，避免小语料下无关句被凑进 snippet。
+
+    余弦相似度按 ``self_contained_weight`` 折算后再排序，实词寥寥的片段不会仅凭向量方向
+    集中就压过真正回答查询的正文句。
     """
     query = normalize(query_vector)
     scores = [
-        sum(left * right for left, right in zip(query, vector))
-        for vector in corpus.vectors
+        corpus.weights[position]
+        * sum(left * right for left, right in zip(query, vector))
+        for position, vector in enumerate(corpus.vectors)
     ]
     pool = sorted(
         (position for position, score in enumerate(scores) if score > 0.0),

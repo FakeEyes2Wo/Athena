@@ -23,6 +23,7 @@ from athena.research.paper_rag.search import (
     RetrievalSession,
     keyword_search,
     read_chunks,
+    self_contained_weight,
     semantic_search,
 )
 from athena.research.paper_rag.tool import (
@@ -243,7 +244,8 @@ class SearchTest(unittest.IsolatedAsyncioTestCase):
         embedder = FakeEmbedder(VOCABULARY)
         corpus = await self.load(
             [
-                "Hierarchical retrieval interfaces help. Robotic grasping differs.",
+                "Hierarchical retrieval interfaces help the agent. "
+                "Robotic grasping differs.",
                 "Nothing relevant here.",
             ],
             embedder,
@@ -254,7 +256,35 @@ class SearchTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["p1:c0"], [hit.chunk_id for hit in hits])
         self.assertAlmostEqual(1.0, hits[0].score)
-        self.assertEqual("Hierarchical retrieval interfaces help.", hits[0].snippet)
+        self.assertEqual(
+            "Hierarchical retrieval interfaces help the agent.", hits[0].snippet
+        )
+
+    async def test_sparse_fragments_lose_to_a_self_contained_sentence(self) -> None:
+        embedder = FakeEmbedder(VOCABULARY)
+        corpus = await self.load(
+            [
+                "$r = $ retrieval",
+                "Sentence-level retrieval keeps the matched evidence local.",
+            ],
+            embedder,
+        )
+
+        query = await embedder.embed(["retrieval"])
+        hits = semantic_search(corpus, query[0], 5)
+
+        # 两句的向量完全相同，排序只由自足度权重决定：1 个实词 vs 5 个以上
+        self.assertEqual(["p1:c1", "p1:c0"], [hit.chunk_id for hit in hits])
+        self.assertAlmostEqual(1.0, hits[0].score)
+        self.assertAlmostEqual(0.2, hits[1].score)
+
+    async def test_self_contained_weight_counts_words_not_characters(self) -> None:
+        long_but_empty = "|  |  |  | 0.2 |  | 5.47 | 25.7 |  |  | 4.95 | 25.5 |  |"
+
+        self.assertEqual(0.0, self_contained_weight(long_but_empty))
+        self.assertEqual(
+            1.0, self_contained_weight("Fully formed sentences read well.")
+        )
 
     async def test_semantic_search_returns_nothing_without_vectors(self) -> None:
         corpus = await self.load(["Retrieval interfaces."])
