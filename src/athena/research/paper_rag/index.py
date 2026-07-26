@@ -4,8 +4,8 @@
 切分 chunk——上游的结构化切分不会从元素中间截断，重切只会丢掉 locator 溯源。
 
 切句是结构感知的：标题行、``> Section:`` 前缀、表格分隔行这类纯结构片段不进入句子索
-引（见 ``is_indexable``）。语料是论文全文而非维基段落，Markdown 结构行占了相当比例，
-放任它们与正文句平权参与检索会系统性地劣化排序。
+引（见 ``is_indexable``），跨行的展示公式整块作为一个单元。语料是论文全文而非维基段
+落，Markdown 结构行占了相当比例，放任它们与正文句平权参与检索会系统性地劣化排序。
 """
 
 import json
@@ -26,6 +26,7 @@ SENTENCE_END = re.compile(r"[.!?](?=\s)")
 WORD_BOUNDARY = re.compile(r"[\s(\[]")
 HEADING_PATH_PREFIX = "> Section:"
 TABLE_DELIMITER = re.compile(r"^\|[\s\-:|]+\|?$")
+DISPLAY_MATH_FENCES = {"$$": "$$", "\\[": "\\]"}
 # [^\W\d_] 是"任意语言的字母"，因此 Gómez 这类作者名不会被当成无内容片段丢掉
 LETTER_RUN = re.compile(r"[^\W\d_]{2,}")
 ABBREVIATIONS = frozenset(
@@ -105,23 +106,55 @@ def line_sentence_spans(line: str) -> list[tuple[int, int]]:
     return spans
 
 
+def display_math_end(lines: list[str], start: int) -> int:
+    """返回展示公式块最后一行的下标；不是公式起始行或块未闭合时返回 ``start``。
+
+    未闭合的块退化成普通行处理，避免一个漏写的定界符把后面整篇正文吞进同一个单元。
+    """
+    closing = DISPLAY_MATH_FENCES.get(lines[start].strip())
+    if closing is None:
+        return start
+    for index in range(start + 1, len(lines)):
+        if lines[index].strip() == closing:
+            return index
+    return start
+
+
 def split_sentences(text: str) -> list[tuple[int, int]]:
     """把 chunk 正文切成可检索的句子区间 ``[start, end)``。
 
-    先按行切分，让 Markdown 表格行与公式行各自成为独立单元，再在行内按句末标点切
-    分，最后按 ``is_indexable`` 剔除纯结构片段。区间指向的仍是未经改动的 chunk 正文，
-    因此 ``paper_chunk_read`` 返回的全文不受影响。
+    先按行切分，让 Markdown 表格行各自成为独立单元，再在行内按句末标点切分，最后按
+    ``is_indexable`` 剔除纯结构片段。跨行的展示公式整块作为一个单元：按行切会把一条
+    公式拆成 ``$$``、``\\begin{aligned}``、``&=`` 等十几个碎片，既让整条公式不再可检索，
+    又要为每个碎片各付一次编码。区间指向的仍是未经改动的 chunk 正文，因此
+    ``paper_chunk_read`` 返回的全文不受影响。
     ``split_sentences("Hello there. Next one.")`` 返回 ``[(0, 12), (13, 22)]``。
     """
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    cursor = 0
+    for line in lines:
+        offsets.append(cursor)
+        cursor += len(line)
+
     spans: list[tuple[int, int]] = []
-    offset = 0
-    for line in text.splitlines(keepends=True):
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip())
+    index = 0
+    while index < len(lines):
+        last = display_math_end(lines, index)
+        if last > index:
+            indent = len(lines[index]) - len(lines[index].lstrip())
+            spans.append(
+                (offsets[index] + indent, offsets[last] + len(lines[last].rstrip()))
+            )
+            index = last + 1
+            continue
+        stripped = lines[index].strip()
+        indent = len(lines[index]) - len(lines[index].lstrip())
         for start, end in line_sentence_spans(stripped):
             if end - start >= MIN_SENTENCE_CHARS and is_indexable(stripped[start:end]):
-                spans.append((offset + indent + start, offset + indent + end))
-        offset += len(line)
+                position = offsets[index] + indent
+                spans.append((position + start, position + end))
+        index += 1
     return spans
 
 

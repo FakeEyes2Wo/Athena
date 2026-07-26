@@ -142,6 +142,48 @@ class SentenceSplitTest(unittest.TestCase):
             [text[start:end] for start, end in spans],
         )
 
+    def test_display_math_block_stays_one_retrieval_unit(self) -> None:
+        text = (
+            "We obtain the identity\n"
+            "$$\n"
+            "\\begin{aligned}\n"
+            "\\mathcal F_{n,m,k}\n"
+            "&= \\frac{\\Gamma(m/2)}{\\Gamma(m)}\n"
+            "\\end{aligned}\n"
+            "$$\n"
+            "and conclude the proof."
+        )
+        spans = split_sentences(text)
+        blocks = [text[start:end] for start, end in spans]
+
+        self.assertEqual(3, len(blocks))
+        self.assertEqual("We obtain the identity", blocks[0])
+        self.assertTrue(blocks[1].startswith("$$\n\\begin{aligned}"))
+        self.assertTrue(blocks[1].endswith("\\end{aligned}\n$$"))
+        self.assertEqual("and conclude the proof.", blocks[2])
+
+    def test_bracket_display_math_is_also_kept_whole(self) -> None:
+        text = "\\[\nQ_\\lambda(u)=S_{\\lambda,k}(M)\n\\]\nand\n\\[\nR(u)=0\n\\]"
+        spans = split_sentences(text)
+
+        self.assertEqual(
+            [
+                "\\[\nQ_\\lambda(u)=S_{\\lambda,k}(M)\n\\]",
+                "and",
+                "\\[\nR(u)=0\n\\]",
+            ],
+            [text[start:end] for start, end in spans],
+        )
+
+    def test_unclosed_math_fence_does_not_swallow_the_rest_of_the_chunk(self) -> None:
+        text = "$$\nx = 1\nA sentence that must stay retrievable on its own."
+        spans = split_sentences(text)
+
+        self.assertEqual(
+            ["A sentence that must stay retrievable on its own."],
+            [text[start:end] for start, end in spans],
+        )
+
     def test_numeric_table_rows_survive_while_delimiters_do_not(self) -> None:
         self.assertTrue(is_indexable("| 74.1 | 66.2 |"))
         self.assertFalse(is_indexable("| --- | :---: |"))
