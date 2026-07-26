@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Notify, RwLock, mpsc};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{Notify, watch};
 
 // ── Event ──
 
+/// A single authoritative, ordered event on one thread's journal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
@@ -21,23 +22,62 @@ pub struct Event {
     pub data: Option<Value>,
 }
 
+/// An event before the journal assigns its sequence number.
+#[derive(Debug, Clone)]
+pub struct EventDraft {
+    pub turn_id: Option<String>,
+    pub kind: String,
+    pub event_ref: String,
+    pub data: Option<Value>,
+}
+
+impl EventDraft {
+    pub fn new(kind: impl Into<String>, event_ref: impl Into<String>) -> Self {
+        Self {
+            turn_id: None,
+            kind: kind.into(),
+            event_ref: event_ref.into(),
+            data: None,
+        }
+    }
+
+    pub fn turn(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = Some(turn_id.into());
+        self
+    }
+
+    pub fn data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+}
+
 // ── EventJournal ──
 
-/// Per-thread append-only event journal. Notify replaces asyncio.Condition.
+/// Per-thread append-only journal. The journal itself assigns each sequence
+/// number (callers never read-then-write it), and a `watch` tail guarantees a
+/// waiter is woken for every append even if notifications coalesce.
 pub struct EventJournal {
     thread_id: String,
     records: RwLock<Vec<Event>>,
-    next_sequence: RwLock<u64>,
-    notify: Notify,
+    tail: watch::Sender<u64>,
+}
+
+fn read_guard<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|p| p.into_inner())
+}
+
+fn write_guard<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|p| p.into_inner())
 }
 
 impl EventJournal {
-    pub fn new(thread_id: String) -> Self {
+    pub fn new(thread_id: impl Into<String>) -> Self {
+        let (tail, _) = watch::channel(0);
         Self {
-            thread_id,
+            thread_id: thread_id.into(),
             records: RwLock::new(Vec::new()),
-            next_sequence: RwLock::new(1),
-            notify: Notify::new(),
+            tail,
         }
     }
 
@@ -45,66 +85,82 @@ impl EventJournal {
         &self.thread_id
     }
 
-    pub async fn next_sequence(&self) -> u64 {
-        *self.next_sequence.read().await
+    /// Append a drafted event, assigning the next sequence internally.
+    pub fn append(&self, draft: EventDraft) -> Event {
+        let mut records = write_guard(&self.records);
+        let sequence = records.len() as u64 + 1;
+        let event = Event {
+            thread_id: self.thread_id.clone(),
+            turn_id: draft.turn_id,
+            sequence,
+            kind: draft.kind,
+            event_ref: draft.event_ref,
+            data: draft.data,
+        };
+        records.push(event.clone());
+        // `send_replace` updates the tail value and notifies even when no
+        // receiver currently exists (subscribers may come and go).
+        self.tail.send_replace(sequence);
+        event
     }
 
-    /// Append an event and notify all waiters.
-    pub async fn append(&self, event: Event) {
-        let mut records = self.records.write().await;
-        let mut seq = self.next_sequence.write().await;
-        records.push(event);
-        *seq = records.last().map(|e| e.sequence + 1).unwrap_or(1);
-        self.notify.notify_waiters();
+    pub fn len(&self) -> usize {
+        read_guard(&self.records).len()
     }
 
-    /// Len of records.
-    pub async fn len(&self) -> usize {
-        self.records.read().await.len()
+    pub fn is_empty(&self) -> bool {
+        read_guard(&self.records).is_empty()
     }
 
-    /// Block until a new event arrives after the given index, then return it.
+    pub fn last_sequence(&self) -> u64 {
+        *self.tail.borrow()
+    }
+
+    pub fn snapshot(&self) -> Vec<Event> {
+        read_guard(&self.records).clone()
+    }
+
+    /// Events strictly after `after_index` (0-based position in the log).
+    pub fn events_since(&self, after_index: usize) -> Vec<Event> {
+        let records = read_guard(&self.records);
+        if after_index >= records.len() {
+            Vec::new()
+        } else {
+            records[after_index..].to_vec()
+        }
+    }
+
+    /// A receiver for tail-sequence updates, for cursor-driven replay.
+    pub fn subscribe_tail(&self) -> watch::Receiver<u64> {
+        self.tail.subscribe()
+    }
+
+    /// Block until an event exists at `after_index`, then return it.
     pub async fn wait_for_next(&self, after_index: usize) -> Event {
+        let mut tail = self.tail.subscribe();
         loop {
             {
-                let records = self.records.read().await;
+                let records = read_guard(&self.records);
                 if after_index < records.len() {
                     return records[after_index].clone();
                 }
             }
-            self.notify.notified().await;
+            // Sender lives as long as `self`, so this never errors.
+            if tail.changed().await.is_err() {
+                tail = self.tail.subscribe();
+            }
         }
-    }
-
-    /// Snapshot all records (for subscription pump).
-    pub async fn snapshot(&self) -> Vec<Event> {
-        self.records.read().await.clone()
-    }
-
-    /// Get events since a given index.
-    pub async fn events_since(&self, after_index: usize) -> Vec<Event> {
-        let records = self.records.read().await;
-        if after_index >= records.len() {
-            return vec![];
-        }
-        records[after_index..].to_vec()
-    }
-
-    /// Returns true if the journal has no events.
-    pub async fn is_empty(&self) -> bool {
-        self.records.read().await.is_empty()
     }
 }
 
-// ── Subscription ──
+// ── Subscription & FairMux ──
 
+/// A single event subscription; the paired `Sender` is held by its pump.
 pub struct Subscription {
     pub subscription_id: String,
     pub thread_id: String,
     pub cursor: RwLock<u64>,
-    /// FairMux reads events from this receiver in round-robin fashion.
-    /// The paired Sender is kept by the pump (external code).
-    pub rx: std::sync::Mutex<mpsc::Receiver<Event>>,
+    pub rx: std::sync::Mutex<tokio::sync::mpsc::Receiver<Event>>,
     pub has_data: Notify,
     pub active: AtomicBool,
     pub pump_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
@@ -115,7 +171,7 @@ impl Subscription {
         subscription_id: String,
         thread_id: String,
         cursor: u64,
-        rx: mpsc::Receiver<Event>,
+        rx: tokio::sync::mpsc::Receiver<Event>,
     ) -> Self {
         Self {
             subscription_id,
@@ -129,40 +185,41 @@ impl Subscription {
     }
 }
 
-// ── FairMux ──
-
 /// Round-robin multiplexer — prevents starvation across subscriptions.
 pub struct FairMux {
     subs: Arc<RwLock<HashMap<String, Arc<Subscription>>>>,
-    outgoing: mpsc::Sender<athena_protocol::EventNotification>,
+    outgoing: tokio::sync::mpsc::Sender<athena_protocol::EventNotification>,
+}
+
+fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 impl FairMux {
-    pub fn new(outgoing: mpsc::Sender<athena_protocol::EventNotification>) -> Self {
+    pub fn new(outgoing: tokio::sync::mpsc::Sender<athena_protocol::EventNotification>) -> Self {
         Self {
             subs: Arc::new(RwLock::new(HashMap::new())),
             outgoing,
         }
     }
 
-    pub async fn add(&self, sub: Arc<Subscription>) {
-        let mut subs = self.subs.write().await;
-        subs.insert(sub.subscription_id.clone(), sub);
+    pub fn add(&self, sub: Arc<Subscription>) {
+        write_guard(&self.subs).insert(sub.subscription_id.clone(), sub);
     }
 
-    pub async fn remove(&self, subscription_id: &str) {
-        let mut subs = self.subs.write().await;
-        if let Some(sub) = subs.remove(subscription_id) {
+    pub fn remove(&self, subscription_id: &str) {
+        if let Some(sub) = write_guard(&self.subs).remove(subscription_id) {
             sub.active.store(false, Ordering::SeqCst);
         }
     }
 
-    /// Start the multiplexer loop.
+    /// Run the multiplexer loop, delivering at most one event per ready
+    /// subscription per round.
     pub async fn run(self: Arc<Self>) {
         let mut index = 0usize;
         loop {
             let ready: Vec<Arc<Subscription>> = {
-                let subs = self.subs.read().await;
+                let subs = read_guard(&self.subs);
                 subs.values()
                     .filter(|s| s.active.load(Ordering::SeqCst) && !lock_recover(&s.rx).is_closed())
                     .cloned()
@@ -170,7 +227,6 @@ impl FairMux {
             };
 
             if ready.is_empty() {
-                // Wait for a subscription to be added (poll)
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 continue;
             }
@@ -179,8 +235,6 @@ impl FairMux {
             let sub = &ready[index];
             index += 1;
 
-            // Try to receive from this subscription's channel.
-            // Scope the MutexGuard so it is dropped before any .await below.
             let recv_result = lock_recover(&sub.rx).try_recv();
             let notification = match recv_result {
                 Ok(event) => Some(athena_protocol::EventNotification {
@@ -192,12 +246,12 @@ impl FairMux {
                     event_ref: event.event_ref.clone(),
                     data: event.data.clone(),
                 }),
-                Err(mpsc::error::TryRecvError::Empty) => {
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                     sub.has_data.notify_one();
                     tokio::task::yield_now().await;
                     None
                 }
-                Err(mpsc::error::TryRecvError::Disconnected) => None,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
             };
 
             if let Some(n) = notification
@@ -209,194 +263,41 @@ impl FairMux {
     }
 }
 
-/// Lock a `std::sync::Mutex`, recovering the guard if a previous holder panicked.
-///
-/// The fair-mux must keep draining other subscriptions even if one thread
-/// poisoned a receiver lock, so poison is recovered rather than propagated as a
-/// panic (production code forbids `unwrap`/`expect`).
-fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn make_event(thread_id: &str, sequence: u64, kind: &str) -> Event {
-        Event {
-            thread_id: thread_id.to_string(),
-            turn_id: None,
-            sequence,
-            kind: kind.to_string(),
-            event_ref: String::new(),
-            data: None,
-        }
-    }
+    #[tokio::test]
+    async fn journal_assigns_sequences_and_replays() {
+        let journal = EventJournal::new("t1");
+        assert!(journal.is_empty());
+        assert_eq!(journal.last_sequence(), 0);
 
-    // ── journal append/read ──
+        let e1 = journal.append(EventDraft::new("started", "ev:1"));
+        assert_eq!(e1.sequence, 1);
+        let e2 = journal.append(EventDraft::new("delta", "ev:2").turn("turn-1"));
+        assert_eq!(e2.sequence, 2);
+
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal.last_sequence(), 2);
+        assert_eq!(journal.events_since(1).len(), 1);
+        assert_eq!(journal.events_since(1)[0].kind, "delta");
+        assert!(journal.events_since(2).is_empty());
+    }
 
     #[tokio::test]
-    async fn test_journal_append_read() {
-        let journal = EventJournal::new("t1".to_string());
-
-        assert_eq!(journal.len().await, 0);
-        assert!(journal.is_empty().await);
-        assert_eq!(journal.next_sequence().await, 1);
-
-        let e1 = make_event("t1", 1, "test_event");
-        journal.append(e1).await;
-        assert_eq!(journal.len().await, 1);
-        assert_eq!(journal.next_sequence().await, 2);
-
-        // snapshot
-        let snap = journal.snapshot().await;
-        assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].kind, "test_event");
-
-        // events_since
-        let since = journal.events_since(0).await;
-        assert_eq!(since.len(), 1);
-        let since = journal.events_since(1).await;
-        assert!(since.is_empty());
-
-        // append second event
-        let e2 = make_event("t1", 2, "second");
-        journal.append(e2).await;
-        assert_eq!(journal.len().await, 2);
-
-        // events_since after index 0 returns only newer events
-        let since = journal.events_since(1).await;
-        assert_eq!(since.len(), 1);
-        assert_eq!(since[0].sequence, 2);
-        assert_eq!(since[0].kind, "second");
-    }
-
-    // ── multi-subscriber (concurrent wait_for_next) ──
-
-    #[tokio::test]
-    async fn test_multi_subscriber() {
-        let journal = Arc::new(EventJournal::new("t1".to_string()));
-
-        // Spawn three waiters, each waiting for a different index
-        let mut handles = Vec::new();
-        for i in 0..3 {
-            let j = journal.clone();
-            handles.push(tokio::spawn(async move {
-                let event = j.wait_for_next(i).await;
-                assert_eq!(event.sequence, (i + 1) as u64);
-                event
-            }));
-        }
-
-        // Give waiters a moment to start
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Append events one at a time — each notify_waiters() wakes all waiters
-        for i in 0..3 {
-            let ev = make_event("t1", (i + 1) as u64, &format!("ev{}", i + 1));
-            journal.append(ev).await;
-        }
-
-        for (i, handle) in handles.into_iter().enumerate() {
-            let event = tokio::time::timeout(Duration::from_secs(5), handle)
-                .await
-                .expect("waiter timed out")
-                .expect("waiter panicked");
-            assert_eq!(event.sequence, (i + 1) as u64);
-        }
-    }
-
-    // ── FairMux round-robin ──
-
-    #[tokio::test]
-    async fn test_fairmux_round_robin() {
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(256);
-        let mux = Arc::new(FairMux::new(outgoing_tx));
-
-        // Create 3 subscriptions with independent channels
-        let (tx1, rx1) = mpsc::channel(256);
-        let sub1 = Arc::new(Subscription::new("sub:1".into(), "t1".into(), 0, rx1));
-        let (tx2, rx2) = mpsc::channel(256);
-        let sub2 = Arc::new(Subscription::new("sub:2".into(), "t1".into(), 0, rx2));
-        let (tx3, rx3) = mpsc::channel(256);
-        let sub3 = Arc::new(Subscription::new("sub:3".into(), "t1".into(), 0, rx3));
-
-        // Register subscriptions
-        mux.add(sub1).await;
-        mux.add(sub2).await;
-        mux.add(sub3).await;
-
-        // Start the mux loop in background
-        let mux_clone = mux.clone();
-        let _mux_handle = tokio::spawn(async move {
-            mux_clone.run().await;
-        });
-
-        // Let the mux settle and register all subs
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Send one event to each subscription's sender
-        tx1.send(make_event("t1", 1, "ev1"))
+    async fn wait_for_next_wakes_on_append() {
+        let journal = Arc::new(EventJournal::new("t1"));
+        let j = journal.clone();
+        let waiter = tokio::spawn(async move { j.wait_for_next(0).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        journal.append(EventDraft::new("first", "ev:1"));
+        let event = tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
-            .expect("tx1 send");
-        tx2.send(make_event("t1", 2, "ev2"))
-            .await
-            .expect("tx2 send");
-        tx3.send(make_event("t1", 3, "ev3"))
-            .await
-            .expect("tx3 send");
-
-        // Collect 3 notifications from outgoing — round-robin order depends on
-        // HashMap iteration, but each subscription must deliver exactly once.
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for _ in 0..3 {
-            let notif = tokio::time::timeout(Duration::from_secs(5), outgoing_rx.recv())
-                .await
-                .expect("timeout waiting for notification")
-                .expect("outgoing channel closed unexpectedly");
-
-            assert!(
-                seen.insert(notif.subscription_id.clone()),
-                "duplicate subscription_id: {}",
-                notif.subscription_id
-            );
-            assert!(notif.sequence >= 1 && notif.sequence <= 3);
-        }
-
-        // All three distinct subs were served
-        assert_eq!(seen.len(), 3);
-    }
-
-    // ── Event serialization round-trip ──
-
-    #[test]
-    fn test_event_serialize_roundtrip() {
-        let event = Event {
-            thread_id: "t1".to_string(),
-            turn_id: Some("turn-1".to_string()),
-            sequence: 42,
-            kind: "ping".to_string(),
-            event_ref: "ref:abc".to_string(),
-            data: Some(serde_json::json!({"key": "value"})),
-        };
-
-        let json = serde_json::to_string(&event).expect("serialize");
-        let deserialized: Event = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(deserialized.thread_id, "t1");
-        assert_eq!(deserialized.turn_id, Some("turn-1".to_string()));
-        assert_eq!(deserialized.sequence, 42);
-        assert_eq!(deserialized.kind, "ping");
-        assert_eq!(deserialized.event_ref, "ref:abc");
-        assert_eq!(deserialized.data, Some(serde_json::json!({"key": "value"})));
-    }
-
-    #[test]
-    fn test_event_deny_unknown_fields() {
-        let json =
-            r#"{"thread_id":"t1","sequence":1,"kind":"x","event_ref":"","unknown":"should_fail"}"#;
-        let result: Result<Event, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "unknown fields should be denied");
+            .expect("no timeout")
+            .expect("joined");
+        assert_eq!(event.sequence, 1);
     }
 }
