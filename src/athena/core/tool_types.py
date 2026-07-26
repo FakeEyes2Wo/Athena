@@ -1,0 +1,65 @@
+"""Tool types, constants, and lightweight data classes.
+
+Zero logic — pure data containers shared by ``tool.py`` and ``agent.py``.
+"""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+# ── EmitEvent ──
+
+EmitEvent = Callable[[str, str, dict[str, Any] | None], Awaitable[None]]
+"""事件发射器: ``(kind: str, artifact_ref: str, data: dict | None) -> None``。"""
+
+# ── Event kind 常量 ──
+
+TOOL_BEGIN = "tool/begin"
+TOOL_END = "tool/end"
+TOOL_ERROR = "tool/error"
+
+# ── 数据类 ──
+
+
+@dataclass(slots=True)
+class ToolSpec:
+    """工具描述 — 最小化字段，删除 category/exposure/read_only/destructive。"""
+
+    name: str
+    description: str
+    input_schema: dict  # JSON Schema
+    concurrency_safe: bool = True
+    """是否支持并行执行 — AgentLoop 以此决定串行还是并发。"""
+    max_result_chars: int = 50_000
+
+    def to_openai_tool(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
+
+
+@dataclass(slots=True)
+class ToolResult:
+    """Normalised tool output."""
+
+    data: Any
+    success: bool = True
+    error: str | None = None
+    truncated: bool = False
+    artifacts: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ToolContext:
+    """Per-invocation context — created fresh for every tool call."""
+
+    tool_name: str
+    call_id: str
+    emit: EmitEvent
+    cancel: asyncio.Event

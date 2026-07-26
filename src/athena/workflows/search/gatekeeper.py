@@ -2,6 +2,11 @@
 
 P0 简化规则：结构或可证伪性任一不满足 -> REVISE；"核心主张不可证伪且无法修正 -> REJECT"这个
 需要额外可修正性判断的分支不在 P0 范围内，留给后续 hard_gate 迭代。
+
+设计参考：这里的 verdict 判定本质是一个简化版的准入谓词（对应 AutoSOTA 论文里的 Adm(h)——
+逐项校验是否保持评估完整性，不满足则拒绝/退回修改，而不是给一个模糊的总分）；itemized
+rubric + 强制 REVISE（而不是静默放行）也呼应 Co-Scientist 论文里"审阅独立于生成、不自我
+批准"的设计（AI co-scientist, arXiv:2502.18864）。
 """
 
 from athena.workflows.search.idea_schemas import (

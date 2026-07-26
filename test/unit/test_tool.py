@@ -1,0 +1,221 @@
+"""Unit tests for tool abstractions."""
+
+import asyncio
+
+import pytest
+
+from athena.core.tool import BaseTool, ToolRegistry, tool
+from athena.core.tool_types import (
+    TOOL_BEGIN,
+    TOOL_END,
+    TOOL_ERROR,
+    ToolContext,
+    ToolResult,
+    ToolSpec,
+)
+
+# ── test tools ──
+
+
+class _EchoTool(BaseTool):
+    spec = ToolSpec(
+        name="echo",
+        description="echo",
+        input_schema={},
+    )
+
+    async def execute(self, inpt: dict, ctx: ToolContext) -> dict:
+        return inpt  # raw dict, auto-wrapped by _execute
+
+
+class _FailingTool(BaseTool):
+    spec = ToolSpec(name="fail", description="fail", input_schema={})
+
+    async def execute(self, inpt: dict, ctx: ToolContext):
+        raise RuntimeError("boom")  # caught by _execute → ToolResult(success=False)
+
+
+class _CancellingTool(BaseTool):
+    spec = ToolSpec(name="cancel_me", description="cancel", input_schema={})
+
+    async def execute(self, inpt: dict, ctx: ToolContext):
+        raise asyncio.CancelledError()  # NOT caught → propagates
+
+
+class _ToolResultTool(BaseTool):
+    """Tool that returns ToolResult directly — _execute passes it through."""
+
+    spec = ToolSpec(name="direct", description="direct", input_schema={})
+
+    async def execute(self, inpt: dict, ctx: ToolContext) -> ToolResult:
+        return ToolResult(data={"custom": True}, success=True)
+
+
+# ── @tool decorator tests ──
+
+
+@tool(name="deco_echo")
+async def _deco_echo(text: str, repeat: int = 1) -> dict:
+    """Echo with the @tool decorator."""
+    return {"text": text, "repeat": repeat}
+
+
+@tool(name="deco_fail")
+async def _deco_fail() -> dict:
+    """Always fails."""
+    raise ValueError("bad input")
+
+
+# ── helpers ──
+
+
+def _arun(coro):
+    return asyncio.run(coro)
+
+
+async def _collect_events(tool: BaseTool, **inpt) -> tuple[ToolResult, list[str]]:
+    events: list[str] = []
+
+    async def emit(kind: str, _ref: str, _data: dict | None = None) -> None:
+        events.append(kind)
+
+    ctx = ToolContext(tool.spec.name, "test-1", emit, asyncio.Event())
+    result = await tool.ainvoke(ctx, **inpt)
+    return result, events
+
+
+# ── BaseTool tests ──
+
+
+class TestBaseTool:
+    def test_sync_invoke(self):
+        result = _EchoTool().invoke(x=1, y="hello")
+        assert result.success
+        assert result.data == {"x": 1, "y": "hello"}
+
+    def test_ainvoke_events(self):
+        result, events = _arun(_collect_events(_EchoTool(), a=1))
+        assert result.success
+        assert result.data == {"a": 1}
+        assert TOOL_BEGIN in events
+        assert TOOL_END in events
+
+    def test_ainvoke_error_wrapped(self):
+        """Exception → ToolResult(success=False), TOOL_ERROR emitted."""
+        result, events = _arun(_collect_events(_FailingTool()))
+        assert result.success is False
+        assert "RuntimeError" in result.error
+        assert TOOL_BEGIN in events
+        assert TOOL_ERROR in events
+
+    def test_ainvoke_cancelled_error(self):
+        """CancelledError is NOT caught — propagates up."""
+        with pytest.raises(asyncio.CancelledError):
+            _arun(_collect_events(_CancellingTool()))
+
+    def test_direct_tool_result_passthrough(self):
+        result, events = _arun(_collect_events(_ToolResultTool()))
+        assert result.success
+        assert result.data == {"custom": True}
+
+
+# ── @tool decorator tests ──
+
+
+class TestToolDecorator:
+    def test_decorated_invoke(self):
+        t = _deco_echo
+        result = t.invoke(text="hi")
+        assert result.success
+        assert result.data == {"text": "hi", "repeat": 1}
+
+    def test_decorated_ainvoke(self):
+        t = _deco_echo
+        result, events = _arun(_collect_events(t, text="x", repeat=3))
+        assert result.data == {"text": "x", "repeat": 3}
+        assert TOOL_BEGIN in events
+        assert TOOL_END in events
+
+    def test_decorated_spec(self):
+        assert _deco_echo.spec.name == "deco_echo"
+        assert _deco_echo.spec.description == "Echo with the @tool decorator."
+
+    def test_decorated_error(self):
+        result, events = _arun(_collect_events(_deco_fail))
+        assert result.success is False
+        assert "ValueError" in result.error
+        assert TOOL_ERROR in events
+
+
+# ── ToolRegistry tests ──
+
+
+class TestToolRegistry:
+    def test_register_and_resolve(self):
+        reg = ToolRegistry()
+        reg.register(_EchoTool())
+        assert "echo" in reg
+        assert len(reg) == 1
+
+    def test_register_duplicate(self):
+        reg = ToolRegistry()
+        reg.register(_EchoTool())
+        with pytest.raises(KeyError):
+            reg.register(_EchoTool())
+
+    def test_resolve_missing(self):
+        with pytest.raises(KeyError):
+            ToolRegistry().resolve("nope")
+
+    def test_specs_sorted(self):
+        reg = ToolRegistry()
+        reg.register(_EchoTool())
+        reg.register(_deco_echo)  # "deco_echo"
+        assert [s.name for s in reg.specs] == ["deco_echo", "echo"]
+
+    def test_search(self):
+        reg = ToolRegistry()
+        reg.register(_EchoTool())
+        reg.register(_deco_echo)
+        results = reg.search("deco")
+        assert len(results) == 1
+        assert results[0].name == "deco_echo"
+
+    def test_sync_invoke(self):
+        reg = ToolRegistry()
+        reg.register(_EchoTool())
+        assert reg.invoke("echo", msg="hi").data == {"msg": "hi"}
+
+    def test_sync_dispatch(self):
+        reg = ToolRegistry()
+        reg.register(_EchoTool())
+        reg.register(_FailingTool())
+        results = reg.dispatch([("echo", {"x": 1}), ("fail", {})])
+        assert len(results) == 2
+        assert isinstance(results[0], ToolResult)
+        assert results[0].data == {"x": 1}
+        assert isinstance(results[1], ToolResult)
+        assert results[1].success is False
+
+    def test_adispatch(self):
+        reg = ToolRegistry()
+        reg.register(_EchoTool())
+        reg.register(_FailingTool())
+        events: list[str] = []
+
+        async def emit(k, _r, _d=None):
+            events.append(k)
+
+        results = _arun(
+            reg.adispatch(
+                [("echo", "c1", {"a": 1}), ("fail", "c2", {})],
+                emit,
+                asyncio.Event(),
+            )
+        )
+        assert len(results) == 2
+        assert results[0].success
+        assert results[1].success is False
+        assert TOOL_BEGIN in events
+        assert TOOL_END in events
+        assert TOOL_ERROR in events

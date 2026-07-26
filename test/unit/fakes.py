@@ -1,42 +1,39 @@
-"""共享测试替身：满足 single_turn_chat 所需的最小模型契约，不依赖真实 LangChain provider。
+"""共享测试替身：用 pydantic-ai 的 FunctionModel 脚本化确定性响应，不依赖真实 provider。
 
-LangChain 自带的 FakeListChatModel/GenericFakeChatModel 不支持 with_structured_output（会直接
-抛 NotImplementedError，因为它们没实现 bind_tools），所以这里手写一个只满足我们实际用到的
-两个方法的替身。
+FunctionModel 是 pydantic-ai 官方提供的测试用 Model 实现（不是我们自己臆造的协议）：
+把一个普通函数注入进去，函数收到消息历史和 AgentInfo，返回一个 ModelResponse；结构化输出
+通过 info.output_tools[0] 对应的工具调用表达，pydantic-ai 自己负责按 output_type 校验解析。
 """
 
 from pydantic import BaseModel
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 
-class _FakeStructuredRunnable:
-    """.with_structured_output(schema) 的返回值替身；与 FakeChatModel 共享同一个结果队列。"""
-
-    def __init__(self, results: list) -> None:
-        self._results = results  # 有意共享引用而非拷贝，这样跨多次 with_structured_output 调用也能按顺序消费
-
-    async def ainvoke(self, prompt: str) -> BaseModel:
-        if not self._results:
-            raise AssertionError("FakeChatModel ran out of scripted responses")
-        result = self._results.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-
-class FakeChatModel:
-    """single_turn_chat 的测试替身：按调用顺序返回预设的 Pydantic 实例，或抛出预设异常。
+def make_scripted_model(responses: list) -> FunctionModel:
+    """按调用顺序返回预设结果的 FunctionModel：列表项可以是 BaseModel 实例、原始 dict，
+    或者一个 Exception（会被原样抛出，用于模拟 provider/解析失败）。
 
     Example:
         >>> import asyncio
+        >>> from pydantic_ai import Agent
         >>> class Answer(BaseModel):
         ...     value: str
-        >>> model = FakeChatModel([Answer(value="hi")])
-        >>> asyncio.run(model.with_structured_output(Answer).ainvoke("prompt"))
+        >>> model = make_scripted_model([Answer(value="hi")])
+        >>> agent = Agent(output_type=Answer)
+        >>> asyncio.run(agent.run("prompt", model=model)).output  # doctest: +SKIP
         Answer(value='hi')
     """
+    queue = list(responses)
 
-    def __init__(self, results: list) -> None:
-        self._results = list(results)
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if not queue:
+            raise AssertionError("scripted model ran out of responses")
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        args = item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+        tool_name = info.output_tools[0].name if info.output_tools else "final_result"
+        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args)])
 
-    def with_structured_output(self, schema: type[BaseModel]) -> _FakeStructuredRunnable:
-        return _FakeStructuredRunnable(self._results)
+    return FunctionModel(respond)

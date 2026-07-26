@@ -1,33 +1,32 @@
-"""Idea Generation P0（pre_gate 闭环）的完整 langgraph 工作流。
+"""Idea Generation P0（pre_gate 闭环）的完整异步流水线：generate -> structural_check ->
+falsifiability_check -> gate。
 
-审查反馈：不应该是"分布式 CompiledGraph"（一个 langgraph 节点 + 外部普通函数依次调用），
-整条 [3]→[4] 链路（生成 → 结构审计 → 可证伪性审计 → 门控）都应该是同一张 StateGraph 上的节点，
-用 langgraph 的 add_node/add_edge 表达，而不是在图外面再串一层 Python 调用。本文件是这条链路
-唯一的 CompiledGraph 入口；`pre_gate_checks.py`/`gatekeeper.py` 仍保留纯函数实现（职责单一、
-独立可测），本文件只把它们包装成图节点。
+架构变更说明：原实现用 langgraph 的 StateGraph 把这四步接成一张 CompiledGraph（响应此前
+review 反馈"不应该是分布式 CompiledGraph"）；随着共享依赖栈从 langchain/langgraph 切换到
+openai + pydantic-ai（见 pyproject.toml），继续依赖 langgraph 已不可行，四步改回顺序 await
+的纯异步调用。但仍然只集中在这一个文件里对外暴露唯一入口 run_pre_gate，不把编排逻辑散到
+多处调用点——这是对原 review 意见"整条链路应该是一个整体"的延续，只是承载手段从"图"换成了
+"一个函数里的顺序 await"。
 
-P0 说明：不经过 ThreadManager.submit()——ThreadManager 尚未实现，这是临时决定；ThreadManager
-落地后需要在它之上补一层适配，而不是假装已经兼容。四个节点线性连接（不做条件边短路），
-保证行为与门控语义（pre_gate 始终需要两份报告）完全一致，不引入额外的分支复杂度。
+P0 说明：不经过 app_server 的 ThreadManager/Agent 循环——那一套（core/agent/agent.py）是为
+工具调用型 ReAct Agent 设计的（多轮采样、工具执行、并发工具调用）；我们这里是单次结构化生成，
+不需要工具、不需要多轮对话，接入 ThreadManager/BaseAgent 属于过度设计，遵循 Occam's razor：
+只在真正需要独立上下文、工具权限、多轮推理或并发时才用 Agent。
 """
 
 import uuid
-from typing import TypedDict
 
-from langgraph.graph import END, START, StateGraph
+from pydantic_ai.models import Model
 
 from athena.core.schemas import Hypothesis
-from athena.utils.single_turn_chat import StructuredChatModel, single_turn_chat
+from athena.utils.single_turn_chat import single_turn_chat
 from athena.workflows.prompts import IDEA_GENERATOR_SYSTEM_PROMPT, IDEA_GENERATOR_USER_PROMPT_TEMPLATE
 from athena.workflows.search.gatekeeper import pre_gate
 from athena.workflows.search.idea_schemas import (
-    FalsifiabilityReport,
     GateDecision,
-    GateVerdict,
     HypothesisDraft,
     HypothesisPackage,
     ResearchProblemInput,
-    StructuralCheckReport,
 )
 from athena.workflows.search.pre_gate_checks import falsifiability_check, structural_check
 
@@ -37,37 +36,25 @@ from athena.workflows.search.pre_gate_checks import falsifiability_check, struct
 GENERATION_STRATEGY: str = "single_strategy_v1"
 MAX_GENERATION_ATTEMPTS: int = 2
 
-# pre_gate 的 verdict 到 Hypothesis 节点 status 的映射，字符串对应设计文档 IdeaState 的命名，
-# 但 P0 不接入完整的 IdeaState 状态机，这里只是标记字符串，供 demo 输出参考
-_STATUS_BY_VERDICT: dict[GateVerdict, str] = {
-    GateVerdict.PASS: "GATED_PASS",
-    GateVerdict.REVISE: "REVISION_REQUESTED",
-    GateVerdict.REJECT: "REJECTED",
-}
 
+# ====== 对外入口 ======
 
-# ====== 类型 ======
+async def run_pre_gate(
+    problem: ResearchProblemInput, *, model: Model | str | None = None
+) -> tuple[Hypothesis, HypothesisPackage, GateDecision]:
+    """跑一遍 [3]→[4] 的 P0 闭环，返回 (Hypothesis, HypothesisPackage, GateDecision)。
 
-class PreGateState(TypedDict):
-    """pre_gate 闭环全流程共用的图状态；不做序列化/持久化，只在单次 ainvoke 内传递。"""
-    problem: ResearchProblemInput
-    model: StructuredChatModel | None
-    idea_id: str
-    node: Hypothesis | None
-    package: HypothesisPackage | None
-    structural_report: StructuralCheckReport | None
-    falsifiability_report: FalsifiabilityReport | None
-    decision: GateDecision | None
+    设计参考：生成阶段本身不做自我批判/自我打分（打分权始终在 gatekeeper.pre_gate 一处），
+    呼应 Co-Scientist 论文里"生成与审阅分离，生成侧不自证"的思路（AI co-scientist,
+    arXiv:2502.18864）；P0 只跑单一策略，多策略并行生成/空白挖掘留给后续迭代。
 
-
-# ====== 图节点 ======
-
-async def _generate_node(state: PreGateState) -> dict:
-    """节点 [3]：拼 prompt、调一次 LLM，解析失败重试一次，仍失败则抛出 ValueError；
-    再把 LLM 输出的 draft 折成 Hypothesis 节点与 HypothesisPackage。
+    Example:
+        >>> node, package, decision = await run_pre_gate(problem, model=fake_model)  # doctest: +SKIP
+        >>> decision.gate_phase
+        'pre_gate'
     """
-    problem = state["problem"]
-    idea_id = state["idea_id"]
+    idea_id = f"idea-{uuid.uuid4().hex[:12]}"
+
     evidence_lines = "\n".join(
         f"ev-{index}: {text}" for index, text in enumerate(problem.evidence_texts)
     ) or "(no evidence supplied)"
@@ -85,25 +72,20 @@ async def _generate_node(state: PreGateState) -> dict:
     last_error: Exception | None = None
     for _ in range(MAX_GENERATION_ATTEMPTS):
         try:
-            draft = await single_turn_chat(prompt, HypothesisDraft, model=state["model"])
+            draft = await single_turn_chat(prompt, HypothesisDraft, model=model)
             break
         except Exception as error:  # noqa: BLE001 - provider 报错形态不定，统一重试一次后再上抛
             last_error = error
     if draft is None:
         raise ValueError(f"IdeaGenerator failed to produce a valid HypothesisDraft: {last_error}")
 
-    # P0 用 inline:// 占位 payload_ref/package_ref，等 ArtifactStore 落地后替换成真实引用
-    evidence_refs = [ref for premise in draft.supported_premises for ref in premise.supporting_refs]
+    # 共享 schema 的 Hypothesis 没有 node_id/package_ref 这类身份字段了（RecordNode 已被移除），
+    # 只承载内容；idea_id 只在本模块自己的 HypothesisPackage 里作为审计/关联用的标识
     node = Hypothesis(
-        node_id=idea_id,
-        parent_ids=[],
-        status="DRAFTED",
-        payload_ref=f"inline://{idea_id}",
         statement=draft.statement,
         intervention=draft.intervention,
         expected_effect=draft.expected_effect,
-        evidence_refs=evidence_refs,
-        package_ref=f"inline://{idea_id}",
+        evidence_refs=[ref for premise in draft.supported_premises for ref in premise.supporting_refs],
     )
     # 补上代码负责的 idea_id/lineage_op/validation_plan_ref；这些字段不该由 LLM 决定
     package = HypothesisPackage(
@@ -117,72 +99,8 @@ async def _generate_node(state: PreGateState) -> dict:
         validation_plan_ref=None,
         lineage_op="generate",
     )
-    return {"node": node, "package": package}
 
-
-def _structural_check_node(state: PreGateState) -> dict:
-    """节点 [4a]：纯函数结构审计，包一层适配 graph state。"""
-    return {"structural_report": structural_check(state["package"])}
-
-
-async def _falsifiability_check_node(state: PreGateState) -> dict:
-    """节点 [4b]：一次 LLM 判断可证伪性，包一层适配 graph state。"""
-    report = await falsifiability_check(state["package"], model=state["model"])
-    return {"falsifiability_report": report}
-
-
-def _gate_node(state: PreGateState) -> dict:
-    """节点 [4c]：唯一产出 GateVerdict 的地方，并把 verdict 落到 Hypothesis 节点的 status 上。"""
-    decision = pre_gate(state["structural_report"], state["falsifiability_report"])
-    node = state["node"]
-    node.status = _STATUS_BY_VERDICT.get(decision.verdict, "DRAFTED")
-    return {"decision": decision, "node": node}
-
-
-# ====== 图构建 ======
-
-def _build_graph():
-    """构建 pre_gate 闭环唯一的 CompiledGraph：generate -> structural_check ->
-    falsifiability_check -> gate，线性连接，不做条件边短路。
-    """
-    graph = StateGraph(PreGateState)
-    graph.add_node("generate", _generate_node)
-    graph.add_node("structural_check", _structural_check_node)
-    graph.add_node("falsifiability_check", _falsifiability_check_node)
-    graph.add_node("gate", _gate_node)
-    graph.add_edge(START, "generate")
-    graph.add_edge("generate", "structural_check")
-    graph.add_edge("structural_check", "falsifiability_check")
-    graph.add_edge("falsifiability_check", "gate")
-    graph.add_edge("gate", END)
-    return graph.compile()
-
-
-# 模块级单例：全项目共用一份编译好的图，避免每次调用都重新构建
-PRE_GATE_GRAPH = _build_graph()
-
-
-# ====== 对外入口 ======
-
-async def run_pre_gate(
-    problem: ResearchProblemInput, *, model: StructuredChatModel | None = None
-) -> tuple[Hypothesis, HypothesisPackage, GateDecision]:
-    """跑一遍编译好的 pre_gate CompiledGraph，返回 (Hypothesis 节点, HypothesisPackage, GateDecision)。
-
-    Example:
-        >>> node, package, decision = await run_pre_gate(problem, model=fake_model)  # doctest: +SKIP
-        >>> decision.gate_phase
-        'pre_gate'
-    """
-    idea_id = f"idea-{uuid.uuid4().hex[:12]}"
-    result = await PRE_GATE_GRAPH.ainvoke({
-        "problem": problem,
-        "model": model,
-        "idea_id": idea_id,
-        "node": None,
-        "package": None,
-        "structural_report": None,
-        "falsifiability_report": None,
-        "decision": None,
-    })
-    return result["node"], result["package"], result["decision"]
+    structural_report = structural_check(package)
+    falsifiability_report = await falsifiability_check(package, model=model)
+    decision = pre_gate(structural_report, falsifiability_report)
+    return node, package, decision

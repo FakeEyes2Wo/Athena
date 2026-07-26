@@ -9,7 +9,7 @@ from athena.workflows.search.idea_schemas import (
     HypothesisPackage,
 )
 from athena.workflows.search.pre_gate_checks import falsifiability_check, structural_check
-from unit.fakes import FakeChatModel
+from unit.fakes import make_scripted_model
 
 
 def _make_package(**overrides) -> HypothesisPackage:
@@ -62,25 +62,25 @@ class StructuralCheckTest(unittest.TestCase):
 
 class FalsifiabilityCheckTest(unittest.IsolatedAsyncioTestCase):
     async def test_falsifiable_judgment_maps_to_report(self) -> None:
-        fake = FakeChatModel([
+        model = make_scripted_model([
             FalsifiabilityJudgment(
                 testable_implication="Measure Y after manipulating X",
                 unobservable_variables=[],
                 is_falsifiable=True,
             )
         ])
-        report = await falsifiability_check(_make_package(), model=fake)
+        report = await falsifiability_check(_make_package(), model=model)
         self.assertTrue(report.is_falsifiable)
         self.assertEqual("idea-1", report.idea_id)
 
     async def test_unfalsifiable_judgment_maps_to_report(self) -> None:
-        fake = FakeChatModel([
+        model = make_scripted_model([
             FalsifiabilityJudgment(
                 testable_implication="",
                 unobservable_variables=["internal motivation"],
                 is_falsifiable=False,
             )
         ])
-        report = await falsifiability_check(_make_package(), model=fake)
+        report = await falsifiability_check(_make_package(), model=model)
         self.assertFalse(report.is_falsifiable)
         self.assertEqual(["internal motivation"], report.unobservable_variables)

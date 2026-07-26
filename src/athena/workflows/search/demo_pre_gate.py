@@ -56,7 +56,7 @@ async def main(argv: list[str] | None = None) -> None:
     problem, verbose = parse_args(argv)
     node, package, decision = await run_pre_gate(problem)
 
-    print(f"[HYPOTHESIS] {node.node_id}: {package.novel_hypothesis}")
+    print(f"[HYPOTHESIS] {package.idea_id}: {package.novel_hypothesis}")
     print(f"  status={node.status}")
 
     if verbose:

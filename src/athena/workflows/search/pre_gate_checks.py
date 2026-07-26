@@ -1,6 +1,8 @@
 """步骤 [4] 的两项审计：均只产出报告，不产出 verdict（判断权集中在 gatekeeper.pre_gate）。"""
 
-from athena.utils.single_turn_chat import StructuredChatModel, single_turn_chat
+from pydantic_ai.models import Model
+
+from athena.utils.single_turn_chat import single_turn_chat
 from athena.workflows.prompts import (
     FALSIFIABILITY_CHECK_SYSTEM_PROMPT,
     FALSIFIABILITY_CHECK_USER_PROMPT_TEMPLATE,
@@ -49,7 +51,7 @@ def structural_check(package: HypothesisPackage) -> StructuralCheckReport:
 
 
 async def falsifiability_check(
-    package: HypothesisPackage, *, model: StructuredChatModel | None = None
+    package: HypothesisPackage, *, model: Model | str | None = None
 ) -> FalsifiabilityReport:
     """用一次单轮 LLM 调用判断核心变量是否可观测、是否存在可执行的可证伪测试。
 

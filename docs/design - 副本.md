@@ -105,7 +105,7 @@ class DataCard(BaseModel):
         - 机器学习模型拟合
 
 
-## 
+##
 Kaggle 交互的Agent 工具
 ### utils
 这里的框架还没有决定，所以在这里记录的时候只能写出功能
@@ -123,7 +123,7 @@ class ExpCkpt(ABC):
     这里整理我们需要做出来的方面
     如  机器学习方面
         这个方面包括  EDA等等, 比方对于Kaggle竞赛， 再比如说机器学习问题的探索
-        
+
         还有竞赛有关的天文学方面
         这个方面包括
         1、基于活动区磁场数据，提炼可量化其复杂度的参数，建立参数与爆发强度或频次之间的定量关系，并基于 JW-SSD 数据集构建太阳黑子的表征及分类方法；
@@ -139,7 +139,7 @@ class ExpCkpt(ABC):
         result: Literal[float,str]# 这里的指标还不确定   我们做两套内容，一套用在机器学习上，一套用在那个天文数据集上。
 
     def get_prompt(self)->str:
-        
+
 
 class ExpCkptTree(ABC):
     """"
@@ -205,7 +205,7 @@ AgentMonitor  在Qcoder完成过程中我们需要监控完成过程，防止死
 # AthenaThread.py
 class AthenaThread():
     # TODO:一个Thread 应该包含这个线程应该做的任务，同时应该返回的信息。  不过我还是应该参考codex的设计。这里还需要查看Codex的源码
-    # 
+    #
 
 class BackgroundInfo():
 
