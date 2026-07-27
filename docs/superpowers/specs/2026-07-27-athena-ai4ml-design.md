@@ -18,6 +18,8 @@ HypothesisId = NewType("HypothesisId", str)
 ExperimentId = NewType("ExperimentId", str)
 ArtifactRef  = NewType("ArtifactRef", str)   # "<store_key>:<sha256>"
 
+from uuid import uuid4
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 ```
@@ -67,6 +69,12 @@ class BudgetSnapshot(BaseModel):
     no_improve_streak: int = 0
     max_no_improve: int = 5
     is_exhausted: bool = False
+
+    def consume(self, improved: bool) -> None:
+        self.remaining -= 1
+        self.no_improve_streak = 0 if improved else self.no_improve_streak + 1
+        if self.remaining <= 0 or self.no_improve_streak >= self.max_no_improve:
+            self.is_exhausted = True
 ```
 
 ### 0.6 运行模式
@@ -290,7 +298,7 @@ class HypothesisRanker:
 
         其中 μ 为 Bradley-Terry 估计强度，σ 为 Bootstrap 标准差。
         执行次数少的 Hypothesis 天然 σ 大 → 自动探索。
-        λ 小，仅用于去重，不影响探索/利用平衡。
+        β 默认 2.0，λ 默认 0.1，仅用于去重，不影响探索/利用平衡。
         """
 
 class ProximityGraph:
@@ -302,7 +310,7 @@ class ProximityGraph:
 
 ### 对比实验结果更新评分
 
-| 结果 | ELO 操作 |
+| 结果 | Bradley-Terry 更新 |
 |------|---------|
 | SUPPORTED | winner 击败 parent |
 | REFUTED | loser 输给 parent |
@@ -373,7 +381,7 @@ parent_commit → GitWorkspace.prepare() → 隔离 worktree + 分支
 class AgentMonitor:
     async def watch(self, task: AgentTask, timeout_s: int = 600) -> AgentResult:
         # 1. 超时 → interrupt + TIMEOUT
-        # 2. 连续 10 步无文件变更 → warning（仅日志）
+        # 2. 连续 10 个 turn 无文件变更 → warning（仅日志）
         # 3. Sandbox OOM/崩溃 → 捕获 + FAIL
 ```
 
@@ -422,15 +430,20 @@ class SearchLoop:
             result = await self._dispatch("CodeAgent", task_from(h))
 
             # 4. 评估 + 比较（模块 1）
-            verdict = self._evaluator.compare(baseline.result, result.eval)
+            baseline = self._tree.best_experiment()
+            verdict = self._evaluator.compare(baseline.eval, result.eval)
 
             # 5. Supervisor 决策
             decision = self._supervisor.decide(verdict, self._budget)
 
-            # 6. 更新状态
+            # 6. 更新状态 + 评分
             self._tree.checkpoint(h, result, decision)
-            self._budget.consume()
-            self._ranker.update(h, result.eval.primary)
+            improved = verdict.winner == "candidate"
+            self._budget.consume(improved=improved)
+            if verdict.winner != "tie":
+                winner_id = result.experiment_id if improved else baseline.experiment_id
+                loser_id = baseline.experiment_id if improved else result.experiment_id
+                self._ranker.update([(winner_id, loser_id, False)])
 
             # 7. HiL 暂停
             if self._mode.hil:
