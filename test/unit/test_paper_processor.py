@@ -10,7 +10,11 @@ import fitz
 
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import TOOL_BEGIN, TOOL_END, ToolContext
-from athena.research.paper_markdown.document import ParsedElement, ParsedPaper
+from athena.research.paper_markdown.document import (
+    ParsedElement,
+    ParsedPaper,
+    ParsedVisual,
+)
 from athena.research.paper_markdown.interfaces import (
     StructureRepairResult,
     VisualInterpretation,
@@ -136,6 +140,29 @@ class FakeStructureRefiner:
             model="test-llm@1",
             notes="restored spaces",
         )
+
+
+class RecordingArtifactStore:
+    """Record writes while delegating storage behavior to the real local store."""
+
+    def __init__(self, delegate: LocalArtifactStore) -> None:
+        self.delegate = delegate
+        self.byte_writes: list[bytes] = []
+        self.text_writes: list[str] = []
+
+    async def put_bytes(self, data: bytes) -> str:
+        self.byte_writes.append(data)
+        return await self.delegate.put_bytes(data)
+
+    async def get_bytes(self, ref: str) -> bytes:
+        return await self.delegate.get_bytes(ref)
+
+    async def put_text(self, text: str) -> str:
+        self.text_writes.append(text)
+        return await self.delegate.put_text(text)
+
+    async def get_text(self, ref: str) -> str:
+        return await self.delegate.get_text(ref)
 
 
 class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
@@ -412,6 +439,90 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, markdown.count("Retrieval architecture"))
         self.assertEqual(1, search_text.count("Retrieval architecture"))
         self.assertFalse(any(unit.kind.startswith("visual:") for unit in units))
+
+    async def test_identical_chunk_content_and_retrieval_text_share_one_write(
+        self,
+    ) -> None:
+        source_ref = await self.store.put_bytes(b"static source")
+        recording = RecordingArtifactStore(self.store)
+        chunk_text = "Unique standalone retrieval evidence."
+        paper = ParsedPaper(
+            source_kind="tex",
+            source_fingerprint="f" * 64,
+            converter="test",
+            title="",
+            authors=[],
+            abstract="",
+            elements=[ParsedElement("paragraph", "paragraph", chunk_text, [], [])],
+            visuals=[],
+            diagnostics=[],
+        )
+
+        class StaticPaperProcessor(PaperProcessor):
+            async def parse_source(self, request):
+                return paper, request.tex_source_ref
+
+        content = await StaticPaperProcessor(recording, None).process(
+            PaperConversionRequest(
+                tex_source_ref=source_ref,
+                tex_source_format="plain",
+            )
+        )
+
+        self.assertEqual(
+            content.chunks[0].content_ref,
+            content.chunks[0].retrieval_text_ref,
+        )
+        # One chunk write plus the independently persisted full Markdown.
+        self.assertEqual(2, recording.text_writes.count(chunk_text))
+
+    async def test_best_effort_skips_model_context_and_reuses_visual_artifacts(
+        self,
+    ) -> None:
+        recording = RecordingArtifactStore(self.store)
+        processor = PaperProcessor(recording, None)
+        evidence = "| Method | Score |\n| --- | --- |\n| Athena | 0.91 |"
+        image = png_bytes()
+        visual = ParsedVisual(
+            visual_id="table-static",
+            kind="table",
+            locator=SourceLocator(
+                source_kind="pdf", page_number=1, bbox=(0, 0, 10, 10)
+            ),
+            element_id="table-element",
+            asset_bytes=image,
+            asset_media_type="image/png",
+            preview_bytes=image,
+            structured_text=evidence,
+        )
+        paper = ParsedPaper(
+            source_kind="pdf",
+            source_fingerprint="f" * 64,
+            converter="test",
+            title="",
+            authors=[],
+            abstract="",
+            elements=[],
+            visuals=[visual],
+            diagnostics=[],
+        )
+
+        stored, _ = await processor.interpret_visual(
+            visual,
+            PaperConversionRequest(
+                pdf_ref="sha256:" + "0" * 64,
+                visual_policy="best_effort",
+            ),
+            paper,
+        )
+
+        self.assertEqual(stored.asset_ref, stored.preview_ref)
+        self.assertEqual(stored.structured_text_ref, stored.search_text_ref)
+        self.assertEqual(1, recording.byte_writes.count(image))
+        self.assertEqual(1, recording.text_writes.count(evidence))
+        self.assertFalse(
+            any(text.startswith("Kind: table") for text in recording.text_writes)
+        )
 
     async def test_retrieval_exposes_semantic_heading_and_reference_edges(self) -> None:
         tex = rb"""\begin{document}

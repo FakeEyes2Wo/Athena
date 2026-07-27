@@ -141,33 +141,23 @@ class PaperProcessor:
                 visual.asset_bytes,
                 visual.asset_media_type,
             )
-        preview_ref = (
-            await self.artifacts.put_bytes(preview) if preview is not None else None
-        )
+        preview_ref = None
+        if preview is not None:
+            preview_ref = (
+                asset_ref
+                if asset_ref is not None and preview == visual.asset_bytes
+                else await self.artifacts.put_bytes(preview)
+            )
         structured_ref = (
             await self.artifacts.put_text(visual.structured_text)
             if visual.structured_text
             else None
         )
-        context = "\n".join(
-            value
-            for value in (
-                f"Kind: {visual.kind}",
-                f"Label: {visual.label}" if visual.label else "",
-                f"Caption: {visual.caption}" if visual.caption else "",
-                visual.surrounding_text,
+        model_asset_ref = preview_ref or asset_ref
+        if model_asset_ref is None and structured_ref is None:
+            raise ValueError(
+                "Visual interpretation requires an asset or structured text."
             )
-            if value
-        )
-        model_request = VisualInterpretationRequest(
-            visual_id=visual.visual_id,
-            kind=visual.kind,
-            asset_ref=preview_ref or asset_ref,
-            media_type="image/png" if preview_ref else visual.asset_media_type,
-            structured_text_ref=structured_ref,
-            context_ref=await self.artifacts.put_text(context),
-            locator=visual.locator,
-        )
         if self.visual_interpreter is None:
             if request.visual_policy == "required":
                 raise VisualInterpretationRequiredError(
@@ -183,6 +173,25 @@ class PaperProcessor:
                 )
             )
         else:
+            context = "\n".join(
+                value
+                for value in (
+                    f"Kind: {visual.kind}",
+                    f"Label: {visual.label}" if visual.label else "",
+                    f"Caption: {visual.caption}" if visual.caption else "",
+                    visual.surrounding_text,
+                )
+                if value
+            )
+            model_request = VisualInterpretationRequest(
+                visual_id=visual.visual_id,
+                kind=visual.kind,
+                asset_ref=model_asset_ref,
+                media_type="image/png" if preview_ref else visual.asset_media_type,
+                structured_text_ref=structured_ref,
+                context_ref=await self.artifacts.put_text(context),
+                locator=visual.locator,
+            )
             try:
                 interpretation = await self.visual_interpreter.interpret(model_request)
             except Exception as error:
@@ -222,6 +231,11 @@ class PaperProcessor:
             == "unavailable"
             else "interpreted"
         )
+        search_text_ref = (
+            structured_ref
+            if structured_ref is not None and search_text == visual.structured_text
+            else await self.artifacts.put_text(search_text)
+        )
         stored = PaperVisual(
             visual_id=visual.visual_id,
             kind=visual.kind,
@@ -236,7 +250,7 @@ class PaperProcessor:
             interpretation_ref=interpretation_ref,
             interpretation_model=interpretation.model,
             interpretation_status=status,
-            search_text_ref=await self.artifacts.put_text(search_text),
+            search_text_ref=search_text_ref,
             locator=visual.locator,
         )
         return stored, interpretation
@@ -288,14 +302,18 @@ class PaperProcessor:
 
         chunks: list[PaperChunk] = []
         for chunk in draft_chunks:
+            content_ref = await self.artifacts.put_text(chunk.content_text)
+            retrieval_text_ref = (
+                content_ref
+                if chunk.retrieval_text == chunk.content_text
+                else await self.artifacts.put_text(chunk.retrieval_text)
+            )
             chunks.append(
                 PaperChunk(
                     chunk_id=chunk.chunk_id,
                     kind=chunk.kind,
-                    content_ref=await self.artifacts.put_text(chunk.content_text),
-                    retrieval_text_ref=await self.artifacts.put_text(
-                        chunk.retrieval_text
-                    ),
+                    content_ref=content_ref,
+                    retrieval_text_ref=retrieval_text_ref,
                     heading_path=chunk.heading_path,
                     semantic_heading_path=chunk.semantic_heading_path,
                     char_start=chunk.char_start,
