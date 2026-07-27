@@ -10,6 +10,8 @@ from athena.research.paper_markdown.schemas import (
     PaperChunk,
     PaperContent,
     PaperProvenance,
+    PaperVisual,
+    SourceLocator,
 )
 from athena.research.paper_rag.contextual import contextualize_entries
 from athena.research.paper_rag.index import (
@@ -93,6 +95,39 @@ async def make_paper(
         diagnostics_ref=await store.put_text("[]"),
         chunks=chunks,
     )
+
+
+async def make_illustrated_paper(
+    store: LocalArtifactStore, interpretation_status: str
+) -> PaperContent:
+    """Persist a paper whose first chunk discusses a figure, linked in both directions."""
+    paper = await make_paper(
+        store,
+        "p1",
+        "Paper One",
+        ["Retrieval accuracy is plotted in Figure 1.", "Unrelated closing chunk."],
+    )
+    paper.chunks[0].visual_ids = ["figure-1"]
+    paper.visuals = [
+        PaperVisual(
+            visual_id="figure-1",
+            kind="figure",
+            heading_path=["Method"],
+            chunk_ids=["c0"],
+            label="fig:acc",
+            caption="Retrieval accuracy by variant.",
+            structured_text_ref=await store.put_text("accuracy plot"),
+            interpretation_ref=await store.put_text("{}"),
+            interpretation_status=interpretation_status,
+            search_text_ref=await store.put_text(
+                "Figure 1 plots retrieval accuracy for each variant across datasets."
+            ),
+            locator=SourceLocator(
+                source_kind="tex", file="main.tex", line_start=1, line_end=1
+            ),
+        )
+    ]
+    return paper
 
 
 class SentenceSplitTest(unittest.TestCase):
@@ -281,6 +316,33 @@ class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, index.entries[0].sentence_end)
         self.assertEqual(2, index.entries[1].sentence_start)
 
+    async def test_text_and_visual_units_link_to_each_other(self) -> None:
+        paper = await make_illustrated_paper(self.store, "interpreted")
+
+        corpus_ref = await build_corpus_index(self.store, [paper])
+        index = PaperCorpusIndex.model_validate_json(
+            await self.store.get_text(corpus_ref)
+        )
+        by_id = {entry.chunk_id: entry for entry in index.entries}
+
+        self.assertIn("p1:figure-1", by_id)
+        self.assertEqual(["p1:figure-1"], by_id["p1:c0"].related_ids)
+        self.assertEqual(["p1:c0"], by_id["p1:figure-1"].related_ids)
+        self.assertEqual([], by_id["p1:c1"].related_ids)
+
+    async def test_links_to_uninterpreted_visuals_are_dropped(self) -> None:
+        paper = await make_illustrated_paper(self.store, "unavailable")
+
+        corpus_ref = await build_corpus_index(self.store, [paper])
+        index = PaperCorpusIndex.model_validate_json(
+            await self.store.get_text(corpus_ref)
+        )
+        by_id = {entry.chunk_id: entry for entry in index.entries}
+
+        # 视觉单元没进语料，指向它的链接必须一并剔除，否则 Agent 会读到 not_found
+        self.assertNotIn("p1:figure-1", by_id)
+        self.assertEqual([], by_id["p1:c0"].related_ids)
+
     async def test_embedder_records_model_and_persists_one_vector_per_sentence(
         self,
     ) -> None:
@@ -409,6 +471,22 @@ class ChunkReadTest(unittest.IsolatedAsyncioTestCase):
         chunks = read_chunks(self.corpus, self.session, ["p1:c2"], True)
 
         self.assertEqual(["p1:c1", "p1:c2"], [chunk.chunk_id for chunk in chunks])
+
+    async def test_search_and_read_carry_the_link_to_the_figure(self) -> None:
+        store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        session = RetrievalSession()
+        paper = await make_illustrated_paper(store, "interpreted")
+        corpus_ref = await build_corpus_index(store, [paper])
+        corpus = await session.load(store, corpus_ref)
+
+        hits = keyword_search(corpus, ["retrieval accuracy"], 5)
+        target = next(hit for hit in hits if hit.chunk_id == "p1:c0")
+        figure = read_chunks(corpus, session, target.related_ids, False)
+
+        self.assertEqual(["p1:figure-1"], target.related_ids)
+        self.assertEqual("read", figure[0].status)
+        self.assertIn("plots retrieval accuracy", figure[0].text)
+        self.assertEqual(["p1:c0"], figure[0].related_ids)
 
     async def test_unknown_chunk_id_is_reported_not_raised(self) -> None:
         chunks = read_chunks(self.corpus, self.session, ["p1:missing"], False)

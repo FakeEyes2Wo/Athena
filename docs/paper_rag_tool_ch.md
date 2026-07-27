@@ -165,6 +165,21 @@ astro-ph.GA）、603 个 chunk、6662 个句子上做过一次扫描。查询取
 Agent 去探索新的 chunk。`include_adjacent` 连同同一篇论文内的相邻 chunk 一并返回，越过
 论文边界的邻居会被排除。
 
+### 图表与正文的互相跳转
+
+`CorpusEntry.related_ids` 保留上游已经算好的关联，两个检索工具与 `paper_chunk_read` 都
+把它带出来：正文 chunk 指向它讨论的图表（上游的 `visual_ids`），视觉单元指向讨论它的正
+文（上游的 `chunk_ids`）。上游两侧存的都是裸 id，建索引时补上论文命名空间，因此返回值可
+以直接回填给 `paper_chunk_read`，两个方向都不需要新工具。
+
+指向未被解释的视觉单元的链接会在建索引时剔除。没有配置 `VisualInterpreter` 时
+`interpretation_status` 为 `unavailable` 的视觉根本不进语料，留着链接只会让 Agent 读到
+`not_found`。
+
+没有这一层时，正文与图表之间唯一的关联是词面巧合——例如正文里的 `[fig:multi-head-att]`
+恰好与图注里的 `**fig:multi-head-att**` 对得上。那依赖上游"交叉引用未解析"这个缺陷；一旦
+上游把它渲染成 `Figure 1`，多篇语料里的 `Figure 1` 互相碰撞，关联反而更差。
+
 ### 会话状态
 
 三个工具共享一个 `RetrievalSession`：按 `corpus_ref` 缓存已解码的语料，并记录已读集合。
@@ -233,3 +248,6 @@ Athena 目前没有配置任何 `ChunkContextualizer`，把半成品接进 `buil
   模型不一致守卫、top-k 夹紧与保留入口的拒绝行为。
 - 端到端实跑：arXiv 取源 → Markdown 转换 → 语料构建 → 三个工具经 `ToolRegistry.adispatch`
   派发，覆盖 3 篇论文 / 273 chunk / 1430 句，含取消与失败路径。
+- 图表联动实跑：接入真实 VLM 解释 3 篇论文的 30 张图表（0 失败）后，语料含 18 个
+  `visual:figure` 与 12 个 `visual:table` 单元，27 个正文 chunk 指向图表、30 个视觉单元
+  指回正文，无悬空链接；经工具完成 `正文 → 图 → 正文` 的完整往返。

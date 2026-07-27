@@ -63,7 +63,8 @@ class PaperKeywordSearchTool(BaseTool):
             "Locate paper chunks containing exact keywords. Returns chunk ids with "
             "only the sentences that matched, not the full chunk. Best for entity, "
             "method, dataset, and metric names. Follow up with paper_chunk_read on "
-            "the chunks worth reading in full."
+            "the chunks worth reading in full, or on their related_ids to reach the "
+            "figures and tables a chunk discusses."
         ),
         input_schema={
             "type": "object",
@@ -120,7 +121,8 @@ class PaperSemanticSearchTool(BaseTool):
             "Find paper chunks whose sentences are semantically closest to a natural "
             "language query. Returns chunk ids with only the matched sentences, not "
             "the full chunk. Best when the wording in the papers is unknown. Follow "
-            "up with paper_chunk_read on the chunks worth reading in full."
+            "up with paper_chunk_read on the chunks worth reading in full, or on "
+            "their related_ids to reach the figures and tables a chunk discusses."
         ),
         input_schema={
             "type": "object",
@@ -192,7 +194,9 @@ class PaperChunkReadTool(BaseTool):
             "Read the full text of chunks returned by the search tools. Chunks "
             "already read in this session return a short notice instead of their "
             "text, so re-reading costs nothing. Set include_adjacent to also read "
-            "the neighbouring chunks of the same paper for surrounding context."
+            "the neighbouring chunks of the same paper for surrounding context. "
+            "Each result carries related_ids: pass them back here to move between a "
+            "figure or table and the text that discusses it."
         ),
         input_schema={
             "type": "object",

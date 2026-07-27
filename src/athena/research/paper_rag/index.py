@@ -13,7 +13,7 @@ import math
 import re
 
 from athena.core.schemas import ArtifactRef
-from athena.research.paper_markdown.schemas import PaperContent
+from athena.research.paper_markdown.schemas import PaperContent, RetrievalUnit
 from athena.research.paper_rag.interfaces import TextEmbedder
 from athena.research.paper_rag.schemas import (
     CorpusEntry,
@@ -223,6 +223,17 @@ def split_sentences(text: str) -> list[tuple[int, int]]:
     return joined
 
 
+def related_unit_ids(unit: RetrievalUnit) -> list[str]:
+    """取出与该单元直接关联的其他单元 id，并补上论文命名空间。
+
+    正文 chunk 的 ``visual_ids`` 指向它讨论的图表，视觉单元的 ``chunk_ids`` 指向讨论它
+    的正文；上游两侧都只存裸 id，加上命名空间后才能直接交给 ``paper_chunk_read``。
+    """
+    namespace = unit.metadata.get("retrieval_namespace", "")
+    linked = unit.metadata.get("visual_ids") or unit.metadata.get("chunk_ids") or ""
+    return [f"{namespace}:{item}" for item in linked.split(",") if item]
+
+
 async def embed_sentences(
     store: ArtifactStore, index: PaperCorpusIndex, embedder: TextEmbedder
 ) -> ArtifactRef:
@@ -258,6 +269,7 @@ async def build_corpus_index(
                     kind=unit.kind,
                     heading_path=unit.heading_path,
                     text=unit.text,
+                    related_ids=related_unit_ids(unit),
                     sentence_start=len(sentences),
                     sentence_end=len(sentences) + len(spans),
                 )
@@ -268,6 +280,11 @@ async def build_corpus_index(
                 )
                 for start, end in spans
             )
+
+    # 未被解释的视觉单元不会进入语料，指向它们的链接必须剔除，否则 Agent 会读到 not_found
+    present = {entry.chunk_id for entry in entries}
+    for entry in entries:
+        entry.related_ids = [item for item in entry.related_ids if item in present]
 
     index = PaperCorpusIndex(entries=entries, sentences=sentences)
     if embedder is not None:

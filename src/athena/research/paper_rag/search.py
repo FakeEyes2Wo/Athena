@@ -111,6 +111,7 @@ def make_hit(
         heading_path=entry.heading_path,
         score=score,
         snippet=snippet,
+        related_ids=entry.related_ids,
     )
 
 
@@ -205,6 +206,7 @@ def read_one(
         title=entry.title,
         heading_path=entry.heading_path,
         text=entry.text,
+        related_ids=entry.related_ids,
     )
 
 
