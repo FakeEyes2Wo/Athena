@@ -130,6 +130,8 @@ class ResearchTreeNodes:
 class ResearchTree:
     def __init__(self) -> None:
         self._nodes = ResearchTreeNodes()
+        self._hypotheses: dict[str, "Hypothesis"] = {}
+        self._sota_id: str | None = None
 
     def get_node_by_id(self, node_id: str) -> ResearchTreeNode:
         try:
@@ -205,6 +207,47 @@ class ResearchTree:
             exp=exp,
             parent_id=parent_id,
         )
+
+    # ── AI4ML query methods ──
+
+    def best_experiment(self) -> "ResearchTreeNode | None":
+        """Return the best experiment node (highest primary metric)."""
+        if self._sota_id and self._sota_id in self._nodes.nodes:
+            return self._nodes.nodes[self._sota_id]
+        # Fallback: scan all nodes
+        best, best_val = None, None
+        for node in self._nodes.nodes.values():
+            val = node.exp.result_as_float()
+            if val is not None and (best_val is None or val > best_val):
+                best, best_val = node, val
+        if best:
+            self._sota_id = best.id
+        return best
+
+    def add_hypothesis(self, h: "Hypothesis") -> None:
+        """Register a hypothesis for potential execution."""
+        from athena.core.schemas import Hypothesis as H
+
+        if not h.id:
+            h = h.model_copy(update={"id": f"hyp_{uuid4().hex[:12]}"})
+        self._hypotheses[h.id] = h
+
+    def pending_hypotheses(self) -> list["Hypothesis"]:
+        """Return hypotheses not yet executed (status=PROPOSED)."""
+        return [h for h in self._hypotheses.values() if h.status == "PROPOSED"]
+
+    def hypotheses_path(self, node_id: str) -> list["Hypothesis"]:
+        """Return hypotheses from root to given node, ordered root->leaf."""
+        node_ids_on_path: set[str] = set()
+        n = self.get_node_by_id(node_id)
+        while n.parent_id:
+            n = self.get_node_by_id(n.parent_id)
+            node_ids_on_path.add(n.id)
+        return [h for h in self._hypotheses.values() if h.parent_id in node_ids_on_path]
+
+    def update_sota(self, node_id: str, is_sota: bool) -> None:
+        if is_sota:
+            self._sota_id = node_id
 
     # TODO: 还需要保存这个树的内容，从而可以达到断点续传。这里不允许codex完成
 

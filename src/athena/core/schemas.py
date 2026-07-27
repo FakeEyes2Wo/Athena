@@ -86,7 +86,8 @@ class ExperimentPlan(
         description="根据假设，Plan应该如何改变目录从而完成我们的实验部分"
     )
     rubrics: List[str] = Field(
-        description="我们建立Plan过后，这个Plan应该实现到什么程度的评价指标"
+        default_factory=list,
+        description="我们建立Plan过后，这个Plan应该实现到什么程度的评价指标",
     )
     run_config_ref: ArtifactRef
     budget: dict
