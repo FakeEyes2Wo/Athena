@@ -47,6 +47,13 @@ class Hypothesis(BaseModel):
     evidence_refs: list[ArtifactRef] = Field(default_factory=list)
     patience_grant: int = Field(default=0, ge=0)
     patience_evidence_ref: ArtifactRef | None = None
+    id: str | None = Field(default=None, description="Unique hypothesis identifier")
+    parent_id: str | None = Field(
+        default=None, description="Parent experiment ID in ResearchTree"
+    )
+    sources: list[str] = Field(
+        default_factory=list, description="Paper URLs or model repos"
+    )
 
     @model_validator(mode="after")
     def _validate_patience(self) -> Self:
@@ -99,3 +106,49 @@ class AthenaTurn(BaseModel):
     request_ref: ArtifactRef
     status: str
     result_ref: ArtifactRef | None = None
+
+
+# ── AI4ML evaluation types ──
+
+
+class MetricDef(BaseModel):
+    """Specification of a metric the CodeAgent must compute."""
+
+    name: str
+    direction: Literal["maximize", "minimize"]
+    description: str  # prompt for CodeAgent
+
+
+class EvalSpec(BaseModel):
+    """Frozen evaluation protocol. Built in PREPARE, immutable during SEARCH."""
+
+    model_config = {"frozen": True}
+
+    primary: MetricDef
+    secondary: list[MetricDef] = Field(default_factory=list)
+    split_seed: int = 42
+    test_ratio: float = 0.2
+
+
+class EvalResult(BaseModel):
+    """Output of running eval.py on predictions."""
+
+    experiment_id: str
+    primary: float
+    secondary: dict[str, float] = Field(default_factory=dict)
+    per_sample: ArtifactRef
+
+
+class ComparisonVerdict(BaseModel):
+    """Pairwise comparison of two experiments."""
+
+    winner: Literal["baseline", "candidate", "tie"]
+    p_value: float
+
+
+class ExperimentOutcome(BaseModel):
+    """Result of a completed experiment stored in ResearchTree."""
+
+    eval: EvalResult
+    verdict: ComparisonVerdict | None = None
+    is_sota: bool = False
