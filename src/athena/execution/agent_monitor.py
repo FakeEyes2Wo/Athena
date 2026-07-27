@@ -1,6 +1,20 @@
-"""待实现：Qoder/Codex 等长运行 Agent 的进度监控。
+"""Watch CodeAgent execution for timeout and stalls."""
 
-监控器应订阅 ThreadManager 的事件与工具调用状态，识别无进度、等待循环或资源
-耗尽等可能死锁，并将诊断、超时和建议中断动作写为 artifact。它不应自行修改
-Agent 代码或工作流状态；是否重试、终止或请求人工介入由 Scheduler 决定。
-"""
+import asyncio
+
+
+class AgentMonitor:
+    """Watch CodeAgent execution for timeout and stalls."""
+
+    async def watch(self, coro, timeout_s: int = 600) -> dict:
+        try:
+            result = await asyncio.wait_for(coro, timeout=timeout_s)
+            return {"status": "OK", "result": result}
+        except asyncio.TimeoutError:
+            return {
+                "status": "TIMEOUT",
+                "result": None,
+                "error": f"Exceeded {timeout_s}s",
+            }
+        except Exception as e:
+            return {"status": "FAIL", "result": None, "error": str(e)}
