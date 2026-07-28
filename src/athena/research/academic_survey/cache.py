@@ -17,6 +17,7 @@ from athena.research.academic_survey.schemas import (
     QueryEvolution,
     QueryPlan,
     RewrittenQuery,
+    SearchPage,
     SearchQuery,
     SurveyCandidate,
     SurveyConstraints,
@@ -84,6 +85,7 @@ def channel_cache_key(
     operation: str,
     payload: dict,
     limit: int,
+    cursor: str = "",
 ) -> str:
     canonical = _canonical(
         {
@@ -91,7 +93,7 @@ def channel_cache_key(
             "adapter_version": adapter_version,
             "operation": operation,
             "payload": payload,
-            "cursor": "",
+            "cursor": cursor,
             "limit": limit,
         }
     )
@@ -140,6 +142,55 @@ class CachedChannelAdapter:
         return await self._get_or_call(
             key, lambda: self.delegate.search(query, constraints, limit, cancel)
         )
+
+    async def search_page(
+        self,
+        query: SearchQuery,
+        constraints: SurveyConstraints,
+        limit: int,
+        cursor: str | None,
+        cancel: asyncio.Event,
+    ) -> SearchPage:
+        normalized_cursor = cursor or ""
+        key = channel_cache_key(
+            self.name,
+            self.version,
+            "search_page",
+            {
+                "query": " ".join(query.text.casefold().split()),
+                "constraints": _normalized_constraints(constraints),
+            },
+            limit,
+            normalized_cursor,
+        )
+
+        async def call() -> SearchPage:
+            method = getattr(self.delegate, "search_page", None)
+            if method is not None:
+                return await method(query, constraints, limit, cursor, cancel)
+            return SearchPage(
+                observations=await self.delegate.search(
+                    query, constraints, limit, cancel
+                )
+            )
+
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = await self.cache.get(key)
+            if cached and self._fresh(cached):
+                self.cache_hits += 1
+                record_run_metric("cache_hits")
+                return SearchPage.model_validate_json(
+                    await self.artifacts.get_text(cached.value_ref)
+                )
+            self.network_calls += 1
+            record_run_metric("cache_misses")
+            page = await call()
+            value_ref = await self.artifacts.put_text(page.model_dump_json())
+            await self.cache.put(
+                CacheRecord(key=key, value_ref=value_ref, created_at=time.time())
+            )
+            return page
 
     async def references(
         self,
@@ -214,6 +265,32 @@ class ReplayChannelAdapter:
             limit,
         )
         return await self._require(key)
+
+    async def search_page(
+        self,
+        query: SearchQuery,
+        constraints: SurveyConstraints,
+        limit: int,
+        cursor: str | None,
+        cancel: asyncio.Event,
+    ) -> SearchPage:
+        key = channel_cache_key(
+            self.name,
+            self.version,
+            "search_page",
+            {
+                "query": " ".join(query.text.casefold().split()),
+                "constraints": _normalized_constraints(constraints),
+            },
+            limit,
+            cursor or "",
+        )
+        record = await self.cache.get(key)
+        if record is None:
+            raise ReplayCacheMiss(f"exact replay cache miss: {self.name}:{key}")
+        return SearchPage.model_validate_json(
+            await self.artifacts.get_text(record.value_ref)
+        )
 
     async def references(
         self,

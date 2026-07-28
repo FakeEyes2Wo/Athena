@@ -8,6 +8,7 @@ from athena.research.academic_survey.channels.base import HttpChannel, text, yea
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
+    SearchPage,
     SearchQuery,
     SurveyCandidate,
     SurveyConstraints,
@@ -20,7 +21,7 @@ _FIELD_PREFIX = re.compile(r"(?:^|[\s(])(?:all|ti|au|abs|co|jr|cat|rn|id):", re.
 
 class ArxivChannel(HttpChannel):
     name = "arxiv"
-    version = "arxiv-atom-v1"
+    version = "arxiv-atom-v2"
 
     async def search(
         self,
@@ -29,6 +30,19 @@ class ArxivChannel(HttpChannel):
         limit: int,
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
+        return (
+            await self.search_page(query, constraints, limit, None, cancel)
+        ).observations
+
+    async def search_page(
+        self,
+        query: SearchQuery,
+        constraints: SurveyConstraints,
+        limit: int,
+        cursor: str | None,
+        cancel: asyncio.Event,
+    ) -> SearchPage:
+        start = int(cursor or 0)
         expression = query.text.strip()
         if not _FIELD_PREFIX.search(expression):
             expression = f'all:"{expression}"'
@@ -39,7 +53,7 @@ class ArxivChannel(HttpChannel):
         params = urllib.parse.urlencode(
             {
                 "search_query": expression,
-                "start": 0,
+                "start": start,
                 "max_results": limit,
                 "sortBy": "relevance",
                 "sortOrder": "descending",
@@ -47,7 +61,7 @@ class ArxivChannel(HttpChannel):
         )
         response, raw_ref = await self.get(f"{ARXIV_QUERY_URL}?{params}", cancel)
         metadata = list(parse_atom_feed(response.body).values())
-        return [
+        observations = [
             CandidateObservation(
                 channel=self.name,
                 query_id=query.query_id,
@@ -76,6 +90,12 @@ class ArxivChannel(HttpChannel):
             for rank, item in enumerate(metadata[:limit], start=1)
             if item.title
         ]
+        return SearchPage(
+            observations=observations,
+            next_cursor=(
+                str(start + len(observations)) if len(observations) == limit else None
+            ),
+        )
 
     async def references(
         self,

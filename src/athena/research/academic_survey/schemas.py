@@ -273,6 +273,13 @@ class CandidateObservation(BaseModel):
     raw_response_ref: ArtifactRef | None = None
 
 
+class SearchPage(BaseModel):
+    """一个可重放的检索结果页；next_cursor 为空表示该 arm 已耗尽。"""
+
+    observations: list[CandidateObservation] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
 class SurveyCandidate(BaseModel):
     """跨通道合并后、具有稳定真实身份的一篇候选论文。"""
 
@@ -376,6 +383,10 @@ class SurveyStats(BaseModel):
     channel_rewards: dict[ChannelName, int] = Field(default_factory=dict)
     batch_allocations: list[dict[ChannelName, int]] = Field(default_factory=list)
     query_channel_batches: list[dict[str, str | int]] = Field(default_factory=list)
+    planned_queries: int = Field(default=0, ge=0)
+    executed_queries: int = Field(default=0, ge=0)
+    query_coverage: float = Field(default=0, ge=0, le=1)
+    paginated_pulls: int = Field(default=0, ge=0)
     query_diagnostics: list[str] = Field(default_factory=list)
     cache_hits: int = Field(default=0, ge=0)
     cache_misses: int = Field(default=0, ge=0)

@@ -27,7 +27,7 @@ class SurveyBudget:
 
 _BUDGETS = {
     "fast": SurveyBudget(
-        "academic-survey-budget-v1",
+        "academic-survey-budget-v2",
         2,
         4,
         250,
@@ -39,7 +39,7 @@ _BUDGETS = {
         max_batches_per_round=4,
     ),
     "diligent": SurveyBudget(
-        "academic-survey-budget-v1",
+        "academic-survey-budget-v2",
         4,
         8,
         1000,
@@ -73,30 +73,41 @@ def ucb_score(
     return mean_reward + exploration * math.sqrt(math.log(total) / channel_pulls)
 
 
-def allocate_batch_indices(
-    channels: list[str],
-    pulls: dict[str, int],
-    rewards: dict[str, int],
+def allocate_search_indices(
+    arms: list[tuple[str, str, str]],
+    query_pulls: dict[str, int],
+    arm_pulls: dict[str, int],
+    channel_pulls: dict[str, int],
+    channel_rewards: dict[str, int],
     budget: SurveyBudget,
-    round_index: int,
 ) -> list[int]:
-    """首轮 probe 每个通道，后续按 UCB 稳定选择批次。"""
-    cap = min(len(channels), budget.max_batches_per_round)
-    if round_index == 0:
-        selected = []
-        seen = set()
-        for index, channel in enumerate(channels):
-            if channel not in seen:
-                selected.append(index)
-                seen.add(channel)
-        selected.extend(
-            index for index in range(len(channels)) if index not in selected
+    """先覆盖 query family/channel，再按 UCB 选择稳定的检索 arm。"""
+    remaining = list(range(len(arms)))
+    selected: list[int] = []
+    local_queries = dict(query_pulls)
+    local_arms = dict(arm_pulls)
+    local_channels = dict(channel_pulls)
+    cap = min(len(arms), budget.max_batches_per_round)
+    while remaining and len(selected) < cap:
+        index = min(
+            remaining,
+            key=lambda value: (
+                local_queries.get(arms[value][0], 0) > 0,
+                local_channels.get(arms[value][1], 0) > 0,
+                local_arms.get(arms[value][2], 0) > 0,
+                -ucb_score(
+                    arms[value][1],
+                    local_channels,
+                    channel_rewards,
+                    budget.ucb_exploration,
+                ),
+                value,
+            ),
         )
-        return selected[:cap]
-    return sorted(
-        range(len(channels)),
-        key=lambda index: (
-            -ucb_score(channels[index], pulls, rewards, budget.ucb_exploration),
-            index,
-        ),
-    )[:cap]
+        selected.append(index)
+        remaining.remove(index)
+        query_id, channel, arm_key = arms[index]
+        local_queries[query_id] = local_queries.get(query_id, 0) + 1
+        local_channels[channel] = local_channels.get(channel, 0) + 1
+        local_arms[arm_key] = local_arms.get(arm_key, 0) + 1
+    return selected

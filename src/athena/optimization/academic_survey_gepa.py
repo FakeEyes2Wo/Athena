@@ -102,6 +102,7 @@ class DocumentMetrics(BaseModel):
 class SurveyRolloutTrace(BaseModel):
     case_id: str
     bundle_version: str
+    candidate_paper_ids: list[str] = Field(default_factory=list)
     predicted_paper_ids: list[str] = Field(default_factory=list)
     predicted_titles: dict[str, str] = Field(default_factory=dict)
     trace_refs: list[ArtifactRef] = Field(default_factory=list)
@@ -116,6 +117,8 @@ class PromotionCaseResult(BaseModel):
     case_id: str
     incumbent: DocumentMetrics
     candidate: DocumentMetrics
+    incumbent_candidate_recall: float = 0
+    candidate_candidate_recall: float = 0
     added_paper_ids: list[str] = Field(default_factory=list)
     removed_paper_ids: list[str] = Field(default_factory=list)
 
@@ -125,6 +128,12 @@ class PromotionReport(BaseModel):
     candidate_version: str
     incumbent_macro_f1: float
     candidate_macro_f1: float
+    incumbent_macro_precision: float = 0
+    candidate_macro_precision: float = 0
+    incumbent_macro_candidate_recall: float = 0
+    candidate_macro_candidate_recall: float = 0
+    precision_preserved: bool = False
+    candidate_recall_preserved: bool = False
     strictly_improved: bool
     approved: bool
     replay_mode: ReplayMode
@@ -387,6 +396,9 @@ class GraphSurveyRolloutRunner:
         return SurveyRolloutTrace(
             case_id=case.case_id,
             bundle_version=bundle.version,
+            candidate_paper_ids=[
+                candidate.identity.paper_key() for candidate in ledger.candidates
+            ],
             predicted_paper_ids=[item.paper_id for item in corpus.reference_papers],
             predicted_titles={
                 item.paper_id: item.title for item in corpus.reference_papers
@@ -631,6 +643,12 @@ async def optimize_prompt_bundle(
             case_id=case.case_id,
             incumbent=incumbent_result[1],
             candidate=candidate_result[1],
+            incumbent_candidate_recall=document_metrics(
+                incumbent_result[0].candidate_paper_ids, case.gold_paper_ids
+            ).recall,
+            candidate_candidate_recall=document_metrics(
+                candidate_result[0].candidate_paper_ids, case.gold_paper_ids
+            ).recall,
             added_paper_ids=sorted(
                 set(candidate_result[0].predicted_paper_ids)
                 - set(incumbent_result[0].predicted_paper_ids)
@@ -651,12 +669,34 @@ async def optimize_prompt_bundle(
     }
     if len(snapshot_versions) != 1:
         raise ValueError("promotion rollouts must use one snapshot version")
-    improved = candidate_macro > incumbent_macro
+    incumbent_precision = _macro_precision(incumbent_results)
+    candidate_precision = _macro_precision(candidate_results)
+    incumbent_candidate_recall = _macro_candidate_recall(
+        incumbent_results, splits.promotion
+    )
+    candidate_candidate_recall = _macro_candidate_recall(
+        candidate_results, splits.promotion
+    )
+    precision_preserved = candidate_precision >= incumbent_precision
+    candidate_recall_preserved = (
+        candidate_candidate_recall >= incumbent_candidate_recall
+    )
+    improved = (
+        candidate_macro > incumbent_macro
+        and precision_preserved
+        and candidate_recall_preserved
+    )
     report = PromotionReport(
         incumbent_version=incumbent.version,
         candidate_version=candidate.version,
         incumbent_macro_f1=incumbent_macro,
         candidate_macro_f1=candidate_macro,
+        incumbent_macro_precision=incumbent_precision,
+        candidate_macro_precision=candidate_precision,
+        incumbent_macro_candidate_recall=incumbent_candidate_recall,
+        candidate_macro_candidate_recall=candidate_candidate_recall,
+        precision_preserved=precision_preserved,
+        candidate_recall_preserved=candidate_recall_preserved,
         strictly_improved=improved,
         approved=approve and improved,
         replay_mode=replay_mode,
@@ -705,6 +745,22 @@ def _evaluate_cases(
     return results, macro
 
 
+def _macro_precision(
+    results: list[tuple[SurveyRolloutTrace, DocumentMetrics]],
+) -> float:
+    return sum(metrics.precision for _, metrics in results) / len(results)
+
+
+def _macro_candidate_recall(
+    results: list[tuple[SurveyRolloutTrace, DocumentMetrics]],
+    cases: list[SurveyBenchmarkCase],
+) -> float:
+    return sum(
+        document_metrics(trace.candidate_paper_ids, case.gold_paper_ids).recall
+        for (trace, _), case in zip(results, cases, strict=True)
+    ) / len(results)
+
+
 def _prompt_candidate(
     bundle: PromptBundle, mode: ReplayMode = "frozen_snapshot"
 ) -> dict[str, str]:
@@ -746,6 +802,7 @@ def _feedback(
     gold = set(case.gold_paper_ids)
     missed = sorted(gold - predicted)
     false_positive = sorted(predicted - gold)
+    candidate_metrics = document_metrics(trace.candidate_paper_ids, case.gold_paper_ids)
     return "\n".join(
         [
             f"Query: {case.request.topic}",
@@ -757,6 +814,7 @@ def _feedback(
             f"Channel/query first surfaced: {trace.first_sources}",
             f"Cache/snapshot mode: {trace.replay_mode}; "
             f"snapshot={trace.snapshot_version}; invalid: {trace.invalid_reason}",
+            f"Candidate recall={candidate_metrics.recall:.4f}",
             f"Precision={metrics.precision:.4f} Recall={metrics.recall:.4f} F1={metrics.f1:.4f}",
         ]
     )

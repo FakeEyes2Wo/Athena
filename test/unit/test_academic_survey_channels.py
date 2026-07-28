@@ -7,7 +7,7 @@ import urllib.parse
 import pytest
 
 from athena.research.academic_survey.budget import (
-    allocate_batch_indices,
+    allocate_search_indices,
     budget_for,
     ucb_score,
 )
@@ -27,6 +27,7 @@ from athena.research.academic_survey.logic import merge_observations
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
+    SearchPage,
     SearchQuery,
     SurveyConstraints,
 )
@@ -77,6 +78,7 @@ ARXIV = b"""<?xml version="1.0"?>
 </feed>"""
 
 OPENALEX = {
+    "meta": {"next_cursor": "next-openalex"},
     "results": [
         {
             "id": "https://openalex.org/W1",
@@ -93,10 +95,11 @@ OPENALEX = {
             },
             "abstract_inverted_index": {"Paper": [0], "agents": [1]},
         }
-    ]
+    ],
 }
 
 S2 = {
+    "next": 5,
     "data": [
         {
             "paperId": "s2-1",
@@ -109,7 +112,7 @@ S2 = {
             "citationCount": 9,
             "openAccessPdf": {"url": "https://example.test/paper.pdf"},
         }
-    ]
+    ],
 }
 
 PUBMED_XML = b"""<PubmedArticleSet><PubmedArticle><MedlineCitation>
@@ -157,6 +160,63 @@ async def test_arxiv_channel_preserves_fielded_query(tmp_path) -> None:
         'all:"paper agents" AND abs:retrieval '
         "AND submittedDate:[202001010000 TO 999912312359]"
     ]
+
+
+async def test_channels_use_real_page_cursors(tmp_path) -> None:
+    arxiv_transport = FakeTransport({"api/query": ARXIV})
+    arxiv = ArxivChannel(limiter(arxiv_transport), LocalArtifactStore(tmp_path / "a"))
+    arxiv_page = await arxiv.search_page(
+        query("arxiv"), SurveyConstraints(), 1, "20", asyncio.Event()
+    )
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(arxiv_transport.calls[0]).query)[
+        "start"
+    ] == ["20"]
+    assert arxiv_page.next_cursor == "21"
+
+    openalex_transport = FakeTransport(
+        {"api.openalex.org/works?": json.dumps(OPENALEX).encode()}
+    )
+    openalex = OpenAlexChannel(
+        limiter(openalex_transport), LocalArtifactStore(tmp_path / "o")
+    )
+    openalex_page = await openalex.search_page(
+        query("openalex"), SurveyConstraints(), 5, "cursor-1", asyncio.Event()
+    )
+    assert urllib.parse.parse_qs(
+        urllib.parse.urlsplit(openalex_transport.calls[0]).query
+    )["cursor"] == ["cursor-1"]
+    assert openalex_page.next_cursor == "next-openalex"
+
+    s2_transport = FakeTransport({"paper/search": json.dumps(S2).encode()})
+    s2 = SemanticScholarChannel(
+        limiter(s2_transport), LocalArtifactStore(tmp_path / "s")
+    )
+    s2_page = await s2.search_page(
+        query("semantic_scholar"), SurveyConstraints(), 5, "10", asyncio.Event()
+    )
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(s2_transport.calls[0]).query)[
+        "offset"
+    ] == ["10"]
+    assert s2_page.next_cursor == "5"
+
+    pubmed_transport = FakeTransport(
+        {
+            "esearch.fcgi": json.dumps(
+                {"esearchresult": {"idlist": ["42"], "count": "12"}}
+            ).encode(),
+            "efetch.fcgi": PUBMED_XML,
+        }
+    )
+    pubmed = PubMedChannel(
+        limiter(pubmed_transport), LocalArtifactStore(tmp_path / "p")
+    )
+    pubmed_page = await pubmed.search_page(
+        query("pubmed"), SurveyConstraints(), 5, "10", asyncio.Event()
+    )
+    assert urllib.parse.parse_qs(
+        urllib.parse.urlsplit(pubmed_transport.calls[0]).query
+    )["retstart"] == ["10"]
+    assert pubmed_page.next_cursor == "11"
 
 
 async def test_openalex_channel_reconstructs_abstract_and_hints(tmp_path) -> None:
@@ -310,6 +370,29 @@ class CountingChannel:
         return []
 
 
+class PagingChannel(CountingChannel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursors: list[str | None] = []
+
+    async def search_page(self, query, constraints, limit, cursor, cancel):
+        self.cursors.append(cursor)
+        suffix = cursor or "first"
+        return SearchPage(
+            observations=[
+                CandidateObservation(
+                    channel="arxiv",
+                    query_id=query.query_id,
+                    query_text=query.text,
+                    raw_rank=1,
+                    identity=ObservedIdentity(arxiv_id=f"2501.{len(self.cursors):05d}"),
+                    title=f"Paper {suffix}",
+                )
+            ],
+            next_cursor="next" if cursor is None else None,
+        )
+
+
 async def test_channel_cache_is_idempotent_and_exact_replay_miss_is_not_empty(
     tmp_path,
 ) -> None:
@@ -330,24 +413,63 @@ async def test_channel_cache_is_idempotent_and_exact_replay_miss_is_not_empty(
         await replay.search(query("arxiv"), constraints, 6, asyncio.Event())
 
 
-def test_ucb_rewards_unique_discovery_and_first_round_probes_channels() -> None:
-    budget = budget_for("fast")
-    channels = ["arxiv", "arxiv", "openalex", "semantic_scholar", "pubmed"]
+async def test_page_cache_and_replay_are_cursor_specific(tmp_path) -> None:
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    cache = MemorySurveyCache()
+    delegate = PagingChannel()
+    cached = CachedChannelAdapter(delegate, artifacts, cache)
+    constraints = SurveyConstraints()
 
-    first = allocate_batch_indices(channels, {}, {}, budget, 0)
-    later = allocate_batch_indices(
-        channels,
-        {"arxiv": 2, "openalex": 1, "semantic_scholar": 1, "pubmed": 1},
-        {"arxiv": 2, "openalex": 0, "semantic_scholar": 0, "pubmed": 0},
-        budget,
-        1,
+    first = await cached.search_page(
+        query("arxiv"), constraints, 5, None, asyncio.Event()
+    )
+    second = await cached.search_page(
+        query("arxiv"), constraints, 5, "next", asyncio.Event()
+    )
+    replay = ReplayChannelAdapter("arxiv", "fixture-v1", artifacts, cache)
+
+    assert first != second
+    assert delegate.cursors == [None, "next"]
+    assert (
+        await replay.search_page(query("arxiv"), constraints, 5, None, asyncio.Event())
+        == first
+    )
+    assert (
+        await replay.search_page(
+            query("arxiv"), constraints, 5, "next", asyncio.Event()
+        )
+        == second
     )
 
-    assert {channels[index] for index in first} == {
+
+def test_ucb_rewards_unique_discovery() -> None:
+    assert ucb_score("arxiv", {"arxiv": 2}, {"arxiv": 2}, 1.4) > 1.0
+
+
+def test_search_allocator_covers_query_families_before_reusing_them() -> None:
+    budget = budget_for("fast")
+    arms = [
+        (query_id, channel, f"{query_id}:{channel}")
+        for query_id in ("q1", "q2", "q3")
+        for channel in ("arxiv", "openalex", "semantic_scholar", "pubmed")
+    ]
+
+    selected = allocate_search_indices(arms, {}, {}, {}, {}, budget)
+
+    assert {arms[index][0] for index in selected} == {"q1", "q2", "q3"}
+    assert {arms[index][1] for index in selected} == {
         "arxiv",
         "openalex",
         "semantic_scholar",
         "pubmed",
     }
-    assert channels[later[0]] == "arxiv"
-    assert ucb_score("arxiv", {"arxiv": 2}, {"arxiv": 2}, 1.4) > 1.0
+
+    later = allocate_search_indices(
+        arms,
+        {"q1": 4, "q2": 4, "q3": 4},
+        {arm_key: 1 for _, _, arm_key in arms},
+        {"arxiv": 2, "openalex": 2, "semantic_scholar": 2, "pubmed": 2},
+        {"arxiv": 4},
+        budget,
+    )
+    assert arms[later[0]][1] == "arxiv"

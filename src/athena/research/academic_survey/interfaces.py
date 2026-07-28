@@ -9,6 +9,7 @@ from athena.research.academic_survey.schemas import (
     QueryEvolution,
     QueryPlan,
     RewrittenQuery,
+    SearchPage,
     SearchQuery,
     SurveyCandidate,
     SurveyConstraints,
@@ -30,6 +31,16 @@ class ChannelAdapter(Protocol):
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
         """执行一条检索查询并返回按原始名次排序的观察。"""
+
+    async def search_page(
+        self,
+        query: SearchQuery,
+        constraints: SurveyConstraints,
+        limit: int,
+        cursor: str | None,
+        cancel: asyncio.Event,
+    ) -> SearchPage:
+        """执行一页检索；不支持分页的 adapter 返回空 next_cursor。"""
 
     async def references(
         self,

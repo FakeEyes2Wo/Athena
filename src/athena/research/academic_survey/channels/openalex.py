@@ -7,6 +7,7 @@ from athena.research.academic_survey.channels.base import HttpChannel, text
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
+    SearchPage,
     SearchQuery,
     SurveyCandidate,
     SurveyConstraints,
@@ -23,7 +24,7 @@ OPENALEX_FIELDS = (
 
 class OpenAlexChannel(HttpChannel):
     name = "openalex"
-    version = "openalex-works-v1"
+    version = "openalex-works-v2"
 
     def __init__(self, *args, contact_email: str | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -36,10 +37,23 @@ class OpenAlexChannel(HttpChannel):
         limit: int,
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
+        return (
+            await self.search_page(query, constraints, limit, None, cancel)
+        ).observations
+
+    async def search_page(
+        self,
+        query: SearchQuery,
+        constraints: SurveyConstraints,
+        limit: int,
+        cursor: str | None,
+        cancel: asyncio.Event,
+    ) -> SearchPage:
         params: dict[str, object] = {
             "search": query.text,
             "per-page": limit,
             "select": OPENALEX_FIELDS,
+            "cursor": cursor or "*",
         }
         filters = []
         if constraints.year_from is not None:
@@ -54,7 +68,12 @@ class OpenAlexChannel(HttpChannel):
             f"{OPENALEX_WORKS_URL}?{urllib.parse.urlencode(params)}", cancel
         )
         works = payload.get("results", []) if isinstance(payload, dict) else []
-        return self._observations(works, query, raw_ref, limit)
+        meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+        next_cursor = meta.get("next_cursor") if isinstance(meta, dict) else None
+        return SearchPage(
+            observations=self._observations(works, query, raw_ref, limit),
+            next_cursor=str(next_cursor) if next_cursor else None,
+        )
 
     async def references(
         self,

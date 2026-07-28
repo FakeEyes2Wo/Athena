@@ -33,6 +33,7 @@ from athena.research.academic_survey.schemas import (
     QueryPlan,
     RankingIntent,
     RelevanceCriterion,
+    SearchPage,
     SearchQuery,
     SurveyCandidate,
     SurveyConstraints,
@@ -150,6 +151,7 @@ class FakeChannel:
         self.reference_results = references or {}
         self.error = error
         self.search_calls = 0
+        self.searched_texts: list[str] = []
         self.reference_calls: list[str] = []
 
     async def search(
@@ -160,6 +162,7 @@ class FakeChannel:
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
         self.search_calls += 1
+        self.searched_texts.append(query.text)
         if self.error:
             raise self.error
         return self.searches.get(query.text, [])[:limit]
@@ -172,6 +175,23 @@ class FakeChannel:
     ) -> list[CandidateObservation]:
         self.reference_calls.append(paper.candidate_id)
         return self.reference_results.get(paper.candidate_id, [])[:limit]
+
+
+class PagedFakeChannel(FakeChannel):
+    async def search_page(self, query, constraints, limit, cursor, cancel):
+        self.search_calls += 1
+        self.searched_texts.append(query.text)
+        page = 1 if cursor is None else 2
+        return SearchPage(
+            observations=[
+                observation(
+                    f"Relevant page {page}",
+                    arxiv_id=f"2501.{page:05d}",
+                    query_id=query.query_id,
+                )
+            ],
+            next_cursor="page-2" if cursor is None else None,
+        )
 
 
 async def run_agent(tmp_path, chains, channels, *, cancel=None):
@@ -384,6 +404,112 @@ async def test_agent_runs_two_rounds_refchain_and_relevant_only_handoff(
     assert len(stats.batch_allocations) == 2
     assert channel.reference_calls == ["arxiv:2501.00001"]
     assert events[-1][0] == "academic_survey/completed"
+
+
+async def test_single_round_covers_all_initial_query_families(
+    tmp_path, monkeypatch
+) -> None:
+    channels = ["arxiv", "openalex", "semantic_scholar", "pubmed"]
+    query_plan = plan(channels).model_copy(
+        update={
+            "queries": [
+                SearchQuery(
+                    query_id=f"q{index}", text=f"family {index}", channels=channels
+                )
+                for index in range(1, 4)
+            ]
+        }
+    )
+    searches = {
+        f"family {index}": [
+            observation(f"Relevant family {index}", arxiv_id=f"2501.{index:05d}")
+        ]
+        for index in range(1, 4)
+    }
+    adapters = {name: FakeChannel(searches=searches) for name in channels}
+    monkeypatch.setitem(
+        survey_budget._BUDGETS,
+        "fast",
+        replace(survey_budget.budget_for("fast"), max_rounds=1),
+    )
+
+    artifacts, _, result, corpus, _ = await run_agent(
+        tmp_path, FakeChains(query_plan), adapters
+    )
+    stats = SurveyStats.model_validate_json(await artifacts.get_text(result.stats_ref))
+
+    assert stats.planned_queries == 3
+    assert stats.executed_queries == 3
+    assert stats.query_coverage == 1.0
+    assert {batch["query_id"] for batch in stats.query_channel_batches} == {
+        "q1",
+        "q2",
+        "q3",
+    }
+    assert len(corpus.reference_papers) == 3
+
+
+async def test_evolution_appends_without_dropping_unexecuted_queries(
+    tmp_path, monkeypatch
+) -> None:
+    query_plan = plan().model_copy(
+        update={
+            "queries": [
+                SearchQuery(query_id="q1", text="family one", channels=["arxiv"]),
+                SearchQuery(query_id="q2", text="family two", channels=["arxiv"]),
+            ]
+        }
+    )
+    evolved = SearchQuery(query_id="q3", text="family three", channels=["arxiv"])
+    channel = FakeChannel(
+        searches={
+            "family one": [observation("Relevant one", arxiv_id="2501.00001")],
+            "family two": [observation("Relevant two", arxiv_id="2501.00002")],
+            "family three": [observation("Relevant three", arxiv_id="2501.00003")],
+        }
+    )
+    monkeypatch.setitem(
+        survey_budget._BUDGETS,
+        "fast",
+        replace(
+            survey_budget.budget_for("fast"),
+            max_rounds=2,
+            max_batches_per_round=1,
+        ),
+    )
+
+    artifacts, _, result, _, _ = await run_agent(
+        tmp_path, FakeChains(query_plan, [evolved]), {"arxiv": channel}
+    )
+    stats = SurveyStats.model_validate_json(await artifacts.get_text(result.stats_ref))
+
+    assert channel.searched_texts == ["family one", "family two"]
+    assert stats.query_coverage == 1.0
+
+
+async def test_pagination_continues_after_handoff_cap(tmp_path, monkeypatch) -> None:
+    channel = PagedFakeChannel()
+    monkeypatch.setitem(
+        survey_budget._BUDGETS,
+        "fast",
+        replace(
+            survey_budget.budget_for("fast"),
+            max_rounds=2,
+            max_batches_per_round=1,
+            max_final_papers=1,
+        ),
+    )
+
+    artifacts, _, result, corpus, _ = await run_agent(
+        tmp_path, FakeChains(plan()), {"arxiv": channel}
+    )
+    stats = SurveyStats.model_validate_json(await artifacts.get_text(result.stats_ref))
+
+    assert channel.search_calls == 2
+    assert stats.paginated_pulls == 1
+    assert stats.unique_candidates == 2
+    assert stats.stop_reason == "max_rounds"
+    assert len(corpus.reference_papers) == 1
 
 
 async def test_zero_results_are_complete_without_paper_source_request(tmp_path) -> None:

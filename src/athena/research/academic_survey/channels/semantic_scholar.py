@@ -7,6 +7,7 @@ from athena.research.academic_survey.channels.base import HttpChannel, text
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
+    SearchPage,
     SearchQuery,
     SurveyCandidate,
     SurveyConstraints,
@@ -21,7 +22,7 @@ S2_FIELDS = (
 
 class SemanticScholarChannel(HttpChannel):
     name = "semantic_scholar"
-    version = "semantic-scholar-graph-v1"
+    version = "semantic-scholar-graph-v2"
 
     def __init__(self, *args, api_key: str | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -34,9 +35,23 @@ class SemanticScholarChannel(HttpChannel):
         limit: int,
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
+        return (
+            await self.search_page(query, constraints, limit, None, cancel)
+        ).observations
+
+    async def search_page(
+        self,
+        query: SearchQuery,
+        constraints: SurveyConstraints,
+        limit: int,
+        cursor: str | None,
+        cancel: asyncio.Event,
+    ) -> SearchPage:
+        offset = int(cursor or 0)
         params: dict[str, object] = {
             "query": query.text,
             "limit": min(limit, 100),
+            "offset": offset,
             "fields": S2_FIELDS,
         }
         if constraints.year_from is not None or constraints.year_to is not None:
@@ -49,7 +64,11 @@ class SemanticScholarChannel(HttpChannel):
             self.headers,
         )
         papers = payload.get("data", []) if isinstance(payload, dict) else []
-        return self._observations(papers, query, raw_ref, limit)
+        next_offset = payload.get("next") if isinstance(payload, dict) else None
+        return SearchPage(
+            observations=self._observations(papers, query, raw_ref, limit),
+            next_cursor=str(next_offset) if next_offset is not None else None,
+        )
 
     async def references(
         self,

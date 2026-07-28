@@ -193,6 +193,7 @@ async def test_materialized_snapshot_collects_then_replays_without_live_channel(
     assert stored == manifest
     assert trace.invalid_reason is None
     assert trace.snapshot_version == manifest.version
+    assert trace.candidate_paper_ids == ["arxiv:2501.00001"]
     assert trace.predicted_paper_ids == ["arxiv:2501.00001"]
     assert channel.search_calls == collection_calls
 
@@ -377,3 +378,100 @@ async def test_equal_promotion_f1_never_promotes(tmp_path, monkeypatch) -> None:
 
     assert not result.promoted
     assert result.active_bundle_ref != result.candidate_bundle_ref
+
+
+@pytest.mark.parametrize(
+    (
+        "incumbent_predicted",
+        "candidate_predicted",
+        "incumbent_candidates",
+        "candidate_candidates",
+        "precision_preserved",
+        "candidate_recall_preserved",
+    ),
+    [
+        (
+            ["arxiv:2501.00001"],
+            ["arxiv:2501.00001", "arxiv:2501.00002", "doi:10.1000/false"],
+            ["arxiv:2501.00001", "arxiv:2501.00002"],
+            ["arxiv:2501.00001", "arxiv:2501.00002", "doi:10.1000/false"],
+            False,
+            True,
+        ),
+        (
+            [],
+            ["arxiv:2501.00001"],
+            ["arxiv:2501.00001", "arxiv:2501.00002"],
+            ["arxiv:2501.00001"],
+            True,
+            False,
+        ),
+    ],
+)
+async def test_promotion_blocks_precision_or_candidate_recall_regression(
+    tmp_path,
+    monkeypatch,
+    incumbent_predicted,
+    candidate_predicted,
+    incumbent_candidates,
+    candidate_candidates,
+    precision_preserved,
+    candidate_recall_preserved,
+) -> None:
+    def fake_optimize(**kwargs):
+        candidate = dict(kwargs["seed_candidate"])
+        candidate["relevance_judgment"] = "improved judge"
+        return SimpleNamespace(best_candidate=candidate)
+
+    monkeypatch.setattr(gepa, "optimize", fake_optimize)
+    monkeypatch.setattr(langchain_adapter, "make_reflection_lm", lambda model: None)
+
+    def benchmark(case_id):
+        return SurveyBenchmarkCase(
+            case_id=case_id,
+            request=SurveyRequest(topic=f"query {case_id}"),
+            gold_paper_ids=["arxiv:2501.00001", "arxiv:2501.00002"],
+        )
+
+    benchmark_splits = SurveyBenchmarkSplits(
+        feedback=[benchmark("feedback-gated")],
+        pareto=[benchmark("pareto-gated")],
+        promotion=[benchmark("promotion-gated")],
+    )
+
+    def runner(bundle, benchmark_case, mode):
+        is_candidate = bundle.relevance_judgment == "improved judge"
+        return SurveyRolloutTrace(
+            case_id=benchmark_case.case_id,
+            bundle_version=bundle.version,
+            candidate_paper_ids=(
+                candidate_candidates if is_candidate else incumbent_candidates
+            ),
+            predicted_paper_ids=(
+                candidate_predicted if is_candidate else incumbent_predicted
+            ),
+            replay_mode=mode,
+            snapshot_version="snapshot-v1",
+        )
+
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    result = await optimize_prompt_bundle(
+        DEFAULT_PROMPTS,
+        benchmark_splits,
+        runner,
+        artifacts,
+        object(),
+        replay_mode="frozen_snapshot",
+        optimization_model_revision="optimizer-model-v1",
+        deployment_model_revision="deployment-model-v1",
+        max_metric_calls=4,
+        approve=True,
+    )
+    report = PromotionReport.model_validate_json(
+        await artifacts.get_text(result.promotion_report_ref)
+    )
+
+    assert report.candidate_macro_f1 > report.incumbent_macro_f1
+    assert report.precision_preserved is precision_preserved
+    assert report.candidate_recall_preserved is candidate_recall_preserved
+    assert not result.promoted

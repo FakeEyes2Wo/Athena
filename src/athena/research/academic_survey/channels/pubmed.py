@@ -14,6 +14,7 @@ from athena.research.academic_survey.channels.base import (
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
+    SearchPage,
     SearchQuery,
     SurveyCandidate,
     SurveyConstraints,
@@ -25,7 +26,7 @@ EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 class PubMedChannel(HttpChannel):
     name = "pubmed"
-    version = "pubmed-eutils-v1"
+    version = "pubmed-eutils-v2"
 
     def __init__(
         self,
@@ -45,11 +46,25 @@ class PubMedChannel(HttpChannel):
         limit: int,
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
+        return (
+            await self.search_page(query, constraints, limit, None, cancel)
+        ).observations
+
+    async def search_page(
+        self,
+        query: SearchQuery,
+        constraints: SurveyConstraints,
+        limit: int,
+        cursor: str | None,
+        cancel: asyncio.Event,
+    ) -> SearchPage:
+        start = int(cursor or 0)
         params = self._params(
             db="pubmed",
             retmode="json",
             term=query.text,
             retmax=limit,
+            retstart=start,
             sort="relevance",
         )
         if constraints.year_from is not None:
@@ -61,12 +76,19 @@ class PubMedChannel(HttpChannel):
         payload, search_ref = await self.get_json(
             f"{EUTILS}/esearch.fcgi?{urllib.parse.urlencode(params)}", cancel
         )
-        ids = (
-            (payload.get("esearchresult") or {}).get("idlist", [])
-            if isinstance(payload, dict)
-            else []
+        result = payload.get("esearchresult") or {} if isinstance(payload, dict) else {}
+        ids = result.get("idlist", []) if isinstance(result, dict) else []
+        try:
+            total = int(result.get("count", len(ids)))
+        except (TypeError, ValueError):
+            total = start + len(ids)
+        observations = await self._fetch(ids[:limit], query, search_ref, cancel)
+        return SearchPage(
+            observations=observations,
+            next_cursor=(
+                str(start + len(ids)) if ids and start + len(ids) < total else None
+            ),
         )
-        return await self._fetch(ids[:limit], query, search_ref, cancel)
 
     async def references(
         self,

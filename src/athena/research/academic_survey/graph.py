@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from athena.core.schemas import ArtifactRef
 from athena.core.tool_types import EmitEvent
-from athena.research.academic_survey.budget import allocate_batch_indices, budget_for
+from athena.research.academic_survey.budget import allocate_search_indices, budget_for
 from athena.research.academic_survey.channels.base import ChannelFailure
 from athena.research.academic_survey.interfaces import ChannelAdapter, SurveyChains
 from athena.research.academic_survey.logic import (
@@ -101,6 +101,10 @@ class SurveyState(TypedDict, total=False):
     refchain_expanded_ids: list[str]
     quarantine_enrichment_keys: list[str]
     new_relevant_ids: list[str]
+    query_pulls: dict[str, int]
+    arm_pulls: dict[str, int]
+    search_cursors: dict[str, str]
+    exhausted_search_arms: list[str]
     channel_pulls: dict[ChannelName, int]
     bandit_pulls: dict[ChannelName, int]
     channel_rewards: dict[ChannelName, int]
@@ -118,6 +122,7 @@ class SurveyState(TypedDict, total=False):
     saturation_curve: list[int]
     refchain_seed_count: int
     refchain_observation_count: int
+    paginated_pulls: int
     started_at: float
     stop_reason: str
     errors: list[str]
@@ -213,6 +218,10 @@ async def load_request(state: SurveyState, runtime: Runtime[SurveyRuntime]) -> d
         "seen_query_texts": [],
         "refchain_expanded_ids": [],
         "quarantine_enrichment_keys": [],
+        "query_pulls": {},
+        "arm_pulls": {},
+        "search_cursors": {},
+        "exhausted_search_arms": [],
         "channel_pulls": {},
         "bandit_pulls": {},
         "channel_rewards": {},
@@ -230,6 +239,7 @@ async def load_request(state: SurveyState, runtime: Runtime[SurveyRuntime]) -> d
         "saturation_curve": [],
         "refchain_seed_count": 0,
         "refchain_observation_count": 0,
+        "paginated_pulls": 0,
         "started_at": time.time(),
         "errors": [
             f"unresolved constraint: {value}"
@@ -273,7 +283,7 @@ async def understand(state: SurveyState, runtime: Runtime[SurveyRuntime]) -> dic
 
 
 async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) -> dict:
-    """首轮 probe、后续 UCB 分配，并在调用前执行通道查询改写。"""
+    """优先覆盖 query family/channel，再按 UCB 拉取可分页检索 arm。"""
     context = runtime.context
     _check_cancel(context)
     request = await _request(state, context)
@@ -285,36 +295,43 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
     remaining = max(0, budget.max_candidates - used)
     pulls = dict(state.get("channel_pulls", {}))
     bandit_pulls = dict(state.get("bandit_pulls", {}))
+    query_pulls = dict(state.get("query_pulls", {}))
+    arm_pulls = dict(state.get("arm_pulls", {}))
+    cursors = dict(state.get("search_cursors", {}))
+    exhausted = list(state.get("exhausted_search_arms", []))
     errors = list(state.get("errors", []))
     disabled = list(state.get("disabled_channels", []))
     failures = dict(state.get("retryable_failures", {}))
     potential = [
-        (query, channel_name)
+        (query, channel_name, _search_arm_key(query, channel_name))
         for query in queries
         for channel_name in query.channels
         if channel_name not in disabled
+        and _search_arm_key(query, channel_name) not in exhausted
     ]
-    selected = allocate_batch_indices(
-        [channel for _, channel in potential],
+    selected = allocate_search_indices(
+        [(query.query_id, channel, arm_key) for query, channel, arm_key in potential],
+        query_pulls,
+        arm_pulls,
         bandit_pulls,
         state.get("channel_rewards", {}),
         budget,
-        state.get("round_index", 0),
     )
     allocation: dict[ChannelName, int] = {}
-    calls: list[tuple[SearchQuery, ChannelName, ChannelAdapter]] = []
+    calls: list[tuple[SearchQuery, ChannelName, str, str | None, ChannelAdapter]] = []
     round_number = state.get("round_index", 0) + 1
     query_channel_batches = list(state.get("query_channel_batches", []))
     attempted = state.get("attempted_pulls", 0)
     for index in selected:
-        query, channel_name = potential[index]
-        query_channel_batches.append(
-            {
-                "round": round_number,
-                "query_id": query.query_id,
-                "channel": channel_name,
-            }
-        )
+        query, channel_name, arm_key = potential[index]
+        cursor = cursors.get(arm_key)
+        batch: dict[str, str | int] = {
+            "round": round_number,
+            "query_id": query.query_id,
+            "channel": channel_name,
+        }
+        if cursor:
+            batch["cursor"] = cursor
         attempted += 1
         pulls[channel_name] = pulls.get(channel_name, 0) + 1
         bandit_pulls[channel_name] = bandit_pulls.get(channel_name, 0) + 1
@@ -324,10 +341,16 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
             _add_error(errors, f"{channel_name}: adapter is not configured")
             disabled.append(channel_name)
         else:
-            calls.append((query, channel_name, adapter))
+            query_channel_batches.append(batch)
+            query_pulls[query.query_id] = query_pulls.get(query.query_id, 0) + 1
+            arm_pulls[arm_key] = arm_pulls.get(arm_key, 0) + 1
+            calls.append((query, channel_name, arm_key, cursor, adapter))
 
     async def execute(
-        query: SearchQuery, channel_name: ChannelName, adapter: ChannelAdapter
+        query: SearchQuery,
+        channel_name: ChannelName,
+        cursor: str | None,
+        adapter: ChannelAdapter,
     ):
         rewrite_error = None
         try:
@@ -347,10 +370,11 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
             ) from error
         result = await _external(
             context,
-            lambda: adapter.search(
+            lambda: adapter.search_page(
                 channel_query,
                 request.constraints,
                 max(1, min(budget.search_batch_size, remaining)),
+                cursor,
                 context.cancel,
             ),
         )
@@ -358,14 +382,17 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
 
     results = await asyncio.gather(
         *(
-            execute(query, channel_name, adapter)
-            for query, channel_name, adapter in calls
+            execute(query, channel_name, cursor, adapter)
+            for query, channel_name, _, cursor, adapter in calls
         ),
         return_exceptions=True,
     )
     observations: list[CandidateObservation] = []
     successful = state.get("successful_pulls", 0)
-    for (query, channel_name, _), result in zip(calls, results, strict=True):
+    paginated = state.get("paginated_pulls", 0)
+    for (query, channel_name, arm_key, cursor, _), result in zip(
+        calls, results, strict=True
+    ):
         if isinstance(result, asyncio.CancelledError):
             raise result
         if isinstance(result, _StructuredOutputFailure):
@@ -374,10 +401,17 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
             _add_error(errors, f"{channel_name}: {type(result).__name__}: {result}")
             _record_channel_failure(channel_name, result, failures, disabled)
             continue
-        channel_query, found, rewrite_error = result
+        channel_query, page, rewrite_error = result
         if rewrite_error:
             _add_error(errors, rewrite_error)
         successful += 1
+        if cursor:
+            paginated += 1
+        if page.next_cursor is None:
+            exhausted.append(arm_key)
+            cursors.pop(arm_key, None)
+        else:
+            cursors[arm_key] = page.next_cursor
         observations.extend(
             item.model_copy(
                 update={
@@ -387,7 +421,7 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
                     "depth": 0,
                 }
             )
-            for item in found
+            for item in page.observations
         )
     _check_cancel(context)
     observations = observations[:remaining]
@@ -405,6 +439,10 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
     return {
         "round_index": round_index,
         "round_observations_ref": observations_ref,
+        "query_pulls": query_pulls,
+        "arm_pulls": arm_pulls,
+        "search_cursors": cursors,
+        "exhausted_search_arms": list(dict.fromkeys(exhausted)),
         "channel_pulls": pulls,
         "bandit_pulls": bandit_pulls,
         "batch_allocations": [*state.get("batch_allocations", []), allocation],
@@ -413,6 +451,7 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
         "retryable_failures": failures,
         "attempted_pulls": attempted,
         "successful_pulls": successful,
+        "paginated_pulls": paginated,
         "errors": errors,
     }
 
@@ -627,7 +666,7 @@ async def merge_and_judge_references(
 
 
 async def evolve_queries(state: SurveyState, runtime: Runtime[SurveyRuntime]) -> dict:
-    """用 LangChain 生成下一轮查询，再做确定性去重。"""
+    """追加 LangChain 生成的查询，并保留尚未耗尽的检索 arm。"""
     context = runtime.context
     request = await _request(state, context)
     budget = budget_for(request.mode)
@@ -641,6 +680,7 @@ async def evolve_queries(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
             **_saturation_update(state, relevant_total),
         }
     plan = await _plan(state, context)
+    active = await _load_queries(context.artifacts, state["pending_queries_ref"])
     candidates = await _load_candidates(
         context.artifacts, state["eligible_candidates_ref"]
     )
@@ -673,7 +713,17 @@ async def evolve_queries(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
     except TimeoutError as error:
         _add_error(errors, f"query evolution: {type(error).__name__}: {error}")
         queries = []
-    pending_ref = await _put_models(context.artifacts, queries)
+    exhausted = set(state.get("exhausted_search_arms", []))
+    disabled = set(state.get("disabled_channels", []))
+    pending = [
+        query
+        for query in [*active, *queries]
+        if any(
+            channel not in disabled and _search_arm_key(query, channel) not in exhausted
+            for channel in query.channels
+        )
+    ]
+    pending_ref = await _put_models(context.artifacts, pending)
     seen = [*state.get("seen_query_texts", []), *(item.text for item in queries)]
     return {
         "pending_queries_ref": pending_ref,
@@ -714,10 +764,6 @@ async def update_stop_state(
     if deadline_reached:
         stop_reason = "max_seconds"
         _add_error(errors, "survey wall-clock deadline reached")
-    elif relevant >= min(
-        budget.max_final_papers, request.paper_source_policy.max_papers
-    ):
-        stop_reason = "final_paper_cap"
     elif unique_candidates >= budget.max_candidates:
         stop_reason = "candidate_cap"
     elif state.get("judged_count", 0) >= budget.max_judgments:
@@ -803,6 +849,14 @@ async def build_paper_source_request(
     counts = {"relevant": 0, "irrelevant": 0, "uncertain": 0}
     for record in judgments.records.values():
         counts[record.judgment.verdict] += 1
+    plan = await _plan(state, context)
+    planned_query_ids = {query.query_id for query in plan.queries}
+    executed_query_ids = {
+        str(batch["query_id"])
+        for batch in state.get("query_channel_batches", [])
+        if batch.get("query_id") in planned_query_ids
+    }
+    planned_queries = len(planned_query_ids)
     stats = SurveyStats(
         rounds=state["round_index"],
         observations=sum(len(item.observations) for item in candidates.candidates)
@@ -819,6 +873,12 @@ async def build_paper_source_request(
         channel_rewards=state.get("channel_rewards", {}),
         batch_allocations=state.get("batch_allocations", []),
         query_channel_batches=state.get("query_channel_batches", []),
+        planned_queries=planned_queries,
+        executed_queries=len(executed_query_ids),
+        query_coverage=(
+            len(executed_query_ids) / planned_queries if planned_queries else 0
+        ),
+        paginated_pulls=state.get("paginated_pulls", 0),
         query_diagnostics=state.get("query_diagnostics", []),
         cache_hits=context.metrics.get("cache_hits", 0),
         cache_misses=context.metrics.get("cache_misses", 0),
@@ -1064,6 +1124,11 @@ def _saturation_update(state: SurveyState, relevant: int) -> dict:
         "saturation_streak": streak,
         "saturation_curve": [*state.get("saturation_curve", []), relevant],
     }
+
+
+def _search_arm_key(query: SearchQuery, channel: ChannelName) -> str:
+    normalized = " ".join(query.text.casefold().split())
+    return hashlib.sha256(f"{normalized}\0{channel}".encode()).hexdigest()
 
 
 def _paper_ref(
