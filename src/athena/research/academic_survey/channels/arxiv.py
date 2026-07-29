@@ -4,7 +4,12 @@ import asyncio
 import re
 import urllib.parse
 
-from athena.research.academic_survey.channels.base import HttpChannel, text, year_from
+from athena.research.academic_survey.channels.base import (
+    HttpChannel,
+    date_from,
+    text,
+    year_from,
+)
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
@@ -22,6 +27,7 @@ _FIELD_PREFIX = re.compile(r"(?:^|[\s(])(?:all|ti|au|abs|co|jr|cat|rn|id):", re.
 class ArxivChannel(HttpChannel):
     name = "arxiv"
     version = "arxiv-atom-v2"
+    supports_references = False
 
     async def search(
         self,
@@ -42,18 +48,35 @@ class ArxivChannel(HttpChannel):
         cursor: str | None,
         cancel: asyncio.Event,
     ) -> SearchPage:
-        start = int(cursor or 0)
+        offset = int(cursor or 0)
         expression = query.text.strip()
         if not _FIELD_PREFIX.search(expression):
             expression = f'all:"{expression}"'
-        if constraints.year_from is not None or constraints.year_to is not None:
-            start = constraints.year_from or 1000
-            end = constraints.year_to or 9999
-            expression += f" AND submittedDate:[{start}01010000 TO {end}12312359]"
+        if any(
+            (
+                constraints.year_from,
+                constraints.year_to,
+                constraints.published_from,
+                constraints.published_to,
+            )
+        ):
+            date_min = constraints.published_from
+            date_max = constraints.published_to
+            start = (
+                date_min.strftime("%Y%m%d")
+                if date_min
+                else f"{constraints.year_from or 1000}0101"
+            )
+            end = (
+                date_max.strftime("%Y%m%d")
+                if date_max
+                else f"{constraints.year_to or 9999}1231"
+            )
+            expression += f" AND submittedDate:[{start}0000 TO {end}2359]"
         params = urllib.parse.urlencode(
             {
                 "search_query": expression,
-                "start": start,
+                "start": offset,
                 "max_results": limit,
                 "sortBy": "relevance",
                 "sortOrder": "descending",
@@ -76,6 +99,7 @@ class ArxivChannel(HttpChannel):
                 abstract=item.abstract,
                 authors=item.authors,
                 year=year_from(item.published),
+                published_date=date_from(item.published),
                 venue=text(item.journal_ref),
                 hints=[
                     SourceHint(
@@ -93,7 +117,7 @@ class ArxivChannel(HttpChannel):
         return SearchPage(
             observations=observations,
             next_cursor=(
-                str(start + len(observations)) if len(observations) == limit else None
+                str(offset + len(observations)) if len(observations) == limit else None
             ),
         )
 

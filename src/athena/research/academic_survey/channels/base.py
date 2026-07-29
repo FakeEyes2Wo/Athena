@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import date
 
 from athena.research.paper_source.http import HostRateLimiter, HttpResponse
 from athena.storage.artifact_store import ArtifactStore
@@ -83,3 +84,11 @@ def year_from(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return year if 1000 <= year <= 9999 else None
+
+
+def date_from(value: object) -> date | None:
+    """解析学术 API 常见的 ISO 日期前缀，缺失日精度时返回 None。"""
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None

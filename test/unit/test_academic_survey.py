@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import replace
+from datetime import date
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -22,11 +23,14 @@ from athena.research.academic_survey.logic import (
     validate_judgment,
 )
 from athena.research.academic_survey import budget as survey_budget
+from athena.research.academic_survey.chains import DEFAULT_PROMPTS
 from athena.research.academic_survey.schemas import (
     AcademicSurveyResult,
+    CandidateJudgmentDraft,
     CandidateObservation,
     CriterionJudgmentDraft,
     JudgmentDraft,
+    JudgmentBatchDraft,
     JudgmentEvidence,
     ObservedIdentity,
     QueryEvolution,
@@ -54,6 +58,7 @@ def observation(
     query_id: str = "q1",
     rank: int = 1,
     year: int | None = 2025,
+    published_date: date | None = None,
 ) -> CandidateObservation:
     return CandidateObservation(
         channel=channel,
@@ -64,6 +69,7 @@ def observation(
         title=title,
         abstract=f"{title} presents a verified retrieval method.",
         year=year,
+        published_date=published_date,
         language="en",
     )
 
@@ -86,6 +92,16 @@ def plan(channels: list[str] | None = None) -> QueryPlan:
         ],
         ranking_intent=RankingIntent(),
     )
+
+
+def test_default_prompt_requires_a_broad_survey_query_family() -> None:
+    prompt = DEFAULT_PROMPTS.query_understanding.casefold()
+
+    assert DEFAULT_PROMPTS.version == "academic-survey-v6"
+    assert "dedicated broad" in prompt
+    assert "query family first" in prompt
+    assert all(term in prompt for term in ("survey", "review", "overview"))
+    assert "never use grouped field syntax" in DEFAULT_PROMPTS.channel_query_rewrite
 
 
 class FakeChains:
@@ -121,7 +137,8 @@ class FakeChains:
                 CriterionJudgmentDraft(
                     criterion_id="topic", verdict=verdict, evidence=evidence
                 )
-            ]
+            ],
+            relevance_score=0 if verdict == "unmet" else 1,
         )
 
     async def evolve(
@@ -138,6 +155,27 @@ class FakeChains:
         )
 
 
+class BatchFakeChains(FakeChains):
+    def __init__(self, query_plan: QueryPlan) -> None:
+        super().__init__(query_plan)
+        self.batch_calls = 0
+
+    async def judge_batch(self, request, query_plan, candidates):
+        self.batch_calls += 1
+        drafts = [
+            await self.judge(request, query_plan, candidate) for candidate in candidates
+        ]
+        return JudgmentBatchDraft(
+            judgments=[
+                CandidateJudgmentDraft(
+                    candidate_id=candidate.candidate_id,
+                    **draft.model_dump(),
+                )
+                for candidate, draft in zip(candidates, drafts, strict=True)
+            ]
+        )
+
+
 class FakeChannel:
     name = "arxiv"
 
@@ -146,7 +184,9 @@ class FakeChannel:
         searches: dict[str, list[CandidateObservation]] | None = None,
         references: dict[str, list[CandidateObservation]] | None = None,
         error: Exception | None = None,
+        name: str = "arxiv",
     ) -> None:
+        self.name = name
         self.searches = searches or {}
         self.reference_results = references or {}
         self.error = error
@@ -273,6 +313,29 @@ def test_hard_constraints_reject_missing_metadata() -> None:
     )
 
 
+def test_exact_publication_date_constraint_is_enforced() -> None:
+    after_cutoff = merge_observations(
+        [
+            observation(
+                "Future paper",
+                arxiv_id="2504.00001",
+                published_date=date(2025, 4, 1),
+            )
+        ]
+    )[0][0]
+    older_year = merge_observations(
+        [observation("Older paper", arxiv_id="2412.00001", year=2024)]
+    )[0][0]
+    unknown_day = merge_observations(
+        [observation("Unknown date", arxiv_id="2501.00001", year=2025)]
+    )[0][0]
+    constraints = SurveyConstraints(published_to=date(2025, 3, 13))
+
+    assert constraint_status(after_cutoff, constraints) == "rejected"
+    assert constraint_status(older_year, constraints) == "eligible"
+    assert constraint_status(unknown_day, constraints) == "unknown"
+
+
 def test_invalid_evidence_cannot_produce_relevant_verdict() -> None:
     candidate = merge_observations(
         [observation("Relevant paper", arxiv_id="2501.00001")]
@@ -284,7 +347,8 @@ def test_invalid_evidence_cannot_produce_relevant_verdict() -> None:
                 verdict="met",
                 evidence=[JudgmentEvidence(field="abstract", quote="invented quote")],
             )
-        ]
+        ],
+        relevance_score=1,
     )
 
     judgment = validate_judgment(plan(), candidate, draft, "test-bundle-v1")
@@ -301,12 +365,41 @@ def test_unmet_without_counterevidence_is_uncertain() -> None:
         plan(),
         candidate,
         JudgmentDraft(
-            criteria=[CriterionJudgmentDraft(criterion_id="topic", verdict="unmet")]
+            criteria=[CriterionJudgmentDraft(criterion_id="topic", verdict="unmet")],
+            relevance_score=1,
         ),
         "test-bundle-v1",
     )
 
     assert judgment.verdict == "uncertain"
+
+
+def test_relevance_score_threshold_is_applied_after_core_evidence() -> None:
+    candidate = merge_observations(
+        [observation("Relevant paper", arxiv_id="2501.00001")]
+    )[0][0]
+
+    def judge(score: float):
+        return validate_judgment(
+            plan(),
+            candidate,
+            JudgmentDraft(
+                criteria=[
+                    CriterionJudgmentDraft(
+                        criterion_id="topic",
+                        verdict="met",
+                        evidence=[
+                            JudgmentEvidence(field="title", quote=candidate.title)
+                        ],
+                    )
+                ],
+                relevance_score=score,
+            ),
+            "test-bundle-v1",
+        )
+
+    assert judge(0.49).verdict == "irrelevant"
+    assert judge(0.5).verdict == "relevant"
 
 
 def test_non_biomedical_plan_drops_pubmed_unless_explicitly_requested() -> None:
@@ -322,6 +415,52 @@ def test_non_biomedical_plan_drops_pubmed_unless_explicitly_requested() -> None:
 
     assert automatic.queries[0].channels == ["arxiv"]
     assert explicit.queries[0].channels == ["arxiv", "pubmed"]
+
+
+def test_plan_policy_keeps_only_the_broadest_criterion() -> None:
+    query_plan = plan()
+    query_plan.criteria.extend(
+        [
+            RelevanceCriterion(
+                criterion_id="method", description="Uses a preferred method"
+            ),
+            RelevanceCriterion(
+                criterion_id="evaluation", description="Reports an evaluation"
+            ),
+        ]
+    )
+
+    enforced = enforce_plan_policy(
+        query_plan, SurveyRequest(topic="paper retrieval methods")
+    )
+
+    assert [criterion.criterion_id for criterion in enforced.criteria] == ["topic"]
+    assert enforced.criteria[0].required
+
+
+def test_plan_policy_prioritizes_the_survey_query_family() -> None:
+    query_plan = plan().model_copy(
+        update={
+            "queries": [
+                SearchQuery(
+                    query_id="q_core",
+                    text="machine learning climate prediction",
+                    channels=["arxiv"],
+                ),
+                SearchQuery(
+                    query_id="q_review",
+                    text="climate prediction survey review overview",
+                    channels=["arxiv"],
+                ),
+            ]
+        }
+    )
+
+    enforced = enforce_plan_policy(
+        query_plan, SurveyRequest(topic="climate prediction survey")
+    )
+
+    assert [query.query_id for query in enforced.queries] == ["q_review", "q_core"]
 
 
 def test_ranking_is_deterministic_on_ties() -> None:
@@ -344,7 +483,8 @@ def test_ranking_is_deterministic_on_ties() -> None:
                             JudgmentEvidence(field="title", quote=candidate.title)
                         ],
                     )
-                ]
+                ],
+                relevance_score=0.8,
             ),
             "test-bundle-v1",
         )
@@ -357,8 +497,132 @@ def test_ranking_is_deterministic_on_ties() -> None:
         "arxiv:2501.00001",
         "arxiv:2501.00002",
     ]
-    assert ranked[0].breakdown.formula_version == "academic-survey-ranking-v1"
+    assert ranked[0].breakdown.formula_version == "academic-survey-ranking-v2"
     assert ranked[0].breakdown.raw_rrf > 0
+
+
+def test_ranking_uses_holistic_relevance_score() -> None:
+    candidates, _ = merge_observations(
+        [
+            observation("Lower relevance", arxiv_id="2501.00001"),
+            observation("Higher relevance", arxiv_id="2501.00002"),
+        ]
+    )
+    scores = {"arxiv:2501.00001": 0.6, "arxiv:2501.00002": 0.9}
+    judgments = {
+        candidate.candidate_id: validate_judgment(
+            plan(),
+            candidate,
+            JudgmentDraft(
+                criteria=[
+                    CriterionJudgmentDraft(
+                        criterion_id="topic",
+                        verdict="met",
+                        evidence=[
+                            JudgmentEvidence(field="title", quote=candidate.title)
+                        ],
+                    )
+                ],
+                relevance_score=scores[candidate.candidate_id],
+            ),
+            "test-bundle-v1",
+        )
+        for candidate in candidates
+    }
+
+    ranked = rank_candidates(candidates, judgments, plan(), current_year=2026)
+
+    assert ranked[0].candidate.candidate_id == "arxiv:2501.00002"
+    assert ranked[0].breakdown.relevance == 0.9
+
+
+def test_ranking_uses_citations_only_within_a_relevance_bucket() -> None:
+    candidates, _ = merge_observations(
+        [
+            observation("Lower bucket", arxiv_id="2501.00001"),
+            observation("Cited in same bucket", arxiv_id="2501.00002"),
+            observation("Uncited in same bucket", arxiv_id="2501.00003"),
+        ]
+    )
+    scores = {
+        "arxiv:2501.00001": 0.91,
+        "arxiv:2501.00002": 0.94,
+        "arxiv:2501.00003": 0.95,
+    }
+    citations = {
+        "arxiv:2501.00001": 1000,
+        "arxiv:2501.00002": 10,
+        "arxiv:2501.00003": 0,
+    }
+    for candidate in candidates:
+        candidate.citation_count = citations[candidate.candidate_id]
+    judgments = {
+        candidate.candidate_id: validate_judgment(
+            plan(),
+            candidate,
+            JudgmentDraft(
+                criteria=[
+                    CriterionJudgmentDraft(
+                        criterion_id="topic",
+                        verdict="met",
+                        evidence=[
+                            JudgmentEvidence(field="title", quote=candidate.title)
+                        ],
+                    )
+                ],
+                relevance_score=scores[candidate.candidate_id],
+            ),
+            "test-bundle-v1",
+        )
+        for candidate in candidates
+    }
+
+    ranked = rank_candidates(candidates, judgments, plan(), current_year=2026)
+
+    assert [item.candidate.candidate_id for item in ranked] == [
+        "arxiv:2501.00002",
+        "arxiv:2501.00003",
+        "arxiv:2501.00001",
+    ]
+
+
+def test_ranking_falls_back_to_query_consensus_without_citations() -> None:
+    candidates, _ = merge_observations(
+        [
+            observation("New single hit", arxiv_id="2501.00001", year=2025),
+            observation("Older repeated hit", arxiv_id="2401.00001", year=2024),
+            observation(
+                "Older repeated hit",
+                arxiv_id="2401.00001",
+                year=2024,
+                query_id="q2",
+            ),
+        ]
+    )
+    judgments = {
+        candidate.candidate_id: validate_judgment(
+            plan(),
+            candidate,
+            JudgmentDraft(
+                criteria=[
+                    CriterionJudgmentDraft(
+                        criterion_id="topic",
+                        verdict="met",
+                        evidence=[
+                            JudgmentEvidence(field="title", quote=candidate.title)
+                        ],
+                    )
+                ],
+                relevance_score=0.8,
+            ),
+            "test-bundle-v1",
+        )
+        for candidate in candidates
+    }
+
+    ranked = rank_candidates(candidates, judgments, plan(), current_year=2026)
+
+    assert ranked[0].candidate.candidate_id == "arxiv:2401.00001"
 
 
 async def test_agent_runs_two_rounds_refchain_and_relevant_only_handoff(
@@ -404,6 +668,71 @@ async def test_agent_runs_two_rounds_refchain_and_relevant_only_handoff(
     assert len(stats.batch_allocations) == 2
     assert channel.reference_calls == ["arxiv:2501.00001"]
     assert events[-1][0] == "academic_survey/completed"
+
+
+async def test_refchain_can_use_semantic_scholar_for_an_arxiv_seed(tmp_path) -> None:
+    root = observation("Relevant root", arxiv_id="2501.00001")
+    reference = observation("Relevant reference", doi="10.1000/reference")
+    search = FakeChannel(searches={"paper search": [root]})
+    semantic_scholar = FakeChannel(
+        references={"arxiv:2501.00001": [reference]},
+        name="semantic_scholar",
+    )
+
+    _, _, _, corpus, _ = await run_agent(
+        tmp_path,
+        FakeChains(plan()),
+        {"arxiv": search, "semantic_scholar": semantic_scholar},
+    )
+
+    assert {paper.title for paper in corpus.reference_papers} == {
+        "Relevant root",
+        "Relevant reference",
+    }
+    assert semantic_scholar.reference_calls == ["arxiv:2501.00001"]
+
+
+async def test_refchain_reserves_time_for_remaining_judgments(
+    tmp_path, monkeypatch
+) -> None:
+    root = observation("Relevant root", arxiv_id="2501.00001")
+    reference = observation("Relevant reference", doi="10.1000/reference")
+    channel = FakeChannel(
+        searches={"paper search": [root]},
+        references={"arxiv:2501.00001": [reference]},
+    )
+    monkeypatch.setitem(
+        survey_budget._BUDGETS,
+        "fast",
+        replace(
+            survey_budget.budget_for("fast"),
+            refchain_judgment_reserve_seconds=10_000,
+        ),
+    )
+
+    _, _, _, corpus, _ = await run_agent(
+        tmp_path, FakeChains(plan()), {"arxiv": channel}
+    )
+
+    assert channel.reference_calls == []
+    assert [paper.title for paper in corpus.reference_papers] == ["Relevant root"]
+
+
+async def test_agent_batches_independent_relevance_judgments(tmp_path) -> None:
+    chains = BatchFakeChains(plan())
+    channel = FakeChannel(
+        searches={
+            "paper search": [
+                observation("Relevant one", arxiv_id="2501.00001"),
+                observation("Relevant two", arxiv_id="2501.00002"),
+            ]
+        }
+    )
+
+    _, _, _, corpus, _ = await run_agent(tmp_path, chains, {"arxiv": channel})
+
+    assert chains.batch_calls == 1
+    assert len(corpus.reference_papers) == 2
 
 
 async def test_single_round_covers_all_initial_query_families(
@@ -562,6 +891,42 @@ async def test_one_channel_failure_returns_partial_result(tmp_path) -> None:
     assert corpus.status == "partial"
     assert len(corpus.reference_papers) == 1
     assert any("offline" in warning for warning in result.warnings)
+
+
+async def test_failed_query_family_uses_a_backup_channel_before_evolution(
+    tmp_path, monkeypatch
+) -> None:
+    query_plan = plan(["arxiv", "semantic_scholar"])
+    evolved = SearchQuery(
+        query_id="q2", text="evolved query", channels=["arxiv", "semantic_scholar"]
+    )
+    semantic_scholar = FakeChannel(
+        searches={
+            "paper search": [observation("Relevant fallback", arxiv_id="2501.00001")]
+        },
+        name="semantic_scholar",
+    )
+    monkeypatch.setitem(
+        survey_budget._BUDGETS,
+        "fast",
+        replace(
+            survey_budget.budget_for("fast"),
+            max_rounds=2,
+            max_batches_per_round=1,
+        ),
+    )
+
+    _, _, _, corpus, _ = await run_agent(
+        tmp_path,
+        FakeChains(query_plan, [evolved]),
+        {
+            "arxiv": FakeChannel(error=RuntimeError("offline")),
+            "semantic_scholar": semantic_scholar,
+        },
+    )
+
+    assert semantic_scholar.searched_texts == ["paper search"]
+    assert [paper.title for paper in corpus.reference_papers] == ["Relevant fallback"]
 
 
 async def test_preexisting_cancellation_propagates(tmp_path) -> None:

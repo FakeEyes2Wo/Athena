@@ -6,6 +6,7 @@ from typing import Protocol
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     JudgmentDraft,
+    JudgmentBatchDraft,
     QueryEvolution,
     QueryPlan,
     RewrittenQuery,
@@ -67,6 +68,14 @@ class SurveyChains(Protocol):
         candidate: SurveyCandidate,
     ) -> JudgmentDraft:
         """根据 title/abstract 返回逐项相关性草稿。"""
+
+    async def judge_batch(
+        self,
+        request: SurveyRequest,
+        plan: QueryPlan,
+        candidates: list[SurveyCandidate],
+    ) -> JudgmentBatchDraft:
+        """批量返回逐候选独立草稿；候选 ID 必须与输入完全一致。"""
 
     async def rewrite(
         self,

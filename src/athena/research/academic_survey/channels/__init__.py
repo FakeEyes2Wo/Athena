@@ -15,6 +15,7 @@ def build_default_channels(
     *,
     http: HostRateLimiter | None = None,
     contact_email: str | None = None,
+    openalex_api_key: str | None = None,
     semantic_scholar_api_key: str | None = None,
     pubmed_api_key: str | None = None,
 ):
@@ -29,7 +30,12 @@ def build_default_channels(
     )
     return {
         "arxiv": ArxivChannel(limiter, artifacts),
-        "openalex": OpenAlexChannel(limiter, artifacts, contact_email=contact_email),
+        "openalex": OpenAlexChannel(
+            limiter,
+            artifacts,
+            contact_email=contact_email,
+            api_key=openalex_api_key,
+        ),
         "semantic_scholar": SemanticScholarChannel(
             limiter,
             artifacts,

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import urllib.parse
+from datetime import date
 
 import pytest
 
@@ -85,6 +86,7 @@ OPENALEX = {
             "doi": "https://doi.org/10.1000/agents",
             "display_name": "Paper Agents",
             "publication_year": 2025,
+            "publication_date": "2025-01-02",
             "language": "en",
             "cited_by_count": 9,
             "authorships": [{"author": {"display_name": "Ada Author"}}],
@@ -108,6 +110,7 @@ S2 = {
             "abstract": "A retrieval agent.",
             "authors": [{"name": "Ada Author"}],
             "year": 2025,
+            "publicationDate": "2025-01-02",
             "venue": "IR Journal",
             "citationCount": 9,
             "openAccessPdf": {"url": "https://example.test/paper.pdf"},
@@ -160,6 +163,54 @@ async def test_arxiv_channel_preserves_fielded_query(tmp_path) -> None:
         'all:"paper agents" AND abs:retrieval '
         "AND submittedDate:[202001010000 TO 999912312359]"
     ]
+
+
+async def test_arxiv_year_filter_does_not_change_page_offset(tmp_path) -> None:
+    transport = FakeTransport({"api/query": ARXIV})
+    channel = ArxivChannel(limiter(transport), LocalArtifactStore(tmp_path))
+    constraints = SurveyConstraints(year_to=2025)
+
+    await channel.search_page(query("arxiv"), constraints, 1, None, asyncio.Event())
+    await channel.search_page(query("arxiv"), constraints, 1, "20", asyncio.Event())
+
+    first = urllib.parse.parse_qs(urllib.parse.urlsplit(transport.calls[0]).query)
+    second = urllib.parse.parse_qs(urllib.parse.urlsplit(transport.calls[1]).query)
+    assert first["start"] == ["0"]
+    assert second["start"] == ["20"]
+    assert first["search_query"] == [
+        'all:"paper agents" AND submittedDate:[100001010000 TO 202512312359]'
+    ]
+
+
+async def test_channels_apply_exact_publication_dates(tmp_path) -> None:
+    constraints = SurveyConstraints(
+        published_from=date(2024, 2, 3), published_to=date(2025, 3, 13)
+    )
+    arxiv_transport = FakeTransport({"api/query": ARXIV})
+    arxiv = ArxivChannel(limiter(arxiv_transport), LocalArtifactStore(tmp_path / "a"))
+    pubmed_transport = FakeTransport(
+        {
+            "esearch.fcgi": json.dumps({"esearchresult": {"idlist": []}}).encode(),
+        }
+    )
+    pubmed = PubMedChannel(
+        limiter(pubmed_transport), LocalArtifactStore(tmp_path / "p")
+    )
+
+    await arxiv.search_page(query("arxiv"), constraints, 1, None, asyncio.Event())
+    await pubmed.search_page(query("pubmed"), constraints, 1, None, asyncio.Event())
+
+    arxiv_query = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(arxiv_transport.calls[0]).query
+    )
+    pubmed_query = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(pubmed_transport.calls[0]).query
+    )
+    assert arxiv_query["search_query"] == [
+        'all:"paper agents" AND submittedDate:[202402030000 TO 202503132359]'
+    ]
+    assert pubmed_query["mindate"] == ["2024/02/03"]
+    assert pubmed_query["maxdate"] == ["2025/03/13"]
 
 
 async def test_channels_use_real_page_cursors(tmp_path) -> None:
@@ -309,16 +360,17 @@ async def test_openalex_semantic_scholar_and_pubmed_reference_endpoints(
     s2_seed = merge_observations(
         [
             CandidateObservation(
-                channel="semantic_scholar",
+                channel="arxiv",
                 query_id="q",
                 query_text="q",
                 raw_rank=1,
-                identity=ObservedIdentity(s2_paper_id="seed"),
+                identity=ObservedIdentity(arxiv_id="2501.00001"),
                 title="Seed",
             )
         ]
     )[0][0]
     assert await s2.references(s2_seed, 5, asyncio.Event())
+    assert "ARXIV%3A2501.00001" in s2_transport.calls[0]
 
     pubmed_transport = FakeTransport(
         {
@@ -370,6 +422,10 @@ class CountingChannel:
         return []
 
 
+class SearchOnlyChannel(CountingChannel):
+    supports_references = False
+
+
 class PagingChannel(CountingChannel):
     def __init__(self) -> None:
         super().__init__()
@@ -411,6 +467,16 @@ async def test_channel_cache_is_idempotent_and_exact_replay_miss_is_not_empty(
     assert await replay.search(query("arxiv"), constraints, 5, asyncio.Event())
     with pytest.raises(ReplayCacheMiss):
         await replay.search(query("arxiv"), constraints, 6, asyncio.Event())
+
+
+def test_channel_cache_preserves_reference_capability(tmp_path) -> None:
+    cached = CachedChannelAdapter(
+        SearchOnlyChannel(),
+        LocalArtifactStore(tmp_path / "artifacts"),
+        MemorySurveyCache(),
+    )
+
+    assert cached.supports_references is False
 
 
 async def test_page_cache_and_replay_are_cursor_specific(tmp_path) -> None:

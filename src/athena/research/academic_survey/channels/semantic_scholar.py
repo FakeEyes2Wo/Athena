@@ -3,7 +3,7 @@
 import asyncio
 import urllib.parse
 
-from athena.research.academic_survey.channels.base import HttpChannel, text
+from athena.research.academic_survey.channels.base import HttpChannel, date_from, text
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
@@ -16,7 +16,8 @@ from athena.research.paper_source.schemas import SourceHint
 
 S2_API = "https://api.semanticscholar.org/graph/v1"
 S2_FIELDS = (
-    "paperId,externalIds,title,abstract,authors,year,venue,citationCount,openAccessPdf"
+    "paperId,externalIds,title,abstract,authors,year,publicationDate,venue,"
+    "citationCount,openAccessPdf"
 )
 
 
@@ -76,7 +77,12 @@ class SemanticScholarChannel(HttpChannel):
         limit: int,
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
-        paper_id = paper.identity.s2_paper_id
+        paper_id = (
+            paper.identity.s2_paper_id
+            or (f"ARXIV:{paper.identity.arxiv_id}" if paper.identity.arxiv_id else None)
+            or (f"DOI:{paper.identity.doi}" if paper.identity.doi else None)
+            or (f"PMID:{paper.identity.pmid}" if paper.identity.pmid else None)
+        )
         if not paper_id:
             return []
         params = {"limit": min(limit, 100), "fields": S2_FIELDS}
@@ -86,7 +92,7 @@ class SemanticScholarChannel(HttpChannel):
             cancel,
             self.headers,
         )
-        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        rows = (payload.get("data") or []) if isinstance(payload, dict) else []
         papers = [
             row.get("citedPaper")
             for row in rows
@@ -137,6 +143,7 @@ class SemanticScholarChannel(HttpChannel):
                         if isinstance(paper.get("year"), int)
                         else None
                     ),
+                    published_date=date_from(paper.get("publicationDate")),
                     venue=text(paper.get("venue")),
                     citation_count=(
                         paper.get("citationCount")

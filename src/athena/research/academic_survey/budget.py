@@ -20,9 +20,12 @@ class SurveyBudget:
     max_seconds: int
     search_batch_size: int = 20
     judgment_concurrency: int = 8
+    judgment_batch_size: int = 8
+    judgment_batch_concurrency: int = 2
     max_batches_per_round: int = 8
     ucb_exploration: float = 1.4
     query_overlap_threshold: float = 0.8
+    refchain_judgment_reserve_seconds: int = 30
 
 
 _BUDGETS = {
@@ -49,6 +52,7 @@ _BUDGETS = {
         50,
         600,
         max_batches_per_round=8,
+        refchain_judgment_reserve_seconds=60,
     ),
 }
 

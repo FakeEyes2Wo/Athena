@@ -80,7 +80,8 @@ class MaterializeChains:
                     verdict="met",
                     evidence=[JudgmentEvidence(field="title", quote=candidate.title)],
                 )
-            ]
+            ],
+            relevance_score=1,
         )
 
     async def evolve(self, request, query_plan, accepted, searched_queries):

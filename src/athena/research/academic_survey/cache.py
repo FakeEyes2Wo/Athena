@@ -12,8 +12,10 @@ from pydantic import BaseModel
 
 from athena.research.academic_survey.interfaces import ChannelAdapter, SurveyChains
 from athena.research.academic_survey.schemas import (
+    CandidateJudgmentDraft,
     CandidateObservation,
     JudgmentDraft,
+    JudgmentBatchDraft,
     QueryEvolution,
     QueryPlan,
     RewrittenQuery,
@@ -115,6 +117,7 @@ class CachedChannelAdapter:
         self.delegate = delegate
         self.name = name or delegate.name
         self.version = getattr(delegate, "version", "unversioned")
+        self.supports_references = getattr(delegate, "supports_references", True)
         self.artifacts = artifacts
         self.cache = cache
         self.max_age_seconds = max_age_seconds
@@ -389,6 +392,42 @@ class CachedSurveyChains:
             request,
             plan,
             candidate,
+        )
+
+    async def judge_batch(
+        self,
+        request: SurveyRequest,
+        plan: QueryPlan,
+        candidates: list[SurveyCandidate],
+    ) -> JudgmentBatchDraft:
+        method = getattr(self.delegate, "judge_batch", None)
+        if method is None:
+            drafts = await asyncio.gather(
+                *(self.judge(request, plan, candidate) for candidate in candidates)
+            )
+            return JudgmentBatchDraft(
+                judgments=[
+                    CandidateJudgmentDraft(
+                        candidate_id=candidate.candidate_id,
+                        **draft.model_dump(),
+                    )
+                    for candidate, draft in zip(candidates, drafts, strict=True)
+                ]
+            )
+        return await self._cached(
+            "judge_batch",
+            {
+                "request": request.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json"),
+                "candidates": [
+                    candidate.model_dump(mode="json") for candidate in candidates
+                ],
+            },
+            JudgmentBatchDraft,
+            method,
+            request,
+            plan,
+            candidates,
         )
 
     async def evolve(

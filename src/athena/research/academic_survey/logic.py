@@ -23,7 +23,8 @@ from athena.research.academic_survey.schemas import (
 from athena.research.paper_source.schemas import PaperIdentity
 
 RRF_K = 60
-RUBRIC_VERSION = "academic-survey-rubric-v1"
+RUBRIC_VERSION = "academic-survey-rubric-v2"
+RELEVANCE_THRESHOLD = 0.5
 _TOKEN = re.compile(r"[\w]+", re.UNICODE)
 _BIOMEDICAL_TERMS = {
     "biological",
@@ -119,6 +120,7 @@ def _candidate_from_group(group: list[CandidateObservation]) -> SurveyCandidate:
     identity = PaperIdentity(**identity_data, title=richest.title)
     authors = next((item.authors for item in group if item.authors), [])
     year = next((item.year for item in group if item.year is not None), None)
+    dates = [item.published_date for item in group if item.published_date is not None]
     venue = next((item.venue for item in group if item.venue), "")
     language = next((item.language for item in group if item.language), "")
     citations = [
@@ -131,6 +133,7 @@ def _candidate_from_group(group: list[CandidateObservation]) -> SurveyCandidate:
         abstract=richest.abstract,
         authors=authors,
         year=year,
+        published_date=min(dates) if dates else None,
         venue=venue,
         language=language,
         citation_count=max(citations) if citations else None,
@@ -151,6 +154,24 @@ def constraint_status(
         if candidate.year is None:
             return "unknown"
         if candidate.year > constraints.year_to:
+            return "rejected"
+    if constraints.published_from is not None:
+        if candidate.published_date is not None:
+            if candidate.published_date < constraints.published_from:
+                return "rejected"
+        elif (
+            candidate.year is None or candidate.year == constraints.published_from.year
+        ):
+            return "unknown"
+        elif candidate.year < constraints.published_from.year:
+            return "rejected"
+    if constraints.published_to is not None:
+        if candidate.published_date is not None:
+            if candidate.published_date > constraints.published_to:
+                return "rejected"
+        elif candidate.year is None or candidate.year == constraints.published_to.year:
+            return "unknown"
+        elif candidate.year > constraints.published_to.year:
             return "rejected"
     if constraints.venues:
         allowed = {_normal_text(value) for value in constraints.venues}
@@ -175,7 +196,7 @@ def satisfies_constraints(
 
 
 def enforce_plan_policy(plan: QueryPlan, request: SurveyRequest) -> QueryPlan:
-    """确定性收紧 PubMed 使用范围并应用 intent 排序权重。"""
+    """确定性收紧核心判据、PubMed 使用范围和 intent 排序权重。"""
     context = " ".join(
         [request.topic, plan.domain, *request.constraints.domains]
     ).casefold()
@@ -189,13 +210,26 @@ def enforce_plan_policy(plan: QueryPlan, request: SurveyRequest) -> QueryPlan:
             channels = [channel for channel in query.channels if channel != "pubmed"]
             if channels:
                 queries.append(query.model_copy(update={"channels": channels}))
+    if plan.intent == "survey":
+        review_terms = {"survey", "review", "overview"}
+        queries = sorted(
+            queries,
+            key=lambda query: not bool(
+                set(_TOKEN.findall(query.text.casefold())) & review_terms
+            ),
+        )
     weights = plan.ranking_intent.model_dump()
     if plan.intent == "recent_advances":
         weights["recency_weight"] *= 1.5
     elif plan.intent in {"influential_works", "early_works"}:
         weights["authority_weight"] *= 1.5
+    criteria = [plan.criteria[0].model_copy(update={"required": True})]
     return plan.model_copy(
-        update={"queries": queries, "ranking_intent": RankingIntent(**weights)}
+        update={
+            "criteria": criteria,
+            "queries": queries,
+            "ranking_intent": RankingIntent(**weights),
+        }
     )
 
 
@@ -263,12 +297,15 @@ def validate_judgment(
         verdict = "irrelevant"
     elif "unknown" in required_verdicts:
         verdict = "uncertain"
+    elif draft.relevance_score < RELEVANCE_THRESHOLD:
+        verdict = "irrelevant"
     else:
         verdict = "relevant"
     return RelevanceJudgment(
         rubric_version=RUBRIC_VERSION,
         prompt_bundle_version=prompt_bundle_version,
         criteria=criteria,
+        relevance_score=draft.relevance_score,
         verdict=verdict,
     )
 
@@ -321,7 +358,7 @@ def rank_candidates(
     *,
     current_year: int | None = None,
 ) -> list[RankedCandidate]:
-    """计算 RRF、criterion coverage、authority 与 recency 后稳定排序。"""
+    """按 SPAR 的相关性分桶、引用量与年份进行稳定排序。"""
     if not candidates:
         return []
     year = current_year or datetime.now(UTC).year
@@ -331,16 +368,10 @@ def rank_candidates(
     for candidate in candidates:
         judgment = judgments[candidate.candidate_id]
         rrf = raw_rrf[candidate.candidate_id] / max_rrf
-        relevance = _criterion_coverage(plan, judgment)
+        relevance = judgment.relevance_score
         authority = _authority(candidate, candidates)
         recency = _recency(candidate.year, plan.intent, year)
-        weights = plan.ranking_intent
-        final = (
-            weights.rrf_weight * rrf
-            + weights.relevance_weight * relevance
-            + weights.authority_weight * authority
-            + weights.recency_weight * recency
-        )
+        relevance_bucket = round(relevance / 0.05) * 0.05
         lists = len({(item.channel, item.query_id) for item in candidate.observations})
         ranked.append(
             RankedCandidate(
@@ -353,16 +384,30 @@ def rank_candidates(
                     relevance=relevance,
                     authority=authority,
                     recency=recency,
-                    final_score=final,
+                    final_score=relevance_bucket,
                 ),
                 lists,
             )
+        )
+    if any(item.candidate.citation_count is not None for item in ranked):
+        return sorted(
+            ranked,
+            key=lambda item: (
+                -item.breakdown.final_score,
+                -(item.candidate.citation_count or 0),
+                -(item.candidate.year or 0),
+                -item.independent_lists,
+                -item.breakdown.rrf,
+                item.candidate.candidate_id,
+            ),
         )
     return sorted(
         ranked,
         key=lambda item: (
             -item.breakdown.final_score,
             -item.independent_lists,
+            -item.breakdown.rrf,
+            -(item.candidate.year or 0),
             item.candidate.candidate_id,
         ),
     )
@@ -374,17 +419,6 @@ def _rrf(candidate: SurveyCandidate) -> float:
         key = (item.channel, item.query_id)
         ranks[key] = min(ranks.get(key, item.raw_rank), item.raw_rank)
     return sum(1 / (RRF_K + rank) for rank in ranks.values())
-
-
-def _criterion_coverage(plan: QueryPlan, judgment: RelevanceJudgment) -> float:
-    optional = {item.criterion_id for item in plan.criteria if not item.required}
-    if not optional:
-        return 1.0
-    met = sum(
-        item.criterion_id in optional and item.verdict == "met"
-        for item in judgment.criteria
-    )
-    return met / len(optional)
 
 
 def _authority(candidate: SurveyCandidate, candidates: list[SurveyCandidate]) -> float:

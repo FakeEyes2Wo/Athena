@@ -3,6 +3,7 @@
 import asyncio
 import json
 import urllib.parse
+from datetime import date, datetime
 from xml.etree import ElementTree
 
 from athena.research.academic_survey.channels.base import (
@@ -67,10 +68,16 @@ class PubMedChannel(HttpChannel):
             retstart=start,
             sort="relevance",
         )
-        if constraints.year_from is not None:
+        if constraints.published_from is not None:
+            params["mindate"] = constraints.published_from.strftime("%Y/%m/%d")
+            params["datetype"] = "pdat"
+        elif constraints.year_from is not None:
             params["mindate"] = str(constraints.year_from)
             params["datetype"] = "pdat"
-        if constraints.year_to is not None:
+        if constraints.published_to is not None:
+            params["maxdate"] = constraints.published_to.strftime("%Y/%m/%d")
+            params["datetype"] = "pdat"
+        elif constraints.year_to is not None:
             params["maxdate"] = str(constraints.year_to)
             params["datetype"] = "pdat"
         payload, search_ref = await self.get_json(
@@ -191,6 +198,7 @@ def _observation(
         article.findtext("Journal/JournalIssue/PubDate/Year")
         or article.findtext("Journal/JournalIssue/PubDate/MedlineDate")
     )
+    published_date = _publication_date(article)
     pmc_id = ids.get("pmc") or None
     hints = []
     if pmc_id:
@@ -237,11 +245,38 @@ def _observation(
             )
         ],
         year=year,
+        published_date=published_date,
         venue=text(article.findtext("Journal/Title")),
         language=text(article.findtext("Language")),
         hints=hints,
         raw_response_ref=raw_ref,
     )
+
+
+def _publication_date(article: ElementTree.Element) -> date | None:
+    for node in (
+        article.find("ArticleDate"),
+        article.find("Journal/JournalIssue/PubDate"),
+    ):
+        if node is None:
+            continue
+        year = text(node.findtext("Year"))
+        month = text(node.findtext("Month"))
+        day = text(node.findtext("Day"))
+        if not (year and month and day):
+            continue
+        try:
+            month_number = int(month)
+        except ValueError:
+            try:
+                month_number = datetime.strptime(month[:3], "%b").month
+            except ValueError:
+                continue
+        try:
+            return date(int(year), month_number, int(day))
+        except ValueError:
+            continue
+    return None
 
 
 def _pmid(node: ElementTree.Element) -> str:

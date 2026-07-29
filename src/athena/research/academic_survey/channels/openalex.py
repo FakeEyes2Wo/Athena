@@ -3,7 +3,7 @@
 import asyncio
 import urllib.parse
 
-from athena.research.academic_survey.channels.base import HttpChannel, text
+from athena.research.academic_survey.channels.base import HttpChannel, date_from, text
 from athena.research.academic_survey.schemas import (
     CandidateObservation,
     ObservedIdentity,
@@ -17,7 +17,7 @@ from athena.research.paper_source.schemas import SourceHint, normalize_doi
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 OPENALEX_FIELDS = (
-    "id,doi,display_name,publication_year,language,cited_by_count,authorships,"
+    "id,doi,display_name,publication_year,publication_date,language,cited_by_count,authorships,"
     "primary_location,best_oa_location,open_access,abstract_inverted_index"
 )
 
@@ -26,9 +26,16 @@ class OpenAlexChannel(HttpChannel):
     name = "openalex"
     version = "openalex-works-v2"
 
-    def __init__(self, *args, contact_email: str | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        contact_email: str | None = None,
+        api_key: str | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.contact_email = contact_email
+        self.api_key = api_key
 
     async def search(
         self,
@@ -49,21 +56,29 @@ class OpenAlexChannel(HttpChannel):
         cursor: str | None,
         cancel: asyncio.Event,
     ) -> SearchPage:
-        params: dict[str, object] = {
-            "search": query.text,
-            "per-page": limit,
-            "select": OPENALEX_FIELDS,
-            "cursor": cursor or "*",
-        }
+        params = self._params(
+            **{
+                "search": query.text,
+                "per-page": limit,
+                "select": OPENALEX_FIELDS,
+                "cursor": cursor or "*",
+            }
+        )
         filters = []
         if constraints.year_from is not None:
             filters.append(f"from_publication_date:{constraints.year_from}-01-01")
         if constraints.year_to is not None:
             filters.append(f"to_publication_date:{constraints.year_to}-12-31")
+        if constraints.published_from is not None:
+            filters.append(
+                f"from_publication_date:{constraints.published_from.isoformat()}"
+            )
+        if constraints.published_to is not None:
+            filters.append(
+                f"to_publication_date:{constraints.published_to.isoformat()}"
+            )
         if filters:
             params["filter"] = ",".join(filters)
-        if self.contact_email:
-            params["mailto"] = self.contact_email
         payload, raw_ref = await self.get_json(
             f"{OPENALEX_WORKS_URL}?{urllib.parse.urlencode(params)}", cancel
         )
@@ -81,14 +96,16 @@ class OpenAlexChannel(HttpChannel):
         limit: int,
         cancel: asyncio.Event,
     ) -> list[CandidateObservation]:
-        work_id = paper.identity.openalex_id
-        if not work_id:
+        locator = (
+            bare_openalex_id(paper.identity.openalex_id)
+            if paper.identity.openalex_id
+            else f"https://doi.org/{paper.identity.doi}" if paper.identity.doi else None
+        )
+        if not locator:
             return []
-        params = {"select": "referenced_works"}
-        if self.contact_email:
-            params["mailto"] = self.contact_email
+        params = self._params(select="referenced_works")
         record, _ = await self.get_json(
-            f"{OPENALEX_WORKS_URL}/{bare_openalex_id(work_id)}?"
+            f"{OPENALEX_WORKS_URL}/{urllib.parse.quote(locator, safe=':/')}?"
             f"{urllib.parse.urlencode(params)}",
             cancel,
         )
@@ -100,13 +117,10 @@ class OpenAlexChannel(HttpChannel):
         if not ids:
             return []
         bare_ids = [bare_openalex_id(str(value)) for value in ids]
-        lookup = {
-            "filter": "openalex_id:" + "|".join(bare_ids),
-            "per-page": len(bare_ids),
-            "select": OPENALEX_FIELDS,
-        }
-        if self.contact_email:
-            lookup["mailto"] = self.contact_email
+        lookup = self._params(
+            filter="openalex_id:" + "|".join(bare_ids),
+            **{"per-page": len(bare_ids), "select": OPENALEX_FIELDS},
+        )
         payload, raw_ref = await self.get_json(
             f"{OPENALEX_WORKS_URL}?{urllib.parse.urlencode(lookup)}", cancel
         )
@@ -164,6 +178,7 @@ class OpenAlexChannel(HttpChannel):
                         if isinstance(work.get("publication_year"), int)
                         else None
                     ),
+                    published_date=date_from(work.get("publication_date")),
                     venue=(
                         text(source.get("display_name"))
                         if isinstance(source, dict)
@@ -180,6 +195,13 @@ class OpenAlexChannel(HttpChannel):
                 )
             )
         return result
+
+    def _params(self, **values: object) -> dict[str, object]:
+        if self.contact_email:
+            values["mailto"] = self.contact_email
+        if self.api_key:
+            values["api_key"] = self.api_key
+        return values
 
 
 def _abstract(value: object) -> str:

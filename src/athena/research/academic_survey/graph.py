@@ -342,7 +342,6 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
             disabled.append(channel_name)
         else:
             query_channel_batches.append(batch)
-            query_pulls[query.query_id] = query_pulls.get(query.query_id, 0) + 1
             arm_pulls[arm_key] = arm_pulls.get(arm_key, 0) + 1
             calls.append((query, channel_name, arm_key, cursor, adapter))
 
@@ -405,6 +404,7 @@ async def retrieve_round(state: SurveyState, runtime: Runtime[SurveyRuntime]) ->
         if rewrite_error:
             _add_error(errors, rewrite_error)
         successful += 1
+        query_pulls[query.query_id] = query_pulls.get(query.query_id, 0) + 1
         if cursor:
             paginated += 1
         if page.next_cursor is None:
@@ -549,10 +549,7 @@ async def expand_refchain(state: SurveyState, runtime: Runtime[SurveyRuntime]) -
     failures = dict(state.get("retryable_failures", {}))
     for seed_id in seed_ids:
         seed = candidates[seed_id]
-        names = list(dict.fromkeys(item.channel for item in seed.observations))
-        configured = [
-            name for name in names if name in context.channels and name not in disabled
-        ]
+        configured = _reference_channels(seed, context, disabled)
         per_channel = max(
             1,
             (budget.references_per_seed + max(1, len(configured)) - 1)
@@ -572,6 +569,7 @@ async def expand_refchain(state: SurveyState, runtime: Runtime[SurveyRuntime]) -
                 lambda adapter=adapter, seed_id=seed_id, limit=limit: adapter.references(
                     candidates[seed_id], limit, context.cancel
                 ),
+                reserve_seconds=budget.refchain_judgment_reserve_seconds,
             )
             for seed_id, _, adapter, limit in calls
         ),
@@ -748,16 +746,17 @@ async def update_stop_state(
         record.judgment.verdict == "relevant" for record in judgments.records.values()
     )
     deadline_reached = time.monotonic() >= context.deadline
+    pending = await _load_queries(context.artifacts, state["pending_queries_ref"])
     if (
         state.get("attempted_pulls", 0) > 0
         and state.get("successful_pulls", 0) == 0
         and relevant == 0
+        and not pending
         and not deadline_reached
     ):
         detail = "; ".join(state.get("errors", []))
         raise RuntimeError(f"all configured retrieval channels failed: {detail}")
 
-    pending = await _load_queries(context.artifacts, state["pending_queries_ref"])
     unique_candidates = len(ledger.candidates) + len(ledger.quarantined)
     stop_reason = ""
     errors = list(state.get("errors", []))
@@ -988,27 +987,49 @@ async def _judge_eligible(
         if (record := ledger.records.get(candidate.candidate_id)) is None
         or record.evidence_fingerprint != _evidence_fingerprint(candidate)
     ][:remaining]
-    semaphore = asyncio.Semaphore(budget.judgment_concurrency)
+    batches = [
+        pending[index : index + budget.judgment_batch_size]
+        for index in range(0, len(pending), budget.judgment_batch_size)
+    ]
+    semaphore = asyncio.Semaphore(budget.judgment_batch_concurrency)
 
-    async def judge(candidate: SurveyCandidate):
+    async def judge_batch(batch: list[SurveyCandidate]):
         async with semaphore:
             _check_cancel(context)
             try:
-                draft = await _external(
+                draft_batch = await _external(
                     context,
-                    lambda: _retry_judge(context.chains, request, plan, candidate),
+                    lambda: _retry_judge_batch(context.chains, request, plan, batch),
                 )
                 error = None
             except TimeoutError as exception:
-                draft = JudgmentDraft(criteria=[])
+                draft_batch = None
                 error = exception
-            judgment = validate_judgment(
-                plan, candidate, draft, context.chains.prompt_bundle_version
+            drafts = (
+                {item.candidate_id: item for item in draft_batch.judgments}
+                if draft_batch is not None
+                else {}
             )
-            judgment_ref = await _put_model(context.artifacts, judgment)
-            return candidate, judgment, judgment_ref, error
+            results = []
+            for candidate in batch:
+                item = drafts.get(candidate.candidate_id)
+                draft = (
+                    JudgmentDraft(
+                        criteria=item.criteria,
+                        relevance_score=item.relevance_score,
+                    )
+                    if item is not None
+                    else JudgmentDraft(criteria=[], relevance_score=0)
+                )
+                judgment = validate_judgment(
+                    plan, candidate, draft, context.chains.prompt_bundle_version
+                )
+                judgment_ref = await _put_model(context.artifacts, judgment)
+                results.append((candidate, judgment, judgment_ref, error))
+            return results
 
-    results = await asyncio.gather(*(judge(candidate) for candidate in pending))
+    batch_results = await asyncio.gather(*(judge_batch(batch) for batch in batches))
+    results = [item for batch in batch_results for item in batch]
     errors = list(state.get("errors", []))
     for candidate, judgment, judgment_ref, error in results:
         if error is not None:
@@ -1067,16 +1088,16 @@ async def _judge_eligible(
     }
 
 
-async def _retry_judge(
+async def _retry_judge_batch(
     chains: SurveyChains,
     request: SurveyRequest,
     plan: QueryPlan,
-    candidate: SurveyCandidate,
-) -> JudgmentDraft:
+    candidates: list[SurveyCandidate],
+):
     try:
-        return await chains.judge(request, plan, candidate)
+        return await chains.judge_batch(request, plan, candidates)
     except Exception:
-        return await chains.judge(request, plan, candidate)
+        return await chains.judge_batch(request, plan, candidates)
 
 
 async def _retry_understand(chains: SurveyChains, request: SurveyRequest) -> QueryPlan:
@@ -1374,12 +1395,40 @@ def _record_channel_failure(
         disabled.append(channel)
 
 
-async def _external(context: SurveyRuntime, factory):
+def _reference_channels(
+    paper: SurveyCandidate,
+    context: SurveyRuntime,
+    disabled: list[ChannelName],
+) -> list[ChannelName]:
+    """按可解析身份选择引用通道，而不局限于首次命中的检索来源。"""
+    identity = paper.identity
+    names = [item.channel for item in paper.observations]
+    if any((identity.s2_paper_id, identity.arxiv_id, identity.doi, identity.pmid)):
+        names.append("semantic_scholar")
+    if identity.openalex_id or identity.doi:
+        names.append("openalex")
+    if identity.pmid:
+        names.append("pubmed")
+    return [
+        name
+        for name in dict.fromkeys(names)
+        if name in context.channels
+        and name not in disabled
+        and getattr(context.channels[name], "supports_references", True)
+    ]
+
+
+async def _external(
+    context: SurveyRuntime,
+    factory,
+    *,
+    reserve_seconds: float = 0,
+):
     """把每个网络/模型调用限制在本次 survey 的剩余墙钟预算内。"""
     _check_cancel(context)
-    remaining = context.deadline - time.monotonic()
+    remaining = context.deadline - time.monotonic() - reserve_seconds
     if remaining <= 0:
-        raise TimeoutError("survey wall-clock deadline reached")
+        raise TimeoutError("survey wall-clock reserve reached")
     async with asyncio.timeout(remaining):
         return await factory()
 

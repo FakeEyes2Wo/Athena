@@ -1,5 +1,6 @@
 """AcademicSurvey 的请求、检索状态与持久化结果模型。"""
 
+from datetime import date
 from typing import Literal, Self, TypeAlias
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -23,6 +24,8 @@ class SurveyConstraints(BaseModel):
 
     year_from: int | None = Field(default=None, ge=1000, le=9999)
     year_to: int | None = Field(default=None, ge=1000, le=9999)
+    published_from: date | None = None
+    published_to: date | None = None
     venues: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
     domains: list[str] = Field(default_factory=list)
@@ -36,13 +39,19 @@ class SurveyConstraints(BaseModel):
 
     @model_validator(mode="after")
     def validate_year_range(self) -> Self:
-        """拒绝反向年份区间。"""
+        """拒绝反向年份或日期区间。"""
         if (
             self.year_from is not None
             and self.year_to is not None
             and self.year_from > self.year_to
         ):
             raise ValueError("year_from must not exceed year_to")
+        if (
+            self.published_from is not None
+            and self.published_to is not None
+            and self.published_from > self.published_to
+        ):
+            raise ValueError("published_from must not exceed published_to")
         return self
 
 
@@ -265,6 +274,7 @@ class CandidateObservation(BaseModel):
     abstract: str = ""
     authors: list[str] = Field(default_factory=list)
     year: int | None = Field(default=None, ge=1000, le=9999)
+    published_date: date | None = None
     venue: str = ""
     language: str = ""
     citation_count: int | None = Field(default=None, ge=0)
@@ -289,6 +299,7 @@ class SurveyCandidate(BaseModel):
     abstract: str
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
+    published_date: date | None = None
     venue: str = ""
     language: str = ""
     citation_count: int | None = None
@@ -311,9 +322,22 @@ class CriterionJudgmentDraft(BaseModel):
 
 
 class JudgmentDraft(BaseModel):
-    """LLM 返回的逐项判断；不允许直接决定总 verdict。"""
+    """LLM 返回的逐项证据判断和 SPAR 整体相关性分数。"""
 
     criteria: list[CriterionJudgmentDraft]
+    relevance_score: float = Field(ge=0, le=1)
+
+
+class CandidateJudgmentDraft(JudgmentDraft):
+    """批量判断中一篇候选的草稿，以稳定 ID 关联输入。"""
+
+    candidate_id: str = Field(min_length=1)
+
+
+class JudgmentBatchDraft(BaseModel):
+    """一次 LangChain 调用返回的逐候选独立判断。"""
+
+    judgments: list[CandidateJudgmentDraft]
 
 
 class CriterionJudgment(BaseModel):
@@ -330,14 +354,15 @@ class RelevanceJudgment(BaseModel):
     rubric_version: str
     prompt_bundle_version: str
     criteria: list[CriterionJudgment]
+    relevance_score: float = Field(ge=0, le=1)
     verdict: RelevanceVerdict
 
 
 class RankBreakdown(BaseModel):
     """一篇参考论文的可重放排序组成。"""
 
-    formula_version: Literal["academic-survey-ranking-v1"] = (
-        "academic-survey-ranking-v1"
+    formula_version: Literal["academic-survey-ranking-v2"] = (
+        "academic-survey-ranking-v2"
     )
     raw_rrf: float
     citation_count: int | None = None

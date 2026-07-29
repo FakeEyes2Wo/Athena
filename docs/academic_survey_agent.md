@@ -20,7 +20,7 @@ Scheduler 形成 SurveyRequest
         │
         ▼
 Academic Survey Agent
-  理解主题 → 多源检索 → 去重 → 相关性判断 → 排序
+  理解主题 → 高召回查询改写 → 多源检索 → 去重 → 批量相关性判断 → 排序
         │
         ├── SurveyCorpus：供审查、复现和离线评测
         │
@@ -49,13 +49,13 @@ Agent 接收一个已经写入共享 ArtifactStore 的 `SurveyRequest`。Athena 
 | 信息 | 含义 | 协作方注意事项 |
 | --- | --- | --- |
 | `topic` | 要调查的研究主题 | 必填；应表达研究问题，而不是检索 API 语法 |
-| `constraints` | 年份、venue、语言、领域等硬约束 | 只有能确定执行的约束才能放入这里 |
+| `constraints` | 精确发布日期、年份、venue、语言、领域等硬约束 | 只有能确定执行的约束才能放入这里 |
 | `mode` | `fast` 或 `diligent` | 决定固定预算；模型不能自行扩张预算 |
 | `task_metadata_ref` / `objective_ref` | 原任务上下文 | 只作溯源，不替代 topic |
 | `unresolved_constraints` | 尚不能确定执行的用户要求 | 不得静默猜测；结果会标记为 partial 并提醒审查者 |
 | `paper_source_policy` | 下游取源策略和最终论文数上限 | 由编排层决定，不由相关性模型生成 |
 
-年份区间必须有效。显式给出的 venue、年份或语言约束遇到元数据缺失时，候选会进入 `constraint_unknown`，不会因为“可能符合”而进入最终集合。
+日期和年份区间必须有效。显式给出的发布日期、venue、年份或语言约束遇到元数据缺失时，候选会进入 `constraint_unknown`，不会因为“可能符合”而进入最终集合。
 
 ### 两种预算
 
@@ -72,6 +72,7 @@ Agent 接收一个已经写入共享 ArtifactStore 的 `SurveyRequest`。Athena 
 | 最终参考论文 | 20 | 50 |
 | 墙钟时间 | 180 秒 | 600 秒 |
 | 每轮检索 batch | 4 | 8 |
+| RefChain 后续阶段预留 | 30 秒 | 60 秒 |
 
 最终 handoff 数还会受到 `paper_source_policy.max_papers` 限制。这个限制只截断交付集合，不会让论文发现提前停止。
 
@@ -79,26 +80,30 @@ Agent 接收一个已经写入共享 ArtifactStore 的 `SurveyRequest`。Athena 
 
 一次运行由固定阶段组成。模型负责理解和判断，阶段顺序、预算、过滤和停止条件由确定性控制流负责。
 
-1. **理解研究问题。** 将主题拆成多个互补的 query family，并形成可逐项核验的相关性标准。
-2. **覆盖优先检索。** 在重复搜索同一视角前，优先执行尚未覆盖的 query family 和尚未探测的通道。
+1. **理解研究问题。** 形成一个宽口径核心判据，并把方法、应用、比较等不同方面拆成互补的 query family；综合调查会额外形成宽口径 survey/review/overview 查询，避免把多意图问题误解成全部条件同时成立。
+2. **按通道改写并覆盖优先检索。** 综合调查先执行专用综述查询；查询改写只保留当前检索方面，限制 arXiv 的多重 `AND`，并使用逐项字段前缀的有效语法；其后优先覆盖尚未执行的 query family 和通道。
 3. **深入结果页。** 四个正式通道都支持真实分页；仍有下一页的查询会保留到后续轮次。
 4. **合并真实身份。** 只使用 DOI、arXiv、Semantic Scholar、OpenAlex、PMID 或 PMC 等真实标识符合并；标题相似本身不会触发合并。
 5. **执行硬约束。** 明确不符合或缺少必要约束元数据的候选不会进入相关性判断后的交付集合。
-6. **逐项判断相关性。** 每个结论必须引用标题或摘要中的原文证据；无法提供有效证据时不能判为 relevant。
-7. **扩展一跳引用。** 对新发现的高相关论文做一次受限 RefChain；引用论文仍要经过相同的身份、约束和证据门槛。
+6. **批量判断相关性。** 一次结构化 LangChain 调用可以判断多篇论文，但每篇仍以稳定 ID 返回独立分数和标题/摘要原文证据；无法提供有效证据时不能判为 relevant。
+7. **跨源扩展一跳引用。** 对新发现的高相关论文做一次受限 RefChain；arXiv、DOI 或 PMID 身份可以交给支持引用检索的其他通道，引用论文仍要经过相同的身份、约束和证据门槛。RefChain 到达预留时间边界时停止，把剩余墙钟留给判断和交付。
 8. **补充检索视角。** Query Evolution 可以追加方法、应用、比较或局限等查询，但不会替换尚未执行或仍有下一页的查询。
-9. **确定性排序与交付。** 只在 relevant 候选中综合多列表命中、判据覆盖、影响力和时效性排序，再按 handoff 上限截断。
+9. **确定性排序与交付。** 只在 relevant 候选中按 SPAR 的 0.05 相关性分桶排序，同一桶优先引用量和年份；整批缺少引用量时以多查询命中和 RRF 作为回退，再按 handoff 上限截断。
 
-### 为什么 V2 更重视召回
+### 在 SPAR 基底上的召回改进
 
 旧调度会先把多个通道都分给第一个 query。若一轮只有四次检索，而第一个 query 恰好配置四个通道，其他 query family 可能一次都没有执行。这会得到很高的 precision，却系统性漏掉不同术语、方法或应用方向的论文。
 
-V2 从四个方面处理这个问题：
+Athena 保留 SPAR 的 query expansion、相关性分数、0.5 门槛、RefChain 和 relevance-first 排序，并从以下方面降低开放 API 环境下的漏检：
 
 - **先覆盖 query family，再利用高收益通道。** 同等预算下优先扩大主题视角，而不是反复确认同一视角。
 - **使用真实 cursor 分页。** 后续轮次可以进入结果长尾，不再重复第一页。
 - **保留活动查询。** 尚未执行、仍有下一页或新演化出的查询共同参与后续调度。
 - **分离 discovery 与 handoff。** 找够最终论文数不代表搜索已经充分；Agent 会继续运行到轮数、候选、判断、时间、饱和或无活动查询等边界。
+- **把多意图拆成检索覆盖而非 AND 门槛。** 一个宽核心判据负责准入，具体方面由互补查询覆盖；通道改写不会把所有方面重新拼成窄查询。
+- **优先执行宽口径综述查询。** survey intent 把 survey/review/overview 查询稳定放在首位，并避免会让 arXiv 查询卡住的分组字段语法。
+- **使用精确日期和跨源 RefChain。** 日期约束精确到日；已有 arXiv、DOI 或 PMID 身份可以转交支持引用的其他通道扩展，而不受首次命中通道限制。
+- **为引用候选判断预留时间。** RefChain 不能消耗完整墙钟预算，避免已经发现的候选因为来不及判断而全部降为 uncertain。
 
 通道收益仍会参与后续分配，但只能在覆盖要求之后起作用。这样保留了 SPAR 对有效通道的利用能力，同时降低早期视角偏差。
 
@@ -123,9 +128,11 @@ V2 从四个方面处理这个问题：
 
 1. 至少有一个真实、可供下游解析的论文标识符；
 2. 不违反年份、venue、语言等硬约束；
-3. 所有 required relevance criteria 都有有效证据支持；
+3. 核心 required criterion 有有效证据支持，且 SPAR 整体相关性分数不低于 0.5；
 4. 跨通道合并后身份没有已知冲突；
 5. 排名后位于本次 handoff 上限内。
+
+Query Understanding 只保留一个宽口径的 required criterion，用于验证论文是否实质涉及整体研究请求；方法、应用、比较和实验等细分方面由 query family 表达，不再成为额外准入门槛。在核心证据有效的前提下，Agent 复用 SPAR 的整体相关性分数和 0.5 阈值决定最终 verdict。最终排序先按相关性分数分桶，再使用引用量和年份；若整批都没有引用量，则以独立查询命中数和 RRF 回退。这样既避免把多意图检索错误地解释成 AND 查询，也避免元数据通道降级时让“年份”成为唯一 tie-break。
 
 三个容易混淆的概念应分开看：
 
@@ -212,7 +219,7 @@ Agent 的顶层结果是 `AcademicSurveyResult`。它只包含少量状态和 ar
 
 ### 运维和凭据
 
-组合根可以向默认通道工厂注入联系邮箱、Semantic Scholar API key 和 PubMed API key。凭据不能进入请求、checkpoint、事件或 artifact。
+组合根可以向默认通道工厂注入联系邮箱、OpenAlex API key、Semantic Scholar API key 和 PubMed API key。凭据不能进入请求、checkpoint、事件或 artifact。
 
 建议生产环境提供持久化 cache 和 LangGraph checkpointer。默认内存 cache 适合单进程运行和测试，但进程退出后不能复用；checkpoint 的命名空间由 thread 与 turn 稳定导出，便于显式恢复。
 
@@ -277,7 +284,7 @@ GEPA 调用同一条生产调查流程，但不进入生产 Session。它只能�
 
 ## 验证证据
 
-截至 2026-07-28，V2 已通过固定 A/B、真实外部服务运行和完整回归。
+截至 2026-07-29，当前版本已通过固定 A/B、真实外部服务运行和完整回归。
 
 ### 固定同预算 A/B
 
@@ -315,9 +322,25 @@ V2 live corpus、stats 和 validation report 的内容引用分别为：
 
 这些引用需要在执行验证时使用的 ArtifactStore 中解析。123 个 live artifacts 全部通过内容哈希校验，API key 匹配数为 0。
 
+### SPARBench 真实测试（无 GEPA）
+
+测试使用 SPAR 公开的 SPARBench、样本 `published_time` 当日作为精确发布日期上限、官方标题规范化集合语义、`gpt-5.6` 与 diligent 预算。运行时从 `secrets/llmapikey.txt` 注入模型配置；GEPA 未导入或执行。
+
+| 评测 | 方法 | F1 | Recall | Precision | 状态 |
+| --- | --- | ---: | ---: | ---: | --- |
+| SPARBench 50 题 | SPAR 论文报告 | 0.3015 | 0.3103 | 0.2932 | 论文结果 |
+| `sparbench_000` | Athena，无 GEPA | 0.3000 | 0.3000 | 0.3000 | partial；OpenAlex/S2 429 |
+| `sparbench_003`–`005` | Athena，无 GEPA | 0.0000 | 0.0000 | 0.0000 | 0 complete / 2 partial / 1 failed |
+
+`sparbench_000` 的 Top-10 命中 3 篇 gold，证明当前 Agent 可以在真实端到端运行中达到 SPAR 报告的约 0.30 单题尺度；该单题结果不是 50 题 macro 复现，不能代替完整基准。此运行耗时 383.64 秒，执行 41 次 LLM 调用、处理 217 条 observations 与 121 篇唯一候选，244 个 artifacts 的内容哈希失败数和 API key 匹配数都为 0。
+
+held-out 运行如实保留了失败：`sparbench_003` 在 Query Understanding 阶段因模型 API 超时而 failed；`sparbench_004` 和 `005` 为 partial 且没有 gold 进入最终集合。进一步针对 case 4 的轨迹显示，OpenAlex/Semantic Scholar 429 会把综述查询推迟到 arXiv；RefChain 曾发现 gold `2312.03014` 与 `2302.10480`，但一次扩展 335 篇引用并耗尽墙钟，新增候选来不及判断。
+
+针对该轨迹，当前实现将 survey/review/overview 查询稳定提升到首位、禁止会拖慢 arXiv 的分组字段语法、只在通道调用成功后计入 query coverage，并允许失败 query 优先走备用通道；RefChain 同时为后续判断预留 30/60 秒。专项和全仓回归已经覆盖这些规则。2026-07-29 14:41（Asia/Shanghai）后续真实复测时，arXiv、OpenAlex 与 Semantic Scholar 对当前共享出口同时返回 429，连 arXiv 单篇 `id_list` 健康检查也失败，因此没有把该基础设施窗口记作新的质量分数。
+
 ### 自动回归
 
-完整测试结果为 362 passed、25 subtests passed；同时通过源码编译、Black、依赖一致性和 diff whitespace 检查。测试中的论文服务全部使用离线 fixture，只有单独标记的真实验收流程会访问外部服务。
+完整测试结果为 377 passed、25 subtests passed；Academic Survey 针对性测试为 57 passed，benchmark runner 自检通过。测试中的论文服务全部使用离线 fixture，只有单独执行的真实验收流程会访问外部服务。
 
 ## 当前限制与后续协作点
 
