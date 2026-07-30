@@ -56,7 +56,7 @@ class HFModelSearchTool(BaseTool):
             "required": ["task_type", "modality"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,
+        concurrency_safe=True,  # 只读搜索，可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
@@ -121,7 +121,7 @@ class HFModelDownloadTool(BaseTool):
             "required": ["hf_model_id", "output_dir"],
             "additionalProperties": False,
         },
-        concurrency_safe=False,
+        concurrency_safe=False,  # 下载写入文件系统，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:

@@ -105,7 +105,7 @@ class KaggleDiscussionSearchTool(BaseTool):
             "required": ["competition_url"],
             "additionalProperties": False,
         },
-        concurrency_safe=False,
+        concurrency_safe=False,  # 外部 HTTP 调用，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:

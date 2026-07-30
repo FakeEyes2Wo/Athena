@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from athena.core.tool_types import ToolContext
-from athena.tools.hf_dataset import HFDatasetSearchTool
+from athena.tools.hf_dataset import HFDatasetDownloadTool, HFDatasetSearchTool
 from athena.tools import hf_dataset as hf_mod
 
 
@@ -66,3 +66,26 @@ async def test_dataset_search_empty_results(mock_hf_api):
     assert result.success is True
     assert len(result.data["datasets"]) == 0
     assert "suggestion" in result.data
+
+
+# ── HFDatasetDownloadTool ──
+
+
+@pytest.mark.asyncio
+async def test_dataset_download_returns_local_path():
+    """snapshot_download 被 mock 后返回固定路径，验证字段完整。"""
+    fake_path = "/tmp/mocked_datasets/user/titanic-similar"
+    with patch("athena.tools.hf_dataset.snapshot_download", return_value=fake_path):
+        tool = HFDatasetDownloadTool()
+        ctx = ToolContext("test", "call-dl-ds", AsyncMock(), AsyncMock())
+
+        result = await tool.ainvoke(
+            ctx,
+            hf_dataset_id="user/titanic-similar",
+            output_dir="/tmp/mocked_datasets",
+        )
+
+    assert result.success is True
+    assert result.data["dataset_id"] == "user/titanic-similar"
+    assert result.data["local_path"] == fake_path
+    assert result.data["status"] == "downloaded"

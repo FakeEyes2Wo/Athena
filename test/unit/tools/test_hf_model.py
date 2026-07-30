@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from athena.core.tool_types import ToolContext
-from athena.tools.hf_model import HFModelSearchTool
+from athena.tools.hf_model import HFModelDownloadTool, HFModelSearchTool
 from athena.tools import hf_model as hf_mod
 
 
@@ -63,3 +63,26 @@ async def test_model_search_empty_is_ok(mock_hf_api):
     assert result.success is True
     assert len(result.data["models"]) == 0
     assert "suggestion" in result.data
+
+
+# ── HFModelDownloadTool ──
+
+
+@pytest.mark.asyncio
+async def test_model_download_returns_local_path():
+    """snapshot_download 被 mock 后返回固定路径，验证字段完整。"""
+    fake_path = "/tmp/mocked_models/google/vit-base-patch16-224"
+    with patch("athena.tools.hf_model.snapshot_download", return_value=fake_path):
+        tool = HFModelDownloadTool()
+        ctx = ToolContext("test", "call-dl-model", AsyncMock(), AsyncMock())
+
+        result = await tool.ainvoke(
+            ctx,
+            hf_model_id="google/vit-base-patch16-224",
+            output_dir="/tmp/mocked_models",
+        )
+
+    assert result.success is True
+    assert result.data["model_id"] == "google/vit-base-patch16-224"
+    assert result.data["model_path"] == fake_path
+    assert result.data["status"] == "downloaded"
