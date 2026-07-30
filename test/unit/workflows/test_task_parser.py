@@ -5,7 +5,9 @@
 """
 
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from athena.workflows.prepare.task_parser import parse_competition_info
 
@@ -46,12 +48,13 @@ MOCK_UNKNOWN_LLM_RESPONSE = json.dumps({
 # ---------------------------------------------------------------------------
 # 测试用例
 # ---------------------------------------------------------------------------
-@patch("athena.workflows.prepare.task_parser.single_turn_chat")
-def test_parse_basic_competition_info(mock_chat):
+@pytest.mark.asyncio
+@patch("athena.workflows.prepare.task_parser.single_turn_chat", new_callable=AsyncMock)
+async def test_parse_basic_competition_info(mock_chat):
     """验证标准 Kaggle 竞赛描述可以正确解析为结构化元数据。"""
     mock_chat.return_value = MOCK_KAGGLE_LLM_RESPONSE
 
-    result = parse_competition_info(
+    result = await parse_competition_info(
         MOCK_KAGGLE_TEXT, "https://kaggle.com/c/titanic"
     )
 
@@ -62,14 +65,32 @@ def test_parse_basic_competition_info(mock_chat):
     assert result.primary_metric.direction == "maximize"
 
 
-@patch("athena.workflows.prepare.task_parser.single_turn_chat")
-def test_parse_handles_unknown_fields(mock_chat):
+@pytest.mark.asyncio
+@patch("athena.workflows.prepare.task_parser.single_turn_chat", new_callable=AsyncMock)
+async def test_parse_handles_unknown_fields(mock_chat):
     """验证信息不足时仍能返回合法的结构化结果。"""
     mock_chat.return_value = MOCK_UNKNOWN_LLM_RESPONSE
 
-    result = parse_competition_info(
+    result = await parse_competition_info(
         "Some competition with no details.", "https://example.com"
     )
 
     assert isinstance(result.task_type, str) and len(result.task_type) > 0
     assert isinstance(result.primary_metric.name, str)
+
+
+@pytest.mark.asyncio
+@patch("athena.workflows.prepare.task_parser.single_turn_chat", new_callable=AsyncMock)
+async def test_parse_handles_invalid_json(mock_chat):
+    """验证 LLM 返回非 JSON 时回退到默认值，不会抛出异常。"""
+    mock_chat.return_value = "not a valid json {{{"
+
+    result = await parse_competition_info(
+        "Some text", "https://example.com"
+    )
+
+    assert result.task_type == "other"
+    assert result.data_type == "other"
+    assert result.target_vars == []
+    assert result.primary_metric.name == "unknown"
+    assert result.primary_metric.direction == "maximize"

@@ -1,13 +1,16 @@
 """将原始比赛描述文本解析为结构化的 TaskMetaData。
 
 通过 LLM 调用从非结构化比赛文本中提取任务类型、数据模态、目标变量、
-主要指标和约束条件。
+主要指标和约束条件。LLM 解析失败时回退为默认值。
 """
 
 import json
+import logging
 
 from athena.core.schemas import MetricSpec, TaskMetaData
 from athena.utils.single_turn_chat import single_turn_chat
+
+logger = logging.getLogger(__name__)
 
 # 系统提示词：让 LLM 从原始比赛描述中提取结构化字段
 _PARSE_SYSTEM_PROMPT = """\
@@ -32,8 +35,10 @@ primary_metric_name="unknown", primary_metric_direction="maximize".
 """
 
 
-def parse_competition_info(raw_text: str, source_url: str) -> TaskMetaData:
-    """通过 LLM 将比赛描述文本解析为 TaskMetaData。
+async def parse_competition_info(raw_text: str, source_url: str) -> TaskMetaData:
+    """通过 LLM 将比赛描述文本解析为 TaskMetaData（异步）。
+
+    LLM 返回非 JSON 或 JSON 解析失败时回退为默认值，不会抛出异常。
 
     Args:
         raw_text: 抓取的比赛描述或 markdown 内容。
@@ -46,12 +51,17 @@ def parse_competition_info(raw_text: str, source_url: str) -> TaskMetaData:
         f"Competition URL: {source_url}\n\n"
         f"Competition description:\n{raw_text}"
     )
-    result = single_turn_chat(
+    result = await single_turn_chat(
         system_prompt=_PARSE_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         response_format={"type": "json_object"},
     )
-    data = json.loads(result)
+
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("LLM 返回非 JSON 响应，回退到默认值: %s", exc)
+        data = {}
 
     return TaskMetaData(
         task_type=data.get("task_type", "other"),
