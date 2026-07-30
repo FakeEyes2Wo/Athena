@@ -1,9 +1,7 @@
-"""TaskUnderstandAgent -- Kaggle competition agent entry point.
+"""TaskUnderstandAgent —— Kaggle 竞赛智能体入口。
 
-This Agent is the single entry point for the competition workflow. It holds a
-ToolRegistry containing all competition-related tools and uses a ReAct loop to
-autonomously decide tool-calling order, completing the full pipeline from
-competition research through submission.
+该 Agent 是竞赛流程的唯一入口。它持有所有竞赛相关工具的 ToolRegistry，
+通过 ReAct loop 自主决策工具调用顺序，完成从搜索到提交的完整 pipeline。
 """
 
 from typing import TYPE_CHECKING
@@ -11,23 +9,23 @@ from typing import TYPE_CHECKING
 from athena.core.agent.agent import Agent, AgentConfig, create_agent
 from athena.core.tool import ToolRegistry
 
-# Search and understanding layer (Task 4)
+# ── 搜索 & 理解层 (Task 4) ──
 from athena.tools.kaggle_search import (
     KaggleCompetitionSearchTool,
     KaggleDatasetDownloadTool,
     KaggleDiscussionSearchTool,
 )
 
-# Data acquisition layer -- HuggingFace datasets (Task 5)
+# ── 数据获取层 —— HuggingFace 数据集 (Task 5) ──
 from athena.tools.hf_dataset import HFDatasetDownloadTool, HFDatasetSearchTool
 
-# Data acquisition layer -- HuggingFace models (Task 6)
+# ── 数据获取层 —— HuggingFace 模型 (Task 6) ──
 from athena.tools.hf_model import HFModelDownloadTool, HFModelSearchTool
 
-# Data preparation layer (Task 7)
+# ── 数据准备层 (Task 7) ──
 from athena.tools.data_prepare import DataAnalyzeTool, DataCleanCodeGenTool
 
-# Modeling and submission layer (Task 8)
+# ── 建模 & 提交层 (Task 8) ──
 from athena.tools.baseline_builder import (
     CodeExecuteTool,
     ProjectCodeGenTool,
@@ -83,46 +81,45 @@ def build_task_understand_agent(
     max_tokens: int = 8192,
     temperature: float = 0.1,
 ) -> Agent:
-    """Build a TaskUnderstandAgent with all competition tools registered.
+    """构建 TaskUnderstandAgent，注册所有竞赛工具。
 
     Args:
-        model: LLM model name (e.g. "deepseek-v4-flash").
-        client: OpenAI-compatible async client.
-        max_turns: Maximum turns for the agent loop (competition workflows
-                   need more turns).
-        max_tokens: Maximum tokens per LLM request.
-        temperature: LLM temperature parameter.
+        model: LLM 模型名称（如 "deepseek-v4-flash"）。
+        client: OpenAI 兼容的异步客户端。
+        max_turns: Agent loop 最大轮次（竞赛流程需要较多轮次）。
+        max_tokens: 每次 LLM 请求的最大 token 数。
+        temperature: LLM 温度参数。
 
     Returns:
-        A fully-configured Agent instance ready for ThreadRuntime.
+        配置完成的 Agent 实例，可直接用于 ThreadRuntime。
     """
-    # Build tool registry, sorted alphabetically for prompt-cache stability
+    # 构建工具注册表，按字母序排列以保证 prompt cache 稳定
     tools = ToolRegistry()
 
-    # Search and understanding layer (3 tools)
+    # ── 搜索 & 理解层 (3 工具) ──
     tools.register(KaggleCompetitionSearchTool())
     tools.register(KaggleDiscussionSearchTool())
     tools.register(KaggleDatasetDownloadTool())
 
-    # Data acquisition layer -- HF datasets (2 tools)
+    # ── 数据获取层 —— HF 数据集 (2 工具) ──
     tools.register(HFDatasetSearchTool())
     tools.register(HFDatasetDownloadTool())
 
-    # Data acquisition layer -- HF models (2 tools)
+    # ── 数据获取层 —— HF 模型 (2 工具) ──
     tools.register(HFModelSearchTool())
     tools.register(HFModelDownloadTool())
 
-    # Data preparation layer (2 tools)
+    # ── 数据准备层 (2 工具) ──
     tools.register(DataAnalyzeTool())
     tools.register(DataCleanCodeGenTool())
 
-    # Modeling and submission layer (4 tools)
+    # ── 建模 & 提交层 (4 工具) ──
     tools.register(SolutionDesignTool())
     tools.register(ProjectCodeGenTool())
     tools.register(CodeExecuteTool())
     tools.register(SubmissionBuildTool())
 
-    # Guard: all 13 tools must be registered
+    # 守卫：确保全部 13 个工具已注册
     assert len(tools) == 13, (
         f"Expected 13 competition tools, got {len(tools)}"
     )

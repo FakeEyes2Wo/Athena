@@ -83,7 +83,7 @@ class TestAgentConstruction:
         assert agent.config.max_turns == 30
         assert agent.config.max_tokens == 8192
         assert agent.config.temperature == 0.1
-        assert "TaskUnderstandAgent" in agent.config.system_prompt or True
+        assert "TaskUnderstandAgent" in agent.config.system_prompt
         assert "Kaggle" in agent.config.system_prompt
 
     def test_agent_config_custom_params(self):
