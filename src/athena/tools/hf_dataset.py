@@ -59,10 +59,14 @@ class HFDatasetSearchTool(BaseTool):
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         hf = _get_hf_api()
         keywords = input["task_keywords"]
+        modality = input.get("modality", "")
         n_results = input.get("n_results", 10)
 
+        # 将 modality 追加到搜索关键词中以过滤结果
+        search_query = f"{keywords} {modality}".strip()
+
         try:
-            results = list(hf.list_datasets(search=keywords, limit=n_results))
+            results = list(hf.list_datasets(search=search_query, limit=n_results))
         except Exception as exc:
             return ToolResult(success=False, error=f"HF dataset search failed: {exc}")
 
@@ -80,7 +84,7 @@ class HFDatasetSearchTool(BaseTool):
         suggestion = ""
         if not datasets:
             suggestion = (
-                f"No datasets found for '{keywords}'. "
+                f"No datasets found for '{search_query}'. "
                 f"Consider broadening keywords or removing modality filter."
             )
 

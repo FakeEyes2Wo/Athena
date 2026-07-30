@@ -48,6 +48,11 @@ async def test_dataset_search_returns_list(mock_hf_api):
     assert len(result.data["datasets"]) == 1
     assert result.data["datasets"][0]["id"] == "user/titanic-similar"
 
+    # 验证 modality 被追加到了搜索关键词中
+    api = mock_hf_api.return_value
+    call_kwargs = api.list_datasets.call_args.kwargs
+    assert "tabular" in call_kwargs["search"]
+
 
 @pytest.mark.asyncio
 async def test_dataset_search_empty_results(mock_hf_api):
