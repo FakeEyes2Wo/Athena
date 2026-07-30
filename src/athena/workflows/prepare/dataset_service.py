@@ -1,6 +1,73 @@
-"""待实现：数据集接入、原始副本与 ``DataCard`` 构建服务。
+"""Dataset ingestion service: immutable copy, fingerprint, DataCard.
 
-服务在任何清洗、抽样或特征处理前保存不可变原始数据副本，计算内容指纹，并产出
-schema 与轻量 profile artifact。数据切分必须另存为不可变 split manifest；服务
-只管理数据事实和引用，不把完整表格送入 Agent 上下文。
+Saves an immutable raw-data copy before any cleaning, sampling, or feature
+engineering. Computes a SHA-256 content fingerprint and produces a schema
+artifact referenced from the returned DataCard.
 """
+
+import hashlib
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from athena.core.schemas import DataCard
+from athena.storage.artifact_store import ArtifactStore
+
+
+def _infer_schema(df: pd.DataFrame) -> dict:
+    """从 DataFrame 构建轻量级列级 schema 摘要。"""
+    columns = {}
+    for col_name in df.columns:
+        col = df[col_name]
+        columns[str(col_name)] = {
+            "dtype": str(col.dtype),
+            "null_count": int(col.isnull().sum()),
+            "unique_count": int(col.nunique()),
+        }
+    return {
+        "columns": columns,
+        "row_count": len(df),
+        "column_count": len(df.columns),
+    }
+
+
+async def create_data_card(dataset_path: str, store: ArtifactStore) -> DataCard:
+    """接入数据集：保存不可变原始副本，计算指纹，产出 schema artifact。
+
+    在清洗、抽样或特征工程之前保存原始数据。计算文件字节的 SHA-256 指纹，
+    将原始内容存入 ArtifactStore，并写入 schema 摘要 artifact。
+
+    Args:
+        dataset_path: CSV 或 Parquet 文件在磁盘上的路径。
+        store: 内容寻址持久化的 ArtifactStore。
+
+    Returns:
+        包含 dataset_ref（不可变原始副本）、fingerprint 和 schema_ref 的 DataCard。
+    """
+    raw_path = Path(dataset_path)
+    if not raw_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+
+    raw_bytes = raw_path.read_bytes()
+    fingerprint = hashlib.sha256(raw_bytes).hexdigest()
+
+    # 保存不可变原始副本到 artifact store
+    dataset_ref = await store.put_bytes(raw_bytes)
+
+    # 读取数据用于 schema 推断
+    if raw_path.suffix.lower() == ".parquet":
+        df = pd.read_parquet(raw_path)
+    else:
+        df = pd.read_csv(raw_path)
+
+    schema = _infer_schema(df)
+    schema_json = json.dumps(schema, ensure_ascii=False)
+    schema_ref = await store.put_text(schema_json)
+
+    return DataCard(
+        dataset_ref=dataset_ref,
+        fingerprint=fingerprint,
+        schema_ref=schema_ref,
+        split_manifest_ref=None,  # 原始数据无 split manifest
+    )
