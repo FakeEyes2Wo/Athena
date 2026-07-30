@@ -1,7 +1,12 @@
-"""待实现：需要独立上下文与工具权限的数据分析 Agent。
+"""DEPRECATED — 此模块已被 TaskUnderstandAgent 吸收。
 
-DataAgent 通过数据工具按需检查大型或宽表数据，提出并执行受控的清洗、缺失值处理、
-异常值处理和 EDA 步骤，检查处理效果，并把每列措施写入 ``feature_process.csv``。
-它不得把完整数据集直接塞入上下文，也不得覆盖 DatasetService 保存的原始副本；循环
-终止、清洗策略与工具协议仍待后续实现。
+DataAgent 的数据分析、清洗、EDA 能力已由以下工具替代：
+- athena.tools.data_prepare.DataAnalyzeTool
+- athena.tools.data_prepare.DataCleanCodeGenTool
+
+TaskUnderstandAgent 通过 ToolRegistry 持有这些工具，
+不再需要独立的 DataAgent 进程。
+
+如需数据分析能力，请使用上述工具或直接调用
+athena.workflows.prepare.data_analysis 中的工作流。
 """
