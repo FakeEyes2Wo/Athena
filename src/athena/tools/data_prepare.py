@@ -1,8 +1,7 @@
-"""Data preparation tools — EDA analysis and data cleaning code generation.
+"""数据准备工具 — EDA 分析和数据清洗代码生成。
 
-data_analyze: Perform exploratory data analysis on datasets, producing an EDA report.
-data_clean_code_gen: Generate a cleaning script based on an EDA report,
-    and execute it to produce cleaned data.
+data_analyze: 对数据集进行探索性数据分析，生成 EDA 报告。
+data_clean_code_gen: 基于 EDA 报告生成清洗脚本，产出 cleaned data DataCard。
 """
 
 import json
@@ -11,7 +10,9 @@ from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.utils.single_turn_chat import single_turn_chat
 
-# EDA system prompt: instruct the LLM to analyze dataset characteristics
+# ── 系统提示词 ──
+
+# EDA 系统提示词：让 LLM 分析数据集的各项特征
 _EDA_SYSTEM_PROMPT = """\
 You are a data analyst. Given a dataset schema summary, produce an
 Exploratory Data Analysis (EDA) report as JSON.
@@ -26,7 +27,7 @@ Output JSON with these fields:
 Be quantitative where possible. Note data quality issues that need cleaning.
 """
 
-# Cleaning code generation system prompt
+# 清洗代码生成提示词：让 LLM 基于 EDA 报告生成可运行的清洗脚本
 _CLEAN_SYSTEM_PROMPT = """\
 You are a data engineer. Given an EDA report, generate a Python cleaning
 script that:
@@ -41,8 +42,10 @@ should read data from INPUT_PATH, clean it, and write to OUTPUT_PATH.
 """
 
 
+# ── EDA 分析工具 ──
+
 class DataAnalyzeTool(BaseTool):
-    """Perform exploratory data analysis (EDA) on datasets."""
+    """对数据集进行探索性数据分析（EDA），生成 JSON 格式的 EDA 报告。"""
 
     spec = ToolSpec(
         name="data_analyze",
@@ -64,7 +67,7 @@ class DataAnalyzeTool(BaseTool):
             "required": ["data_card_refs"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,
+        concurrency_safe=True,  # 仅调用 LLM，无外部副作用，可安全并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
@@ -74,8 +77,8 @@ class DataAnalyzeTool(BaseTool):
                 success=False, error="At least one DataCard ref is required"
             )
 
-        # Build analysis prompt from DataCard schema info.
-        # In production, this would read schemas from ArtifactStore.
+        # 从 DataCard 中收集 schema 信息，构建分析 prompt
+        # 生产环境中应从 ArtifactStore 读取实际 schema
         schema_summaries = []
         for ref in refs:
             schema_summaries.append(f"Dataset ref: {ref}")
@@ -85,13 +88,14 @@ class DataAnalyzeTool(BaseTool):
             + "\n".join(schema_summaries)
         )
 
+        # 调用 LLM 生成 EDA 报告，要求 JSON 格式输出
         eda_result = await single_turn_chat(
             system_prompt=_EDA_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             response_format={"type": "json_object"},
         )
 
-        # Return the EDA report as parsed JSON
+        # EDA 报告作为解析后的 JSON artifact 返回
         return ToolResult(
             data={
                 "eda_report": json.loads(eda_result),
@@ -100,8 +104,10 @@ class DataAnalyzeTool(BaseTool):
         )
 
 
+# ── 数据清洗代码生成工具 ──
+
 class DataCleanCodeGenTool(BaseTool):
-    """Generate a data cleaning Python script based on an EDA report."""
+    """基于 EDA 报告生成数据清洗 Python 脚本，返回脚本内容和元信息。"""
 
     spec = ToolSpec(
         name="data_clean_code_gen",
@@ -126,11 +132,11 @@ class DataCleanCodeGenTool(BaseTool):
             "required": ["eda_report_ref", "data_card_refs"],
             "additionalProperties": False,
         },
-        concurrency_safe=False,
+        concurrency_safe=False,  # 生成脚本后可能执行写入文件系统，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        # Generate cleaning script based on EDA report using LLM
+        # 基于 EDA 报告用 LLM 生成清洗脚本
         eda_ref = input["eda_report_ref"]
         data_refs = input["data_card_refs"]
 
@@ -140,6 +146,7 @@ class DataCleanCodeGenTool(BaseTool):
             f"Generate a Python cleaning script for these datasets."
         )
 
+        # 调用 LLM 生成清洗代码，不要求 JSON（输出为 Python 脚本）
         clean_script = await single_turn_chat(
             system_prompt=_CLEAN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
