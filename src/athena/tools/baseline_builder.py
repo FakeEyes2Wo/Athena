@@ -1,9 +1,9 @@
-"""Baseline builder tools — solution design, code generation, execution, submission.
+"""基线构建器工具 — 方案设计、代码生成、沙箱执行、提交打包。
 
-solution_design: Design solution approach based on research, with rubric self-check.
-project_code_gen: Generate complete project code from a solution plan.
-code_execute: Execute code in a sandbox, capture logs and results.
-submission_build: Package predictions into competition submission format.
+solution_design: 基于调研结果设计方案，附带 rubric 自检清单。
+project_code_gen: 根据方案生成完整项目代码（model.py, dataset.py, train.py, infer.py, config）。
+code_execute: 在沙箱中执行代码，捕获日志和结果。
+submission_build: 按比赛格式打包预测结果。
 """
 
 import json
@@ -12,8 +12,9 @@ from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.utils.single_turn_chat import single_turn_chat
 
-# ── System prompts ──
+# ── 系统提示词 ──
 
+# 方案设计系统提示词：让 LLM 基于调研和分析设计竞赛方案，输出 JSON
 _SOLUTION_SYSTEM_PROMPT = """\
 You are an ML competition strategist. Given task metadata, EDA report,
 research summaries, and available models, design a solution approach.
@@ -29,6 +30,7 @@ The rubric must include at minimum: correctness, feasibility, and
 submission format compliance.
 """
 
+# 代码生成系统提示词：让 LLM 根据方案生成完整的可运行 Python 项目
 _CODE_GEN_SYSTEM_PROMPT = """\
 You are an ML engineer. Given a solution plan, generate a complete,
 runnable Python project with these files:
@@ -43,11 +45,11 @@ Output each file with its path and content clearly labeled.
 """
 
 
-# ── Solution Design Tool ──
+# ── 方案设计工具 ──
 
 
 class SolutionDesignTool(BaseTool):
-    """Design a competition solution approach based on research and EDA."""
+    """基于调研结果和数据分析设计竞赛方案，返回附带 rubric 自检清单的方案计划。"""
 
     spec = ToolSpec(
         name="solution_design",
@@ -81,12 +83,14 @@ class SolutionDesignTool(BaseTool):
             "required": ["task_metadata", "eda_report_ref", "research_refs", "model_candidates"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,
+        concurrency_safe=True,  # 仅调用 LLM，无外部副作用，可安全并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        # 将输入组装为 LLM user prompt
         user_prompt = json.dumps(input, ensure_ascii=False)
 
+        # 调用 LLM 生成方案设计，要求 JSON 格式输出
         result_text = await single_turn_chat(
             system_prompt=_SOLUTION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
@@ -95,7 +99,7 @@ class SolutionDesignTool(BaseTool):
 
         plan = json.loads(result_text)
 
-        # Validate rubric must exist
+        # 验证 rubric 必须存在 — 设计要求，缺失则返回失败
         if "rubric" not in plan or not plan["rubric"]:
             return ToolResult(
                 success=False,
@@ -107,11 +111,11 @@ class SolutionDesignTool(BaseTool):
         return ToolResult(data={"solution_plan": plan})
 
 
-# ── Project Code Gen Tool ──
+# ── 项目代码生成工具 ──
 
 
 class ProjectCodeGenTool(BaseTool):
-    """Generate complete project code from a solution plan."""
+    """根据方案设计生成完整的可运行 Python 项目代码。"""
 
     spec = ToolSpec(
         name="project_code_gen",
@@ -143,12 +147,14 @@ class ProjectCodeGenTool(BaseTool):
             "required": ["solution_plan_ref", "data_card_refs", "submission_format"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,
+        concurrency_safe=True,  # 仅调用 LLM，无外部副作用，可安全并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        # 将方案引用和配置组装为 LLM user prompt
         user_prompt = json.dumps(input, ensure_ascii=False)
 
+        # 调用 LLM 生成项目代码，不要求 JSON（输出为多文件代码）
         code_text = await single_turn_chat(
             system_prompt=_CODE_GEN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
@@ -163,11 +169,11 @@ class ProjectCodeGenTool(BaseTool):
         )
 
 
-# ── Code Execute Tool ──
+# ── 代码执行工具 ──
 
 
 class CodeExecuteTool(BaseTool):
-    """Execute code in sandbox (train or infer)."""
+    """在沙箱中执行训练或推理代码，捕获日志和输出路径。"""
 
     spec = ToolSpec(
         name="code_execute",
@@ -192,12 +198,12 @@ class CodeExecuteTool(BaseTool):
             "required": ["code_artifact_ref", "entry_point"],
             "additionalProperties": False,
         },
-        concurrency_safe=False,  # Exclusive sandbox, no parallelism
+        concurrency_safe=False,  # 独占沙箱，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        # TODO: Integrate athena.execution.sandbox_runtime for actual execution
-        # Currently a stub implementation
+        # TODO: 集成 athena.execution.sandbox_runtime 进行实际沙箱执行
+        # 当前为占位实现，返回固定状态供 Agent 流程串联验证
         entry_point = input["entry_point"]
 
         return ToolResult(
@@ -210,11 +216,11 @@ class CodeExecuteTool(BaseTool):
         )
 
 
-# ── Submission Build Tool ──
+# ── 提交打包工具 ──
 
 
 class SubmissionBuildTool(BaseTool):
-    """Package predictions into competition submission format."""
+    """按比赛要求格式将预测结果打包为 submission.csv。"""
 
     spec = ToolSpec(
         name="submission_build",
@@ -238,14 +244,14 @@ class SubmissionBuildTool(BaseTool):
             "required": ["predictions_path", "submission_format"],
             "additionalProperties": False,
         },
-        concurrency_safe=False,
+        concurrency_safe=False,  # 可能写入文件系统，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         predictions_path = input["predictions_path"]
         submission_format = input["submission_format"]
 
-        # LLM-driven formatting: if format doesn't match, LLM generates conversion code
+        # LLM 驱动格式化：如果格式不匹配，让 LLM 生成转换代码
         format_prompt = (
             f"Predictions file path: {predictions_path}\n"
             f"Required submission format: {submission_format}\n\n"
@@ -253,6 +259,7 @@ class SubmissionBuildTool(BaseTool):
             f"submission.csv file matching the required format."
         )
 
+        # 调用 LLM 生成格式转换脚本
         format_script = await single_turn_chat(
             system_prompt="You are a data formatting expert. Output only Python code.",
             user_prompt=format_prompt,
