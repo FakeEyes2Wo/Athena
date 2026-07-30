@@ -6,6 +6,7 @@ artifact referenced from the returned DataCard.
 """
 
 import hashlib
+import io
 import json
 from pathlib import Path
 
@@ -55,11 +56,12 @@ async def create_data_card(dataset_path: str, store: ArtifactStore) -> DataCard:
     # 保存不可变原始副本到 artifact store
     dataset_ref = await store.put_bytes(raw_bytes)
 
-    # 读取数据用于 schema 推断
+    # 从已读取的字节读取数据用于 schema 推断，避免二次磁盘 I/O
+    buf = io.BytesIO(raw_bytes)
     if raw_path.suffix.lower() == ".parquet":
-        df = pd.read_parquet(raw_path)
+        df = pd.read_parquet(buf)
     else:
-        df = pd.read_csv(raw_path)
+        df = pd.read_csv(buf)
 
     schema = _infer_schema(df)
     schema_json = json.dumps(schema, ensure_ascii=False)

@@ -42,6 +42,7 @@ async def test_create_data_card_idempotent(temp_store, sample_csv):
     card2 = await create_data_card(str(sample_csv), temp_store)
     assert card1.dataset_ref == card2.dataset_ref
     assert card1.fingerprint == card2.fingerprint
+    assert card1.schema_ref == card2.schema_ref
 
 
 @pytest.mark.asyncio
