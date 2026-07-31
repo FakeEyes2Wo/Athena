@@ -5,6 +5,7 @@ data_clean_code_gen: 基于 EDA 报告生成清洗脚本，产出 cleaned data D
 """
 
 import json
+from pathlib import Path
 
 from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
@@ -46,6 +47,10 @@ should read data from INPUT_PATH, clean it, and write to OUTPUT_PATH.
 
 class DataAnalyzeTool(BaseTool):
     """对数据集进行探索性数据分析（EDA），生成 JSON 格式的 EDA 报告。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，EDA 报告的落盘目录
+        self.output_dir = Path(work_root) / "data_analyze"
 
     spec = ToolSpec(
         name="data_analyze",
@@ -108,6 +113,10 @@ class DataAnalyzeTool(BaseTool):
 
 class DataCleanCodeGenTool(BaseTool):
     """基于 EDA 报告生成数据清洗 Python 脚本，返回脚本内容和元信息。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，清洗脚本的落盘目录
+        self.output_dir = Path(work_root) / "data_clean_code_gen"
 
     spec = ToolSpec(
         name="data_clean_code_gen",

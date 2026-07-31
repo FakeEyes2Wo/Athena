@@ -77,6 +77,7 @@ def build_task_understand_agent(
     model: str,
     client: "AsyncOpenAI | None" = None,
     *,
+    work_root: str = "work",  # 新增：产物输出根目录
     max_turns: int = 30,
     max_tokens: int = 8192,
     temperature: float = 0.1,
@@ -86,6 +87,7 @@ def build_task_understand_agent(
     Args:
         model: LLM 模型名称（如 "deepseek-v4-flash"）。
         client: OpenAI 兼容的异步客户端。
+        work_root: 工具产物输出根目录，每个工具在下方创建子目录。
         max_turns: Agent loop 最大轮次（竞赛流程需要较多轮次）。
         max_tokens: 每次 LLM 请求的最大 token 数。
         temperature: LLM 温度参数。
@@ -97,29 +99,29 @@ def build_task_understand_agent(
     tools = ToolRegistry()
 
     # ── 搜索 & 理解层 (3 工具) ──
-    tools.register(KaggleCompetitionSearchTool())
-    tools.register(KaggleDiscussionSearchTool())
-    tools.register(KaggleDatasetDownloadTool())
+    tools.register(KaggleCompetitionSearchTool(work_root=work_root))
+    tools.register(KaggleDiscussionSearchTool(work_root=work_root))
+    tools.register(KaggleDatasetDownloadTool(work_root=work_root))
 
     # ── 数据获取层 —— HF 数据集 (2 工具) ──
-    tools.register(HFDatasetSearchTool())
-    tools.register(HFDatasetDownloadTool())
+    tools.register(HFDatasetSearchTool(work_root=work_root))
+    tools.register(HFDatasetDownloadTool(work_root=work_root))
 
     # ── 数据获取层 —— HF 模型 (2 工具) ──
-    tools.register(HFModelSearchTool())
-    tools.register(HFModelDownloadTool())
+    tools.register(HFModelSearchTool(work_root=work_root))
+    tools.register(HFModelDownloadTool(work_root=work_root))
 
     # ── 数据准备层 (2 工具) ──
-    tools.register(DataAnalyzeTool())
-    tools.register(DataCleanCodeGenTool())
+    tools.register(DataAnalyzeTool(work_root=work_root))
+    tools.register(DataCleanCodeGenTool(work_root=work_root))
 
     # ── 建模 & 提交层 (4 工具) ──
-    tools.register(SolutionDesignTool())
-    tools.register(ProjectCodeGenTool())
-    tools.register(CodeExecuteTool())
-    tools.register(SubmissionBuildTool())
+    tools.register(SolutionDesignTool(work_root=work_root))
+    tools.register(ProjectCodeGenTool(work_root=work_root))
+    tools.register(CodeExecuteTool(work_root=work_root))
+    tools.register(SubmissionBuildTool(work_root=work_root))
 
-    # 守卫：确保全部 13 个工具已注册
+    # Guard：确保全部 13 个工具已注册
     assert len(tools) == 13, (
         f"Expected 13 competition tools, got {len(tools)}"
     )

@@ -26,6 +26,10 @@ def _get_hf_api() -> HfApi:
 class HFDatasetSearchTool(BaseTool):
     """在 HuggingFace Hub 上搜索与比赛任务相关的数据集。"""
 
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，搜索结果的落盘目录
+        self.output_dir = Path(work_root) / "hf_dataset_search"
+
     spec = ToolSpec(
         name="hf_dataset_search",
         description=(
@@ -111,6 +115,10 @@ class HFDatasetSearchTool(BaseTool):
 
 class HFDatasetDownloadTool(BaseTool):
     """从 HuggingFace Hub 下载数据集并保存到本地。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，下载数据的落盘目录
+        self.output_dir = Path(work_root) / "hf_dataset_download"
 
     spec = ToolSpec(
         name="hf_dataset_download",

@@ -5,6 +5,7 @@
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 from athena.core.tool import BaseTool
@@ -27,6 +28,10 @@ def _get_kaggle_mcp_client() -> Any:
 
 class KaggleCompetitionSearchTool(BaseTool):
     """搜索 Kaggle 比赛基本信息：描述、评价指标、数据格式、提交要求。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，比赛信息的落盘目录
+        self.output_dir = Path(work_root) / "kaggle_competition_search"
 
     spec = ToolSpec(
         name="kaggle_competition_search",
@@ -81,6 +86,10 @@ class KaggleCompetitionSearchTool(BaseTool):
 
 class KaggleDiscussionSearchTool(BaseTool):
     """搜索 Kaggle Discussion/Notebook 中的 Top 方案思路。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，讨论摘要的落盘目录
+        self.output_dir = Path(work_root) / "kaggle_discussion_search"
 
     spec = ToolSpec(
         name="kaggle_discussion_search",
@@ -142,6 +151,10 @@ class KaggleDiscussionSearchTool(BaseTool):
 
 class KaggleDatasetDownloadTool(BaseTool):
     """通过 Kaggle MCP 下载比赛数据集并生成 DataCard。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，下载数据的落盘目录
+        self.output_dir = Path(work_root) / "kaggle_dataset_download"
 
     spec = ToolSpec(
         name="kaggle_dataset_download",

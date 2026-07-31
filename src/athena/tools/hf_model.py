@@ -25,6 +25,10 @@ def _get_hf_api() -> HfApi:
 class HFModelSearchTool(BaseTool):
     """在 HuggingFace Hub 上搜索预训练模型。"""
 
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，搜索结果的落盘目录
+        self.output_dir = Path(work_root) / "hf_model_search"
+
     spec = ToolSpec(
         name="hf_model_search",
         description=(
@@ -99,6 +103,10 @@ class HFModelSearchTool(BaseTool):
 
 class HFModelDownloadTool(BaseTool):
     """从 HuggingFace Hub 下载预训练模型权重到本地。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，模型权重的落盘目录
+        self.output_dir = Path(work_root) / "hf_model_download"
 
     spec = ToolSpec(
         name="hf_model_download",

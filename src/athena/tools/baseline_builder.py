@@ -7,6 +7,7 @@ submission_build: 按比赛格式打包预测结果。
 """
 
 import json
+from pathlib import Path
 
 from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
@@ -50,6 +51,10 @@ Output each file with its path and content clearly labeled.
 
 class SolutionDesignTool(BaseTool):
     """基于调研结果和数据分析设计竞赛方案，返回附带 rubric 自检清单的方案计划。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，方案设计的落盘目录
+        self.output_dir = Path(work_root) / "solution_design"
 
     spec = ToolSpec(
         name="solution_design",
@@ -117,6 +122,10 @@ class SolutionDesignTool(BaseTool):
 class ProjectCodeGenTool(BaseTool):
     """根据方案设计生成完整的可运行 Python 项目代码。"""
 
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，项目代码的落盘目录
+        self.output_dir = Path(work_root) / "project_code_gen"
+
     spec = ToolSpec(
         name="project_code_gen",
         description=(
@@ -175,6 +184,10 @@ class ProjectCodeGenTool(BaseTool):
 class CodeExecuteTool(BaseTool):
     """在沙箱中执行训练或推理代码，捕获日志和输出路径。"""
 
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，执行日志的落盘目录
+        self.output_dir = Path(work_root) / "code_execute"
+
     spec = ToolSpec(
         name="code_execute",
         description=(
@@ -221,6 +234,10 @@ class CodeExecuteTool(BaseTool):
 
 class SubmissionBuildTool(BaseTool):
     """按比赛要求格式将预测结果打包为 submission.csv。"""
+
+    def __init__(self, work_root: str = "work") -> None:
+        # 构造器注入产物输出根目录，提交打包产物的落盘目录
+        self.output_dir = Path(work_root) / "submission_build"
 
     spec = ToolSpec(
         name="submission_build",
