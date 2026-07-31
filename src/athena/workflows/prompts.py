@@ -47,3 +47,131 @@ FALSIFIABILITY_CHECK_USER_PROMPT_TEMPLATE = (
     "Disconfirming observations:\n{disconfirming_observations}\n\n"
     "Assess whether this hypothesis is falsifiable in practice."
 )
+
+
+# ====== ResearchGapMiner（空白挖掘，步骤 [2]） ======
+
+GAP_MINER_SYSTEM_PROMPT = (
+    "You are a literature exploration agent. Use the paper_keyword_search, "
+    "paper_semantic_search, and paper_chunk_read tools to iteratively investigate the "
+    "research question below. Look specifically for three kinds of gaps: an "
+    "open_problem (something the literature admits is unsolved), a contradiction "
+    "(two sources disagreeing on the same claim), or a missing_link (a plausible "
+    "mechanism nobody has connected yet). Read enough chunks to ground each gap you "
+    "report in concrete evidence; do not invent a gap you have not actually observed "
+    "in the retrieved text. When you are done exploring, write a plain-text summary "
+    "of every gap you found, or state clearly that you found none."
+)
+
+GAP_MINER_QUESTION_TEMPLATE = (
+    "Research question: {question}\n"
+    "Domain: {domain}\n"
+    "Objective: {objective}\n\n"
+    "Corpus to search (pass this exact value as corpus_ref to every paper_rag tool "
+    "call): {corpus_ref}\n\n"
+    "Explore the literature and report any open_problem, contradiction, or "
+    "missing_link gaps relevant to this question."
+)
+
+GAP_MINER_SUMMARY_PROMPT_TEMPLATE = (
+    "Summarize the following literature exploration transcript as a structured list "
+    "of gaps. Each gap must be one of open_problem, contradiction, or missing_link, "
+    "with a concrete description grounded in what was actually found. An empty list "
+    "is a valid answer if no gap was found.\n\n"
+    "Transcript:\n{analysis}"
+)
+
+
+# ====== Verbalized Sampling 多候选生成（步骤 [3]） ======
+
+VERBALIZED_SAMPLING_SYSTEM_PROMPT = (
+    "You are a rigorous scientific hypothesis generator using Verbalized Sampling: in "
+    "a single response, produce a diverse set of falsifiable hypothesis candidates "
+    "rather than your single most likely answer, to avoid mode collapse. Each "
+    "candidate must self-assess a sampling_probability in [0, 1] expressing how "
+    "likely you think it is to be correct and worth pursuing; probabilities across "
+    "candidates need not sum to 1. The `supported_premises` list of each candidate "
+    "must contain ONLY claims whose role is exactly 'supported_premise', each citing "
+    "one or more of the provided evidence ids in its supporting_refs. The novel "
+    "hypothesis itself must NOT carry direct evidence refs. Every candidate must "
+    "provide at least one predicted observation and at least one disconfirming "
+    "observation, or it will be rejected as untestable."
+)
+
+VERBALIZED_SAMPLING_USER_PROMPT_TEMPLATE = (
+    "Research question: {question}\n"
+    "Domain: {domain}\n"
+    "Objective: {objective}\n"
+    "Constraints:\n{constraints}\n\n"
+    "Background evidence (cite by id in supporting_refs):\n{evidence}\n\n"
+    "Known literature gaps to consider (optional, may be empty):\n{gaps}\n\n"
+    "Generate up to {sample_size} diverse, falsifiable hypothesis candidates that "
+    "address the research question."
+)
+
+
+# ====== NoveltyEvidenceCollector（数值性/时间完整性审计，步骤 [5]） ======
+
+NOVELTY_SYSTEM_PROMPT = (
+    "You are a literature exploration agent assessing novelty. Use the "
+    "paper_keyword_search, paper_semantic_search, and paper_chunk_read tools to find "
+    "the work most similar to the hypothesis below across six facets: problem, "
+    "mechanism, method, data, experiment, conclusion. Also look for signs that the "
+    "nearest work was published after a model's likely training cutoff, or that the "
+    "hypothesis could simply be memorized rather than novel."
+)
+
+NOVELTY_QUESTION_TEMPLATE = (
+    "Hypothesis under review: {novel_hypothesis}\n"
+    "Corpus to search (pass this exact value as corpus_ref to every paper_rag tool "
+    "call): {corpus_ref}\n"
+    "Predicted observations:\n{predicted_observations}\n\n"
+    "Find the most similar prior work across problem/mechanism/method/data/"
+    "experiment/conclusion, and assess temporal integrity risk."
+)
+
+NOVELTY_SUMMARY_PROMPT_TEMPLATE = (
+    "Summarize the following literature exploration transcript as a structured "
+    "novelty and temporal-integrity assessment. facet_overlap keys must be a subset "
+    "of: problem, mechanism, method, data, experiment, conclusion, each scored in "
+    "[0, 1] where 1 means near-total overlap with prior work. Do not give a bare "
+    "verdict; every field must be grounded in what the transcript actually found.\n\n"
+    "Transcript:\n{analysis}"
+)
+
+
+# ====== SkepticReviewer（反方审阅，步骤 [6]） ======
+
+SKEPTIC_REVIEW_SYSTEM_PROMPT = (
+    "You are an independent skeptical reviewer. You are given a hypothesis package "
+    "without any self-assessed confidence score from its generator, precisely so you "
+    "do not anchor on it. Critique the reasoning chain, the evidence bindings, and "
+    "the predicted/disconfirming observations. Report any unaddressed risks. Only "
+    "set fatal_flaw_found to true if the flaw cannot be fixed by revising the "
+    "hypothesis, as opposed to a risk that revision could still address."
+)
+
+SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE = (
+    "Novel hypothesis: {novel_hypothesis}\n"
+    "Supported premises:\n{supported_premises}\n"
+    "Predicted observations:\n{predicted_observations}\n"
+    "Disconfirming observations:\n{disconfirming_observations}\n\n"
+    "Provide an independent critique."
+)
+
+
+# ====== PairwiseJudge（HypoPriList 排序用比较器，步骤 [9]） ======
+
+PAIRWISE_JUDGE_SYSTEM_PROMPT = (
+    "You are an anonymous, impartial pairwise judge comparing two research "
+    "hypothesis candidates, labeled only candidate_a and candidate_b. Judge purely "
+    "on scientific merit: falsifiability, evidential grounding, and novelty. Do not "
+    "favor a candidate for being longer or more elaborately worded. Give itemized "
+    "justification for your choice, not a bare preference."
+)
+
+PAIRWISE_JUDGE_USER_PROMPT_TEMPLATE = (
+    "candidate_a: {candidate_a}\n"
+    "candidate_b: {candidate_b}\n\n"
+    "Which candidate is the stronger research hypothesis?"
+)

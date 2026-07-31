@@ -1,34 +1,54 @@
-"""Idea Generation P0（pre_gate 闭环）的完整异步流水线：generate -> structural_check ->
-falsifiability_check -> gate。
+"""Idea Generation 的编排层：整条链路的唯一入口都在这一个文件里。
 
-架构变更说明：原实现用 langgraph 的 StateGraph 把这四步接成一张 CompiledGraph（响应此前
-review 反馈"不应该是分布式 CompiledGraph"）；随着共享依赖栈从 langchain/langgraph 切换到
-openai + pydantic-ai（见 pyproject.toml），继续依赖 langgraph 已不可行，四步改回顺序 await
-的纯异步调用。但仍然只集中在这一个文件里对外暴露唯一入口 run_pre_gate，不把编排逻辑散到
-多处调用点——这是对原 review 意见"整条链路应该是一个整体"的延续，只是承载手段从"图"换成了
-"一个函数里的顺序 await"。
+对外两个入口：
+- ``run_pre_gate``（P0 遗留）：单策略生成 -> structural_check -> falsifiability_check ->
+  pre_gate，只跑到步骤 [4]。保留它是因为 ``demo_pre_gate.py`` 与既有测试仍以它作为最小闭环
+  演示入口；P1+P2 的正式路径是 ``run_full_pipeline``。
+- ``run_full_pipeline``（P1+P2）：空白挖掘 [2] -> 多候选生成+去重 [3] -> pre_gate [4] ->
+  数值性审计 [5] -> 反方审阅 [6] -> 验证方案 [7] -> hard_gate [8] -> Elo 排序 [9]。
 
-P0 说明：不经过 app_server 的 ThreadManager/Agent 循环——那一套（core/agent/agent.py）是为
-工具调用型 ReAct Agent 设计的（多轮采样、工具执行、并发工具调用）；我们这里是单次结构化生成，
-不需要工具、不需要多轮对话，接入 ThreadManager/BaseAgent 属于过度设计，遵循 Occam's razor：
-只在真正需要独立上下文、工具权限、多轮推理或并发时才用 Agent。
+编排原则（延续此前 review 意见"整条链路应该是一个整体"）：生成/审计/门控不散落到多处调用
+点，而是集中在一个函数里顺序 await；原先用 langgraph StateGraph 承载，依赖栈切到
+openai + pydantic-ai 后改为纯异步顺序调用，承载手段变了但"一个整体"的约束不变。
+
+Agent 的使用边界遵循 Occam's razor：只有真正需要工具权限+多轮检索的步骤 [2]/[5] 走
+``core.agent.Agent``（见 evidence_retrieval.py）；[3]/[6]/[9] 这些单次结构化生成用
+``single_turn_chat``，不接 ThreadManager/BaseAgent。
 """
 
 import uuid
 
 from pydantic_ai.models import Model
 
-from athena.core.schemas import Hypothesis
+from athena.core.agent import Agent
+from athena.core.schemas import ArtifactRef, Hypothesis
+from athena.research.ranking import HypoPriList, PairwiseComparison, RankedCandidate
+from athena.storage.artifact_store import ArtifactStore
 from athena.utils.single_turn_chat import single_turn_chat
-from athena.workflows.prompts import IDEA_GENERATOR_SYSTEM_PROMPT, IDEA_GENERATOR_USER_PROMPT_TEMPLATE
-from athena.workflows.search.gatekeeper import pre_gate
+from athena.workflows.prompts import (
+    IDEA_GENERATOR_SYSTEM_PROMPT,
+    IDEA_GENERATOR_USER_PROMPT_TEMPLATE,
+    PAIRWISE_JUDGE_SYSTEM_PROMPT,
+    PAIRWISE_JUDGE_USER_PROMPT_TEMPLATE,
+)
+from athena.workflows.search.candidate_generation import (
+    MAX_VERBALIZED_SAMPLES,
+    deduplicate_candidates,
+    generate_candidates,
+)
+from athena.workflows.search.evidence_retrieval import collect_novelty_evidence, mine_research_gaps
+from athena.workflows.search.gatekeeper import hard_gate, pre_gate
 from athena.workflows.search.idea_schemas import (
     GateDecision,
+    GateVerdict,
     HypothesisDraft,
     HypothesisPackage,
+    PairwiseJudgment,
+    PipelineCandidateResult,
     ResearchProblemInput,
 )
 from athena.workflows.search.pre_gate_checks import falsifiability_check, structural_check
+from athena.workflows.search.review_and_validation import match_verifier, plan_validation, skeptic_review
 
 
 # ====== 常量 ======
@@ -104,3 +124,124 @@ async def run_pre_gate(
     falsifiability_report = await falsifiability_check(package, model=model)
     decision = pre_gate(structural_report, falsifiability_report)
     return node, package, decision
+
+
+# ====== PairwiseJudge（HypoPriList 排序用比较器，步骤 [9]） ======
+
+async def pairwise_compare(
+    package_a: HypothesisPackage, package_b: HypothesisPackage, *, model: Model | str | None = None,
+) -> PairwiseComparison:
+    """轻量 PairwiseJudge：匿名化两个候选、双向各跑一次，规避 position/verbosity/
+    self-preference 偏见（呼应设计文档第5节引用的 LLM-as-judge 偏见研究）。双向结果一致时
+    直接采信；不一致时以正向结果为准，但把分歧写进 rationale 供审计。
+
+    Example:
+        >>> comparison = await pairwise_compare(pkg_a, pkg_b, model=fake_model)  # doctest: +SKIP
+        >>> comparison.winner_id in (pkg_a.idea_id, pkg_b.idea_id)
+        True
+    """
+    forward_prompt = "\n\n".join([
+        PAIRWISE_JUDGE_SYSTEM_PROMPT,
+        PAIRWISE_JUDGE_USER_PROMPT_TEMPLATE.format(
+            candidate_a=package_a.novel_hypothesis, candidate_b=package_b.novel_hypothesis,
+        ),
+    ])
+    backward_prompt = "\n\n".join([
+        PAIRWISE_JUDGE_SYSTEM_PROMPT,
+        PAIRWISE_JUDGE_USER_PROMPT_TEMPLATE.format(
+            candidate_a=package_b.novel_hypothesis, candidate_b=package_a.novel_hypothesis,
+        ),
+    ])
+    forward = await single_turn_chat(forward_prompt, PairwiseJudgment, model=model)
+    backward = await single_turn_chat(backward_prompt, PairwiseJudgment, model=model)
+
+    forward_winner = package_a.idea_id if forward.winner == "candidate_a" else package_b.idea_id
+    # 反向调用里 candidate_a 对应 package_b，candidate_b 对应 package_a
+    backward_winner = package_b.idea_id if backward.winner == "candidate_a" else package_a.idea_id
+
+    if forward_winner == backward_winner:
+        winner_id = forward_winner
+        rationale = f"forward+backward agree: {forward.rationale} | {backward.rationale}"
+    else:
+        winner_id = forward_winner
+        rationale = (
+            f"forward/backward disagreement (possible position bias); forward picked "
+            f"{forward_winner} ({forward.rationale}), backward picked {backward_winner} "
+            f"({backward.rationale})"
+        )
+    return PairwiseComparison(
+        idea_id_a=package_a.idea_id, idea_id_b=package_b.idea_id, winner_id=winner_id, rationale=rationale,
+    )
+
+
+# ====== 全流程编排（P1+P2） ======
+
+async def run_full_pipeline(
+    problem: ResearchProblemInput,
+    *,
+    gap_miner_agent: Agent,
+    novelty_agent: Agent,
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+    sample_size: int = MAX_VERBALIZED_SAMPLES,
+    model: Model | str | None = None,
+) -> tuple[list[PipelineCandidateResult], list[RankedCandidate]]:
+    """P1+P2 全流程：[2]空白挖掘 → [3]多候选生成+去重 → 每个候选跑
+    [4]pre_gate(不合格直接筛掉,跳过[5]-[8]) → [5]数值性审计 → [6]反方审阅 → [7]验证方案 →
+    [8]hard_gate → [9]存活候选(PASS/EXPLORATORY) pairwise Elo 排序。
+
+    gap_miner_agent 与 novelty_agent 是两个独立的 core.agent.Agent 实例(各自配了不同的
+    system_prompt与各自的 agent.config.tools),分别用 evidence_retrieval.build_gap_miner_agent
+    与 build_novelty_agent 构造,以保证绑定的是 GAP_MINER_SYSTEM_PROMPT/NOVELTY_SYSTEM_PROMPT；
+    ResearchTree 交接(add_hypothesis)不在本轮范围内。
+
+    Example:
+        >>> results, ranking = await run_full_pipeline(problem, gap_miner_agent=agent1,
+        ...     novelty_agent=agent2, artifacts=store, corpus_ref=corpus_ref,
+        ...     model=fake_model)  # doctest: +SKIP
+    """
+    gaps = await mine_research_gaps(
+        problem, agent=gap_miner_agent, corpus_ref=corpus_ref, artifacts=artifacts, model=model,
+    )
+    candidates = await generate_candidates(problem, gaps, sample_size=sample_size, model=model)
+    candidates = deduplicate_candidates(candidates)
+
+    results: list[PipelineCandidateResult] = []
+    for package in candidates:
+        structural = structural_check(package)
+        falsifiability = await falsifiability_check(package, model=model)
+        decision = pre_gate(structural, falsifiability)
+
+        if decision.verdict != GateVerdict.PASS:
+            results.append(PipelineCandidateResult(
+                package=package, structural=structural, falsifiability=falsifiability, decision=decision,
+            ))
+            continue
+
+        novelty = await collect_novelty_evidence(
+            package, agent=novelty_agent, artifacts=artifacts, corpus_ref=corpus_ref, model=model,
+        )
+        skeptic = await skeptic_review(package, model=model)
+        verifier = match_verifier(package, problem.domain)
+        validation_plan = await plan_validation(package, verifier, artifacts=artifacts)
+        # validation_plan_ref 必须指向 ValidationPlan 本身；早期实现误用了
+        # estimated_cost_ref（那只是一小段成本估计 JSON），解析出来拿不到方案内容
+        plan_ref = await artifacts.put_text(validation_plan.model_dump_json())
+        package = package.model_copy(update={"validation_plan_ref": plan_ref})
+        decision = hard_gate(structural, falsifiability, novelty, skeptic, validation_plan)
+
+        results.append(PipelineCandidateResult(
+            package=package, structural=structural, falsifiability=falsifiability,
+            novelty=novelty, skeptic=skeptic, validation_plan=validation_plan, decision=decision,
+        ))
+
+    survivors = [r for r in results if r.decision.verdict in (GateVerdict.PASS, GateVerdict.EXPLORATORY)]
+    book = HypoPriList()
+    for survivor in survivors:
+        book.ensure_registered(survivor.package.idea_id)
+    for i in range(len(survivors)):
+        for j in range(i + 1, len(survivors)):
+            comparison = await pairwise_compare(survivors[i].package, survivors[j].package, model=model)
+            book.record_comparison(comparison)
+
+    return results, book.rank()

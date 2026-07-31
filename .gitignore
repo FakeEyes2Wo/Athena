@@ -61,3 +61,6 @@ XH-202619.pdf
 
 # Local planning artifacts (superpowers skill specs/plans), not shipped in repo
 /docs/superpowers/
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, review packages)
+/.superpowers/
