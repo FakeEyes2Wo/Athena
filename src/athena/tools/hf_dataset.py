@@ -62,34 +62,50 @@ class HFDatasetSearchTool(BaseTool):
         modality = input.get("modality", "")
         n_results = input.get("n_results", 10)
 
-        # 将 modality 追加到搜索关键词中以过滤结果
-        search_query = f"{keywords} {modality}".strip()
+        # 渐进式回退搜索：keywords+modality → keywords → 返回空
+        queries: list[str] = []
+        if modality:
+            queries.append(f"{keywords} {modality}".strip())
+        queries.append(keywords.strip())
 
-        try:
-            results = list(hf.list_datasets(search=search_query, limit=n_results))
-        except Exception as exc:
-            return ToolResult(success=False, error=f"HF dataset search failed: {exc}")
+        datasets: list[dict] = []
+        tried_queries: list[str] = []
 
-        datasets = []
-        for ds in results:
-            datasets.append({
-                "id": getattr(ds, "id", ""),
-                "description": getattr(ds, "description", "") or "",
-                "tags": getattr(ds, "tags", []) or [],
-                "downloads": getattr(ds, "downloads", 0) or 0,
-                "likes": getattr(ds, "likes", 0) or 0,
-            })
+        for search_query in queries:
+            tried_queries.append(search_query)
+            try:
+                results = list(hf.list_datasets(search=search_query, limit=n_results))
+            except Exception as exc:
+                return ToolResult(success=False, error=f"HF dataset search failed: {exc}")
+
+            for ds in results:
+                datasets.append({
+                    "id": getattr(ds, "id", ""),
+                    "description": getattr(ds, "description", "") or "",
+                    "tags": getattr(ds, "tags", []) or [],
+                    "downloads": getattr(ds, "downloads", 0) or 0,
+                    "likes": getattr(ds, "likes", 0) or 0,
+                })
+
+            if datasets:
+                break  # 当前查询有结果，遵守 n_results 限制，不继续回退
 
         # 空结果时给 LLM 搜索建议
         suggestion = ""
         if not datasets:
             suggestion = (
-                f"No datasets found for '{search_query}'. "
-                f"Consider broadening keywords or removing modality filter."
+                f"No datasets found for {tried_queries}. "
+                f"Consider broader keywords or a different task description."
             )
 
         return ToolResult(
-            data={"datasets": datasets, "count": len(datasets), "suggestion": suggestion}
+            data={
+                "datasets": datasets,
+                "count": len(datasets),
+                "search_query_used": tried_queries[-1],
+                "fallback_chain": tried_queries,
+                "suggestion": suggestion,
+            }
         )
 
 
