@@ -3,19 +3,23 @@
 使用真实 LLM API + HuggingFace Hub 在 Titanic 竞赛上测试
 TaskUnderstandAgent 的完整 pipeline。
 
+所有工具在 execute() 阶段直接将产物写入 {work_dir}/{tool_name}/ 子目录，
+不再依赖对话历史提取。
+
 用法::
 
     # 默认运行（seeded 模式，绕过 Kaggle stub）
-    python taskunderstand_agent_demo.py
+    python demo_taskunderstand_agent.py
 
+    # 后面的先不要尝试，没测试过
     # 完全自主 ReAct 模式
-    python taskunderstand_agent_demo.py --mode auto
+    python demo_taskunderstand_agent.py --mode auto
 
     # 使用国内 HF 镜像（默认启用，无需手动指定）
-   python taskunderstand_agent_demo.py --hf-endpoint https://hf-mirror.com
+    python demo_taskunderstand_agent.py --hf-endpoint https://hf-mirror.com
 
     # 其他参数
-    python taskunderstand_agent_demo.py --max-turns 10 --competition "titanic"
+    python demo_taskunderstand_agent.py --max-turns 10 --competition "titanic"
 """
 
 from __future__ import annotations
@@ -27,7 +31,6 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -75,31 +78,24 @@ Here is the competition metadata (ALREADY FETCHED — do NOT call any Kaggle too
 CRITICAL RULES (follow strictly to avoid wasting turns on unavailable tools):
 1. DO NOT call kaggle_competition_search, kaggle_discussion_search, or
    kaggle_dataset_download — these are NOT available yet.
-2. DO NOT call code_execute — the sandbox is not ready. Skip training/inference.
-3. USE THESE AVAILABLE TOOLS (they work via LLM):
-   - hf_dataset_search / hf_dataset_download: search/download HuggingFace datasets
-   - hf_model_search / hf_model_download: search/download HuggingFace models
-   - data_analyze: generate an EDA report from the competition metadata
-   - data_clean_code_gen: generate a data cleaning script
-   - solution_design: design a solution plan with rubric
-   - project_code_gen: generate complete project code
-   - submission_build: build submission.csv
+2. DO NOT call code_execute — the sandbox is not ready. Skip training/inference
 
-4. WORKING DIRECTORY: {work_dir}
-   - ALL hf_dataset_download calls MUST use output_dir="{work_dir}/datasets"
-   - ALL hf_model_download calls MUST use output_dir="{work_dir}/models"
-   - ALL generated code MUST reference data paths under "{work_dir}"
+EXECUTION STRATEGY:
+- acquire data first, then analyze, then design, then code.
+- Do NOT batch tools from different phases in the same turn. For example,
+  do not call data_analyze together with hf_dataset_search — wait until
+  you know whether data was found and downloaded.
+- After each phase, review the results before deciding the next step.
+  If a data search returns nothing, you may still proceed with what you
+  have, but do not fabricate references to non-existent data.
 
-5. START by calling hf_dataset_search, hf_model_search, and data_analyze
-   in parallel, then proceed through the pipeline based on available results.
 """
 
 
-def _build_seeded_prompt(work_dir: str) -> str:
-    """构建 seeded 模式提示词，注入工作目录路径。"""
+def _build_seeded_prompt() -> str:
+    """构建 seeded 模式提示词，预注入 Titanic 竞赛元数据。"""
     return _TITANIC_SEEDED_PROMPT.format(
         titanic_metadata=json.dumps(_TITANIC_TASK_METADATA, ensure_ascii=False, indent=2),
-        work_dir=work_dir,
     )
 
 # ── 工具函数 ────────────────────────────────────────────────────────────
@@ -202,7 +198,7 @@ async def run_diagnostics(
             "endpoint": hf_endpoint,
             "sample_count": len(ds),
         }
-        print(f"   ✅ HF Hub 可达 (endpoint={hf_endpoint}, latency={elapsed:.1f}s)", flush=True)
+        print(f"✅ HF Hub 可达 (endpoint={hf_endpoint}, latency={elapsed:.1f}s)", flush=True)
     except Exception as exc:
         results["hf_hub"] = {
             "ok": False,
@@ -241,19 +237,17 @@ def emit_factory(output_dir: Path):
 
         elif kind == "tool/begin":
             name = _parse_tool_name(event_ref)
-            print(f"\n{'─' * 60}")
-            print(f"🔧 [TOOL START] {name}")
-            print(f"{'─' * 60}", flush=True)
+            print("\n",'-'*20)
+            print(f"\n🔧 [TOOL START] {name}")
 
         elif kind == "tool/end":
             name = _parse_tool_name(event_ref)
-            print(f"   ✅ [TOOL OK] {name}")
-            print(f"{'─' * 60}\n", flush=True)
+            print(f"✅ [TOOL OK] {name}")
 
         elif kind == "tool/error":
             name = _parse_tool_name(event_ref)
-            print(f"   ❌ [TOOL FAIL] {name}")
-            print(f"{'─' * 60}\n", flush=True)
+            print(f"❌ [TOOL FAIL] {name}")
+            print('-'*20)
             tool_errors.append({"tool": name, "ref": event_ref, "ts": ts})
 
     return emit, log_fh, turn_texts, tool_errors
@@ -305,108 +299,6 @@ def dump_memory_diagnostic(ctx: AgentContext, output_dir: Path) -> Path:
     return diag_path
 
 
-def _save_generated_artifacts(ctx: AgentContext, work_dir: Path) -> list[Path]:
-    """从 Agent 对话记忆中提取生成产物，写入 work_dir/code/ 目录。
-
-    支持的产物类型：
-    - project_code_gen → 解析多文件代码块，按文件名保存
-    - data_clean_code_gen → 保存为 clean_script.py
-    - solution_design → 保存为 solution_plan.json
-    - submission_build → 保存为 format_script.py
-    """
-    import re
-
-    mem = ctx.memory
-    if mem is None:
-        return []
-
-    saved: list[Path] = []
-
-    for msg in mem.items:
-        for p in getattr(msg, "parts", []):
-            if getattr(p, "part_kind", None) != "tool-return":
-                continue
-            content = str(getattr(p, "content", ""))
-            tool_call_id = getattr(p, "tool_call_id", "")
-
-            # 找到对应的 tool-call 来确定工具名
-            tool_name = ""
-            for m2 in mem.items:
-                for p2 in getattr(m2, "parts", []):
-                    if getattr(p2, "part_kind", None) == "tool-call":
-                        if getattr(p2, "tool_call_id", "") == tool_call_id:
-                            tool_name = getattr(p2, "tool_name", "")
-                            break
-                if tool_name:
-                    break
-
-            if not tool_name:
-                continue
-
-            try:
-                data = json.loads(content) if not content.startswith("[ERROR") else None
-            except json.JSONDecodeError:
-                data = None
-
-            if tool_name == "project_code_gen" and data and "code" in data:
-                # 解析 LLM 生成的多文件代码块
-                code_text = str(data["code"])
-                _extract_code_files(code_text, work_dir / "code", saved)
-
-            elif tool_name == "data_clean_code_gen" and data and "clean_script" in data:
-                path = work_dir / "code" / "clean_script.py"
-                path.write_text(str(data["clean_script"]), encoding="utf-8")
-                saved.append(path)
-
-            elif tool_name == "solution_design" and data and "solution_plan" in data:
-                path = work_dir / "code" / "solution_plan.json"
-                path.write_text(
-                    json.dumps(data["solution_plan"], ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                saved.append(path)
-
-            elif tool_name == "submission_build" and data and "format_script" in data:
-                path = work_dir / "code" / "format_script.py"
-                path.write_text(str(data["format_script"]), encoding="utf-8")
-                saved.append(path)
-
-    return saved
-
-
-def _extract_code_files(code_text: str, out_dir: Path, saved: list[Path]) -> None:
-    """从 LLM 生成的代码文本中提取  ``## filename`` 或 ````py ... ``` 块。"""
-    import re
-
-    # 模式 1: ## filename.py 后跟 ``` 代码块
-    pattern1 = re.compile(
-        r'##\s*(\S+\.(?:py|yaml|yml))\s*\n\s*```(?:python|yaml)?\s*\n(.*?)```',
-        re.DOTALL,
-    )
-    for match in pattern1.finditer(code_text):
-        fname = match.group(1)
-        code = match.group(2).strip()
-        path = out_dir / fname
-        path.write_text(code + "\n", encoding="utf-8")
-        saved.append(path)
-
-    # 模式 2: 裸 ```python / ```yaml 代码块（无显式文件名时按序号命名）
-    if not saved:
-        pattern2 = re.compile(
-            r'```(?:python|yaml)?\s*\n(.*?)```',
-            re.DOTALL,
-        )
-        blocks = pattern2.findall(code_text)
-        for i, block in enumerate(blocks):
-            # 跳过太短的块（可能是内联示例）
-            if len(block.strip()) < 50:
-                continue
-            ext = "yaml" if "yaml" in code_text[: code_text.index(block)].rsplit("```", 1)[0] else "py"
-            path = out_dir / f"generated_{i + 1}.{ext}"
-            path.write_text(block.strip() + "\n", encoding="utf-8")
-            saved.append(path)
-
-
 # ── 主流程 ───────────────────────────────────────────────────────────────
 
 
@@ -439,11 +331,8 @@ async def run_demo(
     # 配置 HF 镜像端点（解决国内访问 huggingface.co 的问题）
     os.environ["HF_ENDPOINT"] = hf_endpoint
 
-    # 创建工作目录结构
+    # 创建工作目录
     work_dir.mkdir(parents=True, exist_ok=True)
-    (work_dir / "datasets").mkdir(exist_ok=True)
-    (work_dir / "models").mkdir(exist_ok=True)
-    (work_dir / "code").mkdir(exist_ok=True)
 
     print("=" * 70)
     print("🧪 TaskUnderstandAgent 真实任务测试")
@@ -480,16 +369,18 @@ async def run_demo(
         agent = build_task_understand_agent(
             model=model,
             client=client,
+            work_root=str(work_dir),
             max_turns=max_turns,
         )
-        print(f"✅ Agent 构建完成，已注册 {len(agent.config.tools)} 个工具\n")
+        print(f"✅ Agent 构建完成，已注册 {len(agent.config.tools)} 个工具（产物目录: {work_dir}）\n")
     except Exception as exc:
         print(f"\n❌ Agent 构建失败: {exc}")
         return 1
 
     # ── 4. 构建上下文和提示词 ──
     if mode == "seeded":
-        user_prompt = _build_seeded_prompt(str(work_dir))
+        user_prompt = _build_seeded_prompt()
+        print(f"these are user's propmt, print for debug:\n{user_prompt}")
     else:
         user_prompt = (
             f"I want to compete in the Kaggle competition: {competition}. "
@@ -565,10 +456,7 @@ async def run_demo(
             except json.JSONDecodeError:
                 pass
 
-    # ── 7. 从记忆中提取生成产物并落盘 ──
-    _save_generated_artifacts(ctx, work_dir)
-
-    # ── 8. 保存产物 ──
+    # ── 7. 保存产物 ──
     # 对话记忆诊断（包含工具错误的完整信息）
     memory_dump_path = dump_memory_diagnostic(ctx, output_dir)
 
@@ -598,7 +486,7 @@ async def run_demo(
     summary_path = output_dir / "run_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # ── 9. 控制台报告 ──
+    # ── 8. 控制台报告 ──
     print(f"\n📊 工具调用统计:")
     if tool_stats:
         for name, stats in sorted(tool_stats.items()):
@@ -608,18 +496,25 @@ async def run_demo(
     else:
         print("   (无工具调用记录)")
 
-    print(f"\n📁 工作目录产物: {work_dir}")
-    for category in ["datasets", "models", "code"]:
-        cat_dir = work_dir / category
-        if cat_dir.exists():
-            files = list(cat_dir.iterdir())
+    print(f"\n📁 工具产物目录: {work_dir}")
+    # 扫描各工具子目录（每个工具写入 {work_dir}/{tool_name}/）
+    if work_dir.exists():
+        for tool_dir in sorted(work_dir.iterdir()):
+            if not tool_dir.is_dir():
+                continue
+            files = list(tool_dir.iterdir())
             if files:
-                print(f"   {category}/: {len(files)} 个文件")
-                for f in sorted(files):
-                    size_kb = f.stat().st_size / 1024
-                    print(f"      - {f.name} ({size_kb:.1f} KB)")
+                print(f"   {tool_dir.name}/: {len(files)} 个文件")
+                for f in sorted(files)[:10]:  # 最多显示 10 个
+                    if f.is_file():
+                        size_kb = f.stat().st_size / 1024
+                        print(f"      - {f.name} ({size_kb:.1f} KB)")
+                    elif f.is_dir():
+                        print(f"      - {f.name}/ (目录)")
+                if len(files) > 10:
+                    print(f"      ... 及其他 {len(files) - 10} 个条目")
             else:
-                print(f"   {category}/: (空)")
+                print(f"   {tool_dir.name}/: (空)")
 
     print(f"\n📄 日志文件:")
     print(f"   运行摘要:   {summary_path}")

@@ -1,9 +1,10 @@
 """数据准备工具 — EDA 分析和数据清洗代码生成。
 
-data_analyze: 对数据集进行探索性数据分析，生成 EDA 报告。
+data_analyze: 扫描 work_root 下的数据目录，读取样本，交给 LLM 生成 EDA 报告。
 data_clean_code_gen: 基于 EDA 报告生成清洗脚本，产出 cleaned data DataCard。
 """
 
+import csv
 import json
 from pathlib import Path
 
@@ -11,21 +12,35 @@ from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.utils.single_turn_chat import single_turn_chat
 
+# ── 工具输出目录（扫描数据时排除，避免把生成产物当数据） ──
+
+_TOOL_OUTPUT_DIRS = {
+    "data_analyze", "data_clean_code_gen", "solution_design",
+    "project_code_gen", "code_execute", "submission_build",
+    "hf_dataset_search", "hf_model_search",
+    "kaggle_competition_search", "kaggle_discussion_search",
+}
+
 # ── 系统提示词 ──
 
-# EDA 系统提示词：让 LLM 分析数据集的各项特征
 _EDA_SYSTEM_PROMPT = """\
-You are a data analyst. Given a dataset schema summary, produce an
-Exploratory Data Analysis (EDA) report as JSON.
+You are a data analyst. Given a directory structure and data samples from
+downloaded datasets, produce an Exploratory Data Analysis (EDA) report as JSON.
+
+If samples show column names and values, describe their distributions.
+If only directory structure is available (no readable samples), describe what
+data appears to be present and note that deeper analysis requires loading.
 
 Output JSON with these fields:
-- distributions: per-column distribution description
-- missing_values: columns with missing values and counts
+- dataset_overview: what datasets were found (names, formats, sizes)
+- distributions: per-column distribution description (if columns visible)
+- missing_values: columns with missing values and counts (if detectable)
 - outliers: columns with outlier issues and description
 - correlations: key pairwise correlations (if tabular)
 - class_balance: target variable distribution (if classification)
 
 Be quantitative where possible. Note data quality issues that need cleaning.
+If samples are insufficient, state what additional information is needed.
 """
 
 # 清洗代码生成提示词：让 LLM 基于 EDA 报告生成可运行的清洗脚本
@@ -41,6 +56,112 @@ script that:
 Output the COMPLETE runnable Python script as a code block. The script
 should read data from INPUT_PATH, clean it, and write to OUTPUT_PATH.
 """
+
+
+# ── 目录扫描 & 样本读取辅助函数 ──
+
+
+def _read_sample(filepath: Path) -> str:
+    """Read a small sample from a data file for LLM analysis."""
+    suffix = filepath.suffix.lower()
+
+    try:
+        if suffix == ".csv":
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                reader = csv.reader(fh)
+                rows = []
+                for i, row in enumerate(reader):
+                    if i >= 6:  # header + 5 data rows
+                        break
+                    rows.append(row)
+                if rows:
+                    return (
+                        f"[CSV: {len(rows)} rows (header + {len(rows) - 1} data)]\n"
+                        + "\n".join(",".join(r) for r in rows)
+                    )
+                return "[CSV: empty file]"
+
+        elif suffix == ".jsonl":
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                lines = []
+                for i, line in enumerate(fh):
+                    if i >= 3:
+                        break
+                    lines.append(line.rstrip("\n")[:300])
+                return "[JSONL: first 3 lines]\n" + "\n".join(lines)
+
+        elif suffix == ".json":
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                data = json.loads(fh.read(4096))
+            if isinstance(data, dict):
+                keys = list(data.keys())[:30]
+                return f"[JSON object with keys]: {keys}"
+            elif isinstance(data, list):
+                preview = json.dumps(data[0], ensure_ascii=False)[:300] if data else "empty"
+                return f"[JSON array: {len(data)} items, first item]: {preview}"
+            return f"[JSON]: {json.dumps(data, ensure_ascii=False)[:500]}"
+
+        elif suffix in (".txt", ".md", ".py", ".yaml", ".yml", ".cfg", ".toml"):
+            with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+                return f"[text file, first 500 chars]:\n{fh.read(500)}"
+
+        elif suffix in (".parquet", ".arrow", ".feather"):
+            return f"[binary {suffix} file, {filepath.stat().st_size} bytes — schema not loaded]"
+
+        else:
+            return f"[{suffix or 'no ext'} file, {filepath.stat().st_size} bytes]"
+
+    except Exception as exc:
+        return f"[could not read {filepath.name}: {exc}]"
+
+
+def _scan_work_dir(work_root: Path, max_samples: int = 8) -> tuple[str, str]:
+    """Scan work_root for actual data files (1 level of sub-directories).
+
+    Returns:
+        (tree_summary, samples_text) — both empty strings if no data found.
+    """
+    lines: list[str] = []
+    samples: list[str] = []
+    sample_count = 0
+
+    # 收集一级子目录中非工具输出的数据目录
+    data_dirs: list[Path] = []
+    for child in sorted(work_root.iterdir()):
+        if child.is_dir() and child.name not in _TOOL_OUTPUT_DIRS:
+            data_dirs.append(child)
+
+    # 也检查 work_root 根目录下的裸文件
+    root_files = [f for f in sorted(work_root.iterdir()) if f.is_file()]
+    if root_files:
+        data_dirs.insert(0, work_root)
+
+    if not data_dirs:
+        return "", ""
+
+    for d in data_dirs:
+        files = [f for f in sorted(d.iterdir()) if f.is_file()]
+        # 跳过空目录（work_root 自身的空目录已在上面处理）
+        if not files and d != work_root:
+            continue
+
+        rel = d.name if d != work_root else "(root)"
+        dir_label = f"{rel}/ ({len(files)} files)"
+        lines.append(dir_label)
+
+        for f in files:
+            size_kb = f.stat().st_size / 1024
+            lines.append(f"  {f.name}  ({size_kb:.1f} KB)")
+
+            if sample_count < max_samples:
+                sample = _read_sample(f)
+                samples.append(f"--- {f.name} (in {rel}/) ---\n{sample}\n")
+                sample_count += 1
+
+    if not any(line.startswith("  ") for line in lines):
+        return "", ""
+
+    return "\n".join(lines), "\n".join(samples)
 
 
 # ── EDA 分析工具 ──
@@ -79,18 +200,34 @@ class DataAnalyzeTool(BaseTool):
         refs = input["data_card_refs"]
         if not refs:
             return ToolResult(
-                success=False, error="At least one DataCard ref is required"
+                success=False, data=None,
+                error="At least one DataCard ref is required",
             )
 
-        # 从 DataCard 中收集 schema 信息，构建分析 prompt
-        # 生产环境中应从 ArtifactStore 读取实际 schema
-        schema_summaries = []
-        for ref in refs:
-            schema_summaries.append(f"Dataset ref: {ref}")
+        work_root = self.output_dir.parent
 
+        # ── 扫描 work_root 下的实际数据文件 ──
+        tree_summary, samples_text = _scan_work_dir(work_root)
+        if not tree_summary:
+            return ToolResult(
+                success=False, data=None,
+                error=(
+                    "No data files found in the work directory. "
+                    "You MUST download a dataset first (e.g. via "
+                    "hf_dataset_download or kaggle_dataset_download) "
+                    "before calling data_analyze. "
+                    "Do NOT fabricate data_card_refs — only pass "
+                    "references to actual downloaded data."
+                ),
+            )
+
+        # ── 用真实数据构建分析 prompt ──
         user_prompt = (
-            "Analyze the following datasets and produce an EDA report:\n\n"
-            + "\n".join(schema_summaries)
+            "Analyze the following downloaded datasets and produce an EDA report.\n\n"
+            "## Directory Structure\n"
+            f"{tree_summary}\n\n"
+            "## Data Samples\n"
+            f"{samples_text or '(binary or unreadable files only — infer from file names and sizes)'}"
         )
 
         # 调用 LLM 生成 EDA 报告，要求 JSON 格式输出
@@ -154,9 +291,24 @@ class DataCleanCodeGenTool(BaseTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        # 基于 EDA 报告用 LLM 生成清洗脚本
         eda_ref = input["eda_report_ref"]
         data_refs = input["data_card_refs"]
+
+        # ── 校验 EDA 报告已生成 ──
+        work_root = self.output_dir.parent
+        eda_report_path = work_root / "data_analyze" / "eda_report.json"
+        if not eda_report_path.exists():
+            return ToolResult(
+                success=False, data=None,
+                error=(
+                    f"EDA report not found at {eda_report_path}. "
+                    f"You MUST run data_analyze successfully before calling "
+                    f"data_clean_code_gen. The EDA report provides the data "
+                    f"quality analysis needed to generate a meaningful cleaning script."
+                ),
+            )
+
+        # 基于 EDA 报告用 LLM 生成清洗脚本
 
         user_prompt = (
             f"EDA report reference: {eda_ref}\n"

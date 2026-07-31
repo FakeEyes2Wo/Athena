@@ -4,7 +4,9 @@ Uses huggingface_hub Python API to search for pre-trained models
 on HuggingFace Hub and download their weights locally.
 """
 
+import asyncio
 import json
+import os
 from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
@@ -17,9 +19,12 @@ _hf_api: HfApi | None = None
 
 
 def _get_hf_api() -> HfApi:
+    """获取 HfApi 客户端，显式读取 HF_ENDPOINT 环境变量。"""
     global _hf_api
     if _hf_api is None:
-        _hf_api = HfApi()
+        endpoint = os.environ.get("HF_ENDPOINT")
+        _hf_api = HfApi(endpoint=endpoint)
+        print(f"📡 HfApi initialized (endpoint={endpoint or 'default'})")
     return _hf_api
 
 
@@ -75,35 +80,46 @@ class HFModelSearchTool(BaseTool):
         if architecture_hint:
             search_terms = f"{architecture_hint} {search_terms}"
 
+        error_msg: str | None = None
         try:
-            results = list(hf.list_models(search=search_terms, limit=n_results))
+            results = await asyncio.to_thread(
+                lambda: list(hf.list_models(search=search_terms, limit=n_results))
+            )
         except Exception as exc:
-            return ToolResult(success=False, error=f"HF model search failed: {exc}")
+            error_msg = f"HF model search failed: {exc}"
+            results = []
 
         models = []
-        for m in results:
-            models.append({
-                "id": getattr(m, "modelId", getattr(m, "id", "")),
-                "pipeline_tag": getattr(m, "pipeline_tag", "") or "",
-                "tags": getattr(m, "tags", []) or [],
-                "downloads": getattr(m, "downloads", 0) or 0,
-                "likes": getattr(m, "likes", 0) or 0,
-            })
+        if not error_msg:
+            for m in results:
+                models.append({
+                    "id": getattr(m, "modelId", getattr(m, "id", "")),
+                    "pipeline_tag": getattr(m, "pipeline_tag", "") or "",
+                    "tags": getattr(m, "tags", []) or [],
+                    "downloads": getattr(m, "downloads", 0) or 0,
+                    "likes": getattr(m, "likes", 0) or 0,
+                })
 
         suggestion = ""
-        if not models:
+        if not models and not error_msg:
             suggestion = (
                 f"No models found for '{search_terms}'. "
                 f"Try a broader architecture hint or omit it."
             )
 
-        data = {"models": models, "count": len(models), "suggestion": suggestion}
+        data = {
+            "models": models, "count": len(models), "suggestion": suggestion,
+            "error": error_msg,
+        }
 
-        # 落盘 search_results.json
+        # 落盘 search_results.json（无论成功或失败）
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "search_results.json").write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+        if error_msg:
+            return ToolResult(success=False, data=None, error=error_msg)
 
         return ToolResult(data={**data, "output_dir": str(self.output_dir)})
 
@@ -147,10 +163,13 @@ class HFModelDownloadTool(BaseTool):
         Path(download_dir).mkdir(parents=True, exist_ok=True)
 
         try:
-            local_path = snapshot_download(repo_id=model_id, local_dir=download_dir)
+            local_path = await asyncio.to_thread(
+                lambda: snapshot_download(repo_id=model_id, local_dir=download_dir)
+            )
         except Exception as exc:
             return ToolResult(
                 success=False,
+                data=None,
                 error=f"HF model download failed for '{model_id}': {exc}",
             )
 

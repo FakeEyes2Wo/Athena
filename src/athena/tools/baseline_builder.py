@@ -174,6 +174,20 @@ class ProjectCodeGenTool(BaseTool):
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         from athena.tools._code_utils import parse_code_files
 
+        # ── 校验方案计划已生成 ──
+        work_root = self.output_dir.parent
+        plan_path = work_root / "solution_design" / "solution_plan.json"
+        if not plan_path.exists():
+            return ToolResult(
+                success=False, data=None,
+                error=(
+                    f"Solution plan not found at {plan_path}. "
+                    f"You MUST run solution_design successfully before calling "
+                    f"project_code_gen. Without a solution plan, the generated "
+                    f"code would have no design to follow."
+                ),
+            )
+
         # 将方案引用和配置组装为 LLM user prompt
         user_prompt = json.dumps(input, ensure_ascii=False)
 
@@ -312,6 +326,24 @@ class SubmissionBuildTool(BaseTool):
 
         predictions_path = input["predictions_path"]
         submission_format = input["submission_format"]
+
+        # ── 校验预测文件存在 ──
+        pred_path = Path(predictions_path)
+        work_root = self.output_dir.parent
+        # 尝试绝对路径，或相对 work_root 的路径
+        if not pred_path.exists():
+            pred_path = work_root / predictions_path
+        if not pred_path.exists():
+            return ToolResult(
+                success=False, data=None,
+                error=(
+                    f"Predictions file not found: '{predictions_path}'. "
+                    f"You MUST run training and inference (via code_execute) "
+                    f"to produce a predictions file before calling "
+                    f"submission_build. Without actual predictions, the "
+                    f"submission would be fabricated."
+                ),
+            )
 
         # LLM 驱动格式化：如果格式不匹配，让 LLM 生成转换代码
         format_prompt = (

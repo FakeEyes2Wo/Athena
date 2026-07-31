@@ -58,3 +58,8 @@ XH-202619.pdf
 
 # AI Agent Skills
 .claude/skills/
+
+
+# local demo work dir
+demo_work
+demo_output

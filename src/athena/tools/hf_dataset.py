@@ -5,7 +5,9 @@ HuggingFace Hub and download them locally. Downloaded datasets are
 ingested via dataset_service.create_data_card to produce DataCard.
 """
 
+import asyncio
 import json
+import os
 from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
@@ -18,9 +20,16 @@ _hf_api: HfApi | None = None
 
 
 def _get_hf_api() -> HfApi:
+    """获取 HfApi 客户端，显式读取 HF_ENDPOINT 环境变量。
+
+    不使用 HfApi() 的默认行为（依赖库内部读取环境变量），
+    而是显式传参，与 run_diagnostics 保持一致。
+    """
     global _hf_api
     if _hf_api is None:
-        _hf_api = HfApi()
+        endpoint = os.environ.get("HF_ENDPOINT")
+        _hf_api = HfApi(endpoint=endpoint)
+        print(f"📡 HfApi initialized (endpoint={endpoint or 'default'})")
     return _hf_api
 
 
@@ -75,13 +84,23 @@ class HFDatasetSearchTool(BaseTool):
 
         datasets: list[dict] = []
         tried_queries: list[str] = []
+        error_msg: str | None = None
 
-        for search_query in queries:
+        for i, search_query in enumerate(queries):
             tried_queries.append(search_query)
+            remaining = queries[i + 1:]
+
+            # 展示当前正在搜索的关键词
+            print(f"🔍 Searching HuggingFace for dataset: '{search_query}'...")
+
             try:
-                results = list(hf.list_datasets(search=search_query, limit=n_results))
+                results = await asyncio.to_thread(
+                    lambda: list(hf.list_datasets(search=search_query, limit=n_results))
+                )
             except Exception as exc:
-                return ToolResult(success=False, error=f"HF dataset search failed: {exc}")
+                print(f"❌ Search failed for '{search_query}': {exc}")
+                error_msg = f"HF dataset search failed: {exc}"
+                break
 
             for ds in results:
                 datasets.append({
@@ -93,7 +112,19 @@ class HFDatasetSearchTool(BaseTool):
                 })
 
             if datasets:
+                print(f"✅ Found {len(datasets)} dataset(s) for '{search_query}'")
                 break  # 当前查询有结果，遵守 n_results 限制，不继续回退
+            else:
+                if remaining:
+                    print(
+                        f"⚠️  No results for '{search_query}', "
+                        f"trying next query: '{remaining[0]}'"
+                    )
+                else:
+                    print(
+                        f"⚠️  No results for '{search_query}' and no fallback "
+                        f"queries left. Consider using different or broader keywords."
+                    )
 
         # 空结果时给 LLM 搜索建议
         suggestion = ""
@@ -106,18 +137,23 @@ class HFDatasetSearchTool(BaseTool):
         data = {
             "datasets": datasets,
             "count": len(datasets),
-            "search_query_used": tried_queries[-1],
+            "search_query_used": tried_queries[-1] if tried_queries else "",
             "fallback_chain": tried_queries,
             "suggestion": suggestion,
+            "error": error_msg,
         }
 
-        # 落盘 search_results.json
+        # 落盘 search_results.json（无论成功或失败）
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "search_results.json").write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+        if error_msg:
+            return ToolResult(success=False, data=None, error=error_msg)
+
         return ToolResult(data={**data, "output_dir": str(self.output_dir)})
+
 
 
 class HFDatasetDownloadTool(BaseTool):
@@ -159,12 +195,15 @@ class HFDatasetDownloadTool(BaseTool):
         Path(download_dir).mkdir(parents=True, exist_ok=True)
 
         try:
-            local_path = snapshot_download(
-                repo_id=ds_id, repo_type="dataset", local_dir=download_dir
+            local_path = await asyncio.to_thread(
+                lambda: snapshot_download(
+                    repo_id=ds_id, repo_type="dataset", local_dir=download_dir
+                )
             )
         except Exception as exc:
             return ToolResult(
                 success=False,
+                data=None,
                 error=f"HF dataset download failed for '{ds_id}': {exc}",
             )
 
