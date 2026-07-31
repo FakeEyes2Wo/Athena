@@ -113,7 +113,19 @@ class SolutionDesignTool(BaseTool):
                       "The plan must include a self-check rubric.",
             )
 
-        return ToolResult(data={"solution_plan": plan})
+        # 落盘方案计划到 output_dir/solution_plan.json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        plan_path = self.output_dir / "solution_plan.json"
+        plan_path.write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        return ToolResult(
+            data={
+                "solution_plan": plan,
+                "output_dir": str(self.output_dir),
+            }
+        )
 
 
 # ── 项目代码生成工具 ──
@@ -160,6 +172,8 @@ class ProjectCodeGenTool(BaseTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        from athena.tools._code_utils import parse_code_files
+
         # 将方案引用和配置组装为 LLM user prompt
         user_prompt = json.dumps(input, ensure_ascii=False)
 
@@ -169,9 +183,25 @@ class ProjectCodeGenTool(BaseTool):
             user_prompt=user_prompt,
         )
 
+        # 从 LLM 响应中解析各文件，缺失必需文件则返回失败
+        try:
+            files = parse_code_files(code_text)
+        except ValueError as exc:
+            return ToolResult(
+                success=False,
+                error=str(exc),
+                data={"raw_response": code_text[:500]},
+            )
+
+        # 落盘所有文件到 output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        for fname, content in files.items():
+            (self.output_dir / fname).write_text(content, encoding="utf-8")
+
         return ToolResult(
             data={
-                "code": code_text,
+                "files": sorted(files.keys()),
+                "output_dir": str(self.output_dir),
                 "solution_plan_ref": input["solution_plan_ref"],
                 "status": "code_generated",
             }
@@ -215,16 +245,29 @@ class CodeExecuteTool(BaseTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        # TODO: 集成 athena.execution.sandbox_runtime 进行实际沙箱执行
-        # 当前为占位实现，返回固定状态供 Agent 流程串联验证
         entry_point = input["entry_point"]
+
+        # TODO: 集成 athena.execution.sandbox_runtime 进行实际沙箱执行
+        # 当前为占位实现，落盘占位日志与输出目录供 Agent 流程串联验证
+        log_content = (
+            f"[sandbox execution stub — entry_point={entry_point}]\n"
+            f"code_artifact_ref: {input['code_artifact_ref']}\n"
+            f"needs sandbox_runtime integration\n"
+        )
+
+        # 落盘日志与输出目录到 output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        log_name = f"{entry_point}_log.txt"
+        (self.output_dir / log_name).write_text(log_content, encoding="utf-8")
+        (self.output_dir / f"{entry_point}_output").mkdir(parents=True, exist_ok=True)
 
         return ToolResult(
             data={
                 "entry_point": entry_point,
                 "status": "executed",
-                "logs": "[sandbox execution stub — needs sandbox_runtime integration]",
-                "output_path": f"/tmp/{entry_point}_output",
+                "logs": log_content,
+                "output_dir": str(self.output_dir),
+                "output_path": str(self.output_dir / f"{entry_point}_output"),
             }
         )
 
@@ -265,6 +308,8 @@ class SubmissionBuildTool(BaseTool):
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        from athena.tools._code_utils import extract_code_block
+
         predictions_path = input["predictions_path"]
         submission_format = input["submission_format"]
 
@@ -282,10 +327,20 @@ class SubmissionBuildTool(BaseTool):
             user_prompt=format_prompt,
         )
 
+        # 提取代码块并落盘脚本，无代码块标记则全量保存
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        script_content = extract_code_block(format_script)
+        if script_content is None:
+            script_content = format_script  # 没有代码块标记则全量保存
+        (self.output_dir / "format_script.py").write_text(
+            script_content, encoding="utf-8"
+        )
+
         return ToolResult(
             data={
                 "format_script": format_script,
                 "predictions_path": predictions_path,
                 "status": "submission_ready",
+                "output_dir": str(self.output_dir),
             }
         )
