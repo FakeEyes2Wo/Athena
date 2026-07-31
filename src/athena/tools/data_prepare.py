@@ -100,11 +100,20 @@ class DataAnalyzeTool(BaseTool):
             response_format={"type": "json_object"},
         )
 
-        # EDA 报告作为解析后的 JSON artifact 返回
+        # 解析 EDA 报告为 JSON artifact
+        report = json.loads(eda_result)
+
+        # 落盘 EDA 报告到 data_analyze/eda_report.json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "eda_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
         return ToolResult(
             data={
-                "eda_report": json.loads(eda_result),
+                "eda_report": report,
                 "data_card_refs": refs,
+                "output_dir": str(self.output_dir),
             }
         )
 
@@ -161,11 +170,28 @@ class DataCleanCodeGenTool(BaseTool):
             user_prompt=user_prompt,
         )
 
+        # 从 LLM 响应中提取 Python 代码块
+        from athena.tools._code_utils import extract_code_block
+
+        # 无代码块时返回失败，附上原始响应片段便于排查
+        code = extract_code_block(clean_script)
+        if code is None:
+            return ToolResult(
+                success=False,
+                error="No code block found in LLM response",
+                data={"raw_response": clean_script[:500]},
+            )
+
+        # 落盘清洗脚本到 data_clean_code_gen/clean_script.py
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "clean_script.py").write_text(code, encoding="utf-8")
+
         return ToolResult(
             data={
                 "clean_script": clean_script,
                 "eda_report_ref": eda_ref,
                 "data_card_refs": data_refs,
                 "status": "script_generated",
+                "output_dir": str(self.output_dir),
             }
         )
