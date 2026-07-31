@@ -58,7 +58,7 @@ class HFDatasetSearchTool(BaseTool):
             "required": ["task_keywords", "modality"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,  # 只读搜索，可并行
+        concurrency_safe=False,  # 落盘搜索结果，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:

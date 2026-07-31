@@ -88,7 +88,7 @@ class SolutionDesignTool(BaseTool):
             "required": ["task_metadata", "eda_report_ref", "research_refs", "model_candidates"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,  # 仅调用 LLM，无外部副作用，可安全并行
+        concurrency_safe=False,  # 落盘文件，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
@@ -168,7 +168,7 @@ class ProjectCodeGenTool(BaseTool):
             "required": ["solution_plan_ref", "data_card_refs", "submission_format"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,  # 仅调用 LLM，无外部副作用，可安全并行
+        concurrency_safe=False,  # 落盘多文件，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:

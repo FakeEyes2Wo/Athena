@@ -72,7 +72,7 @@ class DataAnalyzeTool(BaseTool):
             "required": ["data_card_refs"],
             "additionalProperties": False,
         },
-        concurrency_safe=True,  # 仅调用 LLM，无外部副作用，可安全并行
+        concurrency_safe=False,  # 落盘 EDA 报告，不可并行
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
