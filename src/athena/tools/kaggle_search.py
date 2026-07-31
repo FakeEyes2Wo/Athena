@@ -66,20 +66,26 @@ class KaggleCompetitionSearchTool(BaseTool):
         # 用 LLM 解析为结构化 TaskMetaData
         metadata = await parse_competition_info(raw_html, competition_url)
 
-        return ToolResult(
-            data={
-                "task_type": metadata.task_type,
-                "data_type": metadata.data_type,
-                "target_vars": metadata.target_vars,
-                "primary_metric": {
-                    "name": metadata.primary_metric.name,
-                    "direction": metadata.primary_metric.direction,
-                },
-                "constraints": metadata.constraints,
-                "source_url": competition_url,
-                "description_text": raw_html,
-            }
+        data = {
+            "task_type": metadata.task_type,
+            "data_type": metadata.data_type,
+            "target_vars": metadata.target_vars,
+            "primary_metric": {
+                "name": metadata.primary_metric.name,
+                "direction": metadata.primary_metric.direction,
+            },
+            "constraints": metadata.constraints,
+            "source_url": competition_url,
+            "description_text": raw_html,
+        }
+
+        # 落盘 competition_info.json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "competition_info.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+        return ToolResult(data={**data, "output_dir": str(self.output_dir)})
 
 
 # ── Discussion 搜索工具 ──
@@ -139,12 +145,18 @@ class KaggleDiscussionSearchTool(BaseTool):
                 "url": d.get("url", ""),
             })
 
-        return ToolResult(
-            data={
-                "discussion_count": len(summaries),
-                "discussions": summaries,
-            }
+        data = {
+            "discussion_count": len(summaries),
+            "discussions": summaries,
+        }
+
+        # 落盘 discussions.json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "discussions.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+        return ToolResult(data={**data, "output_dir": str(self.output_dir)})
 
 
 # ── 数据集下载工具 ──
@@ -183,13 +195,14 @@ class KaggleDatasetDownloadTool(BaseTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         competition_ref = input["competition_ref"]
-        output_dir = input["output_dir"]
+        # 使用构造器注入的 output_dir，忽略 LLM 传入的 output_dir（安全原因）
+        download_dir = str(self.output_dir)
 
         # 通过 Kaggle MCP 下载数据集
         mcp = _get_kaggle_mcp_client()
         download_result = await mcp.call_tool(
             "download_competition_data",
-            {"url": competition_ref, "output_dir": output_dir},
+            {"url": competition_ref, "output_dir": download_dir},
         )
 
         # 对每个下载的数据文件生成 DataCard
@@ -205,7 +218,7 @@ class KaggleDatasetDownloadTool(BaseTool):
         return ToolResult(
             data={
                 "competition_ref": competition_ref,
-                "output_dir": output_dir,
+                "output_dir": download_dir,
                 "files": data_cards,
                 "status": "downloaded",
             }
