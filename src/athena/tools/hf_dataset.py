@@ -5,6 +5,7 @@ HuggingFace Hub and download them locally. Downloaded datasets are
 ingested via dataset_service.create_data_card to produce DataCard.
 """
 
+import json
 from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
@@ -102,15 +103,21 @@ class HFDatasetSearchTool(BaseTool):
                 f"Consider broader keywords or a different task description."
             )
 
-        return ToolResult(
-            data={
-                "datasets": datasets,
-                "count": len(datasets),
-                "search_query_used": tried_queries[-1],
-                "fallback_chain": tried_queries,
-                "suggestion": suggestion,
-            }
+        data = {
+            "datasets": datasets,
+            "count": len(datasets),
+            "search_query_used": tried_queries[-1],
+            "fallback_chain": tried_queries,
+            "suggestion": suggestion,
+        }
+
+        # 落盘 search_results.json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "search_results.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+        return ToolResult(data={**data, "output_dir": str(self.output_dir)})
 
 
 class HFDatasetDownloadTool(BaseTool):
@@ -146,13 +153,14 @@ class HFDatasetDownloadTool(BaseTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ds_id = input["hf_dataset_id"]
-        output_dir = input["output_dir"]
+        # 使用构造器注入的 output_dir，忽略 LLM 传入的路径（安全原因）
+        download_dir = str(self.output_dir)
 
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        Path(download_dir).mkdir(parents=True, exist_ok=True)
 
         try:
             local_path = snapshot_download(
-                repo_id=ds_id, repo_type="dataset", local_dir=output_dir
+                repo_id=ds_id, repo_type="dataset", local_dir=download_dir
             )
         except Exception as exc:
             return ToolResult(
@@ -165,5 +173,6 @@ class HFDatasetDownloadTool(BaseTool):
                 "dataset_id": ds_id,
                 "local_path": local_path,
                 "status": "downloaded",
+                "output_dir": download_dir,
             }
         )
