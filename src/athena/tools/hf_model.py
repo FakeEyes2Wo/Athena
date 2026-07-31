@@ -4,6 +4,7 @@ Uses huggingface_hub Python API to search for pre-trained models
 on HuggingFace Hub and download their weights locally.
 """
 
+import json
 from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
@@ -96,9 +97,15 @@ class HFModelSearchTool(BaseTool):
                 f"Try a broader architecture hint or omit it."
             )
 
-        return ToolResult(
-            data={"models": models, "count": len(models), "suggestion": suggestion}
+        data = {"models": models, "count": len(models), "suggestion": suggestion}
+
+        # 落盘 search_results.json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "search_results.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+        return ToolResult(data={**data, "output_dir": str(self.output_dir)})
 
 
 class HFModelDownloadTool(BaseTool):
@@ -134,12 +141,13 @@ class HFModelDownloadTool(BaseTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         model_id = input["hf_model_id"]
-        output_dir = input["output_dir"]
+        # 使用构造器注入的 output_dir，忽略 LLM 传入的路径（安全原因）
+        download_dir = str(self.output_dir)
 
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        Path(download_dir).mkdir(parents=True, exist_ok=True)
 
         try:
-            local_path = snapshot_download(repo_id=model_id, local_dir=output_dir)
+            local_path = snapshot_download(repo_id=model_id, local_dir=download_dir)
         except Exception as exc:
             return ToolResult(
                 success=False,
@@ -147,5 +155,10 @@ class HFModelDownloadTool(BaseTool):
             )
 
         return ToolResult(
-            data={"model_id": model_id, "model_path": local_path, "status": "downloaded"}
+            data={
+                "model_id": model_id,
+                "model_path": local_path,
+                "status": "downloaded",
+                "output_dir": download_dir,
+            }
         )
