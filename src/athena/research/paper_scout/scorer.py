@@ -27,7 +27,7 @@ from athena.research.paper_scout.prompts import (
 )
 from athena.research.paper_scout.schemas import ScoutPaper
 
-GRADE_SCALE = 3.0
+GRADE_SCORES = (0.0, 0.2, 0.45, 1.0)
 DEFAULT_BATCH_SIZE = 8
 SCORING_ABSTRACT_CHARS = 1200
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
@@ -50,9 +50,14 @@ def clip_abstract(abstract: str) -> str:
 
 
 def parse_grades(content: str, count: int) -> list[float]:
-    """把模型返回的 ``{"1": 3, ...}`` 解析成归一化分数；缺失项按 0 计。
+    """把模型返回的 ``{"1": 3, ...}`` 映射成 ρ 分数；缺失项按 0 计。
 
-    ``parse_grades('{"1": 3, "2": 0}', 2)`` 返回 ``[1.0, 0.0]``。
+    映射不是简单的 ``grade / 3``。论文的 ρ 是 selector 判定"该论文完全满足查询"的概率，
+    交付门槛 ρ ≥ 0.5；等分成三份会把 2 分（切题但不满足全部条件）放到 0.667，越过门槛，
+    交付集合因此膨胀。``GRADE_SCORES`` 让 2 分落在 0.45——仍以 τ = 0.01 进池参与排序，但
+    不进交付集合，只有 3 分（直接回答查询）才越过 0.5。
+
+    ``parse_grades('{"1": 3, "2": 2}', 2)`` 返回 ``[1.0, 0.45]``。
     """
     match = JSON_OBJECT.search(content or "")
     if match is None:
@@ -68,7 +73,8 @@ def parse_grades(content: str, count: int) -> list[float]:
     for index in range(1, count + 1):
         raw = payload.get(str(index), payload.get(index, 0))
         value = raw if isinstance(raw, (int, float)) else 0
-        scores.append(min(max(float(value) / GRADE_SCALE, 0.0), 1.0))
+        grade = min(max(int(value), 0), len(GRADE_SCORES) - 1)
+        scores.append(GRADE_SCORES[grade])
     return scores
 
 

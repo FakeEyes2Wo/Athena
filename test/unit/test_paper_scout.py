@@ -260,14 +260,25 @@ class PromptTest(unittest.TestCase):
 
 
 class ScorerTest(unittest.TestCase):
-    def test_grades_are_normalised_to_the_unit_interval(self):
+    def test_grades_are_mapped_into_the_unit_interval(self):
         self.assertEqual(parse_grades('{"1": 3, "2": 0}', 2), [1.0, 0.0])
+
+    def test_partial_relevance_stays_below_the_retention_threshold(self):
+        scores = parse_grades('{"1": 2, "2": 1}', 2)
+        self.assertTrue(all(score < RETAIN_THRESHOLD for score in scores))
+        self.assertTrue(all(score >= ACCEPT_THRESHOLD for score in scores))
+
+    def test_only_a_full_match_clears_the_retention_threshold(self):
+        self.assertGreaterEqual(parse_grades('{"1": 3}', 1)[0], RETAIN_THRESHOLD)
 
     def test_missing_entries_score_zero(self):
         self.assertEqual(parse_grades('{"1": 3}', 2), [1.0, 0.0])
 
     def test_surrounding_prose_is_tolerated(self):
-        self.assertEqual(parse_grades('Here you go: {"1": 2} done', 1), [2 / 3])
+        self.assertEqual(parse_grades('Here you go: {"1": 2} done', 1), [0.45])
+
+    def test_out_of_range_grades_are_clamped(self):
+        self.assertEqual(parse_grades('{"1": 9, "2": -4}', 2), [1.0, 0.0])
 
     def test_unparsable_output_scores_zero(self):
         self.assertEqual(parse_grades("no json at all", 2), [0.0, 0.0])
