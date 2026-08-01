@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from athena.core.schemas import ArtifactRef
+from athena.research.paper_source.schemas import PaperSourcePolicy
 
 ACCEPT_THRESHOLD = 0.01
 RETAIN_THRESHOLD = 0.5
@@ -112,6 +113,10 @@ class ScoutRequest(BaseModel):
     )
     max_papers: int = Field(default=0, ge=0, description="0 means no handoff cap.")
     max_seconds: float = Field(default=600.0, gt=0, description="Wall-clock budget.")
+    paper_source_policy: PaperSourcePolicy = Field(
+        default_factory=PaperSourcePolicy,
+        description="Fetch policy carried into the generated paper_source request.",
+    )
 
 
 class ScoutCorpus(BaseModel):
@@ -136,5 +141,12 @@ class PaperScoutResult(BaseModel):
     )
     corpus_ref: ArtifactRef = Field(description="Reference to the ScoutCorpus.")
     stats_ref: ArtifactRef = Field(description="Reference to the ScoutStats.")
+    paper_source_request_ref: ArtifactRef | None = Field(
+        default=None,
+        description=(
+            "PaperSourceRequest ready for paper_fetch; None when no delivered paper "
+            "carries an identifier paper_source can resolve."
+        ),
+    )
     paper_count: int = Field(default=0, ge=0, description="Retained paper count.")
     warnings: list[str] = Field(default_factory=list)

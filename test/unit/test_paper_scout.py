@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+import zlib
 
 from athena.core.agent.agent import AgentContext
 from athena.core.schemas import AthenaThread, AthenaTurn
@@ -35,6 +36,7 @@ from athena.research.paper_scout.tool import (
     PaperScoutSearchTool,
 )
 from athena.research.paper_source.http import HostRateLimiter, HttpResponse
+from athena.research.paper_source.schemas import PaperSourceRequest
 from athena.storage import LocalArtifactStore
 
 ATOM_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -140,10 +142,19 @@ def limiter(transport: StubTransport) -> HostRateLimiter:
     )
 
 
+def aid(key: str) -> str:
+    """Map a short fixture key to a well-formed arXiv id.
+
+    PaperIdentity validates the identifier format, so fixtures cannot use bare
+    counters like "1" once the delivered set is turned into a paper_source request.
+    """
+    return "2401.%05d" % (zlib.crc32(key.encode()) % 90000 + 10000)
+
+
 def paper(key: str, title: str, score: float, expanded: bool = False) -> ScoutPaper:
     return ScoutPaper(
-        paper_key=f"arxiv:{key}",
-        arxiv_id=key,
+        paper_key=f"arxiv:{aid(key)}",
+        arxiv_id=aid(key),
         title=title,
         abstract="abstract text",
         source="search",
@@ -192,7 +203,7 @@ class PoolTest(unittest.TestCase):
         self.assertTrue(pool.add(paper("1", "First", 0.9)))
         self.assertFalse(pool.add(paper("1", "Duplicate", 0.1)))
         self.assertEqual(len(pool), 1)
-        self.assertEqual(pool.get("arxiv:1").title, "First")
+        self.assertEqual(pool.get(f"arxiv:{aid('1')}").title, "First")
 
     def test_same_title_under_different_identifiers_is_one_paper(self):
         pool = PaperPool()
@@ -222,8 +233,8 @@ class PoolTest(unittest.TestCase):
     def test_mark_expanded_only_succeeds_once(self):
         pool = PaperPool()
         pool.add(paper("1", "First", 0.9))
-        self.assertTrue(pool.mark_expanded("arxiv:1"))
-        self.assertFalse(pool.mark_expanded("arxiv:1"))
+        self.assertTrue(pool.mark_expanded(f"arxiv:{aid('1')}"))
+        self.assertFalse(pool.mark_expanded(f"arxiv:{aid('1')}"))
         self.assertFalse(pool.mark_expanded("arxiv:missing"))
 
     def test_retained_applies_threshold_and_limit(self):
@@ -384,7 +395,7 @@ class SessionSearchTest(unittest.TestCase):
         action = asyncio.run(session.search("graph anomaly"))
         self.assertEqual(action.accepted, 1)
         self.assertEqual(len(session.pool), 1)
-        self.assertAlmostEqual(session.pool.get("arxiv:1").relevance, 0.8)
+        self.assertAlmostEqual(session.pool.get(f"arxiv:{aid('1')}").relevance, 0.8)
 
     def test_papers_below_tau_are_rejected(self):
         backend = StubBackend("stub", [paper("1", "Irrelevant", 0.0)])
@@ -464,12 +475,12 @@ class SessionSearchTest(unittest.TestCase):
 
 class SessionExpandTest(unittest.TestCase):
     def test_expanding_a_pooled_paper_adds_its_references(self):
-        reference = StubBackend("refs", [paper("2401.00002", "Cited", 0.0)])
+        reference = StubBackend("refs", [paper("cited", "Cited", 0.0)])
         session = session_for([], reference=reference, scores={"Cited": 0.7})
-        session.pool.add(paper("2401.00001", "Seed", 0.9))
-        action = asyncio.run(session.expand("2401.00001"))
+        session.pool.add(paper("seed", "Seed", 0.9))
+        action = asyncio.run(session.expand(aid("seed")))
         self.assertEqual(action.accepted, 1)
-        self.assertTrue(session.pool.get("arxiv:2401.00001").expanded)
+        self.assertTrue(session.pool.get(f"arxiv:{aid('seed')}").expanded)
 
     def test_expanding_an_unknown_paper_is_penalised(self):
         session = session_for([], reference=StubBackend("refs", []))
@@ -478,18 +489,25 @@ class SessionExpandTest(unittest.TestCase):
         self.assertAlmostEqual(action.reward, -0.5)
 
     def test_expanding_twice_is_penalised(self):
-        reference = StubBackend("refs", [paper("2401.00002", "Cited", 0.0)])
+        reference = StubBackend("refs", [paper("cited", "Cited", 0.0)])
         session = session_for([], reference=reference, scores={"Cited": 0.7})
-        session.pool.add(paper("2401.00001", "Seed", 0.9))
-        first = asyncio.run(session.expand("2401.00001"))
-        action = asyncio.run(session.expand("2401.00001"))
+        session.pool.add(paper("seed", "Seed", 0.9))
+        first = asyncio.run(session.expand(aid("seed")))
+        action = asyncio.run(session.expand(aid("seed")))
         self.assertFalse(first.repeated)
         self.assertTrue(action.repeated)
 
     def test_versioned_identifier_is_normalised(self):
         reference = StubBackend("refs", [])
         session = session_for([], reference=reference)
-        session.pool.add(paper("1706.03762", "Seed", 0.9))
+        seed = ScoutPaper(
+            paper_key="arxiv:1706.03762",
+            arxiv_id="1706.03762",
+            title="Seed",
+            source="search",
+            relevance=0.9,
+        )
+        session.pool.add(seed)
         action = asyncio.run(session.expand("arXiv:1706.03762v5"))
         self.assertFalse(action.repeated)
         self.assertEqual(action.argument, "1706.03762")
@@ -497,8 +515,8 @@ class SessionExpandTest(unittest.TestCase):
     def test_reference_backend_failure_is_recorded(self):
         reference = StubBackend("refs", [], error=BackendError("HTTP 429"))
         session = session_for([], reference=reference)
-        session.pool.add(paper("2401.00001", "Seed", 0.9))
-        action = asyncio.run(session.expand("2401.00001"))
+        session.pool.add(paper("seed", "Seed", 0.9))
+        action = asyncio.run(session.expand(aid("seed")))
         self.assertIn("refs", action.error)
         self.assertTrue(session.errors)
 
@@ -614,7 +632,7 @@ class AgentTest(unittest.TestCase):
             max_steps=1,
         )
         self.assertEqual(result.paper_count, 1)
-        self.assertEqual(corpus.retained[0].arxiv_id, "1")
+        self.assertEqual(corpus.retained[0].arxiv_id, aid("1"))
         self.assertEqual(stats.search_actions, 1)
         self.assertEqual(stats.stop_reason, "max_steps")
 
@@ -660,7 +678,7 @@ class AgentTest(unittest.TestCase):
         _, _, _, provider = self.run_agent(
             [
                 [("paper_scout_search", {"query": "graph anomaly"})],
-                [("paper_scout_expand", {"arxiv_id": "1"})],
+                [("paper_scout_expand", {"arxiv_id": aid("1")})],
             ],
             [StubBackend("stub", [paper("1", "Relevant", 0.0)])],
             reference=StubBackend("refs", []),
@@ -680,6 +698,58 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(result.status, "partial")
         self.assertTrue(stats.errors)
         self.assertEqual(result.warnings, ["bad"])
+
+    def test_delivered_papers_become_a_paper_source_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = LocalArtifactStore(directory)
+            request = ScoutRequest(query="anomaly detection", max_steps=1)
+            ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
+            agent = PaperScoutAgent(
+                artifacts,
+                [StubBackend("stub", [paper("1", "Relevant", 0.0)])],
+                None,
+                StubScorer({"Relevant": 0.9}),
+                model="stub-model",
+            )
+            agent._provider = ScriptedProvider(
+                [[("paper_scout_search", {"query": "graph anomaly"})]]
+            )
+            outcome = asyncio.run(agent.run(agent_context(ref)))
+            result = PaperScoutResult.model_validate_json(
+                asyncio.run(artifacts.get_text(outcome.result_ref))
+            )
+            self.assertIsNotNone(result.paper_source_request_ref)
+            source = PaperSourceRequest.model_validate_json(
+                asyncio.run(artifacts.get_text(result.paper_source_request_ref))
+            )
+            self.assertEqual(len(source.papers), 1)
+            self.assertEqual(source.papers[0].identity.arxiv_id, aid("1"))
+            self.assertEqual(source.corpus_ref, result.corpus_ref)
+
+    def test_papers_without_identifiers_yield_no_source_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = LocalArtifactStore(directory)
+            request = ScoutRequest(query="anomaly detection", max_steps=1)
+            ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
+            titled = ScoutPaper(
+                paper_key="title:only", title="Title Only", source="search"
+            )
+            agent = PaperScoutAgent(
+                artifacts,
+                [StubBackend("stub", [titled])],
+                None,
+                StubScorer({"Title Only": 0.9}),
+                model="stub-model",
+            )
+            agent._provider = ScriptedProvider(
+                [[("paper_scout_search", {"query": "q"})]]
+            )
+            outcome = asyncio.run(agent.run(agent_context(ref)))
+            result = PaperScoutResult.model_validate_json(
+                asyncio.run(artifacts.get_text(outcome.result_ref))
+            )
+            self.assertEqual(result.paper_count, 1)
+            self.assertIsNone(result.paper_source_request_ref)
 
     def test_max_papers_truncates_only_the_delivered_set(self):
         papers = [paper(str(index), f"P{index}", 0.0) for index in range(4)]

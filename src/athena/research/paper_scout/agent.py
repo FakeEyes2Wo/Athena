@@ -12,6 +12,7 @@ import asyncio
 import time
 
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from athena.core.agent.agent import AgentConfig, AgentContext, AgentOutcome, BaseAgent
@@ -33,6 +34,11 @@ from athena.research.paper_scout.schemas import (
 )
 from athena.research.paper_scout.scorer import RelevanceScorer
 from athena.research.paper_scout.session import ScoutSession
+from athena.research.paper_source.schemas import (
+    PaperIdentity,
+    PaperRef,
+    PaperSourceRequest,
+)
 from athena.research.paper_scout.tool import (
     EXPAND_TOOL_NAME,
     SEARCH_TOOL_NAME,
@@ -219,11 +225,15 @@ class PaperScoutAgent(BaseAgent):
             stats_ref=stats_ref,
         )
         corpus_ref = await self.artifacts.put_text(corpus.model_dump_json())
+        source_ref = await self._paper_source_request(
+            retained, corpus_ref, session.request
+        )
         status = "partial" if session.errors else "complete"
         result = PaperScoutResult(
             status=status,
             corpus_ref=corpus_ref,
             stats_ref=stats_ref,
+            paper_source_request_ref=source_ref,
             paper_count=len(retained),
             warnings=sorted({error.split(":")[0] for error in session.errors}),
         )
@@ -237,6 +247,46 @@ class PaperScoutAgent(BaseAgent):
             result_ref=result_ref,
             next_context_ref=f"context://{ctx.turn.turn_id}/next",
         )
+
+    async def _paper_source_request(
+        self, retained: list, corpus_ref: str, request: ScoutRequest
+    ) -> str | None:
+        """把交付集合转成 paper_source 可直接消费的取源请求。
+
+        只带真实标识符的论文才进得去：``PaperIdentity`` 要求至少一个非标题标识符，纯标题
+        的候选交给下游只会变成无法解析的失败记录。全都没有标识符时返回 ``None``，与
+        "零命中"区分开。顺序沿用交付顺序，即优先级。
+        """
+        papers = []
+        for paper in retained:
+            if not (paper.arxiv_id or paper.doi or paper.s2_paper_id):
+                continue
+            try:
+                identity = PaperIdentity(
+                    arxiv_id=paper.arxiv_id or None,
+                    doi=paper.doi or None,
+                    s2_paper_id=paper.s2_paper_id or None,
+                )
+            except ValidationError:
+                # 后端给出的标识符格式不合法 → 跳过这一篇，而不是让整个 Turn 失败
+                continue
+            papers.append(
+                PaperRef(
+                    identity=identity,
+                    upstream_metadata={
+                        "title": paper.title,
+                        "year": str(paper.year) if paper.year else "",
+                    },
+                    retrieval_channels=[paper.channel] if paper.channel else [],
+                    matched_queries=[paper.origin] if paper.origin else [],
+                )
+            )
+        if not papers:
+            return None
+        source_request = PaperSourceRequest(
+            papers=papers, policy=request.paper_source_policy, corpus_ref=corpus_ref
+        )
+        return await self.artifacts.put_text(source_request.model_dump_json())
 
     def _backend_requests(self) -> int:
         """汇总各后端共享限流器的真实请求数；限流器缺失时返回 0。"""
