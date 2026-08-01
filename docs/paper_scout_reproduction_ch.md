@@ -85,6 +85,53 @@ R@all 在 0.561–0.811，本实现的 0.481 明显偏低，直接原因就是�
 **后端稳定性。** 30 题中 22 题为 `partial`，全部来自后端零星失败：Semantic Scholar 38 次、
 arXiv 13 次，均已由限流层退避重试兜住，未导致整题失败。
 
+## SPARBench 交叉评测
+
+PaperScout 论文没有在 SPARBench 上评测，这一节是把同一个实现放到另一个基准上，与本仓库
+已有的 academic_survey 结果做同基准对照。跑的是全部 50 题（不施加 AutoScholarQuery 的
+`gold ≥ 5` 过滤），配置与上面一致（`max_steps=6`、并发 2、修正后的打分映射），发布日期
+上限统一为样本的 2025-03-20。
+
+| 方法 | Precision | F1 | Recall | R@all | 来源 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SPAR（50 题） | 0.293 | 0.302 | 0.310 | — | SPAR 论文 |
+| Athena academic_survey（6 题） | 0.085 | 0.079 | 0.074 | — | 本仓库既有结果 |
+| **本实现（48 题计分）** | 0.024 | 0.039 | 0.100 | 0.111 | 本次运行 |
+
+48/50 计分，2 题（`sparbench_015`、`sparbench_045`）重试后仍因模型代理 5xx 失败。
+平均 gold 11.1 篇、交付 49.1 篇、候选池 146.1 篇；48 题中有 19 题一篇 gold 都没命中。
+
+**结论：本实现在 SPARBench 上显著弱于 SPAR，也弱于 AutoScholarQuery 上的表现。**
+Recall 0.100 对 R@all 0.111，转化率 90%——瓶颈同样在"找不到"，不在打分或交付策略。
+
+### 主要原因是检索深度，不是查询质量
+
+把 `sparbench_000` 里 Agent 自己发出的 4 条查询按不同深度重新执行：
+
+| 检索深度 | 该题 gold 浮现数 |
+| ---: | ---: |
+| 10（当前设置） | 1 / 10 |
+| 50 | 6 / 10 |
+| 100 | 6 / 10 |
+
+查询本身是对的——"Data Diversity Matters for Robust Instruction Tuning"这类 gold 已经被
+排进前 50，只是 `search_top_k=10` 让它们在进入打分之前就被丢掉了。
+
+AutoScholarQuery 上没暴露这个问题，是因为它的 gold 来自单篇论文的引文列表，一条准确查询
+就能把它们打进前 10；SPARBench 的 gold 平均 11.1 篇、分散在一个宽主题上，排名散落在
+10–50 之间。论文的 `top_k = 10` 是针对全 arXiv 稠密语义索引设的，换成 arXiv 的词法排序
+后这个常数不成立。
+
+### 另一部分原因是 gold 本身宽松
+
+`sparbench_001` 问"如何提升模型跨多个域的泛化能力"，其 gold 包含 Swin Transformer、
+DistilBERT、Distilling the Knowledge in a Neural Network、Perceiver——都不是域泛化工作。
+Agent 精确检索 domain generalization 并且正确地没有返回 Swin Transformer。这类题目对
+"检索得准"的系统是结构性扣分，加大深度也补不回来。SPARBench 又是 SPAR 自己的基准，其
+0.302 属于主场成绩。
+
+两个原因同时存在：深度是可修的那部分，宽松 gold 是不可修的那部分。
+
 ## 结论边界
 
 - 30 题不是 112 题；样本量小，单题 gold 中位数只有 6.5 篇。
