@@ -17,7 +17,7 @@ from athena.research.paper_markdown.interfaces import (
     VisualInterpreter,
 )
 from athena.research.paper_markdown.pdf_parser import parse_pdf_paper
-from athena.research.paper_markdown.quality import validate_rag_quality
+from athena.research.paper_markdown.quality import grade_quality, validate_rag_quality
 from athena.research.paper_markdown.schemas import (
     PaperChunk,
     PaperContent,
@@ -380,7 +380,7 @@ class PaperProcessor:
                 else None
             ),
             diagnostics_ref=diagnostics_ref,
-            quality_status="degraded" if quality_codes else "pass",
+            quality_status=grade_quality(quality_codes),
             quality_codes=quality_codes,
             chunks=chunks,
             visuals=visuals,

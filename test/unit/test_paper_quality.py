@@ -1,9 +1,18 @@
 """Deterministic paper RAG quality-gate tests."""
 
+import pathlib
+import re
 import unittest
+
+import athena.research.paper_markdown
 
 from athena.research.paper_markdown.chunking import build_chunks
 from athena.research.paper_markdown.document import ParsedElement, ParsedPaper
+from athena.research.paper_markdown.quality import (
+    BOOKKEEPING_CODES,
+    CONTENT_LOSS_CODES,
+    grade_quality,
+)
 from athena.research.paper_markdown.quality import validate_rag_quality
 from athena.research.paper_markdown.schemas import ChunkingConfig, SourceLocator
 
@@ -127,3 +136,52 @@ class PaperQualityTest(unittest.TestCase):
             "rag_appendix_heading_unparsed",
             {item.code for item in paper.diagnostics},
         )
+
+
+class QualityGradingTest(unittest.TestCase):
+    """`degraded` must mean content is missing, not merely that a check fired.
+
+    The old rule was `"degraded" if quality_codes else "pass"`, which gave the same
+    label to "the whole visual modality is absent" and "one chunk is 40% over the
+    target size". Downstream could not tell whether re-running would help.
+    """
+
+    def test_no_codes_is_a_clean_pass(self):
+        self.assertEqual("pass", grade_quality([]))
+
+    def test_bookkeeping_only_is_not_degraded(self):
+        self.assertEqual(
+            "pass_with_notes",
+            grade_quality(["rag_chunk_oversized", "rag_chunk_multiple_visuals"]),
+        )
+
+    def test_missing_visual_interpretation_is_degraded(self):
+        self.assertEqual(
+            "degraded", grade_quality(["visual_interpretation_unavailable"])
+        )
+
+    def test_content_loss_outranks_bookkeeping(self):
+        self.assertEqual(
+            "degraded",
+            grade_quality(["rag_chunk_oversized", "visual_interpretation_failed"]),
+        )
+
+    def test_unregistered_codes_are_treated_conservatively(self):
+        self.assertEqual("degraded", grade_quality(["some_brand_new_code"]))
+
+    def test_every_emitted_code_is_classified(self):
+        """A new diagnostic code must be graded explicitly, not silently inherit one."""
+        package = pathlib.Path(athena.research.paper_markdown.__file__).parent
+        emitted = set()
+        for path in package.glob("*.py"):
+            emitted.update(
+                re.findall(r'code="([a-z0-9_]+)"', path.read_text(encoding="utf-8"))
+            )
+        classified = CONTENT_LOSS_CODES | BOOKKEEPING_CODES
+        self.assertTrue(emitted, "no diagnostic codes were discovered")
+        self.assertEqual(
+            set(), emitted - classified, "these codes are not graded anywhere"
+        )
+
+    def test_the_two_classes_do_not_overlap(self):
+        self.assertEqual(set(), CONTENT_LOSS_CODES & BOOKKEEPING_CODES)

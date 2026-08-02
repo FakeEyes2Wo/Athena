@@ -33,7 +33,7 @@ VisualKind = Literal["figure", "table", "equation", "page"]
 TexSourceFormat = Literal["auto", "tar", "tar.gz", "zip", "gzip", "plain"]
 VisualPolicy = Literal["required", "best_effort"]
 InterpretationStatus = Literal["interpreted", "unavailable", "unknown"]
-QualityStatus = Literal["pass", "degraded", "unknown"]
+QualityStatus = Literal["pass", "pass_with_notes", "degraded", "unknown"]
 
 
 class ChunkingConfig(BaseModel):

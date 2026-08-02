@@ -103,8 +103,23 @@ sha256:dd3a498795a7586920d4256ccc08d0c58061e3f7c140f53092d0cd6a2c4cae5b
 2. `best_effort` 且解释不可用的表格不再生成重复视觉 retrieval unit；正文表格 chunk
    是其唯一文本检索单元。
 3. 有新增解释的视觉单元继续独立索引，并携带父 chunk 与章节元数据。
-4. `PaperContent` 暴露 `quality_status` 和 `quality_codes`。任何 warning/error 都产生
-   `degraded`，旧 schema 产物读取时为 `unknown`。
+4. `PaperContent` 暴露 `quality_status` 和 `quality_codes`。状态按**内容是否真的丢了**
+   分三档，而不是按"有没有 warning"：
+
+   | 状态 | 含义 |
+   | --- | --- |
+   | `pass` | 没有 warning/error |
+   | `pass_with_notes` | 内容完整，只是记账不理想——chunk 超出目标大小、一个 chunk 含多个视觉、标签图不完整等 |
+   | `degraded` | 内容确实没进语料——视觉解释缺失或失败、`\input` 未解析、表格/公式 Markdown 失效、入口文件靠弱推断选出 |
+
+   旧 schema 产物读取时为 `unknown`。分级理由：此前"任何 warning 都降级"让"整个视觉模态
+   缺失"和"某个 chunk 比目标大 40%"拿到同一标签，下游看到 `degraded` 无法判断要不要重跑。
+   实测一轮三篇全是 `degraded`，而语料完整、链接无悬空、检索正常；改判后这三篇变成
+   `pass_with_notes`，另一轮里一篇 `tex_include_missing` 的论文**仍然是 `degraded`**——
+   那才是真的少了内容。
+
+   代码归类见 `quality.CONTENT_LOSS_CODES` 与 `BOOKKEEPING_CODES`；未登记的新代码按
+   `degraded` 处理（漏报比误报危险），且有覆盖测试强制新代码显式归类。
 5. `best_effort` 可以生成降级产物，但不得被标记为通过；`required` 仍要求视觉解释器。
 
 ## 验收标准
