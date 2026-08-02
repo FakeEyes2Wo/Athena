@@ -120,7 +120,8 @@ sha256:dd3a498795a7586920d4256ccc08d0c58061e3f7c140f53092d0cd6a2c4cae5b
 
    代码归类见 `quality.CONTENT_LOSS_CODES` 与 `BOOKKEEPING_CODES`；未登记的新代码按
    `degraded` 处理（漏报比误报危险），且有覆盖测试强制新代码显式归类。
-5. `best_effort` 可以生成降级产物，但不得被标记为通过；`required` 仍要求视觉解释器。
+5. `best_effort` 可以生成降级产物，但不得被标记为 `pass`；`required` 仍要求视觉解释器。
+   注意视觉解释缺失属于内容缺失，因此仍是 `degraded`，不会落到 `pass_with_notes`。
 
 ## 验收标准
 
@@ -288,8 +289,9 @@ PaSa 活动源码含 43 个有效 label，产物含 42 个，但集合并不等�
 图片只有 caption，无法提供曲线数值、趋势和图内关系等额外语义。
 
 这不是下载或模型供应商问题的工具内替代实现点。工具必须继续保留视觉解释注入接口：
-`required` 在解释不可用时拒绝产出，`best_effort` 允许生成明确的 degraded 产物；不得
-把 caption fallback 伪装为视觉理解。生产多模态验收必须由调用方注入解释器后重跑。
+`required` 在解释不可用时拒绝产出，`best_effort` 允许生成明确的 degraded 产物——视觉
+解释缺失是内容缺失，不会被分级规则降格成 `pass_with_notes`；不得把 caption fallback
+伪装为视觉理解。生产多模态验收必须由调用方注入解释器后重跑。
 
 ### 15. 论文原文存在低强度重复
 
@@ -317,7 +319,9 @@ PaSa 活动源码含 43 个有效 label，产物含 42 个，但集合并不等�
 3. TeX parser 从活动 document AST 独立收集 source labels 和 cross-reference targets，
    供质量门禁与元素 metadata 交叉验证。
 4. 活动 label 集与元素持久化 label 集不一致时产生稳定诊断；任何 cross-reference target
-   无法在持久化 label 集中解析时产生独立诊断并把产物标记为 degraded。
+   无法在持久化 label 集中解析时产生独立诊断。这两条属于记账类（`rag_label_graph_incomplete`、
+   `rag_cross_reference_unresolved`）——正文并没有丢，因此产物为 `pass_with_notes` 而非
+   `degraded`。
 
 ## 三次验收标准
 
@@ -405,7 +409,7 @@ label。消费者只能重新解析 `[label]` 文本，无法可靠区分普通�
 2. chunk 只聚合其实际元素包含的 reference keys；overlap 不得引入其他章节的引用边。
 3. `PaperChunk.reference_keys` 持久化局部边；正文 retrieval metadata 暴露同名字段。
 4. 元素 reference keys 的全集必须与活动 document AST 的 reference targets 一致，否则
-   产生稳定诊断并把产物标记为 degraded。
+   产生稳定诊断（`rag_reference_edges_incomplete`，记账类，产物为 `pass_with_notes`）。
 
 ### Multicolumn 去重
 
@@ -597,7 +601,7 @@ PaSa PDF。确定性文本和结构问题的修复结果如下：
   索引。独立单行公式仍按既有 `equation` 视觉协议处理，行内公式不产生视觉任务。
 - 质量门禁新增 `rag_control_character`、`rag_bibliography_fragment`、
   `rag_appendix_heading_unparsed` 检查；这些问题即使绕过 PDF parser 直接进入文档，也会
-  使结果保持 degraded。视觉解释器未注入仍会记录 `visual_interpretation_unavailable`，
+  被记录下来。按当前分级它们属于记账类，产物为 `pass_with_notes`。视觉解释器未注入仍会记录 `visual_interpretation_unavailable`，
   本轮不把它误判为 VLM 通过。
 
 PaSa 正式产物当前为 103 个 retrieval unit、25 个视觉对象（20 表、3 图、2 公式），
