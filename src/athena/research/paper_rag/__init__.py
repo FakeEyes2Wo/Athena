@@ -5,7 +5,10 @@
 """
 
 from athena.research.paper_rag.index import (
+    NonSemanticEmbedderError,
     build_corpus_index,
+    require_semantic_embedder,
+    semantic_margin,
     is_indexable,
     split_sentences,
 )
@@ -38,7 +41,10 @@ __all__ = [
     "TextEmbedder",
     "ChunkContextualizer",
     "RetrievalSession",
+    "NonSemanticEmbedderError",
     "build_corpus_index",
+    "require_semantic_embedder",
+    "semantic_margin",
     "split_sentences",
     "is_indexable",
     "keyword_search",

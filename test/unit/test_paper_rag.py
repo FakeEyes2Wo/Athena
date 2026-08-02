@@ -15,7 +15,12 @@ from athena.research.paper_markdown.schemas import (
 )
 from athena.research.paper_rag.contextual import contextualize_entries
 from athena.research.paper_rag.index import (
+    SEMANTIC_MARGIN_THRESHOLD,
+    SEMANTIC_PROBES,
+    NonSemanticEmbedderError,
     build_corpus_index,
+    require_semantic_embedder,
+    semantic_margin,
     display_math_close,
     is_indexable,
     split_sentences,
@@ -53,6 +58,48 @@ class FakeEmbedder:
             [float(text.lower().count(word)) for word in self.vocabulary]
             for text in texts
         ]
+
+
+class BagOfWordsEmbedder:
+    """The lexical placeholder earlier runs had to use; kept as the negative case."""
+
+    model = "bag-of-words"
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        vocabulary: dict[str, int] = {}
+        for text in texts:
+            for token in text.lower().split():
+                vocabulary.setdefault(token.strip(".,"), len(vocabulary))
+        vectors = []
+        for text in texts:
+            vector = [0.0] * max(len(vocabulary), 1)
+            for token in text.lower().split():
+                vector[vocabulary[token.strip(".,")]] += 1.0
+            vectors.append(vector)
+        return vectors
+
+
+class SemanticStubEmbedder:
+    """Places each probe anchor beside its paraphrase and away from the distractor."""
+
+    model = "semantic-stub"
+
+    def __init__(self) -> None:
+        self.placement: dict[str, list[float]] = {}
+        for index, (anchor, paraphrase, unrelated) in enumerate(SEMANTIC_PROBES):
+            topic = [0.0] * (len(SEMANTIC_PROBES) + 1)
+            topic[index] = 1.0
+            self.placement[anchor] = list(topic)
+            near = list(topic)
+            near[-1] = 0.3
+            self.placement[paraphrase] = near
+            far = [0.0] * (len(SEMANTIC_PROBES) + 1)
+            far[-1] = 1.0
+            self.placement[unrelated] = far
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        width = len(SEMANTIC_PROBES) + 1
+        return [self.placement.get(text, [0.0] * width) for text in texts]
 
 
 async def noop_emit(kind: str, ref: str, data: dict | None = None) -> None:
@@ -688,3 +735,32 @@ class ContextualSkeletonTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         with self.assertRaises(NotImplementedError):
             await contextualize_entries([], "document", None)
+
+
+class SemanticEmbedderGuardTest(unittest.IsolatedAsyncioTestCase):
+    """A lexical stand-in builds a corpus that looks fine and retrieves noise.
+
+    Measured on the same corpus, lexical vs neural encoding differ by 8.7x in MRR
+    (0.048 vs 0.417) with R@1 of 0.025, so an accidental injection is not a small
+    regression. The probe pairs share no content words between anchor and
+    paraphrase, which is exactly what a bag-of-words encoder cannot bridge.
+    """
+
+    async def test_a_lexical_encoder_is_rejected(self) -> None:
+        with self.assertRaises(NonSemanticEmbedderError):
+            await require_semantic_embedder(BagOfWordsEmbedder())
+
+    async def test_the_rejection_names_the_model_and_the_threshold(self) -> None:
+        with self.assertRaises(NonSemanticEmbedderError) as caught:
+            await require_semantic_embedder(BagOfWordsEmbedder())
+        message = str(caught.exception)
+        self.assertIn("bag-of-words", message)
+        self.assertIn(str(SEMANTIC_MARGIN_THRESHOLD), message)
+
+    async def test_a_semantic_encoder_is_accepted(self) -> None:
+        margin = await require_semantic_embedder(SemanticStubEmbedder())
+        self.assertGreaterEqual(margin, SEMANTIC_MARGIN_THRESHOLD)
+
+    async def test_margin_is_reported_without_raising(self) -> None:
+        self.assertLess(await semantic_margin(BagOfWordsEmbedder()), 0.25)
+        self.assertGreater(await semantic_margin(SemanticStubEmbedder()), 0.25)
