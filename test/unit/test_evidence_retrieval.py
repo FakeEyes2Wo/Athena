@@ -1,5 +1,6 @@
 """Unit tests for ResearchGapMiner and NoveltyEvidenceCollector (Agent + paper_rag two-phase pattern)."""
 
+import json
 import tempfile
 import unittest
 
@@ -20,6 +21,7 @@ from athena.workflows.search.idea_schemas import (
     GapCandidateDraft,
     HypothesisPackage,
     NoveltyEvidenceJudgment,
+    NoveltyEvidenceReport,
     EvidenceRef,
     ResearchProblemInput,
 )
@@ -79,6 +81,21 @@ def _build_agent(provider) -> Agent:
     agent = Agent(AgentConfig(model="test-model", system_prompt="system", tools=ToolRegistry()))
     agent._provider = provider
     return agent
+
+
+def _build_retrieval_agent() -> Agent:
+    """构造一个只回放固定文本、不调用工具的检索 Agent，配合 _FAKE_CORPUS_REF 使用。"""
+    return _build_agent(_TextOnlyProvider("found one closely related prior work"))
+
+
+def _clean_novelty_judgment() -> NoveltyEvidenceJudgment:
+    """一份无风险信号的 NoveltyEvidenceJudgment，供只关心 report 结构而非具体打分的用例复用。"""
+    return NoveltyEvidenceJudgment(
+        nearest_work=[], facet_overlap={}, coverage_estimate=0.5, unrecalled_risk=0.3,
+        citation_cutoff_ok=True, retrieval_cutoff_ok=True, post_cutoff_similarity=0.1,
+        possible_memorization=False, leakage_risk=0.1, historical_backtest_validity=True,
+        uncertainty=0.2,
+    )
 
 
 class BuildRetrievalAgentTest(unittest.TestCase):
@@ -180,3 +197,28 @@ class CollectNoveltyEvidenceTest(unittest.IsolatedAsyncioTestCase):
             )
             coverage_text = await artifacts.get_text(report.coverage_ref)
             self.assertIn("paper_keyword_search", coverage_text)
+
+
+class NoveltyQueryLogRefTest(unittest.IsolatedAsyncioTestCase):
+    async def test_report_exposes_query_log_ref_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = LocalArtifactStore(tmp)
+            model = make_scripted_model([_clean_novelty_judgment()])
+            report = await collect_novelty_evidence(
+                _package(), agent=_build_retrieval_agent(), artifacts=artifacts,
+                corpus_ref=_FAKE_CORPUS_REF, model=model,
+            )
+            self.assertIsNotNone(report.query_log_ref)
+            self.assertTrue(report.query_log_ref.startswith("sha256:"))
+            # 与 RetrievalCoverage 内部记录的是同一个引用，不是另存一份
+            coverage = json.loads(await artifacts.get_text(report.coverage_ref))
+            self.assertEqual(coverage["query_log_ref"], report.query_log_ref)
+
+    def test_query_log_ref_defaults_to_none(self) -> None:
+        # novelty 失败降级产出的空报告没有转录，此时 domain_consistency 退回完整检索
+        report = NoveltyEvidenceReport(
+            idea_id="idea-1", nearest_work=[], facet_overlap={},
+            coverage_ref="sha256:" + "a" * 64, temporal_ref="sha256:" + "b" * 64,
+            uncertainty=0.5,
+        )
+        self.assertIsNone(report.query_log_ref)

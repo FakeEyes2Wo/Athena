@@ -238,7 +238,7 @@ class SkepticModelsTest(unittest.TestCase):
     def test_judgment_and_report_share_shape(self) -> None:
         judgment = SkepticJudgment(critique="weak premise", unaddressed_risks=["confound"],
                                     fatal_flaw_found=False)
-        report = SkepticReport(idea_id="idea-1", **judgment.model_dump())
+        report = SkepticReport(idea_id="idea-1", perspective="methodology", **judgment.model_dump())
         self.assertEqual(["confound"], report.unaddressed_risks)
 
 
@@ -262,7 +262,7 @@ class PairwiseJudgmentTest(unittest.TestCase):
 
 
 class PipelineCandidateResultTest(unittest.TestCase):
-    def test_novelty_skeptic_and_plan_default_to_none(self) -> None:
+    def test_novelty_reviews_and_plan_default_to_empty(self) -> None:
         package = HypothesisPackage(
             idea_id="idea-1", generation_strategy="s", novel_hypothesis="n",
             supported_premises=[], inference_chain=[], predicted_observations=["p"],
@@ -279,5 +279,5 @@ class PipelineCandidateResultTest(unittest.TestCase):
         result = PipelineCandidateResult(package=package, structural=structural,
                                           falsifiability=falsifiability, decision=decision)
         self.assertIsNone(result.novelty)
-        self.assertIsNone(result.skeptic)
+        self.assertEqual([], result.reviews)
         self.assertIsNone(result.validation_plan)

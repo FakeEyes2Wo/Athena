@@ -7,6 +7,8 @@ ThreadManager 持久化。
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -46,9 +48,29 @@ if TYPE_CHECKING:
 DEFAULT_NOVELTY_TOP_K: int = 5
 
 
+# ====== 限流辅助 ======
+
+@asynccontextmanager
+async def limited_by(semaphore: asyncio.Semaphore | None) -> AsyncIterator[None]:
+    """semaphore 为 None 时不限流，否则用 async with 获取名额。
+
+    只用 async with、不手动 acquire()/release()——异常路径漏 release 会静默泄漏名额，
+    症状是流水线越跑越慢直至卡死，极难定位。
+
+    Example:
+        >>> async with limited_by(None):  # doctest: +SKIP
+        ...     pass
+    """
+    if semaphore is None:
+        yield
+        return
+    async with semaphore:
+        yield
+
+
 # ====== 阶段一共用：Agent 检索循环 ======
 
-async def _run_retrieval_agent(agent: Agent, question: str) -> tuple[str, list[str]]:
+async def run_retrieval_agent(agent: Agent, question: str) -> tuple[str, list[str]]:
     """两阶段模式的阶段一：跑一段开放式 Agent 检索循环，返回 (自由文本结论, 实际调用过的工具名)。
 
     ``AgentContext.tools`` 只在手动驱动的 Agent（调用 ``self.tool(ctx, name, ...)``）里有用；
@@ -57,7 +79,7 @@ async def _run_retrieval_agent(agent: Agent, question: str) -> tuple[str, list[s
     不再让调用方多传一份可能对不上的 ToolRegistry。
 
     Example:
-        >>> text, channels = await _run_retrieval_agent(agent, "question")  # doctest: +SKIP
+        >>> text, channels = await run_retrieval_agent(agent, "question")  # doctest: +SKIP
     """
     collected: list[str] = []
     channels: list[str] = []
@@ -145,7 +167,7 @@ async def mine_research_gaps(
         question=problem.question, domain=problem.domain, objective=problem.objective,
         corpus_ref=corpus_ref,
     )
-    collected_text, _channels = await _run_retrieval_agent(agent, question)
+    collected_text, _channels = await run_retrieval_agent(agent, question)
     context_ref = await artifacts.put_text(collected_text or "(agent produced no text)")
 
     response = await single_turn_chat(
@@ -170,13 +192,16 @@ async def collect_novelty_evidence(
     corpus_ref: ArtifactRef,
     top_k: int = DEFAULT_NOVELTY_TOP_K,
     model_training_cutoff: str | None = None,
+    llm_sem: asyncio.Semaphore | None = None,
+    retrieval_sem: asyncio.Semaphore | None = None,
     model: Model | str | None = None,
 ) -> NoveltyEvidenceReport:
     """检索最相近工作，产出数值性 facet_overlap 打分与 TemporalIntegrity 泄漏风险；不产出
     verdict，判断权留给 hard_gate。channels_used/index_version/query_log_ref 等确定性事实
     由代码填，facet_overlap/coverage_estimate 等解释性判断由 LLM 填。agent 需已配好 paper_rag
     工具(agent.config.tools)，corpus_ref 既写进问题文本供 agent 原样传给工具，也用作
-    RetrievalCoverage.index_version。
+    RetrievalCoverage.index_version。llm_sem/retrieval_sem 为 None 时不限流,供并发流水线
+    传入 workflow.LLM_CONCURRENCY / RETRIEVAL_CONCURRENCY 控制的信号量。
 
     Example:
         >>> report = await collect_novelty_evidence(package, agent=agent,
@@ -189,12 +214,14 @@ async def collect_novelty_evidence(
         corpus_ref=corpus_ref,
         predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
     )
-    collected_text, channels_used = await _run_retrieval_agent(agent, question)
+    async with limited_by(retrieval_sem):
+        collected_text, channels_used = await run_retrieval_agent(agent, question)
     query_log_ref = await artifacts.put_text(collected_text or "(agent produced no text)")
 
-    judgment = await single_turn_chat(
-        NOVELTY_SUMMARY_PROMPT_TEMPLATE.format(analysis=collected_text), NoveltyEvidenceJudgment, model=model,
-    )
+    async with limited_by(llm_sem):
+        judgment = await single_turn_chat(
+            NOVELTY_SUMMARY_PROMPT_TEMPLATE.format(analysis=collected_text), NoveltyEvidenceJudgment, model=model,
+        )
 
     coverage = RetrievalCoverage(
         channels_used=sorted(set(channels_used)),
@@ -225,5 +252,6 @@ async def collect_novelty_evidence(
         facet_overlap=judgment.facet_overlap,
         coverage_ref=coverage_ref,
         temporal_ref=temporal_ref,
+        query_log_ref=query_log_ref,
         uncertainty=judgment.uncertainty,
     )

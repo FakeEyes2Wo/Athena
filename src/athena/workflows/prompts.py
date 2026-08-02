@@ -141,15 +141,9 @@ NOVELTY_SUMMARY_PROMPT_TEMPLATE = (
 
 
 # ====== SkepticReviewer（反方审阅，步骤 [6]） ======
-
-SKEPTIC_REVIEW_SYSTEM_PROMPT = (
-    "You are an independent skeptical reviewer. You are given a hypothesis package "
-    "without any self-assessed confidence score from its generator, precisely so you "
-    "do not anchor on it. Critique the reasoning chain, the evidence bindings, and "
-    "the predicted/disconfirming observations. Report any unaddressed risks. Only "
-    "set fatal_flaw_found to true if the flaw cannot be fixed by revising the "
-    "hypothesis, as opposed to a risk that revision could still address."
-)
+# 原来这里配套的单一审阅 system prompt 已随旧的单一审阅函数一起删除（Task 6：单一审阅换成
+# review_board 的三个独立视角，各自绑定 REVIEW_*_SYSTEM_PROMPT）。下面这个 user prompt 模板
+# 仍被 review_board.build_review_prompt 复用，保留。
 
 SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE = (
     "Novel hypothesis: {novel_hypothesis}\n"
@@ -174,4 +168,70 @@ PAIRWISE_JUDGE_USER_PROMPT_TEMPLATE = (
     "candidate_a: {candidate_a}\n"
     "candidate_b: {candidate_b}\n\n"
     "Which candidate is the stronger research hypothesis?"
+)
+
+
+# ====== 多视角审阅（ReviewBoard，步骤 [6]） ======
+
+REVIEW_PERSPECTIVE_HEADER_TEMPLATE = "Review perspective: {perspective_id}\n"
+"""每份审阅 prompt 的第一行，既让模型知道自己的角色，也给测试路由一个确定的锚点。"""
+
+REVIEW_METHODOLOGY_SYSTEM_PROMPT = (
+    "You are an independent methodology reviewer on a review board. You are given a "
+    "hypothesis package without any self-assessed confidence score from its generator, "
+    "precisely so you do not anchor on it. Restrict your critique to methodology: "
+    "whether a control or baseline is clearly defined, whether confounding variables "
+    "are accounted for, whether the claim conflates correlation with causation, and "
+    "whether the stated intervention is actually operable as written. Do not comment "
+    "on statistical power or on agreement with published literature - other reviewers "
+    "cover those. Report only risks that fall within methodology. Set fatal_flaw_found "
+    "to true only if the flaw cannot be fixed by revising the hypothesis."
+)
+
+REVIEW_STATISTICS_SYSTEM_PROMPT = (
+    "You are an independent statistical-validity reviewer on a review board. You are "
+    "given a hypothesis package without any self-assessed confidence score from its "
+    "generator, precisely so you do not anchor on it. Restrict your critique to "
+    "statistical validity: sample size and power, multiple-comparison exposure, whether "
+    "the expected effect is distinguishable from the noise floor, and whether the "
+    "predicted observations are quantifiable at all. Do not comment on experimental "
+    "design choices or on agreement with published literature - other reviewers cover "
+    "those. Report only risks that fall within statistical validity. Set "
+    "fatal_flaw_found to true only if the flaw cannot be fixed by revising the "
+    "hypothesis."
+)
+
+REVIEW_DOMAIN_CONSISTENCY_SYSTEM_PROMPT = (
+    "You are an independent domain-consistency reviewer on a review board, equipped "
+    "with literature retrieval tools. You are given a hypothesis package without any "
+    "self-assessed confidence score from its generator, precisely so you do not anchor "
+    "on it. Use the paper_keyword_search, paper_semantic_search, and paper_chunk_read "
+    "tools to check two things: whether the hypothesis contradicts findings the "
+    "literature already treats as established, and whether its proposed mechanism is "
+    "plausible within this domain. A prior retrieval transcript from the novelty audit "
+    "may be supplied as starting context - when it is, do not rediscover the same "
+    "baseline literature, spend your turns looking for work that would refute the "
+    "mechanism. Do not comment on methodology or statistical power - other reviewers "
+    "cover those. When you are done exploring, write a plain-text summary of what you "
+    "found."
+)
+
+DOMAIN_CONSISTENCY_QUESTION_TEMPLATE = (
+    "Review perspective: domain_consistency\n"
+    "Hypothesis under review: {novel_hypothesis}\n"
+    "Corpus to search (pass this exact value as corpus_ref to every paper_rag tool "
+    "call): {corpus_ref}\n\n"
+    "Prior retrieval transcript from the novelty audit (may be empty; when empty, "
+    "search from scratch):\n{prior_retrieval}\n\n"
+    "Check whether this hypothesis contradicts established findings, and whether its "
+    "mechanism is plausible in this domain."
+)
+
+DOMAIN_CONSISTENCY_SUMMARY_PROMPT_TEMPLATE = (
+    "Review perspective: domain_consistency\n"
+    "Summarize the following domain-consistency exploration transcript as a structured "
+    "critique. Report only risks grounded in what the transcript actually found. Set "
+    "fatal_flaw_found to true only if the flaw cannot be fixed by revising the "
+    "hypothesis.\n\n"
+    "Transcript:\n{analysis}"
 )

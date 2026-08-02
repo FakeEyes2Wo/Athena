@@ -5,17 +5,30 @@
   pre_gate，只跑到步骤 [4]。保留它是因为 ``demo_pre_gate.py`` 与既有测试仍以它作为最小闭环
   演示入口；P1+P2 的正式路径是 ``run_full_pipeline``。
 - ``run_full_pipeline``（P1+P2）：空白挖掘 [2] -> 多候选生成+去重 [3] -> pre_gate [4] ->
-  数值性审计 [5] -> 反方审阅 [6] -> 验证方案 [7] -> hard_gate [8] -> Elo 排序 [9]。
+  数值性审计 [5] -> 三视角审阅委员会 [6]（methodology/statistics/domain_consistency 并行）
+  -> 验证方案 [7] -> hard_gate [8] -> 存活候选（PASS/EXPLORATORY）pairwise Elo 排序 [9]。
 
 编排原则（延续此前 review 意见"整条链路应该是一个整体"）：生成/审计/门控不散落到多处调用
 点，而是集中在一个函数里顺序 await；原先用 langgraph StateGraph 承载，依赖栈切到
 openai + pydantic-ai 后改为纯异步顺序调用，承载手段变了但"一个整体"的约束不变。
 
-Agent 的使用边界遵循 Occam's razor：只有真正需要工具权限+多轮检索的步骤 [2]/[5] 走
-``core.agent.Agent``（见 evidence_retrieval.py）；[3]/[6]/[9] 这些单次结构化生成用
-``single_turn_chat``，不接 ThreadManager/BaseAgent。
+Agent 的使用边界遵循 Occam's razor：只有真正需要工具权限+多轮检索的步骤才走
+``core.agent.Agent``——[2] 空白挖掘、[5] 数值性审计（见 evidence_retrieval.py），以及 [6]
+审阅委员会里唯一配了 paper_rag 工具、需要跑检索循环核对领域一致性的 domain_consistency
+视角（见 review_board.py 的 ``build_domain_consistency_agent``/``review_one_perspective``）。
+其余单次结构化生成——[3] 候选生成、[6] 里仅靠包内信息即可判定的 methodology/statistics
+两个视角、以及 [9] pairwise 比较——都走 ``single_turn_chat``，不接 ThreadManager/BaseAgent。
+
+并发编排（本分支的另一大动因）：``run_full_pipeline`` 内部按 LLM_CONCURRENCY /
+RETRIEVAL_CONCURRENCY 建两级 ``asyncio.Semaphore``（下面这两个常量），分别约束
+single_turn_chat 调用与带检索的 Agent 循环。候选之间、审阅委员会内的三个视角之间、以及
+pairwise 双向调用之间全部用 ``asyncio.gather`` 并发发起，取代 P0 时代的顺序 for 循环；
+``asyncio.gather`` 天然保序，各阶段之间靠这一点对齐候选顺序，而不是另建索引结构。名额获取
+与释放的粒度、以及死锁规避规则见两个常量与 ``_audit_candidate``/``pairwise_compare`` 各自
+的函数注释。
 """
 
+import asyncio
 import uuid
 
 from pydantic_ai.models import Model
@@ -36,25 +49,50 @@ from athena.workflows.search.candidate_generation import (
     deduplicate_candidates,
     generate_candidates,
 )
-from athena.workflows.search.evidence_retrieval import collect_novelty_evidence, mine_research_gaps
+from athena.workflows.search.evidence_retrieval import (
+    collect_novelty_evidence,
+    limited_by,
+    mine_research_gaps,
+)
 from athena.workflows.search.gatekeeper import hard_gate, pre_gate
 from athena.workflows.search.idea_schemas import (
+    FalsifiabilityReport,
     GateDecision,
     GateVerdict,
     HypothesisDraft,
     HypothesisPackage,
+    NoveltyEvidenceReport,
     PairwiseJudgment,
     PipelineCandidateResult,
     ResearchProblemInput,
+    StructuralCheckReport,
 )
 from athena.workflows.search.pre_gate_checks import falsifiability_check, structural_check
-from athena.workflows.search.review_and_validation import match_verifier, plan_validation, skeptic_review
+from athena.workflows.search.review_board import review_board
+from athena.workflows.search.validation import match_verifier, plan_validation
 
 
 # ====== 常量 ======
 
 GENERATION_STRATEGY: str = "single_strategy_v1"
 MAX_GENERATION_ATTEMPTS: int = 2
+
+LLM_CONCURRENCY: int = 16
+"""single_turn_chat 的并发上限。
+
+按 **pairwise 阶段**定的——那是全流水线唯一有确定并发上界的阶段：n 个存活候选 = C(n,2) 对,
+每对双向 2 次且并发,5 个候选就是 20 次同时在飞。审阅阶段峰值与之同量级(3 个视角调用 +
+novelty 与 domain_consistency 各自的转结构化调用),但随视角数与候选数两个变量浮动,不适合
+作为定值依据。日后调 MAX_VERBALIZED_SAMPLES 或增删视角时,该动的是这条注释描述的推算,
+不是随手改数字。"""
+
+RETRIEVAL_CONCURRENCY: int = 4
+"""带 paper_rag 工具的 Agent 检索循环的并发上限。保守估计,未经 paper_rag 实际承受能力验证。
+
+**名额必须在单个检索循环的粒度上获取与释放**,禁止跨越 novelty -> domain_consistency 的
+依赖边界持有:持有一个名额的同时等待第二个名额,在候选数 >= 名额数时必然死锁(5 个候选抢
+4 个名额,4 个各持 1 个、各等 1 个)。只用 async with 获取,不手动 acquire()/release()——
+异常路径漏 release 会静默泄漏名额,症状是流水线越跑越慢直至卡死,极难定位。"""
 
 
 # ====== 对外入口 ======
@@ -129,11 +167,16 @@ async def run_pre_gate(
 # ====== PairwiseJudge（HypoPriList 排序用比较器，步骤 [9]） ======
 
 async def pairwise_compare(
-    package_a: HypothesisPackage, package_b: HypothesisPackage, *, model: Model | str | None = None,
+    package_a: HypothesisPackage, package_b: HypothesisPackage, *,
+    llm_sem: asyncio.Semaphore | None = None, model: Model | str | None = None,
 ) -> PairwiseComparison:
     """轻量 PairwiseJudge：匿名化两个候选、双向各跑一次，规避 position/verbosity/
     self-preference 偏见（呼应设计文档第5节引用的 LLM-as-judge 偏见研究）。双向结果一致时
     直接采信；不一致时以正向结果为准，但把分歧写进 rationale 供审计。
+
+    forward/backward 之间没有依赖，用 gather 并发发起；两次调用各自在自己的协程内部
+    ``async with limited_by(llm_sem)`` 获取名额，不在外层整体持有一个名额再等第二个——
+    那是候选数 >= 名额数时必然死锁的模式（见 evidence_retrieval.limited_by 的注释）。
 
     Example:
         >>> comparison = await pairwise_compare(pkg_a, pkg_b, model=fake_model)  # doctest: +SKIP
@@ -152,8 +195,18 @@ async def pairwise_compare(
             candidate_a=package_b.novel_hypothesis, candidate_b=package_a.novel_hypothesis,
         ),
     ])
-    forward = await single_turn_chat(forward_prompt, PairwiseJudgment, model=model)
-    backward = await single_turn_chat(backward_prompt, PairwiseJudgment, model=model)
+
+    async def _run(prompt: str) -> PairwiseJudgment:
+        """在自己的名额作用域内跑一次 single_turn_chat，供 gather 并发调度。"""
+        async with limited_by(llm_sem):
+            return await single_turn_chat(prompt, PairwiseJudgment, model=model)
+
+    # 注：设计文档 §6.2 要求所有并发点都用 asyncio.gather(..., return_exceptions=True)，
+    # 这里刻意没加——run_full_pipeline 里包这一层调用的外层 gather 已经带
+    # return_exceptions=True（见下方 pairwise 阶段），forward/backward 任一失败都会在这里
+    # 直接向外抛，交给外层兜底跳过整对比较；在这里再吞一次异常只会让外层的降级逻辑看不到
+    # 失败发生在哪一侧，没有实际收益。
+    forward, backward = await asyncio.gather(_run(forward_prompt), _run(backward_prompt))
 
     forward_winner = package_a.idea_id if forward.winner == "candidate_a" else package_b.idea_id
     # 反向调用里 candidate_a 对应 package_b，candidate_b 对应 package_a
@@ -174,6 +227,96 @@ async def pairwise_compare(
     )
 
 
+# ====== 候选内子编排（供 run_full_pipeline 并发调度） ======
+
+async def _screen_candidate(
+    package: HypothesisPackage,
+    *,
+    llm_sem: asyncio.Semaphore,
+    model: Model | str | None = None,
+) -> tuple[StructuralCheckReport, FalsifiabilityReport, GateDecision]:
+    """步骤 [4]：结构检查 + 可证伪性审计 + pre_gate。廉价前置筛子，跑在昂贵步骤之前。
+
+    falsifiability_check 失败按不可证伪处理而非上抛：没有证据不能算通过，交给 pre_gate
+    判 REVISE，不静默放行也不拖垮整批候选。
+
+    Example:
+        >>> structural, falsifiability, decision = await _screen_candidate(
+        ...     package, llm_sem=sem)  # doctest: +SKIP
+    """
+    structural = structural_check(package)
+    try:
+        async with limited_by(llm_sem):
+            falsifiability = await falsifiability_check(package, model=model)
+    except Exception as error:  # noqa: BLE001 - provider 报错形态不定，一律降级
+        # 审计没跑成不能算"可证伪"——没有证据不能算通过，交给 pre_gate 判 REVISE
+        falsifiability = FalsifiabilityReport(
+            idea_id=package.idea_id, testable_implication="",
+            unobservable_variables=[f"falsifiability check failed: {error}"],
+            is_falsifiable=False,
+        )
+    return structural, falsifiability, pre_gate(structural, falsifiability)
+
+
+async def _audit_candidate(
+    package: HypothesisPackage,
+    problem: ResearchProblemInput,
+    structural: StructuralCheckReport,
+    falsifiability: FalsifiabilityReport,
+    *,
+    novelty_agent: Agent,
+    domain_review_agent: Agent,
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+    llm_sem: asyncio.Semaphore,
+    retrieval_sem: asyncio.Semaphore,
+    model: Model | str | None = None,
+) -> PipelineCandidateResult:
+    """步骤 [5]-[8]：novelty -> review_board -> 验证方案 -> hard_gate。
+
+    structural / falsifiability 由 _screen_candidate 传入而非重算，避免每个候选多一次
+    LLM 调用。novelty 与 review_board 之间是本设计唯一的候选内串行依赖（domain_consistency
+    复用 novelty 的检索转录）；retrieval_sem 的名额在各自的检索循环内部获取与释放，绝不跨
+    这条依赖边界持有——否则候选数 >= 名额数时必然死锁。
+
+    collect_novelty_evidence 失败降级为空报告而不是上抛，不拖垮整批候选：facet_overlap
+    为空会命中 hard_gate 既有的"空 facet 判 REVISE"逻辑，无需另写判定；query_log_ref=None
+    让 domain_consistency 退回完整检索，不被 novelty 的失败牵连——一次检索抖动不该同时
+    废掉两项 rubric。
+
+    Example:
+        >>> result = await _audit_candidate(package, problem, structural, falsifiability,
+        ...     novelty_agent=a1, domain_review_agent=a2, artifacts=store,
+        ...     corpus_ref=ref, llm_sem=s1, retrieval_sem=s2)  # doctest: +SKIP
+    """
+    try:
+        novelty = await collect_novelty_evidence(
+            package, agent=novelty_agent, artifacts=artifacts, corpus_ref=corpus_ref,
+            llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
+        )
+    except Exception as error:  # noqa: BLE001 - 检索失败降级为空报告，不拖垮整批
+        empty_ref = await artifacts.put_text(f"novelty retrieval failed: {error}")
+        novelty = NoveltyEvidenceReport(
+            idea_id=package.idea_id, nearest_work=[], facet_overlap={},
+            coverage_ref=empty_ref, temporal_ref=empty_ref, query_log_ref=None,
+            uncertainty=1.0,
+        )
+    reviews = await review_board(
+        package, novelty, domain_review_agent=domain_review_agent, artifacts=artifacts,
+        corpus_ref=corpus_ref, llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
+    )
+    verifier = match_verifier(package, problem.domain)
+    validation_plan = await plan_validation(package, verifier, artifacts=artifacts)
+    # validation_plan_ref 必须指向 ValidationPlan 本身，不是成本估计
+    plan_ref = await artifacts.put_text(validation_plan.model_dump_json())
+    package = package.model_copy(update={"validation_plan_ref": plan_ref})
+    decision = hard_gate(structural, falsifiability, novelty, reviews, validation_plan)
+    return PipelineCandidateResult(
+        package=package, structural=structural, falsifiability=falsifiability,
+        novelty=novelty, reviews=reviews, validation_plan=validation_plan, decision=decision,
+    )
+
+
 # ====== 全流程编排（P1+P2） ======
 
 async def run_full_pipeline(
@@ -181,24 +324,26 @@ async def run_full_pipeline(
     *,
     gap_miner_agent: Agent,
     novelty_agent: Agent,
+    domain_review_agent: Agent,
     artifacts: ArtifactStore,
     corpus_ref: ArtifactRef,
     sample_size: int = MAX_VERBALIZED_SAMPLES,
     model: Model | str | None = None,
 ) -> tuple[list[PipelineCandidateResult], list[RankedCandidate]]:
     """P1+P2 全流程：[2]空白挖掘 → [3]多候选生成+去重 → 每个候选跑
-    [4]pre_gate(不合格直接筛掉,跳过[5]-[8]) → [5]数值性审计 → [6]反方审阅 → [7]验证方案 →
-    [8]hard_gate → [9]存活候选(PASS/EXPLORATORY) pairwise Elo 排序。
+    [4]pre_gate(不合格直接筛掉,跳过[5]-[8]) → [5]数值性审计 → [6]三视角审阅委员会 →
+    [7]验证方案 → [8]hard_gate → [9]存活候选(PASS/EXPLORATORY) pairwise Elo 排序。
 
     gap_miner_agent 与 novelty_agent 是两个独立的 core.agent.Agent 实例(各自配了不同的
     system_prompt与各自的 agent.config.tools),分别用 evidence_retrieval.build_gap_miner_agent
     与 build_novelty_agent 构造,以保证绑定的是 GAP_MINER_SYSTEM_PROMPT/NOVELTY_SYSTEM_PROMPT；
-    ResearchTree 交接(add_hypothesis)不在本轮范围内。
+    domain_review_agent 同理由 review_board.build_domain_consistency_agent 构造,供 [6] 的
+    domain_consistency 视角使用；ResearchTree 交接(add_hypothesis)不在本轮范围内。
 
     Example:
         >>> results, ranking = await run_full_pipeline(problem, gap_miner_agent=agent1,
-        ...     novelty_agent=agent2, artifacts=store, corpus_ref=corpus_ref,
-        ...     model=fake_model)  # doctest: +SKIP
+        ...     novelty_agent=agent2, domain_review_agent=agent3, artifacts=store,
+        ...     corpus_ref=corpus_ref, model=fake_model)  # doctest: +SKIP
     """
     gaps = await mine_research_gaps(
         problem, agent=gap_miner_agent, corpus_ref=corpus_ref, artifacts=artifacts, model=model,
@@ -206,42 +351,65 @@ async def run_full_pipeline(
     candidates = await generate_candidates(problem, gaps, sample_size=sample_size, model=model)
     candidates = deduplicate_candidates(candidates)
 
-    results: list[PipelineCandidateResult] = []
-    for package in candidates:
-        structural = structural_check(package)
-        falsifiability = await falsifiability_check(package, model=model)
-        decision = pre_gate(structural, falsifiability)
+    llm_sem = asyncio.Semaphore(LLM_CONCURRENCY)
+    retrieval_sem = asyncio.Semaphore(RETRIEVAL_CONCURRENCY)
 
-        if decision.verdict != GateVerdict.PASS:
+    # 阶段一：pre_gate 全并发。gather 保序，pre_gated[i] 对应 candidates[i]
+    # 注：设计文档 §6.2 要求所有并发点都用 return_exceptions=True，这里刻意没加——
+    # _screen_candidate 内部已经把 falsifiability_check 的失败降级为空报告（见其注释），
+    # 正常路径下不会再有异常穿透到这一层；如果确实穿透了，说明出现了未预期的 bug，
+    # fail-fast 中止比悄悄吞掉、产出一批部分结果更安全。
+    pre_gated = await asyncio.gather(*[
+        _screen_candidate(package, llm_sem=llm_sem, model=model) for package in candidates
+    ])
+
+    # 阶段二：只有 PASS 的候选进昂贵段，同样保序
+    # 注：同上，设计文档 §6.2 要求 return_exceptions=True，这里刻意没加。_audit_candidate
+    # 内部只对 collect_novelty_evidence 做了失败降级；artifacts.put_text / plan_validation /
+    # hard_gate 没有类似保护。ArtifactStore 一次 I/O 失败被当成环境故障而非某个候选自身的
+    # 问题——"重试/跳过单个候选"对存储层故障没有意义，所以任其向外抛出、让整轮 fail-fast
+    # 更符合语义。代价是异常抛出瞬间姐妹协程不会被取消，会成为孤儿继续持有
+    # llm_sem/retrieval_sem 名额直至自然结束；把"候选级失败"定义成不拖垮整批的结果形态
+    # 属于新设计，不在本轮范围内。
+    survivor_indices = [i for i, (_, _, d) in enumerate(pre_gated) if d.verdict == GateVerdict.PASS]
+    audited = await asyncio.gather(*[
+        _audit_candidate(
+            candidates[i], problem, pre_gated[i][0], pre_gated[i][1],
+            novelty_agent=novelty_agent, domain_review_agent=domain_review_agent,
+            artifacts=artifacts, corpus_ref=corpus_ref,
+            llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
+        )
+        for i in survivor_indices
+    ])
+
+    # 阶段三：按 candidates 输入序组装 results
+    audited_by_index = dict(zip(survivor_indices, audited))
+    results: list[PipelineCandidateResult] = []
+    for i, (structural, falsifiability, decision) in enumerate(pre_gated):
+        if i not in audited_by_index:
             results.append(PipelineCandidateResult(
-                package=package, structural=structural, falsifiability=falsifiability, decision=decision,
+                package=candidates[i], structural=structural,
+                falsifiability=falsifiability, decision=decision,
             ))
             continue
-
-        novelty = await collect_novelty_evidence(
-            package, agent=novelty_agent, artifacts=artifacts, corpus_ref=corpus_ref, model=model,
-        )
-        skeptic = await skeptic_review(package, model=model)
-        verifier = match_verifier(package, problem.domain)
-        validation_plan = await plan_validation(package, verifier, artifacts=artifacts)
-        # validation_plan_ref 必须指向 ValidationPlan 本身；早期实现误用了
-        # estimated_cost_ref（那只是一小段成本估计 JSON），解析出来拿不到方案内容
-        plan_ref = await artifacts.put_text(validation_plan.model_dump_json())
-        package = package.model_copy(update={"validation_plan_ref": plan_ref})
-        decision = hard_gate(structural, falsifiability, novelty, skeptic, validation_plan)
-
-        results.append(PipelineCandidateResult(
-            package=package, structural=structural, falsifiability=falsifiability,
-            novelty=novelty, skeptic=skeptic, validation_plan=validation_plan, decision=decision,
-        ))
+        results.append(audited_by_index[i])
 
     survivors = [r for r in results if r.decision.verdict in (GateVerdict.PASS, GateVerdict.EXPLORATORY)]
     book = HypoPriList()
     for survivor in survivors:
         book.ensure_registered(survivor.package.idea_id)
-    for i in range(len(survivors)):
-        for j in range(i + 1, len(survivors)):
-            comparison = await pairwise_compare(survivors[i].package, survivors[j].package, model=model)
+
+    pairs = [(i, j) for i in range(len(survivors)) for j in range(i + 1, len(survivors))]
+    comparisons = await asyncio.gather(*[
+        pairwise_compare(survivors[i].package, survivors[j].package, llm_sem=llm_sem, model=model)
+        for i, j in pairs
+    ], return_exceptions=True)
+
+    # 比较可以全并发执行，但必须按 (i, j) 索引序喂入——Elo 是在线增量更新，顺序影响评分。
+    # 而 (i, j) 有序的前提是 survivors 保持 results 的输入序，results 又保持 candidates 的
+    # 输入序（asyncio.gather 天然保序，禁止改用 as_completed）。
+    for comparison in comparisons:
+        if isinstance(comparison, PairwiseComparison):
             book.record_comparison(comparison)
 
     return results, book.rank()

@@ -263,9 +263,10 @@ class GateDecision(BaseModel):
     verdict: GateVerdict = Field(description="Gate verdict.")
     rubric_version: str = Field(description="Versioned rubric used, e.g. gate-rubric/v2.")
     item_scores: list[RubricItemScore] = Field(
-        description="Per-item scores with evidence: pre_gate has 2 items "
-                    "(evidence_traceable, falsifiable); hard_gate has 5 "
-                    "(adds novelty_ok, verifier_ok, risk_ok)."
+        description="Per-item scores with evidence: pre_gate always has 2 items "
+                    "(evidence_traceable, falsifiable); hard_gate has 5 + one per review "
+                    "perspective (adds novelty_ok, verifier_ok, risk_total, and one "
+                    "risk_ok_<perspective> per entry in REVIEW_PERSPECTIVES)."
     )
     blocking_factor: str | None = Field(default=None, description="First blocking item if any.")
 
@@ -434,6 +435,12 @@ class NoveltyEvidenceReport(BaseModel):
     )
     coverage_ref: ArtifactRef = Field(description="Artifact ref of the RetrievalCoverage record.")
     temporal_ref: ArtifactRef = Field(description="Artifact ref of the TemporalIntegrity record.")
+    query_log_ref: ArtifactRef | None = Field(
+        default=None,
+        description="Artifact ref of the raw retrieval transcript, reused by the "
+                    "domain_consistency reviewer as starting context. None when novelty "
+                    "retrieval failed and this is a degraded empty report.",
+    )
     uncertainty: float = Field(ge=0, le=1, description="Overall uncertainty in this novelty assessment.")
 
 
@@ -490,7 +497,8 @@ class SkepticJudgment(BaseModel):
         False
     """
     critique: str = Field(
-        description="Independent critique, written without seeing the generator's sampling_probability."
+        description="Independent critique, written without access to the generator's "
+                    "self-assessed confidence score."
     )
     unaddressed_risks: list[str] = Field(default_factory=list, description="Risks the package does not address.")
     fatal_flaw_found: bool = Field(
@@ -502,14 +510,29 @@ class SkepticReport(BaseModel):
     """Design-time skeptic review result; not itself a verdict (hard_gate judges).
 
     Example:
-        >>> SkepticReport(idea_id="idea-1", critique="c", unaddressed_risks=[],
-        ...                 fatal_flaw_found=False).idea_id
+        >>> SkepticReport(idea_id="idea-1", perspective="methodology", critique="c",
+        ...                 unaddressed_risks=[], fatal_flaw_found=False).idea_id
         'idea-1'
     """
     idea_id: str = Field(description="Candidate id.")
+    perspective: str = Field(
+        description="Review perspective id this report came from; matches "
+                    "ReviewPerspective.perspective_id and the rubric item suffix risk_ok_*."
+    )
     critique: str = Field(description="Independent critique text.")
     unaddressed_risks: list[str] = Field(default_factory=list, description="Risks the package does not address.")
     fatal_flaw_found: bool = Field(description="Whether an unfixable flaw was found.")
+    transcript_ref: ArtifactRef | None = Field(
+        default=None,
+        description="Artifact ref of the retrieval transcript; only perspectives with "
+                    "tools produce one.",
+    )
+    failed: bool = Field(
+        default=False,
+        description="True when this perspective's call failed. hard_gate treats a failed "
+                    "review as not passing (fail-closed): a review that did not run must "
+                    "never count as a review that approved.",
+    )
 
 
 # ====== Verbalized Sampling（多候选生成，步骤 [3]） ======
@@ -544,8 +567,9 @@ class PairwiseJudgment(BaseModel):
 class PipelineCandidateResult(BaseModel):
     """Full audit trail for one candidate through run_full_pipeline.
 
-    novelty/skeptic/validation_plan stay None when pre_gate already REVISEd the candidate, since
-    the expensive [5]-[7] steps are skipped for candidates that fail the cheap [4] check first.
+    novelty/validation_plan stay None, and reviews stays empty, when pre_gate already REVISEd
+    the candidate, since the expensive [5]-[7] steps are skipped for candidates that fail the
+    cheap [4] check first.
 
     Example:
         >>> PipelineCandidateResult(package=package, structural=structural,
@@ -555,6 +579,11 @@ class PipelineCandidateResult(BaseModel):
     structural: StructuralCheckReport
     falsifiability: FalsifiabilityReport
     novelty: NoveltyEvidenceReport | None = None
-    skeptic: SkepticReport | None = None
+    reviews: list[SkepticReport] = Field(
+        default_factory=list,
+        description="One report per review perspective. Empty list means the candidate was "
+                    "REVISEd at pre_gate and never reached the review stage - distinct from "
+                    "novelty/validation_plan which use None for the same situation.",
+    )
     validation_plan: ValidationPlan | None = None
     decision: GateDecision

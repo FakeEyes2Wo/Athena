@@ -1,7 +1,11 @@
 """Unit tests for the pre_gate async pipeline (run_pre_gate)."""
 
+import asyncio
 import tempfile
 import unittest
+
+from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.models.function import FunctionModel
 
 from athena.core.agent import Agent, AgentConfig, StreamEvent
 from athena.core.tool import ToolRegistry
@@ -20,12 +24,29 @@ from athena.workflows.search.idea_schemas import (
     SkepticJudgment,
     VerbalizedSamplingResponse,
 )
-from athena.workflows.search.workflow import pairwise_compare, run_full_pipeline, run_pre_gate
-from unit.fakes import make_scripted_model
+from athena.workflows.search.workflow import (
+    RETRIEVAL_CONCURRENCY,
+    pairwise_compare,
+    run_full_pipeline,
+    run_pre_gate,
+)
+from unit.fakes import make_routed_model, make_scripted_model
 
 # 占位 corpus_ref：这组测试只验证编排/门控/排序逻辑,不重复 Task 6 已经覆盖过的真实 paper_rag
 # 检索集成,所以用一个格式合法但不指向真实内容的 sha256 引用即可。
 _FAKE_CORPUS_REF = "sha256:" + "c" * 64
+
+# 路由锚点：取各 prompt 模板中唯一、且互不为前缀的片段。GAP_MINER_SUMMARY 与
+# NOVELTY_SUMMARY 共享前缀 "Summarize the following literature exploration transcript
+# as a structured "，所以锚点必须取分岔之后的部分。
+_ROUTE_GAP_MINING = "structured list of gaps"
+_ROUTE_GENERATION = "Verbalized Sampling"
+_ROUTE_FALSIFIABILITY = "falsifiability auditor"
+_ROUTE_NOVELTY = "novelty and temporal-integrity assessment"
+_ROUTE_REVIEW_METHODOLOGY = "Review perspective: methodology"
+_ROUTE_REVIEW_STATISTICS = "Review perspective: statistics"
+_ROUTE_REVIEW_DOMAIN = "Review perspective: domain_consistency"
+_ROUTE_PAIRWISE = "impartial pairwise judge"
 
 
 class _StaticTextProvider:
@@ -87,6 +108,57 @@ def _second_valid_draft() -> HypothesisDraft:
     )
 
 
+def _third_valid_draft() -> HypothesisDraft:
+    """第三个候选，主张与前两个候选词集几乎不重叠，供 5-候选并发场景使用。"""
+    return HypothesisDraft(
+        statement="Mitochondrial calcium uptake accelerates dendritic spine pruning during sleep",
+        intervention="Block mitochondrial calcium uniporter in cortical neurons overnight",
+        expected_effect="Spine pruning rate drops relative to untreated controls",
+        generation_strategy="verbalized_sampling_v1",
+        supported_premises=[
+            ClaimEvidence(claim="X correlates with Y in mice", role=ClaimRole.SUPPORTED_PREMISE,
+                          supporting_refs=["ev-0"]),
+        ],
+        inference_chain=[],
+        predicted_observations=["Spine pruning rate drops after uniporter blockade"],
+        disconfirming_observations=["Spine pruning rate is unchanged after uniporter blockade"],
+    )
+
+
+def _fourth_valid_draft() -> HypothesisDraft:
+    """第四个候选，主张与前三个候选词集几乎不重叠，供 5-候选并发场景使用。"""
+    return HypothesisDraft(
+        statement="Gut microbiome diversity loss impairs vaccine antibody titers in aged mice",
+        intervention="Deplete gut flora with broad-spectrum antibiotics before vaccination",
+        expected_effect="Antibody titers drop relative to flora-intact controls",
+        generation_strategy="verbalized_sampling_v1",
+        supported_premises=[
+            ClaimEvidence(claim="X correlates with Y in mice", role=ClaimRole.SUPPORTED_PREMISE,
+                          supporting_refs=["ev-0"]),
+        ],
+        inference_chain=[],
+        predicted_observations=["Antibody titers drop after flora depletion"],
+        disconfirming_observations=["Antibody titers are unchanged after flora depletion"],
+    )
+
+
+def _fifth_valid_draft() -> HypothesisDraft:
+    """第五个候选，主张与前四个候选词集几乎不重叠，供 5-候选并发场景使用。"""
+    return HypothesisDraft(
+        statement="Circadian clock disruption elevates hepatic lipid peroxidation after high-fat feeding",
+        intervention="Knock out core clock gene Bmal1 in hepatocytes before high-fat feeding",
+        expected_effect="Lipid peroxidation markers rise relative to clock-intact controls",
+        generation_strategy="verbalized_sampling_v1",
+        supported_premises=[
+            ClaimEvidence(claim="X correlates with Y in mice", role=ClaimRole.SUPPORTED_PREMISE,
+                          supporting_refs=["ev-0"]),
+        ],
+        inference_chain=[],
+        predicted_observations=["Lipid peroxidation markers rise after Bmal1 knockout"],
+        disconfirming_observations=["Lipid peroxidation markers are unchanged after Bmal1 knockout"],
+    )
+
+
 def _clean_novelty_judgment() -> NoveltyEvidenceJudgment:
     """低 facet_overlap、无时间泄漏风险的数值性审计结果，用来让候选顺利通过 hard_gate。"""
     return NoveltyEvidenceJudgment(
@@ -109,6 +181,29 @@ def _falsifiability_judgment(ok: bool) -> FalsifiabilityJudgment:
         unobservable_variables=["internal state"],
         is_falsifiable=False,
     )
+
+
+def _full_pipeline_routes(drafts: list[HypothesisDraft]) -> dict:
+    """run_full_pipeline 全绿路径的路由表。
+
+    Example:
+        >>> routes = _full_pipeline_routes([_valid_draft()])  # doctest: +SKIP
+        >>> _ROUTE_GENERATION in routes  # doctest: +SKIP
+        True
+    """
+    return {
+        _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+        _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=drafts),
+        _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
+        _ROUTE_NOVELTY: _clean_novelty_judgment(),
+        _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
+            critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+        _ROUTE_REVIEW_STATISTICS: SkepticJudgment(
+            critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+        _ROUTE_REVIEW_DOMAIN: SkepticJudgment(
+            critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+        _ROUTE_PAIRWISE: PairwiseJudgment(winner="candidate_a", rationale="a is stronger"),
+    }
 
 
 class RunPreGateTest(unittest.IsolatedAsyncioTestCase):
@@ -155,10 +250,19 @@ class PairwiseCompareTest(unittest.IsolatedAsyncioTestCase):
         # candidate_a=package_b、candidate_b=package_a（顺序对调）。forward 选 candidate_a
         # 即 package_a 获胜；backward 选 candidate_b，backward 的 candidate_b 就是
         # package_a，所以两次调用其实都指向 package_a 获胜——用来验证一致同意路径。
-        model = make_scripted_model([
-            PairwiseJudgment(winner="candidate_a", rationale="a wins forward"),
-            PairwiseJudgment(winner="candidate_b", rationale="a still wins backward"),
-        ])
+        #
+        # 用 make_routed_model 而非 make_scripted_model：forward/backward 并发发起后由
+        # FunctionModel 在线程池里执行，谁先 pop(0) 不再有序，按调用顺序消费队列的
+        # make_scripted_model 在并发下是 flaky 的。路由版按 prompt 内容而非调用序分发，
+        # 锚点必须落在 "candidate_a: " 紧跟的文本上——两个候选的原文都会同时出现在同一条
+        # prompt 里（只是 candidate_a/candidate_b 位置对调），单纯用候选原文当锚点会同时命中
+        # forward 和 backward 两条 prompt，触发 make_routed_model 的“命中数必须恰好为 1”校验失败。
+        model = make_routed_model({
+            f"candidate_a: {package_a.novel_hypothesis}":
+                PairwiseJudgment(winner="candidate_a", rationale="a wins forward"),
+            f"candidate_a: {package_b.novel_hypothesis}":
+                PairwiseJudgment(winner="candidate_b", rationale="a still wins backward"),
+        })
         comparison = await pairwise_compare(package_a, package_b, model=model)
         self.assertEqual("idea-a", comparison.winner_id)
         # 仅断言 winner_id 无法区分"双向一致"与"双向分歧但 forward 结果凑巧相同"这两种情况
@@ -183,11 +287,47 @@ class PairwiseCompareTest(unittest.IsolatedAsyncioTestCase):
         # forward 选 candidate_a（即 package_a）获胜；backward 也选 candidate_a，但 backward
         # 调用里 candidate_a 对应的是 package_b，所以 backward 实际上是 package_b 获胜——
         # 两次调用真正分歧，用来验证"不一致时以正向结果为准，且把分歧写进 rationale"这条规则。
-        model = make_scripted_model([
-            PairwiseJudgment(winner="candidate_a", rationale="a wins forward"),
-            PairwiseJudgment(winner="candidate_a", rationale="b wins backward"),
-        ])
+        #
+        # 同上一条测试，改用 make_routed_model 消除并发下的线程调度顺序依赖。
+        model = make_routed_model({
+            f"candidate_a: {package_a.novel_hypothesis}":
+                PairwiseJudgment(winner="candidate_a", rationale="a wins forward"),
+            f"candidate_a: {package_b.novel_hypothesis}":
+                PairwiseJudgment(winner="candidate_a", rationale="b wins backward"),
+        })
         comparison = await pairwise_compare(package_a, package_b, model=model)
+        self.assertEqual("idea-a", comparison.winner_id)
+        self.assertIn("disagreement", comparison.rationale)
+
+    async def test_both_directions_are_still_called_after_concurrency_change(self) -> None:
+        """并发化不得改变双向比较的语义：两次调用都要发生，winner 映射保持正确。
+
+        不试图断言两次调用在时间上重叠——FunctionModel 的 respond 是同步函数，写时序断言
+        只会得到一个脆弱且实际什么都没验证的测试。"深度减半"由 gather 的代码结构保证。
+        """
+        prompts: list[str] = []
+
+        def respond(messages, info):
+            prompts.append(str(messages))
+            args = PairwiseJudgment(winner="candidate_a", rationale="r").model_dump(mode="json")
+            tool_name = info.output_tools[0].name if info.output_tools else "final_result"
+            return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args)])
+
+        package_a = HypothesisPackage(
+            idea_id="idea-a", generation_strategy="s", novel_hypothesis="X causes Y",
+            supported_premises=[], inference_chain=[], predicted_observations=["p"],
+            disconfirming_observations=["d"], lineage_op="generate",
+        )
+        package_b = package_a.model_copy(update={"idea_id": "idea-b",
+                                                  "novel_hypothesis": "Z inhibits W"})
+        comparison = await pairwise_compare(package_a, package_b,
+                                            model=FunctionModel(respond))
+
+        self.assertEqual(2, len(prompts))
+        # 一次正向（candidate_a=package_a）、一次反向（candidate_a=package_b），顺序不重要
+        first_positions = {p.index("X causes Y") < p.index("Z inhibits W") for p in prompts}
+        self.assertEqual({True, False}, first_positions)
+        # 两次都选 candidate_a，反向的 candidate_a 是 package_b，故为双向分歧，取正向结果
         self.assertEqual("idea-a", comparison.winner_id)
         self.assertIn("disagreement", comparison.rationale)
 
@@ -196,21 +336,22 @@ class RunFullPipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_single_surviving_candidate_is_ranked_without_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = LocalArtifactStore(tmp)
-            model = make_scripted_model([
-                GapMiningResponse(gaps=[]),
-                VerbalizedSamplingResponse(candidates=[_valid_draft()]),
-                _falsifiability_judgment(True),
-                NoveltyEvidenceJudgment(
-                    nearest_work=[], facet_overlap={"problem": 0.1}, coverage_estimate=0.5,
-                    unrecalled_risk=0.2, citation_cutoff_ok=True, retrieval_cutoff_ok=True,
-                    post_cutoff_similarity=0.1, possible_memorization=False, leakage_risk=0.1,
-                    historical_backtest_validity=True, uncertainty=0.2,
-                ),
-                SkepticJudgment(critique="looks solid", unaddressed_risks=[], fatal_flaw_found=False),
-            ])
+            model = make_routed_model({
+                _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[_valid_draft()]),
+                _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
+                _ROUTE_NOVELTY: _clean_novelty_judgment(),
+                _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(critique="looks solid", unaddressed_risks=[],
+                                                            fatal_flaw_found=False),
+                _ROUTE_REVIEW_STATISTICS: SkepticJudgment(critique="looks solid", unaddressed_risks=[],
+                                                           fatal_flaw_found=False),
+                _ROUTE_REVIEW_DOMAIN: SkepticJudgment(critique="looks solid", unaddressed_risks=[],
+                                                       fatal_flaw_found=False),
+            })
 
             results, ranking = await run_full_pipeline(
                 _problem(), gap_miner_agent=_build_retrieval_agent(), novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
                 artifacts=artifacts, corpus_ref=_FAKE_CORPUS_REF, sample_size=1, model=model,
             )
 
@@ -227,44 +368,45 @@ class RunFullPipelineTest(unittest.IsolatedAsyncioTestCase):
     async def test_candidate_revised_at_pre_gate_skips_expensive_stages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = LocalArtifactStore(tmp)
-            model = make_scripted_model([
-                GapMiningResponse(gaps=[]),
-                VerbalizedSamplingResponse(candidates=[_valid_draft()]),
-                _falsifiability_judgment(False),
-            ])
+            model = make_routed_model({
+                _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[_valid_draft()]),
+                _ROUTE_FALSIFIABILITY: _falsifiability_judgment(False),
+            })
 
             results, ranking = await run_full_pipeline(
                 _problem(), gap_miner_agent=_build_retrieval_agent(), novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
                 artifacts=artifacts, corpus_ref=_FAKE_CORPUS_REF, sample_size=1, model=model,
             )
 
             self.assertEqual(1, len(results))
             self.assertEqual("pre_gate", results[0].decision.gate_phase)
             self.assertIsNone(results[0].novelty)
-            self.assertIsNone(results[0].skeptic)
+            self.assertEqual([], results[0].reviews)
             self.assertEqual([], ranking)
 
     async def test_two_surviving_candidates_get_pairwise_compared_and_ranked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = LocalArtifactStore(tmp)
-            # 脚本化顺序必须与 run_full_pipeline 里 single_turn_chat 的真实调用顺序一致：
-            # [2]空白挖掘 → [3]多候选生成 → 候选1([4]可证伪性/[5]数值性/[6]反方审阅) →
-            # 候选2(同样三次) → [9]一次 pairwise_compare 内部的正向+反向两次调用。
-            model = make_scripted_model([
-                GapMiningResponse(gaps=[]),
-                VerbalizedSamplingResponse(candidates=[_valid_draft(), _second_valid_draft()]),
-                _falsifiability_judgment(True),
-                _clean_novelty_judgment(),
-                SkepticJudgment(critique="solid", unaddressed_risks=[], fatal_flaw_found=False),
-                _falsifiability_judgment(True),
-                _clean_novelty_judgment(),
-                SkepticJudgment(critique="also solid", unaddressed_risks=["minor"], fatal_flaw_found=False),
-                PairwiseJudgment(winner="candidate_a", rationale="first candidate is more falsifiable"),
-                PairwiseJudgment(winner="candidate_b", rationale="first candidate still wins reversed"),
-            ])
+            model = make_routed_model({
+                _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+                _ROUTE_GENERATION: VerbalizedSamplingResponse(
+                    candidates=[_valid_draft(), _second_valid_draft()]),
+                _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
+                _ROUTE_NOVELTY: _clean_novelty_judgment(),
+                _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(critique="solid", unaddressed_risks=[],
+                                                            fatal_flaw_found=False),
+                _ROUTE_REVIEW_STATISTICS: SkepticJudgment(critique="solid", unaddressed_risks=[],
+                                                           fatal_flaw_found=False),
+                _ROUTE_REVIEW_DOMAIN: SkepticJudgment(critique="solid", unaddressed_risks=[],
+                                                       fatal_flaw_found=False),
+                _ROUTE_PAIRWISE: PairwiseJudgment(winner="candidate_a", rationale="first is more falsifiable"),
+            })
 
             results, ranking = await run_full_pipeline(
                 _problem(), gap_miner_agent=_build_retrieval_agent(), novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
                 artifacts=artifacts, corpus_ref=_FAKE_CORPUS_REF, sample_size=2, model=model,
             )
 
@@ -274,6 +416,241 @@ class RunFullPipelineTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(GateVerdict.PASS, result.decision.verdict)
             self.assertEqual(2, len(ranking))
             self.assertEqual([1, 1], [entry.comparisons for entry in ranking])
-            # 双向一致判 candidate_a（即第一个存活候选）获胜，Elo 更新后它应排在首位
+            # 路由版下正反两次调用返回同一 winner 标签，按 pairwise_compare 的映射即为双向分歧，
+            # 以正向结果（第一个存活候选）为准；"双向一致"路径由 PairwiseCompareTest 用顺序版覆盖
             self.assertEqual(results[0].package.idea_id, ranking[0].idea_id)
             self.assertTrue(all(entry.evidence for entry in ranking))
+
+
+class FailureDegradationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_novelty_failure_does_not_drag_down_domain_consistency(self) -> None:
+        """一次检索抖动不该同时废掉 novelty_ok 和 risk_ok_domain_consistency 两项。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = [_valid_draft()]
+            routes = _full_pipeline_routes(drafts)
+            routes[_ROUTE_NOVELTY] = ValueError("retrieval hiccup")
+            results, _ = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=1, model=make_routed_model(routes),
+            )
+            result = results[0]
+            # novelty 降级成空报告：facet_overlap 为空 -> novelty_ok 判 REVISE
+            self.assertEqual({}, result.novelty.facet_overlap)
+            self.assertIsNone(result.novelty.query_log_ref)
+            self.assertEqual(GateVerdict.REVISE, result.decision.verdict)
+            self.assertEqual("novelty_ok", result.decision.blocking_factor)
+            # domain_consistency 不受牵连：退回完整检索，仍然正常产出
+            by_id = {r.perspective: r for r in result.reviews}
+            self.assertFalse(by_id["domain_consistency"].failed)
+
+    async def test_falsifiability_failure_degrades_to_not_falsifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = [_valid_draft()]
+            routes = _full_pipeline_routes(drafts)
+            routes[_ROUTE_FALSIFIABILITY] = ValueError("provider down")
+            results, ranking = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=1, model=make_routed_model(routes),
+            )
+            self.assertEqual("pre_gate", results[0].decision.gate_phase)
+            self.assertEqual(GateVerdict.REVISE, results[0].decision.verdict)
+            self.assertEqual("falsifiable", results[0].decision.blocking_factor)
+            self.assertFalse(results[0].falsifiability.is_falsifiable)
+            self.assertEqual([], ranking)
+
+    async def test_pairwise_failure_is_skipped_without_crashing_ranking(self) -> None:
+        """spec 6.2 降级表第二行（Task 8 已实现,这里补覆盖）：某对 pairwise 比较失败时,
+        跳过这一对,Elo 少一条记录,而不是让整个排序阶段崩掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = [_valid_draft(), _second_valid_draft()]
+            routes = _full_pipeline_routes(drafts)
+            routes[_ROUTE_PAIRWISE] = ValueError("judge unavailable")
+            results, ranking = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=2, model=make_routed_model(routes),
+            )
+            self.assertEqual(2, len(results))
+            # 两个候选都存活但唯一一对比较失败被跳过：都停在 0 条 comparisons,而不是抛异常
+            self.assertEqual(2, len(ranking))
+            self.assertEqual([0, 0], sorted(entry.comparisons for entry in ranking))
+
+
+class ConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_retrieval_concurrency_is_capped(self) -> None:
+        """假 provider 记录并发峰值，断言不超过 RETRIEVAL_CONCURRENCY。
+
+        场景必须让真实并发真的有机会超过上限才有意义：每个候选内部 novelty ->
+        domain_consistency 是串行的，所以同时在飞的检索数上限 = 存活候选数；用
+        sample_size=2 只能到 2，永远撞不到 RETRIEVAL_CONCURRENCY=4，测不出限流有没有生效。
+        这里用 5 个互不相似的候选（MAX_VERBALIZED_SAMPLES），5 个候选同时跑 novelty 检索时
+        无限流的话 peak 会到 5 > 4，这样"peak <= 4"才是一条真的会失败的断言。
+        """
+        class _CountingProvider:
+            def __init__(self) -> None:
+                self.active = 0
+                self.peak = 0
+
+            async def stream(self, *_args):
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                await asyncio.sleep(0)
+                yield StreamEvent("text_delta", {"delta": "t", "accumulated": "t"})
+                # 递减必须在最后一个 yield 之前：core/agent/agent.py 的 _sampling_loop 收到
+                # response_completed 就 break，不会把生成器消费完，写在最后一个 yield 之后的
+                # 代码永远不执行——那样 active 就只增不减，peak 测的是"累计发起的检索调用总数"
+                # 而不是"任意时刻并发数"，测试会变成假阳性。
+                self.active -= 1
+                yield StreamEvent("response_completed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = _CountingProvider()
+            novelty_agent = _build_retrieval_agent()
+            novelty_agent._provider = provider
+            domain_agent = _build_retrieval_agent()
+            domain_agent._provider = provider
+            drafts = [
+                _valid_draft(), _second_valid_draft(), _third_valid_draft(),
+                _fourth_valid_draft(), _fifth_valid_draft(),
+            ]
+            _, _ = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=novelty_agent, domain_review_agent=domain_agent,
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=5,
+                model=make_routed_model(_full_pipeline_routes(drafts)),
+            )
+            self.assertLessEqual(provider.peak, RETRIEVAL_CONCURRENCY)
+
+    async def test_ranking_is_deterministic_across_runs(self) -> None:
+        """同一输入跑两次，排名必须完全一致——Elo 是在线增量更新，喂入顺序影响评分。
+
+        必须用 5 个存活候选（C(5,2)=10 次比较）而非 2 个：2 个候选只有 C(2,2)=1 次比较，
+        不存在"喂入顺序"这回事，测不出 Task 8 要保证的按 (i, j) 索引序喂入 Elo 这条规则——
+        任何把 pairs/comparisons 顺序改乱的回归都不会被这条测试发现。5 个互不相似的候选
+        复用 test_retrieval_concurrency_is_capped 已经验证过的那组（两两 Jaccard <= 0.053，
+        远低于去重阈值 0.8），保证不会被 deduplicate_candidates 合并掉。
+        """
+        rankings = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as tmp:
+                drafts = [
+                    _valid_draft(), _second_valid_draft(), _third_valid_draft(),
+                    _fourth_valid_draft(), _fifth_valid_draft(),
+                ]
+                _, ranking = await run_full_pipeline(
+                    _problem(), gap_miner_agent=_build_retrieval_agent(),
+                    novelty_agent=_build_retrieval_agent(),
+                    domain_review_agent=_build_retrieval_agent(),
+                    artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                    sample_size=5,
+                    model=make_routed_model(_full_pipeline_routes(drafts)),
+                )
+                rankings.append([(e.idea_id, e.rating) for e in ranking])
+        self.assertEqual(
+            [r[1] for r in rankings[0]], [r[1] for r in rankings[1]],
+            "Elo ratings must not depend on task completion order",
+        )
+
+    async def test_reports_are_not_crossed_between_candidates(self) -> None:
+        """并发重构最典型的缺陷是闭包变量捕获错，症状正是候选 A 的 package 配上候选 B 的报告。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = [_valid_draft(), _second_valid_draft()]
+            results, _ = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=2,
+                model=make_routed_model(_full_pipeline_routes(drafts)),
+            )
+            for result in results:
+                idea_id = result.package.idea_id
+                self.assertEqual(idea_id, result.structural.idea_id)
+                self.assertEqual(idea_id, result.falsifiability.idea_id)
+                self.assertEqual(idea_id, result.novelty.idea_id)
+                self.assertEqual(idea_id, result.decision.idea_id)
+                for review in result.reviews:
+                    self.assertEqual(idea_id, review.idea_id)
+
+    async def test_domain_reviewer_runs_once_per_survivor_only(self) -> None:
+        """两个检索 Agent 各挂独立计数器：domain_review_agent 只应为存活候选跑，且每个
+        存活候选恰好跑一次；pre_gate 就被筛掉的候选不该触发它。共用一个计数器分不清是谁
+        跑的。退化情形（0 存活 -> 0 次调用）与正例（N 存活 -> N 次调用）都要覆盖，否则
+        名字里的"per survivor"从未被真正断言过。"""
+        class _CountingProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, *_args):
+                self.calls += 1
+                yield StreamEvent("text_delta", {"delta": "t", "accumulated": "t"})
+                yield StreamEvent("response_completed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            novelty_provider = _CountingProvider()
+            domain_provider = _CountingProvider()
+            novelty_agent = _build_retrieval_agent()
+            novelty_agent._provider = novelty_provider
+            domain_agent = _build_retrieval_agent()
+            domain_agent._provider = domain_provider
+            # 两个候选，其中一个在 pre_gate 就被筛掉：可证伪性审计对所有候选返回 False
+            drafts = [_valid_draft(), _second_valid_draft()]
+            routes = _full_pipeline_routes(drafts)
+            routes[_ROUTE_FALSIFIABILITY] = _falsifiability_judgment(False)
+            results, _ = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=novelty_agent, domain_review_agent=domain_agent,
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=2, model=make_routed_model(routes),
+            )
+            survivors = [r for r in results if r.decision.gate_phase == "full"]
+            self.assertEqual(0, len(survivors))
+            # 没有候选走到步骤 [5]/[6]，两个检索 Agent 都不该被触发
+            self.assertEqual(0, novelty_provider.calls)
+            self.assertEqual(0, domain_provider.calls)
+
+        # 正例：两个候选都通过 pre_gate 存活，domain_review_agent 应恰好为每个存活候选
+        # 跑一次（2 次），而不是 0 次（上面已覆盖）或者被漏跑/去重成 1 次。
+        with tempfile.TemporaryDirectory() as tmp:
+            novelty_provider = _CountingProvider()
+            domain_provider = _CountingProvider()
+            novelty_agent = _build_retrieval_agent()
+            novelty_agent._provider = novelty_provider
+            domain_agent = _build_retrieval_agent()
+            domain_agent._provider = domain_provider
+            drafts = [_valid_draft(), _second_valid_draft()]
+            results, _ = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=novelty_agent, domain_review_agent=domain_agent,
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=2, model=make_routed_model(_full_pipeline_routes(drafts)),
+            )
+            survivors = [r for r in results if r.decision.gate_phase == "full"]
+            self.assertEqual(2, len(survivors))
+            self.assertEqual(2, domain_provider.calls)
+
+    async def test_results_preserve_candidate_input_order(self) -> None:
+        """results 必须保持 candidates 输入序——这是 Elo 确定性的真正前提。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            drafts = [_valid_draft(), _second_valid_draft()]
+            results, _ = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=2,
+                model=make_routed_model(_full_pipeline_routes(drafts)),
+            )
+            self.assertEqual(
+                [d.statement for d in drafts],
+                [r.package.novel_hypothesis for r in results],
+            )

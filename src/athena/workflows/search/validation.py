@@ -1,24 +1,12 @@
-"""SkepticReviewer（反方审阅，步骤 [6]）、VerifierRegistry+ValidationPlanner（验证方案，
-步骤 [7]）。SkepticReviewer 只看 HypothesisPackage 的 claims+evidence，不接触
-sampling_probability，呼应 Co-Scientist"生成与审阅分离、审阅侧不看生成侧自评概率"的设计。
-VerifierRegistry 是纯规则匹配（无 LLM），P1+P2 阶段先内置一个小列表，不接外部服务；找不到
-匹配就返回 None，交给 ValidationPlanner 标 EXPLORATORY，不得虚构 verifier。
+"""VerifierRegistry+ValidationPlanner（验证方案，步骤 [7]）。VerifierRegistry 是纯规则匹配
+（无 LLM），P1+P2 阶段先内置一个小列表，不接外部服务；找不到匹配就返回 None，交给
+ValidationPlanner 标 EXPLORATORY，不得虚构 verifier。
 """
 
 import json
 
-from pydantic_ai.models import Model
-
 from athena.storage.artifact_store import ArtifactStore
-from athena.utils.single_turn_chat import single_turn_chat
-from athena.workflows.prompts import SKEPTIC_REVIEW_SYSTEM_PROMPT, SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE
-from athena.workflows.search.idea_schemas import (
-    HypothesisPackage,
-    SkepticJudgment,
-    SkepticReport,
-    ValidationPlan,
-    VerifierSpec,
-)
+from athena.workflows.search.idea_schemas import HypothesisPackage, ValidationPlan, VerifierSpec
 
 
 # ====== 常量：内置 verifier 列表 ======
@@ -61,41 +49,6 @@ BUILTIN_VERIFIERS: tuple[VerifierSpec, ...] = (
         requires_human_approval=True,
     ),
 )
-
-
-# ====== SkepticReviewer（步骤 [6]） ======
-
-async def skeptic_review(package: HypothesisPackage, *, model: Model | str | None = None) -> SkepticReport:
-    """独立审阅：只用 novel_hypothesis/supported_premises/predicted_observations/
-    disconfirming_observations 构造 prompt，刻意不传 sampling_probability，避免审阅侧
-    锚定生成侧的自评概率。
-
-    Example:
-        >>> report = await skeptic_review(package, model=fake_model)  # doctest: +SKIP
-        >>> report.fatal_flaw_found
-        False
-    """
-    premise_lines = "\n".join(
-        f"- [{premise.role.value}] {premise.claim} (refs: {', '.join(premise.supporting_refs) or '-'})"
-        for premise in package.supported_premises
-    ) or "(no supported premises)"
-
-    prompt = "\n\n".join([
-        SKEPTIC_REVIEW_SYSTEM_PROMPT,
-        SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE.format(
-            novel_hypothesis=package.novel_hypothesis,
-            supported_premises=premise_lines,
-            predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
-            disconfirming_observations="\n".join(f"- {o}" for o in package.disconfirming_observations),
-        ),
-    ])
-    judgment = await single_turn_chat(prompt, SkepticJudgment, model=model)
-    return SkepticReport(
-        idea_id=package.idea_id,
-        critique=judgment.critique,
-        unaddressed_risks=judgment.unaddressed_risks,
-        fatal_flaw_found=judgment.fatal_flaw_found,
-    )
 
 
 # ====== VerifierRegistry（步骤 [7]，纯规则匹配） ======
