@@ -97,6 +97,43 @@ async def make_paper(
     )
 
 
+CITED_TITLE = "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"
+
+
+async def make_citing_pair(store: LocalArtifactStore) -> list[PaperContent]:
+    """Two papers where the second cites the first, with a real bibliography chunk."""
+    cited = await make_paper(store, "p-cited", CITED_TITLE, ["We introduce RAG."])
+    cited.chunks[0].kind = "abstract"
+    citing = await make_paper(
+        store,
+        "p-citing",
+        "Few-shot Learning with Retrieval Augmented Language Models",
+        ["We build on retrieval augmentation [@lewis2020].", "Unrelated closing text."],
+    )
+    citing.chunks[0].citation_keys = ["lewis2020"]
+    reference = (
+        "## References\n\n- [@lewis2020] Patrick Lewis, Ethan Perez, and others. "
+        f"{CITED_TITLE}. NeurIPS 2020."
+    )
+    outside = (
+        "## References\n\n- [@vaswani2017] Ashish Vaswani and others. "
+        "Attention Is All You Need. NeurIPS 2017."
+    )
+    for position, text in enumerate((reference, outside), start=len(citing.chunks)):
+        citing.chunks.append(
+            PaperChunk(
+                chunk_id=f"b{position}",
+                kind="bibliography",
+                content_ref=await store.put_text(text),
+                heading_path=["References"],
+                char_start=0,
+                char_end=len(text),
+                token_estimate=len(text) // 4,
+            )
+        )
+    return [cited, citing]
+
+
 async def make_illustrated_paper(
     store: LocalArtifactStore, interpretation_status: str
 ) -> PaperContent:
@@ -585,6 +622,64 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(2, len(result.data["hits"]))
+
+
+class BibliographyAsCitationEdgeTest(unittest.IsolatedAsyncioTestCase):
+    """References carry more value as graph edges than as retrievable passages.
+
+    SciRAG (EACL 2026) calls indexing them as plain text a superficial use of the
+    citation structure; here they leave the retrievable set and reappear as links
+    from the citing chunk to the cited paper.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp())
+        self.papers = await make_citing_pair(self.store)
+
+    async def load(self, **kwargs) -> PaperCorpusIndex:
+        ref = await build_corpus_index(self.store, self.papers, **kwargs)
+        return PaperCorpusIndex.model_validate_json(await self.store.get_text(ref))
+
+    async def test_bibliography_is_not_a_retrieval_unit_by_default(self) -> None:
+        index = await self.load()
+        self.assertNotIn("bibliography", {entry.kind for entry in index.entries})
+
+    async def test_bibliography_can_be_restored_for_comparison(self) -> None:
+        index = await self.load(index_bibliography=True)
+        kinds = [entry.kind for entry in index.entries]
+        self.assertEqual(2, kinds.count("bibliography"))
+
+    async def test_citing_chunk_links_to_the_cited_paper(self) -> None:
+        index = await self.load()
+        citing = next(entry for entry in index.entries if "[@lewis2020]" in entry.text)
+        target = next(entry for entry in index.entries if entry.paper_id == "p-cited")
+        self.assertIn(target.chunk_id, citing.related_ids)
+
+    async def test_the_link_lands_on_the_abstract_of_the_cited_paper(self) -> None:
+        index = await self.load()
+        citing = next(entry for entry in index.entries if "[@lewis2020]" in entry.text)
+        landed = next(
+            entry for entry in index.entries if entry.chunk_id == citing.related_ids[0]
+        )
+        self.assertEqual("abstract", landed.kind)
+
+    async def test_references_outside_the_corpus_create_no_edge(self) -> None:
+        index = await self.load()
+        for entry in index.entries:
+            self.assertTrue(
+                all(
+                    item in {e.chunk_id for e in index.entries}
+                    for item in entry.related_ids
+                )
+            )
+        citing = next(entry for entry in index.entries if "[@lewis2020]" in entry.text)
+        self.assertEqual(1, len(citing.related_ids))
+
+    async def test_dropping_bibliography_shrinks_the_sentence_index(self) -> None:
+        without = await self.load()
+        with_bibliography = await self.load(index_bibliography=True)
+        self.assertLess(len(without.sentences), len(with_bibliography.sentences))
+        self.assertLess(len(without.entries), len(with_bibliography.entries))
 
 
 class ContextualSkeletonTest(unittest.IsolatedAsyncioTestCase):

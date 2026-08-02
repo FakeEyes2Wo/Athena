@@ -24,6 +24,10 @@ from athena.storage.artifact_store import ArtifactStore
 
 SENTENCE_END = re.compile(r"[.!?](?=\s)")
 WORD_BOUNDARY = re.compile(r"[\s(\[]")
+BIBLIOGRAPHY_KIND = "bibliography"
+ABSTRACT_KIND = "abstract"
+CITATION_KEY = re.compile(r"\[@([^\]\s]+)\]")
+MIN_TITLE_MATCH_CHARS = 20
 HEADING_PATH_PREFIX = "> Section:"
 TABLE_DELIMITER = re.compile(r"^\|[\s\-:|]+\|?$")
 DISPLAY_MATH_FENCES = {"$$": "$$", "\\[": "\\]"}
@@ -246,20 +250,105 @@ async def embed_sentences(
     return await store.put_text(json.dumps(vectors))
 
 
+def title_key(title: str) -> str:
+    """把标题规范化成匹配键；``title_key("Attention Is All You Need!")`` 返回
+    ``"attentionisallyouneed"``。"""
+    return "".join(character for character in title if character.isalnum()).lower()
+
+
+def paper_anchors(units_by_paper: list[list[RetrievalUnit]]) -> dict[str, str]:
+    """给每篇论文选一个可被引用指向的落点：优先摘要，否则第一个单元。"""
+    anchors: dict[str, str] = {}
+    for units in units_by_paper:
+        if not units:
+            continue
+        namespace = units[0].metadata.get("retrieval_namespace", "")
+        chosen = next((item for item in units if item.kind == ABSTRACT_KIND), units[0])
+        anchors[namespace] = chosen.unit_id
+    return anchors
+
+
+def citation_edges(
+    units_by_paper: list[list[RetrievalUnit]], anchors: dict[str, str]
+) -> dict[tuple[str, str], str]:
+    """把参考文献条目解析成 ``(命名空间, 引用键) → 被引论文落点`` 的边。
+
+    只认语料内部的引用：一条参考文献的文本里若包含语料中某篇论文的规范化标题，就把该
+    条目的引用键连到那篇论文。跨出语料的引用没有落点，留着只会变成 ``not_found``。
+    标题短于 ``MIN_TITLE_MATCH_CHARS`` 时不参与匹配，避免"RAG"这类短名误连。
+    """
+    catalogue = [
+        (title_key(units[0].metadata.get("title", "")), namespace)
+        for units, namespace in (
+            (items, items[0].metadata.get("retrieval_namespace", ""))
+            for items in units_by_paper
+            if items
+        )
+        if len(title_key(units[0].metadata.get("title", ""))) >= MIN_TITLE_MATCH_CHARS
+    ]
+    edges: dict[tuple[str, str], str] = {}
+    for units in units_by_paper:
+        for unit in units:
+            if unit.kind != BIBLIOGRAPHY_KIND:
+                continue
+            namespace = unit.metadata.get("retrieval_namespace", "")
+            normalized = title_key(unit.text)
+            target = next(
+                (
+                    anchors[cited]
+                    for key, cited in catalogue
+                    if cited != namespace and key in normalized
+                ),
+                None,
+            )
+            if target is None:
+                continue
+            for citation_key in CITATION_KEY.findall(unit.text):
+                edges[(namespace, citation_key)] = target
+    return edges
+
+
+def cited_paper_ids(
+    unit: RetrievalUnit, edges: dict[tuple[str, str], str]
+) -> list[str]:
+    """取出该单元引用到的、语料内部论文的落点 id，保持出现顺序且去重。"""
+    namespace = unit.metadata.get("retrieval_namespace", "")
+    found: list[str] = []
+    for citation_key in unit.metadata.get("citation_keys", "").split(","):
+        target = edges.get((namespace, citation_key.strip()))
+        if target and target not in found:
+            found.append(target)
+    return found
+
+
 async def build_corpus_index(
     store: ArtifactStore,
     papers: list[PaperContent],
     embedder: TextEmbedder | None = None,
+    *,
+    index_bibliography: bool = False,
 ) -> ArtifactRef:
     """把若干篇论文构建成可检索语料，返回三个检索工具接受的 ``corpus_ref``。
 
     没有 ``embedder`` 时仍产出完整索引，只是不生成句向量：关键词检索与整篇读取照常可
     用，语义检索会明确报错而不是静默返回空结果。
+
+    参考文献默认不作为独立检索单元，而是解析成引用边挂到引用它的正文 chunk 上（见
+    ``citation_edges``）。实测一篇论文的参考文献能占到语料 45% 的条目，而它们本身是稀
+    薄文本；SciRAG（EACL 2026）把这种做法称为对引用关系的"表层利用"——参考文献的价值
+    在于它是图的边，不是一段可检索的正文。``index_bibliography=True`` 可恢复旧行为，
+    用于对照测量。
     """
+    units_by_paper = [await paper.load_retrieval_units(store) for paper in papers]
+    anchors = paper_anchors(units_by_paper)
+    edges = citation_edges(units_by_paper, anchors)
+
     entries: list[CorpusEntry] = []
     sentences: list[CorpusSentence] = []
-    for paper in papers:
-        for unit in await paper.load_retrieval_units(store):
+    for units in units_by_paper:
+        for unit in units:
+            if unit.kind == BIBLIOGRAPHY_KIND and not index_bibliography:
+                continue
             spans = split_sentences(unit.text)
             entries.append(
                 CorpusEntry(
@@ -269,7 +358,7 @@ async def build_corpus_index(
                     kind=unit.kind,
                     heading_path=unit.heading_path,
                     text=unit.text,
-                    related_ids=related_unit_ids(unit),
+                    related_ids=related_unit_ids(unit) + cited_paper_ids(unit, edges),
                     sentence_start=len(sentences),
                     sentence_end=len(sentences) + len(spans),
                 )
@@ -281,7 +370,8 @@ async def build_corpus_index(
                 for start, end in spans
             )
 
-    # 未被解释的视觉单元不会进入语料，指向它们的链接必须剔除，否则 Agent 会读到 not_found
+    # 未被解释的视觉单元与未索引的参考文献都不在语料里，指向它们的链接必须剔除，
+    # 否则 Agent 会读到 not_found
     present = {entry.chunk_id for entry in entries}
     for entry in entries:
         entry.related_ids = [item for item in entry.related_ids if item in present]

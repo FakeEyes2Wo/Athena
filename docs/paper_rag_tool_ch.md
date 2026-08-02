@@ -68,8 +68,8 @@ A-RAG 论文的贡献本就在"给模型什么样的检索接口"，而不在循
 | `\| --- \| :-: \|` 表格分隔行 | 不含任何可检索内容 |
 | 不含任何字母词的片段（`$$`、`\[`、`[1]`） | 同上 |
 
-表格**数据**行与参考文献条目一律保留：方法名、数据集名、数字、被引作者，正是检索最该
-命中的东西。
+表格**数据**行一律保留：方法名、数据集名、数字，正是检索最该命中的东西。参考文献不再
+作为独立检索单元，改为解析成引用边，见下一节。
 
 **为什么必须过滤。** 三个各自正确的设计叠在一起会产生系统性偏置：
 
@@ -102,6 +102,56 @@ A-RAG 论文的贡献本就在"给模型什么样的检索接口"，而不在循
   `During training, we retrieve the top $k$ documents for each query.`
 
 区间指向的仍是未经改动的 chunk 正文，因此 `paper_chunk_read` 返回的全文不受影响。
+
+### 参考文献作为引用边，而不是检索单元
+
+`build_corpus_index(..., index_bibliography=False)` 是默认行为：`kind == "bibliography"`
+的单元不进入语料，改为被解析成**引用边**，挂在引用它们的正文 chunk 的 `related_ids` 上。
+
+**为什么改。** 实测一次真实全链路（5 篇 RAG 方向论文，见验收状态）里，参考文献占了语料
+条目的 **45%**（277 / 614），而它们单条只有约 346 字符、语义稀薄。更关键的是，把参考文献
+当文本索引，等于把一个**关系结构**拍平成了正文。
+
+[SciRAG](https://aclanthology.org/2026.eacl-long.303.pdf)（Ding et al., EACL 2026）把当前
+科学文献 RAG 的第一个局限就归结为这一点：
+
+> **Superficial exploitation of citations**: references are treated as plain unstructured
+> text rather than as structured relational entities, or, at best, single-hop backlinks,
+> leaving the richer forward–backward citation graph unused.
+
+Athena 此前同时命中了这句话的两半：参考文献作为纯文本进索引，而 `paper_scout` 的 `expand`
+只做反向单跳。SciRAG 的做法是让参考文献退出检索文本，转而承担三件事：从初筛集合出发沿
+**正反向各扩一跳**的 citation-graph expansion；按 T(theory)/E(experiment)/M(method)/
+A(application) 给论文片段打概念角色标签，据此发现跨论文的概念链接（如 `[1]T→[2]E`）并剪
+掉矛盾分支；最后抽出 **contribution chains** 并让模型在链上推理排序，而不是按相似度或中
+心性打分。
+
+**本仓库实现到哪一步。** 只做了其中最基础的一层——**语料内部的引用边**：
+
+1. 每篇论文选一个落点（`paper_anchors`）：优先其 `abstract` 单元，否则第一个单元；
+2. 逐条参考文献做标题匹配（`citation_edges`）：把条目文本规范化后，检查是否包含语料中
+   某篇论文的规范化标题；命中即把该条目的 `[@key]` 连到那篇论文的落点；
+3. 正文 chunk 通过自身的 `citation_keys`（paper_markdown 早就解析好了）查表，把命中的
+   落点并入 `related_ids`（`cited_paper_ids`）。
+
+只认语料内部的引用：跨出语料的引用没有落点，留着只会让 Agent 读到 `not_found`。标题短于
+20 个规范化字符不参与匹配，避免 "RAG" 这类短名误连；自引（同一命名空间）被排除。
+
+**实测效果**（同一批 5 篇论文，同一份 store）：
+
+| | entries | sentences | 引用边命中的 chunk | 图表链接 |
+| --- | ---: | ---: | ---: | ---: |
+| `index_bibliography=True`（旧行为） | 614 | 4974 | 26 | 156 |
+| 默认（参考文献作为边） | **337** | **3957** | **19** | 156 |
+
+条目减少 45%、句子减少 20%，图表双向链接不受影响；19 个正文 chunk 获得了指向被引论文的
+跳转（例如 Atlas 的正文段落 → RAG 论文、ReAct 的表格 → RAG 论文）。
+
+**与 SciRAG 的差距，以及尚未回答的问题。** 正向边（谁引用了本文）、角色标注和
+contribution chains 都没有实现；`paper_scout.expand` 已有反向单跳，S2 的 `/citations`
+端点可补正向边。另外**没有任何公开工作做过"索引参考文献 vs 不索引"的检索质量消融**，因此
+"45% 是否真的有害"目前只有结构性论证，没有数值证据——`index_bibliography=True` 保留下来
+就是为了让这个对照可以在自家 benchmark 上跑出来。
 
 ## 检索语义
 
@@ -194,6 +244,8 @@ Agent 去探索新的 chunk。`include_adjacent` 连同同一篇论文内的相�
 4. 语义检索排除相似度非正的句子，避免小语料下无关句被凑进片段。
 5. 结构感知切句与自足度权重（见上），论文的维基语料不存在这个问题。
 6. 不移植论文实验设定里"禁止并行工具调用"的约束——那是评测控制变量，不是接口契约。
+7. 参考文献不作为检索单元，改为引用边（见上）；A-RAG 的语料里没有参考文献段落，这个
+   取舍是论文语料特有的。
 
 ## 备选方案：Contextual Retrieval
 
@@ -241,6 +293,13 @@ Athena 目前没有配置任何 `ChunkContextualizer`，把半成品接进 `buil
   （权重恒为 0.2）。当前语料全是英文论文因而未暴露，混入中文正文时会被系统性压低。
 - 句子接合只跨展示公式。被行内公式、脚注或列表打断的散文仍可能留下短片段，它们会被自足
   度权重压住因而不影响排序，但仍各占一条向量。
+- 引用边只按**标题字符串包含**匹配，没有做真正的参考文献解析。参考文献里标题被截断、
+  换行改写或缩写时会漏连；反过来若一篇论文的标题恰好是另一篇标题的子串，会误连。要做稳
+  就得像 GROBID 那样把条目解析成结构化字段，或直接用条目里的 DOI/arXiv id。
+- 引用边只覆盖语料内部，且只有反向（本文引了谁）。正向边（谁引了本文）需要接
+  Semantic Scholar 的 `/citations`，尚未接入。
+- 参考文献退出检索单元后，`paper_chunk_read` 读不到参考文献原文。若出现"这条引用的完整
+  出处是什么"这类需求，应从 `PaperContent.bibliography_ref` 取，而不是恢复索引。
 
 ## 验收状态
 
