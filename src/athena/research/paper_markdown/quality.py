@@ -60,6 +60,8 @@ BOOKKEEPING_CODES = frozenset(
         "tex_float_semantic_heading_ambiguous",
         "tex_float_semantic_heading_inferred",
         "tex_heading_empty",
+        # 内容已经找回来了，只是源码里的大小写与磁盘不一致
+        "tex_include_case_mismatch",
         # 正文完整，只是部分字符可能解码走样
         "tex_latin1_fallback",
         "tex_table_complex_fallback",
