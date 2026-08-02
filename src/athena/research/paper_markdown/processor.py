@@ -39,6 +39,7 @@ REPAIR_INSTRUCTION = (
     "Restore Markdown structure and word spacing only. Preserve every claim, qualifier, "
     "citation, formula, number, and source order. Do not summarize or add facts."
 )
+DEFAULT_VISUAL_CONCURRENCY = 6
 
 
 class VisualInterpretationRequiredError(RuntimeError):
@@ -53,10 +54,12 @@ class PaperProcessor:
         artifacts: ArtifactStore,
         visual_interpreter: VisualInterpreter | None,
         structure_refiner: StructureRefiner | None = None,
+        visual_concurrency: int = DEFAULT_VISUAL_CONCURRENCY,
     ) -> None:
         self.artifacts = artifacts
         self.visual_interpreter = visual_interpreter
         self.structure_refiner = structure_refiner
+        self.visual_concurrency = max(1, visual_concurrency)
 
     async def parse_source(
         self, request: PaperConversionRequest
@@ -127,8 +130,13 @@ class PaperProcessor:
         visual: ParsedVisual,
         request: PaperConversionRequest,
         paper: ParsedPaper,
-    ) -> tuple[PaperVisual, VisualInterpretation]:
-        """保存视觉证据，调用解释器，并持久化结构化结果。"""
+    ) -> tuple[PaperVisual, VisualInterpretation, list[ProcessingDiagnostic]]:
+        """保存视觉证据，调用解释器，并持久化结构化结果。
+
+        诊断以返回值交出而不是就地追加到 ``paper.diagnostics``：多张图表并发解释时，
+        就地追加会让诊断顺序随完成先后变化，调用方按源顺序合并才能保持可复现。
+        """
+        notes: list[ProcessingDiagnostic] = []
         asset_ref = (
             await self.artifacts.put_bytes(visual.asset_bytes)
             if visual.asset_bytes is not None
@@ -174,7 +182,7 @@ class PaperProcessor:
                     f"Visual interpreter is required for {visual.visual_id} ({visual.kind})."
                 )
             interpretation = fallback_interpretation(visual)
-            paper.diagnostics.append(
+            notes.append(
                 ProcessingDiagnostic(
                     level="warning",
                     code="visual_interpretation_unavailable",
@@ -191,7 +199,7 @@ class PaperProcessor:
                         f"Visual interpretation failed for {visual.visual_id}: {error}"
                     ) from error
                 interpretation = fallback_interpretation(visual)
-                paper.diagnostics.append(
+                notes.append(
                     ProcessingDiagnostic(
                         level="warning",
                         code="visual_interpretation_failed",
@@ -239,23 +247,44 @@ class PaperProcessor:
             search_text_ref=await self.artifacts.put_text(search_text),
             locator=visual.locator,
         )
-        return stored, interpretation
+        return stored, interpretation, notes
 
     async def enrich_visuals(
         self,
         paper: ParsedPaper,
         request: PaperConversionRequest,
     ) -> list[PaperVisual]:
-        """逐项解释视觉资源并替换对应正文占位符。"""
+        """并发解释视觉资源，再按源顺序替换正文占位符。
+
+        每次解释都是一次模型往返，串行执行会让转换耗时与图表数线性相关——实测一篇 22
+        张图的论文要 1776 秒，而单次调用只有约 30 秒。解释之间没有依赖，因此并发发出，
+        再按 ``paper.visuals`` 的原始顺序落地：占位符替换、heading 归属和诊断合并都在
+        gather 之后串行完成，产物与串行版本逐字节一致。
+
+        并发度受 ``visual_concurrency`` 约束——上游端点在并发下单次延迟会上升，无界并发
+        既拿不到额外吞吐，也可能触发限流。
+        """
         elements = {element.element_id: element for element in paper.elements}
-        stored_visuals: list[PaperVisual] = []
         for visual in paper.visuals:
-            element = elements.get(visual.element_id)
-            if element is None:
+            if visual.element_id not in elements:
                 raise ValueError(
                     f"Visual {visual.visual_id} references missing element {visual.element_id}."
                 )
-            stored, interpretation = await self.interpret_visual(visual, request, paper)
+
+        gate = asyncio.Semaphore(self.visual_concurrency)
+
+        async def interpret(visual: ParsedVisual):
+            async with gate:
+                return await self.interpret_visual(visual, request, paper)
+
+        results = await asyncio.gather(*(interpret(visual) for visual in paper.visuals))
+
+        stored_visuals: list[PaperVisual] = []
+        for visual, (stored, interpretation, notes) in zip(
+            paper.visuals, results, strict=True
+        ):
+            element = elements[visual.element_id]
+            paper.diagnostics.extend(notes)
             stored.source_heading_path = list(element.heading_path)
             stored.heading_path = list(
                 element.semantic_heading_path or element.heading_path

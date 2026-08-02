@@ -61,6 +61,59 @@ def figure_source_package() -> bytes:
     return buffer.getvalue()
 
 
+def many_figures_package(count: int) -> bytes:
+    """Create a TeX package holding ``count`` independent figures."""
+    floats = "\n".join(
+        rf"\begin{{figure}}\includegraphics{{figures/f{index}.png}}"
+        rf"\caption{{Figure {index}}}\label{{fig:f{index}}}\end{{figure}}"
+        for index in range(count)
+    )
+    tex = (r"\begin{document}" + floats + r"\end{document}").encode()
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        payloads = {"main.tex": tex}
+        for index in range(count):
+            payloads[f"figures/f{index}.png"] = png_bytes()
+        for name, payload in payloads.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+class ConcurrencyProbeInterpreter:
+    """Records how many interpretations are in flight at once.
+
+    Each call yields to the event loop, so a serial caller peaks at 1 while a
+    concurrent one peaks at the configured limit.
+    """
+
+    def __init__(self, fail_on: set[str] | None = None) -> None:
+        self.inflight = 0
+        self.peak = 0
+        self.order: list[str] = []
+        self.fail_on = fail_on or set()
+
+    async def interpret(self, request):
+        from athena.research.paper_markdown.interfaces import VisualInterpretation
+
+        self.inflight += 1
+        self.peak = max(self.peak, self.inflight)
+        try:
+            await asyncio.sleep(0.02)
+            self.order.append(request.visual_id)
+            if request.visual_id in self.fail_on:
+                raise RuntimeError("interpretation refused")
+            return VisualInterpretation(
+                summary=f"summary {request.visual_id}",
+                searchable_text=f"searchable text for {request.visual_id}",
+                structured_data={},
+                model="probe-1",
+            )
+        finally:
+            self.inflight -= 1
+
+
 def paper_pdf() -> bytes:
     """Create a text-only PDF suitable for fallback tests."""
     document = fitz.open()
@@ -537,3 +590,94 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
             [TOOL_BEGIN, TOOL_END, TOOL_BEGIN, TOOL_END],
             events,
         )
+
+
+class VisualConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """Every visual costs one model round trip, so they must not be serialised.
+
+    Interpretations are independent; only the placeholder substitution, heading
+    assignment and diagnostic merge depend on source order, and those happen after
+    the gather.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = LocalArtifactStore(self.directory.name)
+
+    async def asyncTearDown(self) -> None:
+        self.directory.cleanup()
+
+    async def request_for(self, count: int) -> PaperConversionRequest:
+        ref = await self.store.put_bytes(many_figures_package(count))
+        return PaperConversionRequest(
+            tex_source_ref=ref, tex_source_format="tar", visual_policy="best_effort"
+        )
+
+    async def test_visuals_are_interpreted_concurrently(self) -> None:
+        interpreter = ConcurrencyProbeInterpreter()
+        request = await self.request_for(6)
+
+        await PaperProcessor(self.store, interpreter, visual_concurrency=6).process(
+            request
+        )
+
+        self.assertEqual(6, interpreter.peak)
+
+    async def test_concurrency_is_bounded_by_the_configured_limit(self) -> None:
+        interpreter = ConcurrencyProbeInterpreter()
+        request = await self.request_for(6)
+
+        await PaperProcessor(self.store, interpreter, visual_concurrency=2).process(
+            request
+        )
+
+        self.assertEqual(2, interpreter.peak)
+
+    async def test_a_limit_of_one_still_works(self) -> None:
+        interpreter = ConcurrencyProbeInterpreter()
+        request = await self.request_for(3)
+
+        content = await PaperProcessor(
+            self.store, interpreter, visual_concurrency=1
+        ).process(request)
+
+        self.assertEqual(1, interpreter.peak)
+        self.assertEqual(3, len(content.visuals))
+
+    async def test_visual_order_follows_the_source_not_completion(self) -> None:
+        interpreter = ConcurrencyProbeInterpreter()
+        request = await self.request_for(5)
+
+        content = await PaperProcessor(
+            self.store, interpreter, visual_concurrency=5
+        ).process(request)
+
+        self.assertEqual(
+            [f"fig:f{index}" for index in range(5)],
+            [visual.label for visual in content.visuals],
+        )
+
+    async def test_diagnostics_keep_source_order_when_some_fail(self) -> None:
+        request = await self.request_for(4)
+        parsed_ids = []
+
+        probe = ConcurrencyProbeInterpreter()
+        content = await PaperProcessor(self.store, probe, visual_concurrency=4).process(
+            request
+        )
+        parsed_ids = [visual.visual_id for visual in content.visuals]
+
+        interpreter = ConcurrencyProbeInterpreter(
+            fail_on={parsed_ids[2], parsed_ids[0]}
+        )
+        content = await PaperProcessor(
+            self.store, interpreter, visual_concurrency=4
+        ).process(request)
+        diagnostics = await content.load_diagnostics(self.store)
+        failures = [
+            item for item in diagnostics if item.code == "visual_interpretation_failed"
+        ]
+
+        self.assertEqual(2, len(failures))
+        self.assertIn(parsed_ids[0], failures[0].message)
+        self.assertIn(parsed_ids[2], failures[1].message)
