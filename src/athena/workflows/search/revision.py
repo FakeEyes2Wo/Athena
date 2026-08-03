@@ -15,18 +15,25 @@ import asyncio
 
 from pydantic_ai.models import Model
 
+from athena.core.schemas import ArtifactRef
+from athena.storage.artifact_store import ArtifactStore
 from athena.utils.single_turn_chat import single_turn_chat
 from athena.workflows.prompts import (
     REVISER_SYSTEM_PROMPT,
     REVISION_USER_PROMPT_TEMPLATE,
 )
-from athena.workflows.search.evidence_retrieval import limited_by
+from athena.workflows.search.evidence_retrieval import build_novelty_question, limited_by
 from athena.workflows.search.idea_schemas import (
     HypothesisPackage,
+    NoveltyEvidenceReport,
     RevisionDraft,
     SkepticReport,
 )
-from athena.workflows.search.review_board import format_premise_lines
+from athena.workflows.search.review_board import (
+    REVIEW_PERSPECTIVES,
+    build_perspective_input,
+    format_premise_lines,
+)
 
 
 # ====== 常量 ======
@@ -136,3 +143,61 @@ async def revise_candidate(
         lineage_op="revise",
     )
     return revised, draft
+
+
+# ====== staleness：逐报告的输入指纹比对 ======
+
+async def novelty_is_stale(
+    package: HypothesisPackage,
+    novelty: NoveltyEvidenceReport,
+    *,
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+) -> bool:
+    """novelty 报告的输入是否已失效。用当前 package 重建检索提问、落盘取内容寻址 ref，与报告
+    存档的 input_ref 比对——ArtifactStore 是 sha256 内容寻址，ref 相等即内容相等。
+
+    input_ref 为 None（失败降级报告）一律判 stale：无法证明未失效就不能复用。
+
+    Example:
+        >>> await novelty_is_stale(package, novelty, artifacts=store,
+        ...     corpus_ref=corpus_ref)  # doctest: +SKIP
+        False
+    """
+    if novelty.input_ref is None:
+        return True
+    current = await artifacts.put_text(build_novelty_question(package, corpus_ref))
+    return novelty.input_ref != current
+
+
+async def stale_perspectives(
+    package: HypothesisPackage,
+    reviews: list[SkepticReport],
+    *,
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+    prior_transcript: str,
+) -> set[str]:
+    """返回输入已失效、需要重跑的视角 id 集合。
+
+    **prior_transcript 必须是刷新后当前有效的那份转录**：domain_consistency 的输入模板内嵌
+    prior_retrieval，存档指纹编码的是旧转录，传入新转录才能让级联（novelty 重跑 →
+    domain_consistency 也失效）自动成立。调用方因此必须按"先 novelty、再视角"的顺序调。
+
+    Example:
+        >>> await stale_perspectives(package, reviews, artifacts=store,
+        ...     corpus_ref=corpus_ref, prior_transcript="")  # doctest: +SKIP
+        set()
+    """
+    by_perspective = {r.perspective: r for r in reviews}
+    stale: set[str] = set()
+    for perspective in REVIEW_PERSPECTIVES:
+        report = by_perspective.get(perspective.perspective_id)
+        if report is None or report.input_ref is None:
+            stale.add(perspective.perspective_id)
+            continue
+        current = await artifacts.put_text(build_perspective_input(
+            package, perspective, corpus_ref=corpus_ref, prior_transcript=prior_transcript))
+        if report.input_ref != current:
+            stale.add(perspective.perspective_id)
+    return stale

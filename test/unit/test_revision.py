@@ -1,12 +1,21 @@
 """Unit tests for the REVISE debate loop."""
 
+import tempfile
 import unittest
 
+from athena.storage.artifact_store import LocalArtifactStore
+from athena.workflows.search.evidence_retrieval import build_novelty_question
 from athena.workflows.search.idea_schemas import (
-    ClaimEvidence, ClaimRole, HypothesisPackage, RevisionDraft, SkepticReport,
+    ClaimEvidence, ClaimRole, HypothesisPackage, NoveltyEvidenceReport,
+    RevisionDraft, SkepticReport,
 )
-from athena.workflows.search.revision import build_revision_prompt, revise_candidate
+from athena.workflows.search.review_board import REVIEW_PERSPECTIVES, build_perspective_input
+from athena.workflows.search.revision import (
+    build_revision_prompt, novelty_is_stale, revise_candidate, stale_perspectives,
+)
 from unit.fakes import make_routed_model
+
+_FAKE_CORPUS_REF = "sha256:" + "c" * 64
 
 
 def _package(sampling_probability: float = 0.42) -> HypothesisPackage:
@@ -45,6 +54,34 @@ def _draft() -> RevisionDraft:
         revised_predicted_observations=["Y increases versus control"],
         revised_disconfirming_observations=["Y flat versus control"],
     )
+
+
+async def _novelty(store: LocalArtifactStore, package: HypothesisPackage) -> NoveltyEvidenceReport:
+    # 模块级 helper（而非 StalenessTest 的方法）：Task 9 的测试需要复用同一份构造逻辑。
+    return NoveltyEvidenceReport(
+        idea_id="idea-1", nearest_work=[], facet_overlap={"problem": 0.1},
+        coverage_ref=_FAKE_CORPUS_REF, temporal_ref=_FAKE_CORPUS_REF,
+        query_log_ref=await store.put_text("old transcript"),
+        input_ref=await store.put_text(build_novelty_question(package, _FAKE_CORPUS_REF)),
+        uncertainty=0.2,
+    )
+
+
+async def _reviews_with_refs(
+    store: LocalArtifactStore, package: HypothesisPackage
+) -> list[SkepticReport]:
+    # 模块级 helper：与 _novelty 同理，供 Task 9 直接复用。
+    out = []
+    for perspective in REVIEW_PERSPECTIVES:
+        prompt = build_perspective_input(
+            package, perspective, corpus_ref=_FAKE_CORPUS_REF,
+            prior_transcript="old transcript")
+        out.append(SkepticReport(
+            idea_id="idea-1", perspective=perspective.perspective_id, critique="c",
+            unaddressed_risks=[], fatal_flaw_found=False,
+            input_ref=await store.put_text(prompt),
+        ))
+    return out
 
 
 class RevisionPromptTest(unittest.TestCase):
@@ -88,3 +125,75 @@ class ReviseCandidateTest(unittest.IsolatedAsyncioTestCase):
             await revise_candidate(
                 _package(), blocking_factor="risk_ok_methodology",
                 debated_perspective="methodology", reviews=_reviews(), prior_rounds=[], model=model)
+
+
+class StalenessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_unchanged_package_is_not_stale_at_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            novelty = await _novelty(store, package)
+            reviews = await _reviews_with_refs(store, package)
+            self.assertFalse(await novelty_is_stale(
+                package, novelty, artifacts=store, corpus_ref=_FAKE_CORPUS_REF))
+            self.assertEqual(set(), await stale_perspectives(
+                package, reviews, artifacts=store, corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="old transcript"))
+
+    async def test_changed_hypothesis_makes_novelty_and_all_perspectives_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            novelty = await _novelty(store, package)
+            reviews = await _reviews_with_refs(store, package)
+            revised = package.model_copy(update={"novel_hypothesis": "Z causes Y"})
+            self.assertTrue(await novelty_is_stale(
+                revised, novelty, artifacts=store, corpus_ref=_FAKE_CORPUS_REF))
+            self.assertEqual(
+                {"methodology", "statistics", "domain_consistency"},
+                await stale_perspectives(revised, reviews, artifacts=store,
+                                         corpus_ref=_FAKE_CORPUS_REF,
+                                         prior_transcript="old transcript"))
+
+    async def test_disconfirmer_only_revision_spares_both_retrieval_reports(self) -> None:
+        # 成本论证的支点：典型修订必须**证明性地**不触发 novelty 与 domain_consistency，
+        # 那是仅有的两个 retrieval loop。这条一旦失守，整轮设计的成本前提就没了。
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            novelty = await _novelty(store, package)
+            reviews = await _reviews_with_refs(store, package)
+            revised = package.model_copy(
+                update={"disconfirming_observations": ["Y flat versus matched control"]})
+            self.assertFalse(await novelty_is_stale(
+                revised, novelty, artifacts=store, corpus_ref=_FAKE_CORPUS_REF))
+            self.assertEqual(
+                {"methodology", "statistics"},
+                await stale_perspectives(revised, reviews, artifacts=store,
+                                         corpus_ref=_FAKE_CORPUS_REF,
+                                         prior_transcript="old transcript"))
+
+    async def test_new_transcript_cascades_to_domain_consistency(self) -> None:
+        # 级联：修订只改 predicted_observations，domain_consistency 自身字段（novel_hypothesis）
+        # 没变，但 novelty 重跑换了转录，它必须跟着 stale。
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            reviews = await _reviews_with_refs(store, package)
+            revised = package.model_copy(update={"predicted_observations": ["Y doubles"]})
+            stale = await stale_perspectives(
+                revised, reviews, artifacts=store, corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="freshly retrieved transcript")   # 刷新后的转录
+            self.assertIn("domain_consistency", stale)
+
+    async def test_missing_fingerprint_is_always_stale(self) -> None:
+        # fail-closed：失败降级的报告没有可信指纹，无法证明未失效就不能复用
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            novelty = (await _novelty(store, package)).model_copy(
+                update={"input_ref": None})
+            reviews = [r.model_copy(update={"input_ref": None})
+                       for r in await _reviews_with_refs(store, package)]
+            self.assertTrue(await novelty_is_stale(
+                package, novelty, artifacts=store, corpus_ref=_FAKE_CORPUS_REF))
+            self.assertEqual(
+                {"methodology", "statistics", "domain_consistency"},
+                await stale_perspectives(package, reviews, artifacts=store,
+                                         corpus_ref=_FAKE_CORPUS_REF,
+                                         prior_transcript="old transcript"))
