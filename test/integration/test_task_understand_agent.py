@@ -1,6 +1,6 @@
 """Integration tests for TaskUnderstandAgent.
 
-These tests validate that the agent builds correctly and all 13 competition
+These tests validate that the agent builds correctly and all 10 competition
 tools are registered. Tests that require a real LLM API are skipped by default.
 """
 
@@ -13,38 +13,34 @@ pytestmark = pytest.mark.integration
 class TestAgentConstruction:
     """Tests that do NOT require an LLM -- validate tool registration only."""
 
-    def test_all_13_tools_registered(self):
-        """Verify the agent builds successfully with all 13 tools registered."""
+    async def test_all_10_tools_registered(self):
+        """Verify the agent builds successfully with all 10 tools registered."""
         from athena.agents.competition.task_understand_agent import (
             build_task_understand_agent,
         )
 
-        agent = build_task_understand_agent(
+        agent = await build_task_understand_agent(
             model="deepseek-v4-flash",
             client=None,  # build-only, no actual LLM calls
         )
 
         assert agent.name == "TaskUnderstandAgent"
-        assert len(agent.config.tools) == 13, (
-            f"Expected 13 tools, got {len(agent.config.tools)}"
+        assert len(agent.config.tools) == 10, (
+            f"Expected 10 tools, got {len(agent.config.tools)}"
         )
 
-    def test_all_expected_tool_names_present(self):
+    async def test_all_expected_tool_names_present(self):
         """Verify every expected tool is in the registry by name."""
         from athena.agents.competition.task_understand_agent import (
             build_task_understand_agent,
         )
 
-        agent = build_task_understand_agent(
+        agent = await build_task_understand_agent(
             model="deepseek-v4-flash",
             client=None,
         )
 
         expected_names = {
-            # Search and understanding (Task 4 -- 3 tools)
-            "kaggle_competition_search",
-            "kaggle_discussion_search",
-            "kaggle_dataset_download",
             # HF datasets (Task 5 -- 2 tools)
             "hf_dataset_search",
             "hf_dataset_download",
@@ -61,20 +57,20 @@ class TestAgentConstruction:
             "submission_build",
         }
 
-        assert len(expected_names) == 13, "Expected exactly 13 tool names"
+        assert len(expected_names) == 10, "Expected exactly 10 tool names"
 
         for name in expected_names:
             assert name in agent.config.tools, (
                 f"Tool '{name}' not found in registry"
             )
 
-    def test_agent_config_defaults(self):
+    async def test_agent_config_defaults(self):
         """Verify agent config is set with expected defaults."""
         from athena.agents.competition.task_understand_agent import (
             build_task_understand_agent,
         )
 
-        agent = build_task_understand_agent(
+        agent = await build_task_understand_agent(
             model="deepseek-v4-flash",
             client=None,
         )
@@ -84,15 +80,15 @@ class TestAgentConstruction:
         assert agent.config.max_tokens == 8192
         assert agent.config.temperature == 0.1
         assert "TaskUnderstandAgent" in agent.config.system_prompt
-        assert "Kaggle" in agent.config.system_prompt
+        assert "mcp_search_tools" in agent.config.system_prompt
 
-    def test_agent_config_custom_params(self):
+    async def test_agent_config_custom_params(self):
         """Verify custom parameters are propagated to the config."""
         from athena.agents.competition.task_understand_agent import (
             build_task_understand_agent,
         )
 
-        agent = build_task_understand_agent(
+        agent = await build_task_understand_agent(
             model="custom-model",
             client=None,
             max_turns=5,
@@ -105,25 +101,39 @@ class TestAgentConstruction:
         assert agent.config.max_tokens == 1024
         assert agent.config.temperature == 0.7
 
+    async def test_mcp_servers_registers_search_tool(self):
+        """配置 mcp_servers 时注册 mcp_search_tools，且构建期不联网。"""
+        from athena.agents.competition.task_understand_agent import (
+            build_task_understand_agent,
+        )
+        from athena.tools.mcp.config import McpServerConfig
+
+        agent = await build_task_understand_agent(
+            model="deepseek-v4-flash",
+            client=None,
+            mcp_servers=[McpServerConfig(name="kaggle")],
+        )
+        assert "mcp_search_tools" in agent.config.tools
+        assert len(agent.config.tools) == 11  # 10 原生 + 1 搜索工具
+
 
 @pytest.mark.skip(reason="Requires real LLM API access -- run manually")
 @pytest.mark.asyncio
 async def test_agent_loads_all_tools():
-    """Verify agent builds and all 13 tools are registered (integration)."""
+    """Verify agent builds and all 10 tools are registered (integration)."""
     from athena.agents.competition.task_understand_agent import (
         build_task_understand_agent,
     )
 
-    agent = build_task_understand_agent(
+    agent = await build_task_understand_agent(
         model="deepseek-v4-flash",
         client=None,  # build-only, no actual calls
     )
 
     assert agent.name == "TaskUnderstandAgent"
-    assert len(agent.config.tools) == 13
+    assert len(agent.config.tools) == 10
 
     # Verify key tools exist
-    assert "kaggle_competition_search" in agent.config.tools
     assert "hf_dataset_search" in agent.config.tools
     assert "hf_model_search" in agent.config.tools
     assert "data_analyze" in agent.config.tools

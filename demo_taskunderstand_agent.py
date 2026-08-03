@@ -8,7 +8,7 @@ TaskUnderstandAgent 的完整 pipeline。
 
 用法::
 
-    # 默认运行（seeded 模式，绕过 Kaggle stub）
+    # 默认运行（seeded 模式，绕过 MCP 外部工具）
     python demo_taskunderstand_agent.py
 
     # 后面的先不要尝试，没测试过
@@ -50,7 +50,7 @@ DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"  # 国内镜像，无需翻墙
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "demo_output"
 DEFAULT_WORK_DIR = PROJECT_ROOT / "demo_work"  # 数据集、模型、生成代码的存放目录
 
-# ── Titanic 竞赛预注入上下文（用于 seeded 模式绕过 Kaggle MCP stub）────
+# ── Titanic 竞赛预注入上下文（用于 seeded 模式绕过 MCP 外部工具）────
 
 _TITANIC_TASK_METADATA: dict = {
     "task_type": "binary_classification",
@@ -76,8 +76,8 @@ Here is the competition metadata (ALREADY FETCHED — do NOT call any Kaggle too
 {titanic_metadata}
 
 CRITICAL RULES (follow strictly to avoid wasting turns on unavailable tools):
-1. DO NOT call kaggle_competition_search, kaggle_discussion_search, or
-   kaggle_dataset_download — these are NOT available yet.
+1. DO NOT call mcp_search_tools — external MCP tools are NOT needed in
+   seeded mode.
 2. DO NOT call code_execute — the sandbox is not ready. Skip training/inference
 
 EXECUTION STRATEGY:
@@ -366,7 +366,7 @@ async def run_demo(
     emit, log_fh, turn_texts, tool_errors = emit_factory(output_dir)
 
     try:
-        agent = build_task_understand_agent(
+        agent = await build_task_understand_agent(
             model=model,
             client=client,
             work_root=str(work_dir),
@@ -551,7 +551,7 @@ def main() -> None:
         choices=["auto", "seeded"],
         default="seeded",
         help=(
-            '运行模式: "seeded" 绕过 Kaggle stub 预注入竞赛信息（默认），'
+            '运行模式: "seeded" 绕过 MCP 外部工具，预注入竞赛信息（默认），'
             '"auto" 完全自主 ReAct 循环'
         ),
     )

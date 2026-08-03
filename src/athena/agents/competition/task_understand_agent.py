@@ -9,12 +9,9 @@ from typing import TYPE_CHECKING
 from athena.core.agent.agent import Agent, AgentConfig, create_agent
 from athena.core.tool import ToolRegistry
 
-# ── 搜索 & 理解层 (Task 4) ──
-from athena.tools.kaggle_search import (
-    KaggleCompetitionSearchTool,
-    KaggleDatasetDownloadTool,
-    KaggleDiscussionSearchTool,
-)
+# ── MCP 接入层 ──
+from athena.tools.mcp import register_mcp_tools
+from athena.tools.mcp.config import McpServerConfig, load_mcp_servers
 
 # ── 数据获取层 —— HuggingFace 数据集 (Task 5) ──
 from athena.tools.hf_dataset import HFDatasetDownloadTool, HFDatasetSearchTool
@@ -47,7 +44,9 @@ and clean data -> design a solution -> generate and execute code -> produce
 a submission file.
 
 ## Decision-Making Rules
-1. ALWAYS start by searching for competition info using kaggle_competition_search.
+1. When you need external data or services (e.g. Kaggle, HuggingFace),
+   FIRST search for available tools with mcp_search_tools, then call the
+   discovered tool by its full name in a later turn.
 2. After understanding the task, search discussions/notebooks for solution ideas.
 3. Download competition data, then search HuggingFace for augmentation datasets.
 4. Analyze all data before cleaning. Generate and execute cleaning code.
@@ -73,35 +72,23 @@ When done, summarize: what was built, key metrics, submission file location.
 """
 
 
-def build_task_understand_agent(
+async def build_task_understand_agent(
     model: str,
     client: "AsyncOpenAI | None" = None,
     *,
-    work_root: str = "work",  # 新增：产物输出根目录
+    work_root: str = "work",
     max_turns: int = 30,
     max_tokens: int = 8192,
     temperature: float = 0.1,
+    mcp_servers: list[McpServerConfig] | None = None,
 ) -> Agent:
-    """构建 TaskUnderstandAgent，注册所有竞赛工具。
+    """构建 TaskUnderstandAgent，注册全部原生工具与可选 MCP 工具。
 
-    Args:
-        model: LLM 模型名称（如 "deepseek-v4-flash"）。
-        client: OpenAI 兼容的异步客户端。
-        work_root: 工具产物输出根目录，每个工具在下方创建子目录。
-        max_turns: Agent loop 最大轮次（竞赛流程需要较多轮次）。
-        max_tokens: 每次 LLM 请求的最大 token 数。
-        temperature: LLM 温度参数。
-
-    Returns:
-        配置完成的 Agent 实例，可直接用于 ThreadRuntime。
+    mcp_servers 为 None 时尝试从当前目录 mcp_servers.json 加载；
+    未配置任何 server 时 MCP 接入层不生效。
     """
     # 构建工具注册表，按字母序排列以保证 prompt cache 稳定
     tools = ToolRegistry()
-
-    # ── 搜索 & 理解层 (3 工具) ──
-    tools.register(KaggleCompetitionSearchTool(work_root=work_root))
-    tools.register(KaggleDiscussionSearchTool(work_root=work_root))
-    tools.register(KaggleDatasetDownloadTool(work_root=work_root))
 
     # ── 数据获取层 —— HF 数据集 (2 工具) ──
     tools.register(HFDatasetSearchTool(work_root=work_root))
@@ -121,10 +108,13 @@ def build_task_understand_agent(
     tools.register(CodeExecuteTool(work_root=work_root))
     tools.register(SubmissionBuildTool(work_root=work_root))
 
-    # Guard：确保全部 13 个工具已注册
-    assert len(tools) == 13, (
-        f"Expected 13 competition tools, got {len(tools)}"
-    )
+    # Guard：原生工具数量固定；MCP 工具在下方动态追加，不参与此断言
+    assert len(tools) == 10, f"Expected 10 native tools, got {len(tools)}"
+
+    # ── MCP 接入层（可选）：配置驱动，懒连接；未配置 server 时完全惰性 ──
+    servers = mcp_servers if mcp_servers is not None else load_mcp_servers()
+    if servers:
+        await register_mcp_tools(tools, servers, work_root=work_root)
 
     return create_agent(
         model=model,
