@@ -114,6 +114,35 @@ class ConcurrencyProbeInterpreter:
             self.inflight -= 1
 
 
+def tar_package(members: dict[str, bytes]) -> bytes:
+    """打一个 tar 包；成员顺序固定，便于复现。"""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, payload in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+def wrapper_package() -> bytes:
+    """复现 arXiv 的 PDF-wrapper 投稿：一个 includepdf 壳加一份正文 PDF。"""
+    stub = rb"""\documentclass{article}\usepackage{pdfpages}
+\begin{document}\includepdf[pages=1-last]{main.pdf}\end{document}"""
+    return tar_package({"arxiv.tex": stub, "main.pdf": paper_pdf()})
+
+
+def appendix_package() -> bytes:
+    """正文写在 TeX 里、只有附录用 includepdf 嵌了一份 PDF。"""
+    body = (
+        rb"""\documentclass{article}\usepackage{pdfpages}
+\title{Body Wins}\begin{document}\maketitle\section{Method}"""
+        + b"Retrieval quality depends on faithful structure preservation. " * 12
+        + rb"""\includepdf[pages=1]{appendix.pdf}\end{document}"""
+    )
+    return tar_package({"main.tex": body, "appendix.pdf": paper_pdf()})
+
+
 def paper_pdf() -> bytes:
     """Create a text-only PDF suitable for fallback tests."""
     document = fitz.open()
@@ -207,6 +236,13 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
             tex_source_ref=ref, tex_source_format="plain", **values
         )
 
+    async def tar_request(self, payload: bytes) -> PaperConversionRequest:
+        """把一个 tar 源码包做成转换请求。"""
+        return PaperConversionRequest(
+            tex_source_ref=await self.store.put_bytes(payload),
+            tex_source_format="tar",
+        )
+
     async def test_tex_is_used_when_both_sources_are_present(self) -> None:
         tex_ref = await self.store.put_bytes(PLAIN_TEX)
         invalid_pdf_ref = await self.store.put_bytes(b"invalid pdf must not be opened")
@@ -221,6 +257,54 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("tex", content.provenance.source_kind)
         self.assertEqual("TeX Wins", content.title)
         self.assertIn("Source-first", await content.load_markdown(self.store))
+
+    async def test_includepdf_wrapper_falls_back_to_the_bundled_pdf(self) -> None:
+        """源码只是个 \\includepdf 壳时，正文应从包内 PDF 恢复。
+
+        真机命中：``arxiv:1412.6980``（Adam）的源码包是 298 字节的 ``arxiv.tex``
+        套着 534KB 的 PDF。修复前 TeX 通道产出 29 个字符、零诊断、质量判 ``pass``，
+        整篇论文被静默丢掉。
+        """
+        request = await self.tar_request(wrapper_package())
+
+        content = await PaperProcessor(self.store, None).process(request)
+
+        markdown = await content.load_markdown(self.store)
+        self.assertEqual("pdf", content.provenance.source_kind)
+        self.assertIn("PDF Fallback", markdown)
+        self.assertGreater(len(markdown), 100)
+        self.assertNotIn("tex_body_empty_pdf_used", content.quality_codes)
+
+    async def test_wrapper_fallback_is_recorded_in_the_diagnostics(self) -> None:
+        request = await self.tar_request(wrapper_package())
+
+        content = await PaperProcessor(self.store, None).process(request)
+        diagnostics = await content.load_diagnostics(self.store)
+
+        note = next(
+            item for item in diagnostics if item.code == "tex_body_empty_pdf_used"
+        )
+        self.assertEqual("info", note.level)
+        self.assertIn("TeX source package", note.message)
+
+    async def test_short_tex_without_includepdf_is_left_alone(self) -> None:
+        """正文短但没有 \\includepdf → 是合法的短文档，不能当成空壳。
+
+        体量单独不足以判定：这份 fixture 的正文只有三十几个字符，和真实空壳同量级。
+        """
+        content = await PaperProcessor(self.store, None).process(await self.request_for_tex())
+
+        self.assertEqual("tex", content.provenance.source_kind)
+        self.assertEqual("TeX Wins", content.title)
+
+    async def test_includepdf_with_a_real_body_keeps_tex(self) -> None:
+        """正文完整、只是附录嵌了 PDF → TeX 仍然权威。"""
+        request = await self.tar_request(appendix_package())
+
+        content = await PaperProcessor(self.store, None).process(request)
+
+        self.assertEqual("tex", content.provenance.source_kind)
+        self.assertIn("Retrieval quality depends", await content.load_markdown(self.store))
 
     async def test_pdf_is_used_only_when_tex_is_absent(self) -> None:
         pdf_ref = await self.store.put_bytes(paper_pdf())

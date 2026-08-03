@@ -6,6 +6,8 @@ import tempfile
 import unittest
 import zlib
 
+from pydantic import ValidationError
+
 from athena.core.agent.agent import AgentContext
 from athena.core.schemas import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
@@ -766,3 +768,31 @@ class AgentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetainThresholdTest(unittest.TestCase):
+    """交付门槛是请求字段而不是常量 —— 见 RETAIN_THRESHOLD 的说明。"""
+
+    def test_default_reproduces_the_paper_setting(self):
+        self.assertEqual(RETAIN_THRESHOLD, ScoutRequest(query="q").retain_threshold)
+
+    def test_threshold_is_rejected_outside_the_score_range(self):
+        with self.assertRaises(ValidationError):
+            ScoutRequest(query="q", retain_threshold=1.5)
+
+    def test_lowering_it_admits_the_grade_two_band(self):
+        """0.45 是 2 分（切题且有用）的分数；0.5 挡住它，0.3 放行。"""
+        pool = PaperPool()
+        for index, score in enumerate((1.0, 0.45, 0.2)):
+            pool.add(
+                ScoutPaper(
+                    paper_key=f"arxiv:100{index}",
+                    title=f"Paper {index}",
+                    source="search",
+                    relevance=score,
+                )
+            )
+
+        self.assertEqual(1, len(pool.retained(RETAIN_THRESHOLD)))
+        self.assertEqual(2, len(pool.retained(0.3)))
+        self.assertEqual(3, len(pool.retained(0.1)))

@@ -26,7 +26,6 @@ from athena.research.paper_scout.prompts import (
 )
 from athena.research.paper_scout.schemas import (
     IDLE_TURNS_BEFORE_STOP,
-    RETAIN_THRESHOLD,
     PaperScoutResult,
     ScoutCorpus,
     ScoutRequest,
@@ -201,7 +200,9 @@ class PaperScoutAgent(BaseAgent):
         self, ctx: AgentContext, session: ScoutSession, stats: ScoutStats
     ) -> AgentOutcome:
         """汇总统计、写入 artifact 并返回 Turn 结果。"""
-        retained = session.pool.retained(RETAIN_THRESHOLD, session.request.max_papers)
+        retained = session.pool.retained(
+            session.request.retain_threshold, session.request.max_papers
+        )
         stats.search_actions = sum(
             1 for action in session.actions if action.kind == "search"
         )

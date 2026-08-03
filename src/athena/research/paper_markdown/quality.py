@@ -56,6 +56,8 @@ BOOKKEEPING_CODES = frozenset(
         "rag_reference_edges_incomplete",
         "rag_retrieval_heading_mismatch",
         "structure_repaired_by_llm",
+        # 正文已由包内 PDF 完整恢复，只是记下换了通道；质量由 PDF 通道自己的码决定
+        "tex_body_empty_pdf_used",
         "tex_figure_without_asset",
         "tex_float_semantic_heading_ambiguous",
         "tex_float_semantic_heading_inferred",

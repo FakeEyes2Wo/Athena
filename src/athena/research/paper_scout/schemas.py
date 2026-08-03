@@ -16,7 +16,22 @@ from athena.core.schemas import ArtifactRef
 from athena.research.paper_source.schemas import PaperSourcePolicy
 
 ACCEPT_THRESHOLD = 0.01
+
 RETAIN_THRESHOLD = 0.5
+"""交付门槛的默认值，对应论文的 ρ ≥ 0.5。
+
+这个数出自 PaSa 的评测口径：那里 ``select_score > 0.5`` 是算 Precision/Recall 时画的
+一条线，爬到的论文全都留在树里，没有任何下游因此拿不到它们。本仓库把同一个数用成了
+流水线闸门——``retained`` 直接决定哪些论文会被下载——角色变了，取值却没有重新论证。
+
+因为 ``GRADE_SCORES`` 是离散的（0 / 0.2 / 0.45 / 1.0），这个门槛只有三种行为：
+0.5 只放行 3 分（直接回答查询），0.3 放行 2 分（切题且有用），0.1 放行 1 分。实测一次
+AI4S 式查询的 100 篇候选池里，3 分只有 2 篇、2 分有 18 篇——同一个门槛在检索基准上
+交付 30%，在这里只交付 2%。
+
+因此它是 ``ScoutRequest`` 的字段而不是硬编码常量：基准复现继续用 0.5 保证数字可重建，
+下游有全文重排能力时传 0.3。
+"""
 OBSERVATION_EXPANDED = 10
 OBSERVATION_UNEXPANDED = 10
 MAX_ABSTRACT_WORDS = 400
@@ -113,6 +128,15 @@ class ScoutRequest(BaseModel):
     )
     max_papers: int = Field(default=0, ge=0, description="0 means no handoff cap.")
     max_seconds: float = Field(default=600.0, gt=0, description="Wall-clock budget.")
+    retain_threshold: float = Field(
+        default=RETAIN_THRESHOLD,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum relevance for delivery; lower it when a downstream stage "
+            "re-ranks candidates on full text."
+        ),
+    )
     paper_source_policy: PaperSourcePolicy = Field(
         default_factory=PaperSourcePolicy,
         description="Fetch policy carried into the generated paper_source request.",

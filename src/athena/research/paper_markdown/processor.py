@@ -41,9 +41,51 @@ REPAIR_INSTRUCTION = (
 )
 DEFAULT_VISUAL_CONCURRENCY = 6
 
+MIN_TEX_BODY_CHARS = 400
+"""TeX 通道产出低于这个字符数，才考虑它是不是一个空壳。
+
+单独看体量无法区分"空壳"与"真的很短"——实测 ``arxiv:1412.6980`` 的空壳产出 29 个
+字符，而一份合法的极简 TeX 文档也只有三十几个。因此体量只是必要条件，判定还要求
+源码里出现 ``\\includepdf``（见 ``INCLUDE_PDF``）。
+"""
+
+INCLUDE_PDF = "\\includepdf"
+"""``pdfpages`` 用来整档嵌入 PDF 的宏，也是"TeX 只是个壳"的精确信号。
+
+实测 ``arxiv:1412.6980``（Adam）就是这种投稿：298 字节的 ``arxiv.tex`` 里只有
+``\\includepdf[pages=1-last]{0_adam_main.pdf}``，正文全在同包的 534KB PDF 里。
+TeX 通道产出 29 个字符、零诊断、质量判 ``pass``，整篇论文被静默丢掉——这比解析
+报错危险得多：报错会进失败率，"成功但空"会带着 ``pass`` 一路进语料，让检索以为
+这篇已经覆盖。
+
+同时要求体量小，是因为把 ``\\includepdf`` 用于附录、而正文照常写在 TeX 里的论文也
+存在；那种情况 TeX 仍然权威，不能回退。
+"""
+
+PDF_MAGIC = b"%PDF-"
+
 
 class VisualInterpretationRequiredError(RuntimeError):
     """请求要求完整视觉解释，但没有可用解释器或模型调用失败。"""
+
+
+def tex_body_size(paper: ParsedPaper) -> int:
+    """TeX 通道解析出的正文字符数；``tex_body_size(空壳)`` 只有几十。"""
+    return sum(len(item.markdown) for item in paper.elements) + len(paper.abstract)
+
+
+def embedded_pdf(files: dict[str, bytes]) -> bytes | None:
+    """从 TeX 包里取出最大的 PDF；包内没有 PDF 时返回 ``None``。
+
+    按体积取最大而不是按文件名匹配：包装用的文件名没有约定（``0_adam_main.pdf``、
+    ``main.pdf``、``paper.pdf`` 都见过），而正文 PDF 必然远大于插图 PDF。
+    """
+    candidates = [
+        data
+        for name, data in files.items()
+        if name.lower().endswith(".pdf") and data.startswith(PDF_MAGIC)
+    ]
+    return max(candidates, key=len) if candidates else None
 
 
 class PaperProcessor:
@@ -64,23 +106,80 @@ class PaperProcessor:
     async def parse_source(
         self, request: PaperConversionRequest
     ) -> tuple[ParsedPaper, str]:
-        """严格执行 TeX 优先；只有未提供 TeX 时才使用 PDF。"""
-        if request.tex_source_ref is not None:
-            payload = await self.artifacts.get_bytes(request.tex_source_ref)
-            expanded = await asyncio.to_thread(
-                load_tex_source,
-                payload,
-                request.tex_source_format,
-                request.tex_entrypoint,
-            )
-            return (
-                await asyncio.to_thread(parse_tex_paper, expanded),
-                request.tex_source_ref,
-            )
-        if request.pdf_ref is None:
+        """TeX 优先；只有 TeX 没解析出正文时才回退 PDF。
+
+        回退不是"两条通道都跑一遍挑好的"——TeX 只要有内容就永远权威，它保留公式、
+        label 与章节结构，那正是 TeX-first 的全部理由。回退只覆盖一种可精确识别的
+        投稿形态：源码是个 ``\\includepdf`` 壳，正文在同包的 PDF 里。
+        """
+        if request.tex_source_ref is None:
+            return await self.parse_pdf_ref(request.pdf_ref)
+        payload = await self.artifacts.get_bytes(request.tex_source_ref)
+        expanded = await asyncio.to_thread(
+            load_tex_source,
+            payload,
+            request.tex_source_format,
+            request.tex_entrypoint,
+        )
+        paper = await asyncio.to_thread(parse_tex_paper, expanded)
+        if not self.is_pdf_wrapper(paper, expanded.text):
+            return paper, request.tex_source_ref
+        return await self.recover_from_pdf(request, paper, expanded.files)
+
+    def is_pdf_wrapper(self, paper: ParsedPaper, source_text: str) -> bool:
+        """源码是不是"只是个 PDF 壳"：正文近乎为空，且用了 ``\\includepdf``。
+
+        两个条件缺一不可——体量小可能只是文档确实短，用了 ``\\includepdf`` 也可能
+        只是附录嵌了一份 PDF 而正文照常在 TeX 里。
+        """
+        if INCLUDE_PDF not in source_text:
+            return False
+        return tex_body_size(paper) < MIN_TEX_BODY_CHARS
+
+    async def parse_pdf_ref(self, pdf_ref: str | None) -> tuple[ParsedPaper, str]:
+        """按引用解析 PDF；没有 PDF 引用时说明这是上游契约被破坏。"""
+        if pdf_ref is None:
             raise ValueError("PDF source is required when no TeX source is provided.")
-        payload = await self.artifacts.get_bytes(request.pdf_ref)
-        return await asyncio.to_thread(parse_pdf_paper, payload), request.pdf_ref
+        payload = await self.artifacts.get_bytes(pdf_ref)
+        return await asyncio.to_thread(parse_pdf_paper, payload), pdf_ref
+
+    async def recover_from_pdf(
+        self,
+        request: PaperConversionRequest,
+        paper: ParsedPaper,
+        files: dict[str, bytes],
+    ) -> tuple[ParsedPaper, str]:
+        """把 ``\\includepdf`` 壳换成它包着的 PDF；一份都找不到时保持原样。
+
+        优先用源码包里自带的 PDF：这种投稿的正文 PDF 就在同一个包内，既不需要再发
+        一次请求，也不依赖上游是否顺带取了 ``pdf_ref``。
+
+        两处都没有 PDF 时按兵不动而不是报错：能确认的只是"TeX 里有 includepdf 且正文
+        为空"，被引的文件没进包可能是上游打包不全，也可能是解析漏掉了别的内容，
+        在这里断言"内容丢了"会把猜测写成事实。真正的兜底在语料门禁那一层。
+        """
+        chars = tex_body_size(paper)
+        wrapped = embedded_pdf(files)
+        origin = "carried in the TeX source package"
+        source_ref = request.pdf_ref
+        if wrapped is not None:
+            source_ref = await self.artifacts.put_bytes(wrapped)
+        elif source_ref is not None:
+            origin = "supplied by the upstream fetch"
+        if source_ref is None:
+            return paper, request.tex_source_ref
+        recovered, _ = await self.parse_pdf_ref(source_ref)
+        recovered.diagnostics.append(
+            ProcessingDiagnostic(
+                level="info",
+                code="tex_body_empty_pdf_used",
+                message=(
+                    f"TeX parsing produced only {chars} characters; parsed the PDF "
+                    f"{origin} instead."
+                ),
+            )
+        )
+        return recovered, source_ref
 
     async def repair_elements(self, paper: ParsedPaper) -> None:
         """只对解析器明确标记的低置信元素调用结构修复 LLM。"""
