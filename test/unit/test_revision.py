@@ -3,6 +3,8 @@
 import tempfile
 import unittest
 
+from pydantic_ai.models.function import FunctionModel
+
 from athena.core.agent import Agent, AgentConfig, StreamEvent
 from athena.core.tool import ToolRegistry
 from athena.storage.artifact_store import LocalArtifactStore
@@ -19,7 +21,7 @@ from athena.workflows.search.revision import (
     novelty_is_stale, refresh_stale_evidence, revise_candidate, run_debate,
     select_debate_opponent, stale_perspectives,
 )
-from unit.fakes import make_routed_model
+from unit.fakes import make_routed_model, tool_call_response
 
 _FAKE_CORPUS_REF = "sha256:" + "c" * 64
 
@@ -218,6 +220,37 @@ class ReviseCandidateTest(unittest.IsolatedAsyncioTestCase):
             await revise_candidate(
                 _package(), blocking_factor="risk_ok_methodology",
                 debated_perspective="methodology", reviews=_reviews(), prior_rounds=[], model=model)
+
+
+class RevisionRetryTest(unittest.IsolatedAsyncioTestCase):
+    """MAX_REVISION_ATTEMPTS 在核心流程跑通之后接进 revise_candidate 的重试：单次瞬时失败
+    重试一次即可恢复；重试次数耗尽仍按原样上抛，run_debate 的"候选原样返回"承诺不受影响。"""
+
+    async def test_transient_failure_is_retried_once(self) -> None:
+        calls = {"n": 0}
+
+        def flaky(messages, info):
+            # 第一次调用模拟 provider 瞬时抖动；第二次调用正常产出——make_routed_model
+            # 只能给固定响应，表达不出"先失败再成功"，这里改用手写计数器闭包的 FunctionModel。
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            return tool_call_response(_draft(), info)
+
+        revised, _draft_ = await revise_candidate(
+            _package(), blocking_factor="risk_ok_methodology",
+            debated_perspective="methodology", reviews=_reviews(), prior_rounds=[],
+            model=FunctionModel(flaky))
+        self.assertEqual(2, calls["n"])
+        self.assertEqual(1, revised.revision_round)
+
+    async def test_exhausted_retries_still_raise(self) -> None:
+        model = make_routed_model({"Blocking rubric item:": RuntimeError("down")})
+        with self.assertRaises(Exception):
+            await revise_candidate(
+                _package(), blocking_factor="risk_ok_methodology",
+                debated_perspective="methodology", reviews=_reviews(), prior_rounds=[],
+                model=model)
 
 
 class StalenessTest(unittest.IsolatedAsyncioTestCase):

@@ -12,6 +12,30 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 
+def tool_call_response(item: BaseModel | dict, info: AgentInfo) -> ModelResponse:
+    """把一个 BaseModel 实例或原始 dict 包成 FunctionModel 期望的 ModelResponse：工具名取
+    info.output_tools[0]（没有则退回 "final_result"），item 序列化后装进一次 ToolCallPart。
+
+    make_scripted_model / make_routed_model 与需要"先失败再成功"的一次性 FunctionModel
+    （例如重试测试里手写计数器闭包的场景）共用这段拼装逻辑——提出来是为了不让第三份拷贝
+    出现，不改变任何一处的行为。
+
+    Example:
+        >>> import asyncio
+        >>> from pydantic_ai import Agent
+        >>> class Answer(BaseModel):
+        ...     value: str
+        >>> def respond(messages, info):
+        ...     return tool_call_response(Answer(value="hi"), info)
+        >>> agent = Agent(output_type=Answer)
+        >>> asyncio.run(agent.run("prompt", model=FunctionModel(respond))).output  # doctest: +SKIP
+        Answer(value='hi')
+    """
+    args = item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+    tool_name = info.output_tools[0].name if info.output_tools else "final_result"
+    return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args)])
+
+
 def make_scripted_model(responses: list) -> FunctionModel:
     """按调用顺序返回预设结果的 FunctionModel：列表项可以是 BaseModel 实例、原始 dict，
     或者一个 Exception（会被原样抛出，用于模拟 provider/解析失败）。
@@ -34,9 +58,7 @@ def make_scripted_model(responses: list) -> FunctionModel:
         item = queue.pop(0)
         if isinstance(item, Exception):
             raise item
-        args = item.model_dump(mode="json") if isinstance(item, BaseModel) else item
-        tool_name = info.output_tools[0].name if info.output_tools else "final_result"
-        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args)])
+        return tool_call_response(item, info)
 
     return FunctionModel(respond)
 
@@ -69,8 +91,6 @@ def make_routed_model(routes: dict[str, Any]) -> FunctionModel:
         item = routes[hits[0]]
         if isinstance(item, Exception):
             raise item
-        args = item.model_dump(mode="json") if isinstance(item, BaseModel) else item
-        tool_name = info.output_tools[0].name if info.output_tools else "final_result"
-        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args)])
+        return tool_call_response(item, info)
 
     return FunctionModel(respond)

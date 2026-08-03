@@ -3,6 +3,7 @@
 import asyncio
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
@@ -921,3 +922,121 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(GateVerdict.REVISE, result.decision.verdict)
         self.assertEqual("risk_ok_statistics", result.decision.blocking_factor)
         self.assertTrue(result.revisions[-1].cleared)
+
+
+class RevisionLoopConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """并发/确定性护栏：三个候选同时进入修订闭环时，两条不可退让的保证仍然成立——候选间的
+    package/记录不串味（闭包捕获错误的经典症状），以及 Elo 排序在相同输入下逐次运行保持
+    一致（Elo 是在线增量更新，喂入顺序会改变评分，全靠 results 保持 candidates 输入序）。
+
+    generate_candidates 是唯一被替身的一步：真实实现每次调用都用 uuid4 现场给候选分配
+    idea_id，而确定性断言要求同一输入跑两次能拿到完全相同的 idea_id 序列，随机分配做不到
+    这个前提；多候选生成/去重本身已有 candidate_generation 专属测试覆盖，不是这里要测的
+    对象。[4]-[9]（screen -> audit -> 修订闭环 -> pairwise 排序）全部走 run_full_pipeline
+    真实实现，这正是本类要覆盖的并发路径。
+    """
+
+    def _multi_candidate_routes(self) -> dict:
+        # 三个候选共用一套路由：全部在 statistics 视角被拦（unaddressed_risks 数严格超过
+        # MAX_TOLERATED_RISKS），辩论一轮清零风险 -> 终局刷新（novel_hypothesis 被改动，
+        # novelty + methodology + domain_consistency 因指纹失配重跑；statistics 在辩论时
+        # 已经刷新过指纹，不会被重复判 stale）-> 终审 PASS -> 三个存活候选两两 pairwise。
+        # reviser 的固定响应文本刻意与三个候选的原始 statement 都不同，避免任何一个候选被
+        # is_no_op_revision 误判成空转、对手一次都不会被调用。
+        blocking_risks = [f"risk {i}" for i in range(MAX_TOLERATED_RISKS + 1)]
+        revision_draft = RevisionDraft(
+            rebuttal="a matched control cohort and an expanded sample now ground the claim",
+            changes_made=["added a matched control cohort", "expanded the sample size"],
+            revised_novel_hypothesis=(
+                "A shared, control-adjusted revision distinct from any original candidate"),
+            revised_premises=[ClaimEvidence(
+                claim="X correlates with Y in mice", role=ClaimRole.SUPPORTED_PREMISE,
+                supporting_refs=["ev-0"])],
+            revised_predicted_observations=["The revised effect holds versus a matched control"],
+            revised_disconfirming_observations=[
+                "The revised effect disappears versus a matched control"],
+        )
+        return {
+            _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+            _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
+            _ROUTE_NOVELTY: _clean_novelty_judgment(),
+            _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
+                critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+            _ROUTE_REVIEW_STATISTICS: SkepticJudgment(
+                critique="underpowered", unaddressed_risks=blocking_risks, fatal_flaw_found=False),
+            _ROUTE_REVIEW_DOMAIN: SkepticJudgment(
+                critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+            _ROUTE_REVISER: revision_draft,
+            _ROUTE_DEBATE: SkepticJudgment(
+                critique="cleared after revision", unaddressed_risks=[], fatal_flaw_found=False),
+            _ROUTE_PAIRWISE: PairwiseJudgment(winner="candidate_a", rationale="first is stronger"),
+        }
+
+    def _fixed_candidates(self) -> list[HypothesisPackage]:
+        # idea_id 写死，不走 generate_candidates 现场 uuid4 分配：确定性测试要求同一输入
+        # 跑两次能拿到完全相同的 idea_id 序列。三个候选复用已验证过两两 Jaccard 远低于去重
+        # 阈值的三份 draft，保证不会被 deduplicate_candidates 合并掉。
+        drafts = [_valid_draft(), _second_valid_draft(), _third_valid_draft()]
+        return [
+            HypothesisPackage(
+                idea_id=f"idea-fixed-{index}", generation_strategy=draft.generation_strategy,
+                sampling_probability=draft.sampling_probability, novel_hypothesis=draft.statement,
+                supported_premises=draft.supported_premises, inference_chain=draft.inference_chain,
+                predicted_observations=draft.predicted_observations,
+                disconfirming_observations=draft.disconfirming_observations, lineage_op="generate",
+            )
+            for index, draft in enumerate(drafts)
+        ]
+
+    async def _run_multi_candidate_all_blocked(self) -> tuple[list, list]:
+        """跑一遍三候选全阻塞 -> 辩论清除 -> 终审 PASS -> 排序，供两条测试复用。
+
+        只替身 generate_candidates 这一步（原因见类文档字符串），[4] 及之后全部是
+        run_full_pipeline 的真实实现，本函数本身不重新实现任何编排逻辑。
+
+        Example:
+            >>> results, ranking = await self._run_multi_candidate_all_blocked()  # doctest: +SKIP
+            >>> len(results)  # doctest: +SKIP
+            3
+        """
+        async def fixed_generate(problem, gaps, *, sample_size, model):
+            return self._fixed_candidates()
+
+        with patch("athena.workflows.search.workflow.generate_candidates",
+                   side_effect=fixed_generate):
+            return await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(), domain_review_agent=_build_retrieval_agent(),
+                artifacts=self._store, corpus_ref=_FAKE_CORPUS_REF, sample_size=3,
+                model=make_routed_model(self._multi_candidate_routes()),
+            )
+
+    async def test_revision_records_never_cross_candidates(self) -> None:
+        # 并发重构最典型的缺陷是闭包捕获错误，症状正是候选 A 的 package 配上候选 B 的记录
+        with tempfile.TemporaryDirectory() as tmp:
+            self._store = LocalArtifactStore(tmp)
+            results, _ranking = await self._run_multi_candidate_all_blocked()
+            for result in results:
+                for round_record in result.revisions:
+                    stored = HypothesisPackage.model_validate_json(
+                        await self._store.get_text(round_record.package_ref))
+                    self.assertEqual(result.package.idea_id, stored.idea_id)
+
+    async def test_elo_ranking_stays_deterministic_with_the_revision_loop(self) -> None:
+        # 光比 idea_id 顺序不够强：本测试三个候选的 pairwise 胜负是可传递的（0 恒胜 1/2，
+        # 1 恒胜 2），乱序喂入 Elo 时排名的名次顺序不受影响，只有具体评分会变——用这组固定
+        # 路由验证过（见 task-10 报告），把 record_comparison 的两次调用顺序对调，
+        # rank() 返回的 idea_id 顺序不变但 rating 精确值不同。所以决定性断言必须落在 rating
+        # 上，不能只看 idea_id 顺序，否则 asyncio.gather 意外被换成 as_completed 这类真实
+        # 回归会被这条测试放过。
+        with tempfile.TemporaryDirectory() as tmp:
+            self._store = LocalArtifactStore(tmp)
+            first, _ = await self._run_multi_candidate_all_blocked()
+            second, _ = await self._run_multi_candidate_all_blocked()
+            self.assertEqual([r.decision.verdict for r in first],
+                             [r.decision.verdict for r in second])
+            _, ranking_a = await self._run_multi_candidate_all_blocked()
+            _, ranking_b = await self._run_multi_candidate_all_blocked()
+            self.assertEqual([c.idea_id for c in ranking_a], [c.idea_id for c in ranking_b])
+            self.assertEqual([(c.idea_id, c.rating) for c in ranking_a],
+                             [(c.idea_id, c.rating) for c in ranking_b])

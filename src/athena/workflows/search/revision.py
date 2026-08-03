@@ -71,7 +71,7 @@ single_turn_chat。**无经验依据**，与 MAX_TOLERATED_RISKS / MAX_TOTAL_RIS
 
 MAX_REVISION_ATTEMPTS: int = 2
 """单次 reviser 调用的最大尝试次数（即重试 1 次）。沿用 MAX_GENERATION_ATTEMPTS /
-MAX_REVIEW_ATTEMPTS 的先例。重试逻辑在核心流程跑通之后才接进辩论循环（见 Task 10）。"""
+MAX_REVIEW_ATTEMPTS 的先例，按代码规范在核心流程跑通之后才接进 revise_candidate（Task 10）。"""
 
 
 # ====== 入口条件与对手映射 ======
@@ -199,6 +199,9 @@ async def revise_candidate(
 ) -> tuple[HypothesisPackage, RevisionDraft]:
     """跑一次修订，返回 (修订稿, RevisionDraft)。
 
+    reviser 调用最多尝试 MAX_REVISION_ATTEMPTS 次（重试 1 次瞬时失败）；重试用尽仍失败则
+    向外抛出 ValueError，行为与重试之前一致——由调用方 run_debate 按 reviser 失败处理。
+
     idea_id / sampling_probability / revision_round / lineage_op 全部由代码填，不向 LLM 索要：
     idea_id 必须保持不变（hard_gate 强制全套报告同 id），sampling_probability 原样搬运原候选的
     自评（reviser 无权给自己抬分）。
@@ -217,8 +220,19 @@ async def revise_candidate(
         package, blocking_factor=blocking_factor, debated_perspective=debated_perspective,
         reviews=reviews, prior_rounds=prior_rounds,
     )
-    async with limited_by(llm_sem):
-        draft = await single_turn_chat(prompt, RevisionDraft, model=model)
+    # 单次调用最多重试 MAX_REVISION_ATTEMPTS 次；名额在每次尝试内部各自获取与释放，绝不
+    # 跨两次尝试持有——持有跨调用就是候选数 >= 名额数时必然死锁的模式。for...else 保证
+    # raise 只在循环整体未 break（即所有尝试都失败）时触发，成功路径不会误触发它。
+    last_error: Exception | None = None
+    for _ in range(MAX_REVISION_ATTEMPTS):
+        try:
+            async with limited_by(llm_sem):
+                draft = await single_turn_chat(prompt, RevisionDraft, model=model)
+            break
+        except Exception as error:  # noqa: BLE001 - provider 报错形态不定，重试一次后再上抛
+            last_error = error
+    else:
+        raise ValueError(f"reviser failed after {MAX_REVISION_ATTEMPTS} attempts: {last_error}")
 
     revised = HypothesisPackage(
         idea_id=package.idea_id,
