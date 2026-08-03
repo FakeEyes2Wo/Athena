@@ -347,3 +347,33 @@ class BuildPerspectiveInputTest(unittest.IsolatedAsyncioTestCase):
             captured_str = provider.captured_prompts[0]
             expected_escaped = expected.replace("\n", "\\n")
             self.assertIn(expected_escaped, captured_str)
+
+
+class InputFingerprintTest(unittest.IsolatedAsyncioTestCase):
+    async def test_report_records_the_ref_of_its_own_input_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(tmp)
+            perspective = REVIEW_PERSPECTIVES[0]
+            report = await review_one_perspective(
+                _package(), perspective, novelty=_novelty(),
+                domain_review_agent=_build_domain_agent(), artifacts=store,
+                corpus_ref=_FAKE_CORPUS_REF, model=make_routed_model(_routes()),
+            )
+            self.assertTrue(report.input_ref.startswith("sha256:"))
+            expected = build_perspective_input(
+                _package(), perspective, corpus_ref=_FAKE_CORPUS_REF)
+            self.assertEqual(expected, await store.get_text(report.input_ref))
+
+    async def test_failed_review_has_no_input_ref(self) -> None:
+        # 失败降级的报告没有可信指纹，input_ref 必须为 None —— Task 6 会把它一律判 stale
+        with tempfile.TemporaryDirectory() as tmp:
+            routes = _routes()
+            routes["Review perspective: methodology"] = RuntimeError("provider down")
+            reports = await review_board(
+                _package(), _novelty(), domain_review_agent=_build_domain_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                model=make_routed_model(routes),
+            )
+            failed = next(r for r in reports if r.perspective == "methodology")
+            self.assertTrue(failed.failed)
+            self.assertIsNone(failed.input_ref)

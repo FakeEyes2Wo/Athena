@@ -441,6 +441,12 @@ class NoveltyEvidenceReport(BaseModel):
                     "domain_consistency reviewer as starting context. None when novelty "
                     "retrieval failed and this is a degraded empty report.",
     )
+    input_ref: ArtifactRef | None = Field(
+        default=None,
+        description="Artifact ref of the input prompt this report was produced from; the "
+                    "staleness fingerprint. None means the report came from a failure "
+                    "fallback and must always be treated as stale.",
+    )
     uncertainty: float = Field(ge=0, le=1, description="Overall uncertainty in this novelty assessment.")
 
 
@@ -526,6 +532,12 @@ class SkepticReport(BaseModel):
         default=None,
         description="Artifact ref of the retrieval transcript; only perspectives with "
                     "tools produce one.",
+    )
+    input_ref: ArtifactRef | None = Field(
+        default=None,
+        description="Artifact ref of the input prompt this report was produced from; the "
+                    "staleness fingerprint. None means the report came from a failure "
+                    "fallback and must always be treated as stale.",
     )
     failed: bool = Field(
         default=False,

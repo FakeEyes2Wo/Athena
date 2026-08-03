@@ -267,5 +267,6 @@ async def collect_novelty_evidence(
         coverage_ref=coverage_ref,
         temporal_ref=temporal_ref,
         query_log_ref=query_log_ref,
+        input_ref=await artifacts.put_text(question),
         uncertainty=judgment.uncertainty,
     )

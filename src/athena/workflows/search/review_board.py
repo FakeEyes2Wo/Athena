@@ -197,14 +197,14 @@ async def review_one_perspective(
         'methodology'
     """
     if not perspective.needs_retrieval:
+        prompt = build_perspective_input(package, perspective, corpus_ref=corpus_ref)
         async with limited_by(llm_sem):
-            judgment = await single_turn_chat(
-                build_perspective_input(package, perspective, corpus_ref=corpus_ref), SkepticJudgment, model=model,
-            )
+            judgment = await single_turn_chat(prompt, SkepticJudgment, model=model)
         return SkepticReport(
             idea_id=package.idea_id, perspective=perspective.perspective_id,
             critique=judgment.critique, unaddressed_risks=judgment.unaddressed_risks,
             fatal_flaw_found=judgment.fatal_flaw_found,
+            input_ref=await artifacts.put_text(prompt),
         )
 
     prior_transcript = await read_prior_transcript(novelty, artifacts)
@@ -223,6 +223,7 @@ async def review_one_perspective(
         idea_id=package.idea_id, perspective=perspective.perspective_id,
         critique=judgment.critique, unaddressed_risks=judgment.unaddressed_risks,
         fatal_flaw_found=judgment.fatal_flaw_found, transcript_ref=transcript_ref,
+        input_ref=await artifacts.put_text(question),
     )
 
 

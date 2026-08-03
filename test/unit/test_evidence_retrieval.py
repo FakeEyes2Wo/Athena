@@ -238,3 +238,17 @@ class BuildNoveltyQuestionTest(unittest.TestCase):
         question = build_novelty_question(_package(sampling_probability=0.42), _FAKE_CORPUS_REF)
         self.assertNotIn("0.42", question)
         self.assertNotIn("sampling_probability", question)
+
+
+class NoveltyInputFingerprintTest(unittest.IsolatedAsyncioTestCase):
+    async def test_novelty_report_records_its_question_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(tmp)
+            report = await collect_novelty_evidence(
+                _package(), agent=_build_retrieval_agent(), artifacts=store,
+                corpus_ref=_FAKE_CORPUS_REF, model=make_scripted_model([_clean_novelty_judgment()]),
+            )
+            self.assertEqual(
+                build_novelty_question(_package(), _FAKE_CORPUS_REF),
+                await store.get_text(report.input_ref),
+            )
