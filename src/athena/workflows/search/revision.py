@@ -15,6 +15,7 @@ import asyncio
 
 from pydantic_ai.models import Model
 
+from athena.core.agent import Agent
 from athena.core.schemas import ArtifactRef
 from athena.storage.artifact_store import ArtifactStore
 from athena.utils.single_turn_chat import single_turn_chat
@@ -24,9 +25,15 @@ from athena.workflows.prompts import (
     REVISER_SYSTEM_PROMPT,
     REVISION_USER_PROMPT_TEMPLATE,
 )
-from athena.workflows.search.evidence_retrieval import build_novelty_question, limited_by
+from athena.workflows.search.evidence_retrieval import (
+    build_novelty_question,
+    collect_novelty_evidence,
+    degraded_novelty_report,
+    limited_by,
+)
 from athena.workflows.search.gatekeeper import MAX_TOTAL_RISKS, perspective_ok
 from athena.workflows.search.idea_schemas import (
+    FalsifiabilityReport,
     GateDecision,
     GateVerdict,
     HypothesisPackage,
@@ -35,13 +42,23 @@ from athena.workflows.search.idea_schemas import (
     RevisionRound,
     SkepticJudgment,
     SkepticReport,
+    StructuralCheckReport,
+    ValidationPlan,
+)
+from athena.workflows.search.pre_gate_checks import (
+    degraded_falsifiability_report,
+    falsifiability_check,
+    structural_check,
 )
 from athena.workflows.search.review_board import (
     REVIEW_PERSPECTIVES,
     ReviewPerspective,
     build_perspective_input,
     format_premise_lines,
+    read_prior_transcript,
+    review_one_perspective,
 )
+from athena.workflows.search.validation import match_verifier, plan_validation
 
 
 # ====== 常量 ======
@@ -427,3 +444,85 @@ async def run_debate(
             break
 
     return current, current_reviews, rounds
+
+
+# ====== 终局刷新：只重跑输入确已失效的报告 ======
+
+async def refresh_stale_evidence(
+    package: HypothesisPackage,
+    *,
+    problem_domain: str,
+    novelty: NoveltyEvidenceReport,
+    reviews: list[SkepticReport],
+    novelty_agent: Agent,
+    domain_review_agent: Agent,
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+    llm_sem: asyncio.Semaphore | None = None,
+    retrieval_sem: asyncio.Semaphore | None = None,
+    model: Model | str | None = None,
+) -> tuple[HypothesisPackage, StructuralCheckReport, FalsifiabilityReport,
+           NoveltyEvidenceReport, list[SkepticReport], ValidationPlan]:
+    """辩论结束后重跑输入已失效的报告，返回终审所需的整套证据（不产出 verdict）。
+
+    **顺序必须是"先 novelty、再视角"**：novelty 重跑会换掉检索转录，而 domain_consistency 的
+    输入内嵌该转录；用刷新后的转录去判视角失效，级联才成立——反过来做，或者拿旧转录判视角，
+    级联会悄无声息地不成立，一份建立在过时检索证据上的报告就会被当作最新的直接放行。
+
+    structural / falsifiability / validation_plan 无条件重跑——前两者一个是纯函数、一个是
+    1 次 single_turn_chat，validation_plan 是纯规则 + artifact 落盘，判定成本与执行成本同
+    量级，加判定只是复杂化。
+
+    Example:
+        >>> pkg, structural, fals, novelty, reviews, plan = await refresh_stale_evidence(
+        ...     package, problem_domain="ai4s", novelty=novelty, reviews=reviews,
+        ...     novelty_agent=a1, domain_review_agent=a2, artifacts=store,
+        ...     corpus_ref=ref)  # doctest: +SKIP
+    """
+    if await novelty_is_stale(package, novelty, artifacts=artifacts, corpus_ref=corpus_ref):
+        try:
+            novelty = await collect_novelty_evidence(
+                package, agent=novelty_agent, artifacts=artifacts, corpus_ref=corpus_ref,
+                llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
+            )
+        except Exception as error:  # noqa: BLE001 - 与 _audit_candidate 同一条降级
+            novelty = await degraded_novelty_report(package.idea_id, error, artifacts)
+
+    prior_transcript = await read_prior_transcript(novelty, artifacts)
+    stale = await stale_perspectives(
+        package, reviews, artifacts=artifacts, corpus_ref=corpus_ref,
+        prior_transcript=prior_transcript,
+    )
+    # 只建一次有序的 stale 视角列表，gather 的入参与之后的结果配对全部复用这同一份列表——
+    # 两处各写一遍再指望顺序一致是自找的隐患，任何一处漏改都会把结果错配到别的视角上
+    stale_ordered = [p for p in REVIEW_PERSPECTIVES if p.perspective_id in stale]
+    by_perspective = {r.perspective: r for r in reviews}
+    refreshed = await asyncio.gather(*[
+        review_one_perspective(
+            package, perspective, novelty=novelty,
+            domain_review_agent=domain_review_agent, artifacts=artifacts,
+            corpus_ref=corpus_ref, llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
+        )
+        for perspective in stale_ordered
+    ], return_exceptions=True)
+    for perspective, outcome in zip(stale_ordered, refreshed):
+        by_perspective[perspective.perspective_id] = outcome if isinstance(
+            outcome, SkepticReport
+        ) else SkepticReport(
+            idea_id=package.idea_id, perspective=perspective.perspective_id,
+            critique=f"refresh failed: {outcome}", unaddressed_risks=[],
+            fatal_flaw_found=False, failed=True,
+        )
+    ordered_reviews = [by_perspective[p.perspective_id] for p in REVIEW_PERSPECTIVES]
+
+    structural = structural_check(package)
+    try:
+        async with limited_by(llm_sem):
+            falsifiability = await falsifiability_check(package, model=model)
+    except Exception as error:  # noqa: BLE001 - 与 _screen_candidate 同一条降级
+        falsifiability = degraded_falsifiability_report(package.idea_id, error)
+    verifier = match_verifier(package, problem_domain)
+    validation_plan = await plan_validation(package, verifier, artifacts=artifacts)
+    plan_ref = await artifacts.put_text(validation_plan.model_dump_json())
+    package = package.model_copy(update={"validation_plan_ref": plan_ref})
+    return package, structural, falsifiability, novelty, ordered_reviews, validation_plan

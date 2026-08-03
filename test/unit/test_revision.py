@@ -3,18 +3,21 @@
 import tempfile
 import unittest
 
+from athena.core.agent import Agent, AgentConfig, StreamEvent
+from athena.core.tool import ToolRegistry
 from athena.storage.artifact_store import LocalArtifactStore
 from athena.workflows.search.evidence_retrieval import build_novelty_question
 from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS
 from athena.workflows.search.idea_schemas import (
-    ClaimEvidence, ClaimRole, GATE_RUBRIC_VERSION, GateDecision, GateVerdict,
-    HypothesisPackage, NoveltyEvidenceReport, RevisionDraft, SkepticJudgment, SkepticReport,
+    ClaimEvidence, ClaimRole, FalsifiabilityJudgment, GATE_RUBRIC_VERSION, GateDecision,
+    GateVerdict, HypothesisPackage, NoveltyEvidenceJudgment, NoveltyEvidenceReport,
+    RevisionDraft, SkepticJudgment, SkepticReport,
 )
 from athena.workflows.search.review_board import REVIEW_PERSPECTIVES, build_perspective_input
 from athena.workflows.search.revision import (
     MAX_DEBATE_ROUNDS, build_revision_prompt, is_no_op_revision, is_revisable,
-    novelty_is_stale, revise_candidate, run_debate, select_debate_opponent,
-    stale_perspectives,
+    novelty_is_stale, refresh_stale_evidence, revise_candidate, run_debate,
+    select_debate_opponent, stale_perspectives,
 )
 from unit.fakes import make_routed_model
 
@@ -405,6 +408,87 @@ class RunDebateTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(_package(), final)          # 逐字段相同
             self.assertEqual(_reviews(), reviews)
             self.assertEqual([], rounds)
+
+
+class _StaticTextProvider:
+    """总是回放固定文本、不调用工具的假 provider；记下调用次数，供测试断言检索循环有没有
+    真的被触发。照抄 test_review_board.py 的实现（同一份假 provider 没有理由写两遍）。默认
+    文本不含任何路由 key 的子串，避免假 provider 的回放文本被 make_routed_model 误路由。
+    """
+
+    def __init__(self, text: str = "no contradicting work found") -> None:
+        self._text = text
+        self.calls = 0
+
+    async def stream(self, config, messages, cancel):
+        self.calls += 1
+        yield StreamEvent("text_delta", {"delta": self._text, "accumulated": self._text})
+        yield StreamEvent("response_completed")
+
+
+def _build_agent(provider: _StaticTextProvider) -> Agent:
+    # 检索 Agent 工厂：绑定假 provider，供 refresh_stale_evidence 的 novelty_agent/
+    # domain_review_agent 参数使用。
+    agent = Agent(AgentConfig(model="test-model", system_prompt="system", tools=ToolRegistry()))
+    agent._provider = provider
+    return agent
+
+
+def _refresh_routes() -> dict:
+    # 覆盖终局刷新可能触发的五类单轮调用锚点：novelty summary、三个视角、falsifiability。
+    # 锚点互不为子串，且都不出现在 _StaticTextProvider 的默认回放文本里。
+    return {
+        "novelty and temporal-integrity assessment": NoveltyEvidenceJudgment(
+            nearest_work=[], facet_overlap={"problem": 0.1}, coverage_estimate=0.5,
+            unrecalled_risk=0.2, citation_cutoff_ok=True, retrieval_cutoff_ok=True,
+            post_cutoff_similarity=0.1, possible_memorization=False, leakage_risk=0.1,
+            historical_backtest_validity=True, uncertainty=0.2,
+        ),
+        "Review perspective: methodology": SkepticJudgment(
+            critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+        "Review perspective: statistics": SkepticJudgment(
+            critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+        "Review perspective: domain_consistency": SkepticJudgment(
+            critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+        "falsifiability auditor": FalsifiabilityJudgment(
+            testable_implication="t", unobservable_variables=[], is_falsifiable=True),
+    }
+
+
+class RefreshStaleEvidenceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_unchanged_package_reruns_no_retrieval_at_all(self) -> None:
+        # 成本论证的端到端佐证：没有输入变化就不该有任何检索循环
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            novelty_provider, domain_provider = _StaticTextProvider(), _StaticTextProvider()
+            novelty = await _novelty(store, package)
+            reviews = await _reviews_with_refs(store, package)
+            await refresh_stale_evidence(
+                package, problem_domain="ai4s", novelty=novelty, reviews=reviews,
+                novelty_agent=_build_agent(novelty_provider),
+                domain_review_agent=_build_agent(domain_provider),
+                artifacts=store, corpus_ref=_FAKE_CORPUS_REF,
+                model=make_routed_model(_refresh_routes()),
+            )
+            self.assertEqual(0, novelty_provider.calls)
+            self.assertEqual(0, domain_provider.calls)
+
+    async def test_changed_hypothesis_reruns_both_retrieval_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            novelty_provider, domain_provider = _StaticTextProvider(), _StaticTextProvider()
+            novelty = await _novelty(store, package)
+            reviews = await _reviews_with_refs(store, package)
+            revised = package.model_copy(update={"novel_hypothesis": "Z causes Y"})
+            await refresh_stale_evidence(
+                revised, problem_domain="ai4s", novelty=novelty, reviews=reviews,
+                novelty_agent=_build_agent(novelty_provider),
+                domain_review_agent=_build_agent(domain_provider),
+                artifacts=store, corpus_ref=_FAKE_CORPUS_REF,
+                model=make_routed_model(_refresh_routes()),
+            )
+            self.assertEqual(1, novelty_provider.calls)
+            self.assertEqual(1, domain_provider.calls)
 
 
 class PromptConstantCollisionTest(unittest.TestCase):
