@@ -490,6 +490,36 @@ class RefreshStaleEvidenceTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, novelty_provider.calls)
             self.assertEqual(1, domain_provider.calls)
 
+    async def test_predicted_observations_only_change_makes_domain_stale_via_new_transcript(
+        self,
+    ) -> None:
+        # 顺序论证真正吃到"先 novelty、再视角"这条规则的场景：novel_hypothesis 不变，只改
+        # predicted_observations。该字段只出现在 build_novelty_question 里（触发 novelty
+        # 单独重跑、换新转录），不出现在 DOMAIN_CONSISTENCY_QUESTION_TEMPLATE 里（该模板只嵌
+        # novel_hypothesis + corpus_ref + prior_retrieval）。domain_consistency 的 staleness
+        # 因此**只能**靠"新转录 != 旧转录"这一条路径成立——上面两条用例都改了
+        # novel_hypothesis，novel_hypothesis 本身就直接嵌在 domain 的输入模板里，域一致性视角
+        # 会在自己字段上就判 stale，与转录是新是旧无关，测不出顺序颠倒的回归。这条用例把
+        # novel_hypothesis 钉死不变，如果 revision.py 把"先 novelty 再读转录判视角"两句顺序
+        # 颠倒（或者拿旧转录判视角），domain_consistency 会用旧转录判定，结果是不 stale，
+        # domain_provider 永远不会被调用，下面的断言会失败在 domain_provider.calls == 0。
+        with tempfile.TemporaryDirectory() as tmp:
+            store, package = LocalArtifactStore(tmp), _package()
+            novelty_provider, domain_provider = _StaticTextProvider(), _StaticTextProvider()
+            novelty = await _novelty(store, package)
+            reviews = await _reviews_with_refs(store, package)
+            revised = package.model_copy(
+                update={"predicted_observations": ["Y increases sharply"]})
+            await refresh_stale_evidence(
+                revised, problem_domain="ai4s", novelty=novelty, reviews=reviews,
+                novelty_agent=_build_agent(novelty_provider),
+                domain_review_agent=_build_agent(domain_provider),
+                artifacts=store, corpus_ref=_FAKE_CORPUS_REF,
+                model=make_routed_model(_refresh_routes()),
+            )
+            self.assertEqual(1, novelty_provider.calls)
+            self.assertEqual(1, domain_provider.calls)
+
 
 class PromptConstantCollisionTest(unittest.TestCase):
     """回归护栏：REVIEW_PERSPECTIVE_HEADER_TEMPLATE / DOMAIN_CONSISTENCY_* 三处硬编码了

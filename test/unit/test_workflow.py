@@ -788,9 +788,15 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
 
     async def _run_with_empty_facets(self) -> tuple[list, list]:
         # facet_overlap 为空 -> hard_gate 判 REVISE/novelty_ok，is_revisable 排除该项 ->
-        # 直接归档，不进闭环。路由里刻意不放 reviser（_ROUTE_REVISER）与辩论（_ROUTE_DEBATE）
-        # 的锚点：一旦被误调用，make_routed_model 会因 0 命中直接抛 AssertionError，这就是
-        # "reviser 零调用"的强断言。
+        # 直接归档，不进闭环。
+        #
+        # 路由里刻意放一套"辩论会成功"的 reviser/辩论响应（会让某个视角清零风险、产出 1 轮
+        # RevisionRound），而不是干脆不放这两个锚点：run_debate 把 revise_candidate 的任何
+        # 异常都在 except Exception 里吞掉（包括 make_routed_model 0 命中抛出的
+        # AssertionError），返回空 rounds——如果只是不放锚点，即便 is_revisable 的守卫被
+        # 误删、闭环被意外触发，也只会因 0 命中被吞掉、rounds 仍是 []，
+        # assertEqual([], results[0].revisions) 测不出任何东西（详见 test-9 review）。放一套
+        # 会让辩论真正跑通、产出非空 rounds 的响应，这条断言才会在守卫被删掉时真正变红。
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = LocalArtifactStore(tmp)
             draft = _valid_draft()
@@ -799,6 +805,18 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
                 citation_cutoff_ok=True, retrieval_cutoff_ok=True, post_cutoff_similarity=0.0,
                 possible_memorization=False, leakage_risk=0.0, historical_backtest_validity=True,
                 uncertainty=0.9,
+            )
+            # 会被"意外触发的辩论"消费的响应：实质改动 + 对手清零风险，保证一旦被调用就会
+            # 产出至少 1 条非空 RevisionRound。
+            revision_draft = RevisionDraft(
+                rebuttal="a matched control cohort now grounds the disconfirmer",
+                changes_made=["tightened the disconfirming observation"],
+                revised_novel_hypothesis=draft.statement,
+                revised_premises=draft.supported_premises,
+                revised_predicted_observations=draft.predicted_observations,
+                revised_disconfirming_observations=[
+                    "Y stays the same after X knockout, confirmed by a matched control cohort",
+                ],
             )
             routes = {
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
@@ -811,6 +829,9 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
                     critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
                 _ROUTE_REVIEW_DOMAIN: SkepticJudgment(
                     critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+                _ROUTE_REVISER: revision_draft,
+                _ROUTE_DEBATE: SkepticJudgment(
+                    critique="cleared after revision", unaddressed_risks=[], fatal_flaw_found=False),
             }
             return await run_full_pipeline(
                 _problem(), gap_miner_agent=_build_retrieval_agent(),
