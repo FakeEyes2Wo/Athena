@@ -6,12 +6,13 @@ import unittest
 from athena.storage.artifact_store import LocalArtifactStore
 from athena.workflows.search.evidence_retrieval import build_novelty_question
 from athena.workflows.search.idea_schemas import (
-    ClaimEvidence, ClaimRole, HypothesisPackage, NoveltyEvidenceReport,
-    RevisionDraft, SkepticReport,
+    ClaimEvidence, ClaimRole, GATE_RUBRIC_VERSION, GateDecision, GateVerdict,
+    HypothesisPackage, NoveltyEvidenceReport, RevisionDraft, SkepticReport,
 )
 from athena.workflows.search.review_board import REVIEW_PERSPECTIVES, build_perspective_input
 from athena.workflows.search.revision import (
-    build_revision_prompt, novelty_is_stale, revise_candidate, stale_perspectives,
+    build_revision_prompt, is_no_op_revision, is_revisable, novelty_is_stale,
+    revise_candidate, select_debate_opponent, stale_perspectives,
 )
 from unit.fakes import make_routed_model
 
@@ -82,6 +83,93 @@ async def _reviews_with_refs(
             input_ref=await store.put_text(prompt),
         ))
     return out
+
+
+def _decision(verdict: GateVerdict, blocking_factor: str | None) -> GateDecision:
+    return GateDecision(idea_id="idea-1", gate_phase="full", verdict=verdict,
+                        rubric_version=GATE_RUBRIC_VERSION, item_scores=[],
+                        blocking_factor=blocking_factor)
+
+
+class RevisionEligibilityTest(unittest.TestCase):
+    def test_risk_items_are_revisable(self) -> None:
+        self.assertTrue(is_revisable(_decision(GateVerdict.REVISE, "risk_ok_methodology")))
+        self.assertTrue(is_revisable(_decision(GateVerdict.REVISE, "risk_total")))
+
+    def test_novelty_ok_is_excluded(self) -> None:
+        # 该分支只由 facet_overlap 为空触发 = 检索侧失败，改假设文本不会让检索恢复
+        self.assertFalse(is_revisable(_decision(GateVerdict.REVISE, "novelty_ok")))
+
+    def test_non_revise_verdicts_are_excluded(self) -> None:
+        for verdict in (GateVerdict.PASS, GateVerdict.REJECT, GateVerdict.EXPLORATORY):
+            self.assertFalse(is_revisable(_decision(verdict, "risk_ok_methodology")))
+
+
+class DebateOpponentTest(unittest.TestCase):
+    def test_risk_ok_item_names_its_own_opponent(self) -> None:
+        self.assertEqual("statistics",
+                         select_debate_opponent("risk_ok_statistics", _reviews()))
+
+    def test_risk_total_picks_the_noisiest_perspective(self) -> None:
+        reviews = [
+            SkepticReport(idea_id="idea-1", perspective="methodology", critique="c",
+                          unaddressed_risks=["a"], fatal_flaw_found=False),
+            SkepticReport(idea_id="idea-1", perspective="statistics", critique="c",
+                          unaddressed_risks=["a", "b", "c"], fatal_flaw_found=False),
+            SkepticReport(idea_id="idea-1", perspective="domain_consistency", critique="c",
+                          unaddressed_risks=["a"], fatal_flaw_found=False),
+        ]
+        self.assertEqual("statistics", select_debate_opponent("risk_total", reviews))
+
+    def test_ties_break_by_review_perspectives_order_not_caller_order(self) -> None:
+        # 确定性：同样输入必须选出同一个对手。刻意用倒序传入，证明函数内部按
+        # REVIEW_PERSPECTIVES 重排，而不是听凭调用方（gather 入参顺序）的顺序。
+        tied = [
+            SkepticReport(idea_id="idea-1", perspective="domain_consistency", critique="c",
+                          unaddressed_risks=["a", "b"], fatal_flaw_found=False),
+            SkepticReport(idea_id="idea-1", perspective="statistics", critique="c",
+                          unaddressed_risks=["a", "b"], fatal_flaw_found=False),
+            SkepticReport(idea_id="idea-1", perspective="methodology", critique="c",
+                          unaddressed_risks=["a", "b"], fatal_flaw_found=False),
+        ]
+        self.assertEqual("methodology", select_debate_opponent("risk_total", tied))
+
+
+class NoOpGuardTest(unittest.TestCase):
+    def test_identical_content_is_a_no_op(self) -> None:
+        same = RevisionDraft(
+            rebuttal="nothing really changed", changes_made=[],
+            revised_novel_hypothesis=_package().novel_hypothesis,
+            revised_premises=_package().supported_premises,
+            revised_predicted_observations=_package().predicted_observations,
+            revised_disconfirming_observations=_package().disconfirming_observations,
+        )
+        self.assertTrue(is_no_op_revision(same, _package()))
+
+    def test_disconfirmer_only_change_is_NOT_a_no_op(self) -> None:
+        # 判定域必须是四个 revised_* 字段，不是 novel_hypothesis 的相似度。按后者判定，
+        # 最典型的修订（只补 disconfirmer，假设文本一字未动）会被当成噪声掐死，
+        # 对手一次都不会被叫到，主路径直接失效。
+        draft = RevisionDraft(
+            rebuttal="added an explicit disconfirmer", changes_made=["added disconfirmer"],
+            revised_novel_hypothesis=_package().novel_hypothesis,
+            revised_premises=_package().supported_premises,
+            revised_predicted_observations=_package().predicted_observations,
+            revised_disconfirming_observations=["Y flat versus matched control"],
+        )
+        self.assertFalse(is_no_op_revision(draft, _package()))
+
+    def test_premise_only_change_is_NOT_a_no_op(self) -> None:
+        draft = RevisionDraft(
+            rebuttal="bound a second evidence ref", changes_made=["added ref"],
+            revised_novel_hypothesis=_package().novel_hypothesis,
+            revised_premises=[ClaimEvidence(claim="X correlates with Y",
+                                            role=ClaimRole.SUPPORTED_PREMISE,
+                                            supporting_refs=["ev-0", "ev-1"])],
+            revised_predicted_observations=_package().predicted_observations,
+            revised_disconfirming_observations=_package().disconfirming_observations,
+        )
+        self.assertFalse(is_no_op_revision(draft, _package()))
 
 
 class RevisionPromptTest(unittest.TestCase):

@@ -24,6 +24,8 @@ from athena.workflows.prompts import (
 )
 from athena.workflows.search.evidence_retrieval import build_novelty_question, limited_by
 from athena.workflows.search.idea_schemas import (
+    GateDecision,
+    GateVerdict,
     HypothesisPackage,
     NoveltyEvidenceReport,
     RevisionDraft,
@@ -47,6 +49,71 @@ single_turn_chat。**无经验依据**，与 MAX_TOLERATED_RISKS / MAX_TOTAL_RIS
 MAX_REVISION_ATTEMPTS: int = 2
 """单次 reviser 调用的最大尝试次数（即重试 1 次）。沿用 MAX_GENERATION_ATTEMPTS /
 MAX_REVIEW_ATTEMPTS 的先例。重试逻辑在核心流程跑通之后才接进辩论循环（见 Task 10）。"""
+
+
+# ====== 入口条件与对手映射 ======
+
+RISK_ITEM_PREFIX: str = "risk_ok_"
+RISK_TOTAL_ITEM: str = "risk_total"
+
+
+def is_revisable(decision: GateDecision) -> bool:
+    """该判决是否有资格进修订闭环。
+
+    只有 risk_ok_<p> 与 risk_total 可达：evidence_traceable / falsifiable 在
+    run_full_pipeline 里永不作为入口出现（进昂贵段的前提就是 pre_gate 已判它们通过，
+    hard_gate 拿同样两个报告对象重算结果必然相同）；novelty_ok 判 REVISE 只由 facet_overlap
+    为空触发，那是检索失败而非候选缺陷，改假设文本不会让检索恢复；verifier_ok 判
+    EXPLORATORY 不是 REVISE；REJECT 按定义不可由修订解决。
+
+    Example:
+        >>> is_revisable(decision)  # doctest: +SKIP
+        True
+    """
+    if decision.verdict != GateVerdict.REVISE or decision.blocking_factor is None:
+        return False
+    return (decision.blocking_factor.startswith(RISK_ITEM_PREFIX)
+            or decision.blocking_factor == RISK_TOTAL_ITEM)
+
+
+def select_debate_opponent(blocking_factor: str, reviews: list[SkepticReport]) -> str:
+    """被拦项 -> 辩论对手的 perspective_id。
+
+    risk_ok_<p> 直接取后缀；risk_total 取 unaddressed_risks 最多的视角，并列时取
+    REVIEW_PERSPECTIVES 中靠前者。**reviews 在函数内部按 REVIEW_PERSPECTIVES 重排**——把
+    确定性寄托在调用方的入参顺序（asyncio.gather）上等于没有承诺，这与 hard_gate 内部重排
+    是同一条理由。
+
+    Example:
+        >>> select_debate_opponent("risk_ok_statistics", reviews)  # doctest: +SKIP
+        'statistics'
+    """
+    if blocking_factor.startswith(RISK_ITEM_PREFIX):
+        return blocking_factor[len(RISK_ITEM_PREFIX):]
+    by_perspective = {r.perspective: r for r in reviews}
+    ordered = [by_perspective[p.perspective_id] for p in REVIEW_PERSPECTIVES
+               if p.perspective_id in by_perspective]
+    # max 返回首个最大值，配合上面按 REVIEW_PERSPECTIVES 的重排即得到确定的并列裁决
+    return max(ordered, key=lambda r: len(r.unaddressed_risks)).perspective
+
+
+def is_no_op_revision(draft: RevisionDraft, package: HypothesisPackage) -> bool:
+    """这一轮修订有没有实质改动。判定域是 RevisionDraft 的四个 revised_* 字段，逐字段相等
+    比对——纯函数、无阈值、确定性可测。
+
+    **不要改用 novel_hypothesis 的 Jaccard 相似度**：去重问的是"这是不是同一个 idea"，本函数
+    问的是"这一轮有没有实质改动"，判定域完全不同。按前者判定，最典型的修订（只补
+    disconfirming_observations，假设文本一字未动）相似度为 1.0，guard 第一轮就开火、对手
+    一次都不会被叫到，主路径直接失效。
+
+    Example:
+        >>> is_no_op_revision(draft, package)  # doctest: +SKIP
+        False
+    """
+    return (draft.revised_novel_hypothesis == package.novel_hypothesis
+            and draft.revised_premises == package.supported_premises
+            and draft.revised_predicted_observations == package.predicted_observations
+            and draft.revised_disconfirming_observations == package.disconfirming_observations)
 
 
 # ====== Reviser（生成侧：看得到 critique，看不到阈值与自评概率） ======
