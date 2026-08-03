@@ -23,6 +23,8 @@ from athena.workflows.search.idea_schemas import (
     NoveltyEvidenceReport,
     PairwiseJudgment,
     PipelineCandidateResult,
+    RevisionDraft,
+    RevisionRound,
     RetrievalCoverage,
     SkepticJudgment,
     SkepticReport,
@@ -54,6 +56,30 @@ def _draft(**overrides) -> dict:
     )
     defaults.update(overrides)
     return defaults
+
+
+def _package(**overrides) -> HypothesisPackage:
+    defaults = dict(
+        idea_id="idea-1", generation_strategy="single_strategy_v1", novel_hypothesis="n",
+        supported_premises=[], inference_chain=[], predicted_observations=["p"],
+        disconfirming_observations=["d"], lineage_op="generate",
+    )
+    defaults.update(overrides)
+    return HypothesisPackage(**defaults)
+
+
+def _pipeline_result(**overrides) -> PipelineCandidateResult:
+    defaults = dict(
+        package=_package(),
+        structural=StructuralCheckReport(idea_id="idea-1", premise_evidence_ok=True,
+                                        novel_hypothesis_testable=True),
+        falsifiability=FalsifiabilityReport(idea_id="idea-1", testable_implication="t",
+                                           unobservable_variables=[], is_falsifiable=True),
+        decision=GateDecision(idea_id="idea-1", gate_phase="full", verdict=GateVerdict.REVISE,
+                              rubric_version=GATE_RUBRIC_VERSION, item_scores=[]),
+    )
+    defaults.update(overrides)
+    return PipelineCandidateResult(**defaults)
 
 
 class ClaimEvidenceTest(unittest.TestCase):
@@ -281,3 +307,35 @@ class PipelineCandidateResultTest(unittest.TestCase):
         self.assertIsNone(result.novelty)
         self.assertEqual([], result.reviews)
         self.assertIsNone(result.validation_plan)
+
+
+class RevisionSchemaTest(unittest.TestCase):
+    def test_revision_draft_has_no_sampling_probability_field(self) -> None:
+        # schema 泄漏面：不依赖任何运行时路径，有人加字段当场红
+        self.assertNotIn("sampling_probability", RevisionDraft.model_fields)
+
+    def test_revision_draft_carries_rebuttal_and_changes(self) -> None:
+        draft = RevisionDraft(
+            rebuttal="the control group is now explicit",
+            changes_made=["added a matched control arm"],
+            revised_novel_hypothesis="X causes Y under Z",
+            revised_premises=[], revised_predicted_observations=["Y increases"],
+            revised_disconfirming_observations=["Y flat"],
+        )
+        self.assertEqual("the control group is now explicit", draft.rebuttal)
+
+    def test_revision_round_debated_perspective_is_required_and_not_optional(self) -> None:
+        # 设计 §3.2：可达入口只有 risk_ok_<p> 与 risk_total，两者都有对手，没有 None 的生产者
+        self.assertIs(str, RevisionRound.model_fields["debated_perspective"].annotation)
+
+    def test_revision_round_is_not_a_verdict(self) -> None:
+        # 除 GateDecision 外任何报告类模型都不带 verdict
+        self.assertNotIn("verdict", RevisionRound.model_fields)
+
+    def test_package_defaults_to_revision_round_zero(self) -> None:
+        self.assertEqual(0, _package().revision_round)
+
+    def test_pipeline_result_defaults_to_no_revisions(self) -> None:
+        result = _pipeline_result()
+        self.assertEqual([], result.revisions)
+        self.assertIsNone(result.revision_blocking_factor)

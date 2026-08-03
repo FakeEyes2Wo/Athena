@@ -143,6 +143,10 @@ class HypothesisPackage(BaseModel):
         default=None,
         description="ValidationPlan artifact ref; stays None until validation planning.",
     )
+    revision_round: int = Field(
+        default=0, ge=0,
+        description="How many debate revisions produced this package; 0 for an original candidate.",
+    )
     lineage_op: str = Field(description="generate | specialize | merge | mutate | branch.")
 
     @model_validator(mode="after")
@@ -574,6 +578,67 @@ class PairwiseJudgment(BaseModel):
     rationale: str = Field(description="Itemized justification, not a bare preference.")
 
 
+# ====== 修订闭环（RevisionLoop，步骤 [8] 之后） ======
+
+class RevisionDraft(BaseModel):
+    """LLM-authored revision of one blocked candidate.
+
+    Deliberately carries no sampling_probability field: the reviser writes the rebuttal that
+    is shown to the blocking reviewer, so letting it see the generator's self-assessed
+    confidence would leak that score into the review side through the rebuttal text
+    (Co-Scientist: reviewers must not anchor on the generator's self-assessment).
+
+    Example:
+        >>> RevisionDraft(rebuttal="control arm added", changes_made=["added control"],
+        ...     revised_novel_hypothesis="X causes Y", revised_premises=[],
+        ...     revised_predicted_observations=["p"],
+        ...     revised_disconfirming_observations=["d"]).rebuttal
+        'control arm added'
+    """
+    rebuttal: str = Field(
+        description="Reply to the blocking reviewer's critique; shown to that reviewer."
+    )
+    changes_made: list[str] = Field(
+        default_factory=list,
+        description="One entry per change: what was changed and which risk it addresses.",
+    )
+    revised_novel_hypothesis: str = Field(description="The revised novel claim under test.")
+    revised_premises: list[ClaimEvidence] = Field(description="Revised evidence-bound premises.")
+    revised_predicted_observations: list[str] = Field(
+        description="Revised observations predicted if the hypothesis is true."
+    )
+    revised_disconfirming_observations: list[str] = Field(
+        description="Revised observations that would refute the hypothesis."
+    )
+
+
+class RevisionRound(BaseModel):
+    """Audit record for one debate round. Not a verdict.
+
+    Example:
+        >>> RevisionRound(round_index=1, debated_perspective="methodology",
+        ...     package_ref="sha256:" + "a" * 64, rebuttal_ref="sha256:" + "b" * 64,
+        ...     cleared=False).round_index
+        1
+    """
+    round_index: int = Field(ge=1, description="1-based debate round number.")
+    debated_perspective: str = Field(
+        description="Perspective id the reviser debated against; fixed for the whole loop."
+    )
+    package_ref: ArtifactRef = Field(description="Artifact ref of this round's revised package.")
+    rebuttal_ref: ArtifactRef = Field(description="Artifact ref of this round's rebuttal text.")
+    reviewer_response_ref: ArtifactRef | None = Field(
+        default=None,
+        description="Artifact ref of the opponent's response; None when that call failed.",
+    )
+    cleared: bool = Field(
+        description="Whether the blocked rubric item was cleared after this round. This is a "
+                    "local predicate on the debated item only - it does NOT predict the final "
+                    "verdict, because the closing refresh re-runs the other perspectives and "
+                    "the final gate may block on a different item.",
+    )
+
+
 # ====== 全流程审计轨迹 ======
 
 class PipelineCandidateResult(BaseModel):
@@ -599,3 +664,13 @@ class PipelineCandidateResult(BaseModel):
     )
     validation_plan: ValidationPlan | None = None
     decision: GateDecision
+    revisions: list[RevisionRound] = Field(
+        default_factory=list,
+        description="One entry per debate round; empty means the candidate never entered "
+                    "the revision loop.",
+    )
+    revision_blocking_factor: str | None = Field(
+        default=None,
+        description="The rubric item that sent this candidate into the revision loop. Fixed "
+                    "for the whole loop, hence recorded here rather than per RevisionRound.",
+    )
