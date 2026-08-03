@@ -123,6 +123,52 @@ def build_review_prompt(package: HypothesisPackage, perspective: ReviewPerspecti
     ])
 
 
+async def read_prior_transcript(
+    novelty: NoveltyEvidenceReport, artifacts: ArtifactStore
+) -> str:
+    """取回 [5] 的检索转录供 domain_consistency 复用；取不到就返回空串退回完整检索。
+
+    转录复用是优化不是前置条件：query_log_ref 为 None（novelty 失败降级），或 ref 存在但
+    artifact 已缺失/损坏，都退回空串而不是让本视角失败。
+
+    Example:
+        >>> await read_prior_transcript(novelty, store)  # doctest: +SKIP
+        'earlier retrieval notes'
+    """
+    if not novelty.query_log_ref:
+        return ""
+    try:
+        return await artifacts.get_text(novelty.query_log_ref)
+    except (ArtifactNotFoundError, ArtifactIntegrityError):
+        return ""
+
+
+def build_perspective_input(
+    package: HypothesisPackage,
+    perspective: ReviewPerspective,
+    *,
+    corpus_ref: ArtifactRef,
+    prior_transcript: str = "",
+) -> str:
+    """一个视角实际消费的输入：非检索视角是单轮审阅 prompt，检索视角是给 Agent 的检索提问。
+
+    **这是视角输入的唯一构造点。** review_one_perspective 与 revision 的 staleness 判定都调
+    它——两侧分头拼装会让指纹永远失配、所有报告恒 stale，且没有任何测试会红。
+
+    Example:
+        >>> build_perspective_input(package, REVIEW_PERSPECTIVES[0],
+        ...     corpus_ref="sha256:" + "c" * 64).startswith("You are")  # doctest: +SKIP
+        True
+    """
+    if not perspective.needs_retrieval:
+        return build_review_prompt(package, perspective)
+    return DOMAIN_CONSISTENCY_QUESTION_TEMPLATE.format(
+        novel_hypothesis=package.novel_hypothesis,
+        corpus_ref=corpus_ref,
+        prior_retrieval=prior_transcript or "(none; search from scratch)",
+    )
+
+
 async def review_one_perspective(
     package: HypothesisPackage,
     perspective: ReviewPerspective,
@@ -153,7 +199,7 @@ async def review_one_perspective(
     if not perspective.needs_retrieval:
         async with limited_by(llm_sem):
             judgment = await single_turn_chat(
-                build_review_prompt(package, perspective), SkepticJudgment, model=model
+                build_perspective_input(package, perspective, corpus_ref=corpus_ref), SkepticJudgment, model=model,
             )
         return SkepticReport(
             idea_id=package.idea_id, perspective=perspective.perspective_id,
@@ -161,21 +207,9 @@ async def review_one_perspective(
             fatal_flaw_found=judgment.fatal_flaw_found,
         )
 
-    prior_transcript = ""
-    if novelty.query_log_ref:
-        try:
-            prior_transcript = await artifacts.get_text(novelty.query_log_ref)
-        except (ArtifactNotFoundError, ArtifactIntegrityError):
-            # 转录复用是优化不是前置条件：ref 存在但内容缺失/损坏时退回完整检索，而不是让
-            # 整个视角失败。当前流水线内不会触发——run_full_pipeline 里 artifacts 是同一次
-            # 运行内的单实例串行透传，query_log_ref 由本次运行的 collect_novelty_evidence
-            # 写入，读取必然命中；这里防的是 NoveltyEvidenceReport 被持久化后跨会话重放、
-            # 原 artifact 已被清理的情形。
-            prior_transcript = ""
-    question = DOMAIN_CONSISTENCY_QUESTION_TEMPLATE.format(
-        novel_hypothesis=package.novel_hypothesis,
-        corpus_ref=corpus_ref,
-        prior_retrieval=prior_transcript or "(none; search from scratch)",
+    prior_transcript = await read_prior_transcript(novelty, artifacts)
+    question = build_perspective_input(
+        package, perspective, corpus_ref=corpus_ref, prior_transcript=prior_transcript
     )
     async with limited_by(retrieval_sem):
         collected_text, _channels = await run_retrieval_agent(domain_review_agent, question)

@@ -68,6 +68,24 @@ async def limited_by(semaphore: asyncio.Semaphore | None) -> AsyncIterator[None]
         yield
 
 
+# ====== 输入构造（staleness 判定与生产侧共用，禁止两侧分头拼装） ======
+
+def build_novelty_question(package: HypothesisPackage, corpus_ref: ArtifactRef) -> str:
+    """构造 [5] 数值性审计的检索提问。它同时是该报告的 staleness 指纹来源，所以
+    collect_novelty_evidence 与 revision.novelty_is_stale 必须都调这一个函数——两侧分头
+    拼装会让指纹永远失配、所有报告恒 stale。
+
+    Example:
+        >>> build_novelty_question(package, "sha256:" + "a" * 64).startswith("Hypothesis under review:")  # doctest: +SKIP
+        True
+    """
+    return NOVELTY_QUESTION_TEMPLATE.format(
+        novel_hypothesis=package.novel_hypothesis,
+        corpus_ref=corpus_ref,
+        predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
+    )
+
+
 # ====== 阶段一共用：Agent 检索循环 ======
 
 async def run_retrieval_agent(agent: Agent, question: str) -> tuple[str, list[str]]:
@@ -209,11 +227,7 @@ async def collect_novelty_evidence(
         >>> report.uncertainty  # doctest: +SKIP
         0.2
     """
-    question = NOVELTY_QUESTION_TEMPLATE.format(
-        novel_hypothesis=package.novel_hypothesis,
-        corpus_ref=corpus_ref,
-        predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
-    )
+    question = build_novelty_question(package, corpus_ref)
     async with limited_by(retrieval_sem):
         collected_text, channels_used = await run_retrieval_agent(agent, question)
     query_log_ref = await artifacts.put_text(collected_text or "(agent produced no text)")

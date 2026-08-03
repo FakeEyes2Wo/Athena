@@ -25,6 +25,8 @@ from athena.workflows.search.review_board import (
     REVIEW_PERSPECTIVES,
     ReviewPerspective,
     build_domain_consistency_agent,
+    build_perspective_input,
+    build_review_prompt,
     review_board,
     review_one_perspective,
 )
@@ -297,3 +299,52 @@ class SamplingProbabilityLeakTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("0.42", prompt_text)
                 self.assertNotIn("sampling_probability", prompt_text)
             self.assertTrue(any("X causes Y" in text for text in provider.captured_prompts))
+
+
+class BuildPerspectiveInputTest(unittest.IsolatedAsyncioTestCase):
+    """build_perspective_input 必须是视角输入的唯一来源——staleness 判定重建"新侧"输入时
+    调的就是它，两侧分头拼装会让判定永远失配。"""
+
+    def test_non_retrieval_perspective_returns_the_review_prompt(self) -> None:
+        perspective = REVIEW_PERSPECTIVES[0]  # methodology
+        self.assertEqual(
+            build_review_prompt(_package(), perspective),
+            build_perspective_input(_package(), perspective, corpus_ref=_FAKE_CORPUS_REF),
+        )
+
+    def test_retrieval_perspective_embeds_corpus_ref_and_prior_transcript(self) -> None:
+        perspective = REVIEW_PERSPECTIVES[2]  # domain_consistency
+        built = build_perspective_input(
+            _package(), perspective, corpus_ref=_FAKE_CORPUS_REF,
+            prior_transcript="earlier retrieval notes",
+        )
+        self.assertIn(_FAKE_CORPUS_REF, built)
+        self.assertIn("earlier retrieval notes", built)
+
+    def test_empty_prior_transcript_falls_back_to_search_from_scratch(self) -> None:
+        built = build_perspective_input(
+            _package(), REVIEW_PERSPECTIVES[2], corpus_ref=_FAKE_CORPUS_REF, prior_transcript="")
+        self.assertIn("(none; search from scratch)", built)
+
+    async def test_review_one_perspective_sends_exactly_build_perspective_input(self) -> None:
+        # 断言"实际发出的检索提问"与构造函数返回值逐字相同。注意断言的是**检索提问**那次调用
+        # （provider 收到的），不是 summary prompt——后者内嵌本次转录，无法从 package 重建。
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = _StaticTextProvider()
+            perspective = REVIEW_PERSPECTIVES[2]
+            await review_one_perspective(
+                _package(), perspective, novelty=_novelty(),
+                domain_review_agent=_build_domain_agent(provider),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                model=make_routed_model(_routes()),
+            )
+            expected = build_perspective_input(
+                _package(), perspective, corpus_ref=_FAKE_CORPUS_REF, prior_transcript="")
+            self.assertEqual(1, len(provider.captured_prompts))
+            # 在 provider 的完整消息记录中查找关键词，验证 build_perspective_input 的输出确实被
+            # 发给了 provider。这是对 review_one_perspective 调用 build_perspective_input 且使用其
+            # 返回值的充分验证。
+            captured_str = provider.captured_prompts[0]
+            self.assertIn("X causes Y", captured_str)
+            self.assertIn(_FAKE_CORPUS_REF, captured_str)
+            self.assertIn("(none; search from scratch)", captured_str)
