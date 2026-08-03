@@ -69,7 +69,7 @@ class McpSearchTools(BaseTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """在接入的 MCP 服务上搜索工具；命中则注册进 ToolRegistry 并落盘结果。"""
-        query = input["query"].strip().lower()
+        query = (input.get("query") or "").strip().lower()
         server = input.get("server")
         top_k = int(input.get("top_k", self._top_k))
 
@@ -115,14 +115,14 @@ class McpSearchTools(BaseTool):
             activated.append(full)
 
         data: dict[str, Any] = {
-            "query": input["query"],
+            "query": input.get("query", ""),
             "matches": results,
             "activated": activated,
             "errors": errors,
         }
         # 阶段 3：无命中时补充目录兜底，并落盘搜索结果
         if not results:
-            data["catalog"] = await self._catalog(server)
+            data["catalog"] = self._catalog(server)
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "result.json").write_text(
@@ -130,7 +130,7 @@ class McpSearchTools(BaseTool):
         )
         return ToolResult(data={**data, "output_dir": str(self.output_dir)})
 
-    async def _catalog(self, server: str | None) -> list[dict]:
+    def _catalog(self, server: str | None) -> list[dict]:
         """返回（过滤后的）全部工具的精简目录，供 LLM 选择后二次精确搜索。"""
         catalog: list[dict] = []
         for mgr in self._managers:

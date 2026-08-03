@@ -31,13 +31,18 @@ def load_mcp_servers(path: str | Path | None = None) -> list[McpServerConfig]:
     config_path = Path(path) if path else Path("mcp_servers.json")
     if not config_path.exists():
         return []
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{config_path} 不是合法 JSON: {exc}") from exc
     servers = raw.get("servers", []) if isinstance(raw, dict) else []
     return [_parse_server(s) for s in servers]
 
 
 def _parse_server(raw: dict[str, Any]) -> McpServerConfig:
     """把 JSON 的 server 条目映射为 McpServerConfig（含 auth 对象扁平化）。"""
+    if "name" not in raw:
+        raise ValueError("server 条目缺少必填的 name 字段")
     auth = raw.get("auth") or {}
     return McpServerConfig(
         name=str(raw["name"]),

@@ -79,14 +79,11 @@ def _collect_data_files(work_root: Path, max_depth: int = 4) -> dict[Path, list[
     def _walk(d: Path, depth: int) -> None:
         if depth > max_depth:
             return
-        files = [
-            f
-            for f in sorted(d.iterdir())
-            if f.is_file() and f.name not in _ARTIFACT_FILES
-        ]
+        children = sorted(d.iterdir())
+        files = [f for f in children if f.is_file() and f.name not in _ARTIFACT_FILES]
         if files:
             collected[d] = files
-        for child in sorted(d.iterdir()):
+        for child in children:
             if child.is_dir() and child.name not in _TOOL_OUTPUT_DIRS:
                 _walk(child, depth + 1)
 

@@ -37,6 +37,7 @@ default-groups = ["dev"]
 [tool.pytest.ini_options]
 testpaths = ["test"]
 asyncio_mode = "auto"
+markers = ["integration: tests that require external services or real API access"]
 
 [tool.black]
 line-length = 88

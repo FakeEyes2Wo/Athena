@@ -1,5 +1,6 @@
 """MCP 客户端管理 —— 连接、工具清单缓存、call_tool 转发。"""
 
+import asyncio
 import os
 from contextlib import AsyncExitStack
 from typing import Any
@@ -36,6 +37,7 @@ class McpClientManager:
 
     @property
     def prefix(self) -> str:
+        """返回配置的 MCP 工具名前缀。"""
         return self.cfg.prefix
 
     def full_name(self, tool_name: str) -> str:
@@ -100,15 +102,24 @@ class McpClientManager:
             await self.connect()
 
     async def call_tool(self, tool_name: str, arguments: dict) -> Any:
-        """调用 MCP 工具，返回 CallToolResult（或其等价对象）。"""
+        """调用 MCP 工具，失败时重连并指数退避重试（最多 3 次）。"""
         await self.ensure_connected()
-        try:
-            return await self._session.call_tool(tool_name, arguments=arguments)
-        except Exception:
-            # 连接可能已失效 → 重连一次后重试
-            await self.close()
-            await self.connect()
-            return await self._session.call_tool(tool_name, arguments=arguments)
+        delay = 1.0
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                return await self._session.call_tool(tool_name, arguments=arguments)
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 2:  # 最后一次尝试仍失败
+                    break
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 4.0)
+                await self.close()
+                await self.connect()
+        raise McpClientError(
+            f"调用工具 '{tool_name}' 失败（已重连重试）: {last_exc}"
+        ) from last_exc
 
     def tool_defs(self) -> list[Any]:
         """已缓存的工具定义列表（name/description/inputSchema）。"""

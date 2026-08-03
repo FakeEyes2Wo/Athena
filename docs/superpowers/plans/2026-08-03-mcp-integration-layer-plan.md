@@ -362,7 +362,7 @@ import os
 from contextlib import AsyncExitStack
 from typing import Any
 
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -436,7 +436,9 @@ class McpClientManager:
         if self.cfg.transport == "stdio":
             if not self.cfg.command:
                 raise McpClientError(f"server '{self.cfg.name}' 缺 command")
-            return stdio_client(self.cfg.command, self.cfg.args)
+            return stdio_client(
+                StdioServerParameters(command=self.cfg.command, args=self.cfg.args)
+            )
         raise McpClientError(
             f"server '{self.cfg.name}' 不支持的 transport: {self.cfg.transport}"
         )
@@ -483,7 +485,7 @@ class McpClientManager:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `uv run pytest test/unit/tools/mcp/test_client.py -v`
-Expected: PASS（8 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 5: 提交**
 
