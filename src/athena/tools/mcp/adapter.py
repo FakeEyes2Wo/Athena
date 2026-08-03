@@ -50,7 +50,9 @@ class McpToolAdapter(BaseTool):
         self.output_dir.mkdir(parents=True, exist_ok=True)
         try:
             result = await self._manager.call_tool(self._mcp_tool.name, arguments=input)
+            payload, saved_files = await self._normalize(result, ctx)
         except Exception as exc:
+            # MCP 调用失败或归一化/下载抛错（超时/断连/HTTP 错误）→ 落盘错误并返回失败
             return self._persist(
                 {"error": f"{type(exc).__name__}: {exc}"},
                 success=False,
@@ -65,7 +67,6 @@ class McpToolAdapter(BaseTool):
                 error=text or "MCP 工具返回 isError",
             )
 
-        payload, saved_files = await self._normalize(result, ctx)
         return self._persist({**payload, "files": saved_files}, success=True)
 
     async def _normalize(self, result: Any, ctx: ToolContext) -> tuple[dict, list[str]]:

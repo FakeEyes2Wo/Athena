@@ -124,6 +124,40 @@ async def test_downloader_follows_url(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_download_failure_persisted(tmp_path, monkeypatch):
+    manager = _make_manager()
+    manager.call_tool = AsyncMock(
+        return_value=CallToolResult(
+            content=[TextContent(type="text", text="data ready")],
+            structuredContent={"download_url": "https://example.com/train.csv"},
+        )
+    )
+    adapter = McpToolAdapter(
+        manager, _tool_def(name="download_competition_data_file"), str(tmp_path)
+    )
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            raise RuntimeError("download timeout")
+
+    monkeypatch.setattr("athena.tools.mcp.adapter.httpx.AsyncClient", FakeClient)
+    result = await adapter.ainvoke(_ctx(), q=1)
+    assert result.success is False
+    out = Path(result.data["output_dir"])
+    record = json.loads((out / "result.json").read_text(encoding="utf-8"))
+    assert "download timeout" in record["error"]
+
+
+@pytest.mark.asyncio
 async def test_non_downloader_ignores_url(tmp_path, monkeypatch):
     manager = _make_manager()
     manager.call_tool = AsyncMock(
