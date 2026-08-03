@@ -85,11 +85,16 @@ class McpSearchTools(BaseTool):
                 # 某 server 连接失败/超时 → 记录错误并继续搜索其他 server
                 errors.append({"server": mgr.cfg.name, "error": str(exc)})
                 continue
-            for tool in mgr.tool_defs():
-                if query in tool.name.lower():
-                    matches.append((mgr, tool, 2))
-                elif query in f"{tool.name} {tool.description or ''}".lower():
-                    matches.append((mgr, tool, 1))
+            for tool in mgr.tool_defs():  # 遍历工具清单
+                score = 0
+                # 按空格拆分 query，分别匹配工具名和描述，命中得分累加
+                for word in query.split():
+                    if word in tool.name.lower():
+                        score += 2  # 单词命中工具名
+                    elif word in (tool.description or "").lower():
+                        score += 1  # 单词命中描述
+                if score > 0:
+                    matches.append((mgr, tool, score))
 
         matches.sort(key=lambda m: m[2], reverse=True)
 

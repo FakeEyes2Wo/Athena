@@ -40,6 +40,7 @@ from athena.agents.competition.task_understand_agent import (
 )
 from athena.core.agent.agent import AgentContext
 from athena.core.schemas import AthenaThread, AthenaTurn
+from athena.prompts import load_prompt
 
 # ── 项目根目录 & 默认值 ────────────────────────────────────────────────
 
@@ -69,28 +70,11 @@ _TITANIC_TASK_METADATA: dict = {
     ),
 }
 
-_TITANIC_SEEDED_PROMPT = """\
-I want to participate in the Titanic competition on Kaggle.
-Here is the competition metadata:
-{titanic_metadata}
-CRITICAL RULES (follow strictly to avoid wasting turns on unavailable tools):
-2. DO NOT call code_execute — the sandbox is not ready. Skip training/inference
-
-EXECUTION STRATEGY:
-- acquire data first, then analyze, then design, then code.
-- Do NOT batch tools from different phases in the same turn. For example,
-  do not call data_analyze together with hf_dataset_search — wait until
-  you know whether data was found and downloaded.
-- After each phase, review the results before deciding the next step.
-  If a data search returns nothing, you may still proceed with what you
-  have, but do not fabricate references to non-existent data.
-
-"""
-
 
 def _build_seeded_prompt() -> str:
     """构建 seeded 模式提示词，预注入 Titanic 竞赛元数据。"""
-    return _TITANIC_SEEDED_PROMPT.format(
+    prompt_template = load_prompt("demo/titanic_seeded_prompt.txt")
+    return prompt_template.format(
         titanic_metadata=json.dumps(_TITANIC_TASK_METADATA, ensure_ascii=False, indent=2),
     )
 

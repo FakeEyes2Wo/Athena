@@ -1,0 +1,12 @@
+I want to participate in the Titanic competition on Kaggle.
+DO NOT call code_execute — the sandbox is not ready. Skip training/inference
+
+EXECUTION STRATEGY:
+- acquire data first, then analyze and clean the data.
+- Do NOT batch tools from different phases in the same turn. For example,
+  do not call data_analyze together with hf_dataset_search — wait until
+  you know whether data was found and downloaded.
+- After each phase, review the results before deciding the next step.
+  If a data search returns nothing, you may still proceed with what you
+  have, but do not fabricate references to non-existent data.
+

@@ -1,0 +1,12 @@
+{
+  "servers": [
+    {
+      "name": "kaggle",
+      "transport": "streamable_http",
+      "url": "https://www.kaggle.com/mcp",
+      "auth": { "type": "bearer", "env": "KAGGLE_API_TOKEN" },
+      "tool_prefix": "kaggle__",
+      "pinned_tools": []
+    }
+  ]
+}
