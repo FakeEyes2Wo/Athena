@@ -53,19 +53,33 @@ class McpToolAdapter(BaseTool):
             payload, saved_files = await self._normalize(result, ctx)
         except Exception as exc:
             # MCP 调用失败或归一化/下载抛错（超时/断连/HTTP 错误）→ 落盘错误并返回失败
+            err_msg = f"{type(exc).__name__}: {exc}"
+            print(f"\n⚠ MCP 工具 [{self.spec.name}] 连接/下载失败: {err_msg}")
             return self._persist(
-                {"error": f"{type(exc).__name__}: {exc}"},
+                {"error": err_msg},
                 success=False,
                 error=str(exc),
             )
 
         if getattr(result, "isError", False):
             text = _collect_text(result)
-            return self._persist(
-                {"error": text or "MCP 工具返回 isError"},
-                success=False,
-                error=text or "MCP 工具返回 isError",
+            raw_err = text or "MCP 工具返回 isError"
+            enhanced = _enhance_error(
+                raw_err,
+                self._manager.cfg.name,
+                self._mcp_tool.name,
             )
+            print(f"\n⚠ MCP 工具 [{self.spec.name}] 返回错误: {raw_err}")
+            if enhanced != raw_err:
+                hint = enhanced.split("\n", 1)[1] if "\n" in enhanced else enhanced
+                print(f"  {hint}")
+            return self._persist(
+                {"error": enhanced},
+                success=False,
+                error=enhanced,
+            )
+
+        return self._persist({**payload, "files": saved_files}, success=True)
 
         return self._persist({**payload, "files": saved_files}, success=True)
 
@@ -141,6 +155,32 @@ class McpToolAdapter(BaseTool):
         if not success:
             return ToolResult(success=False, error=error, data=data)
         return ToolResult(data=data)
+
+
+def _enhance_error(raw: str, server: str, tool: str) -> str:
+    """根据 MCP 服务返回的原始错误，给出可操作的指导信息。"""
+    lower = raw.lower()
+    if "unauthenticated" in lower:
+        return (
+            f"{raw}\n\n"
+            f"[操作提示] 该操作需要额外授权，原因可能是：\n"
+            f"  1. 未在 {server} 网站接受该竞赛/资源的规则条款\n"
+            f"  2. 当前 API 凭证没有该操作的权限\n"
+            f"请前往 {server} 网站完成授权后重试"
+        )
+    if "need to agree" in lower:
+        return (
+            f"{raw}\n\n"
+            f"[操作提示] 你需要先在 {server} 网站上同意该竞赛的规则条款，"
+            f"然后才能下载数据。请前往 {server} 网站登录并接受规则后重试"
+        )
+    if "not found" in lower:
+        return (
+            f"{raw}\n\n"
+            f"[操作提示] 该资源未找到，请检查参数是否正确，"
+            f"或先用 mcp_search_tools 搜索确认该能力是否存在"
+        )
+    return raw
 
 
 def _collect_text(result: Any) -> str:
