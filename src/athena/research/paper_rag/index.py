@@ -247,27 +247,40 @@ def split_sentences(text: str) -> list[tuple[int, int]]:
     return joined
 
 
-def related_unit_ids(unit: RetrievalUnit) -> list[str]:
-    """取出与该单元直接关联的其他单元 id，并补上论文命名空间。
+def visual_link_ids(unit: RetrievalUnit) -> list[str]:
+    """取出该单元的图文互链 id，并补上论文命名空间。
 
     正文 chunk 的 ``visual_ids`` 指向它讨论的图表，视觉单元的 ``chunk_ids`` 指向讨论它
     的正文；上游两侧都只存裸 id，加上命名空间后才能直接交给 ``paper_chunk_read``。
+
+    这条边与引用边分开存放：两者的语义完全不同（一个留在篇内，一个跨到另一篇论文），
+    合并成一个无类型列表会让 Agent 只能盲跟。
     """
     namespace = unit.metadata.get("retrieval_namespace", "")
     linked = unit.metadata.get("visual_ids") or unit.metadata.get("chunk_ids") or ""
     return [f"{namespace}:{item}" for item in linked.split(",") if item]
 
 
-async def embed_sentences(
-    store: ArtifactStore, index: PaperCorpusIndex, embedder: TextEmbedder
+async def embed_texts(
+    store: ArtifactStore, texts: list[str], embedder: TextEmbedder
 ) -> ArtifactRef:
-    """分批编码全部句子并归一化后落盘，向量顺序与 ``index.sentences`` 一一对应。"""
-    texts = [index.sentence_text(position) for position in range(len(index.sentences))]
+    """分批编码并归一化后落盘，向量顺序与输入一一对应。"""
     vectors: list[list[float]] = []
     for start in range(0, len(texts), EMBED_BATCH):
         batch = await embedder.embed(texts[start : start + EMBED_BATCH])
         vectors.extend(normalize(vector) for vector in batch)
     return await store.put_text(json.dumps(vectors))
+
+
+async def embed_sentences(
+    store: ArtifactStore, index: PaperCorpusIndex, embedder: TextEmbedder
+) -> ArtifactRef:
+    """编码全部句子，向量顺序与 ``index.sentences`` 一一对应。"""
+    return await embed_texts(
+        store,
+        [index.sentence_text(position) for position in range(len(index.sentences))],
+        embedder,
+    )
 
 
 class NonSemanticEmbedderError(RuntimeError):
@@ -417,7 +430,8 @@ async def build_corpus_index(
                     kind=unit.kind,
                     heading_path=unit.heading_path,
                     text=unit.text,
-                    related_ids=related_unit_ids(unit) + cited_paper_ids(unit, edges),
+                    visual_ids=visual_link_ids(unit),
+                    cited_ids=cited_paper_ids(unit, edges),
                     sentence_start=len(sentences),
                     sentence_end=len(sentences) + len(spans),
                 )
@@ -433,7 +447,8 @@ async def build_corpus_index(
     # 否则 Agent 会读到 not_found
     present = {entry.chunk_id for entry in entries}
     for entry in entries:
-        entry.related_ids = [item for item in entry.related_ids if item in present]
+        entry.visual_ids = [item for item in entry.visual_ids if item in present]
+        entry.cited_ids = [item for item in entry.cited_ids if item in present]
 
     index = PaperCorpusIndex(entries=entries, sentences=sentences)
     if embedder is not None:
