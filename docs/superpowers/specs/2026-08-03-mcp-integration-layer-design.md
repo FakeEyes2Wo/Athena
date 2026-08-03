@@ -220,7 +220,22 @@ Athena `_validate` 是 no-op，无额外校验工作。
 - 基于使用频率的自动钉住；
 - 直连 `kaggle` / `kagglehub`。
 
-## 14. 参考
+## 15. 开发约定
+
+- 开发过程中的 **review、report 等文档一律使用中文**。
+- **commit 消息使用中文**（沿用现有提交历史风格：`feat:` / `fix:` / `docs:` 前缀 + 中文描述）。
+- **代码遵循 `docs/代码规范.md`**，要点：
+  - 导入全部置于文件开头，顺序为标准库 → 第三方 → 项目内；不使用
+    `from __future__ import annotations`；`TYPE_CHECKING` 仅用于避免循环导入。
+  - 公开函数/方法/类必须有 docstring，描述**做什么**（非怎么做）；超过 15 行的函数
+    在关键阶段前加单行注释；禁止 ASCII 装饰分隔线。
+  - `except` 捕获特定异常时须注释触发场景（如 `asyncio.CancelledError` → 取消信号）；
+    禁止裸 `except:`。
+  - 空行规范：导入与代码、类/函数定义、逻辑分组之间各一个空行，禁止连续两个空行。
+  - 代码嵌套不超过 3 层，简单优于复杂，不引入无必要的模式/封装/依赖。
+  - 每个模块配有单元测试，公开函数在 docstring 或测试中给出简单输入输出示例。
+
+## 16. 参考
 
 - Kaggle 官方 MCP server：https://www.kaggle.com/mcp （文档 https://www.kaggle.com/docs/mcp）
   - 认证：OAuth 2.0 或 bearer token（`KGAT` 开头，Kaggle 设置页生成）
