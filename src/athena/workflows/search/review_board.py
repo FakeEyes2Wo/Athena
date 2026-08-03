@@ -96,6 +96,22 @@ def build_domain_consistency_agent(
 
 # ====== 单视角审阅 ======
 
+def format_premise_lines(package: HypothesisPackage) -> str:
+    """把 supported_premises 格式化成逐行文本，供审阅 prompt 与修订 prompt 共用。
+
+    两处调用点（build_review_prompt、revision.build_revision_prompt）原本各自内联同一段
+    格式化逻辑；提出来是为了不让第三份拷贝（Task 8 的辩论 prompt）出现，而不是改变行为。
+
+    Example:
+        >>> format_premise_lines(package)  # doctest: +SKIP
+        '- [supported_premise] X correlates with Y (refs: ev-0)'
+    """
+    return "\n".join(
+        f"- [{premise.role.value}] {premise.claim} (refs: {', '.join(premise.supporting_refs) or '-'})"
+        for premise in package.supported_premises
+    ) or "(no supported premises)"
+
+
 def build_review_prompt(package: HypothesisPackage, perspective: ReviewPerspective) -> str:
     """拼装单视角审阅 prompt。刻意只取 novel_hypothesis / supported_premises /
     predicted_observations / disconfirming_observations —— **不传 sampling_probability**，
@@ -105,10 +121,7 @@ def build_review_prompt(package: HypothesisPackage, perspective: ReviewPerspecti
         >>> build_review_prompt(package, REVIEW_PERSPECTIVES[0]).startswith("You are")  # doctest: +SKIP
         True
     """
-    premise_lines = "\n".join(
-        f"- [{premise.role.value}] {premise.claim} (refs: {', '.join(premise.supporting_refs) or '-'})"
-        for premise in package.supported_premises
-    ) or "(no supported premises)"
+    premise_lines = format_premise_lines(package)
     return "\n\n".join([
         perspective.system_prompt,
         REVIEW_PERSPECTIVE_HEADER_TEMPLATE.format(perspective_id=perspective.perspective_id)
