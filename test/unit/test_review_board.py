@@ -341,10 +341,9 @@ class BuildPerspectiveInputTest(unittest.IsolatedAsyncioTestCase):
             expected = build_perspective_input(
                 _package(), perspective, corpus_ref=_FAKE_CORPUS_REF, prior_transcript="")
             self.assertEqual(1, len(provider.captured_prompts))
-            # 在 provider 的完整消息记录中查找关键词，验证 build_perspective_input 的输出确实被
-            # 发给了 provider。这是对 review_one_perspective 调用 build_perspective_input 且使用其
-            # 返回值的充分验证。
+            # pydantic-ai 的 str(messages) 对嵌入的换行符进行转义（"a\nb" → 显示为 "a\\nb"），
+            # 所以要对 expected 的换行符做同样的转义才能在 captured 中找到它。这确保
+            # review_one_perspective 的输出与 build_perspective_input 的返回值逐字相同。
             captured_str = provider.captured_prompts[0]
-            self.assertIn("X causes Y", captured_str)
-            self.assertIn(_FAKE_CORPUS_REF, captured_str)
-            self.assertIn("(none; search from scratch)", captured_str)
+            expected_escaped = expected.replace("\n", "\\n")
+            self.assertIn(expected_escaped, captured_str)
