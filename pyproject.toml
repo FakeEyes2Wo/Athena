@@ -13,6 +13,15 @@ dependencies = [
     "pymupdf>=1.24",
 ]
 
+[project.optional-dependencies]
+tui = [
+    "prompt-toolkit>=3.0.50",
+    "rich>=13.7",
+]
+
+[project.scripts]
+athena-tui = "athena.tui.__main__:main"
+
 [dependency-groups]
 dev = [
     "black==26.5.1",

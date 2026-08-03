@@ -1,6 +1,8 @@
 """BaseTool, ToolRegistry, and ``@tool`` decorator."""
 
 import asyncio
+import json
+import time
 import traceback
 from abc import ABC, abstractmethod
 from typing import Any, Callable
@@ -9,11 +11,24 @@ from athena.core.tool_types import (
     TOOL_BEGIN,
     TOOL_END,
     TOOL_ERROR,
+    TOOL_PREVIEW_CHARS,
     EmitEvent,
     ToolContext,
     ToolResult,
     ToolSpec,
 )
+
+
+def _preview(result: ToolResult) -> str:
+    """结果的短文本预览，仅供 UI 展示；非字符串数据走 JSON 序列化。"""
+    data = result.data
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        text = data
+    else:
+        text = json.dumps(data, ensure_ascii=False, default=str)
+    return text[:TOOL_PREVIEW_CHARS]
 
 
 async def _noop_emit(_k: str, _r: str, _d: dict | None = None) -> None:
@@ -57,20 +72,47 @@ class BaseTool(ABC):
         return asyncio.run(self.ainvoke(_sync_ctx(), **input))
 
     async def ainvoke(self, ctx: ToolContext, **input: Any) -> ToolResult:
-        """Lifecycle: validate → begin → _execute → end/error."""
+        """Lifecycle: validate → begin → _execute → end/error。
+
+        事件携带足够 UI 渲染的最小载荷：begin 带工具名与参数，
+        end 带成功标志、耗时和结果预览。完整结果只走返回值，不进事件流。
+        """
         input = self._validate(input)
-        await ctx.emit(TOOL_BEGIN, f"ev:{ctx.call_id}:begin", None)
+        started = time.monotonic()
+        await ctx.emit(
+            TOOL_BEGIN,
+            f"ev:{ctx.call_id}:begin",
+            {"tool": ctx.tool_name, "call_id": ctx.call_id, "args": input},
+        )
         try:
             result = await self._execute(input, ctx)
         except asyncio.CancelledError:
             # 工具调用被外部取消 → 通知错误后重新传播
-            await ctx.emit(TOOL_ERROR, f"ev:{ctx.call_id}:error", None)
+            await ctx.emit(
+                TOOL_ERROR,
+                f"ev:{ctx.call_id}:error",
+                {
+                    "tool": ctx.tool_name,
+                    "call_id": ctx.call_id,
+                    "ok": False,
+                    "error": "cancelled",
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
             raise
         self._truncate(result)
         await ctx.emit(
             TOOL_END if result.success else TOOL_ERROR,
             f"ev:{ctx.call_id}:end",
-            None,
+            {
+                "tool": ctx.tool_name,
+                "call_id": ctx.call_id,
+                "ok": result.success,
+                "error": result.error,
+                "preview": _preview(result),
+                "truncated": result.truncated,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
         )
         return result
 

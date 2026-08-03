@@ -16,6 +16,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_BASE_URL = "https://api.openai.com/v1"
+"""``OPENAI_BASE_URL`` 为空时的兜底。
+
+必须显式兜底：SDK 只在环境变量**不存在**时用官方地址，
+而 ``.env`` 里写一行空的 ``OPENAI_BASE_URL=`` 会让它拿到空串并原样使用。
+"""
+
 
 @dataclass(slots=True)
 class StreamEvent:
@@ -31,10 +38,17 @@ class ResponsesProvider:
 
     @property
     def client(self) -> AsyncOpenAI:
-        """返回注入的客户端；未注入时按 OpenAI SDK 默认环境变量延迟创建。"""
+        """返回注入的客户端；未注入时按环境变量延迟创建。
+
+        ``OPENAI_BASE_URL`` 显式读取而不是靠 SDK 隐式回退 —— 接百炼、vLLM 等
+        OpenAI 兼容端点时，这个开关必须是可见的。留空则走 OpenAI 官方地址。
+        """
 
         if self._client is None:
-            self._client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+            self._client = AsyncOpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                base_url=os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL,
+            )
         return self._client
 
     async def stream(

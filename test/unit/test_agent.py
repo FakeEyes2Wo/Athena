@@ -16,6 +16,7 @@ from athena.core.agent import (
     agent_runner,
     create_agent,
 )
+from athena.core.agent.provider import ResponsesProvider
 from athena.core.schemas import ArtifactRef, AthenaThread, AthenaTurn
 from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
@@ -23,6 +24,34 @@ from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 
 def _arun(coro):
     return asyncio.run(coro)
+
+
+class TestProviderEndpoint:
+    """OpenAI 兼容端点的地址来自环境变量 —— 百炼 / vLLM 等都靠这个开关。"""
+
+    def test_base_url_comes_from_env(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/compatible/v1")
+        client = ResponsesProvider().client
+        assert (
+            str(client.base_url).rstrip("/") == "https://example.invalid/compatible/v1"
+        )
+
+    def test_blank_base_url_falls_back_to_official(self, monkeypatch):
+        """``.env`` 里写一行空的 OPENAI_BASE_URL= 不能把客户端打成空地址。"""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_BASE_URL", "")
+        assert "api.openai.com" in str(ResponsesProvider().client.base_url)
+
+    def test_missing_base_url_falls_back_to_official(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        assert "api.openai.com" in str(ResponsesProvider().client.base_url)
+
+    def test_injected_client_wins(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+        sentinel = object()
+        assert ResponsesProvider(client=sentinel).client is sentinel
 
 
 # ── minimal agent ──

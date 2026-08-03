@@ -18,6 +18,11 @@ EmitEvent = Callable[[str, str, dict[str, Any] | None], Awaitable[None]]
 TOOL_BEGIN = "tool/begin"
 TOOL_END = "tool/end"
 TOOL_ERROR = "tool/error"
+TOOL_DENIED = "tool/denied"
+"""审批被拒 — 工具未执行。由调用方（如 TUI 的审批闸门）发出，不由 BaseTool 发出。"""
+
+TOOL_PREVIEW_CHARS = 600
+"""``tool/end`` 事件里结果预览的最大长度 — 完整结果仍走 ToolResult，不进事件流。"""
 
 # ── 数据类 ──
 

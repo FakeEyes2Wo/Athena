@@ -273,16 +273,25 @@ class MessageProcessor:
     # Server→Client 调用
 
     async def request_approval(
-        self, thread_id: str, turn_id: str, message: str, timeout=300.0
+        self,
+        thread_id: str,
+        turn_id: str,
+        message: str,
+        timeout=300.0,
+        payload: dict | None = None,
     ) -> bool:
+        """向 Client 请求人工批准。``payload`` 携带结构化补充字段（工具名、参数等）。"""
         call_id = f"s:{uuid4().hex}"
         fut: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
         self._pending_server_calls[call_id] = fut
+        params = {"thread_id": thread_id, "turn_id": turn_id, "message": message}
+        if payload:
+            params.update(payload)
         await self._transport.send_server_request(
             ServerRequest(
                 server_call_id=call_id,
                 method=Method.ITEM_APPROVAL_REQUEST,
-                params={"thread_id": thread_id, "turn_id": turn_id, "message": message},
+                params=params,
             )
         )
         try:

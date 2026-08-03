@@ -212,13 +212,16 @@ class ThreadRuntime:
 
     # ── SubmissionLoop 辅助 ───────────────────────────────────
 
-    def _make_lifecycle_event(self, turn_id: str, kind: str) -> Event:
+    def _make_lifecycle_event(
+        self, turn_id: str, kind: str, data: dict | None = None
+    ) -> Event:
         return Event(
             thread_id=self.thread_id,
             turn_id=turn_id,
             sequence=self.journal.next_sequence(),
             kind=kind,
             event_ref=f"athena-event:{uuid4().hex}",
+            data=data,
         )
 
     async def accept_turn(self, op: StartTurn) -> AthenaTurn:
@@ -263,10 +266,19 @@ class ThreadRuntime:
             self._clear_active_turn(turn_id)
 
     async def commit_failed(self, turn_id: str, exception_type: str) -> None:
+        """失败事件带上异常类型 —— UI 需要区分"失败"和"失败在哪一类"。
+
+        只带类型不带消息：异常消息可能含 prompt 或路径，不该进事件流。
+        完整原因看 runner 侧日志。
+        """
         async with self.journal.condition:
             if self.active_turn is None or self.active_turn.turn_id != turn_id:
                 return
-            self.journal.append(self._make_lifecycle_event(turn_id, "turn_failed"))
+            self.journal.append(
+                self._make_lifecycle_event(
+                    turn_id, "turn_failed", {"exception_type": exception_type}
+                )
+            )
             self.last_terminal_kind = "turn_failed"
             self._clear_active_turn(turn_id)
 

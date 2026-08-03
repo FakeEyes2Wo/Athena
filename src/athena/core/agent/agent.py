@@ -191,8 +191,12 @@ async def _sampling_loop(
                     tool_tasks.append(None)
 
                     tool = config.tools.resolve(tc.name)
+                    # call_id 用 LLM 给的调用 id — 同一轮并行调用同一工具时才能区分
                     tctx = ToolContext(
-                        tc.name, f"{ctx.turn.turn_id}:{tc.name}", ctx.emit, ctx.cancel
+                        tc.name,
+                        f"{ctx.turn.turn_id}:{tc.call_id}",
+                        ctx.emit,
+                        ctx.cancel,
                     )
 
                     if tool.spec.concurrency_safe:
