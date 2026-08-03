@@ -38,6 +38,7 @@
 | `src/athena/tools/mcp/client.py` | Create | `McpClientManager` / `McpClientError` |
 | `src/athena/tools/mcp/adapter.py` | Create | `McpToolAdapter` + 结果归一化/落盘/下载辅助函数 |
 | `src/athena/tools/mcp/search.py` | Create | `McpSearchTools` + `_compact_schema` + 目录兜底 |
+| `test/unit/tools/mcp/__init__.py` | Create | 空文件（子包结构，父目录已有包约定） |
 | `test/unit/tools/mcp/test_config.py` | Create | 配置解析测试 |
 | `test/unit/tools/mcp/test_client.py` | Create | 客户端连接/缓存/转发/重连/认证测试 |
 | `test/unit/tools/mcp/test_adapter.py` | Create | 适配器映射/归一化/落盘/下载测试 |
@@ -68,6 +69,15 @@
   - `McpServerConfig(name, transport="streamable_http", url=None, command=None, args=[], auth_env=None, tool_prefix="", pinned_tools=[])`（`slots=True`）
   - `McpServerConfig.prefix -> str`（`tool_prefix` 或 `f"{name}__"`）
   - `load_mcp_servers(path: str | Path | None = None) -> list[McpServerConfig]`（文件缺失返回 `[]`；JSON 的 `auth.env` 映射为 `auth_env`）
+
+- [ ] **Step 0: 建包结构**
+
+创建 `test/unit/tools/mcp/__init__.py`（空文件，保证 pytest 子包导入正常）：
+
+```bash
+mkdir -p test/unit/tools/mcp
+touch test/unit/tools/mcp/__init__.py
+```
 
 - [ ] **Step 1: 写失败测试**
 
@@ -231,8 +241,10 @@ Expected: 输出 `mcp ok, httpx ok`
 
 - [ ] **Step 3: 提交**
 
+注意：`uv.lock` 在 `.gitignore` 中（第 2 行），**不提交**，只提交 `pyproject.toml`：
+
 ```bash
-git add pyproject.toml uv.lock
+git add pyproject.toml
 git commit -m "build: 添加 mcp 与 httpx 依赖"
 ```
 
