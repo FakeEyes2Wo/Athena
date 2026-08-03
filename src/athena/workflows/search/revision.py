@@ -19,20 +19,26 @@ from athena.core.schemas import ArtifactRef
 from athena.storage.artifact_store import ArtifactStore
 from athena.utils.single_turn_chat import single_turn_chat
 from athena.workflows.prompts import (
+    DEBATE_REREVIEW_PROMPT_TEMPLATE,
+    DEBATE_REREVIEW_SYSTEM_PROMPT,
     REVISER_SYSTEM_PROMPT,
     REVISION_USER_PROMPT_TEMPLATE,
 )
 from athena.workflows.search.evidence_retrieval import build_novelty_question, limited_by
+from athena.workflows.search.gatekeeper import MAX_TOTAL_RISKS, perspective_ok
 from athena.workflows.search.idea_schemas import (
     GateDecision,
     GateVerdict,
     HypothesisPackage,
     NoveltyEvidenceReport,
     RevisionDraft,
+    RevisionRound,
+    SkepticJudgment,
     SkepticReport,
 )
 from athena.workflows.search.review_board import (
     REVIEW_PERSPECTIVES,
+    ReviewPerspective,
     build_perspective_input,
     format_premise_lines,
 )
@@ -82,7 +88,8 @@ def select_debate_opponent(blocking_factor: str, reviews: list[SkepticReport]) -
     risk_ok_<p> 直接取后缀；risk_total 取 unaddressed_risks 最多的视角，并列时取
     REVIEW_PERSPECTIVES 中靠前者。**reviews 在函数内部按 REVIEW_PERSPECTIVES 重排**——把
     确定性寄托在调用方的入参顺序（asyncio.gather）上等于没有承诺，这与 hard_gate 内部重排
-    是同一条理由。
+    是同一条理由。risk_total 分支里的 max() 不会遇到空序列：能走到这个分支之前，hard_gate
+    已经强制要求每个视角恰好一份 review（否则直接抛错），所以 ordered 恒非空。
 
     Example:
         >>> select_debate_opponent("risk_ok_statistics", reviews)  # doctest: +SKIP
@@ -268,3 +275,155 @@ async def stale_perspectives(
         if report.input_ref != current:
             stale.add(perspective.perspective_id)
     return stale
+
+
+# ====== 辩论循环 ======
+
+def build_rereview_prompt(
+    package: HypothesisPackage,
+    perspective: ReviewPerspective,
+    previous: SkepticReport,
+    draft: RevisionDraft,
+    *,
+    round_index: int,
+    prior_transcript: str,
+) -> str:
+    """拼装对手视角的重表态 prompt。
+
+    锚点是 ``Debate round <n> - perspective: <id>``，**绝不能写成
+    ``Review perspective: <id>``**——后者在 prompts.py 里已有三处硬编码，测试的
+    make_routed_model 要求命中数恰好为 1，撞上就直接抛 AssertionError。
+
+    检索转录只对 needs_retrieval 的视角附上，且是**冻结的那份**：辩论轮不跑检索。
+
+    Example:
+        >>> build_rereview_prompt(package, perspective, previous, draft,
+        ...     round_index=1, prior_transcript="")  # doctest: +SKIP
+    """
+    premise_lines = format_premise_lines(package)
+    retrieval_context = (
+        f"Retrieval transcript from your earlier review:\n{prior_transcript}"
+        if perspective.needs_retrieval and prior_transcript else ""
+    )
+    user_prompt = DEBATE_REREVIEW_PROMPT_TEMPLATE.format(
+        round_index=round_index,
+        perspective_id=perspective.perspective_id,
+        previous_critique=previous.critique,
+        previous_risks="\n".join(f"- {r}" for r in previous.unaddressed_risks) or "(none)",
+        rebuttal=draft.rebuttal,
+        changes_made="\n".join(f"- {c}" for c in draft.changes_made) or "(none listed)",
+        novel_hypothesis=package.novel_hypothesis,
+        supported_premises=premise_lines,
+        predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
+        disconfirming_observations="\n".join(
+            f"- {o}" for o in package.disconfirming_observations),
+        retrieval_context=retrieval_context,
+    )
+    return f"{DEBATE_REREVIEW_SYSTEM_PROMPT}\n\n{user_prompt}"
+
+
+def blocked_item_cleared(blocking_factor: str, reviews: list[SkepticReport]) -> bool:
+    """被拦项是否已清除。谓词全部从 gatekeeper 复用，本模块不重写任何阈值。公开（不加下划线）
+    是因为它是一个独立的判定概念，且被 run_debate 每轮都调用一次——按代码规范，两次以上的调用
+    不该藏在私有前缀后面，藏起来还会把 run_debate 的分支多嵌一层，顶到 4 层嵌套。
+
+    Example:
+        >>> blocked_item_cleared("risk_total", reviews)  # doctest: +SKIP
+        True
+    """
+    if blocking_factor == RISK_TOTAL_ITEM:
+        total = sum(len(r.unaddressed_risks) for r in reviews)
+        return total <= MAX_TOTAL_RISKS
+    perspective_id = blocking_factor[len(RISK_ITEM_PREFIX):]
+    target = next((r for r in reviews if r.perspective == perspective_id), None)
+    return target is not None and perspective_ok(target)
+
+
+async def run_debate(
+    package: HypothesisPackage,
+    *,
+    blocking_factor: str,
+    reviews: list[SkepticReport],
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+    prior_transcript: str,
+    llm_sem: asyncio.Semaphore | None = None,
+    model: Model | str | None = None,
+) -> tuple[HypothesisPackage, list[SkepticReport], list[RevisionRound]]:
+    """跑最多 MAX_DEBATE_ROUNDS 轮辩论，返回 (最终修订稿, 更新后的审阅列表, 逐轮记录)。
+
+    每轮恒为 2 次 single_turn_chat、0 个检索循环。llm_sem 的名额在每次调用内部获取与释放，
+    **绝不跨轮持有**——跨轮持有就是候选数 >= 名额数时必然死锁的那个模式。
+
+    任何失败路径都只让候选停在原状：reviser 失败直接返回原 package/原 reviews/空 rounds，
+    绝不存在"修订流程出错反而放行"的路径。
+
+    Example:
+        >>> final, reviews, rounds = await run_debate(package,
+        ...     blocking_factor="risk_ok_methodology", reviews=reviews, artifacts=store,
+        ...     corpus_ref=ref, prior_transcript="")  # doctest: +SKIP
+    """
+    opponent_id = select_debate_opponent(blocking_factor, reviews)
+    perspective = next(p for p in REVIEW_PERSPECTIVES if p.perspective_id == opponent_id)
+
+    current = package
+    current_reviews = list(reviews)
+    rounds: list[RevisionRound] = []
+    prior_summaries: list[str] = []
+
+    for round_index in range(1, MAX_DEBATE_ROUNDS + 1):
+        previous = next(r for r in current_reviews if r.perspective == opponent_id)
+        try:
+            revised, draft = await revise_candidate(
+                current, blocking_factor=blocking_factor, debated_perspective=opponent_id,
+                reviews=current_reviews, prior_rounds=prior_summaries,
+                llm_sem=llm_sem, model=model,
+            )
+        except Exception:  # noqa: BLE001 - provider 报错与修订稿校验失败形态不定，一律停止辩论
+            break
+
+        rebuttal_ref = await artifacts.put_text(draft.rebuttal)
+        if is_no_op_revision(draft, current):
+            rounds.append(RevisionRound(
+                round_index=round_index, debated_perspective=opponent_id,
+                package_ref=await artifacts.put_text(current.model_dump_json()),
+                rebuttal_ref=rebuttal_ref, reviewer_response_ref=None, cleared=False,
+            ))
+            break
+
+        prompt = build_rereview_prompt(
+            revised, perspective, previous, draft,
+            round_index=round_index, prior_transcript=prior_transcript,
+        )
+        async with limited_by(llm_sem):
+            judgment = await single_turn_chat(prompt, SkepticJudgment, model=model)
+
+        # 设计 §4.4：存**规范化**输入的指纹，不是辩论 prompt 的指纹——这让被辩视角在终局
+        # 天然复用，同时 novelty 重跑换了转录时 domain_consistency 仍会正确失效
+        canonical_ref = await artifacts.put_text(build_perspective_input(
+            revised, perspective, corpus_ref=corpus_ref, prior_transcript=prior_transcript))
+        response = SkepticReport(
+            idea_id=revised.idea_id, perspective=opponent_id, critique=judgment.critique,
+            unaddressed_risks=judgment.unaddressed_risks,
+            fatal_flaw_found=judgment.fatal_flaw_found,
+            transcript_ref=previous.transcript_ref, input_ref=canonical_ref,
+        )
+        current = revised
+        current_reviews = [response if r.perspective == opponent_id else r
+                           for r in current_reviews]
+        cleared = blocked_item_cleared(blocking_factor, current_reviews)
+        rounds.append(RevisionRound(
+            round_index=round_index, debated_perspective=opponent_id,
+            package_ref=await artifacts.put_text(revised.model_dump_json()),
+            rebuttal_ref=rebuttal_ref,
+            reviewer_response_ref=await artifacts.put_text(judgment.model_dump_json()),
+            cleared=cleared,
+        ))
+        prior_summaries.append(
+            f"round {round_index}: rebuttal={draft.rebuttal} | "
+            f"reviewer replied={judgment.critique} | remaining risks={judgment.unaddressed_risks}"
+        )
+        if cleared:
+            break
+
+    return current, current_reviews, rounds

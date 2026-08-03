@@ -5,14 +5,16 @@ import unittest
 
 from athena.storage.artifact_store import LocalArtifactStore
 from athena.workflows.search.evidence_retrieval import build_novelty_question
+from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS
 from athena.workflows.search.idea_schemas import (
     ClaimEvidence, ClaimRole, GATE_RUBRIC_VERSION, GateDecision, GateVerdict,
-    HypothesisPackage, NoveltyEvidenceReport, RevisionDraft, SkepticReport,
+    HypothesisPackage, NoveltyEvidenceReport, RevisionDraft, SkepticJudgment, SkepticReport,
 )
 from athena.workflows.search.review_board import REVIEW_PERSPECTIVES, build_perspective_input
 from athena.workflows.search.revision import (
-    build_revision_prompt, is_no_op_revision, is_revisable, novelty_is_stale,
-    revise_candidate, select_debate_opponent, stale_perspectives,
+    MAX_DEBATE_ROUNDS, build_revision_prompt, is_no_op_revision, is_revisable,
+    novelty_is_stale, revise_candidate, run_debate, select_debate_opponent,
+    stale_perspectives,
 )
 from unit.fakes import make_routed_model
 
@@ -285,3 +287,139 @@ class StalenessTest(unittest.IsolatedAsyncioTestCase):
                 await stale_perspectives(package, reviews, artifacts=store,
                                          corpus_ref=_FAKE_CORPUS_REF,
                                          prior_transcript="old transcript"))
+
+
+class RunDebateTest(unittest.IsolatedAsyncioTestCase):
+    def _routes(self, *, cleared: bool) -> dict:
+        # 未清除分支必须严格超过 MAX_TOLERATED_RISKS（perspective_ok 的容忍上限），否则单条
+        # 未处理风险仍会被判定为通过，"never clearing" 场景就名不副实——直接引用常量，不用
+        # 魔法数字，阈值调整时这条 fixture 自动跟着变。
+        # 两轮 reviser 各给一份不同的修订：make_routed_model 不按调用顺序消费，若两轮路由到
+        # 同一份固定 RevisionDraft，第二轮的"修订"内容会与第一轮已经落地的当前稿逐字段相同，
+        # is_no_op_revision 判它是空转而提前结束循环，"跑满 MAX_DEBATE_ROUNDS" 的断言就假不成立。
+        # 用 reviser prompt 里只在各自那一轮出现的锚点文本区分路由："(this is the first round)"
+        # 只在第一轮的 prior_rounds 为空时出现；"reviewer replied=re-reviewed" 只在第二轮才会
+        # 出现在上一轮的 prior_rounds 摘要里。
+        risks = [] if cleared else [f"unaddressed risk {i}" for i in range(MAX_TOLERATED_RISKS + 1)]
+        second_round_draft = RevisionDraft(
+            rebuttal="a second, independently replicated cohort is now cited",
+            changes_made=["cited a second independent cohort"],
+            revised_novel_hypothesis="X causes Y relative to a matched control, replicated twice",
+            revised_premises=_draft().revised_premises,
+            revised_predicted_observations=_draft().revised_predicted_observations,
+            revised_disconfirming_observations=_draft().revised_disconfirming_observations,
+        )
+        return {
+            "(this is the first round)": _draft(),
+            "reviewer replied=re-reviewed": second_round_draft,
+            "Debate round": SkepticJudgment(critique="re-reviewed", unaddressed_risks=risks,
+                                            fatal_flaw_found=False),
+        }
+
+    async def test_cleared_debate_stops_after_one_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package, _reviews_ = _package(), _reviews()
+            final, reviews, rounds = await run_debate(
+                package, blocking_factor="risk_ok_methodology", reviews=_reviews_,
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="old transcript",
+                model=make_routed_model(self._routes(cleared=True)))
+            self.assertEqual(1, len(rounds))
+            self.assertTrue(rounds[0].cleared)
+            self.assertEqual("methodology", rounds[0].debated_perspective)
+            self.assertEqual(1, final.revision_round)
+            # 被辩视角的报告被换成了辩论产出的那份
+            methodology = next(r for r in reviews if r.perspective == "methodology")
+            self.assertEqual("re-reviewed", methodology.critique)
+
+    async def test_never_clearing_debate_stops_at_max_rounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            final, _reviews_, rounds = await run_debate(
+                _package(), blocking_factor="risk_ok_methodology", reviews=_reviews(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="old transcript",
+                model=make_routed_model(self._routes(cleared=False)))
+            self.assertEqual(MAX_DEBATE_ROUNDS, len(rounds))
+            self.assertFalse(rounds[-1].cleared)
+            self.assertEqual(MAX_DEBATE_ROUNDS, final.revision_round)
+
+    async def test_debate_report_records_canonical_not_debate_prompt_fingerprint(self) -> None:
+        # 设计 §4.4：存规范化输入指纹，使被辩视角在终局天然复用
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(tmp)
+            final, reviews, _rounds = await run_debate(
+                _package(), blocking_factor="risk_ok_methodology", reviews=_reviews(),
+                artifacts=store, corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="old transcript",
+                model=make_routed_model(self._routes(cleared=True)))
+            self.assertEqual(
+                set(),
+                await stale_perspectives(final, [r for r in reviews
+                                                 if r.perspective == "methodology"] +
+                                         await self._fresh_others(store, final),
+                                         artifacts=store, corpus_ref=_FAKE_CORPUS_REF,
+                                         prior_transcript="old transcript"))
+
+    async def _fresh_others(self, store, package) -> list[SkepticReport]:
+        out = []
+        for perspective in REVIEW_PERSPECTIVES:
+            if perspective.perspective_id == "methodology":
+                continue
+            prompt = build_perspective_input(package, perspective,
+                                             corpus_ref=_FAKE_CORPUS_REF,
+                                             prior_transcript="old transcript")
+            out.append(SkepticReport(
+                idea_id="idea-1", perspective=perspective.perspective_id, critique="c",
+                unaddressed_risks=[], fatal_flaw_found=False,
+                input_ref=await store.put_text(prompt)))
+        return out
+
+    async def test_no_op_revision_exits_without_calling_the_opponent(self) -> None:
+        no_op = RevisionDraft(
+            rebuttal="no change", changes_made=[],
+            revised_novel_hypothesis=_package().novel_hypothesis,
+            revised_premises=_package().supported_premises,
+            revised_predicted_observations=_package().predicted_observations,
+            revised_disconfirming_observations=_package().disconfirming_observations,
+        )
+        # 路由里**不放** "Debate round" —— 对手一旦被调用，make_routed_model 会因 0 命中抛
+        # AssertionError，这就是"对手 0 次调用"的强断言
+        with tempfile.TemporaryDirectory() as tmp:
+            final, _reviews_, rounds = await run_debate(
+                _package(), blocking_factor="risk_ok_methodology", reviews=_reviews(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="old transcript",
+                model=make_routed_model({"Blocking rubric item:": no_op}))
+            self.assertEqual(1, len(rounds))
+            self.assertFalse(rounds[0].cleared)
+            self.assertIsNone(rounds[0].reviewer_response_ref)
+            self.assertEqual(0, final.revision_round)   # 无实质改动，不算一轮修订
+
+    async def test_reviser_failure_leaves_the_package_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            final, reviews, rounds = await run_debate(
+                _package(), blocking_factor="risk_ok_methodology", reviews=_reviews(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="old transcript",
+                model=make_routed_model({"Blocking rubric item:": RuntimeError("down")}))
+            self.assertEqual(_package(), final)          # 逐字段相同
+            self.assertEqual(_reviews(), reviews)
+            self.assertEqual([], rounds)
+
+
+class PromptConstantCollisionTest(unittest.TestCase):
+    """回归护栏：REVIEW_PERSPECTIVE_HEADER_TEMPLATE / DOMAIN_CONSISTENCY_* 三处硬编码了
+    "Review perspective: " 前缀，make_routed_model 要求命中数恰好为 1。若修订/辩论侧的四个
+    prompt 常量也带上这串文本，会在同一份 prompt 里造成 2 处命中，测试双工具直接抛
+    AssertionError。这条测试把这个前提钉死，防止未来编辑悄悄引入。"""
+
+    def test_revision_and_debate_prompts_never_carry_the_review_header(self) -> None:
+        from athena.workflows.prompts import (
+            DEBATE_REREVIEW_PROMPT_TEMPLATE,
+            DEBATE_REREVIEW_SYSTEM_PROMPT,
+            REVISER_SYSTEM_PROMPT,
+            REVISION_USER_PROMPT_TEMPLATE,
+        )
+        for constant in (REVISER_SYSTEM_PROMPT, REVISION_USER_PROMPT_TEMPLATE,
+                         DEBATE_REREVIEW_SYSTEM_PROMPT, DEBATE_REREVIEW_PROMPT_TEMPLATE):
+            self.assertNotIn("Review perspective: ", constant)
