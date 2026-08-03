@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from athena.core.tool_types import ToolContext
-from athena.tools.data_prepare import DataAnalyzeTool, DataCleanCodeGenTool
+from athena.tools.data_prepare import (
+    DataAnalyzeTool,
+    DataCleanCodeGenTool,
+    _collect_data_files,
+    _TOOL_OUTPUT_DIRS,
+)
 
 
 @pytest.fixture
@@ -19,13 +24,15 @@ def tmp_work_root():
 def mock_llm():
     """Mock LLM returning a fixed EDA report."""
     with patch("athena.tools.data_prepare.single_turn_chat") as mock:
-        mock.return_value = json.dumps({
-            "distributions": {"PassengerId": "uniform", "Survived": "binary"},
-            "missing_values": {"Age": 177},
-            "outliers": {"Fare": "right-skewed with extreme values"},
-            "correlations": {"Pclass-Survived": -0.34},
-            "class_balance": {"Survived": {"0": 549, "1": 342}},
-        })
+        mock.return_value = json.dumps(
+            {
+                "distributions": {"PassengerId": "uniform", "Survived": "binary"},
+                "missing_values": {"Age": 177},
+                "outliers": {"Fare": "right-skewed with extreme values"},
+                "correlations": {"Pclass-Survived": -0.34},
+                "class_balance": {"Survived": {"0": 549, "1": 342}},
+            }
+        )
         yield mock
 
 
@@ -105,3 +112,28 @@ async def test_data_clean_code_gen_no_code_block_fails(tmp_work_root):
         )
         assert result.success is False
         assert "No code block" in result.error
+
+
+def test_tool_output_dirs_removed_kaggle_stubs():
+    assert "kaggle_competition_search" not in _TOOL_OUTPUT_DIRS
+    assert "kaggle_discussion_search" not in _TOOL_OUTPUT_DIRS
+
+
+def test_collect_data_files_recurses_into_mcp(tmp_path):
+    data_dir = tmp_path / "mcp" / "kaggle" / "download_competition_data_file" / "files"
+    data_dir.mkdir(parents=True)
+    (data_dir / "train.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (
+        tmp_path / "mcp" / "kaggle" / "download_competition_data_file" / "result.json"
+    ).write_text("{}", encoding="utf-8")
+    (tmp_path / "data_analyze").mkdir(parents=True)
+    (tmp_path / "data_analyze" / "eda_report.json").write_text("{}", encoding="utf-8")
+
+    collected = _collect_data_files(tmp_path)
+    all_files = [f for files in collected.values() for f in files]
+    names = [f.name for f in all_files]
+    # 递归找到深层数据文件
+    assert "train.csv" in names
+    # 跳过 MCP 产物与工具输出目录
+    assert "result.json" not in names
+    assert "eda_report.json" not in names

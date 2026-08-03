@@ -15,11 +15,18 @@ from athena.utils.single_turn_chat import single_turn_chat
 # ── 工具输出目录（扫描数据时排除，避免把生成产物当数据） ──
 
 _TOOL_OUTPUT_DIRS = {
-    "data_analyze", "data_clean_code_gen", "solution_design",
-    "project_code_gen", "code_execute", "submission_build",
-    "hf_dataset_search", "hf_model_search",
-    "kaggle_competition_search", "kaggle_discussion_search",
+    "data_analyze",
+    "data_clean_code_gen",
+    "solution_design",
+    "project_code_gen",
+    "code_execute",
+    "submission_build",
+    "hf_dataset_search",
+    "hf_model_search",
 }
+
+_ARTIFACT_FILES = {"result.json"}
+"""扫描数据时跳过的工具产物文件名（MCP 统一落盘结果）。"""
 
 # ── 系统提示词 ──
 
@@ -61,6 +68,32 @@ should read data from INPUT_PATH, clean it, and write to OUTPUT_PATH.
 # ── 目录扫描 & 样本读取辅助函数 ──
 
 
+def _collect_data_files(work_root: Path, max_depth: int = 4) -> dict[Path, list[Path]]:
+    """递归收集 work_root 下的数据文件，跳过工具输出目录与产物文件。
+
+    Returns:
+        {目录: [该目录下的数据文件]}。
+    """
+    collected: dict[Path, list[Path]] = {}
+
+    def _walk(d: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        files = [
+            f
+            for f in sorted(d.iterdir())
+            if f.is_file() and f.name not in _ARTIFACT_FILES
+        ]
+        if files:
+            collected[d] = files
+        for child in sorted(d.iterdir()):
+            if child.is_dir() and child.name not in _TOOL_OUTPUT_DIRS:
+                _walk(child, depth + 1)
+
+    _walk(work_root, 0)
+    return collected
+
+
 def _read_sample(filepath: Path) -> str:
     """Read a small sample from a data file for LLM analysis."""
     suffix = filepath.suffix.lower()
@@ -97,7 +130,9 @@ def _read_sample(filepath: Path) -> str:
                 keys = list(data.keys())[:30]
                 return f"[JSON object with keys]: {keys}"
             elif isinstance(data, list):
-                preview = json.dumps(data[0], ensure_ascii=False)[:300] if data else "empty"
+                preview = (
+                    json.dumps(data[0], ensure_ascii=False)[:300] if data else "empty"
+                )
                 return f"[JSON array: {len(data)} items, first item]: {preview}"
             return f"[JSON]: {json.dumps(data, ensure_ascii=False)[:500]}"
 
@@ -116,7 +151,7 @@ def _read_sample(filepath: Path) -> str:
 
 
 def _scan_work_dir(work_root: Path, max_samples: int = 8) -> tuple[str, str]:
-    """Scan work_root for actual data files (1 level of sub-directories).
+    """Scan work_root for actual data files (recursively, excluding tool outputs).
 
     Returns:
         (tree_summary, samples_text) — both empty strings if no data found.
@@ -125,29 +160,19 @@ def _scan_work_dir(work_root: Path, max_samples: int = 8) -> tuple[str, str]:
     samples: list[str] = []
     sample_count = 0
 
-    # 收集一级子目录中非工具输出的数据目录
-    data_dirs: list[Path] = []
-    for child in sorted(work_root.iterdir()):
-        if child.is_dir() and child.name not in _TOOL_OUTPUT_DIRS:
-            data_dirs.append(child)
+    # 递归收集数据文件（跳过工具输出目录与 MCP 产物）
+    dirs = _collect_data_files(work_root)
 
-    # 也检查 work_root 根目录下的裸文件
-    root_files = [f for f in sorted(work_root.iterdir()) if f.is_file()]
-    if root_files:
-        data_dirs.insert(0, work_root)
-
-    if not data_dirs:
+    if not dirs:
         return "", ""
 
-    for d in data_dirs:
-        files = [f for f in sorted(d.iterdir()) if f.is_file()]
-        # 跳过空目录（work_root 自身的空目录已在上面处理）
-        if not files and d != work_root:
-            continue
-
-        rel = d.name if d != work_root else "(root)"
-        dir_label = f"{rel}/ ({len(files)} files)"
-        lines.append(dir_label)
+    for d, files in sorted(dirs.items()):
+        if d == work_root:
+            rel = "(root)"
+        else:
+            rel = str(d.relative_to(work_root))
+        label = f"{rel}/ ({len(files)} files)"
+        lines.append(label)
 
         for f in files:
             size_kb = f.stat().st_size / 1024
@@ -165,6 +190,7 @@ def _scan_work_dir(work_root: Path, max_samples: int = 8) -> tuple[str, str]:
 
 
 # ── EDA 分析工具 ──
+
 
 class DataAnalyzeTool(BaseTool):
     """对数据集进行探索性数据分析（EDA），生成 JSON 格式的 EDA 报告。"""
@@ -200,7 +226,8 @@ class DataAnalyzeTool(BaseTool):
         refs = input["data_card_refs"]
         if not refs:
             return ToolResult(
-                success=False, data=None,
+                success=False,
+                data=None,
                 error="At least one DataCard ref is required",
             )
 
@@ -210,12 +237,13 @@ class DataAnalyzeTool(BaseTool):
         tree_summary, samples_text = _scan_work_dir(work_root)
         if not tree_summary:
             return ToolResult(
-                success=False, data=None,
+                success=False,
+                data=None,
                 error=(
                     "No data files found in the work directory. "
-                    "You MUST download a dataset first (e.g. via "
-                    "hf_dataset_download or kaggle_dataset_download) "
-                    "before calling data_analyze. "
+                    "You MUST download a dataset first (via mcp_search_tools "
+                    "and the appropriate download tool) before calling "
+                    "data_analyze. "
                     "Do NOT fabricate data_card_refs — only pass "
                     "references to actual downloaded data."
                 ),
@@ -256,6 +284,7 @@ class DataAnalyzeTool(BaseTool):
 
 
 # ── 数据清洗代码生成工具 ──
+
 
 class DataCleanCodeGenTool(BaseTool):
     """基于 EDA 报告生成数据清洗 Python 脚本，返回脚本内容和元信息。"""
@@ -299,7 +328,8 @@ class DataCleanCodeGenTool(BaseTool):
         eda_report_path = work_root / "data_analyze" / "eda_report.json"
         if not eda_report_path.exists():
             return ToolResult(
-                success=False, data=None,
+                success=False,
+                data=None,
                 error=(
                     f"EDA report not found at {eda_report_path}. "
                     f"You MUST run data_analyze successfully before calling "
