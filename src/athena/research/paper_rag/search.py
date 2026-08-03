@@ -239,8 +239,14 @@ def edge_targets(corpus: LoadedCorpus, chunk_ids: list[str], edge: str) -> list[
 
 
 def paper_namespace(chunk_id: str) -> str:
-    """取 chunk id 的论文命名空间；``"p1:chunk-a"`` 返回 ``"p1"``。"""
-    return chunk_id.split(":", 1)[0]
+    """取 chunk id 的论文命名空间；``"arxiv:1706.03762:chunk-a"`` 返回
+    ``"arxiv:1706.03762"``。
+
+    必须从右边切。上游的 ``unit_id`` 是 ``f"{namespace}:{chunk_id}"``，而 namespace 本身
+    通常带前缀（``arxiv:1706.03762``、``doi:10.1145/x``）；从左边切会把整批论文都归成同
+    一个命名空间 ``"arxiv"``，反向引用于是返回全语料的引用者而不是这篇的。
+    """
+    return chunk_id.rsplit(":", 1)[0]
 
 
 def citing_anchors(corpus: LoadedCorpus, chunk_ids: list[str]) -> list[str]:
@@ -284,15 +290,19 @@ def citation_links(
 def section_search(
     corpus: LoadedCorpus, heading: str, paper_ids: list[str], limit: int
 ) -> list[SearchHit]:
-    """按章节名跨论文取 chunk，默认覆盖全语料。
+    """按章节名跨论文取 chunk，默认覆盖全语料，并按论文轮转分配名额。
 
     这是自顶向下的入口：对比性证据几乎总在另一篇论文的可比章节里（Limitations、
     Ablation、Related Work），而按假设措辞做语义检索只会优先返回同意它的段落。
     ``paper_ids`` 为空表示不限定论文——这正是该算子的默认用法。
+
+    **轮转是这个算子的要点，不是修饰。** 一篇论文的 Ablation 往往被切成十几个 chunk，
+    按得分直排会让名额被一篇吃光——实测 `Ablation` 一度返回 10 条却只覆盖 1 篇论文，
+    而该算子存在的理由正是跨论文对比。轮转后每篇先出一条，再出第二条。
     """
     wanted = heading.lower().strip()
     allowed = {item for item in paper_ids if item}
-    scored: list[tuple[float, int]] = []
+    by_paper: dict[str, list[tuple[float, int]]] = {}
     for position, entry in enumerate(corpus.index.entries):
         if allowed and entry.paper_id not in allowed:
             continue
@@ -305,11 +315,23 @@ def section_search(
             None,
         )
         if depth is not None:
-            scored.append((1.0 / (1 + depth), position))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+            by_paper.setdefault(entry.paper_id, []).append(
+                (1.0 / (1 + depth), position)
+            )
+
+    for group in by_paper.values():
+        group.sort(key=lambda item: (-item[0], item[1]))
+    order = sorted(by_paper, key=lambda paper: (-by_paper[paper][0][0], paper))
+    rounds = max((len(group) for group in by_paper.values()), default=0)
+    picked = [
+        by_paper[paper][index]
+        for index in range(rounds)
+        for paper in order
+        if index < len(by_paper[paper])
+    ]
     return [
         make_hit(corpus, position, score, head_snippet(corpus, position))
-        for score, position in scored[:limit]
+        for score, position in picked[:limit]
     ]
 
 

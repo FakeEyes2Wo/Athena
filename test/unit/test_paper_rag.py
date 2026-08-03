@@ -32,6 +32,7 @@ from athena.research.paper_rag.search import (
     citation_links,
     keyword_search,
     read_chunks,
+    paper_namespace,
     section_search,
     self_contained_weight,
     semantic_search,
@@ -982,3 +983,136 @@ class TypedOperatorToolTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.success)
         self.assertIn("heading", result.error)
+
+
+class NamespacedIdTest(unittest.IsolatedAsyncioTestCase):
+    """Real paper keys carry a prefix, so the namespace is not the first segment.
+
+    A left split turns every arxiv paper into the namespace "arxiv", which made
+    reverse citation return the citing chunks of the whole corpus instead of the
+    ones citing the paper asked about. Caught by a live run, not by the fixtures,
+    because the fixtures used bare ids.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    def test_namespace_keeps_the_prefixed_paper_key(self) -> None:
+        self.assertEqual("arxiv:1706.03762", paper_namespace("arxiv:1706.03762:c0"))
+        self.assertEqual("doi:10.1145/x", paper_namespace("doi:10.1145/x:chunk-a"))
+        self.assertEqual("p1", paper_namespace("p1:c0"))
+
+    async def test_reverse_citation_does_not_leak_across_papers(self) -> None:
+        """Two prefixed papers citing a third: asking about one must not return both."""
+        cited = await make_paper(
+            self.store, "arxiv:1000.0001", CITED_TITLE, ["We introduce RAG."]
+        )
+        cited.chunks[0].kind = "abstract"
+        other = await make_paper(
+            self.store,
+            "arxiv:2000.0002",
+            "An Unrelated Paper About Grasping Objects",
+            ["Nothing to do with retrieval."],
+        )
+        papers = [cited, other]
+        for index, citing_id in enumerate(("arxiv:3000.0003", "arxiv:4000.0004")):
+            citing = await make_paper(
+                self.store,
+                citing_id,
+                f"Citing Paper Number {index} With A Sufficiently Long Title",
+                [f"We build on retrieval augmentation [@lewis{index}]."],
+            )
+            citing.chunks[0].citation_keys = [f"lewis{index}"]
+            reference = (
+                f"## References\n\n- [@lewis{index}] Patrick Lewis and others. "
+                f"{CITED_TITLE}. NeurIPS 2020."
+            )
+            citing.chunks.append(
+                PaperChunk(
+                    chunk_id="b1",
+                    kind="bibliography",
+                    content_ref=await self.store.put_text(reference),
+                    heading_path=["References"],
+                    char_start=0,
+                    char_end=len(reference),
+                    token_estimate=len(reference) // 4,
+                )
+            )
+            papers.append(citing)
+        corpus = await self.session.load(
+            self.store, await build_corpus_index(self.store, papers)
+        )
+
+        hits = citation_links(corpus, ["arxiv:1000.0001:c0"], "cited_by")
+        empty = citation_links(corpus, ["arxiv:2000.0002:c0"], "cited_by")
+
+        self.assertEqual(
+            {"arxiv:3000.0003", "arxiv:4000.0004"}, {hit.paper_id for hit in hits}
+        )
+        self.assertEqual([], empty)
+
+
+class SectionRoundRobinTest(unittest.IsolatedAsyncioTestCase):
+    """The section operator exists to compare papers, so one paper must not fill it.
+
+    A live run returned ten Ablation chunks drawn from a single paper while nine
+    other papers had an Ablation section, which defeats the point of the operator.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    async def corpus(self, heavy: int, light: int):
+        papers = [
+            await make_paper(
+                self.store,
+                "heavy",
+                "Heavy Paper",
+                [f"Ablation detail number {index}." for index in range(heavy)],
+            )
+        ]
+        for index in range(light):
+            papers.append(
+                await make_paper(
+                    self.store,
+                    f"light{index}",
+                    f"Light Paper {index}",
+                    ["A single ablation paragraph."],
+                )
+            )
+        for paper in papers:
+            for chunk in paper.chunks:
+                chunk.heading_path = ["Ablation"]
+        return await self.session.load(
+            self.store, await build_corpus_index(self.store, papers)
+        )
+
+    async def test_every_paper_gets_a_slot_before_any_gets_a_second(self) -> None:
+        hits = section_search(await self.corpus(heavy=20, light=4), "ablation", [], 5)
+
+        self.assertEqual(5, len(hits))
+        self.assertEqual(5, len({hit.paper_id for hit in hits}))
+
+    async def test_a_deeper_budget_returns_to_the_richest_paper(self) -> None:
+        """Three papers, budget six: one each, then the surplus goes where it exists."""
+        hits = section_search(await self.corpus(heavy=20, light=2), "ablation", [], 6)
+
+        counts: dict[str, int] = {}
+        for hit in hits:
+            counts[hit.paper_id] = counts.get(hit.paper_id, 0) + 1
+
+        self.assertEqual({"heavy", "light0", "light1"}, set(counts))
+        self.assertEqual(1, counts["light0"])
+        self.assertEqual(1, counts["light1"])
+        self.assertEqual(4, counts["heavy"])
+        self.assertEqual({"heavy", "light0", "light1"}, {h.paper_id for h in hits[:3]})
+
+    async def test_restricting_to_one_paper_still_returns_its_chunks(self) -> None:
+        hits = section_search(
+            await self.corpus(heavy=8, light=3), "ablation", ["heavy"], 5
+        )
+
+        self.assertEqual({"heavy"}, {hit.paper_id for hit in hits})
+        self.assertEqual(5, len(hits))
