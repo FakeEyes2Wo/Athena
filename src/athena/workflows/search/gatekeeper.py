@@ -89,11 +89,11 @@ def structural_rubric_scores(
     return evidence_traceable_ok, evidence_traceable_score, falsifiable_score
 
 
-def _perspective_ok(review: SkepticReport) -> bool:
+def perspective_ok(review: SkepticReport) -> bool:
     """单个视角是否通过：失败的审阅一律不算通过（fail-closed）——审阅没跑成不能等于审阅批准。
 
     Example:
-        >>> _perspective_ok(SkepticReport(idea_id="i", perspective="methodology",
+        >>> perspective_ok(SkepticReport(idea_id="i", perspective="methodology",
         ...     critique="c", unaddressed_risks=[], fatal_flaw_found=False))
         True
     """
@@ -224,7 +224,7 @@ def hard_gate(
     risk_scores = [
         RubricItemScore(
             item=f"risk_ok_{review.perspective}",
-            score=1.0 if _perspective_ok(review) else 0.0,
+            score=1.0 if perspective_ok(review) else 0.0,
             evidence=(
                 f"failed={review.failed}; fatal_flaw_found={review.fatal_flaw_found}; "
                 f"unaddressed_risks={len(review.unaddressed_risks)} "
@@ -246,7 +246,7 @@ def hard_gate(
                    verifier_score, risk_total_score, *risk_scores]
 
     fatal = next((r for r in ordered if r.fatal_flaw_found), None)
-    blocked = next((r for r in ordered if not _perspective_ok(r)), None)
+    blocked = next((r for r in ordered if not perspective_ok(r)), None)
 
     if not evidence_traceable_ok or not falsifiability.is_falsifiable:
         verdict = GateVerdict.REVISE
