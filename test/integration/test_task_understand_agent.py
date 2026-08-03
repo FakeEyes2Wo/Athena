@@ -22,6 +22,7 @@ class TestAgentConstruction:
         agent = await build_task_understand_agent(
             model="deepseek-v4-flash",
             client=None,  # build-only, no actual LLM calls
+            mcp_servers=[],
         )
 
         assert agent.name == "TaskUnderstandAgent"
@@ -94,6 +95,7 @@ class TestAgentConstruction:
             max_turns=5,
             max_tokens=1024,
             temperature=0.7,
+            mcp_servers=[],
         )
 
         assert agent.config.model == "custom-model"
@@ -128,6 +130,7 @@ async def test_agent_loads_all_tools():
     agent = await build_task_understand_agent(
         model="deepseek-v4-flash",
         client=None,  # build-only, no actual calls
+        mcp_servers=[],
     )
 
     assert agent.name == "TaskUnderstandAgent"

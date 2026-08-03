@@ -58,9 +58,9 @@ async def test_no_match_returns_catalog(tmp_path):
     assert result.success is True
     assert result.data["matches"] == []
     # 兜底目录列出全部可用工具（中文 query 无法子串匹配英文描述）
-    assert {m["tool"] for m in result.data["catalog"]} == {
-        "kaggle__search_competitions",
-        "kaggle__submit_competition",
+    assert {m["search_with"] for m in result.data["catalog"]} == {
+        "search_competitions",
+        "submit_competition",
     }
     assert "kaggle__submit_competition" not in registry
 
@@ -208,6 +208,8 @@ async def test_server_filtered_catalog(tmp_path):
         server="kaggle",
     )
     assert result.data["matches"] == []
-    assert {m["tool"] for m in result.data["catalog"]} == {
-        "kaggle__search_competitions"
+    assert {m["search_with"] for m in result.data["catalog"]} == {
+        "search_competitions"
     }
+    for m in result.data["catalog"]:
+        assert "status" in m

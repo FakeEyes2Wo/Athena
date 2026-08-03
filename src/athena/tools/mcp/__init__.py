@@ -19,7 +19,7 @@ async def register_mcp_tools(
     """
     managers = [McpClientManager(cfg) for cfg in servers]
     for mgr in managers:
-        for name in mgr.cfg.pinned_tools:
+        for name in mgr.cfg.pinned_tools:  # 仅注册钉住工具，避免不必要的连接开销
             await mgr.ensure_connected()
             manifest = {t.name: t for t in mgr.tool_defs()}
             if name not in manifest:

@@ -71,13 +71,9 @@ _TITANIC_TASK_METADATA: dict = {
 
 _TITANIC_SEEDED_PROMPT = """\
 I want to participate in the Titanic competition on Kaggle.
-
-Here is the competition metadata (ALREADY FETCHED — do NOT call any Kaggle tools):
+Here is the competition metadata:
 {titanic_metadata}
-
 CRITICAL RULES (follow strictly to avoid wasting turns on unavailable tools):
-1. DO NOT call mcp_search_tools — external MCP tools are NOT needed in
-   seeded mode.
 2. DO NOT call code_execute — the sandbox is not ready. Skip training/inference
 
 EXECUTION STRATEGY:
@@ -386,9 +382,9 @@ async def run_demo(
             f"I want to compete in the Kaggle competition: {competition}. "
             f"Please follow your pipeline: search competition info, "
             f"download data, search for augmentation datasets and models, "
-            f"analyze data, design a solution, generate code, and build a submission. "
-            f"If any tool returns an error, skip it and continue with what you have. "
-            f"Do NOT retry a failed tool more than once."
+            # f"analyze data, design a solution, generate code, and build a submission. "
+            # f"If any tool returns an error, skip it and continue with what you have. "
+            # f"Do NOT retry a failed tool more than once."
         )
 
     thread = AthenaThread(
@@ -416,6 +412,7 @@ async def run_demo(
     print(f"🚀 开始执行 Agent（mode={mode}）...")
     print(f"{'=' * 70}\n")
     t_start = time.monotonic()
+    print(f"📝 用户提示词:\n{user_prompt}\n")
 
     try:
         outcome = await agent.run(ctx)
@@ -549,7 +546,7 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         choices=["auto", "seeded"],
-        default="seeded",
+        default="auto",
         help=(
             '运行模式: "seeded" 绕过 MCP 外部工具，预注入竞赛信息（默认），'
             '"auto" 完全自主 ReAct 循环'
