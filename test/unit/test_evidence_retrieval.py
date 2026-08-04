@@ -13,6 +13,7 @@ from athena.workflows.prompts import GAP_MINER_SYSTEM_PROMPT, NOVELTY_SYSTEM_PRO
 from athena.workflows.search.evidence_retrieval import (
     build_gap_miner_agent,
     build_novelty_agent,
+    build_novelty_question,
     collect_novelty_evidence,
     mine_research_gaps,
 )
@@ -38,9 +39,10 @@ def _problem() -> ResearchProblemInput:
 _FAKE_CORPUS_REF = "sha256:" + "a" * 64
 
 
-def _package() -> HypothesisPackage:
+def _package(sampling_probability: float = 0.42) -> HypothesisPackage:
     return HypothesisPackage(
         idea_id="idea-1", generation_strategy="s", novel_hypothesis="X causes Y",
+        sampling_probability=sampling_probability,
         supported_premises=[], inference_chain=[], predicted_observations=["Y increases"],
         disconfirming_observations=["Y stays flat"], lineage_op="generate",
     )
@@ -222,3 +224,31 @@ class NoveltyQueryLogRefTest(unittest.IsolatedAsyncioTestCase):
             uncertainty=0.5,
         )
         self.assertIsNone(report.query_log_ref)
+
+
+class BuildNoveltyQuestionTest(unittest.TestCase):
+    def test_question_carries_hypothesis_corpus_and_predictions(self) -> None:
+        question = build_novelty_question(_package(), _FAKE_CORPUS_REF)
+        self.assertIn("X causes Y", question)
+        self.assertIn(_FAKE_CORPUS_REF, question)
+        self.assertIn("Y increases", question)
+
+    def test_question_never_carries_sampling_probability(self) -> None:
+        # novelty 提问同样属于"审阅侧"，不得锚定生成侧自评概率
+        question = build_novelty_question(_package(sampling_probability=0.42), _FAKE_CORPUS_REF)
+        self.assertNotIn("0.42", question)
+        self.assertNotIn("sampling_probability", question)
+
+
+class NoveltyInputFingerprintTest(unittest.IsolatedAsyncioTestCase):
+    async def test_novelty_report_records_its_question_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(tmp)
+            report = await collect_novelty_evidence(
+                _package(), agent=_build_retrieval_agent(), artifacts=store,
+                corpus_ref=_FAKE_CORPUS_REF, model=make_scripted_model([_clean_novelty_judgment()]),
+            )
+            self.assertEqual(
+                build_novelty_question(_package(), _FAKE_CORPUS_REF),
+                await store.get_text(report.input_ref),
+            )

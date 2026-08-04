@@ -51,6 +51,7 @@ from athena.workflows.search.candidate_generation import (
 )
 from athena.workflows.search.evidence_retrieval import (
     collect_novelty_evidence,
+    degraded_novelty_report,
     limited_by,
     mine_research_gaps,
 )
@@ -61,14 +62,18 @@ from athena.workflows.search.idea_schemas import (
     GateVerdict,
     HypothesisDraft,
     HypothesisPackage,
-    NoveltyEvidenceReport,
     PairwiseJudgment,
     PipelineCandidateResult,
     ResearchProblemInput,
     StructuralCheckReport,
 )
-from athena.workflows.search.pre_gate_checks import falsifiability_check, structural_check
-from athena.workflows.search.review_board import review_board
+from athena.workflows.search.pre_gate_checks import (
+    degraded_falsifiability_report,
+    falsifiability_check,
+    structural_check,
+)
+from athena.workflows.search.review_board import read_prior_transcript, review_board
+from athena.workflows.search.revision import is_revisable, refresh_stale_evidence, run_debate
 from athena.workflows.search.validation import match_verifier, plan_validation
 
 
@@ -250,11 +255,7 @@ async def _screen_candidate(
             falsifiability = await falsifiability_check(package, model=model)
     except Exception as error:  # noqa: BLE001 - provider 报错形态不定，一律降级
         # 审计没跑成不能算"可证伪"——没有证据不能算通过，交给 pre_gate 判 REVISE
-        falsifiability = FalsifiabilityReport(
-            idea_id=package.idea_id, testable_implication="",
-            unobservable_variables=[f"falsifiability check failed: {error}"],
-            is_falsifiable=False,
-        )
+        falsifiability = degraded_falsifiability_report(package.idea_id, error)
     return structural, falsifiability, pre_gate(structural, falsifiability)
 
 
@@ -272,7 +273,8 @@ async def _audit_candidate(
     retrieval_sem: asyncio.Semaphore,
     model: Model | str | None = None,
 ) -> PipelineCandidateResult:
-    """步骤 [5]-[8]：novelty -> review_board -> 验证方案 -> hard_gate。
+    """步骤 [5]-[8] 加修订闭环：novelty -> review_board -> 验证方案 -> hard_gate ->
+    （若判 REVISE 且可修订）辩论 -> 终局刷新 -> 终审。
 
     structural / falsifiability 由 _screen_candidate 传入而非重算，避免每个候选多一次
     LLM 调用。novelty 与 review_board 之间是本设计唯一的候选内串行依赖（domain_consistency
@@ -283,6 +285,22 @@ async def _audit_candidate(
     为空会命中 hard_gate 既有的"空 facet 判 REVISE"逻辑，无需另写判定；query_log_ref=None
     让 domain_consistency 退回完整检索，不被 novelty 的失败牵连——一次检索抖动不该同时
     废掉两项 rubric。
+
+    修订闭环只在 hard_gate 判 REVISE 且 is_revisable 之上触发：run_debate 本身不跑检索
+    （对手对修订稿重表态只是一次 single_turn_chat），refresh_stale_evidence 是这条闭环里
+    唯一可能重新触发检索的地方,且内部保证"先 novelty、再视角"的刷新顺序。
+
+    是否重跑 refresh_stale_evidence + 终审第二次 hard_gate，判据是 package.revision_round
+    有没有比进入辩论前更大，**不是** rounds 是否非空：reviser 直接失败时 rounds 恒为空，
+    revision_round 自然不变；但"第一轮就是空转 no-op"这条分支会向 rounds 追加一条
+    cleared=False 的审计记录（no-op 本身值得留痕），revision_round 却和进入前一样，两者不
+    等价。用 rounds 非空当判据会让 no-op 场景误触发 refresh_stale_evidence 里那个无条件的
+    falsifiability_check（真实 LLM 调用）与第二次 hard_gate——花了钱、还给一个从未被真正
+    修订过的候选贴上 revision_blocking_factor,审计记录变得自相矛盾。用 revision_round 判据
+    时，no-op 场景下候选原样返回、只多一条 rounds 记录，不重跑任何东西、也不再调用
+    hard_gate 第二次；revision_blocking_factor 同理只在真的发生过修订时才写，否则留 None。
+    hard_gate 在真正发生修订时恰好调用两次：进入修订闭环前一次、闭环跑完后终审一次；
+    revision.py 全程不产出 verdict。
 
     Example:
         >>> result = await _audit_candidate(package, problem, structural, falsifiability,
@@ -295,12 +313,7 @@ async def _audit_candidate(
             llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
         )
     except Exception as error:  # noqa: BLE001 - 检索失败降级为空报告，不拖垮整批
-        empty_ref = await artifacts.put_text(f"novelty retrieval failed: {error}")
-        novelty = NoveltyEvidenceReport(
-            idea_id=package.idea_id, nearest_work=[], facet_overlap={},
-            coverage_ref=empty_ref, temporal_ref=empty_ref, query_log_ref=None,
-            uncertainty=1.0,
-        )
+        novelty = await degraded_novelty_report(package.idea_id, error, artifacts)
     reviews = await review_board(
         package, novelty, domain_review_agent=domain_review_agent, artifacts=artifacts,
         corpus_ref=corpus_ref, llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
@@ -311,9 +324,38 @@ async def _audit_candidate(
     plan_ref = await artifacts.put_text(validation_plan.model_dump_json())
     package = package.model_copy(update={"validation_plan_ref": plan_ref})
     decision = hard_gate(structural, falsifiability, novelty, reviews, validation_plan)
+    if not is_revisable(decision):
+        return PipelineCandidateResult(
+            package=package, structural=structural, falsifiability=falsifiability,
+            novelty=novelty, reviews=reviews, validation_plan=validation_plan,
+            decision=decision,
+        )
+
+    # 修订闭环：辩论（不跑检索）→ 终局刷新（唯一可能产生检索的地方）→ 终审
+    blocking_factor = decision.blocking_factor
+    prior_transcript = await read_prior_transcript(novelty, artifacts)
+    pre_debate_revision_round = package.revision_round
+    package, reviews, rounds = await run_debate(
+        package, blocking_factor=blocking_factor, reviews=reviews, artifacts=artifacts,
+        corpus_ref=corpus_ref, prior_transcript=prior_transcript, llm_sem=llm_sem, model=model,
+    )
+    # 判据是 package 有没有真的被修订过（revision_round 前进了），不是 rounds 是否非空——
+    # no-op 分支也会往 rounds 里追加一条审计记录，但 revision_round 原地不动，见函数注释。
+    revised = package.revision_round > pre_debate_revision_round
+    if revised:
+        package, structural, falsifiability, novelty, reviews, validation_plan = (
+            await refresh_stale_evidence(
+                package, problem_domain=problem.domain, novelty=novelty, reviews=reviews,
+                novelty_agent=novelty_agent, domain_review_agent=domain_review_agent,
+                artifacts=artifacts, corpus_ref=corpus_ref, llm_sem=llm_sem,
+                retrieval_sem=retrieval_sem, model=model,
+            )
+        )
+        decision = hard_gate(structural, falsifiability, novelty, reviews, validation_plan)
     return PipelineCandidateResult(
         package=package, structural=structural, falsifiability=falsifiability,
         novelty=novelty, reviews=reviews, validation_plan=validation_plan, decision=decision,
+        revisions=rounds, revision_blocking_factor=blocking_factor if revised else None,
     )
 
 

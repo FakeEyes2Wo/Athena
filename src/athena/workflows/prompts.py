@@ -235,3 +235,59 @@ DOMAIN_CONSISTENCY_SUMMARY_PROMPT_TEMPLATE = (
     "hypothesis.\n\n"
     "Transcript:\n{analysis}"
 )
+
+
+# ====== 修订闭环（Reviser + 辩论重表态） ======
+
+REVISER_SYSTEM_PROMPT = (
+    "You are a hypothesis reviser on the generation side of a research pipeline. A "
+    "gatekeeper has blocked one candidate on a specific rubric item, and independent "
+    "reviewers have filed critiques. Revise the candidate so the blocking item is "
+    "addressed, without breaking anything the other reviewers already flagged. Write a "
+    "short rebuttal explaining why your revision answers the blocking critique - that "
+    "rebuttal is shown to the reviewer who blocked it. List each change you made and "
+    "which risk it addresses. Keep the hypothesis falsifiable: predicted observations "
+    "and disconfirming observations must both stay non-empty. You are not given any "
+    "self-assessed confidence score for this candidate; never mention or invent one."
+)
+
+REVISION_USER_PROMPT_TEMPLATE = (
+    "Blocking rubric item: {blocking_factor}\n"
+    "Reviewer who blocked it: {debated_perspective}\n\n"
+    "Critique from the blocking reviewer:\n{blocking_critique}\n"
+    "Risks that reviewer left unaddressed:\n{blocking_risks}\n\n"
+    "Critiques from the other reviewers - do not break these:\n{other_critiques}\n\n"
+    "Current candidate:\n"
+    "Novel hypothesis: {novel_hypothesis}\n"
+    "Supported premises:\n{supported_premises}\n"
+    "Predicted observations:\n{predicted_observations}\n"
+    "Disconfirming observations:\n{disconfirming_observations}\n\n"
+    "Earlier debate rounds:\n{prior_rounds}\n\n"
+    "Produce a revised candidate and a rebuttal."
+)
+
+DEBATE_REREVIEW_SYSTEM_PROMPT = (
+    "You are the reviewer who previously blocked this research hypothesis candidate. The "
+    "author has revised it and written a rebuttal. You have no retrieval tools this "
+    "round: judge from your previous critique, the retrieval transcript if one is "
+    "supplied, and the revised candidate itself. Stay strictly inside the perspective you "
+    "reviewed before - do not raise risks that belong to another reviewer. Report only "
+    "risks that remain unaddressed after the revision: drop the ones the revision "
+    "genuinely fixes, keep the ones it does not. You are not given any self-assessed "
+    "confidence score for this candidate. Set fatal_flaw_found to true only if the flaw "
+    "cannot be fixed by further revision."
+)
+
+DEBATE_REREVIEW_PROMPT_TEMPLATE = (
+    "Debate round {round_index} - perspective: {perspective_id}\n\n"
+    "Your previous critique:\n{previous_critique}\n"
+    "Risks you previously raised:\n{previous_risks}\n\n"
+    "Author's rebuttal:\n{rebuttal}\n"
+    "Changes the author made:\n{changes_made}\n\n"
+    "Revised candidate:\n"
+    "Novel hypothesis: {novel_hypothesis}\n"
+    "Supported premises:\n{supported_premises}\n"
+    "Predicted observations:\n{predicted_observations}\n"
+    "Disconfirming observations:\n{disconfirming_observations}\n\n"
+    "{retrieval_context}"
+)

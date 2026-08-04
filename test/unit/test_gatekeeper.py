@@ -2,7 +2,7 @@
 
 import unittest
 
-from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS, MAX_TOTAL_RISKS, hard_gate, pre_gate
+from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS, MAX_TOTAL_RISKS, hard_gate, perspective_ok, pre_gate
 from athena.workflows.search.idea_schemas import (
     FalsifiabilityReport,
     GateVerdict,
@@ -264,3 +264,29 @@ class HardGateMultiPerspectiveTest(unittest.TestCase):
         self.assertEqual(
             [f"risk_ok_{p.perspective_id}" for p in REVIEW_PERSPECTIVES], risk_items,
         )
+
+
+class PerspectiveOkTest(unittest.TestCase):
+    """辩论循环复用这个谓词作终止条件，所以它是公开契约而非实现细节。"""
+
+    def _report(self, **kwargs) -> SkepticReport:
+        base = dict(idea_id="idea-1", perspective="methodology", critique="c",
+                    unaddressed_risks=[], fatal_flaw_found=False)
+        base.update(kwargs)
+        return SkepticReport(**base)
+
+    def test_clean_review_passes(self) -> None:
+        self.assertTrue(perspective_ok(self._report()))
+
+    def test_failed_review_never_passes(self) -> None:
+        # fail-closed：审阅没跑成不能等于审阅批准
+        self.assertFalse(perspective_ok(self._report(failed=True)))
+
+    def test_fatal_flaw_never_passes(self) -> None:
+        self.assertFalse(perspective_ok(self._report(fatal_flaw_found=True)))
+
+    def test_risks_over_tolerance_fail(self) -> None:
+        over = ["r"] * (MAX_TOLERATED_RISKS + 1)
+        self.assertFalse(perspective_ok(self._report(unaddressed_risks=over)))
+        at_limit = ["r"] * MAX_TOLERATED_RISKS
+        self.assertTrue(perspective_ok(self._report(unaddressed_risks=at_limit)))

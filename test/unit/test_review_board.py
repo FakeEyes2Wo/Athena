@@ -25,6 +25,8 @@ from athena.workflows.search.review_board import (
     REVIEW_PERSPECTIVES,
     ReviewPerspective,
     build_domain_consistency_agent,
+    build_perspective_input,
+    build_review_prompt,
     review_board,
     review_one_perspective,
 )
@@ -297,3 +299,103 @@ class SamplingProbabilityLeakTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("0.42", prompt_text)
                 self.assertNotIn("sampling_probability", prompt_text)
             self.assertTrue(any("X causes Y" in text for text in provider.captured_prompts))
+
+
+class BuildPerspectiveInputTest(unittest.IsolatedAsyncioTestCase):
+    """build_perspective_input 必须是视角输入的唯一来源——staleness 判定重建"新侧"输入时
+    调的就是它，两侧分头拼装会让判定永远失配。"""
+
+    def test_non_retrieval_perspective_returns_the_review_prompt(self) -> None:
+        perspective = REVIEW_PERSPECTIVES[0]  # methodology
+        self.assertEqual(
+            build_review_prompt(_package(), perspective),
+            build_perspective_input(_package(), perspective, corpus_ref=_FAKE_CORPUS_REF),
+        )
+
+    def test_retrieval_perspective_embeds_corpus_ref_and_prior_transcript(self) -> None:
+        perspective = REVIEW_PERSPECTIVES[2]  # domain_consistency
+        built = build_perspective_input(
+            _package(), perspective, corpus_ref=_FAKE_CORPUS_REF,
+            prior_transcript="earlier retrieval notes",
+        )
+        self.assertIn(_FAKE_CORPUS_REF, built)
+        self.assertIn("earlier retrieval notes", built)
+
+    def test_empty_prior_transcript_falls_back_to_search_from_scratch(self) -> None:
+        built = build_perspective_input(
+            _package(), REVIEW_PERSPECTIVES[2], corpus_ref=_FAKE_CORPUS_REF, prior_transcript="")
+        self.assertIn("(none; search from scratch)", built)
+
+    async def test_review_one_perspective_sends_exactly_build_perspective_input(self) -> None:
+        # 断言"实际发出的检索提问"与构造函数返回值逐字相同。注意断言的是**检索提问**那次调用
+        # （provider 收到的），不是 summary prompt——后者内嵌本次转录，无法从 package 重建。
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = _StaticTextProvider()
+            perspective = REVIEW_PERSPECTIVES[2]
+            await review_one_perspective(
+                _package(), perspective, novelty=_novelty(),
+                domain_review_agent=_build_domain_agent(provider),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                model=make_routed_model(_routes()),
+            )
+            expected = build_perspective_input(
+                _package(), perspective, corpus_ref=_FAKE_CORPUS_REF, prior_transcript="")
+            self.assertEqual(1, len(provider.captured_prompts))
+            # pydantic-ai 的 str(messages) 对嵌入的换行符进行转义（"a\nb" → 显示为 "a\\nb"），
+            # 所以要对 expected 的换行符做同样的转义才能在 captured 中找到它。这确保
+            # review_one_perspective 的输出与 build_perspective_input 的返回值逐字相同。
+            captured_str = provider.captured_prompts[0]
+            expected_escaped = expected.replace("\n", "\\n")
+            self.assertIn(expected_escaped, captured_str)
+
+
+class InputFingerprintTest(unittest.IsolatedAsyncioTestCase):
+    async def test_report_records_the_ref_of_its_own_input_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(tmp)
+            perspective = REVIEW_PERSPECTIVES[0]
+            report = await review_one_perspective(
+                _package(), perspective, novelty=_novelty(),
+                domain_review_agent=_build_domain_agent(), artifacts=store,
+                corpus_ref=_FAKE_CORPUS_REF, model=make_routed_model(_routes()),
+            )
+            self.assertTrue(report.input_ref.startswith("sha256:"))
+            expected = build_perspective_input(
+                _package(), perspective, corpus_ref=_FAKE_CORPUS_REF)
+            self.assertEqual(expected, await store.get_text(report.input_ref))
+
+    async def test_report_records_the_ref_of_its_own_input_prompt_for_retrieval_perspective(
+        self,
+    ) -> None:
+        # 只测 REVIEW_PERSPECTIVES[0]（methodology，非检索视角）测不出检索分支：
+        # review_one_perspective 里非检索/检索两条分支各自单独调用一次 artifacts.put_text，
+        # 各自的第二个参数完全可能悄悄写错（例如存 collected_text 而不是 question）而不被
+        # 上面那条用例发现。这里镜像同一断言，专测 domain_consistency（唯一的检索视角）。
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(tmp)
+            perspective = REVIEW_PERSPECTIVES[2]
+            marker = "PRIOR-TRANSCRIPT-MARKER: no contradicting evidence in corpus X"
+            prior_transcript_ref = await store.put_text(marker)
+            report = await review_one_perspective(
+                _package(), perspective, novelty=_novelty(query_log_ref=prior_transcript_ref),
+                domain_review_agent=_build_domain_agent(), artifacts=store,
+                corpus_ref=_FAKE_CORPUS_REF, model=make_routed_model(_routes()),
+            )
+            self.assertTrue(report.input_ref.startswith("sha256:"))
+            expected = build_perspective_input(
+                _package(), perspective, corpus_ref=_FAKE_CORPUS_REF, prior_transcript=marker)
+            self.assertEqual(expected, await store.get_text(report.input_ref))
+
+    async def test_failed_review_has_no_input_ref(self) -> None:
+        # 失败降级的报告没有可信指纹，input_ref 必须为 None —— Task 6 会把它一律判 stale
+        with tempfile.TemporaryDirectory() as tmp:
+            routes = _routes()
+            routes["Review perspective: methodology"] = RuntimeError("provider down")
+            reports = await review_board(
+                _package(), _novelty(), domain_review_agent=_build_domain_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                model=make_routed_model(routes),
+            )
+            failed = next(r for r in reports if r.perspective == "methodology")
+            self.assertTrue(failed.failed)
+            self.assertIsNone(failed.input_ref)

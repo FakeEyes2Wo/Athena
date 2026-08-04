@@ -68,6 +68,24 @@ async def limited_by(semaphore: asyncio.Semaphore | None) -> AsyncIterator[None]
         yield
 
 
+# ====== 输入构造（staleness 判定与生产侧共用，禁止两侧分头拼装） ======
+
+def build_novelty_question(package: HypothesisPackage, corpus_ref: ArtifactRef) -> str:
+    """构造 [5] 数值性审计的检索提问。它同时是该报告的 staleness 指纹来源，所以
+    collect_novelty_evidence 与 revision.novelty_is_stale 必须都调这一个函数——两侧分头
+    拼装会让指纹永远失配、所有报告恒 stale。
+
+    Example:
+        >>> build_novelty_question(package, "sha256:" + "a" * 64).startswith("Hypothesis under review:")  # doctest: +SKIP
+        True
+    """
+    return NOVELTY_QUESTION_TEMPLATE.format(
+        novel_hypothesis=package.novel_hypothesis,
+        corpus_ref=corpus_ref,
+        predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
+    )
+
+
 # ====== 阶段一共用：Agent 检索循环 ======
 
 async def run_retrieval_agent(agent: Agent, question: str) -> tuple[str, list[str]]:
@@ -182,6 +200,30 @@ async def mine_research_gaps(
     ]
 
 
+# ====== 降级报告（检索失败时的空报告，两处调用点共用） ======
+
+async def degraded_novelty_report(
+    idea_id: str, error: Exception, artifacts: ArtifactStore
+) -> NoveltyEvidenceReport:
+    """novelty 检索失败时的降级空报告。facet_overlap 为空会命中 hard_gate 既有的"空 facet
+    判 REVISE"逻辑，query_log_ref=None 让 domain_consistency 退回完整检索、不被这次失败
+    牵连。两处调用点（workflow._audit_candidate 首次审计、revision.refresh_stale_evidence
+    终局刷新）的降级行为必须逐字节一致，故抽成一处，不允许两份拷贝各自维护。
+
+    Example:
+        >>> report = await degraded_novelty_report(
+        ...     "idea-1", RuntimeError("down"), store)  # doctest: +SKIP
+        >>> report.facet_overlap
+        {}
+    """
+    empty_ref = await artifacts.put_text(f"novelty retrieval failed: {error}")
+    return NoveltyEvidenceReport(
+        idea_id=idea_id, nearest_work=[], facet_overlap={},
+        coverage_ref=empty_ref, temporal_ref=empty_ref, query_log_ref=None,
+        uncertainty=1.0,
+    )
+
+
 # ====== NoveltyEvidenceCollector（步骤 [5]） ======
 
 async def collect_novelty_evidence(
@@ -209,11 +251,7 @@ async def collect_novelty_evidence(
         >>> report.uncertainty  # doctest: +SKIP
         0.2
     """
-    question = NOVELTY_QUESTION_TEMPLATE.format(
-        novel_hypothesis=package.novel_hypothesis,
-        corpus_ref=corpus_ref,
-        predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
-    )
+    question = build_novelty_question(package, corpus_ref)
     async with limited_by(retrieval_sem):
         collected_text, channels_used = await run_retrieval_agent(agent, question)
     query_log_ref = await artifacts.put_text(collected_text or "(agent produced no text)")
@@ -253,5 +291,6 @@ async def collect_novelty_evidence(
         coverage_ref=coverage_ref,
         temporal_ref=temporal_ref,
         query_log_ref=query_log_ref,
+        input_ref=await artifacts.put_text(question),
         uncertainty=judgment.uncertainty,
     )
