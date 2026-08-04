@@ -223,30 +223,34 @@ async def revise_candidate(
     # 单次调用最多重试 MAX_REVISION_ATTEMPTS 次；名额在每次尝试内部各自获取与释放，绝不
     # 跨两次尝试持有——持有跨调用就是候选数 >= 名额数时必然死锁的模式。for...else 保证
     # raise 只在循环整体未 break（即所有尝试都失败）时触发，成功路径不会误触发它。
+    # 修订稿构造（HypothesisPackage(...)）必须留在 try 块内部：设计 §5.4 把"reviser 调用"
+    # 明确定义成含"修订稿构造校验失败"——一次不合法的 draft（比如 disconfirmers 为空）与
+    # 一次 provider 抖动同属"这次尝试没产出可用结果"，都该消耗同一个重试名额，而不是让
+    # 构造校验失败绕过重试直接向外抛。
     last_error: Exception | None = None
     for _ in range(MAX_REVISION_ATTEMPTS):
         try:
             async with limited_by(llm_sem):
                 draft = await single_turn_chat(prompt, RevisionDraft, model=model)
+            revised = HypothesisPackage(
+                idea_id=package.idea_id,
+                generation_strategy=package.generation_strategy,
+                sampling_probability=package.sampling_probability,
+                novel_hypothesis=draft.revised_novel_hypothesis,
+                supported_premises=draft.revised_premises,
+                inference_chain=package.inference_chain,
+                predicted_observations=draft.revised_predicted_observations,
+                disconfirming_observations=draft.revised_disconfirming_observations,
+                validation_plan_ref=None,
+                revision_round=package.revision_round + 1,
+                lineage_op="revise",
+            )
             break
-        except Exception as error:  # noqa: BLE001 - provider 报错形态不定，重试一次后再上抛
+        except Exception as error:  # noqa: BLE001 - provider 报错与修订稿构造校验失败形态都不定，重试一次后再上抛
             last_error = error
     else:
         raise ValueError(f"reviser failed after {MAX_REVISION_ATTEMPTS} attempts: {last_error}")
 
-    revised = HypothesisPackage(
-        idea_id=package.idea_id,
-        generation_strategy=package.generation_strategy,
-        sampling_probability=package.sampling_probability,
-        novel_hypothesis=draft.revised_novel_hypothesis,
-        supported_premises=draft.revised_premises,
-        inference_chain=package.inference_chain,
-        predicted_observations=draft.revised_predicted_observations,
-        disconfirming_observations=draft.revised_disconfirming_observations,
-        validation_plan_ref=None,
-        revision_round=package.revision_round + 1,
-        lineage_op="revise",
-    )
     return revised, draft
 
 
@@ -386,8 +390,12 @@ async def run_debate(
     每轮恒为 2 次 single_turn_chat、0 个检索循环。llm_sem 的名额在每次调用内部获取与释放，
     **绝不跨轮持有**——跨轮持有就是候选数 >= 名额数时必然死锁的那个模式。
 
-    任何失败路径都只让候选停在原状：reviser 失败直接返回原 package/原 reviews/空 rounds，
-    绝不存在"修订流程出错反而放行"的路径。
+    两条失败路径都不会"出错反而放行"，但落点不同：reviser 失败（含修订稿构造校验失败,
+    重试用尽）发生在辩论有任何进展之前，直接返回原 package/原 reviews/空 rounds；对手重表态
+    失败发生在修订稿已经构造成功之后，candidate 推进到这一轮的修订稿，但对手那份报告标记
+    failed=True 并 fail-closed（cleared=False），异常本身绝不向外传播——调用方
+    （run_full_pipeline 阶段二的 gather）没有 return_exceptions=True，任何一次未捕获的调用
+    失败都会拖垮同批全部候选。
 
     Example:
         >>> final, reviews, rounds = await run_debate(package,
@@ -426,8 +434,31 @@ async def run_debate(
             revised, perspective, previous, draft,
             round_index=round_index, prior_transcript=prior_transcript,
         )
-        async with limited_by(llm_sem):
-            judgment = await single_turn_chat(prompt, SkepticJudgment, model=model)
+        try:
+            async with limited_by(llm_sem):
+                judgment = await single_turn_chat(prompt, SkepticJudgment, model=model)
+        except Exception as error:  # noqa: BLE001 - 对手重表态失败：沿用 review_board 的 fail-closed 降级
+            # 设计 §5.4："对手重表态 | 沿用 review_board 的 fail-closed：failed=True 的
+            # SkepticReport -> perspective_ok 为假 -> 未清除"。这次调用之外没有别的调用方，
+            # 不处理它异常会直接穿出 run_debate、穿出 _audit_candidate，落进
+            # run_full_pipeline 阶段二那个刻意没带 return_exceptions=True 的 gather——一个
+            # 对手抖动就会拖垮整批候选。修订稿本身构造成功（revise_candidate 已经跑通），
+            # 所以 current 仍然推进到 revised，只是把对手的这份报告标成失败，让
+            # blocked_item_cleared 自然判定未清除。
+            failed_report = SkepticReport(
+                idea_id=revised.idea_id, perspective=opponent_id,
+                critique=f"opponent re-review failed: {error}", unaddressed_risks=[],
+                fatal_flaw_found=False, failed=True,
+            )
+            current = revised
+            current_reviews = [failed_report if r.perspective == opponent_id else r
+                               for r in current_reviews]
+            rounds.append(RevisionRound(
+                round_index=round_index, debated_perspective=opponent_id,
+                package_ref=await artifacts.put_text(revised.model_dump_json()),
+                rebuttal_ref=rebuttal_ref, reviewer_response_ref=None, cleared=False,
+            ))
+            break
 
         # 设计 §4.4：存**规范化**输入的指纹，不是辩论 prompt 的指纹——这让被辩视角在终局
         # 天然复用，同时 novelty 重跑换了转录时 domain_consistency 仍会正确失效

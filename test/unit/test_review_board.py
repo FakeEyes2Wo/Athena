@@ -364,6 +364,28 @@ class InputFingerprintTest(unittest.IsolatedAsyncioTestCase):
                 _package(), perspective, corpus_ref=_FAKE_CORPUS_REF)
             self.assertEqual(expected, await store.get_text(report.input_ref))
 
+    async def test_report_records_the_ref_of_its_own_input_prompt_for_retrieval_perspective(
+        self,
+    ) -> None:
+        # 只测 REVIEW_PERSPECTIVES[0]（methodology，非检索视角）测不出检索分支：
+        # review_one_perspective 里非检索/检索两条分支各自单独调用一次 artifacts.put_text，
+        # 各自的第二个参数完全可能悄悄写错（例如存 collected_text 而不是 question）而不被
+        # 上面那条用例发现。这里镜像同一断言，专测 domain_consistency（唯一的检索视角）。
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(tmp)
+            perspective = REVIEW_PERSPECTIVES[2]
+            marker = "PRIOR-TRANSCRIPT-MARKER: no contradicting evidence in corpus X"
+            prior_transcript_ref = await store.put_text(marker)
+            report = await review_one_perspective(
+                _package(), perspective, novelty=_novelty(query_log_ref=prior_transcript_ref),
+                domain_review_agent=_build_domain_agent(), artifacts=store,
+                corpus_ref=_FAKE_CORPUS_REF, model=make_routed_model(_routes()),
+            )
+            self.assertTrue(report.input_ref.startswith("sha256:"))
+            expected = build_perspective_input(
+                _package(), perspective, corpus_ref=_FAKE_CORPUS_REF, prior_transcript=marker)
+            self.assertEqual(expected, await store.get_text(report.input_ref))
+
     async def test_failed_review_has_no_input_ref(self) -> None:
         # 失败降级的报告没有可信指纹，input_ref 必须为 None —— Task 6 会把它一律判 stale
         with tempfile.TemporaryDirectory() as tmp:

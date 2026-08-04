@@ -35,7 +35,7 @@ from athena.workflows.search.workflow import (
     run_full_pipeline,
     run_pre_gate,
 )
-from unit.fakes import make_routed_model, make_scripted_model
+from unit.fakes import make_routed_model, make_scripted_model, tool_call_response
 
 # 占位 corpus_ref：这组测试只验证编排/门控/排序逻辑,不重复 Task 6 已经覆盖过的真实 paper_rag
 # 检索集成,所以用一个格式合法但不指向真实内容的 sha256 引用即可。
@@ -922,6 +922,70 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(GateVerdict.REVISE, result.decision.verdict)
         self.assertEqual("risk_ok_statistics", result.decision.blocking_factor)
         self.assertTrue(result.revisions[-1].cleared)
+
+    async def _run_no_op_debate(self) -> tuple[list, dict]:
+        # blocking = risk_ok_statistics；reviser 直接产出一份逐字段不变的 no-op 修订，
+        # is_no_op_revision 在第一轮就掐断循环——对手（statistics）与终局刷新全程零调用。
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = LocalArtifactStore(tmp)
+            draft = _valid_draft()
+            blocking_risks = [f"risk {i}" for i in range(MAX_TOLERATED_RISKS + 1)]
+            no_op_draft = RevisionDraft(
+                rebuttal="nothing substantive to add",
+                changes_made=[],
+                revised_novel_hypothesis=draft.statement,
+                revised_premises=draft.supported_premises,
+                revised_predicted_observations=draft.predicted_observations,
+                revised_disconfirming_observations=draft.disconfirming_observations,
+            )
+            falsifiability_calls = {"n": 0}
+            routes = {
+                _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[draft]),
+                _ROUTE_NOVELTY: _clean_novelty_judgment(),
+                _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
+                    critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+                _ROUTE_REVIEW_STATISTICS: SkepticJudgment(
+                    critique="underpowered", unaddressed_risks=blocking_risks, fatal_flaw_found=False),
+                _ROUTE_REVIEW_DOMAIN: SkepticJudgment(
+                    critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+                _ROUTE_REVISER: no_op_draft,
+            }
+
+            def respond(messages, info):
+                # falsifiability 单独计数，不放进 routes：no-op 分支必须只在 _screen_candidate
+                # 里被调用一次，不该在 refresh_stale_evidence 里被无条件重跑第二次——这是
+                # finding 4 的核心断言，make_routed_model 本身不计数，所以这里手写一个
+                # FunctionModel，其余锚点复用与 make_routed_model 相同的"命中数恰为一"规则。
+                prompt = str(messages)
+                if _ROUTE_FALSIFIABILITY in prompt:
+                    falsifiability_calls["n"] += 1
+                    return tool_call_response(_falsifiability_judgment(True), info)
+                hits = [key for key in routes if key in prompt]
+                assert len(hits) == 1, hits
+                return tool_call_response(routes[hits[0]], info)
+
+            results, _ranking = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(), domain_review_agent=_build_retrieval_agent(),
+                artifacts=artifacts, corpus_ref=_FAKE_CORPUS_REF, sample_size=1,
+                model=FunctionModel(respond),
+            )
+            return results, falsifiability_calls
+
+    async def test_no_op_debate_does_not_rerun_falsifiability_or_regate(self) -> None:
+        # 设计 §5.4：no-op guard 意味着立即退出、不再花钱——终局刷新（含无条件的
+        # falsifiability_check）与第二次 hard_gate 都不该跑，但 no-op 轮次本身仍要留痕
+        # （revisions 长度为 1），revision_blocking_factor 因为没有真实修订而留 None。
+        results, falsifiability_calls = await self._run_no_op_debate()
+        result = results[0]
+        self.assertEqual(GateVerdict.REVISE, result.decision.verdict)
+        self.assertEqual("risk_ok_statistics", result.decision.blocking_factor)
+        self.assertEqual(1, len(result.revisions))
+        self.assertFalse(result.revisions[0].cleared)
+        self.assertIsNone(result.revisions[0].reviewer_response_ref)
+        self.assertIsNone(result.revision_blocking_factor)
+        self.assertEqual(1, falsifiability_calls["n"])
 
 
 class RevisionLoopConcurrencyTest(unittest.IsolatedAsyncioTestCase):

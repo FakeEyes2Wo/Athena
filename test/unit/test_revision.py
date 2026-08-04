@@ -9,7 +9,7 @@ from athena.core.agent import Agent, AgentConfig, StreamEvent
 from athena.core.tool import ToolRegistry
 from athena.storage.artifact_store import LocalArtifactStore
 from athena.workflows.search.evidence_retrieval import build_novelty_question
-from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS
+from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS, perspective_ok
 from athena.workflows.search.idea_schemas import (
     ClaimEvidence, ClaimRole, FalsifiabilityJudgment, GATE_RUBRIC_VERSION, GateDecision,
     GateVerdict, HypothesisPackage, NoveltyEvidenceJudgment, NoveltyEvidenceReport,
@@ -17,8 +17,8 @@ from athena.workflows.search.idea_schemas import (
 )
 from athena.workflows.search.review_board import REVIEW_PERSPECTIVES, build_perspective_input
 from athena.workflows.search.revision import (
-    MAX_DEBATE_ROUNDS, build_revision_prompt, is_no_op_revision, is_revisable,
-    novelty_is_stale, refresh_stale_evidence, revise_candidate, run_debate,
+    MAX_DEBATE_ROUNDS, build_rereview_prompt, build_revision_prompt, is_no_op_revision,
+    is_revisable, novelty_is_stale, refresh_stale_evidence, revise_candidate, run_debate,
     select_debate_opponent, stale_perspectives,
 )
 from unit.fakes import make_routed_model, tool_call_response
@@ -198,6 +198,23 @@ class RevisionPromptTest(unittest.TestCase):
         self.assertNotIn("sampling_probability", prompt)
 
 
+class RereviewPromptTest(unittest.TestCase):
+    def test_prompt_never_leaks_sampling_probability(self) -> None:
+        # 泄漏面三（设计 §5.3）：build_rereview_prompt 接收完整 HypothesisPackage，reviser
+        # 写的 rebuttal 也会一并送进去——它是唯一手工拼装、之前完全没有测试覆盖的入口，若
+        # 手滑用 model_dump_json() 或直接引用 package.sampling_probability，就会让审阅侧看到
+        # 生成侧的自评概率，绕开 build_revision_prompt/schema 两道已有防线。
+        perspective = REVIEW_PERSPECTIVES[0]
+        previous = SkepticReport(
+            idea_id="idea-1", perspective="methodology", critique="no control arm",
+            unaddressed_risks=["confound"], fatal_flaw_found=False)
+        prompt = build_rereview_prompt(
+            _package(sampling_probability=0.42), perspective, previous, _draft(),
+            round_index=1, prior_transcript="")
+        self.assertNotIn("0.42", prompt)
+        self.assertNotIn("sampling_probability", prompt)
+
+
 class ReviseCandidateTest(unittest.IsolatedAsyncioTestCase):
     async def test_revised_package_keeps_id_and_probability_bumps_round(self) -> None:
         model = make_routed_model({"Blocking rubric item:": _draft()})
@@ -251,6 +268,26 @@ class RevisionRetryTest(unittest.IsolatedAsyncioTestCase):
                 _package(), blocking_factor="risk_ok_methodology",
                 debated_perspective="methodology", reviews=_reviews(), prior_rounds=[],
                 model=model)
+
+    async def test_malformed_draft_construction_failure_is_retried_once(self) -> None:
+        # 设计 §5.4："reviser 调用（含修订稿构造校验失败）| 重试 1 次"——第一次产出的
+        # RevisionDraft 构造不出合法 HypothesisPackage（disconfirmers 为空），必须像瞬时
+        # provider 抖动一样被重试一次，而不是直接向外抛出、把重试预算浪费掉。
+        calls = {"n": 0}
+
+        def flaky(messages, info):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                bad = _draft().model_copy(update={"revised_disconfirming_observations": []})
+                return tool_call_response(bad, info)
+            return tool_call_response(_draft(), info)
+
+        revised, _draft_ = await revise_candidate(
+            _package(), blocking_factor="risk_ok_methodology",
+            debated_perspective="methodology", reviews=_reviews(), prior_rounds=[],
+            model=FunctionModel(flaky))
+        self.assertEqual(2, calls["n"])
+        self.assertEqual(1, revised.revision_round)
 
 
 class StalenessTest(unittest.IsolatedAsyncioTestCase):
@@ -430,6 +467,28 @@ class RunDebateTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(rounds[0].cleared)
             self.assertIsNone(rounds[0].reviewer_response_ref)
             self.assertEqual(0, final.revision_round)   # 无实质改动，不算一轮修订
+
+    async def test_opponent_failure_leaves_item_uncleared_and_stays_inside_run_debate(self) -> None:
+        # 设计 §5.4："对手重表态 | 沿用 review_board 的 fail-closed：failed=True 的
+        # SkepticReport -> perspective_ok 为假 -> 未清除"。reviser 本身成功（_draft() 是一份
+        # 合法的实质修订），只有对手重表态那次 single_turn_chat 失败——异常绝不能穿出
+        # run_debate（外层 run_full_pipeline 的 stage-two gather 没有 return_exceptions=True，
+        # 一个对手抖动会拖垮整批候选）。
+        with tempfile.TemporaryDirectory() as tmp:
+            final, reviews, rounds = await run_debate(
+                _package(), blocking_factor="risk_ok_methodology", reviews=_reviews(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                prior_transcript="old transcript",
+                model=make_routed_model({
+                    "Blocking rubric item:": _draft(),
+                    "Debate round": RuntimeError("opponent provider down"),
+                }))
+            self.assertEqual(1, len(rounds))
+            self.assertFalse(rounds[0].cleared)
+            self.assertIsNone(rounds[0].reviewer_response_ref)
+            methodology = next(r for r in reviews if r.perspective == "methodology")
+            self.assertTrue(methodology.failed)
+            self.assertFalse(perspective_ok(methodology))
 
     async def test_reviser_failure_leaves_the_package_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

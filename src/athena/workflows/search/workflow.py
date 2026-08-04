@@ -288,10 +288,19 @@ async def _audit_candidate(
 
     修订闭环只在 hard_gate 判 REVISE 且 is_revisable 之上触发：run_debate 本身不跑检索
     （对手对修订稿重表态只是一次 single_turn_chat），refresh_stale_evidence 是这条闭环里
-    唯一可能重新触发检索的地方,且内部保证"先 novelty、再视角"的刷新顺序。run_debate 产出
-    0 轮（reviser 直接失败、或第一轮就是空转 no-op）时，候选原样返回，不重跑任何东西、
-    也不再调用 hard_gate 第二次——`if rounds:` 把整段刷新+终审都护住。hard_gate 在本函数里
-    恰好调用两次：进入修订闭环前一次、闭环跑完后终审一次；revision.py 全程不产出 verdict。
+    唯一可能重新触发检索的地方,且内部保证"先 novelty、再视角"的刷新顺序。
+
+    是否重跑 refresh_stale_evidence + 终审第二次 hard_gate，判据是 package.revision_round
+    有没有比进入辩论前更大，**不是** rounds 是否非空：reviser 直接失败时 rounds 恒为空，
+    revision_round 自然不变；但"第一轮就是空转 no-op"这条分支会向 rounds 追加一条
+    cleared=False 的审计记录（no-op 本身值得留痕），revision_round 却和进入前一样，两者不
+    等价。用 rounds 非空当判据会让 no-op 场景误触发 refresh_stale_evidence 里那个无条件的
+    falsifiability_check（真实 LLM 调用）与第二次 hard_gate——花了钱、还给一个从未被真正
+    修订过的候选贴上 revision_blocking_factor,审计记录变得自相矛盾。用 revision_round 判据
+    时，no-op 场景下候选原样返回、只多一条 rounds 记录，不重跑任何东西、也不再调用
+    hard_gate 第二次；revision_blocking_factor 同理只在真的发生过修订时才写，否则留 None。
+    hard_gate 在真正发生修订时恰好调用两次：进入修订闭环前一次、闭环跑完后终审一次；
+    revision.py 全程不产出 verdict。
 
     Example:
         >>> result = await _audit_candidate(package, problem, structural, falsifiability,
@@ -325,11 +334,15 @@ async def _audit_candidate(
     # 修订闭环：辩论（不跑检索）→ 终局刷新（唯一可能产生检索的地方）→ 终审
     blocking_factor = decision.blocking_factor
     prior_transcript = await read_prior_transcript(novelty, artifacts)
+    pre_debate_revision_round = package.revision_round
     package, reviews, rounds = await run_debate(
         package, blocking_factor=blocking_factor, reviews=reviews, artifacts=artifacts,
         corpus_ref=corpus_ref, prior_transcript=prior_transcript, llm_sem=llm_sem, model=model,
     )
-    if rounds:
+    # 判据是 package 有没有真的被修订过（revision_round 前进了），不是 rounds 是否非空——
+    # no-op 分支也会往 rounds 里追加一条审计记录，但 revision_round 原地不动，见函数注释。
+    revised = package.revision_round > pre_debate_revision_round
+    if revised:
         package, structural, falsifiability, novelty, reviews, validation_plan = (
             await refresh_stale_evidence(
                 package, problem_domain=problem.domain, novelty=novelty, reviews=reviews,
@@ -342,7 +355,7 @@ async def _audit_candidate(
     return PipelineCandidateResult(
         package=package, structural=structural, falsifiability=falsifiability,
         novelty=novelty, reviews=reviews, validation_plan=validation_plan, decision=decision,
-        revisions=rounds, revision_blocking_factor=blocking_factor if rounds else None,
+        revisions=rounds, revision_blocking_factor=blocking_factor if revised else None,
     )
 
 
