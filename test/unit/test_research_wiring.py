@@ -1,10 +1,14 @@
 """组合根测试 — 环境变量解析、编码器、视觉解释器与工具注册。"""
 
+import asyncio
 import base64
 import json
 import tempfile
 import unittest
 from unittest import mock
+
+import httpx
+from openai import RateLimitError
 
 from athena.research.paper_markdown.interfaces import VisualInterpretationRequest
 from athena.research.paper_markdown.schemas import SourceLocator
@@ -12,6 +16,7 @@ from athena.research.paper_source.http import HostRateLimiter
 from athena.research.wiring import (
     ARTIFACT_ROOT_ENV,
     DEFAULT_ARTIFACT_ROOT,
+    EMBED_MAX_RETRIES,
     RESEARCH_MODEL_ENV,
     TUI_MODEL_ENV,
     OpenAIEmbedder,
@@ -30,19 +35,50 @@ class FakeEmbeddingItem:
         self.embedding = embedding
 
 
+def rate_limited() -> RateLimitError:
+    """构造一个真实形状的 429，重试逻辑捕获的就是这个类型。"""
+    request = httpx.Request("POST", "https://example.invalid/embeddings")
+    return RateLimitError(
+        "Allocated quota exceeded",
+        response=httpx.Response(429, request=request),
+        body=None,
+    )
+
+
+async def no_sleep(_seconds: float) -> None:
+    """让退避不真的等待，否则重试测试要跑几十秒。"""
+
+
 class FakeEmbeddings:
-    """按倒序返回，用来验证调用方确实按 ``index`` 重排。"""
+    """按倒序返回，用来验证调用方确实按 ``index`` 重排。
+
+    ``fail_times`` 模拟限流，``peak_inflight`` 记录同时在途的请求数——后者是并发上限
+    这条约束唯一能观测到的地方。
+    """
 
     def __init__(self) -> None:
         self.batches: list[list[str]] = []
+        self.fail_times = 0
+        self.inflight = 0
+        self.peak_inflight = 0
 
     async def create(self, *, model: str, input: list[str]):
-        self.batches.append(list(input))
-        items = [
-            FakeEmbeddingItem(position, [float(position), float(len(text))])
-            for position, text in enumerate(input)
-        ]
-        return type("Resp", (), {"data": list(reversed(items))})()
+        self.inflight += 1
+        self.peak_inflight = max(self.peak_inflight, self.inflight)
+        try:
+            # 让出一次控制权，否则协程从头跑到尾，永远观测不到并发
+            await asyncio.sleep(0)
+            if self.fail_times > 0:
+                self.fail_times -= 1
+                raise rate_limited()
+            self.batches.append(list(input))
+            items = [
+                FakeEmbeddingItem(position, [float(position), float(len(text))])
+                for position, text in enumerate(input)
+            ]
+            return type("Resp", (), {"data": list(reversed(items))})()
+        finally:
+            self.inflight -= 1
 
 
 class FakeChoice:
@@ -118,6 +154,43 @@ class EmbedderTest(unittest.IsolatedAsyncioTestCase):
         vectors = await embedder.embed(["a", "bb", "ccc"])
 
         self.assertEqual([[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]], vectors)
+
+    async def test_in_flight_requests_are_capped(self) -> None:
+        """真机命中：50 篇约 39000 条句子、两千多个批次同时打出去，撞出 insufficient_quota。
+
+        撞上的时机最难受——取源和转换都做完了，钱已经花掉，报告却拿不到。
+        """
+        client = FakeClient()
+        embedder = OpenAIEmbedder(client, "m", batch_size=1, concurrency=4)
+
+        await embedder.embed([str(index) for index in range(40)])
+
+        self.assertEqual(4, client.embeddings.peak_inflight)
+        self.assertEqual(40, len(client.embeddings.batches))
+
+    async def test_a_rate_limited_batch_is_retried(self) -> None:
+        client = FakeClient()
+        client.embeddings.fail_times = 2
+        embedder = OpenAIEmbedder(client, "m", batch_size=8)
+
+        with mock.patch("asyncio.sleep", new=no_sleep):
+            vectors = await embedder.embed(["a", "bb"])
+
+        self.assertEqual(2, len(vectors))
+        self.assertEqual(2, embedder.retries)
+        self.assertEqual(3, embedder.calls)
+
+    async def test_retrying_stops_and_surfaces_the_failure(self) -> None:
+        """重试不能无限：真的没配额时要让调用方看见，而不是挂在那里。"""
+        client = FakeClient()
+        client.embeddings.fail_times = 99
+        embedder = OpenAIEmbedder(client, "m")
+
+        with mock.patch("asyncio.sleep", new=no_sleep):
+            with self.assertRaises(RateLimitError):
+                await embedder.embed(["a"])
+
+        self.assertEqual(EMBED_MAX_RETRIES, embedder.calls)
 
     async def test_batches_respect_the_configured_size(self) -> None:
         client = FakeClient()

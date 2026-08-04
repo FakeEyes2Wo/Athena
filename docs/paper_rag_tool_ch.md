@@ -415,7 +415,15 @@ MRR 相差 8.7 倍，R@1 只有 0.025——40 题里对 1 题。
 1. **是神经稠密编码器**，不是词频/哈希类的词法向量；
 2. 建索引与查询使用**同一模型**（`PaperCorpusIndex.embedding_model` 会记下标识，不一致
    时语义检索明确报错而不是返回无意义的相似度）；
-3. 启动时调用 `require_semantic_embedder(embedder)` 校验，不合格直接拒绝启动。
+3. 启动时调用 `require_semantic_embedder(embedder)` 校验，不合格直接拒绝启动；
+4. **响应必须按 `index` 重排后再返回。** 批量编码的响应顺序由服务端决定，而
+   `build_corpus_index` 依赖向量与句子严格一一对应；顺序错位不会报错，只会让之后每一次
+   语义检索都返回错的句子；
+5. **并发要有上限、限流要重试。** 50 篇论文约 36900 条句子、2300 个批次，无上限地
+   `gather` 会一次性打光配额——而且是在取源与转换都已完成之后。
+
+生产实现见 `athena/research/wiring.py` 的 `OpenAIEmbedder`，说明见
+[全链路文档](research_pipeline_ch.md)。
 
 ### 校验方式
 

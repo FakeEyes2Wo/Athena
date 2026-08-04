@@ -16,6 +16,7 @@ from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.pipeline import SurveyReport, SurveyRequest, run_survey
 from athena.research.wiring import (
     EMBEDDING_MODEL_ENV,
+    GHOSTSCRIPT_ENV,
     VISION_MODEL_ENV,
     build_research_stack,
     build_research_tools,
@@ -41,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="逗号分隔的 arXiv id，给了就跳过检索直接取源（用于单独测量下游各段）",
     )
-    parser.add_argument("--max-papers", type=int, default=5, help="交给下游的篇数")
+    parser.add_argument("--max-papers", type=int, default=50, help="交给下游的篇数")
     parser.add_argument("--max-steps", type=int, default=6, help="PaperScout 步数上限")
     parser.add_argument("--search-top-k", type=int, default=10, help="每次检索取回数")
     parser.add_argument("--max-seconds", type=float, default=600.0, help="检索墙钟预算")
@@ -50,8 +51,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=RETAIN_THRESHOLD,
         help=(
-            f"交付门槛，默认 {RETAIN_THRESHOLD}（只要 3 分）。"
-            "打分是离散的，只有三档有意义：>0.45 只要 3 分，>0.2 含 2 分，>0 含 1 分"
+            f"交付门槛，默认 {RETAIN_THRESHOLD}（整池按相关性排序，由 --max-papers 截断）。"
+            "打分离散，非零门槛只有三档：>0.45 只要 3 分，>0.2 含 2 分，>0 含 1 分"
+        ),
+    )
+    parser.add_argument(
+        "--allow-unfetchable",
+        action="store_true",
+        help=(
+            "让取不到源的论文也参与交付（默认剔除：既无 arXiv id、上游也没给开放获取"
+            "链接的论文下载不到，却会占掉一个交付名额）"
         ),
     )
     parser.add_argument("--published-to", default="", help="发布日期上限 ISO")
@@ -65,7 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="视觉解读严格度",
     )
     parser.add_argument("--concurrency", type=int, default=2, help="并发转换篇数")
-    parser.add_argument("--index-degraded", action="store_true", help="降级论文也入索引")
+    parser.add_argument(
+        "--strict-quality",
+        action="store_true",
+        help="只把 pass / pass_with_notes 的论文放进语料（默认放行 degraded）",
+    )
     parser.add_argument("--no-index", action="store_true", help="跳过建索引")
     parser.add_argument("--artifact-root", default="", help="artifact 根目录")
     parser.add_argument("--model", default="", help="策略与打分模型")
@@ -83,7 +96,11 @@ def print_check(argv_model: str, artifact_root: str) -> int:
     stack = build_research_stack(artifact_root=artifact_root, model=argv_model)
     tools = build_research_tools(stack)
     print("装配结果")
-    print(report_line("artifact 根目录", stack.artifacts.path_for("sha256:" + "0" * 64).parents[1]))
+    print(
+        report_line(
+            "artifact 根目录", stack.artifacts.path_for("sha256:" + "0" * 64).parents[1]
+        )
+    )
     print(report_line("文本模型", stack.model or "（未设置）"))
     embedder = stack.embedder
     print(
@@ -99,8 +116,18 @@ def print_check(argv_model: str, artifact_root: str) -> int:
             interpreter.model if interpreter else f"关闭（未设 {VISION_MODEL_ENV}）",
         )
     )
+    print(
+        report_line(
+            "Ghostscript",
+            stack.ghostscript or f"未找到（EPS/PS 插图读不了，可设 {GHOSTSCRIPT_ENV}）",
+        )
+    )
     print(report_line("联系邮箱", stack.contact_email or "（未设置，礼貌池不生效）"))
-    print(report_line("S2 key", "已设置" if stack.semantic_scholar_api_key else "无（会零星 429）"))
+    print(
+        report_line(
+            "S2 key", "已设置" if stack.semantic_scholar_api_key else "无（会零星 429）"
+        )
+    )
     print(report_line("工具", ", ".join(item.name for item in tools.specs)))
     if not stack.model:
         print("\n缺少文本模型：设置 ATHENA_RESEARCH_MODEL 或 ATHENA_TUI_MODEL。")
@@ -124,6 +151,13 @@ def print_report(report: SurveyReport) -> None:
             f"（门槛 {report.retain_threshold}）",
         )
     )
+    if report.scout_dropped_no_source:
+        print(
+            report_line(
+                "无源剔除",
+                f"{report.scout_dropped_no_source} 篇过线但取不到源，未占交付名额",
+            )
+        )
     print(
         report_line(
             "取源成功", f"{report.fetched} / {report.fetched + report.fetch_failed}"
@@ -131,7 +165,11 @@ def print_report(report: SurveyReport) -> None:
     )
     print(report_line("转换成功", f"{report.converted()} / {report.fetched}"))
     print(report_line("转换失败率", f"{report.conversion_failure_rate():.1%}"))
-    print(report_line("静默丢失", f"{report.suspect_empty_count()} 篇（转换成功但正文近乎为空）"))
+    print(
+        report_line(
+            "静默丢失", f"{report.suspect_empty_count()} 篇（转换成功但正文近乎为空）"
+        )
+    )
     if report.score_histogram:
         buckets = "  ".join(
             f"{score}:{count}" for score, count in report.score_histogram.items()
@@ -185,7 +223,10 @@ async def main_async(argv: list[str] | None = None) -> int:
 
     stack = build_research_stack(artifact_root=args.artifact_root, model=args.model)
     if not stack.model:
-        print("缺少文本模型：设置 ATHENA_RESEARCH_MODEL 或 ATHENA_TUI_MODEL。", file=sys.stderr)
+        print(
+            "缺少文本模型：设置 ATHENA_RESEARCH_MODEL 或 ATHENA_TUI_MODEL。",
+            file=sys.stderr,
+        )
         return 1
     request = SurveyRequest(
         query=args.query or "direct fetch",
@@ -195,11 +236,12 @@ async def main_async(argv: list[str] | None = None) -> int:
         search_top_k=args.search_top_k,
         max_seconds=args.max_seconds,
         retain_threshold=args.retain_threshold,
+        require_retrievable_source=not args.allow_unfetchable,
         published_to=args.published_to,
         prefer=args.prefer,
         visual_policy=args.visual_policy,
         conversion_concurrency=args.concurrency,
-        index_degraded=args.index_degraded,
+        strict_quality=args.strict_quality,
         build_index=not args.no_index,
     )
     report = await run_survey(stack, request)

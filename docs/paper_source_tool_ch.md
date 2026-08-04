@@ -105,6 +105,11 @@ DOI 只会补进身份字段和元数据，不会移动 key。
 的请求预算。进入非 arXiv 阶段前会先查一次 OpenAlex 记录，用于反推可能存在的 arXiv id 和
 开放获取链接——不少论文上游只给了 DOI，但其实有 arXiv 版本。
 
+第 3 步的线索来自 `PaperRef.hints`。`paper_scout` 会把检索阶段顺带拿到的
+`openAccessPdf` 链接写进去（`kind="oa_pdf"`），因此常见情况下第一个候选就能命中，省掉第 4
+步的 OpenAlex 解析，也避开了 `best_oa_location` 指向第三方镜像的已知问题。上限 3 个候选保证
+线索给错时仍会试到 OpenAlex 那条，不存在挤占。线索不是权威，字节照样要过魔数判定。
+
 第 5 步默认关闭。OpenAlex 的元数据 API 免费，但内容端点按额度计费且必须持有 API key；
 策略允许而 key 缺失时只记一条诊断，不发出注定失败的请求。
 
@@ -187,6 +192,22 @@ DOI 只会补进身份字段和元数据，不会移动 key。
 | `paper_source.payload_not_recognized` | error | 字节既不是 TeX 包也不是 PDF | 上游链接 / 数据源 |
 | `paper_source.pdf_only_submission` | info | 该篇 arXiv 上没有 TeX 源码 | 无需处理 |
 | `paper_source.no_channel_available` | error | 没有任何通道可尝试 | 上游身份 / 策略 |
+| `paper_source.transport_failed` | warning / error | 主机不可达：DNS、TLS 或超时 | 上游链接 / 网络 |
+
+### 传输层失败必须降级，不能上抛
+
+`HttpTransportError` 覆盖 DNS、TLS 握手与读取超时——它和"返回了非 2xx"是两回事，后者有
+response，前者没有。这类异常**在任何一层都不允许逃出取源阶段**：
+
+| 位置 | 失败时 |
+| --- | --- |
+| `_fetch_url` | 记 warning，继续试候选队列里的下一个 |
+| `_fetch_one` | 记 error，这一篇标记 `failed`，批次继续 |
+| `_resolve_versions` | 记 error，退回空解析，各篇按未钉版本继续 |
+
+理由是成本结构：取源是唯一按篇计费的阶段，跑到第 12 篇崩掉等于前 11 篇的下载全部白花。
+真机上出现过：一条 `doi.org` 线索 TLS 握手超时，异常一路逃到调用方，打断了 50 篇的全程。
+线索 URL 来自检索后端，域名完全不可控，50 篇的批次里出现一个不可达主机是常态而非意外。
 
 ## 请求预算与限流
 

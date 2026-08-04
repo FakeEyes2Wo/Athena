@@ -21,6 +21,7 @@ from athena.research.paper_source.http import (
     DEFAULT_BUCKET_INTERVALS,
     HostRateLimiter,
     HttpResponse,
+    HttpTransportError,
     rate_limit_bucket,
 )
 from athena.research.paper_source.schemas import (
@@ -116,10 +117,17 @@ class FakeTransport:
         return HttpResponse(status=404, url=url, body=b"not found")
 
     def _take(self, prefix: str, url: str) -> HttpResponse:
-        """Pop the next queued response for a prefix, keeping the last one sticky."""
+        """Pop the next queued response for a prefix, keeping the last one sticky.
+
+        A route may also be an exception instance, which is raised instead of
+        returned; that is how transport-layer failures (DNS, TLS, timeout) are
+        simulated, since those never produce a response at all.
+        """
         route = self.routes[prefix]
         if isinstance(route, list):
-            return route.pop(0) if len(route) > 1 else route[0]
+            route = route.pop(0) if len(route) > 1 else route[0]
+        if isinstance(route, Exception):
+            raise route
         return route
 
     def count(self, prefix: str) -> int:
@@ -360,6 +368,60 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
                 )
             ],
             policy=PaperSourcePolicy(**policy),
+        )
+
+    async def test_an_unreachable_hint_host_does_not_abort_the_batch(self) -> None:
+        """真机命中：一条 doi.org 线索 TLS 握手超时，异常一路逃到 run_survey 打断全程。
+
+        线索 URL 来自检索后端，域名完全不可控。取源是唯一按篇计费的阶段，跑到一半崩掉
+        等于前面下载的都白花，因此传输层失败只能降级成诊断。
+        """
+        fetcher, transport = self.build(
+            {
+                QUERY_URL: ok(ATOM_FEED),
+                SRC_URL: ok(self.source),
+                "https://dead.example": HttpTransportError("handshake timed out"),
+            }
+        )
+        request = PaperSourceRequest(
+            papers=[
+                PaperRef(
+                    identity=PaperIdentity(doi="10.18845/tm.v37i7.7295"),
+                    hints=[SourceHint(url="https://dead.example/x.pdf", kind="oa_pdf")],
+                ),
+                PaperRef(identity=PaperIdentity(arxiv_id="arXiv:2501.10120")),
+            ],
+            policy=PaperSourcePolicy(),
+        )
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual("failed", result.records[0].status)
+        self.assertEqual("fetched", result.records[1].status)
+        self.assertIn(
+            "paper_source.transport_failed",
+            {item.code for item in result.records[0].diagnostics},
+        )
+
+    async def test_an_unreachable_metadata_endpoint_still_lets_papers_through(
+        self,
+    ) -> None:
+        """版本解析在逐篇取源之前，异常逃出去等于整批一篇都拿不到。"""
+        fetcher, _ = self.build(
+            {
+                QUERY_URL: HttpTransportError("arxiv.org unreachable"),
+                # 版本没解析出来，下载走的是不带 v2 的定位符
+                "https://arxiv.org/src/2501.10120": ok(self.source),
+            }
+        )
+
+        result = await fetcher.fetch(self.pasa_request(allow_unpinned_version=True))
+
+        self.assertEqual("fetched", result.records[0].status)
+        self.assertFalse(result.records[0].version_pinned)
+        self.assertIn(
+            "paper_source.transport_failed",
+            {item.code for item in result.diagnostics},
         )
 
     async def test_pins_resolved_version_and_emits_conversion_request(self) -> None:

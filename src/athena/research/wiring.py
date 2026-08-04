@@ -15,10 +15,11 @@ import base64
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 
 from athena.core.tool import ToolRegistry
 from athena.research.paper_markdown.interfaces import (
@@ -51,7 +52,12 @@ BASE_URL_ENV = "OPENAI_BASE_URL"
 API_KEY_ENV = "OPENAI_API_KEY"
 
 DEFAULT_ARTIFACT_ROOT = Path.home() / ".athena" / "artifacts"
+GHOSTSCRIPT_ENV = "ATHENA_GHOSTSCRIPT"
+GHOSTSCRIPT_NAMES = ("gs", "gswin64c", "gswin32c", "mgs", "rungs")
 DEFAULT_EMBED_BATCH = 16
+DEFAULT_EMBED_CONCURRENCY = 4
+EMBED_MAX_RETRIES = 5
+EMBED_BACKOFF_SECONDS = 2.0
 DEFAULT_VISION_TIMEOUT = 180.0
 SEMANTIC_SCHOLAR_INTERVAL = 1.1
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
@@ -97,6 +103,26 @@ def build_artifact_store(root: str | Path = "") -> LocalArtifactStore:
     return LocalArtifactStore(resolved)
 
 
+def find_ghostscript() -> str:
+    """找出可用的 Ghostscript 可执行文件；找不到返回空串。
+
+    EPS/PS 是 ``paper_markdown`` 唯一无法用 Python 生态渲染的格式（PostScript 是图灵
+    完备语言），而 arXiv 上 2015 年前的论文几乎全用 EPS 插图。实测一批 44 篇里有 59
+    张图卡在这里。
+
+    显式的 ``ATHENA_GHOSTSCRIPT`` 优先；否则按 PATH 依次找常见命名，其中 ``mgs`` 与
+    ``rungs`` 是 MiKTeX 自带的那份——装了 TeX 发行版的机器通常已经有了，不必另装。
+    """
+    explicit = os.environ.get(GHOSTSCRIPT_ENV, "").strip()
+    if explicit:
+        return explicit if Path(explicit).exists() else (shutil.which(explicit) or "")
+    for name in GHOSTSCRIPT_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
 def build_client(client: AsyncOpenAI | None = None) -> AsyncOpenAI:
     """构造 OpenAI 兼容客户端；``OPENAI_BASE_URL`` 为空串时才回落官方地址。"""
     if client is not None:
@@ -113,6 +139,10 @@ class OpenAIEmbedder:
     响应按 ``index`` 重排后再返回：批量编码的响应顺序由服务端决定，而
     ``build_corpus_index`` 依赖向量与句子严格一一对应，顺序错位不会报错，
     只会让之后每一次语义检索都返回错的句子。
+
+    并发有上限、限流会重试。一次 50 篇的调研要编码约 39000 条句子，按 16 条一批就是
+    两千多个请求；无上限地 ``gather`` 会把它们同时打出去，真机上直接撞出
+    ``insufficient_quota``，而且是在取源与转换都已完成之后——最贵的那部分成本已经付了。
     """
 
     def __init__(
@@ -121,12 +151,15 @@ class OpenAIEmbedder:
         model: str,
         *,
         batch_size: int = DEFAULT_EMBED_BATCH,
+        concurrency: int = DEFAULT_EMBED_CONCURRENCY,
     ) -> None:
         self.client = client
         self.model = model
         self.batch_size = batch_size
         self.calls = 0
         self.embedded = 0
+        self.retries = 0
+        self._limit = asyncio.Semaphore(concurrency)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """批量编码文本，返回与输入等长、顺序一致的向量列表。"""
@@ -140,11 +173,28 @@ class OpenAIEmbedder:
         return [vector for batch in results for vector in batch]
 
     async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        self.calls += 1
-        self.embedded += len(batch)
-        reply = await self.client.embeddings.create(model=self.model, input=batch)
-        ordered = sorted(reply.data, key=lambda item: item.index)
-        return [list(item.embedding) for item in ordered]
+        async with self._limit:
+            return await self._request(batch)
+
+    async def _request(self, batch: list[str]) -> list[list[float]]:
+        """发一批编码请求，遇限流按指数退避重试；重试用尽才抛出。"""
+        for attempt in range(EMBED_MAX_RETRIES):
+            self.calls += 1
+            try:
+                reply = await self.client.embeddings.create(
+                    model=self.model, input=batch
+                )
+            except RateLimitError:
+                # 配额是按时间窗分配的，退避后通常能过；最后一次仍失败才让调用方看见
+                if attempt == EMBED_MAX_RETRIES - 1:
+                    raise
+                self.retries += 1
+                await asyncio.sleep(EMBED_BACKOFF_SECONDS * 2**attempt)
+                continue
+            self.embedded += len(batch)
+            ordered = sorted(reply.data, key=lambda item: item.index)
+            return [list(item.embedding) for item in ordered]
+        raise RuntimeError("unreachable: the retry loop either returns or raises")
 
 
 class VisionInterpreter:
@@ -260,6 +310,7 @@ class ResearchStack:
     contact_email: str = ""
     semantic_scholar_api_key: str = ""
     openalex_api_key: str = ""
+    ghostscript: str = ""
 
     def build_backends(self) -> tuple[list, object]:
         """构造共享限流器的检索后端与引用后端。"""
@@ -309,6 +360,7 @@ def build_research_stack(
         contact_email=contact,
         semantic_scholar_api_key=os.environ.get(SEMANTIC_SCHOLAR_KEY_ENV, ""),
         openalex_api_key=os.environ.get(OPENALEX_KEY_ENV, ""),
+        ghostscript=find_ghostscript(),
     )
 
 
@@ -327,7 +379,13 @@ def build_research_tools(stack: ResearchStack) -> ToolRegistry:
             openalex_api_key=stack.openalex_api_key or None,
         )
     )
-    tools.register(PaperMarkdownTool(stack.artifacts, stack.visual_interpreter))
+    tools.register(
+        PaperMarkdownTool(
+            stack.artifacts,
+            stack.visual_interpreter,
+            ghostscript=stack.ghostscript or None,
+        )
+    )
     tools.register(PaperKeywordSearchTool(stack.artifacts))
     tools.register(PaperChunkReadTool(stack.artifacts))
     tools.register(PaperVisualOfTool(stack.artifacts))

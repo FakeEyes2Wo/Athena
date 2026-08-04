@@ -10,6 +10,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+import httpx
+from openai import RateLimitError
+
 from athena.core.agent.agent import AgentOutcome
 from athena.research import pipeline as pipeline_module
 from athena.research.paper_markdown.schemas import (
@@ -21,6 +24,7 @@ from athena.research.paper_scout.schemas import (
     PaperScoutResult,
     ScoutCorpus,
     ScoutPaper,
+    ScoutRequest,
     ScoutStats,
 )
 from athena.research.paper_source.http import HostRateLimiter
@@ -108,11 +112,16 @@ class FakeScoutAgent:
 
     source_request: PaperSourceRequest | None = None
     papers = PAPERS
+    dropped_no_source = 0
+    seen_request: ScoutRequest | None = None
 
     def __init__(self, artifacts, backends, references, scorer, *, model, client):
         self.artifacts = artifacts
 
     async def run(self, ctx) -> AgentOutcome:
+        type(self).seen_request = ScoutRequest.model_validate_json(
+            await self.artifacts.get_text(ctx.turn.request_ref)
+        )
         retained = [
             ScoutPaper(
                 paper_key=key,
@@ -123,7 +132,9 @@ class FakeScoutAgent:
             )
             for key, title, score in type(self).papers
         ]
-        stats_ref = await self.artifacts.put_text(ScoutStats().model_dump_json())
+        stats_ref = await self.artifacts.put_text(
+            ScoutStats(dropped_no_source=type(self).dropped_no_source).model_dump_json()
+        )
         corpus = ScoutCorpus(
             query="q", retained=retained, pool=retained, actions=[], stats_ref=stats_ref
         )
@@ -173,7 +184,9 @@ class FakeFetcher:
                     paper_key=identity.paper_key(),
                     identity=identity,
                     status=status,
-                    tex_source_ref="sha256:" + "1" * 64 if status == "fetched" else None,
+                    tex_source_ref=(
+                        "sha256:" + "1" * 64 if status == "fetched" else None
+                    ),
                     conversion_request_ref=(
                         type(self).conversion_refs[index]
                         if status == "fetched"
@@ -236,6 +249,8 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             visual_interpreter=self.interpreter,
         )
         FakeScoutAgent.papers = PAPERS
+        FakeScoutAgent.dropped_no_source = 0
+        FakeScoutAgent.seen_request = None
         FakeFetcher.statuses = ["fetched", "fetched"]
         FakeFetcher.enriched = {}
         FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
@@ -335,10 +350,23 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         broken = next(item for item in report.papers if item.error)
         self.assertIn("VisualInterpretationRequiredError", broken.error)
 
-    async def test_degraded_papers_are_excluded_from_the_index_by_default(self) -> None:
+    async def test_degraded_papers_are_indexed_by_default(self) -> None:
+        """degraded 是存在性判定：一条诊断否决整篇，与论文规模无关。
+
+        实测 5 篇被挡的论文逐条核对后 4 篇是误判；而 paper_rag 是 chunk 级检索，
+        坏掉的公式或表格 chunk 本来就捞不出来，局部缺陷不该否决整篇。
+        """
         FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "degraded"}
 
         report = await self.run_pipeline()
+
+        self.assertTrue(all(item.indexed for item in report.papers))
+        self.assertEqual([2], [len(batch) for batch in self.indexed])
+
+    async def test_strict_quality_restores_the_narrow_gate(self) -> None:
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "degraded"}
+
+        report = await self.run_pipeline(strict_quality=True)
 
         degraded = next(
             item for item in report.papers if item.quality_status == "degraded"
@@ -346,14 +374,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("converted", degraded.conversion_status)
         self.assertFalse(degraded.indexed)
         self.assertEqual([1], [len(batch) for batch in self.indexed])
-
-    async def test_index_degraded_flag_lets_them_through(self) -> None:
-        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "degraded"}
-
-        report = await self.run_pipeline(index_degraded=True)
-
-        self.assertTrue(all(item.indexed for item in report.papers))
-        self.assertEqual([2], [len(batch) for batch in self.indexed])
 
     async def test_no_index_flag_skips_the_encoding_cost(self) -> None:
         report = await self.run_pipeline(build_index=False)
@@ -420,7 +440,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
         FakeProcessor.empty = {PAPERS[1][0]}
 
-        report = await self.run_pipeline()
+        report = await self.run_pipeline(strict_quality=True)
 
         hollow = next(item for item in report.papers if item.paper_key == PAPERS[1][0])
         healthy = next(item for item in report.papers if item.paper_key == PAPERS[0][0])
@@ -433,22 +453,29 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, report.suspect_empty_count())
         self.assertEqual([1], [len(batch) for batch in self.indexed])
 
-    async def test_index_degraded_does_not_override_the_empty_check(self) -> None:
+    async def test_empty_check_holds_even_in_the_permissive_default(self) -> None:
+        """suspect_empty 表达的是"正文根本没提取出来"，和局部缺陷不是一回事。"""
         FakeProcessor.empty = {PAPERS[1][0]}
 
-        report = await self.run_pipeline(index_degraded=True)
+        report = await self.run_pipeline()
 
         hollow = next(item for item in report.papers if item.paper_key == PAPERS[1][0])
         self.assertFalse(hollow.indexed)
 
     async def test_conversion_time_excludes_the_concurrency_wait(self) -> None:
-        """单篇耗时必须从拿到信号量之后算起，否则排队时间会被计进成本。"""
-        FakeProcessor.delay = 0.05
+        """单篇耗时必须从拿到信号量之后算起，否则排队时间会被计进成本。
+
+        判据是两篇的**差值**而不是绝对上限。并发为 1 时第二篇要整整等第一篇一轮：计时
+        写错的话它约等于第一篇的两倍，差值接近 delay；写对的话两篇都约等于 delay，差值
+        只剩调度抖动。绝对阈值在负载高时会假失败——真机上就撞到过一次。
+        """
+        FakeProcessor.delay = 0.2
 
         report = await self.run_pipeline(conversion_concurrency=1)
 
-        for item in report.papers:
-            self.assertLess(item.conversion_seconds, 0.1)
+        times = [item.conversion_seconds for item in report.papers]
+        self.assertLess(max(times) - min(times), FakeProcessor.delay)
+        self.assertGreaterEqual(min(times), FakeProcessor.delay)
 
     async def test_timings_and_call_counts_are_recorded(self) -> None:
         report = await self.run_pipeline()
@@ -457,3 +484,60 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(report.timings.scout_seconds, 0.0)
         self.assertEqual(1, report.embed_calls)
         self.assertEqual(0, report.vision_calls)
+
+    async def test_a_failed_index_still_produces_a_report(self) -> None:
+        """真机命中：50 篇跑到建索引时编码配额耗尽，异常带走了整份报告。
+
+        建索引是最后一段，也是唯一会一次性打光配额的一段；而取源与转换才是花钱的部分，
+        它们的产物都已落盘。这里必须降级成"没有语料"，不能降级成"没有报告"。
+        """
+
+        async def failing_index(*args, **kwargs):
+            raise RateLimitError(
+                "Allocated quota exceeded",
+                response=httpx.Response(
+                    429, request=httpx.Request("POST", "https://example.invalid")
+                ),
+                body=None,
+            )
+
+        request = SurveyRequest(query="tabular auc")
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            GradedRelevanceScorer=mock.MagicMock(),
+            build_corpus_index=failing_index,
+        ):
+            report = await SurveyPipeline(self.stack, request).run()
+
+        self.assertEqual(2, report.converted())
+        self.assertIsNone(report.corpus_ref)
+        self.assertEqual("partial", report.status)
+        self.assertFalse(any(item.indexed for item in report.papers))
+        self.assertIn("index_failed: RateLimitError", report.warnings)
+        self.assertTrue(all(item.paper_content_ref for item in report.papers))
+
+    async def test_the_delivery_budget_defaults_to_fifty(self) -> None:
+        """成本已经量过，默认按调研需要给量；要省钱就调小它，而不是抬门槛。"""
+        self.assertEqual(50, SurveyRequest(query="q").max_papers)
+
+        await self.run_pipeline()
+
+        self.assertEqual(50, FakeScoutAgent.seen_request.max_papers)
+
+    async def test_the_fetchable_filter_reaches_paper_scout(self) -> None:
+        await self.run_pipeline()
+        self.assertTrue(FakeScoutAgent.seen_request.require_retrievable_source)
+
+        await self.run_pipeline(require_retrievable_source=False)
+        self.assertFalse(FakeScoutAgent.seen_request.require_retrievable_source)
+
+    async def test_dropped_unfetchable_papers_are_reported(self) -> None:
+        """交付变少要能分辨原因：池子差，还是这批命中全在付费墙后。"""
+        FakeScoutAgent.dropped_no_source = 7
+
+        report = await self.run_pipeline()
+
+        self.assertEqual(7, report.scout_dropped_no_source)

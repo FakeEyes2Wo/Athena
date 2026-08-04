@@ -17,6 +17,7 @@ import asyncio
 import time
 from typing import Literal
 
+from openai import OpenAIError
 from pydantic import BaseModel, Field
 
 from athena.core.agent.agent import AgentContext
@@ -39,6 +40,7 @@ from athena.research.paper_scout.schemas import (
     PaperScoutResult,
     ScoutCorpus,
     ScoutRequest,
+    ScoutStats,
 )
 from athena.research.paper_scout.scorer import GradedRelevanceScorer
 from athena.research.paper_source.fetcher import PaperSourceFetcher
@@ -74,9 +76,12 @@ ConversionStatus = Literal["converted", "failed", "no_source"]
 class SurveyRequest(BaseModel):
     """一次全链路调研的输入。
 
-    ``max_papers`` 默认取 5 而不是 ``PaperSourcePolicy`` 的 50：真正决定成本的是
-    ``paper_markdown``（TeX/PDF 解析加逐图模型调用），首次真机验证要的是可观测，
-    不是覆盖面。
+    ``max_papers`` 默认 50，与 ``PaperSourcePolicy`` 一致。它曾取 5，那是首次真机验证
+    要可观测而不要覆盖面；现在链路已经量过（转换硬失败率 0%，单篇 30–110 秒），可以按
+    调研本身的需要来定。在默认的 ``retain_threshold=0`` 下它是交付量的唯一控制。
+
+    成本随它线性增长：按实测单篇约 23 秒、11 次视觉调用、780 条句向量，50 篇在并发 3
+    下约 6–8 分钟转换。要省钱就调小它，而不是调高门槛——门槛只有三档，调不细。
 
     ``visual_policy`` 默认 ``best_effort`` 而不是 schema 默认的 ``required``：
     ``required`` 下任何一张图解读失败都会让整篇论文失败，测出来的是"有没有失败"，
@@ -92,7 +97,7 @@ class SurveyRequest(BaseModel):
             "downstream stages without paying for or being gated by PaperScout."
         ),
     )
-    max_papers: int = Field(default=5, ge=1, description="Papers carried downstream.")
+    max_papers: int = Field(default=50, ge=1, description="Papers carried downstream.")
     max_steps: int = Field(default=6, ge=1, description="PaperScout step budget.")
     search_top_k: int = Field(default=10, ge=1, description="Results per search call.")
     expand_top_k: int = Field(default=20, ge=1, description="References per expand.")
@@ -102,6 +107,10 @@ class SurveyRequest(BaseModel):
         ge=0.0,
         le=1.0,
         description="PaperScout delivery threshold; see RETAIN_THRESHOLD.",
+    )
+    require_retrievable_source: bool = Field(
+        default=True,
+        description="Deliver only fetchable papers; see has_retrievable_source.",
     )
     published_to: str = Field(default="", description="Inclusive ISO date upper bound.")
     prefer: SourcePreference = Field(default="tex", description="Source preference.")
@@ -113,8 +122,9 @@ class SurveyRequest(BaseModel):
         ge=1,
         description="Papers converted in parallel.",
     )
-    index_degraded: bool = Field(
-        default=False, description="Index papers whose quality gate did not pass."
+    strict_quality: bool = Field(
+        default=False,
+        description="Only index papers whose quality gate returned pass or pass_with_notes.",
     )
     build_index: bool = Field(
         default=True, description="Build the RAG corpus index after conversion."
@@ -173,6 +183,14 @@ class SurveyReport(BaseModel):
     source_result_ref: ArtifactRef | None = Field(default=None)
     scout_pool: int = Field(default=0, ge=0, description="Papers accepted into pool.")
     scout_retained: int = Field(default=0, ge=0, description="Papers above threshold.")
+    scout_dropped_no_source: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Papers above the threshold that were dropped for having no fetchable "
+            "source, and so never competed for a delivery slot."
+        ),
+    )
     retain_threshold: float = Field(
         default=RETAIN_THRESHOLD,
         description="Delivery threshold this run used; delivery counts mean nothing without it.",
@@ -181,7 +199,9 @@ class SurveyReport(BaseModel):
         default_factory=dict,
         description="Pool relevance distribution, for deciding where the threshold belongs.",
     )
-    fetched: int = Field(default=0, ge=0, description="Papers with usable source bytes.")
+    fetched: int = Field(
+        default=0, ge=0, description="Papers with usable source bytes."
+    )
     fetch_failed: int = Field(
         default=0, ge=0, description="Papers no channel could resolve."
     )
@@ -278,6 +298,7 @@ class SurveyPipeline:
             max_papers=self.request.max_papers,
             max_seconds=self.request.max_seconds,
             retain_threshold=self.request.retain_threshold,
+            require_retrievable_source=self.request.require_retrievable_source,
             paper_source_policy=PaperSourcePolicy(
                 prefer=self.request.prefer,
                 max_papers=self.request.max_papers,
@@ -326,9 +347,13 @@ class SurveyPipeline:
         corpus = ScoutCorpus.model_validate_json(
             await self.stack.artifacts.get_text(result.corpus_ref)
         )
+        stats = ScoutStats.model_validate_json(
+            await self.stack.artifacts.get_text(result.stats_ref)
+        )
         self.report.scout_result_ref = result_ref
         self.report.scout_pool = len(corpus.pool)
         self.report.scout_retained = len(corpus.retained)
+        self.report.scout_dropped_no_source = stats.dropped_no_source
         self.report.retain_threshold = self.request.retain_threshold
         # 分数分布是决定门槛该放在哪的唯一依据：交付 2 篇既可能是"池里只有 2 篇好的"，
         # 也可能是"18 篇 2 分被门槛挡住了"，只看交付量分不出这两种情况
@@ -357,7 +382,11 @@ class SurveyPipeline:
         沿 arXiv id 工作），后者期刊 DOI 优先（arXiv 自铸 DOI 会让语料按投稿年份分裂）。
         同一篇论文因此会在交接处换 key，两边各自都对，把它们并回一条是本层的职责。
         """
-        for prefix, attribute in (("arxiv", "arxiv_id"), ("doi", "doi"), ("s2", "s2_paper_id")):
+        for prefix, attribute in (
+            ("arxiv", "arxiv_id"),
+            ("doi", "doi"),
+            ("s2", "s2_paper_id"),
+        ):
             value = getattr(source, attribute, "") or ""
             if value:
                 self._by_identifier[f"{prefix}:{value.lower()}"] = paper_key
@@ -415,8 +444,10 @@ class SurveyPipeline:
         """并发转换所有拿到源文件的论文，逐篇计时并记录质量结果。"""
         started = time.monotonic()
         jobs = [
-            (self._conversion_keys.get(record.paper_key, record.paper_key),
-             record.conversion_request_ref)
+            (
+                self._conversion_keys.get(record.paper_key, record.paper_key),
+                record.conversion_request_ref,
+            )
             for record in source_result.records
             if record.conversion_request_ref
         ]
@@ -424,7 +455,10 @@ class SurveyPipeline:
             self.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
             return []
         processor = PaperProcessor(
-            self.stack.artifacts, self.stack.visual_interpreter, None
+            self.stack.artifacts,
+            self.stack.visual_interpreter,
+            None,
+            ghostscript=self.stack.ghostscript or None,
         )
         limit = asyncio.Semaphore(self.request.conversion_concurrency)
         results = await asyncio.gather(
@@ -506,23 +540,39 @@ class SurveyPipeline:
         if not selected:
             return
         started = time.monotonic()
-        self.report.corpus_ref = await build_corpus_index(
-            self.stack.artifacts, selected, self.stack.embedder
-        )
+        try:
+            self.report.corpus_ref = await build_corpus_index(
+                self.stack.artifacts, selected, self.stack.embedder
+            )
+        except OpenAIError as error:
+            # 建索引是最后一段，也是唯一会一次性打光编码配额的一段。异常逃出去会连同
+            # 前面所有已完成的取源与转换一起丢掉——而那才是真正花了钱的部分，且每篇的
+            # PaperContent 已经落盘，重跑只需重新编码。因此降级成"没有语料"而不是没有报告。
+            self.report.warnings.append(f"index_failed: {type(error).__name__}")
+            self.report.status = "partial"
+            for content in selected:
+                raw = content.paper_id or ""
+                self._outcome_for(self._conversion_keys.get(raw, raw)).indexed = False
         self.report.timings.index_seconds = round(time.monotonic() - started, 3)
 
     def _indexable(self, content: PaperContent) -> bool:
-        """质量门禁：默认只放行 ``pass`` 与 ``pass_with_notes``。
+        """语料门禁：只有 ``suspect_empty`` 一票否决，``degraded`` 默认放行。
 
-        ``suspect_empty`` 一票否决，``index_degraded`` 也覆盖不了：放宽门禁的用意是
-        "宁可收进质量有瑕疵的论文"，而不是"收进一篇空壳"——空壳既提供不了证据，
-        又会让语料看起来已经覆盖这篇论文。
+        ``degraded`` 是存在性判定——出现**一条**内容缺失诊断就否决整篇，与论文规模
+        无关。实测一批真实论文里，85 个 chunk 的论文因 1 条诊断出局，5 篇被挡的论文
+        逐条核对后 4 篇是误判、1 篇只是参考文献未解析而正文完整。而 ``paper_rag`` 本
+        身是 chunk 级检索：坏掉的公式或表格 chunk 不会被捞出来，局部缺陷不该否决整篇。
+
+        ``suspect_empty`` 仍然一票否决，因为它表达的是另一件事——正文根本没提取出来。
+        空壳既提供不了证据，又会让语料看起来已经覆盖这篇论文。
+
+        ``strict_quality`` 保留严格口径，供需要"只要干净语料"的评测使用。
         """
         raw = content.paper_id or ""
         key = self._conversion_keys.get(raw, raw)
         if self._outcome_for(key).suspect_empty:
             return False
-        if self.request.index_degraded:
+        if not self.request.strict_quality:
             return True
         return content.quality_status in INDEXABLE_QUALITY
 
