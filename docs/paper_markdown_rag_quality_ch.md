@@ -609,3 +609,53 @@ PaSa 正式产物当前为 103 个 retrieval unit、25 个视觉对象（20 表�
 字符区间回放通过，103 个 unit ID 均带 `arxiv:2501.10120:` namespace。非视觉 lexical
 probe 可以召回数据集、主结果、附录表格、prompt 和参考文献证据；公式 VLM 未注入时只
 保留两个可确定提取的独立公式和降级诊断，不以伪造文本替代视觉解释。
+
+## 六次审计：50 篇真实语料上的门禁误判（2026-08-04）
+
+前五次审计都在单篇论文上做。这一轮第一次拿全链路批量产物核对——一次 AI4S 式调研的
+44 篇转换结果——暴露的问题不在解析器，而在**门禁本身判得太狠**。
+
+### 26. `split` 环境被判成不支持的对齐标记
+
+`MATH_ALIGNMENT` 的正则只列了 `aligned|gathered|cases|array|\w*matrix`，漏掉 amsmath
+的其余对齐环境。真机上 8 个用 `split` 的合法公式被记 `rag_math_markdown_invalid`，
+连累三篇论文判 `degraded` 挡在语料外。
+
+逐条核对那 8 处：60 个公式 chunk、0 个空 body，KaTeX 渲染正常，**正文一个字都没丢**。
+
+改为把环境名抽成 `ALIGNMENT_ENVIRONMENTS` 常量，补齐 14 个环境并支持星号变体
+（`align*`、`alignat*`、`eqnarray*`），按长度降序排列避免前缀互吞。裸 `&`（无环境）与
+残留 `\label` 仍然报警——放宽识别不等于关掉这条检查。
+
+### 27. `degraded` 一票否决与论文规模无关
+
+`grade_quality` 是存在性判定：出现**一条**内容缺失诊断就否决整篇。85 个 chunk 的论文因
+1 条诊断出局，而 `paper_rag` 本身是 chunk 级检索——坏掉的公式或表格 chunk 根本不会被捞
+出来，局部缺陷不该否决整篇。
+
+实测一轮里 5 篇被挡的论文逐条核对后：4 篇是误判（3 篇 `split`、1 篇表格已由视觉解读
+覆盖），只有 1 篇 `tex_bibliography_unresolved` 是真实但很窄的损失（正文完整）。
+
+因此把判断从质量门禁移到**流水线的语料门禁**：`SurveyPipeline._indexable` 默认接受
+`degraded`，只保留 `suspect_empty` 一票否决——后者表达的是另一件事，正文根本没提取出来，
+空壳既提供不了证据又会让语料看起来已覆盖这篇论文。需要干净语料的评测可用
+`strict_quality=True` 恢复严格口径。
+
+`grade_quality` 的三档分级本身不变：它描述事实，由消费者决定怎么用。
+
+### 28. 视觉预览失败没有独立的诊断码
+
+图渲染不出来时此前只会在调用模型失败后记 `visual_interpretation_failed`，而"格式不支持"
+和"模型故障"是两回事。新增 `visual_preview_unavailable`（归入 `CONTENT_LOSS_CODES`），
+`reason` 区分 `empty_asset` / `ghostscript_missing` / `ghostscript_failed` /
+`unsupported_format`。补上 Ghostscript 后 63 次视觉失败降为 0，详见
+[paper_markdown 文档](paper_markdown_tool_ch.md)。
+
+### 六次验收标准
+
+- `split` 及其余 14 个 amsmath 对齐环境（含星号变体）不再触发 `rag_math_markdown_invalid`；
+  无环境的裸 `&` 与残留 `\label` 仍然触发；
+- 语料门禁默认放行 `degraded`，`suspect_empty` 仍被拒；`strict_quality` 可恢复严格口径；
+- 每个新增诊断码都在 `CONTENT_LOSS_CODES` 或 `BOOKKEEPING_CODES` 里有归属
+  （`test_every_emitted_code_is_classified` 保证）；
+- 真机复核：`arxiv:1908.01672` 与 `arxiv:2407.14381` 由 `degraded` 转 `pass`。

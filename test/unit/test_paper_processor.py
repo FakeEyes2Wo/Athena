@@ -292,7 +292,9 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
 
         体量单独不足以判定：这份 fixture 的正文只有三十几个字符，和真实空壳同量级。
         """
-        content = await PaperProcessor(self.store, None).process(await self.request_for_tex())
+        content = await PaperProcessor(self.store, None).process(
+            await self.request_for_tex()
+        )
 
         self.assertEqual("tex", content.provenance.source_kind)
         self.assertEqual("TeX Wins", content.title)
@@ -304,7 +306,9 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
         content = await PaperProcessor(self.store, None).process(request)
 
         self.assertEqual("tex", content.provenance.source_kind)
-        self.assertIn("Retrieval quality depends", await content.load_markdown(self.store))
+        self.assertIn(
+            "Retrieval quality depends", await content.load_markdown(self.store)
+        )
 
     async def test_pdf_is_used_only_when_tex_is_absent(self) -> None:
         pdf_ref = await self.store.put_bytes(paper_pdf())

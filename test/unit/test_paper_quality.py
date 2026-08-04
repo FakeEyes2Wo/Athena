@@ -9,6 +9,7 @@ import athena.research.paper_markdown
 from athena.research.paper_markdown.chunking import build_chunks
 from athena.research.paper_markdown.document import ParsedElement, ParsedPaper
 from athena.research.paper_markdown.quality import (
+    ALIGNMENT_ENVIRONMENTS,
     BOOKKEEPING_CODES,
     CONTENT_LOSS_CODES,
     grade_quality,
@@ -185,3 +186,88 @@ class QualityGradingTest(unittest.TestCase):
 
     def test_the_two_classes_do_not_overlap(self):
         self.assertEqual(set(), CONTENT_LOSS_CODES & BOOKKEEPING_CODES)
+
+
+class MathAlignmentTest(unittest.TestCase):
+    """公式对齐环境的识别 —— 漏一个环境就会把合法公式判成内容缺失。
+
+    LaTeX 片段一律用 raw 字符串：``"\\begin"`` 里的 ``\\b`` 是退格符，
+    写成非 raw 会同时触发 ``rag_control_character``，把测试意图搅浑。
+    """
+
+    def codes(self, markdown: str) -> list[str]:
+        """跑一遍质量门禁，返回它给出的全部诊断码。"""
+        paper = paper_with(
+            [
+                ParsedElement(
+                    element_id="equation-1",
+                    kind="equation",
+                    markdown=markdown,
+                    heading_path=["Method"],
+                    locators=[LOCATOR],
+                )
+            ]
+        )
+        body, chunks = build_chunks(paper.elements, ChunkingConfig())
+        validate_rag_quality(paper, chunks, body, ChunkingConfig())
+        return [item.code for item in paper.diagnostics]
+
+    def test_split_is_a_valid_alignment_environment(self):
+        """真机命中：8 个用 split 的合法公式被判成不支持的对齐标记。
+
+        split 是标准 amsmath 环境，与 aligned 一样合法、KaTeX 能正常渲染，正文一个字
+        都没丢，却让三篇论文被判 degraded 挡在语料之外。
+        """
+        markdown = (
+            "$$\n"
+            r"\begin{split}"
+            "\n"
+            r"\mathcal{L} &\approx \sum_i g_i f(x_i) \\"
+            "\n"
+            r"& \propto \Omega(f)"
+            "\n"
+            r"\end{split}"
+            "\n$$"
+        )
+
+        self.assertNotIn("rag_math_markdown_invalid", self.codes(markdown))
+
+    def test_every_alignment_environment_is_recognized(self):
+        for name in ALIGNMENT_ENVIRONMENTS:
+            markdown = (
+                "$$\n"
+                + rf"\begin{{{name}}}"
+                + "\na &= b\n"
+                + rf"\end{{{name}}}"
+                + "\n$$"
+            )
+            with self.subTest(environment=name):
+                self.assertNotIn("rag_math_markdown_invalid", self.codes(markdown))
+
+    def test_matrix_family_is_recognized(self):
+        for name in ("matrix", "bmatrix", "pmatrix", "smallmatrix"):
+            markdown = (
+                "$$\n"
+                + rf"\begin{{{name}}}"
+                + "\na & b\n"
+                + rf"\end{{{name}}}"
+                + "\n$$"
+            )
+            with self.subTest(environment=name):
+                self.assertNotIn("rag_math_markdown_invalid", self.codes(markdown))
+
+    def test_starred_variants_are_recognized(self):
+        markdown = "$$\n" r"\begin{align*}" "\na &= b\n" r"\end{align*}" "\n$$"
+
+        self.assertNotIn("rag_math_markdown_invalid", self.codes(markdown))
+
+    def test_bare_ampersand_without_an_environment_is_still_flagged(self):
+        """真正的裸 & 仍要报出来 —— 放宽识别不等于关掉这条检查。"""
+        self.assertIn("rag_math_markdown_invalid", self.codes("$$\na &= b\n$$"))
+
+    def test_leftover_label_is_still_flagged(self):
+        markdown = (
+            "$$\n" r"\begin{aligned}" "\na &= b\n" r"\end{aligned}\label{eq:1}" "\n$$"
+        )
+
+        self.assertIn("rag_math_markdown_invalid", self.codes(markdown))

@@ -14,6 +14,40 @@ from athena.research.paper_markdown.schemas import (
 UNINDEXABLE_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|[\ue000-\uf8ff]")
 UNPARSED_APPENDIX_HEADING = re.compile(r"^[A-Z]\.\d+(?:\.\d+){0,3}\.?\s+[A-Z]")
 
+ALIGNMENT_ENVIRONMENTS = (
+    "alignedat",
+    "subarray",
+    "eqnarray",
+    "flalign",
+    "gathered",
+    "alignat",
+    "aligned",
+    "gather",
+    "dcases",
+    "rcases",
+    "align",
+    "array",
+    "cases",
+    "split",
+)
+"""\u516c\u5f0f\u91cc\u5408\u6cd5\u4f7f\u7528 ``&`` \u505a\u5bf9\u9f50\u7684\u73af\u5883\uff0c\u6309\u540d\u5b57\u957f\u5ea6\u964d\u5e8f\u6392\u5217\u3002
+
+\u964d\u5e8f\u662f\u5fc5\u8981\u7684\uff1a\u6b63\u5219\u7684\u5206\u652f\u6309\u987a\u5e8f\u5c1d\u8bd5\uff0c``align`` \u6392\u5728 ``alignat`` \u524d\u9762\u4f1a\u5148\u5339\u914d\u5230
+``align`` \u518d\u8981\u6c42\u95ed\u5408\u82b1\u62ec\u53f7\uff0c\u867d\u7136 Python \u7684 ``re`` \u4f1a\u56de\u6eaf\u6551\u56de\u6765\uff0c\u4f46\u987a\u5e8f\u5199\u5bf9\u66f4\u7701\u4e8b
+\u4e5f\u66f4\u597d\u8bfb\u3002
+
+\u6e05\u5355\u4e00\u5ea6\u53ea\u6709 ``aligned|gathered|cases|array|*matrix``\uff0c\u6f0f\u6389\u4e86 ``split``\u3002\u5b9e\u6d4b\u4e00\u6279
+\u771f\u5b9e\u8bba\u6587\u7684 60 \u4e2a\u516c\u5f0f\u91cc\uff0c8 \u4e2a\u7528 ``split``\u300114 \u4e2a\u7528 ``aligned``\u2014\u2014\u6f0f\u9879\u8ba9\u90a3 8 \u4e2a\u5168\u88ab\u5224
+\u6210"\u4e0d\u652f\u6301\u7684\u5bf9\u9f50\u6807\u8bb0"\uff0c\u800c\u5b83\u4eec\u662f\u5b8c\u5168\u5408\u6cd5\u3001KaTeX \u80fd\u6b63\u5e38\u6e32\u67d3\u7684 amsmath \u516c\u5f0f\uff0c\u6b63\u6587\u4e00\u4e2a
+\u5b57\u90fd\u6ca1\u4e22\u3002\u4e09\u7bc7\u8bba\u6587\u56e0\u6b64\u88ab\u5224 ``degraded`` \u6321\u5728\u8bed\u6599\u4e4b\u5916\u3002
+"""
+
+MATH_ALIGNMENT = re.compile(
+    r"\\begin\{(?:"
+    + "|".join(ALIGNMENT_ENVIRONMENTS)
+    + r")\*?\}|\\begin\{\w*matrix\*?\}"
+)
+
 CONTENT_LOSS_CODES = frozenset(
     {
         "pdf_formula_layout_fragment_omitted",
@@ -31,6 +65,8 @@ CONTENT_LOSS_CODES = frozenset(
         # 入口猜错会静默丢掉大半篇论文，宁可按内容缺失处理
         "tex_entrypoint_weak_inference",
         "tex_figure_asset_missing",
+        # 渲染不出预览 ⇒ 模型看不到这张图，图里的数据就是没进语料
+        "visual_preview_unavailable",
         "visual_interpretation_failed",
         "visual_interpretation_unavailable",
     }
@@ -206,10 +242,7 @@ def _validate_elements(paper: ParsedPaper) -> None:
             )
         if element.kind != "equation":
             continue
-        has_alignment = re.search(
-            r"\\begin\{(?:aligned|gathered|cases|array|\w*matrix)\}",
-            element.markdown,
-        )
+        has_alignment = MATH_ALIGNMENT.search(element.markdown)
         invalid_math = (
             "\\label" in element.markdown
             or "\\nonumber" in element.markdown

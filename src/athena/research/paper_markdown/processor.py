@@ -29,8 +29,11 @@ from athena.research.paper_markdown.schemas import (
 from athena.research.paper_markdown.tex_parser import parse_tex_paper
 from athena.research.paper_markdown.tex_source import load_tex_source
 from athena.research.paper_markdown.visuals import (
+    DEFAULT_PREVIEW_DPI,
+    VISION_READABLE,
     fallback_interpretation,
     render_preview,
+    sniff_media_type,
     visual_markdown,
 )
 from athena.storage.artifact_store import ArtifactStore
@@ -97,11 +100,13 @@ class PaperProcessor:
         visual_interpreter: VisualInterpreter | None,
         structure_refiner: StructureRefiner | None = None,
         visual_concurrency: int = DEFAULT_VISUAL_CONCURRENCY,
+        ghostscript: str | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.visual_interpreter = visual_interpreter
         self.structure_refiner = structure_refiner
         self.visual_concurrency = max(1, visual_concurrency)
+        self.ghostscript = ghostscript
 
     async def parse_source(
         self, request: PaperConversionRequest
@@ -243,11 +248,27 @@ class PaperProcessor:
         )
         preview = visual.preview_bytes
         if preview is None and visual.asset_bytes is not None:
-            preview = await asyncio.to_thread(
+            rendered = await asyncio.to_thread(
                 render_preview,
                 visual.asset_bytes,
                 visual.asset_media_type,
+                DEFAULT_PREVIEW_DPI,
+                self.ghostscript,
             )
+            preview = rendered.png
+            if rendered.reason:
+                notes.append(
+                    ProcessingDiagnostic(
+                        level="warning",
+                        code="visual_preview_unavailable",
+                        message=(
+                            f"Could not render a preview for {visual.visual_id} "
+                            f"({rendered.media_type or 'unknown format'}): "
+                            f"{rendered.reason}."
+                        ),
+                        locator=visual.locator,
+                    )
+                )
         preview_ref = (
             await self.artifacts.put_bytes(preview) if preview is not None else None
         )
@@ -266,11 +287,15 @@ class PaperProcessor:
             )
             if value
         )
+        # 渲染不出预览时，只有本来就能内联的格式才把原图交出去。把模型读不了的字节
+        # 硬发过去，换回来的只是一次注定失败的调用——证据文本这条路本来就还在。
+        raw_media = sniff_media_type(visual.asset_bytes or b"", visual.asset_media_type)
+        inline_raw = asset_ref is not None and raw_media in VISION_READABLE
         model_request = VisualInterpretationRequest(
             visual_id=visual.visual_id,
             kind=visual.kind,
-            asset_ref=preview_ref or asset_ref,
-            media_type="image/png" if preview_ref else visual.asset_media_type,
+            asset_ref=preview_ref or (asset_ref if inline_raw else None),
+            media_type="image/png" if preview_ref else (raw_media or None),
             structured_text_ref=structured_ref,
             context_ref=await self.artifacts.put_text(context),
             locator=visual.locator,

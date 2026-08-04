@@ -52,6 +52,7 @@ class PaperMarkdownTool(BaseTool):
         visual_interpreter: VisualInterpreter | None,
         structure_refiner: StructureRefiner | None = None,
         visual_concurrency: int = DEFAULT_VISUAL_CONCURRENCY,
+        ghostscript: str | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.processor = PaperProcessor(
@@ -59,6 +60,7 @@ class PaperMarkdownTool(BaseTool):
             visual_interpreter,
             structure_refiner,
             visual_concurrency=visual_concurrency,
+            ghostscript=ghostscript,
         )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
