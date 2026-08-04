@@ -66,6 +66,22 @@ logprobs，改用 0–3 分级评分，最初按 `grade / 3` 归一——2 分�
 错误而不是可调超参——但表中的 Precision 与 F1 仍是同一批 30 题上复算得到的，需要在留出
 题目上确认后才能作为对比结论使用。
 
+### 复现本表必须显式传两个参数
+
+`ScoutRequest` 的默认值此后为服务 IdeaGeneration 而改动（理由见
+`docs/paper_scout_agent_ch.md`），与本表的口径不再一致。`run_paperscout.py` 因此显式钉住：
+
+```python
+ScoutRequest(
+    ...,
+    retain_threshold=PASA_RETAIN_THRESHOLD,   # 默认已改为 0.0
+    require_retrievable_source=False,          # 默认已改为 True
+)
+```
+
+前者恢复 ρ ≥ 0.5 的交付口径；后者关掉可取源过滤——基准比对的是论文身份，取不取得到源不参与
+判分，按默认剔除非 arXiv 论文会凭空压低 Recall。**不传这两个参数跑出来的数字与本表不可比。**
+
 ## 行为观察
 
 **expand 是效率更高的动作。** 它只占 11.0% 的调用（79 / 717），却贡献了 31.5% 的入池论文

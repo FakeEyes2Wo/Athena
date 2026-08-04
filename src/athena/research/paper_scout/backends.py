@@ -26,7 +26,8 @@ SEMANTIC_SCHOLAR_REFERENCES = (
     "https://api.semanticscholar.org/graph/v1/paper/{locator}/references"
 )
 SEMANTIC_SCHOLAR_FIELDS = (
-    "title,abstract,externalIds,year,publicationDate,citationCount"
+    "title,abstract,externalIds,year,publicationDate,citationCount,"
+    "isOpenAccess,openAccessPdf"
 )
 SEMANTIC_SCHOLAR_INTERVAL = 1.1
 ARXIV_MAX_RESULTS = 50
@@ -67,6 +68,21 @@ def paper_key_for(arxiv_id: str, doi: str, s2_paper_id: str, title: str) -> str:
     if s2_paper_id:
         return f"s2:{s2_paper_id.lower()}"
     return "title:" + "".join(char for char in title if char.isalnum()).lower()
+
+
+def open_access_pdf(record: dict) -> tuple[str, bool | None]:
+    """从 S2 记录里取出开放获取 PDF 链接与 OA 判定。
+
+    付费墙论文返回的是 ``{"url": "", "status": "CLOSED"}`` 而不是缺字段，因此判据
+    只能是"url 非空"，不能是"字段存在"。实测三例：Wiley 与 Elsevier 的两篇给空串，
+    一份 GOLD 期刊给出的链接与上一轮真正取到源时用的 URL 完全一致。
+
+    这两个字段与既有字段在同一次请求里返回，不额外增加任何 HTTP 往返。
+    """
+    payload = record.get("openAccessPdf")
+    url = str(payload.get("url") or "").strip() if isinstance(payload, dict) else ""
+    flag = record.get("isOpenAccess")
+    return url, flag if isinstance(flag, bool) else None
 
 
 def within_cutoff(arxiv_id: str, published_date: str, cutoff: str) -> bool:
@@ -226,6 +242,7 @@ class SemanticScholarBackend:
         published = str(record.get("publicationDate") or "")
         year = record.get("year")
         citations = record.get("citationCount")
+        pdf_url, is_open_access = open_access_pdf(record)
         return ScoutPaper(
             paper_key=paper_key_for(arxiv_id, doi, s2_id, title),
             arxiv_id=arxiv_id,
@@ -236,6 +253,8 @@ class SemanticScholarBackend:
             year=year if isinstance(year, int) else None,
             published_date=published,
             citation_count=citations if isinstance(citations, int) else None,
+            open_access_pdf=pdf_url,
+            is_open_access=is_open_access,
             source=source,  # type: ignore[arg-type]
             origin=origin,
             channel=self.name,

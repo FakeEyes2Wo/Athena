@@ -4,8 +4,8 @@ PaperScout 把论文检索建模成 POMDP：隐状态是累积的 paper pool，A
 pool 的一个摘要视图（observation），并选择 ``search`` 或 ``expand`` 动作。这里的模型
 对应论文里的三个对象——池中的一篇论文、一次动作的结果、一次运行的统计。
 
-相关性分数 ``relevance`` 是 [0,1] 的连续值，既决定论文能否进池（τ），也决定最终交付
-集合（ρ ≥ 0.5）和排序，因此它是唯一贯穿全流程的排序信号。
+相关性分数 ``relevance`` 是 [0,1] 的连续值，既决定论文能否进池（τ），也决定交付集合的
+排序与截断（见 ``RETAIN_THRESHOLD``），因此它是唯一贯穿全流程的排序信号。
 """
 
 from typing import Literal
@@ -17,20 +17,30 @@ from athena.research.paper_source.schemas import PaperSourcePolicy
 
 ACCEPT_THRESHOLD = 0.01
 
-RETAIN_THRESHOLD = 0.5
-"""交付门槛的默认值，对应论文的 ρ ≥ 0.5。
+PASA_RETAIN_THRESHOLD = 0.5
+"""PaSa 论文的交付门槛 ρ ≥ 0.5，复现检索基准时必须显式传这个值。
 
-这个数出自 PaSa 的评测口径：那里 ``select_score > 0.5`` 是算 Precision/Recall 时画的
-一条线，爬到的论文全都留在树里，没有任何下游因此拿不到它们。本仓库把同一个数用成了
-流水线闸门——``retained`` 直接决定哪些论文会被下载——角色变了，取值却没有重新论证。
+在 PaSa 里它只是算 Precision/Recall 时画的一条线：爬到的论文全都留在树里，没有任何
+下游因此拿不到它们。本仓库一度把它用作流水线闸门——``retained`` 直接决定哪些论文会
+被下载——角色变了，取值却没有重新论证。
 
-因为 ``GRADE_SCORES`` 是离散的（0 / 0.2 / 0.45 / 1.0），这个门槛只有三种行为：
-0.5 只放行 3 分（直接回答查询），0.3 放行 2 分（切题且有用），0.1 放行 1 分。实测一次
-AI4S 式查询的 100 篇候选池里，3 分只有 2 篇、2 分有 18 篇——同一个门槛在检索基准上
-交付 30%，在这里只交付 2%。
+``docs/paper_scout_reproduction_ch.md`` 里的数字对应这个取值。
+"""
 
-因此它是 ``ScoutRequest`` 的字段而不是硬编码常量：基准复现继续用 0.5 保证数字可重建，
-下游有全文重排能力时传 0.3。
+RETAIN_THRESHOLD = 0.0
+"""交付门槛的默认值：不按分数截断，只按 ``max_papers`` 取相关性最高的若干篇。
+
+默认服务 IdeaGeneration 而不是检索基准，两者的代价结构相反。基准里误报直接扣
+Precision；这里误报的代价只是多下载一篇、多转换一次，而 ``paper_rag`` 的 chunk 级
+检索根本不会把它捞出来——漏报的代价却是一个永远不会生成的假设，下游没有任何一段能
+把它找回来。因此工作点偏向召回。
+
+因为 ``GRADE_SCORES`` 是离散的（0 / 0.2 / 0.45 / 1.0），非零门槛只有三种行为，各档
+之间落差极大：实测一次 AI4S 式查询的候选池里 3 分 2 篇、2 分 18 篇、1 分 80 篇，
+0.5 只交付 2%。取 0 后交付集合等于整个池按相关性降序，``max_papers`` 成为唯一的量
+控制——这对下游也更自然，它要的是"最相关的 N 篇"而不是"分数过线的若干篇"。
+
+取 0 不等于"什么都收"：``ACCEPT_THRESHOLD`` 仍然把 0 分（无关）的论文挡在池外。
 """
 OBSERVATION_EXPANDED = 10
 OBSERVATION_UNEXPANDED = 10
@@ -63,6 +73,16 @@ class ScoutPaper(BaseModel):
         description="Query text for search results, parent title for expansions.",
     )
     channel: str = Field(default="", description="Backend that returned the paper.")
+    open_access_pdf: str = Field(
+        default="",
+        description=(
+            "Open-access PDF URL claimed by the retrieval channel; empty when the "
+            "paper is paywalled. Unverified, and carried into paper_source as a hint."
+        ),
+    )
+    is_open_access: bool | None = Field(
+        default=None, description="Upstream open-access claim; None when unknown."
+    )
     relevance: float = Field(default=0.0, ge=0.0, le=1.0, description="Score in [0,1].")
     expanded: bool = Field(
         default=False, description="Whether its references were already followed."
@@ -98,6 +118,14 @@ class ScoutStats(BaseModel):
     pool_size: int = Field(default=0, ge=0)
     scored_papers: int = Field(default=0, ge=0)
     retained_papers: int = Field(default=0, ge=0)
+    dropped_no_source: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Papers above the threshold dropped for having no arXiv source. Large "
+            "values mean the query is being answered mostly by paywalled venues."
+        ),
+    )
     policy_calls: int = Field(default=0, ge=0)
     scorer_calls: int = Field(default=0, ge=0)
     backend_requests: int = Field(default=0, ge=0)
@@ -110,7 +138,8 @@ class ScoutRequest(BaseModel):
     """一次 PaperScout 运行的输入。
 
     ``published_to`` 对应基准构造时的发布日期上限；``max_papers`` 只截断交付集合，
-    不改变检索过程。
+    不改变检索过程——但在默认的 ``retain_threshold=0`` 下它是交付量的唯一控制，
+    因为交付集合此时等于整个候选池按相关性降序。
     """
 
     schema_version: Literal["1.0"] = "1.0"
@@ -133,8 +162,16 @@ class ScoutRequest(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Minimum relevance for delivery; lower it when a downstream stage "
-            "re-ranks candidates on full text."
+            "Minimum relevance for delivery; 0 delivers the whole pool ranked by "
+            "relevance. Use PASA_RETAIN_THRESHOLD to reproduce the paper benchmark."
+        ),
+    )
+    require_retrievable_source: bool = Field(
+        default=True,
+        description=(
+            "Deliver only papers with an arXiv id or an upstream open-access PDF. "
+            "Set False to reproduce retrieval benchmarks, which score identity "
+            "rather than retrievability."
         ),
     )
     paper_source_policy: PaperSourcePolicy = Field(
@@ -149,7 +186,10 @@ class ScoutCorpus(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     query: str = Field(description="The request this corpus answers.")
     retained: list[ScoutPaper] = Field(
-        description="Papers with relevance >= RETAIN_THRESHOLD, ranked."
+        description=(
+            "Papers with relevance >= the request threshold, ranked and capped "
+            "by max_papers."
+        )
     )
     pool: list[ScoutPaper] = Field(description="Every paper accepted into the pool.")
     actions: list[ScoutAction] = Field(description="Ordered action trace.")

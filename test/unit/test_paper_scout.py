@@ -14,16 +14,24 @@ from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext
 from athena.research.paper_scout.agent import PaperScoutAgent
 from athena.research.paper_scout.backends import (
+    SEMANTIC_SCHOLAR_FIELDS,
     ArxivSearchBackend,
     BackendError,
     SemanticScholarBackend,
+    open_access_pdf,
     paper_key_for,
     within_cutoff,
 )
-from athena.research.paper_scout.pool import EMPTY_POOL, PaperPool, truncate_abstract
+from athena.research.paper_scout.pool import (
+    EMPTY_POOL,
+    PaperPool,
+    has_retrievable_source,
+    truncate_abstract,
+)
 from athena.research.paper_scout.prompts import format_history
 from athena.research.paper_scout.schemas import (
     ACCEPT_THRESHOLD,
+    PASA_RETAIN_THRESHOLD,
     RETAIN_THRESHOLD,
     PaperScoutResult,
     ScoutCorpus,
@@ -165,6 +173,23 @@ def paper(key: str, title: str, score: float, expanded: bool = False) -> ScoutPa
     )
 
 
+def journal_paper(
+    doi: str, title: str, score: float, open_access_pdf: str = ""
+) -> ScoutPaper:
+    """一篇没有 arXiv id 的期刊论文；给了 ``open_access_pdf`` 就是能下载的那种。"""
+    return ScoutPaper(
+        paper_key=f"doi:{doi}",
+        doi=doi,
+        title=title,
+        abstract="abstract text",
+        source="search",
+        channel="semantic_scholar",
+        relevance=score,
+        open_access_pdf=open_access_pdf,
+        is_open_access=True if open_access_pdf else None,
+    )
+
+
 class PaperKeyTest(unittest.TestCase):
     def test_identifier_priority(self):
         self.assertEqual(
@@ -244,8 +269,8 @@ class PoolTest(unittest.TestCase):
         pool.add(paper("1", "High", 0.9))
         pool.add(paper("2", "Mid", 0.6))
         pool.add(paper("3", "Low", 0.2))
-        self.assertEqual(len(pool.retained(RETAIN_THRESHOLD)), 2)
-        self.assertEqual(len(pool.retained(RETAIN_THRESHOLD, 1)), 1)
+        self.assertEqual(len(pool.retained(PASA_RETAIN_THRESHOLD)), 2)
+        self.assertEqual(len(pool.retained(PASA_RETAIN_THRESHOLD, 1)), 1)
 
     def test_observation_caps_each_list_at_ten(self):
         pool = PaperPool()
@@ -278,11 +303,11 @@ class ScorerTest(unittest.TestCase):
 
     def test_partial_relevance_stays_below_the_retention_threshold(self):
         scores = parse_grades('{"1": 2, "2": 1}', 2)
-        self.assertTrue(all(score < RETAIN_THRESHOLD for score in scores))
+        self.assertTrue(all(score < PASA_RETAIN_THRESHOLD for score in scores))
         self.assertTrue(all(score >= ACCEPT_THRESHOLD for score in scores))
 
     def test_only_a_full_match_clears_the_retention_threshold(self):
-        self.assertGreaterEqual(parse_grades('{"1": 3}', 1)[0], RETAIN_THRESHOLD)
+        self.assertGreaterEqual(parse_grades('{"1": 3}', 1)[0], PASA_RETAIN_THRESHOLD)
 
     def test_missing_entries_score_zero(self):
         self.assertEqual(parse_grades('{"1": 3}', 2), [1.0, 0.0])
@@ -638,15 +663,47 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(stats.search_actions, 1)
         self.assertEqual(stats.stop_reason, "max_steps")
 
-    def test_papers_below_the_retain_threshold_are_excluded(self):
+    def test_papers_below_an_explicit_threshold_are_excluded(self):
+        result, corpus, _, _ = self.run_agent(
+            [[("paper_scout_search", {"query": "q"})]],
+            [StubBackend("stub", [paper("1", "Weak", 0.0)])],
+            scores={"Weak": 0.2},
+            max_steps=1,
+            retain_threshold=PASA_RETAIN_THRESHOLD,
+        )
+        self.assertEqual(result.paper_count, 0)
+        self.assertEqual(len(corpus.pool), 1)
+
+    def test_unfetchable_papers_are_dropped_and_counted(self):
+        """剔除要记数：交付变少可能是池子差，也可能是这批全在付费墙后。"""
+        result, corpus, stats, _ = self.run_agent(
+            [[("paper_scout_search", {"query": "q"})]],
+            [
+                StubBackend(
+                    "stub",
+                    [
+                        paper("1", "Open", 0.0),
+                        journal_paper("10.1/paywalled", "Closed", 0.0),
+                    ],
+                )
+            ],
+            scores={"Open": 0.9, "Closed": 0.9},
+            max_steps=1,
+        )
+        self.assertEqual(result.paper_count, 1)
+        self.assertEqual(len(corpus.pool), 2)
+        self.assertEqual(stats.dropped_no_source, 1)
+
+    def test_the_default_threshold_delivers_weak_papers_too(self):
+        """默认 0 之下，进了池的论文都会交付；下游在全文层面自己重排。"""
         result, corpus, _, _ = self.run_agent(
             [[("paper_scout_search", {"query": "q"})]],
             [StubBackend("stub", [paper("1", "Weak", 0.0)])],
             scores={"Weak": 0.2},
             max_steps=1,
         )
-        self.assertEqual(result.paper_count, 0)
-        self.assertEqual(len(corpus.pool), 1)
+        self.assertEqual(result.paper_count, 1)
+        self.assertEqual(len(corpus.retained), len(corpus.pool))
 
     def test_an_empty_policy_response_stops_the_loop(self):
         _, _, stats, provider = self.run_agent(
@@ -729,9 +786,16 @@ class AgentTest(unittest.TestCase):
             self.assertEqual(source.corpus_ref, result.corpus_ref)
 
     def test_papers_without_identifiers_yield_no_source_request(self):
+        """``_paper_source_request`` 的标识符兜底 —— 只在关掉可取源过滤时才走得到。
+
+        默认配置下纯标题的论文早在交付环节就被剔除了，但这层兜底仍要留着：它守的是
+        ``PaperIdentity`` 的前置条件，而不是取源成功率。
+        """
         with tempfile.TemporaryDirectory() as directory:
             artifacts = LocalArtifactStore(directory)
-            request = ScoutRequest(query="anomaly detection", max_steps=1)
+            request = ScoutRequest(
+                query="anomaly detection", max_steps=1, require_retrievable_source=False
+            )
             ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
             titled = ScoutPaper(
                 paper_key="title:only", title="Title Only", source="search"
@@ -753,6 +817,70 @@ class AgentTest(unittest.TestCase):
             self.assertEqual(result.paper_count, 1)
             self.assertIsNone(result.paper_source_request_ref)
 
+    def test_the_open_access_url_is_handed_to_paper_source_as_a_hint(self):
+        """检索阶段已经拿到了下载链接，不传下去就得让 paper_source 再解析一次 OpenAlex。
+
+        同一批里放一篇 arXiv 论文作对照：它走 arXiv 通道，不需要也不应该带线索。
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = LocalArtifactStore(directory)
+            request = ScoutRequest(query="auc", max_steps=1)
+            ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
+            agent = PaperScoutAgent(
+                artifacts,
+                [
+                    StubBackend(
+                        "semantic_scholar",
+                        [
+                            paper("1", "Preprint", 0.0),
+                            journal_paper("10.29220/csam", "L1-penalized", 0.0, OA_PDF),
+                        ],
+                    )
+                ],
+                None,
+                StubScorer({"Preprint": 1.0, "L1-penalized": 0.9}),
+                model="stub-model",
+            )
+            agent._provider = ScriptedProvider(
+                [[("paper_scout_search", {"query": "q"})]]
+            )
+            outcome = asyncio.run(agent.run(agent_context(ref)))
+            result = PaperScoutResult.model_validate_json(
+                asyncio.run(artifacts.get_text(outcome.result_ref))
+            )
+            source_request = PaperSourceRequest.model_validate_json(
+                asyncio.run(artifacts.get_text(result.paper_source_request_ref))
+            )
+
+        preprint, journal = source_request.papers
+        self.assertEqual([], preprint.hints)
+        self.assertEqual(1, len(journal.hints))
+        self.assertEqual(OA_PDF, journal.hints[0].url)
+        self.assertEqual("oa_pdf", journal.hints[0].kind)
+        self.assertEqual("semantic_scholar", journal.hints[0].channel)
+        self.assertTrue(journal.hints[0].is_open_access)
+
+    def test_title_only_papers_are_dropped_before_delivery_by_default(self):
+        result, corpus, stats, _ = self.run_agent(
+            [[("paper_scout_search", {"query": "q"})]],
+            [
+                StubBackend(
+                    "stub",
+                    [
+                        ScoutPaper(
+                            paper_key="title:only", title="Title Only", source="search"
+                        )
+                    ],
+                )
+            ],
+            scores={"Title Only": 0.9},
+            max_steps=1,
+        )
+        self.assertEqual(result.paper_count, 0)
+        self.assertEqual(len(corpus.pool), 1)
+        self.assertEqual(stats.dropped_no_source, 1)
+        self.assertIsNone(result.paper_source_request_ref)
+
     def test_max_papers_truncates_only_the_delivered_set(self):
         papers = [paper(str(index), f"P{index}", 0.0) for index in range(4)]
         result, corpus, _, _ = self.run_agent(
@@ -771,17 +899,21 @@ if __name__ == "__main__":
 
 
 class RetainThresholdTest(unittest.TestCase):
-    """交付门槛是请求字段而不是常量 —— 见 RETAIN_THRESHOLD 的说明。"""
+    """交付门槛是请求字段，默认 0 —— 见 RETAIN_THRESHOLD 的说明。"""
 
-    def test_default_reproduces_the_paper_setting(self):
-        self.assertEqual(RETAIN_THRESHOLD, ScoutRequest(query="q").retain_threshold)
+    def test_default_delivers_the_whole_pool(self):
+        """默认不按分数截断：IdeaGeneration 里漏报不可恢复，误报只是多花算力。"""
+        self.assertEqual(0.0, ScoutRequest(query="q").retain_threshold)
+
+    def test_paper_threshold_is_still_available_for_reproduction(self):
+        self.assertEqual(0.5, PASA_RETAIN_THRESHOLD)
 
     def test_threshold_is_rejected_outside_the_score_range(self):
         with self.assertRaises(ValidationError):
             ScoutRequest(query="q", retain_threshold=1.5)
 
-    def test_lowering_it_admits_the_grade_two_band(self):
-        """0.45 是 2 分（切题且有用）的分数；0.5 挡住它，0.3 放行。"""
+    def test_each_band_admits_the_expected_grades(self):
+        """0.45 是 2 分、0.2 是 1 分；打分离散，门槛只有三种有意义的取值。"""
         pool = PaperPool()
         for index, score in enumerate((1.0, 0.45, 0.2)):
             pool.add(
@@ -793,6 +925,145 @@ class RetainThresholdTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(1, len(pool.retained(RETAIN_THRESHOLD)))
+        self.assertEqual(1, len(pool.retained(PASA_RETAIN_THRESHOLD)))
         self.assertEqual(2, len(pool.retained(0.3)))
-        self.assertEqual(3, len(pool.retained(0.1)))
+        self.assertEqual(3, len(pool.retained(RETAIN_THRESHOLD)))
+
+    def test_max_papers_is_the_only_cap_at_the_default_threshold(self):
+        pool = PaperPool()
+        for index, score in enumerate((1.0, 0.45, 0.45, 0.2, 0.2)):
+            pool.add(
+                ScoutPaper(
+                    paper_key=f"arxiv:200{index}",
+                    title=f"Paper {index}",
+                    source="search",
+                    relevance=score,
+                )
+            )
+
+        top = pool.retained(RETAIN_THRESHOLD, 3)
+
+        self.assertEqual(3, len(top))
+        self.assertEqual([1.0, 0.45, 0.45], [item.relevance for item in top])
+
+
+OA_PDF = (
+    "http://www.csam.or.kr/journal/download_pdf.php?doi=10.29220/CSAM.2024.31.2.203"
+)
+
+
+class FetchableDeliveryTest(unittest.TestCase):
+    """交付集合只留取得到源的论文 —— 见 ``has_retrievable_source``。
+
+    真机命中：一次调研的交付前 8 篇里有 2 篇是付费墙期刊，取源阶段直接 ``skipped``，
+    白占了两个名额，而池里还有 28 篇同分的 arXiv 论文在排队。
+
+    判据是"拿不拿得到字节"而不是"有没有 arXiv id"：同一批数据里那篇 GOLD 期刊论文
+    上一轮真的取到了源，只按 arXiv id 判会把它一起误杀。
+    """
+
+    def build_pool(self) -> PaperPool:
+        """复刻那次真机运行的分数结构：1.0 档 4 篇，其中 2 篇是付费墙期刊。"""
+        pool = PaperPool()
+        pool.add(paper("1", "Tabular GAN", 1.0))
+        pool.add(paper("2", "Robust Low-Rank", 1.0))
+        pool.add(journal_paper("10.1002/cpe.70882", "Student Performance", 1.0))
+        pool.add(journal_paper("10.1016/j.cbc.2026.108984", "Driver Genes", 1.0))
+        for index, name in enumerate(("Consistency", "PAC-Bayes", "Proximal"), start=3):
+            pool.add(paper(str(index), name, 0.45))
+        return pool
+
+    def test_an_arxiv_id_makes_a_paper_fetchable(self):
+        self.assertTrue(has_retrievable_source(paper("1", "T", 1.0)))
+
+    def test_an_open_access_pdf_also_makes_a_paper_fetchable(self):
+        """真机对照：这篇 GOLD 期刊论文上一轮确实取到了源，不该被当成取不到。"""
+        self.assertTrue(
+            has_retrievable_source(journal_paper("10.29220/csam", "T", 1.0, OA_PDF))
+        )
+
+    def test_a_paywalled_paper_is_not_fetchable(self):
+        self.assertFalse(has_retrievable_source(journal_paper("10.1/x", "T", 1.0)))
+        self.assertFalse(
+            has_retrievable_source(
+                ScoutPaper(
+                    paper_key="s2:aaa", s2_paper_id="aaa", title="T", source="search"
+                )
+            )
+        )
+
+    def test_open_access_journals_keep_their_delivery_slot(self):
+        pool = self.build_pool()
+        pool.add(journal_paper("10.29220/csam", "L1-penalized AUC", 1.0, OA_PDF))
+
+        kept = pool.retained(RETAIN_THRESHOLD, require_retrievable_source=True)
+
+        self.assertIn("doi:10.29220/csam", [item.paper_key for item in kept])
+        self.assertEqual(6, len(kept))
+
+    def test_unfetchable_papers_never_reach_delivery(self):
+        kept = self.build_pool().retained(
+            RETAIN_THRESHOLD, require_retrievable_source=True
+        )
+
+        self.assertTrue(all(item.arxiv_id for item in kept))
+        self.assertEqual(5, len(kept))
+
+    def test_the_freed_slots_go_to_the_next_fetchable_papers(self):
+        """过滤必须在截断之前：否则名额只是空着，后面能下载的论文仍然轮不上。"""
+        pool = self.build_pool()
+
+        without = [item.paper_key for item in pool.retained(RETAIN_THRESHOLD, 4)]
+        with_filter = [
+            item.paper_key
+            for item in pool.retained(
+                RETAIN_THRESHOLD, 4, require_retrievable_source=True
+            )
+        ]
+
+        self.assertEqual(2, sum(1 for key in without if key.startswith("doi:")))
+        self.assertEqual(4, len(with_filter))
+        self.assertTrue(all(key.startswith("arxiv:") for key in with_filter))
+
+    def test_the_filter_is_on_by_default(self):
+        self.assertTrue(ScoutRequest(query="q").require_retrievable_source)
+
+    def test_it_can_be_turned_off_for_benchmarks(self):
+        """检索基准比对论文身份，不比对能不能下载，关掉才不会凭空压低 Recall。"""
+        kept = self.build_pool().retained(
+            RETAIN_THRESHOLD, require_retrievable_source=False
+        )
+
+        self.assertEqual(7, len(kept))
+        self.assertEqual(2, sum(1 for item in kept if not item.arxiv_id))
+
+
+class OpenAccessFieldTest(unittest.TestCase):
+    """``openAccessPdf`` 的解析 —— 三种形状都来自真实响应。"""
+
+    def test_a_gold_journal_yields_a_usable_url(self):
+        url, flag = open_access_pdf(
+            {"isOpenAccess": True, "openAccessPdf": {"url": OA_PDF, "status": "GOLD"}}
+        )
+        self.assertEqual(OA_PDF, url)
+        self.assertTrue(flag)
+
+    def test_a_closed_paper_yields_an_empty_url_not_a_missing_key(self):
+        """付费墙论文返回的是空串而不是缺字段，判据只能是 url 非空。"""
+        url, flag = open_access_pdf(
+            {
+                "isOpenAccess": False,
+                "openAccessPdf": {"url": "", "status": "CLOSED", "license": None},
+            }
+        )
+        self.assertEqual("", url)
+        self.assertFalse(flag)
+
+    def test_missing_and_null_payloads_degrade_to_unknown(self):
+        self.assertEqual(("", None), open_access_pdf({}))
+        self.assertEqual(("", None), open_access_pdf({"openAccessPdf": None}))
+
+    def test_the_fields_are_requested_from_the_backend(self):
+        """字段与标题摘要同批返回，漏掉它就等于把这条信号丢在上游。"""
+        self.assertIn("openAccessPdf", SEMANTIC_SCHOLAR_FIELDS)
+        self.assertIn("isOpenAccess", SEMANTIC_SCHOLAR_FIELDS)

@@ -11,9 +11,14 @@ from athena.research.paper_scout.backends import (
     paper_key_for,
     within_cutoff,
 )
-from athena.research.paper_scout.pool import PaperPool, truncate_abstract
+from athena.research.paper_scout.pool import (
+    PaperPool,
+    has_retrievable_source,
+    truncate_abstract,
+)
 from athena.research.paper_scout.schemas import (
     ACCEPT_THRESHOLD,
+    PASA_RETAIN_THRESHOLD,
     RETAIN_THRESHOLD,
     PaperScoutResult,
     ScoutAction,
@@ -36,11 +41,13 @@ from athena.research.paper_scout.tool import (
 
 __all__ = [
     "ACCEPT_THRESHOLD",
+    "PASA_RETAIN_THRESHOLD",
     "RETAIN_THRESHOLD",
     "ArxivSearchBackend",
     "BackendError",
     "GradedRelevanceScorer",
     "PaperPool",
+    "has_retrievable_source",
     "PaperScoutAgent",
     "PaperScoutExpandTool",
     "PaperScoutResult",

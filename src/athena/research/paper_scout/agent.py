@@ -19,6 +19,7 @@ from athena.core.agent.agent import AgentConfig, AgentContext, AgentOutcome, Bas
 from athena.core.agent.provider import ResponsesProvider
 from athena.core.tool import ToolRegistry
 from athena.research.paper_scout.backends import ReferenceBackend, SearchBackend
+from athena.research.paper_scout.pool import has_retrievable_source
 from athena.research.paper_scout.prompts import (
     PAPERSCOUT_SYSTEM_PROMPT,
     PAPERSCOUT_USER_PROMPT,
@@ -37,6 +38,7 @@ from athena.research.paper_source.schemas import (
     PaperIdentity,
     PaperRef,
     PaperSourceRequest,
+    SourceHint,
 )
 from athena.research.paper_scout.tool import (
     EXPAND_TOOL_NAME,
@@ -200,9 +202,16 @@ class PaperScoutAgent(BaseAgent):
         self, ctx: AgentContext, session: ScoutSession, stats: ScoutStats
     ) -> AgentOutcome:
         """汇总统计、写入 artifact 并返回 Turn 结果。"""
+        eligible = session.pool.retained(session.request.retain_threshold)
         retained = session.pool.retained(
-            session.request.retain_threshold, session.request.max_papers
+            session.request.retain_threshold,
+            session.request.max_papers,
+            require_retrievable_source=session.request.require_retrievable_source,
         )
+        if session.request.require_retrievable_source:
+            stats.dropped_no_source = sum(
+                1 for paper in eligible if not has_retrievable_source(paper)
+            )
         stats.search_actions = sum(
             1 for action in session.actions if action.kind == "search"
         )
@@ -257,6 +266,10 @@ class PaperScoutAgent(BaseAgent):
         只带真实标识符的论文才进得去：``PaperIdentity`` 要求至少一个非标题标识符，纯标题
         的候选交给下游只会变成无法解析的失败记录。全都没有标识符时返回 ``None``，与
         "零命中"区分开。顺序沿用交付顺序，即优先级。
+
+        检索阶段拿到的开放获取链接顺带传成 ``SourceHint``：``paper_source`` 会优先试
+        这些 URL，省掉一次 OpenAlex 解析，也避开了 OpenAlex 的 ``best_oa_location``
+        指向第三方镜像的已知问题。线索不是权威，字节仍然要校验。
         """
         papers = []
         for paper in retained:
@@ -271,6 +284,16 @@ class PaperScoutAgent(BaseAgent):
             except ValidationError:
                 # 后端给出的标识符格式不合法 → 跳过这一篇，而不是让整个 Turn 失败
                 continue
+            hints = []
+            if paper.open_access_pdf:
+                hints.append(
+                    SourceHint(
+                        url=paper.open_access_pdf,
+                        kind="oa_pdf",
+                        channel=paper.channel,
+                        is_open_access=paper.is_open_access,
+                    )
+                )
             papers.append(
                 PaperRef(
                     identity=identity,
@@ -278,6 +301,7 @@ class PaperScoutAgent(BaseAgent):
                         "title": paper.title,
                         "year": str(paper.year) if paper.year else "",
                     },
+                    hints=hints,
                     retrieval_channels=[paper.channel] if paper.channel else [],
                     matched_queries=[paper.origin] if paper.origin else [],
                 )

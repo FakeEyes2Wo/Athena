@@ -27,7 +27,7 @@ PSPO 训练：PSPO 是训练算法，需要 4×H800、Qwen3-4B 底座与 verl/ra
 | 动作空间 | `search(query)`、`expand(arxiv_id)` | Table 1 |
 | 观测 | 双列表，至多 10 篇已扩展 + 10 篇未扩展 | §4.1 与 A.2 |
 | 入池阈值 τ | 0.01 | A.2 |
-| 交付阈值 ρ | 0.5 | Evaluation Protocol |
+| 交付阈值 ρ | 0.5（`PASA_RETAIN_THRESHOLD`，仅复现时用，见下） | Evaluation Protocol |
 | 过程奖励 top-k | 3，判定阈值 0.4 | A.2 与开源实现 |
 | 重复动作惩罚 η | 0.5 | 式 (2) |
 | 终止条件 | 池连续三步不变 | A.2 |
@@ -48,6 +48,35 @@ PSPO 训练：PSPO 是训练算法，需要 4×H800、Qwen3-4B 底座与 verl/ra
    返回 logprobs。当前端点实测不返回 logprobs，二值判定会让 ρ 只剩两个取值、Recall@k 排序
    和 0.5 阈值同时退化，因此默认改用论文 LLM-score 一节的 0–3 分级评分归一到 [0,1]。
    `TokenProbabilityScorer` 保留了原口径，端点支持 logprobs 时可直接切换。
+4. **交付门槛与可取源过滤**。默认值不再是论文的 ρ ≥ 0.5，理由见下节；复现基准时必须显式
+   传 `retain_threshold=PASA_RETAIN_THRESHOLD, require_retrievable_source=False`。
+
+### 交付集合为什么不再用 ρ ≥ 0.5
+
+在 PaSa 里 0.5 只是算 Precision/Recall 时画的一条线：爬到的论文全都留在树里，没有任何下游
+因此拿不到它们。本仓库一度把它用作流水线闸门——`retained` 直接决定哪些论文会被下载——角色
+变了，取值却没有重新论证。
+
+两个用途的代价结构相反。基准里误报直接扣 Precision；服务 IdeaGeneration 时误报的代价只是
+多下载一篇、多转换一次，而 `paper_rag` 的 chunk 级检索根本不会把它捞出来——漏报的代价却是
+一个永远不会生成的假设，下游没有任何一段能把它找回来。
+
+而且 `GRADE_SCORES` 是离散的（0 / 0.2 / 0.45 / 1.0），非零门槛只有三种行为：
+
+| 门槛区间 | 等价含义 | 实测一次 AI4S 式查询（池 240） |
+| --- | --- | --- |
+| (0, 0.2] | 1 分及以上 | 240 篇 |
+| (0.2, 0.45] | 2 分及以上 | 32 篇 |
+| (0.45, 1.0] | 只要 3 分 | 11 篇 |
+
+"0.3" 没有独立含义，它就是"要 2 分及以上"。因此默认取 `RETAIN_THRESHOLD = 0.0`，交付集合
+等于整池按相关性降序，`max_papers` 成为唯一的量控制——这对下游也更自然，它要的是"最相关的
+N 篇"而不是"分数过线的若干篇"。取 0 不等于什么都收：τ = 0.01 仍把 0 分论文挡在池外。
+
+在此之上还有一层 `require_retrievable_source`（默认开）：没有 arXiv id、上游也没给开放获取
+链接的论文直接不进交付集合。它们取不到源，在下游只会变成一条 `skipped` 记录，却占掉一个
+`max_papers` 名额。过滤发生在截断**之前**，空出来的名额让给后面真能下载的论文；否则过滤
+只是把交付集合变短。同一次运行里这一层剔除了 82 篇。
 
 ## 执行流程
 
@@ -89,8 +118,10 @@ ScoutCorpus（retained / pool / actions）+ ScoutStats → PaperScoutResult
    −0.5。
 6. **判定终止。** 该步结束后比较池大小：连续三步没有增长即 `pool_unchanged` 停止；否则受
    `max_steps`、`max_seconds` 和取消信号约束。
-7. **产出。** 池里分数 ≥ 0.5 的论文按分数排序成交付集合，连同完整池与逐动作轨迹写成
-   `ScoutCorpus`，统计写成 `ScoutStats`，顶层返回 `PaperScoutResult`。
+7. **产出。** 池里分数 ≥ `retain_threshold`（默认 0）的论文，先剔除取不到源的，再按分数
+   降序截到 `max_papers`，成为交付集合；剔除数记进 `ScoutStats.dropped_no_source`。连同完整
+   池与逐动作轨迹写成 `ScoutCorpus`，统计写成 `ScoutStats`，顶层返回 `PaperScoutResult`。
+   检索阶段拿到的开放获取链接顺带写成 `PaperRef.hints`，`paper_source` 会优先试它们。
 
 ### 复核要点
 
@@ -101,8 +132,12 @@ ScoutCorpus（retained / pool / actions）+ ScoutStats → PaperScoutResult
   write，必须整体在锁内，且入池前要重新检查一次是否已存在。
 - **`expand` 只接受池内论文的 arXiv id。** 池外 id、无效 id、重复扩展都走同一条 −0.5 分支，
   不会去打后端。
-- **限流按服务分桶。** arXiv 每 3 秒 1 次是服务条款要求；Semantic Scholar 实测即使按 1 秒
-  间隔仍会零星返回 429，只能靠退避重试兜住，因此它是"尽力而为"通道。
+- **限流按服务分桶。** arXiv 每 3 秒 1 次是服务条款要求；Semantic Scholar 无 key 时几乎必然
+  429——实测一次运行 19 次 search 里 15 次因此失败；配上 `SEMANTIC_SCHOLAR_API_KEY` 后同一
+  查询 28 次动作只剩 4 次失败，候选池从 148 涨到 240。
+- **开放获取判定不额外花请求。** `isOpenAccess` 与 `openAccessPdf` 跟标题摘要在同一次
+  Semantic Scholar 请求里返回，只是 `fields` 串长了 27 个字符（实测响应 +45 字节 / +0.9%）。
+  付费墙论文返回的是 `{"url": "", "status": "CLOSED"}` 而不是缺字段，因此判据只能是 url 非空。
 - **单后端失败不终止动作。** 记进 `errors` 并继续用其他后端，整轮结束时 `status` 变
   `partial`。
 

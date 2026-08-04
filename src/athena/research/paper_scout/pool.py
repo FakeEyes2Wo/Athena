@@ -37,6 +37,23 @@ def title_key(title: str) -> str:
     return "".join(character for character in title if character.isalnum()).lower()
 
 
+def has_retrievable_source(paper: ScoutPaper) -> bool:
+    """论文是否存在 ``paper_source`` 拿得到的源：arXiv id，或上游给出的开放获取 PDF。
+
+    取不到源的论文进了交付集合就是一条 ``skipped`` 记录：既没有正文，又占掉一个
+    ``max_papers`` 名额，而池里排在它后面、真能下载的论文因此永远轮不上。
+
+    判据不是"有没有 DOI"而是"有没有拿得到的字节"。Semantic Scholar 的
+    ``openAccessPdf`` 在付费墙论文上返回空串、在开放获取论文上返回可直接下载的链接，
+    这个字段与标题摘要在同一次请求里返回，因此这层区分不花任何额外请求——只按
+    arXiv id 判会连同开放获取期刊论文一起误杀，而它们是真能取到的。
+
+    上游的说法未经验证，只作为线索：``paper_source`` 仍然会校验下载到的字节。判错的
+    代价是一次失败的下载，不是一篇错误的语料。
+    """
+    return bool(paper.arxiv_id or paper.open_access_pdf)
+
+
 class PaperPool:
     """按标识符与规范化标题双重去重的论文池，按相关性分数降序排列。
 
@@ -89,9 +106,22 @@ class PaperPool:
             self._papers.values(), key=lambda item: (-item.relevance, item.paper_key)
         )
 
-    def retained(self, threshold: float, limit: int = 0) -> list[ScoutPaper]:
-        """返回分数不低于阈值的论文；``limit`` 为 0 表示不截断。"""
+    def retained(
+        self,
+        threshold: float,
+        limit: int = 0,
+        *,
+        require_retrievable_source: bool = False,
+    ) -> list[ScoutPaper]:
+        """返回分数不低于阈值的论文；``limit`` 为 0 表示不截断。
+
+        ``require_retrievable_source`` 的过滤发生在截断**之前**：先剔除取不到源的，
+        再取前 ``limit`` 篇。顺序反过来的话过滤就只是把交付集合变短，空出来的名额不会
+        让位给后面能下载的论文。
+        """
         kept = [item for item in self.ranked() if item.relevance >= threshold]
+        if require_retrievable_source:
+            kept = [item for item in kept if has_retrievable_source(item)]
         return kept[:limit] if limit else kept
 
     def observation(self) -> str:
