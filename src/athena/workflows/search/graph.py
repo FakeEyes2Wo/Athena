@@ -39,7 +39,6 @@ from athena.workflows.search.idea_schemas import (
     PairwiseJudgment,
     PipelineCandidateResult,
     ResearchProblemInput,
-    RevisionDraft,
     RevisionRound,
     SkepticJudgment,
     SkepticReport,

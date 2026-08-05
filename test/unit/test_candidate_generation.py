@@ -2,6 +2,8 @@
 
 import unittest
 
+from pydantic_ai.models.function import FunctionModel
+
 from athena.workflows.search.candidate_generation import (
     GENERATION_STRATEGIES,
     MAX_VERBALIZED_SAMPLES,
@@ -16,7 +18,7 @@ from athena.workflows.search.idea_schemas import (
     HypothesisPackage,
     ResearchProblemInput,
 )
-from unit.fakes import make_routed_model
+from unit.fakes import make_routed_model, tool_call_response
 
 
 def _problem() -> ResearchProblemInput:
@@ -68,15 +70,56 @@ class GenerateOneStrategyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, package.sampling_probability)
 
 
+def _recording_model(seen: list[str]) -> FunctionModel:
+    """记录每次调用命中了哪个策略头部，再返回对应的 draft。
+
+    **不能靠 make_routed_model 来数策略调用次数**：generate_candidates 用
+    return_exceptions=True 收集结果，会把 make_routed_model 的"无匹配路由"AssertionError
+    一起吞掉——只给前 N 个策略配路由、指望多余的调用炸出来，是测不到的（Task 9 变异 M11
+    实测：把 GENERATION_STRATEGIES[:sample_size] 的截断删掉，全量测试依旧全绿）。所以改成
+    每个策略都能应答、但把实际发生的调用记下来，直接断言调用集合。
+
+    Example:
+        >>> seen = []; model = _recording_model(seen)  # doctest: +SKIP
+    """
+    def respond(messages, info):
+        prompt = str(messages)
+        for strategy in GENERATION_STRATEGIES:
+            if f"Generation strategy: {strategy.strategy_id}" in prompt:
+                seen.append(strategy.strategy_id)
+                return tool_call_response(_draft(f"hypothesis from {strategy.strategy_id}"), info)
+        raise AssertionError(f"prompt carries no strategy header: {prompt[:200]}")
+
+    return FunctionModel(respond)
+
+
 class GenerateCandidatesTest(unittest.IsolatedAsyncioTestCase):
-    async def test_runs_exactly_sample_size_strategies_in_parallel(self) -> None:
-        # 每个策略绑一条独立路由；make_routed_model 要求命中数恰好为 1，缺一条都会
-        # AssertionError——这条测试本身就在断言"确实起了 sample_size 个并发策略调用"
-        routes = {
-            _strategy_route(i): _draft(f"hypothesis-{i}") for i in range(3)
-        }
-        packages = await generate_candidates(_problem(), [], sample_size=3, model=make_routed_model(routes))
+    async def test_runs_exactly_sample_size_strategies_and_no_more(self) -> None:
+        # sample_size 是成本旋钮（1 次 vs 5 次 LLM 调用），断言必须落在"实际发起了哪些
+        # 策略调用"上，不能只看返回了几个包——返回包数会被 return_exceptions=True 的跳过
+        # 逻辑掩盖掉多余的调用。
+        seen: list[str] = []
+        packages = await generate_candidates(
+            _problem(), [], sample_size=3, model=_recording_model(seen))
         self.assertEqual(3, len(packages))
+        self.assertEqual([s.strategy_id for s in GENERATION_STRATEGIES[:3]], sorted(
+            seen, key=lambda sid: [s.strategy_id for s in GENERATION_STRATEGIES].index(sid)))
+
+    async def test_sample_size_one_runs_only_the_first_strategy(self) -> None:
+        # 上层 run_full_pipeline 的多条测试都用 sample_size=1；这条把"1 就是 1"钉死，
+        # 顺带覆盖边界值。
+        seen: list[str] = []
+        await generate_candidates(_problem(), [], sample_size=1, model=_recording_model(seen))
+        self.assertEqual([GENERATION_STRATEGIES[0].strategy_id], seen)
+
+    async def test_default_sample_size_runs_every_declared_strategy(self) -> None:
+        # MAX_VERBALIZED_SAMPLES 的文档承诺"等于 len(GENERATION_STRATEGIES)"，此前没有断言：
+        # 加第 6 个策略而忘了改常量，GENERATION_STRATEGIES[:sample_size] 会静默封顶在 5，
+        # 新策略永远不会被调用而没有任何测试变红。
+        self.assertEqual(len(GENERATION_STRATEGIES), MAX_VERBALIZED_SAMPLES)
+        seen: list[str] = []
+        await generate_candidates(_problem(), [], model=_recording_model(seen))
+        self.assertEqual({s.strategy_id for s in GENERATION_STRATEGIES}, set(seen))
 
     async def test_each_package_is_tagged_with_its_own_strategy(self) -> None:
         # 把它对应的生产代码删掉（比如把 generate_one_strategy 里传给每个调用的 strategy

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from pydantic_ai.models import Model
@@ -170,6 +171,7 @@ async def run_full_pipeline(
     model: Model | str | None = None,
     thread_id: str | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
+    emit: Callable[..., Awaitable[None]] | None = None,
 ) -> tuple[list[PipelineCandidateResult], list[RankedCandidate]]:
     """P1+P2 全流程：[2]空白挖掘 → [3]多候选生成+去重 → 每个候选跑
     [4]pre_gate(不合格直接筛掉,跳过[5]-[8]) → [5]数值性审计 → [6]三视角审阅委员会 →
@@ -187,6 +189,14 @@ async def run_full_pipeline(
     thread_id/checkpointer 原样透传给 run_graph（Task 6）：都为 None 时不启用 checkpoint，
     行为与重构前一致；同时提供才会在中断后按 thread_id 续跑，跳过已完成的节点。
 
+    emit 同样原样透传：为 None（默认）时整条链路不发任何事件，行为与不带事件时逐字节一致；
+    非 None 时 run_graph 在顶层节点边界发 idea_generation/started|step|completed，候选子图
+    另发带 candidate_index 的候选级 step 事件。**本参数存在的理由是"唯一入口"这条约束**——
+    事件桥接不能只在 run_graph 上可用，否则调用方要拿到候选级事件就必须绕过本函数、自己
+    组装 PipelineDeps，而组装 PipelineDeps 正是本函数存在的意义。事件最终挂到
+    ThreadManager 还是别处由 execution/app_server 决定（见 CLAUDE.md"四种执行形态分层未定"），
+    本函数只负责把回调透传下去，不假设消费者是谁。
+
     Example:
         >>> results, ranking = await run_full_pipeline(problem, gap_miner_agent=agent1,
         ...     novelty_agent=agent2, domain_review_agent=agent3, artifacts=store,
@@ -200,4 +210,4 @@ async def run_full_pipeline(
         domain_review_agent=domain_review_agent, model=model,
     )
     return await run_graph(problem, deps=deps, sample_size=sample_size,
-                            thread_id=thread_id, checkpointer=checkpointer)
+                            thread_id=thread_id, checkpointer=checkpointer, emit=emit)

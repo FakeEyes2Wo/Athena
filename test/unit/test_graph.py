@@ -15,13 +15,14 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import get_runtime
 from langgraph.types import Send
 
+from athena.research.ranking import PairwiseComparison
 from athena.workflows.search.graph import run_graph
 from athena.workflows.search.idea_schemas import (
     GATE_RUBRIC_VERSION, ClaimEvidence, ClaimRole, FalsifiabilityReport, GateDecision, GateVerdict,
     HypothesisPackage, PipelineCandidateResult, ResearchProblemInput, RevisionRound,
     StructuralCheckReport,
 )
-from athena.workflows.search.state import PipelineDeps
+from athena.workflows.search.state import PipelineDeps, PipelineState
 
 
 _FAKE_CORPUS_REF = "sha256:" + "c" * 64
@@ -229,9 +230,59 @@ class PipelineShellTest(unittest.IsolatedAsyncioTestCase):
             required,
         )
         self.assertEqual(
-            {"sample_size", "model", "thread_id", "checkpointer"},
+            {"sample_size", "model", "thread_id", "checkpointer", "emit"},
             optional,
         )
+
+    async def test_emit_reaches_the_candidate_subgraph_through_run_full_pipeline(self) -> None:
+        # I4：事件桥接不能只在 run_graph 上可用。run_full_pipeline 是文档声明的唯一入口，
+        # 它组装 PipelineDeps 这件事本身就是调用方使用它的理由——emit 传不进来的话，想拿
+        # 候选级事件就必须绕过它自己拼 PipelineDeps，"唯一入口"这条约束当场失效。
+        # 断言取候选级事件（带 candidate_index 的那种）而不是顶层事件：顶层事件只证明
+        # emit 到了 run_graph，候选级事件才证明它经 deps 一路带进了候选子图。
+        import athena.workflows.search.graph as graph_mod
+        from athena.workflows.search.workflow import run_full_pipeline
+
+        async def fake_mine(*a, **kw):
+            return []
+
+        async def fake_generate(*a, **kw):
+            return [HypothesisPackage(
+                idea_id="idea-1", generation_strategy="s", novel_hypothesis="h",
+                supported_premises=[], inference_chain=[], predicted_observations=["p"],
+                disconfirming_observations=["d"], lineage_op="generate",
+            )]
+
+        async def fake_falsifiability_check(*a, **kw):
+            # 强制降级 -> pre_gate 判 REVISE -> screen 后直接 END，不必搭 novelty/审阅的替身
+            raise RuntimeError("forced degrade")
+
+        for name, fake in (("mine_research_gaps", fake_mine),
+                           ("generate_candidates", fake_generate),
+                           ("falsifiability_check", fake_falsifiability_check)):
+            self.addCleanup(setattr, graph_mod, name, getattr(graph_mod, name))
+            setattr(graph_mod, name, fake)
+
+        events = []
+
+        async def emit(kind, ref, data=None):
+            events.append((kind, ref, data))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            from athena.storage.artifact_store import LocalArtifactStore
+
+            deps = _deps()
+            await run_full_pipeline(
+                _problem(), gap_miner_agent=deps.gap_miner_agent,
+                novelty_agent=deps.novelty_agent, domain_review_agent=deps.domain_review_agent,
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=1, emit=emit,
+            )
+
+        candidate_steps = [data for kind, _ref, data in events
+                           if kind == "idea_generation/step" and "candidate_index" in (data or {})]
+        self.assertTrue(candidate_steps, "no candidate-level events reached the emit callback")
+        self.assertEqual({0}, {data["candidate_index"] for data in candidate_steps})
 
     async def test_graph_has_the_top_level_nodes(self) -> None:
         from athena.workflows.search.graph import build_pipeline_graph
@@ -259,6 +310,65 @@ class CollectNodeOrderingTest(unittest.IsolatedAsyncioTestCase):
         patch_result = await collect_node(state)
 
         self.assertEqual([r0, r1, r2], patch_result["ordered_results"])
+
+
+class RankNodeConsumesOrderedResultsTest(unittest.IsolatedAsyncioTestCase):
+    """CollectNodeOrderingTest 只证明了 collect **排了序**，没有任何测试证明 rank **消费的是
+    排好序的那个字段**——把 rank_node 的 `state["ordered_results"]` 换成直接读 `results`
+    累加器，全量 560 条测试依旧全绿（Task 9 变异 M9 实测）。原因与上一轮 Elo 确定性测试
+    失去区分力是同一个：FunctionModel 驱动下 Send 分支恒按提交序完成，`results` 的到达序
+    恰好等于 index 序，两个字段在测试里恒等。
+
+    这里绕开调度时序，直接构造两份状态：两份的 `ordered_results` 都是有序的，只有 `results`
+    累加器的顺序不同（一份模拟乱序到达）。读 ordered_results 的实现两次结果必然相同；读
+    results 的实现会因为 Elo 是在线增量更新而给出不同评分。
+    """
+
+    @staticmethod
+    async def _fake_pairwise(package_a, package_b, *, llm_sem=None, model=None):
+        """确定性比较器：idea_id 字典序小的恒胜。胜负与喂入顺序无关，所以两次运行的评分
+        若不同，只可能来自 Elo 的喂入顺序，不会来自判决本身。"""
+        return PairwiseComparison(
+            idea_id_a=package_a.idea_id, idea_id_b=package_b.idea_id,
+            winner_id=min(package_a.idea_id, package_b.idea_id), rationale="lowest id wins",
+        )
+
+    async def _rank(self, results_order: list[int], ordered_order: list[int]) -> list[tuple]:
+        """把 rank_node 挂进一张只有它自己的图跑一次——rank_node 用 get_runtime 取依赖，
+        必须在 langgraph 的 runtime context 里执行，不能直接 await 它。"""
+        import athena.workflows.search.graph as graph_mod
+
+        by_index = {i: _pipeline_result(f"idea-{i}") for i in range(4)}
+
+        # 状态 schema 直接用 PipelineState，不另写一个精简版：rank_node 的入参注解就是
+        # PipelineState，langgraph 会把注解里的 channel 一并注册进图，自定义 schema 若把
+        # results 声明成没有 reducer 的普通字段，两处会撞成
+        # "Channel 'results' already exists with a different type"。
+        graph = StateGraph(PipelineState, context_schema=PipelineDeps)
+        graph.add_node("rank", graph_mod.rank_node)
+        graph.add_edge(START, "rank")
+        graph.add_edge("rank", END)
+
+        original = graph_mod.pairwise_compare
+        graph_mod.pairwise_compare = self._fake_pairwise
+        try:
+            final = await graph.compile().ainvoke(
+                {"results": [(i, by_index[i]) for i in results_order],
+                 "ordered_results": [by_index[i] for i in ordered_order]},
+                context=_deps(),
+            )
+        finally:
+            graph_mod.pairwise_compare = original
+        return [(entry.idea_id, entry.rating) for entry in final["ranking"]]
+
+    async def test_ranking_ignores_the_results_accumulator_arrival_order(self) -> None:
+        # 两次的 ordered_results 完全相同；只有 results 累加器的顺序不同（第二次模拟
+        # Send 分支按 2 -> 0 -> 3 -> 1 完成到达）。rank_node 读 ordered_results 时两次
+        # 评分必须逐位相等；读 results 时会得到不同评分（已实测四个候选足以拉开差异，
+        # 两个候选只有一次比较，测不出喂入顺序这回事）。
+        in_order = await self._rank(results_order=[0, 1, 2, 3], ordered_order=[0, 1, 2, 3])
+        scrambled = await self._rank(results_order=[2, 0, 3, 1], ordered_order=[0, 1, 2, 3])
+        self.assertEqual(in_order, scrambled)
 
 
 class CandidateSubgraphTest(unittest.IsolatedAsyncioTestCase):
@@ -593,6 +703,104 @@ class MultiRoundDebateGraphIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("risk_ok_statistics", result.revision_blocking_factor)
 
 
+    async def test_round2_reviser_failure_does_not_reuse_round1s_stale_draft(self) -> None:
+        # I1：revise_node 的 reviser-失败分支显式把 pending_draft 清成 None（graph.py 该分支
+        # 里那行注释说的就是这条）。删掉那一行，全量 560 条测试依旧全绿——no-op 分支的同一个
+        # 清空动作有覆盖（上一条用例），失败分支的没有。
+        #
+        # 场景必须是**第 2 轮** reviser 失败，且第 1 轮真的推进过：第 1 轮就失败时
+        # pending_draft 从来没被写过，残不残留没有区别，测不出这行代码。第 1 轮真实修订 +
+        # 对手回应但未清除，才会在进入第 2 轮时把一份非 None 的旧草稿留在 state 里；第 2 轮
+        # reviser 抛错后若不清空，route_after_revise 会把它当成"本轮产出了新草稿"，拿第 1 轮
+        # 的旧草稿再给对手打一次电话（多一次 LLM 调用 + 多一条语义错误的 RevisionRound），
+        # 与 run_debate 的 try/except: break 直接冲突。
+        import athena.workflows.search.graph as graph_mod
+        from pydantic_ai.models.function import FunctionModel
+
+        from athena.storage import LocalArtifactStore
+        from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS
+        from athena.workflows.search.idea_schemas import (
+            GapMiningResponse, RevisionDraft, SkepticJudgment,
+        )
+        from athena.workflows.search.workflow import run_full_pipeline
+        from unit.fakes import tool_call_response
+        from unit.test_workflow import (
+            _ROUTE_FALSIFIABILITY, _ROUTE_GAP_MINING, _ROUTE_GENERATION, _ROUTE_NOVELTY,
+            _ROUTE_REVIEW_DOMAIN, _ROUTE_REVIEW_METHODOLOGY, _ROUTE_REVIEW_STATISTICS,
+            _build_retrieval_agent, _clean_novelty_judgment, _falsifiability_judgment,
+            _problem, _valid_draft,
+        )
+
+        draft = _valid_draft()
+        blocking_risks = [f"risk {i}" for i in range(MAX_TOLERATED_RISKS + 1)]
+        round1_draft = RevisionDraft(
+            rebuttal="a matched control cohort now grounds the disconfirmer",
+            changes_made=["tightened the disconfirming observation"],
+            revised_novel_hypothesis=draft.statement,
+            revised_premises=draft.supported_premises,
+            revised_predicted_observations=draft.predicted_observations,
+            revised_disconfirming_observations=[
+                "Y stays the same after X knockout, round 1 revision (matched control cohort)"],
+        )
+        round1_critique = "still underpowered after revision"
+
+        fixed_routes = {
+            _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+            _ROUTE_GENERATION: draft,
+            _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
+            _ROUTE_NOVELTY: _clean_novelty_judgment(),
+            _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
+                critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+            _ROUTE_REVIEW_STATISTICS: SkepticJudgment(
+                critique="underpowered", unaddressed_risks=blocking_risks, fatal_flaw_found=False),
+            _ROUTE_REVIEW_DOMAIN: SkepticJudgment(
+                critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
+        }
+        # 对手每轮都回应但从不清除风险，第 1 轮因此不会提前结束辩论
+        debate_response = SkepticJudgment(
+            critique=round1_critique, unaddressed_risks=blocking_risks, fatal_flaw_found=False)
+
+        rereview_calls = {"n": 0}
+        revise_calls = {"n": 0}
+
+        def respond(messages, info):
+            prompt = str(messages)
+            if "Debate round" in prompt:
+                rereview_calls["n"] += 1
+                return tool_call_response(debate_response, info)
+            if "(this is the first round)" in prompt:
+                revise_calls["n"] += 1
+                return tool_call_response(round1_draft, info)
+            if f"reviewer replied={round1_critique}" in prompt:
+                # 第 2 轮 reviser 直接抛错（revise_candidate 单次调用即向外抛，不重试）
+                revise_calls["n"] += 1
+                raise RuntimeError("reviser provider down")
+            hits = [key for key in fixed_routes if key in prompt]
+            assert len(hits) == 1, (hits, prompt[:200])
+            return tool_call_response(fixed_routes[hits[0]], info)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results, _ranking = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(),
+                novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
+                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
+                sample_size=1, model=FunctionModel(respond),
+            )
+
+        result = results[0]
+        # reviser 两轮各一次（第 2 轮那次抛错）；对手只在第 1 轮被联系过一次——残留旧草稿
+        # 会让这个数变成 2。
+        self.assertEqual(2, revise_calls["n"])
+        self.assertEqual(1, rereview_calls["n"])
+        # 只留第 1 轮那条记录；残留旧草稿会多出一条用旧草稿伪造的第 2 轮记录
+        self.assertEqual(1, len(result.revisions))
+        self.assertEqual(1, result.revisions[0].round_index)
+        # 第 1 轮的修订确实落地了，所以 refresh -> regate 仍然跑完（与 run_debate 一致：
+        # 失败即停不等于"从未推进过"）
+        self.assertEqual("risk_ok_statistics", result.revision_blocking_factor)
+
+
 class RetryRelocationTest(unittest.IsolatedAsyncioTestCase):
     def test_revision_draft_enforces_the_falsifiability_invariant(self) -> None:
         # 把不变量上提到 LLM 面向的 schema，pydantic-ai 的输出校验重试原生接管；
@@ -830,7 +1038,12 @@ class EventBridgeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_events_carry_no_payload(self) -> None:
         # 硬约束：事件只带小摘要与 ArtifactRef，不带 payload——不能出现结果列表、候选对象
-        # 这类大对象；ref 必须是字符串，step 事件的 data 只能有 node 这一个 key
+        # 这类大对象；ref 必须是字符串，顶层 step 事件的 data 只能有 node 这一个 key。
+        #
+        # 本用例跑的是空候选快速路径，看不到候选级 step 事件（那种多一个 candidate_index）。
+        # 候选级事件的 payload 形状由
+        # test_candidate_subgraph_emits_step_events_with_candidate_index 覆盖——不要在这里
+        # 放宽断言去兼容它，那样两种形状都只剩一条宽松断言在守。
         await self._patched_empty_run()
         events = []
         async def emit(kind, ref, data=None):
@@ -894,3 +1107,16 @@ class EventBridgeTest(unittest.IsolatedAsyncioTestCase):
         _kind, ref, data = candidate_steps[0]
         self.assertEqual(0, data["candidate_index"])
         self.assertIn("candidate[0]", ref)
+
+        # I6：候选级 step 事件此前完全不受"事件只带小摘要"这条硬约束的守卫——
+        # test_events_carry_no_payload 断言的是 data 的 key 集合恰好为 {"node"}，但它跑的是
+        # 空候选路径，从来没见过候选级事件这种多带一个 candidate_index 的形状。这里补上：
+        # 候选级 step 事件的 key 集合必须恰好是 {node, candidate_index}，两个值都是小标量，
+        # 谁往里塞 package/reviews 这类大对象都会在这里变红。
+        for _k, event_ref, event_data in events:
+            self.assertIsInstance(event_ref, str)
+        for _k, _r, event_data in [e for e in events if e[0] == "idea_generation/step"
+                                   and "candidate_index" in (e[2] or {})]:
+            self.assertEqual({"node", "candidate_index"}, set(event_data.keys()))
+            self.assertIsInstance(event_data["node"], str)
+            self.assertIsInstance(event_data["candidate_index"], int)

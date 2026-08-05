@@ -3,6 +3,9 @@
 **写作时间：** 2026-08-04（第二版：并入 ④生成侧多 Agent化 / ⑤ThreadManager 事件流 两份
 提示词核对结果）→ 2026-08-05 更新：任务一/二/三/四已全部处理完（三项落地代码，一项落地
 决策 + 记录新发现的缺口），见下方每节开头的【状态】标记。全量测试跑到 560 passed。
+→ 2026-08-05 二次更新（全分支复审后）：复审用真实变异测试（改坏 → 跑测试 → 记录 RED →
+还原）发现三处 load-bearing 逻辑改坏后全量测试仍全绿，已全部补上测试；`emit` 此前传不进
+`run_full_pipeline` 也已修。测试数 560 → 565。任务一/四的【状态】按代码实际行为下调，见各节。
 **范围：** 严格限定在 `workflows/search/`（Idea Generation 任务本体）+ 它需要挂接/依赖的
 外部接口。不含下游消费方或与 Idea Generation 无直接关系的架构问题——具体排除项见文末。
 
@@ -34,9 +37,16 @@ async def run_full_pipeline(
 
 ## 任务一：Hypothesis Selector
 
-**【状态：已完成】** `hypothesis_selector.py::select_next_hypotheses`，`test_hypothesis_selector.py`
-8 条测试，含一次红→绿变异验证（排序方向）。commit `459a1d6`。下面保留原始分析——budget 是
-唯一接入的资源预算形式，"已执行实验"这项没接（见任务二）。
+**【状态：函数已实现，尚无调用方——阻塞于 Scheduler / RecordTree】**
+`hypothesis_selector.py::select_next_hypotheses`，`test_hypothesis_selector.py` 8 条测试，
+含一次红→绿变异验证（排序方向）。commit `459a1d6`。下面保留原始分析——budget 是唯一接入的
+资源预算形式，"已执行实验"这项没接（见任务二）。
+
+**为什么不标"已完成"：** 全仓库没有任何生产调用点（复审 grep 确认，只有它自己的定义和单测）。
+按设计它的调用方是控制平面 `Scheduler`，而 `agents/control/scheduler.py` 目前是 7 行 docstring
+占位；它要读的"已执行实验"信息又绕不开 ResearchTree，而 `research/record_tree.py` 根本不存在
+（`ExpCkptTree` 还没被泛化成 `RecordTree`）。两个前置都在 Idea Generation 范围之外，**这一项
+在本任务内无法闭环**，不是漏做。
 
 **文件：** `src/athena/workflows/search/hypothesis_selector.py`（当前 7 行，纯 docstring 占位）
 
@@ -185,10 +195,20 @@ Verbalized Sampling 的决策，还是先补做那个悬而未决的 Kaggle 对�
 
 ## 任务四：候选级细粒度可观测性事件（步骤 [5]-[8]）
 
-**【状态：已完成】** `candidate_node` 现在 `deps.emit` 非 None 时把候选子图从 `ainvoke` 换成
-`astream`，screen/novelty/三视角/辩论闭环逐节点发 `idea_generation/step`，`data` 里带
-`candidate_index` 区分并发候选。commit `fe4a7f0`，含红→绿变异验证。⑤(b)（AgentControl/
-ThreadManager 层次关系）仍未动，见文末排除项——那部分本来就不打算做。
+**【状态：事件已产出并可从唯一入口开启；消费方待定，属 execution/app_server 的决策】**
+`candidate_node` 在 `deps.emit` 非 None 时把候选子图从 `ainvoke` 换成 `astream`，
+screen/novelty/三视角/辩论闭环逐节点发 `idea_generation/step`，`data` 里带 `candidate_index`
+区分并发候选。commit `fe4a7f0`，含红→绿变异验证。
+
+**复审补正：** `fe4a7f0` 落地时 `emit` 只有 `run_graph` 收，`run_full_pipeline` 的签名里没有
+它——而 `workflow.py` 自己声明"`run_full_pipeline` 仍是唯一入口"，调用方想拿候选级事件就必须
+绕过它自己组装 `PipelineDeps`，而组装 `PipelineDeps` 正是这个入口存在的意义。已补上 `emit`
+参数透传 + 一条从 `run_full_pipeline` 一路验到候选子图的测试。
+
+**谁消费这些事件仍未定，且不该由本任务定：** `Scheduler` 是 7 行占位，
+`execution/thread_manager.py` 不存在（真实实现在 `app_server/thread_manager.py`），而
+CLAUDE.md 明写四种 agent 执行形态"分层未定"。沿用 paper_scout 的先例——先把域事件发出去，
+分层留给它的 owner。⑤(b)（AgentControl/ThreadManager 层次关系）仍未动，见文末排除项。
 
 **对应之前给 AI 的提示词⑤的 (a) 分支。核对结论（写这版分析时）：没有专门做过，但这次图编排
 重构顺带做出了一个更粗粒度的版本，够不上 ⑤ 想要的粒度——是"部分存在但需要加细"，不是
