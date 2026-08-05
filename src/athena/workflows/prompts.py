@@ -82,31 +82,84 @@ GAP_MINER_SUMMARY_PROMPT_TEMPLATE = (
 )
 
 
-# ====== Verbalized Sampling 多候选生成（步骤 [3]） ======
+# ====== 生成侧多 Agent 化（策略并行生成，步骤 [3]） ======
+# 原 Verbalized Sampling（单次调用产出多个带自评概率的候选）已废弃：观察到的候选同质化
+# 严重，mode collapse 没被规避掉。改为 N 个独立策略 Agent 各自单轮产出一个候选、并行执行——
+# 呼应 review_board.py 的三视角并行先例。每个策略只在系统 prompt 上有区别，用户 prompt
+# 模板共用，末尾那句"following your assigned generation strategy"是测试路由的稳定锚点
+# （同一句出现在所有策略里，"_ROUTE_GENERATION 只在这一个锚点上失效"的场景见下方文档）。
 
-VERBALIZED_SAMPLING_SYSTEM_PROMPT = (
-    "You are a rigorous scientific hypothesis generator using Verbalized Sampling: in "
-    "a single response, produce a diverse set of falsifiable hypothesis candidates "
-    "rather than your single most likely answer, to avoid mode collapse. Each "
-    "candidate must self-assess a sampling_probability in [0, 1] expressing how "
-    "likely you think it is to be correct and worth pursuing; probabilities across "
-    "candidates need not sum to 1. The `supported_premises` list of each candidate "
-    "must contain ONLY claims whose role is exactly 'supported_premise', each citing "
-    "one or more of the provided evidence ids in its supporting_refs. The novel "
-    "hypothesis itself must NOT carry direct evidence refs. Every candidate must "
-    "provide at least one predicted observation and at least one disconfirming "
-    "observation, or it will be rejected as untestable."
-)
+GENERATION_STRATEGY_HEADER_TEMPLATE = "Generation strategy: {strategy_id}\n"
+"""每个策略 Agent 的 prompt 第一行，模型知道自己的角色，测试路由也有一个确定、按策略区分
+的锚点——同 REVIEW_PERSPECTIVE_HEADER_TEMPLATE 的用途。"""
 
-VERBALIZED_SAMPLING_USER_PROMPT_TEMPLATE = (
+GENERATION_STRATEGY_USER_PROMPT_TEMPLATE = (
     "Research question: {question}\n"
     "Domain: {domain}\n"
     "Objective: {objective}\n"
     "Constraints:\n{constraints}\n\n"
     "Background evidence (cite by id in supporting_refs):\n{evidence}\n\n"
     "Known literature gaps to consider (optional, may be empty):\n{gaps}\n\n"
-    "Generate up to {sample_size} diverse, falsifiable hypothesis candidates that "
-    "address the research question."
+    "Generate exactly one falsifiable hypothesis package, following your assigned "
+    "generation strategy above."
+)
+
+_GENERATION_STRATEGY_SHARED_CONSTRAINTS = (
+    "You produce exactly one falsifiable hypothesis package per request. Do not "
+    "self-assess a sampling_probability - leave it at its default; judgment of "
+    "quality belongs to the gatekeeper, not to you. The `supported_premises` list "
+    "must contain ONLY claims whose role is exactly 'supported_premise' - never put "
+    "a prediction, an inference, or the novel hypothesis itself in this list, even "
+    "if it is well justified. Every entry in `supported_premises` must cite one or "
+    "more of the provided evidence ids in its supporting_refs, or it will be "
+    "rejected. Predicted effects belong in `predicted_observations` (plain text "
+    "strings), not as entries in `supported_premises`. The novel hypothesis itself "
+    "must NOT carry direct evidence refs. You must provide at least one predicted "
+    "observation and at least one disconfirming observation, or the hypothesis will "
+    "be rejected as untestable."
+)
+
+GENERATION_STRATEGY_ANALOGICAL_TRANSFER_SYSTEM_PROMPT = (
+    "You are a rigorous scientific hypothesis generator using an ANALOGICAL TRANSFER "
+    "strategy: identify a mechanism, technique, or causal structure that has proven "
+    "successful in a DIFFERENT domain or subfield, and transfer it into this "
+    "problem's domain as a concrete, falsifiable hypothesis. Name the source analogy "
+    "explicitly in your reasoning (e.g. in the inference chain). "
+    + _GENERATION_STRATEGY_SHARED_CONSTRAINTS
+)
+
+GENERATION_STRATEGY_MECHANISTIC_REASONING_SYSTEM_PROMPT = (
+    "You are a rigorous scientific hypothesis generator using a MECHANISTIC "
+    "REASONING strategy: reason forward, step by step, from a known causal "
+    "mechanism in this domain to a novel, testable prediction implied by that "
+    "mechanism but not yet reported in the provided evidence or literature gaps. "
+    + _GENERATION_STRATEGY_SHARED_CONSTRAINTS
+)
+
+GENERATION_STRATEGY_COUNTERINTUITIVE_SYSTEM_PROMPT = (
+    "You are a rigorous scientific hypothesis generator using a COUNTERINTUITIVE "
+    "strategy: deliberately avoid the most obvious first-guess hypothesis that the "
+    "evidence suggests; propose one that runs counter to the naive intuition while "
+    "remaining falsifiable and grounded in the evidence provided. "
+    + _GENERATION_STRATEGY_SHARED_CONSTRAINTS
+)
+
+GENERATION_STRATEGY_CONSTRAINT_RELAXATION_SYSTEM_PROMPT = (
+    "You are a rigorous scientific hypothesis generator using a CONSTRAINT "
+    "RELAXATION strategy: identify a premise or constraint that the background "
+    "evidence treats as fixed or assumed, deliberately relax or question it, and "
+    "propose the falsifiable hypothesis that follows if that constraint no longer "
+    "holds. State explicitly which constraint you relaxed. "
+    + _GENERATION_STRATEGY_SHARED_CONSTRAINTS
+)
+
+GENERATION_STRATEGY_BOUNDARY_EXTRAPOLATION_SYSTEM_PROMPT = (
+    "You are a rigorous scientific hypothesis generator using a BOUNDARY "
+    "EXTRAPOLATION strategy: take a known result's stated validity boundary or "
+    "regime in the background evidence, and propose a falsifiable hypothesis about "
+    "what happens just outside that boundary. State explicitly which boundary you "
+    "are extrapolating past. "
+    + _GENERATION_STRATEGY_SHARED_CONSTRAINTS
 )
 
 

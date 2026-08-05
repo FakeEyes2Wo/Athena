@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.models.function import FunctionModel
 
 from athena.core.agent import Agent, AgentConfig, StreamEvent
@@ -21,7 +22,7 @@ from athena.workflows.search.revision import (
     is_revisable, novelty_is_stale, refresh_stale_evidence, revise_candidate, run_debate,
     select_debate_opponent, stale_perspectives,
 )
-from unit.fakes import make_routed_model, tool_call_response
+from unit.fakes import make_routed_model
 
 _FAKE_CORPUS_REF = "sha256:" + "c" * 64
 
@@ -229,65 +230,44 @@ class ReviseCandidateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("a matched control arm is now specified", draft.rebuttal)
 
     async def test_invalid_revision_raises_and_validator_is_not_relaxed(self) -> None:
-        # 空 disconfirmers 构造不出合法 HypothesisPackage —— 这是预期路径，按 reviser 失败处理，
-        # 绝不放宽校验器（那两条不变量是 evidence_traceable 这项 rubric 的结构基础）
+        # 空 disconfirmers 构造不出合法 RevisionDraft —— 这是预期路径，按 reviser 失败处理，
+        # 绝不放宽校验器（那两条不变量是 evidence_traceable 这项 rubric 的结构基础）。
+        # 校验器现在长在 RevisionDraft 本身（Task 5），single_turn_chat 内部的
+        # pydantic-ai 输出校验会先重试一次再放弃，稳定抛出 pydantic-ai 自己公开导出的
+        # UnexpectedModelBehavior（"Exceeded maximum output retries"），不再是我们手写的
+        # ValueError——断言锁定这个具体类型，而不是宽松的 Exception（否则一个不相关的
+        # TypeError 之类的 bug 也能让这条测试假绿通过）。
         bad = _draft().model_copy(update={"revised_disconfirming_observations": []})
         model = make_routed_model({"Blocking rubric item:": bad})
-        with self.assertRaises(ValueError):
+        with self.assertRaises(UnexpectedModelBehavior):
             await revise_candidate(
                 _package(), blocking_factor="risk_ok_methodology",
                 debated_perspective="methodology", reviews=_reviews(), prior_rounds=[], model=model)
 
 
 class RevisionRetryTest(unittest.IsolatedAsyncioTestCase):
-    """MAX_REVISION_ATTEMPTS 在核心流程跑通之后接进 revise_candidate 的重试：单次瞬时失败
-    重试一次即可恢复；重试次数耗尽仍按原样上抛，run_debate 的"候选原样返回"承诺不受影响。"""
+    """revise_candidate 单次调用，不重试（Task 5：模块内重试循环已删除，OpenAI SDK
+    max_retries=2 覆盖传输层的连接错误与 4xx/5xx）。
 
-    async def test_transient_failure_is_retried_once(self) -> None:
+    test_transient_failure_is_retried_once（断言"瞬时失败重试一次后成功"）与
+    test_malformed_draft_construction_failure_is_retried_once（断言"构造失败重试一次后
+    成功"）均删除——两者测的都是模块内重试，删循环后这个行为在这条代码路径上不存在了，也没有
+    等价物可以替换；后者与 ReviseCandidateTest::test_invalid_revision_raises_and_validator_
+    is_not_relaxed 现在覆盖的是同一条路径（构造失败直接向外抛），不需要另开一条。"""
+
+    async def test_failure_raises_immediately_without_retry(self) -> None:
         calls = {"n": 0}
 
-        def flaky(messages, info):
-            # 第一次调用模拟 provider 瞬时抖动；第二次调用正常产出——make_routed_model
-            # 只能给固定响应，表达不出"先失败再成功"，这里改用手写计数器闭包的 FunctionModel。
+        def always_fails(messages, info):
             calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("transient")
-            return tool_call_response(_draft(), info)
+            raise RuntimeError("down")
 
-        revised, _draft_ = await revise_candidate(
-            _package(), blocking_factor="risk_ok_methodology",
-            debated_perspective="methodology", reviews=_reviews(), prior_rounds=[],
-            model=FunctionModel(flaky))
-        self.assertEqual(2, calls["n"])
-        self.assertEqual(1, revised.revision_round)
-
-    async def test_exhausted_retries_still_raise(self) -> None:
-        model = make_routed_model({"Blocking rubric item:": RuntimeError("down")})
         with self.assertRaises(Exception):
             await revise_candidate(
                 _package(), blocking_factor="risk_ok_methodology",
                 debated_perspective="methodology", reviews=_reviews(), prior_rounds=[],
-                model=model)
-
-    async def test_malformed_draft_construction_failure_is_retried_once(self) -> None:
-        # 设计 §5.4："reviser 调用（含修订稿构造校验失败）| 重试 1 次"——第一次产出的
-        # RevisionDraft 构造不出合法 HypothesisPackage（disconfirmers 为空），必须像瞬时
-        # provider 抖动一样被重试一次，而不是直接向外抛出、把重试预算浪费掉。
-        calls = {"n": 0}
-
-        def flaky(messages, info):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                bad = _draft().model_copy(update={"revised_disconfirming_observations": []})
-                return tool_call_response(bad, info)
-            return tool_call_response(_draft(), info)
-
-        revised, _draft_ = await revise_candidate(
-            _package(), blocking_factor="risk_ok_methodology",
-            debated_perspective="methodology", reviews=_reviews(), prior_rounds=[],
-            model=FunctionModel(flaky))
-        self.assertEqual(2, calls["n"])
-        self.assertEqual(1, revised.revision_round)
+                model=FunctionModel(always_fails))
+        self.assertEqual(1, calls["n"])
 
 
 class StalenessTest(unittest.IsolatedAsyncioTestCase):
@@ -472,8 +452,10 @@ class RunDebateTest(unittest.IsolatedAsyncioTestCase):
         # 设计 §5.4："对手重表态 | 沿用 review_board 的 fail-closed：failed=True 的
         # SkepticReport -> perspective_ok 为假 -> 未清除"。reviser 本身成功（_draft() 是一份
         # 合法的实质修订），只有对手重表态那次 single_turn_chat 失败——异常绝不能穿出
-        # run_debate（外层 run_full_pipeline 的 stage-two gather 没有 return_exceptions=True，
-        # 一个对手抖动会拖垮整批候选）。
+        # run_debate。run_debate 已经没有生产调用方（图节点 revise_node/rereview_node 是它的
+        # 细粒度等价实现，见 run_debate 自身文档字符串），这条"异常就近吞掉不向外传播"的约束
+        # 因此按"调用方可能不做任何兜底"的最坏情形设计，不依赖某个外层 gather 是否带
+        # return_exceptions=True。
         with tempfile.TemporaryDirectory() as tmp:
             final, reviews, rounds = await run_debate(
                 _package(), blocking_factor="risk_ok_methodology", reviews=_reviews(),

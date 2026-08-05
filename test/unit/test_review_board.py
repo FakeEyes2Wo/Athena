@@ -217,29 +217,9 @@ class ReviewBoardTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ReviewRetryTest(unittest.IsolatedAsyncioTestCase):
-    async def test_transient_failure_is_retried_once_then_succeeds(self) -> None:
-        calls = {"n": 0}
-
-        def respond(messages, info):
-            if "Review perspective: statistics" in str(messages):
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    raise ValueError("transient hiccup")
-            args = SkepticJudgment(
-                critique="c", unaddressed_risks=[], fatal_flaw_found=False
-            ).model_dump(mode="json")
-            tool_name = info.output_tools[0].name if info.output_tools else "final_result"
-            return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args)])
-
-        with tempfile.TemporaryDirectory() as tmp:
-            reports = await review_board(
-                _package(), _novelty(), domain_review_agent=_build_domain_agent(),
-                artifacts=LocalArtifactStore(tmp), corpus_ref=_FAKE_CORPUS_REF,
-                model=FunctionModel(respond),
-            )
-            by_id = {r.perspective: r for r in reports}
-            self.assertFalse(by_id["statistics"].failed)
-            self.assertEqual(2, calls["n"])
+    """review_or_degrade 单次尝试，不重试（Task 5：模块内重试循环已删除，OpenAI SDK
+    max_retries=2 覆盖传输层）。test_transient_failure_is_retried_once_then_succeeds
+    （断言"瞬时失败重试一次后成功"）随之删除——它测的行为不再存在，也没有等价物可以替换。"""
 
     async def test_persistent_failure_still_marks_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

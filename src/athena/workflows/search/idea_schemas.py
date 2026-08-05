@@ -611,6 +611,14 @@ class RevisionDraft(BaseModel):
         description="Revised observations that would refute the hypothesis."
     )
 
+    @model_validator(mode="after")
+    def check_revision_stays_falsifiable(self) -> "RevisionDraft":
+        # 与 HypothesisPackage 相同的不变量。放在 LLM 面向的 schema 上，让 pydantic-ai 的输出
+        # 校验重试原生接管"返回了但内容不合法"这一类，无需我们写重试代码。
+        if not self.revised_predicted_observations or not self.revised_disconfirming_observations:
+            raise ValueError("revision requires predictions and disconfirmers")
+        return self
+
 
 class RevisionRound(BaseModel):
     """Audit record for one debate round. Not a verdict.

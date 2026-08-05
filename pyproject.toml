@@ -11,6 +11,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pylatexenc>=2.10",
     "pymupdf>=1.24",
+    "langgraph>=1.2.10",
 ]
 
 [dependency-groups]

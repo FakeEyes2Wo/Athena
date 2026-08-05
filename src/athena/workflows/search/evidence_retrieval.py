@@ -207,7 +207,7 @@ async def degraded_novelty_report(
 ) -> NoveltyEvidenceReport:
     """novelty 检索失败时的降级空报告。facet_overlap 为空会命中 hard_gate 既有的"空 facet
     判 REVISE"逻辑，query_log_ref=None 让 domain_consistency 退回完整检索、不被这次失败
-    牵连。两处调用点（workflow._audit_candidate 首次审计、revision.refresh_stale_evidence
+    牵连。两处调用点（graph.novelty_node 首次审计、revision.refresh_stale_evidence
     终局刷新）的降级行为必须逐字节一致，故抽成一处，不允许两份拷贝各自维护。
 
     Example:

@@ -69,11 +69,6 @@ MAX_DEBATE_ROUNDS: int = 2
 single_turn_chat。**无经验依据**，与 MAX_TOLERATED_RISKS / MAX_TOTAL_RISKS 同属"先取保守
 起点、真实跑过几轮后一并校准"。"""
 
-MAX_REVISION_ATTEMPTS: int = 2
-"""单次 reviser 调用的最大尝试次数（即重试 1 次）。沿用 MAX_GENERATION_ATTEMPTS /
-MAX_REVIEW_ATTEMPTS 的先例，按代码规范在核心流程跑通之后才接进 revise_candidate（Task 10）。"""
-
-
 # ====== 入口条件与对手映射 ======
 
 RISK_ITEM_PREFIX: str = "risk_ok_"
@@ -199,8 +194,10 @@ async def revise_candidate(
 ) -> tuple[HypothesisPackage, RevisionDraft]:
     """跑一次修订，返回 (修订稿, RevisionDraft)。
 
-    reviser 调用最多尝试 MAX_REVISION_ATTEMPTS 次（重试 1 次瞬时失败）；重试用尽仍失败则
-    向外抛出 ValueError，行为与重试之前一致——由调用方 run_debate 按 reviser 失败处理。
+    单次调用，不重试：连接错误与 4xx/5xx 已经由 OpenAI SDK 的 max_retries=2 在传输层覆盖。
+    调用失败（含 RevisionDraft 自身校验器拒绝、修订内容构造不出合法 HypothesisPackage）一律
+    向外抛出，由调用方 run_debate/revise_node 按 reviser 失败处理——它们已有的
+    try/except 原样接管这次调用失败，不需要新机制。
 
     idea_id / sampling_probability / revision_round / lineage_op 全部由代码填，不向 LLM 索要：
     idea_id 必须保持不变（hard_gate 强制全套报告同 id），sampling_probability 原样搬运原候选的
@@ -220,37 +217,21 @@ async def revise_candidate(
         package, blocking_factor=blocking_factor, debated_perspective=debated_perspective,
         reviews=reviews, prior_rounds=prior_rounds,
     )
-    # 单次调用最多重试 MAX_REVISION_ATTEMPTS 次；名额在每次尝试内部各自获取与释放，绝不
-    # 跨两次尝试持有——持有跨调用就是候选数 >= 名额数时必然死锁的模式。for...else 保证
-    # raise 只在循环整体未 break（即所有尝试都失败）时触发，成功路径不会误触发它。
-    # 修订稿构造（HypothesisPackage(...)）必须留在 try 块内部：设计 §5.4 把"reviser 调用"
-    # 明确定义成含"修订稿构造校验失败"——一次不合法的 draft（比如 disconfirmers 为空）与
-    # 一次 provider 抖动同属"这次尝试没产出可用结果"，都该消耗同一个重试名额，而不是让
-    # 构造校验失败绕过重试直接向外抛。
-    last_error: Exception | None = None
-    for _ in range(MAX_REVISION_ATTEMPTS):
-        try:
-            async with limited_by(llm_sem):
-                draft = await single_turn_chat(prompt, RevisionDraft, model=model)
-            revised = HypothesisPackage(
-                idea_id=package.idea_id,
-                generation_strategy=package.generation_strategy,
-                sampling_probability=package.sampling_probability,
-                novel_hypothesis=draft.revised_novel_hypothesis,
-                supported_premises=draft.revised_premises,
-                inference_chain=package.inference_chain,
-                predicted_observations=draft.revised_predicted_observations,
-                disconfirming_observations=draft.revised_disconfirming_observations,
-                validation_plan_ref=None,
-                revision_round=package.revision_round + 1,
-                lineage_op="revise",
-            )
-            break
-        except Exception as error:  # noqa: BLE001 - provider 报错与修订稿构造校验失败形态都不定，重试一次后再上抛
-            last_error = error
-    else:
-        raise ValueError(f"reviser failed after {MAX_REVISION_ATTEMPTS} attempts: {last_error}")
-
+    async with limited_by(llm_sem):
+        draft = await single_turn_chat(prompt, RevisionDraft, model=model)
+    revised = HypothesisPackage(
+        idea_id=package.idea_id,
+        generation_strategy=package.generation_strategy,
+        sampling_probability=package.sampling_probability,
+        novel_hypothesis=draft.revised_novel_hypothesis,
+        supported_premises=draft.revised_premises,
+        inference_chain=package.inference_chain,
+        predicted_observations=draft.revised_predicted_observations,
+        disconfirming_observations=draft.revised_disconfirming_observations,
+        validation_plan_ref=None,
+        revision_round=package.revision_round + 1,
+        lineage_op="revise",
+    )
     return revised, draft
 
 
@@ -387,15 +368,21 @@ async def run_debate(
 ) -> tuple[HypothesisPackage, list[SkepticReport], list[RevisionRound]]:
     """跑最多 MAX_DEBATE_ROUNDS 轮辩论，返回 (最终修订稿, 更新后的审阅列表, 逐轮记录)。
 
+    **不再被图或 run_full_pipeline 调用**（Task 4 起，图节点 revise_node/rereview_node 是
+    它的细粒度等价实现——图把这里的 for 循环拆成 revise/rereview 之间的条件边循环，好让
+    每一轮都能单独作为 checkpoint 边界）。保留这个函数和它的完整实现，是因为它自己的单元
+    测试（test_revision.py::RunDebateTest）覆盖了图层 DebateCycleTest 没有覆盖到的粒度——
+    对手选择、no-op 判定、reviser/对手两条失败路径等边界情形；删除会造成测试保护净损失
+    （Task 8 清理判断的结论，见该任务报告 Step 3）。
+
     每轮恒为 2 次 single_turn_chat、0 个检索循环。llm_sem 的名额在每次调用内部获取与释放，
     **绝不跨轮持有**——跨轮持有就是候选数 >= 名额数时必然死锁的那个模式。
 
-    两条失败路径都不会"出错反而放行"，但落点不同：reviser 失败（含修订稿构造校验失败,
-    重试用尽）发生在辩论有任何进展之前，直接返回原 package/原 reviews/空 rounds；对手重表态
-    失败发生在修订稿已经构造成功之后，candidate 推进到这一轮的修订稿，但对手那份报告标记
-    failed=True 并 fail-closed（cleared=False），异常本身绝不向外传播——调用方
-    （run_full_pipeline 阶段二的 gather）没有 return_exceptions=True，任何一次未捕获的调用
-    失败都会拖垮同批全部候选。
+    两条失败路径都不会"出错反而放行"，但落点不同：reviser 失败（含修订稿构造校验失败，
+    单次调用即向外抛出、不重试）发生在辩论有任何进展之前，直接返回原 package/原 reviews/
+    空 rounds；对手重表态失败发生在修订稿已经构造成功之后，candidate 推进到这一轮的
+    修订稿，但对手那份报告标记 failed=True 并 fail-closed（cleared=False），异常本身在这个
+    函数内部就近吞掉、绝不向外传播，不依赖调用方是否会用 return_exceptions=True 兜底。
 
     Example:
         >>> final, reviews, rounds = await run_debate(package,
@@ -439,10 +426,10 @@ async def run_debate(
                 judgment = await single_turn_chat(prompt, SkepticJudgment, model=model)
         except Exception as error:  # noqa: BLE001 - 对手重表态失败：沿用 review_board 的 fail-closed 降级
             # 设计 §5.4："对手重表态 | 沿用 review_board 的 fail-closed：failed=True 的
-            # SkepticReport -> perspective_ok 为假 -> 未清除"。这次调用之外没有别的调用方，
-            # 不处理它异常会直接穿出 run_debate、穿出 _audit_candidate，落进
-            # run_full_pipeline 阶段二那个刻意没带 return_exceptions=True 的 gather——一个
-            # 对手抖动就会拖垮整批候选。修订稿本身构造成功（revise_candidate 已经跑通），
+            # SkepticReport -> perspective_ok 为假 -> 未清除"。run_debate 本身已经没有生产
+            # 调用方（见函数 docstring），但这条 fail-closed 逻辑仍按"调用方可能不做任何
+            # 兜底"的最坏情形设计：异常在这里就近吞掉，不向外传播，不依赖调用方是否会用
+            # return_exceptions=True 兜底。修订稿本身构造成功（revise_candidate 已经跑通），
             # 所以 current 仍然推进到 revised，只是把对手的这份报告标成失败，让
             # blocked_item_cleared 自然判定未清除。
             failed_report = SkepticReport(
@@ -530,7 +517,7 @@ async def refresh_stale_evidence(
                 package, agent=novelty_agent, artifacts=artifacts, corpus_ref=corpus_ref,
                 llm_sem=llm_sem, retrieval_sem=retrieval_sem, model=model,
             )
-        except Exception as error:  # noqa: BLE001 - 与 _audit_candidate 同一条降级
+        except Exception as error:  # noqa: BLE001 - 与 graph.novelty_node 同一条降级
             novelty = await degraded_novelty_report(package.idea_id, error, artifacts)
 
     prior_transcript = await read_prior_transcript(novelty, artifacts)
@@ -564,7 +551,7 @@ async def refresh_stale_evidence(
     try:
         async with limited_by(llm_sem):
             falsifiability = await falsifiability_check(package, model=model)
-    except Exception as error:  # noqa: BLE001 - 与 _screen_candidate 同一条降级
+    except Exception as error:  # noqa: BLE001 - 与 graph.screen_node 同一条降级
         falsifiability = degraded_falsifiability_report(package.idea_id, error)
     verifier = match_verifier(package, problem_domain)
     validation_plan = await plan_validation(package, verifier, artifacts=artifacts)

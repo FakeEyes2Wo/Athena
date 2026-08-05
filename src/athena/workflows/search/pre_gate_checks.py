@@ -53,7 +53,7 @@ def structural_check(package: HypothesisPackage) -> StructuralCheckReport:
 
 def degraded_falsifiability_report(idea_id: str, error: Exception) -> FalsifiabilityReport:
     """falsifiability_check 失败时的降级报告：没有证据不能算通过，交给 gatekeeper 判
-    REVISE，不静默放行。两处调用点（workflow._screen_candidate 前置筛选、
+    REVISE，不静默放行。两处调用点（graph.screen_node 前置筛选、
     revision.refresh_stale_evidence 终局刷新）的降级行为必须逐字节一致，故抽成一处。
 
     Example:

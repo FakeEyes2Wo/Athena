@@ -57,12 +57,6 @@ class ReviewPerspective:
     needs_retrieval: bool
 
 
-MAX_REVIEW_ATTEMPTS: int = 2
-"""单个视角审阅的最大尝试次数。视角从 1 个变 3 个后，fail-closed 之下单次 provider 抖动把
-候选打成 REVISE 的概率大致翻三倍。沿用生成路径 MAX_GENERATION_ATTEMPTS = 2 的先例；
-fail-closed 规则本身不变——重试用尽仍失败就照常标 failed=True。"""
-
-
 REVIEW_PERSPECTIVES: tuple[ReviewPerspective, ...] = (
     ReviewPerspective("methodology", REVIEW_METHODOLOGY_SYSTEM_PROMPT, needs_retrieval=False),
     ReviewPerspective("statistics", REVIEW_STATISTICS_SYSTEM_PROMPT, needs_retrieval=False),
@@ -240,28 +234,28 @@ async def review_one_perspective(
     )
 
 
-async def _review_with_retry(
+async def review_or_degrade(
     package: HypothesisPackage, perspective: ReviewPerspective, **kwargs
 ) -> SkepticReport:
-    """最多尝试 MAX_REVIEW_ATTEMPTS 次（即重试 1 次）仍失败才标 failed=True。
+    """跑一次视角审阅；失败就把异常映射成 failed=True 的 SkepticReport，从不向外抛。
+
+    单次尝试，不重试：连接错误与 4xx/5xx 已经由 OpenAI SDK 的 max_retries=2 在传输层覆盖，
+    这里再叠一层重试属于 code review 点名的"重试该由传输层保证"。
 
     Example:
-        >>> report = await _review_with_retry(package, REVIEW_PERSPECTIVES[0], novelty=novelty,
+        >>> report = await review_or_degrade(package, REVIEW_PERSPECTIVES[0], novelty=novelty,
         ...     domain_review_agent=agent, artifacts=store, corpus_ref=ref)  # doctest: +SKIP
         >>> report.failed  # doctest: +SKIP
         False
     """
-    last_error: Exception | None = None
-    for _ in range(MAX_REVIEW_ATTEMPTS):
-        try:
-            return await review_one_perspective(package, perspective, **kwargs)
-        except Exception as error:  # noqa: BLE001 - provider 报错形态不定，重试后再降级
-            last_error = error
-    return SkepticReport(
-        idea_id=package.idea_id, perspective=perspective.perspective_id,
-        critique=f"review failed after {MAX_REVIEW_ATTEMPTS} attempts: {last_error}",
-        unaddressed_risks=[], fatal_flaw_found=False, failed=True,
-    )
+    try:
+        return await review_one_perspective(package, perspective, **kwargs)
+    except Exception as error:  # noqa: BLE001 - provider 报错形态不定，直接降级
+        return SkepticReport(
+            idea_id=package.idea_id, perspective=perspective.perspective_id,
+            critique=f"review failed: {error}",
+            unaddressed_risks=[], fatal_flaw_found=False, failed=True,
+        )
 
 
 # ====== 审阅委员会 ======
@@ -278,13 +272,13 @@ async def review_board(
     model: Model | str | None = None,
 ) -> list[SkepticReport]:
     """对一个候选跑齐 REVIEW_PERSPECTIVES 的全部视角，返回与常量同序的报告列表。三个视角并发
-    执行（asyncio.gather 保序），并发度受 llm_sem/retrieval_sem 约束；每个视角内部先按
-    MAX_REVIEW_ATTEMPTS 重试一次瞬时失败。
+    执行（asyncio.gather 保序），并发度受 llm_sem/retrieval_sem 约束；每个视角单次尝试，不重试
+    （连接错误与 4xx/5xx 已由 OpenAI SDK 的 max_retries=2 覆盖）。
 
-    fail-closed：单个视角重试用尽仍失败，映射成 failed=True 的报告而不是抛出——审阅没跑成
-    不能等于审阅通过，判定由 hard_gate 按 failed 标志作出。外层 gather 仍保留
-    return_exceptions=True 作最后防线（例如意外的非预期异常），因为 _review_with_retry
-    已经吞掉了所有 review_one_perspective 抛出的异常，正常情况下不会再有异常穿透到这里。
+    fail-closed：单个视角失败，映射成 failed=True 的报告而不是抛出——审阅没跑成不能等于审阅
+    通过，判定由 hard_gate 按 failed 标志作出。外层 gather 仍保留 return_exceptions=True 作
+    最后防线（例如意外的非预期异常），因为 review_or_degrade 已经吞掉了所有
+    review_one_perspective 抛出的异常，正常情况下不会再有异常穿透到这里。
 
     Example:
         >>> reports = await review_board(package, novelty, domain_review_agent=agent,
@@ -293,7 +287,7 @@ async def review_board(
         ['methodology', 'statistics', 'domain_consistency']
     """
     outcomes = await asyncio.gather(*[
-        _review_with_retry(
+        review_or_degrade(
             package, perspective, novelty=novelty,
             domain_review_agent=domain_review_agent, artifacts=artifacts,
             corpus_ref=corpus_ref, llm_sem=llm_sem, retrieval_sem=retrieval_sem,

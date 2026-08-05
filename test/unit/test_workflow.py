@@ -11,7 +11,9 @@ from pydantic_ai.models.function import FunctionModel
 from athena.core.agent import Agent, AgentConfig, StreamEvent
 from athena.core.tool import ToolRegistry
 from athena.storage import LocalArtifactStore
+from athena.workflows.search.candidate_generation import GENERATION_STRATEGIES
 from athena.workflows.search.gatekeeper import MAX_TOLERATED_RISKS
+from athena.workflows.search.graph import pairwise_compare
 from athena.workflows.search.idea_schemas import (
     ClaimEvidence,
     ClaimRole,
@@ -25,13 +27,11 @@ from athena.workflows.search.idea_schemas import (
     ResearchProblemInput,
     RevisionDraft,
     SkepticJudgment,
-    VerbalizedSamplingResponse,
 )
 from athena.workflows.search.review_board import REVIEW_PERSPECTIVES, build_review_prompt
 from athena.workflows.search.revision import MAX_DEBATE_ROUNDS
 from athena.workflows.search.workflow import (
     RETRIEVAL_CONCURRENCY,
-    pairwise_compare,
     run_full_pipeline,
     run_pre_gate,
 )
@@ -45,7 +45,12 @@ _FAKE_CORPUS_REF = "sha256:" + "c" * 64
 # NOVELTY_SUMMARY 共享前缀 "Summarize the following literature exploration transcript
 # as a structured "，所以锚点必须取分岔之后的部分。
 _ROUTE_GAP_MINING = "structured list of gaps"
-_ROUTE_GENERATION = "Verbalized Sampling"
+# 生成侧改成并行多策略 Agent 后，"Verbalized Sampling" 这个锚点已经不存在于任何 prompt
+# 里；改用第一个策略（analogical_transfer）的锚点——sample_size=1 的测试只会跑这一个
+# 策略，这条路由就够用。sample_size>1 的测试各自在自己的 routes 里按策略逐条加锚点，
+# 不复用这个常量（同一个路由表里既有通配又有精确锚点，会撞上 make_routed_model 要求
+# 命中数恰好为 1 的规则）。
+_ROUTE_GENERATION = f"Generation strategy: {GENERATION_STRATEGIES[0].strategy_id}"
 _ROUTE_FALSIFIABILITY = "falsifiability auditor"
 _ROUTE_NOVELTY = "novelty and temporal-integrity assessment"
 _ROUTE_REVIEW_METHODOLOGY = "Review perspective: methodology"
@@ -193,14 +198,17 @@ def _falsifiability_judgment(ok: bool) -> FalsifiabilityJudgment:
 def _full_pipeline_routes(drafts: list[HypothesisDraft]) -> dict:
     """run_full_pipeline 全绿路径的路由表。
 
+    每个 draft 对应 GENERATION_STRATEGIES 里同下标的那个策略——调用方必须让
+    sample_size == len(drafts)，否则要么某个策略没有路由（AssertionError），要么
+    drafts 有多余的没被消费（不影响测试但说明调用有问题，检查调用点）。
+
     Example:
         >>> routes = _full_pipeline_routes([_valid_draft()])  # doctest: +SKIP
         >>> _ROUTE_GENERATION in routes  # doctest: +SKIP
         True
     """
-    return {
+    routes = {
         _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-        _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=drafts),
         _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
         _ROUTE_NOVELTY: _clean_novelty_judgment(),
         _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
@@ -211,6 +219,9 @@ def _full_pipeline_routes(drafts: list[HypothesisDraft]) -> dict:
             critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
         _ROUTE_PAIRWISE: PairwiseJudgment(winner="candidate_a", rationale="a is stronger"),
     }
+    for strategy, draft in zip(GENERATION_STRATEGIES, drafts):
+        routes[f"Generation strategy: {strategy.strategy_id}"] = draft
+    return routes
 
 
 class RunPreGateTest(unittest.IsolatedAsyncioTestCase):
@@ -340,12 +351,36 @@ class PairwiseCompareTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RunFullPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_candidates_degrades_to_empty_results_without_crashing(self) -> None:
+        # 生成全灭是合法输出,不是错误——多策略并行下,"全灭"对应"sample_size 个策略全部
+        # 调用失败",generate_candidates 用 return_exceptions=True 收集,跳过失败的那个,
+        # 全部失败则返回空列表,不向外抛。图编排下 Send fan-out 收到空列表时,langgraph
+        # 不会触发下游任何一条分支——candidate/collect/rank 整条跳过,run_graph 读
+        # final["ordered_results"] 就会因为 key 缺失而 KeyError。重构前 asyncio.gather([])
+        # 天然退化到空列表;graph.py 的 fan_out_candidates 必须在 candidates 为空时显式
+        # 路由到 "collect" 才能保住这条退化路径。
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = LocalArtifactStore(tmp)
+            model = make_routed_model({
+                _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
+                _ROUTE_GENERATION: RuntimeError("provider hiccup"),
+            })
+
+            results, ranking = await run_full_pipeline(
+                _problem(), gap_miner_agent=_build_retrieval_agent(), novelty_agent=_build_retrieval_agent(),
+                domain_review_agent=_build_retrieval_agent(),
+                artifacts=artifacts, corpus_ref=_FAKE_CORPUS_REF, sample_size=1, model=model,
+            )
+
+            self.assertEqual([], results)
+            self.assertEqual([], ranking)
+
     async def test_single_surviving_candidate_is_ranked_without_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             artifacts = LocalArtifactStore(tmp)
             model = make_routed_model({
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[_valid_draft()]),
+                _ROUTE_GENERATION: _valid_draft(),
                 _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
                 _ROUTE_NOVELTY: _clean_novelty_judgment(),
                 _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(critique="looks solid", unaddressed_risks=[],
@@ -377,7 +412,7 @@ class RunFullPipelineTest(unittest.IsolatedAsyncioTestCase):
             artifacts = LocalArtifactStore(tmp)
             model = make_routed_model({
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[_valid_draft()]),
+                _ROUTE_GENERATION: _valid_draft(),
                 _ROUTE_FALSIFIABILITY: _falsifiability_judgment(False),
             })
 
@@ -398,8 +433,8 @@ class RunFullPipelineTest(unittest.IsolatedAsyncioTestCase):
             artifacts = LocalArtifactStore(tmp)
             model = make_routed_model({
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(
-                    candidates=[_valid_draft(), _second_valid_draft()]),
+                f"Generation strategy: {GENERATION_STRATEGIES[0].strategy_id}": _valid_draft(),
+                f"Generation strategy: {GENERATION_STRATEGIES[1].strategy_id}": _second_valid_draft(),
                 _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
                 _ROUTE_NOVELTY: _clean_novelty_judgment(),
                 _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(critique="solid", unaddressed_risks=[],
@@ -695,7 +730,7 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
             )
             routes = {
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[draft]),
+                _ROUTE_GENERATION: draft,
                 _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
                 _ROUTE_NOVELTY: _clean_novelty_judgment(),
                 _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
@@ -756,7 +791,7 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
             )
             routes = {
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[draft]),
+                _ROUTE_GENERATION: draft,
                 _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
                 _ROUTE_NOVELTY: _clean_novelty_judgment(),
                 _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
@@ -821,7 +856,7 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
             )
             routes = {
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[draft]),
+                _ROUTE_GENERATION: draft,
                 _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
                 _ROUTE_NOVELTY: empty_facet_novelty,
                 _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
@@ -889,7 +924,7 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
             )
             routes = {
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[draft]),
+                _ROUTE_GENERATION: draft,
                 _ROUTE_FALSIFIABILITY: _falsifiability_judgment(True),
                 _ROUTE_NOVELTY: _clean_novelty_judgment(),
                 _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
@@ -941,7 +976,7 @@ class RevisionLoopPipelineTest(unittest.IsolatedAsyncioTestCase):
             falsifiability_calls = {"n": 0}
             routes = {
                 _ROUTE_GAP_MINING: GapMiningResponse(gaps=[]),
-                _ROUTE_GENERATION: VerbalizedSamplingResponse(candidates=[draft]),
+                _ROUTE_GENERATION: draft,
                 _ROUTE_NOVELTY: _clean_novelty_judgment(),
                 _ROUTE_REVIEW_METHODOLOGY: SkepticJudgment(
                     critique="ok", unaddressed_risks=[], fatal_flaw_found=False),
@@ -1066,7 +1101,10 @@ class RevisionLoopConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         async def fixed_generate(problem, gaps, *, sample_size, model):
             return self._fixed_candidates()
 
-        with patch("athena.workflows.search.workflow.generate_candidates",
+        # 补丁挂在 graph.generate_candidates 而非 workflow.generate_candidates：图编排改造
+        # 之后 run_full_pipeline 是薄壳，[3] 多候选生成的调用点搬去了 graph.generate_node，
+        # workflow 模块自己已经不再引用 generate_candidates 这个名字。
+        with patch("athena.workflows.search.graph.generate_candidates",
                    side_effect=fixed_generate):
             return await run_full_pipeline(
                 _problem(), gap_miner_agent=_build_retrieval_agent(),
