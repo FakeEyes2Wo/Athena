@@ -1,6 +1,6 @@
-"""Tool types, constants, and lightweight data classes.
+"""工具类型、常量和轻量级数据类。
 
-Zero logic — pure data containers shared by ``tool.py`` and ``agent.py``.
+零逻辑 — ``tool.py`` 和 ``agent.py`` 共享的纯数据容器。
 """
 
 import asyncio
@@ -8,18 +8,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-# ── EmitEvent ──
-
 EmitEvent = Callable[[str, str, dict[str, Any] | None], Awaitable[None]]
 """事件发射器: ``(kind: str, artifact_ref: str, data: dict | None) -> None``。"""
-
-# ── Event kind 常量 ──
 
 TOOL_BEGIN = "tool/begin"
 TOOL_END = "tool/end"
 TOOL_ERROR = "tool/error"
-
-# ── 数据类 ──
 
 
 @dataclass(slots=True)
@@ -46,7 +40,7 @@ class ToolSpec:
 
 @dataclass(slots=True)
 class ToolResult:
-    """Normalised tool output."""
+    """标准化的工具输出。"""
 
     data: Any
     success: bool = True
@@ -57,7 +51,7 @@ class ToolResult:
 
 @dataclass(slots=True)
 class ToolContext:
-    """Per-invocation context — created fresh for every tool call."""
+    """每次调用的上下文 — 每次工具调用时重新创建。"""
 
     tool_name: str
     call_id: str

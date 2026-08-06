@@ -1,13 +1,11 @@
-"""Athena shared fact models; large payloads stay behind artifact references."""
+"""Models owned by Athena's core research tree."""
 
-from typing import Annotated, Literal, Self, TypeAlias, List
+from typing import List, Literal, Self, TypeAlias
 
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-NonBlankText: TypeAlias = Annotated[str, StringConstraints(pattern=r"\S")]
-ArtifactRef: TypeAlias = NonBlankText
-CommitHash: TypeAlias = NonBlankText
-ExecutionId: TypeAlias = NonBlankText
+from athena.core.contracts import ArtifactRef, NonBlankText
+from athena.evaluation.types import ComparisonVerdict, EvalResult
 
 HypothesisStatus: TypeAlias = Literal[
     "PROPOSED",  # 刚刚提出假设
@@ -15,26 +13,6 @@ HypothesisStatus: TypeAlias = Literal[
     "REFUTED",  # 不支持假设
     "REJECTED",  # 彻底拒绝
 ]
-
-
-class MetricSpec(BaseModel):
-    name: NonBlankText
-    direction: Literal["maximize", "minimize"]
-
-
-class TaskMetaData(BaseModel):
-    task_type: str
-    data_type: str
-    target_vars: list[str] = Field(default_factory=list)
-    primary_metric: MetricSpec
-    constraints: list[str] = Field(default_factory=list)
-
-
-class DataCard(BaseModel):
-    dataset_ref: ArtifactRef
-    fingerprint: str
-    schema_ref: ArtifactRef
-    split_manifest_ref: ArtifactRef | None = None
 
 
 class Hypothesis(BaseModel):
@@ -47,6 +25,13 @@ class Hypothesis(BaseModel):
     evidence_refs: list[ArtifactRef] = Field(default_factory=list)
     patience_grant: int = Field(default=0, ge=0)
     patience_evidence_ref: ArtifactRef | None = None
+    id: str | None = Field(default=None, description="Unique hypothesis identifier")
+    parent_id: str | None = Field(
+        default=None, description="Parent experiment ID in ResearchTree"
+    )
+    sources: list[str] = Field(
+        default_factory=list, description="Paper URLs or model repos"
+    )
 
     @model_validator(mode="after")
     def _validate_patience(self) -> Self:
@@ -55,6 +40,7 @@ class Hypothesis(BaseModel):
         return self
 
     def to_prompt(self):
+        """将假设转为自然语言提示字符串，包含 statement、intervention、预期效果和验证状态。"""
         status_text = {
             "PROPOSED": "该假设尚未验证，需要后续实验进行评估。",
             "SUPPORTED": "实验结果支持该假设，该假设较大概率成立。",
@@ -71,31 +57,28 @@ class Hypothesis(BaseModel):
         )
 
 
-class ExperimentPlan(
-    BaseModel
-):  # 这里一定要注意，生成之前要说明工作目录。不过工作目录应该是通过程序进行处理的
+class ExperimentPlan(BaseModel):
+    """实验计划 — 描述如何修改代码目录以验证假设，含评价标准和资源预算。
+
+    生成计划前需要明确工作目录（由程序控制而非 LLM 输出）。
+    """
+
     kind: str
     change: str = Field(
         description="根据假设，Plan应该如何改变目录从而完成我们的实验部分"
     )
     rubrics: List[str] = Field(
-        description="我们建立Plan过后，这个Plan应该实现到什么程度的评价指标"
+        default_factory=list,
+        description="我们建立Plan过后，这个Plan应该实现到什么程度的评价指标",
     )
     run_config_ref: ArtifactRef
     budget: dict
     acceptance_rule: str
 
 
-class AthenaThread(BaseModel):
-    thread_id: str
-    session_id: str
-    status: str
-    context_ref: ArtifactRef
+class ExperimentOutcome(BaseModel):
+    """已完成实验的结果，存储在 ResearchTree 中。"""
 
-
-class AthenaTurn(BaseModel):
-    turn_id: str
-    thread_id: str
-    request_ref: ArtifactRef
-    status: str
-    result_ref: ArtifactRef | None = None
+    eval: EvalResult
+    verdict: ComparisonVerdict | None = None
+    is_sota: bool = False

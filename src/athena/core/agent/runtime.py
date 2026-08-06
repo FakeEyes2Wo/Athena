@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from contextlib import aclosing
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import (
     ModelRequest,
@@ -18,8 +18,15 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from athena.core.agent.models import (
+    AgentConfig,
+    AgentContext,
+    AgentOutcome,
+    StepOutcome,
+    ToolCall,
+)
 from athena.core.agent.provider import ResponsesProvider
-from athena.core.schemas import AthenaThread, AthenaTurn
+from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import EmitEvent, ToolContext, ToolResult
 from athena.memory.context_manager import ContextManager
@@ -30,55 +37,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ── 统一契约类型 ─────────────────────────────────────────────────
-
-
-@dataclass(slots=True, frozen=True)
-class AgentConfig:
-    model: str
-    system_prompt: str
-    tools: ToolRegistry
-    max_turns: int = 20
-    max_tokens: int = 4096
-    temperature: float = 0.1
-
-
-@dataclass(slots=True)
-class AgentOutcome:
-    """Agent 运行结果 — 替代 tuple 和多套返回签名。"""
-
-    result_ref: str
-    next_context_ref: str
-
-
-@dataclass(slots=True)
-class StepOutcome:
-    """采样步进结果 — kind 驱动循环分派。"""
-
-    kind: Literal["done", "continue", "error"]
-    text: str = ""
-
-
-@dataclass(slots=True)
-class ToolCall:
-    call_id: str
-    name: str
-    arguments: dict[str, Any]
-
-
-@dataclass(slots=True)
-class AgentContext:
-    """每 Turn 上下文。memory 由 ThreadRuntime 注入，Agent 不自行创建。"""
-
-    thread: AthenaThread
-    turn: AthenaTurn
-    emit: EmitEvent
-    tools: ToolRegistry
-    cancel: asyncio.Event
-    memory: "ContextManager | None" = None
-
-
 class BaseAgent(ABC):
+    """Agent 抽象基类 — 定义 ``run`` 和 ``tool`` 统一契约。
+
+    所有 Agent 实现必须提供 ``name``、``description`` 和 ``run`` 方法。
+    """
+
     name: str
     description: str
 
@@ -101,16 +65,23 @@ class Agent(BaseAgent):
 
     def __init__(
         self,
-        config: AgentConfig,
-        *,
-        client: "AsyncOpenAI | None" = None,
-        name: str = "agent",
-        description: str = "",
+        model: ResponsesProvider,
+        tools: ToolRegistry,
+        system_prompt: str,
+        config: AgentConfig | None = None,
     ) -> None:
-        self.config = config
-        self.name = name
-        self.description = description or f"Agent: {config.model}"
-        self._provider = ResponsesProvider(client=client)
+        self.model = model
+        self.tools = tools
+        self.system_prompt = system_prompt
+        self.config = config or AgentConfig()
+
+    @property
+    def name(self) -> str:
+        return self.config.name
+
+    @property
+    def description(self) -> str:
+        return f"Agent: {self.model.model_name}"
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
         mem = ctx.memory
@@ -119,11 +90,9 @@ class Agent(BaseAgent):
 
         # 注入 system prompt（每个 ContextManager 生命周期仅一次）
         user = _load_input(ctx)
-        if not _has_system(mem):
+        if self.system_prompt and not _has_system(mem):
             mem.append(
-                ModelRequest(
-                    parts=[SystemPromptPart(content=self.config.system_prompt)]
-                )
+                ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)])
             )
         if user:
             mem.append(ModelRequest(parts=[UserPromptPart(content=user)]))
@@ -132,7 +101,7 @@ class Agent(BaseAgent):
         for _ in range(self.config.max_turns):
             if ctx.cancel.is_set():
                 break
-            outcome = await _sampling_loop(self.config, ctx, self._provider)
+            outcome = await _sampling_loop(self, ctx)
             if outcome.kind == "done":
                 ref = f"result://{ctx.turn.turn_id}"
                 return AgentOutcome(
@@ -148,12 +117,16 @@ class Agent(BaseAgent):
         )
 
 
-# ── _sampling_loop ───────────────────────────────────────────────
+async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any] | None]) -> None:
+    """取消并等待所有在途工具任务；吞掉取消引发的异常。"""
+    pending = [t for t in tool_tasks if t is not None and not t.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
-async def _sampling_loop(
-    config: AgentConfig, ctx: AgentContext, provider
-) -> StepOutcome:
+async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
     """单次 LLM 采样 + 工具执行 + 结果回写。
 
     并发策略：
@@ -171,97 +144,62 @@ async def _sampling_loop(
     had_calls = False
 
     try:
-        async for ev in provider.stream(config, mem.items, ctx.cancel):
-            match ev.kind:
-                case "text_delta":
-                    text = ev.data.get("accumulated", text + ev.data.get("delta", ""))
-                    await ctx.emit(
-                        "agent/text_delta", f"event:{ctx.turn.turn_id}", ev.data
-                    )
-
-                case "function_call":
-                    had_calls = True
-                    tc = ToolCall(
-                        call_id=ev.data["call_id"],
-                        name=ev.data["name"],
-                        arguments=ev.data.get("arguments", {}),
-                    )
-                    idx = len(tool_calls)
-                    tool_calls.append(tc)
-                    tool_tasks.append(None)
-
-                    tool = config.tools.resolve(tc.name)
-                    tctx = ToolContext(
-                        tc.name, f"{ctx.turn.turn_id}:{tc.name}", ctx.emit, ctx.cancel
-                    )
-
-                    if tool.spec.concurrency_safe:
-                        # 安全工具：等待串行屏障（如存在）后并行执行
-                        async def _run_safe(
-                            barrier: asyncio.Task[Any] | None = serial_barrier,
-                            selected_tool=tool,
-                            selected_ctx=tctx,
-                            arguments=tc.arguments,
-                        ) -> ToolResult:
-                            if barrier is not None:
-                                await barrier
-                            return await selected_tool.ainvoke(
-                                selected_ctx, **arguments
-                            )
-
-                        tool_tasks[idx] = asyncio.create_task(_run_safe())
-                    else:
-                        # 非安全工具：先完成所有前置任务，自身成为后续的屏障
-                        previous = [
-                            task for task in tool_tasks[:idx] if task is not None
-                        ]
-
-                        async def _run_serial(
-                            pending: list[asyncio.Task[Any]] = previous,
-                            selected_tool=tool,
-                            selected_ctx=tctx,
-                            arguments=tc.arguments,
-                        ) -> ToolResult:
-                            if pending:
-                                await asyncio.gather(*pending, return_exceptions=True)
-                            return await selected_tool.ainvoke(
-                                selected_ctx, **arguments
-                            )
-
-                        serial_barrier = asyncio.create_task(_run_serial())
-                        tool_tasks[idx] = serial_barrier
-
-                case "response_completed":
-                    break
-
-                case "error":
-                    # 流错误：取消未完成的工具任务后返回 error 步进
-                    for task in tool_tasks:
-                        if task is not None and not task.done():
-                            task.cancel()
-                    if tool_tasks:
-                        await asyncio.gather(
-                            *[task for task in tool_tasks if task is not None],
-                            return_exceptions=True,
+        async with aclosing(
+            agent.model.stream(agent.config, agent.tools, mem.items, ctx.cancel)
+        ) as stream:
+            async for event in stream:
+                match event.kind:
+                    case "text_delta":
+                        text = event.data.get(
+                            "accumulated", text + event.data.get("delta", "")
                         )
-                    return StepOutcome(kind="error", text=ev.data.get("message", ""))
+                        await ctx.emit(
+                            "agent/text_delta", f"event:{ctx.turn.turn_id}", event.data
+                        )
+
+                    case "function_call":
+                        had_calls = True
+                        tc = ToolCall(
+                            call_id=event.data["call_id"],
+                            name=event.data["name"],
+                            arguments=event.data.get("arguments", {}),
+                        )
+                        idx = len(tool_calls)
+                        tool_calls.append(tc)
+                        tool_tasks.append(None)
+
+                        tool = agent.tools.resolve(tc.name)
+                        tctx = ToolContext(
+                            tc.name,
+                            f"{ctx.turn.turn_id}:{tc.name}",
+                            ctx.emit,
+                            ctx.cancel,
+                        )
+
+                        task = _dispatch_tool_call(
+                            tool, tctx, tc, idx, tool_tasks, serial_barrier
+                        )
+                        tool_tasks[idx] = task
+                        if not tool.spec.concurrency_safe:
+                            serial_barrier = task
+
+                    case "response_completed":
+                        break
+
+                    case "error":
+                        # 流错误：取消未完成的工具任务后返回 error 步进
+                        await _cancel_tool_tasks(tool_tasks)
+                        return StepOutcome(
+                            kind="error", text=event.data.get("message", "")
+                        )
 
     except asyncio.CancelledError:
         # 外部取消信号（ThreadRuntime 关闭 / Turn 中断）→ 清理工具任务后传播
-        for task in tool_tasks:
-            if task is not None and not task.done():
-                task.cancel()
-        if tool_tasks:
-            await asyncio.gather(
-                *[task for task in tool_tasks if task is not None],
-                return_exceptions=True,
-            )
+        await _cancel_tool_tasks(tool_tasks)
         raise
-    except Exception as exc:
+    except Exception as exc:  # Provider 流未预期异常 → 清理工具任务后返回错误
         logger.error("Provider stream 失败: %s", exc)
-        for t in tool_tasks:
-            if t and not t.done():
-                t.cancel()
+        await _cancel_tool_tasks(tool_tasks)
         return StepOutcome(kind="error", text=f"{type(exc).__name__}: {exc}")
 
     # 等待所有工具执行完成
@@ -316,7 +254,46 @@ async def _sampling_loop(
     return StepOutcome(kind="done", text=text)
 
 
-# ── create_agent / agent_runner ───────────────────────────────────
+def _dispatch_tool_call(
+    tool,
+    tctx: ToolContext,
+    tc: ToolCall,
+    idx: int,
+    tool_tasks: list[asyncio.Task[Any] | None],
+    serial_barrier: asyncio.Task[Any] | None,
+) -> asyncio.Task[Any]:
+    """根据工具是否并发安全，创建并返回对应的异步任务。
+
+    将 function_call 分支中的嵌套逻辑抽取为独立函数，
+    避免 match/case 内出现超过 3 层的代码嵌套。
+    """
+    if tool.spec.concurrency_safe:
+
+        async def _run_safe(
+            barrier: asyncio.Task[Any] | None = serial_barrier,
+            selected_tool=tool,
+            selected_ctx=tctx,
+            arguments=tc.arguments,
+        ) -> ToolResult:
+            if barrier is not None:
+                await barrier
+            return await selected_tool.ainvoke(selected_ctx, **arguments)
+
+        return asyncio.create_task(_run_safe())
+    else:
+        previous = [task for task in tool_tasks[:idx] if task is not None]
+
+        async def _run_serial(
+            pending: list[asyncio.Task[Any]] = previous,
+            selected_tool=tool,
+            selected_ctx=tctx,
+            arguments=tc.arguments,
+        ) -> ToolResult:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            return await selected_tool.ainvoke(selected_ctx, **arguments)
+
+        return asyncio.create_task(_run_serial())
 
 
 def agent_runner(agent: BaseAgent, tools: ToolRegistry):
@@ -360,20 +337,23 @@ def create_agent(
     max_tokens: int = 4096,
     temperature: float = 0.1,
     name: str = "agent",
-    description: str = "",
 ) -> Agent:
-    config = AgentConfig(
-        model=model,
-        system_prompt=system_prompt,
-        tools=tools,
-        max_turns=max_turns,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return Agent(config, client=client, name=name, description=description)
+    """创建 Agent 实例的便捷工厂函数。
+
+    将分散的配置参数统一构造为 AgentConfig 和 Agent 对象。
+    """
+    provider = ResponsesProvider(model, client=client)
+    config = AgentConfig(max_turns, max_tokens, temperature, name)
+    return create_code_agent(provider, tools, system_prompt, config)
 
 
-# ── 内部工具函数 ─────────────────────────────────────────────────
+def create_code_agent(
+    model: ResponsesProvider,
+    tools: ToolRegistry,
+    system_prompt: str,
+    config: AgentConfig | None = None,
+) -> Agent:
+    return Agent(model, tools, system_prompt, config)
 
 
 def _to_str(r: Any) -> str:
@@ -394,7 +374,9 @@ def _to_str(r: Any) -> str:
 
 
 def _load_input(ctx: AgentContext) -> str:
-    """从 turn.request_ref 提取用户输入。支持 artifact:// 前缀的文件读取。"""
+    """优先使用显式文本，否则从 request_ref 读取文本或 artifact 文件。"""
+    if ctx.input_text is not None:
+        return ctx.input_text
     ref = ctx.turn.request_ref
     if ref and ref.startswith("artifact://"):
         try:

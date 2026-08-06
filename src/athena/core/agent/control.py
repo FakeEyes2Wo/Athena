@@ -6,16 +6,18 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from athena.core.agent.agent import AgentContext, AgentOutcome
-from athena.core.schemas import AthenaThread, AthenaTurn
+from athena.core.agent.models import AgentContext, AgentOutcome
+from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.memory.context_manager import ContextManager
 
 if TYPE_CHECKING:
-    from athena.core.agent.agent import Agent
+    from athena.core.agent.runtime import Agent
 
 
 @dataclass(slots=True)
 class AgentResult:
+    """子 Agent 执行结果 — agent_id 标识来源，status 表示完成/取消状态。"""
+
     agent_id: str
     result_ref: str = ""
     status: str = "completed"
@@ -23,6 +25,8 @@ class AgentResult:
 
 @dataclass(slots=True, frozen=True)
 class AgentEvent:
+    """子 Agent 运行时事件 — 通过事件队列和 emit 双通道传递。"""
+
     kind: str
     event_ref: str
     data: dict[str, Any] | None = None
@@ -102,7 +106,7 @@ class AgentControl:
                 status="running",
             )
             ctx = AgentContext(
-                thread, turn, _emit, agent.config.tools, asyncio.Event(), memory
+                thread, turn, _emit, agent.tools, asyncio.Event(), memory
             )
 
             outcome: AgentOutcome = await agent.run(ctx)
@@ -115,7 +119,7 @@ class AgentControl:
                 handle._future.set_result(
                     AgentResult(agent_id=agent_id, status="cancelled")
                 )
-        except Exception as exc:
+        except Exception as exc:  # 子 Agent 执行异常 → 通过 future 传播给调用方
             if not handle._future.done():
                 handle._future.set_exception(exc)
         finally:
@@ -130,9 +134,9 @@ class AgentControl:
         handle._memory.append(ModelRequest(parts=[UserPromptPart(content=message)]))
 
     async def interrupt(self, agent_id: str) -> None:
-        h = self._handles.get(agent_id)
-        if h:
-            h.cancel()
+        handle = self._handles.get(agent_id)
+        if handle:
+            handle.cancel()
 
     def list_agents(self) -> list[str]:
         return list(self._handles.keys())
