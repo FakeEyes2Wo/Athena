@@ -1,0 +1,88 @@
+:root {
+  color-scheme: light;
+
+  /* background */
+  --bg: #F7F8FA;
+  --surface: #FFFFFF;
+  --surface-elevated: #F1F3F6;
+  --surface-muted: #F0F2F5;
+
+  /* border */
+  --border: rgba(0, 0, 0, 0.07);
+  --border-hover: rgba(37, 99, 235, 0.18);
+  --border-focus: rgba(37, 99, 235, 0.35);
+
+  /* accent */
+  --accent: #2563EB;
+  --accent-hover: #1D4ED8;
+  --accent-subtle: rgba(37, 99, 235, 0.06);
+
+  /* text */
+  --text-primary: #111318;
+  --text-secondary: #6B7280;
+  --text-tertiary: #9CA3AF;
+
+  /* semantic */
+  --success: #059669;
+  --warning: #D97706;
+  --danger: #DC2626;
+
+  /* shadow */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+
+  /* font */
+  --font-sans: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", "Fira Code", monospace;
+
+  /* radius */
+  --radius-panel: 16px;
+  --radius-card: 12px;
+  --radius-bubble: 14px;
+  --radius-btn: 10px;
+
+  /* spacing */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+
+  /* chart palette */
+  --chart-1: #2563EB;
+  --chart-2: #059669;
+  --chart-3: #D97706;
+  --chart-4: #7C3AED;
+  --chart-5: #DB2777;
+  --chart-6: #0891B2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  font-family: var(--font-sans);
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--text-primary);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
