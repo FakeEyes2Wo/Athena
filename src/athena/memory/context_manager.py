@@ -8,7 +8,7 @@ snapshot/items_since/rollback 构成版本化快照协议：
 
 from dataclasses import replace
 
-from pydantic_ai.messages import ModelMessage, ModelRequest
+from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
 _MAX_TOOL_RESULT_CHARS = 50_000
 _TRUNCATION_MARKER = "\n... [TRUNCATED] ...\n"
@@ -24,12 +24,11 @@ class ContextManager:
     __slots__ = ("_items", "_token_count", "_context_limit", "_version")
 
     def __init__(self, context_limit: int = 200_000) -> None:
+        """初始化空上下文，设置指定 token 上限。"""
         self._items: list[ModelMessage] = []
         self._token_count: int = 0
         self._context_limit = context_limit
         self._version: int = 0
-
-    # ── 查询 ─────────────────────────────────────────────────
 
     @property
     def items(self) -> list[ModelMessage]:
@@ -38,20 +37,22 @@ class ContextManager:
 
     @property
     def tokens(self) -> int:
+        """返回当前估算 token 数。"""
         return self._token_count
 
     @property
     def version(self) -> int:
+        """返回当前上下文版本号。"""
         return self._version
 
     @property
     def limit(self) -> int:
+        """返回上下文 token 上限。"""
         return self._context_limit
 
     def token_margin(self, ratio: float = 0.85) -> int:
+        """返回上限以下的可用 token 余量。"""
         return max(0, int(self._context_limit * ratio) - self._token_count)
-
-    # ── 快照/回滚 ────────────────────────────────────────────
 
     def snapshot(self) -> tuple[int, int]:
         """返回 (idx, version)。compaction 后 version 递增，检测过期快照。"""
@@ -72,9 +73,8 @@ class ContextManager:
         self._token_count -= removed
         self._version += 1
 
-    # ── 写入 ─────────────────────────────────────────────────
-
     def append(self, msg: ModelMessage) -> None:
+        """向上下文追加消息，更新 token 计数和版本。"""
         prepared = self._prepare(msg)
         self._items.append(prepared)
         self._token_count += self._estimate_one(prepared)
@@ -91,8 +91,6 @@ class ContextManager:
         self._token_count += added - removed
         self._version += 1
 
-    # ── 内部 ─────────────────────────────────────────────────
-
     @staticmethod
     def _prepare(msg: ModelMessage) -> ModelMessage:
         """预处理消息：深拷贝 parts 并截断过长工具返回。
@@ -104,10 +102,10 @@ class ContextManager:
             return replace(msg, parts=list(msg.parts))
         parts = list(msg.parts)
         for i, part in enumerate(parts):
+            content = getattr(part, "content", None)
             if getattr(part, "part_kind", None) == "tool-return" and isinstance(
-                getattr(part, "content", None), str
+                content, str
             ):
-                content: str = part.content
                 if len(content) > _MAX_TOOL_RESULT_CHARS:
                     budget = _MAX_TOOL_RESULT_CHARS - len(_TRUNCATION_MARKER)
                     head = budget // 2
@@ -130,3 +128,10 @@ class ContextManager:
             if a is not None:
                 total += len(str(a))
         return max(1, total // 4)
+
+
+if __name__ == "__main__":
+    ctx = ContextManager(context_limit=100_000)
+    msg = ModelRequest(parts=[SystemPromptPart(content="Hello")])
+    ctx.append(msg)
+    print(f"Tokens: {ctx.tokens}, Items: {len(ctx.items)}")

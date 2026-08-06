@@ -8,7 +8,6 @@ from athena.app_server.submissions import InterruptTurn, StartTurn
 
 logger = logging.getLogger(__name__)
 
-
 class ExecutionAdapter:
     """协议 DTO → ThreadManager 调用映射。
 
@@ -16,13 +15,13 @@ class ExecutionAdapter:
     - turn/start: SubmissionLoop 接纳后立即返回（不等 runner）
     - turn/interrupt: 中断终态已提交到 Journal 后返回
     """
-
     def __init__(self, manager, event_handlers, subscriptions) -> None:
         self._manager = manager
         self._event_handlers = event_handlers
         self._subscriptions = subscriptions
 
     async def execute(self, method: str, params: dict) -> dict:
+        """根据协议方法名路由到对应的 ThreadManager 操作。"""
         match method:
             case Method.THREAD_START:
                 handle = await self._manager.start(

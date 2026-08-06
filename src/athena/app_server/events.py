@@ -10,14 +10,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from athena.app_server.protocol import EventNotification
 from pydantic import BaseModel, Field
 
-from athena.core.schemas import ArtifactRef
+from athena.app_server.protocol import EventNotification
+from athena.core.contracts import ArtifactRef
 
 logger = logging.getLogger(__name__)
-
-# ── Event & EventJournal ──────────────────────────────────────────────
 
 
 class Event(BaseModel):
@@ -60,6 +58,7 @@ class EventJournal:
         self._condition.notify_all()
 
     def read_from(self, after_sequence: int = 0) -> AsyncIterator[Event]:
+        """返回从指定 sequence 之后开始的异步事件迭代器。"""
         return self._event_iterator(after_sequence)
 
     async def _event_iterator(self, after_sequence: int) -> AsyncIterator[Event]:
@@ -79,11 +78,10 @@ class EventJournal:
         return self._next_sequence - 1
 
 
-# ── Subscription & FairMux ────────────────────────────────────────────
-
-
 @dataclass(slots=True)
 class Subscription:
+    """事件订阅——追踪 cursor、缓冲队列和活跃状态。"""
+
     subscription_id: str
     thread_id: str
     cursor: int = 0
@@ -105,21 +103,25 @@ class FairMux:
         self._wake = asyncio.Event()  # add() 时 set，唤醒 _run 检测新订阅
 
     def add(self, sub: Subscription) -> None:
+        """添加订阅并唤醒轮询循环。"""
         self._subs[sub.subscription_id] = sub
         self._has_subscriptions.set()
         self._wake.set()  # 唤醒 _run 以检测新订阅的数据
 
     def remove(self, subscription_id: str) -> None:
+        """移除订阅；无订阅时清除标记信号量。"""
         self._subs.pop(subscription_id, None)
         if not self._subs:
             self._has_subscriptions.clear()
 
     async def start(self) -> None:
+        """启动 FairMux 后台轮询任务。"""
         if self._task is not None:
             return
         self._task = asyncio.create_task(self._run(), name="fair-mux")
 
     async def stop(self) -> None:
+        """取消 FairMux 后台任务并等待退出。"""
         if self._task is not None:
             self._task.cancel()
             try:

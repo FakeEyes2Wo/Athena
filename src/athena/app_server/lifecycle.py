@@ -24,31 +24,24 @@ DEFAULT_STARTUP_TIMEOUT = 5.0
 DEFAULT_SHUTDOWN_TIMEOUT = 5.0
 
 
-class _aclose_context:
-    """将 ``transport.aclose()`` 适配为 async context manager。"""
-
-    def __init__(self, transport):
-        self._t = transport
-
-    async def __aenter__(self):
-        return self._t
-
-    async def __aexit__(self, *args):
-        await self._t.aclose()
-
-
 class ThreadEventHandlerRegistry:
+    """Thread 事件处理器注册表 — 管理 Thread 生命周期回调的注册与清理。"""
+
     def __init__(self):
         self._handlers: dict[str, object] = {}
 
     async def attach(self, thread_id: str) -> None:
+        """为 Thread 注册事件处理回调。"""
         self._handlers.setdefault(thread_id, None)
 
     async def stop_all(self) -> None:
+        """清理所有已注册的处理器。"""
         self._handlers.clear()
 
 
 class SubscriptionRegistry:
+    """订阅注册表 — 创建/管理 EventJournal 订阅，通过 FairMux 多路复用事件。"""
+
     def __init__(self, mux: FairMux, manager=None):
         self._mux = mux
         self._manager = manager
@@ -140,7 +133,7 @@ class AppServer:
             transport = Transport(
                 control_capacity=control_capacity, event_capacity=event_capacity
             )
-            await stack.enter_async_context(_aclose_context(transport))
+            stack.push_async_callback(transport.aclose)
             mux = FairMux(transport.send_event)
             await mux.start()
             stack.push_async_callback(mux.stop)
@@ -198,6 +191,7 @@ class AppServer:
                 self.client.request("server/shutdown", timeout=timeout), timeout=timeout
             )
         except Exception:
+            # 关闭请求失败（Server 可能已关闭）→ 忽略，继续清理本地资源
             pass
         await self._exit_stack.aclose()
         if self._owns_manager and hasattr(self.manager, "aclose"):

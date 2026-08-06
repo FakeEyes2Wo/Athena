@@ -7,9 +7,7 @@ Submission 是 ThreadRuntime 内部控制消息，不是公开协议 DTO。
 import asyncio
 from dataclasses import dataclass, field
 
-from athena.core.schemas import ArtifactRef
-
-# Op — 操作判别联合
+from athena.core.contracts import ArtifactRef
 
 
 @dataclass(slots=True)
@@ -45,8 +43,6 @@ class ShutdownThread:
 # 未来: ResolveApproval, ResolveUserInput
 Op = StartTurn | InterruptTurn | GetForkSnapshot | ShutdownThread
 
-# Submission — 内控消息
-
 
 @dataclass(slots=True)
 class Submission:
@@ -60,9 +56,6 @@ class Submission:
     op: Op
     reply: asyncio.Future[object] = field(default_factory=asyncio.Future)
     trace_context: dict[str, str] | None = None
-
-
-# RuntimeSignal — runner 终态
 
 
 @dataclass(slots=True)
@@ -90,8 +83,6 @@ class RunnerCancelled:
 
 
 RuntimeSignal = RunnerSucceeded | RunnerFailed | RunnerCancelled
-
-# TurnRuntime — 活动 Turn 所有权对象
 
 
 @dataclass(slots=True)
