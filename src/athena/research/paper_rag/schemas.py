@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 
 
 class CorpusSentence(BaseModel):
@@ -30,16 +30,12 @@ class CorpusEntry(BaseModel):
         default_factory=list, description="Section ancestry used for orientation."
     )
     text: str = Field(description="Full retrieval text of this chunk.")
-    visual_ids: list[str] = Field(
+    related_ids: list[str] = Field(
         default_factory=list,
         description=(
-            "Units on the other side of the text/visual link: the figures and "
-            "tables a text chunk discusses, or the text chunks discussing a visual."
+            "Identifiers of directly related units: the visuals a text chunk "
+            "discusses, or the text chunks that discuss a visual."
         ),
-    )
-    cited_ids: list[str] = Field(
-        default_factory=list,
-        description="Anchor units of in-corpus papers this chunk cites.",
     )
     sentence_start: int = Field(
         ge=0, description="Inclusive index of this entry's first sentence."
@@ -95,13 +91,11 @@ class SearchHit(BaseModel):
     )
     score: float = Field(description="Channel-specific relevance score.")
     snippet: str = Field(description="Matched sentences only, never the full chunk.")
-    visual_ids: list[str] = Field(
+    related_ids: list[str] = Field(
         default_factory=list,
-        description="Linked figure/table or discussing-text ids for paper_visual_of.",
-    )
-    cited_ids: list[str] = Field(
-        default_factory=list,
-        description="In-corpus papers this chunk cites, for paper_cites.",
+        description=(
+            "Related figure/table or text chunk ids, ready to pass to paper_chunk_read."
+        ),
     )
 
 
@@ -121,11 +115,9 @@ class ChunkRead(BaseModel):
         default_factory=list, description="Section ancestry of the chunk."
     )
     text: str = Field(default="", description="Full chunk text or a short notice.")
-    visual_ids: list[str] = Field(
+    related_ids: list[str] = Field(
         default_factory=list,
-        description="Linked figure/table or discussing-text ids for paper_visual_of.",
-    )
-    cited_ids: list[str] = Field(
-        default_factory=list,
-        description="In-corpus papers this chunk cites, for paper_cites.",
+        description=(
+            "Related figure/table or text chunk ids, ready to pass to paper_chunk_read."
+        ),
     )

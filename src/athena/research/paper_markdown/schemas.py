@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 
 if TYPE_CHECKING:
     from athena.storage.artifact_store import ArtifactStore
@@ -33,7 +33,7 @@ VisualKind = Literal["figure", "table", "equation", "page"]
 TexSourceFormat = Literal["auto", "tar", "tar.gz", "zip", "gzip", "plain"]
 VisualPolicy = Literal["required", "best_effort"]
 InterpretationStatus = Literal["interpreted", "unavailable", "unknown"]
-QualityStatus = Literal["pass", "pass_with_notes", "degraded", "unknown"]
+QualityStatus = Literal["pass", "degraded", "unknown"]
 
 
 class ChunkingConfig(BaseModel):

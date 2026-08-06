@@ -12,7 +12,7 @@ import json
 import math
 import re
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import PaperContent, RetrievalUnit
 from athena.research.paper_rag.interfaces import TextEmbedder
 from athena.research.paper_rag.schemas import (
@@ -24,30 +24,6 @@ from athena.storage.artifact_store import ArtifactStore
 
 SENTENCE_END = re.compile(r"[.!?](?=\s)")
 WORD_BOUNDARY = re.compile(r"[\s(\[]")
-SEMANTIC_MARGIN_THRESHOLD = 0.25
-# 每组是（锚句，改写句，无关句）。锚句与改写句刻意不共享实词，词法编码器因此无法把改写
-# 句排在无关句前面；三组覆盖不同措辞，避免个别词偶然重合让探针失效。
-SEMANTIC_PROBES = (
-    (
-        "Retrieval augmentation reduces hallucination in question answering.",
-        "Grounding a model in fetched documents makes its answers more factual.",
-        "The cat slept on the windowsill all afternoon without moving.",
-    ),
-    (
-        "The optimizer converged faster with a smaller learning rate.",
-        "Training reached its plateau sooner once step sizes were reduced.",
-        "She bought three loaves of bread and a jar of honey.",
-    ),
-    (
-        "Ablation shows the reranking stage contributes most of the gain.",
-        "Removing the second-pass scoring component costs nearly all improvement.",
-        "Heavy rain delayed the ferry departure until the following morning.",
-    ),
-)
-BIBLIOGRAPHY_KIND = "bibliography"
-ABSTRACT_KIND = "abstract"
-CITATION_KEY = re.compile(r"\[@([^\]\s]+)\]")
-MIN_TITLE_MATCH_CHARS = 20
 HEADING_PATH_PREFIX = "> Section:"
 TABLE_DELIMITER = re.compile(r"^\|[\s\-:|]+\|?$")
 DISPLAY_MATH_FENCES = {"$$": "$$", "\\[": "\\]"}
@@ -247,24 +223,22 @@ def split_sentences(text: str) -> list[tuple[int, int]]:
     return joined
 
 
-def visual_link_ids(unit: RetrievalUnit) -> list[str]:
-    """取出该单元的图文互链 id，并补上论文命名空间。
+def related_unit_ids(unit: RetrievalUnit) -> list[str]:
+    """取出与该单元直接关联的其他单元 id，并补上论文命名空间。
 
     正文 chunk 的 ``visual_ids`` 指向它讨论的图表，视觉单元的 ``chunk_ids`` 指向讨论它
     的正文；上游两侧都只存裸 id，加上命名空间后才能直接交给 ``paper_chunk_read``。
-
-    这条边与引用边分开存放：两者的语义完全不同（一个留在篇内，一个跨到另一篇论文），
-    合并成一个无类型列表会让 Agent 只能盲跟。
     """
     namespace = unit.metadata.get("retrieval_namespace", "")
     linked = unit.metadata.get("visual_ids") or unit.metadata.get("chunk_ids") or ""
     return [f"{namespace}:{item}" for item in linked.split(",") if item]
 
 
-async def embed_texts(
-    store: ArtifactStore, texts: list[str], embedder: TextEmbedder
+async def embed_sentences(
+    store: ArtifactStore, index: PaperCorpusIndex, embedder: TextEmbedder
 ) -> ArtifactRef:
-    """分批编码并归一化后落盘，向量顺序与输入一一对应。"""
+    """分批编码全部句子并归一化后落盘，向量顺序与 ``index.sentences`` 一一对应。"""
+    texts = [index.sentence_text(position) for position in range(len(index.sentences))]
     vectors: list[list[float]] = []
     for start in range(0, len(texts), EMBED_BATCH):
         batch = await embedder.embed(texts[start : start + EMBED_BATCH])
@@ -272,155 +246,20 @@ async def embed_texts(
     return await store.put_text(json.dumps(vectors))
 
 
-async def embed_sentences(
-    store: ArtifactStore, index: PaperCorpusIndex, embedder: TextEmbedder
-) -> ArtifactRef:
-    """编码全部句子，向量顺序与 ``index.sentences`` 一一对应。"""
-    return await embed_texts(
-        store,
-        [index.sentence_text(position) for position in range(len(index.sentences))],
-        embedder,
-    )
-
-
-class NonSemanticEmbedderError(RuntimeError):
-    """注入的编码器无法把改写句与无关句区分开，语义检索会退化成噪声。"""
-
-
-async def semantic_margin(embedder: TextEmbedder) -> float:
-    """探针测量编码器的语义分辨力：改写句与无关句的余弦相似度之差。
-
-    每组探针的锚句与其改写句刻意不共享实词，因此**词法编码器无法把改写句排在无关句
-    前面**，而语义编码器可以。实测同一组探针上词法 bag-of-words 得 0.114，
-    ``qwen3.7-text-embedding`` 得 0.502，相差 4.4 倍，中间留得下阈值。
-    """
-    texts = [text for probe in SEMANTIC_PROBES for text in probe]
-    vectors = [normalize(vector) for vector in await embedder.embed(texts)]
-    margins = []
-    for position in range(0, len(vectors), 3):
-        anchor, paraphrase, unrelated = vectors[position : position + 3]
-        near = sum(left * right for left, right in zip(anchor, paraphrase))
-        far = sum(left * right for left, right in zip(anchor, unrelated))
-        margins.append(near - far)
-    return sum(margins) / len(margins) if margins else 0.0
-
-
-async def require_semantic_embedder(embedder: TextEmbedder) -> float:
-    """在组合根启动时校验编码器确实是语义的；不合格直接拒绝，返回实测 margin。
-
-    这一步刻意不放进 ``build_corpus_index``：它要额外打一次模型，而单元测试用假编码器
-    是正当的。它属于装配期检查——一次错误注入会让之后每一次检索都无声地返回噪声，实测
-    词法与神经编码的 MRR 相差 8.7 倍、R@1 仅 0.025。
-    """
-    margin = await semantic_margin(embedder)
-    if margin < SEMANTIC_MARGIN_THRESHOLD:
-        raise NonSemanticEmbedderError(
-            f"Embedder '{getattr(embedder, 'model', '?')}' separates paraphrase from "
-            f"unrelated text by only {margin:.3f}; semantic retrieval needs at least "
-            f"{SEMANTIC_MARGIN_THRESHOLD}. Inject a neural text embedder."
-        )
-    return margin
-
-
-def title_key(title: str) -> str:
-    """把标题规范化成匹配键；``title_key("Attention Is All You Need!")`` 返回
-    ``"attentionisallyouneed"``。"""
-    return "".join(character for character in title if character.isalnum()).lower()
-
-
-def paper_anchors(units_by_paper: list[list[RetrievalUnit]]) -> dict[str, str]:
-    """给每篇论文选一个可被引用指向的落点：优先摘要，否则第一个单元。"""
-    anchors: dict[str, str] = {}
-    for units in units_by_paper:
-        if not units:
-            continue
-        namespace = units[0].metadata.get("retrieval_namespace", "")
-        chosen = next((item for item in units if item.kind == ABSTRACT_KIND), units[0])
-        anchors[namespace] = chosen.unit_id
-    return anchors
-
-
-def citation_edges(
-    units_by_paper: list[list[RetrievalUnit]], anchors: dict[str, str]
-) -> dict[tuple[str, str], str]:
-    """把参考文献条目解析成 ``(命名空间, 引用键) → 被引论文落点`` 的边。
-
-    只认语料内部的引用：一条参考文献的文本里若包含语料中某篇论文的规范化标题，就把该
-    条目的引用键连到那篇论文。跨出语料的引用没有落点，留着只会变成 ``not_found``。
-    标题短于 ``MIN_TITLE_MATCH_CHARS`` 时不参与匹配，避免"RAG"这类短名误连。
-    """
-    catalogue = [
-        (title_key(units[0].metadata.get("title", "")), namespace)
-        for units, namespace in (
-            (items, items[0].metadata.get("retrieval_namespace", ""))
-            for items in units_by_paper
-            if items
-        )
-        if len(title_key(units[0].metadata.get("title", ""))) >= MIN_TITLE_MATCH_CHARS
-    ]
-    edges: dict[tuple[str, str], str] = {}
-    for units in units_by_paper:
-        for unit in units:
-            if unit.kind != BIBLIOGRAPHY_KIND:
-                continue
-            namespace = unit.metadata.get("retrieval_namespace", "")
-            normalized = title_key(unit.text)
-            target = next(
-                (
-                    anchors[cited]
-                    for key, cited in catalogue
-                    if cited != namespace and key in normalized
-                ),
-                None,
-            )
-            if target is None:
-                continue
-            for citation_key in CITATION_KEY.findall(unit.text):
-                edges[(namespace, citation_key)] = target
-    return edges
-
-
-def cited_paper_ids(
-    unit: RetrievalUnit, edges: dict[tuple[str, str], str]
-) -> list[str]:
-    """取出该单元引用到的、语料内部论文的落点 id，保持出现顺序且去重。"""
-    namespace = unit.metadata.get("retrieval_namespace", "")
-    found: list[str] = []
-    for citation_key in unit.metadata.get("citation_keys", "").split(","):
-        target = edges.get((namespace, citation_key.strip()))
-        if target and target not in found:
-            found.append(target)
-    return found
-
-
 async def build_corpus_index(
     store: ArtifactStore,
     papers: list[PaperContent],
     embedder: TextEmbedder | None = None,
-    *,
-    index_bibliography: bool = False,
 ) -> ArtifactRef:
     """把若干篇论文构建成可检索语料，返回三个检索工具接受的 ``corpus_ref``。
 
     没有 ``embedder`` 时仍产出完整索引，只是不生成句向量：关键词检索与整篇读取照常可
     用，语义检索会明确报错而不是静默返回空结果。
-
-    参考文献默认不作为独立检索单元，而是解析成引用边挂到引用它的正文 chunk 上（见
-    ``citation_edges``）。实测一篇论文的参考文献能占到语料 45% 的条目，而它们本身是稀
-    薄文本；SciRAG（EACL 2026）把这种做法称为对引用关系的"表层利用"——参考文献的价值
-    在于它是图的边，不是一段可检索的正文。``index_bibliography=True`` 可恢复旧行为，
-    用于对照测量。
     """
-    units_by_paper = [await paper.load_retrieval_units(store) for paper in papers]
-    anchors = paper_anchors(units_by_paper)
-    edges = citation_edges(units_by_paper, anchors)
-
     entries: list[CorpusEntry] = []
     sentences: list[CorpusSentence] = []
-    for units in units_by_paper:
-        for unit in units:
-            if unit.kind == BIBLIOGRAPHY_KIND and not index_bibliography:
-                continue
+    for paper in papers:
+        for unit in await paper.load_retrieval_units(store):
             spans = split_sentences(unit.text)
             entries.append(
                 CorpusEntry(
@@ -430,8 +269,7 @@ async def build_corpus_index(
                     kind=unit.kind,
                     heading_path=unit.heading_path,
                     text=unit.text,
-                    visual_ids=visual_link_ids(unit),
-                    cited_ids=cited_paper_ids(unit, edges),
+                    related_ids=related_unit_ids(unit),
                     sentence_start=len(sentences),
                     sentence_end=len(sentences) + len(spans),
                 )
@@ -443,12 +281,10 @@ async def build_corpus_index(
                 for start, end in spans
             )
 
-    # 未被解释的视觉单元与未索引的参考文献都不在语料里，指向它们的链接必须剔除，
-    # 否则 Agent 会读到 not_found
+    # 未被解释的视觉单元不会进入语料，指向它们的链接必须剔除，否则 Agent 会读到 not_found
     present = {entry.chunk_id for entry in entries}
     for entry in entries:
-        entry.visual_ids = [item for item in entry.visual_ids if item in present]
-        entry.cited_ids = [item for item in entry.cited_ids if item in present]
+        entry.related_ids = [item for item in entry.related_ids if item in present]
 
     index = PaperCorpusIndex(entries=entries, sentences=sentences)
     if embedder is not None:

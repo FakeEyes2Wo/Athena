@@ -10,7 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import (
     ChunkingConfig,
     ProcessingDiagnostic,

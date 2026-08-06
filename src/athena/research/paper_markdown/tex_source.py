@@ -281,39 +281,22 @@ def strip_comment(line: str) -> str:
 
 def resolve_include(
     current_file: str, target: str, files: dict[str, bytes]
-) -> tuple[str | None, bool]:
-    """按当前文件目录、包根目录和省略的 ``.tex`` 后缀解析 include。
-
-    返回 ``(路径, 是否大小写完全匹配)``。找不到时返回 ``(None, True)``。
-
-    精确匹配失败后会做一次不区分大小写的回退。作者多在 macOS/Windows 这类大小写不敏感
-    的文件系统上编译，源码里 ``\\input{prompts/ALFWorld}`` 而磁盘上是 ``alfworld.tex``
-    在 arXiv 包里很常见——ReAct 那篇就因此丢了 6789 字符的附录提示词。回退命中时返回
-    ``False``，让调用方留下诊断：这类不一致值得记录，不该静默吞掉。
-    """
+) -> str | None:
+    """按当前文件目录、包根目录和省略的 ``.tex`` 后缀解析 include。"""
     target = target.strip().replace("\\", "/")
-    choices: list[str] = []
+    choices: list[PurePosixPath] = []
     for base in (PurePosixPath(current_file).parent, PurePosixPath(".")):
         candidate = base / target
-        for option in (candidate, candidate.with_suffix(".tex")):
-            if option is candidate or not candidate.suffix:
-                normalized = str(option)
-                choices.append(
-                    normalized[2:] if normalized.startswith("./") else normalized
-                )
+        choices.append(candidate)
+        if not candidate.suffix:
+            choices.append(candidate.with_suffix(".tex"))
     for choice in choices:
-        if choice in files:
-            return choice, True
-
-    folded: dict[str, list[str]] = {}
-    for name in files:
-        folded.setdefault(name.lower(), []).append(name)
-    for choice in choices:
-        matches = folded.get(choice.lower())
-        if matches:
-            # 同一目录下同时存在 A.tex 与 a.tex 时按名称排序取定，保证可复现
-            return sorted(matches)[0], False
-    return None, True
+        normalized = str(choice)
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        if normalized in files:
+            return normalized
+    return None
 
 
 def expand_file(
@@ -344,18 +327,7 @@ def expand_file(
                 output.append(prefix)
                 line_map.append(SourceLine(file=path, line=line_number))
             target = match.group(1) or match.group(2) or ""
-            included, exact_case = resolve_include(path, target, files)
-            if included is not None and not exact_case:
-                diagnostics.append(
-                    ProcessingDiagnostic(
-                        level="warning",
-                        code="tex_include_case_mismatch",
-                        message=(
-                            f"Include '{target}' from {path}:{line_number} resolved to "
-                            f"{included} only by ignoring case."
-                        ),
-                    )
-                )
+            included = resolve_include(path, target, files)
             if included is None:
                 diagnostics.append(
                     ProcessingDiagnostic(

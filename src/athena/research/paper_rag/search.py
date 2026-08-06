@@ -1,14 +1,13 @@
-"""A-RAG 检索与遍历算子的实现，与工具边界分离以便直接单测。
+"""A-RAG 三个检索接口的实现，与工具边界分离以便直接单测。
 
-两类算子：**检索**（关键词、语义）按内容找入口，**遍历**（图文互链、引用、章节）沿已
-有的类型化边走一步。全部算子共享一个 ``RetrievalSession``：它缓存已解码的语料，避
-免每次工具调用重复解析大 artifact，同时记录本会话已整篇读过的 chunk。
+三个接口共享一个 ``RetrievalSession``：它缓存已解码的语料，避免每次工具调用重复解析
+大 artifact，同时记录本会话已整篇读过的 chunk。
 """
 
 import json
 from dataclasses import dataclass
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 from athena.research.paper_rag.index import LETTER_RUN, normalize
 from athena.research.paper_rag.schemas import ChunkRead, PaperCorpusIndex, SearchHit
 from athena.storage.artifact_store import ArtifactStore
@@ -16,23 +15,17 @@ from athena.storage.artifact_store import ArtifactStore
 MAX_SNIPPET_CHARS = 600
 SENTENCE_POOL_FACTOR = 8
 SELF_CONTAINED_TOKENS = 5
-TRAVERSAL_SNIPPET_SENTENCES = 3
 ALREADY_READ_NOTICE = "This chunk has been read before."
 
 
 @dataclass(slots=True)
 class LoadedCorpus:
-    """解码后的语料：索引本体、句向量、自足度权重、以及 chunk_id 到位置的映射。
-
-    ``cited_by`` 是引用边的反向索引，装载时构建一次：正向"这个 chunk 引了谁"直接读
-    ``entry.cited_ids`` 即可，反向"谁引了这篇"要遍历全部条目，每次查询重算不合算。
-    """
+    """解码后的语料：索引本体、句向量、自足度权重、以及 chunk_id 到位置的映射。"""
 
     index: PaperCorpusIndex
     vectors: list[list[float]]
     weights: list[float]
     positions: dict[str, int]
-    cited_by: dict[str, list[str]]
 
 
 def self_contained_weight(text: str) -> float:
@@ -74,10 +67,6 @@ class RetrievalSession:
                 self_contained_weight(index.sentence_text(position))
                 for position in range(len(index.sentences))
             ]
-        cited_by: dict[str, list[str]] = {}
-        for entry in index.entries:
-            for target in entry.cited_ids:
-                cited_by.setdefault(target, []).append(entry.chunk_id)
         loaded = LoadedCorpus(
             index=index,
             vectors=vectors,
@@ -85,7 +74,6 @@ class RetrievalSession:
             positions={
                 entry.chunk_id: position for position, entry in enumerate(index.entries)
             },
-            cited_by=cited_by,
         )
         self._corpora[corpus_ref] = loaded
         return loaded
@@ -123,8 +111,7 @@ def make_hit(
         heading_path=entry.heading_path,
         score=score,
         snippet=snippet,
-        visual_ids=entry.visual_ids,
-        cited_ids=entry.cited_ids,
+        related_ids=entry.related_ids,
     )
 
 
@@ -199,142 +186,6 @@ def semantic_search(
     ]
 
 
-def head_snippet(corpus: LoadedCorpus, position: int) -> str:
-    """取该 chunk 的开头几句作为定位用片段。
-
-    遍历类算子没有查询向量可用来选句，因此固定取开头：正文 chunk 的开头通常就是它的
-    主张句，图表单元的开头是图注。
-    """
-    entry = corpus.index.entries[position]
-    return join_snippet(
-        [
-            corpus.index.sentence_text(sentence)
-            for sentence in range(entry.sentence_start, entry.sentence_end)
-        ][:TRAVERSAL_SNIPPET_SENTENCES]
-    )
-
-
-def traverse(corpus: LoadedCorpus, targets: list[str]) -> list[SearchHit]:
-    """把一组 chunk id 组装成命中，保持给定顺序并去重、跳过不在语料内的 id。"""
-    hits: list[SearchHit] = []
-    seen: set[str] = set()
-    for chunk_id in targets:
-        position = corpus.positions.get(chunk_id)
-        if position is None or chunk_id in seen:
-            continue
-        seen.add(chunk_id)
-        hits.append(make_hit(corpus, position, 1.0, head_snippet(corpus, position)))
-    return hits
-
-
-def edge_targets(corpus: LoadedCorpus, chunk_ids: list[str], edge: str) -> list[str]:
-    """读取若干 chunk 的同一条类型化边，按给定顺序摊平；未知 chunk 直接跳过。"""
-    targets: list[str] = []
-    for chunk_id in chunk_ids:
-        position = corpus.positions.get(chunk_id)
-        if position is None:
-            continue
-        targets.extend(getattr(corpus.index.entries[position], edge))
-    return targets
-
-
-def paper_namespace(chunk_id: str) -> str:
-    """取 chunk id 的论文命名空间；``"arxiv:1706.03762:chunk-a"`` 返回
-    ``"arxiv:1706.03762"``。
-
-    必须从右边切。上游的 ``unit_id`` 是 ``f"{namespace}:{chunk_id}"``，而 namespace 本身
-    通常带前缀（``arxiv:1706.03762``、``doi:10.1145/x``）；从左边切会把整批论文都归成同
-    一个命名空间 ``"arxiv"``，反向引用于是返回全语料的引用者而不是这篇的。
-    """
-    return chunk_id.rsplit(":", 1)[0]
-
-
-def citing_anchors(corpus: LoadedCorpus, chunk_ids: list[str]) -> list[str]:
-    """把任意 chunk id 归约到它所属论文"被引用时的落点"。
-
-    引用边指向的是落点（摘要或首个单元），因此反向查询必须先归约，否则调用方传进来
-    一个正文中段就会查不到任何引用者。
-    """
-    wanted = {paper_namespace(chunk_id) for chunk_id in chunk_ids}
-    return [anchor for anchor in corpus.cited_by if paper_namespace(anchor) in wanted]
-
-
-def visual_links(corpus: LoadedCorpus, chunk_ids: list[str]) -> list[SearchHit]:
-    """沿图文互链走一步：正文 chunk 给出它讨论的图表，图表给出讨论它的正文。
-
-    这条边此前和引用边一起塞在一个无类型列表里，Agent 只能盲跟；拆开之后"去看这段
-    话讨论的那张图"是一次可命名的动作。
-    """
-    return traverse(corpus, edge_targets(corpus, chunk_ids, "visual_ids"))
-
-
-def citation_links(
-    corpus: LoadedCorpus, chunk_ids: list[str], direction: str
-) -> list[SearchHit]:
-    """沿引用边走一步。
-
-    ``cites`` 是正向：给出这些 chunk 引用到的、语料内部论文的落点。``cited_by`` 是反
-    向：给出语料里引用了这些论文的 chunk——对"谁在此基础上做了什么、谁反驳了它"这类
-    问题，反向边比任何相似度都直接。MRAgent 把这两类分别称作 forward 与 reverse
-    traversal，并指出正是反向遍历让 Agent 能根据已得证据改道。
-    """
-    if direction != "cited_by":
-        return traverse(corpus, edge_targets(corpus, chunk_ids, "cited_ids"))
-    anchors = sorted(citing_anchors(corpus, chunk_ids))
-    return traverse(
-        corpus,
-        [target for anchor in anchors for target in corpus.cited_by[anchor]],
-    )
-
-
-def section_search(
-    corpus: LoadedCorpus, heading: str, paper_ids: list[str], limit: int
-) -> list[SearchHit]:
-    """按章节名跨论文取 chunk，默认覆盖全语料，并按论文轮转分配名额。
-
-    这是自顶向下的入口：对比性证据几乎总在另一篇论文的可比章节里（Limitations、
-    Ablation、Related Work），而按假设措辞做语义检索只会优先返回同意它的段落。
-    ``paper_ids`` 为空表示不限定论文——这正是该算子的默认用法。
-
-    **轮转是这个算子的要点，不是修饰。** 一篇论文的 Ablation 往往被切成十几个 chunk，
-    按得分直排会让名额被一篇吃光——实测 `Ablation` 一度返回 10 条却只覆盖 1 篇论文，
-    而该算子存在的理由正是跨论文对比。轮转后每篇先出一条，再出第二条。
-    """
-    wanted = heading.lower().strip()
-    allowed = {item for item in paper_ids if item}
-    by_paper: dict[str, list[tuple[float, int]]] = {}
-    for position, entry in enumerate(corpus.index.entries):
-        if allowed and entry.paper_id not in allowed:
-            continue
-        depth = next(
-            (
-                level
-                for level, name in enumerate(entry.heading_path)
-                if wanted in name.lower()
-            ),
-            None,
-        )
-        if depth is not None:
-            by_paper.setdefault(entry.paper_id, []).append(
-                (1.0 / (1 + depth), position)
-            )
-
-    for group in by_paper.values():
-        group.sort(key=lambda item: (-item[0], item[1]))
-    order = sorted(by_paper, key=lambda paper: (-by_paper[paper][0][0], paper))
-    rounds = max((len(group) for group in by_paper.values()), default=0)
-    picked = [
-        by_paper[paper][index]
-        for index in range(rounds)
-        for paper in order
-        if index < len(by_paper[paper])
-    ]
-    return [
-        make_hit(corpus, position, score, head_snippet(corpus, position))
-        for score, position in picked[:limit]
-    ]
-
-
 def read_one(
     corpus: LoadedCorpus, session: RetrievalSession, position: int
 ) -> ChunkRead:
@@ -355,8 +206,7 @@ def read_one(
         title=entry.title,
         heading_path=entry.heading_path,
         text=entry.text,
-        visual_ids=entry.visual_ids,
-        cited_ids=entry.cited_ids,
+        related_ids=entry.related_ids,
     )
 
 
