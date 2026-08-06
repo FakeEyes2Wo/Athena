@@ -1,0 +1,90 @@
+<h2>右侧窄栏：里面该怎么组织？</h2>
+<p class="subtitle">你已经选了：聊天主区 + 右侧窄仪表盘 + 极简高级黑。最后一个关键选择是：右侧这根窄栏，到底是“固定摘要”、还是“可切换工具集”。</p>
+
+<div class="cards">
+  <div class="card" data-choice="A" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · 固定摘要流（推荐）</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px; background:linear-gradient(180deg,#0b0f17,#0f141d); border-radius:12px; padding:12px;">
+          <div style="flex:1; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Conversation</div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:40px; background:rgba(255,255,255,0.08);"></div>
+          </div>
+          <div style="width:270px; display:flex; flex-direction:column; gap:8px;">
+            <div class="placeholder" style="height:72px; background:rgba(255,255,255,0.05);"></div>
+            <div class="placeholder" style="height:84px; background:rgba(255,255,255,0.05);"></div>
+            <div class="placeholder" style="height:84px; background:rgba(255,255,255,0.05);"></div>
+            <div class="placeholder" style="height:84px; background:rgba(255,255,255,0.05);"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>固定摘要流</h3>
+      <p>永远显示 4 块：运行状态、SOTA/Budget、ResearchTree 摘要、最新实验。最稳定，也最不打断聊天。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="B" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · Tab 切换工具栏</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px; background:linear-gradient(180deg,#0b0f17,#0f141d); border-radius:12px; padding:12px;">
+          <div style="flex:1; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Conversation</div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:40px; background:rgba(255,255,255,0.08);"></div>
+          </div>
+          <div style="width:270px; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:6px;">
+              <div class="placeholder" style="height:28px; background:rgba(255,255,255,0.07);"></div>
+              <div class="placeholder" style="height:28px; background:rgba(255,255,255,0.04);"></div>
+              <div class="placeholder" style="height:28px; background:rgba(255,255,255,0.04);"></div>
+              <div class="placeholder" style="height:28px; background:rgba(255,255,255,0.04);"></div>
+            </div>
+            <div class="placeholder" style="height:260px; background:rgba(255,255,255,0.05);"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Tab 工具集</h3>
+      <p>右栏顶部有 Status / Tree / Metrics / Diff 标签。能力更强，但会频繁切换上下文。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="C" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C · 摘要 + 弹出详情</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px; background:linear-gradient(180deg,#0b0f17,#0f141d); border-radius:12px; padding:12px;">
+          <div style="flex:1; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Conversation</div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:56px; background:rgba(255,255,255,0.06);"></div>
+            <div class="placeholder" style="height:40px; background:rgba(255,255,255,0.08);"></div>
+          </div>
+          <div style="width:270px; display:flex; flex-direction:column; gap:8px;">
+            <div class="placeholder" style="height:72px; background:rgba(255,255,255,0.05);"></div>
+            <div class="placeholder" style="height:72px; background:rgba(255,255,255,0.05);"></div>
+            <div class="placeholder" style="height:72px; background:rgba(255,255,255,0.05);"></div>
+            <div class="placeholder" style="height:72px; background:rgba(255,255,255,0.05);"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>摘要卡片 + 点击弹层</h3>
+      <p>右栏只放简洁摘要；点任一块再展开浮层看 Tree / Diff / 指标详情。最克制，但交互更多一步。</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">回复示例：<code>A</code>、<code>C，但弹层要很顺滑</code>、<code>B，不过默认先显示 Status</code>。</p>

@@ -58,3 +58,9 @@ XH-202619.pdf
 
 # AI Agent Skills
 .claude/skills/
+
+# Isolated feature worktrees
+.worktrees/
+
+# Rust build artifacts
+athena-rust/target/

@@ -1,6 +1,6 @@
-"""Minimal Athena agent example — one callable tool, one streamed turn.
+"""最简 Athena Agent 示例 — 一个可调用工具，一个流式轮次。
 
-Run from the project root:
+从项目根目录运行：
 
     uv run python agent_tool_example.py
 """
@@ -13,8 +13,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from athena.core.agent import AgentContext, create_agent
-from athena.core.schemas import AthenaThread, AthenaTurn
+from athena.core.agent.models import AgentContext
+from athena.core.agent.runtime import create_agent
+from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry, tool
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -42,7 +43,7 @@ async def add_numbers(a: float, b: float) -> float:
 def create_model_client(
     env_path: Path = PROJECT_ROOT / ".env",
 ) -> tuple[str, AsyncOpenAI]:
-    """Load model settings and construct an OpenAI-compatible async client."""
+    """加载模型配置并构造 OpenAI 兼容的异步客户端。"""
 
     load_dotenv(env_path)
     api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -56,7 +57,7 @@ def create_model_client(
 
 
 def build_agent(model: str, client: AsyncOpenAI):
-    """Create the example agent with one registered tool."""
+    """创建带有一个注册工具的示例 Agent。"""
 
     tools = ToolRegistry()
     tools.register(add_numbers)
@@ -73,7 +74,7 @@ def build_agent(model: str, client: AsyncOpenAI):
 
 
 async def run(question: str = DEFAULT_QUESTION) -> None:
-    """Run one streamed turn and print tool/text events."""
+    """运行一个流式轮次并打印工具/文本事件。"""
 
     model, client = create_model_client()
     try:
@@ -102,7 +103,7 @@ async def run(question: str = DEFAULT_QUESTION) -> None:
                 status="running",
             ),
             emit=emit,
-            tools=agent.config.tools,
+            tools=agent.tools,
             cancel=asyncio.Event(),
         )
 
