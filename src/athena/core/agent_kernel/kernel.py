@@ -360,9 +360,7 @@ class AgentKernel:
 
     async def persist_event(self, agent_id: AgentId, event: AgentEvent) -> None:
         """将事件经序列器耐久写入 Store（R3）。"""
-        future = self._enqueue(
-            "agent_event", {"agent_id": agent_id, "event": event}
-        )
+        future = self._enqueue("agent_event", {"agent_id": agent_id, "event": event})
         await asyncio.shield(future)
 
     def _persist_event(self, command: KernelCommand) -> None:
@@ -565,6 +563,7 @@ class AgentKernel:
                 await future
                 return
             except Exception:
+                # 终态提交失败 → 退避重试原始 outcome；耗尽后走 fatal 兜底
                 if attempt < 2:
                     await asyncio.sleep(0.05 * (attempt + 1))
                     continue
@@ -1153,7 +1152,9 @@ class AgentKernel:
             or run.status in TERMINAL_RUN_STATUSES
             or (parking_generation is not None and parking_generation != run.generation)
         ):
-            return AgentWaitResult(completed={}, timed_out=False)  # 已终结/过期 → 立即返回
+            return AgentWaitResult(
+                completed={}, timed_out=False
+            )  # 已终结/过期 → 立即返回
         lock = self._park_locks.setdefault(parking_run_id, asyncio.Lock())
         # 锁等待计入 timeout 预算；获取后只把剩余预算交给 wait_agent（B9）
         if timeout is None:
