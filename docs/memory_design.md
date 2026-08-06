@@ -1,10 +1,14 @@
 # Athena Memory 设计（精简版）
 
+Status: current
+Last verified: 2026-07-30
+Source of truth: `src/athena/memory/` and `src/athena/app_server/thread_runtime.py`
+
 只做 Layer 1：当前对话上下文管理 + JSONL 持久化到项目目录。消息类型用 PydanticAI 原生
 `ModelMessage`。
 
-实现状态（2026-07-24）：`ContextManager`、`Compactor`、`RolloutRecorder` 和
-`resume_context` 已完成并通过 38 个定向测试。本设计参考当前 Codex 的
+实现状态（2026-07-30）：`ContextManager`、`Compactor`、`RolloutRecorder`、
+`resume_context` 及 `ThreadRuntime` 接入均已完成并有定向测试。本设计参考 Codex 的
 `codex-rs/core/src/context_manager/history.rs`、`codex-rs/core/src/compact.rs`、
 `codex-rs/rollout/src/recorder.rs` 和
 `codex-rs/core/src/session/rollout_reconstruction.rs`。下方代码用于说明核心算法；
@@ -254,48 +258,17 @@ class RolloutRecorder:
 
 ## 4. 与 Agent / ThreadRuntime 集成
 
-不引入中间层（hook / adapter / callback）。Memory 操作直接内联到 `_run_turn()` 中，
-零额外函数调用开销。
+不引入 hook 注册系统。`ThreadRuntime` 持有 `ContextManager`、`Compactor` 与
+`RolloutRecorder`，通过两个窄方法封装所有权：
 
 ```python
-# 在 ThreadRuntime._run_turn() 中内联 — 不创建新类
-
-async def _run_turn(self, turn):
-    ctx = self._context_manager
-    compactor = self._compactor
-    rollout = self._rollout
-
-    # ── Turn 前 ── (内联，无 hook 开销)
-    if compactor is not None and compactor.should_compact(ctx):
-        ckpt = await compactor.compact(ctx, self._llm)
-        rollout.record_compaction(ckpt.version, ckpt.summary)
-
-    ctx.append(ModelRequest(parts=[UserPromptPart(content=user_content)]))
-
-    # ── Turn 中 ── (Agent 执行 — 不变)
-    result_ref, next_ctx_ref = await self._runner(...)
-
-    # ── Turn 后 ── (内联，无 hook 开销)
-    if rollout is not None:
-        for msg in ctx.items[-20:]:
-            rollout.record(msg)
-    if compactor is not None and compactor.should_compact(ctx):
-        ckpt = await compactor.compact(ctx, self._llm)
-        rollout.record_compaction(ckpt.version, ckpt.summary)
-
-    return result_ref, next_ctx_ref
+await runtime.maybe_compact()    # Turn 前压缩
+runtime.record_items(messages)   # Turn 后持久化新增消息
 ```
 
-**为什么不用 hook/回调系统：**
-
-| 方式 | 每次 Turn 开销 | 调试难度 |
-|---|---|---|
-| 内联调用 | ~0 (正常函数调用) | 低 — 控制流清晰 |
-| 直接方法调用 (`adapter.pre_turn()`) | ~0.1μs | 中 — 多一层间接 |
-| Hook 注册/分发 (`for h in hooks: await h()`) | ~1-5μs + 可能的动态调度 | 高 — 执行顺序不确定 |
-
-`_run_turn()` 本身就是少数几行编排代码，内联不会让它变复杂。
-不创建 `integration.py`，不引入任何 hook 注册机制。
+`_run_turn()` 在执行前记录 ContextManager 快照；runner 失败时回滚半成品消息，成功时
+只将本轮新增消息写入 rollout。带 `run_with_context` 的 Agent runner 接收同一
+ContextManager，旧三参数 runner 保持兼容。
 
 ---
 
@@ -338,4 +311,4 @@ src/athena/memory/
 | 2 | `RolloutRecorder` | 已完成、已测试 |
 | 3 | `Compactor` | 已完成、已测试 |
 | 4 | `resume_context` 恢复逻辑 | 已完成、已测试 |
-| 5 | `ThreadRuntime` 集成 | 尚未实施（不属于本次 memory 模块测试范围） |
+| 5 | `ThreadRuntime` 集成 | 已完成、已测试 |
