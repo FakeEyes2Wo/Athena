@@ -1,4 +1,4 @@
-"""Unit tests for Codex-style local context compaction."""
+"""Codex 风格本地上下文压缩的单元测试。"""
 
 from types import SimpleNamespace
 

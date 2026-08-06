@@ -30,8 +30,8 @@ def test_build_agent_registers_add_numbers_tool():
     client = AsyncOpenAI(api_key="test-key")
     agent = example.build_agent("test-model", client)
 
-    assert "add_numbers" in agent.config.tools
-    assert agent._provider.client is client
+    assert "add_numbers" in agent.tools
+    assert agent.model.client is client
 
 
 @pytest.mark.asyncio

@@ -1,1 +1,1 @@
-"""Independent acceptance tests for :mod:`athena.app_server`."""
+""":mod:`athena.app_server` 的独立验收测试。"""

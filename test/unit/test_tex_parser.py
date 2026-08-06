@@ -8,7 +8,7 @@ import fitz
 
 from athena.research.paper_markdown.chunking import build_chunks
 from athena.research.paper_markdown.schemas import ChunkingConfig
-from athena.research.paper_markdown.tex_parser import normalize_title, parse_tex_paper
+from athena.research.paper_markdown.tex_parser import parse_tex_paper
 from athena.research.paper_markdown.tex_source import load_tex_source
 
 
@@ -429,46 +429,3 @@ Body text.
         self.assertNotIn("p1.25", structured_text)
         self.assertNotIn("c]@", structured_text)
         self.assertNotIn("begin tabular", structured_text)
-
-
-class NormalizeTitleTest(unittest.TestCase):
-    r"""Authors put typesetting inside ``\title{}``: venue lines, placeholder icons
-    and line breaks. The rendered value reaches ``PaperContent.title`` and the
-    ``upstream_metadata`` paper_source uses for identity checks, so it must be
-    flattened to the title itself."""
-
-    def test_custom_macro_image_path_is_dropped(self):
-        self.assertEqual(
-            normalize_title("images/icon-no-border.jpg Interleaving Retrieval"),
-            "Interleaving Retrieval",
-        )
-
-    def test_venue_line_is_dropped(self):
-        self.assertEqual(
-            normalize_title("ACL 2023\nWhen Not to Trust Language Models"),
-            "When Not to Trust Language Models",
-        )
-        self.assertEqual(
-            normalize_title("NeurIPS 2020\nDense Passage Retrieval"),
-            "Dense Passage Retrieval",
-        )
-
-    def test_wrapped_title_lines_are_joined(self):
-        self.assertEqual(
-            normalize_title("Few-shot Learning with\nRetrieval Augmented Models"),
-            "Few-shot Learning with Retrieval Augmented Models",
-        )
-
-    def test_inline_markup_is_stripped(self):
-        self.assertEqual(
-            normalize_title("`ReAct`: Synergizing Reasoning"),
-            "ReAct: Synergizing Reasoning",
-        )
-
-    def test_ordinary_titles_are_untouched(self):
-        for title in (
-            "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
-            "BERT: Pre-training of Deep Bidirectional Transformers",
-            "Attention Is All You Need",
-        ):
-            self.assertEqual(normalize_title(title), title)

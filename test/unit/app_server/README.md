@@ -12,8 +12,5 @@ Run the suite with:
 
 The suite follows the current constructors, DTO shapes, return values, and
 module docstrings. Tests with deadlines cover current asynchronous ownership
-and shutdown paths without modifying production code.
-
-Known contradictions between current docstrings and current behavior are
-marked as strict `xfail` tests with an explicit reason. If such a behavior is
-fixed, the unexpected pass makes the suite fail until the marker is removed.
+and shutdown paths without modifying production code. The current suite has no
+expected failures; any failure blocks acceptance.

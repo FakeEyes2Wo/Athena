@@ -21,6 +21,7 @@ OWNED_TASK_PREFIXES = (
     "merged-sub",
     "submission-loop-",
     "turn-",
+    "execution-monitor-",
 )
 
 

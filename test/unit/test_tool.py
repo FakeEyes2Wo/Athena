@@ -1,4 +1,4 @@
-"""Unit tests for tool abstractions."""
+"""工具抽象层的单元测试。"""
 
 import asyncio
 
@@ -14,8 +14,6 @@ from athena.core.tool_types import (
     ToolSpec,
 )
 
-# ── test tools ──
-
 
 class _EchoTool(BaseTool):
     spec = ToolSpec(
@@ -25,25 +23,25 @@ class _EchoTool(BaseTool):
     )
 
     async def execute(self, inpt: dict, ctx: ToolContext) -> dict:
-        return inpt  # raw dict, auto-wrapped by _execute
+        return inpt  # 原始字典，由 _execute 自动包装
 
 
 class _FailingTool(BaseTool):
     spec = ToolSpec(name="fail", description="fail", input_schema={})
 
     async def execute(self, inpt: dict, ctx: ToolContext):
-        raise RuntimeError("boom")  # caught by _execute → ToolResult(success=False)
+        raise RuntimeError("boom")  # 由 _execute 捕获 → ToolResult(success=False)
 
 
 class _CancellingTool(BaseTool):
     spec = ToolSpec(name="cancel_me", description="cancel", input_schema={})
 
     async def execute(self, inpt: dict, ctx: ToolContext):
-        raise asyncio.CancelledError()  # NOT caught → propagates
+        raise asyncio.CancelledError()  # 不捕获 → 向上传播
 
 
 class _ToolResultTool(BaseTool):
-    """Tool that returns ToolResult directly — _execute passes it through."""
+    """直接返回 ToolResult 的工具 — _execute 透传。"""
 
     spec = ToolSpec(name="direct", description="direct", input_schema={})
 
@@ -51,22 +49,16 @@ class _ToolResultTool(BaseTool):
         return ToolResult(data={"custom": True}, success=True)
 
 
-# ── @tool decorator tests ──
-
-
 @tool(name="deco_echo")
 async def _deco_echo(text: str, repeat: int = 1) -> dict:
-    """Echo with the @tool decorator."""
+    """使用 @tool 装饰器的 Echo。"""
     return {"text": text, "repeat": repeat}
 
 
 @tool(name="deco_fail")
 async def _deco_fail() -> dict:
-    """Always fails."""
+    """始终失败。"""
     raise ValueError("bad input")
-
-
-# ── helpers ──
 
 
 def _arun(coro):
@@ -84,9 +76,6 @@ async def _collect_events(tool: BaseTool, **inpt) -> tuple[ToolResult, list[str]
     return result, events
 
 
-# ── BaseTool tests ──
-
-
 class TestBaseTool:
     def test_sync_invoke(self):
         result = _EchoTool().invoke(x=1, y="hello")
@@ -101,7 +90,7 @@ class TestBaseTool:
         assert TOOL_END in events
 
     def test_ainvoke_error_wrapped(self):
-        """Exception → ToolResult(success=False), TOOL_ERROR emitted."""
+        """异常 → ToolResult(success=False)，触发 TOOL_ERROR。"""
         result, events = _arun(_collect_events(_FailingTool()))
         assert result.success is False
         assert "RuntimeError" in result.error
@@ -109,7 +98,7 @@ class TestBaseTool:
         assert TOOL_ERROR in events
 
     def test_ainvoke_cancelled_error(self):
-        """CancelledError is NOT caught — propagates up."""
+        """CancelledError 不捕获 — 向上传播。"""
         with pytest.raises(asyncio.CancelledError):
             _arun(_collect_events(_CancellingTool()))
 
@@ -117,9 +106,6 @@ class TestBaseTool:
         result, events = _arun(_collect_events(_ToolResultTool()))
         assert result.success
         assert result.data == {"custom": True}
-
-
-# ── @tool decorator tests ──
 
 
 class TestToolDecorator:
@@ -138,16 +124,13 @@ class TestToolDecorator:
 
     def test_decorated_spec(self):
         assert _deco_echo.spec.name == "deco_echo"
-        assert _deco_echo.spec.description == "Echo with the @tool decorator."
+        assert _deco_echo.spec.description == "使用 @tool 装饰器的 Echo。"
 
     def test_decorated_error(self):
         result, events = _arun(_collect_events(_deco_fail))
         assert result.success is False
         assert "ValueError" in result.error
         assert TOOL_ERROR in events
-
-
-# ── ToolRegistry tests ──
 
 
 class TestToolRegistry:

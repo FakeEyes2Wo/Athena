@@ -6,11 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from athena.core.gitutils.workspace import (
-    GitWorkspaceError,
-    GitWorkBranch,
-    LocalGitWorkspace,
-)
+from athena.core.workspace import GitWorkspaceError, GitWorkBranch
+from athena.git_workspace import LocalGitWorkspace
 
 
 class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
