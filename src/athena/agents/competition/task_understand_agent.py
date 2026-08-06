@@ -23,6 +23,9 @@ from athena.tools.hf_model import HFModelDownloadTool, HFModelSearchTool
 # ── 数据准备层 (Task 7) ──
 from athena.tools.data_prepare import DataAnalyzeTool, DataCleanCodeGenTool
 
+# ── Agent 认知子系统 (Task 5) ──
+from athena.cognition import register_cognition_tools
+
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
@@ -58,8 +61,11 @@ async def build_task_understand_agent(
     tools.register(DataAnalyzeTool(work_root=work_root))
     tools.register(DataCleanCodeGenTool(work_root=work_root))
 
+    # ── Agent 认知子系统（5 个认知工具）──
+    await register_cognition_tools(tools, work_root=work_root)
+
     # Guard：原生工具数量固定；MCP 工具在下方动态追加，不参与此断言
-    assert len(tools) == 6, f"Expected 6 native tools, got {len(tools)}"
+    assert len(tools) == 11, f"Expected 11 native tools (6 core + 5 cognition), got {len(tools)}"
 
     # ── MCP 接入层（可选）：配置驱动，懒连接；未配置 server 时完全惰性 ──
     servers = mcp_servers if mcp_servers is not None else load_mcp_servers()
