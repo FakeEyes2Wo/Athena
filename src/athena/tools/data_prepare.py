@@ -17,10 +17,6 @@ from athena.utils.single_turn_chat import single_turn_chat
 _TOOL_OUTPUT_DIRS = {
     "data_analyze",
     "data_clean_code_gen",
-    "solution_design",
-    "project_code_gen",
-    "code_execute",
-    "submission_build",
     "hf_dataset_search",
     "hf_model_search",
 }

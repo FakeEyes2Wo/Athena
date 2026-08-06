@@ -1,6 +1,4 @@
 I want to participate in the Titanic competition on Kaggle.
-DO NOT call code_execute — the sandbox is not ready. Skip training/inference
-
 EXECUTION STRATEGY:
 - acquire data first, then analyze and clean the data.
 - Do NOT batch tools from different phases in the same turn. For example,

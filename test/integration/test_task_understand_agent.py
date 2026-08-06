@@ -1,6 +1,6 @@
 """Integration tests for TaskUnderstandAgent.
 
-These tests validate that the agent builds correctly and all 10 competition
+These tests validate that the agent builds correctly and all 6 competition
 tools are registered. Tests that require a real LLM API are skipped by default.
 """
 
@@ -13,8 +13,8 @@ pytestmark = pytest.mark.integration
 class TestAgentConstruction:
     """Tests that do NOT require an LLM -- validate tool registration only."""
 
-    async def test_all_10_tools_registered(self):
-        """Verify the agent builds successfully with all 10 tools registered."""
+    async def test_all_6_tools_registered(self):
+        """Verify the agent builds successfully with all 6 tools registered."""
         from athena.agents.competition.task_understand_agent import (
             build_task_understand_agent,
         )
@@ -26,8 +26,8 @@ class TestAgentConstruction:
         )
 
         assert agent.name == "TaskUnderstandAgent"
-        assert len(agent.config.tools) == 10, (
-            f"Expected 10 tools, got {len(agent.config.tools)}"
+        assert len(agent.config.tools) == 6, (
+            f"Expected 6 tools, got {len(agent.config.tools)}"
         )
 
     async def test_all_expected_tool_names_present(self):
@@ -51,14 +51,9 @@ class TestAgentConstruction:
             # Data preparation (Task 7 -- 2 tools)
             "data_analyze",
             "data_clean_code_gen",
-            # Modeling and submission (Task 8 -- 4 tools)
-            "solution_design",
-            "project_code_gen",
-            "code_execute",
-            "submission_build",
         }
 
-        assert len(expected_names) == 10, "Expected exactly 10 tool names"
+        assert len(expected_names) == 6, "Expected exactly 6 tool names"
 
         for name in expected_names:
             assert name in agent.config.tools, (
@@ -116,7 +111,7 @@ class TestAgentConstruction:
             mcp_servers=[McpServerConfig(name="kaggle")],
         )
         assert "mcp_search_tools" in agent.config.tools
-        assert len(agent.config.tools) == 11  # 10 原生 + 1 搜索工具
+        assert len(agent.config.tools) == 7  # 6 原生 + 1 搜索工具
 
 
 @pytest.mark.skip(reason="Requires real LLM API access -- run manually")
@@ -134,13 +129,9 @@ async def test_agent_loads_all_tools():
     )
 
     assert agent.name == "TaskUnderstandAgent"
-    assert len(agent.config.tools) == 10
+    assert len(agent.config.tools) == 6
 
     # Verify key tools exist
     assert "hf_dataset_search" in agent.config.tools
     assert "hf_model_search" in agent.config.tools
     assert "data_analyze" in agent.config.tools
-    assert "solution_design" in agent.config.tools
-    assert "project_code_gen" in agent.config.tools
-    assert "code_execute" in agent.config.tools
-    assert "submission_build" in agent.config.tools

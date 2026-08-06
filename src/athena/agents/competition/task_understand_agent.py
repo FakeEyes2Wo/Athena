@@ -23,14 +23,6 @@ from athena.tools.hf_model import HFModelDownloadTool, HFModelSearchTool
 # ── 数据准备层 (Task 7) ──
 from athena.tools.data_prepare import DataAnalyzeTool, DataCleanCodeGenTool
 
-# ── 建模 & 提交层 (Task 8) ──
-from athena.tools.baseline_builder import (
-    CodeExecuteTool,
-    ProjectCodeGenTool,
-    SolutionDesignTool,
-    SubmissionBuildTool,
-)
-
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
@@ -66,14 +58,8 @@ async def build_task_understand_agent(
     tools.register(DataAnalyzeTool(work_root=work_root))
     tools.register(DataCleanCodeGenTool(work_root=work_root))
 
-    # ── 建模 & 提交层 (4 工具) ──
-    tools.register(SolutionDesignTool(work_root=work_root))
-    tools.register(ProjectCodeGenTool(work_root=work_root))
-    tools.register(CodeExecuteTool(work_root=work_root))
-    tools.register(SubmissionBuildTool(work_root=work_root))
-
     # Guard：原生工具数量固定；MCP 工具在下方动态追加，不参与此断言
-    assert len(tools) == 10, f"Expected 10 native tools, got {len(tools)}"
+    assert len(tools) == 6, f"Expected 6 native tools, got {len(tools)}"
 
     # ── MCP 接入层（可选）：配置驱动，懒连接；未配置 server 时完全惰性 ──
     servers = mcp_servers if mcp_servers is not None else load_mcp_servers()
