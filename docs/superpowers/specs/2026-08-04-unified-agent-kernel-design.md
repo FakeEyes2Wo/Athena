@@ -212,7 +212,8 @@ async def spawn(
     fork: ForkPolicy = ForkPolicy.none(),
 ) -> tuple[AgentHandle, AgentRun[ResponseT]]: ...
 
-async def send_message(target: AgentHandle, message: AgentMessage) -> None: ...
+async def send_message(target: AgentHandle, message: object) -> None:
+    # 只接受业务 payload；envelope（source/sequence）由 Kernel 权威生成（R3 契约）
 
 async def followup(
     target: AgentHandle,

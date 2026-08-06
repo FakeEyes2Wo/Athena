@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_check
 from athena.core.contracts import ArtifactRef
 
 if TYPE_CHECKING:
-    from athena.core.agent_kernel.session import AgentSession
+    from athena.core.agent_kernel.session import RunSession
 
 RequestT = TypeVar("RequestT", contravariant=True)
 ResponseT = TypeVar("ResponseT", covariant=True)
@@ -114,13 +114,13 @@ class EventSink(Protocol):
 
 @runtime_checkable
 class AgentRunner(Protocol[RequestT, ResponseT]):
-    """执行一个已类型化请求的协议（§2.2）。session 由 Kernel 提供。"""
+    """执行一个已类型化请求的协议（§2.2）。session 为绑定本 Run 的受限视图。"""
 
     async def run(
         self,
         request: RequestT,
         *,
-        session: "AgentSession",
+        session: "RunSession",
         emit: EventSink,
     ) -> ResponseT: ...
 

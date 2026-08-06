@@ -526,3 +526,21 @@ def test_fingerprint_is_key_order_independent() -> None:
     fp1 = store._fingerprint("mailbox", {"agent_id": "a", "message": "x"})
     fp2 = store._fingerprint("mailbox", {"message": "x", "agent_id": "a"})
     assert fp1 == fp2
+
+
+def test_run_running_rejects_generation_regression() -> None:
+    store = AgentGraphStore()
+    _spawn(store)
+    store.commit(
+        command_id="rr1",
+        kind="run_running",
+        payload={"run_id": "root:r1", "generation": 2},
+    )
+    before = store.sequence
+    store.commit(
+        command_id="rr2",
+        kind="run_running",
+        payload={"run_id": "root:r1", "generation": 1},  # 回退 → 拒绝（R8）
+    )
+    assert store.sequence == before
+    assert store.run("root:r1").generation == 2

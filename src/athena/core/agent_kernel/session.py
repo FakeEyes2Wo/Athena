@@ -116,7 +116,8 @@ class AgentSession:
         self._wakeup = asyncio.Event()
         self._active_run_id: RunId | None = None
         self._active_generation: int | None = None
-        self._visible = 0
+        # 可见游标按 (run_id, generation) 隔离：旧 Run 不推进新 Run 的可见状态（R4）
+        self._visible: dict[tuple[RunId | None, int | None], int] = {}
         self._memory_view = _MemoryView(self._resources.memory)
         self._closed = False
 
@@ -160,13 +161,23 @@ class AgentSession:
         self._active_run_id = None
         self._active_generation = None
 
-    def receive_messages(self) -> list[AgentMessage]:
-        """返回未读 mailbox 窗口并推进独立可见游标；重复读取不再重投（B4）。"""
+    def receive_messages(
+        self, *, run_id: RunId | None = None, generation: int | None = None
+    ) -> list[AgentMessage]:
+        """返回未读 mailbox 窗口并推进该 Run 的可见游标；重复读取不再重投（B4）。
+
+        可见游标按 (run_id, generation) 隔离；旧 Run 视图不得读取或推进（R4）。
+        """
+        if run_id is not None and self._active_run_id != run_id:
+            return []  # 旧 Run 视图 → 不读取
+        if generation is not None and self._active_generation != generation:
+            return []
         committed = self._store.mailbox_committed(self._agent_id)
         messages = self._store.mailbox(self._agent_id)
-        self._visible = max(self._visible, committed)  # 单调，不回退
-        window = list(messages[self._visible :])
-        self._visible = len(messages)
+        key = (run_id, generation)
+        visible = max(self._visible.get(key, 0), committed)  # 单调，不回退
+        window = list(messages[visible:])
+        self._visible[key] = len(messages)
         return window
 
     def checkpoint(
@@ -182,10 +193,12 @@ class AgentSession:
             return
         if generation is not None and self._active_generation != generation:
             return
+        key = (run_id, generation)
+        visible = self._visible.get(key, self._store.mailbox_committed(self._agent_id))
         self._store.commit(
             command_id=f"ckpt:{self._agent_id}:{self._store.sequence + 1}",
             kind="mailbox_committed",
-            payload={"agent_id": self._agent_id, "committed": self._visible},
+            payload={"agent_id": self._agent_id, "committed": visible},
         )
 
     def append_message(
@@ -213,7 +226,10 @@ class AgentSession:
         event_ref: ArtifactRef,
         data: dict[str, Any] | None = None,
     ) -> None:
-        """追加当前 Run 事件；非当前 Run/generation 或已关闭的事件丢弃（B8）。"""
+        """追加当前 Run 事件；非当前 Run/generation 或已关闭的事件丢弃（B8）。
+
+        事件同时经序列器耐久写入 Store（R3）；持久化失败仅记日志，不阻断流式发布。
+        """
         if (
             self._closed
             or self._active_run_id != run_id
@@ -223,6 +239,9 @@ class AgentSession:
         event = AgentEvent(run_id, self._next_sequence(), kind, event_ref, data)
         self._events.append(event)
         self._wakeup.set()
+        # 持久化为 fire-and-forget：入队顺序保证与终态事务一致，且不阻塞流式发布（R3）
+        if self._kernel is not None:
+            asyncio.create_task(self._kernel.persist_event(self._agent_id, event))
 
     def append_terminal_event(
         self,
@@ -235,6 +254,27 @@ class AgentSession:
         event = AgentEvent(run_id, self._next_sequence(), kind, event_ref, data)
         self._events.append(event)
         self._wakeup.set()
+
+    def build_terminal_event(
+        self,
+        run_id: RunId,
+        kind: str,
+        event_ref: ArtifactRef,
+        data: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        """构造终态事件（推进序列）；发布时机由调用方决定（先持久后发布，B1/R3）。"""
+        return AgentEvent(run_id, self._next_sequence(), kind, event_ref, data)
+
+    def publish_event(self, event: AgentEvent) -> None:
+        """向订阅者发布事件（live journal 追加 + 唤醒）。"""
+        self._events.append(event)
+        self._wakeup.set()
+
+    def seed_events(self, events: list[AgentEvent]) -> None:
+        """恢复时以 Store 持久化的事件填充 live journal（R3）。"""
+        self._events = list(events)
+        if events:
+            self._next_event_sequence = max(e.sequence for e in events) + 1
 
     def events(self, after_sequence: int = 0) -> AsyncIterator[AgentEvent]:
         """返回整条 Session journal（跨 Run，订阅式：持续等待新事件，由调用方决定何时终止读取，§5.1）。"""
@@ -268,7 +308,10 @@ class AgentSession:
         if self._kernel is None:
             raise RuntimeError("session has no kernel binding")
         return await self._kernel.wait_agent_parked(
-            target_ids, parking_run_id=self._active_run_id, timeout=timeout
+            target_ids,
+            parking_run_id=self._active_run_id,
+            parking_generation=self._active_generation,
+            timeout=timeout,
         )
 
 
@@ -299,7 +342,10 @@ class RunSession:
         return self._memory
 
     def receive_messages(self) -> list[AgentMessage]:
-        return self._session.receive_messages()
+        """返回本 Run 的未读窗口，游标归属于本 (run, generation)（R4）。"""
+        return self._session.receive_messages(
+            run_id=self._run_id, generation=self._generation
+        )
 
     def checkpoint(self) -> None:
         """推进 committed_cursor；仅当本 Run 仍是活跃 Run 时生效（B5）。"""
@@ -318,4 +364,13 @@ class RunSession:
     async def wait_agents(
         self, target_ids: list[AgentId], *, timeout: float | None = None
     ) -> Any:
-        return await self._session.wait_agents(target_ids, timeout=timeout)
+        """等待目标终结；park 用本视图固有的 run/generation，旧视图不得 park 新 Run（R5）。"""
+        kernel = self._session._kernel
+        if kernel is None:
+            raise RuntimeError("session has no kernel binding")
+        return await kernel.wait_agent_parked(
+            target_ids,
+            parking_run_id=self._run_id,
+            parking_generation=self._generation,
+            timeout=timeout,
+        )

@@ -798,17 +798,26 @@ async def test_recover_terminates_orphaned_queued_run() -> None:
 
 @pytest.mark.asyncio
 async def test_park_lock_timeout_returns_timed_out() -> None:
+    blocker = BlockingRunner()
     kernel = _kernel()
-    kernel._park_locks["fake-run"] = asyncio.Lock()
-    lock = kernel._park_locks["fake-run"]
+    await kernel.start()
+    agent_id, run_id = await kernel.create_root(_spec(blocker), {})
+    await blocker.started.wait()
+    kernel._park_locks[run_id] = asyncio.Lock()
+    lock = kernel._park_locks[run_id]
     await lock.acquire()
     try:
         result = await kernel.wait_agent_parked(
-            [], parking_run_id="fake-run", timeout=0.05
+            [agent_id],
+            parking_run_id=run_id,
+            parking_generation=1,  # 有效 Run → 走到锁等待
+            timeout=0.05,
         )
     finally:
         lock.release()
+        kernel._park_locks.pop(run_id, None)
     assert result.timed_out is True  # 锁等待超时 → timed_out，不抛 TimeoutError（B8）
+    blocker.release.set()
     await kernel.aclose()
 
 
@@ -838,4 +847,31 @@ async def test_codec_error_has_no_cause() -> None:
     with pytest.raises(AgentCommandError) as raised:
         await kernel.create_root(spec, {})
     assert raised.value.__cause__ is None  # 断链，secret 不可经 __cause__ 读取（B10）
+    assert raised.value.__context__ is None  # __context__ 亦不泄密（R6）
     await kernel.aclose()
+
+
+@pytest.mark.asyncio
+async def test_events_survive_recovery() -> None:
+    kernel = _kernel()
+    await kernel.start()
+    agent_id, run_id = await kernel.create_root(_spec(EchoRunner()), {})
+    await kernel.wait_run(run_id, timeout=2)
+    snapshot = kernel._store.snapshot()
+    journal = kernel._store.journal
+    await kernel.aclose()
+
+    recovered = await AgentKernel.from_snapshot(
+        snapshot=snapshot,
+        journal=journal,
+        resources_factory=InMemoryResourcesFactory(),
+        max_agents=32,
+        max_active_runs=8,
+    )
+    await recovered.start()
+    # live journal 已从 Store 回填：agent/step + run_completed 两条事件（R3）
+    events = await collect_events(recovered.session_events(agent_id), 2)
+    kinds = [e.kind for e in events]
+    assert "agent/step" in kinds
+    assert "run_completed" in kinds
+    await recovered.aclose()

@@ -232,6 +232,28 @@ def test_receive_messages_does_not_redeliver() -> None:
     assert session.receive_messages() == []  # 重复读取不重投（B4）
 
 
+def test_visible_cursor_is_per_run() -> None:
+    store = AgentGraphStore()
+    store.commit(
+        command_id="m1",
+        kind="mailbox",
+        payload={
+            "agent_id": "root",
+            "message": AgentMessage(source="x", content="a", sequence=1),
+        },
+    )
+    session = _session(store)
+    session.set_active_run("r1", 1)
+    session.receive_messages(run_id="r1", generation=1)  # r1 读取但不 checkpoint
+    # 新 Run r2 应看到未提交的消息（游标按 Run 隔离，R4）
+    session.set_active_run("r2", 1)
+    assert [m.content for m in session.receive_messages(run_id="r2", generation=1)] == ["a"]
+    # 旧 Run 视图不得读取/推进（active 已变）
+    session.set_active_run("r3", 1)
+    assert session.receive_messages(run_id="r1", generation=1) == []
+    assert store.mailbox_committed("root") == 0
+
+
 def test_run_session_blocks_stale_checkpoint_and_rollback() -> None:
     store = AgentGraphStore()
     session = _session(store)

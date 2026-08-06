@@ -1,5 +1,6 @@
 """AgentControl — 面向调用方的能力门面（设计 §1.2、§2.4）。"""
 
+import logging
 from collections.abc import AsyncIterator, Collection
 from typing import Any, Generic, TYPE_CHECKING
 
@@ -25,6 +26,8 @@ from athena.core.agent_kernel.types import (
 
 if TYPE_CHECKING:
     from athena.core.agent_kernel.kernel import AgentKernel
+
+logger = logging.getLogger(__name__)
 
 
 class AgentHandle:
@@ -98,13 +101,16 @@ class AgentRun(Generic[ResponseT]):
             raise AgentRunFailed(summary.error or "run failed")
         if summary.response_ref is None:
             raise RuntimeError("completed run has no response reference")
+        decode_error: str | None = None
         try:
-            return self._codec.decode_response(summary.response_ref)
+            decoded = self._codec.decode_response(summary.response_ref)
         except Exception as exc:
-            # 响应解码失败 → 只暴露异常类型且断链，防凭据/响应内容泄露（B10）
-            raise AgentRunFailed(
-                f"response decode failed: {type(exc).__name__}"
-            ) from None
+            # 响应解码失败 → 原异常只入受保护日志，不进入公开异常链（R6）
+            logger.warning("response decode failed: %s", type(exc).__name__)
+            decode_error = type(exc).__name__
+        if decode_error is not None:
+            raise AgentRunFailed(f"response decode failed: {decode_error}")
+        return decoded
 
     async def cancel(self, reason: str = "caller_cancelled") -> None:
         """取消本 Run 并终止执行。"""

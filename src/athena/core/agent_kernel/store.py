@@ -10,6 +10,7 @@ from typing import Any
 
 from athena.core.agent_kernel.types import (
     TERMINAL_RUN_STATUSES,
+    AgentEvent,
     AgentId,
     AgentMessage,
     AgentPath,
@@ -93,6 +94,7 @@ class StoreSnapshot:
     outbox: dict[RunId, OutboxRecord]
     command_results: dict[CommandId, CommandResult]
     applied: dict[CommandId, tuple[int, str]]
+    events: dict[AgentId, list[AgentEvent]]
 
 
 class AgentGraphStore:
@@ -107,6 +109,7 @@ class AgentGraphStore:
         self._mailbox_committed: dict[AgentId, int] = {}
         self._outbox: dict[RunId, OutboxRecord] = {}
         self._command_results: dict[CommandId, CommandResult] = {}
+        self._events: dict[AgentId, list[AgentEvent]] = {}
         # command_id -> (应用 sequence, 命令指纹)；指纹用于识别 ID 复用冲突（B3）
         self._applied: dict[CommandId, tuple[int, str]] = {}
 
@@ -201,6 +204,9 @@ class AgentGraphStore:
     def outbox(self) -> dict[RunId, OutboxRecord]:
         return dict(self._outbox)
 
+    def events(self, agent_id: AgentId) -> list[AgentEvent]:
+        return list(self._events.get(agent_id, []))
+
     def run_summary(self, run_id: RunId) -> RunSummary | None:
         run = self._runs.get(run_id)
         if run is None:
@@ -251,8 +257,10 @@ class AgentGraphStore:
             run_id = payload["run_id"]
             generation = payload["generation"]
             run = self.require_run(run_id)
-            if run.status in TERMINAL_RUN_STATUSES:
-                return False  # 终态 Run 不可重开（B2）
+            if run.status != RunStatus.QUEUED:
+                return False  # 仅 QUEUED → RUNNING（R8）
+            if generation <= run.generation:
+                return False  # generation 必须严格递增（R8）
             agent = self.require_agent(run.agent_id)
             run.status = RunStatus.RUNNING
             run.generation = generation
@@ -284,6 +292,9 @@ class AgentGraphStore:
                 agent.status = AgentStatus.IDLE
             if outbox is not None:
                 self._outbox[outbox.child_run_id] = outbox
+            terminal_event = payload.get("terminal_event")
+            if terminal_event is not None:
+                self._events.setdefault(run.agent_id, []).append(terminal_event)
             return True
         elif kind == "mailbox":
             agent_id = payload["agent_id"]
@@ -302,6 +313,11 @@ class AgentGraphStore:
         elif kind == "outbox":
             record = payload["record"]
             self._outbox[record.child_run_id] = record
+            return True
+        elif kind == "agent_event":
+            agent_id = payload["agent_id"]
+            event = payload["event"]
+            self._events.setdefault(agent_id, []).append(event)
             return True
         elif kind == "agent_closed":
             agent = self.require_agent(payload["agent_id"])
@@ -338,6 +354,7 @@ class AgentGraphStore:
             outbox={k: OutboxRecord(**vars(v)) for k, v in self._outbox.items()},
             command_results=dict(self._command_results),
             applied=dict(self._applied),
+            events={k: list(v) for k, v in self._events.items()},
         )
 
     def load(self, snapshot: StoreSnapshot, journal: list[JournalRecord]) -> None:
@@ -352,6 +369,7 @@ class AgentGraphStore:
         self._mailbox_committed = dict(snapshot.mailbox_committed)
         self._outbox = dict(snapshot.outbox)
         self._command_results = dict(snapshot.command_results)
+        self._events = {k: list(v) for k, v in snapshot.events.items()}
         self._journal = list(journal)
         # 快照前已应用的命令（含指纹）恢复幂等账本，journal 只补快照后的（B3）
         self._applied = dict(snapshot.applied)
