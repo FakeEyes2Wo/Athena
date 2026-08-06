@@ -13,8 +13,8 @@ pytestmark = pytest.mark.integration
 class TestAgentConstruction:
     """Tests that do NOT require an LLM -- validate tool registration only."""
 
-    async def test_all_6_tools_registered(self):
-        """Verify the agent builds successfully with all 6 tools registered."""
+    async def test_all_11_native_tools_registered(self):
+        """Verify the agent builds successfully with all 11 native tools (6 core + 5 cognition)."""
         from athena.agents.competition.task_understand_agent import (
             build_task_understand_agent,
         )
@@ -26,8 +26,8 @@ class TestAgentConstruction:
         )
 
         assert agent.name == "TaskUnderstandAgent"
-        assert len(agent.config.tools) == 6, (
-            f"Expected 6 tools, got {len(agent.config.tools)}"
+        assert len(agent.config.tools) == 11, (
+            f"Expected 11 native tools (6 core + 5 cognition), got {len(agent.config.tools)}"
         )
 
     async def test_all_expected_tool_names_present(self):
@@ -51,9 +51,15 @@ class TestAgentConstruction:
             # Data preparation (Task 7 -- 2 tools)
             "data_analyze",
             "data_clean_code_gen",
+            # Agent 认知子系统 —— 5 个认知工具
+            "agent_plan",
+            "agent_checkpoint",
+            "agent_track",
+            "agent_reflect",
+            "agent_guard",
         }
 
-        assert len(expected_names) == 6, "Expected exactly 6 tool names"
+        assert len(expected_names) == 11, "Expected exactly 11 native tool names (6 core + 5 cognition)"
 
         for name in expected_names:
             assert name in agent.config.tools, (
@@ -111,7 +117,7 @@ class TestAgentConstruction:
             mcp_servers=[McpServerConfig(name="kaggle")],
         )
         assert "mcp_search_tools" in agent.config.tools
-        assert len(agent.config.tools) == 7  # 6 原生 + 1 搜索工具
+        assert len(agent.config.tools) == 12  # 11 原生 + 1 搜索工具
 
 
 @pytest.mark.skip(reason="Requires real LLM API access -- run manually")
@@ -129,7 +135,7 @@ async def test_agent_loads_all_tools():
     )
 
     assert agent.name == "TaskUnderstandAgent"
-    assert len(agent.config.tools) == 6
+    assert len(agent.config.tools) == 11
 
     # Verify key tools exist
     assert "hf_dataset_search" in agent.config.tools
