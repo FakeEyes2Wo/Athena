@@ -1,1 +1,1 @@
-"""Deterministic workflow-stage services and orchestration."""
+"""确定性工作流阶段服务与编排。"""
