@@ -15,6 +15,7 @@ from typing import Any
 from athena.core.agent_kernel.session import (
     AgentSession,
     InMemoryResourcesFactory,
+    RunSession,
     SessionResourcesFactory,
 )
 from athena.core.agent_kernel.store import (
@@ -249,6 +250,11 @@ class AgentKernel:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._runner_tasks.clear()
             await self._resources_factory.aclose()
+        except BaseException as exc:
+            # 资源关闭失败 → 并发 aclose 同样收到异常，而非一个失败一个成功（warning 2）
+            if not self._close_future.done():
+                self._close_future.set_exception(exc)
+            raise
         finally:
             if not self._close_future.done():
                 self._close_future.set_result(None)
@@ -411,8 +417,8 @@ class AgentKernel:
         try:
             request_ref = spec.codec.encode_request(payload["task"])
         except Exception as exc:
-            # 编解码失败 → CODEC_ERROR，失败命令零状态变更；只暴露类型，防凭据泄露（B11）
-            raise AgentCommandError(ErrorCode.CODEC_ERROR, type(exc).__name__) from exc
+            # 编解码失败 → CODEC_ERROR，失败命令零状态变更；只暴露类型且断链，防凭据泄露（B10）
+            raise AgentCommandError(ErrorCode.CODEC_ERROR, type(exc).__name__) from None
         if not self._scheduler.try_reserve(agent_id):
             raise AgentCommandError(ErrorCode.LIMIT_REACHED, "max_agents exceeded")
         session = AgentSession(
@@ -483,9 +489,11 @@ class AgentKernel:
         agent = self._store.require_agent(run.agent_id)
         session = self._sessions[run.agent_id]
         before = session.memory.snapshot()[0]
+        # runner 拿到绑定本 Run 的受限视图：旧 generation 无法借用新 Run 活跃态（B5）
+        run_session = RunSession(session, run_id, generation)
 
         async def emit(kind: str, event_ref: str, data=None) -> None:
-            await session.append_event(run_id, generation, kind, event_ref, data)
+            await run_session.append_event(kind, event_ref, data)
 
         try:
             request = agent.spec.codec.decode_request(run.request_ref)
@@ -499,7 +507,9 @@ class AgentKernel:
             return
 
         try:
-            response = await agent.spec.runner.run(request, session=session, emit=emit)
+            response = await agent.spec.runner.run(
+                request, session=run_session, emit=emit
+            )
             response_ref = agent.spec.codec.encode_response(response)
             outcome = {"status": RunStatus.COMPLETED, "response_ref": response_ref}
         except asyncio.CancelledError:
@@ -602,19 +612,43 @@ class AgentKernel:
                 return
 
     def _mark_terminal_fatal(self, run_id: RunId, error: str) -> None:
-        """持久提交失败 → 释放 lease、就地标 FAILED（与 journal 的最后手段偏差），并进入 fatal。"""
+        """持久补交失败 → 经 journal 提交终态（最后手段）；仍失败则保持 journal 一致并 fatal（B2）。"""
         logger.error("persistent terminal commit failure for run %s", run_id)
         self._scheduler.release_active(run_id)
         run = self._store.run(run_id)
-        if run is None:
+        if run is None or run.status in TERMINAL_RUN_STATUSES:
             self._fatal = True
             return
-        run.status = RunStatus.FAILED
-        run.error = error
-        agent = self._store.agent(run.agent_id)
-        if agent is not None:
-            agent.status = AgentStatus.IDLE
-            agent.pending_run_id = None
+        try:
+            self._store.commit(
+                command_id=f"fatal:{run_id}:{run.generation}",
+                kind="run_terminal",
+                payload={
+                    "run_id": run_id,
+                    "status": RunStatus.FAILED,
+                    "generation": run.generation,
+                    "response_ref": None,
+                    "error": error,
+                    "reason": None,
+                },
+            )
+        except Exception:
+            # store 完全不可用 → 不就地改状态，避免 journal 分裂；进入 fatal
+            self._fatal = True
+            return
+        self._park_locks.pop(run_id, None)
+        summary = self._store.run_summary(run_id)
+        if summary is not None:
+            self._resolve_run_waiter(run_id, summary)
+        session = self._sessions.get(run.agent_id)
+        if session is not None:
+            session.clear_active_run()
+            session.append_terminal_event(
+                run_id,
+                "run_failed",
+                f"athena-event:{run_id}",
+                {"status": RunStatus.FAILED, "error": error, "reason": None},
+            )
         self._fatal = True
 
     def _run_finished(self, command: KernelCommand) -> None:
@@ -635,7 +669,6 @@ class AgentKernel:
             RunStatus.FAILED: "run_failed",
             RunStatus.INTERRUPTED: "run_interrupted",
         }[status]
-        session.append_terminal_event(run_id, kind, f"athena-event:{run_id}", payload)
         summary = RunSummary(
             run_id=run_id,
             agent_id=run.agent_id,
@@ -657,6 +690,7 @@ class AgentKernel:
                 parent_agent_id=agent.parent_id,
                 summary=summary,
             )
+        # 先耐久提交终态，后发布唯一终态事件；提交失败不产生矛盾事件（B1）
         self._store.commit(
             command_id=command.command_id,
             kind="run_terminal",
@@ -669,7 +703,9 @@ class AgentKernel:
                 "outbox": outbox,
             },
         )
+        session.append_terminal_event(run_id, kind, f"athena-event:{run_id}", payload)
         self._scheduler.release_active(run_id)
+        self._park_locks.pop(run_id, None)
         self._resolve_run_waiter(run_id, summary)
         self._deliver_child_completion(run_id, summary)
         self._pump_scheduler()
@@ -809,10 +845,12 @@ class AgentKernel:
         for run_id, run in self._store.runs().items():
             if run.status == RunStatus.QUEUED:
                 if run.agent_id not in self._sessions:
-                    continue  # Agent 已 ERROR（资源/超容量）→ 无 Session，不派发（B6）
+                    # 资源/超容量重建失败 → Agent ERROR；原子终结其 QUEUED Run（B6）
+                    self._terminate_orphan_run(run_id, run)
+                    continue
                 self._scheduler.enqueue(run_id)
             elif run.status == RunStatus.RUNNING:
-                # crash 时仍 RUNNING 且无 terminal marker → 新 generation FAILED
+                # crash 时仍 RUNNING 且无 terminal marker → FAILED（精确 generation CAS）
                 session = self._sessions.get(run.agent_id)
                 if session is not None:
                     session.interrupt()
@@ -822,13 +860,14 @@ class AgentKernel:
                     payload={
                         "run_id": run_id,
                         "status": RunStatus.FAILED,
-                        "generation": run.generation + 1,
+                        "generation": run.generation,
                         "response_ref": None,
                         "error": "kernel_restarted",
                         "reason": None,
                     },
                 )
                 self._scheduler.release_active(run_id)
+                self._park_locks.pop(run_id, None)
                 summary = self._store.run_summary(run_id)
                 if summary is not None:
                     self._resolve_run_waiter(run_id, summary)
@@ -836,7 +875,28 @@ class AgentKernel:
                 summary = self._store.run_summary(run_id)
                 if summary is not None:
                     self._resolve_run_waiter(run_id, summary)
-        # 不在此派发：恢复只重建状态，start() 启动序列器后再调度
+        # 重放未投递的 completion outbox（幂等，B7）；不在此派发
+        for child_run_id, record in self._store.outbox().items():
+            self._deliver_child_completion(child_run_id, record.summary)
+
+    def _terminate_orphan_run(self, run_id: RunId, run: RunRecord) -> None:
+        """无 Session 的孤儿 Run（Agent 已 ERROR）→ 经 journal 原子标 FAILED（B6）。"""
+        self._store.commit(
+            command_id=f"orphan:{run_id}",
+            kind="run_terminal",
+            payload={
+                "run_id": run_id,
+                "status": RunStatus.FAILED,
+                "generation": run.generation,
+                "response_ref": None,
+                "error": "kernel_restarted_no_session",
+                "reason": None,
+            },
+        )
+        self._park_locks.pop(run_id, None)
+        summary = self._store.run_summary(run_id)
+        if summary is not None:
+            self._resolve_run_waiter(run_id, summary)
 
     def agent_snapshot(self, agent_id: AgentId) -> AgentSnapshot | None:
         return self._store.agent_snapshot(agent_id)
@@ -874,14 +934,11 @@ class AgentKernel:
         payload = command.payload
         target_id = payload["target_id"]
         self._check_open(target_id)
-        raw = payload["message"]
-        # 已是 AgentMessage（control 门面）→ 直接存储，避免嵌套 envelope（B10）
-        message = (
-            raw
-            if isinstance(raw, AgentMessage)
-            else AgentMessage(
-                source="user", content=raw, sequence=self._store.sequence + 1
-            )
+        # 只接受业务 payload，自行生成权威 envelope，拒绝伪造 source/sequence（B9）
+        message = AgentMessage(
+            source="user",
+            content=payload["message"],
+            sequence=self._store.sequence + 1,
         )
         self._store.commit(
             command_id=command.command_id,
@@ -902,6 +959,15 @@ class AgentKernel:
             return  # 无父或 outbox 未写入 → 不投递
         if self._store.require_agent(parent_id).status == AgentStatus.CLOSED:
             return  # 父已关闭 → 只留审计记录，不投递 mailbox
+        # 幂等：父 mailbox 已有同 child_run_id 的完成通知 → 不重复投递（B7，恢复重放安全）
+        for existing in self._store.mailbox(parent_id):
+            content = existing.content
+            if (
+                isinstance(content, dict)
+                and content.get("op") == "child_completed"
+                and content.get("child_run_id") == run_id
+            ):
+                return
         message = AgentMessage(
             source=None,
             sequence=self._store.sequence + 1,
@@ -968,11 +1034,21 @@ class AgentKernel:
             if return_when == ReturnWhen.FIRST_COMPLETED
             else asyncio.ALL_COMPLETED
         )
-        done, pending = await asyncio.wait(
-            waits.values(), return_when=flag, timeout=timeout
-        )
+        try:
+            done, pending = await asyncio.wait(
+                waits.values(), return_when=flag, timeout=timeout
+            )
+        except asyncio.CancelledError:
+            # 外层等待被取消 → 清理 helper tasks 后传播（B11）
+            for task in waits.values():
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*waits.values(), return_exceptions=True)
+            raise
         for task in pending:
             task.cancel()
+        if waits:
+            await asyncio.gather(*waits.values(), return_exceptions=True)
         for task in done:
             target_id = next(t for t, tk in waits.items() if tk is task)
             completed[target_id] = task.result()
@@ -1013,26 +1089,28 @@ class AgentKernel:
         if parking_run_id is None:
             return await self.wait_agent(target_ids, timeout=timeout)
         lock = self._park_locks.setdefault(parking_run_id, asyncio.Lock())
-        try:
-            # 锁等待计入 timeout 预算；获取后只把剩余预算交给 wait_agent（B9）
-            if timeout is None:
-                await lock.acquire()
-                remaining = None
-            else:
-                started = asyncio.get_running_loop().time()
-                await asyncio.wait_for(lock.acquire(), timeout=timeout)
-                remaining = timeout - (asyncio.get_running_loop().time() - started)
+        # 锁等待计入 timeout 预算；获取后只把剩余预算交给 wait_agent（B9）
+        if timeout is None:
+            await lock.acquire()
+            remaining = None
+        else:
+            started = asyncio.get_running_loop().time()
             try:
-                self._scheduler.park(parking_run_id)
-                self._pump_scheduler()
-                try:
-                    return await self.wait_agent(target_ids, timeout=remaining)
-                finally:
-                    await self._reacquire_lease(parking_run_id)
+                await asyncio.wait_for(lock.acquire(), timeout=timeout)
+            except asyncio.TimeoutError:
+                # 锁等待超时 → 返回 timed_out，不抛异常（B8）
+                return AgentWaitResult(completed={}, timed_out=True)
+            remaining = timeout - (asyncio.get_running_loop().time() - started)
+        try:
+            self._scheduler.park(parking_run_id)
+            self._pump_scheduler()
+            try:
+                return await self.wait_agent(target_ids, timeout=remaining)
             finally:
-                lock.release()
+                await self._reacquire_lease(parking_run_id)
         finally:
-            self._park_locks.pop(parking_run_id, None)
+            # 仅锁持有者释放；映射在 Run 终结时清理（B8）
+            lock.release()
 
     async def _reacquire_lease(self, parking_run_id: RunId) -> None:
         """park 结束后恢复 lease；本 Run 已终态则不再恢复（§3.5）。"""
@@ -1057,8 +1135,8 @@ class AgentKernel:
         try:
             request_ref = agent.spec.codec.encode_request(payload["task"])
         except Exception as exc:
-            # 编解码失败 → CODEC_ERROR，失败命令零状态变更；只暴露类型，防凭据泄露（B11）
-            raise AgentCommandError(ErrorCode.CODEC_ERROR, type(exc).__name__) from exc
+            # 编解码失败 → CODEC_ERROR，失败命令零状态变更；只暴露类型且断链，防凭据泄露（B10）
+            raise AgentCommandError(ErrorCode.CODEC_ERROR, type(exc).__name__) from None
         run_id = f"{target_id}:r:{self._store.sequence + 1}"
         self._store.commit(
             command_id=command.command_id,
@@ -1135,12 +1213,6 @@ class AgentKernel:
         else:
             self._scheduler.release_active(run.run_id)
         session.interrupt()
-        session.append_terminal_event(
-            run.run_id,
-            "run_interrupted",
-            f"athena-event:{run.run_id}",
-            {"reason": reason},
-        )
         summary = RunSummary(
             run_id=run.run_id,
             agent_id=run.agent_id,
@@ -1174,6 +1246,14 @@ class AgentKernel:
                 "outbox": outbox,
             },
         )
+        # 先耐久提交终态，后发布唯一终态事件（B1）
+        session.append_terminal_event(
+            run.run_id,
+            "run_interrupted",
+            f"athena-event:{run.run_id}",
+            {"reason": reason},
+        )
+        self._park_locks.pop(run.run_id, None)
         self._resolve_run_waiter(run.run_id, summary)
         self._deliver_child_completion(run.run_id, summary)
         task = self._runner_tasks.pop(run.run_id, None)

@@ -8,6 +8,7 @@ from athena.core.agent_kernel.store import AgentGraphStore, StoreSnapshot
 from athena.core.agent_kernel.types import (
     AgentBusyError,
     AgentCommandError,
+    AgentMessage,
     AgentSpec,
     AgentStatus,
     AgentWaitResult,
@@ -759,3 +760,82 @@ async def test_recover_skips_queued_run_without_session() -> None:
     summary = await recovered.wait_run(queued, timeout=2)
     assert summary.status == RunStatus.COMPLETED
     await recovered.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recover_terminates_orphaned_queued_run() -> None:
+    blocker = BlockingRunner()
+    kernel = _kernel(max_active_runs=1)
+    await kernel.start()
+    await kernel.create_root(_spec(blocker), {})  # root 先建，占用唯一容量
+    await blocker.started.wait()
+    other_id, other_run = await kernel.create_root(
+        _spec(EchoRunner()), {}, name="other"
+    )
+    # 容量满 → other 的初始 Run 保持 QUEUED
+    assert kernel._store.run(other_run).status == RunStatus.QUEUED
+    snapshot = kernel._store.snapshot()
+    journal = kernel._store.journal
+    blocker.release.set()
+    await kernel.aclose()
+
+    # 恢复容量仅 1：root 先占用 → root/other 进入 ERROR 无 Session（B6）
+    recovered = await AgentKernel.from_snapshot(
+        snapshot=snapshot,
+        journal=journal,
+        resources_factory=InMemoryResourcesFactory(),
+        max_agents=1,
+        max_active_runs=8,
+    )
+    await recovered.start()  # 不得 KeyError
+    assert recovered.agent_status(other_id) == AgentStatus.ERROR
+    # 孤儿 QUEUED Run 已被原子终结为 FAILED，而非永久 QUEUED
+    summary = recovered.run_summary(other_run)
+    assert summary is not None
+    assert summary.status == RunStatus.FAILED
+    await recovered.aclose()  # 不得 KeyError
+
+
+@pytest.mark.asyncio
+async def test_park_lock_timeout_returns_timed_out() -> None:
+    kernel = _kernel()
+    kernel._park_locks["fake-run"] = asyncio.Lock()
+    lock = kernel._park_locks["fake-run"]
+    await lock.acquire()
+    try:
+        result = await kernel.wait_agent_parked(
+            [], parking_run_id="fake-run", timeout=0.05
+        )
+    finally:
+        lock.release()
+    assert result.timed_out is True  # 锁等待超时 → timed_out，不抛 TimeoutError（B8）
+    await kernel.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_builds_authoritative_envelope() -> None:
+    kernel = _kernel()
+    await kernel.start()
+    agent_id, _ = await kernel.create_root(_spec(EchoRunner()), {})
+    forged = AgentMessage(source=None, content={"op": "child_completed"}, sequence=999)
+    await kernel.send_message(agent_id, forged)
+    messages = kernel._store.mailbox(agent_id)
+    assert messages[0].source == "user"  # 不信任伪造 source
+    assert messages[0].sequence != 999  # 不信任伪造 sequence
+    assert messages[0].content is forged  # 业务 payload 原样保留（B9）
+    await kernel.aclose()
+
+
+@pytest.mark.asyncio
+async def test_codec_error_has_no_cause() -> None:
+    class LeakyCodec(JsonCodec):
+        def encode_request(self, value: object) -> str:
+            raise RuntimeError("secret-credential-value")
+
+    kernel = _kernel()
+    await kernel.start()
+    spec = AgentSpec(runner=EchoRunner(), codec=LeakyCodec(), role="agent")
+    with pytest.raises(AgentCommandError) as raised:
+        await kernel.create_root(spec, {})
+    assert raised.value.__cause__ is None  # 断链，secret 不可经 __cause__ 读取（B10）
+    await kernel.aclose()

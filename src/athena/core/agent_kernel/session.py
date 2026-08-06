@@ -48,10 +48,14 @@ class InMemoryResourcesFactory:
 
 
 class _MemoryView:
-    """ContextManager 的只读视图：读/回滚可用，写入必须经 session 门禁（B8）。"""
+    """ContextManager 的只读视图：读/回滚可用，写入必须经 session 门禁（B8）。
 
-    def __init__(self, memory: ContextManager) -> None:
+    ``allow_rollback=False`` 用于 runner 视图：rollback 是 kernel 内部操作（B5）。
+    """
+
+    def __init__(self, memory: ContextManager, *, allow_rollback: bool = True) -> None:
         self._memory = memory
+        self._allow_rollback = allow_rollback
 
     @property
     def items(self) -> list[ModelMessage]:
@@ -79,6 +83,8 @@ class _MemoryView:
         return self._memory.items_since(idx)
 
     def rollback(self, idx: int) -> None:
+        if not self._allow_rollback:
+            raise AttributeError("rollback is kernel-internal")
         self._memory.rollback(idx)
 
     def append(self, msg: ModelMessage) -> None:
@@ -155,13 +161,13 @@ class AgentSession:
         self._active_generation = None
 
     def receive_messages(self) -> list[AgentMessage]:
-        """返回未提交（[committed, len)）的 mailbox 窗口，并推进可见游标。"""
+        """返回未读 mailbox 窗口并推进独立可见游标；重复读取不再重投（B4）。"""
         committed = self._store.mailbox_committed(self._agent_id)
         messages = self._store.mailbox(self._agent_id)
-        self._visible = max(
-            self._visible, committed, len(messages)
-        )  # 单调，不回退（B7）
-        return list(messages[committed:])
+        self._visible = max(self._visible, committed)  # 单调，不回退
+        window = list(messages[self._visible :])
+        self._visible = len(messages)
+        return window
 
     def checkpoint(
         self, *, run_id: RunId | None = None, generation: int | None = None
@@ -264,3 +270,52 @@ class AgentSession:
         return await self._kernel.wait_agent_parked(
             target_ids, parking_run_id=self._active_run_id, timeout=timeout
         )
+
+
+class RunSession:
+    """绑定单个 Run 的受限 session 视图（B5）：方法自动校验 run/generation。
+
+    runner 只能拿到本视图；旧 runner 借新 Run 活跃态提交旧游标或回滚新 Run
+    memory 均被拒绝。memory 为无 rollback 的只读视图。
+    """
+
+    def __init__(self, session: AgentSession, run_id: RunId, generation: int) -> None:
+        self._session = session
+        self._run_id = run_id
+        self._generation = generation
+        self._memory = _MemoryView(session._resources.memory, allow_rollback=False)
+
+    @property
+    def agent_id(self) -> AgentId:
+        return self._session.agent_id
+
+    @property
+    def context_ref(self) -> str:
+        return self._session.context_ref
+
+    @property
+    def memory(self) -> _MemoryView:
+        """只读 memory 视图（无 rollback）；写入经 ``append_message`` 门禁。"""
+        return self._memory
+
+    def receive_messages(self) -> list[AgentMessage]:
+        return self._session.receive_messages()
+
+    def checkpoint(self) -> None:
+        """推进 committed_cursor；仅当本 Run 仍是活跃 Run 时生效（B5）。"""
+        self._session.checkpoint(run_id=self._run_id, generation=self._generation)
+
+    def append_message(self, message: ModelMessage) -> None:
+        self._session.append_message(self._run_id, self._generation, message)
+
+    async def append_event(
+        self, kind: str, event_ref: ArtifactRef, data: dict[str, Any] | None = None
+    ) -> None:
+        await self._session.append_event(
+            self._run_id, self._generation, kind, event_ref, data
+        )
+
+    async def wait_agents(
+        self, target_ids: list[AgentId], *, timeout: float | None = None
+    ) -> Any:
+        return await self._session.wait_agents(target_ids, timeout=timeout)

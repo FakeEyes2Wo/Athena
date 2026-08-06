@@ -5,7 +5,7 @@
 """
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from typing import Any
 
 from athena.core.agent_kernel.types import (
@@ -125,10 +125,29 @@ class AgentGraphStore:
     def result_for(self, command_id: CommandId) -> CommandResult | None:
         return self._command_results.get(command_id)
 
-    @staticmethod
-    def _fingerprint(kind: str, payload: dict[str, Any]) -> str:
-        """命令的规范化指纹：同 command_id 重试须一致，否则视为 ID 复用冲突（B3）。"""
-        return hashlib.sha256(repr((kind, payload)).encode()).hexdigest()
+    @classmethod
+    def _canonical(cls, value: Any) -> Any:
+        """递归规范化：dict 按键排序、dataclass 展开为字段 dict，用于稳定指纹。"""
+        if is_dataclass(value):
+            return cls._canonical(vars(value))
+        if isinstance(value, dict):
+            return {
+                k: cls._canonical(v)
+                for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._canonical(v) for v in value]
+        return value
+
+    @classmethod
+    def _fingerprint(cls, kind: str, payload: dict[str, Any]) -> str:
+        """命令的规范指纹：同 command_id 重试须一致，否则视为 ID 复用冲突。
+
+        递归按键排序，保证同一命令不同键序得到相同指纹（规范要求）。
+        """
+        return hashlib.sha256(
+            repr((kind, cls._canonical(payload))).encode()
+        ).hexdigest()
 
     def commit(
         self, *, command_id: CommandId, kind: str, payload: dict[str, Any]
@@ -178,6 +197,9 @@ class AgentGraphStore:
 
     def outbox_for(self, child_run_id: RunId) -> OutboxRecord | None:
         return self._outbox.get(child_run_id)
+
+    def outbox(self) -> dict[RunId, OutboxRecord]:
+        return dict(self._outbox)
 
     def run_summary(self, run_id: RunId) -> RunSummary | None:
         run = self._runs.get(run_id)
@@ -242,14 +264,17 @@ class AgentGraphStore:
             run = self.require_run(run_id)
             if run.status in TERMINAL_RUN_STATUSES:
                 return False  # CAS：终态 first-writer-wins（B2）
+            status = payload["status"]
+            if status not in TERMINAL_RUN_STATUSES:
+                return False  # 目标状态必须为终态（B3）
             generation = payload.get("generation", run.generation)
-            if generation < run.generation:
-                return False  # 过期 generation → 不写入（B2）
+            if generation != run.generation:
+                return False  # 精确 generation CAS：未来/过期 generation 均拒绝（B3）
             outbox = payload.get("outbox")
             if outbox is not None and not hasattr(outbox, "child_run_id"):
                 raise ValueError("malformed outbox payload")
             agent = self.require_agent(run.agent_id)
-            run.status = payload["status"]
+            run.status = status
             run.generation = generation
             run.response_ref = payload.get("response_ref")
             run.error = payload.get("error")
@@ -267,7 +292,10 @@ class AgentGraphStore:
             return True
         elif kind == "mailbox_committed":
             agent_id = payload["agent_id"]
-            committed = payload.get("committed", len(self.mailbox(agent_id)))
+            messages = self._mailboxes.get(agent_id, [])
+            committed = payload.get("committed", len(messages))
+            if committed > len(messages):
+                return False  # 越过 mailbox 长度的游标 → 拒绝（B4）
             current = self._mailbox_committed.get(agent_id, 0)
             self._mailbox_committed[agent_id] = max(current, committed)  # 单调（B7）
             return True

@@ -448,3 +448,81 @@ def test_commit_rejects_reused_command_id_with_different_payload() -> None:
                 "message": AgentMessage(source="x", content="second", sequence=1),
             },
         )
+
+
+def test_terminal_rejects_future_generation() -> None:
+    store = AgentGraphStore()
+    _spawn(store)
+    store.commit(
+        command_id="rr",
+        kind="run_running",
+        payload={"run_id": "root:r1", "generation": 2},
+    )
+    before = store.sequence
+    store.commit(
+        command_id="t1",
+        kind="run_terminal",
+        payload={
+            "run_id": "root:r1",
+            "status": RunStatus.COMPLETED,
+            "generation": 99,  # 未来 generation → 拒绝
+            "response_ref": "r://1",
+            "error": None,
+            "reason": None,
+        },
+    )
+    assert store.sequence == before
+    assert store.run("root:r1").status == RunStatus.RUNNING
+
+
+def test_terminal_rejects_non_terminal_status() -> None:
+    store = AgentGraphStore()
+    _spawn(store)
+    store.commit(
+        command_id="rr",
+        kind="run_running",
+        payload={"run_id": "root:r1", "generation": 1},
+    )
+    before = store.sequence
+    store.commit(
+        command_id="t1",
+        kind="run_terminal",
+        payload={
+            "run_id": "root:r1",
+            "status": RunStatus.RUNNING,  # 非终态 → 拒绝
+            "generation": 1,
+            "response_ref": None,
+            "error": None,
+            "reason": None,
+        },
+    )
+    assert store.sequence == before
+    assert store.run("root:r1").status == RunStatus.RUNNING
+
+
+def test_mailbox_committed_rejects_cursor_beyond_length() -> None:
+    store = AgentGraphStore()
+    _spawn(store)
+    store.commit(
+        command_id="m1",
+        kind="mailbox",
+        payload={
+            "agent_id": "root",
+            "message": AgentMessage(source="x", content="a", sequence=1),
+        },
+    )
+    before = store.sequence
+    store.commit(
+        command_id="ck1",
+        kind="mailbox_committed",
+        payload={"agent_id": "root", "committed": 99},  # > len → 拒绝
+    )
+    assert store.sequence == before
+    assert store.mailbox_committed("root") == 0
+
+
+def test_fingerprint_is_key_order_independent() -> None:
+    store = AgentGraphStore()
+    fp1 = store._fingerprint("mailbox", {"agent_id": "a", "message": "x"})
+    fp2 = store._fingerprint("mailbox", {"message": "x", "agent_id": "a"})
+    assert fp1 == fp2

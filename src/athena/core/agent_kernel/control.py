@@ -7,7 +7,6 @@ from athena.core.agent_kernel.types import (
     AgentCommandError,
     AgentEvent,
     AgentId,
-    AgentMessage,
     AgentPath,
     AgentRunFailed,
     AgentRunInterrupted,
@@ -102,10 +101,10 @@ class AgentRun(Generic[ResponseT]):
         try:
             return self._codec.decode_response(summary.response_ref)
         except Exception as exc:
-            # 响应解码失败 → 只暴露异常类型，防凭据/响应内容泄露（B11）
+            # 响应解码失败 → 只暴露异常类型且断链，防凭据/响应内容泄露（B10）
             raise AgentRunFailed(
                 f"response decode failed: {type(exc).__name__}"
-            ) from exc
+            ) from None
 
     async def cancel(self, reason: str = "caller_cancelled") -> None:
         """取消本 Run 并终止执行。"""
@@ -152,8 +151,8 @@ class AgentControl:
         )
         return AgentHandle(agent_id, self), AgentRun(run_id, self, spec.codec)
 
-    async def send_message(self, target: AgentHandle, message: AgentMessage) -> None:
-        """向目标 mailbox 投递消息；只投递，不触发 Turn（§3.3）。"""
+    async def send_message(self, target: AgentHandle, message: object) -> None:
+        """向目标 mailbox 投递业务 payload；envelope 由 Kernel 权威生成（§3.3，B9）。"""
         target._check_control(self)
         await self.kernel.send_message(target.agent_id, message)
 

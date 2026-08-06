@@ -3,7 +3,11 @@ import asyncio
 import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from athena.core.agent_kernel.session import AgentSession, InMemoryResourcesFactory
+from athena.core.agent_kernel.session import (
+    AgentSession,
+    InMemoryResourcesFactory,
+    RunSession,
+)
 from athena.core.agent_kernel.store import AgentGraphStore
 from athena.core.agent_kernel.types import AgentMessage, AgentSpec
 
@@ -211,3 +215,41 @@ def test_memory_view_blocks_direct_writes() -> None:
     session = _session(store)
     with pytest.raises(AttributeError):
         session.memory.append(ModelRequest(parts=[UserPromptPart(content="direct")]))
+
+
+def test_receive_messages_does_not_redeliver() -> None:
+    store = AgentGraphStore()
+    store.commit(
+        command_id="m1",
+        kind="mailbox",
+        payload={
+            "agent_id": "root",
+            "message": AgentMessage(source="x", content="a", sequence=1),
+        },
+    )
+    session = _session(store)
+    assert [m.content for m in session.receive_messages()] == ["a"]
+    assert session.receive_messages() == []  # 重复读取不重投（B4）
+
+
+def test_run_session_blocks_stale_checkpoint_and_rollback() -> None:
+    store = AgentGraphStore()
+    session = _session(store)
+    store.commit(
+        command_id="m1",
+        kind="mailbox",
+        payload={
+            "agent_id": "root",
+            "message": AgentMessage(source="x", content="a", sequence=1),
+        },
+    )
+    session.set_active_run("r1", 2)
+    run_session = RunSession(session, "r1", 2)
+    run_session.receive_messages()  # visible = 1
+    # 旧 generation 视图 checkpoint → 拒绝
+    stale = RunSession(session, "r1", 1)
+    stale.checkpoint()
+    assert store.mailbox_committed("root") == 0
+    # runner 视图无 rollback（B5）
+    with pytest.raises(AttributeError):
+        run_session.memory.rollback(0)
