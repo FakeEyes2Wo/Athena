@@ -377,9 +377,13 @@ class CodeAgent:
         return (
             "Implement this Athena experiment by creating or revising only "
             "run_experiment.py. Do not modify eval.py, eval_spec.json, "
-            "splits.json, or any other file. Read splits.json for the frozen "
-            "dataset paths. The script must write predictions.csv and labels.csv "
-            "with one value column each. Do not run eval.py.\n\n"
+            ".athena/phase_manifest.json, or any other file. Read "
+            ".athena/phase_manifest.json for the frozen dataset paths. Use only "
+            "the train split for fitting. Baseline, search, and ablation "
+            "experiments must score the validation split. Only final-test may "
+            "read the test split. The script must write predictions.csv with "
+            "exactly two columns: __athena_row_id and prediction. Never create "
+            "or write labels.csv. Do not run eval.py.\n\n"
             f"Frozen experiment context:\n{context}"
         )
 
