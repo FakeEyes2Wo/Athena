@@ -35,7 +35,7 @@ class ProcessResult(BaseModel):
 class CodeExecutionError(RuntimeError):
     """Experiment execution failed after producing log evidence."""
 
-    def __init__(self, message: str, *, logs: ArtifactRef):
+    def __init__(self, message: str, *, logs: ArtifactRef | None = None):
         super().__init__(message)
         self.logs = logs
 

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -174,3 +175,47 @@ async def test_code_agent_feeds_execution_failure_to_revision_round(
     assert backend.calls == 2
     assert backend.feedback[1]
     assert "first round failed" in backend.feedback[1][0].stderr
+
+
+@pytest.mark.asyncio
+async def test_generated_tree_policy_permits_auxiliary_files(tmp_path):
+    from athena.code.file_policy import GeneratedTreePolicy
+
+    (tmp_path / "run_experiment.py").write_text("print(1)", encoding="utf-8")
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "stack.py").write_text("x", encoding="utf-8")
+    GeneratedTreePolicy().validate(
+        tmp_path, {"run_experiment.py", "models/stack.py", "config.json"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_generated_tree_policy_rejects_protected_and_missing_entrypoint(
+    tmp_path,
+):
+    from athena.code.file_policy import GeneratedTreePolicy
+    from athena.workflows.search.code_agent import CodeExecutionError
+
+    (tmp_path / "run_experiment.py").write_text("print(1)", encoding="utf-8")
+    policy = GeneratedTreePolicy()
+    with pytest.raises(CodeExecutionError, match="protected path changed"):
+        policy.validate(tmp_path, {"run_experiment.py", "eval.py"})
+    (tmp_path / "run_experiment.py").unlink()
+    with pytest.raises(CodeExecutionError, match="run_experiment.py"):
+        policy.validate(tmp_path, set())
+
+
+@pytest.mark.asyncio
+async def test_generated_tree_policy_rejects_external_symlink(tmp_path):
+    from athena.code.file_policy import GeneratedTreePolicy
+    from athena.workflows.search.code_agent import CodeExecutionError
+
+    (tmp_path / "run_experiment.py").write_text("print(1)", encoding="utf-8")
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("x", encoding="utf-8")
+    try:
+        os.symlink(outside, tmp_path / "leak.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation requires platform privileges")
+    with pytest.raises(CodeExecutionError, match="symlink"):
+        GeneratedTreePolicy().validate(tmp_path, {"leak.py"})

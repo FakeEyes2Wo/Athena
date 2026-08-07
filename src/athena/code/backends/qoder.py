@@ -9,6 +9,7 @@ from athena.code.backends import BackendUnavailableError
 from athena.code.backends.base import (
     CodeBackend,
     generation_result,
+    render_backend_prompt,
     snapshot_files,
 )
 from athena.code.types import ExecutionOutput, GenerationResult
@@ -48,7 +49,6 @@ class QoderBackend(CodeBackend):
         previous_outputs: list[ExecutionOutput],
         history: list[dict],
     ) -> GenerationResult:
-        del previous_outputs, history
         before = snapshot_files(target_dir)
         sdk = self._sdk
         if self._environ.get("QODER_PERSONAL_ACCESS_TOKEN"):
@@ -69,7 +69,10 @@ class QoderBackend(CodeBackend):
         options = sdk.QoderAgentOptions(**options_kwargs)
         output: list[str] = []
         try:
-            async for message in sdk.query(prompt=prompt, options=options):
+            async for message in sdk.query(
+                prompt=render_backend_prompt(prompt, previous_outputs, history),
+                options=options,
+            ):
                 if not isinstance(message, sdk.AssistantMessage):
                     continue
                 output.extend(

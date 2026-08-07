@@ -150,6 +150,53 @@ async def test_qoder_backend_uses_restricted_sdk_options(tmp_path) -> None:
     assert result.output == "generated"
 
 
+class _DeletingBackend(CodeBackend):
+    def __init__(self, runner):
+        self._runner = runner
+        self.observed = {}
+
+    async def generate(self, prompt, target_dir, previous_outputs, history):
+        self.observed = {
+            "prompt": prompt,
+            "prev": list(previous_outputs),
+            "hist": list(history),
+        }
+        root = Path(target_dir)
+        (root / "old_model.py").unlink(missing_ok=True)
+        (root / "run_experiment.py").write_text("print('ok')\n", encoding="utf-8")
+        return generation_result(
+            snapshot_files(root),
+            snapshot_files(root),
+            output="revised",
+        )
+
+
+@pytest.mark.asyncio
+async def test_render_backend_prompt_includes_bounded_feedback():
+    from athena.code.backends.base import render_backend_prompt
+
+    previous = [
+        ExecutionOutput(stdout="", stderr="model failed on validation", returncode=1)
+    ]
+    history = [
+        {"round": 1, "files": ["run_experiment.py"], "stdout": "", "stderr": "boom"}
+    ]
+    prompt = render_backend_prompt("do it", previous, history)
+    assert "Previous execution feedback" in prompt
+    assert "model failed on validation" in prompt
+    assert "boom" in prompt
+
+
+def test_generation_result_reports_deleted_files(tmp_path):
+    from athena.code.backends.base import generation_result, snapshot_files
+
+    (tmp_path / "old_model.py").write_text("x", encoding="utf-8")
+    before = snapshot_files(tmp_path)
+    (tmp_path / "old_model.py").unlink()
+    result = generation_result(before, snapshot_files(tmp_path), output="")
+    assert result.files_deleted == ["old_model.py"]
+
+
 @pytest.mark.parametrize("name", ["codex", "qoder"])
 def test_load_backend_routes_config_to_named_adapter(monkeypatch, name: str) -> None:
     """The backend factory routes config to the named adapter."""

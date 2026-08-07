@@ -8,6 +8,7 @@ from athena.code.backends import BackendUnavailableError
 from athena.code.backends.base import (
     CodeBackend,
     generation_result,
+    render_backend_prompt,
     snapshot_files,
 )
 from athena.code.types import ExecutionOutput, GenerationResult
@@ -82,7 +83,6 @@ class CodexBackend(CodeBackend):
         previous_outputs: list[ExecutionOutput],
         history: list[dict],
     ) -> GenerationResult:
-        del previous_outputs, history
         before = snapshot_files(target_dir)
         command = [
             self._executable,
@@ -95,7 +95,9 @@ class CodexBackend(CodeBackend):
         ]
         if self._model is not None:
             command.extend(("--model", self._model))
-        command.extend(("-C", target_dir, prompt))
+        command.extend(
+            ("-C", target_dir, render_backend_prompt(prompt, previous_outputs, history))
+        )
         result = await self._runner(
             tuple(command), cwd=target_dir, timeout_s=self._timeout_s
         )

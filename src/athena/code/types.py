@@ -19,6 +19,7 @@ class GenerationResult:
 
     files_created: list[str] = field(default_factory=list)
     files_modified: list[str] = field(default_factory=list)
+    files_deleted: list[str] = field(default_factory=list)
     output: str = ""  # LLM's textual response
 
 
