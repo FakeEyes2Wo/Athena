@@ -37,6 +37,7 @@ class EvalSpec(BaseModel):                # 仍 frozen
     primary: MetricDef
     secondary: list[MetricDef] = Field(default_factory=list)
     protocol: EvalProtocol = Field(default_factory=lambda: EvalProtocol(method="holdout"))
+    eval_script: str = ""                 # 冻结的评估实现（planner 生成或默认模板）
     split_seed: int = 42
     test_ratio: float = 0.2
 
@@ -48,6 +49,8 @@ class EvalResult(BaseModel):
     per_sample: ArtifactRef              # 保留：诊断用途，不参与显著性
 ```
 
+> 机制修正：当前 `LocalGitWorkspace.diff()/commit()` 未被 SEARCH 接线，工作区内容从不提交、候选不继承 baseline 文件。因此 `eval_script` 内嵌进冻结的 `EvalSpec`，`CodeAgent` 在每个 worktree 里从 `spec.eval_script` 写入**字节级相同**的 eval.py —— 不依赖分支继承，同时保证所有实验运行同一份评估代码。
+
 `TaskMetaData`（`research/models.py`）增加 `description: str = ""`，由 `_configure` / `_parse_intent` 捕获用户消息，或来自 Kaggle 描述。
 
 ### 2. MetricPlanner（`workflows/prepare/metric_planner.py`，替代 `EvaluatorFactory`）
@@ -58,19 +61,18 @@ class EvalResult(BaseModel):
 
 ```python
 class MetricPlan(BaseModel):
-    spec: EvalSpec          # 冻结的评估协议
-    eval_script: str        # 实现该协议的 eval.py 源码
+    spec: EvalSpec          # 冻结的评估协议（内含 eval_script）
     rationale: str          # 为什么选这个指标（审计）
 ```
 
 - 一次 LLM 调用，不可用时**回退到现有 `_DEFAULT_METRICS` 按 task_type 兜底**（`EvaluatorFactory` 的逻辑保留为 `default_spec(task_type)`），eval_script 用 bundled 默认模板（按默认指标生成）。
-- planner 依据协议生成 eval_script：holdout → 读 predictions.csv + labels.csv 出标量；cv → 额外读 fold_ids.csv 出每折值。
+- planner 依据协议生成 `spec.eval_script`：holdout → 读 predictions.csv + labels.csv 出标量；cv → 额外读 fold_ids.csv 出每折值。`spec` 冻结后 `eval_script` 随之冻结。
 
 ### 3. eval.py 生命周期（`workflows/search/code_agent.py`）
 
-- **PREPARE**：planner 产出 eval_script → **smoke 校验**（合成数据跑一遍，验证不崩溃、输出符合 schema）→ 写入 baseline worktree → 随 baseline 提交。
-- **SEARCH**：候选 worktree 从 SOTA 分支继承 eval.py。`CodeAgent._write_evaluator` 改为 `_ensure_evaluator`：只在缺失时写入，不覆盖冻结版本。
-- **契约**：读 `predictions.csv`（y_pred）+ `labels.csv`（y_true），cv 时读 `fold_ids.csv`；写 `eval_result.json`：`{experiment_id, primary, secondary?, fold_scores?}`。Athena 侧校验 experiment_id 匹配、primary 有限、cv 时 `len(fold_scores) == n_folds`。
+- **PREPARE**：planner 产出 `spec.eval_script` → **smoke 校验**（合成数据跑一遍，验证不崩溃、输出符合 schema）→ 冻结进 `EvalSpec`。
+- **SEARCH**：`CodeAgent._write_evaluator` 改为 `_ensure_evaluator`：每个 worktree 从 `spec.eval_script`（为空时用 `default_eval_script`）写 eval.py，已有则不覆盖。所有实验运行字节级相同的评估代码。
+- **契约**：读 `predictions.csv`（y_pred）+ `labels.csv`（y_true），cv 时读 `fold_ids.csv`；写 `eval_result.json`：`{experiment_id, primary, secondary?, fold_scores?}`。Athena 侧校验 experiment_id 匹配（来自 `ATHENA_EXPERIMENT_ID` 环境变量，因为 eval.py 全实验共用、不能内嵌单次实验 ID）、primary 有限、cv 时 `len(fold_scores) == n_folds`。
 
 ### 4. 评估协议
 
@@ -90,8 +92,8 @@ class MetricPlan(BaseModel):
 |---|---|
 | `research/runtime.py` | `_parse_intent`/`_configure` 捕获 `description` |
 | `workflows/prepare/evaluator_factory.py` | 变为 `MetricPlanner`（async）+ `default_spec` 兜底 |
-| `workflows/prepare/baseline.py` | `create_baseline` 写入并提交 planner 生成的 eval.py |
-| `workflows/search/code_agent.py` | `_write_evaluator` → `_ensure_evaluator`；契约校验含 fold_scores |
+| `workflows/prepare/baseline.py` | 不改（eval.py 由 code_agent 从 `spec.eval_script` 写入） |
+| `workflows/search/code_agent.py` | `_write_evaluator` → `_ensure_evaluator`；env 传 `ATHENA_EXPERIMENT_ID`；契约校验含 fold_scores |
 | `evaluation/comparator.py` | fold_scores 折级比较分支 |
 | `examples/trial_run.py`、`examples/ai4ml_pipeline.py` | 改用 `MetricPlanner.plan` |
 
