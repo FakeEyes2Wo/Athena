@@ -7,6 +7,18 @@ from athena.code.runner import run_script
 
 
 @pytest.mark.asyncio
+async def test_run_script_uses_the_active_python_environment(tmp_path) -> None:
+    """Generated experiments inherit the environment that launched Athena."""
+    script = tmp_path / "interpreter.py"
+    script.write_text("import pandas\nprint('ACTIVE_ENV')\n", encoding="utf-8")
+
+    result = await run_script(str(script), cwd=str(tmp_path), timeout_s=10)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ACTIVE_ENV"
+
+
+@pytest.mark.asyncio
 async def test_run_script_success():
     """Running a valid script returns stdout with returncode 0."""
     with tempfile.TemporaryDirectory() as tmp:
