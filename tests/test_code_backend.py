@@ -52,8 +52,8 @@ async def test_codex_backend_invokes_cli_and_reports_changed_files(tmp_path) -> 
 
     calls = []
 
-    async def runner(command, *, cwd, timeout_s):
-        calls.append((command, cwd, timeout_s))
+    async def runner(command, *, cwd, timeout_s, input_bytes=None):
+        calls.append((command, cwd, timeout_s, input_bytes))
         (Path(cwd) / "run_experiment.py").write_text("print('ok')\n", encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="generated", stderr="")
 
@@ -64,7 +64,7 @@ async def test_codex_backend_invokes_cli_and_reports_changed_files(tmp_path) -> 
         history=[],
     )
 
-    command, cwd, timeout_s = calls[0]
+    command, cwd, timeout_s, input_bytes = calls[0]
     assert command[:5] == (
         "codex",
         "exec",
@@ -72,7 +72,9 @@ async def test_codex_backend_invokes_cli_and_reports_changed_files(tmp_path) -> 
         "workspace-write",
         "--ephemeral",
     )
-    assert command[-3:] == ("-C", str(tmp_path), "Create run_experiment.py")
+    # The prompt is piped via stdin ("-" argument) to avoid the Windows command-line limit.
+    assert command[-3:] == ("-C", str(tmp_path), "-")
+    assert input_bytes == b"Create run_experiment.py"
     assert cwd == str(tmp_path)
     assert timeout_s == 600
     assert result.files_created == ["run_experiment.py"]
@@ -86,7 +88,7 @@ async def test_codex_backend_rejects_cli_failure(tmp_path) -> None:
     from athena.code.backends import BackendUnavailableError
     from athena.code.backends.codex import CodexBackend
 
-    async def runner(command, *, cwd, timeout_s):
+    async def runner(command, *, cwd, timeout_s, input_bytes=None):
         return SimpleNamespace(returncode=2, stdout="", stderr="auth failed")
 
     with pytest.raises(BackendUnavailableError, match="auth failed"):

@@ -25,12 +25,21 @@ Runner = Callable[..., Awaitable[_ProcessOutput]]
 
 
 async def _run_process(
-    command: tuple[str, ...], *, cwd: str, timeout_s: float
+    command: tuple[str, ...],
+    *,
+    cwd: str,
+    timeout_s: float,
+    input_bytes: bytes | None = None,
 ) -> _ProcessOutput:
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
+            stdin=(
+                asyncio.subprocess.PIPE
+                if input_bytes is not None
+                else asyncio.subprocess.DEVNULL
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -38,7 +47,7 @@ async def _run_process(
         raise BackendUnavailableError("codex CLI executable was not found") from exc
     try:
         stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=timeout_s
+            process.communicate(input=input_bytes), timeout=timeout_s
         )
     except TimeoutError as exc:
         process.kill()
@@ -95,11 +104,15 @@ class CodexBackend(CodeBackend):
         ]
         if self._model is not None:
             command.extend(("--model", self._model))
-        command.extend(
-            ("-C", target_dir, render_backend_prompt(prompt, previous_outputs, history))
-        )
+        rendered = render_backend_prompt(prompt, previous_outputs, history)
+        # codex exec reads the prompt from stdin when the positional argument is
+        # "-", avoiding the Windows command-line length limit for large prompts.
+        command.extend(("-C", target_dir, "-"))
         result = await self._runner(
-            tuple(command), cwd=target_dir, timeout_s=self._timeout_s
+            tuple(command),
+            cwd=target_dir,
+            timeout_s=self._timeout_s,
+            input_bytes=rendered.encode("utf-8"),
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
