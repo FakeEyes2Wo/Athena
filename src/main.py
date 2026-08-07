@@ -18,6 +18,9 @@ from pydantic_ai import Agent as PydanticAgent
 from athena.code.backends.base import CodeBackend
 from athena.code.backends.codex import CodexBackend
 from athena.code.backends.qoder import QoderBackend
+from athena.code.execution import LocalExperimentRuntime
+from athena.evaluation.trusted import TrustedEvaluator
+from athena.evaluation.types import EvaluationInputs
 from athena.git_workspace import LocalGitWorkspace
 from athena.ideator import Ideator
 from athena.research import (
@@ -218,6 +221,7 @@ async def _seed_repository(
             "fold_ids.csv",
             "eval_result.json",
             "athena_logs_*.txt",
+            ".athena/",
             "__pycache__/",
             "",
         )
@@ -229,8 +233,7 @@ async def _seed_repository(
     )
     shutil.copyfile(prepared.evaluator_path, repo / "eval.py")
     shutil.copyfile(prepared.eval_spec_path, repo / "eval_spec.json")
-    shutil.copyfile(prepared.split_manifest_path, repo / "splits.json")
-    await _git(repo, "add", "eval.py", "eval_spec.json", "splits.json")
+    await _git(repo, "add", "eval.py", "eval_spec.json")
     await _git(repo, "commit", "-m", "freeze evaluation protocol")
     return await _git(repo, "rev-parse", "HEAD")
 
@@ -241,19 +244,33 @@ class _DeferredValidator:
         context: WorkflowContext,
         workspace: LocalGitWorkspace,
         code_agent: CodeAgent,
+        validation_inputs: EvaluationInputs | None = None,
+        test_inputs: EvaluationInputs | None = None,
     ) -> None:
         self._context = context
         self._workspace = workspace
         self._code_agent = code_agent
+        self._validation_inputs = validation_inputs
+        self._test_inputs = test_inputs
+
+    def set_inputs(
+        self, validation_inputs: EvaluationInputs, test_inputs: EvaluationInputs
+    ) -> None:
+        self._validation_inputs = validation_inputs
+        self._test_inputs = test_inputs
 
     async def run(self, sota_id, tree):
         prepared = self._context.prepared
         if prepared is None:
             raise RuntimeError("validation requested before PREPARE completed")
+        if self._validation_inputs is None or self._test_inputs is None:
+            raise RuntimeError("validation inputs are not configured")
         return await Validator(
             self._workspace,
             self._code_agent,
             prepared.eval_spec,
+            self._validation_inputs,
+            self._test_inputs,
         ).run(sota_id, tree)
 
 
@@ -271,10 +288,15 @@ def build_application(
     worktree_root = output / "worktrees"
     workspace = LocalGitWorkspace(repo, worktree_root, artifacts.put_bytes)
     selected_backends = backends if backends is not None else _build_backends(config)
+    runtime = LocalExperimentRuntime()
+    evaluator = TrustedEvaluator(artifacts)
     code_agent = CodeAgent(
         backend=config.backend,
         backends=selected_backends,
         workspace=workspace,
+        runtime=runtime,
+        artifacts=artifacts,
+        evaluator=evaluator,
     )
     context = WorkflowContext()
     active_ideator = ideator or Ideator(
@@ -286,6 +308,8 @@ def build_application(
         output_dir=output / "reports",
     )
 
+    deferred_validator = _DeferredValidator(context, workspace, code_agent)
+
     async def prepare_baseline(task, tree):
         prepared = await prepare_workflow_data(
             config.data,
@@ -295,6 +319,7 @@ def build_application(
         )
         context.prepared = prepared
         context.base_commit = await _seed_repository(workspace, repo, prepared)
+        deferred_validator.set_inputs(prepared.validation_inputs, prepared.test_inputs)
         return await create_baseline(
             workspace,
             context.base_commit,
@@ -302,6 +327,7 @@ def build_application(
             data_profile=prepared.profile,
             processing_log=prepared.processing_log,
             eval_spec=prepared.eval_spec,
+            validation_inputs=prepared.validation_inputs,
             code_agent=code_agent,
         )
 
@@ -316,6 +342,7 @@ def build_application(
             budget,
             RunMode(hil=config.hil, debug=config.debug),
             data_profile=prepared.profile,
+            validation_inputs=prepared.validation_inputs,
             ideator=active_ideator,
             code_agent=code_agent,
             before_iteration=checkpoint,
@@ -324,7 +351,7 @@ def build_application(
     dependencies = ResearchWorkflowDependencies(
         prepare_baseline=prepare_baseline,
         search_factory=search_factory,
-        validator=_DeferredValidator(context, workspace, code_agent),
+        validator=deferred_validator,
         reporter=active_reporter,
     )
     runtime = ResearchRuntime(

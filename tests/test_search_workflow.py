@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from athena.code.backends.base import CodeBackend
+from athena.code.types import ExecutionOutput, GenerationResult
 from athena.core.research_models import ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
@@ -13,6 +15,7 @@ from athena.evaluation.types import (
     ComparisonVerdict,
     EvalResult,
     EvalSpec,
+    EvaluationInputs,
     MetricDef,
 )
 from athena.experiment.supervisor import Supervisor
@@ -36,6 +39,33 @@ TEST_PROFILE = DataProfile(
     col_count=5,
     task_type_hint="classification",
 )
+
+
+def _inputs(tmp_path) -> EvaluationInputs:
+    train = tmp_path / "train.csv"
+    features = tmp_path / "features.csv"
+    labels = tmp_path / "labels.csv"
+    train.write_text("__athena_row_id,label\n0,0\n1,1\n", encoding="utf-8")
+    features.write_text("__athena_row_id,feature\n0,1\n1,2\n", encoding="utf-8")
+    labels.write_text("__athena_row_id,label\n0,0\n1,1\n", encoding="utf-8")
+    return EvaluationInputs(
+        phase="validation",
+        train_path=train,
+        features_path=features,
+        labels_path=labels,
+        target="label",
+    )
+
+
+def _dummy_inputs() -> EvaluationInputs:
+    """Inputs for recording doubles; the recorded files need not exist."""
+    return EvaluationInputs(
+        phase="validation",
+        train_path=Path("C:/inputs/train.csv"),
+        features_path=Path("C:/inputs/features.csv"),
+        labels_path=Path("C:/inputs/labels.csv"),
+        target="label",
+    )
 
 
 class RecordingIdeator:
@@ -185,11 +215,21 @@ class _CodeAgent:
         self.tree = tree
         self.error = error
         self.observed_id: str | None = None
+        self.phases: list[str] = []
 
     async def execute(
-        self, experiment_id, hypothesis, plan, parent_commit, eval_spec, worktree
+        self,
+        experiment_id,
+        hypothesis,
+        plan,
+        parent_commit,
+        eval_spec,
+        worktree,
+        *,
+        inputs,
     ) -> CodegenResult:
         self.observed_id = experiment_id
+        self.phases.append(inputs.phase)
         assert (
             self.tree.get_experiment(experiment_id).status is ExperimentStatus.RUNNING
         )
@@ -199,6 +239,7 @@ class _CodeAgent:
             experiment_id=experiment_id,
             commit=parent_commit,
             diff=f"artifact://diffs/{experiment_id}",
+            evaluation=f"artifact://evaluations/{experiment_id}",
             logs=f"artifact://logs/{experiment_id}",
             eval=EvalResult(
                 experiment_id=experiment_id,
@@ -234,6 +275,7 @@ def _loop(
         ),
         budget,
         data_profile=TEST_PROFILE,
+        validation_inputs=_dummy_inputs(),
         ranker=ranker,
         proximity=proximity,
         comparator=comparator,
@@ -290,6 +332,7 @@ async def test_search_without_pending_hypotheses_requires_ideator(monkeypatch) -
         ),
         BudgetSnapshot(remaining=1),
         data_profile=TEST_PROFILE,
+        validation_inputs=_dummy_inputs(),
     )
 
     with pytest.raises(RuntimeError, match="^SEARCH requires an Ideator$"):
@@ -318,6 +361,7 @@ async def test_search_ideator_receives_constructor_data_profile(monkeypatch) -> 
         ),
         BudgetSnapshot(remaining=1),
         data_profile=profile,
+        validation_inputs=_dummy_inputs(),
         ideator=ideator,
     )
 
@@ -341,6 +385,7 @@ async def test_search_requires_a_successful_baseline() -> None:
         ),
         BudgetSnapshot(remaining=1),
         data_profile=TEST_PROFILE,
+        validation_inputs=_dummy_inputs(),
     )
 
     with pytest.raises(RuntimeError, match="successful baseline"):
@@ -467,27 +512,29 @@ def test_supervisor_accepts_improvement():
 @pytest.mark.asyncio
 async def test_code_agent_uses_a_fixed_entrypoint_without_fixing_model_filename(
     tmp_path,
-    monkeypatch,
 ) -> None:
-    scripts: list[str] = []
+    from athena.evaluation.trusted import TrustedEvaluator
+    from athena.storage.artifact_store import LocalArtifactStore
 
-    async def fake_run(script: str, cwd, timeout_s: float, env=None) -> ProcessResult:
-        scripts.append(script)
-        if script == code_agent_module.EVALUATION_ENTRYPOINT:
-            (cwd / "predictions.csv").write_text("prediction\n0\n", encoding="utf-8")
-            (cwd / "eval_result.json").write_text(
-                json.dumps(
-                    {
-                        "experiment_id": "exp-test",
-                        "primary": 0.5,
-                        "secondary": {},
-                    }
-                ),
+    class EntrypointBackend(CodeBackend):
+        async def generate(self, prompt, target_dir, previous_outputs, history):
+            (Path(target_dir) / "run_experiment.py").write_text(
+                "from pathlib import Path\n"
+                "Path('predictions.csv').write_text("
+                "'__athena_row_id,prediction\\n0,0\\n1,1\\n', encoding='utf-8')\n",
                 encoding="utf-8",
             )
-        return ProcessResult(returncode=0, output="ok")
+            return GenerationResult(
+                files_created=["run_experiment.py"], files_modified=[]
+            )
 
-    monkeypatch.setattr(code_agent_module, "_run_python", fake_run)
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    agent = CodeAgent(
+        backend="qoder",
+        backends={"qoder": EntrypointBackend()},
+        artifacts=artifacts,
+        evaluator=TrustedEvaluator(artifacts),
+    )
     hypothesis = Hypothesis(
         id="hyp-test",
         statement="Use a baseline",
@@ -508,45 +555,67 @@ async def test_code_agent_uses_a_fixed_entrypoint_without_fixing_model_filename(
         base_commit="a" * 40,
     )
 
-    result = await CodeAgent().execute(
+    result = await agent.execute(
         "exp-test",
         hypothesis,
         experiment_plan(),
         "a" * 40,
         spec,
         worktree,
+        inputs=_inputs(tmp_path),
     )
 
     assert result.experiment_id == "exp-test"
     assert result.eval.experiment_id == "exp-test"
+    assert result.eval.primary == 1.0
     assert result.diff.startswith("artifact://")
-    assert result.logs.startswith("artifact://")
-    assert scripts == [
-        code_agent_module.EXPERIMENT_ENTRYPOINT,
-        code_agent_module.EVALUATION_ENTRYPOINT,
-    ]
+    assert result.logs.startswith("sha256:")
     assert (tmp_path / code_agent_module.EXPERIMENT_ENTRYPOINT).is_file()
     assert not (tmp_path / "model.py").exists()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("process_result", "expected"),
+    ("returncode", "stderr", "expected_log"),
     [
-        (ProcessResult(returncode=2, output="training crashed"), "exited with code 2"),
-        (ProcessResult(returncode=-1, output="Timed out after 300s"), "Timed out"),
+        (2, "training crashed", "training crashed"),
+        (-1, "TIMEOUT: process exceeded 300s", "TIMEOUT"),
     ],
 )
 async def test_code_agent_rejects_process_failures_with_log_evidence(
     tmp_path,
-    monkeypatch,
-    process_result: ProcessResult,
-    expected: str,
+    returncode: int,
+    stderr: str,
+    expected_log: str,
 ) -> None:
-    async def fake_run(script: str, cwd, timeout_s: float, env=None) -> ProcessResult:
-        return process_result
+    from athena.evaluation.trusted import TrustedEvaluator
+    from athena.storage.artifact_store import LocalArtifactStore
 
-    monkeypatch.setattr(code_agent_module, "_run_python", fake_run)
+    class CrashedRuntime:
+        async def preflight(self) -> None:
+            return None
+
+        async def run(self, request):
+            return ExecutionOutput(returncode=returncode, stdout="", stderr=stderr)
+
+    class EntrypointBackend(CodeBackend):
+        async def generate(self, prompt, target_dir, previous_outputs, history):
+            (Path(target_dir) / "run_experiment.py").write_text(
+                "print(1)\n", encoding="utf-8"
+            )
+            return GenerationResult(
+                files_created=["run_experiment.py"], files_modified=[]
+            )
+
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    agent = CodeAgent(
+        backend="qoder",
+        backends={"qoder": EntrypointBackend()},
+        runtime=CrashedRuntime(),
+        artifacts=artifacts,
+        evaluator=TrustedEvaluator(artifacts),
+        max_rounds=1,
+    )
     hypothesis = Hypothesis(
         id="hyp-test",
         statement="Use a baseline",
@@ -560,30 +629,53 @@ async def test_code_agent_rejects_process_failures_with_log_evidence(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
-    with pytest.raises(CodeExecutionError, match=expected) as captured:
-        await CodeAgent().execute(
+    with pytest.raises(CodeExecutionError, match="bounded revision rounds") as captured:
+        await agent.execute(
             "exp-test",
             hypothesis,
             experiment_plan(),
             "a" * 40,
             spec,
             worktree,
+            inputs=_inputs(tmp_path),
         )
 
     log_text = Path(captured.value.logs.removeprefix("artifact://")).read_text(
         encoding="utf-8"
     )
-    assert "training" in log_text or "Timed out" in log_text
+    assert expected_log in log_text
 
 
 @pytest.mark.asyncio
-async def test_code_agent_rejects_missing_evaluation_output(
-    tmp_path, monkeypatch
-) -> None:
-    async def fake_run(script: str, cwd, timeout_s: float, env=None) -> ProcessResult:
-        return ProcessResult(returncode=0, output="ok")
+async def test_code_agent_rejects_missing_evaluation_output(tmp_path) -> None:
+    from athena.evaluation.trusted import TrustedEvaluator
+    from athena.storage.artifact_store import LocalArtifactStore
 
-    monkeypatch.setattr(code_agent_module, "_run_python", fake_run)
+    class EmptyRuntime:
+        async def preflight(self) -> None:
+            return None
+
+        async def run(self, request):
+            return ExecutionOutput(returncode=0, stdout="ok", stderr="")
+
+    class EntrypointBackend(CodeBackend):
+        async def generate(self, prompt, target_dir, previous_outputs, history):
+            (Path(target_dir) / "run_experiment.py").write_text(
+                "print('ok')\n", encoding="utf-8"
+            )
+            return GenerationResult(
+                files_created=["run_experiment.py"], files_modified=[]
+            )
+
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    agent = CodeAgent(
+        backend="qoder",
+        backends={"qoder": EntrypointBackend()},
+        runtime=EmptyRuntime(),
+        artifacts=artifacts,
+        evaluator=TrustedEvaluator(artifacts),
+        max_rounds=1,
+    )
     hypothesis = Hypothesis(
         id="hyp-test",
         statement="Use a baseline",
@@ -597,12 +689,13 @@ async def test_code_agent_rejects_missing_evaluation_output(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
-    with pytest.raises(CodeExecutionError, match="did not produce eval_result.json"):
-        await CodeAgent().execute(
+    with pytest.raises(CodeExecutionError, match="bounded revision rounds"):
+        await agent.execute(
             "exp-test",
             hypothesis,
             experiment_plan(),
             "a" * 40,
             spec,
             worktree,
+            inputs=_inputs(tmp_path),
         )

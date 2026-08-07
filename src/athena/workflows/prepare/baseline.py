@@ -8,7 +8,7 @@ from athena.core.workspace import GitWorkspace
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.contracts import new_id
 from athena.core.research_models import ExperimentPlan, Hypothesis
-from athena.evaluation.types import EvalSpec
+from athena.evaluation.types import EvalSpec, EvaluationInputs
 from athena.data.types import DataProfile, ProcessingLog
 from athena.workflows.search.code_agent import CodeAgent, CodeExecutionError
 
@@ -80,6 +80,7 @@ async def create_baseline(
     data_profile: DataProfile,
     processing_log: ProcessingLog,
     eval_spec: EvalSpec,
+    validation_inputs: EvaluationInputs,
     code_agent: CodeAgent,
     agent=None,
 ) -> str:
@@ -152,6 +153,7 @@ async def create_baseline(
             base_commit,
             eval_spec,
             worktree,
+            inputs=validation_inputs,
         )
     except asyncio.CancelledError:
         research_tree.transition_experiment(experiment_id, ExperimentStatus.CANCELLED)

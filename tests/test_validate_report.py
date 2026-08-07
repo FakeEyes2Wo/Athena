@@ -8,7 +8,13 @@ import pytest
 from athena.core.workspace import GitWorkBranch
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.research_models import ExperimentPlan, Hypothesis
-from athena.evaluation.types import EvalResult, EvalSpec, MetricDef
+from athena.evaluation.factory import create_eval_spec
+from athena.evaluation.types import (
+    EvalResult,
+    EvalSpec,
+    EvaluationInputs,
+    MetricDef,
+)
 from athena.workflows.report import ReportNarrative, Reporter
 from athena.workflows.search.code_agent import CodeExecutionError, CodegenResult
 from athena.workflows.validate import ValidationResult, Validator
@@ -35,18 +41,19 @@ def _successful_experiment(
     kind: str,
     parent_id: str | None,
     primary: float,
+    commit: str = COMMIT,
 ) -> None:
     tree.add_experiment(
         experiment_id,
         Experiment(
             parent_id=parent_id,
             hypothesis_id=hypothesis_id,
-            commit=COMMIT,
+            commit=commit,
             plan=_plan(kind, f"Execute {kind}"),
             gitwork=GitWorkBranch(
                 path=f"C:/worktrees/{experiment_id}",
                 branch=f"{kind}/{experiment_id}",
-                base_commit=COMMIT,
+                base_commit=commit,
             ),
         ),
     )
@@ -107,6 +114,112 @@ def _tree() -> tuple[ResearchTree, str]:
     return tree, "exp-sota"
 
 
+def _inputs(root: Path, phase: str = "validation") -> EvaluationInputs:
+    """Host-owned input set; paths need not exist for the recording agents."""
+    return EvaluationInputs(
+        phase=phase,
+        train_path=root / "train.csv",
+        features_path=root / "features.csv",
+        labels_path=root / "labels.csv",
+        target="label",
+    )
+
+
+def _dummy_result(
+    experiment_id: str = "exp-x", commit: str = "c" * 40
+) -> CodegenResult:
+    return CodegenResult(
+        experiment_id=experiment_id,
+        commit=commit,
+        diff=f"sha256:{'0' * 64}",
+        eval=EvalResult(
+            experiment_id=experiment_id,
+            primary=0.8,
+            per_sample=f"sha256:{'1' * 64}",
+        ),
+        evaluation=f"sha256:{'2' * 64}",
+        logs=f"sha256:{'3' * 64}",
+    )
+
+
+def _tree_with_sota(validation_inputs) -> tuple[ResearchTree, str]:
+    """A tree with a successful SEARCH SOTA (commit 'c'*40) and two hypotheses."""
+    tree = ResearchTree()
+    tree.add_hypothesis(
+        Hypothesis(
+            id="hyp-baseline",
+            statement="Establish a baseline",
+            intervention="Train the default model",
+            expected_effect="Provide the reference score",
+            status="SUPPORTED",
+        )
+    )
+    tree.add_hypothesis(
+        Hypothesis(
+            id="hyp-search",
+            parent_id="exp-baseline",
+            statement="Add calibrated features",
+            intervention="Add calibrated aggregate features",
+            expected_effect="Improve macro F1",
+            status="SUPPORTED",
+        )
+    )
+    _successful_experiment(
+        tree,
+        "exp-baseline",
+        "hyp-baseline",
+        kind="baseline",
+        parent_id=None,
+        primary=0.7,
+    )
+    _successful_experiment(
+        tree,
+        "exp-sota",
+        "hyp-search",
+        kind="search",
+        parent_id="exp-baseline",
+        primary=0.8,
+        commit="c" * 40,
+    )
+    tree.set_sota("exp-sota")
+    return tree, "exp-sota"
+
+
+class RecordingTrustedAgent:
+    def __init__(self, *, commit: str) -> None:
+        self.commit = commit
+        self.generated: list[str] = []
+        self.frozen: list[str] = []
+
+    async def execute(
+        self,
+        experiment_id,
+        hypothesis,
+        plan,
+        parent_commit,
+        eval_spec,
+        worktree,
+        *,
+        inputs,
+    ):
+        self.generated.append(inputs.phase)
+        return _dummy_result(experiment_id=experiment_id, commit=self.commit)
+
+    async def execute_frozen(
+        self,
+        experiment_id,
+        hypothesis,
+        plan,
+        parent_commit,
+        eval_spec,
+        worktree,
+        *,
+        inputs,
+    ):
+        self.frozen.append(inputs.phase)
+        return _dummy_result(experiment_id=experiment_id, commit=parent_commit)
+
+
 class RecordingWorkspace:
     def __init__(self) -> None:
         self.created: list[GitWorkBranch] = []
@@ -133,14 +246,24 @@ class RecordingCodeAgent:
         self.fail_kind = fail_kind
         self.cancel_kind = cancel_kind
         self.calls: list[tuple[str, str, ExperimentPlan, GitWorkBranch]] = []
+        self.phases: list[str] = []
 
     async def execute(
-        self, experiment_id, hypothesis, plan, parent_commit, eval_spec, worktree
+        self,
+        experiment_id,
+        hypothesis,
+        plan,
+        parent_commit,
+        eval_spec,
+        worktree,
+        *,
+        inputs,
     ) -> CodegenResult:
         assert (
             self.tree.get_experiment(experiment_id).status is ExperimentStatus.RUNNING
         )
         self.calls.append((experiment_id, hypothesis.id, plan, worktree))
+        self.phases.append(inputs.phase)
         if plan.kind == self.cancel_kind:
             raise asyncio.CancelledError()
         if plan.kind == self.fail_kind:
@@ -152,10 +275,40 @@ class RecordingCodeAgent:
             experiment_id=experiment_id,
             commit=parent_commit,
             diff=f"artifact://diffs/{experiment_id}",
+            evaluation=f"artifact://evaluations/{experiment_id}",
             logs=f"artifact://logs/{experiment_id}",
             eval=EvalResult(
                 experiment_id=experiment_id,
                 primary=primary,
+                per_sample=f"artifact://samples/{experiment_id}",
+            ),
+        )
+
+    async def execute_frozen(
+        self,
+        experiment_id,
+        hypothesis,
+        plan,
+        parent_commit,
+        eval_spec,
+        worktree,
+        *,
+        inputs,
+    ) -> CodegenResult:
+        assert (
+            self.tree.get_experiment(experiment_id).status is ExperimentStatus.RUNNING
+        )
+        self.calls.append((experiment_id, hypothesis.id, plan, worktree))
+        self.phases.append(inputs.phase)
+        return CodegenResult(
+            experiment_id=experiment_id,
+            commit=parent_commit,
+            diff=f"artifact://diffs/{experiment_id}",
+            evaluation=f"artifact://evaluations/{experiment_id}",
+            logs=f"artifact://logs/{experiment_id}",
+            eval=EvalResult(
+                experiment_id=experiment_id,
+                primary=0.77,
                 per_sample=f"artifact://samples/{experiment_id}",
             ),
         )
@@ -172,6 +325,8 @@ def _validator(tree: ResearchTree, **agent_options):
                 name="f1_macro", direction="maximize", description="Macro F1"
             )
         ),
+        validation_inputs=_inputs(Path("C:/validation")),
+        test_inputs=_inputs(Path("C:/test"), phase="test"),
     )
     return validator, workspace, agent
 
@@ -261,6 +416,31 @@ async def test_validator_preserves_failed_or_cancelled_ablation(
     if expected_status is ExperimentStatus.FAILED:
         assert experiment.error == "ablation failed"
         assert "logs" in experiment.artifacts
+
+
+@pytest.mark.asyncio
+async def test_validator_runs_ablation_on_validation_and_final_test_frozen(
+    tmp_path: Path,
+) -> None:
+    from athena.workflows.validate.ablation import Validator
+
+    agent = RecordingTrustedAgent(commit="c" * 40)
+    eval_spec = create_eval_spec("classification")
+    validation_inputs = _inputs(tmp_path / "v")
+    test_inputs = _inputs(tmp_path / "t", phase="test")
+    validator = Validator(
+        None,
+        agent,
+        eval_spec,
+        validation_inputs=validation_inputs,
+        test_inputs=test_inputs,
+    )
+    tree, sota_id = _tree_with_sota(validation_inputs)
+    result = await validator.run(sota_id, tree)
+
+    assert agent.generated == ["validation", "validation"]
+    assert agent.frozen == ["test"]
+    assert tree.get_experiment(result.final_test_id).commit == "c" * 40
 
 
 @pytest.mark.asyncio

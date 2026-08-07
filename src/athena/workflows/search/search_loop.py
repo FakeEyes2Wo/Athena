@@ -9,7 +9,7 @@ from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkspace
 from athena.data.types import DataProfile
 from athena.evaluation import Comparator
-from athena.evaluation.types import EvalSpec
+from athena.evaluation.types import EvalSpec, EvaluationInputs
 from athena.experiment.ranking import HypothesisRanker, ProximityGraph
 from athena.experiment.supervisor import Supervisor
 from athena.ideator import Ideator
@@ -38,6 +38,7 @@ class SearchLoop:
         mode: RunMode = RunMode(),
         *,
         data_profile: DataProfile,
+        validation_inputs: EvaluationInputs,
         ideator: Ideator | None = None,
         ranker: HypothesisRanker | None = None,
         proximity: ProximityGraph | None = None,
@@ -52,6 +53,7 @@ class SearchLoop:
         self._budget = budget
         self._mode = mode
         self._data_profile = data_profile
+        self._validation_inputs = validation_inputs
         self._ideator = ideator
         self._ranker = ranker or HypothesisRanker()
         self._proximity = proximity or ProximityGraph()
@@ -140,6 +142,7 @@ class SearchLoop:
                     current_sota.commit,
                     self._eval_spec,
                     worktree,
+                    inputs=self._validation_inputs,
                 )
                 assert current_sota.eval is not None, "SOTA 实验必有 eval"
                 verdict = self._comparator.compare(

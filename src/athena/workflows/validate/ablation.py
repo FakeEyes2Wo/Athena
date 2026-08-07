@@ -4,11 +4,11 @@ import asyncio
 
 from pydantic import BaseModel
 
-from athena.core.workspace import GitWorkspace
+from athena.core.workspace import GitWorkBranch, GitWorkspace
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.contracts import new_id
 from athena.core.research_models import ExperimentPlan, Hypothesis
-from athena.evaluation.types import EvalSpec
+from athena.evaluation.types import EvalSpec, EvaluationInputs
 from athena.workflows.search.code_agent import CodeAgent, CodeExecutionError
 
 
@@ -28,10 +28,14 @@ class Validator:
         workspace: GitWorkspace,
         code_agent: CodeAgent,
         eval_spec: EvalSpec,
+        validation_inputs: EvaluationInputs,
+        test_inputs: EvaluationInputs,
     ) -> None:
         self._workspace = workspace
         self._code_agent = code_agent
         self._eval_spec = eval_spec
+        self._validation_inputs = validation_inputs
+        self._test_inputs = test_inputs
 
     @staticmethod
     def _validate_sota(sota_id: str, tree: ResearchTree) -> Experiment:
@@ -79,10 +83,17 @@ class Validator:
     ) -> str:
         # tree 中存储的 hypothesis 必有 id（add_hypothesis 保证）
         assert hypothesis.id is not None
-        worktree = await self._workspace.create(
-            sota.commit,
-            f"validate/{branch_kind}/{experiment_id}",
-        )
+        if self._workspace is None:
+            worktree = GitWorkBranch(
+                path=f"validate/{branch_kind}/{experiment_id}",
+                branch=f"validate/{branch_kind}/{experiment_id}",
+                base_commit=sota.commit,
+            )
+        else:
+            worktree = await self._workspace.create(
+                sota.commit,
+                f"validate/{branch_kind}/{experiment_id}",
+            )
         tree.add_experiment(
             experiment_id,
             Experiment(
@@ -95,14 +106,26 @@ class Validator:
         )
         tree.transition_experiment(experiment_id, ExperimentStatus.RUNNING)
         try:
-            result = await self._code_agent.execute(
-                experiment_id,
-                hypothesis,
-                plan,
-                sota.commit,
-                self._eval_spec,
-                worktree,
-            )
+            if branch_kind == "final-test":
+                result = await self._code_agent.execute_frozen(
+                    experiment_id,
+                    hypothesis,
+                    plan,
+                    sota.commit,
+                    self._eval_spec,
+                    worktree,
+                    inputs=self._test_inputs,
+                )
+            else:
+                result = await self._code_agent.execute(
+                    experiment_id,
+                    hypothesis,
+                    plan,
+                    sota.commit,
+                    self._eval_spec,
+                    worktree,
+                    inputs=self._validation_inputs,
+                )
             tree.complete_experiment(
                 experiment_id,
                 eval=result.eval,

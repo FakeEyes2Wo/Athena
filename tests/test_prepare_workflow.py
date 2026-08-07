@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import pytest
 import pandas as pd
 from athena.core.workspace import GitWorkBranch
 from athena.core.research_tree import ExperimentStatus, ResearchTree
-from athena.evaluation.types import EvalResult, EvalSpec, MetricDef
+from athena.evaluation.types import EvalResult, EvalSpec, EvaluationInputs, MetricDef
 from athena.research.models import MetricSpec, TaskMetaData
 from athena.data.types import DataProfile, ProcessingLog
 from athena.experiment import pipeline
@@ -13,6 +15,16 @@ from athena.workflows.search.code_agent import (
     CodeExecutionError,
     CodegenResult,
 )
+
+
+def _inputs() -> EvaluationInputs:
+    return EvaluationInputs(
+        phase="validation",
+        train_path=Path("C:/prepare/train.csv"),
+        features_path=Path("C:/prepare/features.csv"),
+        labels_path=Path("C:/prepare/labels.csv"),
+        target="label",
+    )
 
 
 def frozen_eval_spec() -> EvalSpec:
@@ -189,14 +201,18 @@ async def test_baseline_is_created_once_after_prepare(tmp_path) -> None:
             parent_commit,
             eval_spec,
             worktree,
+            *,
+            inputs,
         ) -> CodegenResult:
             self.calls += 1
             assert tree.get_experiment(experiment_id).status is ExperimentStatus.RUNNING
             assert plan.kind == "baseline"
+            assert inputs.phase == "validation"
             self.result = CodegenResult(
                 experiment_id=experiment_id,
                 commit=parent_commit,
                 diff=f"artifact://diffs/{experiment_id}",
+                evaluation=f"artifact://evaluations/{experiment_id}",
                 eval=EvalResult(
                     experiment_id=experiment_id,
                     primary=0.71,
@@ -225,6 +241,7 @@ async def test_baseline_is_created_once_after_prepare(tmp_path) -> None:
         data_profile=profile,
         processing_log=log,
         eval_spec=frozen_eval_spec(),
+        validation_inputs=_inputs(),
         code_agent=code_agent,
     )
     second_id = await create_baseline(
@@ -234,6 +251,7 @@ async def test_baseline_is_created_once_after_prepare(tmp_path) -> None:
         data_profile=profile,
         processing_log=log,
         eval_spec=frozen_eval_spec(),
+        validation_inputs=_inputs(),
         code_agent=code_agent,
     )
 
@@ -287,11 +305,14 @@ async def test_baseline_accepts_a_structured_agent_draft(tmp_path) -> None:
             parent_commit,
             eval_spec,
             worktree,
+            *,
+            inputs,
         ) -> CodegenResult:
             return CodegenResult(
                 experiment_id=experiment_id,
                 commit=parent_commit,
                 diff=f"artifact://diffs/{experiment_id}",
+                evaluation=f"artifact://evaluations/{experiment_id}",
                 eval=EvalResult(
                     experiment_id=experiment_id,
                     primary=0.72,
@@ -317,6 +338,7 @@ async def test_baseline_accepts_a_structured_agent_draft(tmp_path) -> None:
         data_profile=DataProfile(row_count=10, col_count=2),
         processing_log=log,
         eval_spec=frozen_eval_spec(),
+        validation_inputs=_inputs(),
         code_agent=CodeAgent(),
         agent=Agent(),
     )
@@ -358,6 +380,7 @@ async def test_failed_baseline_records_error_and_blocks_retry(tmp_path) -> None:
             data_profile=DataProfile(row_count=10, col_count=2),
             processing_log=log,
             eval_spec=frozen_eval_spec(),
+            validation_inputs=_inputs(),
             code_agent=FailingCodeAgent(),
         )
 
@@ -376,5 +399,6 @@ async def test_failed_baseline_records_error_and_blocks_retry(tmp_path) -> None:
             data_profile=DataProfile(row_count=10, col_count=2),
             processing_log=log,
             eval_spec=frozen_eval_spec(),
+            validation_inputs=_inputs(),
             code_agent=FailingCodeAgent(),
         )

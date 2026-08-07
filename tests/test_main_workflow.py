@@ -77,6 +77,47 @@ class RecordingRuntime:
         raise AssertionError(method)
 
 
+def test_build_application_injects_trusted_runtime_and_phase_inputs(
+    tmp_path: Path,
+) -> None:
+    from athena.code.execution import LocalExperimentRuntime
+    from athena.evaluation.trusted import TrustedEvaluator
+    from athena.evaluation.types import EvaluationInputs
+    from src.main import build_application
+
+    config = RunConfig(
+        data=tmp_path / "data.csv",
+        target="label",
+        model="test",
+        backend="qoder",
+        output_dir=tmp_path / "run",
+    )
+    application = build_application(config, backends={})
+
+    validator = application.runtime._dependencies.validator
+    code_agent = validator._code_agent
+    assert isinstance(code_agent._runtime, LocalExperimentRuntime)
+    assert isinstance(code_agent._evaluator, TrustedEvaluator)
+
+    validation_inputs = EvaluationInputs(
+        phase="validation",
+        train_path=tmp_path / "train.csv",
+        features_path=tmp_path / "validation.csv",
+        labels_path=tmp_path / "validation_labels.csv",
+        target="label",
+    )
+    test_inputs = EvaluationInputs(
+        phase="test",
+        train_path=tmp_path / "train.csv",
+        features_path=tmp_path / "test.csv",
+        labels_path=tmp_path / "test_labels.csv",
+        target="label",
+    )
+    validator.set_inputs(validation_inputs, test_inputs)
+    assert validator._validation_inputs is validation_inputs
+    assert validator._test_inputs is test_inputs
+
+
 @pytest.mark.asyncio
 async def test_drive_runtime_executes_and_persists_all_phases(tmp_path: Path) -> None:
     runtime = RecordingRuntime()

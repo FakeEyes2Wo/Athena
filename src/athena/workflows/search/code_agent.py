@@ -276,6 +276,87 @@ class CodeAgent:
             wall_time_s=time.time() - started_at,
         )
 
+    async def execute_frozen(
+        self,
+        experiment_id,
+        hypothesis,
+        plan,
+        parent_commit,
+        eval_spec,
+        worktree,
+        *,
+        inputs: EvaluationInputs,
+    ) -> CodegenResult:
+        wt_path = Path(worktree.path)
+        wt_path.mkdir(parents=True, exist_ok=True)
+        started_at = time.time()
+        log_path = wt_path / f"athena_logs_{experiment_id}.txt"
+        logs_ref = f"artifact://{log_path}"
+
+        await self._stage_inputs(wt_path, inputs)
+        await self._ensure_evaluator(wt_path, eval_spec)
+        if self._artifacts is None or self._evaluator is None:
+            raise CodeExecutionError(
+                "trusted evaluation is not configured", logs=logs_ref
+            )
+
+        run_output = await self._runtime.run(
+            ExecutionRequest(
+                entrypoint=EXPERIMENT_ENTRYPOINT,
+                cwd=wt_path,
+                timeout_s=300,
+                environment={
+                    "ATHENA_EXPERIMENT_ID": experiment_id,
+                    "ATHENA_PHASE": inputs.phase,
+                },
+                readonly_inputs=(inputs.features_path,),
+            )
+        )
+        await self._write_logs(
+            log_path,
+            [
+                (
+                    "run_experiment.py",
+                    ProcessResult(
+                        returncode=run_output.returncode,
+                        output="\n".join(
+                            part
+                            for part in (run_output.stdout, run_output.stderr)
+                            if part
+                        ),
+                    ),
+                )
+            ],
+        )
+        if run_output.returncode != 0:
+            raise CodeExecutionError(
+                "frozen final-test execution failed", logs=logs_ref
+            )
+
+        evaluation = await self._evaluator.evaluate(
+            experiment_id, wt_path / "predictions.csv", inputs, eval_spec
+        )
+        evaluation_ref = await self._artifacts.put_bytes(
+            await asyncio.to_thread((wt_path / "predictions.csv").read_bytes)
+        )
+        diff_ref = f"artifact://diffs/{experiment_id}"
+        commit = parent_commit
+        if self._workspace is not None:
+            diff = await self._workspace.diff(worktree)
+            diff_ref = diff.ref
+            commit = await self._workspace.commit(
+                worktree, diff, f"experiment: {experiment_id}"
+            )
+        return CodegenResult(
+            experiment_id=experiment_id,
+            commit=commit,
+            diff=diff_ref,
+            eval=evaluation,
+            evaluation=evaluation_ref,
+            logs=logs_ref,
+            wall_time_s=time.time() - started_at,
+        )
+
     @staticmethod
     def _generation_prompt(
         experiment_id: str,
