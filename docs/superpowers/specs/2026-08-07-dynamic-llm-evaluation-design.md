@@ -52,7 +52,8 @@ class EvalResult(BaseModel):
 
 ### 2. MetricPlanner（`workflows/prepare/metric_planner.py`，替代 `EvaluatorFactory`）
 
-- 输入：`task.description`、`task.constraints`、`DataProfile`；用户显式指定的 `primary_metric` 作为硬约束。
+- 输入：`task.description`、`task.constraints`、`DataProfile`。
+- 硬约束规则：若 `task.primary_metric` 与 task_type 默认猜测不同（说明用户显式指定了指标），则作为硬约束传给 planner；否则 planner 自由选择。
 - 输出（schema 强制，pydantic）：
 
 ```python
@@ -62,7 +63,7 @@ class MetricPlan(BaseModel):
     rationale: str          # 为什么选这个指标（审计）
 ```
 
-- 一次 LLM 调用，不可用时**回退到现有 `_DEFAULT_METRICS` 按 task_type 兜底**（`EvaluatorFactory` 的逻辑保留为 `default_spec(task_type)`）。
+- 一次 LLM 调用，不可用时**回退到现有 `_DEFAULT_METRICS` 按 task_type 兜底**（`EvaluatorFactory` 的逻辑保留为 `default_spec(task_type)`），eval_script 用 bundled 默认模板（按默认指标生成）。
 - planner 依据协议生成 eval_script：holdout → 读 predictions.csv + labels.csv 出标量；cv → 额外读 fold_ids.csv 出每折值。
 
 ### 3. eval.py 生命周期（`workflows/search/code_agent.py`）
