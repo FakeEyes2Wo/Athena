@@ -5,6 +5,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from athena.sandbox.executor import SandboxExecutor
+from athena.sandbox.limits import SandboxLimits
 
 
 def create_sandbox_server(work_root: str) -> FastMCP:
@@ -74,7 +75,7 @@ def create_sandbox_server(work_root: str) -> FastMCP:
             "work_root": str(executor.work_root),
             "whitelist": sorted(executor.allowed_imports),
             "timeout_max": {"inspect": 30, "execute": 120},
-            "memory_limit_mb": 512,
+            "memory_limit_mb": SandboxLimits.MEMORY_MB,
         }
 
     return mcp
