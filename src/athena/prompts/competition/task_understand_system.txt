@@ -27,15 +27,41 @@ analyze and clean data。
 - Search HuggingFace for augmentation datasets if the task would benefit
   from additional training data.
 
-### Phase 4 — Data Analysis
-- Run data_analyze on all acquired datasets BEFORE attempting any cleaning
-  or modeling. The EDA report must cover: distributions, missing values,
-  outliers, correlations, and class balance (if applicable).
-- Do NOT skip this phase — downstream code generation depends on it.
+### Phase 4 — Data Exploration
 
-### Phase 5 — Data Preparation
-- Generate and persist a cleaning. The script must handle: missing values, outliers,
-  categorical encoding, and normalization.
+You have access to sandbox tools (mcp__sandbox__python_inspect and
+mcp__sandbox__python_execute) for Python code execution. Take an
+iterative, scientist-like approach:
+
+1. **Survey**: Use python_inspect with os.listdir('.') to understand the
+   downloaded data directory structure.
+2. **Peek**: Use python_inspect to load data and get quick statistics:
+   - pd.read_csv('file.csv').head()
+   - pd.read_csv('file.csv').describe()
+   - pd.read_csv('file.csv').info() (via python_execute since .info() prints)
+   - df['target'].value_counts() (for classification tasks)
+   - df.isnull().sum() (missing value overview)
+3. **Deep analysis**: Use python_execute to run multi-step analysis
+   scripts. Save plots (plt.savefig) and summary tables as output files.
+4. **Iterate**: Each observation should guide the next question. Don't
+   script everything upfront — explore, observe, then decide what to
+   investigate next.
+
+### Phase 5 — Data Cleaning & EDA Report
+
+1. Based on Phase 4 findings, design a cleaning strategy:
+   - Missing value handling (drop vs impute, with justification)
+   - Outlier treatment
+   - Categorical encoding
+   - Feature scaling if needed
+2. Use python_execute to run the cleaning script step by step.
+3. Use python_inspect to verify cleaning results after each step.
+4. Write eda.md summarizing:
+   - Dataset overview (source, size, format)
+   - Column-by-column analysis (distributions, issues found)
+   - Cleaning decisions and justification for each
+   - Remaining quality concerns
+   - Key insights for downstream modeling
 
 ## Phase Ordering
 - Tools from different phases MUST NOT be batched in the same turn.

@@ -20,15 +20,11 @@ from athena.tools.hf_dataset import HFDatasetDownloadTool, HFDatasetSearchTool
 # ── 数据获取层 —— HuggingFace 模型 (Task 6) ──
 from athena.tools.hf_model import HFModelDownloadTool, HFModelSearchTool
 
-# ── 数据准备层 (Task 7) ──
-from athena.tools.data_prepare import DataAnalyzeTool, DataCleanCodeGenTool
-
 # ── Agent 认知子系统 (Task 5) ──
 from athena.cognition import register_cognition_tools
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
-
 
 
 async def build_task_understand_agent(
@@ -56,10 +52,6 @@ async def build_task_understand_agent(
     # ── 数据获取层 —— HF 模型 (2 工具) ──
     tools.register(HFModelSearchTool(work_root=work_root))
     tools.register(HFModelDownloadTool(work_root=work_root))
-
-    # ── 数据准备层 (2 工具) ──
-    # tools.register(DataAnalyzeTool(work_root=work_root))
-    # tools.register(DataCleanCodeGenTool(work_root=work_root))
 
     # ── Agent 认知子系统（5 个认知工具）──
     await register_cognition_tools(tools, work_root=work_root)

@@ -1,6 +1,14 @@
 {
   "servers": [
     {
+      "name": "sandbox",
+      "transport": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "athena.sandbox", "--work-root", "${WORK_ROOT}"],
+      "tool_prefix": "mcp__sandbox__",
+      "pinned_tools": []
+    },
+    {
       "name": "kaggle",
       "transport": "streamable_http",
       "url": "https://www.kaggle.com/mcp",
