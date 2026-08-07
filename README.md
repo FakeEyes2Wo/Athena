@@ -73,6 +73,31 @@ logs, predictions, and evaluation results are content-addressed (`sha256:`) in
 `artifacts/objects/` and remain readable after the experiment worktree is
 removed.
 
+## Titanic example
+
+The bundled Titanic dataset in `examples/titanic/` runs the complete workflow
+end-to-end. `train.csv` (with the `Survived` target) is the single dataset
+input; `test.csv` and `gender_submission.csv` are included for reference:
+
+```powershell
+uv run python src/main.py `
+  --data examples/titanic/train.csv `
+  --target Survived `
+  --model openai:deepseek-chat `
+  --backend codex `
+  --output-dir .athena/titanic-run `
+  --max-experiments 1 `
+  --max-no-improve 1
+```
+
+Set `OPENAI_API_KEY` (or an `ATHENA_IDEATOR_MODEL` override) and, for the
+DeepSeek-compatible endpoint, `OPENAI_BASE_URL=https://api.deepseek.com`.
+A successful run writes `run_summary.json` (with `execution: local` and
+`strong_isolation: false`), a Markdown report in `reports/`, the persistent
+`research_tree.json`, and content-addressed evidence in `artifacts/objects/`.
+A verified local run reached a final-test `f1_macro` of `0.8126` on the Titanic
+validation, with the frozen final-test recorded under the unchanged SOTA commit.
+
 ## Development
 
 Install uv, then create or update the project environment:
