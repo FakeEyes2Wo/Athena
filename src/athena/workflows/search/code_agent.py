@@ -185,7 +185,6 @@ class CodeAgent:
                 )
                 log_results.append(run_record)
                 await self._write_logs(log_path, log_results)
-                previous_outputs.append(run_output)
                 history.append(
                     {
                         "round": round_num,
@@ -195,6 +194,7 @@ class CodeAgent:
                     }
                 )
                 if run_output.returncode != 0:
+                    previous_outputs.append(run_output)
                     continue
                 try:
                     evaluation = await self._evaluator.evaluate(
