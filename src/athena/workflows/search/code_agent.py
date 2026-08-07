@@ -339,14 +339,14 @@ class CodeAgent:
         evaluation_ref = await self._artifacts.put_bytes(
             await asyncio.to_thread((wt_path / "predictions.csv").read_bytes)
         )
+        # Final-test runs the exact committed tree: no codegen, no diff, no child
+        # commit. ResearchTree commit must equal the SOTA commit. Predictions and
+        # logs are persisted durably through the artifact store, so a Git commit
+        # would add no evidence and must not be created.
         diff_ref = f"artifact://diffs/{experiment_id}"
         commit = parent_commit
-        if self._workspace is not None:
-            diff = await self._workspace.diff(worktree)
-            diff_ref = diff.ref
-            commit = await self._workspace.commit(
-                worktree, diff, f"experiment: {experiment_id}"
-            )
+        log_text = await asyncio.to_thread(log_path.read_text, encoding="utf-8")
+        logs_ref = await self._artifacts.put_text(log_text)
         return CodegenResult(
             experiment_id=experiment_id,
             commit=commit,

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from athena.code.backends.base import CodeBackend
+from athena.code.execution import LocalExperimentRuntime
 from athena.code.types import GenerationResult
 from athena.core.research_models import ExperimentPlan, Hypothesis
 from athena.core.workspace import GitDiff, GitWorkBranch
@@ -186,6 +187,62 @@ async def test_code_agent_runs_the_frozen_evaluator_source(tmp_path) -> None:
     assert (tmp_path / "eval.py").read_text(encoding="utf-8") == spec.eval_script
     assert result.eval.experiment_id == "exp-test"
     assert result.eval.primary == 1.0
+
+
+@pytest.mark.asyncio
+async def test_code_agent_frozen_execute_keeps_sota_commit_and_durable_logs(
+    tmp_path,
+) -> None:
+    """execute_frozen runs the committed entrypoint once and returns the SOTA commit.
+
+    The frozen final-test path never invokes a backend or a repair loop; it runs the
+    exact committed run_experiment.py with the final-test phase manifest and keeps
+    ``commit == parent_commit``. Logs and predictions are persisted durably.
+    """
+    store = LocalArtifactStore(tmp_path / "store")
+    inputs = _inputs(tmp_path)
+    worktree = GitWorkBranch(
+        path=str(tmp_path), branch="exp/test", base_commit="a" * 40
+    )
+    (tmp_path / "run_experiment.py").write_text(
+        "import json\n"
+        "from pathlib import Path\n"
+        "import pandas as pd\n"
+        "counter = Path('run_count.txt')\n"
+        "count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+        "counter.write_text(str(count))\n"
+        "manifest = json.loads(Path('.athena/phase_manifest.json').read_text())\n"
+        "features = pd.read_csv(manifest['predict'])\n"
+        "row_id = manifest['row_id_column']\n"
+        "pd.DataFrame(\n"
+        "    {row_id: features[row_id], 'prediction': (features['feature'] >= 1.5).astype(int)}\n"
+        ").to_csv('predictions.csv', index=False)\n",
+        encoding="utf-8",
+    )
+    agent = CodeAgent(
+        workspace=None,
+        runtime=LocalExperimentRuntime(),
+        artifacts=store,
+        evaluator=TrustedEvaluator(store),
+    )
+
+    result = await agent.execute_frozen(
+        "exp-test",
+        _hypothesis(),
+        _plan(),
+        "a" * 40,
+        _spec(),
+        worktree,
+        inputs=inputs,
+    )
+
+    assert result.commit == "a" * 40
+    assert result.eval.primary == 1.0
+    assert result.evaluation.startswith("sha256:")
+    assert result.logs.startswith("sha256:")
+    logs = await store.get_text(result.logs)
+    assert "run_experiment.py" in logs
+    assert (tmp_path / "run_count.txt").read_text(encoding="utf-8") == "1"
 
 
 @pytest.mark.asyncio
