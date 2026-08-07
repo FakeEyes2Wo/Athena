@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,7 +10,7 @@ from pandas.api.types import is_numeric_dtype
 
 from athena.data.operations import deterministic_split
 from athena.data.types import ColumnSummary, DataProfile, ProcessingLog
-from athena.evaluation.types import EvalSpec
+from athena.evaluation.types import EvaluationInputs, EvalSpec
 from athena.research.models import TaskMetaData
 from athena.workflows.prepare.evaluator_factory import EvaluatorFactory
 
@@ -23,7 +22,8 @@ class PreparedWorkflowData:
     profile: DataProfile
     processing_log: ProcessingLog
     eval_spec: EvalSpec
-    split_manifest_path: Path
+    validation_inputs: EvaluationInputs
+    test_inputs: EvaluationInputs
     eval_spec_path: Path
     evaluator_path: Path
 
@@ -41,8 +41,12 @@ def _write_bytes(root: Path, data: bytes, suffix: str) -> Path:
 
 
 def _write_frame(root: Path, frame: pd.DataFrame) -> str:
+    return _artifact_ref(_write_frame_path(root, frame))
+
+
+def _write_frame_path(root: Path, frame: pd.DataFrame) -> Path:
     data = frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
-    return _artifact_ref(_write_bytes(root, data, ".csv"))
+    return _write_bytes(root, data, ".csv")
 
 
 def _clean_partitions(
@@ -128,23 +132,34 @@ def _prepare(
     frame = pd.read_csv(source)
     if target not in frame.columns:
         raise ValueError(f"target column not found: {target}")
+    if "__athena_row_id" in frame.columns:
+        raise ValueError("dataset must not contain reserved column __athena_row_id")
     frame = frame.loc[frame[target].notna()].copy()
     if frame.empty:
         raise ValueError("dataset has no rows after removing missing targets")
+    frame["__athena_row_id"] = range(len(frame))
     train, validation, test = deterministic_split(
         frame,
         seed=seed,
         validation_ratio=validation_ratio,
         test_ratio=test_ratio,
     )
+    if train.empty or validation.empty or test.empty:
+        raise ValueError(
+            "dataset must produce non-empty train, validation, and test splits"
+        )
     partitions, processing = _clean_partitions(train, validation, test, target=target)
     train, validation, test = partitions
     cleaned = pd.concat(partitions).sort_index()
-    split_refs = {
-        "train": _write_frame(artifacts, train),
-        "validation": _write_frame(artifacts, validation),
-        "test": _write_frame(artifacts, test),
-    }
+    train_path = _write_frame_path(artifacts, train)
+    validation_features_path = _write_frame_path(
+        artifacts, validation.drop(columns=[target])
+    )
+    validation_labels_path = _write_frame_path(
+        artifacts, validation[["__athena_row_id", target]]
+    )
+    test_features_path = _write_frame_path(artifacts, test.drop(columns=[target]))
+    test_labels_path = _write_frame_path(artifacts, test[["__athena_row_id", target]])
     processing_log = ProcessingLog(
         columns={
             summary.name: summary
@@ -156,8 +171,8 @@ def _prepare(
             ).columns
         },
         raw_copy=raw_copy,
-        cleaned_data=_write_frame(artifacts, cleaned),
-        splits=split_refs,
+        cleaned_data=_artifact_ref(train_path),
+        splits={"train": _artifact_ref(train_path)},
     )
     profile = _profile(
         cleaned,
@@ -166,17 +181,6 @@ def _prepare(
         processing=processing,
     )
     eval_spec = EvaluatorFactory.build(task, profile)
-    split_manifest_path = config / "splits.json"
-    split_manifest_path.write_text(
-        json.dumps(
-            {"target": target, "splits": split_refs},
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
     eval_spec_path = config / "eval_spec.json"
     eval_spec_path.write_text(
         eval_spec.model_dump_json(indent=2) + "\n", encoding="utf-8"
@@ -187,7 +191,20 @@ def _prepare(
         profile=profile,
         processing_log=processing_log,
         eval_spec=eval_spec,
-        split_manifest_path=split_manifest_path,
+        validation_inputs=EvaluationInputs(
+            phase="validation",
+            train_path=train_path,
+            features_path=validation_features_path,
+            labels_path=validation_labels_path,
+            target=target,
+        ),
+        test_inputs=EvaluationInputs(
+            phase="test",
+            train_path=train_path,
+            features_path=test_features_path,
+            labels_path=test_labels_path,
+            target=target,
+        ),
         eval_spec_path=eval_spec_path,
         evaluator_path=evaluator_path,
     )

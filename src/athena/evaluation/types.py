@@ -1,5 +1,6 @@
 """Evaluation protocol models."""
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -27,6 +28,19 @@ class EvalSpec(BaseModel):
     test_ratio: float = 0.2
 
 
+class EvaluationInputs(BaseModel):
+    """Host-owned files required to score one held-out phase."""
+
+    model_config = {"frozen": True}
+
+    phase: Literal["validation", "test"]
+    train_path: Path
+    features_path: Path
+    labels_path: Path
+    target: str
+    row_id_column: str = "__athena_row_id"
+
+
 class EvalResult(BaseModel):
     """在预测上运行 eval.py 的输出结果。"""
 
@@ -43,4 +57,10 @@ class ComparisonVerdict(BaseModel):
     p_value: float
 
 
-__all__ = ["ComparisonVerdict", "EvalResult", "EvalSpec", "MetricDef"]
+__all__ = [
+    "ComparisonVerdict",
+    "EvaluationInputs",
+    "EvalResult",
+    "EvalSpec",
+    "MetricDef",
+]

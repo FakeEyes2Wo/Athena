@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -18,7 +17,7 @@ def _task() -> TaskMetaData:
 
 
 @pytest.mark.asyncio
-async def test_prepare_workflow_data_preserves_raw_and_freezes_splits(
+async def test_prepare_workflow_data_creates_phase_scoped_private_labels(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.csv"
@@ -50,27 +49,38 @@ async def test_prepare_workflow_data_preserves_raw_and_freezes_splits(
     assert prepared.profile.row_count == 10
     assert prepared.profile.target_col == "label"
     assert prepared.eval_spec.eval_script
-    manifest = json.loads(prepared.split_manifest_path.read_text(encoding="utf-8"))
-    assert manifest["target"] == "label"
-    assert set(manifest["splits"]) == {"train", "validation", "test"}
-    partitions = {
-        name: pd.read_csv(Path(ref.removeprefix("artifact://")))
-        for name, ref in manifest["splits"].items()
-    }
-    assert {name: len(part) for name, part in partitions.items()} == {
-        "train": 6,
-        "validation": 2,
-        "test": 2,
-    }
-    assert all(not part.isna().any().any() for part in partitions.values())
-    assert (
-        len(
-            {
-                Path(ref.removeprefix("artifact://")).resolve()
-                for ref in manifest["splits"].values()
-            }
-        )
-        == 3
+    train = pd.read_csv(prepared.validation_inputs.train_path)
+    validation = prepared.validation_inputs
+    test = prepared.test_inputs
+    validation_features = pd.read_csv(validation.features_path)
+    validation_labels = pd.read_csv(validation.labels_path)
+    test_features = pd.read_csv(test.features_path)
+    test_labels = pd.read_csv(test.labels_path)
+
+    assert "__athena_row_id" in train.columns
+    assert "label" in train.columns
+    assert list(validation_labels.columns) == ["__athena_row_id", "label"]
+    assert list(test_labels.columns) == ["__athena_row_id", "label"]
+    assert "label" not in validation_features.columns
+    assert "label" not in test_features.columns
+    assert validation.row_id_column == "__athena_row_id"
+    assert set(validation_features["__athena_row_id"]) == set(
+        validation_labels["__athena_row_id"]
+    )
+    assert set(test_features["__athena_row_id"]) == set(test_labels["__athena_row_id"])
+    split_ids = [
+        set(train["__athena_row_id"]),
+        set(validation_features["__athena_row_id"]),
+        set(test_features["__athena_row_id"]),
+    ]
+    assert all(split_ids)
+    assert not (split_ids[0] & split_ids[1])
+    assert not (split_ids[0] & split_ids[2])
+    assert not (split_ids[1] & split_ids[2])
+    assert set.union(*split_ids) == set(range(10))
+    assert all(
+        not part.isna().any().any()
+        for part in [train, validation_features, test_features]
     )
 
 
@@ -80,6 +90,39 @@ async def test_prepare_workflow_data_rejects_missing_target(tmp_path: Path) -> N
     pd.DataFrame({"feature": [1, 2]}).to_csv(source, index=False)
 
     with pytest.raises(ValueError, match="target column"):
+        await prepare_workflow_data(
+            source,
+            target="label",
+            task=_task(),
+            output_dir=tmp_path / "run",
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_workflow_data_rejects_reserved_row_id(tmp_path: Path) -> None:
+    source = tmp_path / "source.csv"
+    pd.DataFrame({"__athena_row_id": [1, 2], "label": [0, 1]}).to_csv(
+        source, index=False
+    )
+
+    with pytest.raises(ValueError, match="__athena_row_id"):
+        await prepare_workflow_data(
+            source,
+            target="label",
+            task=_task(),
+            output_dir=tmp_path / "run",
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_workflow_data_rejects_empty_split(tmp_path: Path) -> None:
+    source = tmp_path / "source.csv"
+    pd.DataFrame({"feature": [1, 2, 3], "label": [0, 1, 0]}).to_csv(source, index=False)
+
+    with pytest.raises(
+        ValueError,
+        match="dataset must produce non-empty train, validation, and test splits",
+    ):
         await prepare_workflow_data(
             source,
             target="label",

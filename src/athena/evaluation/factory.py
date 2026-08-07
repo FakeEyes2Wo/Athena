@@ -1,6 +1,19 @@
 """EvalSpec 默认指标：按 task_type 构造主/次指标协议。"""
 
 import json
+import math
+from collections.abc import Sequence
+
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from athena.evaluation.types import EvalSpec, MetricDef
 
@@ -19,6 +32,56 @@ _DEFAULT_METRICS = {
         description="Area Under the ROC Curve",
     ),
 }
+
+
+def metric_value(
+    name: str, y_true: Sequence[object], y_pred: Sequence[object]
+) -> float:
+    """Calculate one catalog metric from host-owned labels and predictions."""
+    if name == "accuracy":
+        return float(accuracy_score(y_true, y_pred))
+    if name == "f1_macro":
+        return float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    if name in {"f1", "f1_binary", "precision", "recall"}:
+        labels = sorted(set(y_true))
+        if len(labels) != 2:
+            raise ValueError("binary metrics require exactly two target values")
+        negative, positive = labels
+        binary_predictions = [
+            positive if prediction >= 0.5 else negative for prediction in y_pred
+        ]
+        if name in {"f1", "f1_binary"}:
+            return float(
+                f1_score(
+                    y_true, binary_predictions, pos_label=positive, zero_division=0
+                )
+            )
+        if name == "precision":
+            return float(
+                precision_score(
+                    y_true, binary_predictions, pos_label=positive, zero_division=0
+                )
+            )
+        return float(
+            recall_score(
+                y_true, binary_predictions, pos_label=positive, zero_division=0
+            )
+        )
+    if name == "precision_macro":
+        return float(precision_score(y_true, y_pred, average="macro", zero_division=0))
+    if name == "recall_macro":
+        return float(recall_score(y_true, y_pred, average="macro", zero_division=0))
+    if name == "roc_auc":
+        return float(roc_auc_score(y_true, y_pred))
+    if name == "mae":
+        return float(mean_absolute_error(y_true, y_pred))
+    if name == "mse":
+        return float(mean_squared_error(y_true, y_pred))
+    if name == "rmse":
+        return float(math.sqrt(mean_squared_error(y_true, y_pred)))
+    if name == "r2":
+        return float(r2_score(y_true, y_pred))
+    raise ValueError(f"unsupported frozen metric: {name}")
 
 
 def create_eval_spec(task_type: str) -> EvalSpec:

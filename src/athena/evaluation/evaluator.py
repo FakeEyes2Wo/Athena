@@ -5,6 +5,7 @@ import math
 from collections.abc import Callable, Sequence
 
 from athena.core.contracts import ArtifactRef
+from athena.evaluation.factory import metric_value
 from athena.evaluation.types import EvalSpec, EvalResult, MetricDef
 
 
@@ -28,7 +29,7 @@ def evaluate_predictions(
 def metric_values(
     spec: EvalSpec, y_true: Sequence[float], y_pred: Sequence[float]
 ) -> tuple[float, dict[str, float], list[float]]:
-    """Calculate the frozen metrics and direction-compatible paired samples."""
+    """Calculate frozen metrics and direction-compatible paired samples."""
     actual = [float(value) for value in y_true]
     predicted = [float(value) for value in y_pred]
     if len(actual) != len(predicted):
@@ -39,14 +40,9 @@ def metric_values(
         raise ValueError("predictions must be finite")
 
     per_sample = _per_sample_values(spec.primary, actual, predicted)
-    primary = _metric_value(spec.primary, actual, predicted, per_sample)
+    primary = metric_value(spec.primary.name, actual, predicted)
     secondary = {
-        metric.name: _metric_value(
-            metric,
-            actual,
-            predicted,
-            _per_sample_values(metric, actual, predicted),
-        )
+        metric.name: metric_value(metric.name, actual, predicted)
         for metric in spec.secondary
     }
     return primary, secondary, per_sample
@@ -70,133 +66,6 @@ def _per_sample_values(
     return [float(truth == prediction) for truth, prediction in zip(actual, predicted)]
 
 
-def _metric_value(
-    metric: MetricDef,
-    actual: list[float],
-    predicted: list[float],
-    per_sample: list[float],
-) -> float:
-    if metric.name == "rmse":
-        return math.sqrt(sum(per_sample) / len(per_sample))
-    if metric.name == "mse":
-        return sum(per_sample) / len(per_sample)
-    if metric.name == "mae":
-        return sum(
-            abs(truth - prediction) for truth, prediction in zip(actual, predicted)
-        ) / len(actual)
-    if metric.name == "r2":
-        mean = sum(actual) / len(actual)
-        total = sum((truth - mean) ** 2 for truth in actual)
-        return 1.0 - sum(per_sample) / total if total else 0.0
-    if metric.name == "accuracy":
-        return sum(per_sample) / len(per_sample)
-    if metric.name in {"f1_macro", "precision_macro", "recall_macro"}:
-        return _macro_classification_metric(metric.name, actual, predicted)
-    if metric.name in {"roc_auc", "f1", "precision", "recall"}:
-        return _binary_classification_metric(metric.name, actual, predicted)
-    raise ValueError(f"unsupported metric: {metric.name}")
-
-
-def _macro_classification_metric(
-    name: str, actual: list[float], predicted: list[float]
-) -> float:
-    values: list[float] = []
-    for label in set(actual + predicted):
-        true_positive = sum(
-            truth == label and prediction == label
-            for truth, prediction in zip(actual, predicted)
-        )
-        false_positive = sum(
-            truth != label and prediction == label
-            for truth, prediction in zip(actual, predicted)
-        )
-        false_negative = sum(
-            truth == label and prediction != label
-            for truth, prediction in zip(actual, predicted)
-        )
-        precision = (
-            true_positive / (true_positive + false_positive)
-            if true_positive + false_positive
-            else 0.0
-        )
-        recall = (
-            true_positive / (true_positive + false_negative)
-            if true_positive + false_negative
-            else 0.0
-        )
-        if name == "f1_macro":
-            values.append(
-                2 * precision * recall / (precision + recall)
-                if precision + recall
-                else 0.0
-            )
-        elif name == "precision_macro":
-            values.append(precision)
-        else:
-            values.append(recall)
-    return sum(values) / len(values)
-
-
-def _binary_classification_metric(
-    name: str, actual: list[float], predicted: list[float]
-) -> float:
-    labels = sorted(set(actual))
-    if len(labels) != 2:
-        raise ValueError("binary metrics require exactly two target values")
-    negative, positive = labels
-    if name == "roc_auc":
-        positive_scores = [
-            prediction
-            for truth, prediction in zip(actual, predicted)
-            if truth == positive
-        ]
-        negative_scores = [
-            prediction
-            for truth, prediction in zip(actual, predicted)
-            if truth == negative
-        ]
-        return sum(
-            (
-                1.0
-                if positive_score > negative_score
-                else 0.5 if positive_score == negative_score else 0.0
-            )
-            for positive_score in positive_scores
-            for negative_score in negative_scores
-        ) / (len(positive_scores) * len(negative_scores))
-
-    labels_predicted = [
-        positive if prediction >= 0.5 else negative for prediction in predicted
-    ]
-    true_positive = sum(
-        truth == positive and prediction == positive
-        for truth, prediction in zip(actual, labels_predicted)
-    )
-    false_positive = sum(
-        truth == negative and prediction == positive
-        for truth, prediction in zip(actual, labels_predicted)
-    )
-    false_negative = sum(
-        truth == positive and prediction == negative
-        for truth, prediction in zip(actual, labels_predicted)
-    )
-    precision = (
-        true_positive / (true_positive + false_positive)
-        if true_positive + false_positive
-        else 0.0
-    )
-    recall = (
-        true_positive / (true_positive + false_negative)
-        if true_positive + false_negative
-        else 0.0
-    )
-    if name == "precision":
-        return precision
-    if name == "recall":
-        return recall
-    return 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-
-
 class Evaluator:
     """Thin runner: reads eval_result.json produced by CodeAgent's eval.py."""
 
@@ -206,33 +75,11 @@ class Evaluator:
     def evaluate(self, predictions_ref: ArtifactRef) -> EvalResult:
         """Read eval_result.json from the artifact path and return EvalResult."""
         result_path = f"{predictions_ref.split(':')[1]}/eval_result.json"
-        with open(result_path) as f:
-            data = json.load(f)
+        with open(result_path) as stream:
+            data = json.load(stream)
         return EvalResult(
             experiment_id=data["experiment_id"],
             primary=data["primary"],
             secondary=data.get("secondary", {}),
             per_sample=f"{predictions_ref}/per_sample.csv",
         )
-
-
-if __name__ == "__main__":
-    import tempfile
-    import os as _os
-
-    with tempfile.TemporaryDirectory() as tmp:
-        result_data = {
-            "experiment_id": "exp_001",
-            "primary": 0.85,
-            "secondary": {"accuracy": 0.83},
-        }
-        os.makedirs(_os.path.join(tmp, "artifact_ref"), exist_ok=True)
-        with open(_os.path.join(tmp, "artifact_ref", "eval_result.json"), "w") as f:
-            json.dump(result_data, f)
-        spec = EvalSpec(
-            primary={"name": "f1_macro", "direction": "maximize", "description": "F1"},
-            secondary=[],
-        )
-        evaluator = Evaluator(spec)
-        result = evaluator.evaluate(f"artifact://{tmp}/artifact_ref")
-        print(f"EvalResult: {result}")

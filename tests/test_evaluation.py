@@ -7,7 +7,11 @@ from pydantic import ValidationError
 from athena.evaluation import Comparator
 from athena.evaluation.comparator import compare_results
 from athena.evaluation.evaluator import evaluate_predictions
-from athena.evaluation.factory import create_eval_spec, default_eval_script
+from athena.evaluation.factory import (
+    create_eval_spec,
+    default_eval_script,
+    metric_value,
+)
 from athena.evaluation.types import ComparisonVerdict, EvalResult, EvalSpec, MetricDef
 
 
@@ -89,6 +93,11 @@ def test_default_eval_script_supports_regression_metric() -> None:
 
     assert '"rmse"' in spec.eval_script
     assert "mean_squared_error" in spec.eval_script
+
+
+def test_metric_value_uses_catalog_metric_names() -> None:
+    assert metric_value("accuracy", [0, 1, 0], [0, 1, 1]) == pytest.approx(2 / 3)
+    assert metric_value("rmse", [1, 2], [2, 2]) == pytest.approx(math.sqrt(0.5))
 
 
 def test_comparator_detects_improvement():
