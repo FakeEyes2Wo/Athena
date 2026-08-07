@@ -1,12 +1,12 @@
 """RunGuard —— Agent ReAct loop 硬约束。
 
 在运行时层面防止 Agent 陷入死循环：相同调用拒绝、连续失败限制、
-相同错误模式循环检测。不依赖 System Prompt。
+相同错误模式累计检测。不依赖 System Prompt。
 """
 
 import json
+import threading
 from dataclasses import dataclass, field
-
 
 class GuardError(RuntimeError):
     """RunGuard 拦截死循环/重复调用时抛出。
@@ -22,7 +22,7 @@ class RunGuard:
 
     三条规则：
     1. 完全相同的调用 → 拒绝
-    2. 同一工具连续失败 3 次 → GuardError
+    2. 同一工具连续失败超过 N 次 → GuardError
     3. 同一 (tool, error_type) 累计 3 次 → GuardError
     """
 
@@ -44,8 +44,13 @@ class RunGuard:
     _error_patterns: dict[tuple[str, str], int] = field(default_factory=dict)
     """(tool_name, err_key) → 累计出现次数。"""
 
+    def __post_init__(self) -> None:
+        """初始化线程锁。"""
+        self._lock = threading.Lock()
+
     def check_enter_loop(self) -> None:
         """进入下一轮采样前的准入检查。"""
+        pass
 
     def check_before_call(self, tool_name: str, args: dict) -> None:
         """工具调用前准入检查。
@@ -57,13 +62,14 @@ class RunGuard:
         Raises:
             GuardError: 相同调用已执行过
         """
-        call_hash = (tool_name, _hash_args(args))
-        if call_hash in self._call_hashes:
-            raise GuardError(
-                f"完全相同的调用 {tool_name}({_summarize_args(args)}) 已执行过。"
-                f"请改变参数或换一种方式。"
-            )
-        self._call_hashes.add(call_hash)
+        with self._lock:
+            call_hash = (tool_name, _hash_args(args))
+            if call_hash in self._call_hashes:
+                raise GuardError(
+                    f"完全相同的调用 {tool_name}({_summarize_args(args)}) 已执行过。"
+                    f"请改变参数或换一种方式。"
+                )
+            self._call_hashes.add(call_hash)
 
     def record_result(
         self, tool_name: str, success: bool, error: str | None
@@ -78,32 +84,33 @@ class RunGuard:
         Raises:
             GuardError: 连续失败或错误模式循环触及上限
         """
-        if success:
-            # 成功后重置该工具的连续失败计数
-            self._consecutive_failures.pop(tool_name, None)
-            return
+        with self._lock:
+            if success:
+                # 成功后重置该工具的连续失败计数
+                self._consecutive_failures.pop(tool_name, None)
+                return
 
-        # 连续失败计数
-        self._consecutive_failures[tool_name] = (
-            self._consecutive_failures.get(tool_name, 0) + 1
-        )
-        if self._consecutive_failures[tool_name] > self.max_consecutive_failures:
-            raise GuardError(
-                f"{tool_name} 已连续失败 {self.max_consecutive_failures} 次。"
-                f"请换一种完全不同的方式。"
+            # 连续失败计数
+            self._consecutive_failures[tool_name] = (
+                self._consecutive_failures.get(tool_name, 0) + 1
             )
+            if self._consecutive_failures[tool_name] > self.max_consecutive_failures:
+                raise GuardError(
+                    f"{tool_name} 已连续失败 {self.max_consecutive_failures} 次。"
+                    f"请换一种完全不同的方式。"
+                )
 
-        # 错误模式计数
-        err_key = _classify_error(error)
-        pattern = (tool_name, err_key)
-        self._error_patterns[pattern] = (
-            self._error_patterns.get(pattern, 0) + 1
-        )
-        if self._error_patterns[pattern] > self.max_same_approach_failures:
-            raise GuardError(
-                f"{tool_name} 反复遇到 '{err_key}' 错误。"
-                f"当前策略无效，请改变策略。"
+            # 错误模式计数
+            err_key = _classify_error(error)
+            pattern = (tool_name, err_key)
+            self._error_patterns[pattern] = (
+                self._error_patterns.get(pattern, 0) + 1
             )
+            if self._error_patterns[pattern] > self.max_same_approach_failures:
+                raise GuardError(
+                    f"{tool_name} 反复遇到 '{err_key}' 错误。"
+                    f"当前策略无效，请改变策略。"
+                )
 
 
 def _hash_args(args: dict) -> int:
