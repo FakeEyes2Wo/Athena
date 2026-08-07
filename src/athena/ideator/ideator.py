@@ -129,6 +129,7 @@ class IdeatorConfig(BaseModel):
     quorum: int = Field(default=2, ge=2)
     stage_timeout_seconds: float = Field(default=120.0, gt=0)
     max_hypotheses: int = Field(default=5, ge=3, le=5)
+    judge_max_attempts: int = Field(default=3, ge=1, le=5)
 
     @model_validator(mode="after")
     def _validate_quorum(self) -> "IdeatorConfig":
@@ -491,71 +492,84 @@ class Ideator:
                     "failures": failures,
                 },
             )
-            try:
-                judge_result = await self._invoke(
-                    manager,
-                    runner,
-                    judge_thread.thread_id,
-                    stage="judge",
-                    role="judge",
-                    agent_index=0,
-                    prompt=judge_prompt,
-                )
-                judge_output = _JudgeOutput.model_validate(judge_result)
-                surviving_keys = {
-                    candidate["key"]
-                    for candidates in revisions.values()
-                    for candidate in candidates
-                }
-                decided_keys = [
-                    key
-                    for decision in judge_output.decisions
-                    for key in decision.candidate_keys
-                ]
-                if not set(decided_keys).issubset(surviving_keys):
-                    raise ValueError("judge decisions contain unknown candidate keys")
-                if len(decided_keys) != len(set(decided_keys)):
-                    raise ValueError(
-                        "judge decisions cover candidate keys more than once"
+            judge_output = None
+            hypotheses: list[Hypothesis] | None = None
+            last_judge_error: BaseException | None = None
+            for _attempt in range(self._config.judge_max_attempts):
+                try:
+                    judge_result = await self._invoke(
+                        manager,
+                        runner,
+                        judge_thread.thread_id,
+                        stage="judge",
+                        role="judge",
+                        agent_index=0,
+                        prompt=judge_prompt,
                     )
-                if set(decided_keys) != surviving_keys:
-                    raise ValueError(
-                        "judge decisions must cover every surviving candidate key"
-                    )
+                    judge_output = _JudgeOutput.model_validate(judge_result)
+                    surviving_keys = {
+                        candidate["key"]
+                        for candidates in revisions.values()
+                        for candidate in candidates
+                    }
+                    decided_keys = [
+                        key
+                        for decision in judge_output.decisions
+                        for key in decision.candidate_keys
+                    ]
+                    if not set(decided_keys).issubset(surviving_keys):
+                        raise ValueError(
+                            "judge decisions contain unknown candidate keys"
+                        )
+                    if len(decided_keys) != len(set(decided_keys)):
+                        raise ValueError(
+                            "judge decisions cover candidate keys more than once"
+                        )
+                    if set(decided_keys) != surviving_keys:
+                        raise ValueError(
+                            "judge decisions must cover every surviving candidate key"
+                        )
 
-                dispositions = {
-                    key: decision.disposition
-                    for decision in judge_output.decisions
-                    for key in decision.candidate_keys
-                }
-                lineage_keys = [
-                    key
-                    for draft in judge_output.hypotheses
-                    for key in draft.candidate_keys
-                ]
-                if not set(lineage_keys).issubset(surviving_keys):
-                    raise ValueError("judge lineage contains unknown candidate keys")
-                if any(dispositions[key] == "rejected" for key in lineage_keys):
-                    raise ValueError("judge lineage contains rejected candidate keys")
-                if len(lineage_keys) != len(set(lineage_keys)):
-                    raise ValueError(
-                        "judge lineage covers candidate keys more than once"
-                    )
-                selected_or_merged_keys = {
-                    key
-                    for key, disposition in dispositions.items()
-                    if disposition in {"selected", "merged"}
-                }
-                if set(lineage_keys) != selected_or_merged_keys:
-                    raise ValueError(
-                        "judge lineage must cover every selected or merged "
-                        "candidate key"
-                    )
-                hypotheses = self._validated_hypotheses(judge_output, parent_id)
-            except asyncio.CancelledError:
-                raise
-            except BaseException as exc:
-                raise RuntimeError("ideator judge failed") from exc
+                    dispositions = {
+                        key: decision.disposition
+                        for decision in judge_output.decisions
+                        for key in decision.candidate_keys
+                    }
+                    lineage_keys = [
+                        key
+                        for draft in judge_output.hypotheses
+                        for key in draft.candidate_keys
+                    ]
+                    if not set(lineage_keys).issubset(surviving_keys):
+                        raise ValueError(
+                            "judge lineage contains unknown candidate keys"
+                        )
+                    if any(dispositions[key] == "rejected" for key in lineage_keys):
+                        raise ValueError(
+                            "judge lineage contains rejected candidate keys"
+                        )
+                    if len(lineage_keys) != len(set(lineage_keys)):
+                        raise ValueError(
+                            "judge lineage covers candidate keys more than once"
+                        )
+                    selected_or_merged_keys = {
+                        key
+                        for key, disposition in dispositions.items()
+                        if disposition in {"selected", "merged"}
+                    }
+                    if set(lineage_keys) != selected_or_merged_keys:
+                        raise ValueError(
+                            "judge lineage must cover every selected or merged "
+                            "candidate key"
+                        )
+                    hypotheses = self._validated_hypotheses(judge_output, parent_id)
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as exc:
+                    last_judge_error = exc
+            if judge_output is None or hypotheses is None:
+                raise RuntimeError("ideator judge failed") from last_judge_error
             transcript.append(
                 {
                     "stage": "judge",

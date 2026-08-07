@@ -391,6 +391,7 @@ class DebateAgent:
         invalid_judge_mode: str | None,
         stage_failures: dict[tuple[str, int, str], BaseException],
         stage_blocks: dict[tuple[str, int, str], StageBlock],
+        transient_judge_failures: int = 0,
     ) -> None:
         self.role = role
         self.agent_index = agent_index
@@ -402,6 +403,7 @@ class DebateAgent:
         self.invalid_judge_mode = invalid_judge_mode
         self.stage_failures = stage_failures
         self.stage_blocks = stage_blocks
+        self.transient_judge_failures = transient_judge_failures
         self.calls: list[tuple[str, type[object]]] = []
 
     @staticmethod
@@ -441,6 +443,9 @@ class DebateAgent:
         key = (self.role, self.agent_index, stage)
         if key in self.stage_failures:
             raise self.stage_failures[key]
+        if stage == "judge" and self.transient_judge_failures > 0:
+            self.transient_judge_failures -= 1
+            raise LookupError("judge unavailable")
         if output_type is _ProposalBatch:
             await self.barrier.wait()
         if key in self.stage_blocks:
@@ -561,6 +566,7 @@ class DebateAgentFactory:
         invalid_judge_mode: str | None = None,
         stage_failures: dict[tuple[str, int, str], BaseException] | None = None,
         stage_blocks: dict[tuple[str, int, str], StageBlock] | None = None,
+        transient_judge_failures: int = 0,
     ) -> None:
         self.debater_count = debater_count
         self.barrier = barrier
@@ -570,6 +576,7 @@ class DebateAgentFactory:
         self.invalid_judge_mode = invalid_judge_mode
         self.stage_failures = stage_failures or {}
         self.stage_blocks = stage_blocks or {}
+        self.transient_judge_failures = transient_judge_failures
         self.agents: list[DebateAgent] = []
 
     @property
@@ -592,6 +599,7 @@ class DebateAgentFactory:
             invalid_judge_mode=self.invalid_judge_mode,
             stage_failures=self.stage_failures,
             stage_blocks=self.stage_blocks,
+            transient_judge_failures=self.transient_judge_failures,
         )
         self.agents.append(agent)
         return agent
@@ -735,6 +743,7 @@ async def _generate_successfully(
     stage_blocks: dict[tuple[str, int, str], StageBlock] | None = None,
     quorum: int = 2,
     stage_timeout_seconds: float = 120.0,
+    transient_judge_failures: int = 0,
 ):
     debater_count = 3
     barrier = ProposalBarrier(debater_count, blocked=blocked)
@@ -747,6 +756,7 @@ async def _generate_successfully(
         invalid_judge_mode=invalid_judge_mode,
         stage_failures=stage_failures,
         stage_blocks=stage_blocks,
+        transient_judge_failures=transient_judge_failures,
     )
     artifacts = RecordingArtifactStore(tmp_path)
     ideator = Ideator(
@@ -1060,9 +1070,26 @@ async def test_judge_failure_is_wrapped_once_without_fallback_or_audit(
     with pytest.raises(RuntimeError, match="^ideator judge failed$") as raised:
         await task
 
+    # A persistent judge failure exhausts all bounded retry attempts before surfacing.
     assert str(raised.value.__cause__) == "turn failed: LookupError"
-    assert factory.judge_calls == 1
+    assert factory.judge_calls == 3
     assert artifacts.audit_payloads() == []
+
+
+@pytest.mark.asyncio
+async def test_transient_judge_failure_recovers_within_retry_bound(
+    tmp_path,
+) -> None:
+    task, _, factory, artifacts, _, _ = await _generate_successfully(
+        tmp_path,
+        transient_judge_failures=1,
+    )
+
+    result = await task
+
+    assert result.hypotheses
+    assert factory.judge_calls == 2
+    assert artifacts.audit_payloads()
 
 
 @pytest.mark.asyncio
