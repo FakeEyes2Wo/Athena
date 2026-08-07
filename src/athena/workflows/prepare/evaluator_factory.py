@@ -21,6 +21,17 @@ _DEFAULT_METRICS = {
     ),
 }
 
+# 预检目录：任务类型与其主指标默认名（及工厂显式支持的 accuracy 回退）。
+SUPPORTED_TASK_TYPES = frozenset(_DEFAULT_METRICS)
+SUPPORTED_METRICS = frozenset(
+    {metric.name for metric in _DEFAULT_METRICS.values()} | {"accuracy"}
+)
+
+
+def supported_metric(name: str) -> bool:
+    """Return whether ``name`` is a selectable frozen primary metric."""
+    return name in SUPPORTED_METRICS
+
 
 class EvaluatorFactory:
     """Build and freeze EvalSpec from TaskMetaData and data profile."""

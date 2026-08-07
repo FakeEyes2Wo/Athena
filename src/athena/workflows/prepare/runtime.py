@@ -172,7 +172,11 @@ def _prepare(
         },
         raw_copy=raw_copy,
         cleaned_data=_artifact_ref(train_path),
-        splits={"train": _artifact_ref(train_path)},
+        splits={
+            "train": _artifact_ref(train_path),
+            "validation": _write_frame(artifacts, validation),
+            "test": _write_frame(artifacts, test),
+        },
     )
     profile = _profile(
         cleaned,

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import pandas as pd
 from dotenv import load_dotenv
 from pydantic_ai import Agent as PydanticAgent
 
@@ -31,6 +32,10 @@ from athena.research import (
 from athena.research.budget import RunMode
 from athena.storage.artifact_store import LocalArtifactStore
 from athena.workflows.prepare.baseline import create_baseline
+from athena.workflows.prepare.evaluator_factory import (
+    SUPPORTED_TASK_TYPES,
+    supported_metric,
+)
 from athena.workflows.prepare.runtime import (
     PreparedWorkflowData,
     prepare_workflow_data,
@@ -62,6 +67,7 @@ class RunConfig:
     code_model: str | None = None
     hil: bool = False
     debug: bool = False
+    execution: Literal["local"] = "local"
 
 
 @dataclass
@@ -117,6 +123,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-no-improve", type=int, default=2)
     parser.add_argument("--hil", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--execution",
+        choices=("local",),
+        default="local",
+        help="Experiment execution mode (local is the only mode in this build)",
+    )
     return parser
 
 
@@ -138,6 +150,7 @@ def parse_args(argv: list[str] | None = None) -> RunConfig:
         code_model=namespace.code_model,
         hil=namespace.hil,
         debug=namespace.debug,
+        execution=namespace.execution,
     )
 
 
@@ -159,6 +172,27 @@ def validate_config(config: RunConfig) -> None:
         raise ValueError(
             "output directory already contains an experiment repository; "
             "choose a new --output-dir"
+        )
+    if config.task_type not in SUPPORTED_TASK_TYPES:
+        raise ValueError(f"unsupported task type: {config.task_type}")
+    metric, _ = _metric(config)
+    if not supported_metric(metric):
+        raise ValueError(f"unsupported metric: {metric}")
+    _validate_dataset(config)
+
+
+def _validate_dataset(config: RunConfig) -> None:
+    """Confirm the CSV header contains the target and enough usable rows."""
+    header = pd.read_csv(config.data, nrows=0)
+    if config.target not in header.columns:
+        raise ValueError(f"target column not found: {config.target}")
+    usable = int(
+        pd.read_csv(config.data, usecols=[config.target])[config.target].notna().sum()
+    )
+    if usable < 5:
+        raise ValueError(
+            "dataset must contain at least 5 non-null target rows to yield "
+            "non-empty train, validation, and test splits"
         )
 
 
@@ -429,6 +463,8 @@ async def run(config: RunConfig) -> dict[str, Any]:
             "tree_path": result["tree_path"],
             "report_ref": result["report_ref"],
             "backend": config.backend,
+            "execution": config.execution,
+            "strong_isolation": False,
             "budget": application.runtime.budget.model_dump(mode="json"),
         }
         summary_path = config.output_dir.resolve() / "run_summary.json"
@@ -449,6 +485,12 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"athena: invalid configuration: {exc}", file=sys.stderr)
         return 2
+    if config.execution == "local":
+        print(
+            "athena: running in local mode; experiments share the current user's "
+            "OS-level permissions (strong_isolation=false)",
+            file=sys.stderr,
+        )
     try:
         summary = asyncio.run(run(config))
     except KeyboardInterrupt:

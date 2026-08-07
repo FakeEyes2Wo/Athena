@@ -144,6 +144,42 @@ async def test_drive_runtime_executes_and_persists_all_phases(tmp_path: Path) ->
     assert result["report_ref"] == "artifact://reports/final.md"
 
 
+def test_parse_args_defaults_local_execution(tmp_path: Path) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text("feature,label\n0,0\n1,1\n", encoding="utf-8")
+    config = parse_args(["--data", str(data), "--target", "label", "--model", "m"])
+    assert config.execution == "local"
+
+
+def test_validate_config_rejects_unsupported_metric(tmp_path: Path) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text("feature,label\n0,0\n1,1\n", encoding="utf-8")
+    config = RunConfig(
+        data=data,
+        target="label",
+        model="m",
+        backend="qoder",
+        output_dir=tmp_path / "run",
+        metric="not_a_metric",
+    )
+    with pytest.raises(ValueError, match="unsupported"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_target_missing_from_header(tmp_path: Path) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text("feature,other\n0,0\n1,1\n", encoding="utf-8")
+    config = RunConfig(
+        data=data,
+        target="label",
+        model="m",
+        backend="qoder",
+        output_dir=tmp_path / "run",
+    )
+    with pytest.raises(ValueError, match="target column not found"):
+        validate_config(config)
+
+
 @pytest.mark.asyncio
 async def test_drive_runtime_saves_tree_when_search_fails(tmp_path: Path) -> None:
     runtime = RecordingRuntime(fail_search=True)
