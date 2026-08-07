@@ -26,6 +26,8 @@ class AgentOutcome:
 
     result_ref: str
     next_context_ref: str
+    guard_interrupted: bool = False
+    guard_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -56,3 +58,4 @@ class AgentContext:
     cancel: asyncio.Event
     memory: "ContextManager | None" = None
     input_text: str | None = None
+    guard: "RunGuard | None" = None

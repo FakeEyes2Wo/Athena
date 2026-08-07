@@ -18,6 +18,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
+from athena.core.agent.guard import GuardError, RunGuard
 from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
@@ -88,6 +89,10 @@ class Agent(BaseAgent):
         if mem is None:
             mem = ctx.memory = ContextManager()
 
+        # 创建 RunGuard 实例并挂载到上下文
+        guard = RunGuard()
+        ctx.guard = guard
+
         # 注入 system prompt（每个 ContextManager 生命周期仅一次）
         user = _load_input(ctx)
         if self.system_prompt and not _has_system(mem):
@@ -101,7 +106,17 @@ class Agent(BaseAgent):
         for _ in range(self.config.max_turns):
             if ctx.cancel.is_set():
                 break
-            outcome = await _sampling_loop(self, ctx)
+            try:
+                outcome = await _sampling_loop(self, ctx)
+            except GuardError as exc:
+                # 硬约束触发 → 终止当前 Turn，Thread 存活
+                ref = f"result://{ctx.turn.turn_id}"
+                return AgentOutcome(
+                    result_ref=ref,
+                    next_context_ref=f"context://{ctx.turn.turn_id}/next",
+                    guard_interrupted=True,
+                    guard_reason=str(exc),
+                )
             if outcome.kind == "done":
                 ref = f"result://{ctx.turn.turn_id}"
                 return AgentOutcome(
@@ -168,6 +183,10 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
                         tool_calls.append(tc)
                         tool_tasks.append(None)
 
+                        # 工具调用前准入检查：相同调用拒绝
+                        if ctx.guard is not None:
+                            ctx.guard.check_before_call(tc.name, tc.arguments)
+
                         tool = agent.tools.resolve(tc.name)
                         tctx = ToolContext(
                             tc.name,
@@ -195,6 +214,10 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
 
     except asyncio.CancelledError:
         # 外部取消信号（ThreadRuntime 关闭 / Turn 中断）→ 清理工具任务后传播
+        await _cancel_tool_tasks(tool_tasks)
+        raise
+    except GuardError:
+        # 硬约束拦截 → 清理工具任务后传播到 Agent.run()
         await _cancel_tool_tasks(tool_tasks)
         raise
     except Exception as exc:  # Provider 流未预期异常 → 清理工具任务后返回错误
@@ -235,6 +258,22 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
         content = _to_str(r)
         if len(content) > 50000:
             content = content[:24950] + "\n...[TRUNCATED]...\n" + content[-24950:]
+
+        # 记录工具调用结果：连续失败/错误模式检测
+        if ctx.guard is not None:
+            error_text = None
+            if isinstance(r, ToolResult) and not r.success:
+                error_text = r.error
+            elif isinstance(r, BaseException):
+                error_text = f"{type(r).__name__}: {r}"
+            ctx.guard.record_result(
+                tc.name,
+                success=(
+                    isinstance(r, ToolResult) and r.success
+                ),
+                error=error_text,
+            )
+
         mem.append(
             ModelRequest(
                 parts=[
