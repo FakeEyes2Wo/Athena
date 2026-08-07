@@ -67,54 +67,64 @@ class SandboxExecutor:
     def _build_wrapper(self, *, inject: str, preamble: str) -> str:
         """生成带有隔离注入的 wrapper script。"""
         allowed_str = "{" + ", ".join(repr(x) for x in sorted(self.allowed_imports)) + "}"
-        safe_os_code = (
-            "from athena.sandbox.whitelist import build_safe_os\n"
-            "sys.modules['os'] = build_safe_os()\n"
-        )
+        safe_os_code = "sys.modules['os'] = build_safe_os()\n"
 
         return f'''\
 # -*- coding: utf-8 -*-
 import sys, json
 
-# 0. 资源限制
+# 0. 资源限制与内部依赖（真实 import，绕过后续白名单）
 from athena.sandbox.limits import SandboxLimits
 SandboxLimits.apply_memory_limit()
-
-# 1. Import 白名单
+import os as _sandbox_os
+import traceback as _traceback
 import builtins as __builtins__
+import types as _types
+from athena.sandbox.whitelist import build_safe_os
+
+# 1. 库预加载（真实 import，库内部模块不被白名单拦截）
+{preamble}
+
+# 2. Import 白名单
 _ALLOWED = {allowed_str}
 _orig_import = __builtins__.__import__
 def _safe_import(name, g=None, l=None, f=None, level=0):
     top = name.split(".")[0]
-    if top not in _ALLOWED:
-        raise ImportError(f"{{name!r}} is not in the sandbox allowlist")
-    return _orig_import(name, g, l, f, level)
+    if top in _ALLOWED:
+        return _orig_import(name, g, l, f, level)
+    # 信任已预加载库的内部依赖导入：调用方必须是一个真实已加载模块
+    _caller = sys._getframe(1)
+    _caller_mod = sys.modules.get(_caller.f_globals.get("__name__", ""))
+    if _caller_mod is not None and _caller.f_globals is _caller_mod.__dict__:
+        return _orig_import(name, g, l, f, level)
+    raise ImportError(f"{{name!r}} is not in the sandbox allowlist")
 __builtins__.__import__ = _safe_import
 
-# 2. SafeOS 代理
+# 3. SafeOS 代理
 {safe_os_code}
 
-# 3. 用户 preamble
-import os as _sandbox_os
-{preamble}
+# 4. 安全隔离 __main__（防止经 __main__ 访问 wrapper 全局）
+sys.modules["__main__"] = _types.ModuleType("__main__")
 
-# 4. 执行用户代码
+# 5. 执行用户代码
 try:
 {inject}
     _ok = True
 except Exception as _e:
-    import traceback
     _ok = False
     _error = repr(_e)
-    _tb = traceback.format_exc()
+    _tb = _traceback.format_exc()
 
-# 5. 输出标记行
+# 6. 输出标记行
 _marker_start = "___SANDBOX_RESULT_START___"
 _marker_end = "___SANDBOX_RESULT_END___"
-if _ok:
-    _output = {{"ok": True, "value": repr(result)[:2000] if 'result' in dir() else None}}
-else:
-    _output = {{"ok": False, "error": _error, "traceback": _tb[-800:] if _tb else None}}
+try:
+    if _ok:
+        _output = {{"ok": True, "value": repr(result)[:2000] if 'result' in dir() else None}}
+    else:
+        _output = {{"ok": False, "error": _error, "traceback": _tb[-800:] if _tb else None}}
+except Exception as _e:
+    _output = {{"ok": False, "error": "结果序列化失败: " + repr(_e)}}
 print(_marker_start, flush=True)
 print(json.dumps(_output, ensure_ascii=False), flush=True)
 print(_marker_end, flush=True)
