@@ -4,6 +4,7 @@
 > 日期：2026-08-08
 > 上位设计：[dynamic-agent-orchestration-design.md](dynamic-agent-orchestration-design.md)
 > 编排设计：[supervisor-agent-design.md](supervisor-agent-design.md)
+> 类型目录：[registered-agent-catalog-design.md](registered-agent-catalog-design.md)
 > 范围：DataAgent、PlotAgent、ReflectionAgent、DataAnalysis Bundle、rubric 与修订版本链
 
 ## 1. 目标
@@ -54,6 +55,12 @@ PlotAgent 输出：
 
 PlotAgent 不提交 DataAnalysis、不修改调用方报告、不拥有报告版本。
 
+是否等待 PlotAgent 由调用方按图片用途决定：
+
+- 图片支撑当前报告的分析结论时，DataAgent 必须 `wait_for`，收到 completion 后再提交当前版本。
+- 图片只用于后续美化时，调用方可以不等待；该图片不能进入已经提交的不可变版本，只能在后续显式修订中引用。
+- 正式 DataAnalysis 仍要求至少一张已完成且可解析的图片，因此 v1 至少等待一个 PlotAgent。
+
 ### 3.3 ReflectionAgent
 
 ReflectionAgent 是只读评审者：
@@ -88,6 +95,10 @@ DataAnalysis/
   report.md
   figures/
     <one-or-more-images>
+  tables/
+    feature_process.csv        # 可选
+  analysis/
+    <scripts-or-notebooks>     # 可选
 ```
 
 可选的分析表格、脚本和统计摘要可以放入其他子目录，但首版结构有效性只要求：
@@ -96,6 +107,8 @@ DataAnalysis/
 - `figures/` 下至少一张图片；
 - report 中每个本地图片引用都能解析到同一 Bundle；
 - 不允许绝对路径和 `..` 越界引用。
+
+原始数据副本、清洗后数据和 train/validation/test split 继续由确定性 PREPARE 作为独立 Artifact 管理，不复制进 DataAnalysis Bundle。`report.md` 通过 ArtifactRefs 或 ProcessingLog 引用这些事实；`feature_process.csv` 和复现分析所需的小型脚本可以选择随 Bundle 保存。
 
 ### 4.2 内容寻址 Manifest
 

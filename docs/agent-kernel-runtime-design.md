@@ -12,6 +12,7 @@
 本文不设计具体业务 Agent、DataAnalysis 内容、记忆晋升规则或实现任务拆分。相关设计见：
 
 - [supervisor-agent-design.md](supervisor-agent-design.md)
+- [registered-agent-catalog-design.md](registered-agent-catalog-design.md)
 - [data-analysis-agent-workflow-design.md](data-analysis-agent-workflow-design.md)
 - [agent-memory-human-wait-design.md](agent-memory-human-wait-design.md)
 
@@ -26,16 +27,17 @@
 - Agent 私有 `ContextManager`；
 - Agent 等待子任务时释放执行 lease。
 - 当前 `AgentMessage` 已收敛为 `source/content/context_refs`，公共消息不再携带 sequence。
+- 当前 Scheduler 已按 `agent_id` FIFO 排队，只限制活动 Agent 数，不再维护逻辑实例 resident 容量。
+- 旧 `core/agent/control.py` 已在当前工作树删除，`core.agent` 与 `core` 的旧控制面导出也已移除。
+- 当前工作树已增加 `AgentTypeRegistry(agent_type -> AgentSpec)`；create/spawn 改为按类型查找，`AgentRecord` 与 `AgentSnapshot` 也已显示 `agent_type`。
 
 需要修正的不是这些机制本身，而是它们的身份、持久化和接入方式：
 
-1. `AgentSpec` 当前携带 runner、codec 和 role，并被直接放入 `AgentRecord`，不能可靠持久化或跨进程重建。
-2. `agent_id` 当前由 name/path 拼接，同名实例会冲突。
-3. Scheduler 的 ready 队列保存 `RunId`，并把所有逻辑 Agent 长期计入 resident 容量。
-4. parked wait 仍依赖存活的 Python coroutine，重启后不能继续。
-5. `InMemoryResourcesFactory` 恢复时创建空上下文，没有恢复私有记忆。
-6. [core/agent/control.py](../src/athena/core/agent/control.py) 与新 Kernel 各自拥有 task、memory 和 handle，形成双控制面。
-7. App Server `ThreadRuntime`、ResearchRuntime 和 Ideator 仍各自拥有部分 Agent 生命周期。
+1. `AgentSpec` 已不再携带 role，但仍被直接放入 `AgentRecord`；Registry 目前也直接保存 `AgentSpec`，尚不能可靠持久化或跨进程重建 runtime binding。
+2. `agent_id` 当前仍由 name/path 拼接，同名实例会冲突。
+3. parked wait 仍依赖存活的 Python coroutine，重启后不能继续。
+4. `InMemoryResourcesFactory` 恢复时创建空上下文，没有恢复私有记忆。
+5. App Server `ThreadRuntime`、ResearchRuntime 和 Ideator 仍各自拥有部分 Agent 生命周期。
 
 目标不是增加兼容层，而是让 `core/agent_kernel` 成为唯一 Agent 生命周期所有者。
 
@@ -146,9 +148,9 @@ close(target)
 
 `AgentHandle` 只持有稳定 `agent_id` 和所属 control；`AgentRun` 只持有 `run_id`。两者不缓存状态、memory、task 或 queue。
 
-### 5.2 Supervisor 工具面
+### 5.2 Agent 工具面
 
-SupervisorAgent 只获得五个受控命令：
+Kernel 只有五个供模型 Agent 使用的受控编排命令：
 
 ```text
 spawn
@@ -158,7 +160,11 @@ wait_for
 wait_for_human
 ```
 
-Kernel 在每个 Supervisor turn 开始时注入当前已注册的 `agent_type` 列表，因此不增加注册表查询 DTO。首版不向业务 Agent 暴露注册类型、关闭任意子树或直接修改状态的能力。
+SupervisorAgent 获得当前项目内的完整五项能力，并在 turn 开始时接收已注册 `agent_type` 列表，因此不增加注册表查询 DTO。其他业务 Agent 只获得 factory 注入的最小子集：例如 DataAgent 可以创建并等待 PlotAgent，Ideator 可以创建辩者和 ReflectionAgent。PlotAgent 不获得创建业务子 Agent 的能力。
+
+权限投影属于 Composition Root 配置，不新增公开 `AgentRoleSpec`。首版不向任何业务 Agent 暴露注册类型、关闭任意非子树实例或直接修改状态的能力。具体矩阵见 [已注册 Agent 目录设计](registered-agent-catalog-design.md)。
+
+暴露给模型的工具是绑定当前 Run 的闭包。`source agent_id`、`parent_id`、项目边界和允许创建的子类型由 Kernel 从 `RunSession` 与进程配置取得，不能作为模型参数传入。这样既复用同一组命令，也不需要额外的调用 envelope。
 
 ## 6. Scheduler
 
@@ -284,11 +290,11 @@ commands
 
 | 当前所有者 | 目标 |
 |---|---|
-| `core/agent/control.py` | 调用方迁移后删除；不保留第二个 AgentControl |
+| `core/agent/control.py` | 当前工作树已删除；保持旧公开导出缺失，不恢复第二个 AgentControl |
 | `app_server/ThreadRuntime` | 只保留外部协议适配，Agent 生命周期进入 Kernel |
 | `ResearchRuntime._run_task` | 由 root SupervisorAgent 的 AgentRun 取代 |
 | Ideator 私有 agent/history 字典 | 每个辩者改为已注册 Agent 实例及其私有记忆 |
-| `AgentSpec.role` | 改为 Registry 的 `agent_type` |
+| `AgentSpec.role` | 当前工作树已移除；保持 Registry `agent_type` 为唯一类型键 |
 | `AgentRecord.spec` | 改为 `agent_type + config_ref` |
 
 迁移期间不允许新旧控制面双写同一个 Agent。某个调用方一旦切到 Kernel，就不再回退到旧 runtime。

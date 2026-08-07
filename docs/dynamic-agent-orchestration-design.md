@@ -1,6 +1,6 @@
 # Athena 动态 Agent 编排设计
 
-> 状态：设计基线，已确认
+> 状态：设计基线已确认，专题细化待用户审阅
 > 日期：2026-08-08
 > 范围：Agent 身份、动态编排、调度边界、消息、记忆、人工等待与 DataAnalysis 评审闭环
 
@@ -12,6 +12,7 @@
 |---|---|
 | [Agent Kernel Runtime 设计](agent-kernel-runtime-design.md) | `core/agent_kernel`、注册表、实例生命周期、Scheduler、mailbox、持久化等待与恢复 |
 | [SupervisorAgent 设计](supervisor-agent-design.md) | 动态编排输入、工具面、决策边界，以及 ResearchRuntime 适配 |
+| [已注册 Agent 目录设计](registered-agent-catalog-design.md) | 首版静态 `agent_type`、Agent 准入规则、最小工具权限与旧角色映射 |
 | [DataAnalysis Agent 工作流设计](data-analysis-agent-workflow-design.md) | DataAgent、PlotAgent、ReflectionAgent、报告 Bundle、rubric、评审和修订版本链 |
 | [Agent 记忆与人工等待设计](agent-memory-human-wait-design.md) | 私有/项目/全局记忆、晋升与检索、用户确认 |
 
@@ -48,6 +49,7 @@ Athena 以 Agent 作为执行层面的基本单位。`SupervisorAgent` 根据目
 8. 评估协议和 rubric 采用 append-only 版本链：允许追加，不能删除或改写已有条目。
 9. 跨项目全局记忆必须经用户确认，Agent 只能生成候选。
 10. 等待必须持久化；不能依赖暂停的 Python coroutine 或在线连接。
+11. 只有需要独立上下文、工具权限、多轮推理或并发执行的职责才注册为 Agent；其余保留为确定性 Service。
 
 ## 3. 架构所有权
 
@@ -63,7 +65,10 @@ src/athena/agents/
   ├─ supervisor.py
   ├─ data.py
   ├─ plot.py
-  └─ reflection.py
+  ├─ reflection.py
+  ├─ ideator.py
+  ├─ code.py
+  └─ report.py
 
 src/athena/core/agent/
   └─ BaseAgent + sampling/tool loop
@@ -130,6 +135,8 @@ wait_for_human(content, context_refs=[])
 - `send` 只投递，不创建 turn、不唤醒目标。
 - `followup` 显式复用原实例，投递消息并创建新 turn；目标 busy 时零状态变更。
 - `wait_for` 和 `wait_for_human` 登记持久化等待，并在安全边界结束当前 turn。
+
+这些命令是统一 Kernel 原语，不代表每个 Agent 都拥有全部权限。Supervisor 获得项目内完整编排能力；其他 Agent 由 Composition Root 按 `agent_type` 注入最小子集。PlotAgent 是通用辅助类型，任何确实需要图片的 Agent 都可以获得创建并等待 PlotAgent 的能力。具体类型与权限见 [已注册 Agent 目录设计](registered-agent-catalog-design.md)。
 
 不新增 `AgentRoleSpec`、`AgentInvocation`、`AgentCompletion`、`SupervisorDecision`、`ApprovalRecord`、`MemoryCandidate` 或专用 `DataAnalysisManifest` 等公共 DTO。必要元数据优先作为存储层内部格式。
 
@@ -216,16 +223,16 @@ Supervisor wait_for_human(content, refs)
 
 ## 7. 当前代码适配结论
 
-当前 `core/agent_kernel` 已可复用 Agent/Run 分离、命令序列器、FIFO、mailbox、follow-up、completion outbox 和 generation/CAS。当前实现中的 `AgentMessage(source, content, context_refs)` 也已符合最小字段设计。
+当前 `core/agent_kernel` 已可复用 Agent/Run 分离、命令序列器、mailbox、follow-up、completion outbox 和 generation/CAS。当前工作树还已经完成四项收敛：`AgentMessage` 改为 `source/content/context_refs`；Scheduler 改为按 AgentId FIFO 且只限制活动实例；旧 `core.agent.AgentControl` 及其公开导出已删除；`AgentTypeRegistry`、按类型 create/spawn、Snapshot 的 `agent_type/name` 已加入。这些内容不再列为设计缺口。
 
 仍需在后续实施中收敛的边界：
 
-1. 以 `AgentTypeRegistry` 替代调用方持久传入 runner/codec 的 `AgentSpec`，GraphStore 只保存 `agent_type` 和配置引用。
-2. `agent_id` 与 name/path 解耦，并在快照中显式保留 `agent_type` 与 `name`。
-3. Scheduler 从 RunId/常驻容量语义迁为 AgentId/FIFO/活动执行槽语义。
-4. 进程内 parked wait 和审批 Future 迁为持久化 WAITING / WAITING_FOR_HUMAN。
-5. 生产 SessionResources 从 `context_ref` 恢复私有记忆，内存实现只用于测试。
-6. `core.agent.AgentControl`、App Server、ResearchRuntime、Ideator 和 DataPipeline 的 Agent 生命周期所有权迁入 Kernel，最终只保留一个控制面。
+1. 将当前 `AgentTypeRegistry(agent_type -> AgentSpec)` 收敛为进程内 runtime binding；GraphStore 移除 `AgentRecord.spec`，只保存 `agent_type` 和配置引用，并在恢复时重新解析。
+2. `agent_id` 与 name/path 解耦为不透明唯一 ID；当前 Snapshot 的 `agent_type` 与 `name` 继续保留。
+3. 进程内 parked wait 和审批 Future 迁为持久化 WAITING / WAITING_FOR_HUMAN。
+4. 生产 SessionResources 从 `context_ref` 恢复私有记忆，内存实现只用于测试。
+5. App Server、ResearchRuntime、Ideator 和 DataPipeline 的 Agent 生命周期所有权迁入 Kernel；迁移后的调用方不再保留第二条执行路径。
+6. 具体业务 Agent 迁入 `src/athena/agents/`，并按 [已注册 Agent 目录设计](registered-agent-catalog-design.md) 静态注册。
 7. Agent 正式结果写入 ArtifactStore；DataAnalysis 增加目录 Bundle 与 owner/latest 版本事实。
 8. 评估协议改为 append-only 版本链，单个版本对象仍保持不可变。
 
@@ -247,4 +254,4 @@ Supervisor wait_for_human(content, refs)
 
 ## 9. 确认状态
 
-本文所列架构边界、最小合同、DataAnalysis 所有权、append-only rubric、记忆门禁、持久化等待和精简错误策略均已确认。四份专题文档继续细化这些决定，但不得引入新的公共 DTO 或第二套 Agent 生命周期所有者。
+本文所列架构边界、最小合同、DataAnalysis 所有权、append-only rubric、记忆门禁、持久化等待和精简错误策略均已确认。五份专题文档继续细化这些决定，但不得引入新的公共 DTO 或第二套 Agent 生命周期所有者；新增的静态类型目录与本轮细节修正仍待用户审阅。

@@ -4,6 +4,7 @@
 > 日期：2026-08-08
 > 上位设计：[dynamic-agent-orchestration-design.md](dynamic-agent-orchestration-design.md)
 > 运行时设计：[agent-kernel-runtime-design.md](agent-kernel-runtime-design.md)
+> 类型目录：[registered-agent-catalog-design.md](registered-agent-catalog-design.md)
 > 范围：根 SupervisorAgent 的输入、工具、决策边界、等待与现有 ResearchRuntime 的适配
 
 ## 1. 目标
@@ -91,6 +92,8 @@ wait_for_human(content, context_refs=[])
 
 首版不提供动态注册新类型、修改调度优先级、强制写全局记忆和绕过 EvaluationPolicy 的工具。
 
+同一组 Kernel 命令也可以按最小权限投影给业务 Agent，例如 DataAgent 创建 PlotAgent。Supervisor 仍是跨业务阶段的唯一动态编排者；业务 Agent 只编排完成自身结果所需的辅助子实例。
+
 ## 6. 单个 Turn 的行为
 
 Supervisor 每个 turn 只完成一个可审计的编排步骤：
@@ -111,11 +114,11 @@ Supervisor 每个 turn 只完成一个可审计的编排步骤：
 
 ```text
 source = None                 Kernel 内部 completion
-content                       child run id、状态与简短失败信息
+content                       child run id
 context_refs                  成功结果及其他已提交 ArtifactRefs
 ```
 
-不新增 completion DTO；Supervisor 从短消息和 ArtifactRefs 继续工作，需要完整运行详情时通过只读运行摘要查询获得。
+不新增 completion DTO，也不在消息中复制权威状态。Supervisor 用 `run_id` 读取 `RunSummary`，获得来源 `agent_id`、终态和简短失败信息，再从 `context_refs` 读取正式结果。
 
 Supervisor 被唤醒后：
 
