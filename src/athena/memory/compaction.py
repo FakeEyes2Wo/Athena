@@ -12,15 +12,12 @@ from athena.memory.context_manager import ContextManager
 
 _SUMMARY_PART_CHARS = 300
 
-
 @dataclass(slots=True)
 class Compaction:
     """一次压缩的结果，包含回滚所需的原始消息。"""
-
     version: int
     summary: str
     original_items: list[ModelMessage]
-
 
 class Compactor:
     """将早期对话历史替换为 LLM 生成的摘要。
@@ -29,7 +26,6 @@ class Compactor:
         keep_recent: 保留最近多少 Token 的消息不被压缩。
         summary_model: 用于生成摘要的轻量模型 ID。
     """
-
     __slots__ = ("_keep_recent", "_summary_model")
 
     def __init__(self, keep_recent: int = 20_000, summary_model: str = "haiku") -> None:
@@ -39,6 +35,7 @@ class Compactor:
         self._summary_model = summary_model
 
     def should_compact(self, ctx: ContextManager, at_tokens: int = 170_000) -> bool:
+        """如果上下文 token 数超过压缩阈值则返回 True。"""
         return ctx.tokens >= at_tokens
 
     async def compact(self, ctx: ContextManager, llm: Any) -> Compaction:
@@ -59,8 +56,6 @@ class Compactor:
         )
         ctx.replace_range(0, split, [summary_msg])
         return Compaction(version=ctx.version, summary=summary, original_items=old)
-
-    # ── 内部 ───────────────────────────────────────────────────────
 
     def _split_recent(self, items: list[ModelMessage]) -> int:
         """从后往前累积 Token，找到近期消息的起始位置。"""
@@ -112,3 +107,6 @@ class Compactor:
         if choices:
             return getattr(choices[0].message, "content", "")
         raise ValueError("摘要模型未返回文本")
+
+if __name__ == "__main__":
+    print("Compactor loaded.")

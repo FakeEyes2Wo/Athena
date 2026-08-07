@@ -4,7 +4,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field, model_validator
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import SourceLocator, VisualKind
 
 

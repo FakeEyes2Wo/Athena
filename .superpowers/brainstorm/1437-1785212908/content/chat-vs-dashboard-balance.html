@@ -1,0 +1,87 @@
+<h2>聊天主导下，仪表盘怎么出现？</h2>
+<p class="subtitle">你已经选了：整体更像 Codex / ChatGPT Web，聊天占主角。下一步要定的是：仪表盘是如何并入这个交互里的。</p>
+
+<div class="cards">
+  <div class="card" data-choice="A" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · 右侧固定仪表盘</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px;">
+          <div style="flex:1.35; background:#121722; border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Athena Conversation</div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:42px;"></div>
+          </div>
+          <div style="width:340px; display:flex; flex-direction:column; gap:8px;">
+            <div class="placeholder" style="height:96px;"></div>
+            <div class="placeholder" style="height:96px;"></div>
+            <div class="placeholder" style="height:96px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>聊天主区 + 固定右栏</h3>
+      <p>最稳妥。像 Codex 的主聊天体验，同时右边一直能看实验状态、ResearchTree 和指标。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="B" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · 聊天主区 + 底部可展开工作台（推荐）</div>
+        <div class="mockup-body" style="display:flex; flex-direction:column; gap:8px; min-height:320px;">
+          <div style="background:#121722; border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px; flex:1;">
+            <div class="label">Athena Conversation</div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:42px;"></div>
+          </div>
+          <div style="background:#151925; border-radius:10px; padding:10px; display:grid; grid-template-columns:1.2fr 1fr 1fr; gap:8px;">
+            <div class="placeholder" style="height:88px;"></div>
+            <div class="placeholder" style="height:88px;"></div>
+            <div class="placeholder" style="height:88px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>底部工作台</h3>
+      <p>默认最像聊天产品；当任务开始运行时，底部展开实验控制台。对话感最强，也更现代。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="C" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C · 聊天主区 + 右侧抽屉</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px;">
+          <div style="flex:1; background:#121722; border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Athena Conversation</div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:56px;"></div>
+            <div class="placeholder" style="height:42px;"></div>
+          </div>
+          <div style="width:84px; background:#151925; border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px; align-items:center; justify-content:flex-start;">
+            <div class="placeholder" style="width:48px; height:48px;"></div>
+            <div class="placeholder" style="width:48px; height:48px;"></div>
+            <div class="placeholder" style="width:48px; height:48px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>右侧抽屉式工具仓</h3>
+      <p>日常最简洁，需要时展开 Metrics / Tree / Diff。很现代，但切换成本略高。</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">回复示例：<code>A，但右栏不要太宽</code>、<code>B，运行时自动展开</code>、<code>C，不过必须支持快捷切换</code>。</p>

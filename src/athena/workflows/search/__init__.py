@@ -1,1 +1,1 @@
-"""Search-stage deterministic services."""
+"""搜索阶段确定性服务。"""

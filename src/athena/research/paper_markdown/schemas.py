@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 
 if TYPE_CHECKING:
     from athena.storage.artifact_store import ArtifactStore

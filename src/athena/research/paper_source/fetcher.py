@@ -22,7 +22,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import (
     PaperConversionRequest,
     ProcessingDiagnostic,

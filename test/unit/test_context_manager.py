@@ -1,4 +1,4 @@
-"""Unit tests for ``athena.memory.context_manager.ContextManager``."""
+"""``athena.memory.context_manager.ContextManager`` 的单元测试。"""
 
 from pydantic_ai.messages import (
     ModelRequest,
@@ -9,8 +9,6 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
-
-# ── helpers ─────────────────────────────────────────────────────────────
 
 
 def _user(text: str) -> ModelRequest:
@@ -35,9 +33,6 @@ def _tool_result(name: str, content: str, call_id: str = "c1") -> ModelRequest:
             )
         ]
     )
-
-
-# ── tests ───────────────────────────────────────────────────────────────
 
 
 class TestContextManager:
@@ -209,7 +204,7 @@ class TestTokenEstimation:
         from athena.memory.context_manager import ContextManager
 
         ctx = ContextManager()
-        ctx.append(_user("hello world " * 36))  # ~400 chars
+        ctx.append(_user("hello world " * 36))  # 约 400 字符
         assert 80 <= ctx.tokens <= 120
 
     def test_code_block_estimate_is_plausible(self):
@@ -246,4 +241,4 @@ class TestEdgeCases:
                 ]
             )
         )
-        assert ctx.tokens > 0  # only TextPart counted
+        assert ctx.tokens > 0  # 仅 TextPart 被计数

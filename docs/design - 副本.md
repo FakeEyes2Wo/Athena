@@ -1,3 +1,7 @@
+> Status: historical
+> Last verified: 2026-07-30
+> 早期设计副本，仅供考据；不得作为当前接口或实现依据。
+
 我们的整套框架都需要异步
 同时我们的prompt都需要使用英文。以及pydantic里面的description都是英文。因为互联网上英文语料最多
 我们可以在后处理阶段将英文翻译成中文

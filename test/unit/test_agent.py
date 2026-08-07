@@ -1,36 +1,118 @@
-"""Unit tests for agent abstractions."""
+"""Agent 抽象层的单元测试。"""
 
 import asyncio
-from types import SimpleNamespace
-
+from dataclasses import fields
+from inspect import signature
 import pytest
 
-from athena.core.agent import (
-    Agent,
+import athena.core as core_api
+import athena.core.agent as agent_api
+from athena.core.agent.control import AgentControl, AgentEvent, AgentHandle, AgentResult
+from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
-    AgentControl,
     AgentOutcome,
+    StepOutcome,
+    ToolCall,
+)
+from athena.core.agent.provider import ResponsesProvider, StreamEvent
+from athena.core.agent.runtime import (
+    Agent,
     BaseAgent,
-    StreamEvent,
     agent_runner,
     create_agent,
+    create_code_agent,
 )
-from athena.core.schemas import ArtifactRef, AthenaThread, AthenaTurn
+from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
+from athena.memory.context_manager import ContextManager
 
 
 def _arun(coro):
     return asyncio.run(coro)
 
 
-# ── minimal agent ──
+def test_public_agent_exports_point_to_canonical_owners() -> None:
+    assert agent_api.Agent is Agent
+    assert agent_api.AgentConfig is AgentConfig
+    assert agent_api.AgentContext is AgentContext
+    assert agent_api.AgentControl is AgentControl
+    assert agent_api.AgentEvent is AgentEvent
+    assert agent_api.AgentHandle is AgentHandle
+    assert agent_api.AgentOutcome is AgentOutcome
+    assert agent_api.AgentResult is AgentResult
+    assert agent_api.BaseAgent is BaseAgent
+    assert agent_api.ResponsesProvider is ResponsesProvider
+    assert agent_api.StepOutcome is StepOutcome
+    assert agent_api.StreamEvent is StreamEvent
+    assert agent_api.ToolCall is ToolCall
+    assert agent_api.agent_runner is agent_runner
+    assert agent_api.create_agent is create_agent
+    assert agent_api.create_code_agent is create_code_agent
+
+    assert core_api.Agent is Agent
+    assert core_api.AgentConfig is AgentConfig
+    assert core_api.AgentContext is AgentContext
+    assert core_api.AgentControl is AgentControl
+    assert core_api.AgentEvent is AgentEvent
+    assert core_api.AgentOutcome is AgentOutcome
+    assert core_api.BaseAgent is BaseAgent
+    assert core_api.StreamEvent is StreamEvent
+    assert core_api.ToolCall is ToolCall
+    assert core_api.agent_runner is agent_runner
+    assert core_api.create_agent is create_agent
+
+
+def test_code_agent_interface_has_four_parameters_and_four_fields() -> None:
+    assert list(signature(create_code_agent).parameters) == [
+        "model",
+        "tools",
+        "system_prompt",
+        "config",
+    ]
+    assert [field.name for field in fields(AgentConfig)] == [
+        "max_turns",
+        "max_tokens",
+        "temperature",
+        "name",
+    ]
+
+
+def test_model_combines_name_and_client() -> None:
+    client = object()
+    model = ResponsesProvider("test-model", client=client)
+    assert model.model_name == "test-model"
+    assert model.client is client
+
+
+def test_environment_builds_three_independent_core_agents() -> None:
+    model = ResponsesProvider("test-model", client=object())
+    agents = [
+        create_code_agent(
+            model,
+            ToolRegistry(),
+            f"{name} prompt",
+            AgentConfig(name=f"{name}-agent"),
+        )
+        for name in ("code", "data", "plot")
+    ]
+    assert all(type(agent) is Agent for agent in agents)
+    assert [agent.name for agent in agents] == [
+        "code-agent",
+        "data-agent",
+        "plot-agent",
+    ]
+    assert all(
+        set(vars(agent)) == {"model", "tools", "system_prompt", "config"}
+        for agent in agents
+    )
+    assert len({id(agent) for agent in agents}) == 3
 
 
 class _SpyAgent(BaseAgent):
     name = "spy"
-    description = "Records calls for testing."
+    description = "记录调用以供测试。"
 
     def __init__(self):
         self.calls: list[AgentContext] = []
@@ -42,7 +124,7 @@ class _SpyAgent(BaseAgent):
 
 class _ToolUsingAgent(BaseAgent):
     name = "tool_user"
-    description = "Uses tools."
+    description = "使用工具。"
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
         r = await self.tool(ctx, "echo", msg="hello")
@@ -51,17 +133,11 @@ class _ToolUsingAgent(BaseAgent):
         )
 
 
-# ── minimal tool ──
-
-
 class _EchoTool(BaseTool):
     spec = ToolSpec(name="echo", description="echo", input_schema={})
 
     async def execute(self, inpt: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(data=inpt)
-
-
-# ── tests ──
 
 
 class TestBaseAgent:
@@ -76,8 +152,8 @@ class TestBaseAgent:
             client=client,
         )
 
-        assert agent.config.model == "test-model"
-        assert agent._provider.client is client
+        assert agent.model.model_name == "test-model"
+        assert agent.model.client is client
 
     def test_run_receives_context(self):
         agent = _SpyAgent()
@@ -124,14 +200,105 @@ class TestBaseAgent:
         outcome = _arun(runner(thread, turn, emit))
         assert outcome.result_ref == "hello"
 
+    async def test_empty_system_prompt_is_not_added_to_memory(self):
+        class TextProvider:
+            async def stream(self, _config, _tools, messages, _cancel):
+                assert all(
+                    part.part_kind != "system-prompt"
+                    for message in messages
+                    for part in message.parts
+                )
+                yield StreamEvent(
+                    "text_delta", {"delta": "answer", "accumulated": "answer"}
+                )
+                yield StreamEvent("response_completed")
+
+        tools = ToolRegistry()
+        agent = Agent(ResponsesProvider("model"), tools, "")
+        agent.model = TextProvider()
+        memory = ContextManager()
+        ctx = AgentContext(
+            AthenaThread(
+                thread_id="thread:test",
+                session_id="session:test",
+                status="running",
+                context_ref="context:test",
+            ),
+            AthenaTurn(
+                turn_id="turn:test",
+                thread_id="thread:test",
+                request_ref="question",
+                status="running",
+            ),
+            lambda *_args: asyncio.sleep(0),
+            tools,
+            asyncio.Event(),
+            memory,
+        )
+
+        await agent.run(ctx)
+
+        assert all(
+            part.part_kind != "system-prompt"
+            for message in memory.items
+            for part in message.parts
+        )
+
+    async def test_response_completed_closes_provider_stream_immediately(self):
+        class ClosingProbeProvider:
+            def __init__(self):
+                self.closed = False
+                self.generator = None
+
+            def stream(self, *_args):
+                async def events():
+                    try:
+                        yield StreamEvent(
+                            "text_delta", {"delta": "done", "accumulated": "done"}
+                        )
+                        yield StreamEvent("response_completed")
+                    finally:
+                        self.closed = True
+
+                self.generator = events()
+                return self.generator
+
+        tools = ToolRegistry()
+        provider = ClosingProbeProvider()
+        agent = Agent(ResponsesProvider("model"), tools, "system")
+        agent.model = provider
+        ctx = AgentContext(
+            AthenaThread(
+                thread_id="t1",
+                session_id="s1",
+                status="running",
+                context_ref="ctx://0",
+            ),
+            AthenaTurn(
+                turn_id="t1.1",
+                thread_id="t1",
+                request_ref="request",
+                status="running",
+            ),
+            lambda *_args: asyncio.sleep(0),
+            tools,
+            asyncio.Event(),
+        )
+
+        await agent.run(ctx)
+
+        assert provider.closed
+        assert provider.generator is not None
+        assert provider.generator.ag_frame is None
+
     async def test_provider_error_is_not_reported_as_success(self):
         class ErrorProvider:
             async def stream(self, *_args):
                 yield StreamEvent(kind="error", data={"message": "provider failed"})
 
         tools = ToolRegistry()
-        agent = Agent(AgentConfig("model", "system", tools))
-        agent._provider = ErrorProvider()
+        agent = Agent(ResponsesProvider("model"), tools, "system")
+        agent.model = ErrorProvider()
         ctx = AgentContext(
             AthenaThread(
                 thread_id="t1",
@@ -201,8 +368,8 @@ class TestBaseAgent:
         tools = ToolRegistry()
         tools.register(UnsafeTool())
         tools.register(SafeTool())
-        agent = Agent(AgentConfig("model", "system", tools))
-        agent._provider = CallsProvider()
+        agent = Agent(ResponsesProvider("model"), tools, "system")
+        agent.model = CallsProvider()
         ctx = AgentContext(
             AthenaThread(
                 thread_id="t1",
@@ -230,7 +397,7 @@ class TestAgentControl:
     async def test_message_and_streaming_event_reach_running_subagent(self):
         class StreamingAgent:
             def __init__(self):
-                self.config = SimpleNamespace(tools=ToolRegistry())
+                self.tools = ToolRegistry()
                 self.release = asyncio.Event()
                 self.context = None
 

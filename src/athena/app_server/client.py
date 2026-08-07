@@ -39,6 +39,7 @@ class Sequencer:
         self._next = 1
 
     def next(self) -> int:
+        """返回下一个单调递增的 request_id。"""
         if self._next > 2**63 - 1:
             raise OverflowError("request id space exhausted")
         rid = self._next
@@ -57,11 +58,13 @@ class ClientWorker:
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        """启动 Worker 后台读取任务。"""
         if self._task is not None:
             return
         self._task = asyncio.create_task(self._run(), name="client-worker")
 
     async def stop(self) -> None:
+        """取消 Worker 后台任务并等待退出。"""
         if self._task is not None:
             self._task.cancel()
             try:
@@ -74,14 +77,17 @@ class ClientWorker:
     def register_pending(
         self, request_id: int, future: asyncio.Future[ResponseEnvelope]
     ) -> None:
+        """注册 pending Future，收到响应时由 Worker 完成。"""
         self._pending[request_id] = future
 
     def unregister_pending(
         self, request_id: int
     ) -> asyncio.Future[ResponseEnvelope] | None:
+        """取消注册并返回 pending Future。"""
         return self._pending.pop(request_id, None)
 
     def fail_all_pending(self, error: RpcError) -> None:
+        """将所有未完成的请求以错误回复完成并清空。"""
         for fut in self._pending.values():
             if not fut.done():
                 fut.set_result(
@@ -104,6 +110,7 @@ class ClientWorker:
                     try:
                         self._control_buf.put_nowait(msg)
                     except asyncio.QueueFull:
+                        # 控制通道满 → 回退到阻塞 put
                         await self._control_buf.put(msg)
 
         async def _read_events() -> None:
@@ -114,6 +121,7 @@ class ClientWorker:
                 try:
                     self._event_buf.put_nowait(evt)
                 except asyncio.QueueFull:
+                    # 事件缓冲区满 → 回退到阻塞 put
                     logger.warning("event buffer full, blocking")
                     await self._event_buf.put(evt)
 
@@ -122,9 +130,11 @@ class ClientWorker:
             tg.create_task(_read_events())
 
     async def next_event(self, timeout: float | None = None) -> ServerEvent | None:
+        """返回下一条 control 或 event 消息，超时返回 None。"""
         try:
             return self._control_buf.get_nowait()
         except asyncio.QueueEmpty:
+            # 控制通道已空 → 回退到异步等待，同时监听 control 和 event
             pass
         # 同时等待 control 和 event — 审批等控制消息到达时立即返回
         ctrl_task = asyncio.ensure_future(self._control_buf.get())
@@ -135,6 +145,7 @@ class ClientWorker:
                 tasks, return_when=asyncio.FIRST_COMPLETED, timeout=timeout
             )
         except asyncio.TimeoutError:
+            # 等待超时 → 取消所有挂起任务，返回 None
             for t in tasks:
                 t.cancel()
             return None
@@ -216,18 +227,21 @@ class AthenaClient:
                     init_resp["error"].get("message", "initialize failed"),
                 )
         except asyncio.TimeoutError:
+            # 等待 initialize 响应超时 → 清理资源并提示使用 AppServer.create()
             await client._cleanup()
             raise RuntimeError(
                 "server did not respond — standalone start() requires an "
                 "externally created AppServer. Use AppServer.create() instead."
             )
         except Exception:
+            # 初始化握手未预期异常 → 清理资源后原样传播
             await client._cleanup()
             raise
         await client.notify(Method.INITIALIZED)
         try:
             await asyncio.wait_for(transport.wait_ready(), timeout=startup_timeout)
         except asyncio.TimeoutError:
+            # Server ready 信号超时 → 清理资源
             await client._cleanup()
             raise RuntimeError("server did not become ready in time")
         return client
@@ -239,6 +253,7 @@ class AthenaClient:
         *,
         timeout=DEFAULT_REQUEST_TIMEOUT,
     ) -> dict:
+        """向 Server 发送请求，返回结果的 result 部分。RPC 错误转为 RpcException。"""
         rid = self._sequencer.next()
         response = await self._raw_request(method, rid, params or {}, timeout)
         if "error" in response:
@@ -249,6 +264,7 @@ class AthenaClient:
         return response.get("result", {})
 
     async def notify(self, method: str, params: dict | None = None) -> None:
+        """向 Server 发送单向通知（无响应）。关闭中则静默丢弃。"""
         if self._closing:
             return
         await self._transport.send_notification(
@@ -256,11 +272,13 @@ class AthenaClient:
         )
 
     async def next_event(self, timeout: float | None = None) -> ServerEvent | None:
+        """从 Server 拉取下一条 ServerRequest 或 EventNotification。"""
         return await self._worker.next_event(timeout=timeout)
 
     async def respond_to_server_request(
         self, server_call_id: str, result: dict
     ) -> None:
+        """回复 Server 发来的 ServerRequest（如审批请求）。"""
         await self._transport.send_server_request_reply(
             ServerRequestReply(server_call_id=server_call_id, result=result)
         )
@@ -268,6 +286,7 @@ class AthenaClient:
     async def fail_server_request(
         self, server_call_id: str, error_message: str
     ) -> None:
+        """以 INTERNAL 错误码回复 ServerRequest。"""
         await self._transport.send_server_request_reply(
             ServerRequestReply(
                 server_call_id=server_call_id,
@@ -277,6 +296,7 @@ class AthenaClient:
         )
 
     async def shutdown(self, timeout=DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        """向 Server 发送关闭请求并清理本地资源。"""
         if self._closing:
             return
         try:
@@ -284,6 +304,7 @@ class AthenaClient:
                 self.request(Method.SERVER_SHUTDOWN, timeout=timeout), timeout=timeout
             )
         except Exception:
+            # 关闭请求异常（server 可能已提前关闭）→ 吞掉并继续本地清理
             logger.debug("shutdown request failed (server may already be closing)")
         self._closing = True
         await self._cleanup()
@@ -309,14 +330,17 @@ class AthenaClient:
                 timeout=timeout,
             )
         except OverloadedError:
+            # transport 过载拒绝发送 → 注销 pending 后原样传播
             self._worker.unregister_pending(request_id)
             raise
         try:
             response = await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
+            # RPC 响应等待超时 → 清理注册后传播超时
             self._worker.unregister_pending(request_id)
             raise
         except asyncio.CancelledError:
+            # RPC 请求被取消 → 清理注册后传播取消
             self._worker.unregister_pending(request_id)
             raise
         result: dict = {"result": None}
@@ -330,10 +354,6 @@ class AthenaClient:
             }
         return result
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 使用示例：python -m athena.app_server.client
-# ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import asyncio
@@ -398,7 +418,7 @@ if __name__ == "__main__":
             if event is None:
                 print("   (no event, timeout)")
                 break
-            # EventNotification
+            # 事件通知
             if hasattr(event, "kind"):
                 print(f"   [{event.sequence}] {event.kind}  turn={event.turn_id}")
                 if event.kind in ("turn_completed", "turn_failed"):

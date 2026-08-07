@@ -37,6 +37,19 @@ class RuntimeThreadManagerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await manager.aclose("test_cleanup")
 
+    async def test_wait_turn_delegates_to_thread_handle(self) -> None:
+        manager = RuntimeThreadManager(immediate_runner)
+        try:
+            thread = await manager.start("session:1", "artifact:context")
+            turn = await manager.submit(thread.thread_id, "artifact:request")
+
+            self.assertEqual(
+                await manager.wait_turn(thread.thread_id, turn.turn_id),
+                "artifact:result",
+            )
+        finally:
+            await manager.aclose("test_cleanup")
+
     async def test_interrupt_routes_to_thread_handle(self) -> None:
         runner = BlockingRunner()
         manager = RuntimeThreadManager(runner)

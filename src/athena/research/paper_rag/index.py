@@ -12,7 +12,7 @@ import json
 import math
 import re
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import PaperContent, RetrievalUnit
 from athena.research.paper_rag.interfaces import TextEmbedder
 from athena.research.paper_rag.schemas import (

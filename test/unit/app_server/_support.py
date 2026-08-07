@@ -14,7 +14,7 @@ async def append_current_event(
     kind: str = "item",
     event_ref: str = "artifact:event",
 ) -> Event:
-    """Append an event through EventJournal's current lock-owning call pattern."""
+    """通过 EventJournal 当前持锁调用模式追加事件。"""
 
     async with journal.condition:
         event = Event(
@@ -49,7 +49,7 @@ async def cancel_tasks(*tasks: asyncio.Task[Any] | None) -> None:
 
 
 async def break_self_wait_cycles(*tasks: asyncio.Task[Any]) -> None:
-    """Unwind the legacy shutdown task that awaits a gather containing itself."""
+    """解开等待包含自身的 gather 的遗留关闭任务。"""
 
     for task in tasks:
         waiter = getattr(task, "_fut_waiter", None)
@@ -71,7 +71,7 @@ async def cancel_event_waiters() -> None:
 
 
 async def force_stop_processor(processor: Any) -> None:
-    """Test-only cleanup for a processor stuck in a failed shutdown path."""
+    """测试专用的清理函数，用于处理卡在失败关闭路径中的处理器。"""
 
     tasks = list(processor._inflight.values())
     dispatcher = processor._dispatcher_task

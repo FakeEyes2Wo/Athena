@@ -38,8 +38,8 @@ from openai import AsyncOpenAI
 from athena.agents.competition.task_understand_agent import (
     build_task_understand_agent,
 )
-from athena.core.agent.agent import AgentContext
-from athena.core.schemas import AthenaThread, AthenaTurn
+from athena.core.agent import AgentContext
+from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.prompts import load_prompt
 
 # ── 项目根目录 & 默认值 ────────────────────────────────────────────────
@@ -352,7 +352,7 @@ async def run_demo(
             work_root=str(work_dir),
             max_turns=max_turns,
         )
-        print(f"✅ Agent 构建完成，已注册 {len(agent.config.tools)} 个工具（产物目录: {work_dir}）\n")
+        print(f"✅ Agent 构建完成，已注册 {len(agent.tools)} 个工具（产物目录: {work_dir}）\n")
     except Exception as exc:
         print(f"\n❌ Agent 构建失败: {exc}")
         return 1
@@ -387,7 +387,7 @@ async def run_demo(
         thread=thread,
         turn=turn,
         emit=emit,
-        tools=agent.config.tools,
+        tools=agent.tools,
         cancel=asyncio.Event(),
     )
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from athena.app_server.execution import ExecutionAdapter
 from athena.app_server.protocol import Method
 from athena.app_server.submissions import InterruptTurn, StartTurn
-from athena.core.schemas import AthenaThread, AthenaTurn
+from athena.core.thread_models import AthenaThread, AthenaTurn
 
 
 class FakeHandle:

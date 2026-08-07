@@ -1,8 +1,4 @@
-"""ThreadManager 实现 — 进程级 Thread 注册表 + ThreadRuntime 工厂。
-
-实现 ``execution.thread_manager.ThreadManager`` ABC，
-内部使用 ThreadRuntime/ThreadHandle/SubmissionLoop 架构。
-"""
+"""进程级 Thread 注册表与 ThreadRuntime 工厂。"""
 
 import asyncio
 import logging
@@ -13,15 +9,16 @@ from uuid import uuid4
 
 from athena.app_server.submissions import GetForkSnapshot, InterruptTurn, StartTurn
 from athena.app_server.thread_runtime import Runner, ThreadHandle, ThreadRuntime
-from athena.core.schemas import ArtifactRef, AthenaThread, AthenaTurn
-from athena.execution.handlers import ThreadManager as ThreadManagerABC
+from athena.core.contracts import ArtifactRef
+from athena.core.thread_models import AthenaThread, AthenaTurn
+from athena.execution import MonitorLimits
 from athena.memory.context_manager import ContextManager
 from athena.memory.rollout import RolloutRecorder
 
 logger = logging.getLogger(__name__)
 
 
-class RuntimeThreadManager(ThreadManagerABC):
+class RuntimeThreadManager:
     """基于 ThreadRuntime 的 ThreadManager 实现。对齐 Codex ``ThreadManager``。
 
     Args:
@@ -41,6 +38,9 @@ class RuntimeThreadManager(ThreadManagerABC):
         rollout: Any = None,
         llm: Any = None,
         project_root: Path | None = None,
+        monitor_limits: MonitorLimits | None = None,
+        monitor_scan_interval: float = 1.0,
+        monitor_terminal_retention: float = 300.0,
     ) -> None:
         if not callable(runner):
             raise TypeError("runner must be callable")
@@ -56,6 +56,11 @@ class RuntimeThreadManager(ThreadManagerABC):
             "llm": llm,
         }
         self._project_root = project_root or Path.cwd()
+        self._monitor_kwargs = {
+            "monitor_limits": monitor_limits,
+            "monitor_scan_interval": monitor_scan_interval,
+            "monitor_terminal_retention": monitor_terminal_retention,
+        }
 
     def _make_runtime(
         self, thread_id: str, session_id: str, context_ref: str
@@ -77,10 +82,12 @@ class RuntimeThreadManager(ThreadManagerABC):
             session_id=session_id,
             context_ref=context_ref,
             runner=self._runner,
+            **self._monitor_kwargs,
             **kwargs,
         )
 
     async def start(self, session_id: str, context_ref: ArtifactRef) -> AthenaThread:
+        """创建新 Thread 并启动其 runtime。"""
         self._require_ref(session_id, "session_id")
         self._require_ref(context_ref, "context_ref")
         thread_id = str(uuid4())
@@ -104,6 +111,7 @@ class RuntimeThreadManager(ThreadManagerABC):
         )
 
     async def submit(self, thread_id: str, request_ref: ArtifactRef) -> AthenaTurn:
+        """向指定 Thread 提交新 Turn。"""
         self._require_ref(thread_id, "thread_id")
         self._require_ref(request_ref, "request_ref")
         handle = await self.get(thread_id)
@@ -119,6 +127,7 @@ class RuntimeThreadManager(ThreadManagerABC):
     async def fork(
         self, thread_id: str, after_turn_id: str | None = None
     ) -> AthenaThread:
+        """从指定 Turn 之后 fork 一个新 Thread，共享上下文快照。"""
         self._require_ref(thread_id, "thread_id")
         async with self._lock:
             if self._state != "alive":
@@ -142,13 +151,20 @@ class RuntimeThreadManager(ThreadManagerABC):
         )
 
     async def interrupt(self, thread_id: str, turn_id: str, reason: str) -> None:
+        """中断指定 Thread 上正在运行的 Turn。"""
         self._require_ref(thread_id, "thread_id")
         self._require_ref(turn_id, "turn_id")
         self._require_ref(reason, "reason")
         handle = await self.get(thread_id)
         await handle.submit(InterruptTurn(turn_id=turn_id, reason=reason))
 
+    async def wait_turn(self, thread_id: str, turn_id: str) -> ArtifactRef:
+        self._require_ref(thread_id, "thread_id")
+        self._require_ref(turn_id, "turn_id")
+        return await (await self.get(thread_id)).wait_turn(turn_id)
+
     def events(self, thread_id: str) -> AsyncIterator[ArtifactRef]:
+        """返回指定 Thread 的事件流迭代器。"""
         self._require_ref(thread_id, "thread_id")
 
         async def _iter() -> AsyncIterator[ArtifactRef]:
@@ -159,12 +175,14 @@ class RuntimeThreadManager(ThreadManagerABC):
         return _iter()
 
     async def get(self, thread_id: str) -> ThreadHandle:
+        """获取指定 Thread 的句柄。不存在则抛出 KeyError。"""
         async with self._lock:
             if thread_id not in self._handles:
                 raise KeyError(f"unknown thread: {thread_id}")
             return self._handles[thread_id]
 
     async def get_thread(self, thread_id: str) -> AthenaThread:
+        """返回 Thread 的元数据快照。"""
         handle = await self.get(thread_id)
         r = handle._runtime
         return AthenaThread(
@@ -175,6 +193,7 @@ class RuntimeThreadManager(ThreadManagerABC):
         )
 
     async def aclose(self, reason: str = "server_shutdown") -> None:
+        """关闭所有 Thread 并清理资源。"""
         should_shutdown = False
         async with self._lock:
             if self._state != "alive":

@@ -1,4 +1,5 @@
 .env
+.superpowers
 uv.lock
 # Python bytecode and caches
 __pycache__/
@@ -59,7 +60,17 @@ XH-202619.pdf
 # AI Agent Skills
 .claude/skills/
 
+# Isolated feature worktrees
+.worktrees/
+.claude/worktrees/
+
+# Rust build artifacts
+athena-rust/target/
+
 
 # local demo work dir
 demo_work
-demo_outputmcp_servers.json
+demo_output
+mcp_servers.json
+
+docs/superpowers

@@ -1,4 +1,4 @@
-"""BaseTool, ToolRegistry, and ``@tool`` decorator."""
+"""BaseTool、ToolRegistry 和 ``@tool`` 装饰器。"""
 
 import asyncio
 import traceback
@@ -24,13 +24,10 @@ def _sync_ctx() -> ToolContext:
     return ToolContext("", "sync", _noop_emit, asyncio.Event())
 
 
-# ── BaseTool ──
-
-
 class BaseTool(ABC):
-    """Subclass: ``spec`` + ``execute()`` (returns raw data, not ToolResult).
+    """子类需定义 ``spec`` + ``execute()``（返回原始数据，非 ToolResult）。
 
-    Call:  ``tool.invoke(**kw)`` (sync)  /  ``tool.ainvoke(ctx, **kw)`` (async)
+    调用方式：``tool.invoke(**kw)``（同步） / ``tool.ainvoke(ctx, **kw)``（异步）
     """
 
     spec: ToolSpec
@@ -39,13 +36,14 @@ class BaseTool(ABC):
     async def execute(self, input: dict, ctx: ToolContext) -> Any: ...
 
     async def _execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        """Wrap return value / exception into ``ToolResult``."""
+        """将返回值或异常包装为 ``ToolResult``。
+
+        取消（CancelledError 继承 BaseException）不会被 ``except Exception``
+        捕获，因此直接向上传播，由调用方处理。
+        """
         try:
             raw = await self.execute(input, ctx)
             return raw if isinstance(raw, ToolResult) else ToolResult(data=raw)
-        except asyncio.CancelledError:
-            # 工具执行被取消 → 不包装为 ToolResult，直接传播
-            raise
         except Exception as exc:
             return ToolResult(
                 success=False,
@@ -57,8 +55,7 @@ class BaseTool(ABC):
         return asyncio.run(self.ainvoke(_sync_ctx(), **input))
 
     async def ainvoke(self, ctx: ToolContext, **input: Any) -> ToolResult:
-        """Lifecycle: validate → begin → _execute → end/error."""
-        input = self._validate(input)
+        """生命周期：开始 → 执行 → 截断 → 结束/错误。"""
         await ctx.emit(TOOL_BEGIN, f"ev:{ctx.call_id}:begin", None)
         try:
             result = await self._execute(input, ctx)
@@ -74,15 +71,9 @@ class BaseTool(ABC):
         )
         return result
 
-    def _validate(self, input: dict) -> dict:
-        return input
-
     def _truncate(self, r: ToolResult) -> None:
         if isinstance(r.data, str) and len(r.data) > self.spec.max_result_chars:
             r.truncated = True
-
-
-# ── @tool decorator ──
 
 
 def tool(
@@ -92,7 +83,7 @@ def tool(
     input_schema: dict | None = None,
     **spec_kwargs: Any,
 ) -> Callable[[Any], BaseTool]:
-    """Decorator: turn an async function into a ``BaseTool`` instance."""
+    """装饰器：将异步函数转为 ``BaseTool`` 实例。"""
 
     def deco(fn):
         doc = (fn.__doc__ or "").strip()
@@ -117,11 +108,8 @@ def tool(
     return deco
 
 
-# ── ToolRegistry ──
-
-
 class ToolRegistry:
-    """Sorted registry — specs ordered by name for prompt-cache stability."""
+    """有序注册表 — 按名称排序 spec 以保证 prompt-cache 稳定性。"""
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}

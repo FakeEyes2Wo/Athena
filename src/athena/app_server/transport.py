@@ -57,7 +57,7 @@ class Transport:
 
     async def recv_response_or_control(
         self,
-    ) -> "ResponseEnvelope | ServerRequest | TransportControl | None":
+    ) -> "ResponseEnvelope | ServerRequest | None":
         return await self._s2c_control.get()
 
     async def recv_event(self) -> EventNotification | None:
@@ -85,9 +85,6 @@ class Transport:
     async def send_event(self, notification: EventNotification) -> None:
         await self._s2c_event.put(notification)
 
-    async def send_transport_control(self, control: "TransportControl") -> None:
-        await self._s2c_control.put(control)
-
     # 双端
 
     async def aclose(self) -> None:
@@ -111,14 +108,6 @@ class Transport:
     @property
     def closed(self) -> bool:
         return self._closed
-
-
-class TransportControl:
-    """传输控制消息基类。"""
-
-
-class TransportEOF(TransportControl):
-    """传输结束标记。"""
 
 
 class ServerRequestReply:

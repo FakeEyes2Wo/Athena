@@ -21,7 +21,6 @@ from pydantic_ai.messages import (
 
 from athena.memory.context_manager import ContextManager
 
-
 class RolloutRecorder:
     """单个 Thread 的 append-only JSONL 记录器。
 
@@ -39,7 +38,6 @@ class RolloutRecorder:
     Attributes:
         path: 当前文件路径（``open()`` 之前为 ``None``）。
     """
-
     __slots__ = ("_base", "_path", "_fd", "_seq", "_adapter")
 
     def __init__(self, project_root: Path) -> None:
@@ -49,14 +47,10 @@ class RolloutRecorder:
         self._seq = 0
         self._adapter = ModelMessagesTypeAdapter  # 预构建的单例
 
-    # ── 属性 ───────────────────────────────────────────────────────
-
     @property
     def path(self) -> Path | None:
         """当前 JSONL 文件路径，``open()`` 之前为 ``None``。"""
         return self._path
-
-    # ── 生命周期 ───────────────────────────────────────────────────
 
     async def open(self, thread_id: str) -> Path:
         """创建当天的 rollout 文件并返回路径。
@@ -105,8 +99,6 @@ class RolloutRecorder:
             self._fd.close()
             self._fd = None
 
-    # ── 内部 ───────────────────────────────────────────────────────
-
     def _write_line(self, obj: object) -> None:
         assert self._fd is not None
         self._fd.write(
@@ -114,10 +106,6 @@ class RolloutRecorder:
         )
         self._fd.flush()
         self._seq += 1
-
-
-# ── 恢复 ──────────────────────────────────────────────────────────────
-
 
 async def resume_context(rollout_path: Path) -> "ContextManager":
     """从 rollout JSONL 文件重建 :class:`ContextManager`。
@@ -127,13 +115,8 @@ async def resume_context(rollout_path: Path) -> "ContextManager":
     """
     return await asyncio.to_thread(_resume_context_sync, rollout_path)
 
-
-# ── 辅助函数 ───────────────────────────────────────────────────────────
-
-
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _safe_short_id(thread_id: str) -> str:
     """返回紧凑且安全的文件名 ID。"""
@@ -141,7 +124,6 @@ def _safe_short_id(thread_id: str) -> str:
         char if char.isalnum() or char in "-_" else "_" for char in thread_id[:12]
     )
     return safe or "thread"
-
 
 def _resume_context_sync(rollout_path: Path) -> ContextManager:
     """流式读取一个 rollout，仅保留最新的 compacted 上下文。"""
@@ -154,8 +136,8 @@ def _resume_context_sync(rollout_path: Path) -> ContextManager:
                 continue
             try:
                 record = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # 崩溃可能导致最后一行不完整。跳过损坏记录而非丢失整个可恢复会话。
+            except json.JSONDecodeError:
+                # JSON 解析失败（崩溃导致截断）→ 跳过损坏记录而非丢失整个会话
                 continue
             if not isinstance(record, dict):
                 continue
@@ -180,8 +162,12 @@ def _resume_context_sync(rollout_path: Path) -> ContextManager:
             try:
                 messages = adapter.validate_python(payload)
             except Exception:
+                # 跳过格式损坏的消息，不中断恢复流程
                 continue
             for message in messages:
                 ctx.append(message)
 
     return ctx
+
+if __name__ == "__main__":
+    print("RolloutRecorder loaded.")

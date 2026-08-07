@@ -1,1 +1,1 @@
-"""Prepare-stage deterministic services."""
+"""准备阶段确定性服务。"""

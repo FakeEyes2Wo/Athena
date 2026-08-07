@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from athena.app_server.events import Event, EventJournal
 from athena.app_server.exceptions import ClosedError
+from athena.app_server.observability import ThreadExecutionObserver
 from athena.app_server.submissions import (
     GetForkSnapshot,
     InterruptTurn,
@@ -25,9 +26,12 @@ from athena.app_server.submissions import (
     ShutdownThread,
     StartTurn,
     Submission,
+    TurnTerminalState,
     TurnRuntime,
 )
-from athena.core.schemas import ArtifactRef, AthenaThread, AthenaTurn
+from athena.core.contracts import ArtifactRef
+from athena.core.thread_models import AthenaThread, AthenaTurn
+from athena.execution import MonitorLimits
 
 if TYPE_CHECKING:
     from athena.memory.compaction import Compaction, Compactor
@@ -41,9 +45,6 @@ EmitEvent = Callable[[str, ArtifactRef], Awaitable[None]]
 Runner = Callable[
     [AthenaThread, AthenaTurn, EmitEvent], Awaitable[tuple[ArtifactRef, ArtifactRef]]
 ]
-
-
-# ── _MergedQueue ─────────────────────────────────────────────────
 
 
 class _MergedQueue:
@@ -76,9 +77,6 @@ class _MergedQueue:
             await self._merged.put(msg)
 
 
-# ── ThreadRuntime ─────────────────────────────────────────────────
-
-
 class ThreadRuntime:
     """单个 Thread 的执行容器 — 状态、通道、Journal、后台 loop。
 
@@ -99,6 +97,9 @@ class ThreadRuntime:
         compactor: "Compactor | None" = None,
         rollout: "RolloutRecorder | None" = None,
         llm: Any = None,
+        monitor_limits: MonitorLimits | None = None,
+        monitor_scan_interval: float = 1.0,
+        monitor_terminal_retention: float = 300.0,
     ) -> None:
         self.thread_id = thread_id
         self.session_id = session_id
@@ -106,7 +107,7 @@ class ThreadRuntime:
         self._runner = runner
         self.state: Literal["idle", "running", "closing", "closed"] = "idle"
 
-        # Memory Layer
+        # 记忆层
         self._ctx = ctx
         self._compactor = compactor
         self._rollout = rollout
@@ -119,8 +120,15 @@ class ThreadRuntime:
 
         # 事件 & 并发
         self.journal = EventJournal(thread_id)
+        self._execution_observer = ThreadExecutionObserver(
+            self.journal,
+            limits=monitor_limits,
+            scan_interval=monitor_scan_interval,
+            terminal_retention=monitor_terminal_retention,
+        )
         self.loop_task: asyncio.Task[None] | None = None
         self.active_turn: TurnRuntime | None = None
+        self._turn_done: dict[str, asyncio.Future[TurnTerminalState]] = {}
 
         # 快照
         self.active_turn_id: str | None = None
@@ -128,9 +136,8 @@ class ThreadRuntime:
         self._completed_contexts: dict[str, ArtifactRef] = {}
         self._completed_results: dict[str, ArtifactRef] = {}
 
-    # ── 生命周期 ──────────────────────────────────────────────
-
     async def start(self) -> None:
+        """启动合并队列和 submission_loop 后台任务。"""
         if self.loop_task is not None:
             return
         if self._rollout is not None:
@@ -139,6 +146,7 @@ class ThreadRuntime:
         self.loop_task = asyncio.create_task(
             submission_loop(self), name=f"submission-loop-{self.thread_id}"
         )
+        await self._execution_observer.start()
 
     async def shutdown(self, reason: str) -> None:
         """优雅关闭：入队 ShutdownThread → 等待 loop 退出 → 停止合并队列。"""
@@ -158,6 +166,7 @@ class ThreadRuntime:
                 # loop_task 在关闭流程中被取消 → 预期行为，忽略
                 pass
         await self._merged.stop()
+        await self._execution_observer.stop()
         self.state = "closed"
         if self._rollout is not None:
             await self._rollout.close()
@@ -166,6 +175,7 @@ class ThreadRuntime:
         """强制关闭：取消活跃 turn runner + 取消 loop。"""
         self.state = "closing"
         if self.active_turn is not None:
+            self.active_turn.cancel_requested.set()
             self.active_turn.runner_task.cancel()
         if self.loop_task is not None:
             self.loop_task.cancel()
@@ -174,12 +184,16 @@ class ThreadRuntime:
             except asyncio.CancelledError:
                 # 强制取消 loop_task → 预期行为，忽略
                 pass
+        for future in self._turn_done.values():
+            if not future.done():
+                future.set_result(TurnTerminalState(cancelled=True))
+        if self.active_turn is not None:
+            self._clear_active_turn(self.active_turn.turn_id)
         await self._merged.stop()
+        await self._execution_observer.stop()
         self.state = "closed"
         if self._rollout is not None:
             await self._rollout.close()
-
-    # ── Memory API ─────────────────────────────────────────────
 
     async def maybe_compact(self) -> "Compaction | None":
         """Turn 前压缩检查。超过阈值时用 LLM 摘要替换早期消息。
@@ -210,8 +224,6 @@ class ThreadRuntime:
     def has_memory(self) -> bool:
         return self._ctx is not None
 
-    # ── SubmissionLoop 辅助 ───────────────────────────────────
-
     def _make_lifecycle_event(self, turn_id: str, kind: str) -> Event:
         return Event(
             thread_id=self.thread_id,
@@ -222,6 +234,7 @@ class ThreadRuntime:
         )
 
     async def accept_turn(self, op: StartTurn) -> AthenaTurn:
+        """登记 Turn 启动事件，将状态切换到 running。"""
         if self.active_turn is not None:
             raise RuntimeError("thread already has an active turn")
         turn = AthenaTurn(
@@ -236,9 +249,11 @@ class ThreadRuntime:
             )
         self.state = "running"
         self.active_turn_id = turn.turn_id
+        await self._execution_observer.turn_started(turn.turn_id)
         return turn
 
     def spawn_turn(self, turn: AthenaTurn) -> TurnRuntime:
+        """创建 TurnRuntime 并启动 turn runner 任务。"""
         tr = TurnRuntime(
             turn_id=turn.turn_id,
             request_ref=turn.request_ref,
@@ -247,11 +262,13 @@ class ThreadRuntime:
             ),
         )
         self.active_turn = tr
+        self._turn_done[turn.turn_id] = tr.done
         return tr
 
     async def commit_completed(
         self, turn_id: str, result_ref: ArtifactRef, next_context_ref: ArtifactRef
     ) -> None:
+        """记录 Turn 成功完成到 Journal 并更新上下文引用。"""
         async with self.journal.condition:
             if self.active_turn is None or self.active_turn.turn_id != turn_id:
                 return
@@ -260,24 +277,38 @@ class ThreadRuntime:
             self._completed_contexts[turn_id] = next_context_ref
             self._completed_results[turn_id] = result_ref
             self.last_terminal_kind = "turn_completed"
+            self._turn_done[turn_id].set_result(
+                TurnTerminalState(
+                    result_ref=result_ref, next_context_ref=next_context_ref
+                )
+            )
             self._clear_active_turn(turn_id)
+        await self._execution_observer.turn_completed(turn_id)
 
     async def commit_failed(self, turn_id: str, exception_type: str) -> None:
+        """记录 Turn 执行失败到 Journal。"""
         async with self.journal.condition:
             if self.active_turn is None or self.active_turn.turn_id != turn_id:
                 return
             self.journal.append(self._make_lifecycle_event(turn_id, "turn_failed"))
             self.last_terminal_kind = "turn_failed"
+            self._turn_done[turn_id].set_result(
+                TurnTerminalState(exception_type=exception_type)
+            )
             self._clear_active_turn(turn_id)
+        await self._execution_observer.turn_failed(turn_id, exception_type)
 
     async def commit_interrupted(self, turn_id: str, reason: str) -> None:
+        """记录 Turn 被中断到 Journal 并设置取消标记。"""
         async with self.journal.condition:
             if self.active_turn is None or self.active_turn.turn_id != turn_id:
                 return
             self.active_turn.cancel_requested.set()
             self.journal.append(self._make_lifecycle_event(turn_id, "turn_interrupted"))
             self.last_terminal_kind = "turn_interrupted"
+            self._turn_done[turn_id].set_result(TurnTerminalState(cancelled=True))
             self._clear_active_turn(turn_id)
+        await self._execution_observer.turn_cancelled(turn_id)
 
     def _clear_active_turn(self, turn_id: str) -> None:
         if self.active_turn is not None and self.active_turn.turn_id == turn_id:
@@ -287,6 +318,7 @@ class ThreadRuntime:
             self.active_turn_id = None
 
     def completed_snapshot(self, after_turn_id: str | None) -> ArtifactRef:
+        """返回指定 Turn 或当前的上下文快照。"""
         if after_turn_id is not None:
             ctx = self._completed_contexts.get(after_turn_id)
             if ctx is None:
@@ -294,7 +326,22 @@ class ThreadRuntime:
             return ctx
         return self.context_ref
 
+    async def wait_turn(self, turn_id: str) -> ArtifactRef:
+        try:
+            done = self._turn_done[turn_id]
+        except KeyError as exc:
+            raise KeyError(f"unknown turn: {turn_id}") from exc
+        terminal = await asyncio.shield(done)
+        if terminal.cancelled:
+            raise asyncio.CancelledError
+        if terminal.exception_type is not None:
+            raise RuntimeError(f"turn failed: {terminal.exception_type}")
+        if terminal.result_ref is None:
+            raise RuntimeError("completed turn has no result reference")
+        return terminal.result_ref
+
     async def ensure_runner_stopped(self) -> None:
+        """取消活跃 Turn 的 runner 任务并等待退出。"""
         if self.active_turn is not None:
             self.active_turn.runner_task.cancel()
             try:
@@ -304,6 +351,7 @@ class ThreadRuntime:
                 pass
 
     def fail_pending_submissions(self, error: ClosedError) -> None:
+        """排空待处理提交队列，对未完成的提交抛出 ClosedError。"""
         while True:
             try:
                 sub = self.submission_queue.get_nowait()
@@ -312,9 +360,6 @@ class ThreadRuntime:
             except asyncio.QueueEmpty:
                 # 队列已排空 → 所有待处理提交已处理完毕
                 break
-
-
-# ── ThreadHandle ──────────────────────────────────────────────────
 
 
 class ThreadHandle:
@@ -327,6 +372,7 @@ class ThreadHandle:
     async def submit(
         self, op: StartTurn | InterruptTurn | GetForkSnapshot | ShutdownThread
     ) -> object:
+        """向 ThreadRuntime 提交一个控制操作，返回操作的回复。"""
         if self._runtime.state in ("closing", "closed"):
             raise ClosedError("thread is closed")
         sub_id = op.turn_id if isinstance(op, StartTurn) else str(uuid4())
@@ -334,14 +380,20 @@ class ThreadHandle:
         try:
             self._runtime.submission_queue.put_nowait(sub)
         except asyncio.QueueFull:
+            # 提交队列满 → 回退到阻塞 put，保证提交不丢失
             await self._runtime.submission_queue.put(sub)
         return await sub.reply
 
     def events(self, *, after_sequence: int = 0) -> AsyncIterator[Event]:
+        """返回从指定 sequence 之后开始的异步事件迭代器。"""
         return self._runtime.journal.read_from(after_sequence)
 
     async def shutdown_and_wait(self, reason: str = "client_shutdown") -> None:
+        """优雅关闭 ThreadRuntime 并等待退出。"""
         await self._runtime.shutdown(reason)
+
+    async def wait_turn(self, turn_id: str) -> ArtifactRef:
+        return await self._runtime.wait_turn(turn_id)
 
     @property
     def state(self) -> str:
@@ -350,9 +402,6 @@ class ThreadHandle:
     @property
     def context_ref(self) -> ArtifactRef:
         return self._runtime.context_ref
-
-
-# ── SubmissionLoop ────────────────────────────────────────────────
 
 
 async def submission_loop(runtime: ThreadRuntime) -> None:
@@ -444,9 +493,6 @@ async def submission_loop(runtime: ThreadRuntime) -> None:
         runtime.fail_pending_submissions(ClosedError("thread runtime closed"))
 
 
-# ── Runner 执行 ───────────────────────────────────────────────────
-
-
 async def _run_turn(runtime: ThreadRuntime, turn: AthenaTurn) -> None:
     """执行 runner 并编排 Memory。
 
@@ -478,6 +524,9 @@ async def _run_turn(runtime: ThreadRuntime, turn: AthenaTurn) -> None:
                     data=data,
                 )
             )
+        await runtime._execution_observer.agent_event(
+            turn.turn_id, kind, event_ref, data
+        )
 
     before_index: int | None = None
 

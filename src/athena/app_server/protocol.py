@@ -9,17 +9,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 class ProtocolModel(BaseModel):
     """所有协议 DTO 的基类：不可变，拒绝未知字段。"""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-
-# 错误码
-
-
 class ErrorCode(IntEnum):
+    """协议错误码枚举，对齐 JSON-RPC 风格。"""
     INVALID_ARGUMENT = -32602
     NOT_FOUND = -32601
     FAILED_PRECONDITION = -32000
@@ -30,13 +25,11 @@ class ErrorCode(IntEnum):
     CLOSED = -32006
     INTERNAL = -32603
 
-
 _EXCEPTION_MAP: dict[type[Exception], ErrorCode] = {
     ValueError: ErrorCode.INVALID_ARGUMENT,
     KeyError: ErrorCode.NOT_FOUND,
     RuntimeError: ErrorCode.FAILED_PRECONDITION,
 }
-
 
 def map_exception_to_error_code(exc: Exception) -> ErrorCode:
     """将 Python 异常映射为协议错误码。CancelledError 继承 BaseException，不经过此函数。"""
@@ -45,25 +38,20 @@ def map_exception_to_error_code(exc: Exception) -> ErrorCode:
             return code
     return ErrorCode.INTERNAL
 
-
 class RpcError(ProtocolModel):
     """协议错误——仅含稳定通用文案，不含异常消息/prompt/traceback。"""
-
     code: int
     message: str
     data: dict[str, Any] | None = None
 
-
 def rpc_error(
     code: ErrorCode, message: str, data: dict[str, Any] | None = None
 ) -> RpcError:
+    """创建携带指定错误码的 RpcError 实例。"""
     return RpcError(code=code.value, message=message, data=data)
 
-
-# 方法名常量
-
-
 class Method:
+    """协议方法名常量——所有 RPC 方法和通知的标识符。"""
     INITIALIZE = "initialize"
     INITIALIZED = "initialized"
     THREAD_START = "thread/start"
@@ -81,34 +69,31 @@ class Method:
     def is_control_method(cls, method: str) -> bool:
         return method in (cls.INITIALIZE, cls.SERVER_SHUTDOWN)
 
-
-# 请求 / 响应信封
-
-
 class RequestEnvelope(ProtocolModel):
+    """客户端请求信封。"""
     request_id: int = Field(ge=0)
     method: str
     params: dict[str, Any] | None = None
 
-
 class ResponseEnvelope(ProtocolModel):
+    """服务端响应信封。"""
     request_id: int
     result: dict[str, Any] | None = None
     error: RpcError | None = None
 
-
 class ClientNotification(ProtocolModel):
+    """客户端单向通知（无响应）。"""
     method: str
     params: dict[str, Any] | None = None
 
-
 class ServerRequest(ProtocolModel):
+    """服务端发起的请求（如审批）。"""
     server_call_id: str
     method: str
     params: dict[str, Any]
 
-
 class EventNotification(ProtocolModel):
+    """事件通知——通过订阅推送到客户端。"""
     subscription_id: str
     thread_id: str
     turn_id: str | None
@@ -117,71 +102,64 @@ class EventNotification(ProtocolModel):
     event_ref: str
     data: dict[str, Any] | None = None
 
-
 ServerEvent = ServerRequest | EventNotification
 
-# 业务 Operation 参数
-
-
 class ThreadStartParams(ProtocolModel):
+    """创建 Thread 的请求参数。"""
     session_id: str
     context_ref: str
 
-
 class TurnStartParams(ProtocolModel):
+    """启动 Turn 的请求参数。"""
     thread_id: str
     request_ref: str
 
-
 class TurnInterruptParams(ProtocolModel):
+    """中断 Turn 的请求参数。"""
     thread_id: str
     turn_id: str
     reason: str
 
-
 class ThreadForkParams(ProtocolModel):
+    """Fork Thread 的请求参数。"""
     thread_id: str
     after_turn_id: str | None = None
 
-
 class ThreadSubscribeParams(ProtocolModel):
+    """订阅 Thread 事件的请求参数。"""
     thread_id: str
     after_sequence: int = 0
 
-
 class ThreadUnsubscribeParams(ProtocolModel):
+    """取消订阅的请求参数。"""
     subscription_id: str
 
-
 class ServerRequestReply(ProtocolModel):
+    """Client 对 ServerRequest 的回复 DTO（协议层）。"""
     server_call_id: str
     result: dict[str, Any] | None = None
     error: RpcError | None = None
 
-
-# 响应结果
-
-
 class ThreadStartedResult(ProtocolModel):
+    """Thread 创建成功的响应结果。"""
     thread_id: str
-
 
 class TurnStartedResult(ProtocolModel):
+    """Turn 启动成功的响应结果。"""
     turn_id: str
-
 
 class ThreadForkedResult(ProtocolModel):
+    """Thread Fork 成功的响应结果。"""
     thread_id: str
 
-
 class SubscribedResult(ProtocolModel):
+    """订阅成功的响应结果。"""
     subscription_id: str
 
-
 class InterruptedResult(ProtocolModel):
+    """中断成功的响应结果。"""
     turn_id: str
     status: str = "interrupted"
-
 
 ResponseResult = (
     ThreadStartedResult

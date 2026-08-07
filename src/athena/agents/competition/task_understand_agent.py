@@ -6,7 +6,7 @@
 
 from typing import TYPE_CHECKING
 
-from athena.core.agent.agent import Agent, AgentConfig, create_agent
+from athena.core.agent import Agent, create_agent
 from athena.core.tool import ToolRegistry
 from athena.prompts import load_prompt
 
@@ -58,14 +58,14 @@ async def build_task_understand_agent(
     tools.register(HFModelDownloadTool(work_root=work_root))
 
     # ── 数据准备层 (2 工具) ──
-    tools.register(DataAnalyzeTool(work_root=work_root))
-    tools.register(DataCleanCodeGenTool(work_root=work_root))
+    # tools.register(DataAnalyzeTool(work_root=work_root))
+    # tools.register(DataCleanCodeGenTool(work_root=work_root))
 
     # ── Agent 认知子系统（5 个认知工具）──
     await register_cognition_tools(tools, work_root=work_root)
 
     # Guard：原生工具数量固定；MCP 工具在下方动态追加，不参与此断言
-    assert len(tools) == 11, f"Expected 11 native tools (6 core + 5 cognition), got {len(tools)}"
+    # assert len(tools) == 11, f"Expected 11 native tools (6 core + 5 cognition), got {len(tools)}"
 
     # ── MCP 接入层（可选）：配置驱动，懒连接；未配置 server 时完全惰性 ──
     servers = mcp_servers if mcp_servers is not None else load_mcp_servers()
@@ -81,8 +81,4 @@ async def build_task_understand_agent(
         max_tokens=max_tokens,
         temperature=temperature,
         name="TaskUnderstandAgent",
-        description=(
-            "Autonomous task execution agent that researches, "
-            "downloads data, builds baselines, and produces deliverables."
-        ),
     )

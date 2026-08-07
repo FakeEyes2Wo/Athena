@@ -1,0 +1,116 @@
+<h2>Athena IDE 布局方向</h2>
+<p class="subtitle">你已经选了更偏 VS Code / Cursor 的方向。下面是 3 种更具体的布局版本。重点看：信息密度、专业感、以及是否适合 AI4ML 工作流。</p>
+
+<div class="cards">
+  <div class="card" data-choice="A" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · 经典 IDE</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:300px;">
+          <div style="width:56px; background:#1b1f2a; border-radius:10px; padding:8px; display:flex; flex-direction:column; gap:8px;">
+            <div class="placeholder" style="height:28px;"></div>
+            <div class="placeholder" style="height:28px;"></div>
+            <div class="placeholder" style="height:28px;"></div>
+          </div>
+          <div style="width:220px; background:#151925; border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+            <div class="label">Explorer / Chat</div>
+            <div class="placeholder" style="height:36px;"></div>
+            <div class="placeholder" style="height:22px;"></div>
+            <div class="placeholder" style="height:22px;"></div>
+            <div class="placeholder" style="height:22px;"></div>
+            <div class="placeholder" style="height:120px;"></div>
+          </div>
+          <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:flex; gap:8px;">
+              <div class="placeholder" style="height:34px; flex:1;"></div>
+              <div class="placeholder" style="height:34px; flex:1;"></div>
+            </div>
+            <div class="placeholder" style="height:170px;"></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div class="placeholder" style="height:86px;"></div>
+              <div class="placeholder" style="height:86px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>经典 IDE 三栏</h3>
+      <p>最像 VS Code：活动栏 + 侧边栏 + 主工作区。专业、稳定、熟悉。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="B" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · AI IDE（推荐）</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:300px;">
+          <div style="width:62px; background:#1b1f2a; border-radius:10px; padding:8px; display:flex; flex-direction:column; gap:8px;">
+            <div class="placeholder" style="height:28px;"></div>
+            <div class="placeholder" style="height:28px;"></div>
+            <div class="placeholder" style="height:28px;"></div>
+            <div class="placeholder" style="height:28px;"></div>
+          </div>
+          <div style="width:320px; background:#151925; border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+            <div class="label">Athena Assistant</div>
+            <div class="placeholder" style="height:40px;"></div>
+            <div class="placeholder" style="height:52px;"></div>
+            <div class="placeholder" style="height:52px;"></div>
+            <div class="placeholder" style="height:52px;"></div>
+            <div class="placeholder" style="height:100px;"></div>
+          </div>
+          <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:grid; grid-template-columns:1.3fr 1fr; gap:8px;">
+              <div class="placeholder" style="height:120px;"></div>
+              <div class="placeholder" style="height:120px;"></div>
+            </div>
+            <div class="placeholder" style="height:110px;"></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div class="placeholder" style="height:86px;"></div>
+              <div class="placeholder" style="height:86px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>AI 优先 + IDE 工作区</h3>
+      <p>左边固定聊天与任务控制，中间/右边是实验、图表、文件与 diff。最适合 Athena 的 AI4ML 场景。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="C" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C · 仪表盘优先</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:300px;">
+          <div style="width:250px; background:#151925; border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+            <div class="label">Left Rail</div>
+            <div class="placeholder" style="height:32px;"></div>
+            <div class="placeholder" style="height:90px;"></div>
+            <div class="placeholder" style="height:90px;"></div>
+            <div class="placeholder" style="height:90px;"></div>
+          </div>
+          <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px;">
+              <div class="placeholder" style="height:80px;"></div>
+              <div class="placeholder" style="height:80px;"></div>
+              <div class="placeholder" style="height:80px;"></div>
+            </div>
+            <div class="placeholder" style="height:150px;"></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div class="placeholder" style="height:100px;"></div>
+              <div class="placeholder" style="height:100px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Dashboard First</h3>
+      <p>更偏监控台，聊天弱化。适合盯实验，但不够像 AI IDE。</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">你可以直接点击一个选项，也可以在终端回复例如：B，但把聊天区再更紧凑一点。</p>

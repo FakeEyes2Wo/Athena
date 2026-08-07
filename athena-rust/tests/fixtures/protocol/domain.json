@@ -1,0 +1,61 @@
+{
+  "athena_thread": {
+    "context_ref": "artifact://ctx/initial",
+    "session_id": "sess-2026-07-25",
+    "status": "idle",
+    "thread_id": "t-001"
+  },
+  "athena_turn": {
+    "request_ref": "artifact://req/hello",
+    "result_ref": null,
+    "status": "running",
+    "thread_id": "t-001",
+    "turn_id": "turn-001"
+  },
+  "data_card": {
+    "dataset_ref": "artifact://datasets/cifar10",
+    "fingerprint": "sha256:abc123def456",
+    "schema_ref": "artifact://schemas/cifar10_v1",
+    "split_manifest_ref": "artifact://manifests/cifar10_splits"
+  },
+  "hypothesis_proposed": {
+    "evidence_refs": [],
+    "expected_effect": "Training loss decreases 15% faster",
+    "intervention": "Insert BatchNorm2d after conv1 in ResNet",
+    "patience_evidence_ref": null,
+    "patience_grant": 0,
+    "statement": "Adding a batch-norm layer improves convergence",
+    "status": "PROPOSED"
+  },
+  "hypothesis_refuted_with_patience": {
+    "evidence_refs": [],
+    "expected_effect": "Accuracy improves after epoch 120",
+    "intervention": "Train for 200 epochs instead of 100",
+    "patience_evidence_ref": "artifact://exp/run-43/results",
+    "patience_grant": 1,
+    "statement": "Need more epochs to see effect",
+    "status": "REFUTED"
+  },
+  "hypothesis_supported": {
+    "evidence_refs": [
+      "artifact://exp/run-42/results"
+    ],
+    "expected_effect": "Loss reaches 0.1 in half the epochs",
+    "intervention": "Change lr from 0.001 to 0.01",
+    "patience_evidence_ref": null,
+    "patience_grant": 0,
+    "statement": "Larger learning rate speeds up training",
+    "status": "SUPPORTED"
+  },
+  "hypothesis_validation_error": {
+    "error": "1 validation error for Hypothesis\n  Value error, positive patience grant requires an evidence reference [type=value_error, input_value={'statement': 'Invalid', ...nce_evidence_ref': None}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+  },
+  "metric_spec": {
+    "direction": "maximize",
+    "name": "accuracy"
+  },
+  "metric_spec_minimize": {
+    "direction": "minimize",
+    "name": "loss"
+  }
+}

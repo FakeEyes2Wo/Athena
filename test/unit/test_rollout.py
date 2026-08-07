@@ -1,4 +1,4 @@
-"""Unit tests for ``athena.memory.rollout``."""
+"""``athena.memory.rollout`` 的单元测试。"""
 
 import json
 import tempfile
@@ -14,8 +14,6 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
-# ── helpers ─────────────────────────────────────────────────────────────
-
 
 def _user(text: str) -> ModelRequest:
     return ModelRequest(parts=[UserPromptPart(content=text)])
@@ -29,9 +27,6 @@ def _assistant(text: str) -> ModelResponse:
 def tmp_project():
     with tempfile.TemporaryDirectory() as d:
         yield Path(d)
-
-
-# ── RolloutRecorder ─────────────────────────────────────────────────────
 
 
 class TestRolloutRecorder:
@@ -89,7 +84,7 @@ class TestRolloutRecorder:
         from athena.memory.rollout import RolloutRecorder
 
         rec = RolloutRecorder(tmp_project)
-        rec.record(_user("nope"))  # no fd → silently dropped
+        rec.record(_user("nope"))  # 无文件描述符 → 静默丢弃
         assert rec.path is None
 
     async def test_open_is_idempotent(self, tmp_project):
@@ -129,15 +124,12 @@ class TestRolloutRecorder:
         rec.record(_tool_result("bash", "file1\nfile2"))
         await rec.close()
 
-        # read back and validate
+        # 读回并验证
         adapter = ModelMessagesTypeAdapter
         for line in rec.path.read_text().strip().split("\n"):
             data = json.loads(line)
             msgs = adapter.validate_json(json.dumps(data["msg"]))
             assert len(msgs) == 1
-
-
-# ── helpers ─────────────────────────────────────────────────────────────
 
 
 def _tool_result(name: str, content: str) -> ModelRequest:
@@ -150,9 +142,6 @@ def _tool_result(name: str, content: str) -> ModelRequest:
             )
         ]
     )
-
-
-# ── resume_context ──────────────────────────────────────────────────────
 
 
 class TestResumeContext:
@@ -172,7 +161,7 @@ class TestResumeContext:
 
         rec = RolloutRecorder(tmp_project)
         await rec.open("r2")
-        # simulate: early messages → compact → later messages
+        # 模拟：早期消息 → 压缩 → 后续消息
         rec.record(_user("early question"))
         rec.record(_assistant("early answer"))
         rec.record_compaction(1, "User asked about X, assistant explained Y.")
@@ -182,12 +171,12 @@ class TestResumeContext:
 
         ctx = await resume_context(rec.path)
         assert ctx.tokens > 0
-        # first item should be the compaction summary
+        # 第一项应为压缩摘要
         first = ctx.items[0]
         assert isinstance(first, ModelRequest)
         c = getattr(first.parts[0], "content", "")
         assert "HISTORY SUMMARY" in c
-        # last item should be the follow-up
+        # 最后一项应为后续消息
         last_c = getattr(ctx.items[-1].parts[0], "content", "")
         assert last_c == "follow-up answer"
 
@@ -217,7 +206,7 @@ class TestResumeContext:
         await rec.close()
 
         ctx = await resume_context(rec.path)
-        # only the second compaction summary + q3 should remain
+        # 应仅保留第二次压缩摘要 + q3
         assert len(ctx.items) == 2
         first = getattr(ctx.items[0].parts[0], "content", "")
         assert "second compaction" in first

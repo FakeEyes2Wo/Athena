@@ -38,6 +38,17 @@ ServerState = Literal[
 ]
 
 
+def _serialize_result(result: object) -> dict:
+    """将执行结果转为可 JSON 序列化的 dict。"""
+    if isinstance(result, dict):
+        return result
+    if hasattr(result, "model_dump"):
+        return result.model_dump()
+    if hasattr(result, "__dict__"):
+        return {k: v for k, v in result.__dict__.items() if not k.startswith("_")}
+    return {"value": str(result)}
+
+
 class MessageProcessor:
     """Server 侧请求入口——状态机 + Dispatcher + admission gate。"""
 
@@ -56,15 +67,18 @@ class MessageProcessor:
         self._mux = None
 
     def set_executor(self, executor) -> None:
+        """注入 ExecutionAdapter — 将协议方法映射到 ThreadManager 调用。"""
         self._executor = executor
 
     def set_event_system(self, event_handlers, mux) -> None:
+        """注入事件处理器和 FairMux，用于事件路由。"""
         self._event_handlers = event_handlers
         self._mux = mux
 
     # 生命周期
 
     async def start(self) -> None:
+        """启动 dispatcher 接收循环，从 CREATED 进入 INITIALIZING 状态。"""
         if self._state != "CREATED":
             return
         self._state = "INITIALIZING"
@@ -73,6 +87,7 @@ class MessageProcessor:
         )
 
     async def shutdown(self, timeout=DEFAULT_SHUTDOWN_TIMEOUT) -> None:
+        """优雅关闭：等待 in-flight 任务完成或超时后取消，停止 dispatcher。"""
         if self._state in ("TERMINATED", "FAILED", "FORCE_CLOSED"):
             return
         self._state = "DRAINING"
@@ -83,6 +98,7 @@ class MessageProcessor:
                     asyncio.gather(*tasks, return_exceptions=True), timeout=timeout
                 )
             except asyncio.TimeoutError:
+                # in-flight 任务在超时内未完成，强制取消
                 logger.warning(
                     "shutdown: %d in-flight tasks did not complete", len(self._inflight)
                 )
@@ -95,9 +111,10 @@ class MessageProcessor:
             try:
                 await self._dispatcher_task
             except asyncio.CancelledError:
+                # dispatcher 任务已被 cancel，等待其完全退出
                 pass
 
-    # Dispatcher
+    # 分发器
 
     async def _dispatch(self) -> None:
         """接收循环 — 控制消息直接处理，普通请求入队不阻塞。
@@ -151,6 +168,7 @@ class MessageProcessor:
                     continue
                 await pending.put(msg)
         except asyncio.CancelledError:
+            # dispatcher 循环被 cancel — 正常退出
             pass
         finally:
             # Bug 8 fix: 排空 pending 队列，回复 ClosedError
@@ -164,11 +182,13 @@ class MessageProcessor:
                         )
                     )
                 except Exception:
+                    # 发送 ClosedError 失败 — 忽略，关闭流程已在进行
                     pass
             worker_task.cancel()
             try:
                 await asyncio.shield(worker_task)
             except asyncio.CancelledError:
+                # worker 已被 cancel 且已等待完毕 — 预期行为
                 pass
 
     # 请求执行
@@ -185,26 +205,11 @@ class MessageProcessor:
             await self._transport.send_response(
                 ResponseEnvelope(
                     request_id=rid,
-                    result=(
-                        result
-                        if isinstance(result, dict)
-                        else (
-                            result.model_dump()
-                            if hasattr(result, "model_dump")
-                            else (
-                                {
-                                    k: v
-                                    for k, v in result.__dict__.items()
-                                    if not k.startswith("_")
-                                }
-                                if hasattr(result, "__dict__")
-                                else {"value": str(result)}
-                            )
-                        )
-                    ),
+                    result=_serialize_result(result),
                 )
             )
         except asyncio.CancelledError:
+            # 请求被取消 — 发送 CLOSED 错误回复
             await self._transport.send_response(
                 ResponseEnvelope(
                     request_id=rid,
@@ -212,6 +217,7 @@ class MessageProcessor:
                 )
             )
         except Exception as exc:
+            # 执行过程中发生异常 — 映射为协议错误码并回复
             await self._transport.send_response(
                 ResponseEnvelope(
                     request_id=rid,
@@ -275,6 +281,7 @@ class MessageProcessor:
     async def request_approval(
         self, thread_id: str, turn_id: str, message: str, timeout=300.0
     ) -> bool:
+        """向 Client 发送审批请求，等待用户批准或拒绝。超时默认返回 False。"""
         call_id = f"s:{uuid4().hex}"
         fut: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
         self._pending_server_calls[call_id] = fut
@@ -289,6 +296,7 @@ class MessageProcessor:
             result = await asyncio.wait_for(fut, timeout=timeout)
             return result.get("approved", False)
         except asyncio.TimeoutError:
+            # Client 在超时内未响应审批请求
             self._pending_server_calls.pop(call_id, None)
             return False
 

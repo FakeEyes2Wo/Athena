@@ -1,0 +1,113 @@
+{
+  "client_notification": {
+    "method": "initialized",
+    "params": {
+      "protocol_version": 1
+    }
+  },
+  "error_codes": {
+    "ALREADY_INITIALIZED": -32003,
+    "CLOSED": -32006,
+    "DUPLICATE_REQUEST_ID": -32004,
+    "FAILED_PRECONDITION": -32000,
+    "INTERNAL": -32603,
+    "INVALID_ARGUMENT": -32602,
+    "NOT_FOUND": -32601,
+    "NOT_INITIALIZED": -32002,
+    "OVERLOADED": -32005
+  },
+  "event_notification": {
+    "data": null,
+    "event_ref": "athena-event:xyz",
+    "kind": "turn_completed",
+    "sequence": 5,
+    "subscription_id": "sub:abc123",
+    "thread_id": "t1",
+    "turn_id": "turn-1"
+  },
+  "method_values": {
+    "INITIALIZE": "initialize",
+    "INITIALIZED": "initialized",
+    "ITEM_APPROVAL_REQUEST": "item/approval/request",
+    "ITEM_USER_INPUT_REQUEST": "item/userInput/request",
+    "SERVER_SHUTDOWN": "server/shutdown",
+    "THREAD_FORK": "thread/fork",
+    "THREAD_START": "thread/start",
+    "THREAD_SUBSCRIBE": "thread/subscribe",
+    "THREAD_UNSUBSCRIBE": "thread/unsubscribe",
+    "TOOL_CALL_REQUEST": "tool/call/request",
+    "TURN_INTERRUPT": "turn/interrupt",
+    "TURN_START": "turn/start"
+  },
+  "methods": [
+    "INITIALIZE",
+    "INITIALIZED",
+    "ITEM_APPROVAL_REQUEST",
+    "ITEM_USER_INPUT_REQUEST",
+    "SERVER_SHUTDOWN",
+    "THREAD_FORK",
+    "THREAD_START",
+    "THREAD_SUBSCRIBE",
+    "THREAD_UNSUBSCRIBE",
+    "TOOL_CALL_REQUEST",
+    "TURN_INTERRUPT",
+    "TURN_START"
+  ],
+  "request_envelope": {
+    "method": "turn/start",
+    "params": {
+      "request_ref": "artifact://test",
+      "thread_id": "t1"
+    },
+    "request_id": 42
+  },
+  "response_envelope_error": {
+    "error": {
+      "code": -32006,
+      "data": null,
+      "message": "server shutting down"
+    },
+    "request_id": 42,
+    "result": null
+  },
+  "response_envelope_success": {
+    "error": null,
+    "request_id": 42,
+    "result": {
+      "turn_id": "turn-1"
+    }
+  },
+  "server_request": {
+    "method": "item/approval/request",
+    "params": {
+      "message": "approve?",
+      "thread_id": "t1",
+      "turn_id": "turn-1"
+    },
+    "server_call_id": "call-1"
+  },
+  "thread_fork_params": {
+    "after_turn_id": "turn-3",
+    "thread_id": "t1"
+  },
+  "thread_start_params": {
+    "context_ref": "artifact://ctx/init",
+    "session_id": "sess-1"
+  },
+  "thread_subscribe_params": {
+    "after_sequence": 0,
+    "thread_id": "t1"
+  },
+  "thread_unsubscribe_params": {
+    "subscription_id": "sub:abc123"
+  },
+  "turn_interrupt_params": {
+    "reason": "user_requested",
+    "thread_id": "t1",
+    "turn_id": "turn-1"
+  },
+  "turn_start_params": {
+    "request_ref": "artifact://req/test",
+    "thread_id": "t1"
+  }
+}

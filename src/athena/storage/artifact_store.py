@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Protocol
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 
 REF_PREFIX = "sha256:"
 REF_PATTERN = re.compile(r"^sha256:([0-9a-f]{64})$")

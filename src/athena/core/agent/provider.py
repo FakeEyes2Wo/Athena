@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -12,13 +12,16 @@ from openai import AsyncOpenAI
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 if TYPE_CHECKING:
-    from athena.core.agent.agent import AgentConfig
+    from athena.core.agent.models import AgentConfig
+    from athena.core.tool import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class StreamEvent:
+    """流式响应事件 — kind 区分文本增量、函数调用、完成和错误四种类型。"""
+
     kind: Literal["text_delta", "function_call", "response_completed", "error"]
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -26,8 +29,18 @@ class StreamEvent:
 class ResponsesProvider:
     """OpenAI-compatible Chat Completions 流式调用。"""
 
-    def __init__(self, *, client: AsyncOpenAI | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        self._model_name = model
         self._client = client
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -37,33 +50,27 @@ class ResponsesProvider:
             self._client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
         return self._client
 
+    # TODO: 这里弄一个stream和astream
     async def stream(
         self,
         config: "AgentConfig",
+        tools: "ToolRegistry",
         messages: list[ModelMessage],
         cancel: asyncio.Event,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncGenerator[StreamEvent, None]:
         api_msgs = _to_api(messages)
-        tools = [s.to_openai_tool() for s in config.tools.specs]
-
-        # system prompt：优先用消息列表中的 system 角色，否则用 config
-        system = config.system_prompt
-        if api_msgs and api_msgs[0].get("role") == "system":
-            system = api_msgs[0]["content"]
-            api_msgs = api_msgs[1:]
+        tool_defs = [spec.to_openai_tool() for spec in tools.specs]
 
         kw: dict = dict(
-            model=config.model,
+            model=self.model_name,
             messages=api_msgs,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             stream=True,
         )
-        if tools:
-            kw["tools"] = tools
+        if tool_defs:
+            kw["tools"] = tool_defs
             kw["tool_choice"] = "auto"
-        if system:
-            kw["messages"] = [{"role": "system", "content": system}, *api_msgs]
 
         stream = await self.client.chat.completions.create(**kw)
 
@@ -127,7 +134,7 @@ class ResponsesProvider:
                     finish = ""
                     bufs.clear()
 
-        except Exception as exc:
+        except Exception as exc:  # 流读取未预期异常 → 返回 error 事件
             logger.error("stream 读取失败: %s", exc)
             yield StreamEvent(
                 kind="error", data={"message": f"{type(exc).__name__}: {exc}"}
@@ -138,9 +145,6 @@ class ResponsesProvider:
             kind="response_completed",
             data={"finish_reason": finish or "stop", "accumulated_text": text},
         )
-
-
-# ── PydanticAI → OpenAI Chat Completions dict ────────────────────
 
 
 def _to_api(msgs: list[ModelMessage]) -> list[dict]:

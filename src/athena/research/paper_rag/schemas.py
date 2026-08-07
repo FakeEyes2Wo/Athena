@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from athena.core.schemas import ArtifactRef
+from athena.core.contracts import ArtifactRef
 
 
 class CorpusSentence(BaseModel):

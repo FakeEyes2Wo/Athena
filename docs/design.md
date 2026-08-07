@@ -1,5 +1,11 @@
 # Athena：自动化 AI4S 系统设计
 
+> Status: historical
+> Last verified: 2026-07-30
+> 本文含早期方案与伪代码，不代表当前实现。当前事实见
+> [architecture/current.md](architecture/current.md)，已批准目标见
+> [architecture/target.md](architecture/target.md)。
+
 整套框架需要异步执行。
 
 所有 Prompt 使用英文，Pydantic 的 `description` 也统一使用英文。中文只在报告后处理阶段生成。

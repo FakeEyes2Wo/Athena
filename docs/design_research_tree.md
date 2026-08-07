@@ -1,110 +1,31 @@
-```python
-from abc import ABC, abstractmethod
+# ResearchTree v2 设计
 
-  import math
-  import warnings
+Status: current
+Owner: Athena maintainers
+Last verified: 2026-07-31
+Source of truth: `src/athena/core/research_tree.py`
 
-  from pydantic import BaseModel
+ResearchTree v2 分离 Hypothesis 与 Experiment。Experiment 通过 `hypothesis_id` 引用假设，通过 `parent_id` 形成执行谱系，并拥有 GitWorkBranch、状态、EvalResult、ComparisonVerdict、artifacts 与 error。
 
-  from athena.core.gitutils.workspace import GitWorkBranch
-  from athena.core.schemas import ExperimentPlan, Hypothesis
-
-
-EXPERIMENT_PROMPT="""
-
-当前的假设是：
-结果是：
-评价结果有效，有效原因是：
-
-
-"""
-
-  class Experiment(BaseModel):
-      hypothesis: Hypothesis
-      plan: ExperimentPlan
-      result: str | float
-      gitwork: GitWorkBranch
-
-      def result_as_float(self) -> float | None:
-          try:
-              value = float(self.result)
-          except (TypeError, ValueError):
-              warnings.warn(
-                  f"实验结果无法转换为数字：{self.result!r}",
-                  RuntimeWarning,
-                  stacklevel=2,
-              )
-              return None
-
-          if not math.isfinite(value):
-              warnings.warn(
-                  f"实验结果不是有限数字：{self.result!r}",
-                  RuntimeWarning,
-                  stacklevel=2,
-              )
-              return None
-
-          return value
-
-
-        def get_propmt(self)->str:
-
-
-
-# 这个需要一个
-
-
-
-class ResearchTreeNode(ABC):
-    # 实验信息
-    exp: Experiment
-
-    # 树相关
-    id:str
-    parent_id:Optional[str]
-    children_id:list[str]
-
-    def get_exp_info()->str:
-        从exp里面获取当前节点有关的prompt信息。
-
-
-class ResearchTreeNodes(ABC):
-
-    def __init__(self):
-        self.nodes = 这里应该直接用hash表查询
-        同时生成的key不能重复。 这里还是用一个类来管理
-    def get_new_node(self):
-        同时生成的key不能重复。 这里还是用一个类来管理
-
-class ResearchTree(ABC):
-    _NODES:ResearchTreeNodes
-
-
-    def __init__():
-
-
-    def get_node_by_id(self,node_id)->RearchTreeNode:
-        pass
-
-    def get_prompt(self,node|node_id):
-        判断是ResearchTreeNode还是 id
-
-        我们取id
-
-        node = self.get_node_by_id(id)
-        for node.parent_id is not None:
-
-
-        这里是根据当前的Node来获取节点的：
-
-    def gen_node()->RearchTreeNode:
-        return self._NODES.get_new_node()
-
-
-
-
-
-
-
-
+```text
+ResearchTree
+├── hypotheses: dict[hypothesis_id, Hypothesis]
+├── experiments: dict[experiment_id, Experiment]
+├── derived children index
+└── sota_id
 ```
+
+Experiment 不保存自己的 ID，不嵌入 Hypothesis，也不持久化 children。加载时先完整解析临时图，再校验引用、父环、状态与 SOTA 资格，全部成功后才返回新树。保存使用同目录临时文件与原子替换。
+
+生命周期固定为：
+
+```text
+PENDING -> RUNNING -> SUCCEEDED
+   |           |----> FAILED
+   |           `----> CANCELLED
+   `----------------> CANCELLED
+```
+
+终态不可变。只有 RUNNING 实验可由 `complete_experiment` 写入成功证据；失败必须带非空 error。SOTA 只可指向成功的 baseline 或 search 实验。
+
+验证实验也是普通 v2 Experiment：`plan.kind` 为 `ablation` 或 `final-test`，但不具 SOTA 资格。报告 artifact 附在所选 SOTA 上。

@@ -1,1 +1,0 @@
-"""Prepare-stage agent placeholders."""

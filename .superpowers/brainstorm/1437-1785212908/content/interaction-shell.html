@@ -1,0 +1,99 @@
+<h2>AI 交互方式：更像 Codex，但带更多仪表盘</h2>
+<p class="subtitle">可以，我们就按多页面逐步选。你刚才实际上已经偏向了 B：AI IDE。现在继续细化“像 Codex 的 AI 交互”到底是哪一种壳层。</p>
+
+<div class="cards">
+  <div class="card" data-choice="A" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">A · Chat Main</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px;">
+          <div style="flex:1.3; background:#121722; border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Athena Conversation</div>
+            <div class="placeholder" style="height:54px;"></div>
+            <div class="placeholder" style="height:54px;"></div>
+            <div class="placeholder" style="height:54px;"></div>
+            <div class="placeholder" style="height:54px;"></div>
+            <div class="placeholder" style="height:42px;"></div>
+          </div>
+          <div style="width:320px; display:flex; flex-direction:column; gap:8px;">
+            <div class="placeholder" style="height:90px;"></div>
+            <div class="placeholder" style="height:90px;"></div>
+            <div class="placeholder" style="height:90px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>聊天是绝对主角</h3>
+      <p>最接近 ChatGPT / Codex Web。仪表盘在右侧，但对话永远占最大面积。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="B" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">B · Codex + IDE Hybrid（推荐）</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px;">
+          <div style="width:320px; background:#121722; border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Athena Agent</div>
+            <div class="placeholder" style="height:44px;"></div>
+            <div class="placeholder" style="height:48px;"></div>
+            <div class="placeholder" style="height:48px;"></div>
+            <div class="placeholder" style="height:48px;"></div>
+            <div class="placeholder" style="height:110px;"></div>
+          </div>
+          <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:grid; grid-template-columns:1.2fr 1fr; gap:8px;">
+              <div class="placeholder" style="height:118px;"></div>
+              <div class="placeholder" style="height:118px;"></div>
+            </div>
+            <div class="placeholder" style="height:92px;"></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div class="placeholder" style="height:92px;"></div>
+              <div class="placeholder" style="height:92px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>左侧 Agent，对右侧工作区发号施令</h3>
+      <p>交互逻辑像 Codex：以 AI 对话驱动工作；但实验、树图、diff、metrics 始终可见，更像专业 ML IDE。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="C" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">C · Dashboard Main</div>
+        <div class="mockup-body" style="display:flex; gap:10px; min-height:320px;">
+          <div style="width:250px; background:#121722; border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:10px;">
+            <div class="label">Command / History</div>
+            <div class="placeholder" style="height:44px;"></div>
+            <div class="placeholder" style="height:70px;"></div>
+            <div class="placeholder" style="height:70px;"></div>
+            <div class="placeholder" style="height:70px;"></div>
+          </div>
+          <div style="flex:1; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px;">
+              <div class="placeholder" style="height:80px;"></div>
+              <div class="placeholder" style="height:80px;"></div>
+              <div class="placeholder" style="height:80px;"></div>
+            </div>
+            <div class="placeholder" style="height:150px;"></div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div class="placeholder" style="height:90px;"></div>
+              <div class="placeholder" style="height:90px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>仪表盘是主角，AI 是控制器</h3>
+      <p>更像专业实验控制台。适合盯数据，但会弱化“像 Codex”那种对话感。</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">这一步只决定交互壳层。你可以回复：<code>B，并且聊天区支持流式 token + 参数卡片</code> 这种形式。</p>
