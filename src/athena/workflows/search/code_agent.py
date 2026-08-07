@@ -4,22 +4,21 @@ import asyncio
 from collections.abc import Mapping
 import hashlib
 import json
-import math
-import os
+import shutil
 from pathlib import Path
-import sys
 import time
 
 from pydantic import BaseModel
 
-from athena.code.backends.base import CodeBackend
-from athena.code.engine import CodeEngine
+from athena.code.backends.base import CodeBackend, render_backend_prompt
+from athena.code.execution import ExecutionRequest, LocalExperimentRuntime
+from athena.code.file_policy import GeneratedTreePolicy
 from athena.code.monitor import AgentMonitor
-from athena.code.output_specs import OutputSpec
+from athena.code.types import ExecutionOutput
 from athena.core.workspace import GitWorkBranch
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import ExperimentPlan, Hypothesis
-from athena.evaluation.types import EvalResult, EvalSpec
+from athena.evaluation.types import EvalResult, EvalSpec, EvaluationInputs
 
 EXPERIMENT_ENTRYPOINT = "run_experiment.py"
 EVALUATION_ENTRYPOINT = "eval.py"
@@ -40,40 +39,6 @@ class CodeExecutionError(RuntimeError):
         self.logs = logs
 
 
-async def _run_python(
-    script: str,
-    cwd: Path,
-    timeout_s: float,
-    env: Mapping[str, str] | None = None,
-) -> ProcessResult:
-    """Run one Python entrypoint and retain its exit status and output."""
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        script,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=timeout_s
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        return ProcessResult(
-            returncode=-1,
-            output=f"Timed out after {timeout_s:g}s: {script}",
-        )
-    return ProcessResult(
-        returncode=process.returncode or 0,
-        output="\n".join(
-            part.decode(errors="replace") for part in (stdout, stderr) if part
-        ),
-    )
-
-
 class CodegenResult(BaseModel):
     """Successful code generation and evaluation evidence."""
 
@@ -81,6 +46,7 @@ class CodegenResult(BaseModel):
     commit: str
     diff: ArtifactRef
     eval: EvalResult
+    evaluation: ArtifactRef
     logs: ArtifactRef
     wall_time_s: float = 0.0
 
@@ -98,7 +64,7 @@ class CodeRouter:
 
 
 class CodeAgent:
-    """Run generated experiment and protected evaluation entrypoints."""
+    """Run a bounded generate → execute → evaluate → repair loop."""
 
     def __init__(
         self,
@@ -106,6 +72,9 @@ class CodeAgent:
         *,
         backends: Mapping[str, CodeBackend] | None = None,
         workspace=None,
+        runtime=None,
+        artifacts=None,
+        evaluator=None,
         max_rounds: int = 3,
         monitor: AgentMonitor | None = None,
     ) -> None:
@@ -113,17 +82,22 @@ class CodeAgent:
         self._router = CodeRouter()
         self._backends = dict(backends or {})
         self._workspace = workspace
+        self._runtime = runtime or LocalExperimentRuntime()
+        self._artifacts = artifacts
+        self._evaluator = evaluator
         self._max_rounds = max_rounds
         self._monitor = monitor or AgentMonitor()
 
     async def execute(
         self,
-        experiment_id: str,
-        hypothesis: Hypothesis,
-        plan: ExperimentPlan,
-        parent_commit: str,
-        eval_spec: EvalSpec,
-        worktree: GitWorkBranch,
+        experiment_id,
+        hypothesis,
+        plan,
+        parent_commit,
+        eval_spec,
+        worktree,
+        *,
+        inputs: EvaluationInputs,
     ) -> CodegenResult:
         wt_path = Path(worktree.path)
         wt_path.mkdir(parents=True, exist_ok=True)
@@ -131,89 +105,133 @@ class CodeAgent:
         log_path = wt_path / f"athena_logs_{experiment_id}.txt"
         logs_ref = f"artifact://{log_path}"
 
+        await self._stage_inputs(wt_path, inputs)
         await self._ensure_evaluator(wt_path, eval_spec)
         protected_before = self._protected_hashes(wt_path)
 
-        generation_log: ProcessResult | None = None
+        history: list[dict] = []
+        previous_outputs: list[ExecutionOutput] = []
+        log_results: list[tuple[str, ProcessResult]] = []
+        evaluation: EvalResult | None = None
+        if self._artifacts is None or self._evaluator is None:
+            raise CodeExecutionError(
+                "trusted evaluation is not configured", logs=logs_ref
+            )
         if self._backends:
-            backend_name = (
-                self._router.route(hypothesis)
-                if self.backend == "auto"
-                else self.backend
-            )
-            try:
-                selected_backend = self._backends[backend_name]
-            except KeyError as exc:
-                raise CodeExecutionError(
-                    f"code backend is not configured: {backend_name}", logs=logs_ref
-                ) from exc
-            engine_result = await CodeEngine(selected_backend, self._monitor).run(
-                prompt=self._generation_prompt(
-                    experiment_id, hypothesis, plan, eval_spec
-                ),
-                target_dir=str(wt_path),
-                max_rounds=self._max_rounds,
-                output_spec=OutputSpec(must_exist=[EXPERIMENT_ENTRYPOINT]),
-                entrypoint=EXPERIMENT_ENTRYPOINT,
-            )
-            final_output = engine_result.final_output
-            generation_log = ProcessResult(
-                returncode=(final_output.returncode if final_output else -1),
-                output=(
-                    "\n".join(
-                        part
-                        for part in (
-                            final_output.stdout if final_output else "",
-                            final_output.stderr if final_output else "",
-                        )
-                        if part
+            for round_num in range(1, self._max_rounds + 1):
+                backend_name = (
+                    self._router.route(hypothesis)
+                    if self.backend == "auto"
+                    else self.backend
+                )
+                try:
+                    selected_backend = self._backends[backend_name]
+                except KeyError as exc:
+                    raise CodeExecutionError(
+                        f"code backend is not configured: {backend_name}",
+                        logs=logs_ref,
+                    ) from exc
+                generation = await selected_backend.generate(
+                    prompt=render_backend_prompt(
+                        self._generation_prompt(
+                            experiment_id, hypothesis, plan, eval_spec
+                        ),
+                        previous_outputs,
+                        history,
+                    ),
+                    target_dir=str(wt_path),
+                    previous_outputs=previous_outputs,
+                    history=history,
+                )
+                changed = (
+                    set(generation.files_created)
+                    | set(generation.files_modified)
+                    | set(generation.files_deleted)
+                )
+                self._verify_protected_files(wt_path, protected_before, logs_ref)
+                if EXPERIMENT_ENTRYPOINT not in changed:
+                    raise CodeExecutionError(
+                        "code backend did not modify run_experiment.py",
+                        logs=logs_ref,
                     )
-                    or "code generation produced no execution output"
-                ),
-            )
-            await self._write_logs(log_path, [("generation", generation_log)])
-            if not engine_result.success:
+                try:
+                    GeneratedTreePolicy().validate(wt_path, changed)
+                except CodeExecutionError as policy_error:
+                    raise CodeExecutionError(
+                        str(policy_error), logs=logs_ref
+                    ) from policy_error
+                run_output = await self._runtime.run(
+                    ExecutionRequest(
+                        entrypoint=EXPERIMENT_ENTRYPOINT,
+                        cwd=wt_path,
+                        timeout_s=300,
+                        environment={
+                            "ATHENA_EXPERIMENT_ID": experiment_id,
+                            "ATHENA_PHASE": inputs.phase,
+                        },
+                        readonly_inputs=(inputs.features_path,),
+                    )
+                )
+                run_record = (
+                    "run_experiment.py",
+                    ProcessResult(
+                        returncode=run_output.returncode,
+                        output="\n".join(
+                            part
+                            for part in (run_output.stdout, run_output.stderr)
+                            if part
+                        ),
+                    ),
+                )
+                log_results.append(run_record)
+                await self._write_logs(log_path, log_results)
+                previous_outputs.append(run_output)
+                history.append(
+                    {
+                        "round": round_num,
+                        "files": sorted(changed),
+                        "stdout": (run_output.stdout or "")[-2000:],
+                        "stderr": (run_output.stderr or "")[-2000:],
+                    }
+                )
+                if run_output.returncode != 0:
+                    continue
+                try:
+                    evaluation = await self._evaluator.evaluate(
+                        experiment_id,
+                        wt_path / "predictions.csv",
+                        inputs,
+                        eval_spec,
+                    )
+                except Exception as exc:
+                    previous_outputs.append(
+                        ExecutionOutput(
+                            stdout="",
+                            stderr=f"trusted evaluation failed: {exc}",
+                            returncode=-1,
+                        )
+                    )
+                    continue
+                break
+            else:
                 raise CodeExecutionError(
                     "code generation failed after bounded revision rounds",
                     logs=logs_ref,
                 )
-            changed = set(engine_result.files)
-            if EXPERIMENT_ENTRYPOINT not in changed:
-                raise CodeExecutionError(
-                    "code backend did not modify run_experiment.py", logs=logs_ref
-                )
-            unexpected = changed - {EXPERIMENT_ENTRYPOINT}
-            if unexpected:
-                raise CodeExecutionError(
-                    f"code backend changed files outside scope: {sorted(unexpected)}",
-                    logs=logs_ref,
-                )
-            self._verify_protected_files(wt_path, protected_before, logs_ref)
         else:
-            await self._ensure_experiment_entrypoint(
-                wt_path, experiment_id, hypothesis, plan, eval_spec
+            raise CodeExecutionError(
+                "no code-generation backend configured for trusted execution",
+                logs=logs_ref,
+            )
+        if evaluation is None:
+            raise CodeExecutionError(
+                "experiment did not produce a valid trusted evaluation",
+                logs=logs_ref,
             )
 
-        process_results: list[tuple[str, ProcessResult]] = []
-        if generation_log is not None:
-            process_results.append(("generation", generation_log))
-        run_env = {**os.environ, "ATHENA_EXPERIMENT_ID": experiment_id}
-        for script, timeout_s in (
-            (EXPERIMENT_ENTRYPOINT, 300),
-            (EVALUATION_ENTRYPOINT, 60),
-        ):
-            process_result = await _run_python(script, wt_path, timeout_s, env=run_env)
-            process_results.append((script, process_result))
-            await self._write_logs(log_path, process_results)
-            if process_result.returncode != 0:
-                message = (
-                    process_result.output
-                    if process_result.returncode == -1
-                    else f"{script} exited with code {process_result.returncode}"
-                )
-                raise CodeExecutionError(message, logs=logs_ref)
-
-        evaluation = await self._load_evaluation(wt_path, experiment_id, logs_ref)
+        predictions_path = wt_path / "predictions.csv"
+        canonical = await asyncio.to_thread(lambda: predictions_path.read_bytes())
+        evaluation_ref = await self._artifacts.put_bytes(canonical)
         diff_ref = f"artifact://diffs/{experiment_id}"
         commit = parent_commit
         if self._workspace is not None:
@@ -228,6 +246,7 @@ class CodeAgent:
             commit=commit,
             diff=diff_ref,
             eval=evaluation,
+            evaluation=evaluation_ref,
             logs=logs_ref,
             wall_time_s=time.time() - started_at,
         )
@@ -260,7 +279,11 @@ class CodeAgent:
 
     @staticmethod
     def _protected_hashes(root: Path) -> dict[str, str | None]:
-        protected = (EVALUATION_ENTRYPOINT, "eval_spec.json", "splits.json")
+        protected = (
+            EVALUATION_ENTRYPOINT,
+            "eval_spec.json",
+            ".athena/phase_manifest.json",
+        )
         return {
             name: (
                 hashlib.sha256((root / name).read_bytes()).hexdigest()
@@ -299,32 +322,24 @@ class CodeAgent:
         )
 
     @staticmethod
-    async def _ensure_experiment_entrypoint(
-        wt_path: Path,
-        experiment_id: str,
-        hypothesis: Hypothesis,
-        plan: ExperimentPlan,
-        eval_spec: EvalSpec,
-    ) -> None:
-        entrypoint = wt_path / EXPERIMENT_ENTRYPOINT
-        if entrypoint.is_file():
-            return
-        context = json.dumps(
-            {
-                "experiment_id": experiment_id,
-                "hypothesis": hypothesis.model_dump(mode="json"),
-                "plan": plan.model_dump(mode="json"),
-                "eval_spec": eval_spec.model_dump(mode="json"),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
+    async def _stage_inputs(wt_path: Path, inputs: EvaluationInputs) -> None:
+        stage = wt_path / ".athena" / "inputs"
+        stage.mkdir(parents=True, exist_ok=True)
+        for name in ("train", "predict"):
+            source = inputs.train_path if name == "train" else inputs.features_path
+            await asyncio.to_thread(shutil.copyfile, source, stage / f"{name}.csv")
+        manifest = {
+            "phase": inputs.phase,
+            "row_id_column": inputs.row_id_column,
+            "target": inputs.target,
+            "train": ".athena/inputs/train.csv",
+            "predict": ".athena/inputs/predict.csv",
+        }
+        await asyncio.to_thread(
+            (wt_path / ".athena" / "phase_manifest.json").write_text,
+            json.dumps(manifest, sort_keys=True),
+            encoding="utf-8",
         )
-        source = (
-            f"EXPERIMENT_CONTEXT = {context!r}\n"
-            'raise RuntimeError("code generation backend did not produce '
-            'run_experiment.py")\n'
-        )
-        await asyncio.to_thread(entrypoint.write_text, source, encoding="utf-8")
 
     @staticmethod
     async def _write_logs(
@@ -334,38 +349,3 @@ class CodeAgent:
             f"== {script} ==\n{result.output}" for script, result in results
         )
         await asyncio.to_thread(log_path.write_text, rendered, encoding="utf-8")
-
-    @staticmethod
-    async def _load_evaluation(
-        wt_path: Path, experiment_id: str, logs_ref: ArtifactRef
-    ) -> EvalResult:
-        result_path = wt_path / "eval_result.json"
-        if not result_path.is_file():
-            raise CodeExecutionError(
-                "evaluation did not produce eval_result.json", logs=logs_ref
-            )
-        samples_path = wt_path / "predictions.csv"
-        if not samples_path.is_file():
-            raise CodeExecutionError(
-                "evaluation did not produce per-sample predictions", logs=logs_ref
-            )
-        try:
-            payload = json.loads(
-                await asyncio.to_thread(result_path.read_text, encoding="utf-8")
-            )
-            evaluated_id = payload.get("experiment_id")
-            if evaluated_id != experiment_id:
-                raise ValueError(f"evaluation experiment id mismatch: {evaluated_id!r}")
-            result = EvalResult.model_validate(
-                {
-                    **payload,
-                    "per_sample": f"artifact://{samples_path}",
-                }
-            )
-            if not math.isfinite(result.primary):
-                raise ValueError("evaluation primary metric must be finite")
-            return result
-        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            raise CodeExecutionError(
-                f"invalid evaluation output: {exc}", logs=logs_ref
-            ) from exc

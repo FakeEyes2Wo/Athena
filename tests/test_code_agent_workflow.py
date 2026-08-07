@@ -8,13 +8,14 @@ from athena.code.backends.base import CodeBackend
 from athena.code.types import GenerationResult
 from athena.core.research_models import ExperimentPlan, Hypothesis
 from athena.core.workspace import GitWorkBranch
-from athena.evaluation.types import EvalSpec, MetricDef
 from athena.evaluation.factory import create_eval_spec
+from athena.evaluation.trusted import TrustedEvaluator
+from athena.evaluation.types import EvaluationInputs, EvalSpec, MetricDef
+from athena.storage.artifact_store import LocalArtifactStore
 from athena.workflows.search import code_agent as code_agent_module
 from athena.workflows.search.code_agent import (
     CodeAgent,
     CodeExecutionError,
-    ProcessResult,
 )
 
 
@@ -41,6 +42,22 @@ def _plan() -> ExperimentPlan:
 def _spec() -> EvalSpec:
     return EvalSpec(
         primary=MetricDef(name="f1_macro", direction="maximize", description="Macro F1")
+    )
+
+
+def _inputs(tmp_path) -> EvaluationInputs:
+    train = tmp_path / "train.csv"
+    features = tmp_path / "features.csv"
+    labels = tmp_path / "labels.csv"
+    train.write_text("__athena_row_id,label\n0,0\n1,1\n", encoding="utf-8")
+    features.write_text("__athena_row_id,feature\n0,1\n1,2\n", encoding="utf-8")
+    labels.write_text("__athena_row_id,label\n0,0\n1,1\n", encoding="utf-8")
+    return EvaluationInputs(
+        phase="validation",
+        train_path=train,
+        features_path=features,
+        labels_path=labels,
+        target="label",
     )
 
 
@@ -71,11 +88,14 @@ class WritingBackend(CodeBackend):
         root = Path(target_dir)
         if self.protect_eval:
             (root / "eval.py").write_text("tampered\n", encoding="utf-8")
-        source = (
-            "raise RuntimeError('first round failed')\n"
-            if self.fail_first and self.calls == 1
-            else "print('generated experiment')\n"
-        )
+        if self.fail_first and self.calls == 1:
+            source = "raise RuntimeError('first round failed')\n"
+        else:
+            source = (
+                "from pathlib import Path\n"
+                "Path('predictions.csv').write_text("
+                "'__athena_row_id,prediction\\n0,0\\n1,1\\n', encoding='utf-8')\n"
+            )
         (root / "run_experiment.py").write_text(source, encoding="utf-8")
         return GenerationResult(
             files_created=["run_experiment.py"] if self.calls == 1 else [],
@@ -83,33 +103,48 @@ class WritingBackend(CodeBackend):
         )
 
 
-async def _fake_evaluation_run(script, cwd, timeout_s, env=None):
-    if script == "run_experiment.py":
-        (cwd / "predictions.csv").write_text("prediction\n0\n", encoding="utf-8")
-        (cwd / "labels.csv").write_text("label\n0\n", encoding="utf-8")
-    else:
-        (cwd / "eval_result.json").write_text(
-            json.dumps({"experiment_id": "exp-test", "primary": 1.0, "secondary": {}}),
-            encoding="utf-8",
-        )
-    return ProcessResult(returncode=0, output="ok")
+def _injected_agent(
+    backend: CodeBackend,
+    tmp_path,
+    *,
+    workspace=None,
+    max_rounds: int = 3,
+) -> CodeAgent:
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    return CodeAgent(
+        backend="qoder",
+        backends={"qoder": backend},
+        workspace=workspace,
+        artifacts=artifacts,
+        evaluator=TrustedEvaluator(artifacts),
+        max_rounds=max_rounds,
+    )
+
+
+@pytest.mark.asyncio
+async def test_code_agent_stages_phase_manifest_and_inputs(tmp_path) -> None:
+    inputs = _inputs(tmp_path)
+    worktree = GitWorkBranch(path=str(tmp_path), branch="exp/t", base_commit="a" * 40)
+    agent = CodeAgent()
+    await agent._stage_inputs(tmp_path, inputs)
+    manifest = json.loads((tmp_path / ".athena" / "phase_manifest.json").read_text())
+    assert manifest["phase"] == "validation"
+    assert manifest["row_id_column"] == "__athena_row_id"
+    assert manifest["target"] == "label"
+    assert (tmp_path / ".athena" / "inputs" / "train.csv").is_file()
+    assert "labels" not in json.dumps(manifest)
 
 
 @pytest.mark.asyncio
 async def test_code_agent_runs_the_frozen_evaluator_source(tmp_path) -> None:
-    (tmp_path / "run_experiment.py").write_text(
-        "from pathlib import Path\n"
-        "Path('predictions.csv').write_text('prediction\\n0\\n1\\n', encoding='utf-8')\n"
-        "Path('labels.csv').write_text('label\\n0\\n1\\n', encoding='utf-8')\n",
-        encoding="utf-8",
-    )
     spec = create_eval_spec("classification")
+    inputs = _inputs(tmp_path)
     worktree = GitWorkBranch(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
-    result = await CodeAgent().execute(
-        "exp-test", _hypothesis(), _plan(), "a" * 40, spec, worktree
+    result = await _injected_agent(WritingBackend(), tmp_path).execute(
+        "exp-test", _hypothesis(), _plan(), "a" * 40, spec, worktree, inputs=inputs
     )
 
     assert (tmp_path / "eval.py").read_text(encoding="utf-8") == spec.eval_script
@@ -118,19 +153,17 @@ async def test_code_agent_runs_the_frozen_evaluator_source(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_code_agent_generates_reviews_and_commits_real_diff(
-    tmp_path, monkeypatch
-) -> None:
+async def test_code_agent_generates_reviews_and_commits_real_diff(tmp_path) -> None:
     backend = WritingBackend()
     workspace = RecordingWorkspace()
-    monkeypatch.setattr(code_agent_module, "_run_python", _fake_evaluation_run)
+    inputs = _inputs(tmp_path)
     worktree = GitWorkBranch(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
-    result = await CodeAgent(
-        backend="qoder", backends={"qoder": backend}, workspace=workspace
-    ).execute("exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree)
+    result = await _injected_agent(backend, tmp_path, workspace=workspace).execute(
+        "exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree, inputs=inputs
+    )
 
     assert backend.calls == 1
     assert workspace.diffed == [worktree]
@@ -143,33 +176,39 @@ async def test_code_agent_generates_reviews_and_commits_real_diff(
 @pytest.mark.asyncio
 async def test_code_agent_rejects_backend_changes_to_frozen_evaluator(tmp_path) -> None:
     backend = WritingBackend(protect_eval=True)
+    inputs = _inputs(tmp_path)
     worktree = GitWorkBranch(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
     with pytest.raises(CodeExecutionError, match="protected file changed"):
-        await CodeAgent(backend="qoder", backends={"qoder": backend}).execute(
-            "exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree
+        await _injected_agent(backend, tmp_path).execute(
+            "exp-test",
+            _hypothesis(),
+            _plan(),
+            "a" * 40,
+            _spec(),
+            worktree,
+            inputs=inputs,
         )
 
 
 @pytest.mark.asyncio
 async def test_code_agent_feeds_execution_failure_to_revision_round(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     backend = WritingBackend(fail_first=True)
     workspace = RecordingWorkspace()
-    monkeypatch.setattr(code_agent_module, "_run_python", _fake_evaluation_run)
+    inputs = _inputs(tmp_path)
     worktree = GitWorkBranch(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
-    result = await CodeAgent(
-        backend="qoder",
-        backends={"qoder": backend},
-        workspace=workspace,
-        max_rounds=2,
-    ).execute("exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree)
+    result = await _injected_agent(
+        backend, tmp_path, workspace=workspace, max_rounds=2
+    ).execute(
+        "exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree, inputs=inputs
+    )
 
     assert result.eval.primary == 1.0
     assert backend.calls == 2
