@@ -63,6 +63,7 @@ def test_domain_models_retain_validation_and_serialization() -> None:
 def test_evaluation_types_exports_the_canonical_contracts() -> None:
     assert evaluation_types.__all__ == [
         "ComparisonVerdict",
+        "EvaluationInputs",
         "EvalResult",
         "EvalSpec",
         "MetricDef",
