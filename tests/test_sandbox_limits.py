@@ -8,8 +8,8 @@ from athena.sandbox.limits import SandboxLimits
 
 
 def test_memory_mb_default():
-    # 默认硬内存上限为 512 MiB
-    assert SandboxLimits.MEMORY_MB == 512
+    # 默认硬内存上限为 2048 MiB（需容纳 pandas/numpy/matplotlib 等数据科学栈）
+    assert SandboxLimits.MEMORY_MB == 2048
 
 
 def test_ensure_platform_support_current_platform():

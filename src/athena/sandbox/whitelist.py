@@ -6,7 +6,7 @@ import os as _real_os
 ALLOWED_IMPORTS: frozenset[str] = frozenset({
     "pandas", "numpy", "matplotlib", "seaborn", "scipy", "sklearn",
     "collections", "itertools", "math", "statistics", "json", "csv",
-    "pathlib", "io", "typing", "datetime", "warnings",
+    "pathlib", "io", "typing", "datetime", "warnings", "os",
 })
 
 
@@ -31,6 +31,18 @@ _OS_BLOCKED: frozenset[str] = frozenset({
 })
 
 
+# 模块导入机制会访问的 dunder 属性安全默认值
+_DUNDER_DEFAULTS: dict[str, object] = {
+    "__name__": "os",
+    "__doc__": None,
+    "__spec__": None,
+    "__loader__": None,
+    "__package__": "",
+    "__path__": None,
+    "__all__": None,
+}
+
+
 class _SafeOSProxy:
     """os 模块的安全代理。
 
@@ -40,6 +52,9 @@ class _SafeOSProxy:
     """
 
     def __getattr__(self, name: str) -> object:
+        if name.startswith("__") and name.endswith("__"):
+            # 导入机制会查询 __spec__/__loader__ 等属性，返回安全默认值
+            return _DUNDER_DEFAULTS.get(name, None)
         if name in _OS_BLOCKED:
             raise SafeOSError(f"os.{name} 在 sandbox 中被禁止")
         if name in _OS_WHITELIST:

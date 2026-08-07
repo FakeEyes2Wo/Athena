@@ -37,7 +37,7 @@ elif sys.platform in ("linux", "darwin"):
 class SandboxLimits:
     """子进程资源限制，平台感知。"""
 
-    MEMORY_MB: int = 512
+    MEMORY_MB: int = 2048
     """硬内存上限，单位 MiB。"""
 
     @staticmethod
