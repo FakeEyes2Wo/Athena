@@ -1,13 +1,10 @@
 """Athena Sandbox MCP Server —— 通过 stdio 暴露 python_inspect/python_execute/sandbox_config。"""
 
-import json
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from athena.sandbox.executor import SandboxExecutor
-
-mcp = FastMCP("athena-sandbox")
 
 
 def create_sandbox_server(work_root: str) -> FastMCP:
@@ -19,6 +16,7 @@ def create_sandbox_server(work_root: str) -> FastMCP:
     Returns:
         配置完成的 FastMCP 实例，已注册 3 个工具
     """
+    mcp = FastMCP("athena-sandbox")
     executor = SandboxExecutor(work_root=Path(work_root))
 
     @mcp.tool()

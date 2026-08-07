@@ -8,7 +8,6 @@ import argparse
 from athena.sandbox.lifecycle import ProcessLifecycle
 from athena.sandbox.server import create_sandbox_server
 
-
 def main() -> None:
     """解析 CLI 参数并启动 MCP stdio server。"""
     parser = argparse.ArgumentParser(description="Athena Sandbox MCP Server")
