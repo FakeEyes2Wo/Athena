@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from athena.evaluation import Comparator
 from athena.evaluation.comparator import compare_results
 from athena.evaluation.evaluator import evaluate_predictions
-from athena.evaluation.factory import create_eval_spec
+from athena.evaluation.factory import create_eval_spec, default_eval_script
 from athena.evaluation.types import ComparisonVerdict, EvalResult, EvalSpec, MetricDef
 
 
@@ -74,6 +74,21 @@ def test_eval_spec_is_frozen() -> None:
 
     with pytest.raises(ValidationError):
         spec.test_ratio = 0.3
+
+
+def test_eval_spec_freezes_evaluator_source() -> None:
+    spec = create_eval_spec("classification")
+
+    assert spec.eval_script
+    assert spec.eval_script == default_eval_script(spec)
+    assert "ATHENA_EXPERIMENT_ID" in spec.eval_script
+
+
+def test_default_eval_script_supports_regression_metric() -> None:
+    spec = create_eval_spec("regression")
+
+    assert '"rmse"' in spec.eval_script
+    assert "mean_squared_error" in spec.eval_script
 
 
 def test_comparator_detects_improvement():

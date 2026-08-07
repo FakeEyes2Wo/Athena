@@ -22,6 +22,7 @@ class EvalSpec(BaseModel):
 
     primary: MetricDef
     secondary: list[MetricDef] = Field(default_factory=list)
+    eval_script: str = ""
     split_seed: int = 42
     test_ratio: float = 0.2
 

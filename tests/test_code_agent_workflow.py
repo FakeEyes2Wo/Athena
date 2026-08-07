@@ -8,6 +8,7 @@ from athena.code.types import GenerationResult
 from athena.core.research_models import ExperimentPlan, Hypothesis
 from athena.core.workspace import GitWorkBranch
 from athena.evaluation.types import EvalSpec, MetricDef
+from athena.evaluation.factory import create_eval_spec
 from athena.workflows.search import code_agent as code_agent_module
 from athena.workflows.search.code_agent import (
     CodeAgent,
@@ -81,7 +82,7 @@ class WritingBackend(CodeBackend):
         )
 
 
-async def _fake_evaluation_run(script, cwd, timeout_s):
+async def _fake_evaluation_run(script, cwd, timeout_s, env=None):
     if script == "run_experiment.py":
         (cwd / "predictions.csv").write_text("prediction\n0\n", encoding="utf-8")
         (cwd / "labels.csv").write_text("label\n0\n", encoding="utf-8")
@@ -91,6 +92,28 @@ async def _fake_evaluation_run(script, cwd, timeout_s):
             encoding="utf-8",
         )
     return ProcessResult(returncode=0, output="ok")
+
+
+@pytest.mark.asyncio
+async def test_code_agent_runs_the_frozen_evaluator_source(tmp_path) -> None:
+    (tmp_path / "run_experiment.py").write_text(
+        "from pathlib import Path\n"
+        "Path('predictions.csv').write_text('prediction\\n0\\n1\\n', encoding='utf-8')\n"
+        "Path('labels.csv').write_text('label\\n0\\n1\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    spec = create_eval_spec("classification")
+    worktree = GitWorkBranch(
+        path=str(tmp_path), branch="exp/test", base_commit="a" * 40
+    )
+
+    result = await CodeAgent().execute(
+        "exp-test", _hypothesis(), _plan(), "a" * 40, spec, worktree
+    )
+
+    assert (tmp_path / "eval.py").read_text(encoding="utf-8") == spec.eval_script
+    assert result.eval.experiment_id == "exp-test"
+    assert result.eval.primary == 1.0
 
 
 @pytest.mark.asyncio

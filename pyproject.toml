@@ -15,6 +15,7 @@ dependencies = [
     "scipy>=1.14.0",
     "websockets>=14.0",
     "qoder-agent-sdk==1.0.12",
+    "scikit-learn>=1.5",
 ]
 
 [dependency-groups]

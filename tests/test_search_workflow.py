@@ -471,7 +471,7 @@ async def test_code_agent_uses_a_fixed_entrypoint_without_fixing_model_filename(
 ) -> None:
     scripts: list[str] = []
 
-    async def fake_run(script: str, cwd, timeout_s: float) -> ProcessResult:
+    async def fake_run(script: str, cwd, timeout_s: float, env=None) -> ProcessResult:
         scripts.append(script)
         if script == code_agent_module.EVALUATION_ENTRYPOINT:
             (cwd / "predictions.csv").write_text("prediction\n0\n", encoding="utf-8")
@@ -543,7 +543,7 @@ async def test_code_agent_rejects_process_failures_with_log_evidence(
     process_result: ProcessResult,
     expected: str,
 ) -> None:
-    async def fake_run(script: str, cwd, timeout_s: float) -> ProcessResult:
+    async def fake_run(script: str, cwd, timeout_s: float, env=None) -> ProcessResult:
         return process_result
 
     monkeypatch.setattr(code_agent_module, "_run_python", fake_run)
@@ -580,7 +580,7 @@ async def test_code_agent_rejects_process_failures_with_log_evidence(
 async def test_code_agent_rejects_missing_evaluation_output(
     tmp_path, monkeypatch
 ) -> None:
-    async def fake_run(script: str, cwd, timeout_s: float) -> ProcessResult:
+    async def fake_run(script: str, cwd, timeout_s: float, env=None) -> ProcessResult:
         return ProcessResult(returncode=0, output="ok")
 
     monkeypatch.setattr(code_agent_module, "_run_python", fake_run)

@@ -1,6 +1,7 @@
 """Build and freeze EvalSpec from TaskMetaData during PREPARE phase."""
 
 from athena.evaluation.types import EvalSpec, MetricDef
+from athena.evaluation.factory import default_eval_script
 from athena.data.types import DataProfile
 from athena.research.models import TaskMetaData
 
@@ -40,4 +41,5 @@ class EvaluatorFactory:
             description=task.primary_metric.name or default.description,
         )
         secondary = [default] if default.name != primary.name else []
-        return EvalSpec(primary=primary, secondary=secondary)
+        spec = EvalSpec(primary=primary, secondary=secondary)
+        return spec.model_copy(update={"eval_script": default_eval_script(spec)})

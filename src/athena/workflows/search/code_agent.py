@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -39,7 +40,12 @@ class CodeExecutionError(RuntimeError):
         self.logs = logs
 
 
-async def _run_python(script: str, cwd: Path, timeout_s: float) -> ProcessResult:
+async def _run_python(
+    script: str,
+    cwd: Path,
+    timeout_s: float,
+    env: Mapping[str, str] | None = None,
+) -> ProcessResult:
     """Run one Python entrypoint and retain its exit status and output."""
     process = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -47,6 +53,7 @@ async def _run_python(script: str, cwd: Path, timeout_s: float) -> ProcessResult
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -124,7 +131,7 @@ class CodeAgent:
         log_path = wt_path / f"athena_logs_{experiment_id}.txt"
         logs_ref = f"artifact://{log_path}"
 
-        await self._write_evaluator(wt_path, experiment_id)
+        await self._ensure_evaluator(wt_path, eval_spec)
         protected_before = self._protected_hashes(wt_path)
 
         generation_log: ProcessResult | None = None
@@ -190,11 +197,12 @@ class CodeAgent:
         process_results: list[tuple[str, ProcessResult]] = []
         if generation_log is not None:
             process_results.append(("generation", generation_log))
+        run_env = {**os.environ, "ATHENA_EXPERIMENT_ID": experiment_id}
         for script, timeout_s in (
             (EXPERIMENT_ENTRYPOINT, 300),
             (EVALUATION_ENTRYPOINT, 60),
         ):
-            process_result = await _run_python(script, wt_path, timeout_s)
+            process_result = await _run_python(script, wt_path, timeout_s, env=run_env)
             process_results.append((script, process_result))
             await self._write_logs(log_path, process_results)
             if process_result.returncode != 0:
@@ -277,26 +285,15 @@ class CodeAgent:
             )
 
     @staticmethod
-    async def _write_evaluator(wt_path: Path, experiment_id: str) -> None:
-        evaluator = f"""import json
-import pandas as pd
-from sklearn.metrics import accuracy_score, f1_score
+    async def _ensure_evaluator(wt_path: Path, eval_spec: EvalSpec) -> None:
+        entrypoint = wt_path / EVALUATION_ENTRYPOINT
+        if entrypoint.is_file():
+            return
+        from athena.evaluation.factory import default_eval_script
 
-predictions = pd.read_csv("predictions.csv")
-labels = pd.read_csv("labels.csv")
-y_pred = predictions.iloc[:, 0]
-y_true = labels.iloc[:, 0]
-primary = float(f1_score(y_true, y_pred, average="macro"))
-secondary = {{"accuracy": float(accuracy_score(y_true, y_pred))}}
-with open("eval_result.json", "w", encoding="utf-8") as stream:
-    json.dump({{
-        "experiment_id": "{experiment_id}",
-        "primary": primary,
-        "secondary": secondary,
-    }}, stream, indent=2)
-"""
+        evaluator = eval_spec.eval_script or default_eval_script(eval_spec)
         await asyncio.to_thread(
-            (wt_path / EVALUATION_ENTRYPOINT).write_text,
+            entrypoint.write_text,
             evaluator,
             encoding="utf-8",
         )
