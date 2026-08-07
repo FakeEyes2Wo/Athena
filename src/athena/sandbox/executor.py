@@ -14,7 +14,6 @@ from pathlib import Path
 from athena.sandbox.whitelist import ALLOWED_IMPORTS
 from athena.sandbox.limits import SandboxLimits
 
-
 @dataclass(slots=True)
 class InspectResult:
     """python_inspect 的返回结构。"""
@@ -28,7 +27,6 @@ class InspectResult:
     traceback: str | None = None
     duration_ms: int = 0
 
-
 @dataclass(slots=True)
 class ExecuteResult:
     """python_execute 的返回结构。"""
@@ -41,7 +39,6 @@ class ExecuteResult:
     traceback: str | None = None
     duration_ms: int = 0
     memory_mb: float | None = None
-
 
 class SandboxExecutor:
     """受控 Python 代码执行器。
@@ -255,7 +252,11 @@ print(_marker_end, flush=True)
             )
         except asyncio.TimeoutError:
             # 子进程执行超时 → 强制终止并返回超时错误
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                # 子进程在超时与 kill 之间已退出
+                pass
             await proc.wait()
             return "", {"ok": False, "error": f"超时({timeout}s)"}, None
         finally:
@@ -322,7 +323,6 @@ print(_marker_end, flush=True)
                 # JSON 解析失败（列名含特殊字符）→ 返回 None
                 return None
         return None
-
 
 def _parse_subprocess_output(
     stdout_b: bytes, stderr_b: bytes
