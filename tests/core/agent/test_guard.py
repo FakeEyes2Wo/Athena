@@ -75,13 +75,13 @@ class TestErrorPatterns:
 
     def test_different_patterns_independent(self):
         guard = RunGuard()
-        # 两种错误各记 2 次，穿插成功避免连续失败规则先行触发
-        for _ in range(2):
+        # 累计 Timeout 3 次，穿插成功避免规则 2 先行触发
+        for _ in range(3):
             guard.record_result("python_inspect", success=False, error="Timeout")
             guard.record_result("python_inspect", success=True, error=None)
-            guard.record_result("python_inspect", success=False, error="ValueError")
-            guard.record_result("python_inspect", success=True, error=None)
-        # 不同 error_type → 独立计数，均未达上限 → 不触发
+        # 第 4 次 Timeout 触发规则 3（不同 error_type 独立计数）
+        with pytest.raises(GuardError, match="反复遇到"):
+            guard.record_result("python_inspect", success=False, error="Timeout")
 
 class TestHashArgs:
     """_hash_args 参数哈希：与键顺序无关。"""
