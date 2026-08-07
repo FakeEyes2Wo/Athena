@@ -14,15 +14,63 @@ def test_review_approved_normal_diff() -> None:
     assert verdict.action == "approve"
 
 
-@pytest.mark.parametrize("protected_path", ["eval.py", "splits.json"])
+@pytest.mark.parametrize("protected_path", ["eval.py", "eval_spec.json", ".gitignore"])
 def test_review_rejects_protected_evaluation_changes(protected_path: str) -> None:
-    """Evaluation code and frozen splits cannot be changed."""
+    """Evaluation code, spec, and ignore rules cannot be changed."""
     diff = f"diff --git a/{protected_path} b/{protected_path}\n+tampered\n"
     verdict = review.review_diff(
         diff, allowed_files={protected_path}, declared_dependencies=set()
     )
     assert verdict.action == "reject"
     assert verdict.reasons
+
+
+@pytest.mark.parametrize("aux_path", ["models/stack.py", "config.json"])
+def test_review_approves_auxiliary_paths_in_scope(aux_path: str) -> None:
+    """A declared auxiliary file inside the generated tree is approved."""
+    diff = f"diff --git a/{aux_path} b/{aux_path}\n+def build():\n+    pass\n"
+    verdict = review.review_diff(
+        diff, allowed_files={aux_path}, declared_dependencies=set()
+    )
+    assert verdict.action == "approve"
+
+
+def test_review_does_not_miss_deletion_paths() -> None:
+    """A deletion header (--- a/old.py, +++ /dev/null) still reports the path."""
+    diff = (
+        "diff --git a/old.py b/old.py\n"
+        "deleted file mode 100644\n"
+        "index e929141..0000000\n"
+        "--- a/old.py\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        '-print("old")\n'
+    )
+    approved = review.review_diff(
+        diff, allowed_files={"old.py"}, declared_dependencies=set()
+    )
+    assert approved.action == "approve"
+
+    outside = review.review_diff(
+        diff, allowed_files={"model.py"}, declared_dependencies=set()
+    )
+    assert outside.action == "revise"
+    assert any("old.py" in reason for reason in outside.reasons)
+
+
+def test_review_rejects_protected_deletion() -> None:
+    """Deleting a protected evaluation file is rejected like any change."""
+    diff = (
+        "diff --git a/eval.py b/eval.py\n"
+        "deleted file mode 100644\n"
+        "--- a/eval.py\n"
+        "+++ /dev/null\n"
+    )
+    verdict = review.review_diff(
+        diff, allowed_files={"eval.py"}, declared_dependencies=set()
+    )
+    assert verdict.action == "reject"
+    assert any("eval.py" in reason for reason in verdict.reasons)
 
 
 def test_review_requires_revision_for_scope_escape() -> None:

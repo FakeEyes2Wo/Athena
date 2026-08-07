@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from athena.core.workspace import GitWorkspaceError, GitWorkBranch
+import pytest
+
+from athena.core.workspace import GitDiff, GitWorkspaceError, GitWorkBranch
 from athena.git_workspace import LocalGitWorkspace
 
 
@@ -71,33 +73,33 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         target.write_text("first version\n", encoding="utf-8")
         (path / "weights.bin").write_bytes(bytes(range(256)) * 2)
 
-        first_ref = await self.manager.diff(workspace)
-        self.assertIn(b"diff --git a/new.txt b/new.txt", self.artifacts[first_ref])
-        self.assertIn(b"first version", self.artifacts[first_ref])
-        self.assertIn(b"GIT binary patch", self.artifacts[first_ref])
+        first_diff = await self.manager.diff(workspace)
+        self.assertIn(b"diff --git a/new.txt b/new.txt", self.artifacts[first_diff.ref])
+        self.assertIn(b"first version", self.artifacts[first_diff.ref])
+        self.assertIn(b"GIT binary patch", self.artifacts[first_diff.ref])
 
         # diff 之后的任何 tracked 变化都必须重新进入审查流程。
         target.write_text("approved version\n", encoding="utf-8")
         with self.assertRaises(GitWorkspaceError):
             await self.manager.commit(
-                workspace, first_ref, "must not commit stale review"
+                workspace, first_diff, "must not commit stale review"
             )
 
-        second_ref = await self.manager.diff(workspace)
-        self.assertNotEqual(first_ref, second_ref)
+        second_diff = await self.manager.diff(workspace)
+        self.assertNotEqual(first_diff.ref, second_diff.ref)
         with self.assertRaises(GitWorkspaceError):
             await self.manager.commit(
-                workspace, first_ref, "must bind the approved reference"
+                workspace, first_diff, "must bind the approved reference"
             )
         surprise = path / "not-reviewed.txt"
         surprise.write_text("not reviewed\n", encoding="utf-8")
         with self.assertRaises(GitWorkspaceError):
             await self.manager.commit(
-                workspace, second_ref, "must not commit untracked file"
+                workspace, second_diff, "must not commit untracked file"
             )
         surprise.unlink()
         commit = await self.manager.commit(
-            workspace, second_ref, "checkpoint approved diff"
+            workspace, second_diff, "checkpoint approved diff"
         )
         saved = self._git("show", f"{commit}:new.txt", cwd=path).stdout
         self.assertEqual("approved version\n", saved)
@@ -105,7 +107,7 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             commit,
             await self.manager.commit(
-                workspace, second_ref, "idempotent retry after uncertain response"
+                workspace, second_diff, "idempotent retry after uncertain response"
             ),
         )
 
@@ -128,19 +130,29 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
     async def test_empty_diff_reuses_head_without_creating_commit(self) -> None:
         workspace = await self._create("experiment/config-only")
 
-        diff_ref = await self.manager.diff(workspace)
-        self.assertEqual(b"", self.artifacts[diff_ref])
+        diff = await self.manager.diff(workspace)
+        self.assertEqual(b"", self.artifacts[diff.ref])
         self.assertEqual(
             self.base_commit,
-            await self.manager.commit(
-                workspace, diff_ref, "configuration-only experiment"
-            ),
+            await self.manager.commit(workspace, diff, "configuration-only experiment"),
         )
         self.assertEqual(
             self.base_commit,
             self._git("rev-parse", "HEAD", cwd=Path(workspace.path)).stdout.strip(),
         )
         await self.manager.remove(workspace, delete_branch=True)
+
+    async def test_diff_ignores_runtime_outputs_excluded_by_gitignore(self) -> None:
+        workspace = await self._create("experiment/ignored-runtime")
+        path = Path(workspace.path)
+        (path / ".gitignore").write_text("runtime.log\n", encoding="utf-8")
+        (path / "run_experiment.py").write_text("print('ok')\n", encoding="utf-8")
+        (path / "runtime.log").write_text("observed output\n", encoding="utf-8")
+
+        diff = await self.manager.diff(workspace)
+
+        self.assertIn(b"run_experiment.py", self.artifacts[diff.ref])
+        self.assertNotIn(b"diff --git a/runtime.log", self.artifacts[diff.ref])
 
     async def test_dirty_remove_requires_explicit_force(self) -> None:
         workspace = await self._create("experiment/discard")
@@ -181,7 +193,9 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         workspace = await self._create("experiment/no-review")
         with self.assertRaises(GitWorkspaceError):
             await self.manager.commit(
-                workspace, "artifact://diff/missing", "not reviewed"
+                workspace,
+                GitDiff(ref="artifact://diff/missing", paths=()),
+                "not reviewed",
             )
 
     async def test_branch_delete_failure_can_be_retried(self) -> None:
@@ -204,6 +218,30 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
 
         self.manager._git = original_git  # type: ignore[method-assign]
         await self.manager.remove(workspace, delete_branch=True)
+
+
+@pytest.mark.asyncio
+async def test_diff_reports_paths_including_deletions(tmp_path) -> None:
+    from athena.git_workspace import LocalGitWorkspace
+
+    repo = tmp_path / "repo"
+    workspace = LocalGitWorkspace(
+        repo, tmp_path / "wt", lambda b: f"artifact://d/{len(b)}"
+    )
+    base = await workspace.init(repo_path=repo)
+
+    branch = await workspace.create(base, "exp/t4")
+    p = Path(branch.path)
+    (p / "run_experiment.py").write_text("print(1)", encoding="utf-8")
+    (p / "old.py").write_text("x", encoding="utf-8")
+    diff = await workspace.diff(branch)
+    assert "run_experiment.py" in diff.paths
+    assert "old.py" in diff.paths
+    assert diff.ref.startswith("artifact://")
+
+    (p / "old.py").unlink()
+    diff2 = await workspace.diff(branch)
+    assert "old.py" in diff2.paths
 
 
 if __name__ == "__main__":

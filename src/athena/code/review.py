@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Literal
 
-_PROTECTED_FILES = {"eval.py", "splits.json"}
+_PROTECTED_FILES = {"eval.py", "eval_spec.json", ".gitignore"}
 
 
 @dataclass

@@ -2,13 +2,15 @@
 
 import asyncio
 import hashlib
+import inspect
 import re
 from pathlib import Path
 from uuid import uuid4
 
-from athena.core.contracts import ArtifactRef, CommitHash
+from athena.core.contracts import CommitHash
 from athena.core.workspace import (
     BinaryDiffWriter,
+    GitDiff,
     GitWorkBranch,
     GitWorkspace,
     GitWorkspaceError,
@@ -84,7 +86,7 @@ class LocalGitWorkspace(GitWorkspace):
             }
             return workspace
 
-    async def diff(self, workspace: GitWorkBranch) -> ArtifactRef:
+    async def diff(self, workspace: GitWorkBranch) -> GitDiff:
         async with self._lock:
             state = self._get_state(workspace)
             if state["committed"]:
@@ -96,11 +98,34 @@ class LocalGitWorkspace(GitWorkspace):
                 "diff", "--cached", "--binary", workspace.base_commit, cwd=path
             )
             if await self._git("diff", cwd=path) or await self._git(
-                "ls-files", "--others", cwd=path
+                "ls-files", "--others", "--exclude-standard", cwd=path
             ):
                 raise GitWorkspaceError("工作区仍有未暂存变更")
 
-            artifact = await self._diff_writer(staged)
+            names = await self._git(
+                "diff",
+                "--cached",
+                "--name-only",
+                "-z",
+                workspace.base_commit,
+                cwd=path,
+            )
+            changed = {name for name in names.decode("utf-8").split("\0") if name}
+            # 相对 base 的净 diff 会吞掉「先暂存、后删除且从未提交」的文件；
+            # 用上一轮暂存树再 diff 一次，还原这类删除路径，保证 paths 不漏掉删除。
+            previous_tree = (
+                state["review"]["tree"] if state["review"] else workspace.base_commit
+            )
+            previous_names = await self._git(
+                "diff", "--cached", "--name-only", "-z", previous_tree, cwd=path
+            )
+            changed.update(
+                name for name in previous_names.decode("utf-8").split("\0") if name
+            )
+            paths = tuple(sorted(changed))
+
+            result = self._diff_writer(staged)
+            artifact = await result if inspect.isawaitable(result) else result
             state["review"] = {
                 "artifact": artifact,
                 "sha256": hashlib.sha256(staged).hexdigest(),
@@ -110,15 +135,15 @@ class LocalGitWorkspace(GitWorkspace):
                 .strip(),
                 "empty": not staged,
             }
-            return artifact
+            return GitDiff(ref=artifact, paths=paths)
 
     async def commit(
-        self, workspace: GitWorkBranch, approved_artifact: ArtifactRef, message: str
+        self, workspace: GitWorkBranch, approved_diff: GitDiff, message: str
     ) -> CommitHash:
         async with self._lock:
             state = self._get_state(workspace)
             review = state["review"]
-            if not review or review["artifact"] != approved_artifact:
+            if not review or review["artifact"] != approved_diff.ref:
                 raise GitWorkspaceError("批准的 artifact 与当前 diff 不匹配")
             if state["committed"]:
                 return state["committed"]

@@ -23,6 +23,13 @@ class GitWorkBranch(BaseModel):
     base_commit: CommitHash
 
 
+class GitDiff(BaseModel):
+    """A content-addressed binary diff with the paths changed from the base commit."""
+
+    ref: ArtifactRef
+    paths: tuple[str, ...]
+
+
 class GitWorkspace(ABC):
     """Abstract operations for an isolated Git worktree."""
 
@@ -40,14 +47,14 @@ class GitWorkspace(ABC):
         """Create a temporary branch and isolated worktree from a commit."""
 
     @abstractmethod
-    async def diff(self, workspace: GitWorkBranch) -> ArtifactRef:
+    async def diff(self, workspace: GitWorkBranch) -> GitDiff:
         """Store the binary diff from the workspace base commit."""
 
     @abstractmethod
     async def commit(
         self,
         workspace: GitWorkBranch,
-        approved_diff_ref: ArtifactRef,
+        approved_diff: GitDiff,
         message: str,
     ) -> CommitHash:
         """Commit the last approved, unchanged workspace diff."""

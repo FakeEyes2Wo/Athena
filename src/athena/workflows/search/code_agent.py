@@ -14,6 +14,7 @@ from athena.code.backends.base import CodeBackend, render_backend_prompt
 from athena.code.execution import ExecutionRequest, LocalExperimentRuntime
 from athena.code.file_policy import GeneratedTreePolicy
 from athena.code.monitor import AgentMonitor
+from athena.code.review import review_diff
 from athena.code.types import ExecutionOutput
 from athena.core.workspace import GitWorkBranch
 from athena.core.contracts import ArtifactRef
@@ -22,6 +23,18 @@ from athena.evaluation.types import EvalResult, EvalSpec, EvaluationInputs
 
 EXPERIMENT_ENTRYPOINT = "run_experiment.py"
 EVALUATION_ENTRYPOINT = "eval.py"
+
+
+def _installed_dependencies() -> set[str]:
+    """Top-level import names available in the frozen Athena environment."""
+    try:
+        from importlib.metadata import packages_distributions
+    except ImportError:  # pragma: no cover - Python 3.11+
+        return set()
+    names = set()
+    for top_level in packages_distributions().values():
+        names.update(top_level)
+    return names
 
 
 class ProcessResult(BaseModel):
@@ -235,12 +248,24 @@ class CodeAgent:
         diff_ref = f"artifact://diffs/{experiment_id}"
         commit = parent_commit
         if self._workspace is not None:
-            diff_ref = await self._workspace.diff(worktree)
-            commit = await self._workspace.commit(
-                worktree,
-                diff_ref,
-                f"experiment: {experiment_id}",
+            diff = await self._workspace.diff(worktree)
+            patch = await self._artifacts.get_bytes(diff.ref)
+            verdict = review_diff(
+                patch.decode("utf-8", errors="replace"),
+                allowed_files=set(diff.paths),
+                declared_dependencies=_installed_dependencies(),
             )
+            if verdict.action == "reject":
+                raise CodeExecutionError(
+                    "generated diff rejected: " + "; ".join(verdict.reasons),
+                    logs=logs_ref,
+                )
+            diff_ref = diff.ref
+            commit = await self._workspace.commit(
+                worktree, diff, f"experiment: {experiment_id}"
+            )
+        log_text = await asyncio.to_thread(log_path.read_text, encoding="utf-8")
+        logs_ref = await self._artifacts.put_text(log_text)
         return CodegenResult(
             experiment_id=experiment_id,
             commit=commit,

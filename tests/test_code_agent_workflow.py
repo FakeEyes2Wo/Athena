@@ -7,7 +7,7 @@ import pytest
 from athena.code.backends.base import CodeBackend
 from athena.code.types import GenerationResult
 from athena.core.research_models import ExperimentPlan, Hypothesis
-from athena.core.workspace import GitWorkBranch
+from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.evaluation.factory import create_eval_spec
 from athena.evaluation.trusted import TrustedEvaluator
 from athena.evaluation.types import EvaluationInputs, EvalSpec, MetricDef
@@ -62,16 +62,21 @@ def _inputs(tmp_path) -> EvaluationInputs:
 
 
 class RecordingWorkspace:
-    def __init__(self) -> None:
+    def __init__(self, artifacts) -> None:
         self.diffed = []
         self.committed = []
+        self._artifacts = artifacts
+        self._patch = (
+            "diff --git a/run_experiment.py b/run_experiment.py\n" "+print('ok')\n"
+        )
 
     async def diff(self, worktree):
         self.diffed.append(worktree)
-        return "artifact://diffs/approved"
+        ref = await self._artifacts.put_text(self._patch)
+        return GitDiff(ref=ref, paths=("run_experiment.py",))
 
-    async def commit(self, worktree, approved_diff_ref, message):
-        self.committed.append((worktree, approved_diff_ref, message))
+    async def commit(self, worktree, approved_diff, message):
+        self.committed.append((worktree, approved_diff, message))
         return "c" * 40
 
 
@@ -139,8 +144,9 @@ def _injected_agent(
     *,
     workspace=None,
     max_rounds: int = 3,
+    artifacts=None,
 ) -> CodeAgent:
-    artifacts = LocalArtifactStore(tmp_path / "store")
+    artifacts = artifacts or LocalArtifactStore(tmp_path / "store")
     return CodeAgent(
         backend="qoder",
         backends={"qoder": backend},
@@ -185,22 +191,86 @@ async def test_code_agent_runs_the_frozen_evaluator_source(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_code_agent_generates_reviews_and_commits_real_diff(tmp_path) -> None:
     backend = WritingBackend()
-    workspace = RecordingWorkspace()
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    workspace = RecordingWorkspace(artifacts)
     inputs = _inputs(tmp_path)
     worktree = GitWorkBranch(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
-    result = await _injected_agent(backend, tmp_path, workspace=workspace).execute(
+    result = await _injected_agent(
+        backend, tmp_path, workspace=workspace, artifacts=artifacts
+    ).execute(
         "exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree, inputs=inputs
     )
 
     assert backend.calls == 1
     assert workspace.diffed == [worktree]
-    assert workspace.committed[0][1] == "artifact://diffs/approved"
-    assert result.diff == "artifact://diffs/approved"
+    assert workspace.committed[0][1].ref == result.diff
+    assert result.diff.startswith("sha256:")
     assert result.commit == "c" * 40
     assert result.eval.primary == 1.0
+    assert result.evaluation.startswith("sha256:")
+    assert result.logs.startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_code_agent_evidence_survives_worktree_removal(tmp_path) -> None:
+    """Logs, evaluation, and diff are content-addressed and readable after cleanup."""
+    backend = WritingBackend()
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    workspace = RecordingWorkspace(artifacts)
+    inputs = _inputs(tmp_path)
+    worktree = GitWorkBranch(
+        path=str(tmp_path), branch="exp/test", base_commit="a" * 40
+    )
+
+    result = await _injected_agent(
+        backend, tmp_path, workspace=workspace, artifacts=artifacts
+    ).execute(
+        "exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree, inputs=inputs
+    )
+
+    assert result.diff.startswith("sha256:")
+    assert result.logs.startswith("sha256:")
+    assert result.evaluation.startswith("sha256:")
+    logs = await artifacts.get_text(result.logs)
+    assert "run_experiment.py" in logs
+    predictions = await artifacts.get_bytes(result.evaluation)
+    assert b"prediction" in predictions
+    patch = await artifacts.get_bytes(result.diff)
+    assert b"run_experiment.py" in patch
+
+
+@pytest.mark.asyncio
+async def test_code_agent_rejects_protected_diff_via_review(tmp_path) -> None:
+    """A generated diff touching a protected evaluation file is rejected."""
+
+    class ProtectedWorkspace(RecordingWorkspace):
+        def __init__(self, artifacts):
+            super().__init__(artifacts)
+            self._patch = "diff --git a/eval.py b/eval.py\n+print('tampered')\n"
+
+    backend = WritingBackend()
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    workspace = ProtectedWorkspace(artifacts)
+    inputs = _inputs(tmp_path)
+    worktree = GitWorkBranch(
+        path=str(tmp_path), branch="exp/test", base_commit="a" * 40
+    )
+
+    with pytest.raises(CodeExecutionError, match="generated diff rejected"):
+        await _injected_agent(
+            backend, tmp_path, workspace=workspace, artifacts=artifacts
+        ).execute(
+            "exp-test",
+            _hypothesis(),
+            _plan(),
+            "a" * 40,
+            _spec(),
+            worktree,
+            inputs=inputs,
+        )
 
 
 @pytest.mark.asyncio
@@ -228,14 +298,19 @@ async def test_code_agent_feeds_execution_failure_to_revision_round(
     tmp_path,
 ) -> None:
     backend = WritingBackend(fail_first=True)
-    workspace = RecordingWorkspace()
+    artifacts = LocalArtifactStore(tmp_path / "store")
+    workspace = RecordingWorkspace(artifacts)
     inputs = _inputs(tmp_path)
     worktree = GitWorkBranch(
         path=str(tmp_path), branch="exp/test", base_commit="a" * 40
     )
 
     result = await _injected_agent(
-        backend, tmp_path, workspace=workspace, max_rounds=2
+        backend,
+        tmp_path,
+        workspace=workspace,
+        artifacts=artifacts,
+        max_rounds=2,
     ).execute(
         "exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree, inputs=inputs
     )
