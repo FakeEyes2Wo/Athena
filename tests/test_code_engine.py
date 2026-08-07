@@ -225,7 +225,9 @@ async def test_engine_completes_after_successful_required_output(tmp_path) -> No
         async def generate(self, prompt, target_dir, previous_outputs, history):
             script = os.path.join(target_dir, "work.py")
             with open(script, "w", encoding="utf-8") as file:
-                file.write("with open('REPORT.md', 'w') as report: report.write('ok')\n")
+                file.write(
+                    "with open('REPORT.md', 'w') as report: report.write('ok')\n"
+                )
             return GenerationResult(files_created=["work.py"])
 
     engine = CodeEngine(backend=SuccessfulBackend(), monitor=AgentMonitor())
@@ -264,3 +266,35 @@ async def test_engine_completes_successful_script_without_output_spec(tmp_path) 
     assert result.success is True
     assert result.final_output is not None
     assert result.final_output.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_engine_executes_requested_entrypoint_instead_of_first_python_file(
+    tmp_path,
+) -> None:
+    """Experiment orchestration is stable even when a backend edits helper files."""
+
+    class MultiFileBackend(CodeBackend):
+        async def generate(self, prompt, target_dir, previous_outputs, history):
+            with open(
+                os.path.join(target_dir, "a_helper.py"), "w", encoding="utf-8"
+            ) as file:
+                file.write("raise RuntimeError('wrong entrypoint')\n")
+            with open(
+                os.path.join(target_dir, "run_experiment.py"),
+                "w",
+                encoding="utf-8",
+            ) as file:
+                file.write("print('experiment ok')\n")
+            return GenerationResult(files_created=["a_helper.py", "run_experiment.py"])
+
+    result = await CodeEngine(backend=MultiFileBackend(), monitor=AgentMonitor()).run(
+        prompt="x",
+        target_dir=str(tmp_path),
+        max_rounds=1,
+        entrypoint="run_experiment.py",
+    )
+
+    assert result.success is True
+    assert result.final_output is not None
+    assert "experiment ok" in result.final_output.stdout

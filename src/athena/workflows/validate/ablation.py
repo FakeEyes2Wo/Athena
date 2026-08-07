@@ -108,6 +108,7 @@ class Validator:
                 eval=result.eval,
                 verdict=None,
                 artifacts={"diff": result.diff, "logs": result.logs},
+                commit=result.commit,
             )
         except asyncio.CancelledError:
             tree.transition_experiment(experiment_id, ExperimentStatus.CANCELLED)

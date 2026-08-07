@@ -221,6 +221,7 @@ class ResearchTree:
         eval: EvalResult,
         verdict: ComparisonVerdict | None,
         artifacts: dict[str, ArtifactRef],
+        commit: CommitHash | None = None,
     ) -> None:
         experiment = self.get_experiment(experiment_id)
         if experiment.status is not ExperimentStatus.RUNNING:
@@ -237,6 +238,7 @@ class ResearchTree:
                 "eval": eval.model_dump(),
                 "verdict": verdict.model_dump() if verdict is not None else None,
                 "artifacts": merged_artifacts,
+                "commit": commit or experiment.commit,
                 "error": None,
             }
         )

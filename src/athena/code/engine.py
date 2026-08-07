@@ -1,6 +1,7 @@
 """CodeEngine: generate code → execute → observe → iterate."""
 
 import os
+from pathlib import Path
 
 from athena.code.backends.base import CodeBackend
 from athena.code.monitor import AgentMonitor, WatchResult
@@ -34,8 +35,10 @@ def _review_failure(
         files=output.files,
     )
 
+
 class CodeEngine:
     """通用迭代循环：LLM generates code → subprocess executes → observe → iterate."""
+
     def __init__(self, backend: CodeBackend, monitor: AgentMonitor):
         self._backend = backend
         self._monitor = monitor
@@ -47,6 +50,7 @@ class CodeEngine:
         target_dir: str,
         max_rounds: int = 3,
         output_spec: "OutputSpec | None" = None,
+        entrypoint: str | None = None,
     ) -> EngineResult:
         """Run the generate→execute→iterate loop."""
         history: list[dict] = []
@@ -65,8 +69,11 @@ class CodeEngine:
             all_files.extend(gen_result.files_created)
             all_files.extend(gen_result.files_modified)
 
-            # Find and run the main script (first .py file created or modified)
-            script = self._find_main_script(target_dir, gen_result)
+            script = (
+                self._fixed_entrypoint(target_dir, entrypoint)
+                if entrypoint is not None
+                else self._find_main_script(target_dir, gen_result)
+            )
             if script is None:
                 missing = _missing_outputs(target_dir, output_spec)
                 done = "done" in gen_result.output.lower()
@@ -140,6 +147,14 @@ class CodeEngine:
             success=False,
         )
 
+    @staticmethod
+    def _fixed_entrypoint(target_dir: str, entrypoint: str) -> str | None:
+        root = Path(target_dir).resolve()
+        candidate = (root / entrypoint).resolve()
+        if not candidate.is_relative_to(root):
+            raise ValueError("entrypoint must stay inside target_dir")
+        return str(candidate) if candidate.is_file() else None
+
     def _find_main_script(
         self,
         target_dir: str,
@@ -153,6 +168,7 @@ class CodeEngine:
                 if os.path.exists(full):
                     return full
         return None
+
 
 if __name__ == "__main__":
     print("CodeEngine loaded (requires backend and monitor for full demo).")

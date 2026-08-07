@@ -177,6 +177,7 @@ async def create_baseline(
         eval=result.eval,
         verdict=None,
         artifacts={"diff": result.diff, "logs": result.logs},
+        commit=result.commit,
     )
     research_tree.update_hypothesis_status(hypothesis_id, "SUPPORTED")
     research_tree.set_sota(experiment_id)

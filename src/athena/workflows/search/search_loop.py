@@ -152,6 +152,7 @@ class SearchLoop:
                     eval=result.eval,
                     verdict=verdict,
                     artifacts={"diff": result.diff, "logs": result.logs},
+                    commit=result.commit,
                 )
             except asyncio.CancelledError:
                 self._tree.transition_experiment(
