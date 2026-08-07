@@ -7,6 +7,7 @@ import json
 import shutil
 from pathlib import Path
 import time
+import warnings
 
 from pydantic import BaseModel
 
@@ -99,6 +100,17 @@ class CodeAgent:
         self._artifacts = artifacts
         self._evaluator = evaluator
         self._max_rounds = max_rounds
+        # The monitor argument is retained for API compatibility and future
+        # observability. It is not currently wired into the trusted loop:
+        # neither execute() nor execute_frozen() reports through it, so an
+        # explicit monitor has no runtime effect in this build.
+        if monitor is not None:
+            warnings.warn(
+                "the 'monitor' argument is deprecated: it is not wired into "
+                "trusted execution and has no effect",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._monitor = monitor or AgentMonitor()
 
     async def execute(

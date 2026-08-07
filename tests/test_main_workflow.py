@@ -1,9 +1,18 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
-from src.main import RunConfig, drive_runtime, parse_args, validate_config
+from src.main import (
+    Application,
+    RunConfig,
+    drive_runtime,
+    main,
+    parse_args,
+    run,
+    validate_config,
+)
 
 
 def test_parse_args_builds_explicit_run_config(tmp_path: Path) -> None:
@@ -195,3 +204,143 @@ async def test_drive_runtime_saves_tree_when_search_fails(tmp_path: Path) -> Non
         await drive_runtime(runtime, config)
 
     assert [method for method, _ in runtime.calls][-1] == "tree_save"
+
+
+def test_main_invalid_config_returns_two_without_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    code = main(
+        [
+            "--data",
+            str(tmp_path / "missing.csv"),
+            "--target",
+            "label",
+            "--model",
+            "openai:test-model",
+        ]
+    )
+
+    assert code == 2
+    captured = capsys.readouterr()
+    assert "invalid configuration" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_success_returns_zero_and_warns_once(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "feature,label\n" + "\n".join(f"r{i},{i % 2}" for i in range(10)),
+        encoding="utf-8",
+    )
+    summary = {
+        "phase": "COMPLETED",
+        "sota_id": "exp-1",
+        "tree_path": str(tmp_path / "run" / "research_tree.json"),
+        "report_ref": "artifact://reports/final.md",
+        "backend": "qoder",
+        "execution": "local",
+        "strong_isolation": False,
+        "budget": {},
+    }
+
+    async def fake_run(config):
+        return summary
+
+    monkeypatch.setattr("src.main.run", fake_run)
+
+    code = main(
+        [
+            "--data",
+            str(data),
+            "--target",
+            "label",
+            "--model",
+            "openai:test-model",
+            "--backend",
+            "qoder",
+            "--output-dir",
+            str(tmp_path / "run"),
+        ]
+    )
+
+    assert code == 0
+    captured = capsys.readouterr()
+    assert captured.err.count("local mode") == 1
+    assert "running in local mode" in captured.err
+    assert '"report_ref": "artifact://reports/final.md"' in captured.out
+
+
+class _StubTree:
+    def best_experiment_id(self) -> str:
+        return "exp-1"
+
+
+class _StubBudget:
+    def model_dump(self, mode: str = "json") -> dict:
+        return {"max_experiments": 1}
+
+
+class _StubRuntime:
+    """Minimal runtime surface for run()'s summary assembly."""
+
+    def __init__(self) -> None:
+        self.phase = "COMPLETED"
+        self.tree = _StubTree()
+        self.budget = _StubBudget()
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_run_writes_local_summary_file(tmp_path: Path, monkeypatch) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text(
+        "feature,label\n" + "\n".join(f"r{i},{i % 2}" for i in range(10)),
+        encoding="utf-8",
+    )
+    config = RunConfig(
+        data=data,
+        target="label",
+        model="openai:test-model",
+        backend="qoder",
+        output_dir=tmp_path / "run",
+    )
+    application = Application(runtime=_StubRuntime(), context=object())
+    monkeypatch.setattr("src.main.build_application", lambda _config: application)
+
+    async def fake_drive(runtime, config):
+        config.output_dir.resolve().mkdir(parents=True, exist_ok=True)
+        return {
+            "report_ref": "artifact://reports/final.md",
+            "tree_path": str(config.output_dir / "research_tree.json"),
+        }
+
+    monkeypatch.setattr("src.main.drive_runtime", fake_drive)
+
+    summary = await run(config)
+
+    assert summary["execution"] == "local"
+    assert summary["strong_isolation"] is False
+    saved = json.loads(
+        (config.output_dir / "run_summary.json").read_text(encoding="utf-8")
+    )
+    assert saved["execution"] == "local"
+    assert saved["strong_isolation"] is False
+
+
+def test_validate_config_rejects_too_few_target_rows(tmp_path: Path) -> None:
+    data = tmp_path / "data.csv"
+    data.write_text("feature,label\n0,1\n1,0\n2,1\n3,0\n", encoding="utf-8")
+    config = RunConfig(
+        data=data,
+        target="label",
+        model="m",
+        backend="qoder",
+        output_dir=tmp_path / "run",
+    )
+    with pytest.raises(ValueError, match="non-empty train, validation, and test"):
+        validate_config(config)

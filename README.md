@@ -68,10 +68,13 @@ never sees trusted labels: baseline, SEARCH, and ablation receive train data
 plus validation features; the frozen final-test receives train data plus test
 features through a Git-ignored `.athena/phase_manifest.json`. The selected SOTA
 is re-run unchanged on the final-test split without invoking any
-code-generation backend, and its Git commit equals the SOTA commit. Diffs,
-logs, predictions, and evaluation results are content-addressed (`sha256:`) in
+code-generation backend, and its Git commit equals the SOTA commit. Logs,
+predictions, and evaluation results are content-addressed (`sha256:`) in
 `artifacts/objects/` and remain readable after the experiment worktree is
-removed.
+removed. The frozen final-test `diff` is not a `sha256:` object: because the
+SOTA commit is unchanged there is no new diff to store, so it is a stable
+`artifact://diffs/<experiment_id>` placeholder recording that the same commit
+ran unchanged on the final-test features.
 
 ## Titanic example
 
