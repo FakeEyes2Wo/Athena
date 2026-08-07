@@ -10,6 +10,7 @@ from athena.evaluation.types import EvaluationInputs, EvalResult, EvalSpec
 from athena.storage import ArtifactStore
 
 PREDICTION_COLUMN = "prediction"
+PRIVATE_TARGET_COLUMN = "__athena_private_target"
 
 
 class TrustedEvaluator:
@@ -37,23 +38,27 @@ class TrustedEvaluator:
         if set(predictions[row_id]) != set(labels[row_id]):
             raise ValueError("prediction ID set must exactly match private labels")
 
-        aligned = labels.merge(
-            predictions,
-            on=row_id,
-            how="inner",
-            validate="one_to_one",
-        ).sort_values(row_id, kind="stable")
+        aligned = (
+            labels.rename(columns={inputs.target: PRIVATE_TARGET_COLUMN})
+            .merge(
+                predictions,
+                on=row_id,
+                how="inner",
+                validate="one_to_one",
+            )
+            .sort_values(row_id, kind="stable")
+        )
         primary = _finite_metric(
             "primary",
             eval_spec.primary.name,
-            aligned[inputs.target],
+            aligned[PRIVATE_TARGET_COLUMN],
             aligned[PREDICTION_COLUMN],
         )
         secondary = {
             metric.name: _finite_metric(
                 metric.name,
                 metric.name,
-                aligned[inputs.target],
+                aligned[PRIVATE_TARGET_COLUMN],
                 aligned[PREDICTION_COLUMN],
             )
             for metric in eval_spec.secondary

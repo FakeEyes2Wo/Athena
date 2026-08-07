@@ -9,17 +9,17 @@ from athena.evaluation.types import EvaluationInputs, EvalSpec, MetricDef
 from athena.storage import LocalArtifactStore
 
 
-def _inputs(tmp_path: Path) -> EvaluationInputs:
+def _inputs(tmp_path: Path, *, target: str = "label") -> EvaluationInputs:
     train_path = tmp_path / "train.csv"
     features_path = tmp_path / "features.csv"
     labels_path = tmp_path / "private-labels.csv"
     pd.DataFrame(
-        {"__athena_row_id": [1, 2], "feature": [0.0, 1.0], "label": [0, 1]}
+        {"__athena_row_id": [1, 2], "feature": [0.0, 1.0], target: [0, 1]}
     ).to_csv(train_path, index=False)
     pd.DataFrame({"__athena_row_id": [10, 20, 30], "feature": [0.0, 1.0, 2.0]}).to_csv(
         features_path, index=False
     )
-    pd.DataFrame({"__athena_row_id": [10, 20, 30], "label": [0, 1, 1]}).to_csv(
+    pd.DataFrame({"__athena_row_id": [10, 20, 30], target: [0, 1, 1]}).to_csv(
         labels_path, index=False
     )
     return EvaluationInputs(
@@ -27,7 +27,7 @@ def _inputs(tmp_path: Path) -> EvaluationInputs:
         train_path=train_path,
         features_path=features_path,
         labels_path=labels_path,
-        target="label",
+        target=target,
     )
 
 
@@ -87,6 +87,21 @@ async def test_trusted_evaluator_ignores_forged_adjacent_labels(tmp_path: Path) 
 
     assert result.primary < 1.0
     assert result.per_sample.startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_trusted_evaluator_supports_target_named_prediction(
+    tmp_path: Path,
+) -> None:
+    inputs = _inputs(tmp_path, target="prediction")
+    predictions_path = _write_predictions(
+        tmp_path / "predictions.csv", [(10, 0), (20, 1), (30, 1)]
+    )
+    evaluator = TrustedEvaluator(LocalArtifactStore(tmp_path / "objects"))
+
+    result = await evaluator.evaluate("exp-1", predictions_path, inputs, _spec())
+
+    assert result.primary == 1.0
 
 
 @pytest.mark.asyncio
