@@ -65,8 +65,10 @@ def _inputs(tmp_path) -> EvaluationInputs:
 def test_generation_prompt_freezes_split_usage_rules() -> None:
     prompt = CodeAgent._generation_prompt("exp-test", _hypothesis(), _plan(), _spec())
 
-    assert "Use only the train split for fitting" in prompt
-    assert "Only final-test may read the test split" in prompt
+    assert "phase-agnostic" in prompt
+    assert "trains on the manifest train path" in prompt
+    assert "predicts on the manifest predict path" in prompt
+    assert "Never hardcode a phase check" in prompt
     assert "exactly two columns: __athena_row_id and prediction" in prompt
     assert "Never create or write labels.csv" in prompt
     assert ".athena/phase_manifest.json" in prompt
