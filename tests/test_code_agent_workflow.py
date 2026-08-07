@@ -71,7 +71,11 @@ def test_generation_prompt_freezes_split_usage_rules() -> None:
     assert "Never create or write labels.csv" in prompt
     assert ".athena/phase_manifest.json" in prompt
     assert "splits.json" not in prompt
-    assert "labels.csv" not in prompt.split("Never create or write ")[0]
+    assert "Do not run run_experiment.py or eval.py" in prompt
+    assert "Do NOT write predictions.csv, labels.csv" in prompt
+    # The prompt must only forbid labels.csv, never instruct writing it.
+    assert "write predictions.csv and labels.csv" not in prompt
+    assert "must write predictions.csv and labels.csv" not in prompt
 
 
 class RecordingWorkspace:
@@ -148,6 +152,38 @@ class EvalFailFirstBackend(CodeBackend):
         return GenerationResult(
             files_created=["run_experiment.py"] if self.calls == 1 else [],
             files_modified=["run_experiment.py"] if self.calls > 1 else [],
+        )
+
+
+class PolicyViolationBackend(CodeBackend):
+    """Round 1 writes a runtime output during generation; round 2 complies."""
+
+    def __init__(self):
+        self.calls = 0
+        self.feedback = []
+
+    async def generate(self, prompt, target_dir, previous_outputs, history):
+        self.calls += 1
+        self.feedback.append(list(previous_outputs))
+        root = Path(target_dir)
+        if self.calls == 1:
+            # Backend writes predictions.csv during generation (policy violation).
+            (root / "predictions.csv").write_text(
+                "__athena_row_id,prediction\n0,0\n1,1\n", encoding="utf-8"
+            )
+        source = (
+            "from pathlib import Path\n"
+            "Path('predictions.csv').write_text("
+            "'__athena_row_id,prediction\\n0,0\\n1,1\\n', encoding='utf-8')\n"
+        )
+        (root / "run_experiment.py").write_text(source, encoding="utf-8")
+        return GenerationResult(
+            files_created=(
+                ["run_experiment.py", "predictions.csv"]
+                if self.calls == 1
+                else ["run_experiment.py"]
+            ),
+            files_modified=[],
         )
 
 
@@ -410,6 +446,26 @@ async def test_code_agent_only_feeds_failed_rounds_to_revision_prompt(
     assert len(fed) == 1
     assert fed[0].returncode == -1
     assert "trusted evaluation failed" in fed[0].stderr
+
+
+@pytest.mark.asyncio
+async def test_policy_violation_is_repairable(tmp_path) -> None:
+    backend = PolicyViolationBackend()
+    inputs = _inputs(tmp_path)
+    worktree = GitWorkBranch(
+        path=str(tmp_path), branch="exp/test", base_commit="a" * 40
+    )
+
+    result = await _injected_agent(backend, tmp_path, max_rounds=2).execute(
+        "exp-test", _hypothesis(), _plan(), "a" * 40, _spec(), worktree, inputs=inputs
+    )
+
+    assert backend.calls == 2
+    assert result.eval.primary == 1.0
+    fed = backend.feedback[1]
+    assert len(fed) == 1
+    assert fed[0].returncode == -1
+    assert "protected path changed: predictions.csv" in fed[0].stderr
 
 
 @pytest.mark.asyncio

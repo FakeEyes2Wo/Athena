@@ -170,9 +170,35 @@ class CodeAgent:
                 try:
                     GeneratedTreePolicy().validate(wt_path, changed)
                 except CodeExecutionError as policy_error:
-                    raise CodeExecutionError(
-                        str(policy_error), logs=logs_ref
-                    ) from policy_error
+                    # Policy violations (runtime outputs written during
+                    # generation, protected-path edits, symlinks) are repairable:
+                    # feed the diagnostic back to the backend for the next round.
+                    history.append(
+                        {
+                            "round": round_num,
+                            "files": sorted(changed),
+                            "stdout": "",
+                            "stderr": str(policy_error),
+                        }
+                    )
+                    previous_outputs.append(
+                        ExecutionOutput(
+                            stdout="",
+                            stderr=str(policy_error),
+                            returncode=-1,
+                        )
+                    )
+                    await self._write_logs(
+                        log_path,
+                        log_results
+                        + [
+                            (
+                                "tree-policy",
+                                ProcessResult(returncode=-1, output=str(policy_error)),
+                            )
+                        ],
+                    )
+                    continue
                 run_output = await self._runtime.run(
                     ExecutionRequest(
                         entrypoint=EXPERIMENT_ENTRYPOINT,
@@ -381,9 +407,14 @@ class CodeAgent:
             ".athena/phase_manifest.json for the frozen dataset paths. Use only "
             "the train split for fitting. Baseline, search, and ablation "
             "experiments must score the validation split. Only final-test may "
-            "read the test split. The script must write predictions.csv with "
-            "exactly two columns: __athena_row_id and prediction. Never create "
-            "or write labels.csv. Do not run eval.py.\n\n"
+            "read the test split.\n\n"
+            "run_experiment.py, when executed by Athena, must write "
+            "predictions.csv with exactly two columns: __athena_row_id and "
+            "prediction. Do NOT write predictions.csv, labels.csv, "
+            "eval_result.json, or any runtime output file yourself during code "
+            "generation; Athena produces those when it executes your script. "
+            "Never create or write labels.csv. Do not run run_experiment.py or "
+            "eval.py.\n\n"
             f"Frozen experiment context:\n{context}"
         )
 
