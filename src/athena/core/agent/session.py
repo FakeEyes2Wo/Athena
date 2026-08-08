@@ -13,7 +13,12 @@ from athena.memory.context_manager import ContextManager
 
 
 class _MemoryView:
-    """ContextManager 只读视图;``raw`` 暴露底层 ContextManager(BaseAgent 适配器用)。"""
+    """ContextManager 只读视图;``raw`` 暴露底层 ContextManager(BaseAgent 适配器用)。
+
+    COMPAT: 保留 kernel _MemoryView 消费接口(BaseAgent 适配器经 ``raw`` 访问
+    ContextManager);清理条件: AgentRunner 协议统一为线程 runner、BaseAgentRunner
+    不再消费 session 后。
+    """
 
     def __init__(self, memory: ContextManager, *, allow_rollback: bool = True) -> None:
         self._memory = memory
