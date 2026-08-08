@@ -6,10 +6,9 @@ from ._support import BlockingAgent, make_runtime
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.models import AgentOutcome
 
-# COMPAT: Task 6 迁移后改 from athena.core.agent.{codec,registry,types} import ...
-from athena.core.agent_kernel.codec import JsonCodec
-from athena.core.agent_kernel.registry import AgentTypeRegistry
-from athena.core.agent_kernel.types import AgentSpec, AgentStatus, RunStatus
+from athena.core.agent.codec import JsonCodec
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.types import AgentSpec, AgentStatus, RunStatus
 from athena.agents.base_runner import BaseAgentRunner
 from athena.core.artifact_store import LocalArtifactStore
 

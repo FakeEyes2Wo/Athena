@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
-from athena.core.tool_types import EmitEvent
+from athena.core.tool_types import AskUser, EmitEvent
 from athena.memory.context_manager import ContextManager
 
 if TYPE_CHECKING:
-    from athena.core.agent_kernel.types import AgentMessage
+    from athena.core.agent.types import AgentMessage
 
 
 @dataclass(slots=True, frozen=True)
@@ -59,6 +59,8 @@ class AgentContext:
     ``messages`` 按提交顺序包含触发请求与未读 mailbox 消息（设计
     dynamic-agent-orchestration §4.3）；``input_text`` 是迁移期对当前触发
     消息 ``content`` 的兼容视图，不能承载或替代 ``context_refs``。
+    ``ask_user`` 由外层注入的交互式提问回调；``request_user_input`` 工具
+    await 它阻塞等待回答。
     """
 
     thread: AthenaThread
@@ -69,3 +71,4 @@ class AgentContext:
     memory: "ContextManager | None" = None
     input_text: str | None = None
     messages: list["AgentMessage"] = field(default_factory=list)
+    ask_user: AskUser | None = None

@@ -1,7 +1,7 @@
 import pytest
 
 from athena.core.agent.session import RunSession
-from athena.core.agent_kernel.types import AgentMessage
+from athena.core.agent.types import AgentMessage
 from athena.memory.context_manager import ContextManager
 
 

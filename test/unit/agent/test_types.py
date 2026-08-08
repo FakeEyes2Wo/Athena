@@ -1,6 +1,6 @@
 import pytest
 
-from athena.core.agent_kernel.types import (
+from athena.core.agent.types import (
     TERMINAL_RUN_STATUSES,
     AgentMessage,
     AgentSpec,
@@ -82,7 +82,7 @@ def test_error_code_values_match_spec() -> None:
 
 
 def test_error_hierarchy_matches_spec() -> None:
-    from athena.core.agent_kernel.types import (
+    from athena.core.agent.types import (
         AgentBusyError,
         AgentCommandError,
         AgentError,

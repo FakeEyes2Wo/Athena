@@ -8,8 +8,7 @@ from typing import Any
 
 from pydantic_ai.messages import ModelMessage
 
-# COMPAT: Task 6 迁移后改 from athena.core.agent.types import AgentId, AgentMessage
-from athena.core.agent_kernel.types import AgentId, AgentMessage
+from athena.core.agent.types import AgentId, AgentMessage
 from athena.memory.context_manager import ContextManager
 
 

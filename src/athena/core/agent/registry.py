@@ -8,7 +8,7 @@ runtime binding（AgentSpec），保证同类型多个实例拥有独立状态�
 
 from typing import Callable
 
-from athena.core.agent_kernel.types import (
+from athena.core.agent.types import (
     AgentCommandError,
     AgentId,
     AgentSpec,

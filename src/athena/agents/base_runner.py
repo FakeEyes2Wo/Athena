@@ -11,7 +11,7 @@ import asyncio
 from athena.agents.orchestration import RunToolProjector, _TurnEnded
 from athena.core.agent.models import AgentContext
 from athena.core.agent.runtime import BaseAgent
-from athena.core.agent_kernel.types import AgentMessage
+from athena.core.agent.types import AgentMessage
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 

@@ -10,11 +10,11 @@ import pytest
 from athena.agents.base_runner import BaseAgentRunner
 from athena.agents.data_agent import DataAgent
 from athena.agents.reflection_agent import ReflectionAgent
-from athena.core.agent_kernel.kernel import AgentKernel
-from athena.core.agent_kernel.session import InMemoryResourcesFactory
-from athena.core.agent_kernel.types import AgentSpec, RunStatus
-from athena.storage.artifact_store import LocalArtifactStore
-from athena.storage.bundle import DirectoryBundle, VersionedBundle
+from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.types import AgentSpec, RunStatus
+from athena.core.artifact_store import LocalArtifactStore
+from athena.core.bundle import DirectoryBundle, VersionedBundle
 
 from ._support import JsonCodec, request_payload
 
@@ -46,6 +46,25 @@ def _request(data_path: str, *, report: str | None = None) -> dict:
     return request_payload(payload)
 
 
+def _runtime(tmp_path, data_agent, reflection) -> AgentRuntime:
+    registry = AgentTypeRegistry()
+    registry.register(
+        "data",
+        lambda _aid, _cfg=None: AgentSpec(
+            runner=BaseAgentRunner(data_agent), codec=JsonCodec()
+        ),
+    )
+    registry.register(
+        "reflection",
+        lambda _aid, _cfg=None: AgentSpec(
+            runner=BaseAgentRunner(reflection), codec=JsonCodec()
+        ),
+    )
+    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rt.start()
+    return rt
+
+
 @pytest.mark.asyncio
 async def test_data_analysis_review_loop(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
@@ -54,27 +73,13 @@ async def test_data_analysis_review_loop(tmp_path) -> None:
         store, bundle, owner_agent_id="agent_1", runtime=FakeRuntime()
     )
     reflection = ReflectionAgent(store)
-
-    kernel = AgentKernel(resources_factory=InMemoryResourcesFactory())
-    kernel._type_registry.register(
-        "data",
-        lambda _aid, _cfg=None: AgentSpec(
-            runner=BaseAgentRunner(data_agent), codec=JsonCodec()
-        ),
-    )
-    kernel._type_registry.register(
-        "reflection",
-        lambda _aid, _cfg=None: AgentSpec(
-            runner=BaseAgentRunner(reflection), codec=JsonCodec()
-        ),
-    )
-    await kernel.start()
+    rt = _runtime(tmp_path, data_agent, reflection)
 
     # DataAgent 写脚本并提交 v1
-    data_id, run1 = await kernel.create_root(
+    data_id, run1 = await rt.create_root(
         "data", _request(str(_dataset(tmp_path))), name="data-root"
     )
-    summary = await kernel.wait_run(run1, timeout=2)
+    summary = await rt.wait_run(run1, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     v1 = data_agent.latest_ref
     assert v1 is not None
@@ -82,10 +87,10 @@ async def test_data_analysis_review_loop(tmp_path) -> None:
     assert analysis_id is not None
 
     # ReflectionAgent 只读评审 v1
-    _, run2 = await kernel.create_root(
+    _, run2 = await rt.create_root(
         "reflection", request_payload({"data_analysis_ref": v1}), name="reflection-root"
     )
-    summary = await kernel.wait_run(run2, timeout=2)
+    summary = await rt.wait_run(run2, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     response = JsonCodec().decode_response(summary.response_ref)
     review_ref = response["result_ref"]
@@ -102,7 +107,7 @@ async def test_data_analysis_review_loop(tmp_path) -> None:
     da_files = await DirectoryBundle.files(store, v1)
     assert (await store.get_text(da_files["report.md"])).strip() == "分析报告"
     assert any(key.startswith("figures/") for key in da_files)
-    await kernel.aclose()
+    await rt.aclose()
 
 
 @pytest.mark.asyncio
@@ -115,36 +120,22 @@ async def test_revision_loop_failed_then_revised(tmp_path) -> None:
     )
     reflection = ReflectionAgent(store)
     dataset = str(_dataset(tmp_path))
-
-    kernel = AgentKernel(resources_factory=InMemoryResourcesFactory())
-    kernel._type_registry.register(
-        "data",
-        lambda _aid, _cfg=None: AgentSpec(
-            runner=BaseAgentRunner(data_agent), codec=JsonCodec()
-        ),
-    )
-    kernel._type_registry.register(
-        "reflection",
-        lambda _aid, _cfg=None: AgentSpec(
-            runner=BaseAgentRunner(reflection), codec=JsonCodec()
-        ),
-    )
-    await kernel.start()
+    rt = _runtime(tmp_path, data_agent, reflection)
 
     # v1：report 覆盖为空 → Reflection 判 failed
-    data_id, run1 = await kernel.create_root(
+    data_id, run1 = await rt.create_root(
         "data", _request(dataset, report=""), name="data-root"
     )
-    await kernel.wait_run(run1, timeout=2)
+    await rt.wait_run(run1, timeout=5)
     v1 = data_agent.latest_ref
     assert v1 is not None
     analysis_id = data_agent.analysis_id
 
-    _, run2 = await kernel.create_root(
+    _, run2 = await rt.create_root(
         "reflection", request_payload({"data_analysis_ref": v1}), name="reflection-root"
     )
-    await kernel.wait_run(run2, timeout=2)
-    review1 = JsonCodec().decode_response(kernel.run_summary(run2).response_ref)[
+    await rt.wait_run(run2, timeout=5)
+    review1 = JsonCodec().decode_response(rt.run_summary(run2).response_ref)[
         "result_ref"
     ]
     score1 = json.loads(
@@ -155,21 +146,21 @@ async def test_revision_loop_failed_then_revised(tmp_path) -> None:
     assert score1["scores"]["report_nonempty"] == 0  # failed
 
     # Supervisor 决定返工 → follow-up 原 DataAgent（同 owner 提交 v2，无空覆盖）
-    run3 = await kernel.followup(data_id, _request(dataset))
-    await kernel.wait_run(run3, timeout=2)
+    run3 = await rt.followup(data_id, _request(dataset))
+    await rt.wait_run(run3, timeout=5)
     v2 = data_agent.latest_ref
     assert v2 is not None and v2 != v1
     assert bundle.latest(analysis_id) == v2
     assert bundle.owner(analysis_id) == "agent_1"  # v2 由同一 DataAgent 提交
 
     # 复审 v2 → passed
-    _, run4 = await kernel.create_root(
+    _, run4 = await rt.create_root(
         "reflection",
         request_payload({"data_analysis_ref": v2}),
         name="reflection-root-2",
     )
-    await kernel.wait_run(run4, timeout=2)
-    review2 = JsonCodec().decode_response(kernel.run_summary(run4).response_ref)[
+    await rt.wait_run(run4, timeout=5)
+    review2 = JsonCodec().decode_response(rt.run_summary(run4).response_ref)[
         "result_ref"
     ]
     score2 = json.loads(
@@ -182,4 +173,4 @@ async def test_revision_loop_failed_then_revised(tmp_path) -> None:
     # 旧版本保留，lineage 正确
     assert bundle.latest(analysis_id) == v2
     assert v1 != v2
-    await kernel.aclose()
+    await rt.aclose()

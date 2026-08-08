@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_check
 from athena.core.contracts import ArtifactRef
 
 if TYPE_CHECKING:
-    from athena.core.agent_kernel.session import RunSession
+    from athena.core.agent.session import RunSession
 
 RequestT = TypeVar("RequestT", contravariant=True)
 ResponseT = TypeVar("ResponseT", covariant=True)

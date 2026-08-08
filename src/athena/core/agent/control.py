@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator, Collection
 from typing import Any, Generic, TYPE_CHECKING
 
-from athena.core.agent_kernel.types import (
+from athena.core.agent.types import (
     AgentCommandError,
     AgentEvent,
     AgentId,
@@ -24,7 +24,7 @@ from athena.core.agent_kernel.types import (
 )
 
 if TYPE_CHECKING:
-    from athena.core.agent_kernel.kernel import AgentKernel
+    from athena.core.agent.agent_runtime import AgentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ class AgentRun(Generic[ResponseT]):
 class AgentControl:
     """对 Agent 树执行命令的唯一公开控制面（§2.4）。"""
 
-    def __init__(self, kernel: "AgentKernel") -> None:
+    def __init__(self, kernel: "AgentRuntime") -> None:
         self.kernel = kernel
 
     async def create_root(

@@ -18,11 +18,11 @@ from athena.agents.data_agent import (
     DEFAULT_ANALYSIS_SCRIPT,
     DataAgent,
 )
-from athena.core.agent_kernel.kernel import AgentKernel
-from athena.core.agent_kernel.session import InMemoryResourcesFactory
-from athena.core.agent_kernel.types import AgentSpec, RunStatus
-from athena.storage.artifact_store import LocalArtifactStore
-from athena.storage.bundle import DirectoryBundle, VersionedBundle
+from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.types import AgentSpec, RunStatus
+from athena.core.artifact_store import LocalArtifactStore
+from athena.core.bundle import DirectoryBundle, VersionedBundle
 
 from ._support import JsonCodec, request_payload
 
@@ -60,15 +60,17 @@ def _request(data_path: str, target: str, workspace: str) -> dict:
     )
 
 
-def _kernel(agent: DataAgent) -> AgentKernel:
-    kernel = AgentKernel(resources_factory=InMemoryResourcesFactory())
-    kernel._type_registry.register(
+def _runtime(agent: DataAgent, tmp_path) -> AgentRuntime:
+    registry = AgentTypeRegistry()
+    registry.register(
         "data",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(agent), codec=JsonCodec()
         ),
     )
-    return kernel
+    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rt.start()
+    return rt
 
 
 @pytest.mark.asyncio
@@ -79,13 +81,12 @@ async def test_data_agent_writes_script_and_commits_v1_then_v2(tmp_path) -> None
     workspace = tmp_path / "workspace"
     runtime = FakeRuntime()
     agent = DataAgent(store, bundle, owner_agent_id="agent_1", runtime=runtime)
-    kernel = _kernel(agent)
-    await kernel.start()
+    rt = _runtime(agent, tmp_path)
 
-    agent_id, run1 = await kernel.create_root(
+    agent_id, run1 = await rt.create_root(
         "data", _request(str(data_path), "label", str(workspace))
     )
-    summary = await kernel.wait_run(run1, timeout=2)
+    summary = await rt.wait_run(run1, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     assert (workspace / ANALYSIS_ENTRYPOINT).read_text(
         encoding="utf-8"
@@ -97,10 +98,10 @@ async def test_data_agent_writes_script_and_commits_v1_then_v2(tmp_path) -> None
     assert bundle.latest(analysis_id) == v1
 
     # 同 owner follow-up → v2，parent_ref 指向 v1
-    run2 = await kernel.followup(
+    run2 = await rt.followup(
         agent_id, _request(str(data_path), "label", str(workspace))
     )
-    summary = await kernel.wait_run(run2, timeout=2)
+    summary = await rt.wait_run(run2, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     v2 = agent.latest_ref
     assert v2 is not None and v2 != v1
@@ -112,7 +113,7 @@ async def test_data_agent_writes_script_and_commits_v1_then_v2(tmp_path) -> None
     assert any(key.startswith("figures/") for key in files)
     manifest = json.loads(await store.get_text(v2))
     assert manifest["parent_ref"] == v1
-    await kernel.aclose()
+    await rt.aclose()
 
 
 @pytest.mark.asyncio
@@ -128,12 +129,11 @@ async def test_data_agent_script_failure_surfaces_error(tmp_path) -> None:
             return SimpleNamespace(returncode=1, stdout="", stderr="boom: bad data")
 
     agent = DataAgent(store, bundle, owner_agent_id="agent_1", runtime=FailingRuntime())
-    kernel = _kernel(agent)
-    await kernel.start()
-    agent_id, run1 = await kernel.create_root(
+    rt = _runtime(agent, tmp_path)
+    agent_id, run1 = await rt.create_root(
         "data", _request(str(data_path), "label", str(workspace))
     )
-    summary = await kernel.wait_run(run1, timeout=2)
+    summary = await rt.wait_run(run1, timeout=5)
     assert summary.status == RunStatus.FAILED
     assert bundle.chains() == {}  # 未产生任何版本
-    await kernel.aclose()
+    await rt.aclose()

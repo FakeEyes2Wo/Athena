@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from openai import AsyncOpenAI
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
+from athena.core.tool_types import truncate_text
+
 if TYPE_CHECKING:
     from athena.core.agent.models import AgentConfig
     from athena.core.tool import ToolRegistry
@@ -180,9 +182,7 @@ def _to_api(msgs: list[ModelMessage]) -> list[dict]:
                         }
                     )
                 elif k == "tool-return":
-                    c = str(getattr(p, "content", ""))
-                    if len(c) > 50000:
-                        c = c[:24950] + "\n...[TRUNCATED]...\n" + c[-24950:]
+                    c = truncate_text(str(getattr(p, "content", "")))
                     out.append(
                         {
                             "role": "tool",

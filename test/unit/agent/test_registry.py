@@ -2,8 +2,8 @@
 
 import pytest
 
-from athena.core.agent_kernel.registry import AgentTypeRegistry
-from athena.core.agent_kernel.types import AgentCommandError, AgentSpec, ErrorCode
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.types import AgentCommandError, AgentSpec, ErrorCode
 
 from ._support import EchoRunner, JsonCodec
 

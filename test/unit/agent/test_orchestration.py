@@ -4,12 +4,12 @@ import pytest
 
 from athena.agents.base_runner import BaseAgentRunner
 from athena.agents.orchestration import RunToolProjector
+from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.agent.codec import JsonCodec
 from athena.core.agent.models import AgentContext, AgentOutcome
+from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.runtime import BaseAgent
-from athena.core.agent_kernel.codec import JsonCodec
-from athena.core.agent_kernel.kernel import AgentKernel
-from athena.core.agent_kernel.session import InMemoryResourcesFactory
-from athena.core.agent_kernel.types import AgentSpec, RunStatus
+from athena.core.agent.types import AgentSpec, RunStatus
 from athena.core.tool_types import ToolContext
 
 
@@ -41,43 +41,45 @@ class SpawningAgent(BaseAgent):
         return AgentOutcome(result_ref="result://ok")
 
 
-def _kernel(agent: BaseAgent, agent_type: str) -> AgentKernel:
-    kernel = AgentKernel(resources_factory=InMemoryResourcesFactory())
+def _runtime(agent: BaseAgent, agent_type: str, tmp_path) -> AgentRuntime:
+    registry = AgentTypeRegistry()
     runner = BaseAgentRunner(agent, projector=RunToolProjector(), agent_type=agent_type)
-    kernel._type_registry.register(
+    registry.register(
         agent_type, lambda _aid, _cfg=None: AgentSpec(runner=runner, codec=JsonCodec())
     )
-    kernel._type_registry.register(
+    registry.register(
         "plot",
-        lambda _aid, _cfg=None: AgentSpec(runner=_SimpleAgent(), codec=JsonCodec()),
+        lambda _aid, _cfg=None: AgentSpec(
+            runner=BaseAgentRunner(_SimpleAgent()), codec=JsonCodec()
+        ),
     )
-    return kernel
+    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rt.start()
+    return rt
 
 
 @pytest.mark.asyncio
-async def test_data_agent_can_spawn_plot() -> None:
+async def test_data_agent_can_spawn_plot(tmp_path) -> None:
     agent = SpawningAgent("plot")
-    kernel = _kernel(agent, "data")
-    await kernel.start()
-    agent_id, run = await kernel.create_root("data", {"content": ""})
-    summary = await kernel.wait_run(run, timeout=2)
+    rt = _runtime(agent, "data", tmp_path)
+    agent_id, run = await rt.create_root("data", {"content": ""})
+    summary = await rt.wait_run(run, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     assert agent.spawn_error is None  # data 可 spawn plot（§5）
     assert agent.child_ids  # plot 子已创建
-    await kernel.aclose()
+    await rt.aclose()
 
 
 @pytest.mark.asyncio
-async def test_data_agent_cannot_spawn_data() -> None:
+async def test_data_agent_cannot_spawn_data(tmp_path) -> None:
     agent = SpawningAgent("data")
-    kernel = _kernel(agent, "data")
-    await kernel.start()
-    agent_id, run = await kernel.create_root("data", {"content": ""})
-    summary = await kernel.wait_run(run, timeout=2)
+    rt = _runtime(agent, "data", tmp_path)
+    agent_id, run = await rt.create_root("data", {"content": ""})
+    summary = await rt.wait_run(run, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     assert agent.spawn_error is not None  # data 不可 spawn 另一 data
     assert not agent.child_ids
-    await kernel.aclose()
+    await rt.aclose()
 
 
 def test_default_permission_matrix_shapes() -> None:
@@ -102,12 +104,30 @@ class SenderAgent(BaseAgent):
         return AgentOutcome(result_ref="result://ok")
 
 
+class RecordingTarget(BaseAgent):
+    """记录每轮 ctx.messages，观察 send 工具投递的 mailbox 消息。"""
+
+    def __init__(self) -> None:
+        self.recorded: list[list] = []
+
+    async def run(self, ctx: AgentContext) -> AgentOutcome:
+        self.recorded.append(list(ctx.messages))
+        return AgentOutcome(result_ref="result://ok")
+
+
 @pytest.mark.asyncio
-async def test_send_tool_source_is_calling_agent() -> None:
+async def test_send_tool_source_is_calling_agent(tmp_path) -> None:
     """设计 §4.3：Agent 工具调用的消息 source = 调用方 agent_id。"""
-    kernel = AgentKernel(resources_factory=InMemoryResourcesFactory())
+    registry = AgentTypeRegistry()
+    target_agent = RecordingTarget()
+    registry.register(
+        "target",
+        lambda _aid, _cfg=None: AgentSpec(
+            runner=BaseAgentRunner(target_agent), codec=JsonCodec()
+        ),
+    )
     sender = SenderAgent()
-    kernel._type_registry.register(
+    registry.register(
         "sender",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(
@@ -116,19 +136,17 @@ async def test_send_tool_source_is_calling_agent() -> None:
             codec=JsonCodec(),
         ),
     )
-    kernel._type_registry.register(
-        "target",
-        lambda _aid, _cfg=None: AgentSpec(runner=_SimpleAgent(), codec=JsonCodec()),
-    )
-    await kernel.start()
-    target_id, _ = await kernel.create_root(
-        "target", {"content": ""}, name="target-root"
-    )
-    sender_id, run = await kernel.create_root(
+    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rt.start()
+    target_id, _ = await rt.create_root("target", {"content": ""}, name="target-root")
+    sender_id, run = await rt.create_root(
         "sender", {"content": target_id}, name="sender-root"
     )
-    await kernel.wait_run(run, timeout=2)
-    msgs = kernel._store.mailbox(target_id)
-    assert msgs and msgs[0].source == sender_id  # 非 user
-    assert msgs[0].content == "note"
-    await kernel.aclose()
+    await rt.wait_run(run, timeout=5)
+    # 触发 target 一轮，读取 mailbox 中由 sender 工具投递的消息
+    follow = await rt.followup(target_id, {"content": ""})
+    await rt.wait_run(follow, timeout=5)
+    last = target_agent.recorded[-1]
+    note = next(m for m in last if m.content == "note")
+    assert note.source == sender_id  # 非 user
+    await rt.aclose()

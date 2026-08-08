@@ -2,7 +2,7 @@
 
 把 kernel 的 Agent 树语义重新表达在 app_server 的 Thread 模型上:每个逻辑 Agent =
 一条 ThreadRuntime(agent_id == thread_id)。公共契约(AgentControl/AgentHandle/AgentRun/
-types)迁自 athena.core.agent_kernel,调用方(ProjectRuntime/编排工具)接口不变。
+types)由 core.agent 包统一导出,调用方(ProjectRuntime/编排工具)接口不变。
 mailbox 与 WaitRegistry 为门面持有(内存);对话经 rollout JSONL 确定性持久化。
 """
 
@@ -20,10 +20,8 @@ from uuid import uuid4
 from athena.core.agent.models import AgentOutcome
 from athena.core.agent.session import RunSession
 
-# COMPAT: 以下符号暂从 agent_kernel 导入;Task 6 git mv 后改指向 athena.core.agent.*。
-# 清理条件: agent_kernel 包删除后。
-from athena.core.agent_kernel.registry import AgentTypeRegistry
-from athena.core.agent_kernel.types import (
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.types import (
     TERMINAL_RUN_STATUSES,
     AgentBusyError,
     AgentCommandError,

@@ -1,13 +1,13 @@
-"""BaseAgent 业务契约经适配器在 AgentKernel 上运行（设计 §4.2）。"""
+"""BaseAgent 业务契约经适配器在 AgentRuntime 上运行（设计 §4.2）。"""
 
 import pytest
 
 from athena.agents.base_runner import BaseAgentRunner
+from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.models import AgentContext, AgentOutcome
+from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.runtime import BaseAgent
-from athena.core.agent_kernel.kernel import AgentKernel
-from athena.core.agent_kernel.session import InMemoryResourcesFactory
-from athena.core.agent_kernel.types import AgentSpec, RunStatus
+from athena.core.agent.types import AgentSpec, RunStatus
 
 from ._support import JsonCodec
 
@@ -23,43 +23,43 @@ class EchoOutcomeAgent(BaseAgent):
         return AgentOutcome(result_ref=f"result://{ctx.input_text}")
 
 
-def _kernel(agent: BaseAgent) -> AgentKernel:
-    kernel = AgentKernel(resources_factory=InMemoryResourcesFactory())
-    kernel._type_registry.register(
+def _runtime(agent: BaseAgent, tmp_path) -> AgentRuntime:
+    registry = AgentTypeRegistry()
+    registry.register(
         "echo",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(agent), codec=JsonCodec()
         ),
     )
-    return kernel
+    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rt.start()
+    return rt
 
 
 @pytest.mark.asyncio
-async def test_base_agent_runs_on_kernel() -> None:
+async def test_base_agent_runs_on_runtime(tmp_path) -> None:
     agent = EchoOutcomeAgent()
-    kernel = _kernel(agent)
-    await kernel.start()
-    agent_id, run_id = await kernel.create_root("echo", {"content": "hello"})
-    summary = await kernel.wait_run(run_id, timeout=2)
+    rt = _runtime(agent, tmp_path)
+    agent_id, run_id = await rt.create_root("echo", {"content": "hello"})
+    summary = await rt.wait_run(run_id, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     response = JsonCodec().decode_response(summary.response_ref)
     assert response["result_ref"] == "result://hello"
     assert agent.seen_inputs == ["hello"]
-    await kernel.aclose()
+    await rt.aclose()
 
 
 @pytest.mark.asyncio
-async def test_base_agent_survives_followup_with_memory() -> None:
+async def test_base_agent_survives_followup_with_memory(tmp_path) -> None:
     agent = EchoOutcomeAgent()
-    kernel = _kernel(agent)
-    await kernel.start()
-    agent_id, run1 = await kernel.create_root("echo", {"content": "first"})
-    await kernel.wait_run(run1, timeout=2)
-    run2 = await kernel.followup(agent_id, {"content": "second"})
-    summary = await kernel.wait_run(run2, timeout=2)
+    rt = _runtime(agent, tmp_path)
+    agent_id, run1 = await rt.create_root("echo", {"content": "first"})
+    await rt.wait_run(run1, timeout=5)
+    run2 = await rt.followup(agent_id, {"content": "second"})
+    summary = await rt.wait_run(run2, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     assert agent.seen_inputs == ["first", "second"]
-    await kernel.aclose()
+    await rt.aclose()
 
 
 class MessageCollectingAgent(BaseAgent):
@@ -74,20 +74,19 @@ class MessageCollectingAgent(BaseAgent):
 
 
 @pytest.mark.asyncio
-async def test_agent_receives_structured_messages() -> None:
+async def test_agent_receives_structured_messages(tmp_path) -> None:
     """设计 §4.3：AgentContext.messages 按序包含触发请求与未读 mailbox。"""
     agent = MessageCollectingAgent()
-    kernel = _kernel(agent)
-    await kernel.start()
-    agent_id, run1 = await kernel.create_root("echo", {"content": "first"})
-    await kernel.wait_run(run1, timeout=2)
-    await kernel.send_message(agent_id, "unread-note")
-    run2 = await kernel.followup(agent_id, {"content": "second"})
-    await kernel.wait_run(run2, timeout=2)
+    rt = _runtime(agent, tmp_path)
+    agent_id, run1 = await rt.create_root("echo", {"content": "first"})
+    await rt.wait_run(run1, timeout=5)
+    await rt.send_message(agent_id, "unread-note")
+    run2 = await rt.followup(agent_id, {"content": "second"})
+    await rt.wait_run(run2, timeout=5)
     contents = [m.content for m in agent.messages]
     assert contents[0] == "second"  # 触发消息在前
     assert "unread-note" in contents  # 未读 mailbox 随后
-    await kernel.aclose()
+    await rt.aclose()
 
 
 class MessageProbeAgent(BaseAgent):
@@ -102,33 +101,31 @@ class MessageProbeAgent(BaseAgent):
 
 
 @pytest.mark.asyncio
-async def test_empty_request_has_no_fake_trigger() -> None:
+async def test_empty_request_has_no_fake_trigger(tmp_path) -> None:
     """设计 §4.4：空唤醒请求不生成假 trigger。"""
     agent = MessageProbeAgent()
-    kernel = _kernel(agent)
-    await kernel.start()
-    agent_id, run1 = await kernel.create_root("echo", {"content": "hello"})
-    await kernel.wait_run(run1, timeout=2)
-    run2 = await kernel.followup(agent_id, {})
-    await kernel.wait_run(run2, timeout=2)
+    rt = _runtime(agent, tmp_path)
+    agent_id, run1 = await rt.create_root("echo", {"content": "hello"})
+    await rt.wait_run(run1, timeout=5)
+    run2 = await rt.followup(agent_id, {})
+    await rt.wait_run(run2, timeout=5)
     assert agent.recorded[0] == ["hello"]  # 首轮有 trigger
     assert agent.recorded[1] == []  # 空请求无假 trigger
-    await kernel.aclose()
+    await rt.aclose()
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_prevents_redelivery_on_next_run() -> None:
+async def test_checkpoint_prevents_redelivery_on_next_run(tmp_path) -> None:
     """设计 §4.4：正常返回后提交 mailbox cursor，后续 run 不重投已读消息。"""
     agent = MessageProbeAgent()
-    kernel = _kernel(agent)
-    await kernel.start()
-    agent_id, run1 = await kernel.create_root("echo", {"content": "first"})
-    await kernel.wait_run(run1, timeout=2)
-    await kernel.send_message(agent_id, "note")
-    run2 = await kernel.followup(agent_id, {"content": "second"})
-    await kernel.wait_run(run2, timeout=2)
+    rt = _runtime(agent, tmp_path)
+    agent_id, run1 = await rt.create_root("echo", {"content": "first"})
+    await rt.wait_run(run1, timeout=5)
+    await rt.send_message(agent_id, "note")
+    run2 = await rt.followup(agent_id, {"content": "second"})
+    await rt.wait_run(run2, timeout=5)
     assert "note" in agent.recorded[1]  # 第二轮读到未读
-    run3 = await kernel.followup(agent_id, {"content": "third"})
-    await kernel.wait_run(run3, timeout=2)
+    run3 = await rt.followup(agent_id, {"content": "third"})
+    await rt.wait_run(run3, timeout=5)
     assert agent.recorded[2] == ["third"]  # note 已提交游标，不再重投
-    await kernel.aclose()
+    await rt.aclose()

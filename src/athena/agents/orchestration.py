@@ -5,9 +5,9 @@ spawn/send/followup 的 source、parent 与项目范围来自当前 session；wa
 登记等待后以内部控制流终止当前 turn。内部信号与投影器名称不进入公共合同。
 """
 
-from athena.core.agent_kernel.kernel import AgentKernel
-from athena.core.agent_kernel.session import RunSession
-from athena.core.agent_kernel.types import AgentId
+from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.agent.session import RunSession
+from athena.core.agent.types import AgentId
 from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import ToolContext, ToolSpec
 
@@ -59,13 +59,14 @@ class _SpawnTool(BaseTool):
     )
 
     def __init__(
-        self, kernel: AgentKernel, parent_id: AgentId, allowed: set[str]
+        self, kernel: AgentRuntime, parent_id: AgentId, allowed: set[str]
     ) -> None:
         self._kernel = kernel
         self._parent = parent_id
         self._allowed = allowed
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
+        """创建新 Agent 实例并返回其 id 与首个 Run id。"""
         agent_type = input["agent_type"]
         if agent_type not in self._allowed:
             raise PermissionError(
@@ -94,11 +95,12 @@ class _SendTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentKernel, agent_id: AgentId) -> None:
+    def __init__(self, kernel: AgentRuntime, agent_id: AgentId) -> None:
         self._kernel = kernel
         self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
+        """向目标 Agent 投递消息，不触发目标 turn。"""
         await self._kernel.send_message(
             input["agent_id"],
             input.get("content", ""),
@@ -125,10 +127,11 @@ class _FollowupTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentKernel) -> None:
+    def __init__(self, kernel: AgentRuntime) -> None:
         self._kernel = kernel
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
+        """follow-up 原实例并创建新 turn，返回新 Run id。"""
         run_id = await self._kernel.followup(input["agent_id"], _task_payload(input))
         return {"run_id": run_id}
 
@@ -146,11 +149,12 @@ class _WaitForTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentKernel, agent_id: AgentId) -> None:
+    def __init__(self, kernel: AgentRuntime, agent_id: AgentId) -> None:
         self._kernel = kernel
         self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
+        """登记对目标 Agent 的持久化等待并结束当前 turn。"""
         await self._kernel.wait_for(self._agent_id, input["agent_ids"])
         raise _TurnEnded()
 
@@ -170,11 +174,12 @@ class _WaitForHumanTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentKernel, agent_id: AgentId) -> None:
+    def __init__(self, kernel: AgentRuntime, agent_id: AgentId) -> None:
         self._kernel = kernel
         self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
+        """登记人工等待并结束当前 turn，返回稳定 request id。"""
         request_id = await self._kernel.wait_for_human(
             self._agent_id,
             input.get("content", ""),
@@ -199,6 +204,7 @@ class RunToolProjector:
         return self._permissions
 
     def build(self, agent_type: str, session: RunSession) -> ToolRegistry:
+        """按 agent_type 构造编排 ToolRegistry，权限来自静态矩阵。"""
         registry = ToolRegistry()
         allowed = self._permissions.get(agent_type, set())
         kernel = session.kernel

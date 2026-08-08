@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import aclosing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,7 +25,6 @@ from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
     AgentOutcome,
-    AskUserFactory,
     StepOutcome,
     ToolCall,
 )
@@ -355,13 +355,13 @@ def agent_runner(
     agent: BaseAgent,
     tools: ToolRegistry,
     *,
-    ask_user: AskUserFactory | None = None,
+    ask_user: Callable[[AthenaThread, AthenaTurn], AskUser | None] | None = None,
 ):
     """将 BaseAgent 适配为两套 Runner 签名，向后兼容 ThreadRuntime。
 
-    ``ask_user`` 是 (thread, turn) -> AskUser 的工厂：每次 run 时绑定线程
-    上下文注入 AgentContext，供 ``request_user_input`` 工具阻塞等待用户回答。
-    未提供则 Agent 内的交互提问工具返回错误。
+    ``ask_user`` 是 ``(thread, turn) -> (prompt) -> 回答`` 的工厂：每次 run
+    时绑定线程上下文注入 AgentContext，供 ``request_user_input`` 工具阻塞
+    等待用户回答；未提供则该工具返回错误。
 
     ThreadRuntime 会检测 runner 是否有 run_with_context 属性：
     - 有 → 传递 (thread, turn, emit, memory, cancel) 五参数
@@ -371,8 +371,8 @@ def agent_runner(
     无需修改即可同时支持新旧两种 Runner 签名。
     """
 
-    def _bind_ask_user(thread: AthenaThread, turn: AthenaTurn) -> AskUser | None:
-        return ask_user(thread, turn) if ask_user is not None else None
+    def _bind(thread: AthenaThread, turn: AthenaTurn) -> AskUser | None:
+        return ask_user(thread, turn) if ask_user else None
 
     async def _run(
         thread: AthenaThread, turn: AthenaTurn, emit: EmitEvent
@@ -383,7 +383,7 @@ def agent_runner(
             emit,
             tools,
             asyncio.Event(),
-            ask_user=_bind_ask_user(thread, turn),
+            ask_user=_bind(thread, turn),
         )
         return await agent.run(ctx)
 
@@ -401,7 +401,7 @@ def agent_runner(
             tools,
             cancel,
             memory,
-            ask_user=_bind_ask_user(thread, turn),
+            ask_user=_bind(thread, turn),
         )
         return await agent.run(ctx)
 

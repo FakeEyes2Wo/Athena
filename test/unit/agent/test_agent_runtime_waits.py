@@ -4,8 +4,7 @@ import pytest
 
 from ._support import make_runtime
 
-# COMPAT: Task 6 迁移后改 from athena.core.agent.types import ...
-from athena.core.agent_kernel.types import (
+from athena.core.agent.types import (
     AgentCommandError,
     AgentStatus,
     ErrorCode,
