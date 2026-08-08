@@ -13,7 +13,7 @@ from athena.core.contracts import ArtifactRef
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.execution import MonitorLimits
 from athena.memory.context_manager import ContextManager
-from athena.memory.rollout import RolloutRecorder
+from athena.memory.rollout import RolloutRecorder, resume_context_sync
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,9 @@ class RuntimeThreadManager:
         compactor: 可选的 Compactor — 上下文压缩。
         rollout: 可选的 RolloutRecorder — JSONL 持久化。
         llm: 可选的 LLM 客户端 — compaction 需要。
+        rollout_dir: 可选的确定性 rollout 目录 — 每 agent(session_id)一个
+            ``{rollout_dir}/{agent_id}.jsonl``;文件非空则启动时自动恢复记忆。
+        on_turn_terminal: 可选的终态回调 — 透传每个 ThreadRuntime。
     """
 
     def __init__(
@@ -41,9 +44,11 @@ class RuntimeThreadManager:
         monitor_limits: MonitorLimits | None = None,
         monitor_scan_interval: float = 1.0,
         monitor_terminal_retention: float = 300.0,
+        rollout_dir: Path | None = None,
+        on_turn_terminal: Any | None = None,
     ) -> None:
-        if not callable(runner):
-            raise TypeError("runner must be callable")
+        if not callable(runner) and not hasattr(runner, "run_with_context"):
+            raise TypeError("runner must be callable or expose run_with_context")
         self._runner = runner
         self._lock = asyncio.Lock()
         self._handles: dict[str, ThreadHandle] = {}
@@ -56,6 +61,8 @@ class RuntimeThreadManager:
             "llm": llm,
         }
         self._project_root = project_root or Path.cwd()
+        self._rollout_dir = Path(rollout_dir) if rollout_dir is not None else None
+        self._on_turn_terminal = on_turn_terminal
         self._monitor_kwargs = {
             "monitor_limits": monitor_limits,
             "monitor_scan_interval": monitor_scan_interval,
@@ -73,8 +80,17 @@ class RuntimeThreadManager:
             )
         if self._memory_kwargs["compactor"] is not None:
             kwargs["compactor"] = self._memory_kwargs["compactor"]
-        if self._memory_kwargs["rollout"] is not None:
-            kwargs["rollout"] = RolloutRecorder(self._project_root)
+        if self._memory_kwargs["rollout"] is not None or self._rollout_dir is not None:
+            recorder = RolloutRecorder(self._project_root)
+            if self._rollout_dir is not None:
+                # 确定性路径:同一 agent_id(session_id)重启复用同一 JSONL
+                path = self._rollout_dir / f"{session_id}.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                recorder.open_sync(session_id, append_to=path)
+                if path.exists() and path.stat().st_size > 0:
+                    # COMPAT: 重开会话恢复记忆;清理条件:Codex 风格会话恢复并入 ThreadRuntime 后。
+                    kwargs["ctx"] = resume_context_sync(path)
+            kwargs["rollout"] = recorder
         if self._memory_kwargs["llm"] is not None:
             kwargs["llm"] = self._memory_kwargs["llm"]
         return ThreadRuntime(
@@ -82,6 +98,7 @@ class RuntimeThreadManager:
             session_id=session_id,
             context_ref=context_ref,
             runner=self._runner,
+            on_turn_terminal=self._on_turn_terminal,
             **self._monitor_kwargs,
             **kwargs,
         )
