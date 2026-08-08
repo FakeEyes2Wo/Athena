@@ -6,18 +6,14 @@ SafeOS 代理和资源限制。
 
 import asyncio
 import json
-import logging
 import subprocess
 import sys
-import textwrap
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from athena.sandbox.whitelist import ALLOWED_IMPORTS
 from athena.sandbox.limits import SandboxLimits
-
-_logger = logging.getLogger("athena.sandbox.executor")
 
 @dataclass(slots=True)
 class InspectResult:
@@ -154,19 +150,10 @@ print(_marker_end, flush=True)
             '    result = eval(' + repr(expr) + ', {"__builtins__": __builtins__, "pd": pd, "np": np}, {})\n'
         )
 
-        # 打印即将在沙箱中执行的代码
-        _logger.info("沙箱执行 inspect:\n┌─ expr: %s\n└─ cwd: %s", expr, cwd_path)
-
         wrapper = self._build_wrapper(inject=inject, preamble=preamble)
         t0 = time.perf_counter()
-        stdout, parsed, stderr = await self._run_subprocess(wrapper, timeout)
+        _, parsed, _ = await self._run_subprocess(wrapper, timeout)
         dt_ms = int((time.perf_counter() - t0) * 1000)
-
-        # 打印沙箱执行输出
-        if stdout:
-            _logger.info("沙箱 stdout:\n%s", textwrap.indent(stdout.strip(), "  │ "))
-        if stderr:
-            _logger.info("沙箱 stderr:\n%s", textwrap.indent(stderr.strip(), "  │ "))
 
         if not parsed.get("ok"):
             return InspectResult(
@@ -225,24 +212,10 @@ print(_marker_end, flush=True)
             '    result = _user_globals.get("_result", repr(_user_globals.get("result", "<no explicit result>")))\n'
         )
 
-        # 打印即将在沙箱中执行的代码（多行脚本缩进显示）
-        _logger.info(
-            "沙箱执行 execute (%d 行, cwd=%s):\n%s",
-            script.count("\n") + 1,
-            cwd_path,
-            textwrap.indent(script.strip(), "  │ "),
-        )
-
         wrapper = self._build_wrapper(inject=inject, preamble=preamble)
         t0 = time.perf_counter()
         stdout, parsed, stderr = await self._run_subprocess(wrapper, timeout)  # 真正执行
         dt_ms = int((time.perf_counter() - t0) * 1000)
-
-        # 打印沙箱执行输出
-        if stdout:
-            _logger.info("沙箱 stdout:\n%s", textwrap.indent(stdout.strip(), "  │ "))
-        if stderr:
-            _logger.info("沙箱 stderr:\n%s", textwrap.indent(stderr.strip(), "  │ "))
 
         # 计算新增/修改文件
         after_files = set()

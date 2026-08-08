@@ -8,7 +8,7 @@ TaskUnderstandAgent 的完整 pipeline。
 
 用法::
 
-    # 默认运行（seeded 模式，绕过 MCP 外部工具）
+    # 默认运行
     python demo_taskunderstand_agent.py
 
     # 后面的先不要尝试，没测试过
@@ -286,7 +286,7 @@ async def run_demo(
     *,
     mode: str = "seeded",
     competition: str = "titanic",
-    max_turns: int = 15,
+    max_turns: int = 30,
     hf_endpoint: str = DEFAULT_HF_ENDPOINT,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     work_dir: Path = DEFAULT_WORK_DIR,
@@ -364,11 +364,8 @@ async def run_demo(
     else:
         user_prompt = (
             f"I want to compete in the Kaggle competition: {competition}. "
-            f"Please follow your pipeline: search competition info, "
-            f"download data, search for augmentation datasets and models, "
-            # f"analyze data, design a solution, generate code, and build a submission. "
-            # f"If any tool returns an error, skip it and continue with what you have. "
-            # f"Do NOT retry a failed tool more than once."
+            # f"Please follow your pipeline: search competition info, "
+            # f"download data, search for augmentation datasets and models, "
         )
 
     thread = AthenaThread(
@@ -414,6 +411,9 @@ async def run_demo(
     print(f"🏁 Agent 执行完成 (耗时 {elapsed:.0f}s)")
     print(f"   result_ref:       {outcome.result_ref}")
     print(f"   next_context_ref: {outcome.next_context_ref}")
+    if outcome.guard_interrupted:
+        print(f"   ⚠️  GuardError 触发!")
+        print(f"   guard_reason:     {outcome.guard_reason}")
     print(f"{'=' * 70}")
 
     # ── 6. 工具调用统计 ──
@@ -452,6 +452,8 @@ async def run_demo(
         "elapsed_s": round(elapsed, 1),
         "result_ref": outcome.result_ref,
         "next_context_ref": outcome.next_context_ref,
+        "guard_interrupted": outcome.guard_interrupted,
+        "guard_reason": outcome.guard_reason,
         "thread_id": thread.thread_id,
         "turn_id": turn.turn_id,
         "tool_stats": {
@@ -532,7 +534,7 @@ def main() -> None:
         choices=["auto", "seeded"],
         default="auto",
         help=(
-            '运行模式: "seeded" 绕过 MCP 外部工具，预注入竞赛信息（默认），'
+            '运行模式: "seeded" 绕过 MCP 外部工具，预注入竞赛信息，'
             '"auto" 完全自主 ReAct 循环'
         ),
     )

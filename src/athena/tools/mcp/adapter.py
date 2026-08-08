@@ -48,6 +48,10 @@ class McpToolAdapter(BaseTool):
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """转发 MCP call_tool 调用，把结果归一化并落盘后返回 ToolResult。"""
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 对 sandbox 工具打印执行信息到终端（stdout，与 demo 输出同流）
+        _print_sandbox_input(self._mcp_tool.name, input)
+
         try:
             result = await self._manager.call_tool(self._mcp_tool.name, arguments=input)
             payload, saved_files = await self._normalize(result, ctx)
@@ -60,6 +64,9 @@ class McpToolAdapter(BaseTool):
                 success=False,
                 error=str(exc),
             )
+
+        # 对 sandbox 工具打印返回结果到终端
+        _print_sandbox_result(self._mcp_tool.name, payload)
 
         if getattr(result, "isError", False):
             text = _collect_text(result)
@@ -258,3 +265,49 @@ def _preview(payload: dict) -> str:
     if isinstance(structured, dict):
         return json.dumps(structured, ensure_ascii=False)[:2000]
     return ""
+
+
+_SANDBOX_TOOLS = {"python_inspect", "python_execute"}
+_SEP = "─" * 50
+
+
+def _print_sandbox_input(tool_name: str, args: dict) -> None:
+    """对 sandbox 工具，打印即将执行的代码到终端 stdout。"""
+    if tool_name not in _SANDBOX_TOOLS:
+        return
+    cwd = args.get("cwd", ".")
+    if tool_name == "python_inspect":
+        expr = args.get("expr", "")
+        print(f"\n{_SEP}\n[SANDBOX INSPECT] expr: {expr}\n[SANDBOX INSPECT] cwd:  {cwd}\n{_SEP}", flush=True)
+    elif tool_name == "python_execute":
+        script = args.get("script", "")
+        lines = script.count("\n") + 1 if script else 0
+        print(f"\n{_SEP}\n[SANDBOX EXECUTE] ({lines} lines, cwd={cwd})\n{script}\n{_SEP}", flush=True)
+
+
+def _print_sandbox_result(tool_name: str, payload: dict) -> None:
+    """对 sandbox 工具，解析 JSON 结果并打印 stdout/stderr/error 到终端。"""
+    if tool_name not in _SANDBOX_TOOLS:
+        return
+    text = payload.get("text", "")
+    if not text:
+        return
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return
+    stdout = data.get("stdout", "")
+    stderr = data.get("stderr", "")
+    error = data.get("error", "")
+    value = data.get("value", "")
+    ok = data.get("ok", True)
+    if not ok:
+        print(f"[SANDBOX ERROR] {error}", flush=True)
+    if stdout:
+        print(f"[SANDBOX STDOUT]\n{stdout.strip()}", flush=True)
+    if stderr:
+        print(f"[SANDBOX STDERR]\n{stderr.strip()}", flush=True)
+    # inspect 的结果值
+    if value and value != "None":
+        print(f"[SANDBOX VALUE] {value}", flush=True)
+    print(_SEP, flush=True)
