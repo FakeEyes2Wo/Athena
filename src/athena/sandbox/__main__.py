@@ -4,9 +4,19 @@
 """
 
 import argparse
+import logging
+import sys
 
 from athena.sandbox.lifecycle import ProcessLifecycle
 from athena.sandbox.server import create_sandbox_server
+
+# 配置日志输出到 stderr（MCP stdio transport 中 stdout 被 JSON-RPC 占用）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)-30s %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
 
 def main() -> None:
     """解析 CLI 参数并启动 MCP stdio server。"""
