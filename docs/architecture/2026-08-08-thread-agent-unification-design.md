@@ -87,6 +87,26 @@ ThreadFacadeRecord:
 - **编排工具**:`RunToolProjector.build(agent_type, session)` 中 `session.kernel` 现在指向 AgentRuntime;`_SpawnTool`/`_SendTool`/`_FollowupTool`/`_WaitForTool`/`_WaitForHumanTool` 改调 runtime 方法;静态权限矩阵原样。
 - **AgentContext**:`thread`/`turn` 由 thread_models 构造(现状);`memory` = ThreadRuntime 注入的 ContextManager(现状);`messages` = [trigger, *unread mailbox];`tools` = projector.build(agent_type, session)。
 
+## 兼容层注释规范(必须执行)
+
+凡为迁移保留的兼容层,代码中必须以统一前缀注释标注,写明保留的旧契约与清理条件;**禁止出现无标注的兼容分支**。spec 中任何"兼容/迁移期"表述都必须能对应到代码里的 `COMPAT:` 标注,实现与评审按此核验。
+
+| 兼容层 | 保留的旧契约 | 标注位置 | 清理条件 |
+|---|---|---|---|
+| `response_ref` JSON 信封(`{"result_ref": ...}`) | `ProjectRuntime` 现有 `json.loads(summary.response_ref)["result_ref"]` 调用 | `agent_runtime.py` wait_run / runner 适配器 | ProjectRuntime 改用强类型返回后 |
+| `BaseAgentRunner.run_with_context` 适配入口 | kernel runner 协议 `run(request, *, session, emit)` | `base_runner.py` | AgentRunner 协议统一为线程 runner 后 |
+| `RunSession` 视图 | `receive_messages()/checkpoint()/memory/agent_id/context_ref/kernel` | `core/agent/session.py` | BaseAgentRunner 不再依赖 session 后 |
+| 空唤醒不生成假 trigger | kernel §4.4 wait 唤醒语义 | `base_runner.py` 与 WaitRegistry 唤醒处 | 等待语义内建到 thread 后 |
+| `AgentOutcome.next_context_ref` 迁移字段 | ThreadRuntime 旧字段 | `core/agent/models.py` | 旧调用方迁移完成后删除 |
+| ThreadRuntime 双签名检测(`run_with_context` vs `run`) | 兼容旧 `agent_runner()` 包装器 | `thread_runtime.py` `_run_turn` | 全部 runner 统一带 context 后 |
+| `IdeatorAgent` 确定性 fallback + `run_impl` 注入 | 首版无 LLM 的确定性骨架 | `simple_agents.py` | 真实 Ideator 全量接线后 |
+
+标注格式(代码注释):
+
+```python
+# COMPAT: 保留 <旧契约>;清理条件:<条件>。
+```
+
 ## 持久化与 ProjectRuntime
 
 - `project.json` **去掉 `store` 字段**(不再存 AgentGraphStore),保留确定性事实:`root_supervisor_id`、phase、status、task、eval_specs、sota_ref、validation_ref、report_ref、memory、budget、tree。
