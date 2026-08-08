@@ -6,6 +6,7 @@ AgentContext。本模块用 :class:`ProjectState` 协议桥接：每个 turn 从
 返回 ``AgentOutcome(result_ref)``。缺省仍使用确定性实现。
 """
 
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -34,12 +35,19 @@ Impl = Callable[[AgentContext], Awaitable[AgentOutcome]]
 
 
 def ideator_run_impl(ideator: Any, store: ArtifactStore, project: ProjectState) -> Impl:
-    """构建真实 Ideator 的 run_impl：委托 :class:`~athena.agents.ideator_agent.IdeatorAgent`。
+    """构建真实 Ideator 的 run_impl：解析项目输入 → generate → 写 DebateResult。"""
 
-    真实 Ideator 的接入逻辑（解析项目输入 → ``generate`` → 写 ``DebateResult``）
-    收敛在 ``IdeatorAgent``；这里只构造接入了 ``ideator`` + ``project`` 的实例并
-    返回其 ``run``，保持既有注入契约。
-    """
-    from athena.agents.ideator_agent import IdeatorAgent
+    async def _run(ctx: AgentContext) -> AgentOutcome:
+        inputs = await project.ideator_inputs(ctx)
+        result = await ideator.generate(
+            inputs.profile,
+            inputs.papers,
+            inputs.models,
+            inputs.tree,
+        )
+        result_ref = await store.put_text(
+            json.dumps(result.model_dump(mode="json"), ensure_ascii=False, default=str)
+        )
+        return AgentOutcome(result_ref=result_ref)
 
-    return IdeatorAgent(store, ideator=ideator, project=project).run
+    return _run

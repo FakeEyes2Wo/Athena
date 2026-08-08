@@ -428,13 +428,18 @@ async def test_ideator_run_impl_wires_real_module(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ideator_agent_native_wiring(tmp_path) -> None:
-    """ideator_agent 原生接线：注入 ideator + project 自动构建真实辩论 run_impl。"""
+async def test_ideator_agent_run_impl_wiring(tmp_path) -> None:
+    """ideator_agent 经 production.ideator_run_impl 接入真实 Ideator。"""
     project = ProjectRuntime(tmp_path)
     project.register_defaults()
     await project.open()
     fake_ideator = _FakeIdeator()
-    agent = IdeatorAgent(project.store, ideator=fake_ideator, project=_FakeProject())
+    agent = IdeatorAgent(
+        project.store,
+        run_impl=production.ideator_run_impl(
+            fake_ideator, project.store, _FakeProject()
+        ),
+    )
     project.kernel._type_registry.register(
         "ideator-native",
         lambda _aid, _cfg=None: AgentSpec(
