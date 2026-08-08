@@ -3,13 +3,15 @@
 from pathlib import Path
 
 
+class CodeExecutionError(RuntimeError):
+    """生成实验代码执行/策略校验失败（原 workflows/search.code_agent 迁移至此）。"""
+
+
 class GeneratedTreePolicy:
     PROTECTED = {".gitignore", "eval.py", "eval_spec.json"}
     _RUNTIME_NAMES = {"predictions.csv", "labels.csv", "eval_result.json"}
 
     def validate(self, root: Path, changed_paths: set[str]) -> None:
-        from athena.workflows.search.code_agent import CodeExecutionError
-
         root = root.resolve()
         entrypoint = root / "run_experiment.py"
         if not entrypoint.is_file():

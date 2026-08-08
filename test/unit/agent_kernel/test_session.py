@@ -15,7 +15,7 @@ from ._support import EchoRunner, JsonCodec
 
 
 def _spec() -> AgentSpec:
-    return AgentSpec(runner=EchoRunner(), codec=JsonCodec(), role="debater")
+    return AgentSpec(runner=EchoRunner(), codec=JsonCodec())
 
 
 def _session(store: AgentGraphStore) -> AgentSession:
@@ -40,7 +40,7 @@ def test_receive_messages_returns_uncommitted_window() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="a", sequence=1),
+            "message": AgentMessage(source="x", content="a"),
         },
     )
     store.commit(
@@ -48,7 +48,7 @@ def test_receive_messages_returns_uncommitted_window() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="b", sequence=2),
+            "message": AgentMessage(source="x", content="b"),
         },
     )
     session = _session(store)
@@ -61,7 +61,7 @@ def test_receive_messages_returns_uncommitted_window() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="c", sequence=3),
+            "message": AgentMessage(source="x", content="c"),
         },
     )
     assert [m.content for m in session.receive_messages()] == ["c"]
@@ -148,7 +148,7 @@ def test_checkpoint_does_not_drop_messages_arriving_during_read() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="a", sequence=1),
+            "message": AgentMessage(source="x", content="a"),
         },
     )
     session = _session(store)
@@ -160,7 +160,7 @@ def test_checkpoint_does_not_drop_messages_arriving_during_read() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="b", sequence=2),
+            "message": AgentMessage(source="x", content="b"),
         },
     )
     session.checkpoint()
@@ -174,7 +174,7 @@ def test_checkpoint_rejected_without_active_run_or_wrong_generation() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="a", sequence=1),
+            "message": AgentMessage(source="x", content="a"),
         },
     )
     session = _session(store)
@@ -224,7 +224,7 @@ def test_receive_messages_does_not_redeliver() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="a", sequence=1),
+            "message": AgentMessage(source="x", content="a"),
         },
     )
     session = _session(store)
@@ -239,7 +239,7 @@ def test_visible_cursor_is_per_run() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="a", sequence=1),
+            "message": AgentMessage(source="x", content="a"),
         },
     )
     session = _session(store)
@@ -247,7 +247,9 @@ def test_visible_cursor_is_per_run() -> None:
     session.receive_messages(run_id="r1", generation=1)  # r1 读取但不 checkpoint
     # 新 Run r2 应看到未提交的消息（游标按 Run 隔离，R4）
     session.set_active_run("r2", 1)
-    assert [m.content for m in session.receive_messages(run_id="r2", generation=1)] == ["a"]
+    assert [m.content for m in session.receive_messages(run_id="r2", generation=1)] == [
+        "a"
+    ]
     # 旧 Run 视图不得读取/推进（active 已变）
     session.set_active_run("r3", 1)
     assert session.receive_messages(run_id="r1", generation=1) == []
@@ -262,7 +264,7 @@ def test_run_session_blocks_stale_checkpoint_and_rollback() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="a", sequence=1),
+            "message": AgentMessage(source="x", content="a"),
         },
     )
     session.set_active_run("r1", 2)

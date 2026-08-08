@@ -13,12 +13,21 @@ from athena.core.agent_kernel.types import AgentBusyError, AgentCommandError, Ag
 from ._support import BlockingRunner, EchoRunner, JsonCodec, collect_until_terminal
 
 
-def _spec(runner=None, role="agent") -> AgentSpec:
-    return AgentSpec(runner=runner or EchoRunner(), codec=JsonCodec(), role=role)
-
-
 def _control(**kw) -> AgentControl:
-    return AgentControl(AgentKernel(resources_factory=InMemoryResourcesFactory(), **kw))
+    kernel = AgentKernel(resources_factory=InMemoryResourcesFactory(), **kw)
+    kernel._type_registry.register(
+        "agent",
+        lambda _aid, _cfg=None: AgentSpec(runner=EchoRunner(), codec=JsonCodec()),
+    )
+    return AgentControl(kernel)
+
+
+def _type(control, runner=None) -> str:
+    """注册一个新 spec 到 control 的 type registry 并返回其 agent_type。"""
+    spec = AgentSpec(runner=runner or EchoRunner(), codec=JsonCodec())
+    t = f"t{len(control.kernel._type_registry.types)}"
+    control.kernel._type_registry.register(t, lambda _aid, _cfg=None: spec)
+    return t
 
 
 def test_public_exports_are_exact() -> None:
@@ -37,7 +46,6 @@ def test_public_exports_are_exact() -> None:
         "AgentStatus",
         "AgentWaitResult",
         "ErrorCode",
-        "ForkPolicy",
         "ReturnWhen",
         "RunStatus",
         "RunSummary",
@@ -50,7 +58,7 @@ async def test_invariant_same_agent_never_has_two_nonterminal_runs() -> None:
     control = _control()
     await control.kernel.start()
     runner = BlockingRunner()
-    handle, run = await control.create_root(_spec(runner), {})
+    handle, run = await control.create_root(_type(control, runner), {})
     await runner.started.wait()
     with pytest.raises(AgentBusyError):
         await control.followup(handle, {})
@@ -63,7 +71,7 @@ async def test_invariant_same_agent_never_has_two_nonterminal_runs() -> None:
 async def test_invariant_each_run_has_one_terminal_event() -> None:
     control = _control()
     await control.kernel.start()
-    handle, run = await control.create_root(_spec(), {})
+    handle, run = await control.create_root("agent", {})
     await run.wait(timeout=2)
     events = await collect_until_terminal(run.events())
     terminal = [
@@ -85,7 +93,7 @@ async def test_invariant_busy_followup_changes_nothing() -> None:
     control = _control()
     await control.kernel.start()
     runner = BlockingRunner()
-    handle, run = await control.create_root(_spec(runner), {})
+    handle, run = await control.create_root(_type(control, runner), {})
     await runner.started.wait()
     runs_before = {rid: r.status for rid, r in control.kernel._store.runs().items()}
     mailbox_before = list(control.kernel._store.mailbox(handle.agent_id))
@@ -101,25 +109,23 @@ async def test_invariant_busy_followup_changes_nothing() -> None:
 
 @pytest.mark.asyncio
 async def test_invariant_parent_wait_child_no_deadlock_at_one_slot() -> None:
-    control = _control(max_active_runs=1)
+    control = _control(max_active_agents=1)
     await control.kernel.start()
 
     async def spawn_child(parent_id):
-        return await control.kernel.spawn(parent_id, _spec(), {}, name="kid")
+        return await control.kernel.spawn(parent_id, "agent", {}, name="kid")
 
     class ParentWaiter:
         def __init__(self):
             self.result = None
 
         async def run(self, request, *, session, emit):
-            _, _ = await spawn_child(session.agent_id)
-            self.result = await session.wait_agents(
-                [session.agent_id + "/kid"], timeout=5
-            )
+            child_id, _ = await spawn_child(session.agent_id)
+            self.result = await session.wait_agents([child_id], timeout=5)
             return {"ok": True}
 
     runner = ParentWaiter()
-    parent_handle, parent_run = await control.create_root(_spec(runner), {})
+    parent_handle, parent_run = await control.create_root(_type(control, runner), {})
     await parent_run.wait(timeout=5)
     assert runner.result is not None
     assert runner.result.timed_out is False  # 子 Run 已完成而非超时
@@ -130,12 +136,12 @@ async def test_invariant_parent_wait_child_no_deadlock_at_one_slot() -> None:
 async def test_invariant_closed_agent_rejects_new_messages_runs_and_children() -> None:
     control = _control()
     await control.kernel.start()
-    handle, _ = await control.create_root(_spec(), {})
+    handle, _ = await control.create_root("agent", {})
     await control.close(handle)
     with pytest.raises(AgentCommandError):
         await control.send_message(handle, "late")
     with pytest.raises(AgentCommandError):
         await control.followup(handle, {})
     with pytest.raises(AgentCommandError):
-        await control.kernel.spawn(handle.agent_id, _spec(), {})
+        await control.kernel.spawn(handle.agent_id, "agent", {})
     await control.kernel.aclose()

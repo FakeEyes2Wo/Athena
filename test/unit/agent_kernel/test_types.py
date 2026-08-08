@@ -6,7 +6,6 @@ from athena.core.agent_kernel.types import (
     AgentSpec,
     AgentStatus,
     ErrorCode,
-    ForkPolicy,
     ReturnWhen,
     RunStatus,
 )
@@ -29,6 +28,8 @@ def test_agent_status_enum_values_match_spec() -> None:
         "starting",
         "idle",
         "running",
+        "waiting",
+        "waiting_for_human",
         "error",
         "closed",
     ]
@@ -49,25 +50,20 @@ def test_return_when_has_both_modes() -> None:
     assert {r.value for r in ReturnWhen} == {"first_completed", "all_completed"}
 
 
-def test_fork_policy_has_exactly_three_forms() -> None:
-    assert ForkPolicy.none().mode == "none"
-    assert ForkPolicy.full().mode == "full"
-    assert ForkPolicy.last_n(3).turns == 3
-
-
-def test_fork_policy_rejects_nonpositive_turns() -> None:
-    with pytest.raises(ValueError):
-        ForkPolicy.last_n(0)
-
-
 def test_agent_message_marks_control_messages() -> None:
-    assert AgentMessage(source=None, content={}, sequence=1).is_control
-    assert not AgentMessage(source="root", content="hi", sequence=2).is_control
+    assert AgentMessage(source=None, content="control").is_control
+    assert not AgentMessage(source="root", content="hi").is_control
 
 
-def test_agent_spec_holds_runner_codec_role() -> None:
-    spec = AgentSpec(runner=EchoRunner(), codec=JsonCodec(), role="debater")
-    assert spec.role == "debater"
+def test_agent_message_carries_context_refs() -> None:
+    msg = AgentMessage(source="root", content="评审意见", context_refs=["ref://r"])
+    assert msg.context_refs == ["ref://r"]
+
+
+def test_agent_spec_holds_runner_and_codec() -> None:
+    spec = AgentSpec(runner=EchoRunner(), codec=JsonCodec())
+    assert isinstance(spec.runner, EchoRunner)
+    assert isinstance(spec.codec, JsonCodec)
 
 
 def test_error_code_values_match_spec() -> None:

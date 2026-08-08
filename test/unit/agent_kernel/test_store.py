@@ -7,18 +7,7 @@ from athena.core.agent_kernel.store import (
     OutboxRecord,
     RunRecord,
 )
-from athena.core.agent_kernel.types import (
-    AgentMessage,
-    AgentSpec,
-    AgentStatus,
-    RunStatus,
-)
-
-from ._support import EchoRunner, JsonCodec
-
-
-def _spec() -> AgentSpec:
-    return AgentSpec(runner=EchoRunner(), codec=JsonCodec(), role="debater")
+from athena.core.agent_kernel.types import AgentMessage, AgentStatus, RunStatus
 
 
 def _spawn(store: AgentGraphStore, agent_id: str = "root") -> None:
@@ -30,10 +19,9 @@ def _spawn(store: AgentGraphStore, agent_id: str = "root") -> None:
                 agent_id=agent_id,
                 path=(agent_id,),
                 name=agent_id,
-                role="debater",
+                agent_type="debater",
                 parent_id=None,
                 status=AgentStatus.IDLE,
-                spec=_spec(),
                 created_sequence=store.sequence + 1,
             ),
             "run": RunRecord(
@@ -54,10 +42,9 @@ def test_commit_assigns_monotonic_sequence_and_journals() -> None:
         agent_id="a1",
         path=("a1",),
         name="a1",
-        role="debater",
+        agent_type="debater",
         parent_id=None,
         status=AgentStatus.IDLE,
-        spec=_spec(),
         created_sequence=1,
     )
     run = RunRecord(
@@ -123,7 +110,7 @@ def test_mailbox_cursors_track() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="hi", sequence=1),
+            "message": AgentMessage(source="x", content="hi"),
         },
     )
     assert [m.content for m in store.mailbox("root")] == ["hi"]
@@ -162,7 +149,7 @@ def test_snapshot_and_load_rebuild_identical_state() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="hi", sequence=1),
+            "message": AgentMessage(source="x", content="hi"),
         },
     )
     snapshot = store.snapshot()
@@ -189,7 +176,7 @@ def test_load_advances_sequence_past_replayed_journal() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="hi", sequence=1),
+            "message": AgentMessage(source="x", content="hi"),
         },
     )
     snapshot = store.snapshot()
@@ -198,7 +185,7 @@ def test_load_advances_sequence_past_replayed_journal() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="hi2", sequence=2),
+            "message": AgentMessage(source="x", content="hi2"),
         },
     )
     fresh = AgentGraphStore()
@@ -220,10 +207,9 @@ def test_commit_is_idempotent_by_command_id() -> None:
         agent_id="a1",
         path=("a1",),
         name="a1",
-        role="debater",
+        agent_type="debater",
         parent_id=None,
         status=AgentStatus.IDLE,
-        spec=_spec(),
         created_sequence=1,
     )
     run = RunRecord(
@@ -294,10 +280,9 @@ def test_commit_is_failure_atomic_leaves_no_residue() -> None:
         agent_id="a1",
         path=("a1",),
         name="a1",
-        role="debater",
+        agent_type="debater",
         parent_id=None,
         status=AgentStatus.IDLE,
-        spec=_spec(),
         created_sequence=1,
     )
     with pytest.raises(KeyError):
@@ -410,7 +395,7 @@ def test_idempotency_ledger_survives_snapshot_and_load() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="first", sequence=1),
+            "message": AgentMessage(source="x", content="first"),
         },
     )
     snapshot = store.snapshot()
@@ -422,7 +407,7 @@ def test_idempotency_ledger_survives_snapshot_and_load() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="first", sequence=1),
+            "message": AgentMessage(source="x", content="first"),
         },
     )
     assert [m.content for m in fresh.mailbox("root")] == ["first"]
@@ -436,7 +421,7 @@ def test_commit_rejects_reused_command_id_with_different_payload() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="first", sequence=1),
+            "message": AgentMessage(source="x", content="first"),
         },
     )
     with pytest.raises(ValueError):
@@ -445,7 +430,7 @@ def test_commit_rejects_reused_command_id_with_different_payload() -> None:
             kind="mailbox",
             payload={
                 "agent_id": "root",
-                "message": AgentMessage(source="x", content="second", sequence=1),
+                "message": AgentMessage(source="x", content="second"),
             },
         )
 
@@ -508,7 +493,7 @@ def test_mailbox_committed_rejects_cursor_beyond_length() -> None:
         kind="mailbox",
         payload={
             "agent_id": "root",
-            "message": AgentMessage(source="x", content="a", sequence=1),
+            "message": AgentMessage(source="x", content="a"),
         },
     )
     before = store.sequence

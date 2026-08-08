@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from athena.execution.events import (
     HealthEventSink,
     HealthStateEvent,
     MonitorLimits,
+    require_positive_finite,
     utc_now,
 )
 
@@ -55,8 +55,8 @@ class ExecutionMonitor:
         clock: Callable[[], float] = time.monotonic,
         utc_now: Callable[[], datetime] = utc_now,
     ) -> None:
-        _require_positive_finite(scan_interval, "scan_interval")
-        _require_positive_finite(terminal_retention, "terminal_retention")
+        require_positive_finite(scan_interval, "scan_interval")
+        require_positive_finite(terminal_retention, "terminal_retention")
         self._sink = sink
         self._default_limits = default_limits or MonitorLimits()
         self._scan_interval = scan_interval
@@ -284,10 +284,3 @@ class ExecutionMonitor:
             completed_at=record.completed_at,
             failed_at=record.failed_at,
         )
-
-
-def _require_positive_finite(value: float, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} must be a positive finite number")
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a positive finite number")

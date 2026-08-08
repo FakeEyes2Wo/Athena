@@ -42,8 +42,8 @@ class MonitorLimits:
     timeout_after: float = 3600.0
 
     def __post_init__(self) -> None:
-        _require_positive_finite(self.stalled_after, "stalled_after")
-        _require_positive_finite(self.timeout_after, "timeout_after")
+        require_positive_finite(self.stalled_after, "stalled_after")
+        require_positive_finite(self.timeout_after, "timeout_after")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +107,8 @@ class HealthStateEvent:
 HealthEventSink = Callable[[HealthStateEvent], Awaitable[None]]
 
 
-def _require_positive_finite(value: float, name: str) -> None:
+def require_positive_finite(value: float, name: str) -> None:
+    """Validate that ``value`` is a positive finite number for a limit setting."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be a positive finite number")
     if not math.isfinite(value) or value <= 0:

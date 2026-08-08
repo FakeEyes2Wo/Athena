@@ -5,7 +5,7 @@
 """
 
 import hashlib
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass, field, is_dataclass
 from typing import Any
 
 from athena.core.agent_kernel.types import (
@@ -15,7 +15,6 @@ from athena.core.agent_kernel.types import (
     AgentMessage,
     AgentPath,
     AgentSnapshot,
-    AgentSpec,
     AgentStatus,
     CommandId,
     RunId,
@@ -26,17 +25,17 @@ from athena.core.agent_kernel.types import (
 
 @dataclass
 class AgentRecord:
-    """Agent 的派生状态记录。"""
+    """Agent 的派生状态记录。运行期能力经 agent_type 由注册表解析，不持久化。"""
 
     agent_id: AgentId
     path: AgentPath
     name: str
-    role: str
+    agent_type: str
     parent_id: AgentId | None
     status: AgentStatus
-    spec: AgentSpec
     created_sequence: int
     pending_run_id: RunId | None = None
+    context_ref: str | None = None
 
 
 @dataclass
@@ -74,6 +73,21 @@ class OutboxRecord:
     summary: RunSummary
 
 
+@dataclass
+class WaitRecord:
+    """Kernel 内部持久化等待记录（设计 §7.2）。非公共 DTO。
+
+    kind 为 "human" 时以 request_id 匹配回复；为 "agents" 时以 target_ids 匹配完成。
+    """
+
+    agent_id: AgentId
+    kind: str
+    target_ids: list[AgentId] = field(default_factory=list)
+    request_id: str | None = None
+    content: str = ""
+    context_refs: list[str] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """幂等命令结果。error 保存异常实例以便重试时原样重抛。"""
@@ -84,7 +98,7 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class StoreSnapshot:
-    """crash recovery 的基础状态（§3.7）。"""
+    """crash recovery 的基础状态（设计 §10）。"""
 
     sequence: int
     agents: dict[AgentId, AgentRecord]
@@ -92,6 +106,7 @@ class StoreSnapshot:
     mailboxes: dict[AgentId, list[AgentMessage]]
     mailbox_committed: dict[AgentId, int]
     outbox: dict[RunId, OutboxRecord]
+    waits: dict[AgentId, WaitRecord]
     command_results: dict[CommandId, CommandResult]
     applied: dict[CommandId, tuple[int, str]]
     events: dict[AgentId, list[AgentEvent]]
@@ -108,6 +123,7 @@ class AgentGraphStore:
         self._mailboxes: dict[AgentId, list[AgentMessage]] = {}
         self._mailbox_committed: dict[AgentId, int] = {}
         self._outbox: dict[RunId, OutboxRecord] = {}
+        self._waits: dict[AgentId, WaitRecord] = {}
         self._command_results: dict[CommandId, CommandResult] = {}
         self._events: dict[AgentId, list[AgentEvent]] = {}
         # command_id -> (应用 sequence, 命令指纹)；指纹用于识别 ID 复用冲突（B3）
@@ -204,6 +220,16 @@ class AgentGraphStore:
     def outbox(self) -> dict[RunId, OutboxRecord]:
         return dict(self._outbox)
 
+    def waits(self) -> dict[AgentId, WaitRecord]:
+        return dict(self._waits)
+
+    def wait_for_request(self, request_id: str) -> WaitRecord | None:
+        """按 request id 查找等待记录；未找到返回 None。"""
+        for wait in self._waits.values():
+            if wait.request_id == request_id:
+                return wait
+        return None
+
     def events(self, agent_id: AgentId) -> list[AgentEvent]:
         return list(self._events.get(agent_id, []))
 
@@ -228,7 +254,7 @@ class AgentGraphStore:
             agent_id=agent.agent_id,
             path=agent.path,
             name=agent.name,
-            role=agent.role,
+            agent_type=agent.agent_type,
             status=agent.status,
             parent_id=agent.parent_id,
             pending_run_id=agent.pending_run_id,
@@ -290,6 +316,9 @@ class AgentGraphStore:
             agent.pending_run_id = None
             if agent.status == AgentStatus.RUNNING:
                 agent.status = AgentStatus.IDLE
+            context_ref = payload.get("context_ref")
+            if context_ref is not None:
+                agent.context_ref = context_ref  # 安全边界写回私有记忆引用
             if outbox is not None:
                 self._outbox[outbox.child_run_id] = outbox
             terminal_event = payload.get("terminal_event")
@@ -327,6 +356,45 @@ class AgentGraphStore:
             agent = self.require_agent(payload["agent_id"])
             agent.status = AgentStatus.ERROR
             return True
+        elif kind == "wait_enter":
+            run_id = payload["run_id"]
+            wait = payload["wait"]
+            run = self.require_run(run_id)
+            if run.status in TERMINAL_RUN_STATUSES:
+                return False  # 已终态 → CAS loser（first-writer-wins）
+            generation = payload.get("generation", run.generation)
+            if generation != run.generation:
+                return False  # 过期 generation 拒绝
+            run.status = RunStatus.COMPLETED
+            run.response_ref = None
+            run.error = None
+            run.reason = None
+            agent = self.require_agent(wait.agent_id)
+            agent.pending_run_id = None
+            agent.status = (
+                AgentStatus.WAITING_FOR_HUMAN
+                if wait.kind == "human"
+                else AgentStatus.WAITING
+            )
+            context_ref = payload.get("context_ref")
+            if context_ref is not None:
+                agent.context_ref = context_ref  # 安全边界写回私有记忆引用
+            self._waits[wait.agent_id] = wait
+            terminal_event = payload.get("terminal_event")
+            if terminal_event is not None:
+                self._events.setdefault(wait.agent_id, []).append(terminal_event)
+            return True
+        elif kind == "wait_resolve":
+            agent_id = payload["agent_id"]
+            request_id = payload["request_id"]
+            wait = self._waits.get(agent_id)
+            if wait is None or wait.request_id != request_id:
+                return False  # 已解析或 request id 不匹配
+            del self._waits[agent_id]
+            agent = self.require_agent(agent_id)
+            if agent.status in (AgentStatus.WAITING, AgentStatus.WAITING_FOR_HUMAN):
+                agent.status = AgentStatus.IDLE
+            return True
         raise ValueError(f"unknown journal kind: {kind}")
 
     def require_run(self, run_id: RunId) -> RunRecord:
@@ -352,6 +420,7 @@ class AgentGraphStore:
             mailboxes={k: list(v) for k, v in self._mailboxes.items()},
             mailbox_committed=dict(self._mailbox_committed),
             outbox={k: OutboxRecord(**vars(v)) for k, v in self._outbox.items()},
+            waits={aid: WaitRecord(**vars(w)) for aid, w in self._waits.items()},
             command_results=dict(self._command_results),
             applied=dict(self._applied),
             events={k: list(v) for k, v in self._events.items()},
@@ -368,6 +437,7 @@ class AgentGraphStore:
         self._mailboxes = {k: list(v) for k, v in snapshot.mailboxes.items()}
         self._mailbox_committed = dict(snapshot.mailbox_committed)
         self._outbox = dict(snapshot.outbox)
+        self._waits = {k: WaitRecord(**vars(v)) for k, v in snapshot.waits.items()}
         self._command_results = dict(snapshot.command_results)
         self._events = {k: list(v) for k, v in snapshot.events.items()}
         self._journal = list(journal)

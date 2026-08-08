@@ -11,7 +11,7 @@ from athena.app_server.thread_manager import RuntimeThreadManager
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
 from athena.core.thread_models import AthenaTurn
-from athena.data.types import ColumnSummary, DataProfile
+from athena.agents.data_models import ColumnSummary, DataProfile
 from athena.ideator import DebateResult, Ideator, IdeatorConfig
 from athena.ideator import __all__ as ideator_exports
 from athena.ideator.ideator import _DebateRunner
@@ -1098,7 +1098,8 @@ async def test_proposal_timeout_interrupts_exact_turn_and_records_failure(
 ) -> None:
     RecordingRuntimeThreadManager.instances = []
     monkeypatch.setattr(
-        "athena.ideator.ideator.RuntimeThreadManager", RecordingRuntimeThreadManager
+        "athena.agents.ideator.ideator.RuntimeThreadManager",
+        RecordingRuntimeThreadManager,
     )
     block = StageBlock()
     task, _, _, _, _, _ = await _generate_successfully(
@@ -1205,7 +1206,8 @@ async def test_cancel_closes_owned_manager_and_cancels_all_active_agents(
 ) -> None:
     RecordingRuntimeThreadManager.instances = []
     monkeypatch.setattr(
-        "athena.ideator.ideator.RuntimeThreadManager", RecordingRuntimeThreadManager
+        "athena.agents.ideator.ideator.RuntimeThreadManager",
+        RecordingRuntimeThreadManager,
     )
     task, barrier, factory, _, _, _ = await _generate_successfully(
         tmp_path, blocked=True
@@ -1222,3 +1224,51 @@ async def test_cancel_closes_owned_manager_and_cancels_all_active_agents(
     assert not any(agent.role == "judge" for agent in factory.agents)
     assert manager.state == "closed"
     assert manager.aclose_calls == ["ideator round finished"]
+
+
+@pytest.mark.asyncio
+async def test_ideator_agent_wires_real_ideator(tmp_path) -> None:
+    """IdeatorAgent 接入真实 Ideator：注入 ideator + project 时运行辩论生成。"""
+    from athena.agents.ideator_agent import IdeatorAgent
+    from athena.agents.production import IdeatorInputs
+    from athena.core.agent.models import AgentContext
+    from athena.core.thread_models import AthenaThread, AthenaTurn
+    from athena.core.tool import ToolRegistry
+
+    class _WiringResult:
+        def model_dump(self, mode="json") -> dict:
+            return {"hypothesis": "h", "status": "PROPOSED"}
+
+    class _WiringIdeator:
+        def __init__(self) -> None:
+            self.called_with = None
+
+        async def generate(self, profile, papers, models, tree):
+            self.called_with = (profile, papers, models, tree)
+            return _WiringResult()
+
+    class _WiringProject:
+        async def ideator_inputs(self, ctx):
+            return IdeatorInputs(profile="P", papers=["p1"], models=["m1"], tree="T")
+
+    async def _noop_emit(kind, ref, payload):
+        return None
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    ideator = _WiringIdeator()
+    agent = IdeatorAgent(store, ideator=ideator, project=_WiringProject())
+    ctx = AgentContext(
+        thread=AthenaThread(
+            thread_id="t", session_id="s", status="running", context_ref="ctx"
+        ),
+        turn=AthenaTurn(
+            turn_id="u", thread_id="t", request_ref="req", status="running"
+        ),
+        emit=_noop_emit,
+        tools=ToolRegistry(),
+        cancel=asyncio.Event(),
+    )
+    outcome = await agent.run(ctx)
+    assert ideator.called_with == ("P", ["p1"], ["m1"], "T")  # 真实 Ideator 被调用
+    artifact = json.loads(await store.get_text(outcome.result_ref))
+    assert artifact["hypothesis"] == "h"  # DebateResult 写入 Artifact

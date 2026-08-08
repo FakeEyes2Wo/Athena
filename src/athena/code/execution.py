@@ -1,7 +1,5 @@
 """Trusted experiment subprocess runtimes."""
 
-from __future__ import annotations
-
 import asyncio
 import os
 import shutil

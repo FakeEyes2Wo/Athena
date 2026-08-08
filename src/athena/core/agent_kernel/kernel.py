@@ -12,6 +12,7 @@ from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import Any
 
+from athena.core.agent_kernel.registry import AgentTypeRegistry
 from athena.core.agent_kernel.session import (
     AgentSession,
     InMemoryResourcesFactory,
@@ -26,6 +27,7 @@ from athena.core.agent_kernel.store import (
     OutboxRecord,
     RunRecord,
     StoreSnapshot,
+    WaitRecord,
 )
 from athena.core.agent_kernel.types import (
     TERMINAL_RUN_STATUSES,
@@ -39,8 +41,8 @@ from athena.core.agent_kernel.types import (
     AgentSpec,
     AgentStatus,
     AgentWaitResult,
+    ArtifactRef,
     ErrorCode,
-    ForkPolicy,
     ReturnWhen,
     RunId,
     RunStatus,
@@ -51,100 +53,95 @@ logger = logging.getLogger(__name__)
 
 
 class AgentScheduler:
-    """总 Agent 容量与同时运行容量；FIFO ready 队列（§3.6）。"""
+    """全局并发限制 + 按 agent_id 的 FIFO ready 队列（设计 §6）。
 
-    def __init__(self, *, max_agents: int, max_active_runs: int) -> None:
-        if max_agents <= 0 or max_active_runs <= 0:
-            raise ValueError("capacities must be positive")
-        self._max_agents = max_agents
-        self._max_active_runs = max_active_runs
-        self._resident: set[AgentId] = set()
-        self._active: set[RunId] = set()
-        self._ready: deque[RunId] = deque()
+    同一 Agent 同时最多一个非终态 Run，ready 队列以 agent_id 为元素；
+    dispatcher 取出后读取其 pending_run_id 再启动 turn。逻辑 Agent 总数由
+    项目预算限制，不由本 Scheduler 计算；IDLE/WAITING 不占执行槽。
+    """
+
+    def __init__(self, *, max_active_agents: int) -> None:
+        if max_active_agents <= 0:
+            raise ValueError("capacity must be positive")
+        self._max_active_agents = max_active_agents
+        self._active: set[AgentId] = set()
+        self._ready: deque[AgentId] = deque()
         self._lease_available = asyncio.Event()
 
     @property
-    def max_agents(self) -> int:
-        return self._max_agents
-
-    @property
-    def max_active_runs(self) -> int:
-        return self._max_active_runs
-
-    @property
-    def resident_count(self) -> int:
-        return len(self._resident)
+    def max_active_agents(self) -> int:
+        """全局同时执行上限。"""
+        return self._max_active_agents
 
     @property
     def active_count(self) -> int:
+        """当前占用执行槽的 Agent 数。"""
         return len(self._active)
 
-    def try_reserve(self, agent_id: AgentId) -> bool:
-        """预留 Agent 总量槽位；超过上限返回 False。"""
-        if len(self._resident) >= self._max_agents:
-            return False
-        self._resident.add(agent_id)
-        return True
+    def enqueue(self, agent_id: AgentId) -> None:
+        """将 Agent 放入 ready 队列（FIFO 尾）。"""
+        self._ready.append(agent_id)
 
-    def release_resident(self, agent_id: AgentId) -> None:
-        self._resident.discard(agent_id)
-
-    def enqueue(self, run_id: RunId) -> None:
-        self._ready.append(run_id)
-
-    def dequeue(self, run_id: RunId) -> None:
+    def dequeue(self, agent_id: AgentId) -> None:
+        """从 ready 队列移除 Agent；已派发则忽略。"""
         try:
-            self._ready.remove(run_id)
+            self._ready.remove(agent_id)
         except ValueError:
             # 中断 QUEUED 时可能已派发 → 无需移除
             pass
 
-    def try_dispatch(self) -> RunId | None:
-        """有容量且 ready 非空时派发一个 Run 并占用 lease。"""
-        if len(self._active) >= self._max_active_runs:
+    def try_dispatch(self) -> AgentId | None:
+        """有容量且 ready 非空时派发一个 Agent 并占用执行槽。"""
+        if len(self._active) >= self._max_active_agents:
             return None
         while self._ready:
-            run_id = self._ready.popleft()
-            self._active.add(run_id)
-            return run_id
+            agent_id = self._ready.popleft()
+            self._active.add(agent_id)
+            return agent_id
         return None
 
-    def release_active(self, run_id: RunId) -> None:
-        self._active.discard(run_id)
+    def release_active(self, agent_id: AgentId) -> None:
+        """释放执行槽并唤醒等待容量的 acquire_lease。"""
+        self._active.discard(agent_id)
         self._lease_available.set()
 
-    def park(self, run_id: RunId) -> None:
-        """释放 lease 进入 PARKED phase；公共 RunStatus 仍为 RUNNING（§3.6）。"""
-        self._active.discard(run_id)
+    def park(self, agent_id: AgentId) -> None:
+        """释放执行槽等待目标；公共 RunStatus 仍为 RUNNING（设计 §7.2）。"""
+        self._active.discard(agent_id)
         self._lease_available.set()
 
-    async def acquire_lease(self, run_id: RunId) -> None:
-        """阻塞等待容量后占用 lease（PARKED 恢复路径）。"""
-        while len(self._active) >= self._max_active_runs:
+    async def acquire_lease(self, agent_id: AgentId) -> None:
+        """阻塞等待容量后重新占用执行槽（PARKED 恢复路径）。"""
+        while len(self._active) >= self._max_active_agents:
             self._lease_available.clear()
-            if len(self._active) < self._max_active_runs:
+            if len(self._active) < self._max_active_agents:
                 break
             await self._lease_available.wait()
-        self._active.add(run_id)
+        self._active.add(agent_id)
 
 
 class AgentRegistry:
-    """稳定 AgentPath、父子树与子树查询。状态迁移由 Kernel 执行。"""
+    """父子树与展示路径查询。agent_id 为不透明 ID，身份以 parent_id 表达。
+
+    路径由 store 记录派生，只用于展示和 list 过滤，不参与调度或定位。
+    """
 
     def __init__(self, store: AgentGraphStore) -> None:
         self._store = store
 
     def child_path(self, parent_id: AgentId | None, name: str) -> AgentPath:
+        """计算子 Agent 的展示路径；parent 以 store 记录查取，不拼接 id。"""
         if not name or "/" in name:
             raise ValueError("agent name must be non-empty and contain no '/'")
         if parent_id is None:
             return (name,)
-        return (*parent_id.split("/"), name)
-
-    def has_child_named(self, parent_id: AgentId | None, name: str) -> bool:
-        return self._store.agent("/".join(self.child_path(parent_id, name))) is not None
+        parent = self._store.agent(parent_id)
+        if parent is None:
+            raise KeyError(f"unknown parent: {parent_id}")
+        return (*parent.path, name)
 
     def children(self, agent_id: AgentId) -> list[AgentId]:
+        """返回 parent 的直接子 Agent id（排序）。"""
         return sorted(
             a.agent_id for a in self._store.agents().values() if a.parent_id == agent_id
         )
@@ -158,19 +155,21 @@ class AgentRegistry:
         return result
 
     def has_live_descendants(self, agent_id: AgentId) -> bool:
+        """子树中是否有非 CLOSED 的活子孙。"""
         return any(
             self._store.require_agent(c).status != AgentStatus.CLOSED
             for c in self.post_order(agent_id)[:-1]
         )
 
-    def spec(self, agent_id: AgentId) -> AgentSpec:
-        agent = self._store.agent(agent_id)
-        if agent is None:
-            raise KeyError(f"unknown agent: {agent_id}")
-        return agent.spec
-
     def is_under_fence(self, agent_id: AgentId, fences: set[AgentId]) -> bool:
-        return any(agent_id == f or agent_id.startswith(f + "/") for f in fences)
+        """agent_id 自身或任一祖先在 fences 中 → 处于关闭中的子树。"""
+        current: AgentId | None = agent_id
+        while current is not None:
+            if current in fences:
+                return True
+            agent = self._store.agent(current)
+            current = agent.parent_id if agent is not None else None
+        return False
 
 
 @dataclass
@@ -190,17 +189,16 @@ class AgentKernel:
         self,
         *,
         resources_factory: SessionResourcesFactory | None = None,
-        max_agents: int = 32,
-        max_active_runs: int = 8,
+        type_registry: AgentTypeRegistry | None = None,
+        max_active_agents: int = 8,
         max_spawn_depth: int = 4,
         store: AgentGraphStore | None = None,
     ) -> None:
         self._resources_factory = resources_factory or InMemoryResourcesFactory()
         self._store = store or AgentGraphStore()
+        self._type_registry = type_registry or AgentTypeRegistry()
         self._registry = AgentRegistry(self._store)
-        self._scheduler = AgentScheduler(
-            max_agents=max_agents, max_active_runs=max_active_runs
-        )
+        self._scheduler = AgentScheduler(max_active_agents=max_active_agents)
         self._max_spawn_depth = max_spawn_depth
         self._sessions: dict[AgentId, AgentSession] = {}
         self._runner_tasks: dict[RunId, asyncio.Task[None]] = {}
@@ -213,6 +211,7 @@ class AgentKernel:
         self._close_task: asyncio.Task[None] | None = None
         self._fatal: bool = False
         self._closed = False
+        self._paused = False
 
     async def start(self) -> None:
         """启动命令序列器；随后派发已入队的 Run（含恢复的 QUEUED Run）。"""
@@ -223,6 +222,15 @@ class AgentKernel:
         self._serializer_task = asyncio.create_task(
             self._serializer_loop(), name="agent-kernel-serializer"
         )
+        self._pump_scheduler()
+
+    def pause(self) -> None:
+        """停止派发新 Agent turn；运行中的到安全边界停下，保留 mailbox 与 wait（§13）。"""
+        self._paused = True
+
+    def resume(self) -> None:
+        """恢复 ready Agent 的 FIFO 派发。"""
+        self._paused = False
         self._pump_scheduler()
 
     async def aclose(self) -> None:
@@ -356,6 +364,13 @@ class AgentKernel:
         if kind == "agent_event":
             self._persist_event(command)
             return None
+        if kind == "wait_for":
+            self._wait_for(command)
+            return None
+        if kind == "wait_for_human":
+            return self._wait_for_human(command)
+        if kind == "human_reply":
+            return self._human_reply(command)
         raise ValueError(f"unknown command kind: {kind}")
 
     async def persist_event(self, agent_id: AgentId, event: AgentEvent) -> None:
@@ -372,42 +387,49 @@ class AgentKernel:
         )
 
     async def create_root(
-        self, spec: AgentSpec, task: object, *, name: str = "root"
+        self, agent_type: str, task: object, *, name: str = "root"
     ) -> tuple[AgentId, RunId]:
-        """创建根 Agent 并返回 (agent_id, 首个 Run id)。"""
+        """创建根 Agent 并返回 (agent_id, 首个 Run id)。agent_type 必须已注册。"""
+        if not self._type_registry.contains(agent_type):
+            raise AgentCommandError(
+                ErrorCode.NOT_FOUND, f"unknown agent_type: {agent_type}"
+            )
         future = self._enqueue(
-            "spawn", {"parent_id": None, "spec": spec, "task": task, "name": name}
+            "spawn",
+            {"parent_id": None, "agent_type": agent_type, "task": task, "name": name},
         )
         return await asyncio.shield(future)
 
     async def spawn(
         self,
         parent_id: AgentId,
-        spec: AgentSpec,
+        agent_type: str,
         task: object,
         *,
         name: str | None = None,
-        fork: ForkPolicy = ForkPolicy.none(),
     ) -> tuple[AgentId, RunId]:
-        """在 parent 下创建子 Agent。fork 历史复制（§4.6）待后续，当前仅接受。"""
-        del fork
+        """在 parent 下创建子 Agent。agent_type 必须已注册。"""
+        if not self._type_registry.contains(agent_type):
+            raise AgentCommandError(
+                ErrorCode.NOT_FOUND, f"unknown agent_type: {agent_type}"
+            )
         future = self._enqueue(
             "spawn",
-            {"parent_id": parent_id, "spec": spec, "task": task, "name": name},
+            {
+                "parent_id": parent_id,
+                "agent_type": agent_type,
+                "task": task,
+                "name": name,
+            },
         )
         return await asyncio.shield(future)
 
     def _spawn(self, command: KernelCommand) -> tuple[AgentId, RunId]:
         payload = command.payload
         parent_id = payload["parent_id"]
-        spec = payload["spec"]
+        agent_type = payload["agent_type"]
         name = payload["name"] or "agent"
-        path = self._registry.child_path(parent_id, name)
-        agent_id = "/".join(path)
-        if self._store.agent(agent_id) is not None:
-            raise AgentCommandError(
-                ErrorCode.INVALID_REQUEST, "agent name already exists"
-            )
+        # parent 校验先于身份分配：失败零状态变更
         if parent_id is not None:
             parent = self._store.agent(parent_id)
             if parent is None:
@@ -424,7 +446,12 @@ class AgentKernel:
                 raise AgentCommandError(
                     ErrorCode.LIMIT_REACHED, "max_spawn_depth exceeded"
                 )
-        # 可失败步骤（资源、编码）先于预留执行；预留失败只产生可回收的孤儿资源
+        # name 与派生路径允许重复；身份唯一由不透明 agent_id 保证（设计 §5.1）
+        path = self._registry.child_path(parent_id, name)
+        agent_id = f"agent_{uuid4().hex[:8]}"  # 不透明唯一 ID；path 仅用于展示
+        # 每实例 binding：factory 按 agent_id 创建全新 runner，同类型多实例不共享状态
+        spec = self._type_registry.require_spec(agent_type, agent_id=agent_id)
+        # 可失败步骤（资源、编码）先于提交；失败只产生可回收的孤儿资源
         resources = self._resources_factory.create(agent_id, spec)
         codec_error: str | None = None
         try:
@@ -435,8 +462,6 @@ class AgentKernel:
             codec_error = type(exc).__name__
         if codec_error is not None:
             raise AgentCommandError(ErrorCode.CODEC_ERROR, codec_error)
-        if not self._scheduler.try_reserve(agent_id):
-            raise AgentCommandError(ErrorCode.LIMIT_REACHED, "max_agents exceeded")
         session = AgentSession(
             agent_id=agent_id,
             spec=spec,
@@ -457,12 +482,12 @@ class AgentKernel:
                     agent_id=agent_id,
                     path=path,
                     name=name,
-                    role=spec.role,
+                    agent_type=agent_type,
                     parent_id=parent_id,
                     status=AgentStatus.IDLE,
-                    spec=spec,
                     created_sequence=self._store.sequence + 1,
                     pending_run_id=run_id,
+                    context_ref=session.context_ref,
                 ),
                 "run": RunRecord(
                     run_id=run_id,
@@ -474,25 +499,31 @@ class AgentKernel:
                 ),
             },
         )
-        self._scheduler.enqueue(run_id)
+        self._scheduler.enqueue(agent_id)
         self._pump_scheduler()
         return agent_id, run_id
 
     def _pump_scheduler(self) -> None:
-        """派发 ready 队列中可运行的 Run；无容量、空队列或 fatal 时立即返回。"""
+        """派发 ready 队列中可运行的 Agent；无容量、空队列、fatal 或 paused 时返回。"""
         if self._fatal:
             return  # fatal 后停止调度（R2）
+        if self._paused:
+            return  # 项目 pause：停止派发新 turn，运行中的到安全边界停下（§13）
         while True:
-            run_id = self._scheduler.try_dispatch()
-            if run_id is None:
+            agent_id = self._scheduler.try_dispatch()
+            if agent_id is None:
                 return
-            generation = self._store.require_run(run_id).generation + 1
+            # 同一 Agent 同时最多一个非终态 Run，pending_run_id 即待执行 turn
+            agent = self._store.require_agent(agent_id)
+            run_id = agent.pending_run_id
+            run = self._store.require_run(run_id)
+            generation = run.generation + 1
             self._store.commit(
                 command_id=f"disp:{run_id}:{generation}",
                 kind="run_running",
                 payload={"run_id": run_id, "generation": generation},
             )
-            session = self._sessions[self._store.require_run(run_id).agent_id]
+            session = self._sessions[agent_id]
             session.set_active_run(run_id, generation)
             task = asyncio.create_task(
                 self._execute_run(run_id, generation), name=f"run-{run_id}"
@@ -514,7 +545,7 @@ class AgentKernel:
             await run_session.append_event(kind, event_ref, data)
 
         try:
-            request = agent.spec.codec.decode_request(run.request_ref)
+            request = session.spec.codec.decode_request(run.request_ref)
         except asyncio.CancelledError:
             # 解码被外部取消 → 原样传播，由外层按中断处理
             raise
@@ -525,10 +556,10 @@ class AgentKernel:
             return
 
         try:
-            response = await agent.spec.runner.run(
+            response = await session.spec.runner.run(
                 request, session=run_session, emit=emit
             )
-            response_ref = agent.spec.codec.encode_response(response)
+            response_ref = session.spec.codec.encode_response(response)
             outcome = {"status": RunStatus.COMPLETED, "response_ref": response_ref}
         except asyncio.CancelledError:
             # 外部取消（interrupt/close）→ 终态由中断方提交；runner 自行取消则补交（R1-5）
@@ -640,11 +671,11 @@ class AgentKernel:
     def _mark_terminal_fatal(self, run_id: RunId, error: str) -> None:
         """持久补交失败 → 经 journal 提交终态（最后手段）；仍失败则保持 journal 一致并 fatal（B2）。"""
         logger.error("persistent terminal commit failure for run %s", run_id)
-        self._scheduler.release_active(run_id)
         run = self._store.run(run_id)
         if run is None or run.status in TERMINAL_RUN_STATUSES:
             self._enter_fatal()
             return
+        self._scheduler.release_active(run.agent_id)
         terminal_event: AgentEvent | None = None
         session = self._sessions.get(run.agent_id)
         if session is not None:
@@ -755,13 +786,16 @@ class AgentKernel:
                 "reason": payload.get("reason"),
                 "outbox": outbox,
                 "terminal_event": terminal_event,
+                "context_ref": session.context_ref,  # 安全边界写回私有记忆引用
             },
         )
         session.publish_event(terminal_event)
-        self._scheduler.release_active(run_id)
+        self._scheduler.release_active(run.agent_id)
         self._park_locks.pop(run_id, None)
         self._resolve_run_waiter(run_id, summary)
         self._deliver_child_completion(run_id, summary)
+        # agents-wait 命中检测：子 Agent 终态可能唤醒等待中的父 Agent
+        self._maybe_wake_agents_wait(run.agent_id)
         self._pump_scheduler()
 
     def _resolve_run_waiter(self, run_id: RunId, summary: RunSummary) -> None:
@@ -798,6 +832,7 @@ class AgentKernel:
         return session.events(after_sequence)
 
     def run_summary(self, run_id: RunId) -> RunSummary | None:
+        """返回 Run 摘要；不存在返回 None。"""
         return self._store.run_summary(run_id)
 
     def _close_one(self, agent_id: AgentId) -> None:
@@ -816,7 +851,6 @@ class AgentKernel:
             kind="agent_closed",
             payload={"agent_id": agent_id},
         )
-        self._scheduler.release_resident(agent_id)
 
     def _check_open(self, target_id: AgentId) -> None:
         agent = self._store.agent(target_id)
@@ -838,6 +872,7 @@ class AgentKernel:
         )
 
     def agent_status(self, agent_id: AgentId) -> AgentStatus | None:
+        """返回 Agent 生命周期状态；不存在返回 None。"""
         agent = self._store.agent(agent_id)
         return agent.status if agent is not None else None
 
@@ -848,16 +883,16 @@ class AgentKernel:
         snapshot: StoreSnapshot,
         journal: list[JournalRecord],
         resources_factory: SessionResourcesFactory,
-        max_agents: int,
-        max_active_runs: int,
+        type_registry: AgentTypeRegistry | None = None,
+        max_active_agents: int = 8,
     ) -> "AgentKernel":
-        """从快照 + journal 重建内核（§3.7）。"""
+        """从快照 + journal 重建内核（设计 §10）。"""
         store = AgentGraphStore()
         store.load(snapshot, journal)
         kernel = cls(
             resources_factory=resources_factory,
-            max_agents=max_agents,
-            max_active_runs=max_active_runs,
+            type_registry=type_registry,
+            max_active_agents=max_active_agents,
             store=store,
         )
         kernel._rebuild_sessions()
@@ -869,9 +904,14 @@ class AgentKernel:
             if agent.status == AgentStatus.CLOSED:
                 continue
             try:
-                resources = self._resources_factory.create(agent_id, agent.spec)
+                spec = self._type_registry.require_spec(
+                    agent.agent_type, agent_id=agent_id
+                )
+                resources = self._resources_factory.create(
+                    agent_id, spec, context_ref=agent.context_ref
+                )
             except Exception:
-                # 资源重建失败 → Agent 进入 ERROR，不阻断其它恢复
+                # 资源/类型重建失败 → Agent 进入 ERROR，不阻断其它恢复
                 self._store.commit(
                     command_id=f"err:{agent_id}",
                     kind="agent_error",
@@ -880,19 +920,11 @@ class AgentKernel:
                 continue
             session = AgentSession(
                 agent_id=agent_id,
-                spec=agent.spec,
+                spec=spec,
                 resources=resources,
                 store=self._store,
                 kernel=self,
             )
-            if not self._scheduler.try_reserve(agent_id):
-                # 恢复超出容量 → Agent 标记 ERROR，不静默漏记
-                self._store.commit(
-                    command_id=f"over:{agent_id}",
-                    kind="agent_error",
-                    payload={"agent_id": agent_id},
-                )
-                continue
             # 以 Store 持久化的事件 journal 回填 live journal（R3）
             session.seed_events(self._store.events(agent_id))
             self._sessions[agent_id] = session
@@ -901,10 +933,10 @@ class AgentKernel:
         for run_id, run in self._store.runs().items():
             if run.status == RunStatus.QUEUED:
                 if run.agent_id not in self._sessions:
-                    # 资源/超容量重建失败 → Agent ERROR；原子终结其 QUEUED Run（B6）
+                    # 资源重建失败 → Agent ERROR；原子终结其 QUEUED Run（B6）
                     self._terminate_orphan_run(run_id, run)
                     continue
-                self._scheduler.enqueue(run_id)
+                self._scheduler.enqueue(run.agent_id)
             elif run.status == RunStatus.RUNNING:
                 # crash 时仍 RUNNING 且无 terminal marker → FAILED（精确 generation CAS）
                 session = self._sessions.get(run.agent_id)
@@ -922,7 +954,7 @@ class AgentKernel:
                         "reason": None,
                     },
                 )
-                self._scheduler.release_active(run_id)
+                self._scheduler.release_active(run.agent_id)
                 self._park_locks.pop(run_id, None)
                 summary = self._store.run_summary(run_id)
                 if summary is not None:
@@ -955,34 +987,51 @@ class AgentKernel:
             self._resolve_run_waiter(run_id, summary)
 
     def agent_snapshot(self, agent_id: AgentId) -> AgentSnapshot | None:
+        """返回 Agent 元数据快照；不存在返回 None。"""
         return self._store.agent_snapshot(agent_id)
 
     def agent_path(self, agent_id: AgentId) -> AgentPath | None:
+        """返回 Agent 展示路径；不存在返回 None。"""
         agent = self._store.agent(agent_id)
         return agent.path if agent is not None else None
 
     def registry_spec(self, agent_id: AgentId) -> AgentSpec:
-        return self._registry.spec(agent_id)
+        """按 agent_type 经注册表解析实例能力。"""
+        agent = self._store.require_agent(agent_id)
+        return self._type_registry.require_spec(agent.agent_type, agent_id=agent_id)
 
     def list_agents(self, path_prefix: AgentPath | None = None) -> list[AgentSnapshot]:
-        prefix = "/".join(path_prefix) if path_prefix else ""
+        """列出 Agent 快照，可按展示路径前缀过滤。"""
         return [
             snap
             for snap in (
                 self._store.agent_snapshot(aid) for aid in self._store.agents()
             )
             if snap is not None
-            and (
-                not prefix
-                or snap.agent_id == prefix
-                or snap.agent_id.startswith(prefix + "/")
-            )
+            and (not path_prefix or snap.path[: len(path_prefix)] == path_prefix)
         ]
 
-    async def send_message(self, target_id: AgentId, message: object) -> None:
-        """向目标 mailbox 投递消息；只投递，不触发 Turn（§3.3）。"""
+    async def send_message(
+        self,
+        target_id: AgentId,
+        message: str,
+        context_refs: list[ArtifactRef] | None = None,
+        *,
+        source: str = "user",
+    ) -> None:
+        """向目标 mailbox 投递消息；只投递，不触发 Turn（设计 §3.3、§4.3）。
+
+        ``source`` 为权威消息来源：用户/应用入口为保留值 ``"user"``，Agent 工具
+        调用由 Kernel 按调用方 agent_id 填写。
+        """
         future = self._enqueue(
-            "send_message", {"target_id": target_id, "message": message}
+            "send_message",
+            {
+                "target_id": target_id,
+                "message": message,
+                "context_refs": context_refs or [],
+                "source": source,
+            },
         )
         await asyncio.shield(future)
 
@@ -990,11 +1039,11 @@ class AgentKernel:
         payload = command.payload
         target_id = payload["target_id"]
         self._check_open(target_id)
-        # 只接受业务 payload，自行生成权威 envelope，拒绝伪造 source/sequence（B9）
+        # Kernel 生成权威 envelope：source 由调用方来源决定，消息原文与引用原样保留（B9）
         message = AgentMessage(
-            source="user",
+            source=payload.get("source", "user"),
             content=payload["message"],
-            sequence=self._store.sequence + 1,
+            context_refs=payload.get("context_refs") or [],
         )
         self._store.commit(
             command_id=command.command_id,
@@ -1015,26 +1064,17 @@ class AgentKernel:
             return  # 无父或 outbox 未写入 → 不投递
         if self._store.require_agent(parent_id).status == AgentStatus.CLOSED:
             return  # 父已关闭 → 只留审计记录，不投递 mailbox
-        # 幂等：父 mailbox 已有同 child_run_id 的完成通知 → 不重复投递（B7，恢复重放安全）
-        for existing in self._store.mailbox(parent_id):
-            content = existing.content
-            if (
-                isinstance(content, dict)
-                and content.get("op") == "child_completed"
-                and content.get("child_run_id") == run_id
-            ):
-                return
+        # 幂等：父 mailbox 已有同 run_id 的完成通知 → 不重复投递（B7，恢复重放安全）
+        content = f"child completed: {run_id}"
+        if any(
+            m.source is None and m.content == content
+            for m in self._store.mailbox(parent_id)
+        ):
+            return
         message = AgentMessage(
             source=None,
-            sequence=self._store.sequence + 1,
-            content={
-                "op": "child_completed",
-                "child_run_id": run_id,
-                "child_agent_id": agent.agent_id,
-                "status": summary.status.value,
-                "result_ref": summary.response_ref,
-                "error": summary.error,
-            },
+            content=content,
+            context_refs=[summary.response_ref] if summary.response_ref else [],
         )
         self._store.commit(
             command_id=f"mailbox:{run_id}",
@@ -1169,7 +1209,7 @@ class AgentKernel:
                 return AgentWaitResult(completed={}, timed_out=True)
             remaining = timeout - (asyncio.get_running_loop().time() - started)
         try:
-            self._scheduler.park(parking_run_id)
+            self._scheduler.park(run.agent_id)
             self._pump_scheduler()
             try:
                 return await self.wait_agent(target_ids, timeout=remaining)
@@ -1180,10 +1220,11 @@ class AgentKernel:
             lock.release()
 
     async def _reacquire_lease(self, parking_run_id: RunId) -> None:
-        """park 结束后恢复 lease；本 Run 已终态则不再恢复（§3.5）。"""
+        """park 结束后恢复执行槽；被 park 的 Run 已终态则不再恢复（设计 §7.2）。"""
         run = self._store.run(parking_run_id)
         if run is None or run.status not in TERMINAL_RUN_STATUSES:
-            await self._scheduler.acquire_lease(parking_run_id)
+            return
+        await self._scheduler.acquire_lease(run.agent_id)
 
     async def followup(self, agent_id: AgentId, task: object) -> RunId:
         """向 Agent 投递后续任务并返回新 Run id。"""
@@ -1195,13 +1236,17 @@ class AgentKernel:
         target_id = payload["target_id"]
         self._check_open(target_id)
         agent = self._store.require_agent(target_id)
+        if agent.status in (AgentStatus.WAITING, AgentStatus.WAITING_FOR_HUMAN):
+            raise AgentBusyError(f"agent waiting: {target_id}")
         pending = agent.pending_run_id
         run = self._store.run(pending) if pending else None
         if run is not None and run.status not in TERMINAL_RUN_STATUSES:
             raise AgentBusyError(f"agent busy with run: {pending}")
         codec_error: str | None = None
         try:
-            request_ref = agent.spec.codec.encode_request(payload["task"])
+            request_ref = self._type_registry.require_spec(
+                agent.agent_type, agent_id=target_id
+            ).codec.encode_request(payload["task"])
         except Exception as exc:
             # 编解码失败 → 原异常只入受保护日志，不进入公开异常链（R6）
             logger.warning("codec encode failed: %s", type(exc).__name__)
@@ -1223,7 +1268,7 @@ class AgentKernel:
                 ),
             },
         )
-        self._scheduler.enqueue(run_id)
+        self._scheduler.enqueue(target_id)
         self._pump_scheduler()
         return run_id
 
@@ -1255,6 +1300,190 @@ class AgentKernel:
                 # 旧 runner 已取消 → 预期行为，忽略
                 pass
 
+    async def wait_for_human(
+        self,
+        agent_id: AgentId,
+        content: str,
+        context_refs: list[ArtifactRef] | None = None,
+    ) -> str:
+        """持久化登记人工等待并结束当前 turn（设计 §7.2）。返回稳定 request id。"""
+        future = self._enqueue(
+            "wait_for_human",
+            {
+                "agent_id": agent_id,
+                "content": content,
+                "context_refs": context_refs or [],
+            },
+        )
+        return await asyncio.shield(future)
+
+    def _validate_waiting(self, agent_id: AgentId) -> tuple[AgentRecord, RunRecord]:
+        """等待前置校验：Agent 存在、非等待中、有活动 Run。"""
+        agent = self._store.require_agent(agent_id)
+        if agent.status in (AgentStatus.WAITING, AgentStatus.WAITING_FOR_HUMAN):
+            raise AgentCommandError(
+                ErrorCode.BUSY, f"agent already waiting: {agent_id}"
+            )
+        run = self._store.run(agent.pending_run_id) if agent.pending_run_id else None
+        if run is None or run.status != RunStatus.RUNNING:
+            raise AgentCommandError(
+                ErrorCode.INVALID_REQUEST, f"no active run to wait on: {agent_id}"
+            )
+        return agent, run
+
+    def _enter_wait(self, command_id: str, wait: WaitRecord, run: RunRecord) -> None:
+        """提交 wait_enter 事务：Run 终态 + Agent 等待态 + 等待记录；释放执行槽。"""
+        session = self._sessions[wait.agent_id]
+        terminal_event = session.build_terminal_event(
+            run.run_id,
+            "run_completed",
+            f"athena-event:{run.run_id}",
+            {"wait": wait.kind},
+        )
+        self._store.commit(
+            command_id=command_id,
+            kind="wait_enter",
+            payload={
+                "run_id": run.run_id,
+                "wait": wait,
+                "generation": run.generation,
+                "terminal_event": terminal_event,
+                "context_ref": session.context_ref,  # 安全边界写回私有记忆引用
+            },
+        )
+        session.publish_event(terminal_event)
+        self._scheduler.release_active(wait.agent_id)
+        self._resolve_run_waiter(
+            run.run_id,
+            RunSummary(
+                run_id=run.run_id,
+                agent_id=wait.agent_id,
+                status=RunStatus.COMPLETED,
+                response_ref=None,
+            ),
+        )
+        self._pump_scheduler()  # 释放槽后派发排队中的 Agent
+
+    def _wait_for_human(self, command: KernelCommand) -> str:
+        """序列器处理器：持久化人工等待并结束当前 turn，返回稳定 request id。"""
+        payload = command.payload
+        agent_id = payload["agent_id"]
+        _, run = self._validate_waiting(agent_id)
+        request_id = f"human_{uuid4().hex[:8]}"
+        wait = WaitRecord(
+            agent_id=agent_id,
+            kind="human",
+            request_id=request_id,
+            content=payload.get("content", ""),
+            context_refs=payload.get("context_refs") or [],
+        )
+        self._enter_wait(command.command_id, wait, run)
+        return request_id
+
+    async def wait_for(self, agent_id: AgentId, target_ids: list[AgentId]) -> None:
+        """持久化登记对一组 Agent 的依赖等待并结束当前 turn（设计 §7.2）。"""
+        future = self._enqueue(
+            "wait_for", {"agent_id": agent_id, "target_ids": list(target_ids)}
+        )
+        await asyncio.shield(future)
+
+    def _wait_for(self, command: KernelCommand) -> None:
+        payload = command.payload
+        agent_id = payload["agent_id"]
+        _, run = self._validate_waiting(agent_id)
+        wait = WaitRecord(
+            agent_id=agent_id, kind="agents", target_ids=list(payload["target_ids"])
+        )
+        self._enter_wait(command.command_id, wait, run)
+        # 目标均已空闲 → 立即唤醒；否则等后续 completion 命中
+        self._resolve_agents_wait(wait)
+
+    async def human_reply(self, request_id: str, reply: str) -> RunId:
+        """提交人工回复：写 mailbox、清除等待并创建新 turn 唤醒原 Agent（设计 §7.3）。
+
+        返回唤醒后的新 Run id，便于调用方跟踪。
+        """
+        future = self._enqueue(
+            "human_reply", {"request_id": request_id, "reply": reply}
+        )
+        return await asyncio.shield(future)
+
+    def _human_reply(self, command: KernelCommand) -> RunId:
+        payload = command.payload
+        request_id = payload["request_id"]
+        reply = payload["reply"]
+        wait = self._store.wait_for_request(request_id)
+        if wait is None:
+            raise AgentCommandError(
+                ErrorCode.NOT_FOUND, f"unknown human wait: {request_id}"
+            )
+        agent_id = wait.agent_id
+        self._store.commit(
+            command_id=f"reply:{request_id}",
+            kind="mailbox",
+            payload={
+                "agent_id": agent_id,
+                "message": AgentMessage(source="user", content=str(reply)),
+            },
+        )
+        return self._wake_waiting_agent(wait)
+
+    def _wake_waiting_agent(self, wait: WaitRecord) -> RunId:
+        """清除等待并为原 Agent 创建新 Run 入队（human 与 agents 共用，设计 §7.3）。"""
+        agent_id = wait.agent_id
+        agent = self._store.require_agent(agent_id)
+        dedup_key = wait.request_id or wait.agent_id
+        self._store.commit(
+            command_id=f"resolve:{dedup_key}",
+            kind="wait_resolve",
+            payload={"agent_id": agent_id, "request_id": wait.request_id},
+        )
+        # 新 Run 只作唤醒触发；业务结果经 mailbox / 结果 Artifact 交接
+        request_ref = self._type_registry.require_spec(
+            agent.agent_type, agent_id=agent_id
+        ).codec.encode_request({})
+        run_id = f"{agent_id}:r:{self._store.sequence + 1}"
+        self._store.commit(
+            command_id=f"wake:{dedup_key}",
+            kind="run_queued",
+            payload={
+                "run": RunRecord(
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    parent_run_id=None,
+                    status=RunStatus.QUEUED,
+                    generation=0,
+                    request_ref=request_ref,
+                ),
+            },
+        )
+        self._scheduler.enqueue(agent_id)
+        self._pump_scheduler()
+        return run_id
+
+    def _resolve_agents_wait(self, wait: WaitRecord) -> bool:
+        """wait 的全部目标已完成 → 清除等待并创建唤醒 Run；返回是否已唤醒。"""
+        for target_id in wait.target_ids:
+            target = self._store.agent(target_id)
+            if target is None:
+                continue
+            run = (
+                self._store.run(target.pending_run_id)
+                if target.pending_run_id
+                else None
+            )
+            if run is not None and run.status not in TERMINAL_RUN_STATUSES:
+                return False  # 尚有目标在运行
+        self._wake_waiting_agent(wait)
+        return True
+
+    def _maybe_wake_agents_wait(self, child_agent_id: AgentId) -> None:
+        """子 Agent 完成时，若命中父 Agent 的 agents-wait 且全部目标完成 → 唤醒一次。"""
+        for wait in list(self._store.waits().values()):
+            if wait.kind == "agents" and child_agent_id in wait.target_ids:
+                self._resolve_agents_wait(wait)
+                return  # 命中后等待已清除，多个 completion 只触发一次
+
     async def close(self, target_id: AgentId, *, recursive: bool = False) -> None:
         """关闭 Agent 子树；recursive=False 遇活子孙时失败（§3.5）。"""
         subtree = self._registry.post_order(target_id) if recursive else [target_id]
@@ -1280,9 +1509,9 @@ class AgentKernel:
     def _commit_interrupted(self, run: RunRecord, reason: str) -> None:
         session = self._sessions[run.agent_id]
         if run.status == RunStatus.QUEUED:
-            self._scheduler.dequeue(run.run_id)
+            self._scheduler.dequeue(run.agent_id)
         else:
-            self._scheduler.release_active(run.run_id)
+            self._scheduler.release_active(run.agent_id)
         session.interrupt()
         summary = RunSummary(
             run_id=run.run_id,
@@ -1329,6 +1558,7 @@ class AgentKernel:
         self._park_locks.pop(run.run_id, None)
         self._resolve_run_waiter(run.run_id, summary)
         self._deliver_child_completion(run.run_id, summary)
+        self._maybe_wake_agents_wait(run.agent_id)
         task = self._runner_tasks.pop(run.run_id, None)
         if task is not None:
             task.cancel()

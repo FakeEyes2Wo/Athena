@@ -43,7 +43,7 @@ from athena.app_server.protocol import (
 )
 from athena.core.research_models import Hypothesis
 from athena.core.thread_models import AthenaThread, AthenaTurn
-from athena.data.types import DataCard
+from athena.agents.data_models import DataCard
 from athena.research.models import MetricSpec
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

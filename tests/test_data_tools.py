@@ -1,59 +1,9 @@
-"""Test summary tools with real CSV data."""
+"""Test the EDA sampling service (summary tools get_schema/get_summary/get_sample
+were removed: DataAgent now writes analysis scripts directly)."""
 
-import os
-import tempfile
 import pandas as pd
-import pytest
-from athena.data import tools as data_tools
-from athena.data.tools import get_schema, get_summary, get_sample
 
-
-@pytest.fixture
-def sample_csv():
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
-        f.write("age,income,city\n")
-        f.write("25,50000,NYC\n")
-        f.write("30,60000,LA\n")
-        f.write("35,70000,NYC\n")
-        f.write("40,80000,SF\n")
-        f.write("45,90000,LA\n")
-        path = f.name
-    yield path
-    os.unlink(path)
-
-
-def test_get_schema(sample_csv):
-    result = get_schema(sample_csv)
-    assert "age" in result
-    assert "income" in result
-    assert "city" in result
-    assert "int64" in result or "float" in result
-
-
-def test_get_schema_size_limit(sample_csv):
-    result = get_schema(sample_csv)
-    assert len(result) <= 2048  # 2KB limit
-
-
-def test_get_summary(sample_csv):
-    result = get_summary(sample_csv)
-    assert "mean" in result.lower() or "count" in result.lower()
-
-
-def test_get_summary_size_limit(sample_csv):
-    result = get_summary(sample_csv)
-    assert len(result) <= 4096  # 4KB limit
-
-
-def test_get_sample(sample_csv):
-    result = get_sample(sample_csv, n=3)
-    lines = result.strip().split("\n")
-    assert len(lines) <= 4  # header + up to 3 rows
-
-
-def test_get_sample_file_not_found():
-    result = get_sample("/nonexistent/path.csv")
-    assert "error" in result.lower() or result == ""
+from athena.agents.data_models import create_analysis_samples
 
 
 def test_large_dataset_uses_three_fixed_samples() -> None:
@@ -64,7 +14,7 @@ def test_large_dataset_uses_three_fixed_samples() -> None:
         stored.append(sampled)
         return f"artifact://sample-{len(stored)}"
 
-    refs = data_tools.create_analysis_samples(frame, put_frame=put_frame)
+    refs = create_analysis_samples(frame, put_frame=put_frame)
 
     assert [item.seed for item in refs] == [17, 42, 97]
     assert [item.artifact for item in refs] == [
@@ -80,11 +30,11 @@ def test_small_dataset_uses_one_fixed_sample() -> None:
     first: list[pd.DataFrame] = []
     second: list[pd.DataFrame] = []
 
-    first_refs = data_tools.create_analysis_samples(
+    first_refs = create_analysis_samples(
         frame,
         put_frame=lambda sampled: first.append(sampled) or "artifact://first",
     )
-    second_refs = data_tools.create_analysis_samples(
+    second_refs = create_analysis_samples(
         frame,
         put_frame=lambda sampled: second.append(sampled) or "artifact://second",
     )
@@ -93,3 +43,20 @@ def test_small_dataset_uses_one_fixed_sample() -> None:
     assert [item.seed for item in second_refs] == [17]
     assert set(first[0].index) == set(frame.index)
     assert first[0].index.tolist() == second[0].index.tolist()
+
+
+def test_configurable_eda_cap_triggers_three_samples() -> None:
+    """data-analysis §7.1：EDA 上限可配置，超过项目配置时恰好三项等规模样本。"""
+    frame = pd.DataFrame({"value": range(500)})  # 默认上限 100k 下仅 1 样本
+    stored: list[pd.DataFrame] = []
+
+    def put_frame(sampled: pd.DataFrame) -> str:
+        stored.append(sampled)
+        return f"artifact://sample-{len(stored)}"
+
+    refs = create_analysis_samples(
+        frame, put_frame=put_frame, eda_cap=100, sample_size=100
+    )
+    assert [item.seed for item in refs] == [17, 42, 97]
+    assert len(refs) == 3
+    assert [len(s) for s in stored] == [100, 100, 100]  # 三项等规模样本

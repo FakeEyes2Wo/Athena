@@ -59,6 +59,7 @@ class CodeEngine:
         round_num = 0
 
         for round_num in range(1, max_rounds + 1):
+            # Stage 1: generate code and collect changed files
             gen_result = await self._backend.generate(
                 prompt=prompt,
                 target_dir=target_dir,
@@ -75,6 +76,8 @@ class CodeEngine:
                 else self._find_main_script(target_dir, gen_result)
             )
             if script is None:
+                # Stage 2a: model declared completion without a runnable script →
+                # succeed only when outputs are present and prior rounds agree
                 missing = _missing_outputs(target_dir, output_spec)
                 done = "done" in gen_result.output.lower()
                 prior_success = bool(
@@ -106,6 +109,7 @@ class CodeEngine:
                     previous_outputs.append(_review_failure(None, missing))
                 continue
 
+            # Stage 2b: execute the script under watch and collect its output
             watch_result: WatchResult = await self._monitor.watch(
                 run_script(script, cwd=target_dir),
                 timeout_s=600,

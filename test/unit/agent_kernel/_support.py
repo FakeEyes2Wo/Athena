@@ -1,7 +1,22 @@
-"""测试共享的 codec 与 runner 替身。"""
+"""测试共享的 codec、runner 替身与辅助函数。"""
 
 import asyncio
 import json
+
+
+def request_payload(payload: dict) -> dict:
+    """把业务 payload 包成触发消息 ``{"content": <json>}``。"""
+    return {"content": json.dumps(payload, ensure_ascii=False)}
+
+
+async def eventually(pred, timeout: float = 3) -> bool:
+    """轮询直到谓词为真；超时返回 False。"""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not pred():
+        if asyncio.get_event_loop().time() > deadline:
+            return False
+        await asyncio.sleep(0)
+    return True
 
 
 class JsonCodec:

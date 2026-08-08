@@ -1,11 +1,5 @@
-"""Agent system - streaming runtime, provider, models, and control."""
+"""Agent system - streaming runtime, provider, and models."""
 
-from athena.core.agent.control import (
-    AgentControl,
-    AgentEvent,
-    AgentHandle,
-    AgentResult,
-)
 from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
@@ -26,11 +20,7 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "AgentContext",
-    "AgentControl",
-    "AgentEvent",
-    "AgentHandle",
     "AgentOutcome",
-    "AgentResult",
     "BaseAgent",
     "ResponsesProvider",
     "StepOutcome",

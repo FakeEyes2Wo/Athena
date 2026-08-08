@@ -1,6 +1,6 @@
 """AgentKernel 公开类型与契约（设计 §1.3、§2、§4.4、§4.5）。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 
@@ -19,11 +19,16 @@ CommandId = str
 
 
 class AgentStatus(str, Enum):
-    """Agent 生命周期状态（§1.3）。CLOSED 是唯一 Agent 终态。"""
+    """Agent 生命周期状态（设计 §7.1）。
+
+    WAITING / WAITING_FOR_HUMAN 不占执行槽且可跨进程恢复；CLOSED 是唯一 Agent 终态。
+    """
 
     STARTING = "starting"
     IDLE = "idle"
     RUNNING = "running"
+    WAITING = "waiting"
+    WAITING_FOR_HUMAN = "waiting_for_human"
     ERROR = "error"
     CLOSED = "closed"
 
@@ -137,42 +142,23 @@ class AgentCodec(Protocol[RequestT, ResponseT]):
 
 @dataclass(frozen=True)
 class AgentSpec(Generic[RequestT, ResponseT]):
-    """Agent 的不可变能力说明（§2.1）。"""
+    """Agent 的不可变能力说明（设计 §4.1）。agent_type 由注册表键表达，不再内嵌。"""
 
     runner: AgentRunner[RequestT, ResponseT]
     codec: AgentCodec[RequestT, ResponseT]
-    role: str = "agent"
-
-
-@dataclass(frozen=True)
-class ForkPolicy:
-    """历史继承规则（§2.6）。只有 none/full/last_n 三种构造。"""
-
-    mode: str
-    turns: int | None = None
-
-    @classmethod
-    def none(cls) -> "ForkPolicy":
-        return cls("none")
-
-    @classmethod
-    def full(cls) -> "ForkPolicy":
-        return cls("full")
-
-    @classmethod
-    def last_n(cls, turns: int) -> "ForkPolicy":
-        if turns <= 0:
-            raise ValueError("last_n turns must be positive")
-        return cls("last_n", turns)
 
 
 @dataclass(frozen=True)
 class AgentMessage:
-    """投递至目标 mailbox 的消息（§3.3）。source 为 None 表示内部控制消息。"""
+    """投递至目标 mailbox 的消息（设计 §4.3）。
+
+    source 为 None 表示内部控制消息（Kernel 生成的 completion）；content 说明意图，
+    正式结果（报告、rubric、评审、图片等）经 context_refs 传递。
+    """
 
     source: AgentId | None
-    content: object
-    sequence: int
+    content: str
+    context_refs: list[ArtifactRef] = field(default_factory=list)
 
     @property
     def is_control(self) -> bool:
@@ -204,12 +190,12 @@ class RunSummary:
 
 @dataclass(frozen=True)
 class AgentSnapshot:
-    """Agent 元数据快照（§2.4 list_agents）。"""
+    """Agent 元数据快照（设计 §4.1 list_agents）。"""
 
     agent_id: AgentId
     path: AgentPath
     name: str
-    role: str
+    agent_type: str
     status: AgentStatus
     parent_id: AgentId | None
     pending_run_id: RunId | None = None

@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 
 from athena.memory.context_manager import ContextManager
 
+
 class RolloutRecorder:
     """单个 Thread 的 append-only JSONL 记录器。
 
@@ -38,6 +39,7 @@ class RolloutRecorder:
     Attributes:
         path: 当前文件路径（``open()`` 之前为 ``None``）。
     """
+
     __slots__ = ("_base", "_path", "_fd", "_seq", "_adapter")
 
     def __init__(self, project_root: Path) -> None:
@@ -53,13 +55,24 @@ class RolloutRecorder:
         return self._path
 
     async def open(self, thread_id: str) -> Path:
-        """创建当天的 rollout 文件并返回路径。
+        """创建当天的 rollout 文件并返回路径（同步实现，见 ``open_sync``）。"""
+        return self.open_sync(thread_id)
 
-        打开状态下可重复调用 — 返回当前路径。
+    def open_sync(self, thread_id: str, *, append_to: Path | None = None) -> Path:
+        """同步创建或复用 rollout 文件并返回路径。
+
+        打开状态下可重复调用 — 返回当前路径。``append_to`` 非空时复用该文件
+        追加（Agent 私有记忆的稳定 context_ref 路径），否则新建当天文件。
         """
         if self._fd is not None:
             assert self._path is not None
             return self._path
+
+        if append_to is not None:
+            self._path = append_to
+            self._fd = open(append_to, "a", encoding="utf-8", newline="\n")
+            self._seq = 0
+            return append_to
 
         now = datetime.now(timezone.utc)
         day_dir = self._base / str(now.year) / f"{now.month:02d}" / f"{now.day:02d}"
@@ -107,6 +120,7 @@ class RolloutRecorder:
         self._fd.flush()
         self._seq += 1
 
+
 async def resume_context(rollout_path: Path) -> "ContextManager":
     """从 rollout JSONL 文件重建 :class:`ContextManager`。
 
@@ -115,8 +129,15 @@ async def resume_context(rollout_path: Path) -> "ContextManager":
     """
     return await asyncio.to_thread(_resume_context_sync, rollout_path)
 
+
+def resume_context_sync(rollout_path: Path) -> ContextManager:
+    """同步重建 ContextManager（供同步工厂路径在序列器内恢复私有记忆）。"""
+    return _resume_context_sync(rollout_path)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _safe_short_id(thread_id: str) -> str:
     """返回紧凑且安全的文件名 ID。"""
@@ -124,6 +145,7 @@ def _safe_short_id(thread_id: str) -> str:
         char if char.isalnum() or char in "-_" else "_" for char in thread_id[:12]
     )
     return safe or "thread"
+
 
 def _resume_context_sync(rollout_path: Path) -> ContextManager:
     """流式读取一个 rollout，仅保留最新的 compacted 上下文。"""
@@ -168,6 +190,7 @@ def _resume_context_sync(rollout_path: Path) -> ContextManager:
                 ctx.append(message)
 
     return ctx
+
 
 if __name__ == "__main__":
     print("RolloutRecorder loaded.")

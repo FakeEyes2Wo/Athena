@@ -4,12 +4,15 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from athena.core.research_tree import ExperimentStatus, ResearchTree
 from athena.research.budget import BudgetSnapshot
 from athena.research.models import MetricSpec, TaskMetaData
+
+if TYPE_CHECKING:
+    from athena.research.project_runtime import ProjectRuntime
 
 
 class ResearchMethod:
@@ -77,6 +80,7 @@ class ResearchRuntime:
         tree: ResearchTree | None = None,
         save_path: str | Path = ".athena/research_tree.json",
         dependencies: ResearchWorkflowDependencies | None = None,
+        project: "ProjectRuntime | None" = None,
     ) -> None:
         self._tree = tree or ResearchTree()
         self._phase: ResearchPhase = "IDLE"
@@ -88,10 +92,20 @@ class ResearchRuntime:
         self._subscribers: dict[str, EmitFn] = {}
         self._save_path = Path(save_path)
         self._dependencies = dependencies or ResearchWorkflowDependencies()
+        # §15：可选的 ProjectRuntime 委托——phase/status 由项目状态投影提供
+        self._project = project
 
     @property
     def phase(self) -> ResearchPhase:
+        if self._project is not None:
+            return self._project.projected_phase()
         return self._phase
+
+    def project_status(self) -> str:
+        """外部控制状态（§4.3）；委托 ProjectRuntime 投影，否则为 RUNNING。"""
+        if self._project is not None:
+            return self._project.project_status()
+        return "RUNNING"
 
     @property
     def run_task(self) -> asyncio.Task[None] | None:

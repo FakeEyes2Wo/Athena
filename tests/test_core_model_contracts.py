@@ -3,7 +3,7 @@ import athena.evaluation.types as evaluation_types
 from athena.core.contracts import EventEnvelope, new_id
 from athena.core.research_models import ExperimentPlan, Hypothesis
 from athena.core.thread_models import AgentTask, AthenaThread, AthenaTurn
-from athena.data.types import DataCard
+from athena.agents.data_models import DataCard
 from athena.evaluation.types import ComparisonVerdict, EvalResult, EvalSpec, MetricDef
 from athena.research.models import MetricSpec, TaskMetaData
 
@@ -66,5 +66,6 @@ def test_evaluation_types_exports_the_canonical_contracts() -> None:
         "EvaluationInputs",
         "EvalResult",
         "EvalSpec",
+        "EvalSpecChain",
         "MetricDef",
     ]

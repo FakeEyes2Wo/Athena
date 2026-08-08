@@ -17,7 +17,7 @@ from sklearn.metrics import (
 
 from athena.evaluation.types import EvalSpec, MetricDef
 
-_DEFAULT_METRICS = {
+DEFAULT_METRICS = {
     "classification": MetricDef(
         name="f1_macro",
         direction="maximize",
@@ -86,7 +86,7 @@ def metric_value(
 
 def create_eval_spec(task_type: str) -> EvalSpec:
     """Create the frozen default metric protocol for one task type."""
-    primary = _DEFAULT_METRICS.get(
+    primary = DEFAULT_METRICS.get(
         task_type,
         MetricDef(name="accuracy", direction="maximize", description="Accuracy"),
     )

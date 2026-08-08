@@ -1,13 +1,16 @@
 """Data models shared by Agent runtime and control components."""
 
 import asyncio
-from dataclasses import dataclass
-from typing import Any, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
 
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import EmitEvent
 from athena.memory.context_manager import ContextManager
+
+if TYPE_CHECKING:
+    from athena.core.agent_kernel.types import AgentMessage
 
 
 @dataclass(slots=True, frozen=True)
@@ -22,10 +25,14 @@ class AgentConfig:
 
 @dataclass(slots=True)
 class AgentOutcome:
-    """Agent 运行结果 — 替代 tuple 和多套返回签名。"""
+    """Agent 运行结果 — 目标合同只含 ``result_ref``。
+
+    ``next_context_ref`` 是旧 ThreadRuntime 迁移字段；Kernel 必须忽略私有记忆
+    的 context_ref 由 AgentSession 持有，不是业务结果。旧调用方迁移后删除。
+    """
 
     result_ref: str
-    next_context_ref: str
+    next_context_ref: str = ""
 
 
 @dataclass(slots=True)
@@ -47,7 +54,12 @@ class ToolCall:
 
 @dataclass(slots=True)
 class AgentContext:
-    """每 Turn 上下文。memory 由 ThreadRuntime 注入，Agent 不自行创建。"""
+    """每 Turn 上下文。memory 由 ThreadRuntime 注入，Agent 不自行创建。
+
+    ``messages`` 按提交顺序包含触发请求与未读 mailbox 消息（设计
+    dynamic-agent-orchestration §4.3）；``input_text`` 是迁移期对当前触发
+    消息 ``content`` 的兼容视图，不能承载或替代 ``context_refs``。
+    """
 
     thread: AthenaThread
     turn: AthenaTurn
@@ -56,3 +68,4 @@ class AgentContext:
     cancel: asyncio.Event
     memory: "ContextManager | None" = None
     input_text: str | None = None
+    messages: list["AgentMessage"] = field(default_factory=list)

@@ -1,5 +1,6 @@
 """Athena App Server — 进程内 Client/Server 架构。"""
 
+"""冻结当前目录的代码，不允许修改"""
 from athena.app_server.client import AthenaClient, ClientWorker, Sequencer
 from athena.app_server.exceptions import (
     AppServerError,

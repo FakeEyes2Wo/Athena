@@ -2,7 +2,6 @@
 
 from athena.core.tool_types import EmitEvent, ToolContext, ToolResult, ToolSpec
 from athena.core.tool import BaseTool, ToolRegistry
-from athena.core.agent.control import AgentControl, AgentEvent
 from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
@@ -27,8 +26,6 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "AgentContext",
-    "AgentControl",
-    "AgentEvent",
     "AgentOutcome",
     "BaseAgent",
     "StreamEvent",

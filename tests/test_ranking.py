@@ -3,13 +3,6 @@ from athena.experiment import ranking as ranking_module
 from athena.core.research_models import Hypothesis
 
 
-def test_compatibility_search_loop_is_canonical() -> None:
-    from athena.experiment.search_loop import SearchLoop as CompatibilitySearchLoop
-    from athena.workflows.search.search_loop import SearchLoop as CanonicalSearchLoop
-
-    assert CompatibilitySearchLoop is CanonicalSearchLoop
-
-
 def test_ranker_selects_highest_score():
     ranker = HypothesisRanker()
     pg = ProximityGraph()

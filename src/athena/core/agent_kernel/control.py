@@ -12,11 +12,10 @@ from athena.core.agent_kernel.types import (
     AgentRunFailed,
     AgentRunInterrupted,
     AgentSnapshot,
-    AgentSpec,
     AgentStatus,
     AgentWaitResult,
+    ArtifactRef,
     ErrorCode,
-    ForkPolicy,
     ResponseT,
     ReturnWhen,
     RunId,
@@ -57,9 +56,9 @@ class AgentHandle:
         return self._snapshot().name
 
     @property
-    def role(self) -> str:
-        """Agent 角色。"""
-        return self._snapshot().role
+    def agent_type(self) -> str:
+        """Agent 类型（注册表键）。"""
+        return self._snapshot().agent_type
 
     @property
     def status(self) -> AgentStatus:
@@ -135,32 +134,40 @@ class AgentControl:
         self.kernel = kernel
 
     async def create_root(
-        self, spec: AgentSpec, task: object, *, name: str = "root"
+        self, agent_type: str, task: object, *, name: str = "root"
     ) -> tuple[AgentHandle, AgentRun]:
         """创建根 Agent 并返回其 handle 与首个 Run。"""
-        agent_id, run_id = await self.kernel.create_root(spec, task, name=name)
-        return AgentHandle(agent_id, self), AgentRun(run_id, self, spec.codec)
+        agent_id, run_id = await self.kernel.create_root(agent_type, task, name=name)
+        return AgentHandle(agent_id, self), AgentRun(
+            run_id, self, self.kernel.registry_spec(agent_id).codec
+        )
 
     async def spawn(
         self,
         parent: AgentHandle,
-        spec: AgentSpec,
+        agent_type: str,
         task: object,
         *,
         name: str | None = None,
-        fork: ForkPolicy = ForkPolicy.none(),
     ) -> tuple[AgentHandle, AgentRun]:
         """在 parent 下创建子 Agent 并返回其 handle 与 Run。"""
         parent._check_control(self)
         agent_id, run_id = await self.kernel.spawn(
-            parent.agent_id, spec, task, name=name, fork=fork
+            parent.agent_id, agent_type, task, name=name
         )
-        return AgentHandle(agent_id, self), AgentRun(run_id, self, spec.codec)
+        return AgentHandle(agent_id, self), AgentRun(
+            run_id, self, self.kernel.registry_spec(agent_id).codec
+        )
 
-    async def send_message(self, target: AgentHandle, message: object) -> None:
-        """向目标 mailbox 投递业务 payload；envelope 由 Kernel 权威生成（§3.3，B9）。"""
+    async def send_message(
+        self,
+        target: AgentHandle,
+        message: str,
+        context_refs: list[ArtifactRef] | None = None,
+    ) -> None:
+        """向目标 mailbox 投递消息（不触发 Turn）；envelope 由 Kernel 权威生成（§3.3，B9）。"""
         target._check_control(self)
-        await self.kernel.send_message(target.agent_id, message)
+        await self.kernel.send_message(target.agent_id, message, context_refs)
 
     async def followup(self, target: AgentHandle, task: object) -> AgentRun:
         """向目标 Agent 投递后续任务并返回新 Run。"""

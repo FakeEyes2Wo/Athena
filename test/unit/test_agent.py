@@ -7,7 +7,6 @@ import pytest
 
 import athena.core as core_api
 import athena.core.agent as agent_api
-from athena.core.agent.control import AgentControl, AgentEvent, AgentHandle, AgentResult
 from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
@@ -37,11 +36,7 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert agent_api.Agent is Agent
     assert agent_api.AgentConfig is AgentConfig
     assert agent_api.AgentContext is AgentContext
-    assert agent_api.AgentControl is AgentControl
-    assert agent_api.AgentEvent is AgentEvent
-    assert agent_api.AgentHandle is AgentHandle
     assert agent_api.AgentOutcome is AgentOutcome
-    assert agent_api.AgentResult is AgentResult
     assert agent_api.BaseAgent is BaseAgent
     assert agent_api.ResponsesProvider is ResponsesProvider
     assert agent_api.StepOutcome is StepOutcome
@@ -54,8 +49,6 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert core_api.Agent is Agent
     assert core_api.AgentConfig is AgentConfig
     assert core_api.AgentContext is AgentContext
-    assert core_api.AgentControl is AgentControl
-    assert core_api.AgentEvent is AgentEvent
     assert core_api.AgentOutcome is AgentOutcome
     assert core_api.BaseAgent is BaseAgent
     assert core_api.StreamEvent is StreamEvent
@@ -393,46 +386,14 @@ class TestBaseAgent:
         assert timeline == ["unsafe:start", "unsafe:end", "safe:start"]
 
 
-class TestAgentControl:
-    async def test_message_and_streaming_event_reach_running_subagent(self):
-        class StreamingAgent:
-            def __init__(self):
-                self.tools = ToolRegistry()
-                self.release = asyncio.Event()
-                self.context = None
+def test_chat_completions_tool_schema_is_nested() -> None:
+    spec = ToolSpec(name="echo", description="echo", input_schema={"type": "object"})
 
-            async def run(self, ctx: AgentContext) -> AgentOutcome:
-                self.context = ctx
-                await ctx.emit(
-                    "agent/text_delta", "event://delta", {"delta": "working"}
-                )
-                await self.release.wait()
-                return AgentOutcome("result://ok", "context://next")
-
-        agent = StreamingAgent()
-        control = AgentControl(max_concurrency=1)
-        handle = await control.spawn(agent, "full task text")
-
-        event = await handle.next_event(timeout=0.1)
-        await control.send_message(handle.agent_id, "follow up")
-        agent.release.set()
-        result = await handle.wait(timeout=0.1)
-
-        assert event.kind == "agent/text_delta"
-        assert event.data == {"delta": "working"}
-        assert agent.context.memory.items[-1].parts[0].content == "follow up"
-        assert result.status == "completed"
-
-    def test_chat_completions_tool_schema_is_nested(self):
-        spec = ToolSpec(
-            name="echo", description="echo", input_schema={"type": "object"}
-        )
-
-        assert spec.to_openai_tool() == {
-            "type": "function",
-            "function": {
-                "name": "echo",
-                "description": "echo",
-                "parameters": {"type": "object"},
-            },
-        }
+    assert spec.to_openai_tool() == {
+        "type": "function",
+        "function": {
+            "name": "echo",
+            "description": "echo",
+            "parameters": {"type": "object"},
+        },
+    }

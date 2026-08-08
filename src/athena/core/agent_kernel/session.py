@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic_ai.messages import ModelMessage
@@ -16,35 +17,100 @@ from athena.core.agent_kernel.types import (
     RunId,
 )
 from athena.memory.context_manager import ContextManager
+from athena.memory.rollout import RolloutRecorder, resume_context_sync
 
 
 class SessionResources:
     """单个 Session 的资源绑定。工厂注入，不由 Kernel 硬编码。"""
 
-    def __init__(self, *, memory: ContextManager | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        memory: ContextManager | None = None,
+        recorder: RolloutRecorder | None = None,
+    ) -> None:
         self._memory = memory or ContextManager()
+        self._recorder = recorder
 
     @property
     def memory(self) -> ContextManager:
         return self._memory
 
+    @property
+    def recorder(self) -> RolloutRecorder | None:
+        """可选的 rollout 记录器；None 表示不持久化 memory。"""
+        return self._recorder
+
+    @property
+    def context_ref(self) -> str | None:
+        """rollout 文件路径；无记录器返回 None。"""
+        path = self._recorder.path if self._recorder is not None else None
+        return str(path) if path is not None else None
+
 
 class SessionResourcesFactory(Protocol):
     """为每个 Agent Session 构造独立资源的工厂。"""
 
-    def create(self, agent_id: AgentId, spec: AgentSpec) -> SessionResources: ...
+    def create(
+        self,
+        agent_id: AgentId,
+        spec: AgentSpec,
+        *,
+        context_ref: str | None = None,
+    ) -> SessionResources: ...
     async def aclose(self) -> None: ...
 
 
 class InMemoryResourcesFactory:
-    """默认工厂：每个 Session 一个独立 ContextManager。"""
+    """默认工厂：每个 Session 一个独立 ContextManager（仅用于测试）。"""
 
-    def create(self, agent_id: AgentId, spec: AgentSpec) -> SessionResources:
-        del agent_id, spec
+    def create(
+        self,
+        agent_id: AgentId,
+        spec: AgentSpec,
+        *,
+        context_ref: str | None = None,
+    ) -> SessionResources:
+        del agent_id, spec, context_ref
         return SessionResources()
 
     async def aclose(self) -> None:
         """释放全部资源。内存实现无外部句柄，钩子保留给持久化资源。"""
+
+
+class RolloutResourcesFactory:
+    """生产工厂：按 context_ref 恢复私有记忆，turn 内追加到同一 rollout（设计 §9）。
+
+    每个 Agent 一个稳定 rollout 文件作为其 ``context_ref``；创建时新建文件，
+    恢复时 ``append_to`` 复用同一文件，保证多次重启后记忆持续累积。
+    """
+
+    def __init__(self, project_root: Path) -> None:
+        self._root = Path(project_root)
+        self._recorders: list[RolloutRecorder] = []
+
+    def create(
+        self,
+        agent_id: AgentId,
+        spec: AgentSpec,
+        *,
+        context_ref: str | None = None,
+    ) -> SessionResources:
+        del spec
+        memory = (
+            resume_context_sync(Path(context_ref)) if context_ref is not None else None
+        )
+        recorder = RolloutRecorder(self._root)
+        append_to = Path(context_ref) if context_ref is not None else None
+        recorder.open_sync(agent_id, append_to=append_to)
+        self._recorders.append(recorder)
+        return SessionResources(memory=memory, recorder=recorder)
+
+    async def aclose(self) -> None:
+        """关闭全部 rollout 记录器。"""
+        for recorder in self._recorders:
+            await recorder.close()
+        self._recorders.clear()
 
 
 class _MemoryView:
@@ -56,6 +122,11 @@ class _MemoryView:
     def __init__(self, memory: ContextManager, *, allow_rollback: bool = True) -> None:
         self._memory = memory
         self._allow_rollback = allow_rollback
+
+    @property
+    def raw(self) -> ContextManager:
+        """底层 ContextManager（供 BaseAgent 适配器构造 AgentContext）。"""
+        return self._memory
 
     @property
     def items(self) -> list[ModelMessage]:
@@ -136,7 +207,8 @@ class AgentSession:
 
     @property
     def context_ref(self) -> str:
-        return f"context://{self._agent_id}"
+        """私有记忆的持久化引用；无 rollout 记录器时退回合成标识。"""
+        return self._resources.context_ref or f"context://{self._agent_id}"
 
     @property
     def active_run_id(self) -> RunId | None:
@@ -204,7 +276,7 @@ class AgentSession:
     def append_message(
         self, run_id: RunId, generation: int, message: ModelMessage
     ) -> None:
-        """受门禁的 memory 写入；仅当前 Run 且同 generation 可写。"""
+        """受门禁的 memory 写入；仅当前 Run 且同 generation 可写，同步追加 rollout。"""
         if (
             self._closed
             or self._active_run_id != run_id
@@ -212,6 +284,9 @@ class AgentSession:
         ):
             return
         self._resources.memory.append(message)
+        recorder = self._resources.recorder
+        if recorder is not None:
+            recorder.record(message)
 
     def _next_sequence(self) -> int:
         seq = self._next_event_sequence
@@ -333,6 +408,14 @@ class RunSession:
         return self._session.agent_id
 
     @property
+    def kernel(self) -> Any:
+        """当前 Run 绑定的 Kernel（供受控编排工具使用）。"""
+        kernel = self._session._kernel
+        if kernel is None:
+            raise RuntimeError("session has no kernel binding")
+        return kernel
+
+    @property
     def context_ref(self) -> str:
         return self._session.context_ref
 
@@ -374,3 +457,21 @@ class RunSession:
             parking_generation=self._generation,
             timeout=timeout,
         )
+
+    async def wait_for_human(
+        self, content: str, context_refs: list[str] | None = None
+    ) -> str:
+        """持久化登记人工等待并结束本 turn（设计 §7.2）。返回稳定 request id。"""
+        kernel = self._session._kernel
+        if kernel is None:
+            raise RuntimeError("session has no kernel binding")
+        return await kernel.wait_for_human(
+            self._session.agent_id, content, context_refs
+        )
+
+    async def wait_for(self, target_ids: list[AgentId]) -> None:
+        """持久化登记对目标 Agent 的依赖等待并结束本 turn（设计 §7.2）。"""
+        kernel = self._session._kernel
+        if kernel is None:
+            raise RuntimeError("session has no kernel binding")
+        await kernel.wait_for(self._session.agent_id, target_ids)

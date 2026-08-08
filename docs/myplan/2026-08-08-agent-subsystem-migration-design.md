@@ -52,6 +52,7 @@ src/athena/
 │   ├── orchestration.py       # RunToolProjector + 五编排工具（不变）
 │   ├── supervisor.py          # root SupervisorAgent（+ SearchLoop 编排职责迁入）
 │   ├── data_agent.py          # 真实 EDA/分析（已运行真实分析脚本，阶段 B 与 split 联动）
+│   ├── data_models.py         # 原 data/ 折叠迁入：DataProfile/DataCard/SampleRef + EDA 采样
 │   ├── plot_agent.py          # 通用绘图（不变）
 │   ├── reflection_agent.py    # rubric/score/review（不变）
 │   ├── ideator_agent.py       # 真实 Ideator.generate 经 run_impl 接入
@@ -83,9 +84,6 @@ src/athena/
 ├── evaluation/                # 确定性评估
 │   ├── policy.py / types.py / trusted.py / comparator.py（不变）
 │   └── validator.py           # Validator（从 workflows/validate/ablation.py 迁入）
-├── data/                      # 确定性 DatasetService
-│   ├── domain.py / operations.py / tools.py（不变）
-│   └── prepare.py             # split/profile/eval_spec 准备（从 workflows/prepare/runtime.py 迁入）
 ├── code/                      # 确定性执行引擎（不变，真实实验执行服务的宿主）
 ├── research/                  # ProjectRuntime（Composition Root）+ budget + ResearchTree
 ├── storage/                   # ArtifactStore/Bundle（不变）
@@ -134,7 +132,7 @@ src/athena/
 | `agents/code_agent.py::CodeAgent` | 保留为 BaseAgent 包装：`run(ctx)` 经 `ProjectState` 解析实验输入，调用 `ExperimentExecutionService`，把 `CodegenResult` 写为 Artifact 并返回 `result_ref`。`production.py::code_run_impl` 即此桥接。 |
 | `ideator/ideator.py::Ideator` → `agents/ideator_agent.py` | `production.py::ideator_run_impl` 接入真实 `Ideator.generate`；`agents/ideator_agent.py` 的真实路径可用。 |
 | `workflows/report/final_report.py::Reporter` → `agents/report_agent.py` | `production.py::report_run_impl` 接入真实 `Reporter.generate(sota_id, tree)`。 |
-| `workflows/prepare/runtime.py::prepare_workflow_data` → `data/prepare.py` | 确定性 split/profile/eval_spec 准备，作为 DatasetService。 |
+| `workflows/prepare/runtime.py::prepare_workflow_data` → `data/prepare.py` | 确定性 split/profile/eval_spec 准备，作为 DatasetService。修订（2026-08-08）：`data/` 整体删除，其有用代码折入 `agents/data_models.py`；split/clean 逻辑随 World A（workflows/、experiment/pipeline）一并删除，DatasetService 不再单独成包。 |
 | `workflows/validate/ablation.py::Validator` → `evaluation/validator.py` | 确定性验证服务，由 ProjectRuntime 阶段 B 调用。 |
 
 **阶段 A 期间世界 A 保持运行**：上述迁移动文件时同步更新所有 import 方（main.py、SearchLoop、Validator、baseline 等）指向新路径，行为不变、测试全绿。阶段 C 删除 SearchLoop/Validator 的编排形态后，确定性服务继续存在。
