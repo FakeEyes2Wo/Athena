@@ -100,11 +100,13 @@ class ThreadRuntime:
         monitor_limits: MonitorLimits | None = None,
         monitor_scan_interval: float = 1.0,
         monitor_terminal_retention: float = 300.0,
+        on_turn_terminal: Callable[[str, "TurnTerminalState"], None] | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.session_id = session_id
         self.context_ref = context_ref
         self._runner = runner
+        self._on_turn_terminal = on_turn_terminal
         self.state: Literal["idle", "running", "closing", "closed"] = "idle"
 
         # 记忆层
@@ -284,6 +286,10 @@ class ThreadRuntime:
             )
             self._clear_active_turn(turn_id)
         await self._execution_observer.turn_completed(turn_id)
+        self._fire_turn_terminal(
+            turn_id,
+            TurnTerminalState(result_ref=result_ref, next_context_ref=next_context_ref),
+        )
 
     async def commit_failed(self, turn_id: str, exception_type: str) -> None:
         """记录 Turn 执行失败到 Journal。"""
@@ -297,6 +303,9 @@ class ThreadRuntime:
             )
             self._clear_active_turn(turn_id)
         await self._execution_observer.turn_failed(turn_id, exception_type)
+        self._fire_turn_terminal(
+            turn_id, TurnTerminalState(exception_type=exception_type)
+        )
 
     async def commit_interrupted(self, turn_id: str, reason: str) -> None:
         """记录 Turn 被中断到 Journal 并设置取消标记。"""
@@ -309,6 +318,12 @@ class ThreadRuntime:
             self._turn_done[turn_id].set_result(TurnTerminalState(cancelled=True))
             self._clear_active_turn(turn_id)
         await self._execution_observer.turn_cancelled(turn_id)
+        self._fire_turn_terminal(turn_id, TurnTerminalState(cancelled=True))
+
+    def _fire_turn_terminal(self, turn_id: str, terminal: "TurnTerminalState") -> None:
+        """终态回调:同步、轻量,内部不得 await;供门面调度异步唤醒。"""
+        if self._on_turn_terminal is not None:
+            self._on_turn_terminal(turn_id, terminal)
 
     def _clear_active_turn(self, turn_id: str) -> None:
         if self.active_turn is not None and self.active_turn.turn_id == turn_id:
