@@ -6,6 +6,7 @@ SafeOS 代理和资源限制。
 
 import asyncio
 import json
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -52,7 +53,7 @@ class SandboxExecutor:
         self.allowed_imports = (
             allowed_imports if allowed_imports is not None else ALLOWED_IMPORTS
         )
-        self._running: set[asyncio.subprocess.Process] = set()
+        self._running: set[subprocess.Popen] = set()
         """正在运行的子进程集合，shutdown 时统一清理。"""
 
     def _resolve_cwd(self, cwd: str) -> Path:
@@ -248,37 +249,74 @@ print(_marker_end, flush=True)
     async def _run_subprocess(
         self, wrapper: str, timeout: int
     ) -> tuple[str, dict, str | None]:
-        """启动子进程执行 wrapper script，返回 (stdout, parsed_json, stderr)。"""
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-c", wrapper,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        """启动子进程执行 wrapper script，返回 (stdout, parsed_json, stderr)。
+
+        使用 threading.Thread 直接管理子进程，完全绕开 asyncio 事件循环，
+        避免 FastMCP/anyio 在 Windows Python 3.14 下阻塞线程池的问题。
+        """
+        import threading
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", wrapper],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=str(self.work_root),
         )
         self._running.add(proc)
-        try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            # 子进程执行超时 → 强制终止并返回超时错误
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                # 子进程在超时与 kill 之间已退出
-                pass
-            await proc.wait()
-            return "", {"ok": False, "error": f"超时({timeout}s)"}, None
-        finally:
-            self._running.discard(proc)
 
-        return _parse_subprocess_output(stdout_b, stderr_b)
+        # 用独立的 threading.Event 和 daemon thread 等待子进程
+        done = threading.Event()
+        result: list = [None, None]  # [stdout_b, stderr_b]
+        error: list = [None]
+
+        def _wait():
+            try:
+                result[0], result[1] = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+                error[0] = f"超时({timeout}s)"
+            except Exception as e:
+                error[0] = str(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_wait, daemon=True)
+        t.start()
+
+        # 轮询等待，每次只阻塞 0.1s，确保 FastMCP 事件循环不被长期阻塞
+        _deadline = time.monotonic() + timeout + 5
+        while not done.is_set():
+            if time.monotonic() > _deadline:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+                self._running.discard(proc)
+                return "", {"ok": False, "error": f"超时({timeout}s)"}, None
+            await asyncio.sleep(0.1)
+
+        self._running.discard(proc)
+
+        if error[0]:
+            return "", {"ok": False, "error": error[0]}, None
+
+        return _parse_subprocess_output(result[0], result[1])
 
     async def shutdown(self) -> None:
         """终止所有运行中的子进程。"""
         for proc in list(self._running):
             try:
                 proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=2)
             except Exception:
                 pass
         self._running.clear()
