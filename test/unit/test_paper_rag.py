@@ -34,7 +34,7 @@ from athena.research.paper_rag.tool import (
     PaperKeywordSearchTool,
     PaperSemanticSearchTool,
 )
-from athena.storage import LocalArtifactStore
+from athena.core.artifact_store import LocalArtifactStore
 
 VOCABULARY = ["retrieval", "grasping"]
 

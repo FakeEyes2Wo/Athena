@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from athena.evaluation.policy import evaluate_data_analysis_review
-from athena.storage.artifact_store import LocalArtifactStore
-from athena.storage.bundle import DirectoryBundle
+from athena.agents.reflection_agent import evaluate_data_analysis_review
+from athena.core.artifact_store import LocalArtifactStore
+from athena.core.bundle import DirectoryBundle
 
 RUBRIC = {
     "rubric_version": 1,

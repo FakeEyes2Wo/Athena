@@ -10,7 +10,7 @@ from athena.research.paper_markdown.interfaces import (
 )
 from athena.research.paper_markdown.processor import PaperProcessor
 from athena.research.paper_markdown.schemas import PaperConversionRequest
-from athena.storage.artifact_store import ArtifactStore
+from athena.core.contracts import ArtifactStore
 
 
 class PaperMarkdownTool(BaseTool):

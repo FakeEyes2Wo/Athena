@@ -2,7 +2,7 @@
 
 import pytest
 
-from athena.evaluation.types import EvalSpec, EvalSpecChain, MetricDef
+from athena.research.models import EvalSpec, EvalSpecChain, MetricDef
 
 
 def _spec() -> EvalSpec:

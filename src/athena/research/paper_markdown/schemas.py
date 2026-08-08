@@ -5,15 +5,11 @@
 或视觉单元增量加载。
 """
 
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
-from athena.core.contracts import ArtifactRef
-
-if TYPE_CHECKING:
-    from athena.storage.artifact_store import ArtifactStore
-
+from athena.core.contracts import ArtifactRef, ArtifactStore
 
 SourceKind = Literal["tex", "pdf"]
 ElementKind = Literal[

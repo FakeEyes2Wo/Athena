@@ -6,10 +6,14 @@ from unittest.mock import Mock
 
 import pytest
 
-from athena.core.research_models import ExperimentPlan, Hypothesis
+from athena.core.research_models import (
+    ComparisonVerdict,
+    EvalResult,
+    ExperimentPlan,
+    Hypothesis,
+)
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
-from athena.evaluation.types import ComparisonVerdict, EvalResult
 
 
 def make_hypothesis(hypothesis_id: str) -> Hypothesis:

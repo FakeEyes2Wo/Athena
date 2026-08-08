@@ -7,7 +7,6 @@ import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
 from athena.code.types import ExecutionOutput
 
@@ -23,14 +22,6 @@ class ExecutionRequest:
     timeout_s: int
     environment: Mapping[str, str] = field(default_factory=dict)
     readonly_inputs: tuple[Path, ...] = ()
-
-
-class ExperimentRuntime(Protocol):
-    """Execution boundary used by the generated-code workflow."""
-
-    async def preflight(self) -> None: ...
-
-    async def run(self, request: ExecutionRequest) -> ExecutionOutput: ...
 
 
 CommandRunner = Callable[..., Awaitable[ExecutionOutput]]

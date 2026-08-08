@@ -33,7 +33,7 @@ from athena.research.paper_markdown.visuals import (
     render_preview,
     visual_markdown,
 )
-from athena.storage.artifact_store import ArtifactStore
+from athena.core.contracts import ArtifactStore
 
 REPAIR_INSTRUCTION = (
     "Restore Markdown structure and word spacing only. Preserve every claim, qualifier, "

@@ -46,9 +46,11 @@ class EventJournal:
 
     @property
     def condition(self) -> asyncio.Condition:
+        """事件读写共享的条件变量（配合 append/read_from 使用）。"""
         return self._condition
 
     def next_sequence(self) -> int:
+        """下一条事件的序列号（= 已追加数量）。"""
         return self._next_sequence
 
     def append(self, event: Event) -> None:
@@ -75,6 +77,7 @@ class EventJournal:
 
     @property
     def last_sequence(self) -> int:
+        """最后一条事件的序列号；无事件返回 -1。"""
         return self._next_sequence - 1
 
 

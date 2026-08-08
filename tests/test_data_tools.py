@@ -3,7 +3,7 @@ were removed: DataAgent now writes analysis scripts directly)."""
 
 import pandas as pd
 
-from athena.agents.data_models import create_analysis_samples
+from athena.research.data_models import create_analysis_samples
 
 
 def test_large_dataset_uses_three_fixed_samples() -> None:

@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from athena.storage.artifact_store import LocalArtifactStore
-from athena.storage.bundle import (
+from athena.core.artifact_store import LocalArtifactStore
+from athena.core.bundle import (
     DirectoryBundle,
     InvalidBundleError,
     OwnershipError,

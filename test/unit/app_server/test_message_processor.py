@@ -161,3 +161,31 @@ class MessageProcessorTests(unittest.IsolatedAsyncioTestCase):
             self.transport.recv_response_or_control(), timeout=0.05
         )
         self.assertEqual(response.result, {"status": "shutting_down"})
+
+    async def test_user_input_round_trip_returns_answers(self) -> None:
+        pending = asyncio.create_task(
+            self.processor.request_user_input(
+                "thread:1", "turn:1", [{"id": "q1", "question": "which?"}], timeout=0.1
+            )
+        )
+        request = await asyncio.wait_for(
+            self.transport.recv_response_or_control(), timeout=0.1
+        )
+        self.assertEqual(request.method, Method.ITEM_USER_INPUT_REQUEST)
+        self.assertEqual(
+            request.params["questions"], [{"id": "q1", "question": "which?"}]
+        )
+        await self.transport.send_server_request_reply(
+            ServerRequestReply(
+                request.server_call_id,
+                result={"answers": {"q1": {"answers": ["A"]}}},
+            )
+        )
+        result = await asyncio.wait_for(pending, timeout=0.1)
+        self.assertEqual(result["answers"]["q1"]["answers"], ["A"])
+
+    async def test_user_input_timeout_returns_none(self) -> None:
+        result = await self.processor.request_user_input(
+            "thread:1", "turn:1", [{"id": "q1", "question": "which?"}], timeout=0.05
+        )
+        self.assertIsNone(result)

@@ -14,10 +14,3 @@ class BudgetSnapshot(BaseModel):
         self.no_improve_streak = 0 if improved else self.no_improve_streak + 1
         if self.remaining <= 0 or self.no_improve_streak >= self.max_no_improve:
             self.is_exhausted = True
-
-
-class RunMode(BaseModel):
-    """Configure human-in-the-loop and debug execution modes."""
-
-    hil: bool = False
-    debug: bool = False

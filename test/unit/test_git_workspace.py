@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from athena.core.workspace import GitDiff, GitWorkspaceError, GitWorkBranch
-from athena.git_workspace import LocalGitWorkspace
+from athena.core.git_workspace import LocalGitWorkspace
 
 
 class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
@@ -222,7 +222,7 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
 
 @pytest.mark.asyncio
 async def test_diff_reports_paths_including_deletions(tmp_path) -> None:
-    from athena.git_workspace import LocalGitWorkspace
+    from athena.core.git_workspace import LocalGitWorkspace
 
     repo = tmp_path / "repo"
     workspace = LocalGitWorkspace(

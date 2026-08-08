@@ -39,6 +39,7 @@ class Transport:
     # Client 侧
 
     async def send_request(self, envelope: RequestEnvelope, *, timeout=5.0) -> None:
+        """投递请求信封到控制通道；通道满时抛 OverloadedError。"""
         try:
             await asyncio.wait_for(self._c2s.put(envelope), timeout=timeout)
         except asyncio.TimeoutError:
@@ -46,6 +47,7 @@ class Transport:
             raise OverloadedError("control channel full") from None
 
     async def send_notification(self, notification: ClientNotification) -> None:
+        """投递通知（尽力而为，通道满则丢弃）。"""
         try:
             self._c2s.put_nowait(notification)
         except asyncio.QueueFull:
@@ -53,20 +55,25 @@ class Transport:
             pass
 
     async def send_server_request_reply(self, reply: "ServerRequestReply") -> None:
+        """投递 Client 对 ServerRequest 的回复到控制通道。"""
         await self._c2s.put(reply)
 
     async def recv_response_or_control(
         self,
     ) -> "ResponseEnvelope | ServerRequest | None":
+        """从服务端控制通道接收响应或服务端请求。"""
         return await self._s2c_control.get()
 
     async def recv_event(self) -> EventNotification | None:
+        """从事件通道接收一个事件通知。"""
         return await self._s2c_event.get()
 
     async def wait_ready(self) -> None:
+        """等待传输就绪信号。"""
         await self._ready.wait()
 
     def set_ready(self) -> None:
+        """置就绪信号，唤醒等待方。"""
         self._ready.set()
 
     # Server 侧
@@ -74,15 +81,19 @@ class Transport:
     async def recv_client_message(
         self,
     ) -> "RequestEnvelope | ClientNotification | ServerRequestReply | None":
+        """从客户端控制通道接收一条消息。"""
         return await self._c2s.get()
 
     async def send_response(self, envelope: ResponseEnvelope) -> None:
+        """投递响应信封到服务端控制通道。"""
         await self._s2c_control.put(envelope)
 
     async def send_server_request(self, request: ServerRequest) -> None:
+        """投递服务端请求到控制通道。"""
         await self._s2c_control.put(request)
 
     async def send_event(self, notification: EventNotification) -> None:
+        """投递事件通知到事件通道。"""
         await self._s2c_event.put(notification)
 
     # 双端
@@ -107,6 +118,7 @@ class Transport:
 
     @property
     def closed(self) -> bool:
+        """传输是否已关闭。"""
         return self._closed
 
 

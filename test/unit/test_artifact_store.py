@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import unittest
 
-from athena.storage.artifact_store import (
+from athena.core.artifact_store import (
     ArtifactIntegrityError,
     ArtifactNotFoundError,
     InvalidArtifactRefError,

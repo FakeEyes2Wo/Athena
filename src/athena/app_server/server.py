@@ -300,6 +300,36 @@ class MessageProcessor:
             self._pending_server_calls.pop(call_id, None)
             return False
 
+    async def request_user_input(
+        self, thread_id: str, turn_id: str, questions: list[dict], timeout=300.0
+    ) -> dict | None:
+        """向 Client 发送提问请求，等待用户回答。超时/取消返回 None。
+
+        ``questions`` 是 ``UserInputQuestion`` 的 dict 形式：
+        ``{"id": ..., "question": ..., ...}``。回复形如
+        ``{"answers": {qid: {"answers": [...]}}}``。
+        """
+        call_id = f"s:{uuid4().hex}"
+        fut: asyncio.Future[dict] = asyncio.get_event_loop().create_future()
+        self._pending_server_calls[call_id] = fut
+        await self._transport.send_server_request(
+            ServerRequest(
+                server_call_id=call_id,
+                method=Method.ITEM_USER_INPUT_REQUEST,
+                params={
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "questions": questions,
+                },
+            )
+        )
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            # Client 在超时内未响应提问请求
+            self._pending_server_calls.pop(call_id, None)
+            return None
+
     # 辅助
 
     def _request_allowed(self, msg: RequestEnvelope) -> bool:

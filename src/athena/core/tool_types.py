@@ -11,9 +11,24 @@ from typing import Any
 EmitEvent = Callable[[str, str, dict[str, Any] | None], Awaitable[None]]
 """事件发射器: ``(kind: str, artifact_ref: str, data: dict | None) -> None``。"""
 
+AskUser = Callable[[str], Awaitable[str | None]]
+"""用户输入请求回调: ``(prompt) -> 回答文本``；``None`` 表示取消/超时。"""
+
 TOOL_BEGIN = "tool/begin"
 TOOL_END = "tool/end"
 TOOL_ERROR = "tool/error"
+
+# 工具返回/日志文本写入对话历史的截断上限；保留头尾便于调试。
+_MAX_RESULT_CHARS = 50_000
+_TRUNCATED_MARK = "\n...[TRUNCATED]...\n"
+
+
+def truncate_text(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
+    """超过 ``limit`` 时保留头尾各一半，中间用截断标记连接。"""
+    if len(text) <= limit:
+        return text
+    half = (limit - len(_TRUNCATED_MARK)) // 2
+    return text[:half] + _TRUNCATED_MARK + text[-half:]
 
 
 @dataclass(slots=True)
@@ -45,7 +60,6 @@ class ToolResult:
     data: Any
     success: bool = True
     error: str | None = None
-    truncated: bool = False
     artifacts: list[str] = field(default_factory=list)
 
 
@@ -57,3 +71,5 @@ class ToolContext:
     call_id: str
     emit: EmitEvent
     cancel: asyncio.Event
+    ask_user: AskUser | None = None
+    """交互式提问回调 — 由 Agent 从 AgentContext 透传，工具用它请求用户输入。"""

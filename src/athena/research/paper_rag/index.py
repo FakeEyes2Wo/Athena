@@ -12,7 +12,7 @@ import json
 import math
 import re
 
-from athena.core.contracts import ArtifactRef
+from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.research.paper_markdown.schemas import PaperContent, RetrievalUnit
 from athena.research.paper_rag.interfaces import TextEmbedder
 from athena.research.paper_rag.schemas import (
@@ -20,7 +20,6 @@ from athena.research.paper_rag.schemas import (
     CorpusSentence,
     PaperCorpusIndex,
 )
-from athena.storage.artifact_store import ArtifactStore
 
 SENTENCE_END = re.compile(r"[.!?](?=\s)")
 WORD_BOUNDARY = re.compile(r"[\s(\[]")

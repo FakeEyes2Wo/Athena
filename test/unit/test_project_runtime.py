@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from athena.core.agent_kernel.types import AgentCommandError, AgentStatus
+from athena.core.agent.types import AgentCommandError, AgentStatus
 from athena.research.models import MetricDef, MetricSpec, TaskMetaData
 from athena.research.project_runtime import ProjectRuntime
 from athena.core.bundle import DirectoryBundle
@@ -329,8 +329,8 @@ async def test_ideator_code_report_are_real_factories(tmp_path) -> None:
 from athena.agents.base_runner import BaseAgentRunner
 from athena.agents.simple_agents import IdeatorAgent
 from athena.core.agent.models import AgentOutcome
-from athena.core.agent_kernel.codec import JsonCodec
-from athena.core.agent_kernel.types import AgentSpec
+from athena.core.agent.codec import JsonCodec
+from athena.core.agent.types import AgentSpec
 
 
 @pytest.mark.asyncio
@@ -799,8 +799,8 @@ async def test_llm_agent_runs_through_kernel_via_base_agent_runner(tmp_path) -> 
     from athena.agents.base_runner import BaseAgentRunner
     from athena.core.agent.provider import ResponsesProvider, StreamEvent
     from athena.core.agent.runtime import Agent
-    from athena.core.agent_kernel.codec import JsonCodec
-    from athena.core.agent_kernel.types import AgentSpec
+    from athena.core.agent.codec import JsonCodec
+    from athena.core.agent.types import AgentSpec
     from athena.core.tool import ToolRegistry
     from pydantic import BaseModel
 

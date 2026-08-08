@@ -7,10 +7,9 @@
 import json
 from dataclasses import dataclass
 
-from athena.core.contracts import ArtifactRef
+from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.research.paper_rag.index import LETTER_RUN, normalize
 from athena.research.paper_rag.schemas import ChunkRead, PaperCorpusIndex, SearchHit
-from athena.storage.artifact_store import ArtifactStore
 
 MAX_SNIPPET_CHARS = 600
 SENTENCE_POOL_FACTOR = 8

@@ -295,6 +295,15 @@ class AthenaClient:
             )
         )
 
+    async def reply_user_input(
+        self, server_call_id: str, answers: dict[str, list[str]]
+    ) -> None:
+        """回复 Server 发来的用户输入请求（``item/userInput/request``）。
+
+        ``answers`` 形如 ``{question_id: [answer, ...]}``。
+        """
+        await self.respond_to_server_request(server_call_id, {"answers": answers})
+
     async def shutdown(self, timeout=DEFAULT_SHUTDOWN_TIMEOUT) -> None:
         """向 Server 发送关闭请求并清理本地资源。"""
         if self._closing:
@@ -423,15 +432,21 @@ if __name__ == "__main__":
                 print(f"   [{event.sequence}] {event.kind}  turn={event.turn_id}")
                 if event.kind in ("turn_completed", "turn_failed"):
                     break
-            # ServerRequest（审批等）
+            # ServerRequest（审批 / 用户输入请求等）
             elif hasattr(event, "server_call_id"):
                 print(
                     f"   [SERVER REQUEST] {event.method}  call={event.server_call_id}"
                 )
-                # 自动批准
-                await client.respond_to_server_request(
-                    event.server_call_id, {"approved": True}
-                )
+                if event.method == Method.ITEM_APPROVAL_REQUEST:
+                    # 自动批准
+                    await client.respond_to_server_request(
+                        event.server_call_id, {"approved": True}
+                    )
+                elif event.method == Method.ITEM_USER_INPUT_REQUEST:
+                    # 从请求问题中取第一个，模拟用户作答后回复
+                    questions = (event.params or {}).get("questions", [])
+                    answers = {q["id"]: ["(demo) 方案A"] for q in questions}
+                    await client.reply_user_input(event.server_call_id, answers)
 
         # 6. 关闭
         await app.shutdown(timeout=2.0)

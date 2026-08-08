@@ -20,8 +20,8 @@ from pathlib import Path
 from athena.code.execution import ExecutionRequest, LocalExperimentRuntime
 from athena.core.agent.models import AgentContext, AgentOutcome
 from athena.core.agent.runtime import BaseAgent
-from athena.storage.artifact_store import ArtifactStore
-from athena.storage.bundle import VersionedBundle
+from athena.core.contracts import ArtifactStore
+from athena.core.bundle import VersionedBundle
 
 ANALYSIS_ENTRYPOINT = "analysis.py"
 ANALYSIS_CONFIG = "analysis_config.json"
@@ -197,6 +197,7 @@ class DataAgent(BaseAgent):
         self.latest_ref: str | None = None
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
+        """写分析脚本并运行，收集 report/figures 提交 DataAnalysis 版本。"""
         request = json.loads(ctx.input_text or "{}")
         data_path = request.get("data_path")
         if not data_path:

@@ -28,10 +28,9 @@ from athena.agents.simple_agents import CodeAgent, IdeatorAgent, PlotAgent
 from athena.agents.supervisor import SupervisorAgent
 from athena.core.agent.agent_runtime import AgentRuntime
 
-# COMPAT: Task 6 迁移后改 from athena.core.agent.{codec,registry} import ...
-from athena.core.agent_kernel.codec import JsonCodec
-from athena.core.agent_kernel.registry import AgentTypeRegistry
-from athena.core.agent_kernel.types import (
+from athena.core.agent.codec import JsonCodec
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.types import (
     AgentCommandError,
     AgentId,
     AgentSpec,

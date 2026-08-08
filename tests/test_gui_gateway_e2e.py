@@ -1,10 +1,13 @@
 import json
+from pathlib import Path
 
+import pandas as pd
 import pytest
 import websockets
 
 from gui_gateway.__main__ import start_server
-from athena.research import ResearchRuntime, ResearchWorkflowDependencies
+from athena.research import ResearchRuntime
+from athena.research.project_runtime import ProjectRuntime
 
 
 async def _response(ws, request_id: int) -> dict:
@@ -14,22 +17,14 @@ async def _response(ws, request_id: int) -> dict:
             return message
 
 
-class ImmediateSearch:
-    async def run(self):
-        return []
-
-
 @pytest.mark.asyncio
-async def test_full_chat_flow() -> None:
-    async def prepare(task, tree):
-        return "exp-baseline"
-
-    runtime = ResearchRuntime(
-        dependencies=ResearchWorkflowDependencies(
-            prepare_baseline=prepare,
-            search_factory=lambda tree, budget, checkpoint: ImmediateSearch(),
-        )
-    )
+async def test_full_chat_flow(tmp_path) -> None:
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    dataset = tmp_path / "dataset.csv"
+    pd.DataFrame({"age": range(20), "label": [0, 1] * 10}).to_csv(dataset, index=False)
+    runtime = ResearchRuntime(project=project)
     server, port = await start_server(test_mode=True, runtime=runtime)
     try:
         async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
@@ -62,17 +57,17 @@ async def test_full_chat_flow() -> None:
             configured = await _response(ws, 2)
             assert configured["result"]["configured"] is True
 
+            await project.prepare_data_analysis(str(dataset), "label")
             await ws.send(
                 json.dumps(
                     {
                         "request_id": 3,
                         "method": "SEARCH_START",
-                        "params": {"max_experiments": 3},
+                        "params": {"hypothesis": "假设A"},
                     }
                 )
             )
             started = await _response(ws, 3)
-            assert started["result"]["phase"] == "PREPARE"
             assert started["result"]["status"] == "started"
     finally:
         server.close()

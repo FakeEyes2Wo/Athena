@@ -1,4 +1,4 @@
-"""内容寻址目录 Bundle（设计 data-analysis-agent-workflow §4.2）。
+"""内容寻址目录 Bundle。
 
 正式 DataAnalysis 版本表现为不可变逻辑目录：:
 
@@ -24,8 +24,7 @@ import re
 from uuid import uuid4
 from typing import Any
 
-from athena.core.contracts import ArtifactRef
-from athena.storage.artifact_store import ArtifactStore
+from athena.core.contracts import ArtifactRef, ArtifactStore
 
 _IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
@@ -149,7 +148,7 @@ async def validate_data_analysis(
 
 
 class VersionedBundle:
-    """DataAnalysis 版本所有权链（设计 §5）。
+    """DataAnalysis 版本所有权链。
 
     ``analysis_id -> (owner_agent_id, latest_ref)`` 是存储层事实，不进入公共 DTO。
     后续提交必须由同一 owner 发起且 ``parent_ref == latest_ref``；校验成功并写入
@@ -193,9 +192,10 @@ class VersionedBundle:
         """提交新版本：校验 owner 与 parent_ref==latest，成功则更新 latest_ref。"""
         if analysis_id not in self._latest:
             raise UnknownAnalysisError(f"unknown analysis chain: {analysis_id}")
+        latest = self._latest[analysis_id]
         if self._owners[analysis_id] != owner_agent_id:
             raise OwnershipError(f"{owner_agent_id} is not the owner of {analysis_id}")
-        if parent_ref != self._latest[analysis_id]:
+        if parent_ref != latest:
             raise StaleParentError(
                 f"parent_ref does not match latest for {analysis_id}"
             )

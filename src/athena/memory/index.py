@@ -6,7 +6,7 @@
 默认检索忽略被 supersede 的旧条目，但审计保留全部条目。
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from uuid import uuid4
 
 
@@ -93,6 +93,14 @@ class MemoryStore:
     def all(self) -> list[MemoryEntry]:
         """全部条目（含被忽略与拒绝），供审计。"""
         return list(self._entries.values())
+
+    def to_dict(self) -> list[dict]:
+        """序列化全部条目（供项目状态持久化）。"""
+        return [asdict(e) for e in self._entries.values()]
+
+    def load_dict(self, entries: list[dict]) -> None:
+        """从持久化条目重建索引（append-only 恢复）。"""
+        self._entries = {e["entry_id"]: MemoryEntry(**e) for e in entries}
 
     def _require(self, entry_id: str) -> MemoryEntry:
         if entry_id not in self._entries:

@@ -22,7 +22,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from athena.core.contracts import ArtifactRef
+from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.research.paper_markdown.schemas import (
     PaperConversionRequest,
     ProcessingDiagnostic,
@@ -50,10 +50,9 @@ from athena.research.paper_source.schemas import (
     PaperSourceResult,
     PaperSourceStats,
 )
-from athena.storage.artifact_store import (
+from athena.core.artifact_store import (
     ArtifactIntegrityError,
     ArtifactNotFoundError,
-    ArtifactStore,
 )
 
 TEX_MARKERS = (b"\\documentclass", b"\\begin{document}", b"\\section", b"\\input{")

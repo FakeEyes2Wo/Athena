@@ -16,10 +16,10 @@ from pydantic_ai.messages import (
 
 from athena.app_server.thread_manager import RuntimeThreadManager
 from athena.core.agent import AgentOutcome
-from athena.core.contracts import ArtifactRef, new_id
+from athena.core.contracts import ArtifactRef, ArtifactStore, new_id
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
-from athena.agents.data_models import DataProfile
+from athena.research.data_models import DataProfile
 from athena.agents.ideator.types import (
     DebateResult,
     _JudgeOutput,
@@ -29,7 +29,6 @@ from athena.agents.ideator.types import (
     _TurnRequest,
 )
 from athena.retrieval.types import HFModelRef, PaperRef
-from athena.storage.artifact_store import ArtifactStore
 
 
 class _StructuredAgent(Protocol):

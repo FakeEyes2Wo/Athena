@@ -15,7 +15,7 @@ from athena.research.paper_rag.search import (
     read_chunks,
     semantic_search,
 )
-from athena.storage.artifact_store import ArtifactStore
+from athena.core.contracts import ArtifactStore
 
 DEFAULT_TOP_K = 5
 MAX_TOP_K = 20

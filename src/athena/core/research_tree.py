@@ -12,12 +12,13 @@ from pydantic import BaseModel, Field, model_validator
 
 from athena.core.contracts import ArtifactRef, CommitHash, new_id
 from athena.core.research_models import (
+    ComparisonVerdict,
+    EvalResult,
     ExperimentPlan,
     Hypothesis,
     HypothesisStatus,
 )
 from athena.core.workspace import GitWorkBranch
-from athena.evaluation.types import ComparisonVerdict, EvalResult
 
 SAVE_VERSION = 2
 

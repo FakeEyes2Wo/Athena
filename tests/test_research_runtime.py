@@ -1,15 +1,31 @@
-"""ResearchRuntime ownership, lifecycle, persistence, and routing tests."""
+"""ResearchRuntime 翻译层测试（dynamic-orchestration §8 条件 7）。
 
-import asyncio
+ResearchRuntime 不再拥有第二套生命周期；dispatch 委托 ProjectRuntime。
+"""
 
+from pathlib import Path
+
+import pandas as pd
 import pytest
 
-from athena.core.research_tree import ResearchTree
-from athena.research import (
-    ResearchMethod,
-    ResearchRuntime,
-    ResearchWorkflowDependencies,
-)
+from athena.research import ResearchMethod, ResearchRuntime
+from athena.research.project_runtime import ProjectRuntime
+from athena.research.models import MetricSpec, TaskMetaData
+
+
+def _dataset(tmp_path: Path) -> Path:
+    """写一个小型 CSV，供 DataAgent 脚本分析。"""
+    path = tmp_path / "dataset.csv"
+    pd.DataFrame({"age": range(20), "label": [0, 1] * 10}).to_csv(path, index=False)
+    return path
+
+
+def _task() -> TaskMetaData:
+    return TaskMetaData(
+        task_type="classification",
+        data_type="tabular",
+        primary_metric=MetricSpec(name="accuracy", direction="maximize"),
+    )
 
 
 def _task_params() -> dict[str, object]:
@@ -22,136 +38,79 @@ def _task_params() -> dict[str, object]:
     }
 
 
+async def _make_runtime(tmp_path) -> tuple[ResearchRuntime, ProjectRuntime]:
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    return ResearchRuntime(project=project), project
+
+
 @pytest.mark.asyncio
-async def test_runtime_owns_state_and_configures_task() -> None:
-    runtime = ResearchRuntime()
+async def test_runtime_delegates_phase_to_project(tmp_path) -> None:
+    """§8：phase 由 ProjectRuntime 投影，不保存在 ResearchRuntime。"""
+    runtime, project = await _make_runtime(tmp_path)
+    assert runtime.phase == project.projected_phase()
+    await project.configure(_task())
+    assert runtime.phase == "CONFIGURED"
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_configures_project(tmp_path) -> None:
+    """TASK_CONFIGURE 翻译为 ProjectRuntime.configure。"""
+    runtime, project = await _make_runtime(tmp_path)
     result = await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
     assert result["configured"] is True
-    assert runtime.phase == "CONFIGURED"
-    for attribute in (
-        "_tree",
-        "_phase",
-        "_active_task",
-        "_budget",
-        "_run_task",
-        "_resume_gate",
-        "_subscribers",
-    ):
-        assert hasattr(runtime, attribute)
+    assert project.phase == "CONFIGURED"
     with pytest.raises(ValueError, match="unknown method"):
         await runtime.dispatch("unknown_research_method", {})
+    await project.close()
 
 
 @pytest.mark.asyncio
-async def test_tree_save_and_strict_load_replace_state(tmp_path) -> None:
-    path = tmp_path / "tree.json"
-    runtime = ResearchRuntime(save_path=path)
-    saved = await runtime.dispatch(ResearchMethod.TREE_SAVE, {})
-    loaded = await runtime.dispatch(ResearchMethod.TREE_LOAD, {})
-    assert saved == {"saved": True, "path": str(path)}
-    assert loaded["tree"] == {
-        "version": 2,
-        "sota_id": None,
-        "hypotheses": {},
-        "experiments": {},
-    }
-
-
-class BlockingSearch:
-    def __init__(self, checkpoint) -> None:
-        self.checkpoint = checkpoint
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def run(self):
-        self.started.set()
-        await self.checkpoint()
-        await self.release.wait()
-        return []
-
-
-@pytest.mark.asyncio
-async def test_search_task_pause_resume_stop_and_events() -> None:
-    searches: list[BlockingSearch] = []
-
-    async def prepare(task, tree):
-        return "exp-baseline"
-
-    def search_factory(tree, budget, checkpoint):
-        search = BlockingSearch(checkpoint)
-        searches.append(search)
-        return search
-
-    runtime = ResearchRuntime(
-        dependencies=ResearchWorkflowDependencies(
-            prepare_baseline=prepare,
-            search_factory=search_factory,
-        )
-    )
-    events = []
-    runtime.subscribe(lambda kind, data: events.append((kind, data)))
+async def test_runtime_search_validate_report_delegate(tmp_path) -> None:
+    """SEARCH/VALIDATE/REPORT 翻译为 ProjectRuntime 阶段方法。"""
+    runtime, project = await _make_runtime(tmp_path)
     await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
     started = await runtime.dispatch(
-        ResearchMethod.SEARCH_START, {"max_experiments": 3}
+        ResearchMethod.SEARCH_START, {"hypothesis": "假设A"}
     )
-    for _ in range(10):
-        if searches:
-            break
-        await asyncio.sleep(0)
-    assert searches
-    await asyncio.wait_for(searches[0].started.wait(), timeout=1)
     assert started["status"] == "started"
-    assert runtime.phase == "SEARCH"
-    assert runtime.run_task is not None
-    await runtime.dispatch(ResearchMethod.SEARCH_PAUSE, {})
-    assert runtime.phase == "PAUSED"
-    await runtime.dispatch(ResearchMethod.SEARCH_RESUME, {})
-    assert runtime.phase == "SEARCH"
+    assert project.phase == "SEARCH"
+    validation = await runtime.dispatch(
+        ResearchMethod.VALIDATE_START, {"experiment_ref": "sota"}
+    )
+    assert "validation_ref" in validation
+    report = await runtime.dispatch(
+        ResearchMethod.REPORT_GENERATE, {"report_text": "最终报告正文"}
+    )
+    assert "report_ref" in report
+    assert project.phase == "COMPLETED"
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_pause_resume_stop_delegate(tmp_path) -> None:
+    """SEARCH_PAUSE/RESUME/STOP 翻译为 ProjectRuntime 控制方法。"""
+    runtime, project = await _make_runtime(tmp_path)
+    await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    await runtime.dispatch(ResearchMethod.SEARCH_START, {"hypothesis": "假设A"})
+    paused = await runtime.dispatch(ResearchMethod.SEARCH_PAUSE, {})
+    assert paused["status"] == "paused"
+    assert project.project_status() == "PAUSED"
+    resumed = await runtime.dispatch(ResearchMethod.SEARCH_RESUME, {})
+    assert resumed["status"] == "running"
     stopped = await runtime.dispatch(ResearchMethod.SEARCH_STOP, {})
     assert stopped["status"] == "stopped"
-    assert runtime.phase == "CANCELLED"
-    assert runtime.run_task is None
-    assert any(kind == "phase/change" for kind, _ in events)
+    assert project.project_status() == "CANCELLED"
+    await project.close()
 
 
 @pytest.mark.asyncio
-async def test_runtime_rejects_missing_backends_and_invalid_phases() -> None:
+async def test_runtime_requires_project(tmp_path) -> None:
+    """无 ProjectRuntime 时 dispatch 阶段方法报错。"""
     runtime = ResearchRuntime()
-    with pytest.raises(RuntimeError, match="configured task"):
-        await runtime.dispatch(ResearchMethod.SEARCH_START, {})
-    await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
-    with pytest.raises(RuntimeError, match="search backend"):
-        await runtime.dispatch(ResearchMethod.SEARCH_START, {})
-    with pytest.raises(RuntimeError, match="SEARCH phase"):
-        await runtime.dispatch(ResearchMethod.SEARCH_PAUSE, {})
-
-
-@pytest.mark.asyncio
-async def test_validation_and_reporting_route_to_dependencies() -> None:
-    tree = ResearchTree.load("test/fixtures/research_tree_v2.json")
-
-    class Validator:
-        async def run(self, sota_id, supplied_tree):
-            assert supplied_tree is tree
-            return type(
-                "Result",
-                (),
-                {"model_dump": lambda self, **kwargs: {"sota_id": sota_id}},
-            )()
-
-    class Reporter:
-        async def generate(self, sota_id, supplied_tree):
-            assert supplied_tree is tree
-            return "artifact://reports/final.md"
-
-    runtime = ResearchRuntime(
-        tree=tree,
-        dependencies=ResearchWorkflowDependencies(
-            validator=Validator(), reporter=Reporter()
-        ),
-    )
-    validation = await runtime.dispatch(ResearchMethod.VALIDATE_START, {})
-    report = await runtime.dispatch(ResearchMethod.REPORT_GENERATE, {})
-    assert validation == {"sota_id": "exp_baseline"}
-    assert report == {"report_ref": "artifact://reports/final.md"}
-    assert runtime.phase == "COMPLETED"
+    with pytest.raises(RuntimeError, match="requires a ProjectRuntime"):
+        await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, {})

@@ -33,7 +33,7 @@ from athena.research.paper_source.schemas import (
     normalize_doi,
 )
 from athena.research.paper_source.tool import PaperFetchTool
-from athena.storage import LocalArtifactStore
+from athena.core.artifact_store import LocalArtifactStore
 
 ZERO_INTERVALS = {bucket: 0.0 for bucket in DEFAULT_BUCKET_INTERVALS}
 QUERY_URL = "https://export.arxiv.org/api/query"

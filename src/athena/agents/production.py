@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from athena.core.agent.models import AgentContext, AgentOutcome
-from athena.storage.artifact_store import ArtifactStore
+from athena.core.contracts import ArtifactStore
 
 
 @dataclass(frozen=True)

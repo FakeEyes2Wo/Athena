@@ -16,14 +16,12 @@
 """
 
 from athena.agents.base_runner import BaseAgentRunner
-from athena.agents.code_agent import CodeAgent
 from athena.agents.data_agent import DataAgent
 from athena.agents.ideator import DebateResult, Ideator, IdeatorConfig
-from athena.agents.ideator_agent import IdeatorAgent
 from athena.agents.orchestration import RunToolProjector
-from athena.agents.plot_agent import PlotAgent
 from athena.agents.reflection_agent import ReflectionAgent
 from athena.agents.report_agent import ReportAgent
+from athena.agents.simple_agents import CodeAgent, IdeatorAgent, PlotAgent
 from athena.agents.supervisor import SupervisorAgent
 
 __all__ = [

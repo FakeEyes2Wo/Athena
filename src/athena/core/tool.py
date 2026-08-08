@@ -9,7 +9,6 @@ from athena.core.tool_types import (
     TOOL_BEGIN,
     TOOL_END,
     TOOL_ERROR,
-    EmitEvent,
     ToolContext,
     ToolResult,
     ToolSpec,
@@ -55,7 +54,7 @@ class BaseTool(ABC):
         return asyncio.run(self.ainvoke(_sync_ctx(), **input))
 
     async def ainvoke(self, ctx: ToolContext, **input: Any) -> ToolResult:
-        """生命周期：开始 → 执行 → 截断 → 结束/错误。"""
+        """生命周期：开始 → 执行 → 结束/错误。"""
         await ctx.emit(TOOL_BEGIN, f"ev:{ctx.call_id}:begin", None)
         try:
             result = await self._execute(input, ctx)
@@ -63,17 +62,12 @@ class BaseTool(ABC):
             # 工具调用被外部取消 → 通知错误后重新传播
             await ctx.emit(TOOL_ERROR, f"ev:{ctx.call_id}:error", None)
             raise
-        self._truncate(result)
         await ctx.emit(
             TOOL_END if result.success else TOOL_ERROR,
             f"ev:{ctx.call_id}:end",
             None,
         )
         return result
-
-    def _truncate(self, r: ToolResult) -> None:
-        if isinstance(r.data, str) and len(r.data) > self.spec.max_result_chars:
-            r.truncated = True
 
 
 def tool(
@@ -129,52 +123,6 @@ class ToolRegistry:
     @property
     def specs(self) -> list[ToolSpec]:
         return [t.spec for t in self._sorted]
-
-    def search(self, q: str) -> list[ToolSpec]:
-        q = q.lower()
-        return [
-            t.spec
-            for t in self._sorted
-            if q in t.spec.name.lower() or q in t.spec.description.lower()
-        ]
-
-    def invoke(self, name: str, **inp: Any) -> ToolResult:
-        return self.resolve(name).invoke(**inp)
-
-    def dispatch(
-        self, calls: list[tuple[str, dict]]
-    ) -> list[ToolResult | BaseException]:
-        return asyncio.run(
-            self._dispatch(
-                [(n, f"sync-{i}", inp) for i, (n, inp) in enumerate(calls)],
-                _noop_emit,
-                asyncio.Event(),
-            )
-        )
-
-    async def adispatch(
-        self,
-        calls: list[tuple[str, str, dict]],
-        emit: EmitEvent,
-        cancel: asyncio.Event,
-    ) -> list[ToolResult | BaseException]:
-        return await self._dispatch(calls, emit, cancel)
-
-    async def _dispatch(
-        self,
-        calls: list[tuple[str, str, dict]],
-        emit: EmitEvent,
-        cancel: asyncio.Event,
-    ) -> list[ToolResult | BaseException]:
-        return await asyncio.gather(
-            *[
-                asyncio.create_task(
-                    self.resolve(n).ainvoke(ToolContext(n, cid, emit, cancel), **inp)
-                )
-                for n, cid, inp in calls
-            ],
-            return_exceptions=True,
-        )
 
     def __len__(self) -> int:
         return len(self._tools)

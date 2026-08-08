@@ -2,7 +2,8 @@
 
 ``LocalArtifactStore`` 用 SHA-256 引用数据，以原子替换完成首次写入，并在读取时
 校验内容摘要。论文处理器依靠这一边界保存源码、Markdown、RAG chunk、图像与模型
-解释；结构化状态只持有短小的 ``ArtifactRef``。
+解释；结构化状态只持有短小的 ``ArtifactRef``。契约 ``ArtifactStore`` 在
+``athena.core.contracts``。
 """
 
 import asyncio
@@ -12,7 +13,6 @@ import re
 import tempfile
 import threading
 from pathlib import Path
-from typing import Protocol
 
 from athena.core.contracts import ArtifactRef
 
@@ -30,22 +30,6 @@ class ArtifactNotFoundError(FileNotFoundError):
 
 class ArtifactIntegrityError(OSError):
     """落盘内容与引用中的 SHA-256 不一致。"""
-
-
-class ArtifactStore(Protocol):
-    """论文工具与工作流共享的最小异步 artifact 契约。"""
-
-    async def put_bytes(self, data: bytes) -> ArtifactRef:
-        """保存字节并返回稳定内容引用。"""
-
-    async def get_bytes(self, ref: ArtifactRef) -> bytes:
-        """读取并校验引用对应的字节。"""
-
-    async def put_text(self, text: str) -> ArtifactRef:
-        """按 UTF-8 保存文本。"""
-
-    async def get_text(self, ref: ArtifactRef) -> str:
-        """读取 UTF-8 文本。"""
 
 
 def digest_ref(data: bytes) -> ArtifactRef:

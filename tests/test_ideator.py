@@ -11,7 +11,7 @@ from athena.app_server.thread_manager import RuntimeThreadManager
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
 from athena.core.thread_models import AthenaTurn
-from athena.agents.data_models import ColumnSummary, DataProfile
+from athena.research.data_models import ColumnSummary, DataProfile
 from athena.agents.ideator import DebateResult, Ideator, IdeatorConfig
 from athena.agents.ideator import __all__ as ideator_exports
 from athena.agents.ideator.ideator import _DebateRunner
@@ -22,7 +22,7 @@ from athena.agents.ideator.types import (
     _RevisionBatch,
 )
 from athena.retrieval.types import HFModelRef, PaperRef
-from athena.storage import LocalArtifactStore
+from athena.core.artifact_store import LocalArtifactStore
 
 
 def _hypothesis_payloads(count: int) -> list[dict[str, str]]:
@@ -1229,8 +1229,8 @@ async def test_cancel_closes_owned_manager_and_cancels_all_active_agents(
 @pytest.mark.asyncio
 async def test_ideator_agent_wires_real_ideator(tmp_path) -> None:
     """IdeatorAgent 接入真实 Ideator：注入 ideator + project 时运行辩论生成。"""
-    from athena.agents.ideator_agent import IdeatorAgent
     from athena.agents.production import IdeatorInputs, ideator_run_impl
+    from athena.agents.simple_agents import IdeatorAgent
     from athena.core.agent.models import AgentContext
     from athena.core.thread_models import AthenaThread, AthenaTurn
     from athena.core.tool import ToolRegistry

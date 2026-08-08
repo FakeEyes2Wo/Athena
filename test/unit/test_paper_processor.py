@@ -25,7 +25,7 @@ from athena.research.paper_markdown.schemas import (
     SourceLocator,
 )
 from athena.research.paper_markdown.tool import PaperMarkdownTool
-from athena.storage import LocalArtifactStore
+from athena.core.artifact_store import LocalArtifactStore
 
 PLAIN_TEX = rb"""\documentclass{article}
 \title{TeX Wins}\author{Ada \and Lin}

@@ -5,7 +5,6 @@ from typing import List, Literal, Self, TypeAlias
 from pydantic import BaseModel, Field, model_validator
 
 from athena.core.contracts import ArtifactRef, NonBlankText
-from athena.evaluation.types import ComparisonVerdict, EvalResult
 
 HypothesisStatus: TypeAlias = Literal[
     "PROPOSED",  # 刚刚提出假设
@@ -39,23 +38,6 @@ class Hypothesis(BaseModel):
             raise ValueError("positive patience grant requires an evidence reference")
         return self
 
-    def to_prompt(self):
-        """将假设转为自然语言提示字符串，包含 statement、intervention、预期效果和验证状态。"""
-        status_text = {
-            "PROPOSED": "该假设尚未验证，需要后续实验进行评估。",
-            "SUPPORTED": "实验结果支持该假设，该假设较大概率成立。",
-            "REFUTED": "实验结果不支持该假设，但仍可在调整后继续验证。",
-            "REJECTED": "该假设已被彻底拒绝，不应继续沿此方向实验。",
-        }[self.status]
-
-        return (
-            f"假设：{self.statement}\n"
-            f"实验改动：{self.intervention}\n"
-            f"预期效果：{self.expected_effect}\n"
-            f"验证状态：{self.status}\n"
-            f"状态结论：{status_text}"
-        )
-
 
 class ExperimentPlan(BaseModel):
     """实验计划 — 描述如何修改代码目录以验证假设，含评价标准和资源预算。
@@ -76,9 +58,17 @@ class ExperimentPlan(BaseModel):
     acceptance_rule: str
 
 
-class ExperimentOutcome(BaseModel):
-    """已完成实验的结果，存储在 ResearchTree 中。"""
+class EvalResult(BaseModel):
+    """在预测上运行 eval.py 的输出结果。"""
 
-    eval: EvalResult
-    verdict: ComparisonVerdict | None = None
-    is_sota: bool = False
+    experiment_id: str
+    primary: float
+    secondary: dict[str, float] = Field(default_factory=dict)
+    per_sample: ArtifactRef
+
+
+class ComparisonVerdict(BaseModel):
+    """两个实验的两两比较。"""
+
+    winner: Literal["baseline", "candidate", "tie"]
+    p_value: float

@@ -1,17 +1,8 @@
 """Models describing Athena agent tasks, threads, and turns."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from athena.core.contracts import ArtifactRef
-
-
-class AgentTask(BaseModel):
-    """Agent 任务 — 描述一个 Agent 执行单元的 task_id、类型和指令上下文。"""
-
-    task_id: str
-    agent_type: str
-    command: str
-    context_refs: list[ArtifactRef] = Field(default_factory=list)
 
 
 class AthenaThread(BaseModel):

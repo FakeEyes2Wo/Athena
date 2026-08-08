@@ -12,7 +12,7 @@ from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.research.paper_source.fetcher import LocatorCache, PaperSourceFetcher
 from athena.research.paper_source.http import HostRateLimiter
 from athena.research.paper_source.schemas import PaperSourceRequest
-from athena.storage.artifact_store import ArtifactStore
+from athena.core.contracts import ArtifactStore
 
 
 class PaperFetchTool(BaseTool):

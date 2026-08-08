@@ -1,7 +1,7 @@
-"""DataAgent 领域模型与 EDA 采样服务（由 athena.data 折叠迁入）。
+"""研究域数据模型与 EDA 采样服务（原 ``athena.data`` 折叠迁入）。
 
-原 ``src/athena/data/`` 包在 agent 子系统迁移中整体删除；其中仍被 agent
-路径使用的代码折入本模块：
+原 ``src/athena/data/`` 包在 agent 子系统迁移中整体删除；其中仍被使用的代码
+折入本模块（初置 ``agents/data_models.py``，后归入 research 域）：
 
 - ``DataProfile``/``ColumnSummary``：真实 Ideator 的输入类型
   （``agents/ideator/ideator.py``），描述数据集画像；
@@ -58,6 +58,8 @@ class DataProfile(BaseModel):
 
 @dataclass(frozen=True)
 class SampleRef:
+    """可复现 EDA 样本：固定 seed + 采样结果的 Artifact 引用。"""
+
     seed: int
     artifact: ArtifactRef
 

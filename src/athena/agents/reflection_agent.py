@@ -14,11 +14,12 @@
 """
 
 import json
+from dataclasses import dataclass, field
 
 from athena.core.agent.models import AgentContext, AgentOutcome
 from athena.core.agent.runtime import BaseAgent
-from athena.storage.artifact_store import ArtifactStore
-from athena.storage.bundle import DirectoryBundle
+from athena.core.contracts import ArtifactStore
+from athena.core.bundle import DirectoryBundle
 
 
 class ReflectionAgent(BaseAgent):
@@ -124,3 +125,48 @@ class ReflectionAgent(BaseAgent):
         }
         review_ref = await DirectoryBundle.commit(self._store, review_files)
         return AgentOutcome(result_ref=review_ref)
+
+
+@dataclass(frozen=True)
+class ReviewVerdict:
+    """评审通过判定结果（最小合同，不携带领域对象）。"""
+
+    passed: bool
+    failures: list[str] = field(default_factory=list)
+
+
+async def evaluate_data_analysis_review(
+    store: ArtifactStore, review_ref: str
+) -> ReviewVerdict:
+    """按 rubric 阈值判定 Review Bundle 是否通过（确定性，无模型调用）。
+
+    读取 Reflection 提交的 Review Bundle（rubric.json + score.json），校验每个
+    required criterion 的分数 >= pass_threshold 且总分 >= overall_pass_threshold，
+    返回 passed/failed。不编写 rubric、不解释报告、不选择下一 Agent。
+
+    score 必须绑定 rubric_version；版本不一致按 failed 处理并给出原因。
+    """
+    files = await DirectoryBundle.files(store, review_ref)
+    rubric = json.loads(await store.get_text(files["rubric.json"]))
+    score = json.loads(await store.get_text(files["score.json"]))
+
+    if score.get("rubric_version") != rubric.get("rubric_version"):
+        return ReviewVerdict(
+            passed=False,
+            failures=[f"rubric_version mismatch: {score.get('rubric_version')}"],
+        )
+
+    failures: list[str] = []
+    for criterion in rubric.get("criteria", []):
+        if not criterion.get("required"):
+            continue
+        criterion_id = criterion["criterion_id"]
+        if score.get("scores", {}).get(criterion_id, 0) < criterion.get(
+            "pass_threshold", 1
+        ):
+            failures.append(criterion_id)
+
+    if sum(score.get("scores", {}).values()) < rubric.get("overall_pass_threshold", 0):
+        failures.append("overall")
+
+    return ReviewVerdict(passed=not failures, failures=failures)

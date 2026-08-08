@@ -1,4 +1,10 @@
-"""Authoritative ResearchTree v2 workflow lifecycle outside app-server."""
+"""ResearchRuntime — ProjectRuntime 的外部协议翻译层（dynamic-orchestration §8 条件 7）。
+
+不再拥有第二套 Agent 生命周期：不创建 asyncio.Task、不保存 phase、不管理
+pause、不运行 workflow coroutine。``dispatch`` 把 ResearchMethod 协议翻译为
+``ProjectRuntime`` 的权威调用；phase/status 由项目状态投影提供。gui_gateway
+等外部调用方继续通过 ``dispatch`` 使用。
+"""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -7,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from athena.core.research_tree import ExperimentStatus, ResearchTree
+from athena.core.research_tree import ResearchTree
 from athena.research.budget import BudgetSnapshot
 from athena.research.models import MetricSpec, TaskMetaData
 
@@ -65,6 +71,8 @@ SearchFactory = Callable[
 
 @dataclass(frozen=True)
 class ResearchWorkflowDependencies:
+    """兼容占位（World A 后端已删除）；降级后委托 ProjectRuntime。"""
+
     prepare_baseline: PrepareBaselineFn | None = None
     search_factory: SearchFactory | None = None
     validator: Any | None = None
@@ -72,7 +80,7 @@ class ResearchWorkflowDependencies:
 
 
 class ResearchRuntime:
-    """Own research state, workflow tasks, cooperative pause, and events."""
+    """ProjectRuntime 的外部协议翻译层（dynamic-orchestration §8 条件 7）。"""
 
     def __init__(
         self,
@@ -83,23 +91,17 @@ class ResearchRuntime:
         project: "ProjectRuntime | None" = None,
     ) -> None:
         self._tree = tree or ResearchTree()
-        self._phase: ResearchPhase = "IDLE"
-        self._active_task: TaskMetaData | None = None
-        self._budget = BudgetSnapshot()
-        self._run_task: asyncio.Task[None] | None = None
-        self._resume_gate = asyncio.Event()
-        self._resume_gate.set()
-        self._subscribers: dict[str, EmitFn] = {}
         self._save_path = Path(save_path)
+        self._subscribers: dict[str, EmitFn] = {}
         self._dependencies = dependencies or ResearchWorkflowDependencies()
-        # §15：可选的 ProjectRuntime 委托——phase/status 由项目状态投影提供
         self._project = project
 
     @property
     def phase(self) -> ResearchPhase:
+        """外部投影词；委托 ProjectRuntime 投影，否则为 RUNNING。"""
         if self._project is not None:
             return self._project.projected_phase()
-        return self._phase
+        return "IDLE"
 
     def project_status(self) -> str:
         """外部控制状态（§4.3）；委托 ProjectRuntime 投影，否则为 RUNNING。"""
@@ -108,16 +110,14 @@ class ResearchRuntime:
         return "RUNNING"
 
     @property
-    def run_task(self) -> asyncio.Task[None] | None:
-        return self._run_task
-
-    @property
     def tree(self) -> ResearchTree:
         return self._tree
 
     @property
     def budget(self) -> BudgetSnapshot:
-        return self._budget
+        if self._project is not None:
+            return self._project.budget
+        return BudgetSnapshot()
 
     def subscribe(self, emit: EmitFn) -> str:
         subscription_id = f"research:{uuid4().hex}"
@@ -128,64 +128,44 @@ class ResearchRuntime:
         self._subscribers.pop(subscription_id, None)
 
     async def _publish(self, kind: str, data: dict[str, object]) -> None:
-        async def invoke(subscription_id: str, emit: EmitFn) -> str | None:
+        async def invoke(subscription_id: str, emit: EmitFn) -> None:
             try:
                 result = emit(kind, data)
                 if asyncio.iscoroutine(result):
                     await result
-                return None
             except Exception:
-                return subscription_id
+                pass
 
-        failed = await asyncio.gather(
-            *(
-                invoke(subscription_id, emit)
-                for subscription_id, emit in list(self._subscribers.items())
-            )
+        await asyncio.gather(
+            *(invoke(sid, emit) for sid, emit in list(self._subscribers.items()))
         )
-        for subscription_id in failed:
-            if subscription_id is not None:
-                self._subscribers.pop(subscription_id, None)
-
-    async def _set_phase(self, phase: ResearchPhase) -> None:
-        self._phase = phase
-        await self._publish("phase/change", {"phase": phase})
-
-    def _workflow_active(self) -> bool:
-        return self._run_task is not None and not self._run_task.done()
-
-    def _successful_sota_id(self) -> str | None:
-        experiment_id = self._tree.best_experiment_id()
-        if experiment_id is None:
-            return None
-        experiment = self._tree.get_experiment(experiment_id)
-        if (
-            experiment.status is ExperimentStatus.SUCCEEDED
-            and experiment.eval is not None
-            and experiment.plan.kind in {"baseline", "search"}
-        ):
-            return experiment_id
-        return None
 
     async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, object]:
         if method == ResearchMethod.PARSE_INTENT:
             return self._parse_intent(params)
+        if method not in ResearchMethod.ALL:
+            raise ValueError(f"unknown method: {method}")
+        if self._project is None:
+            raise RuntimeError("ResearchRuntime requires a ProjectRuntime")
         if method == ResearchMethod.TASK_CONFIGURE:
             return await self._configure(params)
         if method == ResearchMethod.SEARCH_START:
             return await self._search_start(params)
         if method == ResearchMethod.SEARCH_PAUSE:
-            return await self._search_pause()
+            self._project.pause()
+            return {"phase": "PAUSED", "status": "paused"}
         if method == ResearchMethod.SEARCH_RESUME:
-            return await self._search_resume()
+            self._project.resume()
+            return {"phase": self._project.projected_phase(), "status": "running"}
         if method == ResearchMethod.SEARCH_STOP:
-            return await self._search_stop()
+            await self._project.stop()
+            return {"phase": "CANCELLED", "status": "stopped"}
         if method == ResearchMethod.VALIDATE_START:
-            return await self._validate()
+            return await self._validate(params)
         if method == ResearchMethod.REPORT_GENERATE:
-            return await self._report()
+            return await self._report(params)
         if method == ResearchMethod.TREE_GET:
-            return {"tree": self._tree.to_dict()}
+            return {"tree": self._project.tree.to_dict()}
         if method == ResearchMethod.TREE_SAVE:
             return await self._tree_save(params)
         if method == ResearchMethod.TREE_LOAD:
@@ -222,8 +202,9 @@ class ResearchRuntime:
         }
 
     async def _configure(self, params: dict[str, Any]) -> dict[str, object]:
-        if self._workflow_active():
-            raise RuntimeError("cannot configure while a research workflow is active")
+        """把 TASK_CONFIGURE 参数翻译为 ProjectRuntime.configure。"""
+        if self._project is None:
+            raise RuntimeError("ResearchRuntime requires a ProjectRuntime")
         raw_metric = params.get("primary_metric", "f1_macro")
         metric = (
             raw_metric
@@ -242,125 +223,35 @@ class ResearchRuntime:
                 "constraints": params.get("constraints", []),
             }
         )
-        self._active_task = task
-        await self._set_phase("CONFIGURED")
+        await self._project.configure(task)
         return {"configured": True, "task": task.model_dump(mode="json")}
 
     async def _search_start(self, params: dict[str, Any]) -> dict[str, object]:
-        if self._workflow_active():
-            raise RuntimeError("research workflow is already active")
-        if self._active_task is None:
-            raise RuntimeError("SEARCH requires a configured task")
-        if self._dependencies.search_factory is None:
-            raise RuntimeError("search backend is not configured")
-        has_baseline = self._successful_sota_id() is not None
-        if not has_baseline and self._dependencies.prepare_baseline is None:
-            raise RuntimeError("prepare backend is not configured")
-        remaining = int(params.get("max_experiments", 10))
-        max_no_improve = int(params.get("max_no_improve", 3))
-        if remaining <= 0 or max_no_improve <= 0:
-            raise ValueError("search budget values must be positive")
-        self._budget = BudgetSnapshot(
-            remaining=remaining, max_no_improve=max_no_improve
-        )
-        self._resume_gate.set()
-        await self._set_phase("SEARCH" if has_baseline else "PREPARE")
-        self._run_task = asyncio.create_task(
-            self._run_search(has_baseline), name="research-search"
-        )
+        """把 SEARCH_START 翻译为 ProjectRuntime.run_search（单假设确定性步骤）。"""
+        if self._project is None:
+            raise RuntimeError("ResearchRuntime requires a ProjectRuntime")
+        hypothesis = str(params.get("hypothesis", "default hypothesis"))
+        ref = await self._project.run_search(hypothesis)
         return {
-            "phase": self._phase,
             "status": "started",
-            "budget": self._budget.model_dump(mode="json"),
+            "phase": self._project.projected_phase(),
+            "sota_ref": ref,
         }
 
-    async def _run_search(self, has_baseline: bool) -> None:
-        try:
-            if not has_baseline:
-                prepare = self._dependencies.prepare_baseline
-                if prepare is None or self._active_task is None:
-                    raise RuntimeError("prepare backend is not configured")
-                await prepare(self._active_task, self._tree)
-                await self._publish("tree/updated", {"tree": self._tree.to_dict()})
-            await self._set_phase("SEARCH")
-            factory = self._dependencies.search_factory
-            if factory is None:
-                raise RuntimeError("search backend is not configured")
-            await factory(self._tree, self._budget, self._resume_gate.wait).run()
-            await self._publish(
-                "budget/update", {"budget": self._budget.model_dump(mode="json")}
-            )
-            await self._publish("tree/updated", {"tree": self._tree.to_dict()})
-            await self._set_phase("COMPLETED")
-        except asyncio.CancelledError:
-            await self._set_phase("CANCELLED")
-            raise
-        except Exception:
-            await self._set_phase("FAILED")
-            raise
-        finally:
-            if self._run_task is asyncio.current_task():
-                self._run_task = None
+    async def _validate(self, params: dict[str, Any]) -> dict[str, object]:
+        """把 VALIDATE_START 翻译为 ProjectRuntime.run_validate。"""
+        if self._project is None:
+            raise RuntimeError("ResearchRuntime requires a ProjectRuntime")
+        ref = str(params.get("experiment_ref", "sota"))
+        validation_ref = await self._project.run_validate(ref)
+        return {"validation_ref": validation_ref}
 
-    async def _search_pause(self) -> dict[str, object]:
-        if self._phase != "SEARCH" or not self._workflow_active():
-            raise RuntimeError("pause requires an active SEARCH phase")
-        self._resume_gate.clear()
-        await self._set_phase("PAUSED")
-        return {"phase": "PAUSED", "status": "paused"}
-
-    async def _search_resume(self) -> dict[str, object]:
-        if self._phase != "PAUSED" or not self._workflow_active():
-            raise RuntimeError("resume requires a PAUSED search")
-        self._resume_gate.set()
-        await self._set_phase("SEARCH")
-        return {"phase": "SEARCH", "status": "running"}
-
-    async def _search_stop(self) -> dict[str, object]:
-        task = self._run_task
-        if task is None or task.done():
-            raise RuntimeError("stop requires an active research workflow")
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        self._run_task = None
-        return {"phase": "CANCELLED", "status": "stopped"}
-
-    async def _validate(self) -> dict[str, object]:
-        if self._workflow_active():
-            raise RuntimeError("cannot validate while a research workflow is active")
-        if self._dependencies.validator is None:
-            raise RuntimeError("validation backend is not configured")
-        sota_id = self._successful_sota_id()
-        if sota_id is None:
-            raise RuntimeError("VALIDATE requires a successful SOTA")
-        await self._set_phase("VALIDATE")
-        try:
-            result = await self._dependencies.validator.run(sota_id, self._tree)
-        except Exception:
-            await self._set_phase("FAILED")
-            raise
-        await self._publish("tree/updated", {"tree": self._tree.to_dict()})
-        return result.model_dump(mode="json")
-
-    async def _report(self) -> dict[str, object]:
-        if self._workflow_active():
-            raise RuntimeError("cannot report while a research workflow is active")
-        if self._dependencies.reporter is None:
-            raise RuntimeError("report backend is not configured")
-        sota_id = self._successful_sota_id()
-        if sota_id is None:
-            raise RuntimeError("REPORT requires a successful SOTA")
-        await self._set_phase("REPORT")
-        try:
-            report_ref = await self._dependencies.reporter.generate(sota_id, self._tree)
-        except Exception:
-            await self._set_phase("FAILED")
-            raise
-        await self._publish("tree/updated", {"tree": self._tree.to_dict()})
-        await self._set_phase("COMPLETED")
+    async def _report(self, params: dict[str, Any]) -> dict[str, object]:
+        """把 REPORT_GENERATE 翻译为 ProjectRuntime.run_report。"""
+        if self._project is None:
+            raise RuntimeError("ResearchRuntime requires a ProjectRuntime")
+        report_text = str(params.get("report_text", "final report"))
+        report_ref = await self._project.run_report(report_text)
         return {"report_ref": report_ref}
 
     async def _tree_save(self, params: dict[str, Any]) -> dict[str, object]:
@@ -368,19 +259,15 @@ class ResearchRuntime:
         return {"saved": True, "path": str(saved)}
 
     async def _tree_load(self, params: dict[str, Any]) -> dict[str, object]:
-        if self._workflow_active():
-            raise RuntimeError("cannot load a tree while a research workflow is active")
-        self._tree = ResearchTree.load(Path(str(params.get("path") or self._save_path)))
+        if self._project is None:
+            raise RuntimeError("ResearchRuntime requires a ProjectRuntime")
+        self._tree = (
+            ResearchTree.from_dict(self._project.tree.to_dict())
+            if self._project.tree is not None
+            else ResearchTree()
+        )
         await self._publish("tree/updated", {"tree": self._tree.to_dict()})
         return {"loaded": True, "tree": self._tree.to_dict()}
 
     async def aclose(self) -> None:
-        task = self._run_task
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._run_task = None
         self._subscribers.clear()
