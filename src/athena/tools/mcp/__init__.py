@@ -1,9 +1,16 @@
 """通用 MCP 接入层 —— 装配入口。"""
 
+from dataclasses import replace
+
 from athena.tools.mcp.config import McpServerConfig, load_mcp_servers
 from athena.tools.mcp.adapter import McpToolAdapter
 from athena.tools.mcp.client import McpClientError, McpClientManager
 from athena.tools.mcp.search import McpSearchTools
+
+
+def _expand_work_root(args: list[str], work_root: str) -> list[str]:
+    """将 args 中的 ``${WORK_ROOT}`` / ``$WORK_ROOT`` 替换为实际路径。"""
+    return [a.replace("${WORK_ROOT}", work_root).replace("$WORK_ROOT", work_root) for a in args]
 
 
 async def register_mcp_tools(
@@ -11,13 +18,20 @@ async def register_mcp_tools(
     servers: list[McpServerConfig],
     *,
     work_root: str,
-    max_discovered: int = 30,
+    max_discovered: int = 10,
 ) -> list[McpClientManager]:
     """把配置的 MCP server 接入 registry：注册钉住工具 + 全局搜索工具。
 
     钉住工具需要构建期连接拉取 schema；未配置钉住工具时全程懒连接。
     """
-    managers = [McpClientManager(cfg) for cfg in servers]
+    # 展开 args 中的 ${WORK_ROOT} / $WORK_ROOT 占位符
+    expanded = []
+    for cfg in servers:
+        expanded_args = _expand_work_root(cfg.args, work_root)
+        if expanded_args != cfg.args:
+            cfg = replace(cfg, args=expanded_args)
+        expanded.append(cfg)
+    managers = [McpClientManager(cfg) for cfg in expanded]
     for mgr in managers:
         for name in mgr.cfg.pinned_tools:  # 仅注册钉住工具，避免不必要的连接开销
             await mgr.ensure_connected()
