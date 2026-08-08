@@ -57,6 +57,8 @@ class ResponsesProvider:
         tools: "ToolRegistry",
         messages: list[ModelMessage],
         cancel: asyncio.Event,
+        *,
+        output_type: type | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         api_msgs = _to_api(messages)
         tool_defs = [spec.to_openai_tool() for spec in tools.specs]
@@ -68,6 +70,14 @@ class ResponsesProvider:
             temperature=config.temperature,
             stream=True,
         )
+        if output_type is not None:
+            kw["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": output_type.__name__,
+                    "schema": output_type.model_json_schema(),
+                },
+            }
         if tool_defs:
             kw["tools"] = tool_defs
             kw["tool_choice"] = "auto"

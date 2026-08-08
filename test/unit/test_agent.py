@@ -3,6 +3,8 @@
 import asyncio
 from dataclasses import fields
 from inspect import signature
+
+from pydantic import BaseModel
 import pytest
 
 import athena.core as core_api
@@ -18,9 +20,7 @@ from athena.core.agent.provider import ResponsesProvider, StreamEvent
 from athena.core.agent.runtime import (
     Agent,
     BaseAgent,
-    agent_runner,
     create_agent,
-    create_code_agent,
 )
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import BaseTool, ToolRegistry
@@ -397,3 +397,69 @@ def test_chat_completions_tool_schema_is_nested() -> None:
             "parameters": {"type": "object"},
         },
     }
+
+
+class _CaptureClient:
+    def __init__(self):
+        self.kwargs: dict = {}
+
+    @property
+    def chat(self):
+        class _Completions:
+            def __init__(self, owner):
+                self._owner = owner
+
+            async def create(self, **kw):
+                self._owner.kwargs = kw
+                chunks = [type("C", (), {"choices": []})()]
+
+                async def gen():
+                    for c in chunks:
+                        yield c
+
+                return gen()
+
+        class _Chat:
+            def __init__(self, owner):
+                self._owner = owner
+
+            @property
+            def completions(self):
+                return _Completions(self._owner)
+
+        return _Chat(self)
+
+
+class _Out(BaseModel):
+    value: int
+
+
+@pytest.mark.asyncio
+async def test_stream_sets_response_format_when_output_type_given() -> None:
+    client = _CaptureClient()
+    provider = ResponsesProvider("model", client=client)
+    events = [
+        e
+        async for e in provider.stream(
+            AgentConfig(), ToolRegistry(), [], asyncio.Event(), output_type=_Out
+        )
+    ]
+    rf = client.kwargs["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["name"] == "_Out"
+    assert rf["json_schema"]["schema"] == _Out.model_json_schema()
+    assert any(e.kind == "response_completed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_stream_omits_response_format_without_output_type() -> None:
+    client = _CaptureClient()
+    provider = ResponsesProvider("model", client=client)
+    events = [
+        e
+        async for e in provider.stream(
+            AgentConfig(), ToolRegistry(), [], asyncio.Event()
+        )
+    ]
+    assert "response_format" not in client.kwargs
+    assert any(e.kind == "response_completed" for e in events)
