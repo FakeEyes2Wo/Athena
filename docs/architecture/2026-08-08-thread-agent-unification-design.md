@@ -94,7 +94,7 @@ ThreadFacadeRecord:
 | 兼容层 | 保留的旧契约 | 标注位置 | 清理条件 |
 |---|---|---|---|
 | `response_ref` JSON 信封(`{"result_ref": ...}`) | `ProjectRuntime` 现有 `json.loads(summary.response_ref)["result_ref"]` 调用 | `agent_runtime.py` wait_run / runner 适配器 | ProjectRuntime 改用强类型返回后 |
-| `BaseAgentRunner.run_with_context` 适配入口 | kernel runner 协议 `run(request, *, session, emit)` | `base_runner.py` | AgentRunner 协议统一为线程 runner 后 |
+| 门面 dispatcher(thread `run_with_context` → AgentRunner 协议) | kernel runner 协议 `run(request, *, session, emit)`;BaseAgentRunner 主体不动 | `agent_runtime.py` `_ThreadRunner` + `core/agent/session.py` `RunSession` 视图 | AgentRunner 协议统一为线程 runner 后 |
 | `RunSession` 视图 | `receive_messages()/checkpoint()/memory/agent_id/context_ref/kernel` | `core/agent/session.py` | BaseAgentRunner 不再依赖 session 后 |
 | 空唤醒不生成假 trigger | kernel §4.4 wait 唤醒语义 | `base_runner.py` 与 WaitRegistry 唤醒处 | 等待语义内建到 thread 后 |
 | `AgentOutcome.next_context_ref` 迁移字段 | ThreadRuntime 旧字段 | `core/agent/models.py` | 旧调用方迁移完成后删除 |
@@ -117,7 +117,7 @@ ThreadFacadeRecord:
 
 ## app_server 改动面(最小挂钩,共 2 处)
 
-1. `ThreadRuntime.__init__` 增加可选 `on_turn_terminal: Callable[[str, TurnTerminalState], None] | None = None`,在 `commit_completed`/`commit_failed`/`commit_interrupted` 三处同步调用(回调须为同步、轻量,内部不得 await;门面据此调度异步唤醒任务)。
+1. `ThreadRuntime.__init__` 增加可选 `on_turn_terminal: Callable[[str, TurnTerminalState], None] | None = None`,在 `commit_completed`/`commit_failed`/`commit_interrupted` 三处同步调用(回调须为同步、轻量,内部不得 await;门面据此调度异步唤醒任务)。`RuntimeThreadManager` 增可选同参并透传注入每个 `ThreadRuntime`。
 2. `RuntimeThreadManager._make_runtime` 支持可选确定性 rollout 路径(按 thread_id 命名),否则沿用现状随机路径。debate Ideator / gui_gateway 不改动。
 
 ## 删除清单
