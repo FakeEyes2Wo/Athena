@@ -20,7 +20,9 @@ from athena.core.agent.provider import ResponsesProvider, StreamEvent
 from athena.core.agent.runtime import (
     Agent,
     BaseAgent,
+    agent_runner,
     create_agent,
+    create_code_agent,
 )
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import BaseTool, ToolRegistry
@@ -97,7 +99,8 @@ def test_environment_builds_three_independent_core_agents() -> None:
         "plot-agent",
     ]
     assert all(
-        set(vars(agent)) == {"model", "tools", "system_prompt", "config"}
+        set(vars(agent))
+        == {"model", "tools", "system_prompt", "config", "_output_type", "_artifacts"}
         for agent in agents
     )
     assert len({id(agent) for agent in agents}) == 3
@@ -195,7 +198,7 @@ class TestBaseAgent:
 
     async def test_empty_system_prompt_is_not_added_to_memory(self):
         class TextProvider:
-            async def stream(self, _config, _tools, messages, _cancel):
+            async def stream(self, _config, _tools, messages, _cancel, **_kwargs):
                 assert all(
                     part.part_kind != "system-prompt"
                     for message in messages
@@ -243,7 +246,7 @@ class TestBaseAgent:
                 self.closed = False
                 self.generator = None
 
-            def stream(self, *_args):
+            def stream(self, *_args, **_kwargs):
                 async def events():
                     try:
                         yield StreamEvent(
@@ -286,7 +289,7 @@ class TestBaseAgent:
 
     async def test_provider_error_is_not_reported_as_success(self):
         class ErrorProvider:
-            async def stream(self, *_args):
+            async def stream(self, *_args, **_kwargs):
                 yield StreamEvent(kind="error", data={"message": "provider failed"})
 
         tools = ToolRegistry()
@@ -341,7 +344,7 @@ class TestBaseAgent:
             def __init__(self):
                 self.calls = 0
 
-            async def stream(self, *_args):
+            async def stream(self, *_args, **_kwargs):
                 self.calls += 1
                 if self.calls == 1:
                     yield StreamEvent(
@@ -463,3 +466,60 @@ async def test_stream_omits_response_format_without_output_type() -> None:
     ]
     assert "response_format" not in client.kwargs
     assert any(e.kind == "response_completed" for e in events)
+
+
+class _StructuredOut(BaseModel):
+    answer: str
+
+
+class _StructuredProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def stream(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                "text_delta", {"delta": "not json", "accumulated": "not json"}
+            )
+        else:
+            yield StreamEvent(
+                "text_delta",
+                {"delta": '{"answer":"hi"}', "accumulated": '{"answer":"hi"}'},
+            )
+        yield StreamEvent("response_completed")
+
+
+@pytest.mark.asyncio
+async def test_agent_structured_output_validates_retries_and_persists(
+    tmp_path,
+) -> None:
+    from athena.core.artifact_store import LocalArtifactStore
+    from athena.core.agent.models import AgentContext
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"),
+        tools,
+        "system",
+        output_type=_StructuredOut,
+        artifacts=store,
+    )
+    agent.model = _StructuredProvider()
+    ctx = AgentContext(
+        AthenaThread(
+            thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+        ),
+        AthenaTurn(
+            turn_id="t1.1", thread_id="t1", request_ref="request", status="running"
+        ),
+        lambda *_a: asyncio.sleep(0),
+        tools,
+        asyncio.Event(),
+    )
+
+    outcome = await agent.run(ctx)
+
+    assert outcome.result_ref.startswith("sha256:")
+    assert (await store.get_text(outcome.result_ref)) == '{"answer":"hi"}'

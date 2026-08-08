@@ -8,6 +8,8 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, ValidationError
+
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -34,7 +36,11 @@ from athena.memory.context_manager import ContextManager
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
+    from athena.core.contracts import ArtifactStore
+
 logger = logging.getLogger(__name__)
+
+_MAX_STRUCTURED_RETRIES = 3
 
 
 class BaseAgent(ABC):
@@ -69,11 +75,16 @@ class Agent(BaseAgent):
         tools: ToolRegistry,
         system_prompt: str,
         config: AgentConfig | None = None,
+        *,
+        output_type: type[BaseModel] | None = None,
+        artifacts: "ArtifactStore | None" = None,
     ) -> None:
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
         self.config = config or AgentConfig()
+        self._output_type = output_type
+        self._artifacts = artifacts
 
     @property
     def name(self) -> str:
@@ -98,11 +109,44 @@ class Agent(BaseAgent):
             mem.append(ModelRequest(parts=[UserPromptPart(content=user)]))
 
         # 多轮采样循环：LLM 输出工具调用 → 执行 → 写入结果 → 再次请求
+        retries = 0
         for _ in range(self.config.max_turns):
             if ctx.cancel.is_set():
                 break
             outcome = await _sampling_loop(self, ctx)
             if outcome.kind == "done":
+                if self._output_type is not None:
+                    try:
+                        instance = self._output_type.model_validate_json(outcome.text)
+                    except ValidationError as exc:
+                        if retries >= _MAX_STRUCTURED_RETRIES:
+                            raise RuntimeError(
+                                f"structured output invalid after retries: {exc}"
+                            ) from exc
+                        retries += 1
+                        mem.append(
+                            ModelRequest(
+                                parts=[
+                                    UserPromptPart(
+                                        content=(
+                                            "Previous JSON output was invalid: "
+                                            f"{exc}\nReturn JSON matching the schema."
+                                        )
+                                    )
+                                ]
+                            )
+                        )
+                        continue
+                    json_text = instance.model_dump_json()
+                    ref = (
+                        await self._artifacts.put_text(json_text)
+                        if self._artifacts is not None
+                        else f"result://{ctx.turn.turn_id}"
+                    )
+                    return AgentOutcome(
+                        result_ref=ref,
+                        next_context_ref=f"context://{ctx.turn.turn_id}/next",
+                    )
                 ref = f"result://{ctx.turn.turn_id}"
                 return AgentOutcome(
                     result_ref=ref,
@@ -145,7 +189,13 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
 
     try:
         async with aclosing(
-            agent.model.stream(agent.config, agent.tools, mem.items, ctx.cancel)
+            agent.model.stream(
+                agent.config,
+                agent.tools,
+                mem.items,
+                ctx.cancel,
+                output_type=getattr(agent, "_output_type", None),
+            )
         ) as stream:
             async for event in stream:
                 match event.kind:
