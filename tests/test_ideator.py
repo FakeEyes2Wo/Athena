@@ -12,10 +12,10 @@ from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
 from athena.core.thread_models import AthenaTurn
 from athena.agents.data_models import ColumnSummary, DataProfile
-from athena.ideator import DebateResult, Ideator, IdeatorConfig
-from athena.ideator import __all__ as ideator_exports
-from athena.ideator.ideator import _DebateRunner
-from athena.ideator.types import (
+from athena.agents.ideator import DebateResult, Ideator, IdeatorConfig
+from athena.agents.ideator import __all__ as ideator_exports
+from athena.agents.ideator.ideator import _DebateRunner
+from athena.agents.ideator.types import (
     _JudgeOutput,
     _ProposalBatch,
     _ReviewBatch,
