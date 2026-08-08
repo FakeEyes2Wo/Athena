@@ -501,7 +501,7 @@ class ProjectRuntime:
             try:
                 await self._runtime.interrupt(snap.agent_id, "project stop")
             except (AgentCommandError, RuntimeError):
-                # AgentRuntime 门面下 interrupt 对无活动 Run 的 Agent 报错
+                # COMPAT: AgentRuntime 门面下 interrupt 对无活动 Run 的 Agent 报错
                 # （旧 kernel 为幂等 no-op）；此处与旧语义一致地跳过。
                 continue
         self._runtime.pause()
