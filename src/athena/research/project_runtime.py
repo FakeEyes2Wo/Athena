@@ -14,13 +14,15 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from athena.agents.base_runner import BaseAgentRunner
-from athena.agents.code_agent import CodeAgent
 from athena.agents.data_agent import DataAgent
-from athena.agents.ideator_agent import IdeatorAgent
+from athena.agents.init_agent import InitAgent
 from athena.agents.orchestration import RunToolProjector
-from athena.agents.plot_agent import PlotAgent
-from athena.agents.reflection_agent import ReflectionAgent
+from athena.agents.reflection_agent import (
+    ReflectionAgent,
+    evaluate_data_analysis_review,
+)
 from athena.agents.report_agent import ReportAgent
+from athena.agents.simple_agents import CodeAgent, IdeatorAgent, PlotAgent
 from athena.agents.supervisor import SupervisorAgent
 from athena.core.agent_kernel.codec import JsonCodec
 from athena.core.agent_kernel.kernel import AgentKernel
@@ -31,12 +33,17 @@ from athena.core.agent_kernel.session import (
 )
 from athena.core.agent_kernel.store import AgentGraphStore
 from athena.core.agent_kernel.store_json import load_store_json, store_to_json
-from athena.core.agent_kernel.types import AgentId, AgentSpec, AgentStatus
-from athena.evaluation.policy import evaluate_data_analysis_review
-from athena.evaluation.types import EvalSpec, EvalSpecChain, MetricDef
-from athena.research.models import TaskMetaData
-from athena.storage.artifact_store import LocalArtifactStore
-from athena.storage.bundle import VersionedBundle
+from athena.core.agent_kernel.types import AgentId, AgentSpec, AgentStatus, RunId
+from athena.core.research_models import Hypothesis
+from athena.core.research_tree import ResearchTree
+from athena.memory.index import MemoryStore
+from athena.research.budget import BudgetSnapshot
+from athena.research.models import EvalSpec, EvalSpecChain, MetricDef, TaskMetaData
+from athena.core.artifact_store import LocalArtifactStore
+from athena.core.bundle import VersionedBundle
+
+# LLM Agent 映射（首版为空——spec「首版否」；后续按 spec 映射表填充即可启用转换）
+LLM_AGENT_MAPPING: dict[str, dict] = {}
 
 
 def _request(payload: dict) -> dict:
@@ -70,6 +77,16 @@ class ProjectRuntime:
         self._status = "RUNNING"
         self._task: TaskMetaData | None = None
         self._eval_specs = EvalSpecChain()
+        # 各阶段已提交事实 refs（端到端 §3 项目最小事实）
+        self._sota_ref: str | None = None
+        self._validation_ref: str | None = None
+        self._report_ref: str | None = None
+        # 项目记忆（memory-human-wait §3）：已验证事实/决定/修复
+        self._memory = MemoryStore()
+        # SEARCH 预算（端到端 §5.3）：预算耗尽即停止
+        self._budget = BudgetSnapshot()
+        # ResearchTree（设计 §4 所有权）：假设/实验/SOTA 的唯一所有者
+        self._tree = ResearchTree()
 
     @property
     def supervisor_id(self) -> AgentId | None:
@@ -100,11 +117,17 @@ class ProjectRuntime:
     def projected_phase(self) -> str:
         """从已提交事实派生研究阶段（§4.2 完成条件，确定性投影）。
 
-        只根据 TaskMetaData、DataAnalysis 版本与冻结 EvalSpec 是否存在计算，
-        不依赖 Agent 的自然语言声明；未满足完成条件时不推进。
+        按六阶段硬门槛推进，只根据已提交的 task/DataAnalysis/EvalSpec/SOTA/
+        validation/report 事实计算，不依赖 Agent 声明；未满足时不推进。
         """
         if self._task is None:
             return "IDLE"
+        if self._report_ref is not None:
+            return "COMPLETED"
+        if self._validation_ref is not None:
+            return "REPORT"
+        if self._sota_ref is not None:
+            return "VALIDATE"
         has_analysis = bool(self._bundle.chains())
         has_protocol = self._eval_specs.version > 0
         if has_analysis and has_protocol:
@@ -130,6 +153,35 @@ class ProjectRuntime:
         """冻结评估协议（§7.2）：append-only EvalSpec 版本链。"""
         return self._eval_specs
 
+    @property
+    def memory(self) -> MemoryStore:
+        """项目记忆索引（memory-human-wait §3）：已验证事实。"""
+        return self._memory
+
+    @property
+    def budget(self) -> BudgetSnapshot:
+        """SEARCH 预算快照（端到端 §5.3）：剩余实验与连续无改进计数。"""
+        return self._budget
+
+    @property
+    def tree(self) -> ResearchTree:
+        """ResearchTree（设计 §4）：假设/实验/SOTA 的唯一所有者。"""
+        return self._tree
+
+    def add_project_memory(
+        self, *, kind: str, summary: str, source_refs: list[str], created_by: str
+    ) -> str:
+        """提交已验证事实为项目记忆，返回 entry_id 并持久化。"""
+        entry_id = self._memory.add(
+            scope="project",
+            kind=kind,
+            summary=summary,
+            source_refs=source_refs,
+            created_by=created_by,
+        )
+        self._save_state()
+        return entry_id
+
     def freeze_eval_spec(
         self, primary: MetricDef, secondary: list[MetricDef] | None = None
     ) -> int:
@@ -140,8 +192,10 @@ class ProjectRuntime:
         self._save_state()
         return version
 
-    def register_defaults(self) -> None:
+    def register_defaults(self, *, model: str | None = None, client=None) -> None:
         """注册静态业务类型（确定性实现，每实例 factory）。"""
+        # 首版框架：LLM_AGENT_MAPPING 为空，全部保持确定性骨架。
+        # 后续填充映射 + 传入 model 时，改用 create_agent_for 注册 LLM Agent。
         self._registry.register(
             "supervisor",
             lambda _aid, _cfg=None: AgentSpec(
@@ -151,6 +205,12 @@ class ProjectRuntime:
                     agent_type="supervisor",
                 ),
                 codec=JsonCodec(),
+            ),
+        )
+        self._registry.register(
+            "init",
+            lambda _aid, _cfg=None: AgentSpec(
+                runner=BaseAgentRunner(InitAgent(self._store)), codec=JsonCodec()
             ),
         )
         self._registry.register(
@@ -207,18 +267,22 @@ class ProjectRuntime:
         *,
         report: str | None = None,
         workspace: Path | None = None,
+        eval_script: str | None = None,
     ) -> str:
         """PREPARE DataAnalysis 评审闭环（§7.1）：返回接受版本 ref。
 
-        DataAgent 生成并运行固定名分析脚本（读 ``data_path``、EDA、绘图到
-        ``figures/``、写 ``report.md``）提交 v1；Reflection 评审 v1；通过接受
-        v1，否则 follow-up 原 DataAgent 提交 v2。``report`` 可覆盖报告文本
-        （确定性 failed 路径，如空报告触发评审失败）。
+        InitAgent 先做 task understanding：读数据集 schema 生成冻结的
+        ``eval.py`` 并回填 ``EvalSpec``（用户首轮输入可用 ``eval_script``
+        直接指定）。随后 DataAgent 生成并运行固定名分析脚本（读 ``data_path``、
+        EDA、绘图到 ``figures/``、写 ``report.md``）提交 v1；Reflection 评审
+        v1；通过接受 v1，否则 follow-up 原 DataAgent 提交 v2。``report`` 可
+        覆盖报告文本（确定性 failed 路径，如空报告触发评审失败）。
         """
         if self._phase != "CONFIGURED":
             raise RuntimeError(f"PREPARE requires CONFIGURED, got {self._phase}")
         self._set_phase("PREPARE")
         workspace = workspace or (self._root / "workspace" / "data")
+        await self._run_init_understanding(data_path, target, eval_script)
         payload: dict[str, str] = {
             "data_path": str(Path(data_path).resolve()),
             "target": target,
@@ -252,28 +316,97 @@ class ProjectRuntime:
             raise RuntimeError("revision produced no new version")
         return v2
 
-    async def run_search(self, hypothesis: str) -> str:
-        """SEARCH 阶段（设计 §5）：spawn Ideator 生成假设并推进阶段。
+    async def _run_init_understanding(
+        self,
+        data_path: str | Path,
+        target: str,
+        eval_script: str | None,
+    ) -> None:
+        """InitAgent task understanding：生成 eval.py 并冻结 EvalSpec。
 
-        返回假设 Artifact ref。真实 SEARCH 需 Ranker/CodeAgent/Policy 完整编排,
-        此处为确定性最小步骤（§8 条件 2 六阶段流程推进）。
+        请求带 ``data_path``/``target``；用户首轮输入可用 ``eval_script``
+        覆盖默认生成。InitAgent 把 eval.py 写为 Artifact，调用方读取后回填
+        ``EvalSpec.eval_script`` 并冻结协议版本（§7.2）。重复调用（PREPARE
+        重入）不覆盖已冻结协议。
         """
-        if self._phase not in ("CONFIGURED", "PREPARE"):
-            raise RuntimeError(f"SEARCH requires CONFIGURED/PREPARE, got {self._phase}")
+        if self._eval_specs.version > 0:
+            return
+        request: dict[str, str] = {
+            "data_path": str(Path(data_path).resolve()),
+            "target": target,
+        }
+        if eval_script is not None:
+            request["eval_script"] = eval_script
+        _, run = await self._kernel.create_root(
+            "init", _request(request), name="init-root"
+        )
+        summary = await self._kernel.wait_run(run, timeout=10)
+        payload = json.loads(summary.response_ref)
+        result_ref = payload["result_ref"]
+        init_result = json.loads(await self._store.get_text(result_ref))
+        spec = EvalSpec(
+            primary=MetricDef(
+                name=init_result["primary_metric"],
+                direction=(
+                    "minimize"
+                    if init_result["primary_metric"] == "rmse"
+                    else "maximize"
+                ),
+                description=f"task understanding primary metric "
+                f"{init_result['primary_metric']}",
+            ),
+            eval_script=init_result["eval_script"],
+        )
+        self._eval_specs.freeze(spec)
+        self._save_state()
+
+    async def run_search(self, hypothesis: str) -> str:
+        """SEARCH 阶段（设计 §5）：Ideator 假设 + CodeAgent 候选 diff 推进阶段。
+
+        前置：PREPARE 已完成或处于 SEARCH 迭代中（预算内可重复）。Ideator
+        假设提交 ResearchTree，CodeAgent 生成候选 diff 作为 SOTA，返回其 ref。
+        真实 SEARCH 需 Ranker/Policy 完整编排，此处为确定性最小步骤。
+        """
+        if self._budget.is_exhausted:
+            raise RuntimeError("SEARCH budget exhausted")
+        if self._phase not in ("PREPARE", "SEARCH"):
+            raise RuntimeError(f"SEARCH requires PREPARE, got {self._phase}")
         self._set_phase("SEARCH")
         _, run_id = await self._kernel.create_root(
             "ideator", {"content": hypothesis}, name="ideator-root"
         )
         summary = await self._kernel.wait_run(run_id, timeout=10)
         response = json.loads(summary.response_ref)
-        return response["result_ref"]
+        hypothesis_ref = response["result_ref"]
+        # 把 Ideator 假设提交到 ResearchTree（设计 §4 所有权）
+        hyp_id = self._tree.add_hypothesis(
+            Hypothesis(
+                statement=hypothesis,
+                intervention="Apply intervention",
+                expected_effect="Improve the primary metric",
+                sources=["ideator"],
+            )
+        )
+        # SEARCH（设计 §5.3）：spawn CodeAgent 为选中假设生成候选 diff
+        _, code_run = await self._kernel.create_root(
+            "code", {"content": f"implement {hypothesis}"}, name="code-root"
+        )
+        code_summary = await self._kernel.wait_run(code_run, timeout=10)
+        code_response = json.loads(code_summary.response_ref)
+        candidate_ref = code_response["result_ref"]
+        self._budget.consume(improved=True)  # 确定性骨架：每次假设视为改进
+        self._sota_ref = candidate_ref  # SEARCH 完成事实：存在成功 SOTA
+        self._save_state()
+        return candidate_ref
 
     async def run_validate(self, experiment_ref: str) -> str:
-        """VALIDATE 阶段（§5）：对冻结 SOTA 执行确定性验证并推进阶段。
+        """VALIDATE 阶段（§5.4）：对冻结 SOTA 执行确定性验证。
 
-        真实 VALIDATE 需完整 ablation + 唯一 frozen final-test；此处为确定性
-        最小步骤（spawn CodeAgent 记录验证结果）。
+        确定性骨架：spawn CodeAgent 记录验证结果。final-test 恰好一次——
+        已提交成功 ``_validation_ref`` 后拒绝重入（端到端 §5.4 不变量）。
         """
+        if self._validation_ref is not None:
+            raise RuntimeError("VALIDATE already has a final-test result")
         if self._phase != "SEARCH":
             raise RuntimeError(f"VALIDATE requires SEARCH, got {self._phase}")
         self._set_phase("VALIDATE")
@@ -282,7 +415,10 @@ class ProjectRuntime:
         )
         summary = await self._kernel.wait_run(run_id, timeout=10)
         response = json.loads(summary.response_ref)
-        return response["result_ref"]
+        validation_ref = response["result_ref"]
+        self._validation_ref = validation_ref  # VALIDATE 完成事实：final-test 已记录
+        self._save_state()
+        return validation_ref
 
     async def run_report(self, report_text: str) -> str:
         """REPORT 阶段（§5.5）：ReportAgent 产出 Bundle → Reflection 评审 → 通过。
@@ -308,6 +444,7 @@ class ProjectRuntime:
         # EvaluationPolicy（确定性）：按 rubric/score 判定
         verdict = await evaluate_data_analysis_review(self._store, review_ref)
         if verdict.passed:
+            self._report_ref = v1  # REPORT 完成事实：报告通过门槛
             self._set_phase("COMPLETED")
             return v1
         # failed → follow-up 原 ReportAgent 提交修订版 v2
@@ -328,6 +465,20 @@ class ProjectRuntime:
         elif message is not None:
             await self._kernel.followup(self._supervisor_id, {"content": message})
         return self._supervisor_id
+
+    async def message(
+        self, content: str, context_refs: list[str] | None = None
+    ) -> None:
+        """向 root Supervisor 投递消息（不触发 turn），供 App Server 外部调用面。"""
+        if self._supervisor_id is None:
+            raise RuntimeError("project not opened")
+        await self._kernel.send_message(
+            self._supervisor_id, content, context_refs or []
+        )
+
+    async def human_reply(self, request_id: str, reply: str) -> RunId:
+        """提交人工回复并唤醒等待的 Agent（端到端 §4 外部调用面）。"""
+        return await self._kernel.human_reply(request_id, reply)
 
     def pause(self) -> None:
         """项目 pause（§13）：停止派发新 turn，状态投影 PAUSED。"""
@@ -372,9 +523,16 @@ class ProjectRuntime:
             "root_supervisor_id": self._supervisor_id,
             "phase": self._phase,
             "status": self._status,
+            "task": self._task.model_dump(mode="json") if self._task else None,
             "eval_specs": [
                 spec.model_dump(mode="json") for spec in self._eval_specs.versions
             ],
+            "sota_ref": self._sota_ref,
+            "validation_ref": self._validation_ref,
+            "report_ref": self._report_ref,
+            "memory": self._memory.to_dict(),
+            "budget": self._budget.model_dump(mode="json"),
+            "tree": self._tree.to_dict(),
             "store": store_to_json(self._kernel._store),
         }
         temp = self._state_path.with_suffix(".json.tmp")
@@ -392,10 +550,21 @@ class ProjectRuntime:
         self._supervisor_id = data.get("root_supervisor_id")
         self._phase = data.get("phase", "IDLE")
         self._status = data.get("status", "RUNNING")
+        if data.get("task"):
+            self._task = TaskMetaData.model_validate(data["task"])
         if data.get("eval_specs"):
             self._eval_specs = EvalSpecChain.from_versions(
                 [EvalSpec.model_validate(s) for s in data["eval_specs"]]
             )
+        self._sota_ref = data.get("sota_ref")
+        self._validation_ref = data.get("validation_ref")
+        self._report_ref = data.get("report_ref")
+        if data.get("memory"):
+            self._memory.load_dict(data["memory"])
+        if data.get("budget"):
+            self._budget = BudgetSnapshot.model_validate(data["budget"])
+        if data.get("tree"):
+            self._tree = ResearchTree.from_dict(data["tree"])
         store = AgentGraphStore()
         load_store_json(data["store"], store)
         # §3.2/§16.1：恢复时校验 root 引用；缺引用但恰有一个合法 root 则修复并记录

@@ -8,10 +8,9 @@ import pandas as pd
 import pytest
 
 from athena.core.agent_kernel.types import AgentStatus
-from athena.evaluation.types import MetricDef
-from athena.research.models import MetricSpec, TaskMetaData
+from athena.research.models import MetricDef, MetricSpec, TaskMetaData
 from athena.research.project_runtime import ProjectRuntime
-from athena.storage.bundle import DirectoryBundle
+from athena.core.bundle import DirectoryBundle
 
 
 def _dataset(tmp_path: Path) -> Path:
@@ -181,11 +180,8 @@ async def test_projected_phase_from_committed_facts(tmp_path) -> None:
     assert project.projected_phase() == "CONFIGURED"
     await project.open()
     await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
-    assert project.projected_phase() == "CONFIGURED"  # 有分析但协议未冻结
-    project.freeze_eval_spec(
-        MetricDef(name="accuracy", direction="maximize", description="acc")
-    )
-    assert project.projected_phase() == "PREPARE"  # 分析 + 冻结协议已提交
+    # InitAgent 在 PREPARE 前置冻结评估协议 → 有分析 + 有协议即 PREPARE
+    assert project.projected_phase() == "PREPARE"
     await project.close()
 
 
@@ -218,12 +214,13 @@ async def test_corrupt_state_rejects_missing_root(tmp_path) -> None:
         await reopened.open()
 
 
-def test_register_defaults_covers_seven_types(tmp_path) -> None:
-    """registered-agent-catalog §3：Composition Root 注册全部七个静态类型。"""
+def test_register_defaults_covers_eight_types(tmp_path) -> None:
+    """registered-agent-catalog §3：Composition Root 注册全部八个静态类型。"""
     project = ProjectRuntime(tmp_path)
     project.register_defaults()
     assert set(project.kernel._type_registry.types) == {
         "supervisor",
+        "init",
         "data",
         "plot",
         "reflection",
@@ -341,7 +338,7 @@ async def test_ideator_code_report_are_real_factories(tmp_path) -> None:
 
 
 from athena.agents.base_runner import BaseAgentRunner
-from athena.agents.ideator_agent import IdeatorAgent
+from athena.agents.simple_agents import IdeatorAgent
 from athena.core.agent.models import AgentOutcome
 from athena.core.agent_kernel.codec import JsonCodec
 from athena.core.agent_kernel.types import AgentSpec
@@ -376,7 +373,7 @@ async def test_injectable_real_impl_delegates(tmp_path) -> None:
 
 
 import athena.agents.production as production
-from athena.agents.ideator_agent import IdeatorAgent
+from athena.agents.simple_agents import IdeatorAgent
 
 
 class _FakeResult:
@@ -460,18 +457,18 @@ async def test_ideator_agent_run_impl_wiring(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_search_advances_phase(tmp_path) -> None:
-    """设计 §5：SEARCH 阶段 spawn Ideator 生成假设并推进阶段。"""
+    """设计 §5：SEARCH spawn Ideator 提交假设 + CodeAgent 生成候选，推进阶段。"""
     project = ProjectRuntime(tmp_path)
     project.register_defaults()
     await project.open()
     await project.configure(_task())
     await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
-    hypothesis_ref = await project.run_search("假设A")
-    assert hypothesis_ref.startswith("sha256:")
+    candidate_ref = await project.run_search("假设A")
+    assert candidate_ref.startswith("sha256:")
     assert project.phase == "SEARCH"
-    hypothesis = json.loads(await project.store.get_text(hypothesis_ref))
-    assert hypothesis["hypothesis"] == "假设A"
-    assert hypothesis["status"] == "PROPOSED"
+    candidate = json.loads(await project.store.get_text(candidate_ref))
+    assert candidate["diff"] == "implement 假设A"  # CodeAgent 候选 diff
+    assert any(h.statement == "假设A" for h in project.tree.pending_hypotheses())
     await project.close()
 
 
@@ -519,4 +516,330 @@ async def test_run_report_failed_then_revised(tmp_path) -> None:
     assert v2 != v1
     files = await DirectoryBundle.files(project.store, v2)
     assert await project.store.get_text(files["report.md"]) == "修订后的报告"
+    await project.close()
+
+
+from athena.agents.report_agent import ReportAgent
+
+
+@pytest.mark.asyncio
+async def test_report_agent_model_path_synthesizes_from_user_input(tmp_path) -> None:
+    """ReportAgent 真实路径：设计 prompt + UserInput（content + context_refs）→ 报告 Bundle。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    captured: list[str] = []
+
+    async def fake_model(prompt: str) -> str:
+        captured.append(prompt)
+        return "# 报告\n\n基于证据的综合。"
+
+    agent = ReportAgent(project.store, model=fake_model)
+    project.kernel._type_registry.register(
+        "report-model",
+        lambda _aid, _cfg=None: AgentSpec(
+            runner=BaseAgentRunner(agent), codec=JsonCodec()
+        ),
+    )
+    evidence_ref = await project.store.put_text("已批准证据正文")
+    _, run_id = await project.kernel.create_root(
+        "report-model",
+        {"content": "请撰写最终报告", "context_refs": [evidence_ref]},
+        name="report-model-root",
+    )
+    summary = await project.kernel.wait_run(run_id, timeout=2)
+    assert summary.status.value == "completed"
+    assert "已批准证据正文" in captured[0]  # UserInput 证据进入 prompt
+    assert "请撰写最终报告" in captured[0]
+    result_ref = json.loads(summary.response_ref)["result_ref"]
+    files = await DirectoryBundle.files(project.store, result_ref)
+    assert (
+        await project.store.get_text(files["report.md"]) == "# 报告\n\n基于证据的综合。"
+    )
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_task_survives_reopen(tmp_path) -> None:
+    """端到端设计 §3：task 事实随项目状态持久化，跨重启恢复。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.configure(_task())
+    await project.close()
+
+    reopened = ProjectRuntime(tmp_path)
+    reopened.register_defaults()
+    await reopened.open()
+    assert reopened.projected_phase() == "CONFIGURED"  # 从 JSON 恢复 task
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_projected_phase_advances_through_six_stages(tmp_path) -> None:
+    """端到端 §5：六阶段投影由已提交事实驱动，SEARCH→VALIDATE→REPORT→COMPLETED。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    assert project.projected_phase() == "PREPARE"
+    await project.run_search("假设A")
+    assert project.projected_phase() == "VALIDATE"  # 有 SOTA 事实
+    await project.run_validate("sota-ref")
+    assert project.projected_phase() == "REPORT"  # 有 validation 事实
+    await project.run_report("最终报告正文")
+    assert project.projected_phase() == "COMPLETED"  # 有 report 事实
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_phase_refs_survive_reopen(tmp_path) -> None:
+    """端到端 §3：各阶段 refs 随项目状态持久化，跨重启投影完整六阶段。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    await project.run_search("假设A")
+    await project.run_validate("sota-ref")
+    await project.close()
+
+    reopened = ProjectRuntime(tmp_path)
+    reopened.register_defaults()
+    await reopened.open()
+    assert reopened.projected_phase() == "REPORT"  # sota+validation 事实恢复
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_project_memory_survives_reopen(tmp_path) -> None:
+    """memory-human-wait §7：项目记忆随项目状态持久化，跨重启检索。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    entry_id = project.add_project_memory(
+        kind="fix",
+        summary="修复了数据切分 bug",
+        source_refs=["sha256:x"],
+        created_by="agent_1",
+    )
+    assert project.memory.get(entry_id).scope == "project"
+    await project.close()
+
+    reopened = ProjectRuntime(tmp_path)
+    reopened.register_defaults()
+    await reopened.open()
+    entries = reopened.memory.retrieve(scope="project")
+    assert [e.summary for e in entries] == ["修复了数据切分 bug"]
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_validate_final_test_exactly_once(tmp_path) -> None:
+    """端到端 §5.4：final-test 恰好一次，已提交结果后拒绝重入。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    await project.run_search("假设A")
+    v1 = await project.run_validate("sota-ref")
+    assert v1.startswith("sha256:")
+    # 第二次 final-test → 拒绝（恰好一次不变量）
+    with pytest.raises(RuntimeError, match="already has a final-test"):
+        await project.run_validate("sota-ref")
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_search_stops_when_budget_exhausted(tmp_path) -> None:
+    """端到端 §5.3：预算耗尽后 run_search 拒绝继续。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    # 预算设 1：一次搜索后耗尽
+    project.budget.remaining = 1
+    project.budget.no_improve_streak = project.budget.max_no_improve - 1
+    await project.run_search("假设A")
+    assert project.budget.is_exhausted
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        await project.run_search("假设B")
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_budget_survives_reopen(tmp_path) -> None:
+    """端到端 §5.3：预算随项目状态持久化，跨重启不重置。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    await project.run_search("假设A")
+    assert project.budget.remaining == 19  # 默认 20，消耗一次
+    await project.close()
+
+    reopened = ProjectRuntime(tmp_path)
+    reopened.register_defaults()
+    await reopened.open()
+    assert reopened.budget.remaining == 19  # 从 JSON 恢复
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_search_requires_prepare(tmp_path) -> None:
+    """端到端 §5.2-5.3：SEARCH 前置 PREPARE，CONFIGURED 直接进入被拒绝。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    with pytest.raises(RuntimeError, match="SEARCH requires PREPARE"):
+        await project.run_search("假设A")
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_message_delivers_to_supervisor_without_turn(tmp_path) -> None:
+    """端到端 §4：message 只投递到 root Supervisor，不触发新 turn。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    sid = await project.open(message="start")
+    await project.message("追加指令")
+    mailbox = project.kernel._store.mailbox(sid)
+    assert any(m.content == "追加指令" for m in mailbox)
+    assert project.kernel.agent_status(sid) != AgentStatus.RUNNING  # 不触发 turn
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_message_requires_open_project(tmp_path) -> None:
+    """端到端 §4：未 open 的 project 调 message 报错。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    with pytest.raises(RuntimeError, match="not opened"):
+        await project.message("x")
+
+
+@pytest.mark.asyncio
+async def test_full_workflow_evidence_traceable_across_reopen(tmp_path) -> None:
+    """完成条件8（端到端 §10.10）：完整 CSV 流程到 COMPLETED，跨重启全部事实可追溯。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    sota_ref = await project.run_search("假设A")
+    validation_ref = await project.run_validate(sota_ref)
+    report_ref = await project.run_report("最终研究报告正文")
+    assert project.phase == "COMPLETED"
+    entry_id = project.add_project_memory(
+        kind="fix", summary="已验证修复", source_refs=[report_ref], created_by="agent_1"
+    )
+    await project.close()
+
+    # 跨重启：全部阶段事实从 JSON 恢复，报告可追溯
+    reopened = ProjectRuntime(tmp_path)
+    reopened.register_defaults()
+    await reopened.open()
+    assert reopened.projected_phase() == "COMPLETED"
+    assert reopened.eval_specs.version >= 1
+    files = await DirectoryBundle.files(reopened.store, report_ref)
+    assert await reopened.store.get_text(files["report.md"]) == "最终研究报告正文"
+    assert reopened.memory.retrieve(scope="project")
+    assert reopened.budget.remaining == 19  # SEARCH 消费一次
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_search_commits_hypothesis_to_research_tree(tmp_path) -> None:
+    """设计 §4：run_search 把 Ideator 假设提交到 ResearchTree（所有权契约）。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    sota_ref = await project.run_search("假设A")
+    assert sota_ref.startswith("sha256:")
+    hypotheses = project.tree.pending_hypotheses()
+    assert any(h.statement == "假设A" for h in hypotheses)
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_research_tree_survives_reopen(tmp_path) -> None:
+    """设计 §4：ResearchTree 随项目状态持久化，跨重启保留假设。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    await project.run_search("假设A")
+    await project.close()
+
+    reopened = ProjectRuntime(tmp_path)
+    reopened.register_defaults()
+    await reopened.open()
+    assert any(h.statement == "假设A" for h in reopened.tree.pending_hypotheses())
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_search_spawns_code_agent_for_hypothesis(tmp_path) -> None:
+    """完成条件3：SEARCH 生命周期由 Kernel 管理——Ideator + CodeAgent 均经 Kernel spawn。"""
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    await project.run_search("假设A")
+    agent_names = [a.name for a in project.kernel.list_agents()]
+    assert "ideator-root" in agent_names  # Ideator 经 Kernel 创建
+    assert "code-root" in agent_names  # CodeAgent 经 Kernel 创建
+    await project.close()
+
+
+@pytest.mark.asyncio
+async def test_llm_agent_runs_through_kernel_via_base_agent_runner(tmp_path) -> None:
+    """框架集成：Agent(output_type) 经 BaseAgentRunner 在 kernel 跑通一个 turn。"""
+    from athena.agents.base_runner import BaseAgentRunner
+    from athena.core.agent.provider import ResponsesProvider, StreamEvent
+    from athena.core.agent.runtime import Agent
+    from athena.core.agent_kernel.codec import JsonCodec
+    from athena.core.agent_kernel.types import AgentSpec, RunStatus
+    from athena.core.tool import ToolRegistry
+    from pydantic import BaseModel
+
+    class Out(BaseModel):
+        ok: bool
+
+    class FakeModel:
+        async def stream(self, *_args, **_kwargs):
+            yield StreamEvent(
+                "text_delta", {"delta": '{"ok":true}', "accumulated": '{"ok":true}'}
+            )
+            yield StreamEvent("response_completed")
+
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults()
+    await project.open()
+    store = project.store
+    agent = Agent(
+        ResponsesProvider("m"), ToolRegistry(), "p", output_type=Out, artifacts=store
+    )
+    agent.model = FakeModel()
+    project.kernel._type_registry.register(
+        "llm-demo",
+        lambda _aid, _cfg=None: AgentSpec(
+            runner=BaseAgentRunner(agent), codec=JsonCodec()
+        ),
+    )
+    _, run_id = await project.kernel.create_root(
+        "llm-demo", {"content": "go"}, name="llm-root"
+    )
+    summary = await project.kernel.wait_run(run_id, timeout=2)
+    assert summary.status.value == "completed"
+    response = json.loads(summary.response_ref)
+    assert response["result_ref"].startswith("sha256:")
     await project.close()
