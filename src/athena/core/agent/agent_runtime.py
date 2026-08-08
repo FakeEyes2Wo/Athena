@@ -444,20 +444,21 @@ class AgentRuntime:
         if record is None:
             return
         req_ref = record.spec.codec.encode_request({})  # COMPAT: 空唤醒,无假 trigger
-        await self._start_run_after_settle(agent_id, req_ref)
+        try:
+            await self._start_run_after_settle(agent_id, req_ref)
+        except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as exc:
+            logger.warning("wake %s failed: %s", agent_id, type(exc).__name__)
 
     async def _start_run_after_settle(
-        self, agent_id: AgentId, req_ref: ArtifactRef
+        self, agent_id: AgentId, req_ref: ArtifactRef, *, settle_timeout: float = 30.0
     ) -> RunId:
-        """唤醒路径:当前 turn 未落定时先等其终态,再启动新 run(避免 AgentBusyError)。
+        """等待当前 turn 终态后再启动新 run,避免与活跃 turn 冲突。
 
-        submit 在 turn 被接纳(spawn)而非完成时即返回;若上一 turn 仍在运行,
-        直接 _start_run 会撞上 "thread already has an active turn"。唤醒语义为
-        "上一轮之后",故先 wait_run 等它终态落地。
+        超时则抛 TimeoutError:调用方(human_reply)将其视为回复失败,而非无限阻塞。
         """
         active = self._active_turn.get(agent_id)
         if active is not None:
-            await self.wait_run(active)
+            await asyncio.wait_for(self.wait_run(active), settle_timeout)
         return await self._start_run(agent_id, req_ref)
 
     def _descendants(self, agent_id: AgentId) -> list[AgentId]:
