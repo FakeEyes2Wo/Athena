@@ -126,8 +126,22 @@ class McpClientManager:
         return list(self._manifest)
 
     async def close(self) -> None:
-        """关闭连接并清空会话。"""
+        """关闭连接并清空会话。
+
+        吞掉 anyio/Python 3.14 兼容性导致的 teardown 异常
+        （cancel scope / async generator cleanup），不影响功能。
+        """
         if self._stack is not None:
-            await self._stack.aclose()
+            try:
+                await self._stack.aclose()
+            except (RuntimeError, ExceptionGroup) as exc:
+                # Python 3.14 + anyio 兼容性问题：
+                # - "Attempted to exit cancel scope in a different task"
+                # - "athrow(): asynchronous generator is already running"
+                msg = str(exc)
+                if "cancel scope" not in msg and "already running" not in msg:
+                    raise
+            except GeneratorExit:
+                pass
             self._stack = None
         self._session = None

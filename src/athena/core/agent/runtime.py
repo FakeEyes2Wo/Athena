@@ -75,6 +75,7 @@ class Agent(BaseAgent):
         self.tools = tools
         self.system_prompt = system_prompt
         self.config = config or AgentConfig()
+        self._mcp_managers: list = []  # 由 build 函数注入
 
     @property
     def name(self) -> str:
@@ -93,43 +94,51 @@ class Agent(BaseAgent):
         guard = RunGuard()
         ctx.guard = guard
 
-        # 注入 system prompt（每个 ContextManager 生命周期仅一次）
-        user = _load_input(ctx)
-        if self.system_prompt and not _has_system(mem):
-            mem.append(
-                ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)])
+        try:
+            # 注入 system prompt（每个 ContextManager 生命周期仅一次）
+            user = _load_input(ctx)
+            if self.system_prompt and not _has_system(mem):
+                mem.append(
+                    ModelRequest(parts=[SystemPromptPart(content=self.system_prompt)])
+                )
+            if user:
+                mem.append(ModelRequest(parts=[UserPromptPart(content=user)]))
+
+            # 多轮采样循环：LLM 输出工具调用 → 执行 → 写入结果 → 再次请求
+            for _ in range(self.config.max_turns):
+                if ctx.cancel.is_set():
+                    break
+                try:
+                    outcome = await _sampling_loop(self, ctx)
+                except GuardError as exc:
+                    # 硬约束触发 → 终止当前 Turn，Thread 存活
+                    ref = f"result://{ctx.turn.turn_id}"
+                    return AgentOutcome(
+                        result_ref=ref,
+                        next_context_ref=f"context://{ctx.turn.turn_id}/next",
+                        guard_interrupted=True,
+                        guard_reason=str(exc),
+                    )
+                if outcome.kind == "done":
+                    ref = f"result://{ctx.turn.turn_id}"
+                    return AgentOutcome(
+                        result_ref=ref,
+                        next_context_ref=f"context://{ctx.turn.turn_id}/next",
+                    )
+                if outcome.kind == "error":
+                    raise RuntimeError(outcome.text or "provider stream failed")
+
+            return AgentOutcome(
+                result_ref=f"result://{ctx.turn.turn_id}",
+                next_context_ref=f"context://{ctx.turn.turn_id}/next",
             )
-        if user:
-            mem.append(ModelRequest(parts=[UserPromptPart(content=user)]))
-
-        # 多轮采样循环：LLM 输出工具调用 → 执行 → 写入结果 → 再次请求
-        for _ in range(self.config.max_turns):
-            if ctx.cancel.is_set():
-                break
-            try:
-                outcome = await _sampling_loop(self, ctx)
-            except GuardError as exc:
-                # 硬约束触发 → 终止当前 Turn，Thread 存活
-                ref = f"result://{ctx.turn.turn_id}"
-                return AgentOutcome(
-                    result_ref=ref,
-                    next_context_ref=f"context://{ctx.turn.turn_id}/next",
-                    guard_interrupted=True,
-                    guard_reason=str(exc),
-                )
-            if outcome.kind == "done":
-                ref = f"result://{ctx.turn.turn_id}"
-                return AgentOutcome(
-                    result_ref=ref,
-                    next_context_ref=f"context://{ctx.turn.turn_id}/next",
-                )
-            if outcome.kind == "error":
-                raise RuntimeError(outcome.text or "provider stream failed")
-
-        return AgentOutcome(
-            result_ref=f"result://{ctx.turn.turn_id}",
-            next_context_ref=f"context://{ctx.turn.turn_id}/next",
-        )
+        finally:
+            # 清理 MCP 连接，吞掉 Python 3.14 + anyio teardown 异常
+            for mgr in self._mcp_managers:
+                try:
+                    await mgr.close()
+                except Exception:
+                    pass
 
 
 async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any] | None]) -> None:

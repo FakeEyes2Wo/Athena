@@ -104,7 +104,7 @@ def test_environment_builds_three_independent_core_agents() -> None:
         "plot-agent",
     ]
     assert all(
-        set(vars(agent)) == {"model", "tools", "system_prompt", "config"}
+        set(vars(agent)) == {"model", "tools", "system_prompt", "config", "_mcp_managers"}
         for agent in agents
     )
     assert len({id(agent) for agent in agents}) == 3

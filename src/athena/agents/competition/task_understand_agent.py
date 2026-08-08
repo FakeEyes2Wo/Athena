@@ -61,10 +61,11 @@ async def build_task_understand_agent(
 
     # ── MCP 接入层（可选）：配置驱动，懒连接；未配置 server 时完全惰性 ──
     servers = mcp_servers if mcp_servers is not None else load_mcp_servers()
+    mcp_managers = []
     if servers:
-        await register_mcp_tools(tools, servers, work_root=work_root)
+        mcp_managers = await register_mcp_tools(tools, servers, work_root=work_root)
 
-    return create_agent(
+    agent = create_agent(
         model=model,
         tools=tools,
         system_prompt=load_prompt("competition/task_understand_system.txt"),
@@ -74,3 +75,6 @@ async def build_task_understand_agent(
         temperature=temperature,
         name="TaskUnderstandAgent",
     )
+    # 挂载 MCP managers，Agent.run() 结束后会自动清理
+    agent._mcp_managers = mcp_managers
+    return agent
