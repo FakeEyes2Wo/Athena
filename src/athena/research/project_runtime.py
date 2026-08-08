@@ -1,9 +1,10 @@
 """项目 Composition Root（设计 §3.1/§6）：装配共享基础设施 + root_supervisor + 阶段投影。
 
-单项目只创建一套共享设施：ArtifactStore、AgentTypeRegistry、AgentKernel。
+单项目只创建一套共享设施：ArtifactStore、AgentTypeRegistry、AgentRuntime（Thread 门面）。
 新项目 ``create_root("supervisor", ...)`` 并把 ``root_supervisor_id`` 持久化；
-重新打开项目读取该 id 并 follow-up 原实例。项目阶段（§4.2）与状态（§4.3）
-由确定性投影推进并持久化，Kernel AgentStatus 与外部 phase 正交。
+重新打开项目读取该 id 并经确定性 rollout 恢复会话。项目阶段（§4.2）与状态（§4.3）
+由确定性投影推进并持久化，Agent 状态与外部 phase 正交。project.json 只存确定性
+事实；对话经 ``.athena/sessions/{agent_id}.jsonl`` Codex 风格轻持久化。
 """
 
 import json
@@ -25,16 +26,18 @@ from athena.agents.reflection_agent import (
 from athena.agents.report_agent import ReportAgent
 from athena.agents.simple_agents import CodeAgent, IdeatorAgent, PlotAgent
 from athena.agents.supervisor import SupervisorAgent
+from athena.core.agent.agent_runtime import AgentRuntime
+
+# COMPAT: Task 6 迁移后改 from athena.core.agent.{codec,registry} import ...
 from athena.core.agent_kernel.codec import JsonCodec
-from athena.core.agent_kernel.kernel import AgentKernel
 from athena.core.agent_kernel.registry import AgentTypeRegistry
-from athena.core.agent_kernel.session import (
-    RolloutResourcesFactory,
-    SessionResourcesFactory,
+from athena.core.agent_kernel.types import (
+    AgentCommandError,
+    AgentId,
+    AgentSpec,
+    AgentStatus,
+    RunId,
 )
-from athena.core.agent_kernel.store import AgentGraphStore
-from athena.core.agent_kernel.store_json import load_store_json, store_to_json
-from athena.core.agent_kernel.types import AgentId, AgentSpec, AgentStatus, RunId
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
 from athena.memory.index import MemoryStore
@@ -54,24 +57,16 @@ def _request(payload: dict) -> dict:
 class ProjectRuntime:
     """单项目共享基础设施与 root Supervisor 生命周期。"""
 
-    def __init__(
-        self,
-        project_root: Path,
-        *,
-        resources_factory: SessionResourcesFactory | None = None,
-    ) -> None:
+    def __init__(self, project_root: Path) -> None:
         self._root = Path(project_root)
         self._state_path = self._root / ".athena" / "project.json"
-        # 生产默认使用 rollout 资源工厂：私有记忆按 context_ref 持久化/恢复
-        self._resources_factory = resources_factory or RolloutResourcesFactory(
-            self._root
-        )
         self._store = LocalArtifactStore(self._root / "artifacts")
         self._bundle = VersionedBundle(self._store)
         self._registry = AgentTypeRegistry()
-        self._kernel = AgentKernel(
-            resources_factory=self._resources_factory,
+        self._runtime = AgentRuntime(
             type_registry=self._registry,
+            project_root=self._root,
+            rollout_dir=self._root / ".athena" / "sessions",
         )
         self._supervisor_id: AgentId | None = None
         self._phase = "IDLE"
@@ -105,12 +100,12 @@ class ProjectRuntime:
         return self._status
 
     def project_status(self) -> str:
-        """从 Kernel 事实派生控制状态（§4.3 确定性投影）。
+        """从 Agent 状态投影控制状态（§4.3 确定性投影）。
 
         root Supervisor 处于持久化人工等待时投影为 WAITING_FOR_HUMAN。
         """
         if self._supervisor_id is not None:
-            agent = self._kernel.agent_status(self._supervisor_id)
+            agent = self._runtime.agent_status(self._supervisor_id)
             if agent == AgentStatus.WAITING_FOR_HUMAN:
                 return "WAITING_FOR_HUMAN"
         return self._status
@@ -136,8 +131,9 @@ class ProjectRuntime:
         return "CONFIGURED"
 
     @property
-    def kernel(self) -> AgentKernel:
-        return self._kernel
+    def kernel(self) -> AgentRuntime:
+        """AgentRuntime 门面（Thread 模型），方法签名与退役前 AgentKernel 对齐。"""
+        return self._runtime
 
     @property
     def bundle(self) -> VersionedBundle:
@@ -293,27 +289,27 @@ class ProjectRuntime:
         }
         if report is not None:
             payload["report"] = report
-        data_id, run1 = await self._kernel.create_root(
+        data_id, run1 = await self._runtime.create_root(
             "data", _request(payload), name="data-root"
         )
-        await self._kernel.wait_run(run1, timeout=10)
+        await self._runtime.wait_run(run1, timeout=10)
         chains = self._bundle.chains()
         if not chains:
             raise RuntimeError("DataAgent produced no analysis chain")
         analysis_id, v1 = next(iter(chains.items()))
         # Reflection 只读评审 v1，产出 rubric + score
-        _, run2 = await self._kernel.create_root(
+        _, run2 = await self._runtime.create_root(
             "reflection", _request({"data_analysis_ref": v1}), name="reflection-root"
         )
-        summary2 = await self._kernel.wait_run(run2, timeout=10)
+        summary2 = await self._runtime.wait_run(run2, timeout=10)
         review_ref = json.loads(summary2.response_ref)["result_ref"]
         # EvaluationPolicy（确定性）：按 rubric/score 判定，不解释报告正文
         verdict = await evaluate_data_analysis_review(self._store, review_ref)
         if verdict.passed:
             return v1
         # failed → follow-up 原 DataAgent 提交修订版
-        run3 = await self._kernel.followup(data_id, _request(payload))
-        await self._kernel.wait_run(run3, timeout=10)
+        run3 = await self._runtime.followup(data_id, _request(payload))
+        await self._runtime.wait_run(run3, timeout=10)
         v2 = self._bundle.latest(analysis_id)
         if v2 is None:
             raise RuntimeError("revision produced no new version")
@@ -340,10 +336,10 @@ class ProjectRuntime:
         }
         if eval_script is not None:
             request["eval_script"] = eval_script
-        _, run = await self._kernel.create_root(
+        _, run = await self._runtime.create_root(
             "init", _request(request), name="init-root"
         )
-        summary = await self._kernel.wait_run(run, timeout=10)
+        summary = await self._runtime.wait_run(run, timeout=10)
         payload = json.loads(summary.response_ref)
         result_ref = payload["result_ref"]
         init_result = json.loads(await self._store.get_text(result_ref))
@@ -375,10 +371,10 @@ class ProjectRuntime:
         if self._phase not in ("PREPARE", "SEARCH"):
             raise RuntimeError(f"SEARCH requires PREPARE, got {self._phase}")
         self._set_phase("SEARCH")
-        _, run_id = await self._kernel.create_root(
+        _, run_id = await self._runtime.create_root(
             "ideator", {"content": hypothesis}, name="ideator-root"
         )
-        summary = await self._kernel.wait_run(run_id, timeout=10)
+        summary = await self._runtime.wait_run(run_id, timeout=10)
         response = json.loads(summary.response_ref)
         hypothesis_ref = response["result_ref"]
         # 把 Ideator 假设提交到 ResearchTree（设计 §4 所有权）
@@ -391,10 +387,10 @@ class ProjectRuntime:
             )
         )
         # SEARCH（设计 §5.3）：spawn CodeAgent 为选中假设生成候选 diff
-        _, code_run = await self._kernel.create_root(
+        _, code_run = await self._runtime.create_root(
             "code", {"content": f"implement {hypothesis}"}, name="code-root"
         )
-        code_summary = await self._kernel.wait_run(code_run, timeout=10)
+        code_summary = await self._runtime.wait_run(code_run, timeout=10)
         code_response = json.loads(code_summary.response_ref)
         candidate_ref = code_response["result_ref"]
         self._budget.consume(improved=True)  # 确定性骨架：每次假设视为改进
@@ -413,10 +409,10 @@ class ProjectRuntime:
         if self._phase != "SEARCH":
             raise RuntimeError(f"VALIDATE requires SEARCH, got {self._phase}")
         self._set_phase("VALIDATE")
-        _, run_id = await self._kernel.create_root(
+        _, run_id = await self._runtime.create_root(
             "code", {"content": f"validate {experiment_ref}"}, name="validate-root"
         )
-        summary = await self._kernel.wait_run(run_id, timeout=10)
+        summary = await self._runtime.wait_run(run_id, timeout=10)
         response = json.loads(summary.response_ref)
         validation_ref = response["result_ref"]
         self._validation_ref = validation_ref  # VALIDATE 完成事实：final-test 已记录
@@ -433,16 +429,16 @@ class ProjectRuntime:
         if self._phase != "VALIDATE":
             raise RuntimeError(f"REPORT requires VALIDATE, got {self._phase}")
         self._set_phase("REPORT")
-        report_id, run1 = await self._kernel.create_root(
+        report_id, run1 = await self._runtime.create_root(
             "report", {"content": report_text}, name="report-root"
         )
-        summary1 = await self._kernel.wait_run(run1, timeout=10)
+        summary1 = await self._runtime.wait_run(run1, timeout=10)
         v1 = json.loads(summary1.response_ref)["result_ref"]
         # Reflection 只读评审 v1，产出报告 rubric + score
-        _, run2 = await self._kernel.create_root(
+        _, run2 = await self._runtime.create_root(
             "reflection", _request({"report_ref": v1}), name="report-review-root"
         )
-        summary2 = await self._kernel.wait_run(run2, timeout=10)
+        summary2 = await self._runtime.wait_run(run2, timeout=10)
         review_ref = json.loads(summary2.response_ref)["result_ref"]
         # EvaluationPolicy（确定性）：按 rubric/score 判定
         verdict = await evaluate_data_analysis_review(self._store, review_ref)
@@ -451,22 +447,25 @@ class ProjectRuntime:
             self._set_phase("COMPLETED")
             return v1
         # failed → follow-up 原 ReportAgent 提交修订版 v2
-        run3 = await self._kernel.followup(report_id, {"content": report_text})
-        summary3 = await self._kernel.wait_run(run3, timeout=10)
+        run3 = await self._runtime.followup(report_id, {"content": report_text})
+        summary3 = await self._runtime.wait_run(run3, timeout=10)
         v2 = json.loads(summary3.response_ref)["result_ref"]
         return v2
 
     async def open(self, *, message: str | None = None) -> AgentId:
-        """创建或恢复 root Supervisor；重新打开时 follow-up 原实例。"""
+        """创建或恢复 root Supervisor；重开会话从 rollout 恢复记忆。"""
         self._load_state()
-        await self._kernel.start()
         if self._supervisor_id is None:
-            self._supervisor_id, _ = await self._kernel.create_root(
+            self._supervisor_id, _ = await self._runtime.create_root(
                 "supervisor", {"content": message or ""}, name="supervisor"
             )
             self._save_state()
-        elif message is not None:
-            await self._kernel.followup(self._supervisor_id, {"content": message})
+        else:
+            await self._runtime.resume_agent(
+                self._supervisor_id, agent_type="supervisor", name="supervisor"
+            )
+            if message is not None:
+                await self._runtime.followup(self._supervisor_id, {"content": message})
         return self._supervisor_id
 
     async def message(
@@ -475,22 +474,22 @@ class ProjectRuntime:
         """向 root Supervisor 投递消息（不触发 turn），供 App Server 外部调用面。"""
         if self._supervisor_id is None:
             raise RuntimeError("project not opened")
-        await self._kernel.send_message(
+        await self._runtime.send_message(
             self._supervisor_id, content, context_refs or []
         )
 
     async def human_reply(self, request_id: str, reply: str) -> RunId:
         """提交人工回复并唤醒等待的 Agent（端到端 §4 外部调用面）。"""
-        return await self._kernel.human_reply(request_id, reply)
+        return await self._runtime.human_reply(request_id, reply)
 
     def pause(self) -> None:
         """项目 pause（§13）：停止派发新 turn，状态投影 PAUSED。"""
-        self._kernel.pause()
+        self._runtime.pause()
         self._set_status("PAUSED")
 
     def resume(self) -> None:
         """项目 resume（§13）：恢复派发，状态投影 RUNNING。"""
-        self._kernel.resume()
+        self._runtime.resume()
         self._set_status("RUNNING")
 
     async def stop(self) -> None:
@@ -498,14 +497,18 @@ class ProjectRuntime:
 
         停止派发（终态，不可 resume），等待中的 Agent 不删除其 wait/mailbox。
         """
-        for snap in self._kernel.list_agents():
-            if snap.status == AgentStatus.RUNNING:
-                await self._kernel.interrupt(snap.agent_id, "project stop")
-        self._kernel.pause()
+        for snap in self._runtime.list_agents():
+            try:
+                await self._runtime.interrupt(snap.agent_id, "project stop")
+            except (AgentCommandError, RuntimeError):
+                # AgentRuntime 门面下 interrupt 对无活动 Run 的 Agent 报错
+                # （旧 kernel 为幂等 no-op）；此处与旧语义一致地跳过。
+                continue
+        self._runtime.pause()
         self._set_status("CANCELLED")
 
     async def close(self) -> None:
-        await self._kernel.aclose()
+        await self._runtime.aclose()
 
     def _set_phase(self, phase: str) -> None:
         self._phase = phase
@@ -516,10 +519,12 @@ class ProjectRuntime:
         self._save_state()
 
     def _save_state(self) -> None:
-        """原子、耐久化 JSON 持久化项目状态（§16.1）。
+        """原子、耐久化 JSON 持久化确定性事实（§16.1）。
 
-        metadata 与 Kernel store 快照都存为可读 JSON（§10 生产持久化基础）；
-        先写临时文件并 fsync，再 ``os.replace`` 原子替换，崩溃不留半写文件。
+        只存确定性事实（root id / phase / task / eval_specs / refs / memory /
+        budget / tree）；对话经 ``.athena/sessions/{agent_id}.jsonl`` 轻持久化，
+        不再写入 store 快照。先写临时文件并 fsync，再 ``os.replace`` 原子替换，
+        崩溃不留半写文件。
         """
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
@@ -536,7 +541,6 @@ class ProjectRuntime:
             "memory": self._memory.to_dict(),
             "budget": self._budget.model_dump(mode="json"),
             "tree": self._tree.to_dict(),
-            "store": store_to_json(self._kernel._store),
         }
         temp = self._state_path.with_suffix(".json.tmp")
         with open(temp, "w", encoding="utf-8") as handle:
@@ -568,34 +572,3 @@ class ProjectRuntime:
             self._budget = BudgetSnapshot.model_validate(data["budget"])
         if data.get("tree"):
             self._tree = ResearchTree.from_dict(data["tree"])
-        store = AgentGraphStore()
-        load_store_json(data["store"], store)
-        # §3.2/§16.1：恢复时校验 root 引用；缺引用但恰有一个合法 root 则修复并记录
-        if self._supervisor_id is not None and store.agent(self._supervisor_id) is None:
-            raise ValueError(
-                f"corrupt project state: root supervisor "
-                f"{self._supervisor_id} missing from store"
-            )
-        if self._supervisor_id is None:
-            roots = [
-                a.agent_id
-                for a in store.agents().values()
-                if a.parent_id is None and a.status is not AgentStatus.CLOSED
-            ]
-            if len(roots) == 1:
-                self._supervisor_id = roots[0]
-                logger.warning(
-                    "repaired missing root supervisor reference -> %s",
-                    self._supervisor_id,
-                )
-            elif len(roots) > 1:
-                raise ValueError(
-                    "multiple root supervisors in store; manual selection required"
-                )
-        self._kernel = AgentKernel(
-            resources_factory=self._resources_factory,
-            type_registry=self._registry,
-            store=store,
-        )
-        self._kernel._rebuild_sessions()
-        self._kernel._recover()

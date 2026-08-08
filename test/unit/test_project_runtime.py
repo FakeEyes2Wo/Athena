@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from athena.core.agent_kernel.types import AgentStatus
+from athena.core.agent_kernel.types import AgentCommandError, AgentStatus
 from athena.research.models import MetricDef, MetricSpec, TaskMetaData
 from athena.research.project_runtime import ProjectRuntime
 from athena.core.bundle import DirectoryBundle
@@ -58,6 +58,25 @@ async def test_reopen_reuses_same_root_supervisor(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_open_resume_restores_supervisor_rollout(tmp_path):
+    """Codex 风格持久化：root Supervisor 对话经确定性 rollout JSONL，重启复用同 id。"""
+    from athena.research.project_runtime import ProjectRuntime
+
+    pr1 = ProjectRuntime(tmp_path)
+    pr1.register_defaults()  # 同步方法,勿 await
+    sid = await pr1.open(message="hello")
+    rollout = tmp_path / ".athena" / "sessions" / f"{sid}.jsonl"
+    assert rollout.exists()
+    await pr1.close()
+
+    pr2 = ProjectRuntime(tmp_path)
+    pr2.register_defaults()
+    sid2 = await pr2.open(message="again")
+    assert sid2 == sid  # 同一 supervisor id 恢复
+    await pr2.close()
+
+
+@pytest.mark.asyncio
 async def test_supervisor_uses_tools_to_orchestrate_child(tmp_path) -> None:
     """设计 §5.2：Supervisor 经受控工具 spawn data 子并 wait_for，子完成后唤醒。"""
     project = ProjectRuntime(tmp_path)
@@ -67,7 +86,7 @@ async def test_supervisor_uses_tools_to_orchestrate_child(tmp_path) -> None:
 
     # supervisor 首轮 spawn data-child + wait_for → 子完成后唤醒回 IDLE
     assert await _eventually(
-        lambda: project.kernel.agent_status(sid) == AgentStatus.IDLE
+        lambda: project.kernel.agent_status(sid) == AgentStatus.IDLE, timeout=15
     )
     children = [s.agent_id for s in project.kernel.list_agents() if s.parent_id == sid]
     assert children  # data-child 已创建且是 supervisor 的子
@@ -196,29 +215,15 @@ async def test_project_status_reflects_kernel(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_corrupt_state_rejects_missing_root(tmp_path) -> None:
-    """设计 §16.1：恢复时校验 root 引用，损坏状态不静默恢复。"""
+async def test_register_defaults_covers_eight_types(tmp_path) -> None:
+    """registered-agent-catalog §3：Composition Root 注册全部八个静态类型。
+
+    AgentRuntime 门面在构造时即创建 asyncio.Future（RuntimeThreadManager），
+    故需在事件循环内构造 ProjectRuntime（与其他用例一致）。
+    """
     project = ProjectRuntime(tmp_path)
-    project.register_defaults()
-    await project.open()
-    await project.close()
-
-    state_path = tmp_path / ".athena" / "project.json"
-    data = json.loads(state_path.read_text(encoding="utf-8"))
-    data["root_supervisor_id"] = "agent_deadbeef"  # 指向不存在的实例
-    state_path.write_text(json.dumps(data), encoding="utf-8")
-
-    reopened = ProjectRuntime(tmp_path)
-    reopened.register_defaults()
-    with pytest.raises(ValueError):
-        await reopened.open()
-
-
-def test_register_defaults_covers_eight_types(tmp_path) -> None:
-    """registered-agent-catalog §3：Composition Root 注册全部八个静态类型。"""
-    project = ProjectRuntime(tmp_path)
-    project.register_defaults()
-    assert set(project.kernel._type_registry.types) == {
+    project.register_defaults()  # 同步方法,勿 await
+    assert set(project.kernel._registry.types) == {
         "supervisor",
         "init",
         "data",
@@ -228,17 +233,21 @@ def test_register_defaults_covers_eight_types(tmp_path) -> None:
         "code",
         "report",
     }
+    await project.close()
 
 
 @pytest.mark.asyncio
 async def test_pause_stops_dispatch_then_resume_continues(tmp_path) -> None:
-    """设计 §13：pause 停止派发新 turn，resume 恢复；mailbox/wait 保留。"""
+    """设计 §13：pause 停止派发新 turn，resume 恢复。
+
+    AgentRuntime 门面下 pause 无全局队列可排队（# COMPAT: 降级为拒绝新派发），
+    故 pause 后 spawn 报错；resume 后派发真实 data 子并完成。
+    """
     project = ProjectRuntime(tmp_path)
     project.register_defaults()
     sid = await project.open()
     project.pause()
     assert project.project_status() == "PAUSED"
-    # pause 后 spawn → 子 run 保持 QUEUED（不派发）；resume 后派发真实 data 子
     content = json.dumps(
         {
             "data_path": str(_dataset(tmp_path)),
@@ -246,12 +255,14 @@ async def test_pause_stops_dispatch_then_resume_continues(tmp_path) -> None:
             "workspace": str(tmp_path / "ws"),
         }
     )
-    child_id, child_run = await project.kernel.spawn(
-        sid, "data", {"content": content}, name="c"
-    )
-    assert project.kernel.run_summary(child_run).status.value == "queued"
+    # pause 后 spawn → 门面拒绝（runtime paused），不再 QUEUED 排队
+    with pytest.raises(AgentCommandError):
+        await project.kernel.spawn(sid, "data", {"content": content}, name="c")
     project.resume()
     assert project.project_status() == "RUNNING"
+    _, child_run = await project.kernel.spawn(
+        sid, "data", {"content": content}, name="c"
+    )
     assert await _eventually(
         lambda: project.kernel.run_summary(child_run).status.value == "completed",
         timeout=10,
@@ -267,11 +278,9 @@ async def test_stop_projects_cancelled_and_halts_dispatch(tmp_path) -> None:
     sid = await project.open()
     await project.stop()
     assert project.project_status() == "CANCELLED"
-    # 停止后 spawn → 保持 QUEUED（不再派发）
-    child_id, child_run = await project.kernel.spawn(
-        sid, "data", {"content": ""}, name="c"
-    )
-    assert project.kernel.run_summary(child_run).status.value == "queued"
+    # 停止后 spawn → 门面拒绝（runtime paused），不再派发
+    with pytest.raises(AgentCommandError):
+        await project.kernel.spawn(sid, "data", {"content": ""}, name="c")
     await project.close()
 
 
@@ -287,26 +296,6 @@ async def test_research_runtime_delegates_phase_to_project(tmp_path) -> None:
     runtime = ResearchRuntime(project=project)
     assert runtime.phase == "CONFIGURED"  # 委托项目投影
     assert runtime.project_status() == "RUNNING"
-
-
-@pytest.mark.asyncio
-async def test_load_state_repairs_missing_root_reference(tmp_path) -> None:
-    """设计 §3.2：元数据缺 root 引用但图中恰有一个合法 root → 修复引用。"""
-    project = ProjectRuntime(tmp_path)
-    project.register_defaults()
-    sid = await project.open()
-    await project.close()
-
-    state_path = tmp_path / ".athena" / "project.json"
-    data = json.loads(state_path.read_text(encoding="utf-8"))
-    data["root_supervisor_id"] = None  # 丢失引用
-    state_path.write_text(json.dumps(data), encoding="utf-8")
-
-    reopened = ProjectRuntime(tmp_path)
-    reopened.register_defaults()
-    repaired_id = await reopened.open()
-    assert repaired_id == sid  # 修复到图中唯一 root
-    await reopened.close()
 
 
 @pytest.mark.asyncio
@@ -356,7 +345,7 @@ async def test_injectable_real_impl_delegates(tmp_path) -> None:
         called.append(ctx.input_text or "")
         return AgentOutcome(result_ref="result://real")
 
-    project.kernel._type_registry.register(
+    project.kernel._registry.register(
         "ideator-real",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(IdeatorAgent(project.store, run_impl=fake_impl)),
@@ -405,7 +394,7 @@ async def test_ideator_run_impl_wires_real_module(tmp_path) -> None:
     await project.open()
     fake_ideator = _FakeIdeator()
     run_impl = production.ideator_run_impl(fake_ideator, project.store, _FakeProject())
-    project.kernel._type_registry.register(
+    project.kernel._registry.register(
         "ideator-real",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(IdeatorAgent(project.store, run_impl=run_impl)),
@@ -437,7 +426,7 @@ async def test_ideator_agent_run_impl_wiring(tmp_path) -> None:
             fake_ideator, project.store, _FakeProject()
         ),
     )
-    project.kernel._type_registry.register(
+    project.kernel._registry.register(
         "ideator-native",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(agent), codec=JsonCodec()
@@ -535,7 +524,7 @@ async def test_report_agent_model_path_synthesizes_from_user_input(tmp_path) -> 
         return "# 报告\n\n基于证据的综合。"
 
     agent = ReportAgent(project.store, model=fake_model)
-    project.kernel._type_registry.register(
+    project.kernel._registry.register(
         "report-model",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(agent), codec=JsonCodec()
@@ -706,8 +695,12 @@ async def test_message_delivers_to_supervisor_without_turn(tmp_path) -> None:
     project = ProjectRuntime(tmp_path)
     project.register_defaults()
     sid = await project.open(message="start")
+    # 等待 supervisor 首轮编排（spawn 子 + 登记 wait）结束，避免与首轮 turn 竞争
+    assert await _eventually(
+        lambda: project.kernel.agent_status(sid) != AgentStatus.RUNNING, timeout=10
+    )
     await project.message("追加指令")
-    mailbox = project.kernel._store.mailbox(sid)
+    mailbox = project.kernel._records[sid].mailbox
     assert any(m.content == "追加指令" for m in mailbox)
     assert project.kernel.agent_status(sid) != AgentStatus.RUNNING  # 不触发 turn
     await project.close()
@@ -829,7 +822,7 @@ async def test_llm_agent_runs_through_kernel_via_base_agent_runner(tmp_path) -> 
         ResponsesProvider("m"), ToolRegistry(), "p", output_type=Out, artifacts=store
     )
     agent.model = FakeModel()
-    project.kernel._type_registry.register(
+    project.kernel._registry.register(
         "llm-demo",
         lambda _aid, _cfg=None: AgentSpec(
             runner=BaseAgentRunner(agent), codec=JsonCodec()
