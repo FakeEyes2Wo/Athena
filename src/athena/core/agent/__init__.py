@@ -15,12 +15,14 @@ from athena.core.agent.runtime import (
     create_agent,
     create_code_agent,
 )
+from athena.core.agent.agent_runtime import AgentRuntime
 
 __all__ = [
     "Agent",
     "AgentConfig",
     "AgentContext",
     "AgentOutcome",
+    "AgentRuntime",
     "BaseAgent",
     "ResponsesProvider",
     "StepOutcome",

@@ -103,11 +103,18 @@ class RuntimeThreadManager:
             **kwargs,
         )
 
-    async def start(self, session_id: str, context_ref: ArtifactRef) -> AthenaThread:
-        """创建新 Thread 并启动其 runtime。"""
+    async def start(
+        self, session_id: str, context_ref: ArtifactRef, *, thread_id: str | None = None
+    ) -> AthenaThread:
+        """创建新 Thread 并启动其 runtime。
+
+        thread_id 缺省为随机值;显式传入可使 thread_id == session_id
+        (AgentRuntime 门面按 agent_id 寻址 Thread)。
+        """
         self._require_ref(session_id, "session_id")
         self._require_ref(context_ref, "context_ref")
-        thread_id = str(uuid4())
+        thread_id = thread_id or str(uuid4())
+        self._require_ref(thread_id, "thread_id")
         # 先检查状态 — 避免创建 runtime 后因状态不对而泄漏后台任务
         async with self._lock:
             if self._state != "alive":
