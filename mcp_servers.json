@@ -3,8 +3,8 @@
     {
       "name": "sandbox",
       "transport": "stdio",
-      "command": "uv",
-      "args": ["run", "python", "-m", "athena.sandbox", "--work-root", "${WORK_ROOT}"],
+      "command": "${PYTHON_EXECUTABLE}",
+      "args": ["-m", "athena.sandbox", "--work-root", "${WORK_ROOT}"],
       "tool_prefix": "mcp__sandbox__",
       "pinned_tools": ["python_inspect", "python_execute", "sandbox_config"]
     },

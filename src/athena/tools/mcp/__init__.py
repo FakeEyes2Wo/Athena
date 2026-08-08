@@ -1,5 +1,6 @@
 """通用 MCP 接入层 —— 装配入口。"""
 
+import sys
 from dataclasses import replace
 
 from athena.tools.mcp.config import McpServerConfig, load_mcp_servers
@@ -8,9 +9,14 @@ from athena.tools.mcp.client import McpClientError, McpClientManager
 from athena.tools.mcp.search import McpSearchTools
 
 
-def _expand_work_root(args: list[str], work_root: str) -> list[str]:
-    """将 args 中的 ``${WORK_ROOT}`` / ``$WORK_ROOT`` 替换为实际路径。"""
-    return [a.replace("${WORK_ROOT}", work_root).replace("$WORK_ROOT", work_root) for a in args]
+def _expand_vars(value: str, work_root: str) -> str:
+    """展开字符串中的占位符：``${WORK_ROOT}``、``${PYTHON_EXECUTABLE}``。"""
+    return value.replace("${WORK_ROOT}", work_root).replace("${PYTHON_EXECUTABLE}", sys.executable)
+
+
+def _expand_args(args: list[str], work_root: str) -> list[str]:
+    """展开 args 列表中每个元素的占位符。"""
+    return [_expand_vars(a, work_root) for a in args]
 
 
 async def register_mcp_tools(
@@ -18,18 +24,24 @@ async def register_mcp_tools(
     servers: list[McpServerConfig],
     *,
     work_root: str,
-    max_discovered: int = 10,
+    max_discovered: int = 30,
 ) -> list[McpClientManager]:
     """把配置的 MCP server 接入 registry：注册钉住工具 + 全局搜索工具。
 
     钉住工具需要构建期连接拉取 schema；未配置钉住工具时全程懒连接。
     """
-    # 展开 args 中的 ${WORK_ROOT} / $WORK_ROOT 占位符
+    # 展开 command/args 中的 ${WORK_ROOT} / ${PYTHON_EXECUTABLE} 占位符
     expanded = []
     for cfg in servers:
-        expanded_args = _expand_work_root(cfg.args, work_root)
-        if expanded_args != cfg.args:
-            cfg = replace(cfg, args=expanded_args)
+        patch: dict = {}
+        new_command = _expand_vars(cfg.command or "", work_root)
+        if new_command != cfg.command:
+            patch["command"] = new_command
+        new_args = _expand_args(cfg.args, work_root)
+        if new_args != cfg.args:
+            patch["args"] = new_args
+        if patch:
+            cfg = replace(cfg, **patch)
         expanded.append(cfg)
     managers = [McpClientManager(cfg) for cfg in expanded]
     for mgr in managers:
