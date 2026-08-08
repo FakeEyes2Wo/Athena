@@ -37,3 +37,28 @@ def test_run_script_runs_in_workspace(tmp_path) -> None:
     result = asyncio.run(tool.execute({"path": "a.py"}, _tctx()))
     assert result.data["returncode"] == 0
     assert "ok" in result.data["stdout"]
+
+
+def test_write_script_rejects_relative_escape(tmp_path) -> None:
+    target = (tmp_path / ".." / "x.py").resolve()
+    tool = WriteScriptTool(tmp_path)
+    result = asyncio.run(tool.execute({"path": "../x.py", "content": "p"}, _tctx()))
+    assert result.success is False
+    assert "escape" in result.error
+    assert not target.exists()
+
+
+def test_write_script_rejects_absolute_path_outside_workspace(tmp_path) -> None:
+    target = (tmp_path.parent / "abs.py").resolve()
+    tool = WriteScriptTool(tmp_path)
+    result = asyncio.run(tool.execute({"path": str(target), "content": "p"}, _tctx()))
+    assert result.success is False
+    assert "escape" in result.error
+    assert not target.exists()
+
+
+def test_write_script_happy_path_success(tmp_path) -> None:
+    tool = WriteScriptTool(tmp_path)
+    result = asyncio.run(tool.execute({"path": "ok.py", "content": "p"}, _tctx()))
+    assert result.success is True
+    assert (tmp_path / "ok.py").read_text() == "p"
