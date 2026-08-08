@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,9 @@ class ProjectRuntime:
         self._save_state()
         return version
 
-    def register_defaults(self, *, model: str | None = None, client=None) -> None:
+    def register_defaults(
+        self, *, model: str | None = None, client: Any = None
+    ) -> None:
         """注册静态业务类型（确定性实现，每实例 factory）。"""
         # 首版框架：LLM_AGENT_MAPPING 为空，全部保持确定性骨架。
         # 后续填充映射 + 传入 model 时，改用 create_agent_for 注册 LLM Agent。

@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from athena.agents.agent_factory import create_agent_for
 from athena.core.agent.runtime import Agent
 from athena.core.tool import ToolRegistry
-from athena.core.agent.provider import ResponsesProvider
 
 
 class _Result(BaseModel):

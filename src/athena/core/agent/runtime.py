@@ -24,13 +24,14 @@ from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
     AgentOutcome,
+    AskUserFactory,
     StepOutcome,
     ToolCall,
 )
 from athena.core.agent.provider import ResponsesProvider
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
-from athena.core.tool_types import EmitEvent, ToolContext, ToolResult
+from athena.core.tool_types import AskUser, EmitEvent, ToolContext, ToolResult
 from athena.memory.context_manager import ContextManager
 
 if TYPE_CHECKING:
@@ -155,6 +156,9 @@ class Agent(BaseAgent):
             if outcome.kind == "error":
                 raise RuntimeError(outcome.text or "provider stream failed")
 
+        if self._output_type is not None:
+            raise RuntimeError("max turns exhausted without structured output")
+
         return AgentOutcome(
             result_ref=f"result://{ctx.turn.turn_id}",
             next_context_ref=f"context://{ctx.turn.turn_id}/next",
@@ -194,7 +198,7 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
                 agent.tools,
                 mem.items,
                 ctx.cancel,
-                output_type=getattr(agent, "_output_type", None),
+                output_type=agent._output_type,
             )
         ) as stream:
             async for event in stream:
@@ -224,6 +228,7 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
                             f"{ctx.turn.turn_id}:{tc.name}",
                             ctx.emit,
                             ctx.cancel,
+                            ask_user=ctx.ask_user,
                         )
 
                         task = _dispatch_tool_call(
@@ -346,8 +351,17 @@ def _dispatch_tool_call(
         return asyncio.create_task(_run_serial())
 
 
-def agent_runner(agent: BaseAgent, tools: ToolRegistry):
+def agent_runner(
+    agent: BaseAgent,
+    tools: ToolRegistry,
+    *,
+    ask_user: AskUserFactory | None = None,
+):
     """将 BaseAgent 适配为两套 Runner 签名，向后兼容 ThreadRuntime。
+
+    ``ask_user`` 是 (thread, turn) -> AskUser 的工厂：每次 run 时绑定线程
+    上下文注入 AgentContext，供 ``request_user_input`` 工具阻塞等待用户回答。
+    未提供则 Agent 内的交互提问工具返回错误。
 
     ThreadRuntime 会检测 runner 是否有 run_with_context 属性：
     - 有 → 传递 (thread, turn, emit, memory, cancel) 五参数
@@ -357,10 +371,20 @@ def agent_runner(agent: BaseAgent, tools: ToolRegistry):
     无需修改即可同时支持新旧两种 Runner 签名。
     """
 
+    def _bind_ask_user(thread: AthenaThread, turn: AthenaTurn) -> AskUser | None:
+        return ask_user(thread, turn) if ask_user is not None else None
+
     async def _run(
         thread: AthenaThread, turn: AthenaTurn, emit: EmitEvent
     ) -> AgentOutcome:
-        ctx = AgentContext(thread, turn, emit, tools, asyncio.Event())
+        ctx = AgentContext(
+            thread,
+            turn,
+            emit,
+            tools,
+            asyncio.Event(),
+            ask_user=_bind_ask_user(thread, turn),
+        )
         return await agent.run(ctx)
 
     async def _run_with_context(
@@ -370,7 +394,15 @@ def agent_runner(agent: BaseAgent, tools: ToolRegistry):
         memory: "ContextManager | None",
         cancel: asyncio.Event,
     ) -> AgentOutcome:
-        ctx = AgentContext(thread, turn, emit, tools, cancel, memory)
+        ctx = AgentContext(
+            thread,
+            turn,
+            emit,
+            tools,
+            cancel,
+            memory,
+            ask_user=_bind_ask_user(thread, turn),
+        )
         return await agent.run(ctx)
 
     setattr(_run, "run_with_context", _run_with_context)

@@ -807,7 +807,7 @@ async def test_llm_agent_runs_through_kernel_via_base_agent_runner(tmp_path) -> 
     from athena.core.agent.provider import ResponsesProvider, StreamEvent
     from athena.core.agent.runtime import Agent
     from athena.core.agent_kernel.codec import JsonCodec
-    from athena.core.agent_kernel.types import AgentSpec, RunStatus
+    from athena.core.agent_kernel.types import AgentSpec
     from athena.core.tool import ToolRegistry
     from pydantic import BaseModel
 

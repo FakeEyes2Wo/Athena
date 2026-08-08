@@ -5,6 +5,7 @@ from dataclasses import fields
 from inspect import signature
 
 from pydantic import BaseModel
+from pydantic_ai.messages import ToolReturnPart
 import pytest
 
 import athena.core as core_api
@@ -24,6 +25,7 @@ from athena.core.agent.runtime import (
     create_agent,
     create_code_agent,
 )
+from athena.core.agent.tools import RequestUserInputTool
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
@@ -523,3 +525,220 @@ async def test_agent_structured_output_validates_retries_and_persists(
 
     assert outcome.result_ref.startswith("sha256:")
     assert (await store.get_text(outcome.result_ref)) == '{"answer":"hi"}'
+
+
+class _AlwaysInvalidStructuredProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def stream(self, *_args, **_kwargs):
+        self.calls += 1
+        yield StreamEvent(
+            "text_delta", {"delta": "not json", "accumulated": "not json"}
+        )
+        yield StreamEvent("response_completed")
+
+
+class _ValidStructuredProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def stream(self, *_args, **_kwargs):
+        self.calls += 1
+        yield StreamEvent(
+            "text_delta",
+            {"delta": '{"answer":"hi"}', "accumulated": '{"answer":"hi"}'},
+        )
+        yield StreamEvent("response_completed")
+
+
+@pytest.mark.asyncio
+async def test_agent_structured_output_raises_after_max_retries() -> None:
+    """无效 JSON 重试耗尽 → RuntimeError，而非回退未校验的虚拟 ref。"""
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"),
+        tools,
+        "system",
+        output_type=_StructuredOut,
+    )
+    agent.model = _AlwaysInvalidStructuredProvider()
+    ctx = AgentContext(
+        AthenaThread(
+            thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+        ),
+        AthenaTurn(
+            turn_id="t1.1", thread_id="t1", request_ref="request", status="running"
+        ),
+        lambda *_a: asyncio.sleep(0),
+        tools,
+        asyncio.Event(),
+    )
+
+    with pytest.raises(RuntimeError, match="structured output invalid"):
+        await agent.run(ctx)
+    assert agent.model.calls == 4  # 1 次初始采样 + 3 次重试，未超过上限
+
+
+@pytest.mark.asyncio
+async def test_agent_structured_output_without_artifacts_uses_virtual_ref() -> None:
+    """artifacts=None 时结构化输出落为虚拟 result:// ref，不持久化。"""
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"),
+        tools,
+        "system",
+        output_type=_StructuredOut,
+    )
+    agent.model = _ValidStructuredProvider()
+    ctx = AgentContext(
+        AthenaThread(
+            thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+        ),
+        AthenaTurn(
+            turn_id="t1.1", thread_id="t1", request_ref="request", status="running"
+        ),
+        lambda *_a: asyncio.sleep(0),
+        tools,
+        asyncio.Event(),
+    )
+
+    outcome = await agent.run(ctx)
+
+    assert outcome.result_ref.startswith("result://")
+    assert outcome.result_ref == f"result://{ctx.turn.turn_id}"
+
+
+class _AskUserProvider:
+    """第一轮输出 request_user_input 工具调用，第二轮输出最终文本。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def stream(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                "function_call",
+                {
+                    "call_id": "c1",
+                    "name": "request_user_input",
+                    "arguments": {"prompt": "请选择方案"},
+                },
+            )
+        else:
+            yield StreamEvent(
+                "text_delta",
+                {"delta": "好的，采用方案A", "accumulated": "好的，采用方案A"},
+            )
+        yield StreamEvent("response_completed")
+
+
+def _tool_returns(memory):
+    return [
+        part
+        for msg in memory.items
+        for part in msg.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ask_user_tool_round_trips_answer_into_memory() -> None:
+    """request_user_input 工具 await ask_user 阻塞 → 回答写回 memory → 循环继续。"""
+    asked: list[str] = []
+
+    async def ask_user(prompt: str) -> str | None:
+        asked.append(prompt)
+        return "方案A"
+
+    tools = ToolRegistry()
+    tools.register(RequestUserInputTool())
+    agent = Agent(ResponsesProvider("model"), tools, "system")
+    agent.model = _AskUserProvider()
+    memory = ContextManager()
+    ctx = AgentContext(
+        AthenaThread(
+            thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+        ),
+        AthenaTurn(
+            turn_id="t1.1", thread_id="t1", request_ref="request", status="running"
+        ),
+        lambda *_a: asyncio.sleep(0),
+        tools,
+        asyncio.Event(),
+        memory,
+        ask_user=ask_user,
+    )
+
+    outcome = await agent.run(ctx)
+
+    assert asked == ["请选择方案"]
+    returns = _tool_returns(memory)
+    assert len(returns) == 1
+    assert returns[0].content == "方案A"
+    assert outcome.result_ref == "result://t1.1"
+
+
+@pytest.mark.asyncio
+async def test_ask_user_tool_without_injection_reports_error() -> None:
+    """未注入 ask_user 时工具返回错误文本，循环不崩溃、照常结束。"""
+    tools = ToolRegistry()
+    tools.register(RequestUserInputTool())
+    agent = Agent(ResponsesProvider("model"), tools, "system")
+    agent.model = _AskUserProvider()
+    memory = ContextManager()
+    ctx = AgentContext(
+        AthenaThread(
+            thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+        ),
+        AthenaTurn(
+            turn_id="t1.1", thread_id="t1", request_ref="request", status="running"
+        ),
+        lambda *_a: asyncio.sleep(0),
+        tools,
+        asyncio.Event(),
+        memory,
+    )
+
+    outcome = await agent.run(ctx)
+
+    returns = _tool_returns(memory)
+    assert len(returns) == 1
+    content = str(returns[0].content)
+    assert "[ERROR]" in content
+    assert "ask_user" in content
+    assert outcome.result_ref == "result://t1.1"
+
+
+def test_agent_runner_binds_ask_user_factory() -> None:
+    """agent_runner 的 ask_user 工厂按 (thread, turn) 绑定注入 AgentContext。"""
+    bound: list[tuple[str, str]] = []
+
+    def make_ask_user(thread, turn):
+        async def ask(_prompt: str) -> str | None:
+            bound.append((thread.thread_id, turn.turn_id))
+            return "ok"
+
+        return ask
+
+    tools = ToolRegistry()
+    tools.register(RequestUserInputTool())
+    agent = Agent(ResponsesProvider("model"), tools, "system")
+    agent.model = _AskUserProvider()
+    runner = agent_runner(agent, tools, ask_user=make_ask_user)
+
+    thread = AthenaThread(
+        thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+    )
+    turn = AthenaTurn(
+        turn_id="t1.1", thread_id="t1", request_ref="request", status="running"
+    )
+
+    async def emit(_k, _r, _d=None):
+        pass
+
+    outcome = _arun(runner(thread, turn, emit))
+
+    assert bound == [("t1", "t1.1")]
+    assert outcome.result_ref == "result://t1.1"

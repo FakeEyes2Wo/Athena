@@ -1,8 +1,4 @@
-from pathlib import Path
-from types import SimpleNamespace
-
 import asyncio
-import pytest
 
 from athena.agents.tools.script_tools import (
     CommitResultTool,
