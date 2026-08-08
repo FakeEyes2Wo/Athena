@@ -1,1 +1,0 @@
-"""External platform integrations."""
