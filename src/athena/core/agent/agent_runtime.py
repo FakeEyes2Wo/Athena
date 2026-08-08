@@ -287,12 +287,12 @@ class AgentRuntime:
                 self._manager.wait_turn(agent_id, run_id), timeout
             )
         except asyncio.CancelledError:
-            return RunSummary(
-                run_id=run_id,
-                agent_id=agent_id,
-                status=RunStatus.INTERRUPTED,
-                reason="run interrupted",
-            )
+            # 区分 turn 终态中断与调用方取消:让终态回调先落地再判断,真实取消则传播。
+            await asyncio.sleep(0)
+            cached = self._run_summaries.get(run_id)
+            if cached is not None and cached.status == RunStatus.INTERRUPTED:
+                return cached
+            raise
         except RuntimeError as exc:
             return RunSummary(
                 run_id=run_id,
@@ -347,7 +347,8 @@ class AgentRuntime:
         return AgentWaitResult(completed=completed, timed_out=bool(pending))
 
     def _last_terminal_summary(self, agent_id: AgentId) -> RunSummary:
-        for run_id, summary in self._run_summaries.items():
+        for run_id in reversed(list(self._run_summaries.keys())):
+            summary = self._run_summaries[run_id]
             if summary.agent_id == agent_id:
                 return summary
         raise AgentCommandError(ErrorCode.NOT_FOUND, f"no run for agent: {agent_id}")
@@ -383,6 +384,81 @@ class AgentRuntime:
         if agent_id is None:
             raise KeyError(f"unknown run: {run_id}")
         await self._manager.interrupt(agent_id, run_id, reason)
+
+    # ---- 等待注册 / 唤醒 ----
+
+    async def wait_for(self, agent_id: AgentId, target_ids: list[AgentId]) -> None:
+        record = self._records.get(agent_id)
+        if record is None:
+            raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown agent: {agent_id}")
+        for t in target_ids:
+            if t not in self._records:
+                raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown target: {t}")
+        if all(self._is_terminal(t) for t in target_ids):
+            return  # 目标已终态 → 当前 turn 由 runner 干净结束
+        self._agent_waits[agent_id] = list(target_ids)
+
+    async def wait_for_human(
+        self,
+        agent_id: AgentId,
+        content: str,
+        context_refs: list[ArtifactRef] | None = None,
+    ) -> str:
+        record = self._records.get(agent_id)
+        if record is None:
+            raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown agent: {agent_id}")
+        del content, context_refs  # COMPAT: 内容待后续人工确认持久化
+        request_id = uuid4().hex
+        self._human_waits[request_id] = agent_id
+        return request_id
+
+    async def human_reply(self, request_id: str, reply: str) -> RunId:
+        agent_id = self._human_waits.pop(request_id, None)
+        if agent_id is None:
+            raise AgentCommandError(
+                ErrorCode.NOT_FOUND, f"unknown wait request: {request_id}"
+            )
+        record = self._records[agent_id]
+        record.mailbox.append(
+            AgentMessage(source="user", content=reply, context_refs=[])
+        )
+        req_ref = record.spec.codec.encode_request({})  # 空唤醒:无假 trigger
+        return await self._start_run_after_settle(agent_id, req_ref)
+
+    def _is_terminal(self, agent_id: AgentId) -> bool:
+        if self.agent_status(agent_id) == AgentStatus.CLOSED:
+            return True
+        return self._last_terminal.get(agent_id) in TERMINAL_RUN_STATUSES
+
+    async def _resolve_agent_waits(self) -> None:
+        for agent_id, target_ids in list(self._agent_waits.items()):
+            if all(self._is_terminal(t) for t in target_ids):
+                del self._agent_waits[agent_id]
+                try:
+                    await self._wake(agent_id)
+                except Exception as exc:  # noqa: BLE001 — 唤醒失败仅记日志,不阻断解析
+                    logger.warning("wake %s failed: %s", agent_id, type(exc).__name__)
+
+    async def _wake(self, agent_id: AgentId) -> None:
+        record = self._records.get(agent_id)
+        if record is None:
+            return
+        req_ref = record.spec.codec.encode_request({})  # COMPAT: 空唤醒,无假 trigger
+        await self._start_run_after_settle(agent_id, req_ref)
+
+    async def _start_run_after_settle(
+        self, agent_id: AgentId, req_ref: ArtifactRef
+    ) -> RunId:
+        """唤醒路径:当前 turn 未落定时先等其终态,再启动新 run(避免 AgentBusyError)。
+
+        submit 在 turn 被接纳(spawn)而非完成时即返回;若上一 turn 仍在运行,
+        直接 _start_run 会撞上 "thread already has an active turn"。唤醒语义为
+        "上一轮之后",故先 wait_run 等它终态落地。
+        """
+        active = self._active_turn.get(agent_id)
+        if active is not None:
+            await self.wait_run(active)
+        return await self._start_run(agent_id, req_ref)
 
     def _descendants(self, agent_id: AgentId) -> list[AgentId]:
         out: list[AgentId] = []
