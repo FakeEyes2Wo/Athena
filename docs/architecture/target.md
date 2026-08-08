@@ -14,7 +14,7 @@ Research control  athena.research.ResearchRuntime
 Policy            Supervisor + experiment.ranking + research.budget.BudgetSnapshot
 Execution         CodeAgent + GitWorkBranch + protected evaluator
 Facts             core.research_tree.ResearchTree v2 + core.contracts.ArtifactRef
-Thread control    athena.app_server (保持独立，不承载研究状态)
+Thread control    app_server Thread 运行时 + core.agent AgentRuntime 门面
 Adapters          gui_gateway + Tauri + React
 ```
 

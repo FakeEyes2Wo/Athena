@@ -1,5 +1,8 @@
 # Agent 运行时框架（Codex-CLI 风格）
 
+> **Superseded (2026-08-08)**：被 [`2026-08-08-thread-agent-unification-design.md`](2026-08-08-thread-agent-unification-design.md) 取代 ——
+> 方向反转，以 app_server Thread 模型为统一底座，本文的 AgentKernel 设计退役。
+>
 > 2026-08-08 · 上位：`agent-end-to-end-workflow-design.md`（历史）
 
 ## 现状

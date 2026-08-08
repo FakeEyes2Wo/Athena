@@ -14,9 +14,10 @@ GUI / Client
   -> PREPARE -> SEARCH -> VALIDATE -> REPORT
   -> core.research_tree.ResearchTree v2
   -> GitWorkBranch + EvalResult + ArtifactRef
+Agent 执行:athena.core.agent.AgentRuntime(Thread 门面) -> app_server Thread 运行时
 ```
 
-`athena.core.thread_models` 负责 Thread/Turn 记录模型；`athena.app_server` 继续独立负责请求响应、订阅、并发控制等运行时与控制逻辑，不拥有 Thread/Turn 记录模型。研究运行时不放入或修改 app-server。`gui_gateway` 仅处理 ping、WebSocket 响应封装和逐连接订阅，不持有研究树、预算或工作流状态。
+`athena.core.thread_models` 负责 Thread/Turn 记录模型；`athena.app_server` 提供 Thread 运行时(thread_runtime/thread_manager)并负责请求响应、订阅、并发控制等控制逻辑，不拥有 Thread/Turn 记录模型。Agent 语义由 `athena.core.agent.AgentRuntime`(Thread 门面，agent_id == thread_id)承载:研究运行时经该门面在 app_server Thread 上执行 Agent，研究运行时模块本身不放入 app-server。`gui_gateway` 仅处理 ping、WebSocket 响应封装和逐连接订阅，不持有研究树、预算或工作流状态。
 
 IdeaGeneration 由 `athena.ideator.Ideator` 唯一负责。Ideator 为可配置的独立辩手创建 Thread，并发执行提案、评审和修订阶段，再由一个 judge 生成最终假设与完整审计 artifact；生成失败会显式报错，不存在模板 fallback。
 
@@ -32,7 +33,8 @@ IdeaGeneration 由 `athena.ideator.Ideator` 唯一负责。Ideator 为可配置�
 | Ranking | `athena.experiment.ranking` | 无遗留 core 路径 |
 | VALIDATE | `athena.workflows.validate` | `athena.experiment.validate` 重导出 |
 | REPORT | `athena.workflows.report` | `athena.experiment.report` 重导出 |
-| Thread/Turn records | `athena.core.thread_models` | `athena.app_server` 负责运行时与控制逻辑；与研究运行时相互独立 |
+| Thread/Turn records | `athena.core.thread_models` | `athena.app_server` 提供 Thread 运行时；AgentRuntime 在 Thread 上承载 Agent；与研究运行时相互独立 |
+| Agent 运行时(Thread 门面) | `athena.core.agent.AgentRuntime` | `athena.app_server` Thread 运行时(`thread_runtime`/`thread_manager`) |
 
 ## ResearchTree v2
 

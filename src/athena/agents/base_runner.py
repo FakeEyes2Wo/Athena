@@ -35,8 +35,8 @@ class BaseAgentRunner:
     async def run(self, request, *, session, emit) -> dict:
         """构造 AgentContext 并运行业务 Agent，返回持久化引用。
 
-        §4.4：wait 唤醒的空请求不生成假 trigger；只有正常返回或进入持久化
-        等待后才提交 mailbox cursor。
+        COMPAT: wait 唤醒的空请求不生成假 trigger(kernel §4.4 语义);只有正常返回
+        或进入持久化等待后才提交 mailbox cursor。清理条件: 等待语义内建到 thread 后。
         """
         # 触发消息：真实 Run 请求解码；空唤醒（{}）无 trigger
         trigger = None

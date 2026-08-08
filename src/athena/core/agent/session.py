@@ -100,4 +100,4 @@ class RunSession:
         return unread
 
     def checkpoint(self) -> None:
-        pass  # COMPAT: mailbox 读即清,游标推进为空操作
+        pass  # COMPAT: mailbox 读即清,游标推进为空操作;清理条件: BaseAgentRunner 不再依赖 session.checkpoint 后

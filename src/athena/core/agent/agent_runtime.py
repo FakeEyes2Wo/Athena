@@ -166,7 +166,8 @@ class AgentRuntime:
         if self._closed:
             raise AgentCommandError(ErrorCode.CLOSED, "runtime is closed")
         if self._paused:
-            # COMPAT: kernel 的 pause 曾排队派发;无全局队列下退化为直接报错。
+            # COMPAT: kernel 的 pause 曾排队派发;无全局队列下退化为直接报错。清理条件:
+            # 队列派发语义内建到 ThreadRuntime 后。
             raise AgentCommandError(ErrorCode.CLOSED, "runtime paused")
 
     # ---- 创建 / 消息 / 续跑 ----
@@ -405,7 +406,10 @@ class AgentRuntime:
         record = self._records.get(agent_id)
         if record is None:
             raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown agent: {agent_id}")
-        del content, context_refs  # COMPAT: 内容待后续人工确认持久化
+        del (
+            content,
+            context_refs,
+        )  # COMPAT: 待办内容待后续人工确认持久化;清理条件: 待办内容落到 rollout 后
         request_id = uuid4().hex
         self._human_waits[request_id] = agent_id
         return request_id
@@ -420,7 +424,9 @@ class AgentRuntime:
         record.mailbox.append(
             AgentMessage(source="user", content=reply, context_refs=[])
         )
-        req_ref = record.spec.codec.encode_request({})  # 空唤醒:无假 trigger
+        req_ref = record.spec.codec.encode_request(
+            {}
+        )  # COMPAT: 空唤醒,无假 trigger;清理条件: 等待语义内建到 thread 后
         return await self._start_run_after_settle(agent_id, req_ref)
 
     def _is_terminal(self, agent_id: AgentId) -> bool:
@@ -441,7 +447,9 @@ class AgentRuntime:
         record = self._records.get(agent_id)
         if record is None:
             return
-        req_ref = record.spec.codec.encode_request({})  # COMPAT: 空唤醒,无假 trigger
+        req_ref = record.spec.codec.encode_request(
+            {}
+        )  # COMPAT: 空唤醒,无假 trigger;清理条件: 等待语义内建到 thread 后
         try:
             await self._start_run_after_settle(agent_id, req_ref)
         except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as exc:
@@ -553,7 +561,7 @@ class AgentRuntime:
     def _session_events(
         self, agent_id: AgentId, run_id: RunId | None, after_sequence: int
     ):
-        """COMPAT: EventJournal(Event) → AgentEvent(run_id/sequence/kind/event_ref/data)。"""
+        """COMPAT: EventJournal(Event) → AgentEvent(run_id/sequence/kind/event_ref/data);清理条件: 事件模型统一为 AgentEvent 后。"""
 
         async def _gen():
             handle = await self._manager.get(agent_id)

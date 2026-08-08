@@ -517,10 +517,9 @@ async def _run_turn(runtime: ThreadRuntime, turn: AthenaTurn) -> None:
     3. Turn 后：record_items() 持久化本轮新增消息到 JSONL
     4. 失败时：rollback(before_index) 丢弃半成品消息
 
-    Runner 签名检测：
-    - 有 run_with_context → 五参数 (thread, turn, emit, memory, cancel)
-    - 无 run_with_context → 三参数 (thread, turn, emit)
-    这保证了与 agent_runner() 包装器的向后兼容。
+    COMPAT: 兼容旧 agent_runner() 包装器的双签名检测(有 run_with_context →
+    五参数 (thread, turn, emit, memory, cancel);无 → 三参数 (thread, turn, emit))。
+    清理条件: 全部 runner 统一为 run_with_context 单签名后。
     """
 
     async def emit(kind: str, event_ref: ArtifactRef, data: dict | None = None) -> None:
