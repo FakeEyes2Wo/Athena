@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -16,19 +15,8 @@ from athena.core.agent.types import AgentSpec, RunStatus
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.bundle import DirectoryBundle, VersionedBundle
 
+from test.unit._support import fake_inner_builder
 from ._support import JsonCodec, request_payload
-
-
-class FakeRuntime:
-    """替代真实子进程：生成 report.md + figures/*.png（评审环测试关注提交链）。"""
-
-    async def run(self, request) -> SimpleNamespace:
-        workspace = request.cwd
-        figures = workspace / "figures"
-        figures.mkdir(exist_ok=True)
-        (figures / "plot.png").write_bytes(b"fake-png")
-        (workspace / "report.md").write_text("分析报告", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
 
 def _dataset(tmp_path: Path) -> Path:
@@ -70,12 +58,16 @@ async def test_data_analysis_review_loop(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     bundle = VersionedBundle(store)
     data_agent = DataAgent(
-        store, bundle, owner_agent_id="agent_1", runtime=FakeRuntime()
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=fake_inner_builder,
     )
     reflection = ReflectionAgent(store)
     rt = _runtime(tmp_path, data_agent, reflection)
 
-    # DataAgent 写脚本并提交 v1
+    # DataAgent 驱动内层 LLM（fake）产出报告并提交 v1
     data_id, run1 = await rt.create_root(
         "data", _request(str(_dataset(tmp_path))), name="data-root"
     )
@@ -116,7 +108,11 @@ async def test_revision_loop_failed_then_revised(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     bundle = VersionedBundle(store)
     data_agent = DataAgent(
-        store, bundle, owner_agent_id="agent_1", runtime=FakeRuntime()
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=fake_inner_builder,
     )
     reflection = ReflectionAgent(store)
     dataset = str(_dataset(tmp_path))

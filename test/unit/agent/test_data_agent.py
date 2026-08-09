@@ -1,49 +1,42 @@
-"""DataAgent 确定性业务 Agent 集成测试（设计 §7.3、data-analysis-agent-workflow §5）。
+"""DataAgent 业务 Agent 集成测试：内层 LLM agent 写 analysis.py → 收集 → 提交。
 
-DataAgent 生成固定名 ``analysis.py`` 并运行，收集 ``report.md`` 与
-``figures/*.png`` 提交 DataAnalysis 版本；不再暴露 DataTools。
+DataAgent 用 ``inner_builder`` 构造内层 LLM ReAct Agent（prompt=data_agent.md +
+通用工具），fake provider 让内层直接收尾；测试预写 workspace（``analysis.py`` +
+``report.md`` + ``figures/*.png``），验证编排：v1→v2 所有权链、提交 Bundle 内容、
+``analysis.py`` 落盘。不依赖真实 LLM API（Task 10 补 @pytest.mark.slow 集成测试）。
 """
 
+import asyncio
 import json
-from types import SimpleNamespace
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from athena.agents.base_runner import BaseAgentRunner
-from athena.agents.data_agent import (
-    ANALYSIS_CONFIG,
-    ANALYSIS_ENTRYPOINT,
-    DEFAULT_ANALYSIS_SCRIPT,
-    DataAgent,
-)
+from athena.agents.data_agent import ANALYSIS_ENTRYPOINT, DataAgent
+from athena.agents.prompt_agent import load_prompt
+from athena.agents.tools.generic_tools import generic_tool_registry
 from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.agent.models import AgentContext
 from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.runtime import Agent
 from athena.core.agent.types import AgentSpec, RunStatus
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.bundle import DirectoryBundle, VersionedBundle
+from athena.core.thread_models import AthenaThread, AthenaTurn
+from athena.core.tool import ToolRegistry
+from athena.memory.context_manager import ContextManager
 
+from test.unit._support import FakeProvider
 from ._support import JsonCodec, request_payload
 
 
-class FakeRuntime:
-    """替代真实子进程：校验脚本/配置已写入，再模拟产出 report.md + 图片。"""
-
-    def __init__(self) -> None:
-        self.requests: list = []
-        self.returncode = 0
-
-    async def run(self, request) -> SimpleNamespace:
-        self.requests.append(request)
-        workspace = request.cwd
-        assert (workspace / ANALYSIS_ENTRYPOINT).is_file()  # 已写分析脚本
-        assert (workspace / ANALYSIS_CONFIG).is_file()  # 已写运行配置
-        figures = workspace / "figures"
-        figures.mkdir(exist_ok=True)
-        (figures / "plot.png").write_bytes(b"fake-png")
-        (workspace / "report.md").write_text("分析报告", encoding="utf-8")
-        return SimpleNamespace(returncode=self.returncode, stdout="", stderr="")
+def _inner_builder(agent_type, *, model, client, workspace):
+    """返回带 fake provider 的内层 Agent；文件由测试预写，不在构建器内创建。"""
+    return Agent(
+        FakeProvider(), generic_tool_registry(workspace), load_prompt(agent_type)
+    )
 
 
 def _dataset(tmp_path: Path) -> Path:
@@ -54,9 +47,22 @@ def _dataset(tmp_path: Path) -> Path:
     return path
 
 
-def _request(data_path: str, target: str, workspace: str) -> dict:
+def _seed_workspace(workspace: Path, *, report: str = "分析报告") -> Path:
+    """预写 LLM 产物的 workspace：analysis.py + report.md + figures/*.png。"""
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / ANALYSIS_ENTRYPOINT).write_text(
+        "# llm-driven analysis.py\n", encoding="utf-8"
+    )
+    (workspace / "report.md").write_text(report, encoding="utf-8")
+    figures = workspace / "figures"
+    figures.mkdir(exist_ok=True)
+    (figures / "plot.png").write_bytes(b"fake-png")
+    return workspace
+
+
+def _request(data_path: str, workspace: Path) -> dict:
     return request_payload(
-        {"data_path": data_path, "target": target, "workspace": workspace}
+        {"data_path": data_path, "target": "label", "workspace": str(workspace)}
     )
 
 
@@ -73,24 +79,46 @@ def _runtime(agent: DataAgent, tmp_path) -> AgentRuntime:
     return rt
 
 
+async def _noop_emit(kind: str, ref: str, data: dict | None = None) -> None:
+    pass
+
+
+def _direct_ctx(input_text: str) -> AgentContext:
+    return AgentContext(
+        thread=AthenaThread(
+            thread_id="t1", session_id="s1", status="running", context_ref="c1"
+        ),
+        turn=AthenaTurn(
+            turn_id="t1-turn", thread_id="t1", request_ref="c1", status="running"
+        ),
+        emit=_noop_emit,
+        tools=ToolRegistry(),
+        cancel=asyncio.Event(),
+        memory=ContextManager(),
+        input_text=input_text,
+    )
+
+
 @pytest.mark.asyncio
-async def test_data_agent_writes_script_and_commits_v1_then_v2(tmp_path) -> None:
+async def test_data_agent_llm_driven_commits_v1_then_v2(tmp_path) -> None:
+    """预写 LLM 产物 workspace → v1 create + v2 commit（owner 链），产物完整。"""
     store = LocalArtifactStore(tmp_path / "artifacts")
     bundle = VersionedBundle(store)
     data_path = _dataset(tmp_path)
-    workspace = tmp_path / "workspace"
-    runtime = FakeRuntime()
-    agent = DataAgent(store, bundle, owner_agent_id="agent_1", runtime=runtime)
+    workspace = _seed_workspace(tmp_path / "workspace")
+    agent = DataAgent(
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=_inner_builder,
+    )
     rt = _runtime(agent, tmp_path)
 
-    agent_id, run1 = await rt.create_root(
-        "data", _request(str(data_path), "label", str(workspace))
-    )
+    agent_id, run1 = await rt.create_root("data", _request(str(data_path), workspace))
     summary = await rt.wait_run(run1, timeout=5)
     assert summary.status == RunStatus.COMPLETED
-    assert (workspace / ANALYSIS_ENTRYPOINT).read_text(
-        encoding="utf-8"
-    ) == DEFAULT_ANALYSIS_SCRIPT  # 生成默认 EDA+plot 脚本
+    assert (workspace / ANALYSIS_ENTRYPOINT).is_file()  # LLM 写入的入口脚本落盘
     analysis_id = agent.analysis_id
     v1 = agent.latest_ref
     assert analysis_id is not None and v1 is not None
@@ -98,9 +126,7 @@ async def test_data_agent_writes_script_and_commits_v1_then_v2(tmp_path) -> None
     assert bundle.latest(analysis_id) == v1
 
     # 同 owner follow-up → v2，parent_ref 指向 v1
-    run2 = await rt.followup(
-        agent_id, _request(str(data_path), "label", str(workspace))
-    )
+    run2 = await rt.followup(agent_id, _request(str(data_path), workspace))
     summary = await rt.wait_run(run2, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     v2 = agent.latest_ref
@@ -117,23 +143,27 @@ async def test_data_agent_writes_script_and_commits_v1_then_v2(tmp_path) -> None
 
 
 @pytest.mark.asyncio
-async def test_data_agent_script_failure_surfaces_error(tmp_path) -> None:
-    """脚本返回非零 → DataAgent 报错，不提交版本。"""
+async def test_data_agent_no_report_does_not_commit(tmp_path) -> None:
+    """内层未产出 report.md → 收集失败，DataAgent 报错且不提交任何版本。"""
     store = LocalArtifactStore(tmp_path / "artifacts")
     bundle = VersionedBundle(store)
     data_path = _dataset(tmp_path)
     workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    (workspace / ANALYSIS_ENTRYPOINT).write_text("print('x')\n", encoding="utf-8")
+    # 无 report.md / figures → _collect_files 抛错
 
-    class FailingRuntime:
-        async def run(self, request) -> SimpleNamespace:
-            return SimpleNamespace(returncode=1, stdout="", stderr="boom: bad data")
-
-    agent = DataAgent(store, bundle, owner_agent_id="agent_1", runtime=FailingRuntime())
-    rt = _runtime(agent, tmp_path)
-    agent_id, run1 = await rt.create_root(
-        "data", _request(str(data_path), "label", str(workspace))
+    agent = DataAgent(
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=_inner_builder,
     )
-    summary = await rt.wait_run(run1, timeout=5)
-    assert summary.status == RunStatus.FAILED
+    request = json.dumps(
+        {"data_path": str(data_path), "target": "label", "workspace": str(workspace)},
+        ensure_ascii=False,
+    )
+    with pytest.raises(RuntimeError, match="report.md"):
+        await agent.run(_direct_ctx(request))
     assert bundle.chains() == {}  # 未产生任何版本
-    await rt.aclose()

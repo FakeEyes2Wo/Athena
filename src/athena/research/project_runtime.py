@@ -10,6 +10,7 @@
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -189,15 +190,19 @@ class ProjectRuntime:
         return version
 
     def register_defaults(
-        self, *, model: str | None = None, client: Any = None
+        self,
+        *,
+        model: str | None = None,
+        client: Any = None,
+        inner_builder: Callable[..., Any] | None = None,
     ) -> None:
         """注册静态业务类型；model 必填（LLM 驱动，无回退）。
 
         调用方必须显式传 ``model=settings.model_name()``；缺省直接报错，不再
-        静默走确定性。各 agent 构造器已接收 model/client（本任务先透传暂存，
-        Task 6/8/9 再启用）。supervisor/reflection/plot/ideator/code 本任务
-        保持确定性、构造器不变；report 由 ReportAgent 自行管理 model（可调用
-        对象而非字符串），注册时不传参。
+        静默走确定性。``inner_builder`` 是 DataAgent 的内层 LLM agent 测试接缝
+        （缺省 ``build_llm_agent``）：单测注入 fake provider 避免真实 API。
+        supervisor/reflection/plot/ideator/code 保持确定性、构造器不变；report
+        由 ReportAgent 自行管理 model（可调用对象而非字符串），注册时不传参。
         """
         if model is None:
             raise RuntimeError(
@@ -229,7 +234,12 @@ class ProjectRuntime:
             lambda aid, _cfg=None: AgentSpec(
                 runner=BaseAgentRunner(
                     DataAgent(
-                        self._store, self._bundle, aid, model=model, client=client
+                        self._store,
+                        self._bundle,
+                        aid,
+                        model=model,
+                        client=client,
+                        inner_builder=inner_builder,
                     )
                 ),
                 codec=JsonCodec(),
