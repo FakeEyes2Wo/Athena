@@ -20,8 +20,11 @@ Impl = Callable[[AgentContext], Awaitable[AgentOutcome]]
 class _JsonSinkAgent(BaseAgent):
     """可选注入真实 run_impl 的 JSON Artifact Agent 基类。
 
-    子类只声明 ``_fallback(text) -> dict`` 缺省 payload；``run`` 优先委托
-    ``run_impl``，否则把 fallback 结果写为 JSON Artifact 并返回其 ref。
+    子类只声明 ``_fallback(text) -> dict`` 缺省 payload;``run`` 优先委托
+    ``run_impl``,否则把 fallback 结果写为 JSON Artifact 并返回其 ref。
+
+    COMPAT: IdeatorAgent 确定性 fallback + run_impl 注入(首版无 LLM 的确定性骨架);
+    清理条件: 真实 Ideator 全量接线后。
     """
 
     def __init__(self, store: ArtifactStore, *, run_impl: Impl | None = None) -> None:

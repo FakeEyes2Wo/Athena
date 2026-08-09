@@ -497,12 +497,14 @@ class ProjectRuntime:
         停止派发（终态，不可 resume），等待中的 Agent 不删除其 wait/mailbox。
         """
         for snap in self._runtime.list_agents():
-            try:
-                await self._runtime.interrupt(snap.agent_id, "project stop")
-            except (AgentCommandError, RuntimeError):
-                # COMPAT: AgentRuntime 门面下 interrupt 对无活动 Run 的 Agent 报错
-                # （旧 kernel 为幂等 no-op）；此处与旧语义一致地跳过。
-                continue
+            if snap.status == AgentStatus.RUNNING:
+                try:
+                    await self._runtime.interrupt(snap.agent_id, "project stop")
+                except AgentCommandError:
+                    # COMPAT: AgentRuntime 门面下 interrupt 对无活动 Run 的 Agent
+                    # 报错(旧 kernel 为幂等 no-op);此处与旧语义一致地跳过。
+                    # 清理条件: AgentRuntime.interrupt 统一为幂等 no-op 后。
+                    continue
         self._runtime.pause()
         self._set_status("CANCELLED")
 

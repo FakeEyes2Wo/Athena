@@ -2,14 +2,22 @@ import asyncio
 
 import pytest
 
-from ._support import make_runtime
+from ._support import BlockingAgent, StubAgent, make_runtime
 
+from athena.agents.base_runner import BaseAgentRunner
+
+from athena.core.agent.agent_runtime import AgentRuntime
+
+from athena.core.agent.codec import JsonCodec
+from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import (
     AgentCommandError,
+    AgentSpec,
     AgentStatus,
     ErrorCode,
     RunStatus,
 )
+from athena.core.artifact_store import LocalArtifactStore
 
 
 async def test_wait_for_resolves_when_target_terminal(tmp_path):
@@ -44,4 +52,43 @@ async def test_human_reply_unknown_raises(tmp_path):
     with pytest.raises(AgentCommandError) as ei:
         await rt.human_reply("nope", "x")
     assert ei.value.code == ErrorCode.NOT_FOUND
+    await rt.aclose()
+
+
+async def test_wait_for_registers_when_target_starts_new_turn_after_terminal(
+    tmp_path,
+):
+    """回归 C1: target 完成首 turn 后又启动阻塞 turn 时,_is_terminal 不得因
+    _last_terminal 为终态而提前满足;wait_for 必须登记等待(waiter → WAITING)。"""
+    gate = asyncio.Event()
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    registry = AgentTypeRegistry()
+    registry.register(
+        "block",
+        lambda aid, cfg=None: AgentSpec(
+            runner=BaseAgentRunner(BlockingAgent(gate)), codec=JsonCodec()
+        ),
+    )
+    registry.register(
+        "stub",
+        lambda aid, cfg=None: AgentSpec(
+            runner=BaseAgentRunner(StubAgent(store)), codec=JsonCodec()
+        ),
+    )
+    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rt.start()
+    waiter, _ = await rt.create_root("stub", {"content": "w"})
+    target, run1 = await rt.create_root("block", {"content": "t1"})
+    await asyncio.wait_for(gate.wait(), timeout=2)  # 首 turn 进入运行
+    await rt.interrupt(target, "first turn done")  # 首 turn 以 INTERRUPTED 终态
+    summary = await rt.wait_run(run1, timeout=5)
+    assert summary.status == RunStatus.INTERRUPTED
+    gate.clear()
+    run2 = await rt.followup(target, {"content": "t2"})  # 第二 turn 阻塞运行中
+    await asyncio.wait_for(gate.wait(), timeout=2)
+    assert rt._active_turn.get(target) == run2
+    await rt.wait_for(waiter, [target])
+    assert rt.agent_status(waiter) == AgentStatus.WAITING  # 未提前满足
+    await rt.interrupt(target, "test stop")
+    await rt.wait_run(run2, timeout=5)
     await rt.aclose()

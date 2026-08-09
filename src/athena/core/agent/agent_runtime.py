@@ -374,7 +374,17 @@ class AgentRuntime:
             raise AgentCommandError(
                 ErrorCode.NOT_FOUND, f"no active run for {agent_id}"
             )
-        await self._manager.interrupt(agent_id, run_id, reason)
+        try:
+            await self._manager.interrupt(agent_id, run_id, reason)
+        except RuntimeError as exc:
+            # COMPAT: turn 在快照与 manager 处理之间已终止 → manager 报
+            # RuntimeError("no active turn");与门面无活跃 Run 同语义归一为
+            # NOT_FOUND。清理条件: AgentRuntime.interrupt 统一为幂等 no-op 后。
+            if "no active turn" in str(exc):
+                raise AgentCommandError(
+                    ErrorCode.NOT_FOUND, f"no active run for {agent_id}"
+                ) from exc
+            raise
 
     async def cancel_run(
         self, run_id: RunId, *, reason: str = "caller_cancelled"
@@ -432,6 +442,8 @@ class AgentRuntime:
     def _is_terminal(self, agent_id: AgentId) -> bool:
         if self.agent_status(agent_id) == AgentStatus.CLOSED:
             return True
+        if self._active_turn.get(agent_id) is not None:
+            return False  # 仍有活跃 turn → 未终态
         return self._last_terminal.get(agent_id) in TERMINAL_RUN_STATUSES
 
     async def _resolve_agent_waits(self) -> None:
