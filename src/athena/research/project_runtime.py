@@ -189,7 +189,7 @@ class ProjectRuntime:
         """注册静态业务类型；model 必填（LLM 驱动，无回退）。
 
         调用方必须显式传 ``model=settings.model_name()``；缺省直接报错，不再
-        静默走确定性。``inner_builder`` 是 DataAgent 的内层 LLM agent 测试接缝
+        静默走确定性。``inner_builder`` 是 data/init 内层 LLM agent 的测试接缝
         （缺省 ``build_llm_agent``）：单测注入 fake provider 避免真实 API。
         supervisor/reflection/plot/ideator/code 保持确定性、构造器不变；report
         由 ReportAgent 自行管理 model（可调用对象而非字符串），注册时不传参。
@@ -214,7 +214,12 @@ class ProjectRuntime:
             "init",
             lambda _aid, _cfg=None: AgentSpec(
                 runner=BaseAgentRunner(
-                    InitAgent(self._store, model=model, client=client)
+                    InitAgent(
+                        self._store,
+                        model=model,
+                        client=client,
+                        inner_builder=inner_builder,
+                    )
                 ),
                 codec=JsonCodec(),
             ),
@@ -286,13 +291,13 @@ class ProjectRuntime:
     ) -> str:
         """PREPARE DataAnalysis 评审闭环（§7.1）：返回接受版本 ref。
 
-        InitAgent 先做 task understanding：读数据集 schema 生成冻结的
-        ``eval.py`` 并把其 artifact ref 存为 ``_eval_ref``（用户首轮输入可用
-        ``eval_script`` 直接指定）。随后 DataAgent 生成并运行固定名分析脚本
+        InitAgent 先做 task understanding：内层 LLM 按 ``init_agent.md`` prompt
+        产出 ``task_understanding.md`` + ``eval.py``，调用方把 ``eval.py`` 的
+        artifact ref 存为 ``_eval_ref``。随后 DataAgent 生成并运行固定名分析脚本
         （读 ``data_path``、EDA、绘图到 ``figures/``、写 ``report.md``）提交
         v1；Reflection 评审 v1；通过接受 v1，否则 follow-up 原 DataAgent 提交
         v2。``report`` 可覆盖报告文本（确定性 failed 路径，如空报告触发评审
-        失败）。
+        失败）。``eval_script`` 参数保留兼容但 LLM 驱动版本不再使用。
         """
         if self._phase != "CONFIGURED":
             raise RuntimeError(f"PREPARE requires CONFIGURED, got {self._phase}")
@@ -338,13 +343,15 @@ class ProjectRuntime:
         target: str,
         eval_script: str | None,
     ) -> None:
-        """InitAgent task understanding：生成 eval.py 并存 artifact ref。
+        """InitAgent task understanding：LLM 产出报告 + eval.py，存 eval 协议事实。
 
-        请求带 ``data_path``/``target``；用户首轮输入可用 ``eval_script``
-        覆盖默认生成。InitAgent 把 eval.py 文本写入 Artifact，调用方读取该
-        文本再 ``put_text`` 为独立 eval.py artifact，ref 存为 ``_eval_ref``
-        （协议事实，§7.2）。primary_metric 由 ``configure(task)`` 持有，不再
-        存。重复调用（PREPARE 重入）不覆盖已提交的 eval_ref。
+        请求带 ``data_path``/``target``；``eval_script`` 参数保留兼容但不再使用
+        ——eval.py 由内层 LLM 按 ``init_agent.md`` prompt 写入。InitAgent 把
+        ``{"task_understanding", "eval_script"}`` 写入 Artifact；调用方读取
+        ``eval_script`` 文本再 ``put_text`` 为独立 eval.py artifact，ref 存为
+        ``_eval_ref``（协议事实，§7.2）。``task_understanding`` 留在 init 产物
+        payload 中留作证据，不单独提升为 ref。重复调用（PREPARE 重入）不覆盖
+        已提交的 eval_ref。
         """
         if self._eval_ref is not None:
             return
@@ -352,8 +359,6 @@ class ProjectRuntime:
             "data_path": str(Path(data_path).resolve()),
             "target": target,
         }
-        if eval_script is not None:
-            request["eval_script"] = eval_script
         _, run = await self._runtime.create_root(
             "init", _request(request), name="init-root"
         )

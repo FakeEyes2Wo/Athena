@@ -145,7 +145,7 @@ async def test_prepare_data_analysis_failed_then_revised(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_prepare_stores_eval_script_ref(tmp_path) -> None:
-    """设计 §7.2：PREPARE 前置 InitAgent 生成 eval.py，存 artifact ref 作为协议事实。"""
+    """设计 §7.2：PREPARE 前置 InitAgent（LLM 驱动）产出 eval.py，存 artifact ref 作为协议事实。"""
     project = make_project(tmp_path)
     await project.open()
     await project.configure(_task())
@@ -153,7 +153,7 @@ async def test_prepare_stores_eval_script_ref(tmp_path) -> None:
     assert project.eval_ref is not None
     assert project.eval_ref.startswith("sha256:")
     script = await project.store.get_text(project.eval_ref)
-    assert "predictions.csv" in script  # 自包含 eval.py 契约
+    assert "predictions.csv" in script  # 自包含 eval.py 契约（fake 内层 LLM 产物）
     await project.close()
 
 
