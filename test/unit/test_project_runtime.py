@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from athena.core.agent.types import AgentCommandError, AgentStatus
-from athena.research.models import MetricDef, MetricSpec, TaskMetaData
+from athena.research.models import MetricSpec, TaskMetaData
 from athena.research.project_runtime import ProjectRuntime
 from athena.core.bundle import DirectoryBundle
 from test.unit._support import make_project
@@ -144,44 +144,17 @@ async def test_prepare_data_analysis_failed_then_revised(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_freeze_eval_spec_creates_version(tmp_path) -> None:
-    """设计 §7.2：冻结第一个评估协议版本。"""
+async def test_prepare_stores_eval_script_ref(tmp_path) -> None:
+    """设计 §7.2：PREPARE 前置 InitAgent 生成 eval.py，存 artifact ref 作为协议事实。"""
     project = make_project(tmp_path)
-    version = project.freeze_eval_spec(
-        MetricDef(name="accuracy", direction="maximize", description="acc")
-    )
-    assert version == 1
-    assert project.eval_specs.version == 1
-    assert project.eval_specs.current.primary.name == "accuracy"
-
-
-@pytest.mark.asyncio
-async def test_eval_protocol_append_only_preserves_v1(tmp_path) -> None:
-    project = make_project(tmp_path)
-    project.freeze_eval_spec(
-        MetricDef(name="accuracy", direction="maximize", description="acc")
-    )
-    v2 = project.eval_specs.append_metric(
-        MetricDef(name="f1", direction="maximize", description="f1")
-    )
-    assert v2 == 2
-    assert [m.name for m in project.eval_specs.version_at(1).secondary] == []
-    assert [m.name for m in project.eval_specs.version_at(2).secondary] == ["f1"]
-
-
-@pytest.mark.asyncio
-async def test_eval_protocol_survives_reopen(tmp_path) -> None:
-    project = make_project(tmp_path)
-    project.freeze_eval_spec(
-        MetricDef(name="accuracy", direction="maximize", description="acc")
-    )
+    await project.open()
+    await project.configure(_task())
+    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
+    assert project.eval_ref is not None
+    assert project.eval_ref.startswith("sha256:")
+    script = await project.store.get_text(project.eval_ref)
+    assert "predictions.csv" in script  # 自包含 eval.py 契约
     await project.close()
-
-    reopened = make_project(tmp_path)
-    await reopened.open()
-    assert reopened.eval_specs.version == 1  # 从 JSON 恢复
-    assert reopened.eval_specs.current.primary.name == "accuracy"
-    await reopened.close()
 
 
 @pytest.mark.asyncio
@@ -702,7 +675,7 @@ async def test_full_workflow_evidence_traceable_across_reopen(tmp_path) -> None:
     reopened = make_project(tmp_path)
     await reopened.open()
     assert reopened.projected_phase() == "COMPLETED"
-    assert reopened.eval_specs.version >= 1
+    assert reopened.eval_ref is not None  # eval.py artifact ref 从 JSON 恢复
     files = await DirectoryBundle.files(reopened.store, report_ref)
     assert await reopened.store.get_text(files["report.md"]) == "最终研究报告正文"
     assert reopened.memory.retrieve(scope="project")

@@ -13,8 +13,8 @@ InitAgent 在 DataAgent 之前运行：读取数据集 schema，理解任务（�
   采用，不做 schema 推断。缺省时按 task understanding 生成默认脚本。
 
 产出：把 eval.py 文本写入 ArtifactStore，``AgentOutcome.result_ref`` 指向该
-Artifact。调用方（ProjectRuntime）从响应 JSON 读取 ``eval_script`` 回填
-``EvalSpec.eval_script`` 并冻结协议。
+Artifact。调用方（ProjectRuntime）从响应 JSON 读取 ``eval_script``，再写为
+独立 eval.py artifact 并把其 ref 存为 ``_eval_ref``（协议事实，§7.2）。
 
 eval.py 契约（自包含，纯 numpy，不依赖 sklearn/scipy）：读当前目录的
 ``predictions.csv``（``__athena_row_id``, ``prediction``）与 ``labels.csv``

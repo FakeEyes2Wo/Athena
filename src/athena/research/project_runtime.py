@@ -42,7 +42,7 @@ from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
 from athena.memory.index import MemoryStore
 from athena.research.budget import BudgetSnapshot
-from athena.research.models import EvalSpec, EvalSpecChain, MetricDef, TaskMetaData
+from athena.research.models import TaskMetaData
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.bundle import VersionedBundle
 
@@ -72,8 +72,8 @@ class ProjectRuntime:
         self._phase = "IDLE"
         self._status = "RUNNING"
         self._task: TaskMetaData | None = None
-        self._eval_specs = EvalSpecChain()
         # 各阶段已提交事实 refs（端到端 §3 项目最小事实）
+        self._eval_ref: str | None = None  # eval.py artifact ref（协议事实 §7.2）
         self._sota_ref: str | None = None
         self._validation_ref: str | None = None
         self._report_ref: str | None = None
@@ -113,7 +113,7 @@ class ProjectRuntime:
     def projected_phase(self) -> str:
         """从已提交事实派生研究阶段（§4.2 完成条件，确定性投影）。
 
-        按六阶段硬门槛推进，只根据已提交的 task/DataAnalysis/EvalSpec/SOTA/
+        按六阶段硬门槛推进，只根据已提交的 task/DataAnalysis/eval_ref/SOTA/
         validation/report 事实计算，不依赖 Agent 声明；未满足时不推进。
         """
         if self._task is None:
@@ -125,7 +125,7 @@ class ProjectRuntime:
         if self._sota_ref is not None:
             return "VALIDATE"
         has_analysis = bool(self._bundle.chains())
-        has_protocol = self._eval_specs.version > 0
+        has_protocol = self._eval_ref is not None
         if has_analysis and has_protocol:
             return "PREPARE"
         return "CONFIGURED"
@@ -146,9 +146,9 @@ class ProjectRuntime:
         return self._store
 
     @property
-    def eval_specs(self) -> EvalSpecChain:
-        """冻结评估协议（§7.2）：append-only EvalSpec 版本链。"""
-        return self._eval_specs
+    def eval_ref(self) -> str | None:
+        """冻结评估协议事实（§7.2）：eval.py artifact ref，未生成返回 None。"""
+        return self._eval_ref
 
     @property
     def memory(self) -> MemoryStore:
@@ -178,16 +178,6 @@ class ProjectRuntime:
         )
         self._save_state()
         return entry_id
-
-    def freeze_eval_spec(
-        self, primary: MetricDef, secondary: list[MetricDef] | None = None
-    ) -> int:
-        """冻结第一个评估协议版本（§7.2）；返回版本号。"""
-        version = self._eval_specs.freeze(
-            EvalSpec(primary=primary, secondary=secondary or [])
-        )
-        self._save_state()
-        return version
 
     def register_defaults(
         self,
@@ -297,11 +287,12 @@ class ProjectRuntime:
         """PREPARE DataAnalysis 评审闭环（§7.1）：返回接受版本 ref。
 
         InitAgent 先做 task understanding：读数据集 schema 生成冻结的
-        ``eval.py`` 并回填 ``EvalSpec``（用户首轮输入可用 ``eval_script``
-        直接指定）。随后 DataAgent 生成并运行固定名分析脚本（读 ``data_path``、
-        EDA、绘图到 ``figures/``、写 ``report.md``）提交 v1；Reflection 评审
-        v1；通过接受 v1，否则 follow-up 原 DataAgent 提交 v2。``report`` 可
-        覆盖报告文本（确定性 failed 路径，如空报告触发评审失败）。
+        ``eval.py`` 并把其 artifact ref 存为 ``_eval_ref``（用户首轮输入可用
+        ``eval_script`` 直接指定）。随后 DataAgent 生成并运行固定名分析脚本
+        （读 ``data_path``、EDA、绘图到 ``figures/``、写 ``report.md``）提交
+        v1；Reflection 评审 v1；通过接受 v1，否则 follow-up 原 DataAgent 提交
+        v2。``report`` 可覆盖报告文本（确定性 failed 路径，如空报告触发评审
+        失败）。
         """
         if self._phase != "CONFIGURED":
             raise RuntimeError(f"PREPARE requires CONFIGURED, got {self._phase}")
@@ -347,14 +338,15 @@ class ProjectRuntime:
         target: str,
         eval_script: str | None,
     ) -> None:
-        """InitAgent task understanding：生成 eval.py 并冻结 EvalSpec。
+        """InitAgent task understanding：生成 eval.py 并存 artifact ref。
 
         请求带 ``data_path``/``target``；用户首轮输入可用 ``eval_script``
-        覆盖默认生成。InitAgent 把 eval.py 写为 Artifact，调用方读取后回填
-        ``EvalSpec.eval_script`` 并冻结协议版本（§7.2）。重复调用（PREPARE
-        重入）不覆盖已冻结协议。
+        覆盖默认生成。InitAgent 把 eval.py 文本写入 Artifact，调用方读取该
+        文本再 ``put_text`` 为独立 eval.py artifact，ref 存为 ``_eval_ref``
+        （协议事实，§7.2）。primary_metric 由 ``configure(task)`` 持有，不再
+        存。重复调用（PREPARE 重入）不覆盖已提交的 eval_ref。
         """
-        if self._eval_specs.version > 0:
+        if self._eval_ref is not None:
             return
         request: dict[str, str] = {
             "data_path": str(Path(data_path).resolve()),
@@ -369,20 +361,7 @@ class ProjectRuntime:
         payload = json.loads(summary.response_ref)
         result_ref = payload["result_ref"]
         init_result = json.loads(await self._store.get_text(result_ref))
-        spec = EvalSpec(
-            primary=MetricDef(
-                name=init_result["primary_metric"],
-                direction=(
-                    "minimize"
-                    if init_result["primary_metric"] == "rmse"
-                    else "maximize"
-                ),
-                description=f"task understanding primary metric "
-                f"{init_result['primary_metric']}",
-            ),
-            eval_script=init_result["eval_script"],
-        )
-        self._eval_specs.freeze(spec)
+        self._eval_ref = await self._store.put_text(init_result["eval_script"])
         self._save_state()
 
     async def run_search(self, hypothesis: str) -> str:
@@ -549,7 +528,7 @@ class ProjectRuntime:
     def _save_state(self) -> None:
         """原子、耐久化 JSON 持久化确定性事实（§16.1）。
 
-        只存确定性事实（root id / phase / task / eval_specs / refs / memory /
+        只存确定性事实（root id / phase / task / eval_ref / refs / memory /
         budget / tree）；对话经 ``.athena/sessions/{agent_id}.jsonl`` 轻持久化，
         不再写入 store 快照。先写临时文件并 fsync，再 ``os.replace`` 原子替换，
         崩溃不留半写文件。
@@ -560,9 +539,7 @@ class ProjectRuntime:
             "phase": self._phase,
             "status": self._status,
             "task": self._task.model_dump(mode="json") if self._task else None,
-            "eval_specs": [
-                spec.model_dump(mode="json") for spec in self._eval_specs.versions
-            ],
+            "eval_ref": self._eval_ref,
             "sota_ref": self._sota_ref,
             "validation_ref": self._validation_ref,
             "report_ref": self._report_ref,
@@ -587,10 +564,7 @@ class ProjectRuntime:
         self._status = data.get("status", "RUNNING")
         if data.get("task"):
             self._task = TaskMetaData.model_validate(data["task"])
-        if data.get("eval_specs"):
-            self._eval_specs = EvalSpecChain.from_versions(
-                [EvalSpec.model_validate(s) for s in data["eval_specs"]]
-            )
+        self._eval_ref = data.get("eval_ref")
         self._sota_ref = data.get("sota_ref")
         self._validation_ref = data.get("validation_ref")
         self._report_ref = data.get("report_ref")
