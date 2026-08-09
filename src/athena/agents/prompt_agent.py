@@ -20,14 +20,15 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "core" / "agent" / "promp
 
 
 def load_prompt(agent_type: str) -> str:
-    """读取 core/agent/prompts/{agent_type}.md；缺失直接报错。
+    """读取 core/agent/prompts/{agent_type}_agent.md；缺失直接报错。
 
     提示文件按 ``{agent_type}_agent.md`` 命名（如 ``data_agent.md``）；先按
-    ``{agent_type}.md`` 直查，再回退到 ``_agent`` 后缀，兼容两种命名。
+    ``_agent`` 后缀直查（所有真实提示都用该命名），再回退到 ``{agent_type}.md``
+    ，兼容两种命名。
     """
-    path = _PROMPT_DIR / f"{agent_type}.md"
+    path = _PROMPT_DIR / f"{agent_type}_agent.md"
     if not path.is_file():
-        path = _PROMPT_DIR / f"{agent_type}_agent.md"
+        path = _PROMPT_DIR / f"{agent_type}.md"
     if not path.is_file():
         raise FileNotFoundError(f"prompt not found for agent_type: {agent_type}")
     return path.read_text(encoding="utf-8")

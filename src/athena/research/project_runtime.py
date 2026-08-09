@@ -12,7 +12,10 @@ import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from athena.core.agent.runtime import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +186,7 @@ class ProjectRuntime:
         *,
         model: str | None = None,
         client: Any = None,
-        inner_builder: Callable[..., Any] | None = None,
+        inner_builder: Callable[..., "Agent"] | None = None,
     ) -> None:
         """注册静态业务类型；model 必填（LLM 驱动，无回退）。
 
@@ -372,6 +375,7 @@ class ProjectRuntime:
         payload = json.loads(summary.response_ref)
         result_ref = payload["result_ref"]
         init_result = json.loads(await self._store.get_text(result_ref))
+        task_understanding = init_result["task_understanding"]  # 固定格式报告，留作证据
         self._eval_ref = await self._store.put_text(init_result["eval_script"])
         self._save_state()
 

@@ -465,7 +465,7 @@ async def test_run_report_failed_then_revised(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_report_prompt_driven_evidence_reaches_inner_agent(tmp_path) -> None:
-    """report 编排器（prompt 驱动）：证据（input + context_refs）进入内层 LLM input，Bundle 含 report.md。"""
+    """report 编排器（prompt 驱动）：证据经 workspace/evidence.md 传递（不内联内层 input），Bundle 含 report.md。"""
     from athena.core.agent import settings
 
     captured: list[str] = []
@@ -502,12 +502,17 @@ async def test_report_prompt_driven_evidence_reaches_inner_agent(tmp_path) -> No
     )
     summary = await project.kernel.wait_run(run_id, timeout=2)
     assert summary.status.value == "completed"
-    assert captured and "已批准证据正文" in captured[0]  # artifact 证据进入内层 input
-    assert "请撰写最终报告" in captured[0]  # 触发内容（input_text）进入内层 input
+    assert (
+        captured and "evidence.md" in captured[0]
+    )  # 内层 input 引用 workspace/evidence.md，不内联证据
+    assert "已批准证据正文" not in captured[0]  # 证据正文不再内联进内层 input
     result_ref = json.loads(summary.response_ref)["result_ref"]
     files = await DirectoryBundle.files(project.store, result_ref)
     assert "report.md" in files  # 提交目录 Bundle 含 report.md
-    assert await project.store.get_text(files["report.md"])  # 非空（综合证据的报告）
+    report_text = await project.store.get_text(files["report.md"])
+    assert (
+        "已批准证据正文" in report_text
+    )  # 证据经 evidence.md → 内层综合进报告（fake 输出派生自 evidence.md）
     await project.close()
 
 

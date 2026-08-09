@@ -13,7 +13,7 @@
 - 无 model 时 LLM agent 构造/`register_defaults` 直接 `raise RuntimeError`，**不保留任何确定性回退**。
 - `data_agent` 入口文件名保留 `analysis.py`；DataAnalysis 提交链（owner / parent_ref）不变。
 - prompt（`core/agent/prompts/*.md`）是「限制」的唯一来源；禁止把脚本模板写回 Python 代码。
-- LLM 配置从 `.env` 读取：`DEEPSEEK_API_KEY`（已有）、`BASE_URL=https://api.deepseek.com`（用户加入）、`MODEL_NAME=deepseek:flash`（默认，可覆盖）。
+- LLM 配置从 `.env` 读取：`DEEPSEEK_API_KEY`（已有）、`BASE_URL=https://api.deepseek.com`（用户加入）、`MODEL_NAME=deepseek-v4-flash`（默认，可覆盖）。
 - 测试用真实 DeepSeek API；LLM 相关测试标 `@pytest.mark.slow`（pyproject 已定义），可 `-m "not slow"` 跳过。
 - 通用工具沙箱：`read_file`/`write_file` 路径逃逸防护；`bash`/`pwsh` 在 workspace cwd 执行。
 
@@ -45,7 +45,7 @@ def test_settings_defaults_when_env_unset(monkeypatch):
     monkeypatch.delenv("BASE_URL", raising=False)
     monkeypatch.delenv("MODEL_NAME", raising=False)
     assert settings.base_url() == "https://api.deepseek.com"
-    assert settings.model_name() == "deepseek:flash"
+    assert settings.model_name() == "deepseek-v4-flash"
     assert settings.api_key() is None
 
 
@@ -83,7 +83,7 @@ from openai import AsyncOpenAI
 load_dotenv()
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek:flash"
+DEFAULT_MODEL = "deepseek-v4-flash"
 
 
 def _resolve(key: str, default: str | None = None) -> str | None:
@@ -102,7 +102,7 @@ def base_url() -> str:
 
 
 def model_name() -> str:
-    """默认 deepseek:flash（最便宜档位），可经 MODEL_NAME 覆盖。"""
+    """默认 deepseek-v4-flash（最便宜档位），可经 MODEL_NAME 覆盖。"""
     return _resolve("MODEL_NAME", DEFAULT_MODEL) or DEFAULT_MODEL
 
 

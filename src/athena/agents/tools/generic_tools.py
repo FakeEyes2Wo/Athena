@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import os
 from pathlib import Path
 
 from athena.core.tool import BaseTool, ToolRegistry
@@ -23,7 +24,7 @@ def _workspace_path(workspace: Path, path: str) -> Path:
 
 
 def _shell_env() -> dict[str, str]:
-    return {k: v for k, v in __import__("os").environ.items() if k in _HostAllow}
+    return {k: v for k, v in os.environ.items() if k in _HostAllow}
 
 
 class ReadFileTool(BaseTool):

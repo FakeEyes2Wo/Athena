@@ -9,6 +9,7 @@
 """
 
 import json
+import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -131,32 +132,43 @@ class ReportAgent(BaseAgent):
         self._latest_ref: str | None = None
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
-        """驱动内层 LLM agent 产出报告，收集后提交 report Bundle。"""
+        """驱动内层 LLM agent 产出报告，收集后提交 report Bundle。
+
+        ``evidence.md`` 是证据的唯一传递路径（内层 LLM 用 ``read_file`` 读取，
+        prompt §inputs 明确指示）；内层 input_text 只引用该文件，不内联证据。
+        临时工作区在 finally 中清理（提交 Bundle 之后）。
+        """
         evidence = await self._collect_evidence(ctx)
         workspace = Path(tempfile.mkdtemp(prefix="athena-report-"))
-        # 证据落到工作区：内层 LLM 可 read_file 读取（prompt「read them with read_file」）
-        (workspace / "evidence.md").write_text(evidence, encoding="utf-8")
-        inner = self._inner_builder(
-            "report", model=self._model, client=self._client, workspace=workspace
-        )
-        inner_ctx = AgentContext(
-            thread=ctx.thread,
-            turn=ctx.turn,
-            emit=ctx.emit,
-            tools=inner.tools,
-            cancel=ctx.cancel,
-            memory=ctx.memory,
-            input_text=f"Write the final report. Evidence:\n{evidence}",
-        )
-        await inner.run(inner_ctx)
-        report = (workspace / "report.md").read_text(encoding="utf-8")
-        ref = await DirectoryBundle.commit(
-            self._store,
-            {"report.md": await self._store.put_text(report)},
-            parent_ref=self._latest_ref,
-        )
-        self._latest_ref = ref
-        return AgentOutcome(result_ref=ref)
+        try:
+            # 证据落到工作区：内层 LLM 可 read_file 读取（prompt §inputs）
+            (workspace / "evidence.md").write_text(evidence, encoding="utf-8")
+            inner = self._inner_builder(
+                "report", model=self._model, client=self._client, workspace=workspace
+            )
+            inner_ctx = AgentContext(
+                thread=ctx.thread,
+                turn=ctx.turn,
+                emit=ctx.emit,
+                tools=inner.tools,
+                cancel=ctx.cancel,
+                memory=ctx.memory,
+                input_text="Write the final report. The evidence is in workspace/evidence.md — read it with read_file.",
+            )
+            await inner.run(inner_ctx)
+            report_path = workspace / "report.md"
+            if not report_path.is_file():
+                raise RuntimeError("LLM did not produce report.md")
+            report = report_path.read_text(encoding="utf-8")
+            ref = await DirectoryBundle.commit(
+                self._store,
+                {"report.md": await self._store.put_text(report)},
+                parent_ref=self._latest_ref,
+            )
+            self._latest_ref = ref
+            return AgentOutcome(result_ref=ref)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
     async def _collect_evidence(self, ctx: AgentContext) -> str:
         """从触发消息 content 与 context_refs 收集已批准证据文本。"""

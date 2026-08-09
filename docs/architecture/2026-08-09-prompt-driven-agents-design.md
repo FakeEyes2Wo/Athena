@@ -18,7 +18,7 @@ eval.py 模板）、`report_agent.py` 的整类。目标是把这些固定限制
 4. report_agent.py 删除，report 改为 prompt 驱动 agent。
 5. simple_agents.py 完善并改名 `builtin_agents.py`。
 6. 无 model 直接报错，不保留确定性回退；测试用 `.env` 真实 DeepSeek API
-   （`BASE_URL=https://api.deepseek.com`，模型 `deepseek:flash`）。
+   （`BASE_URL=https://api.deepseek.com`，模型 `deepseek-v4-flash`）。
 
 ## 目标架构
 
@@ -42,7 +42,7 @@ LLM(DeepSeek) ──ResponsesProvider──▶ Agent(ReAct) ──通用工具�
 
 - `load_dotenv()`（python-dotenv 已在 venv）。
 - 读取环境变量：`DEEPSEEK_API_KEY`（已有）、`BASE_URL`（用户加入，默认
-  `https://api.deepseek.com`）、`MODEL_NAME`（默认 `deepseek:flash`）。
+  `https://api.deepseek.com`）、`MODEL_NAME`（默认 `deepseek-v4-flash`）。
 - `get_client()` → `AsyncOpenAI(api_key=..., base_url=...)`；`default_model()`。
 - `provider.py` 的 `ResponsesProvider.client` 改为走 settings：优先注入的
   client，否则 `get_client()`（不再只认 `OPENAI_API_KEY`）。
