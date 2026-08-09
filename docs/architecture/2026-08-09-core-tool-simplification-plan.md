@@ -16,7 +16,7 @@
 - `@tool` 的 `description` 默认取**完整 docstring**（非首行）。
 - 不改 `ToolSpec` / `ToolResult` / `ToolContext` / `BaseTool` / `ToolRegistry` 结构，不改 runtime / `request_user_input` / 编排工具 / 论文域工具。
 - `generic_tool_registry(workspace: Path) -> ToolRegistry` 接口签名不变（src 消费方 `prompt_agent.py`、`test/unit/_support.py`、`test/unit/agent/test_data_agent.py` 依赖它）。
-- `pytest` 命令：Windows 下用 `python -m pytest`；慢/API 测试用 `-m "not slow"` 排除。
+- `pytest` 命令：Windows 下用 `.venv/Scripts/python -m pytest`；慢/API 测试用 `-m "not slow"` 排除。
 - 错误返回统一 `raise`（由 `_execute` 捕获为 `ToolResult(success=False)`）。
 
 ---
@@ -83,7 +83,7 @@ class TestToolAutoDerive:
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `python -m pytest test/unit/test_tool.py -v -k ToolAutoDerive`
+Run: `.venv/Scripts/python -m pytest test/unit/test_tool.py -v -k ToolAutoDerive`
 Expected: FAIL — `_bare_echo.spec.name` 是函数对象而非 `"_bare_echo"`（当前裸用 `@tool` 会把函数当 `name` 参数传入）。
 
 - [ ] **Step 3: 实现新 `@tool` + schema 助手**
@@ -198,7 +198,7 @@ def tool(
 
 - [ ] **Step 4: 运行确认通过**
 
-Run: `python -m pytest test/unit/test_tool.py -v`
+Run: `.venv/Scripts/python -m pytest test/unit/test_tool.py -v`
 Expected: PASS — 原有 `TestBaseTool`/`TestToolDecorator`/`TestToolRegistry` 与新 `TestToolAutoDerive` 全部通过。
 
 - [ ] **Step 5: Commit**
@@ -282,7 +282,7 @@ async def test_registry_has_four_tools(tmp_path: Path) -> None:
 
 - [ ] **Step 2: 运行确认 `test_read_file_missing_raises` 失败**
 
-Run: `python -m pytest test/unit/agent/test_generic_tools.py -v`
+Run: `.venv/Scripts/python -m pytest test/unit/agent/test_generic_tools.py -v`
 Expected: 除 `test_read_file_missing_raises` 外全 PASS；该用例 FAIL — 旧实现 `read_file` 缺失时返回 `error="file not found: ..."`，不含 `"FileNotFoundError"`。
 
 - [ ] **Step 3: 重写 `generic_tools.py`**
@@ -402,12 +402,12 @@ def generic_tool_registry(workspace: Path) -> ToolRegistry:
 
 - [ ] **Step 4: 运行确认全部通过**
 
-Run: `python -m pytest test/unit/agent/test_generic_tools.py -v`
+Run: `.venv/Scripts/python -m pytest test/unit/agent/test_generic_tools.py -v`
 Expected: PASS — 包括 `test_read_file_missing_raises`。
 
 - [ ] **Step 5: 回归依赖方**
 
-Run: `python -m pytest test/unit/_support.py test/unit/agent/test_data_agent.py test/unit/agent/test_builtin_agents.py -q -m "not slow"`
+Run: `.venv/Scripts/python -m pytest test/unit/_support.py test/unit/agent/test_data_agent.py test/unit/agent/test_builtin_agents.py -q -m "not slow"`
 Expected: PASS — `generic_tool_registry` 接口未变，消费方不受影响。
 
 - [ ] **Step 6: Commit**
@@ -444,7 +444,7 @@ git rm src/athena/agents/tools/script_tools.py test/unit/agents/test_script_tool
 
 - [ ] **Step 2: 全量回归**
 
-Run: `python -m pytest test -q -m "not slow"`
+Run: `.venv/Scripts/python -m pytest test -q -m "not slow"`
 Expected: PASS — 无任何模块引用已删除的脚本工具。
 
 - [ ] **Step 3: Commit**
