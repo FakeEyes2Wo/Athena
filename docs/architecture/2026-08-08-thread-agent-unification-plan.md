@@ -136,6 +136,7 @@ from pathlib import Path
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 from athena.app_server.thread_manager import RuntimeThreadManager
+from athena.memory.context_manager import ContextManager
 from athena.memory.rollout import resume_context_sync
 
 
@@ -159,7 +160,10 @@ class _MemoryRunner:
 
 
 async def test_deterministic_rollout_resumes_context(tmp_path: Path):
-    manager = RuntimeThreadManager(_MemoryRunner(), rollout_dir=tmp_path / "sessions")
+    # 必须传 ctx:否则 memory=None,runner 不写 memory,rollout 文件保持空
+    manager = RuntimeThreadManager(
+        _MemoryRunner(), ctx=ContextManager(), rollout_dir=tmp_path / "sessions"
+    )
     thread = await manager.start("agent-1", "ctx1")
     await manager.submit(thread.thread_id, "req1")
     await asyncio.sleep(0.05)  # 让 turn 跑完
@@ -190,9 +194,9 @@ Expected: FAIL — `TypeError: RuntimeThreadManager.__init__() got an unexpected
         self._rollout_dir = Path(rollout_dir) if rollout_dir is not None else None
         self._on_turn_terminal = on_turn_terminal
 ```
-2. `_make_runtime` 中 rollout 分支改为:
+2. `_make_runtime` 中 rollout 分支改为(注意:**`rollout_dir` 本身即隐式开启 rollout**,无需额外 `rollout=` 哨兵;否则 Task 3 门面/本测试不传 `rollout` 时持久化会被静默跳过):
 ```python
-        if self._memory_kwargs["rollout"] is not None:
+        if self._memory_kwargs["rollout"] is not None or self._rollout_dir is not None:
             recorder = RolloutRecorder(self._project_root)
             if self._rollout_dir is not None:
                 # 确定性路径:同一 agent_id(thread_id)重启复用同一 JSONL
@@ -1029,7 +1033,44 @@ async def test_human_reply_unknown_raises(tmp_path):
 Run: `python -m pytest test/unit/agent/test_agent_runtime_waits.py -v`
 Expected: FAIL — `AttributeError: 'AgentRuntime' object has no attribute 'wait_for'`
 
-- [ ] **Step 3: 在 `agent_runtime.py` 追加方法(放在 `cancel_run` 之后)**
+- [ ] **Step 3: 修复 Task 3 审查发现的两个 Important 缺陷(计划代码 bug,Task 4 一并处理)**
+
+在 `agent_runtime.py`:
+
+1. `_last_terminal_summary` 现在返回**最旧**而非最新摘要(按插入序迭代返回首个匹配)。改为反向迭代取最新:
+```python
+    def _last_terminal_summary(self, agent_id: AgentId) -> RunSummary:
+        for run_id in reversed(list(self._run_summaries.keys())):
+            summary = self._run_summaries[run_id]
+            if summary.agent_id == agent_id:
+                return summary
+        raise AgentCommandError(ErrorCode.NOT_FOUND, f"no run for agent: {agent_id}")
+```
+
+2. `wait_run` 现在把**调用方取消**(如 wait_agent 取消 pending 任务、外层 task.cancel)误当 turn 终态中断吞掉 → shutdown 悬挂。改为:捕获 `CancelledError` 后让终态回调落地(`await asyncio.sleep(0)`),查 run 摘要确为 INTERRUPTED 才返回,否则重抛:
+```python
+    async def wait_run(self, run_id: RunId, *, timeout: float | None = None) -> RunSummary:
+        agent_id = self._run_agent.get(run_id)
+        if agent_id is None:
+            raise KeyError(f"unknown run: {run_id}")
+        try:
+            result_ref = await asyncio.wait_for(self._manager.wait_turn(agent_id, run_id), timeout)
+        except asyncio.CancelledError:
+            # 区分 turn 终态中断与调用方取消:让终态回调先落地再判断,真实取消则传播。
+            await asyncio.sleep(0)
+            cached = self._run_summaries.get(run_id)
+            if cached is not None and cached.status == RunStatus.INTERRUPTED:
+                return cached
+            raise
+        except RuntimeError as exc:
+            return RunSummary(run_id=run_id, agent_id=agent_id, status=RunStatus.FAILED, error=str(exc))
+        summary = RunSummary(run_id=run_id, agent_id=agent_id, status=RunStatus.COMPLETED, response_ref=result_ref)
+        self._run_summaries[run_id] = summary
+        return summary
+```
+> 注:终态回调 `_on_turn_terminal` 在 `commit_interrupted` 中 `set_result` **之后**、同一事件循环内同步触发;`await asyncio.sleep(0)` 给 submission_loop 一次机会落地摘要。若摘要仍未出现,说明确实非终态中断,重抛 CancelledError(调用方取消)。
+
+- [ ] **Step 4: 在 `agent_runtime.py` 追加等待方法(放在 `cancel_run` 之后)**
 
 ```python
     # ---- 等待注册 / 唤醒 ----
@@ -1085,16 +1126,16 @@ Expected: FAIL — `AttributeError: 'AgentRuntime' object has no attribute 'wait
         await self._start_run(agent_id, req_ref)
 ```
 
-- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 5: 运行确认通过**
 
 Run: `python -m pytest test/unit/agent/ -v`
 Expected: 全过。若 `test_wait_for_resolves_when_target_terminal` 偶发不稳,把轮询 sleep 提到 0.05。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
 git add src/athena/core/agent/agent_runtime.py test/unit/agent/test_agent_runtime_waits.py
-git commit -m "feat: AgentRuntime wait_for/wait_for_human/human_reply via in-memory WaitRegistry"
+git commit -m "feat: AgentRuntime wait_for/wait_for_human/human_reply via in-memory WaitRegistry; fix last-terminal-summary + wait_run cancellation"
 ```
 
 ---
@@ -1168,19 +1209,19 @@ async def test_open_resume_restores_supervisor_rollout(tmp_path):
     from athena.research.project_runtime import ProjectRuntime
 
     pr1 = ProjectRuntime(tmp_path)
-    await pr1.register_defaults()
+    pr1.register_defaults()  # 同步方法,勿 await
     sid = await pr1.open(message="hello")
     rollout = tmp_path / ".athena" / "sessions" / f"{sid}.jsonl"
     assert rollout.exists()
     await pr1.close()
 
     pr2 = ProjectRuntime(tmp_path)
-    await pr2.register_defaults()
+    pr2.register_defaults()
     sid2 = await pr2.open(message="again")
     assert sid2 == sid  # 同一 supervisor id 恢复
     await pr2.close()
 ```
-> 注:`register_defaults` 是同步方法;`ProjectRuntime` 是否自动调用取决于现状,若未自动则测试里显式调用。
+> 注:`register_defaults` 是同步方法,不要 await;`ProjectRuntime` 是否自动调用取决于现状,若未自动则测试里显式调用。
 
 - [ ] **Step 6: 运行 + 提交**
 
