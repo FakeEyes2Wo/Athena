@@ -155,3 +155,48 @@ class TestToolRegistry:
         reg.register(_EchoTool())
         reg.register(_deco_echo)  # "deco_echo"
         assert [s.name for s in reg.specs] == ["deco_echo", "echo"]
+
+
+@tool
+async def _bare_echo(text: str, n: int = 2) -> dict:
+    """完整 docstring 作为 description。
+
+    第二行保留。
+    """
+    return {"text": text, "n": n}
+
+
+class TestToolAutoDerive:
+    def test_bare_tool_returns_base_tool(self):
+        assert isinstance(_bare_echo, BaseTool)
+
+    def test_bare_tool_derives_name(self):
+        assert _bare_echo.spec.name == "_bare_echo"
+
+    def test_bare_tool_full_docstring_description(self):
+        assert (
+            _bare_echo.spec.description
+            == "完整 docstring 作为 description。\n\n第二行保留。"
+        )
+
+    def test_bare_tool_derives_schema(self):
+        schema = _bare_echo.spec.input_schema
+        assert schema["type"] == "object"
+        assert schema["required"] == ["text"]
+        assert schema["properties"]["text"] == {"type": "string"}
+        assert schema["properties"]["n"] == {"type": "integer", "default": 2}
+
+    def test_optional_union_param_not_required(self):
+        @tool
+        async def _opt(path: str, start: int | None = None) -> dict:
+            """docstring."""
+            return {}
+
+        schema = _opt.spec.input_schema
+        assert schema["required"] == ["path"]
+        assert schema["properties"]["start"] == {"type": "integer"}
+
+    def test_decorated_tool_runs(self):
+        result = _bare_echo.invoke(text="hi")
+        assert result.success
+        assert result.data == {"text": "hi", "n": 2}

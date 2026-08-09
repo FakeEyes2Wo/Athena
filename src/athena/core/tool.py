@@ -1,9 +1,11 @@
 """BaseTool、ToolRegistry 和 ``@tool`` 装饰器。"""
 
 import asyncio
+import inspect
 import traceback
+import types
 from abc import ABC, abstractmethod
-from typing import Any, Callable
+from typing import Any, Callable, Union, get_args, get_origin
 
 from athena.core.tool_types import (
     TOOL_BEGIN,
@@ -70,24 +72,81 @@ class BaseTool(ABC):
         return result
 
 
+def _type_to_schema(annotation: Any) -> dict:
+    """Python 类型注解 → JSON Schema 片段（str/int/float/bool/list/dict/Optional）。
+
+    无法识别/未注解 → 空 dict（不约束该参数）。
+    """
+    if annotation is inspect.Parameter.empty or annotation is Any:
+        return {}
+    origin = get_origin(annotation)
+    if origin in (types.UnionType, Union):
+        args = [a for a in get_args(annotation) if a is not type(None)]
+        return _type_to_schema(args[0]) if args else {}
+    if annotation is str:
+        return {"type": "string"}
+    if annotation is int:
+        return {"type": "integer"}
+    if annotation is float:
+        return {"type": "number"}
+    if annotation is bool:
+        return {"type": "boolean"}
+    if origin is list or annotation is list:
+        items = get_args(annotation)
+        return {"type": "array", "items": _type_to_schema(items[0]) if items else {}}
+    if annotation is dict or origin is dict:
+        return {"type": "object"}
+    return {}
+
+
+def _schema_from_signature(fn: Any) -> dict:
+    """由函数签名生成 JSON Schema：无默认值 → required；非 None 默认值 → default。
+
+    ``*args``/``**kwargs`` 忽略；``X | None = None`` 视为可选且不写 default。
+    """
+    props: dict[str, dict] = {}
+    required: list[str] = []
+    for pname, p in inspect.signature(fn).parameters.items():
+        if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        prop = _type_to_schema(p.annotation)
+        if p.default is not inspect.Parameter.empty:
+            if p.default is not None:
+                prop["default"] = p.default
+        else:
+            required.append(pname)
+        props[pname] = prop
+    return {"type": "object", "properties": props, "required": required}
+
+
 def tool(
-    name: str | None = None,
+    _fn: Any | None = None,
     *,
+    name: str | None = None,
     description: str | None = None,
     input_schema: dict | None = None,
     **spec_kwargs: Any,
-) -> Callable[[Any], BaseTool]:
-    """装饰器：将异步函数转为 ``BaseTool`` 实例。"""
+) -> Any:
+    """装饰器：把异步函数转成 ``BaseTool`` 实例。
 
-    def deco(fn):
-        doc = (fn.__doc__ or "").strip()
-        desc = description or (doc.split("\n")[0] if doc else fn.__name__)
+    支持裸用 ``@tool`` 与带参 ``@tool(name=..., description=..., input_schema=...)``
+    两种写法。未显式给出的 name/description/input_schema 分别由函数名、**完整
+    docstring**、类型注解自动推导。
+    """
+
+    def deco(fn: Any) -> BaseTool:
+        spec_name = name or fn.__name__
+        doc = inspect.cleandoc(fn.__doc__ or "")
+        spec_desc = description if description is not None else (doc or fn.__name__)
+        schema = (
+            input_schema if input_schema is not None else _schema_from_signature(fn)
+        )
 
         class _T(BaseTool):
             spec = ToolSpec(
-                name=name or fn.__name__,
-                description=desc,
-                input_schema=input_schema or {"type": "object", "properties": {}},
+                name=spec_name,
+                description=spec_desc,
+                input_schema=schema,
                 **spec_kwargs,
             )
 
@@ -99,7 +158,7 @@ def tool(
         _T.__doc__ = fn.__doc__
         return _T()
 
-    return deco
+    return deco(_fn) if _fn is not None else deco
 
 
 class ToolRegistry:
