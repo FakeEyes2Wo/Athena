@@ -67,3 +67,9 @@ XH-202619.pdf
 
 # Rust build artifacts
 athena-rust/target/
+
+# Local session state & smoke artifacts
+.claude/loop_eval_state.json
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+_smoke_artifacts/
