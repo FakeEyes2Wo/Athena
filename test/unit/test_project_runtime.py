@@ -315,7 +315,7 @@ async def test_ideator_code_report_are_real_factories(tmp_path) -> None:
 
 
 from athena.agents.base_runner import BaseAgentRunner
-from athena.agents.simple_agents import IdeatorAgent
+from athena.agents.builtin_agents import IdeatorAgent
 from athena.core.agent.models import AgentOutcome
 from athena.core.agent.codec import JsonCodec
 from athena.core.agent.types import AgentSpec
@@ -349,7 +349,7 @@ async def test_injectable_real_impl_delegates(tmp_path) -> None:
 
 
 import athena.agents.production as production
-from athena.agents.simple_agents import IdeatorAgent
+from athena.agents.builtin_agents import IdeatorAgent
 
 
 class _FakeResult:

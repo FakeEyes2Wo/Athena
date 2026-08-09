@@ -24,7 +24,7 @@ from athena.agents.reflection_agent import (
     evaluate_data_analysis_review,
 )
 from athena.agents.report_agent import ReportAgent
-from athena.agents.simple_agents import CodeAgent, IdeatorAgent, PlotAgent
+from athena.agents.builtin_agents import CodeAgent, IdeatorAgent, PlotAgent
 from athena.agents.supervisor import SupervisorAgent
 from athena.core.agent.agent_runtime import AgentRuntime
 

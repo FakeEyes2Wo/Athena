@@ -1230,7 +1230,7 @@ async def test_cancel_closes_owned_manager_and_cancels_all_active_agents(
 async def test_ideator_agent_wires_real_ideator(tmp_path) -> None:
     """IdeatorAgent 接入真实 Ideator：注入 ideator + project 时运行辩论生成。"""
     from athena.agents.production import IdeatorInputs, ideator_run_impl
-    from athena.agents.simple_agents import IdeatorAgent
+    from athena.agents.builtin_agents import IdeatorAgent
     from athena.core.agent.models import AgentContext
     from athena.core.thread_models import AthenaThread, AthenaTurn
     from athena.core.tool import ToolRegistry

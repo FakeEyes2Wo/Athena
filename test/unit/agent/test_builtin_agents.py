@@ -1,6 +1,6 @@
-"""simple_agents（Code/Ideator/Plot）确定性业务 Agent 测试。
+"""builtin_agents（Code/Ideator/Plot）确定性业务 Agent 测试。
 
-覆盖合并后的 :mod:`athena.agents.simple_agents`：CodeAgent/IdeatorAgent 的
+覆盖合并后的 :mod:`athena.agents.builtin_agents`：CodeAgent/IdeatorAgent 的
 确定性 JSON payload 形状与 run_impl 委托，以及 PlotAgent 的图片/图注产出。
 """
 
@@ -9,7 +9,7 @@ import json
 import pytest
 
 from athena.agents.base_runner import BaseAgentRunner
-from athena.agents.simple_agents import CodeAgent, IdeatorAgent, PlotAgent
+from athena.agents.builtin_agents import CodeAgent, IdeatorAgent, PlotAgent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.models import AgentOutcome
 from athena.core.agent.registry import AgentTypeRegistry
