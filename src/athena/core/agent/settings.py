@@ -8,7 +8,7 @@ from openai import AsyncOpenAI
 load_dotenv()
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek:flash"
+DEFAULT_MODEL = "deepseek-v4-flash"
 
 
 def _resolve(key: str, default: str | None = None) -> str | None:
@@ -27,7 +27,7 @@ def base_url() -> str:
 
 
 def model_name() -> str:
-    """默认 deepseek:flash（最便宜档位），可经 MODEL_NAME 覆盖。"""
+    """默认 deepseek-v4-flash（最便宜档位），可经 MODEL_NAME 覆盖。"""
     return _resolve("MODEL_NAME", DEFAULT_MODEL) or DEFAULT_MODEL
 
 

@@ -10,7 +10,7 @@ def test_settings_defaults_when_env_unset(monkeypatch):
     monkeypatch.delenv("BASE_URL", raising=False)
     monkeypatch.delenv("MODEL_NAME", raising=False)
     assert settings.base_url() == "https://api.deepseek.com"
-    assert settings.model_name() == "deepseek:flash"
+    assert settings.model_name() == "deepseek-v4-flash"
     assert settings.api_key() is None
 
 
