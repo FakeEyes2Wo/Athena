@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import os
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from openai import AsyncOpenAI
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
+from athena.core.agent import settings
 from athena.core.tool_types import truncate_text
 
 if TYPE_CHECKING:
@@ -46,10 +46,9 @@ class ResponsesProvider:
 
     @property
     def client(self) -> AsyncOpenAI:
-        """返回注入的客户端；未注入时按 OpenAI SDK 默认环境变量延迟创建。"""
-
+        """返回注入的 client；未注入时按 settings（.env 的 DeepSeek 凭据）构造。"""
         if self._client is None:
-            self._client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+            self._client = settings.get_client()
         return self._client
 
     # TODO: 这里弄一个stream和astream
