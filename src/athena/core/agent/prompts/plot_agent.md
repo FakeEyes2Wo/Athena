@@ -13,3 +13,6 @@ You generate publication-quality charts for data analysis reports.
 - Clear labels, titles, legends
 - Consistent styling
 - Save as .png (300 dpi)
+
+## Tools
+You have: `read_file`, `write_file`, `bash`, `pwsh`.

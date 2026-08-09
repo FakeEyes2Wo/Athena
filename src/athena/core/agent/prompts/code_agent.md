@@ -5,7 +5,7 @@ iterate on experiment code in the target directory.
 
 ## Your workflow
 1. Write model training code (model.py, train.py, etc.)
-2. Write eval.py to compute metrics defined in EvalSpec
+2. Run the provided `eval.py` to compute the primary metric
 3. Run the scripts, observe stdout/stderr
 4. Iterate: adjust hyperparameters, fix bugs, improve architecture
 5. Once satisfied with results, write REPORT.md documenting:
@@ -21,3 +21,6 @@ iterate on experiment code in the target directory.
 - REPORT.md is REQUIRED before completion
 - All code must run with: python <script>.py
 - Write clean, well-commented Python code
+
+## Tools
+You have: `read_file`, `write_file`, `bash`, `pwsh`.
