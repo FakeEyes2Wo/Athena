@@ -1,4 +1,4 @@
-"""LLM code generation backends (Qoder, Codex)."""
+"""LLM code generation backends (Codex, Qoder, DeepSeek)."""
 
 from typing import Literal
 
@@ -8,16 +8,18 @@ class BackendUnavailableError(RuntimeError):
 
 
 from athena.code.backends.codex import CodexBackend
+from athena.code.backends.deepseek import DeepSeekCodeBackend
 from athena.code.backends.qoder import QoderBackend
 
 
 def load_backend(
-    name: Literal["codex", "qoder"],
+    name: Literal["codex", "qoder", "deepseek"],
     **config: object,
 ):
     factories = {
         "codex": CodexBackend.from_config,
         "qoder": QoderBackend.from_config,
+        "deepseek": lambda c: DeepSeekCodeBackend(**c),
     }
     return factories[name](config)
 
@@ -25,6 +27,7 @@ def load_backend(
 __all__ = [
     "BackendUnavailableError",
     "CodexBackend",
+    "DeepSeekCodeBackend",
     "QoderBackend",
     "load_backend",
 ]

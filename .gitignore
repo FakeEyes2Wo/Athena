@@ -55,6 +55,9 @@ XH-202619.pdf
 !/data_analyze/EDA.md/
 !/data_analyze/EDA.md/.gitkeep
 
+# Titanic research workflow experiment output
+/examples/titanic-run/
+
 # AI Agent Skills
 .agents/skills/
 
