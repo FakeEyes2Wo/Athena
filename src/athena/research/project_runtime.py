@@ -320,7 +320,7 @@ class ProjectRuntime:
         data_id, run1 = await self._runtime.create_root(
             "data", _request(payload), name="data-root"
         )
-        await self._runtime.wait_run(run1, timeout=10)
+        await self._runtime.wait_run(run1, timeout=300)
         chains = self._bundle.chains()
         if not chains:
             raise RuntimeError("DataAgent produced no analysis chain")
@@ -329,7 +329,7 @@ class ProjectRuntime:
         _, run2 = await self._runtime.create_root(
             "reflection", _request({"data_analysis_ref": v1}), name="reflection-root"
         )
-        summary2 = await self._runtime.wait_run(run2, timeout=10)
+        summary2 = await self._runtime.wait_run(run2, timeout=300)
         review_ref = json.loads(summary2.response_ref)["result_ref"]
         # EvaluationPolicy（确定性）：按 rubric/score 判定，不解释报告正文
         verdict = await evaluate_data_analysis_review(self._store, review_ref)
@@ -337,7 +337,7 @@ class ProjectRuntime:
             return v1
         # failed → follow-up 原 DataAgent 提交修订版
         run3 = await self._runtime.followup(data_id, _request(payload))
-        await self._runtime.wait_run(run3, timeout=10)
+        await self._runtime.wait_run(run3, timeout=300)
         v2 = self._bundle.latest(analysis_id)
         if v2 is None:
             raise RuntimeError("revision produced no new version")
@@ -368,7 +368,7 @@ class ProjectRuntime:
         _, run = await self._runtime.create_root(
             "init", _request(request), name="init-root"
         )
-        summary = await self._runtime.wait_run(run, timeout=10)
+        summary = await self._runtime.wait_run(run, timeout=300)
         payload = json.loads(summary.response_ref)
         result_ref = payload["result_ref"]
         init_result = json.loads(await self._store.get_text(result_ref))
@@ -390,7 +390,7 @@ class ProjectRuntime:
         _, run_id = await self._runtime.create_root(
             "ideator", {"content": hypothesis}, name="ideator-root"
         )
-        summary = await self._runtime.wait_run(run_id, timeout=10)
+        summary = await self._runtime.wait_run(run_id, timeout=300)
         response = json.loads(summary.response_ref)
         hypothesis_ref = response["result_ref"]
         # 把 Ideator 假设提交到 ResearchTree（设计 §4 所有权）
@@ -406,7 +406,7 @@ class ProjectRuntime:
         _, code_run = await self._runtime.create_root(
             "code", {"content": f"implement {hypothesis}"}, name="code-root"
         )
-        code_summary = await self._runtime.wait_run(code_run, timeout=10)
+        code_summary = await self._runtime.wait_run(code_run, timeout=300)
         code_response = json.loads(code_summary.response_ref)
         candidate_ref = code_response["result_ref"]
         self._budget.consume(improved=True)  # 确定性骨架：每次假设视为改进
@@ -428,7 +428,7 @@ class ProjectRuntime:
         _, run_id = await self._runtime.create_root(
             "code", {"content": f"validate {experiment_ref}"}, name="validate-root"
         )
-        summary = await self._runtime.wait_run(run_id, timeout=10)
+        summary = await self._runtime.wait_run(run_id, timeout=300)
         response = json.loads(summary.response_ref)
         validation_ref = response["result_ref"]
         self._validation_ref = validation_ref  # VALIDATE 完成事实：final-test 已记录
@@ -448,13 +448,13 @@ class ProjectRuntime:
         report_id, run1 = await self._runtime.create_root(
             "report", {"content": report_text}, name="report-root"
         )
-        summary1 = await self._runtime.wait_run(run1, timeout=10)
+        summary1 = await self._runtime.wait_run(run1, timeout=300)
         v1 = json.loads(summary1.response_ref)["result_ref"]
         # Reflection 只读评审 v1，产出报告 rubric + score
         _, run2 = await self._runtime.create_root(
             "reflection", _request({"report_ref": v1}), name="report-review-root"
         )
-        summary2 = await self._runtime.wait_run(run2, timeout=10)
+        summary2 = await self._runtime.wait_run(run2, timeout=300)
         review_ref = json.loads(summary2.response_ref)["result_ref"]
         # EvaluationPolicy（确定性）：按 rubric/score 判定
         verdict = await evaluate_data_analysis_review(self._store, review_ref)
@@ -464,7 +464,7 @@ class ProjectRuntime:
             return v1
         # failed → follow-up 原 ReportAgent 提交修订版 v2
         run3 = await self._runtime.followup(report_id, {"content": report_text})
-        summary3 = await self._runtime.wait_run(run3, timeout=10)
+        summary3 = await self._runtime.wait_run(run3, timeout=300)
         v2 = json.loads(summary3.response_ref)["result_ref"]
         return v2
 
