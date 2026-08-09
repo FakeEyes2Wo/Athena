@@ -20,8 +20,7 @@ from athena.agents.data_agent import DataAgent
 from athena.agents.ideator import DebateResult, Ideator, IdeatorConfig
 from athena.agents.orchestration import RunToolProjector
 from athena.agents.reflection_agent import ReflectionAgent
-from athena.agents.report_agent import ReportAgent
-from athena.agents.builtin_agents import CodeAgent, IdeatorAgent, PlotAgent
+from athena.agents.builtin_agents import CodeAgent, IdeatorAgent, PlotAgent, ReportAgent
 from athena.agents.supervisor import SupervisorAgent
 
 __all__ = [

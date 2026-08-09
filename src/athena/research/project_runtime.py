@@ -24,8 +24,7 @@ from athena.agents.reflection_agent import (
     ReflectionAgent,
     evaluate_data_analysis_review,
 )
-from athena.agents.report_agent import ReportAgent
-from athena.agents.builtin_agents import CodeAgent, IdeatorAgent, PlotAgent
+from athena.agents.builtin_agents import CodeAgent, IdeatorAgent, PlotAgent, ReportAgent
 from athena.agents.supervisor import SupervisorAgent
 from athena.core.agent.agent_runtime import AgentRuntime
 
@@ -189,10 +188,9 @@ class ProjectRuntime:
         """注册静态业务类型；model 必填（LLM 驱动，无回退）。
 
         调用方必须显式传 ``model=settings.model_name()``；缺省直接报错，不再
-        静默走确定性。``inner_builder`` 是 data/init 内层 LLM agent 的测试接缝
-        （缺省 ``build_llm_agent``）：单测注入 fake provider 避免真实 API。
-        supervisor/reflection/plot/ideator/code 保持确定性、构造器不变；report
-        由 ReportAgent 自行管理 model（可调用对象而非字符串），注册时不传参。
+        静默走确定性。``inner_builder`` 是 data/init/report 内层 LLM agent 的
+        测试接缝（缺省 ``build_llm_agent``）：单测注入 fake provider 避免真实
+        API。supervisor/reflection/plot/ideator/code 保持确定性、构造器不变。
         """
         if model is None:
             raise RuntimeError(
@@ -269,7 +267,15 @@ class ProjectRuntime:
         self._registry.register(
             "report",
             lambda _aid, _cfg=None: AgentSpec(
-                runner=BaseAgentRunner(ReportAgent(self._store)), codec=JsonCodec()
+                runner=BaseAgentRunner(
+                    ReportAgent(
+                        self._store,
+                        model=model,
+                        client=client,
+                        inner_builder=inner_builder,
+                    )
+                ),
+                codec=JsonCodec(),
             ),
         )
 

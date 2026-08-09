@@ -82,8 +82,10 @@ def fake_inner_builder(agent_type, *, model, client, workspace):
 
     模拟真实 LLM 的产物：data（data_agent prompt 要求 workspace 根 report.md +
     至少一张 ``figures/*`` 图）、init（init_agent.md prompt 要求
-    ``task_understanding.md`` + ``eval.py``），让外层编排（DataAgent 收集-提交 /
-    InitAgent 收集-打包）不依赖真实 API。
+    ``task_understanding.md`` + ``eval.py``）、report（report_agent.md prompt
+    要求 ``report.md``；fake 把 ReportAgent 收集落盘的 ``evidence.md`` 作为报告
+    正文，模拟 LLM 综合证据）。让外层编排（DataAgent 收集-提交 / InitAgent
+    收集-打包 / ReportAgent 收集-提交）不依赖真实 API。
     """
     ws = Path(workspace)
     ws.mkdir(parents=True, exist_ok=True)
@@ -92,6 +94,12 @@ def fake_inner_builder(agent_type, *, model, client, workspace):
             FAKE_TASK_UNDERSTANDING, encoding="utf-8"
         )
         (ws / "eval.py").write_text(FAKE_EVAL_PY, encoding="utf-8")
+    elif agent_type == "report":
+        evidence_path = ws / "evidence.md"
+        evidence = (
+            evidence_path.read_text(encoding="utf-8") if evidence_path.is_file() else ""
+        )
+        (ws / "report.md").write_text(evidence, encoding="utf-8")
     else:
         figures = ws / "figures"
         figures.mkdir(exist_ok=True)

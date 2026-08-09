@@ -1,17 +1,24 @@
-"""小型确定性业务 Agent（Code / Ideator / Plot）。
+"""业务 Agent（Code / Ideator / Plot / Report）。
 
-三个 agent 遵循同一形态：``BaseAgent`` 子类，可选注入 ``run_impl``（生产真实
-逻辑），缺省用确定性实现把输入写为 Artifact。代码生成/修订（§4.5）与假设生成
-（§4.4）共享 JSON-sink 基类，仅缺省 payload 不同；通用绘图（§3.2）直接写图片
-字节与 JSON payload。复杂 Agent（data/init/reflection/report/supervisor）保持
-独立文件。
+小型 Agent（Code/Ideator/Plot）遵循同一形态：``BaseAgent`` 子类，可选注入
+``run_impl``（生产真实逻辑），缺省用确定性实现把输入写为 Artifact。代码生成/
+修订（§4.5）与假设生成（§4.4）共享 JSON-sink 基类，仅缺省 payload 不同；通用
+绘图（§3.2）直接写图片字节与 JSON payload。ReportAgent 是外层编排器：收集已
+批准证据 → 驱动内层 LLM agent（prompt=``report_agent.md``）→ 提交 report Bundle。
+其余复杂 Agent（data/init/reflection/supervisor）保持独立文件。
 """
 
 import json
+import tempfile
 from collections.abc import Awaitable, Callable
+from pathlib import Path
+from typing import Any
 
+from athena.agents.prompt_agent import build_llm_agent
 from athena.core.agent.models import AgentContext, AgentOutcome
-from athena.core.agent.runtime import BaseAgent
+from athena.core.agent.runtime import Agent, BaseAgent
+from athena.core.artifact_store import ArtifactNotFoundError, InvalidArtifactRefError
+from athena.core.bundle import DirectoryBundle
 from athena.core.contracts import ArtifactStore
 
 Impl = Callable[[AgentContext], Awaitable[AgentOutcome]]
@@ -91,3 +98,76 @@ class PlotAgent(BaseAgent):
         }
         result_ref = await self._store.put_text(json.dumps(payload, ensure_ascii=False))
         return AgentOutcome(result_ref=result_ref)
+
+
+class ReportAgent(BaseAgent):
+    """最终报告综合 Agent（prompt 驱动内层 LLM agent）。
+
+    外层确定性编排（类似 DataAgent/InitAgent）：从触发消息收集已批准证据
+    （``input_text`` + ``messages[].context_refs``）→ 构造内层 LLM ReAct agent
+    （prompt=``report_agent.md`` + 通用工具，cwd=workspace）→ 运行（LLM 按 prompt
+    写 ``report.md``）→ 收集 → 提交不可变目录 Bundle。证据同时落到
+    ``workspace/evidence.md``，供内层 LLM 用 ``read_file`` 读取（prompt §inputs）。
+    修订 follow-up 原实例，新版本以 ``parent_ref`` 链接，旧版本不删除。
+
+    只综合已批准证据，不运行实验、不修改指标、不补造证据。
+    """
+
+    name = "report-agent"
+    description = "综合已批准证据生成最终报告 Bundle"
+
+    def __init__(
+        self,
+        store: ArtifactStore,
+        *,
+        model: str,
+        client: Any = None,
+        inner_builder: Callable[..., Agent] | None = None,
+    ) -> None:
+        self._store = store
+        self._model = model
+        self._client = client
+        self._inner_builder = inner_builder or build_llm_agent
+        self._latest_ref: str | None = None
+
+    async def run(self, ctx: AgentContext) -> AgentOutcome:
+        """驱动内层 LLM agent 产出报告，收集后提交 report Bundle。"""
+        evidence = await self._collect_evidence(ctx)
+        workspace = Path(tempfile.mkdtemp(prefix="athena-report-"))
+        # 证据落到工作区：内层 LLM 可 read_file 读取（prompt「read them with read_file」）
+        (workspace / "evidence.md").write_text(evidence, encoding="utf-8")
+        inner = self._inner_builder(
+            "report", model=self._model, client=self._client, workspace=workspace
+        )
+        inner_ctx = AgentContext(
+            thread=ctx.thread,
+            turn=ctx.turn,
+            emit=ctx.emit,
+            tools=inner.tools,
+            cancel=ctx.cancel,
+            memory=ctx.memory,
+            input_text=f"Write the final report. Evidence:\n{evidence}",
+        )
+        await inner.run(inner_ctx)
+        report = (workspace / "report.md").read_text(encoding="utf-8")
+        ref = await DirectoryBundle.commit(
+            self._store,
+            {"report.md": await self._store.put_text(report)},
+            parent_ref=self._latest_ref,
+        )
+        self._latest_ref = ref
+        return AgentOutcome(result_ref=ref)
+
+    async def _collect_evidence(self, ctx: AgentContext) -> str:
+        """从触发消息 content 与 context_refs 收集已批准证据文本。"""
+        parts: list[str] = []
+        if ctx.input_text:
+            parts.append(ctx.input_text)
+        for message in ctx.messages:
+            for ref in message.context_refs:
+                try:
+                    parts.append(f"## {ref}\n{await self._store.get_text(ref)}")
+                except (ArtifactNotFoundError, InvalidArtifactRefError):
+                    # 引用 artifact 不存在/无效 → 标记不可读，不中断报告生成
+                    parts.append(f"## {ref}\n(unreadable)")
+        return "\n\n".join(parts) or ""

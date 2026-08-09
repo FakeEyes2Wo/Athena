@@ -11,7 +11,7 @@ from athena.core.agent.types import AgentCommandError, AgentStatus
 from athena.research.models import MetricSpec, TaskMetaData
 from athena.research.project_runtime import ProjectRuntime
 from athena.core.bundle import DirectoryBundle
-from test.unit._support import make_project
+from test.unit._support import fake_inner_builder, make_project
 
 
 @pytest.mark.asyncio
@@ -463,42 +463,51 @@ async def test_run_report_failed_then_revised(tmp_path) -> None:
     await project.close()
 
 
-from athena.agents.report_agent import ReportAgent
-
-
 @pytest.mark.asyncio
-async def test_report_agent_model_path_synthesizes_from_user_input(tmp_path) -> None:
-    """ReportAgent 真实路径：设计 prompt + UserInput（content + context_refs）→ 报告 Bundle。"""
-    project = make_project(tmp_path)
-    await project.open()
+async def test_report_prompt_driven_evidence_reaches_inner_agent(tmp_path) -> None:
+    """report 编排器（prompt 驱动）：证据（input + context_refs）进入内层 LLM input，Bundle 含 report.md。"""
+    from athena.core.agent import settings
+
     captured: list[str] = []
 
-    async def fake_model(prompt: str) -> str:
-        captured.append(prompt)
-        return "# 报告\n\n基于证据的综合。"
+    def capture_builder(agent_type, *, model, client, workspace):
+        inner = fake_inner_builder(
+            agent_type, model=model, client=client, workspace=workspace
+        )
 
-    agent = ReportAgent(project.store, model=fake_model)
-    project.kernel._registry.register(
-        "report-model",
-        lambda _aid, _cfg=None: AgentSpec(
-            runner=BaseAgentRunner(agent), codec=JsonCodec()
-        ),
+        class _Capture:
+            def __init__(self, agent):
+                self._agent = agent
+
+            @property
+            def tools(self):
+                return self._agent.tools
+
+            async def run(self, ctx):
+                captured.append(ctx.input_text or "")
+                return await self._agent.run(ctx)
+
+        return _Capture(inner)
+
+    project = ProjectRuntime(tmp_path)
+    project.register_defaults(
+        model=settings.model_name(), inner_builder=capture_builder
     )
+    await project.open()
     evidence_ref = await project.store.put_text("已批准证据正文")
     _, run_id = await project.kernel.create_root(
-        "report-model",
+        "report",
         {"content": "请撰写最终报告", "context_refs": [evidence_ref]},
-        name="report-model-root",
+        name="report-root",
     )
     summary = await project.kernel.wait_run(run_id, timeout=2)
     assert summary.status.value == "completed"
-    assert "已批准证据正文" in captured[0]  # UserInput 证据进入 prompt
-    assert "请撰写最终报告" in captured[0]
+    assert captured and "已批准证据正文" in captured[0]  # artifact 证据进入内层 input
+    assert "请撰写最终报告" in captured[0]  # 触发内容（input_text）进入内层 input
     result_ref = json.loads(summary.response_ref)["result_ref"]
     files = await DirectoryBundle.files(project.store, result_ref)
-    assert (
-        await project.store.get_text(files["report.md"]) == "# 报告\n\n基于证据的综合。"
-    )
+    assert "report.md" in files  # 提交目录 Bundle 含 report.md
+    assert await project.store.get_text(files["report.md"])  # 非空（综合证据的报告）
     await project.close()
 
 
