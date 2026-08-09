@@ -16,6 +16,7 @@
 import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from athena.code.execution import ExecutionRequest, LocalExperimentRuntime
 from athena.core.agent.models import AgentContext, AgentOutcome
@@ -187,12 +188,17 @@ class DataAgent(BaseAgent):
         *,
         runtime=None,
         script: str | None = None,
+        model: str | None = None,
+        client: Any = None,
     ) -> None:
         self._store = store
         self._bundle = bundle
         self._owner = owner_agent_id
         self._runtime = runtime or LocalExperimentRuntime()
         self._script = script or DEFAULT_ANALYSIS_SCRIPT
+        # model/client 本任务仅暂存（Task 6 启用 LLM 驱动时消费）
+        self._model = model
+        self._client = client
         self.analysis_id: str | None = None
         self.latest_ref: str | None = None
 

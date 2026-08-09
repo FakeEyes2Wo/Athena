@@ -9,7 +9,9 @@ def test_code_agent_assets_have_canonical_owners() -> None:
     assert {path.name for path in prompt_dir.glob("*_agent.md")} == {
         "code_agent.md",
         "data_agent.md",
+        "init_agent.md",
         "plot_agent.md",
+        "report_agent.md",
     }
     assert CODE_AGENT_SPEC.must_exist == ["REPORT.md"]
     assert DATA_AGENT_SPEC.must_exist == ["EDA.md", "feature_process.csv"]

@@ -22,6 +22,7 @@ eval.py 契约（自包含，纯 numpy，不依赖 sklearn/scipy）：读当前�
 """
 
 import json
+from typing import Any
 
 import pandas as pd
 
@@ -104,8 +105,17 @@ class InitAgent(BaseAgent):
     name = "init-agent"
     description = "理解任务并生成冻结的 eval.py 评估脚本"
 
-    def __init__(self, store: ArtifactStore) -> None:
+    def __init__(
+        self,
+        store: ArtifactStore,
+        *,
+        model: str | None = None,
+        client: Any = None,
+    ) -> None:
         self._store = store
+        # model/client 本任务仅暂存（Task 8 启用 LLM 驱动时消费）
+        self._model = model
+        self._client = client
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
         request = json.loads(ctx.input_text or "{}")

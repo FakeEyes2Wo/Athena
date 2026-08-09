@@ -191,9 +191,19 @@ class ProjectRuntime:
     def register_defaults(
         self, *, model: str | None = None, client: Any = None
     ) -> None:
-        """注册静态业务类型（确定性实现，每实例 factory）。"""
-        # 首版框架：LLM_AGENT_MAPPING 为空，全部保持确定性骨架。
-        # 后续填充映射 + 传入 model 时，改用 create_agent_for 注册 LLM Agent。
+        """注册静态业务类型；model 必填（LLM 驱动，无回退）。
+
+        调用方必须显式传 ``model=settings.model_name()``；缺省直接报错，不再
+        静默走确定性。各 agent 构造器已接收 model/client（本任务先透传暂存，
+        Task 6/8/9 再启用）。supervisor/reflection/plot/ideator/code 本任务
+        保持确定性、构造器不变；report 由 ReportAgent 自行管理 model（可调用
+        对象而非字符串），注册时不传参。
+        """
+        if model is None:
+            raise RuntimeError(
+                "register_defaults requires a model: set MODEL_NAME + "
+                "DEEPSEEK_API_KEY/BASE_URL in .env and pass model=..."
+            )
         self._registry.register(
             "supervisor",
             lambda _aid, _cfg=None: AgentSpec(
@@ -208,13 +218,20 @@ class ProjectRuntime:
         self._registry.register(
             "init",
             lambda _aid, _cfg=None: AgentSpec(
-                runner=BaseAgentRunner(InitAgent(self._store)), codec=JsonCodec()
+                runner=BaseAgentRunner(
+                    InitAgent(self._store, model=model, client=client)
+                ),
+                codec=JsonCodec(),
             ),
         )
         self._registry.register(
             "data",
             lambda aid, _cfg=None: AgentSpec(
-                runner=BaseAgentRunner(DataAgent(self._store, self._bundle, aid)),
+                runner=BaseAgentRunner(
+                    DataAgent(
+                        self._store, self._bundle, aid, model=model, client=client
+                    )
+                ),
                 codec=JsonCodec(),
             ),
         )

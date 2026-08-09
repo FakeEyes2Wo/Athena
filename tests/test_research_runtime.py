@@ -11,6 +11,7 @@ import pytest
 from athena.research import ResearchMethod, ResearchRuntime
 from athena.research.project_runtime import ProjectRuntime
 from athena.research.models import MetricSpec, TaskMetaData
+from test.unit._support import make_project
 
 
 def _dataset(tmp_path: Path) -> Path:
@@ -39,8 +40,7 @@ def _task_params() -> dict[str, object]:
 
 
 async def _make_runtime(tmp_path) -> tuple[ResearchRuntime, ProjectRuntime]:
-    project = ProjectRuntime(tmp_path)
-    project.register_defaults()
+    project = make_project(tmp_path)
     await project.open()
     return ResearchRuntime(project=project), project
 

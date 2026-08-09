@@ -7,7 +7,7 @@ import websockets
 
 from gui_gateway.__main__ import start_server
 from athena.research import ResearchRuntime
-from athena.research.project_runtime import ProjectRuntime
+from test.unit._support import make_project
 
 
 async def _response(ws, request_id: int) -> dict:
@@ -19,8 +19,7 @@ async def _response(ws, request_id: int) -> dict:
 
 @pytest.mark.asyncio
 async def test_full_chat_flow(tmp_path) -> None:
-    project = ProjectRuntime(tmp_path)
-    project.register_defaults()
+    project = make_project(tmp_path)
     await project.open()
     dataset = tmp_path / "dataset.csv"
     pd.DataFrame({"age": range(20), "label": [0, 1] * 10}).to_csv(dataset, index=False)
