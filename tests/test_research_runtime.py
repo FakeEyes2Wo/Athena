@@ -1,116 +1,393 @@
-"""ResearchRuntime 翻译层测试（dynamic-orchestration §8 条件 7）。
+"""ResearchRuntime 公开门面测试（supervisor_design §3 控制面）。
 
-ResearchRuntime 不再拥有第二套生命周期；dispatch 委托 ProjectRuntime。
+ResearchRuntime 是 Supervisor 子系统的唯一公开门面；dispatch 只暴露新的控制面
+方法（PARSE_INTENT/TASK_CONFIGURE/RUN/PAUSE/RESUME/STOP/STATUS/...），不再有
+SEARCH_START/VALIDATE_START 等阶段推进命令。
 """
 
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from athena.research import ResearchMethod, ResearchRuntime
-from athena.research.project_runtime import ProjectRuntime
-from athena.research.models import MetricSpec, TaskMetaData
 from test.unit._support import make_project
 
 
-def _dataset(tmp_path: Path) -> Path:
-    """写一个小型 CSV，供 DataAgent 脚本分析。"""
-    path = tmp_path / "dataset.csv"
-    pd.DataFrame({"age": range(20), "label": [0, 1] * 10}).to_csv(path, index=False)
-    return path
-
-
-def _task() -> TaskMetaData:
-    return TaskMetaData(
-        task_type="classification",
-        data_type="tabular",
-        primary_metric=MetricSpec(name="accuracy", direction="maximize"),
-    )
-
-
-def _task_params() -> dict[str, object]:
+def _task_params(data_path: str = "") -> dict[str, object]:
     return {
         "task_type": "classification",
         "data_type": "tabular",
         "target_vars": ["label"],
         "primary_metric": "f1_macro",
         "direction": "maximize",
+        "data_path": data_path,
+        "target": "label",
     }
 
 
-async def _make_runtime(tmp_path) -> tuple[ResearchRuntime, ProjectRuntime]:
-    project = make_project(tmp_path)
-    await project.open()
-    return ResearchRuntime(project=project), project
+async def _make_runtime(tmp_path: Path) -> ResearchRuntime:
+    runtime = make_project(tmp_path)
+    return runtime
 
 
 @pytest.mark.asyncio
-async def test_runtime_delegates_phase_to_project(tmp_path) -> None:
-    """§8：phase 由 ProjectRuntime 投影，不保存在 ResearchRuntime。"""
-    runtime, project = await _make_runtime(tmp_path)
-    assert runtime.phase == project.projected_phase()
-    await project.configure(_task())
-    assert runtime.phase == "CONFIGURED"
-    await project.close()
+async def test_parse_intent(tmp_path) -> None:
+    """PARSE_INTENT 不触碰项目状态，只原样返回意图文本。"""
+    runtime = await _make_runtime(tmp_path)
+    parsed = await runtime.dispatch(
+        ResearchMethod.PARSE_INTENT,
+        {"message": "classify tabular data, optimize f1"},
+    )
+    assert parsed["intent"] == "classify tabular data, optimize f1"
+    assert parsed["needs_configuration"] is True
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
-async def test_runtime_configures_project(tmp_path) -> None:
-    """TASK_CONFIGURE 翻译为 ProjectRuntime.configure。"""
-    runtime, project = await _make_runtime(tmp_path)
+async def test_status_without_execution_returns_idle(tmp_path) -> None:
+    """STATUS 不隐式创建 execution；无 execution → execution=None, phase=IDLE。"""
+    runtime = await _make_runtime(tmp_path)
+    status = await runtime.dispatch(ResearchMethod.STATUS, {})
+    assert status["execution"] is None
+    assert status["phase"] == "IDLE"
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_preserves_auto_mode_and_registers_workers(tmp_path) -> None:
+    """TASK_CONFIGURE 保存 interaction_mode；RUN 保留它并注册 worker 类型。"""
+    runtime = await _make_runtime(tmp_path)
+    await runtime.dispatch(
+        ResearchMethod.TASK_CONFIGURE,
+        {
+            "interaction_mode": "auto",
+            "task": "predict an outcome",
+            "data_path": "data",
+        },
+    )
+    result = await runtime.dispatch(ResearchMethod.RUN, {})
+    assert result["interaction_mode"] == "auto"
+    assert {"init", "data", "reflection", "ideator", "code"} <= set(
+        runtime.registered_worker_types
+    )
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_task_configure_projects_prepare(tmp_path) -> None:
+    """TASK_CONFIGURE 提交 task 事实 → 阶段投影 PREPARE。"""
+    runtime = await _make_runtime(tmp_path)
     result = await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
     assert result["configured"] is True
-    assert project.phase == "CONFIGURED"
-    with pytest.raises(ValueError, match="unknown method"):
-        await runtime.dispatch("unknown_research_method", {})
-    await project.close()
+    assert result["phase"] == "PREPARE"
+    assert runtime.phase == "PREPARE"
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
-async def test_runtime_search_validate_report_delegate(tmp_path) -> None:
-    """SEARCH/VALIDATE/REPORT 翻译为 ProjectRuntime 阶段方法。"""
-    runtime, project = await _make_runtime(tmp_path)
+async def test_run_returns_execution_and_starts_coordinator(tmp_path) -> None:
+    """RUN 幂等创建活动 execution 并立即返回（后台 Coordinator 持续推进）。"""
+    runtime = await _make_runtime(tmp_path)
     await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
-    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
-    started = await runtime.dispatch(
-        ResearchMethod.SEARCH_START, {"hypothesis": "假设A"}
-    )
-    assert started["status"] == "started"
-    assert project.phase == "SEARCH"
-    validation = await runtime.dispatch(
-        ResearchMethod.VALIDATE_START, {"experiment_ref": "sota"}
-    )
-    assert "validation_ref" in validation
-    report = await runtime.dispatch(
-        ResearchMethod.REPORT_GENERATE, {"report_text": "最终报告正文"}
-    )
-    assert "report_ref" in report
-    assert project.phase == "COMPLETED"
-    await project.close()
+    run = await runtime.dispatch(ResearchMethod.RUN, {})
+    assert run["status"] == "running"
+    assert run["execution_id"].startswith("exec_")
+    # 同一项目最多一个活动 execution：再次 RUN 复用同一 id
+    run2 = await runtime.dispatch(ResearchMethod.RUN, {})
+    assert run2["execution_id"] == run["execution_id"]
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
-async def test_runtime_pause_resume_stop_delegate(tmp_path) -> None:
-    """SEARCH_PAUSE/RESUME/STOP 翻译为 ProjectRuntime 控制方法。"""
-    runtime, project = await _make_runtime(tmp_path)
+async def test_run_after_stop_creates_new_execution(tmp_path) -> None:
+    """STOP（CANCELLED）后再次 RUN 创建新 execution；旧保持 terminal。"""
+    runtime = await _make_runtime(tmp_path)
     await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
-    await project.prepare_data_analysis(str(_dataset(tmp_path)), "label")
-    await runtime.dispatch(ResearchMethod.SEARCH_START, {"hypothesis": "假设A"})
-    paused = await runtime.dispatch(ResearchMethod.SEARCH_PAUSE, {})
+    first = await runtime.dispatch(ResearchMethod.RUN, {})
+    await runtime.dispatch(ResearchMethod.STOP, {})
+    second = await runtime.dispatch(ResearchMethod.RUN, {})
+    assert second["execution_id"] != first["execution_id"]
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_status_explicit_execution_id_after_stop(tmp_path) -> None:
+    """STATUS 可用 execution_id 显式选择已 terminal 的 execution。"""
+    runtime = await _make_runtime(tmp_path)
+    await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
+    run = await runtime.dispatch(ResearchMethod.RUN, {})
+    execution_id = run["execution_id"]
+    await runtime.dispatch(ResearchMethod.STOP, {})
+    status = await runtime.dispatch(
+        ResearchMethod.STATUS, {"execution_id": execution_id}
+    )
+    assert status["execution"]["id"] == execution_id
+    assert status["execution"]["status"] == "CANCELLED"
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_status_snapshot_shape(tmp_path) -> None:
+    """STATUS 返回紧凑快照；不存在的可选对象用 null，不省略字段。"""
+    runtime = await _make_runtime(tmp_path)
+    await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
+    status = await runtime.dispatch(ResearchMethod.STATUS, {})
+    assert status["execution"]["phase"] == "PREPARE"
+    assert status["execution"]["status"] == "RUNNING"
+    assert "state_version" in status
+    assert status["human_request"] is None
+    assert status["error"] is None
+    assert status["budgets"]["plans_remaining"] == 100
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_stop(tmp_path) -> None:
+    """控制状态正交：PAUSE/RESUME/STOP 只改控制状态，不改研究阶段。"""
+    runtime = await _make_runtime(tmp_path)
+    await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
+    paused = await runtime.dispatch(ResearchMethod.PAUSE, {})
     assert paused["status"] == "paused"
-    assert project.project_status() == "PAUSED"
-    resumed = await runtime.dispatch(ResearchMethod.SEARCH_RESUME, {})
+    assert runtime.project_status() == "PAUSED"
+    resumed = await runtime.dispatch(ResearchMethod.RESUME, {})
     assert resumed["status"] == "running"
-    stopped = await runtime.dispatch(ResearchMethod.SEARCH_STOP, {})
+    stopped = await runtime.dispatch(ResearchMethod.STOP, {})
     assert stopped["status"] == "stopped"
-    assert project.project_status() == "CANCELLED"
-    await project.close()
+    assert runtime.project_status() == "CANCELLED"
+    await runtime.aclose()
 
 
 @pytest.mark.asyncio
-async def test_runtime_requires_project(tmp_path) -> None:
-    """无 ProjectRuntime 时 dispatch 阶段方法报错。"""
-    runtime = ResearchRuntime()
-    with pytest.raises(RuntimeError, match="requires a ProjectRuntime"):
-        await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, {})
+async def test_unknown_method_rejected(tmp_path) -> None:
+    """旧阶段推进命令不再存在；未知方法报错。"""
+    runtime = await _make_runtime(tmp_path)
+    with pytest.raises(ValueError, match="unknown method"):
+        await runtime.dispatch("SEARCH_START", {})
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tree_get_save_load(tmp_path) -> None:
+    """TREE_GET/SAVE/LOAD 走 ResearchTree 快照。"""
+    runtime = await _make_runtime(tmp_path)
+    tree = await runtime.dispatch(ResearchMethod.TREE_GET, {})
+    assert tree["tree"]["version"] == 2
+    saved = await runtime.dispatch(
+        ResearchMethod.TREE_SAVE, {"path": str(tmp_path / "tree.json")}
+    )
+    assert saved["saved"] is True
+    loaded = await runtime.dispatch(
+        ResearchMethod.TREE_LOAD, {"path": str(tmp_path / "tree.json")}
+    )
+    assert loaded["loaded"] is True
+    await runtime.aclose()
+
+
+# ---- 迁移自 test/unit/test_project_runtime.py（supervisor_imp_docs Task 10）----
+# 仍有效的 ResearchRuntime 集成行为：协调循环推进、跨重启恢复、worker 工厂。
+
+import json
+
+import pandas as pd
+
+
+def _dataset(tmp_path: Path) -> Path:
+    """写一个小型 CSV，供 DataAgent 脚本分析。"""
+    path = tmp_path / "dataset.csv"
+    pd.DataFrame({"age": range(20), "income": range(20), "label": [0, 1] * 10}).to_csv(
+        path, index=False
+    )
+    return path
+
+
+async def _configure(runtime: ResearchRuntime, tmp_path: Path) -> None:
+    """TASK_CONFIGURE：提交 task 事实 + task_config（typed task）。"""
+    await runtime.dispatch(
+        "TASK_CONFIGURE",
+        {
+            "task_type": "classification",
+            "data_type": "tabular",
+            "target_vars": ["label"],
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "data_path": str(_dataset(tmp_path)),
+            "target": "label",
+        },
+    )
+
+
+async def _eventually(pred, timeout: float = 30) -> bool:
+    import asyncio
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not pred():
+        if asyncio.get_event_loop().time() > deadline:
+            return False
+        await asyncio.sleep(0)
+    return True
+
+
+def _unfinished_plan_count(runtime: ResearchRuntime) -> int:
+    execution_id = runtime.coordinator.execution_id
+    if execution_id is None:
+        return 0
+    return 1 if runtime.journal.load_unfinished_plan(execution_id) is not None else 0
+
+
+@pytest.mark.asyncio
+async def test_registers_six_workers_no_supervisor(tmp_path) -> None:
+    """supervisor 不再是 registry 类型：只注册 init/data/plot/reflection/ideator/code。"""
+    runtime = make_project(tmp_path)
+    assert set(runtime.kernel._registry.types) == {
+        "init",
+        "data",
+        "plot",
+        "reflection",
+        "ideator",
+        "code",
+    }
+    assert "supervisor" not in runtime.kernel._registry.types
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_drives_to_completed(tmp_path) -> None:
+    """RUN 启动后台 Coordinator，从 PREPARE 推进到 COMPLETED（事实驱动）。"""
+    runtime = make_project(tmp_path)
+    await _configure(runtime, tmp_path)
+    budget = runtime.state.budget()
+    budget.max_search_experiments = 1
+    runtime.state.save_budget(budget)
+    run = await runtime.dispatch("RUN", {})
+    assert run["status"] == "running"
+    assert await _eventually(
+        lambda: runtime.phase == "COMPLETED", timeout=30
+    ), f"phase stuck at {runtime.phase}"
+    facts = runtime.state.facts()
+    assert facts.dataset_role_review_ref is not None
+    assert facts.eval_spec_ref is not None
+    assert facts.baseline_experiment_ref is not None
+    assert facts.sota_experiment_ref is not None
+    assert facts.search_stop_ref is not None
+    assert facts.validation_result_ref is not None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_phase_refs_survive_reopen(tmp_path) -> None:
+    """阶段事实跨重启恢复：重新打开项目后投影仍为 COMPLETED。"""
+    runtime = make_project(tmp_path)
+    await _configure(runtime, tmp_path)
+    budget = runtime.state.budget()
+    budget.max_search_experiments = 1
+    runtime.state.save_budget(budget)
+    await runtime.dispatch("RUN", {})
+    assert await _eventually(lambda: runtime.phase == "COMPLETED", timeout=30)
+    await runtime.aclose()
+
+    reopened = make_project(tmp_path)
+    assert reopened.phase == "COMPLETED"
+    assert reopened.state.facts().validation_result_ref is not None
+    await reopened.aclose()
+
+
+@pytest.mark.asyncio
+async def test_status_and_budget_survive_reopen(tmp_path) -> None:
+    """STATUS 快照与预算跨重启恢复。"""
+    runtime = make_project(tmp_path)
+    await _configure(runtime, tmp_path)
+    budget = runtime.state.budget()
+    budget.max_search_experiments = 1
+    runtime.state.save_budget(budget)
+    await runtime.dispatch("RUN", {})
+    assert await _eventually(lambda: runtime.phase == "COMPLETED", timeout=30)
+    status = await runtime.dispatch("STATUS", {})
+    assert status["budgets"]["plans_remaining"] >= 0
+    assert status["execution"]["phase"] == "COMPLETED"
+    await runtime.aclose()
+
+    reopened = make_project(tmp_path)
+    status2 = await reopened.dispatch("STATUS", {})
+    assert status2["execution"]["phase"] == "COMPLETED"
+    await reopened.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reopen_reuses_same_execution(tmp_path) -> None:
+    """重新打开项目复用同一活动 execution。"""
+    runtime = make_project(tmp_path)
+    await _configure(runtime, tmp_path)
+    run = await runtime.dispatch("RUN", {})
+    execution_id = run["execution_id"]
+    await runtime.aclose()
+
+    reopened = make_project(tmp_path)
+    status = await reopened.dispatch("STATUS", {})
+    assert status["execution"]["id"] == execution_id
+    await reopened.aclose()
+
+
+@pytest.mark.asyncio
+async def test_workers_are_real_factories(tmp_path) -> None:
+    """worker 为真实 factory，产出真实结果 Artifact。"""
+    runtime = make_project(tmp_path)
+    for agent_type, (content, key) in {
+        "ideator": ("新假设", "hypothesis"),
+        "code": ("补丁", "diff"),
+    }.items():
+        _, run_id = await runtime.kernel.create_root(
+            agent_type, {"content": content}, name=f"{agent_type}-root"
+        )
+        summary = await runtime.kernel.wait_run(run_id, timeout=2)
+        response = json.loads(summary.response_ref)
+        result_ref = response["result_ref"]
+        assert result_ref.startswith("sha256:")
+        artifact = json.loads(await runtime.store.get_text(result_ref))
+        assert artifact[key] == content
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pause_stops_coordinator_then_resume(tmp_path) -> None:
+    """PAUSE 后 Coordinator 不生成新 Plan；RESUME 后恢复推进。"""
+    runtime = make_project(tmp_path)
+    await _configure(runtime, tmp_path)
+    await runtime.dispatch("PAUSE", {})
+    assert runtime.project_status() == "PAUSED"
+    assert _unfinished_plan_count(runtime) == 0
+    await runtime.dispatch("RESUME", {})
+    assert runtime.project_status() == "RUNNING"
+    await runtime.dispatch("RUN", {})
+    assert runtime.phase in ("PREPARE", "SEARCH", "VALIDATE", "COMPLETED")
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stop_projects_cancelled(tmp_path) -> None:
+    """STOP 投影 CANCELLED；保留已提交事实。"""
+    runtime = make_project(tmp_path)
+    await _configure(runtime, tmp_path)
+    await runtime.dispatch("STOP", {})
+    assert runtime.project_status() == "CANCELLED"
+    assert runtime.state.facts().task_ref is not None
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_project_phase_projection_from_facts(tmp_path) -> None:
+    """阶段投影完全由已提交事实派生（IDLE→PREPARE→SEARCH）。"""
+    runtime = make_project(tmp_path)
+    assert runtime.phase == "IDLE"
+    await _configure(runtime, tmp_path)
+    assert runtime.phase == "PREPARE"
+    runtime.state.commit_facts(
+        {
+            "dataset_role_review_ref": "sha256:d",
+            "dataset_manifest_ref": "sha256:m",
+            "eval_spec_ref": "sha256:e",
+            "eda_review_ref": "sha256:r",
+            "baseline_experiment_ref": "sha256:b",
+        }
+    )
+    assert runtime.phase == "SEARCH"
+    await runtime.aclose()

@@ -3,16 +3,11 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from athena.research.runtime import (
-        ResearchMethod,
-        ResearchRuntime,
-        ResearchWorkflowDependencies,
-    )
+    from athena.research.runtime import ResearchMethod, ResearchRuntime
 
 __all__ = [
     "ResearchMethod",
     "ResearchRuntime",
-    "ResearchWorkflowDependencies",
 ]
 
 
