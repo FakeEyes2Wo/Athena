@@ -8,6 +8,8 @@
 
 import asyncio
 import os
+import shutil
+import sys
 from pathlib import Path
 
 from athena.core.tool import ToolRegistry, tool
@@ -23,14 +25,52 @@ def _workspace_path(root: Path, path: str) -> Path:
 
 
 def _shell_env() -> dict[str, str]:
-    return {k: v for k, v in os.environ.items() if k in _HostAllow}
+    """构造子进程环境：保留宿主 PATH 并把当前解释器 Scripts 前置。
+
+    原型沿用宿主环境（supervisor_design §2.6 strong_isolation=false）：LLM 生成
+    脚本用 ``python analysis.py`` 运行，若 PATH 缺当前 venv 的 ``Scripts`` 目录，
+    ``python`` 会解析失败 → ReAct 循环反复修脚本而无法收尾。这里确保 ``python``/
+    ``uv`` 始终可解析。仍过滤凭据类变量，避免脚本读取宿主机密。
+    """
+    env = {k: v for k, v in os.environ.items() if k in _HostAllow}
+    scripts = Path(sys.executable).resolve().parent
+    if "PATH" in env and str(scripts) not in env["PATH"]:
+        env["PATH"] = str(scripts) + os.pathsep + env["PATH"]
+    return env
+
+
+def _resolve_shell(name: str) -> str:
+    """返回确定的 shell 绝对路径，避免 Windows 下 ``bash`` 被解析为 WSL launcher。
+
+    Windows 的 ``C:\\Windows\\System32\\bash.exe`` 是 WSL 入口（启动后无宿主
+    venv/pandas，脚本必然失败）；这里优先 Git Bash 的 ``bash.exe`` 与 Windows
+    PowerShell 的 ``powershell.exe``，两者都不存在时回退 shutil.which。
+    """
+    candidates = {
+        "bash": [
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files\Git\bin\bash.exe",
+        ],
+        "pwsh": [
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        ],
+    }
+    for candidate in candidates.get(name, []):
+        if Path(candidate).is_file():
+            return candidate
+    found = shutil.which(name)
+    if found:
+        return found
+    raise RuntimeError(f"shell not found: {name}")
 
 
 async def _run_command(
     root: Path, shell: str, flag: str, command: str, timeout_s: int
 ) -> dict:
+    shell_path = _resolve_shell(shell)
     proc = await asyncio.create_subprocess_exec(
-        shell,
+        shell_path,
         flag,
         command,
         cwd=str(root.resolve()),

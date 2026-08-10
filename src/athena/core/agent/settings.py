@@ -31,11 +31,26 @@ def model_name() -> str:
     return _resolve("MODEL_NAME", DEFAULT_MODEL) or DEFAULT_MODEL
 
 
+# 技术重试（supervisor_design §4.3）：LLM 响应流断线最多重连 5 次，指数退避 + jitter。
+_LLM_MAX_RETRIES = 5
+# 单次 LLM 流式请求总超时（秒）；DeepSeek 思考可能较久，给足等待时间。
+_LLM_TIMEOUT_S = 300.0
+
+
 def get_client() -> AsyncOpenAI:
-    """构造 OpenAI 兼容 client；无 API key 直接报错。"""
+    """构造 OpenAI 兼容 client；无 API key 直接报错。
+
+    ``timeout``/``max_retries`` 交给 openai SDK：内置指数退避 + jitter，且尊重
+    服务端 retry-after；429/5xx/连接断线属可重试，鉴权/合同错误不重试。
+    """
     key = api_key()
     if not key:
         raise RuntimeError(
             "Missing LLM API key: set DEEPSEEK_API_KEY or OPENAI_API_KEY in .env"
         )
-    return AsyncOpenAI(api_key=key, base_url=base_url())
+    return AsyncOpenAI(
+        api_key=key,
+        base_url=base_url(),
+        timeout=_LLM_TIMEOUT_S,
+        max_retries=_LLM_MAX_RETRIES,
+    )
