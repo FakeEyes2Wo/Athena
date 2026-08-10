@@ -139,16 +139,20 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             f"execution={run['execution_id']} status={run['status']} "
             f"phase={run['phase']}"
         )
+        last_state: tuple[str, str, object] | None = None
         while True:
             status = await runtime.dispatch("STATUS", {})
             execution = _execution_of(status)
             phase = execution.get("phase", "IDLE") if execution else "IDLE"
             exec_status = execution.get("status", "-") if execution else "-"
-            print(
-                f"phase={phase} status={exec_status} "
-                f"version={status.get('state_version')}",
-                flush=True,
-            )
+            version = status.get("state_version")
+            state = (phase, exec_status, version)
+            if state != last_state:
+                print(
+                    f"phase={phase} status={exec_status} " f"version={version}",
+                    flush=True,
+                )
+                last_state = state
             _print_new_messages(project_root)
             request = status.get("human_request")
             if isinstance(request, dict) and request.get("request_id"):
