@@ -24,6 +24,9 @@ dev = [
     "pytest-asyncio>=1.4.0",
 ]
 
+[project.scripts]
+Athena-cli = "athena.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

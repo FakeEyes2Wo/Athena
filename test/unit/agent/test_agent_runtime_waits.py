@@ -8,7 +8,7 @@ from athena.agents.base_runner import BaseAgentRunner
 
 from athena.core.agent.agent_runtime import AgentRuntime
 
-from athena.core.agent.codec import JsonCodec
+from athena.core.agent.types import JsonCodec
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import (
     AgentCommandError,

@@ -1,7 +1,7 @@
 """持久化等待（WAITING / WAITING_FOR_HUMAN）在 AgentRuntime 门面上的语义（设计 §7.2/§7.3）。
 
 Task 4 的 WaitRegistry：wait_for / wait_for_human 由门面登记（supervisor 工具经
-session.kernel 注入），等待登记后当前 turn 干净结束、不占用执行槽；目标终态或
+session.runtime 注入），等待登记后当前 turn 干净结束、不占用执行槽；目标终态或
 人工回复后经空唤醒恢复。
 """
 
@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.agent.codec import JsonCodec
+from athena.core.agent.types import JsonCodec
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec, AgentStatus, RunStatus
 

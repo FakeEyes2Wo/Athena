@@ -30,11 +30,9 @@ def _task_payload(input: dict) -> dict:
 
 # 静态权限矩阵（设计 registered-agent-catalog §5）：agent_type -> 允许 spawn 的类型
 DEFAULT_PERMISSIONS: dict[str, set[str]] = {
-    "supervisor": {"data", "plot", "reflection", "ideator", "code", "report"},
     "data": {"plot"},
     "ideator": {"ideator", "reflection", "plot"},
     "code": {"plot"},
-    "report": {"plot"},
     "reflection": set(),
     "plot": set(),
 }
@@ -59,9 +57,9 @@ class _SpawnTool(BaseTool):
     )
 
     def __init__(
-        self, kernel: AgentRuntime, parent_id: AgentId, allowed: set[str]
+        self, runtime: AgentRuntime, parent_id: AgentId, allowed: set[str]
     ) -> None:
-        self._kernel = kernel
+        self._runtime = runtime
         self._parent = parent_id
         self._allowed = allowed
 
@@ -72,7 +70,7 @@ class _SpawnTool(BaseTool):
             raise PermissionError(
                 f"agent_type {agent_type!r} not allowed for this agent"
             )
-        agent_id, run_id = await self._kernel.spawn(
+        agent_id, run_id = await self._runtime.spawn(
             self._parent, agent_type, _task_payload(input), name=input.get("name")
         )
         return {"agent_id": agent_id, "run_id": run_id}
@@ -95,13 +93,13 @@ class _SendTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentRuntime, agent_id: AgentId) -> None:
-        self._kernel = kernel
+    def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
+        self._runtime = runtime
         self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """向目标 Agent 投递消息，不触发目标 turn。"""
-        await self._kernel.send_message(
+        await self._runtime.send_message(
             input["agent_id"],
             input.get("content", ""),
             input.get("context_refs", []),
@@ -127,12 +125,12 @@ class _FollowupTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentRuntime) -> None:
-        self._kernel = kernel
+    def __init__(self, runtime: AgentRuntime) -> None:
+        self._runtime = runtime
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """follow-up 原实例并创建新 turn，返回新 Run id。"""
-        run_id = await self._kernel.followup(input["agent_id"], _task_payload(input))
+        run_id = await self._runtime.followup(input["agent_id"], _task_payload(input))
         return {"run_id": run_id}
 
 
@@ -149,13 +147,13 @@ class _WaitForTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentRuntime, agent_id: AgentId) -> None:
-        self._kernel = kernel
+    def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
+        self._runtime = runtime
         self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """登记对目标 Agent 的持久化等待并结束当前 turn。"""
-        await self._kernel.wait_for(self._agent_id, input["agent_ids"])
+        await self._runtime.wait_for(self._agent_id, input["agent_ids"])
         raise _TurnEnded()
 
 
@@ -174,13 +172,13 @@ class _WaitForHumanTool(BaseTool):
         },
     )
 
-    def __init__(self, kernel: AgentRuntime, agent_id: AgentId) -> None:
-        self._kernel = kernel
+    def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
+        self._runtime = runtime
         self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """登记人工等待并结束当前 turn，返回稳定 request id。"""
-        request_id = await self._kernel.wait_for_human(
+        request_id = await self._runtime.wait_for_human(
             self._agent_id,
             input.get("content", ""),
             input.get("context_refs", []),
@@ -207,12 +205,12 @@ class RunToolProjector:
         """按 agent_type 构造编排 ToolRegistry，权限来自静态矩阵。"""
         registry = ToolRegistry()
         allowed = self._permissions.get(agent_type, set())
-        kernel = session.kernel
+        runtime = session.runtime
         agent_id = session.agent_id
-        registry.register(_SpawnTool(kernel, agent_id, allowed))
-        registry.register(_SendTool(kernel, agent_id))
-        registry.register(_FollowupTool(kernel))
+        registry.register(_SpawnTool(runtime, agent_id, allowed))
+        registry.register(_SendTool(runtime, agent_id))
+        registry.register(_FollowupTool(runtime))
         if agent_type != "plot":
-            registry.register(_WaitForTool(kernel, agent_id))
-            registry.register(_WaitForHumanTool(kernel, agent_id))
+            registry.register(_WaitForTool(runtime, agent_id))
+            registry.register(_WaitForHumanTool(runtime, agent_id))
         return registry

@@ -19,12 +19,14 @@ You are a research engineer producing task understanding for an ML dataset.
 - `## Evaluation Plan` — how eval.py computes the primary metric from predictions
 
 ## eval.py contract
-- Self-contained, pure numpy (NO sklearn/scipy)
+- Self-contained, Python standard library only
 - Reads `predictions.csv` (`__athena_row_id`, `prediction`) and `labels.csv`
   (`__athena_row_id`, `target`) from the current directory
-- Aligns rows by row_id, computes the primary metric, prints one JSON line:
+- Accepts `--request <request.json> --output <result.json>` arguments
+- Aligns rows by row_id, computes the primary metric, and writes this JSON object
+  to the `--output` path:
   `{"primary": <float>, "metric": "<metric name>"}`
-- Runnable with `python eval.py`
+- Runnable with `python eval.py --request request.json --output result.json`
 
 ## Tools
 You have: `read_file`, `write_file`, `bash`, `pwsh`.

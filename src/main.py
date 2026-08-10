@@ -116,6 +116,10 @@ def _print_new_messages(project_root: Path) -> None:
             for msg in msg_list:
                 rendered = _render_message(msg) if isinstance(msg, dict) else ""
                 if rendered:
+                    encoding = sys.stdout.encoding or "utf-8"
+                    rendered = rendered.encode(encoding, errors="replace").decode(
+                        encoding
+                    )
                     print(f"[{agent_id[:8]}] {rendered}", flush=True)
         _offsets[agent_id] = len(lines)
 
@@ -167,6 +171,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                     {"request_id": request["request_id"], "answer": answer},
                 )
                 continue
+            if execution and execution.get("status") == "FAILED":
+                return 1
             if execution and execution.get("status") == "CANCELLED":
                 return 0
             if execution and execution.get("phase") == "COMPLETED":

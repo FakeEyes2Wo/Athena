@@ -31,6 +31,18 @@ async def _make_runtime(tmp_path: Path) -> ResearchRuntime:
 
 
 @pytest.mark.asyncio
+async def test_publish_isolates_failing_subscriber(tmp_path) -> None:
+    """事件 fan-out 的错误边界：一个 subscriber 抛异常不影响其他 subscriber（不静默吞掉发布）。"""
+    runtime = await _make_runtime(tmp_path)
+    received: list[str] = []
+    runtime.subscribe(lambda kind, data: (_ for _ in ()).throw(RuntimeError("boom")))
+    runtime.subscribe(lambda kind, data: received.append(kind))
+    await runtime._publish("some/event", {"n": 1})  # 内部发布路径不抛、不中断 fan-out
+    assert received == ["some/event"]
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_parse_intent(tmp_path) -> None:
     """PARSE_INTENT 不触碰项目状态，只原样返回意图文本。"""
     runtime = await _make_runtime(tmp_path)
@@ -85,16 +97,60 @@ async def test_task_configure_projects_prepare(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_configure_resolves_relative_data_path(tmp_path) -> None:
+    """相对 data_path 在 TASK_CONFIGURE 解析为绝对路径（worker 独立 workspace 可读）。"""
+    runtime = await _make_runtime(tmp_path)
+    await runtime.dispatch(
+        ResearchMethod.TASK_CONFIGURE,
+        {
+            "task_type": "classification",
+            "data_type": "tabular",
+            "target_vars": ["label"],
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "data_path": "some/relative/data",
+            "target": "label",
+        },
+    )
+    cfg = runtime.journal.get_fact("task_config")
+    assert cfg is not None and isinstance(cfg, dict)
+    resolved = cfg["data_payload"]["data_path"]
+    assert isinstance(resolved, str) and Path(resolved).is_absolute()
+    assert Path(resolved).as_posix().endswith("some/relative/data")
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_run_returns_execution_and_starts_coordinator(tmp_path) -> None:
     """RUN 幂等创建活动 execution 并立即返回（后台 Coordinator 持续推进）。"""
     runtime = await _make_runtime(tmp_path)
-    await runtime.dispatch(ResearchMethod.TASK_CONFIGURE, _task_params())
+    # 有效 data_path，避免后台 coordinator 因 ingest 缺源而把 execution 置 FAILED
+    await runtime.dispatch(
+        ResearchMethod.TASK_CONFIGURE, _task_params(data_path=str(_dataset(tmp_path)))
+    )
     run = await runtime.dispatch(ResearchMethod.RUN, {})
     assert run["status"] == "running"
     assert run["execution_id"].startswith("exec_")
     # 同一项目最多一个活动 execution：再次 RUN 复用同一 id
     run2 = await runtime.dispatch(ResearchMethod.RUN, {})
     assert run2["execution_id"] == run["execution_id"]
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_plan_projects_failed_status(tmp_path) -> None:
+    """无效 data_path → ingest 计划失败 → STATUS 显示 FAILED（不永久轮询）。"""
+    runtime = make_project(tmp_path)
+    await runtime.dispatch(
+        ResearchMethod.TASK_CONFIGURE,
+        _task_params(data_path=str(tmp_path / "nope.csv")),
+    )
+    await runtime.dispatch(ResearchMethod.RUN, {})
+    assert await _eventually(
+        lambda: runtime.project_status() == "FAILED", timeout=30
+    ), f"status stuck at {runtime.project_status()}"
+    status = await runtime.dispatch(ResearchMethod.STATUS, {})
+    assert status["execution"]["status"] == "FAILED"
     await runtime.aclose()
 
 

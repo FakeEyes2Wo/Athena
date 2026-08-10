@@ -1,12 +1,11 @@
 """AgentRuntime — Thread 模型的 Agent 门面(方案 A:门面协调层)。
 
-把 kernel 的 Agent 树语义重新表达在 app_server 的 Thread 模型上:每个逻辑 Agent =
-一条 ThreadRuntime(agent_id == thread_id)。公共契约(AgentControl/AgentHandle/AgentRun/
-types)由 core.agent 包统一导出,调用方(ProjectRuntime/编排工具)接口不变。
-mailbox 与 WaitRegistry 为门面持有(内存);对话经 rollout JSONL 确定性持久化。
+把退役 AgentKernel 的 Agent 树语义重新表达在 app_server 的 Thread 模型上:每个
+逻辑 Agent = 一条 ThreadRuntime(agent_id == thread_id)。公共契约
+(AgentControl/AgentHandle/AgentRun/types)由 core.agent 包统一导出,调用方
+(ResearchRuntime/Supervisor/编排工具)接口不变。mailbox 与 WaitRegistry 为
+门面持有(内存);对话经 rollout JSONL 确定性持久化。
 """
-
-from __future__ import annotations
 
 import asyncio
 import logging
@@ -46,9 +45,7 @@ from athena.memory.context_manager import ContextManager
 # 导出,若在此模块级导入 app_server 会在 app_server 自身导入链(athena.core.*)中
 # 构成循环(events → core → agent → agent_runtime → thread_manager → events)。
 if TYPE_CHECKING:
-    from athena.app_server.exceptions import ClosedError
     from athena.app_server.submissions import TurnTerminalState
-    from athena.app_server.thread_manager import RuntimeThreadManager
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +62,7 @@ class _FacadeRecord:
 
 
 class _ThreadRunner:
-    """把 kernel AgentRunner 协议(经 RunSession 视图)接到 thread run_with_context。
+    """把 AgentRunner 协议(经 RunSession 视图)接到 thread run_with_context。
 
     COMPAT: BaseAgentRunner 主体不动,只在此适配;空唤醒({} 请求)不生成假 trigger
     由 BaseAgentRunner 现有逻辑处理。清理条件: AgentRunner 协议统一为线程 runner 后。
@@ -88,7 +85,7 @@ class _ThreadRunner:
         request = record.spec.codec.decode_request(turn.request_ref)
         session = RunSession(
             agent_id=record.agent_id,
-            kernel=self._runtime,
+            runtime=self._runtime,
             context_ref=thread.context_ref,
             memory=memory,
             mailbox=record.mailbox,
@@ -100,7 +97,7 @@ class _ThreadRunner:
         )
 
 
-def _terminal_to_run_status(terminal: TurnTerminalState) -> RunStatus:
+def _terminal_to_run_status(terminal: "TurnTerminalState") -> RunStatus:
     if terminal.cancelled:
         return RunStatus.INTERRUPTED
     if terminal.exception_type is not None:
@@ -109,7 +106,7 @@ def _terminal_to_run_status(terminal: TurnTerminalState) -> RunStatus:
 
 
 class AgentRuntime:
-    """Agent 树语义的 Thread 门面;方法签名对齐退役前的 AgentKernel。"""
+    """Agent 树语义的 Thread 门面;方法签名对齐退役 AgentKernel 的公共契约。"""
 
     def __init__(
         self,
@@ -452,7 +449,8 @@ class AgentRuntime:
                 del self._agent_waits[agent_id]
                 try:
                     await self._wake(agent_id)
-                except Exception as exc:  # noqa: BLE001 — 唤醒失败仅记日志,不阻断解析
+                except (AgentCommandError, RuntimeError) as exc:
+                    # 领域/运行时错误(如目标忙) → 唤醒失败仅记日志,不阻断其他等待解析
                     logger.warning("wake %s failed: %s", agent_id, type(exc).__name__)
 
     async def _wake(self, agent_id: AgentId) -> None:
@@ -464,7 +462,8 @@ class AgentRuntime:
         )  # COMPAT: 空唤醒,无假 trigger;清理条件: 等待语义内建到 thread 后
         try:
             await self._start_run_after_settle(agent_id, req_ref)
-        except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as exc:
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            # 前一个 turn 尚未稳定(settle 超时)或运行时关闭 → 唤醒失败仅记日志
             logger.warning("wake %s failed: %s", agent_id, type(exc).__name__)
 
     async def _start_run_after_settle(
@@ -592,7 +591,7 @@ class AgentRuntime:
 
     # ---- 终态回调(供 ThreadManager 透传) ----
 
-    def _on_turn_terminal(self, turn_id: str, terminal: TurnTerminalState) -> None:
+    def _on_turn_terminal(self, turn_id: str, terminal: "TurnTerminalState") -> None:
         """同步、无 await;更新状态并调度 wait 解析。"""
         agent_id = self._run_agent.get(turn_id)
         if agent_id is None:

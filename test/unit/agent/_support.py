@@ -7,7 +7,7 @@ from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.models import AgentContext, AgentOutcome
 from athena.core.agent.runtime import BaseAgent
 
-from athena.core.agent.codec import JsonCodec
+from athena.core.agent.types import JsonCodec
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec
 from athena.core.artifact_store import LocalArtifactStore

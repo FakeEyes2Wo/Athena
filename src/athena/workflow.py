@@ -1,20 +1,4 @@
-"""titanic research-loop workflow（ResearchTree + LocalGitWorkspace + CodeEngine/DeepSeek）。
-
-用法：在仓库根目录 ``python -m athena.workflow``。
-
-流程：
-1. PREPARE：ProjectRuntime ``open → configure → prepare_data_analysis``。InitAgent 用
-   DeepSeek 写 eval.py（eval 契约：读 predictions.csv+labels.csv 按 row_id 对齐算主
-   指标，打印 ``{"primary": ..., "metric": ...}``）；DataAgent 产出 EDA report。
-2. Research loop：LocalGitWorkspace 建实验 git 仓库。baseline 实验（确定性性别规则）
-   在 worktree 跑 eval 得到 acc 并 set_sota；search 实验用 CodeEngine(DeepSeekCodeBackend)
-   生成模型代码，跑 eval 得到 acc，与 baseline 比较，赢则 set_sota。
-3. 报告：打印 SOTA 实验 acc、EDA report、SOTA REPORT.md。research_tree 存为
-   ``examples/titanic-run/research_tree.json``。
-
-eval.py 由 InitAgent 生成（本文件不写死 eval 实现细节）；train.csv/val.csv 固定 80/20
-切分写入每个实验 worktree，保证 baseline 与 search 在同一验证集上公平比较。
-"""
+"""DEPRECATED: Historical workflow only; Athena-cli, Supervisor, Agents and tests must not read, import or execute this module."""
 
 import ast
 import asyncio

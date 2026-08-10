@@ -17,7 +17,9 @@ Reflection/Plot 都不能提交新版本。
 provider，避免依赖真实 LLM API。
 """
 
+import asyncio
 import json
+import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +30,7 @@ from athena.core.agent.models import AgentContext, AgentOutcome
 from athena.core.agent.runtime import Agent, BaseAgent
 from athena.core.contracts import ArtifactStore
 from athena.core.bundle import VersionedBundle
+from athena.research.contracts import DatasetRoleProposal
 
 ANALYSIS_ENTRYPOINT = "analysis.py"
 
@@ -60,6 +63,7 @@ class DataAgent(BaseAgent):
         data_path = request.get("data_path")
         if not data_path:
             raise ValueError("DataAgent request requires 'data_path'")
+        kind = str(request.get("kind", "eda"))
         target = request.get("target", "")
         workspace = Path(
             request.get("workspace") or tempfile.mkdtemp(prefix="athena-data-")
@@ -78,12 +82,46 @@ class DataAgent(BaseAgent):
             cancel=ctx.cancel,
             memory=ctx.memory,
             input_text=json.dumps(
-                {"data_path": str(data_path), "target": target}, ensure_ascii=False
+                {"kind": kind, "data_path": str(data_path), "target": target},
+                ensure_ascii=False,
             ),
         )
         await inner.run(inner_ctx)
 
-        # 2. 收集 report.md + figures/*.png；可选的 report 覆盖（评审闭环 failed 路径）
+        script = workspace / ANALYSIS_ENTRYPOINT
+        if not script.is_file():
+            raise RuntimeError(f"DataAgent did not produce {ANALYSIS_ENTRYPOINT}")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            ANALYSIS_ENTRYPOINT,
+            str(data_path),
+            str(target),
+            cwd=workspace,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        if process.returncode:
+            raise RuntimeError(
+                f"{ANALYSIS_ENTRYPOINT} failed: "
+                f"{stderr.decode('utf-8', errors='replace')}"
+            )
+
+        if kind == "role":
+            proposal_path = workspace / "dataset_role_proposal.json"
+            if not proposal_path.is_file():
+                raise RuntimeError(
+                    "role inspection did not produce dataset_role_proposal.json"
+                )
+            proposal = DatasetRoleProposal.model_validate_json(
+                proposal_path.read_text(encoding="utf-8")
+            )
+            return AgentOutcome(
+                result_ref=await self._store.put_text(proposal.model_dump_json())
+            )
+
+        # 2. 收集 report.md + figures/*.png + 可选 role proposal；可选的 report
+        #    覆盖（评审闭环 failed 路径）
         files = await self._collect_files(workspace)
         if request.get("report") is not None:
             files["report.md"] = await self._store.put_text(str(request["report"]))
@@ -100,7 +138,12 @@ class DataAgent(BaseAgent):
         return AgentOutcome(result_ref=self.latest_ref)
 
     async def _collect_files(self, workspace: Path) -> dict[str, str]:
-        """把工作区产出固化为 Bundle 文件：report.md + figures/*.png。"""
+        """把工作区产出固化为 Bundle 文件：report.md + figures/*.png（可选 role proposal）。
+
+        DataAnalysis Bundle 合同要求恰一个根 ``report.md`` + 至少一张 ``figures/``
+        图（VersionedBundle 校验）；role proposal JSON 作为同 Bundle 内的补充产物，
+        proposal/EDA 两阶段在评审侧分流（role 读 proposal JSON、EDA 读 report）。
+        """
         report_path = workspace / "report.md"
         if not report_path.is_file():
             raise RuntimeError("analysis script did not produce report.md")
@@ -109,6 +152,11 @@ class DataAgent(BaseAgent):
                 report_path.read_text(encoding="utf-8")
             ),
         }
+        proposal_path = workspace / "dataset_role_proposal.json"
+        if proposal_path.is_file():
+            files["dataset_role_proposal.json"] = await self._store.put_text(
+                proposal_path.read_text(encoding="utf-8")
+            )
         figures_dir = workspace / "figures"
         if figures_dir.is_dir():
             for path in sorted(figures_dir.iterdir()):

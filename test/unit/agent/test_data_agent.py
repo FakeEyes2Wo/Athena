@@ -143,6 +143,139 @@ async def test_data_agent_llm_driven_commits_v1_then_v2(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_data_agent_role_turn_commits_only_validated_proposal(tmp_path) -> None:
+    """角色识别回合只提交 proposal，不要求 EDA 报告或图表。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    bundle = VersionedBundle(store)
+    data_path = _dataset(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    proposal_json = json.dumps(
+        {
+            "role_proposal": "data.csv is the training dataset",
+            "data_files": ["data.csv"],
+            "target_column": "label",
+            "reasoning": "The target column is present in the file.",
+        }
+    )
+    (workspace / ANALYSIS_ENTRYPOINT).write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "Path('run_count.txt').write_text('1')\n"
+        "Path('received_data_path.txt').write_text(sys.argv[1])\n"
+        f"Path('dataset_role_proposal.json').write_text({proposal_json!r})\n",
+        encoding="utf-8",
+    )
+    agent = DataAgent(
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=_inner_builder,
+    )
+
+    outcome = await agent.run(
+        _direct_ctx(
+            json.dumps(
+                {
+                    "kind": "role",
+                    "data_path": str(data_path),
+                    "workspace": str(workspace),
+                }
+            )
+        )
+    )
+
+    proposal = json.loads(await store.get_text(outcome.result_ref))
+    assert proposal["data_files"] == ["data.csv"]
+    assert (workspace / "run_count.txt").read_text() == "1"
+    assert (workspace / "received_data_path.txt").read_text() == str(data_path)
+    assert bundle.chains() == {}
+
+
+@pytest.mark.asyncio
+async def test_data_agent_role_turn_rejects_invalid_proposal(tmp_path) -> None:
+    """角色提议缺少合同必填字段时不提交 Artifact。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    bundle = VersionedBundle(store)
+    data_path = _dataset(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "dataset_role_proposal.json").write_text(
+        json.dumps(
+            {
+                "role_proposal": "data.csv is the training dataset",
+                "data_files": ["data.csv"],
+                "target_column": "label",
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent = DataAgent(
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=_inner_builder,
+    )
+
+    with pytest.raises(ValueError, match="reasoning"):
+        await agent.run(
+            _direct_ctx(
+                json.dumps(
+                    {
+                        "kind": "role",
+                        "data_path": str(data_path),
+                        "workspace": str(workspace),
+                    }
+                )
+            )
+        )
+    assert bundle.chains() == {}
+
+
+@pytest.mark.asyncio
+async def test_data_agent_eda_runs_generated_script_once(tmp_path) -> None:
+    """EDA 回合由外层执行 LLM 生成脚本一次，再收集报告与图。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    bundle = VersionedBundle(store)
+    data_path = _dataset(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ANALYSIS_ENTRYPOINT).write_text(
+        "from pathlib import Path\n"
+        "count = Path('run_count.txt')\n"
+        "count.write_text(str(int(count.read_text()) + 1) if count.exists() else '1')\n"
+        "Path('report.md').write_text('# EDA Report', encoding='utf-8')\n"
+        "Path('figures').mkdir(exist_ok=True)\n"
+        "Path('figures/plot.png').write_bytes(b'png')\n",
+        encoding="utf-8",
+    )
+    agent = DataAgent(
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=_inner_builder,
+    )
+
+    outcome = await agent.run(
+        _direct_ctx(
+            json.dumps(
+                {
+                    "kind": "eda",
+                    "data_path": str(data_path),
+                    "workspace": str(workspace),
+                }
+            )
+        )
+    )
+
+    assert outcome.result_ref == agent.latest_ref
+    assert (workspace / "run_count.txt").read_text() == "1"
+
+
+@pytest.mark.asyncio
 async def test_data_agent_no_report_does_not_commit(tmp_path) -> None:
     """内层未产出 report.md → 收集失败，DataAgent 报错且不提交任何版本。"""
     store = LocalArtifactStore(tmp_path / "artifacts")

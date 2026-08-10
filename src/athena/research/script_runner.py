@@ -1,0 +1,192 @@
+"""DataScriptRunner — python-uv 数据脚本 Bundle 生命周期（supervisor_imp_docs Task 4）。
+
+LLM 生成的数据脚本以 Bundle 形式冻结：DRAFT 允许 ``uv init/uv add/uv run``；冻结时
+``uv lock`` 并把源码/pyproject.toml/uv.lock 固化到 ArtifactStore，之后只允许
+``uv sync --frozen`` 与 ``uv run --frozen``。统一调用合同：
+
+    uv run --frozen <declared-entrypoint> --request <request.json> --output <result.json>
+
+Runner 不按脚本文件名寻找入口，只认 Bundle metadata 声明的 entrypoint。
+"""
+
+import asyncio
+import hashlib
+import json
+import subprocess
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from athena.core.contracts import ArtifactStore, new_id
+from athena.research.contracts import DataScriptBundle
+
+
+@dataclass
+class BundleMetadata:
+    """冻结 Bundle 的声明式 metadata（唯一 entrypoint + 说明）。"""
+
+    entrypoint: str
+    description: str = ""
+
+
+@dataclass
+class ScriptRunResult:
+    """一次冻结 bundle 运行的结果（首版 strong_isolation=false）。"""
+
+    result_refs: list[str] = field(default_factory=list)
+    outputs: dict[str, object] = field(default_factory=dict)
+    strong_isolation: bool = False
+
+
+def _run_cmd(cmd: list[str], *, cwd: Path) -> None:
+    """在给定目录运行命令；失败抛 ``CalledProcessError``。"""
+    subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _run_cmd_capture(cmd: list[str], *, cwd: Path) -> str:
+    """在给定目录运行命令并返回 stdout（去空白）。"""
+    result = subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def _validate_schema(payload: dict[str, object], schema: dict[str, object]) -> None:
+    """校验 output.json 命中声明字段；缺字段报错（类型检查首版宽松）。"""
+    missing = [key for key in schema if key not in payload]
+    if missing:
+        raise RuntimeError(f"bundle output missing schema fields: {missing}")
+
+
+class DataScriptRunner:
+    """python-uv Bundle 的 DRAFT/FROZEN 生命周期与统一 CLI+JSON 执行。"""
+
+    def __init__(self, *, store: ArtifactStore, workdir: Path) -> None:
+        self._store = store
+        self._workdir = Path(workdir)
+
+    def command(
+        self,
+        bundle: DataScriptBundle,
+        request_path: str = "request.json",
+        output_path: str = "result.json",
+    ) -> list[str]:
+        """构造冻结 bundle 的统一执行命令（uv run --frozen）。"""
+        return [
+            "uv",
+            "run",
+            "--frozen",
+            bundle.entrypoint,
+            "--request",
+            request_path,
+            "--output",
+            output_path,
+        ]
+
+    async def freeze(
+        self, workspace: Path, metadata: BundleMetadata
+    ) -> DataScriptBundle:
+        """冻结 draft：uv lock + 固化完整源码树/Python 版本/environment hash。
+
+        只允许之后的 ``uv sync --frozen`` 与 ``uv run --frozen``。
+        """
+        ws = Path(workspace)
+        entrypoint = metadata.entrypoint
+        if not (ws / entrypoint).is_file():
+            raise FileNotFoundError(f"declared entrypoint missing: {entrypoint}")
+        if not (ws / "pyproject.toml").is_file():
+            raise FileNotFoundError("draft must be a uv project with pyproject.toml")
+        project_text = (ws / "pyproject.toml").read_text(encoding="utf-8")
+        # 1. 完整源码树（排除 pyproject/uv.lock/.venv，另存）
+        tree: dict[str, str] = {}
+        for path in sorted(ws.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(ws).as_posix()
+            if rel in ("pyproject.toml", "uv.lock") or rel.startswith(".venv/"):
+                continue
+            tree[rel] = await self._store.put_bytes(path.read_bytes())
+        tree_ref = await self._store.put_text(json.dumps(tree, ensure_ascii=False))
+        # TODO(supervisor-security): 完整流程跑通后，用强隔离 runner 替换本地 workspace shell；生产/敏感数据发布前必须完成。
+        await asyncio.to_thread(_run_cmd, ["uv", "lock"], cwd=ws)
+        lock_text = (ws / "uv.lock").read_text(encoding="utf-8")
+        # 2. 解析出的解释器版本 + environment hash
+        py_version = await asyncio.to_thread(
+            _run_cmd_capture,
+            ["uv", "run", "--frozen", "python", "--version"],
+            cwd=ws,
+        )
+        py_version = py_version.removeprefix("Python ").strip()
+        env_hash = hashlib.sha256(
+            (project_text + lock_text + py_version).encode("utf-8")
+        ).hexdigest()
+        lock_ref = await self._store.put_text(lock_text)
+        project_ref = await self._store.put_text(project_text)
+        source_ref = await self._store.put_bytes((ws / entrypoint).read_bytes())
+        return DataScriptBundle(
+            bundle_id=new_id("bundle"),
+            entrypoint=entrypoint,
+            runtime="python-uv",
+            lock_ref=lock_ref,
+            project_ref=project_ref,
+            source_ref=source_ref,
+            tree_ref=tree_ref,
+            python_version=py_version,
+            environment_hash=env_hash,
+        )
+
+    async def run(
+        self,
+        bundle: DataScriptBundle,
+        request: dict[str, object],
+        output_schema: dict[str, object] | None = None,
+        *,
+        extra_files: dict[str, str] | None = None,
+    ) -> ScriptRunResult:
+        """执行冻结 bundle；重建冻结项目上下文并读取/校验 output.json。
+
+        在隔离工作目录重建完整源码树 + pyproject.toml + uv.lock 后，先
+        ``uv sync --frozen`` 再 ``uv run --frozen`` 执行（只允许这两个 FROZEN 命令）。
+        ``extra_files`` 注入相对路径文本文件（如 predictions.csv/labels.csv），
+        供 trusted evaluator 在对齐后运行 eval 入口。
+        """
+        if (
+            bundle.project_ref is None
+            or bundle.lock_ref is None
+            or bundle.tree_ref is None
+        ):
+            raise RuntimeError("bundle is not frozen (missing project/lock/tree refs)")
+        run_dir = Path(tempfile.mkdtemp(prefix="athena-script-run-"))
+        (run_dir / "pyproject.toml").write_text(
+            await self._store.get_text(bundle.project_ref), encoding="utf-8"
+        )
+        (run_dir / "uv.lock").write_text(
+            await self._store.get_text(bundle.lock_ref), encoding="utf-8"
+        )
+        tree = json.loads(await self._store.get_text(bundle.tree_ref))
+        for rel, content_ref in tree.items():
+            target = run_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(await self._store.get_bytes(content_ref))
+        for rel, content in (extra_files or {}).items():
+            target = run_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        request_path = run_dir / "request.json"
+        output_path = run_dir / "result.json"
+        request_path.write_text(
+            json.dumps(request, ensure_ascii=False), encoding="utf-8"
+        )
+        # TODO(supervisor-security): 同上——本地 workspace shell 仅首版原型。
+        await asyncio.to_thread(_run_cmd, ["uv", "sync", "--frozen"], cwd=run_dir)
+        cmd = self.command(bundle, str(request_path), str(output_path))
+        await asyncio.to_thread(_run_cmd, cmd, cwd=run_dir)
+        if not output_path.is_file():
+            raise RuntimeError("bundle produced no result.json")
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        if output_schema is not None:
+            _validate_schema(payload, output_schema)
+        result_ref = await self._store.put_text(json.dumps(payload, ensure_ascii=False))
+        return ScriptRunResult(
+            result_refs=[result_ref],
+            outputs=payload,
+            strong_isolation=False,
+        )

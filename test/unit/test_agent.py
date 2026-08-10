@@ -470,6 +470,17 @@ async def test_stream_omits_response_format_without_output_type() -> None:
     assert any(e.kind == "response_completed" for e in events)
 
 
+@pytest.mark.asyncio
+async def test_stream_disables_deepseek_thinking_for_tool_execution() -> None:
+    """工具 Agent 禁用默认 thinking，避免推理耗尽输出预算却未调用工具。"""
+    client = _CaptureClient()
+    provider = ResponsesProvider("model", client=client)
+
+    await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
+
+    assert client.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
 class _StructuredOut(BaseModel):
     answer: str
 

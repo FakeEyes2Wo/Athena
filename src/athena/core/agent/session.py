@@ -1,62 +1,34 @@
-"""RunSession — 门面构造的每 turn 受限视图(COMPAT: 保留 kernel RunSession 消费接口)。
+"""RunSession — 门面构造的每 turn 受限视图(COMPAT: 保留退役 kernel 的 RunSession 消费接口)。
 
 清理条件: AgentRunner 协议统一为线程 runner、BaseAgentRunner 不再消费 session 后。
 mailbox 读即清,checkpoint 为空操作。
 """
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from pydantic_ai.messages import ModelMessage
 
 from athena.core.agent.types import AgentId, AgentMessage
 from athena.memory.context_manager import ContextManager
 
+if TYPE_CHECKING:
+    from athena.core.agent.agent_runtime import AgentRuntime
+
 
 class _MemoryView:
-    """ContextManager 只读视图;``raw`` 暴露底层 ContextManager(BaseAgent 适配器用)。
+    """ContextManager 只读视图；``raw`` 暴露底层 ContextManager（BaseAgent 适配器用）。
 
-    COMPAT: 保留 kernel _MemoryView 消费接口(BaseAgent 适配器经 ``raw`` 访问
+    COMPAT: 保留退役 kernel 的 _MemoryView 消费接口(BaseAgent 适配器经 ``raw`` 访问
     ContextManager);清理条件: AgentRunner 协议统一为线程 runner、BaseAgentRunner
     不再消费 session 后。
     """
 
-    def __init__(self, memory: ContextManager, *, allow_rollback: bool = True) -> None:
+    def __init__(self, memory: ContextManager) -> None:
         self._memory = memory
-        self._allow_rollback = allow_rollback
 
     @property
     def raw(self) -> ContextManager:
         return self._memory
-
-    @property
-    def items(self):
-        return self._memory.items
-
-    @property
-    def tokens(self):
-        return self._memory.tokens
-
-    @property
-    def version(self):
-        return self._memory.version
-
-    @property
-    def limit(self):
-        return self._memory.limit
-
-    def token_margin(self, ratio: float = 0.85):
-        return self._memory.token_margin(ratio)
-
-    def snapshot(self):
-        return self._memory.snapshot()
-
-    def items_since(self, idx: int):
-        return self._memory.items_since(idx)
-
-    def rollback(self, idx: int) -> None:
-        if not self._allow_rollback:
-            raise AttributeError("rollback is runtime-internal")
-        self._memory.rollback(idx)
 
     def append(self, msg: ModelMessage) -> None:
         raise AttributeError("memory writes go through ThreadRuntime")
@@ -72,15 +44,15 @@ class RunSession:
         self,
         *,
         agent_id: AgentId,
-        kernel: Any,
+        runtime: "AgentRuntime",
         context_ref: str,
         memory: ContextManager,
         mailbox: list[AgentMessage],
     ) -> None:
         self._agent_id = agent_id
-        self._kernel = kernel
+        self._runtime = runtime
         self._context_ref = context_ref
-        self._memory_view = _MemoryView(memory, allow_rollback=False)
+        self._memory_view = _MemoryView(memory)
         self._mailbox = mailbox
 
     @property
@@ -88,8 +60,8 @@ class RunSession:
         return self._agent_id
 
     @property
-    def kernel(self) -> Any:
-        return self._kernel
+    def runtime(self) -> "AgentRuntime":
+        return self._runtime
 
     @property
     def context_ref(self) -> str:

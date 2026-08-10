@@ -8,6 +8,7 @@ payload ``{"task_understanding", "eval_script"}``。测试注入 ``fake_inner_bu
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -57,10 +58,19 @@ async def test_init_agent_payload_has_task_understanding_and_eval_script(
 
     assert outcome.result_ref.startswith("sha256:")
     payload = json.loads(await store.get_text(outcome.result_ref))
-    assert set(payload) == {"task_understanding", "eval_script"}
+    assert set(payload) == {
+        "task_understanding",
+        "eval_script",
+        "eval_workspace",
+        "eval_metadata",
+    }
     assert "# Task Understanding" in payload["task_understanding"]  # 固定格式报告
     assert "predictions.csv" in payload["eval_script"]  # 自包含 eval.py 契约
     compile(payload["eval_script"], EVAL_ENTRYPOINT, "exec")  # 语法自检
+    # eval 工作区可直接被 scripts.freeze 冻结为 bundle（uv project + entrypoint）
+    ws = Path(payload["eval_workspace"])
+    assert (ws / "pyproject.toml").is_file()
+    assert payload["eval_metadata"] == {"entrypoint": EVAL_ENTRYPOINT}
 
 
 @pytest.mark.asyncio

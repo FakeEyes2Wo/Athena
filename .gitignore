@@ -1,8 +1,9 @@
+# Secrets
 .env
-.superpowers
-uv.lock
-.athena/
-# Python bytecode and caches
+.env.*
+!.env.example
+
+# Python bytecode, caches, and virtualenvs
 __pycache__/
 *.py[cod]
 *$py.class
@@ -12,18 +13,20 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
-
-# Virtual environments (uv uses .venv by default)
 .venv/
 venv/
 env/
 
-# Python build and packaging artifacts
+# Build and packaging artifacts
 build/
 dist/
 *.egg-info/
 *.egg
 *.whl
+
+# Node tooling
+node_modules/
+npm-debug.log*
 
 # Editors and operating systems
 .idea/
@@ -33,21 +36,18 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Local configuration and secrets
-.env
-.env.*
-!.env.example
-
 # Logs and temporary files
 *.log
 *.tmp
 *.bak
 
-# Node tooling
-node_modules/
-npm-debug.log*
+# AI Agent Skills (nested checkouts)
+.agents/skills/
+.claude/skills/
 
 # Project-local generated or private files
+.superpowers
+uv.lock
 XH-202619.pdf
 /docs/open-design/*
 /data_analyze/*
@@ -55,14 +55,9 @@ XH-202619.pdf
 !/data_analyze/EDA.md/
 !/data_analyze/EDA.md/.gitkeep
 
-# Titanic research workflow experiment output
-/examples/titanic-run/
-
-# AI Agent Skills
-.agents/skills/
-
-# AI Agent Skills
-.claude/skills/
+# Titanic research-loop run output (e.g. titanic-123/artifacts)
+/examples/titanic-*/
+.athena/
 
 # Isolated feature worktrees
 .worktrees/
@@ -71,8 +66,9 @@ XH-202619.pdf
 # Rust build artifacts
 athena-rust/target/
 
-# Local session state & smoke artifacts
+# Claude session / supervisor loop state
 .claude/loop_eval_state.json
+.claude/loop_state/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
 _smoke_artifacts/

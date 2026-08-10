@@ -1,8 +1,8 @@
-"""BaseAgent -> AgentKernel 的 runner 适配器（设计 §4.2、agent-kernel-runtime §4.1）。
+"""BaseAgent -> AgentRuntime 的 runner 适配器（设计 §4.2、agent-kernel-runtime §4.1）。
 
 业务 Agent 遵循 ``BaseAgent.run(AgentContext) -> AgentOutcome`` 公共契约；
-Kernel 的 runner 协议是 ``run(request, *, session, emit)``。本适配器在每个 turn
-构造最小 :class:`AgentContext`（thread/turn 为派生展示值，memory 为会话私有
+AgentRuntime 的 runner 协议是 ``run(request, *, session, emit)``。本适配器在每个
+turn 构造最小 :class:`AgentContext`（thread/turn 为派生展示值，memory 为会话私有
 上下文），并把 ``AgentOutcome`` 的持久化引用作为响应返回。
 """
 
@@ -17,7 +17,7 @@ from athena.core.tool import ToolRegistry
 
 
 class BaseAgentRunner:
-    """把 :class:`BaseAgent` 适配为 Kernel 的 runner。"""
+    """把 :class:`BaseAgent` 适配为 AgentRuntime 的 runner。"""
 
     def __init__(
         self,
@@ -35,8 +35,8 @@ class BaseAgentRunner:
     async def run(self, request, *, session, emit) -> dict:
         """构造 AgentContext 并运行业务 Agent，返回持久化引用。
 
-        COMPAT: wait 唤醒的空请求不生成假 trigger(kernel §4.4 语义);只有正常返回
-        或进入持久化等待后才提交 mailbox cursor。清理条件: 等待语义内建到 thread 后。
+        COMPAT: wait 唤醒的空请求不生成假 trigger(退役 AgentKernel §4.4 语义);只有
+        正常返回或进入持久化等待后才提交 mailbox cursor。清理条件: 等待语义内建到 thread 后。
         """
         # 触发消息：真实 Run 请求解码；空唤醒（{}）无 trigger
         trigger = None
@@ -82,5 +82,5 @@ class BaseAgentRunner:
             session.checkpoint()
             return {"result_ref": None, "wait": "registered"}
         session.checkpoint()  # 正常返回才推进已读 mailbox 游标
-        # Kernel 只认 result_ref；next_context_ref 为迁移字段，忽略（§4.3）
+        # AgentRuntime 只认 result_ref；next_context_ref 为迁移字段，忽略（§4.3）
         return {"result_ref": outcome.result_ref}

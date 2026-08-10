@@ -27,7 +27,7 @@ class AgentConfig:
 class AgentOutcome:
     """Agent 运行结果 — 目标合同只含 ``result_ref``。
 
-    COMPAT: ``next_context_ref`` 是旧 ThreadRuntime 迁移字段;Kernel 必须忽略私有记忆
+    COMPAT: ``next_context_ref`` 是旧 ThreadRuntime 迁移字段;AgentRuntime 必须忽略私有记忆
     的 context_ref 由 AgentSession 持有,不是业务结果。清理条件: 旧调用方迁移完成后删除。
     """
 

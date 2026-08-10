@@ -12,15 +12,18 @@ cwd=workspace）→ 运行（LLM 按 prompt 用 ``read_file``/``bash`` 探查数
 - ``data_path``：数据集 CSV 路径（必需）。
 - ``target``：目标列名（必需）。
 
-产出 payload：``{"task_understanding": str, "eval_script": str}`` 写入
+产出 payload：``{"task_understanding": str, "eval_script": str,
+"eval_workspace": str, "eval_metadata": {"entrypoint": str}}`` 写入
 ArtifactStore，``AgentOutcome.result_ref`` 指向该 Artifact。调用方
-（ProjectRuntime）从响应 JSON 读取 ``eval_script``，再写为独立 eval.py
-artifact 并把其 ref 存为 ``_eval_ref``（协议事实，§7.2）。
+（ResearchRuntime 的 Supervisor）从响应 JSON 读取 ``eval_script`` 提交
+eval_spec_ref 事实，并把 ``eval_workspace`` 交给 ``scripts.freeze`` 冻结为
+``eval_bundle_ref``（真实 frozen bundle，供可信 evaluator 消费）。
 
-eval.py 契约（由 prompt 约束，自包含，纯 numpy，不依赖 sklearn/scipy）：读
+eval.py 契约（由 prompt 约束，自包含，仅用标准库）：读
 当前目录的 ``predictions.csv``（``__athena_row_id``, ``prediction``）与
 ``labels.csv``（``__athena_row_id``, ``target``），按 row_id 对齐后计算主
-指标，打印 ``{"primary": ..., "metric": ...}``。
+指标，接收 ``--request``/``--output`` 并把
+``{"primary": ..., "metric": ...}`` 写入 output 文件。
 """
 
 import json
@@ -96,6 +99,23 @@ class InitAgent(BaseAgent):
         eval_script = (workspace / "eval.py").read_text(encoding="utf-8")
         compile(eval_script, EVAL_ENTRYPOINT, "exec")
 
-        payload = {"task_understanding": report, "eval_script": eval_script}
+        # 3. 保证工作区是可冻结的 uv 项目：缺失 pyproject.toml 时补最小清单
+        #    （打包元数据，非评估语义；真实依赖由 LLM 脚本契约声明）。
+        if not (workspace / "pyproject.toml").is_file():
+            (workspace / "pyproject.toml").write_text(
+                "[project]\n"
+                "name = 'eval'\n"
+                "version = '0.1.0'\n"
+                "requires-python = '>=3.11'\n"
+                "dependencies = []\n",
+                encoding="utf-8",
+            )
+
+        payload = {
+            "task_understanding": report,
+            "eval_script": eval_script,
+            "eval_workspace": str(workspace),
+            "eval_metadata": {"entrypoint": EVAL_ENTRYPOINT},
+        }
         result_ref = await self._store.put_text(json.dumps(payload, ensure_ascii=False))
         return AgentOutcome(result_ref=result_ref)

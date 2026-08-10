@@ -38,7 +38,7 @@ async def _result_ref(summary) -> str:
 
 @pytest.mark.asyncio
 async def test_code_agent_writes_candidate_diff(tmp_path) -> None:
-    """确定性缺省：把输入写为 ``{diff, status: candidate}`` JSON Artifact。"""
+    """确定性缺省：把输入写为 candidate diff（含 candidates 列表供 SEARCH freeze）。"""
     store = LocalArtifactStore(tmp_path / "artifacts")
     agent = CodeAgent(store)
     rt = _runtime(agent, "code", tmp_path)
@@ -46,13 +46,15 @@ async def test_code_agent_writes_candidate_diff(tmp_path) -> None:
     summary = await rt.wait_run(run_id, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     artifact = json.loads(await store.get_text(await _result_ref(summary)))
-    assert artifact == {"diff": "补丁描述", "status": "candidate"}
+    assert artifact["diff"] == "补丁描述"
+    assert artifact["status"] == "candidate"
+    assert artifact["candidates"][0]["candidate_id"] == "cand_fallback"
     await rt.aclose()
 
 
 @pytest.mark.asyncio
 async def test_ideator_agent_writes_proposed_hypothesis(tmp_path) -> None:
-    """确定性缺省：把输入写为 ``{hypothesis, status: PROPOSED}`` JSON Artifact。"""
+    """确定性缺省：把输入写为 PROPOSED Hypothesis（含 hypotheses 列表供 SEARCH 注册）。"""
     store = LocalArtifactStore(tmp_path / "artifacts")
     agent = IdeatorAgent(store)
     rt = _runtime(agent, "ideator", tmp_path)
@@ -60,7 +62,9 @@ async def test_ideator_agent_writes_proposed_hypothesis(tmp_path) -> None:
     summary = await rt.wait_run(run_id, timeout=5)
     assert summary.status == RunStatus.COMPLETED
     artifact = json.loads(await store.get_text(await _result_ref(summary)))
-    assert artifact == {"hypothesis": "新假设", "status": "PROPOSED"}
+    assert artifact["hypothesis"] == "新假设"
+    assert artifact["status"] == "PROPOSED"
+    assert artifact["hypotheses"][0]["statement"] == "新假设"
     await rt.aclose()
 
 

@@ -1,5 +1,6 @@
-"""AgentKernel 公开类型与契约（设计 §1.3、§2、§4.4、§4.5）。"""
+"""AgentRuntime 公开类型与契约（设计 §1.3、§2、§4.4、§4.5）。"""
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
@@ -15,7 +16,6 @@ ResponseT = TypeVar("ResponseT", covariant=True)
 AgentPath = tuple[str, ...]
 AgentId = str
 RunId = str
-CommandId = str
 
 
 class AgentStatus(str, Enum):
@@ -140,6 +140,26 @@ class AgentCodec(Protocol[RequestT, ResponseT]):
     def decode_response(self, ref: ArtifactRef) -> ResponseT: ...
 
 
+class JsonCodec:
+    """请求/响应以 JSON 字符串作为 ArtifactRef。"""
+
+    def encode_request(self, value: object) -> str:
+        """把请求对象编码为 JSON 字符串（ArtifactRef 形式）。"""
+        return json.dumps(value, ensure_ascii=False)
+
+    def decode_request(self, ref: str) -> object:
+        """把请求 JSON 字符串解码回对象。"""
+        return json.loads(ref)
+
+    def encode_response(self, value: object) -> str:
+        """把响应对象编码为 JSON 字符串（ArtifactRef 形式）。"""
+        return json.dumps(value, ensure_ascii=False)
+
+    def decode_response(self, ref: str) -> object:
+        """把响应 JSON 字符串解码回对象。"""
+        return json.loads(ref)
+
+
 @dataclass(frozen=True)
 class AgentSpec(Generic[RequestT, ResponseT]):
     """Agent 的不可变能力说明（设计 §4.1）。agent_type 由注册表键表达，不再内嵌。"""
@@ -152,7 +172,7 @@ class AgentSpec(Generic[RequestT, ResponseT]):
 class AgentMessage:
     """投递至目标 mailbox 的消息（设计 §4.3）。
 
-    source 为 None 表示内部控制消息（Kernel 生成的 completion）；content 说明意图，
+    source 为 None 表示内部控制消息（AgentRuntime 生成的 completion）；content 说明意图，
     正式结果（报告、rubric、评审、图片等）经 context_refs 传递。
     """
 

@@ -5,7 +5,7 @@ import pytest
 from athena.agents.base_runner import BaseAgentRunner
 from athena.agents.orchestration import RunToolProjector
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.agent.codec import JsonCodec
+from athena.core.agent.types import JsonCodec
 from athena.core.agent.models import AgentContext, AgentOutcome
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.runtime import BaseAgent
@@ -83,9 +83,9 @@ async def test_data_agent_cannot_spawn_data(tmp_path) -> None:
 
 
 def test_default_permission_matrix_shapes() -> None:
-    """registered-agent-catalog §5：supervisor 全量；plot 不创建业务子 Agent。"""
+    """registered-agent-catalog §5：plot 不创建业务子 Agent；supervisor 已移除（§2.1）。"""
     permissions = RunToolProjector().permissions
-    assert "data" in permissions["supervisor"]
+    assert "supervisor" not in permissions  # supervisor 不再是 registry 类型
     assert permissions["plot"] == set()
     assert permissions["data"] == {"plot"}
     assert "data" not in permissions["data"]  # data 不可 spawn 另一 data

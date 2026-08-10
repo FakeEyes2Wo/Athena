@@ -1,4 +1,8 @@
-"""DataAnalysis 评审闭环测试（设计 §7.3）：DataAgent 提交 v1 → Reflection 只读评审。"""
+"""DataAnalysis 评审闭环测试（设计 §7.3）：DataAgent 提交 v1 → Reflection 只读评审。
+
+Reflection 输出结构化 decision（ACCEPT/REVISE）扁平 JSON，与 Supervisor 评审闭环
+（supervisor_imp_docs Task 5）同合同。
+"""
 
 import json
 from pathlib import Path
@@ -87,12 +91,12 @@ async def test_data_analysis_review_loop(tmp_path) -> None:
     response = JsonCodec().decode_response(summary.response_ref)
     review_ref = response["result_ref"]
 
-    # review Bundle 结构正确，score 绑定 rubric_version
-    review_files = await DirectoryBundle.files(store, review_ref)
-    assert set(review_files) == {"rubric.json", "score.json", "review.md"}
-    score = json.loads(await store.get_text(review_files["score.json"]))
-    assert score["rubric_version"] == 1
-    assert score["scores"]["report_nonempty"] == 1
+    # review 输出结构化 decision 扁平 JSON（与 Supervisor 评审闭环同合同）
+    payload = json.loads(await store.get_text(review_ref))
+    assert payload["decision"] == "ACCEPT"
+    assert payload["issues"] == []
+    assert payload["required_changes"] == []
+    assert isinstance(payload["evidence_refs"], list)
 
     # Reflection 未修改 DataAnalysis：v1 仍是 latest，report 内容不变（脚本产出）
     assert bundle.latest(analysis_id) == v1
@@ -134,12 +138,9 @@ async def test_revision_loop_failed_then_revised(tmp_path) -> None:
     review1 = JsonCodec().decode_response(rt.run_summary(run2).response_ref)[
         "result_ref"
     ]
-    score1 = json.loads(
-        await store.get_text(
-            (await DirectoryBundle.files(store, review1))["score.json"]
-        )
-    )
-    assert score1["scores"]["report_nonempty"] == 0  # failed
+    payload1 = json.loads(await store.get_text(review1))
+    assert payload1["decision"] == "REVISE"
+    assert "report 为空或缺失" in payload1["issues"]
 
     # Supervisor 决定返工 → follow-up 原 DataAgent（同 owner 提交 v2，无空覆盖）
     run3 = await rt.followup(data_id, _request(dataset))
@@ -159,12 +160,9 @@ async def test_revision_loop_failed_then_revised(tmp_path) -> None:
     review2 = JsonCodec().decode_response(rt.run_summary(run4).response_ref)[
         "result_ref"
     ]
-    score2 = json.loads(
-        await store.get_text(
-            (await DirectoryBundle.files(store, review2))["score.json"]
-        )
-    )
-    assert score2["scores"]["report_nonempty"] == 1  # passed
+    payload2 = json.loads(await store.get_text(review2))
+    assert payload2["decision"] == "ACCEPT"  # passed
+    assert payload2["issues"] == []
 
     # 旧版本保留，lineage 正确
     assert bundle.latest(analysis_id) == v2

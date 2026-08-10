@@ -1,12 +1,10 @@
 import json
-from pathlib import Path
 
 import pandas as pd
 import pytest
 import websockets
 
 from gui_gateway.__main__ import start_server
-from athena.research import ResearchRuntime
 from test.unit._support import make_project
 
 
@@ -19,11 +17,9 @@ async def _response(ws, request_id: int) -> dict:
 
 @pytest.mark.asyncio
 async def test_full_chat_flow(tmp_path) -> None:
-    project = make_project(tmp_path)
-    await project.open()
+    runtime = make_project(tmp_path)
     dataset = tmp_path / "dataset.csv"
     pd.DataFrame({"age": range(20), "label": [0, 1] * 10}).to_csv(dataset, index=False)
-    runtime = ResearchRuntime(project=project)
     server, port = await start_server(test_mode=True, runtime=runtime)
     try:
         async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
@@ -41,33 +37,36 @@ async def test_full_chat_flow(tmp_path) -> None:
                 )
             )
             parsed = await _response(ws, 1)
-            assert parsed["result"]["task_type"] == "classification"
-            assert parsed["result"]["primary_metric"] == "f1_macro"
+            assert parsed["result"]["intent"] == (
+                "classify tabular data, target label, optimize f1"
+            )
+            assert parsed["result"]["needs_configuration"] is True
 
             await ws.send(
                 json.dumps(
                     {
                         "request_id": 2,
                         "method": "TASK_CONFIGURE",
-                        "params": parsed["result"],
+                        "params": {
+                            **parsed["result"],
+                            "data_path": str(dataset),
+                            "target": "label",
+                        },
                     }
                 )
             )
             configured = await _response(ws, 2)
             assert configured["result"]["configured"] is True
 
-            await project.prepare_data_analysis(str(dataset), "label")
-            await ws.send(
-                json.dumps(
-                    {
-                        "request_id": 3,
-                        "method": "SEARCH_START",
-                        "params": {"hypothesis": "假设A"},
-                    }
-                )
-            )
+            await ws.send(json.dumps({"request_id": 3, "method": "RUN", "params": {}}))
             started = await _response(ws, 3)
-            assert started["result"]["status"] == "started"
+            assert started["result"]["status"] == "running"
+
+            await ws.send(
+                json.dumps({"request_id": 4, "method": "STATUS", "params": {}})
+            )
+            status = await _response(ws, 4)
+            assert status["result"]["execution"]["phase"] == "PREPARE"
     finally:
         server.close()
         await server.wait_closed()

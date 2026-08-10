@@ -70,6 +70,7 @@ class ResponsesProvider:
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             stream=True,
+            extra_body={"thinking": {"type": "disabled"}},
         )
         if output_type is not None:
             kw["response_format"] = {

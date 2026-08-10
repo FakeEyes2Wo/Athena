@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import pytest
 
 from athena.core.agent.session import RunSession
@@ -5,19 +7,19 @@ from athena.core.agent.types import AgentMessage
 from athena.memory.context_manager import ContextManager
 
 
-def test_session_view_exposes_kernel_contract():
+def test_session_view_exposes_runtime_contract():
     memory = ContextManager()
     mailbox = [AgentMessage(source="user", content="hi", context_refs=[])]
-    kernel = object()
+    runtime = Mock()
     sess = RunSession(
         agent_id="a1",
-        kernel=kernel,
+        runtime=runtime,
         context_ref="art:ctx",
         memory=memory,
         mailbox=mailbox,
     )
     assert sess.agent_id == "a1"
-    assert sess.kernel is kernel
+    assert sess.runtime is runtime
     assert sess.context_ref == "art:ctx"
     assert sess.memory.raw is memory  # BaseAgentRunner 依赖 .raw
     unread = sess.receive_messages()

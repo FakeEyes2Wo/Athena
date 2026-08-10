@@ -6,7 +6,7 @@ from ._support import BlockingAgent, make_runtime
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.models import AgentOutcome
 
-from athena.core.agent.codec import JsonCodec
+from athena.core.agent.types import JsonCodec
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec, AgentStatus, RunStatus
 from athena.agents.base_runner import BaseAgentRunner

@@ -1,5 +1,6 @@
 """项目 Composition Root 测试支持：带真实 model + fake 内层 LLM 的 make_project。"""
 
+import json
 from pathlib import Path
 
 from athena.agents.prompt_agent import load_prompt
@@ -7,7 +8,7 @@ from athena.agents.tools.generic_tools import generic_tool_registry
 from athena.core.agent import settings
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.runtime import Agent
-from athena.research.project_runtime import ProjectRuntime
+from athena.research.runtime import ResearchRuntime
 
 # 固定格式 task-understanding 报告（init_agent.md prompt §格式）。
 FAKE_TASK_UNDERSTANDING = """\
@@ -31,32 +32,36 @@ eval.py reads predictions.csv + labels.csv, aligns by __athena_row_id,
 computes the primary metric, prints one JSON line.
 """
 
-# 自包含 eval.py（eval.py 契约：纯 numpy，读 predictions.csv + labels.csv）。
+# 自包含 eval.py（eval.py 契约：stdlib-only，读 predictions.csv + labels.csv 算
+# accuracy，把结果写入 --output 文件——DataScriptRunner 要求 bundle 写 result.json，
+# 不是打印 stdout）。确定性测试用 stdlib-only，避免 uv sync 安装 numpy。
 FAKE_EVAL_PY = """\
 import json
-import numpy as np
+import sys
 
-preds = {}
-with open("predictions.csv", encoding="utf-8") as f:
-    for line in f:
-        parts = line.strip().split(",")
-        if len(parts) >= 2 and parts[0] != "__athena_row_id":
-            preds[parts[0]] = float(parts[1])
+def main():
+    out = open(sys.argv[sys.argv.index('--output') + 1], 'w')
+    preds = {}
+    with open("predictions.csv", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) >= 2 and parts[0] != "__athena_row_id":
+                preds[parts[0]] = float(parts[1])
 
-labels = {}
-with open("labels.csv", encoding="utf-8") as f:
-    for line in f:
-        parts = line.strip().split(",")
-        if len(parts) >= 2 and parts[0] != "__athena_row_id":
-            labels[parts[0]] = float(parts[1])
+    labels = {}
+    with open("labels.csv", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) >= 2 and parts[0] != "__athena_row_id":
+                labels[parts[0]] = float(parts[1])
 
-rows = [(preds[k], labels[k]) for k in preds if k in labels]
-y_pred = np.array([r[0] for r in rows])
-y_true = np.array([r[1] for r in rows])
-if len(rows) == 0:
-    raise RuntimeError("no aligned predictions")
-primary = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
-print(json.dumps({"primary": primary, "metric": "rmse"}))
+    rows = [(preds[k], labels[k]) for k in preds if k in labels]
+    if not rows:
+        raise RuntimeError("no aligned predictions")
+    primary = sum(1.0 for a, b in rows if a == b) / len(rows)
+    json.dump({"primary": primary, "metric": "accuracy"}, out)
+
+main()
 """
 
 
@@ -82,10 +87,8 @@ def fake_inner_builder(agent_type, *, model, client, workspace):
 
     模拟真实 LLM 的产物：data（data_agent prompt 要求 workspace 根 report.md +
     至少一张 ``figures/*`` 图）、init（init_agent.md prompt 要求
-    ``task_understanding.md`` + ``eval.py``）、report（report_agent.md prompt
-    要求 ``report.md``；fake 把 ReportAgent 收集落盘的 ``evidence.md`` 作为报告
-    正文，模拟 LLM 综合证据）。让外层编排（DataAgent 收集-提交 / InitAgent
-    收集-打包 / ReportAgent 收集-提交）不依赖真实 API。
+    ``task_understanding.md`` + ``eval.py``）。让外层编排（DataAgent 收集-提交 /
+    InitAgent 收集-打包）不依赖真实 API。
     """
     ws = Path(workspace)
     ws.mkdir(parents=True, exist_ok=True)
@@ -94,30 +97,36 @@ def fake_inner_builder(agent_type, *, model, client, workspace):
             FAKE_TASK_UNDERSTANDING, encoding="utf-8"
         )
         (ws / "eval.py").write_text(FAKE_EVAL_PY, encoding="utf-8")
-    elif agent_type == "report":
-        evidence_path = ws / "evidence.md"
-        evidence = (
-            evidence_path.read_text(encoding="utf-8") if evidence_path.is_file() else ""
-        )
-        (ws / "report.md").write_text(evidence, encoding="utf-8")
     else:
         figures = ws / "figures"
         figures.mkdir(exist_ok=True)
         (figures / "plot.png").write_bytes(b"fake-png")
         (ws / "report.md").write_text("分析报告", encoding="utf-8")
+        (ws / "dataset_role_proposal.json").write_text(
+            json.dumps(
+                {
+                    "role_proposal": "train",
+                    "data_files": ["dataset.csv"],
+                    "target_column": "label",
+                    "reasoning": "fake role proposal",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
     return Agent(FakeProvider(), generic_tool_registry(ws), load_prompt(agent_type))
 
 
-def make_project(tmp_path: Path) -> ProjectRuntime:
+def make_project(tmp_path: Path) -> ResearchRuntime:
     """带 DeepSeek model + fake 内层 LLM 的组合根（LLM 相关测试的入口）。
 
     ``register_defaults`` 要求显式传 ``model``（无 model 报错）；测试统一经
     此 helper 用 ``settings.model_name()`` 装配，并注入 ``fake_inner_builder``
     让 data agent 的内层 LLM 用 fake provider 收尾（单测不 hit 真实 API）。
     """
-    project = ProjectRuntime(tmp_path)
-    project.register_defaults(
+    runtime = ResearchRuntime(project_root=tmp_path)
+    runtime.register_defaults(
         model=settings.model_name(),
         inner_builder=fake_inner_builder,
     )
-    return project
+    return runtime
