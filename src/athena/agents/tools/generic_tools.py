@@ -54,36 +54,74 @@ def _shell_env() -> dict[str, str]:
     return env
 
 
-def _resolve_shell(name: str) -> str:
-    """返回确定的 shell 绝对路径，避免 Windows 下 ``bash`` 被解析为 WSL launcher。
+# 可经环境变量显式指定 shell 路径（对齐 Pi 的 shell_path 设置；优先于探测）。
+_ENV_SHELL = {"bash": "ATHENA_BASH_PATH", "pwsh": "ATHENA_PWSH_PATH"}
 
-    Windows 的 ``C:\\Windows\\System32\\bash.exe`` 是 WSL 入口（启动后无宿主
-    venv/pandas，脚本必然失败）；这里优先 Git Bash 的 ``bash.exe`` 与 Windows
-    PowerShell 的 ``powershell.exe``，两者都不存在时回退 shutil.which。
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _resolve_shell(name: str, env: dict[str, str] | None = None) -> str:
+    """返回确定的 shell 绝对路径（跨平台，参考 Codex/Pi）。
+
+    优先级：环境变量覆盖（``ATHENA_BASH_PATH``/``ATHENA_PWSH_PATH``）→
+    平台已知路径 → ``shutil.which``。Windows 下 ``bash`` 显式走 Git Bash，
+    避免 ``System32\\bash.exe``（WSL launcher）被选中；``pwsh`` 优先
+    PowerShell 7/5.1。Unix 下 ``bash`` 用系统 bash（回退 ``sh``）；
+    ``pwsh`` 缺失时返回 None（由调用方降级为 bash），保证任何机器可用。
     """
-    candidates = {
-        "bash": [
-            r"C:\Program Files\Git\usr\bin\bash.exe",
-            r"C:\Program Files\Git\bin\bash.exe",
-        ],
-        "pwsh": [
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            r"C:\Program Files\PowerShell\7\pwsh.exe",
-        ],
-    }
-    for candidate in candidates.get(name, []):
-        if Path(candidate).is_file():
-            return candidate
+    if env is None:
+        env = os.environ
+    override = env.get(_ENV_SHELL[name])
+    if override:
+        path = Path(override)
+        if path.is_file():
+            return str(path)
+        raise RuntimeError(f"configured {name} path not found: {override}")
+
+    if _is_windows():
+        candidates = {
+            "bash": [
+                r"C:\Program Files\Git\usr\bin\bash.exe",
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files\Git\mingw64\bin\bash.exe",
+            ],
+            "pwsh": [
+                r"C:\Program Files\PowerShell\7\pwsh.exe",
+                r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            ],
+        }
+        for candidate in candidates.get(name, []):
+            if Path(candidate).is_file():
+                return candidate
+
     found = shutil.which(name)
     if found:
         return found
-    raise RuntimeError(f"shell not found: {name}")
+    if name == "bash":
+        sh_path = shutil.which("sh")
+        if sh_path:
+            return sh_path
+    return None
 
 
 async def _run_command(
     root: Path, shell: str, args: list[str], command: str, timeout_s: int
 ) -> dict:
+    """执行 shell 命令；``pwsh`` 在无 PowerShell 的平台（如 Unix）降级为 bash。
+
+    降级后参数换成 bash 风格（``--noprofile -c``），保证 ``pwsh`` 工具在
+    任何机器可用（对齐 Codex：Unix 统一走 POSIX shell）。
+    """
     shell_path = _resolve_shell(shell)
+    if shell_path is None:
+        if shell == "pwsh":
+            shell_path = _resolve_shell("bash")
+            args = ["--noprofile", "-c"]
+        else:
+            raise RuntimeError(f"shell not found: {shell}")
     proc = await asyncio.create_subprocess_exec(
         shell_path,
         *args,
