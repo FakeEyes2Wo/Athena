@@ -57,18 +57,71 @@ def _shell_env() -> dict[str, str]:
 # 可经环境变量显式指定 shell 路径（对齐 Pi 的 shell_path 设置；优先于探测）。
 _ENV_SHELL = {"bash": "ATHENA_BASH_PATH", "pwsh": "ATHENA_PWSH_PATH"}
 
+# Windows 上可探测的 bash 候选，按优先级排列：
+# Git Bash 优先（与宿主共享 venv/PATH，LLM 的 ``python analysis.py`` 可用）；
+# WSL bash 是独立 Linux 环境（通常无宿主 pandas），默认不路由，仅作为可选项。
+_WIN_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\mingw64\bin\bash.exe",
+    r"C:\msys64\usr\bin\bash.exe",
+    r"C:\msys64\bin\bash.exe",
+)
+_WIN_PWSH_CANDIDATES = (
+    r"C:\Program Files\PowerShell\7\pwsh.exe",
+    r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
+    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+)
+_WIN_WSL_BASH = r"C:\Windows\System32\bash.exe"
+_WIN_CMD = r"C:\Windows\System32\cmd.exe"
+
 
 def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _resolve_shell(name: str, env: dict[str, str] | None = None) -> str:
+def _which(name: str) -> str | None:
+    """shutil.which 的 None 安全包装。"""
+    found = shutil.which(name)
+    return found if found else None
+
+
+def _shell_candidates(name: str) -> list[str]:
+    """返回某类 shell 在当前平台的可探测候选（按优先级排列，均验证存在）。
+
+    ``bash``：Windows 依次探测 Git Bash / MSYS2 / WSL bash / cmd；Unix 用
+    ``bash``→``sh``。``pwsh``：PowerShell 7 → 5.1 → PATH。返回列表不含重复
+    路径，未找到时为空列表（调用方决定降级或报错）。
+    """
+    candidates: list[str] = []
+    if _is_windows():
+        pool = _WIN_BASH_CANDIDATES if name == "bash" else _WIN_PWSH_CANDIDATES
+        for candidate in pool:
+            if Path(candidate).is_file() and candidate not in candidates:
+                candidates.append(candidate)
+        if name == "bash":
+            for extra in (_WIN_WSL_BASH, _WIN_CMD):
+                if Path(extra).is_file() and extra not in candidates:
+                    candidates.append(extra)
+    else:
+        found = _which("bash" if name == "bash" else "pwsh")
+        if found:
+            candidates.append(found)
+        if name == "bash":
+            sh_path = _which("sh")
+            if sh_path and sh_path not in candidates:
+                candidates.append(sh_path)
+    return candidates
+
+
+def _resolve_shell(name: str, env: dict[str, str] | None = None) -> str | None:
     """返回确定的 shell 绝对路径（跨平台，参考 Codex/Pi）。
 
     优先级：环境变量覆盖（``ATHENA_BASH_PATH``/``ATHENA_PWSH_PATH``）→
-    平台已知路径 → ``shutil.which``。Windows 下 ``bash`` 显式走 Git Bash，
-    避免 ``System32\\bash.exe``（WSL launcher）被选中；``pwsh`` 优先
-    PowerShell 7/5.1。Unix 下 ``bash`` 用系统 bash（回退 ``sh``）；
+    探测候选。Windows 下 ``bash`` 默认选 Git Bash（与宿主共享 venv/PATH），
+    明确避开 ``System32\\bash.exe``（WSL launcher 或独立 Linux 环境，无宿主
+    pandas）；要显式用 WSL 可设 ``ATHENA_BASH_PATH=C:\\Windows\\System32\\bash.exe``。
+    ``pwsh`` 优先 PowerShell 7/5.1。Unix 下 ``bash`` 用系统 bash（回退 ``sh``）；
     ``pwsh`` 缺失时返回 None（由调用方降级为 bash），保证任何机器可用。
     """
     if env is None:
@@ -80,30 +133,19 @@ def _resolve_shell(name: str, env: dict[str, str] | None = None) -> str:
             return str(path)
         raise RuntimeError(f"configured {name} path not found: {override}")
 
-    if _is_windows():
-        candidates = {
-            "bash": [
-                r"C:\Program Files\Git\usr\bin\bash.exe",
-                r"C:\Program Files\Git\bin\bash.exe",
-                r"C:\Program Files\Git\mingw64\bin\bash.exe",
-            ],
-            "pwsh": [
-                r"C:\Program Files\PowerShell\7\pwsh.exe",
-                r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
-                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            ],
-        }
-        for candidate in candidates.get(name, []):
-            if Path(candidate).is_file():
-                return candidate
-
-    found = shutil.which(name)
-    if found:
-        return found
+    candidates = _shell_candidates(name)
+    for candidate in candidates:
+        # Windows bash 默认候选不含 WSL/cmd；这里是探测顺序，跳过它们。
+        if name == "bash" and _is_windows():
+            wsl_or_cmd = candidate in (_WIN_WSL_BASH, _WIN_CMD)
+            if wsl_or_cmd:
+                continue
+        return candidate
     if name == "bash":
-        sh_path = shutil.which("sh")
-        if sh_path:
-            return sh_path
+        # 回退：显式选 WSL 或 sh（Unix）
+        if _is_windows() and Path(_WIN_WSL_BASH).is_file():
+            return _WIN_WSL_BASH
+        return _which("sh")
     return None
 
 

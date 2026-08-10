@@ -5,8 +5,11 @@ from pathlib import Path
 from unittest import mock
 
 from athena.agents.tools.generic_tools import (
+    _WIN_CMD,
+    _WIN_WSL_BASH,
     _resolve_shell,
     _run_command,
+    _shell_candidates,
     _shell_env,
     generic_tool_registry,
 )
@@ -47,6 +50,59 @@ def test_resolve_shell_env_override_missing(monkeypatch) -> None:
         raise AssertionError("expected RuntimeError")
     except RuntimeError as exc:
         assert "not found" in str(exc)
+
+
+def test_shell_candidates_probe_windows_bash_variants(tmp_path: Path) -> None:
+    """Windows bash 探测含 Git Bash / WSL / cmd；Git Bash 排序在 WSL 前。"""
+    git_bash = tmp_path / "git-bash.exe"
+    wsl_bash = tmp_path / "wsl-bash.exe"
+    cmd = tmp_path / "cmd.exe"
+    for p in (git_bash, wsl_bash, cmd):
+        p.write_bytes(b"")
+    with mock.patch("athena.agents.tools.generic_tools._is_windows", return_value=True):
+        with mock.patch(
+            "athena.agents.tools.generic_tools._WIN_BASH_CANDIDATES", (str(git_bash),)
+        ):
+            with mock.patch(
+                "athena.agents.tools.generic_tools._WIN_WSL_BASH", str(wsl_bash)
+            ):
+                with mock.patch("athena.agents.tools.generic_tools._WIN_CMD", str(cmd)):
+                    candidates = _shell_candidates("bash")
+    assert str(git_bash) in candidates
+    assert str(wsl_bash) in candidates
+    assert candidates.index(str(git_bash)) < candidates.index(str(wsl_bash))
+
+
+def test_resolve_windows_bash_skips_wsl_by_default(tmp_path: Path) -> None:
+    """Windows 默认 bash 解析选中 Git Bash，跳过 WSL/cmd。"""
+    git_bash = tmp_path / "git-bash.exe"
+    wsl_bash = tmp_path / "wsl-bash.exe"
+    cmd = tmp_path / "cmd.exe"
+    for p in (git_bash, wsl_bash, cmd):
+        p.write_bytes(b"")
+    with mock.patch("athena.agents.tools.generic_tools._is_windows", return_value=True):
+        with mock.patch(
+            "athena.agents.tools.generic_tools._WIN_BASH_CANDIDATES", (str(git_bash),)
+        ):
+            with mock.patch(
+                "athena.agents.tools.generic_tools._WIN_WSL_BASH", str(wsl_bash)
+            ):
+                with mock.patch("athena.agents.tools.generic_tools._WIN_CMD", str(cmd)):
+                    resolved = _resolve_shell("bash")
+    assert resolved == str(git_bash)  # Git Bash 优先，WSL/cmd 被跳过
+
+
+def test_resolve_windows_bash_falls_back_to_wsl(tmp_path: Path) -> None:
+    """Windows 无 Git Bash 时回退到 WSL bash。"""
+    wsl_bash = tmp_path / "wsl-bash.exe"
+    wsl_bash.write_bytes(b"")
+    with mock.patch("athena.agents.tools.generic_tools._is_windows", return_value=True):
+        with mock.patch("athena.agents.tools.generic_tools._WIN_BASH_CANDIDATES", ()):
+            with mock.patch(
+                "athena.agents.tools.generic_tools._WIN_WSL_BASH", str(wsl_bash)
+            ):
+                with mock.patch("shutil.which", return_value=None):
+                    assert _resolve_shell("bash") == str(wsl_bash)
 
 
 def test_resolve_pwsh_unix_degrades_to_none() -> None:
