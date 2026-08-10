@@ -14,7 +14,22 @@ from pathlib import Path
 
 from athena.core.tool import ToolRegistry, tool
 
-_HostAllow = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP")
+# 保留宿主 PATH / home / 临时目录等运行环境变量；过滤凭据类（API key 等）。
+# 缺 USERPROFILE/HOME/HOMEDRIVE/HOMEPATH 时 conda/python 的 ``expanduser()``
+# 无法确定 home 目录（报 "Could not determine home directory"），pwsh/bash
+# 启动时加载用户 profile 里的 conda init 会失败并弹窗。
+_HostAllow = (
+    "PATH",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+)
 
 
 def _workspace_path(root: Path, path: str) -> Path:
@@ -66,12 +81,12 @@ def _resolve_shell(name: str) -> str:
 
 
 async def _run_command(
-    root: Path, shell: str, flag: str, command: str, timeout_s: int
+    root: Path, shell: str, args: list[str], command: str, timeout_s: int
 ) -> dict:
     shell_path = _resolve_shell(shell)
     proc = await asyncio.create_subprocess_exec(
         shell_path,
-        flag,
+        *args,
         command,
         cwd=str(root.resolve()),
         stdout=asyncio.subprocess.PIPE,
@@ -118,11 +133,11 @@ def generic_tool_registry(workspace: Path) -> ToolRegistry:
         path_obj.write_text(content, encoding="utf-8")
         return {"path": str(path_obj)}
 
-    def _command_tool(shell: str, flag: str, name: str, description: str):
+    def _command_tool(shell: str, args: list[str], name: str, description: str):
         @tool(name=name, description=description)
         async def _cmd(command: str, timeout_s: int = 120) -> dict:
             """Run a shell command in the workspace."""
-            return await _run_command(root, shell, flag, command, timeout_s)
+            return await _run_command(root, shell, args, command, timeout_s)
 
         return _cmd
 
@@ -132,7 +147,7 @@ def generic_tool_registry(workspace: Path) -> ToolRegistry:
     reg.register(
         _command_tool(
             "bash",
-            "-c",
+            ["--noprofile", "-c"],
             "bash",
             "Run a bash command in the workspace and return stdout/stderr/returncode",
         )
@@ -140,7 +155,7 @@ def generic_tool_registry(workspace: Path) -> ToolRegistry:
     reg.register(
         _command_tool(
             "pwsh",
-            "-Command",
+            ["-NoProfile", "-NonInteractive", "-Command"],
             "pwsh",
             "Run a PowerShell command in the workspace and return stdout/stderr/returncode",
         )
