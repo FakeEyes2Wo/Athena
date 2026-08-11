@@ -685,6 +685,67 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
             [item.code for item in result.diagnostics],
         )
 
+    async def test_fetching_stops_once_the_success_target_is_met(self) -> None:
+        """按"要几篇成功的"下单，够数就不再下载后面的候选。
+
+        成功率按通道差一倍（实测 arXiv 91%、期刊 47%），而候选的通道构成每轮都不同，
+        任何固定的超额系数都会随构成失准——真机上失准过一次，13 篇候选里 5 篇取不到。
+        """
+        fetcher, transport = self.build(
+            {QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(self.source)}
+        )
+        request = self.pasa_request(max_papers=5, stop_after_fetched=1)
+        for extra in ("1706.03762", "1512.03385", "2009.02040"):
+            request.papers.append(PaperRef(identity=PaperIdentity(arxiv_id=extra)))
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual(4, result.stats.accepted)
+        self.assertEqual(1, result.stats.attempted)
+        self.assertEqual(1, result.stats.fetched)
+        self.assertEqual(1, len(result.records))
+        self.assertIn(
+            "paper_source.stopped_after_target",
+            [item.code for item in result.diagnostics],
+        )
+
+    async def test_failures_do_not_count_towards_the_success_target(self) -> None:
+        """失败的候选要继续往下试，否则"够数即停"就退化成"试够几次即停"。"""
+        fetcher, _ = self.build(
+            {
+                QUERY_URL: ok(ATOM_FEED),
+                "https://arxiv.org/src/2501.10120": HttpResponse(
+                    status=404, url="", body=b""
+                ),
+                "https://arxiv.org/src/": ok(self.source),
+            }
+        )
+        request = self.pasa_request(
+            max_papers=5, stop_after_fetched=1, allow_unpinned_version=True
+        )
+        request.papers.append(PaperRef(identity=PaperIdentity(arxiv_id="1706.03762")))
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual(2, result.stats.attempted)
+        self.assertEqual(1, result.stats.fetched)
+        self.assertEqual(1, result.stats.failed)
+
+    async def test_no_target_attempts_every_accepted_paper(self) -> None:
+        """默认 0 保持原行为：接受几篇就试几篇。"""
+        fetcher, _ = self.build({QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(self.source)})
+        request = self.pasa_request(max_papers=5)
+        request.papers.append(PaperRef(identity=PaperIdentity(arxiv_id="1706.03762")))
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual(2, result.stats.accepted)
+        self.assertEqual(2, result.stats.attempted)
+        self.assertNotIn(
+            "paper_source.stopped_after_target",
+            [item.code for item in result.diagnostics],
+        )
+
     async def test_cancellation_stops_the_batch(self) -> None:
         fetcher, _ = self.build({QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(self.source)})
         cancel = asyncio.Event()

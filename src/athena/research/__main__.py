@@ -15,7 +15,8 @@ from dotenv import load_dotenv
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.pipeline import (
     DEFAULT_CONVERSION_CONCURRENCY,
-    DEFAULT_SOURCE_OVERSHOOT,
+    NOT_ATTEMPTED,
+    SOURCE_CANDIDATE_MULTIPLE,
     SurveyReport,
     SurveyRequest,
     run_survey,
@@ -93,12 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="并发转换篇数",
     )
     parser.add_argument(
-        "--source-overshoot",
-        type=float,
-        default=DEFAULT_SOURCE_OVERSHOOT,
+        "--source-candidates",
+        type=int,
+        default=SOURCE_CANDIDATE_MULTIPLE,
         help=(
-            f"多要这个倍数的论文送去取源以抵消取源失败，默认 {DEFAULT_SOURCE_OVERSHOOT}；"
-            "取回后按相关性截回 --max-papers。给 1 关掉垫底"
+            f"交给取源的候选是 --max-papers 的几倍，默认 {SOURCE_CANDIDATE_MULTIPLE}；"
+            "取源顺序尝试、够数即停，多余的候选不会被下载"
         ),
     )
     parser.add_argument(
@@ -190,7 +191,7 @@ def print_report(report: SurveyReport) -> None:
     print(report_line("状态", status))
     print(
         report_line(
-            "候选池 / 取源预算",
+            "候选池 / 取源候选",
             f"{report.scout_pool} / {report.scout_retained}"
             f"（门槛 {report.retain_threshold}）",
         )
@@ -204,7 +205,9 @@ def print_report(report: SurveyReport) -> None:
         )
     print(
         report_line(
-            "取源成功", f"{report.fetched} / {report.fetched + report.fetch_failed}"
+            "取源成功",
+            f"{report.fetched} / {report.fetch_attempted} 次尝试"
+            f"（候选 {report.scout_retained}，够数即停）",
         )
     )
     if report.surplus_dropped:
@@ -248,11 +251,18 @@ def print_report(report: SurveyReport) -> None:
             f"/{report.embedded_texts} 条",
         )
     )
+    # 未尝试的候选不逐条列出：够数即停之后可能有二十来篇，它们既没失败也没花成本，
+    # 混在里面只会把真正失败的那几篇淹掉
+    untouched = sum(1 for item in report.papers if item.fetch_status == NOT_ATTEMPTED)
+    if untouched:
+        print(report_line("未尝试候选", f"{untouched} 篇（够数即停，一次都没下载）"))
     print("\n逐篇：")
     for item in report.papers:
+        if item.fetch_status == NOT_ATTEMPTED:
+            continue
         flag = "✓" if item.conversion_status == "converted" else "✗"
         if item.conversion_status == "surplus":
-            # 垫底富余不是失败：源取到了，只是排在名额外
+            # 多取的富余不是失败：源取到了，只是排在名额外
             flag = "·"
         if item.suspect_empty:
             flag = "!"
@@ -304,7 +314,7 @@ async def main_async(argv: list[str] | None = None) -> int:
         prefer=args.prefer,
         visual_policy=args.visual_policy,
         conversion_concurrency=args.concurrency,
-        source_overshoot=args.source_overshoot,
+        source_candidate_multiple=args.source_candidates,
         strict_quality=args.strict_quality,
         build_index=not args.no_index,
     )

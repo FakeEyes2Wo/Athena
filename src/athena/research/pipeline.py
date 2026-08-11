@@ -14,7 +14,6 @@
 """
 
 import asyncio
-import math
 import time
 from typing import Literal
 
@@ -70,20 +69,21 @@ DEFAULT_CONVERSION_CONCURRENCY = 4
 单篇成本主要花在视觉调用的往返上，本机 CPU 不是瓶颈。
 """
 
-DEFAULT_SOURCE_OVERSHOOT = 1.3
-"""多要几篇送去取源，用来抵消取源失败。
+SOURCE_CANDIDATE_MULTIPLE = 3
+"""交给 ``paper_source`` 的候选篇数是 ``max_papers`` 的几倍。
 
-取不到源只有试过才知道：``require_retrievable_source`` 能挡掉"上游没给任何线索"的
-论文，但挡不住线索本身失效。真机上三种都遇到过——``doi.org`` 重定向回 0 字节、
-ACM 与 MDPI 对非浏览器请求返回 403，其中 MDPI 那篇确实是开放获取，纯粹被反爬拦下。
+取不到源只有试过才知道：``require_retrievable_source`` 能挡掉"上游没给任何线索"的论文，
+挡不住线索本身失效。真机上三种都遇到过——``doi.org`` 重定向回 0 字节、ACM 与 MDPI 对
+非浏览器请求返回 403，其中 MDPI 那篇确实是开放获取，纯粹被反爬拦下。
 
-名额少的时候这件事被放大：50 篇丢 6 篇是 12%，10 篇丢 3 篇就是 30%。多取 30% 再按
-相关性截回 ``max_papers``，代价是最多多几次取源请求（取源不调模型，是整条链路里最
-便宜的一段），换来的是交付量不再被出版商的反爬策略决定。
+**成功率按通道差一倍**：实测六轮 arXiv 81/89 = 91%（排除传输故障那轮是 78/78 = 100%），
+期刊 17/36 = 47%。而交付集合的通道构成每轮都不同——同分次序改用散列之后，期刊占比从
+15% 升到 46%，于是原先按 1.3 倍超额取源的做法当场失准，13 篇里 5 篇取不到，交付掉到 8 篇。
+
+固定的超额系数必然随构成失准，所以不再猜：候选多给一些，由 ``stop_after_fetched`` 顺序
+尝试、够数即停，多余的候选一次都不下载。这个倍数只是攻击面上限——全是期刊论文的最坏情况
+需要 ``10 / 0.47 ≈ 22`` 次尝试，3 倍留了足够余量，而没取到就停不下来的风险由它兜住。
 """
-
-MIN_SOURCE_BACKFILL = 2
-"""``max_papers`` 很小时 30% 不足一篇，至少也要留两篇垫底。"""
 
 MIN_PLAUSIBLE_MARKDOWN = 2000
 """低于这个字符数就认为正文没被真正提取出来。
@@ -97,11 +97,20 @@ MIN_PLAUSIBLE_MARKDOWN = 2000
 阈值取得很松，只用来识别"几乎什么都没有"，不替代 ``paper_markdown`` 自己的质量门禁。
 """
 
-ConversionStatus = Literal["converted", "failed", "no_source", "surplus"]
-"""``surplus`` 是取源垫底的产物：源拿到了，但相关性排在 ``max_papers`` 之外。
+NOT_ATTEMPTED = "not_attempted"
+"""候选从未被下载过——``stop_after_fetched`` 在轮到它之前就够数了。
 
-它必须和 ``failed`` 分开——垫底篇数是策略决定的，把它算进转换失败率会让那个数字
-随 ``source_overshoot`` 浮动，而它衡量的本该是转换器的健壮性。
+不能沿用 ``skipped``：那是 ``PaperSourceRecord`` 已有的状态，含义是"下载前被策略拒绝"。
+两件事共用一个标签，报告里就分不出"我们没试"和"试了但不合规"。多取候选之前候选数等于
+尝试数，这个状态不存在，所以此前没有暴露。
+"""
+
+ConversionStatus = Literal["converted", "failed", "no_source", "surplus"]
+"""``surplus``：源拿到了，但相关性排在 ``max_papers`` 之外，因此不转换。
+
+取源改成"够数即停"之后正常情况下不会再出现，保留是因为它仍然是这一层的正确守卫——
+``paper_source`` 的停止目标由策略给出，而转换名额由本模块负责，两者不该互相假设。
+它必须和 ``failed`` 分开：多取是策略决定的，算进转换失败率会污染那个数字。
 """
 
 
@@ -145,12 +154,12 @@ class SurveyRequest(BaseModel):
         default=True,
         description="Deliver only fetchable papers; see has_retrievable_source.",
     )
-    source_overshoot: float = Field(
-        default=DEFAULT_SOURCE_OVERSHOOT,
-        ge=1.0,
+    source_candidate_multiple: int = Field(
+        default=SOURCE_CANDIDATE_MULTIPLE,
+        ge=1,
         description=(
-            "Fetch this multiple of max_papers so failed fetches do not shrink the "
-            "delivered set; see DEFAULT_SOURCE_OVERSHOOT. 1.0 disables backfill."
+            "Hand paper_source this multiple of max_papers as candidates; it stops "
+            "attempting once max_papers succeed. See SOURCE_CANDIDATE_MULTIPLE."
         ),
     )
     published_to: str = Field(default="", description="Inclusive ISO date upper bound.")
@@ -178,7 +187,13 @@ class PaperOutcome(BaseModel):
     paper_key: str = Field(description="Namespaced RAG identity key.")
     title: str = Field(default="", description="Upstream title.")
     relevance: float = Field(default=0.0, description="PaperScout relevance score.")
-    fetch_status: str = Field(description="fetched, skipped, or failed.")
+    fetch_status: str = Field(
+        description=(
+            "fetched, failed, skipped, or not_attempted. The last one means this "
+            "candidate was never downloaded because max_papers already succeeded; "
+            "paper_source's own 'skipped' means a policy rejected it before download."
+        )
+    )
     source_kind: str = Field(default="", description="tex or pdf when fetched.")
     source_locator: str = Field(default="", description="Exact provenance locator.")
     conversion_status: ConversionStatus = Field(description="Conversion outcome.")
@@ -238,19 +253,22 @@ class SurveyReport(BaseModel):
     scout_retained: int = Field(
         default=0,
         ge=0,
-        description="Papers PaperScout delivered, including the fetch backfill.",
+        description="Papers PaperScout delivered as fetch candidates.",
     )
-    fetch_budget: int = Field(
+    fetch_attempted: int = Field(
         default=0,
         ge=0,
-        description="Papers asked of paper_source: ceil(max_papers * source_overshoot).",
+        description=(
+            "Candidates paper_source actually tried before max_papers succeeded; "
+            "the rest were never downloaded."
+        ),
     )
     surplus_dropped: int = Field(
         default=0,
         ge=0,
         description=(
-            "Backfill papers that fetched successfully but ranked beyond max_papers, "
-            "so they were never converted."
+            "Papers that fetched successfully but ranked beyond max_papers, so they "
+            "were never converted. Normally zero now that fetching stops on target."
         ),
     )
     scout_dropped_no_source: int = Field(
@@ -298,7 +316,7 @@ class SurveyReport(BaseModel):
         取源失败不计入分母：那是网络与开放获取的问题，和转换器的健壮性无关，
         混在一起会让这个数字既不能用来评估 paper_markdown，也不能用来评估取源。
         垫底富余的论文同样不计入：它们取到了源却按策略不转换，算进去只会让这个
-        数字随 ``source_overshoot`` 浮动。
+        数字随取源策略浮动。
         """
         attempted = [
             item
@@ -369,13 +387,9 @@ class SurveyPipeline:
             return "partial"
         return "complete"
 
-    def fetch_budget(self) -> int:
-        """送去取源的篇数：``max_papers`` 之上按 ``source_overshoot`` 加一段垫底。"""
-        wanted = self.request.max_papers
-        budget = math.ceil(wanted * self.request.source_overshoot)
-        if budget > wanted:
-            budget = max(budget, wanted + MIN_SOURCE_BACKFILL)
-        return budget
+    def candidate_cap(self) -> int:
+        """交给取源的候选上限；实际尝试几篇由 ``stop_after_fetched`` 决定。"""
+        return self.request.max_papers * self.request.source_candidate_multiple
 
     async def _scout(self) -> ArtifactRef | None:
         """跑 PaperScout，把交付集合转成取源请求引用；零交付时返回 ``None``。
@@ -398,21 +412,21 @@ class SurveyPipeline:
             model=self.stack.model,
             client=self.stack.client,
         )
-        budget = self.fetch_budget()
-        self.report.fetch_budget = budget
+        candidates = self.candidate_cap()
         scout_request = ScoutRequest(
             query=self.request.query,
             published_to=self.request.published_to,
             max_steps=self.request.max_steps,
             search_top_k=self.request.search_top_k,
             expand_top_k=self.request.expand_top_k,
-            max_papers=budget,
+            max_papers=candidates,
             max_seconds=self.request.max_seconds,
             retain_threshold=self.request.retain_threshold,
             require_retrievable_source=self.request.require_retrievable_source,
             paper_source_policy=PaperSourcePolicy(
                 prefer=self.request.prefer,
-                max_papers=budget,
+                max_papers=candidates,
+                stop_after_fetched=self.request.max_papers,
                 visual_policy=self.request.visual_policy,
             ),
         )
@@ -438,13 +452,12 @@ class SurveyPipeline:
                 paper_key=key,
                 title=raw,
                 relevance=1.0,
-                fetch_status="skipped",
+                fetch_status=NOT_ATTEMPTED,
                 conversion_status="no_source",
             )
             self._register_identifiers(key, identity)
         self.report.scout_retained = len(papers)
         self._convert_cap = max(self.request.max_papers, len(papers))
-        self.report.fetch_budget = self._convert_cap
         request = PaperSourceRequest(
             papers=papers,
             policy=PaperSourcePolicy(
@@ -485,7 +498,7 @@ class SurveyPipeline:
                 paper_key=paper.paper_key,
                 title=paper.title,
                 relevance=paper.relevance,
-                fetch_status="skipped",
+                fetch_status=NOT_ATTEMPTED,
                 conversion_status="no_source",
             )
             self._register_identifiers(paper.paper_key, paper)
@@ -554,6 +567,7 @@ class SurveyPipeline:
             self._conversion_keys[record.paper_key] = key
         self.report.fetched = result.stats.fetched
         self.report.fetch_failed = result.stats.failed + result.stats.skipped
+        self.report.fetch_attempted = result.stats.attempted
         return result
 
     async def _convert(self, source_result: PaperSourceResult) -> list[PaperContent]:
@@ -713,7 +727,7 @@ class SurveyPipeline:
         if outcome is None:
             outcome = PaperOutcome(
                 paper_key=paper_key,
-                fetch_status="skipped",
+                fetch_status=NOT_ATTEMPTED,
                 conversion_status="no_source",
             )
             self._outcomes[paper_key] = outcome

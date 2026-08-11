@@ -273,18 +273,38 @@ class PaperSourceFetcher:
         resolution = await self._resolve_versions(accepted, diagnostics)
 
         # 阶段 3：逐篇取源并生成转换请求（唯一按篇计费的阶段）
+        #
+        # ``stop_after_fetched`` 让调用方按"要几篇成功的"下单，而不是按"试几篇"。取源
+        # 成功率按通道差一倍——实测六轮 arXiv 81/89 = 91%，期刊 17/36 = 47%（出版商反爬：
+        # IEEE 返回 0 字节，MDPI 与 ACM 403）——而交付集合的通道构成每轮都不同，任何固定
+        # 的超额系数都会在构成变化时失准。这里顺序尝试、够数即停，多余的候选一次都不下载。
         records: list[PaperSourceRecord] = []
+        target = request.policy.stop_after_fetched
+        fetched_so_far = 0
         for index, paper in enumerate(accepted):
             if cancel is not None and cancel.is_set():
                 raise asyncio.CancelledError
-            records.append(
-                await self._fetch_one(index, paper, request.policy, resolution)
+            if target and fetched_so_far >= target:
+                break
+            record = await self._fetch_one(index, paper, request.policy, resolution)
+            records.append(record)
+            if record.status == "fetched":
+                fetched_so_far += 1
+        if target and len(records) < len(accepted):
+            diagnostics.append(
+                diagnostic(
+                    "info",
+                    "paper_source.stopped_after_target",
+                    f"Stopped after {fetched_so_far} papers were fetched; "
+                    f"{len(accepted) - len(records)} candidates were never attempted.",
+                )
             )
 
         # 阶段 4：汇总统计
         stats = PaperSourceStats(
             requested=len(request.papers),
             accepted=len(accepted),
+            attempted=len(records),
             fetched=sum(1 for record in records if record.status == "fetched"),
             skipped=sum(1 for record in records if record.status == "skipped"),
             failed=sum(1 for record in records if record.status == "failed"),

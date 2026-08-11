@@ -122,28 +122,37 @@
 ```text
 SurveyRequest
      │
-     ├─ _scout    → PaperScoutResult.paper_source_request_ref（要 max_papers × 1.3 篇）
-     ├─ _fetch    → PaperSourceRecord.conversion_request_ref
-     ├─ _convert  → PaperContent（截回 max_papers；并发，受 conversion_concurrency 约束）
+     ├─ _scout    → PaperScoutResult.paper_source_request_ref（候选 max_papers × 3）
+     ├─ _fetch    → PaperSourceRecord.conversion_request_ref（够 max_papers 篇成功即停）
+     ├─ _convert  → PaperContent（并发，受 conversion_concurrency 约束）
      └─ _index    → corpus_ref
      ▼
 SurveyReport（逐篇成本与质量事实）
 ```
 
-### 取源垫底
+### 取源按"要几篇成功的"下单
 
 取不到源只有试过才知道。`require_retrievable_source` 能挡掉"上游没给任何线索"的论文，但挡不住
 线索本身失效——真机上三种都遇到过：`doi.org` 重定向回 0 字节（IEEE）、ACM 与 MDPI 对非浏览器
 请求返回 403，其中 MDPI 那篇确实是开放获取，纯粹被反爬拦下。
 
-名额少的时候这件事被放大：50 篇丢 6 篇是 12%，10 篇丢 3 篇就是 30%。所以 `_scout` 按
-`ceil(max_papers × source_overshoot)`（默认 1.3，且至少多两篇）交付，`_convert` 再按相关性
-截回 `max_papers`，多出来的记 `conversion_status="surplus"`。
+**成功率按通道差一倍**，实测六轮：
 
-截断放在转换之前而不是取源之前：取源不调模型，是整条链路里最便宜的一段，转换才是花钱的。
-`surplus` 与 `failed` 严格分开——垫底篇数是策略决定的，混进转换失败率会让那个数字随
-`source_overshoot` 浮动。`--source-overshoot 1` 关掉垫底；`--papers` 显式点名的论文不做垫底，
-也不被 `max_papers` 截掉。
+| 通道 | 取源成功率 |
+| --- | --- |
+| arXiv | 81/89 = **91%**（排除传输故障那轮是 78/78 = 100%） |
+| 期刊 | 17/36 = **47%** |
+
+而交付集合的通道构成每轮都不同。最初的做法是按固定系数超额取源（`max_papers × 1.3`），它在
+同分次序改用散列的当天就失准了：期刊占比从 15% 升到 46%，13 篇候选里 5 篇取不到，交付掉到 8 篇。
+
+固定系数必然随构成失准，所以不再猜。`_scout` 交付 `max_papers × 3` 篇候选，`paper_source` 顺序
+尝试、**够 `max_papers` 篇成功即停**（`PaperSourcePolicy.stop_after_fetched`），剩下的候选一次都
+不下载。倍数只是攻击面上限——全是期刊论文的最坏情况需要 `10 / 0.47 ≈ 22` 次尝试，3 倍留了余量。
+
+`surplus` 保留但正常情况下为 0：`paper_source` 的停止目标由策略给出，转换名额由流水线负责，
+两者不该互相假设。它与 `failed` 严格分开，也不进 `conversion_failure_rate` 的分母。
+`--papers` 显式点名的论文不做多取，也不被 `max_papers` 截掉。
 
 ### `status` 只描述本次运行自己的产物
 
@@ -222,7 +231,7 @@ python -m athena.research --papers 1706.03762,1512.03385 # 跳过检索，单独
 把两者绑在一起只会让下游的样本量受制于检索门槛。
 
 主要开关：`--max-papers`（默认 10）、`--scorer-model`、`--retain-threshold`（默认 0）、
-`--source-overshoot`（默认 1.3）、`--allow-unfetchable`、`--strict-quality`、`--concurrency`
+`--source-candidates`（默认 3 倍）、`--allow-unfetchable`、`--strict-quality`、`--concurrency`
 （默认 4）、`--max-seconds`（默认 600）、`--no-index`。
 
 **`--max-papers` 省不到检索。** `paper_scout` 会给整个候选池打分（实测池 240 篇、
@@ -253,7 +262,7 @@ python -m athena.research --papers 1706.03762,1512.03385 # 跳过检索，单独
 
 ## 真机基线（2026-08-10，`--max-papers 10`）
 
-同一个查询，默认 10 篇。这一轮跑在取源垫底与 `--concurrency 3` 之前，所以取源只要了 10 篇、
+同一个查询，默认 10 篇。这一轮跑在取源多取与 `--concurrency 3` 之前，所以取源只要了 10 篇、
 转换按并发 2 跑：
 
 | 项目 | 数值 | 对照 50 篇 |
@@ -273,7 +282,7 @@ python -m athena.research --papers 1706.03762,1512.03385 # 跳过检索，单独
 池成分不同。所以"按上一轮报告的前 N 篇推算"只能给量级，给不了名单。
 
 **这一轮暴露的两件事已经修掉：** 取源只成功 7/10（IEEE 返回 0 字节、ACM 与 MDPI 403），于是有了
-取源垫底；报告写着 `partial` 而语料其实建好了，于是有了 `final_status`。
+取源多取（后来演进成够数即停）；报告写着 `partial` 而语料其实建好了，于是有了 `final_status`。
 
 ## 已知限制
 

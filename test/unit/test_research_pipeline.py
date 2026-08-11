@@ -395,7 +395,9 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(report.papers))
         self.assertEqual(0, report.converted())
         self.assertIsNone(report.corpus_ref)
-        self.assertTrue(all(item.fetch_status == "skipped" for item in report.papers))
+        self.assertTrue(
+            all(item.fetch_status == "not_attempted" for item in report.papers)
+        )
 
     async def test_papers_are_ordered_by_relevance(self) -> None:
         FakeScoutAgent.papers = [
@@ -566,35 +568,30 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.stack.model, scorer.call_args.args[1])
 
-    async def test_the_fetch_budget_overshoots_the_delivery_target(self) -> None:
-        """送去取源的是 ``max_papers × source_overshoot``，不是 ``max_papers``。
+    async def test_source_gets_extra_candidates_and_a_success_target(self) -> None:
+        """取源按"要几篇成功的"下单，而不是按"试几篇"。
 
-        取不到源只有试过才知道，名额少的时候几次 403 就能把交付量打掉三成。
-        多要的那几篇只多花取源请求，取源不调模型。
+        成功率按通道差一倍（实测 arXiv 91%、期刊 47%），而交付集合的通道构成每轮都不同，
+        任何固定的超额系数都会随构成失准——真机上就失准过一次，13 篇里 5 篇取不到。
         """
         report = await self.run_pipeline(max_papers=10)
+        policy = FakeScoutAgent.seen_request.paper_source_policy
 
-        self.assertEqual(13, FakeScoutAgent.seen_request.max_papers)
-        self.assertEqual(13, FakeScoutAgent.seen_request.paper_source_policy.max_papers)
-        self.assertEqual(13, report.fetch_budget)
+        self.assertEqual(30, FakeScoutAgent.seen_request.max_papers)
+        self.assertEqual(30, policy.max_papers)
+        self.assertEqual(10, policy.stop_after_fetched)
+        self.assertEqual(report.scout_retained, len(FakeScoutAgent.papers))
 
-    async def test_a_small_target_still_gets_two_backfill_papers(self) -> None:
-        """``max_papers`` 很小时按比例算出来不足一篇，垫底会退化成没有。"""
-        await self.run_pipeline(max_papers=2)
+    async def test_the_candidate_multiple_is_configurable(self) -> None:
+        await self.run_pipeline(max_papers=10, source_candidate_multiple=5)
 
-        self.assertEqual(4, FakeScoutAgent.seen_request.max_papers)
-
-    async def test_overshoot_of_one_turns_the_backfill_off(self) -> None:
-        """要精确控制成本时，``source_overshoot=1`` 恢复"要几篇取几篇"。"""
-        await self.run_pipeline(max_papers=10, source_overshoot=1.0)
-
-        self.assertEqual(10, FakeScoutAgent.seen_request.max_papers)
+        self.assertEqual(50, FakeScoutAgent.seen_request.max_papers)
 
     async def test_surplus_papers_are_fetched_but_never_converted(self) -> None:
         """垫底富余取到源就停在那里：不转换、不进语料、不算转换失败。
 
         它必须和 ``failed`` 分开——垫底篇数是策略决定的，混进失败率会让那个数字
-        随 ``source_overshoot`` 浮动，而它衡量的本该是转换器的健壮性。
+        随取源策略浮动，而它衡量的本该是转换器的健壮性。
         """
         report = await self.run_pipeline(max_papers=1)
 
