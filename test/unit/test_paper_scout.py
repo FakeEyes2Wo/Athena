@@ -27,6 +27,7 @@ from athena.research.paper_scout.pool import (
     PaperPool,
     has_retrievable_source,
     locator_for,
+    tie_break,
     truncate_abstract,
 )
 from athena.research.paper_scout.prompts import format_history
@@ -262,6 +263,45 @@ class PoolTest(unittest.TestCase):
         for index, score in enumerate([0.2, 0.9, 0.5]):
             pool.add(paper(str(index), f"P{index}", score))
         self.assertEqual([item.relevance for item in pool.ranked()], [0.9, 0.5, 0.2])
+
+    def test_ranking_is_reproducible_across_pools(self):
+        """同分次序必须完全确定：两次运行拿到同一批论文就该得到同一个交付集合。"""
+        papers = [paper(str(index), f"P{index}", 0.45) for index in range(12)]
+        first, second = PaperPool(), PaperPool()
+        for item in papers:
+            first.add(item.model_copy(deep=True))
+        for item in reversed(papers):
+            second.add(item.model_copy(deep=True))
+
+        self.assertEqual(
+            [item.paper_key for item in first.ranked()],
+            [item.paper_key for item in second.ranked()],
+        )
+
+    def test_tied_papers_do_not_fall_back_to_channel_order(self):
+        """同分时期刊论文必须能赢过 arXiv 论文，否则整个期刊文献在边际上被排除。
+
+        实测：某轮 5 个名额由 35 篇同为 0.45 的论文争夺，其中 23 篇是期刊论文——按
+        ``paper_key`` 字典序 ``arxiv:`` 恒排在 ``doi:`` 之前，那 23 篇一篇都进不去。
+        """
+        pool = PaperPool()
+        for index in range(10):
+            pool.add(paper(f"a{index}", f"ArXiv {index}", 0.45))
+            pool.add(journal_paper(f"10.1000/j{index}", f"Journal {index}", 0.45))
+
+        top = pool.ranked()[:10]
+
+        self.assertTrue(any(item.doi for item in top), "期刊论文在同分档里颗粒无收")
+        self.assertTrue(any(item.arxiv_id for item in top))
+
+    def test_tie_break_ignores_relevance_and_only_orders(self):
+        """散列只负责次序，不参与相关性；分数高的永远在前。"""
+        pool = PaperPool()
+        pool.add(journal_paper("10.1000/low", "Journal low", 0.2))
+        pool.add(paper("high", "ArXiv high", 0.45))
+
+        self.assertEqual("ArXiv high", pool.ranked()[0].title)
+        self.assertNotEqual(tie_break("arxiv:1"), tie_break("arxiv:2"))
 
     def test_mark_expanded_only_succeeds_once(self):
         pool = PaperPool()

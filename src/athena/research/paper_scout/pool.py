@@ -6,6 +6,8 @@ pool 是 PaperScout 的隐状态：它记住所有被接受的论文、每篇是
 下一步该 search 还是 expand 所需要的全部信息。
 """
 
+import hashlib
+
 from athena.research.paper_scout.schemas import (
     MAX_ABSTRACT_WORDS,
     OBSERVATION_EXPANDED,
@@ -32,6 +34,27 @@ def truncate_abstract(abstract: str, max_words: int = MAX_ABSTRACT_WORDS) -> str
     if len(words) <= max_words:
         return abstract
     return " ".join(words[:max_words]) + "..."
+
+
+def tie_break(paper_key: str) -> str:
+    """同分论文之间的确定性次序；与相关性无关，只求无系统性偏置。
+
+    打分是四档离散的，交付名额几乎总是在某一档内部被截断——实测一轮里 8 篇满分直接入选，
+    剩下 5 个名额由 **35 篇同为 0.45 的论文** 争夺。所以这个次序决定了将近一半的交付集合。
+
+    此前直接用 ``paper_key`` 字典序，那不是排序设计而是字符串比较的副产物，后果是两条
+    系统性偏置：``arxiv:`` 排在 ``doi:`` 之前，于是那 35 篇里的 23 篇期刊论文**一篇都进不去**；
+    arXiv 编号升序又等于最老的优先，选出来的 5 篇全在 2012–2020，而该档中位年份是 2023。
+
+    改用年份降序试过，不成立：选出来的 5 篇全是 2026 年的边缘论文（多模态生物医学融合、
+    蛋白质数据增强），反而不如原来选中的 DART 与 Imbalance-XGBoost 贴题。同一档内部按
+    定义没有相关性差异，任何单调偏好都只是换一个方向的臆断。
+
+    因此这里只做一件事：把字典序换成 ``paper_key`` 的稳定散列。次序仍然完全可复现，但不再
+    与通道、年代或编号相关，同分的论文按各自的机会入选。要真正区分同档论文，得让打分器给出
+    更细的分数，而不是在这里发明信号。
+    """
+    return hashlib.sha256(paper_key.encode("utf-8")).hexdigest()
 
 
 def locator_for(paper: ScoutPaper) -> str:
@@ -138,9 +161,10 @@ class PaperPool:
         return True
 
     def ranked(self) -> list[ScoutPaper]:
-        """按相关性降序、同分时按 key 升序返回全部论文。"""
+        """按相关性降序返回全部论文；同分次序见 ``tie_break``。"""
         return sorted(
-            self._papers.values(), key=lambda item: (-item.relevance, item.paper_key)
+            self._papers.values(),
+            key=lambda item: (-item.relevance, tie_break(item.paper_key)),
         )
 
     def retained(
@@ -174,7 +198,8 @@ class PaperPool:
         expanded = [item for item in ranked if item.expanded][:OBSERVATION_EXPANDED]
         fresh = [item for item in ranked if not item.expanded][:OBSERVATION_UNEXPANDED]
         shown = sorted(
-            expanded + fresh, key=lambda item: (-item.relevance, item.paper_key)
+            expanded + fresh,
+            key=lambda item: (-item.relevance, tie_break(item.paper_key)),
         )
         lines = [POOL_HEADER]
         for paper in shown:
