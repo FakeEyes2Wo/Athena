@@ -18,6 +18,7 @@ from athena.research.wiring import (
     DEFAULT_ARTIFACT_ROOT,
     EMBED_MAX_RETRIES,
     RESEARCH_MODEL_ENV,
+    SCORER_MODEL_ENV,
     TUI_MODEL_ENV,
     OpenAIEmbedder,
     ResearchStack,
@@ -25,6 +26,7 @@ from athena.research.wiring import (
     build_artifact_store,
     build_research_tools,
     resolve_model,
+    resolve_scorer_model,
 )
 from athena.storage.artifact_store import LocalArtifactStore
 
@@ -130,6 +132,42 @@ class ResolveModelTest(unittest.TestCase):
             "os.environ", {RESEARCH_MODEL_ENV: "", TUI_MODEL_ENV: "tui"}, clear=False
         ):
             self.assertEqual("tui", resolve_model())
+
+
+class ScorerModelTest(unittest.TestCase):
+    """打分模型可以和策略模型分开配置，不配就沿用策略模型。"""
+
+    def test_explicit_argument_wins(self) -> None:
+        with mock.patch.dict(
+            "os.environ", {SCORER_MODEL_ENV: "env-scorer"}, clear=False
+        ):
+            self.assertEqual("explicit", resolve_scorer_model("explicit"))
+
+    def test_reads_its_own_environment_variable(self) -> None:
+        with mock.patch.dict("os.environ", {SCORER_MODEL_ENV: "flash"}, clear=False):
+            self.assertEqual("flash", resolve_scorer_model())
+
+    def test_unset_means_reuse_the_policy_model(self) -> None:
+        """不设时行为必须与分开之前完全一致，否则这是个破坏性默认值。"""
+        with mock.patch.dict("os.environ", {SCORER_MODEL_ENV: ""}, clear=False):
+            self.assertEqual("", resolve_scorer_model())
+        stack = ResearchStack(
+            artifacts=mock.MagicMock(),
+            client=mock.MagicMock(),
+            model="policy",
+            http=HostRateLimiter(),
+        )
+        self.assertEqual("policy", stack.effective_scorer_model())
+
+    def test_configured_scorer_overrides_the_policy_model(self) -> None:
+        stack = ResearchStack(
+            artifacts=mock.MagicMock(),
+            client=mock.MagicMock(),
+            model="policy",
+            http=HostRateLimiter(),
+            scorer_model="flash",
+        )
+        self.assertEqual("flash", stack.effective_scorer_model())
 
 
 class ArtifactRootTest(unittest.TestCase):

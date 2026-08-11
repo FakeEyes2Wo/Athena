@@ -39,7 +39,12 @@ from athena.research.paper_scout.schemas import (
     ScoutRequest,
     ScoutStats,
 )
-from athena.research.paper_scout.scorer import parse_grades, true_probability
+from athena.research.paper_scout.scorer import (
+    DEFAULT_BATCH_SIZE,
+    GradedRelevanceScorer,
+    parse_grades,
+    true_probability,
+)
 from athena.research.paper_scout.session import ScoutSession, process_reward
 from athena.research.paper_scout.tool import (
     PaperScoutExpandTool,
@@ -323,6 +328,67 @@ class ScorerTest(unittest.TestCase):
 
     def test_true_probability_is_none_without_logprobs(self):
         self.assertIsNone(true_probability(None))
+
+
+class StubScoringClient:
+    """记录每次打分请求的 prompt，可按论文标题触发一次失败。"""
+
+    def __init__(self, reply: str, fail_on_title: str = "") -> None:
+        self.reply = reply
+        self.fail_on_title = fail_on_title
+        self.prompts: list[str] = []
+        self.chat = self
+
+    @property
+    def completions(self):
+        return self
+
+    async def create(self, **kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        self.prompts.append(prompt)
+        if self.fail_on_title and self.fail_on_title in prompt:
+            raise RuntimeError("scoring endpoint refused the batch")
+        message = type("Message", (), {"content": self.reply})()
+        choice = type("Choice", (), {"message": message})()
+        return type("Reply", (), {"choices": [choice]})()
+
+
+class ScorerBatchTest(unittest.IsolatedAsyncioTestCase):
+    """批次大小决定请求数，而请求数是 scout 墙钟的主要来源。"""
+
+    def test_default_batch_size_reflects_the_measured_tradeoff(self):
+        """8 篇要 15.8 秒、24 篇要 23.7 秒——三倍的量只多花五成时间。"""
+        self.assertEqual(24, DEFAULT_BATCH_SIZE)
+
+    async def test_papers_are_split_into_batches_of_the_configured_size(self):
+        client = StubScoringClient('{"1": 3, "2": 3, "3": 3}')
+        scorer = GradedRelevanceScorer(client, "m", batch_size=3)
+
+        scores = await scorer.score(
+            "q", [paper(f"arxiv:{i}", f"T{i}", 0.0) for i in range(7)]
+        )
+
+        self.assertEqual(7, len(scores))
+        self.assertEqual(3, scorer.calls)
+        self.assertEqual(3, len(client.prompts))
+
+    async def test_a_failed_batch_scores_zero_without_taking_down_the_rest(self):
+        """整批按 0 分处理——打分失败绝不能把论文误判成高相关。
+
+        批次越大，一次失败作废的论文越多，这是提高 ``batch_size`` 的代价。
+        """
+        client = StubScoringClient('{"1": 3, "2": 3}', fail_on_title="Doomed")
+        scorer = GradedRelevanceScorer(client, "m", batch_size=2)
+        papers = [
+            paper("arxiv:1", "Fine one", 0.0),
+            paper("arxiv:2", "Fine two", 0.0),
+            paper("arxiv:3", "Doomed batch", 0.0),
+            paper("arxiv:4", "Also doomed", 0.0),
+        ]
+
+        scores = await scorer.score("q", papers)
+
+        self.assertEqual([1.0, 1.0, 0.0, 0.0], scores)
 
 
 class RewardTest(unittest.TestCase):

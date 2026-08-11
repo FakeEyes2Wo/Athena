@@ -42,6 +42,7 @@ from athena.storage.artifact_store import LocalArtifactStore
 
 ARTIFACT_ROOT_ENV = "ATHENA_ARTIFACT_ROOT"
 RESEARCH_MODEL_ENV = "ATHENA_RESEARCH_MODEL"
+SCORER_MODEL_ENV = "ATHENA_SCORER_MODEL"
 TUI_MODEL_ENV = "ATHENA_TUI_MODEL"
 EMBEDDING_MODEL_ENV = "ATHENA_EMBEDDING_MODEL"
 VISION_MODEL_ENV = "ATHENA_VISION_MODEL"
@@ -91,6 +92,22 @@ def resolve_model(explicit: str = "") -> str:
         or os.environ.get(RESEARCH_MODEL_ENV, "")
         or os.environ.get(TUI_MODEL_ENV, "")
     )
+
+
+def resolve_scorer_model(explicit: str = "") -> str:
+    """相关性打分的模型；未设 ``ATHENA_SCORER_MODEL`` 时回落到策略模型。
+
+    分开是因为两者的形状完全不同。策略每步一次，要在 20 篇观测里决定下一步搜什么、
+    从哪篇扩展，值得用强模型；打分是**四档分类**——读标题加摘要判 0/1/2/3——但它是调用
+    次数最多的一环：真机一轮 4 步就发了 38 次，而策略只有 4 次。
+
+    延迟由输出 token 决定。实测策略调用一次吐 2210 个 token、38.9 秒，打分一次吐 857 个、
+    15.8 秒。整条链路里 scout 占 69% 的墙钟，其中最大的一块就是这几十次打分，所以把它换成
+    不做长推理的轻量模型，是压缩总时长性价比最高的一处。
+
+    回落而不是报错：不设这个变量时行为与此前完全一致。
+    """
+    return explicit or os.environ.get(SCORER_MODEL_ENV, "")
 
 
 def build_artifact_store(root: str | Path = "") -> LocalArtifactStore:
@@ -299,18 +316,25 @@ class ResearchStack:
     检索和整篇读取照常可用，语义检索会明确报错；没有视觉模型时
     ``visual_policy="best_effort"`` 会退回仅证据文本。两者都是可降级的，
     因此不在装配期强制要求。
+
+    ``scorer_model`` 为空串表示打分沿用 ``model``，用 ``effective_scorer_model()`` 取值。
     """
 
     artifacts: LocalArtifactStore
     client: AsyncOpenAI
     model: str
     http: HostRateLimiter
+    scorer_model: str = ""
     embedder: OpenAIEmbedder | None = None
     visual_interpreter: VisionInterpreter | None = None
     contact_email: str = ""
     semantic_scholar_api_key: str = ""
     openalex_api_key: str = ""
     ghostscript: str = ""
+
+    def effective_scorer_model(self) -> str:
+        """实际用于打分的模型名；未单独配置时就是策略模型。"""
+        return self.scorer_model or self.model
 
     def build_backends(self) -> tuple[list, object]:
         """构造共享限流器的检索后端与引用后端。"""
@@ -325,6 +349,7 @@ def build_research_stack(
     *,
     artifact_root: str | Path = "",
     model: str = "",
+    scorer_model: str = "",
     client: AsyncOpenAI | None = None,
     enable_embedder: bool = True,
     enable_vision: bool = True,
@@ -355,6 +380,7 @@ def build_research_stack(
         client=resolved_client,
         model=resolve_model(model),
         http=http,
+        scorer_model=resolve_scorer_model(scorer_model),
         embedder=embedder,
         visual_interpreter=interpreter,
         contact_email=contact,
