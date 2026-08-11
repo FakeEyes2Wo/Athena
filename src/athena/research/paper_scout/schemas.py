@@ -98,7 +98,7 @@ class ScoutAction(BaseModel):
 
     step: int = Field(ge=1, description="1-based agent step that issued the action.")
     kind: Literal["search", "expand"] = Field(description="Action type.")
-    argument: str = Field(description="Query text or arXiv id.")
+    argument: str = Field(description="Query text or paper locator.")
     returned: int = Field(default=0, ge=0, description="Raw results from the backend.")
     accepted: int = Field(
         default=0, ge=0, description="Papers newly added to the pool."

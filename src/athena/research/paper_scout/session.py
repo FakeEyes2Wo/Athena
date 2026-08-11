@@ -22,9 +22,8 @@ from athena.research.paper_scout.schemas import (
     ScoutPaper,
     ScoutRequest,
 )
-from athena.research.paper_scout.pool import PaperPool, title_key
+from athena.research.paper_scout.pool import PaperPool, locator_for, title_key
 from athena.research.paper_scout.scorer import RelevanceScorer
-from athena.research.paper_source.schemas import normalize_arxiv_id
 
 
 def process_reward(scores: list[float], cost: float) -> float:
@@ -97,17 +96,34 @@ class ScoutSession:
         self._record(action, ("search", cleaned))
         return action
 
-    async def expand(self, arxiv_id: str) -> ScoutAction:
-        """执行一次 ``expand``：沿目标论文的参考文献扩展一跳。"""
-        bare, _ = normalize_arxiv_id(arxiv_id)
-        action = ScoutAction(
-            step=max(self.step, 1), kind="expand", argument=bare or arxiv_id
-        )
-        key = f"arxiv:{bare}" if bare else ""
+    async def expand(self, locator: str) -> ScoutAction:
+        """执行一次 ``expand``：沿目标论文的参考文献扩展一跳。
+
+        接受 ``locator_for`` 给出的任意定位符，不只是 arXiv id。引用后端本来就能为
+        DOI 与 S2 id 构造查询（``SemanticScholarBackend._locator``），此前卡在这一层
+        把非 arXiv 的输入直接判死——而实测池里约一半是纯期刊论文。
+
+        "认不出这个定位符"与"这篇已经扩展过"是两回事，分开记：前者是错误，后者才是
+        重复动作。合在一起会让 ``repeated_actions`` 同时统计模型的重复和我们的解析
+        失败，扣分也扣在错的地方。
+        """
+        cleaned = locator.strip()
         async with self._lock:
-            expandable = bool(key) and self.pool.mark_expanded(key)
-            target = self.pool.get(key) if key else None
-        if not expandable or target is None:
+            target = self.pool.resolve(cleaned)
+            expandable = target is not None and self.pool.mark_expanded(
+                target.paper_key
+            )
+        action = ScoutAction(
+            step=max(self.step, 1),
+            kind="expand",
+            argument=locator_for(target) if target is not None else cleaned,
+        )
+        if target is None:
+            action.error = "unknown paper locator"
+            self.errors.append(f"expand: unknown paper locator {cleaned!r}")
+            self._record(action, ("expand", action.argument))
+            return action
+        if not expandable:
             action.repeated = True
             action.reward = -REPEAT_PENALTY
             self._record(action, ("expand", action.argument))

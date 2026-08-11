@@ -24,7 +24,7 @@ PSPO 训练：PSPO 是训练算法，需要 4×H800、Qwen3-4B 底座与 verl/ra
 
 | 项目 | 取值 | 出处 |
 | --- | --- | --- |
-| 动作空间 | `search(query)`、`expand(arxiv_id)` | Table 1 |
+| 动作空间 | `search(query)`、`expand(arxiv_id)`；本实现放宽为 `expand(locator)`，因为池里约一半是纯期刊论文 | Table 1 |
 | 观测 | 双列表，至多 10 篇已扩展 + 10 篇未扩展 | §4.1 与 A.2 |
 | 入池阈值 τ | 0.01 | A.2 |
 | 交付阈值 ρ | 0.5（`PASA_RETAIN_THRESHOLD`，仅复现时用，见下） | Evaluation Protocol |
@@ -130,8 +130,11 @@ ScoutCorpus（retained / pool / actions）+ ScoutStats → PaperScoutResult
   因此规范化标题相同也算同一篇。
 - **打分在锁外、入池在锁内。** 打分是慢调用，放锁内会把并行动作串行化；入池是 read-modify-
   write，必须整体在锁内，且入池前要重新检查一次是否已存在。
-- **`expand` 只接受池内论文的 arXiv id。** 池外 id、无效 id、重复扩展都走同一条 −0.5 分支，
-  不会去打后端。
+- **`expand` 接受池内论文的任意定位符。** 观测里方括号里显示什么，原样填回来即可——裸 arXiv
+  id 或 `doi:` / `s2:` 前缀的 `paper_key` 都行，大小写与版本号不敏感。定位符的定义只有一处
+  （`pool.locator_for`），`observation()` 与 `expand()` 共用，见下面「观测与 expand 曾经对不上」。
+  认不出的定位符记 `error`；重复扩展同一篇才记 `repeated` 并扣 −0.5。两者分开，否则
+  `repeated_actions` 会把模型的重复和我们的解析失败混成一个数。
 - **限流按服务分桶。** arXiv 每 3 秒 1 次是服务条款要求；Semantic Scholar 无 key 时几乎必然
   429——实测一次运行 19 次 search 里 15 次因此失败；配上 `SEMANTIC_SCHOLAR_API_KEY` 后同一
   查询 28 次动作只剩 4 次失败，候选池从 148 涨到 240。
@@ -140,6 +143,27 @@ ScoutCorpus（retained / pool / actions）+ ScoutStats → PaperScoutResult
   付费墙论文返回的是 `{"url": "", "status": "CLOSED"}` 而不是缺字段，因此判据只能是 url 非空。
 - **单后端失败不终止动作。** 记进 `errors` 并继续用其他后端，整轮结束时 `status` 变
   `partial`。
+
+### 观测与 expand 曾经对不上
+
+一处只值几行代码、却让 expand 大面积空转的缺陷，记下来避免重演。
+
+`observation()` 渲染 `paper.arxiv_id or paper.paper_key`，所以纯期刊论文显示成
+`doi:10.1109/...`；而 `expand()` 走 `normalize_arxiv_id()`，非 arXiv 的输入直接得到空 id，
+于是判成"不可扩展"——**标 `repeated=True`、扣分、返回 0 篇、不记任何错误**。观测在推销
+expand 消费不了的东西，而失败还伪装成了重复动作。
+
+规模不小。实测四轮里池子有 **48–61% 的论文没有 arXiv id**，观测窗口前 20 篇里 **35–45%**
+是这类；某一轮满分档的 10 篇里有 6 篇是 DOI。那一轮 10 次 `expand` 有 7 次颗粒无收（3 次
+后端限流 + 4 次这个缺陷），expand 的平均产出从 11.8 篇掉到 6.0 篇，候选池只有 153 篇。
+
+引用后端本来就支持（`SemanticScholarBackend._locator` 按 arXiv → S2 → DOI 依次构造，
+实测 `paper/DOI:10.29220/csam.2024.31.2.203/references` 返回 200），卡点全在 session 这一层。
+
+修复是把定位符的定义收敛到 `pool.locator_for()` 一处，`observation()` 与 `expand()` 都用它，
+并加上 `PaperPool.resolve()` 反向解析。测试里钉了一条不变式：**观测里出现的每个定位符都必须
+能被 `resolve()` 解析回论文**——两处再想分头拼装就会立刻红。工具参数也从 `arxiv_id` 改名为
+`locator`，名字本身是当初诱导模型把 DOI 当 arXiv id 递进来的原因之一。
 
 ## 接入方式
 

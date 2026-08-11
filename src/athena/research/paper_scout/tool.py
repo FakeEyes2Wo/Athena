@@ -67,13 +67,13 @@ class PaperScoutExpandTool(BaseTool):
         input_schema={
             "type": "object",
             "properties": {
-                "arxiv_id": {
+                "locator": {
                     "type": "string",
                     "minLength": 1,
                     "description": EXPAND_ID_DESCRIPTION,
                 }
             },
-            "required": ["arxiv_id"],
+            "required": ["locator"],
             "additionalProperties": False,
         },
     )
@@ -82,11 +82,15 @@ class PaperScoutExpandTool(BaseTool):
         self.session = session
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        """执行一次扩展动作。"""
-        arxiv_id = input.get("arxiv_id")
-        if not isinstance(arxiv_id, str) or not arxiv_id.strip():
-            raise ValueError("arxiv_id must be a non-empty string.")
+        """执行一次扩展动作。
+
+        参数原名 ``arxiv_id``，而 observation 对纯期刊论文渲染的是 ``doi:...``——
+        名字在诱导模型把 DOI 当 arXiv id 递进来，然后静默失败。改名是修复的一部分。
+        """
+        locator = input.get("locator")
+        if not isinstance(locator, str) or not locator.strip():
+            raise ValueError("locator must be a non-empty string.")
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
-        action = await self.session.expand(arxiv_id)
+        action = await self.session.expand(locator)
         return ToolResult(data=action.model_dump(mode="json"))

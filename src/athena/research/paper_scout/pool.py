@@ -12,13 +12,16 @@ from athena.research.paper_scout.schemas import (
     OBSERVATION_UNEXPANDED,
     ScoutPaper,
 )
+from athena.research.paper_source.schemas import normalize_arxiv_id
 
 POOL_HEADER = (
     "Paper Pool Status:\n"
     "- [EXP]: Paper has been expanded (already used as a seed for more papers).\n"
     "- [NEW]: New paper found via search or expansion, candidate for further "
     "exploration.\n"
-    "- Format: [arxiv_id] (score) [STATUS] Title"
+    "- Format: [locator] (score) [STATUS] Title\n"
+    "- A locator is either a bare arXiv id or a prefixed key such as 'doi:...'. "
+    "Pass it back verbatim to expand that paper."
 )
 EMPTY_POOL = "No papers in the pool."
 
@@ -29,6 +32,17 @@ def truncate_abstract(abstract: str, max_words: int = MAX_ABSTRACT_WORDS) -> str
     if len(words) <= max_words:
         return abstract
     return " ".join(words[:max_words]) + "..."
+
+
+def locator_for(paper: ScoutPaper) -> str:
+    """模型在 observation 里看到、并原样回填给 ``expand`` 的定位符。
+
+    ``observation`` 与 ``expand`` 必须用同一个定义，否则前者会推销后者消费不了的东西。
+    真机上正是这样：observation 对纯期刊论文渲染 ``doi:10.1109/...``，而 ``expand``
+    只认 arXiv id，于是那些动作静默返回 0 篇、还被记成"重复动作"。一轮 10 次 expand
+    里 4 次这样空转，而当时满分档的 10 篇里有 6 篇是 DOI。
+    """
+    return paper.arxiv_id or paper.paper_key
 
 
 def title_key(title: str) -> str:
@@ -83,6 +97,29 @@ class PaperPool:
     def get(self, paper_key: str) -> ScoutPaper | None:
         """取出论文；不存在时返回 ``None``。"""
         return self._papers.get(paper_key)
+
+    def resolve(self, locator: str) -> ScoutPaper | None:
+        """按模型回填的定位符找论文；认不出来时返回 ``None``。
+
+        接受 ``locator_for`` 产出的两种形态——裸 arXiv id 与带前缀的 ``paper_key``——
+        以及模型可能自行加上的 ``arXiv:`` 前缀和版本号。大小写不敏感：DOI 在
+        ``paper_key`` 里保持上游写法，而模型转述时常改变大小写。
+        """
+        cleaned = locator.strip()
+        if not cleaned:
+            return None
+        bare, _ = normalize_arxiv_id(cleaned)
+        candidates = [f"arxiv:{bare}"] if bare else []
+        candidates.append(cleaned)
+        for candidate in candidates:
+            found = self._papers.get(candidate)
+            if found is not None:
+                return found
+        lowered = cleaned.lower()
+        for key, paper in self._papers.items():
+            if key.lower() == lowered:
+                return paper
+        return None
 
     def add(self, paper: ScoutPaper) -> bool:
         """加入一篇新论文；标识符或标题已存在时返回 ``False`` 且不覆盖原记录。"""
@@ -142,7 +179,7 @@ class PaperPool:
         lines = [POOL_HEADER]
         for paper in shown:
             status = "[EXP]" if paper.expanded else "[NEW]"
-            locator = paper.arxiv_id or paper.paper_key
+            locator = locator_for(paper)
             lines.append(
                 f"[{locator}] ({paper.relevance:.2f}) {status} {paper.title}\n"
                 f"Abstract: {truncate_abstract(paper.abstract)}"

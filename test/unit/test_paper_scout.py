@@ -26,6 +26,7 @@ from athena.research.paper_scout.pool import (
     EMPTY_POOL,
     PaperPool,
     has_retrievable_source,
+    locator_for,
     truncate_abstract,
 )
 from athena.research.paper_scout.prompts import format_history
@@ -289,6 +290,40 @@ class PoolTest(unittest.TestCase):
     def test_truncate_abstract_appends_an_ellipsis(self):
         self.assertEqual(truncate_abstract("a b c", 2), "a b...")
         self.assertEqual(truncate_abstract("a b", 2), "a b")
+
+    def test_every_locator_shown_in_the_observation_resolves_back(self):
+        """这是本轮修复要守住的不变式：观测里推销的每个定位符都必须能被 expand 消费。
+
+        此前二者各自拼装 locator，对纯期刊论文一个给 ``doi:...``、另一个只认 arXiv id。
+        """
+        pool = PaperPool()
+        pool.add(paper("1", "ArXiv paper", 0.9))
+        pool.add(journal_paper("10.1109/access.2025.3569523", "Journal paper", 0.8))
+        pool.add(
+            ScoutPaper(
+                paper_key="s2:abc123",
+                s2_paper_id="abc123",
+                title="S2 only",
+                source="search",
+            )
+        )
+
+        for line in pool.observation().split("\n\n")[1:]:
+            locator = line[1 : line.index("]")]
+            self.assertIsNotNone(
+                pool.resolve(locator), f"observation 给出的 {locator!r} 无法解析回论文"
+            )
+
+    def test_resolve_accepts_both_locator_forms_and_versions(self):
+        pool = PaperPool()
+        pool.add(paper("1", "ArXiv paper", 0.9))
+        bare = aid("1")
+
+        self.assertIsNotNone(pool.resolve(bare))
+        self.assertIsNotNone(pool.resolve(f"arxiv:{bare}"))
+        self.assertIsNotNone(pool.resolve(f"arXiv:{bare}v3"))
+        self.assertIsNone(pool.resolve("9999.99999"))
+        self.assertIsNone(pool.resolve(""))
 
 
 class PromptTest(unittest.TestCase):
@@ -575,11 +610,46 @@ class SessionExpandTest(unittest.TestCase):
         self.assertEqual(action.accepted, 1)
         self.assertTrue(session.pool.get(f"arxiv:{aid('seed')}").expanded)
 
-    def test_expanding_an_unknown_paper_is_penalised(self):
+    def test_expanding_an_unknown_locator_is_an_error_not_a_repeat(self):
+        """ "认不出这个定位符"与"这篇扩展过了"是两回事，混在一起会掩盖解析失败。"""
         session = session_for([], reference=StubBackend("refs", []))
+
         action = asyncio.run(session.expand("9999.99999"))
-        self.assertTrue(action.repeated)
-        self.assertAlmostEqual(action.reward, -0.5)
+
+        self.assertFalse(action.repeated)
+        self.assertEqual("unknown paper locator", action.error)
+        self.assertEqual(0.0, action.reward)
+        self.assertTrue(session.errors)
+
+    def test_expanding_a_journal_paper_by_its_doi_locator(self):
+        """observation 对纯期刊论文渲染 doi: 前缀的 key，expand 必须认得。
+
+        真机上这里一轮空转 4 次：静默返回 0 篇、还被记成重复动作，而当时满分档的
+        10 篇里有 6 篇是 DOI。
+        """
+        reference = StubBackend("refs", [paper("cited", "Cited", 0.0)])
+        session = session_for([], reference=reference, scores={"Cited": 0.7})
+        seed = journal_paper("10.1109/access.2025.3569523", "Journal Seed", 0.9)
+        session.pool.add(seed)
+
+        action = asyncio.run(session.expand(locator_for(seed)))
+
+        self.assertEqual("", action.error)
+        self.assertEqual(1, action.accepted)
+        self.assertTrue(session.pool.get(seed.paper_key).expanded)
+
+    def test_a_doi_locator_is_matched_case_insensitively(self):
+        """DOI 在 paper_key 里保持上游写法，而模型转述时常改变大小写。"""
+        reference = StubBackend("refs", [])
+        session = session_for([], reference=reference)
+        seed = journal_paper("10.1109/ACCESS.2025.3569523", "Journal Seed", 0.9)
+        session.pool.add(seed)
+
+        action = asyncio.run(session.expand(locator_for(seed).lower()))
+
+        self.assertEqual("", action.error)
+        self.assertFalse(action.repeated)
+        self.assertTrue(session.pool.get(seed.paper_key).expanded)
 
     def test_expanding_twice_is_penalised(self):
         reference = StubBackend("refs", [paper("cited", "Cited", 0.0)])

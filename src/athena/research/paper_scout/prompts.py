@@ -75,8 +75,10 @@ EXPAND_TOOL_DESCRIPTION = (
     "coverage around a known paper."
 )
 EXPAND_ID_DESCRIPTION = (
-    "The arXiv identifier (e.g., '1706.03762') of a paper already in the current "
-    "paper list."
+    "The locator of a paper already in the paper list, copied verbatim from the "
+    "bracket at the start of its line. It is either a bare arXiv id such as "
+    "'1706.03762' or a prefixed key such as 'doi:10.1109/access.2025.3569523'. "
+    "Both work; do not convert one form into the other."
 )
 
 
