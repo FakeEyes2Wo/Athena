@@ -114,6 +114,8 @@ class FakeScoutAgent:
     papers = PAPERS
     dropped_no_source = 0
     seen_request: ScoutRequest | None = None
+    status = "complete"
+    warnings: list[str] = []
 
     def __init__(self, artifacts, backends, references, scorer, *, model, client):
         self.artifacts = artifacts
@@ -145,11 +147,12 @@ class FakeScoutAgent:
                 type(self).source_request.model_dump_json()
             )
         result = PaperScoutResult(
-            status="complete",
+            status=type(self).status,
             corpus_ref=corpus_ref,
             stats_ref=stats_ref,
             paper_source_request_ref=source_ref,
             paper_count=len(retained),
+            warnings=list(type(self).warnings),
         )
         return AgentOutcome(
             result_ref=await self.artifacts.put_text(result.model_dump_json()),
@@ -251,6 +254,8 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         FakeScoutAgent.papers = PAPERS
         FakeScoutAgent.dropped_no_source = 0
         FakeScoutAgent.seen_request = None
+        FakeScoutAgent.status = "complete"
+        FakeScoutAgent.warnings = []
         FakeFetcher.statuses = ["fetched", "fetched"]
         FakeFetcher.enriched = {}
         FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
@@ -519,13 +524,127 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("index_failed: RateLimitError", report.warnings)
         self.assertTrue(all(item.paper_content_ref for item in report.papers))
 
-    async def test_the_delivery_budget_defaults_to_fifty(self) -> None:
-        """成本已经量过，默认按调研需要给量；要省钱就调小它，而不是抬门槛。"""
-        self.assertEqual(50, SurveyRequest(query="q").max_papers)
+    async def test_the_delivery_budget_defaults_to_ten(self) -> None:
+        """默认交付量按交互延迟定：10 篇约 15 分钟，50 篇约 40 分钟。
 
-        await self.run_pipeline()
+        ``paper_scout`` 用它做交付截断而不是限制打分范围，所以它省的是下游三段，
+        不是检索——检索成本由 ``max_steps`` 决定。
+        """
+        self.assertEqual(10, SurveyRequest(query="q").max_papers)
+        self.assertEqual(4, SurveyRequest(query="q").conversion_concurrency)
 
-        self.assertEqual(50, FakeScoutAgent.seen_request.max_papers)
+    async def test_the_scorer_uses_its_own_model_when_one_is_configured(self) -> None:
+        """打分是调用最多的一环，必须能独立换成轻量模型。"""
+        self.stack.scorer_model = "flash"
+        scorer = mock.MagicMock()
+        request = SurveyRequest(query="tabular auc")
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            GradedRelevanceScorer=scorer,
+            build_corpus_index=self.fake_index,
+        ):
+            await SurveyPipeline(self.stack, request).run()
+
+        self.assertEqual("flash", scorer.call_args.args[1])
+
+    async def test_the_scorer_falls_back_to_the_policy_model(self) -> None:
+        """不配打分模型时行为与分开之前完全一致。"""
+        scorer = mock.MagicMock()
+        request = SurveyRequest(query="tabular auc")
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            GradedRelevanceScorer=scorer,
+            build_corpus_index=self.fake_index,
+        ):
+            await SurveyPipeline(self.stack, request).run()
+
+        self.assertEqual(self.stack.model, scorer.call_args.args[1])
+
+    async def test_the_fetch_budget_overshoots_the_delivery_target(self) -> None:
+        """送去取源的是 ``max_papers × source_overshoot``，不是 ``max_papers``。
+
+        取不到源只有试过才知道，名额少的时候几次 403 就能把交付量打掉三成。
+        多要的那几篇只多花取源请求，取源不调模型。
+        """
+        report = await self.run_pipeline(max_papers=10)
+
+        self.assertEqual(13, FakeScoutAgent.seen_request.max_papers)
+        self.assertEqual(13, FakeScoutAgent.seen_request.paper_source_policy.max_papers)
+        self.assertEqual(13, report.fetch_budget)
+
+    async def test_a_small_target_still_gets_two_backfill_papers(self) -> None:
+        """``max_papers`` 很小时按比例算出来不足一篇，垫底会退化成没有。"""
+        await self.run_pipeline(max_papers=2)
+
+        self.assertEqual(4, FakeScoutAgent.seen_request.max_papers)
+
+    async def test_overshoot_of_one_turns_the_backfill_off(self) -> None:
+        """要精确控制成本时，``source_overshoot=1`` 恢复"要几篇取几篇"。"""
+        await self.run_pipeline(max_papers=10, source_overshoot=1.0)
+
+        self.assertEqual(10, FakeScoutAgent.seen_request.max_papers)
+
+    async def test_surplus_papers_are_fetched_but_never_converted(self) -> None:
+        """垫底富余取到源就停在那里：不转换、不进语料、不算转换失败。
+
+        它必须和 ``failed`` 分开——垫底篇数是策略决定的，混进失败率会让那个数字
+        随 ``source_overshoot`` 浮动，而它衡量的本该是转换器的健壮性。
+        """
+        report = await self.run_pipeline(max_papers=1)
+
+        self.assertEqual(1, report.surplus_dropped)
+        self.assertEqual(1, report.converted())
+        self.assertEqual(0.0, report.conversion_failure_rate())
+        surplus = [
+            item for item in report.papers if item.conversion_status == "surplus"
+        ]
+        self.assertEqual(1, len(surplus))
+        self.assertEqual("fetched", surplus[0].fetch_status)
+        self.assertFalse(surplus[0].indexed)
+        self.assertEqual(1, len(self.indexed[0]))
+
+    async def test_explicit_paper_ids_are_never_treated_as_surplus(self) -> None:
+        """点名的论文就是要的全部：不做垫底，也不被 ``max_papers`` 截掉。"""
+        report = await self.run_pipeline(
+            arxiv_ids=["2501.00001", "2501.00002"], max_papers=1
+        )
+
+        self.assertEqual(0, report.surplus_dropped)
+        self.assertEqual(2, report.converted())
+        self.assertEqual("complete", report.status)
+
+    async def test_a_rate_limited_search_backend_does_not_downgrade_the_run(
+        self,
+    ) -> None:
+        """检索后端零星限流不该把整轮标成 partial。
+
+        真机上出现过语料建好、论文全进索引、报告却写着 ``partial`` 的情况——原因只是
+        Semantic Scholar 429。看报告的人会以为语料没建成。后端的问题归 ``warnings``
+        和 ``scout_status``，总状态只回答"这一轮自己产出了什么"。
+        """
+        FakeScoutAgent.status = "partial"
+        FakeScoutAgent.warnings = ["semantic_scholar"]
+
+        report = await self.run_pipeline()
+
+        self.assertEqual("complete", report.status)
+        self.assertEqual("partial", report.scout_status)
+        self.assertIn("semantic_scholar", report.warnings)
+        self.assertIsNotNone(report.corpus_ref)
+
+    async def test_a_run_that_converts_nothing_is_empty(self) -> None:
+        """一篇都没转换成功时是 ``empty``，与后端是否报过错无关。"""
+        FakeFetcher.statuses = ["failed", "failed"]
+
+        report = await self.run_pipeline()
+
+        self.assertEqual("empty", report.status)
 
     async def test_the_fetchable_filter_reaches_paper_scout(self) -> None:
         await self.run_pipeline()

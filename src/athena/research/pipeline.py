@@ -14,6 +14,7 @@
 """
 
 import asyncio
+import math
 import time
 from typing import Literal
 
@@ -56,7 +57,33 @@ from athena.research.paper_source.schemas import (
 from athena.research.wiring import ResearchStack
 
 INDEXABLE_QUALITY: tuple[QualityStatus, ...] = ("pass", "pass_with_notes")
-DEFAULT_CONVERSION_CONCURRENCY = 2
+
+DEFAULT_CONVERSION_CONCURRENCY = 4
+"""并发转换的篇数。
+
+真机测过三档，都没有出现限流或延迟劣化：7 篇在并发 2 下串行 276.8 秒、墙钟 141.4 秒；
+50 篇在并发 3 下串行 3641 秒、墙钟 1181 秒；10 篇在并发 3 下串行 568.6 秒、墙钟 204.7 秒
+（与 FIFO 列表调度的理论值 204.7 秒吻合到小数点后一位）。同一批按并发 4 重算是 156.9 秒，
+省 48 秒。
+
+再往上收益递减：一批的墙钟不可能低于其中最慢的那一篇，上面那批里最慢的是 94.9 秒。
+单篇成本主要花在视觉调用的往返上，本机 CPU 不是瓶颈。
+"""
+
+DEFAULT_SOURCE_OVERSHOOT = 1.3
+"""多要几篇送去取源，用来抵消取源失败。
+
+取不到源只有试过才知道：``require_retrievable_source`` 能挡掉"上游没给任何线索"的
+论文，但挡不住线索本身失效。真机上三种都遇到过——``doi.org`` 重定向回 0 字节、
+ACM 与 MDPI 对非浏览器请求返回 403，其中 MDPI 那篇确实是开放获取，纯粹被反爬拦下。
+
+名额少的时候这件事被放大：50 篇丢 6 篇是 12%，10 篇丢 3 篇就是 30%。多取 30% 再按
+相关性截回 ``max_papers``，代价是最多多几次取源请求（取源不调模型，是整条链路里最
+便宜的一段），换来的是交付量不再被出版商的反爬策略决定。
+"""
+
+MIN_SOURCE_BACKFILL = 2
+"""``max_papers`` 很小时 30% 不足一篇，至少也要留两篇垫底。"""
 
 MIN_PLAUSIBLE_MARKDOWN = 2000
 """低于这个字符数就认为正文没被真正提取出来。
@@ -70,18 +97,24 @@ MIN_PLAUSIBLE_MARKDOWN = 2000
 阈值取得很松，只用来识别"几乎什么都没有"，不替代 ``paper_markdown`` 自己的质量门禁。
 """
 
-ConversionStatus = Literal["converted", "failed", "no_source"]
+ConversionStatus = Literal["converted", "failed", "no_source", "surplus"]
+"""``surplus`` 是取源垫底的产物：源拿到了，但相关性排在 ``max_papers`` 之外。
+
+它必须和 ``failed`` 分开——垫底篇数是策略决定的，把它算进转换失败率会让那个数字
+随 ``source_overshoot`` 浮动，而它衡量的本该是转换器的健壮性。
+"""
 
 
 class SurveyRequest(BaseModel):
     """一次全链路调研的输入。
 
-    ``max_papers`` 默认 50，与 ``PaperSourcePolicy`` 一致。它曾取 5，那是首次真机验证
-    要可观测而不要覆盖面；现在链路已经量过（转换硬失败率 0%，单篇 30–110 秒），可以按
-    调研本身的需要来定。在默认的 ``retain_threshold=0`` 下它是交付量的唯一控制。
+    ``max_papers`` 默认 10。在默认的 ``retain_threshold=0`` 下它是交付量的唯一控制，
+    但它**只影响下游三段**：``paper_scout`` 会把整个候选池都打一遍分（实测池 240 篇、
+    ``scored_papers`` 也是 240），``max_papers`` 只在 ``_finish`` 里做最后一次截断。
+    所以调小它省的是取源、转换和索引，省不到检索——要压检索成本得调 ``max_steps``。
 
-    成本随它线性增长：按实测单篇约 23 秒、11 次视觉调用、780 条句向量，50 篇在并发 3
-    下约 6–8 分钟转换。要省钱就调小它，而不是调高门槛——门槛只有三档，调不细。
+    真机换算（50 篇跑出来的数据按前 10 篇重算）：scout 640s 不变，取源 68s，转换 167s
+    （并发 3），索引 39s，合计约 15 分钟，其中 scout 占七成。取 50 时合计 40 分钟。
 
     ``visual_policy`` 默认 ``best_effort`` 而不是 schema 默认的 ``required``：
     ``required`` 下任何一张图解读失败都会让整篇论文失败，测出来的是"有没有失败"，
@@ -97,7 +130,7 @@ class SurveyRequest(BaseModel):
             "downstream stages without paying for or being gated by PaperScout."
         ),
     )
-    max_papers: int = Field(default=50, ge=1, description="Papers carried downstream.")
+    max_papers: int = Field(default=10, ge=1, description="Papers carried downstream.")
     max_steps: int = Field(default=6, ge=1, description="PaperScout step budget.")
     search_top_k: int = Field(default=10, ge=1, description="Results per search call.")
     expand_top_k: int = Field(default=20, ge=1, description="References per expand.")
@@ -111,6 +144,14 @@ class SurveyRequest(BaseModel):
     require_retrievable_source: bool = Field(
         default=True,
         description="Deliver only fetchable papers; see has_retrievable_source.",
+    )
+    source_overshoot: float = Field(
+        default=DEFAULT_SOURCE_OVERSHOOT,
+        ge=1.0,
+        description=(
+            "Fetch this multiple of max_papers so failed fetches do not shrink the "
+            "delivered set; see DEFAULT_SOURCE_OVERSHOOT. 1.0 disables backfill."
+        ),
     )
     published_to: str = Field(default="", description="Inclusive ISO date upper bound.")
     prefer: SourcePreference = Field(default="tex", description="Source preference.")
@@ -175,14 +216,43 @@ class SurveyReport(BaseModel):
 
     schema_version: Literal["1.0"] = "1.0"
     query: str = Field(description="The survey topic.")
-    status: str = Field(description="complete, partial, or empty.")
+    status: str = Field(
+        description=(
+            "complete, partial, or empty; describes this run's own products, not the "
+            "health of any upstream backend. See SurveyPipeline.final_status."
+        )
+    )
+    scout_status: str = Field(
+        default="",
+        description=(
+            "PaperScout's own verdict, kept separate: a rate-limited search backend "
+            "says nothing about whether the corpus was built."
+        ),
+    )
     corpus_ref: ArtifactRef | None = Field(
         default=None, description="Corpus index ready for the retrieval tools."
     )
     scout_result_ref: ArtifactRef | None = Field(default=None)
     source_result_ref: ArtifactRef | None = Field(default=None)
     scout_pool: int = Field(default=0, ge=0, description="Papers accepted into pool.")
-    scout_retained: int = Field(default=0, ge=0, description="Papers above threshold.")
+    scout_retained: int = Field(
+        default=0,
+        ge=0,
+        description="Papers PaperScout delivered, including the fetch backfill.",
+    )
+    fetch_budget: int = Field(
+        default=0,
+        ge=0,
+        description="Papers asked of paper_source: ceil(max_papers * source_overshoot).",
+    )
+    surplus_dropped: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Backfill papers that fetched successfully but ranked beyond max_papers, "
+            "so they were never converted."
+        ),
+    )
     scout_dropped_no_source: int = Field(
         default=0,
         ge=0,
@@ -227,8 +297,14 @@ class SurveyReport(BaseModel):
 
         取源失败不计入分母：那是网络与开放获取的问题，和转换器的健壮性无关，
         混在一起会让这个数字既不能用来评估 paper_markdown，也不能用来评估取源。
+        垫底富余的论文同样不计入：它们取到了源却按策略不转换，算进去只会让这个
+        数字随 ``source_overshoot`` 浮动。
         """
-        attempted = [item for item in self.papers if item.fetch_status == "fetched"]
+        attempted = [
+            item
+            for item in self.papers
+            if item.fetch_status == "fetched" and item.conversion_status != "surplus"
+        ]
         if not attempted:
             return 0.0
         failed = sum(1 for item in attempted if item.conversion_status == "failed")
@@ -250,6 +326,8 @@ class SurveyPipeline:
         self._outcomes: dict[str, PaperOutcome] = {}
         self._by_identifier: dict[str, str] = {}
         self._conversion_keys: dict[str, str] = {}
+        # 取源可以多要几篇垫底，转换不能——转换才是花钱的那一段
+        self._convert_cap = request.max_papers
 
     async def run(self) -> SurveyReport:
         """执行全链路，返回逐篇结果与成本账。"""
@@ -268,7 +346,36 @@ class SurveyPipeline:
             self._outcomes.values(),
             key=lambda item: (-item.relevance, item.paper_key),
         )
+        self.report.status = self.final_status()
         return self.report
+
+    def final_status(self) -> str:
+        """本次运行的结论，只看它自己产出了什么。
+
+        ``empty`` 一篇都没转换成功；``partial`` 转换出了东西但要的产物缺了一件，
+        目前只有一种情况——要求建索引却没拿到 ``corpus_ref``；否则 ``complete``。
+
+        这里刻意不看上游后端的健康度。此前是直接沿用 ``PaperScoutResult.status``，
+        于是 Semantic Scholar 零星 429 就能把整轮标成 ``partial``——真机上出现过
+        语料建好、7 篇全进索引、报告却写着 ``partial`` 的情况，看报告的人只会以为
+        语料没建成。后端的问题在 ``warnings`` 与 ``scout_status`` 里，不该冒充结论。
+
+        逐篇的取源与转换失败同样不降级：那是尽力而为流水线的正常产出，篇数、失败率
+        和逐篇原因都已经在报告里，用一个总状态去概括只会丢掉信息。
+        """
+        if not self.report.converted():
+            return "empty"
+        if self.request.build_index and self.report.corpus_ref is None:
+            return "partial"
+        return "complete"
+
+    def fetch_budget(self) -> int:
+        """送去取源的篇数：``max_papers`` 之上按 ``source_overshoot`` 加一段垫底。"""
+        wanted = self.request.max_papers
+        budget = math.ceil(wanted * self.request.source_overshoot)
+        if budget > wanted:
+            budget = max(budget, wanted + MIN_SOURCE_BACKFILL)
+        return budget
 
     async def _scout(self) -> ArtifactRef | None:
         """跑 PaperScout，把交付集合转成取源请求引用；零交付时返回 ``None``。
@@ -285,23 +392,27 @@ class SurveyPipeline:
             self.stack.artifacts,
             backends,
             references,
-            GradedRelevanceScorer(self.stack.client, self.stack.model),
+            GradedRelevanceScorer(
+                self.stack.client, self.stack.effective_scorer_model()
+            ),
             model=self.stack.model,
             client=self.stack.client,
         )
+        budget = self.fetch_budget()
+        self.report.fetch_budget = budget
         scout_request = ScoutRequest(
             query=self.request.query,
             published_to=self.request.published_to,
             max_steps=self.request.max_steps,
             search_top_k=self.request.search_top_k,
             expand_top_k=self.request.expand_top_k,
-            max_papers=self.request.max_papers,
+            max_papers=budget,
             max_seconds=self.request.max_seconds,
             retain_threshold=self.request.retain_threshold,
             require_retrievable_source=self.request.require_retrievable_source,
             paper_source_policy=PaperSourcePolicy(
                 prefer=self.request.prefer,
-                max_papers=self.request.max_papers,
+                max_papers=budget,
                 visual_policy=self.request.visual_policy,
             ),
         )
@@ -313,7 +424,11 @@ class SurveyPipeline:
         return await self._read_scout_result(outcome.result_ref)
 
     async def _direct_source_request(self) -> ArtifactRef | None:
-        """把显式给出的 arXiv id 直接做成取源请求，并登记为待处理论文。"""
+        """把显式给出的 arXiv id 直接做成取源请求，并登记为待处理论文。
+
+        这条路径不做取源垫底：显式点名的论文就是要的全部，多取无从取起，少取也不该
+        被别的论文顶替。
+        """
         papers = []
         for raw in self.request.arxiv_ids:
             identity = PaperIdentity(arxiv_id=raw)
@@ -327,13 +442,14 @@ class SurveyPipeline:
                 conversion_status="no_source",
             )
             self._register_identifiers(key, identity)
-        self.report.status = "complete"
         self.report.scout_retained = len(papers)
+        self._convert_cap = max(self.request.max_papers, len(papers))
+        self.report.fetch_budget = self._convert_cap
         request = PaperSourceRequest(
             papers=papers,
             policy=PaperSourcePolicy(
                 prefer=self.request.prefer,
-                max_papers=max(self.request.max_papers, len(papers)),
+                max_papers=self._convert_cap,
                 visual_policy=self.request.visual_policy,
             ),
         )
@@ -363,7 +479,7 @@ class SurveyPipeline:
             histogram[bucket] = histogram.get(bucket, 0) + 1
         self.report.score_histogram = dict(sorted(histogram.items(), reverse=True))
         self.report.warnings.extend(result.warnings)
-        self.report.status = result.status
+        self.report.scout_status = result.status
         for paper in corpus.retained:
             self._outcomes[paper.paper_key] = PaperOutcome(
                 paper_key=paper.paper_key,
@@ -441,9 +557,15 @@ class SurveyPipeline:
         return result
 
     async def _convert(self, source_result: PaperSourceResult) -> list[PaperContent]:
-        """并发转换所有拿到源文件的论文，逐篇计时并记录质量结果。"""
+        """转换取到源的论文，按 ``_convert_cap`` 截断后并发执行。
+
+        ``paper_source`` 保持上游顺序（``fetcher.fetch`` 顺序遍历 ``accepted``），而
+        上游顺序就是相关性降序，所以"前 N 条取到源的记录"正是相关性最高的 N 篇。
+        截断放在转换之前而不是取源之前：垫底的意义就是先取回来再挑，取源不调模型，
+        转换才是花钱的那一段。
+        """
         started = time.monotonic()
-        jobs = [
+        fetched = [
             (
                 self._conversion_keys.get(record.paper_key, record.paper_key),
                 record.conversion_request_ref,
@@ -451,6 +573,10 @@ class SurveyPipeline:
             for record in source_result.records
             if record.conversion_request_ref
         ]
+        jobs = fetched[: self._convert_cap]
+        for key, _ in fetched[self._convert_cap :]:
+            self._outcome_for(key).conversion_status = "surplus"
+        self.report.surplus_dropped = len(fetched) - len(jobs)
         if not jobs:
             self.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
             return []
@@ -548,8 +674,9 @@ class SurveyPipeline:
             # 建索引是最后一段，也是唯一会一次性打光编码配额的一段。异常逃出去会连同
             # 前面所有已完成的取源与转换一起丢掉——而那才是真正花了钱的部分，且每篇的
             # PaperContent 已经落盘，重跑只需重新编码。因此降级成"没有语料"而不是没有报告。
+            # 状态不在这里写：``corpus_ref`` 留空本身就是证据，``final_status``
+            # 统一按"要的产物缺没缺"下结论
             self.report.warnings.append(f"index_failed: {type(error).__name__}")
-            self.report.status = "partial"
             for content in selected:
                 raw = content.paper_id or ""
                 self._outcome_for(self._conversion_keys.get(raw, raw)).indexed = False

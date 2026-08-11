@@ -13,10 +13,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
-from athena.research.pipeline import SurveyReport, SurveyRequest, run_survey
+from athena.research.pipeline import (
+    DEFAULT_CONVERSION_CONCURRENCY,
+    DEFAULT_SOURCE_OVERSHOOT,
+    SurveyReport,
+    SurveyRequest,
+    run_survey,
+)
 from athena.research.wiring import (
     EMBEDDING_MODEL_ENV,
     GHOSTSCRIPT_ENV,
+    SCORER_MODEL_ENV,
     VISION_MODEL_ENV,
     build_research_stack,
     build_research_tools,
@@ -42,7 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="逗号分隔的 arXiv id，给了就跳过检索直接取源（用于单独测量下游各段）",
     )
-    parser.add_argument("--max-papers", type=int, default=50, help="交给下游的篇数")
+    parser.add_argument(
+        "--max-papers",
+        type=int,
+        default=10,
+        help="交给下游的篇数；只影响取源/转换/索引，检索成本由 --max-steps 决定",
+    )
     parser.add_argument("--max-steps", type=int, default=6, help="PaperScout 步数上限")
     parser.add_argument("--search-top-k", type=int, default=10, help="每次检索取回数")
     parser.add_argument("--max-seconds", type=float, default=600.0, help="检索墙钟预算")
@@ -73,7 +85,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["best_effort", "required"],
         help="视觉解读严格度",
     )
-    parser.add_argument("--concurrency", type=int, default=2, help="并发转换篇数")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONVERSION_CONCURRENCY,
+        help="并发转换篇数",
+    )
+    parser.add_argument(
+        "--source-overshoot",
+        type=float,
+        default=DEFAULT_SOURCE_OVERSHOOT,
+        help=(
+            f"多要这个倍数的论文送去取源以抵消取源失败，默认 {DEFAULT_SOURCE_OVERSHOOT}；"
+            "取回后按相关性截回 --max-papers。给 1 关掉垫底"
+        ),
+    )
     parser.add_argument(
         "--strict-quality",
         action="store_true",
@@ -81,7 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-index", action="store_true", help="跳过建索引")
     parser.add_argument("--artifact-root", default="", help="artifact 根目录")
-    parser.add_argument("--model", default="", help="策略与打分模型")
+    parser.add_argument("--model", default="", help="策略模型")
+    parser.add_argument(
+        "--scorer-model",
+        default="",
+        help="相关性打分模型；留空沿用策略模型。打分是调用最多的一环，换轻量模型最省时间",
+    )
     parser.add_argument("--out", default="", help="把 SurveyReport JSON 写到该路径")
     parser.add_argument("--check", action="store_true", help="只做装配自检")
     return parser
@@ -91,9 +122,11 @@ def report_line(label: str, value: object) -> str:
     return f"  {label.ljust(COLUMN)}{value}"
 
 
-def print_check(argv_model: str, artifact_root: str) -> int:
+def print_check(argv_model: str, argv_scorer: str, artifact_root: str) -> int:
     """装配依赖并报告可用能力；缺能力时说明后果而不是直接失败。"""
-    stack = build_research_stack(artifact_root=artifact_root, model=argv_model)
+    stack = build_research_stack(
+        artifact_root=artifact_root, model=argv_model, scorer_model=argv_scorer
+    )
     tools = build_research_tools(stack)
     print("装配结果")
     print(
@@ -101,7 +134,14 @@ def print_check(argv_model: str, artifact_root: str) -> int:
             "artifact 根目录", stack.artifacts.path_for("sha256:" + "0" * 64).parents[1]
         )
     )
-    print(report_line("文本模型", stack.model or "（未设置）"))
+    print(report_line("策略模型", stack.model or "（未设置）"))
+    print(
+        report_line(
+            "打分模型",
+            stack.scorer_model
+            or f"同策略模型（可设 {SCORER_MODEL_ENV} 换轻量模型提速）",
+        )
+    )
     embedder = stack.embedder
     print(
         report_line(
@@ -143,10 +183,13 @@ def print_report(report: SurveyReport) -> None:
     """把成本账打成人能读的形式。"""
     timings = report.timings
     print(f"\n查询：{report.query}")
-    print(report_line("状态", report.status))
+    status = report.status
+    if report.scout_status and report.scout_status != report.status:
+        status = f"{status}（检索段自评 {report.scout_status}，原因见 warnings）"
+    print(report_line("状态", status))
     print(
         report_line(
-            "候选池 / 交付",
+            "候选池 / 取源预算",
             f"{report.scout_pool} / {report.scout_retained}"
             f"（门槛 {report.retain_threshold}）",
         )
@@ -163,7 +206,19 @@ def print_report(report: SurveyReport) -> None:
             "取源成功", f"{report.fetched} / {report.fetched + report.fetch_failed}"
         )
     )
-    print(report_line("转换成功", f"{report.converted()} / {report.fetched}"))
+    if report.surplus_dropped:
+        print(
+            report_line(
+                "垫底富余",
+                f"{report.surplus_dropped} 篇取到源但排在名额外，未转换",
+            )
+        )
+    print(
+        report_line(
+            "转换成功",
+            f"{report.converted()} / {report.fetched - report.surplus_dropped}",
+        )
+    )
     print(report_line("转换失败率", f"{report.conversion_failure_rate():.1%}"))
     print(
         report_line(
@@ -195,6 +250,9 @@ def print_report(report: SurveyReport) -> None:
     print("\n逐篇：")
     for item in report.papers:
         flag = "✓" if item.conversion_status == "converted" else "✗"
+        if item.conversion_status == "surplus":
+            # 垫底富余不是失败：源取到了，只是排在名额外
+            flag = "·"
         if item.suspect_empty:
             flag = "!"
         print(
@@ -215,13 +273,17 @@ async def main_async(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     load_env()
     if args.check:
-        return print_check(args.model, args.artifact_root)
+        return print_check(args.model, args.scorer_model, args.artifact_root)
     arxiv_ids = [item.strip() for item in args.papers.split(",") if item.strip()]
     if not args.query.strip() and not arxiv_ids:
         print("需要 --query 或 --papers，或用 --check 只做装配自检。", file=sys.stderr)
         return 2
 
-    stack = build_research_stack(artifact_root=args.artifact_root, model=args.model)
+    stack = build_research_stack(
+        artifact_root=args.artifact_root,
+        model=args.model,
+        scorer_model=args.scorer_model,
+    )
     if not stack.model:
         print(
             "缺少文本模型：设置 ATHENA_RESEARCH_MODEL 或 ATHENA_TUI_MODEL。",
@@ -241,6 +303,7 @@ async def main_async(argv: list[str] | None = None) -> int:
         prefer=args.prefer,
         visual_policy=args.visual_policy,
         conversion_concurrency=args.concurrency,
+        source_overshoot=args.source_overshoot,
         strict_quality=args.strict_quality,
         build_index=not args.no_index,
     )

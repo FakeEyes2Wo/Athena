@@ -20,8 +20,9 @@
 | 变量 | 用途 | 缺失时 |
 | --- | --- | --- |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 兼容端点 | 客户端不可用 |
-| `ATHENA_RESEARCH_MODEL` | 策略与打分模型 | 回落 `ATHENA_TUI_MODEL` |
-| `ATHENA_TUI_MODEL` | 同上的兜底 | 无文本模型，流程无法开始 |
+| `ATHENA_RESEARCH_MODEL` | PaperScout 的策略模型 | 回落 `ATHENA_TUI_MODEL` |
+| `ATHENA_SCORER_MODEL` | 相关性打分模型 | 沿用策略模型 |
+| `ATHENA_TUI_MODEL` | 上面两个的兜底 | 无文本模型，流程无法开始 |
 | `ATHENA_EMBEDDING_MODEL` | 句向量 | 语义检索关闭，关键词检索照常 |
 | `ATHENA_VISION_MODEL` | 图表解读 | 图表退回仅证据文本 |
 | `ATHENA_ARTIFACT_ROOT` | artifact 根目录 | 默认 `~/.athena/artifacts` |
@@ -52,6 +53,31 @@
 存储，没有可供模型访问的 URL，而把图片临时上传到公网只为了让模型看一眼，既多一份凭据又多
 一处泄漏面。
 
+### 为什么打分要单独配一个模型
+
+`scout` 占全链路 69% 的墙钟，而它内部的成本结构很不平衡：
+
+| | 每轮次数 | 单次延迟 | 输出 token |
+| --- | --- | --- | --- |
+| 策略调用（决定下一步搜什么） | 4–6 | 38.9s | 2210 |
+| **相关性打分**（四档分类） | **38–56** | 15.8–19.0s | 857–1037 |
+
+延迟由输出 token 决定，不由 prompt 大小决定。策略每步一次、要在 20 篇观测里做判断，值得用强
+模型；打分只是读标题加摘要判 0/1/2/3，却是调用次数最多的一环。
+
+实测同一批论文（一半贴题、一半明显不贴题）：
+
+| 模型 | batch=8 | batch=24 | 判分 |
+| --- | --- | --- | --- |
+| `qwen3.7-plus` | 19.0s | 40.7s | 贴题 1.0 / 不贴题 0.0 |
+| `qwen3.6-flash` | **6.1s** | **12.1s** | **完全相同** |
+
+每篇摊到的时间从 2.38 秒降到 0.50 秒。`ATHENA_SCORER_MODEL` 因此独立于策略模型；不设时沿用
+策略模型，行为与分开之前一致。
+
+`GradedRelevanceScorer` 的 `batch_size` 同时从 8 提到 24：三倍的量只多花五成时间，一个 150 篇
+的池从 19 个请求降到 7 个。代价是一次解析失败作废的论文更多——失败的批次整批按 0 分处理。
+
 ### Ghostscript 发现
 
 `find_ghostscript()` 先看 `ATHENA_GHOSTSCRIPT`，否则按 PATH 依次找
@@ -66,13 +92,44 @@
 ```text
 SurveyRequest
      │
-     ├─ _scout    → PaperScoutResult.paper_source_request_ref
+     ├─ _scout    → PaperScoutResult.paper_source_request_ref（要 max_papers × 1.3 篇）
      ├─ _fetch    → PaperSourceRecord.conversion_request_ref
-     ├─ _convert  → PaperContent（并发，受 conversion_concurrency 约束）
+     ├─ _convert  → PaperContent（截回 max_papers；并发，受 conversion_concurrency 约束）
      └─ _index    → corpus_ref
      ▼
 SurveyReport（逐篇成本与质量事实）
 ```
+
+### 取源垫底
+
+取不到源只有试过才知道。`require_retrievable_source` 能挡掉"上游没给任何线索"的论文，但挡不住
+线索本身失效——真机上三种都遇到过：`doi.org` 重定向回 0 字节（IEEE）、ACM 与 MDPI 对非浏览器
+请求返回 403，其中 MDPI 那篇确实是开放获取，纯粹被反爬拦下。
+
+名额少的时候这件事被放大：50 篇丢 6 篇是 12%，10 篇丢 3 篇就是 30%。所以 `_scout` 按
+`ceil(max_papers × source_overshoot)`（默认 1.3，且至少多两篇）交付，`_convert` 再按相关性
+截回 `max_papers`，多出来的记 `conversion_status="surplus"`。
+
+截断放在转换之前而不是取源之前：取源不调模型，是整条链路里最便宜的一段，转换才是花钱的。
+`surplus` 与 `failed` 严格分开——垫底篇数是策略决定的，混进转换失败率会让那个数字随
+`source_overshoot` 浮动。`--source-overshoot 1` 关掉垫底；`--papers` 显式点名的论文不做垫底，
+也不被 `max_papers` 截掉。
+
+### `status` 只描述本次运行自己的产物
+
+| 值 | 含义 |
+| --- | --- |
+| `empty` | 一篇都没转换成功 |
+| `partial` | 转换出了东西，但要的产物缺了一件（目前只有：要求建索引却没拿到 `corpus_ref`） |
+| `complete` | 其余情况 |
+
+**它不再沿用 `PaperScoutResult.status`。** 那个字段的口径是"检索期间有没有后端报过错"，于是
+Semantic Scholar 零星 429 就能把整轮标成 `partial`——真机上出现过语料建好、7 篇全进索引、报告
+却写着 `partial` 的情况，看报告的人只会以为语料没建成。scout 的自评保留在 `scout_status`，
+原因保留在 `warnings`。
+
+逐篇的取源与转换失败同样不降级：那是尽力而为流水线的正常产出，篇数、失败率和逐篇原因都已经
+在报告里，用一个总状态去概括只会丢信息。
 
 ### 每一段的失败都不终止流程
 
@@ -80,14 +137,24 @@ SurveyReport（逐篇成本与质量事实）
 
 | 位置 | 失败时 | 为什么在这一层 |
 | --- | --- | --- |
+| `HostRateLimiter._get_locked` | 传输失败按指数退避重试，与 429 同一条路径 | 超时是瞬时故障，重试比降级便宜得多 |
 | `paper_source._fetch_url` | 记 warning，继续试下一个候选 | 线索 URL 来自检索后端，域名不可控 |
 | `paper_source._fetch_one` | 这一篇标记 failed | 取源是唯一按篇计费的阶段 |
 | `paper_source._resolve_versions` | 退回空解析 | 它在逐篇取源之前，异常逃出去等于整批拿不到 |
 | `pipeline._convert_one` | 这一篇记失败原因 | 转换失败率要能算出来 |
-| `pipeline._index` | `status=partial` + `corpus_ref=None` | 语料可以事后重建，取源和转换的钱补不回来 |
+| `pipeline._index` | `corpus_ref=None`，由 `final_status` 判成 `partial` | 语料可以事后重建，取源和转换的钱补不回来 |
 
-两次真机事故都属于这一类：一条 `doi.org` 线索 TLS 握手超时，异常一路逃到 `run_survey`
-打断 50 篇的全程；修好之后又在建索引时撞穿编码配额，把已经完成的取源与转换一起丢掉。
+三次真机事故都属于这一类：一条 `doi.org` 线索 TLS 握手超时，异常一路逃到 `run_survey` 打断
+50 篇的全程；修好之后又在建索引时撞穿编码配额，把已经完成的取源与转换一起丢掉。
+
+第三次暴露的是**退回空解析还不够**。`export.arxiv.org` 的批量版本解析超时一次，
+`_resolve_versions` 按设计退回空解析、流程没有中断——但版本解析是整批一次请求，钉不到版本的
+arXiv 论文全部按 `version_unresolved` 跳过，13 篇里当场丢掉 9 篇，剩下 4 篇还全部退化成开放获取
+PDF 通道（`tex_sources: 0`）。
+
+根因不在 `_resolve_versions`，在 `HostRateLimiter`：`UrllibTransport` 把超时与 DNS/TLS 故障包成
+`HttpTransportError` 并注明"按可重试处理"，而 `_get_locked` 此前只对 429/5xx 重试，异常直接穿了
+出去——注释与行为对不上。现在两者走同一条退避路径。
 
 ### 跨段的身份合并
 
@@ -124,8 +191,18 @@ python -m athena.research --papers 1706.03762,1512.03385 # 跳过检索，单独
 `--papers` 存在的理由：检索是全链路里最慢也最贵的一段，而测量取源与转换的健壮性并不需要它，
 把两者绑在一起只会让下游的样本量受制于检索门槛。
 
-主要开关：`--max-papers`（默认 50）、`--retain-threshold`（默认 0）、`--allow-unfetchable`、
-`--strict-quality`、`--concurrency`、`--no-index`。
+主要开关：`--max-papers`（默认 10）、`--scorer-model`、`--retain-threshold`（默认 0）、
+`--source-overshoot`（默认 1.3）、`--allow-unfetchable`、`--strict-quality`、`--concurrency`
+（默认 4）、`--max-seconds`（默认 600）、`--no-index`。
+
+**`--max-papers` 省不到检索。** `paper_scout` 会给整个候选池打分（实测池 240 篇、
+`scored_papers` 也是 240），`max_papers` 只在 `_finish` 里做最后一次截断。把它从 50 调到 10，
+省的是取源、转换和索引这三段。
+
+**要压检索时间，先换打分模型，其次才是 `--max-seconds`。** 三轮实测里有两轮是撞 600 秒墙钟停在
+第 4 步的（`stop_reason: max_seconds`），`--max-steps` 根本没成为绑定约束——同样的工作量，每步
+耗时在 97 到 178 秒之间浮动，取决于 provider 当时的延迟。`--max-seconds` 是唯一确定的时间上界，
+代价是池更小。
 
 ## 真机基线（2026-08-04）
 
@@ -143,6 +220,30 @@ python -m athena.research --papers 1706.03762,1512.03385 # 跳过检索，单独
 | 调用 | http 152，vision 1347，embed 2308 批 / 36920 条 |
 
 那 12 篇纯 DOI 论文靠上游的开放获取链接才取到源，只按 arXiv id 过滤会全部丢失。
+
+## 真机基线（2026-08-10，`--max-papers 10`）
+
+同一个查询，默认 10 篇。这一轮跑在取源垫底与 `--concurrency 3` 之前，所以取源只要了 10 篇、
+转换按并发 2 跑：
+
+| 项目 | 数值 | 对照 50 篇 |
+| --- | --- | --- |
+| 候选池 / 交付 | 241 / 10 | 240 / 50 |
+| 无源剔除 | 80 篇 | 82 篇 |
+| 取源成功 | **7 / 10** | 44 / 50 |
+| 转换成功 | 7 / 7，硬失败率 0% | 44 / 44 |
+| 语料 | 7 篇 / 404 检索单元 / 4106 句向量 | 44 篇 / 36920 句向量 |
+| 耗时 | scout 581s，source 68s，markdown 141s，index 29s，**合计 820s** | 2375s |
+| 调用 | http 74，vision 93，embed 257 批 | http 152，vision 1347，embed 2308 批 |
+
+墙钟 13 分 44 秒，比 50 篇省 65%。scout 占 71%——它只随 `max_steps` 变，不随 `max_papers` 变，
+两轮的池大小（241 vs 240）和无源剔除数（80 vs 82）几乎一致，说明检索段本身高度可复现。
+
+**交付集合与上一轮几乎不重叠**，10 篇里只有 2 篇相同：策略与打分都走 LLM，同一查询两次跑出的
+池成分不同。所以"按上一轮报告的前 N 篇推算"只能给量级，给不了名单。
+
+**这一轮暴露的两件事已经修掉：** 取源只成功 7/10（IEEE 返回 0 字节、ACM 与 MDPI 403），于是有了
+取源垫底；报告写着 `partial` 而语料其实建好了，于是有了 `final_status`。
 
 ## 已知限制
 
