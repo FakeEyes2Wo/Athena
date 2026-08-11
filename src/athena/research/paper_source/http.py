@@ -186,12 +186,29 @@ class HostRateLimiter:
     async def _get_locked(
         self, bucket: str, url: str, headers: dict[str, str]
     ) -> HttpResponse:
-        """在已持有服务锁的前提下发起请求，并对可重试状态码退避重试。"""
+        """在已持有服务锁的前提下发起请求，对可重试状态码与传输失败退避重试。
+
+        传输失败必须和 429 一样重试。``UrllibTransport`` 把超时与 DNS/TLS 故障都包成
+        ``HttpTransportError`` 并注明"按可重试处理"，但此前只有状态码走重试，异常直接
+        穿了出去——注释与行为对不上。
+
+        代价不是丢一个请求。arXiv 的版本解析是整批一次请求，它一超时，这一批所有 arXiv
+        论文都会因 ``version_unresolved`` 被跳过。真机上一次 60 秒超时让 13 篇里的 9 篇
+        直接出局，取源成功率从 70% 掉到 31%，且交付的 4 篇全部退化成 PDF 通道。
+        """
         attempt = 0
         while True:
             await self._wait_for_slot(bucket)
             self.request_count += 1
-            response = await self._transport.get(url, headers)
+            try:
+                response = await self._transport.get(url, headers)
+            except HttpTransportError:
+                # 超时、DNS、TLS 都是瞬时故障；重试用尽才让调用方看见
+                if attempt >= self._max_retries:
+                    raise
+                await self._sleeper(self._backoff(attempt))
+                attempt += 1
+                continue
             if response.status not in RETRY_STATUS or attempt >= self._max_retries:
                 return response
             await self._sleeper(self._retry_delay(response, attempt))
@@ -207,9 +224,13 @@ class HostRateLimiter:
             await self._sleeper(earliest - now)
 
     def _retry_delay(self, response: HttpResponse, attempt: int) -> float:
-        """优先采用 ``Retry-After``，否则指数退避并加抖动避免多主机同步重试。"""
+        """优先采用 ``Retry-After``，否则退回指数退避。"""
         retry_after = response.header("retry-after").strip()
         if retry_after.isdigit():
             return min(float(retry_after), self._max_backoff)
+        return self._backoff(attempt)
+
+    def _backoff(self, attempt: int) -> float:
+        """指数退避并加抖动，避免多主机同步重试。传输失败没有响应可读，只能走这条。"""
         jittered = self._backoff_base * (2**attempt) * (1.0 + random.random())
         return min(jittered, self._max_backoff)

@@ -291,6 +291,43 @@ class RateLimiterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(503, response.status)
         self.assertEqual(4, rate_limited.request_count)
 
+    async def test_retries_a_transport_failure_just_like_a_429(self) -> None:
+        """超时与 429 一样是瞬时故障，必须重试。
+
+        真机命中：``export.arxiv.org`` 的批量版本解析是整批一次请求，它一超时，这一批
+        所有 arXiv 论文都会因 ``version_unresolved`` 被跳过——13 篇里当场丢掉 9 篇。
+        """
+        transport = FakeTransport(
+            {
+                "https://arxiv.org/src/": [
+                    HttpTransportError("timed out"),
+                    HttpTransportError("timed out"),
+                    ok(b"%PDF-1.5"),
+                ]
+            }
+        )
+        sleeps: list[float] = []
+
+        response = await limiter(transport, sleeps).get(SRC_URL)
+
+        self.assertEqual(200, response.status)
+        self.assertEqual(3, transport.count("https://arxiv.org/src/"))
+        self.assertEqual(2, len(sleeps))
+
+    async def test_a_transport_failure_still_surfaces_once_retries_run_out(
+        self,
+    ) -> None:
+        """持续不可达要如实上抛，由调用方按段决定降级——不能重试到永远也不能吞掉。"""
+        transport = FakeTransport(
+            {"https://arxiv.org/src/": HttpTransportError("timed out")}
+        )
+        rate_limited = limiter(transport, [])
+
+        with self.assertRaises(HttpTransportError):
+            await rate_limited.get(SRC_URL)
+
+        self.assertEqual(4, rate_limited.request_count)
+
     async def test_serializes_concurrent_requests_per_bucket(self) -> None:
         transport = FakeTransport({"https://arxiv.org/": ok(b"%PDF-1.5")})
         rate_limited = limiter(transport, [])
