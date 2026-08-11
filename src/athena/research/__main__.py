@@ -64,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=RETAIN_THRESHOLD,
         help=(
             f"交付门槛，默认 {RETAIN_THRESHOLD}（整池按相关性排序，由 --max-papers 截断）。"
-            "打分离散，非零门槛只有三档：>0.45 只要 3 分，>0.2 含 2 分，>0 含 1 分"
+            "打分离散，非零门槛只有三档：>0.45 只要 3 分，>0.2 含 2 分，>0 含 1 分。"
+            "只有 3 分档跨模型稳定，换 --scorer-model 后别用 0.3"
         ),
     )
     parser.add_argument(
