@@ -3,11 +3,11 @@
 import asyncio
 import hashlib
 import inspect
-import re
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from athena.core.contracts import CommitHash
+from athena.core.contracts import ArtifactRef, CommitHash
 from athena.core.workspace import (
     BinaryDiffWriter,
     GitDiff,
@@ -15,6 +15,29 @@ from athena.core.workspace import (
     GitWorkspace,
     GitWorkspaceError,
 )
+
+
+@dataclass(slots=True)
+class _Review:
+    artifact: ArtifactRef
+    sha256: str
+    tree: str
+    head: CommitHash
+    empty: bool
+    pending_commit: CommitHash | None = None
+
+
+@dataclass(slots=True)
+class _Committed:
+    artifact: ArtifactRef
+    commit: CommitHash
+
+
+@dataclass(slots=True)
+class _WorkspaceState:
+    workspace: GitWorkBranch
+    review: _Review | None = None
+    committed: _Committed | None = None
 
 
 class LocalGitWorkspace(GitWorkspace):
@@ -28,7 +51,7 @@ class LocalGitWorkspace(GitWorkspace):
         self._root.mkdir(parents=True, exist_ok=True)
         self._diff_writer = diff_writer
         self._lock = asyncio.Lock()
-        self._states: dict[Path, dict] = {}
+        self._states: dict[Path, _WorkspaceState] = {}
         self._repo_initialized = False
 
     async def init(
@@ -37,6 +60,7 @@ class LocalGitWorkspace(GitWorkspace):
         initial_file: str = "README.md",
         initial_content: str = "# Experiment Base",
     ) -> CommitHash:
+        """初始化 git 仓库并创建 base commit；已初始化则返回当前 HEAD。"""
         path = (repo_path or self._repo).resolve()
         if self._repo_initialized and path == self._repo:
             output = await self._git("rev-parse", "HEAD", cwd=path)
@@ -47,7 +71,7 @@ class LocalGitWorkspace(GitWorkspace):
 
         init_file = path / initial_file
         init_file.write_text(initial_content)
-        await self._git("add", initial_file, cwd=path)
+        await self._git("add", "-A", cwd=path)
         await self._git("commit", "-m", "initial commit", cwd=path)
 
         output = await self._git("rev-parse", "HEAD", cwd=path)
@@ -58,6 +82,7 @@ class LocalGitWorkspace(GitWorkspace):
         return commit_hash
 
     async def create(self, base_commit: CommitHash, branch: str) -> GitWorkBranch:
+        """为分支创建 worktree；分支已存在时幂等返回现有 worktree。"""
         async with self._lock:
             commit = await self._resolve_commit(base_commit)
             self._validate_branch(branch)
@@ -66,7 +91,11 @@ class LocalGitWorkspace(GitWorkspace):
                 "show-ref", "--verify", f"refs/heads/{branch}", check=False
             )
             if existing.strip():
-                raise GitWorkspaceError(f"分支已存在：{branch}")
+                # 幂等恢复：分支已存在 → 返回匹配的现有 worktree（design §idempotent）
+                workspace = await self._find_worktree(branch)
+                if workspace is not None:
+                    return workspace
+                raise GitWorkspaceError(f"分支已存在但无 worktree：{branch}")
 
             path = self._root / f"athena-{uuid4().hex}"
             branch_ref = f"refs/heads/{branch}"
@@ -79,23 +108,48 @@ class LocalGitWorkspace(GitWorkspace):
                 raise GitWorkspaceError("Branch 创建失败")
 
             workspace = GitWorkBranch(path=str(path), branch=branch, base_commit=commit)
-            self._states[path] = {
-                "workspace": workspace,
-                "review": None,
-                "committed": None,
-            }
+            self._states[path] = _WorkspaceState(workspace)
             return workspace
 
+    async def _find_worktree(self, branch: str) -> GitWorkBranch | None:
+        """按分支返回已存在的 worktree（幂等恢复）。"""
+        listing = await self._git("worktree", "list", "--porcelain", cwd=self._repo)
+        for block in listing.decode("utf-8").split("\n\n"):
+            path = br = None
+            for line in block.splitlines():
+                if line.startswith("worktree "):
+                    path = line[len("worktree ") :]
+                elif line.startswith("branch "):
+                    br = line[len("branch ") :].removeprefix("refs/heads/")
+            if br == branch and path:
+                worktree_path = Path(path).resolve()
+                registered = self._states.get(worktree_path)
+                if registered is not None:
+                    workspace = registered.workspace
+                    if workspace.branch != branch:
+                        raise GitWorkspaceError("worktree 分支与已注册状态不匹配")
+                    return workspace
+                workspace = GitWorkBranch(
+                    path=str(worktree_path),
+                    branch=branch,
+                    base_commit=await self._resolve_commit(branch),
+                )
+                self._states[worktree_path] = _WorkspaceState(workspace)
+                return workspace
+        return None
+
     async def diff(self, workspace: GitWorkBranch) -> GitDiff:
+        """计算 worktree 相对当前 HEAD 的内容寻址 diff。"""
         async with self._lock:
             state = self._get_state(workspace)
-            if state["committed"]:
-                raise GitWorkspaceError("已提交，不能再 diff")
             path = Path(workspace.path)
+            current_head = (
+                (await self._git("rev-parse", "HEAD", cwd=path)).decode().strip()
+            )
 
             await self._git("add", "-A", cwd=path)
             staged = await self._git(
-                "diff", "--cached", "--binary", workspace.base_commit, cwd=path
+                "diff", "--cached", "--binary", current_head, cwd=path
             )
             if await self._git("diff", cwd=path) or await self._git(
                 "ls-files", "--others", "--exclude-standard", cwd=path
@@ -107,15 +161,13 @@ class LocalGitWorkspace(GitWorkspace):
                 "--cached",
                 "--name-only",
                 "-z",
-                workspace.base_commit,
+                current_head,
                 cwd=path,
             )
             changed = {name for name in names.decode("utf-8").split("\0") if name}
             # 相对 base 的净 diff 会吞掉「先暂存、后删除且从未提交」的文件；
             # 用上一轮暂存树再 diff 一次，还原这类删除路径，保证 paths 不漏掉删除。
-            previous_tree = (
-                state["review"]["tree"] if state["review"] else workspace.base_commit
-            )
+            previous_tree = state.review.tree if state.review else current_head
             previous_names = await self._git(
                 "diff", "--cached", "--name-only", "-z", previous_tree, cwd=path
             )
@@ -126,67 +178,94 @@ class LocalGitWorkspace(GitWorkspace):
 
             result = self._diff_writer(staged)
             artifact = await result if inspect.isawaitable(result) else result
-            state["review"] = {
-                "artifact": artifact,
-                "sha256": hashlib.sha256(staged).hexdigest(),
-                "tree": (await self._git("write-tree", cwd=path)).decode().strip(),
-                "head": (await self._git("rev-parse", "HEAD", cwd=path))
-                .decode()
-                .strip(),
-                "empty": not staged,
-            }
+            state.review = _Review(
+                artifact=artifact,
+                sha256=hashlib.sha256(staged).hexdigest(),
+                tree=(await self._git("write-tree", cwd=path)).decode().strip(),
+                head=current_head,
+                empty=not staged,
+            )
             return GitDiff(ref=artifact, paths=paths)
 
     async def commit(
         self, workspace: GitWorkBranch, approved_diff: GitDiff, message: str
     ) -> CommitHash:
+        """提交批准的 diff 到 worktree 分支，返回 commit hash。"""
         async with self._lock:
             state = self._get_state(workspace)
-            review = state["review"]
-            if not review or review["artifact"] != approved_diff.ref:
+            review = state.review
+            if not review:
+                committed = state.committed
+                if committed and committed.artifact == approved_diff.ref:
+                    self._record_commit(
+                        state, workspace, approved_diff.ref, committed.commit
+                    )
+                    return committed.commit
+                reconciled = await self._reconcile_installed_review(
+                    workspace, approved_diff
+                )
+                if reconciled is not None:
+                    self._record_commit(state, workspace, approved_diff.ref, reconciled)
+                    return reconciled
                 raise GitWorkspaceError("批准的 artifact 与当前 diff 不匹配")
-            if state["committed"]:
-                return state["committed"]
+            if review.artifact != approved_diff.ref:
+                raise GitWorkspaceError("批准的 artifact 与当前 diff 不匹配")
 
             path = Path(workspace.path)
             current_head = (
                 (await self._git("rev-parse", "HEAD", cwd=path)).decode().strip()
             )
+            pending_commit = review.pending_commit
+            if pending_commit and current_head == pending_commit:
+                marker = await self._resolve_review_marker(workspace.branch)
+                if marker != pending_commit:
+                    raise GitWorkspaceError("已安装的提交缺少匹配的审查标记")
+                self._record_commit(state, workspace, approved_diff.ref, pending_commit)
+                return pending_commit
             current_tree = (await self._git("write-tree", cwd=path)).decode().strip()
             staged = await self._git(
-                "diff", "--cached", "--binary", workspace.base_commit, cwd=path
+                "diff", "--cached", "--binary", review.head, cwd=path
             )
             unstaged = await self._git("diff", cwd=path)
             untracked = await self._git(
                 "ls-files", "--others", "--exclude-standard", cwd=path
             )
             if (
-                hashlib.sha256(staged).hexdigest() != review["sha256"]
-                or current_head != review["head"]
-                or current_tree != review["tree"]
+                hashlib.sha256(staged).hexdigest() != review.sha256
+                or current_head != review.head
+                or current_tree != review.tree
                 or unstaged
                 or untracked
             ):
                 raise GitWorkspaceError("工作区在审查后被修改")
 
-            if review["empty"]:
-                state["committed"] = current_head
+            if review.empty:
+                self._record_commit(state, workspace, approved_diff.ref, current_head)
                 return current_head
 
-            new_commit = (
-                (
-                    await self._git(
-                        "commit-tree",
-                        current_tree,
-                        "-p",
-                        current_head,
-                        "-m",
-                        message,
-                        cwd=path,
+            new_commit = review.pending_commit
+            if new_commit is None:
+                new_commit = (
+                    (
+                        await self._git(
+                            "commit-tree",
+                            current_tree,
+                            "-p",
+                            current_head,
+                            "-m",
+                            message,
+                            cwd=path,
+                        )
                     )
+                    .decode()
+                    .strip()
                 )
-                .decode()
-                .strip()
+                review.pending_commit = new_commit
+            await self._git(
+                "update-ref",
+                self._review_ref(workspace.branch),
+                new_commit,
+                cwd=path,
             )
             await self._git(
                 "update-ref",
@@ -195,8 +274,116 @@ class LocalGitWorkspace(GitWorkspace):
                 current_head,
                 cwd=path,
             )
-            state["committed"] = new_commit
+            self._record_commit(state, workspace, approved_diff.ref, new_commit)
             return new_commit
+
+    async def restore_paths(
+        self,
+        workspace: GitWorkBranch,
+        paths: tuple[str, ...],
+    ) -> None:
+        """Restore declared outputs without hiding other post-review edits."""
+
+        async with self._lock:
+            state = self._get_state(workspace)
+            if state.review is None:
+                raise GitWorkspaceError("restore_paths requires a reviewed diff")
+            root = Path(workspace.path).resolve()
+            resolved: list[tuple[str, Path]] = []
+            for rel in paths:
+                relative = Path(rel)
+                candidate = (root / relative).resolve()
+                if (
+                    not rel
+                    or relative.is_absolute()
+                    or ".." in relative.parts
+                    or candidate == root
+                    or not candidate.is_relative_to(root)
+                ):
+                    raise GitWorkspaceError("restore path escapes workspace")
+                resolved.append((rel, candidate))
+
+            for rel, candidate in resolved:
+                reviewed_path = await self._git(
+                    "ls-tree",
+                    "--name-only",
+                    "-z",
+                    state.review.tree,
+                    "--",
+                    rel,
+                    cwd=root,
+                )
+                if reviewed_path:
+                    await self._git(
+                        "restore",
+                        f"--source={state.review.tree}",
+                        "--staged",
+                        "--worktree",
+                        "--",
+                        rel,
+                        cwd=root,
+                    )
+                    continue
+                await self._git(
+                    "rm", "--cached", "--ignore-unmatch", "--", rel, cwd=root
+                )
+                candidate.unlink(missing_ok=True)
+
+    @staticmethod
+    def _record_commit(
+        state: _WorkspaceState,
+        workspace: GitWorkBranch,
+        artifact: ArtifactRef,
+        commit: CommitHash,
+    ) -> None:
+        state.review = None
+        state.committed = _Committed(artifact, commit)
+        state.workspace.base_commit = commit
+        workspace.base_commit = commit
+
+    async def _reconcile_installed_review(
+        self, workspace: GitWorkBranch, approved_diff: GitDiff
+    ) -> CommitHash | None:
+        marker = await self._resolve_review_marker(workspace.branch)
+        if marker is None:
+            return None
+
+        path = Path(workspace.path)
+        current_head = (await self._git("rev-parse", "HEAD", cwd=path)).decode().strip()
+        if current_head != marker:
+            return None
+
+        parent = await self._git(
+            "rev-parse", "--verify", f"{marker}^{{commit}}^", cwd=path, check=False
+        )
+        if not parent.strip():
+            return None
+        reviewed_diff = await self._git(
+            "diff",
+            "--binary",
+            parent.decode("ascii").strip(),
+            marker,
+            cwd=path,
+        )
+        result = self._diff_writer(reviewed_diff)
+        artifact = await result if inspect.isawaitable(result) else result
+        if artifact != approved_diff.ref:
+            return None
+        return marker
+
+    async def _resolve_review_marker(self, branch: str) -> CommitHash | None:
+        output = await self._git(
+            "rev-parse",
+            "--verify",
+            f"{self._review_ref(branch)}^{{commit}}",
+            cwd=self._repo,
+            check=False,
+        )
+        return output.decode("ascii").strip() or None
+
+    @staticmethod
+    def _review_ref(branch: str) -> str:
+        return f"refs/athena/reviews/{branch}"
 
     async def remove(
         self,
@@ -205,6 +392,7 @@ class LocalGitWorkspace(GitWorkspace):
         delete_branch: bool = False,
         force: bool = False,
     ) -> None:
+        """移除 worktree（可选删分支）。"""
         async with self._lock:
             self._get_state(workspace)
             path = Path(workspace.path)
@@ -220,11 +408,14 @@ class LocalGitWorkspace(GitWorkspace):
                 await self._git("branch", "-D", workspace.branch)
             self._states.pop(path, None)
 
-    def _get_state(self, workspace: GitWorkBranch) -> dict:
+    def _get_state(self, workspace: GitWorkBranch) -> _WorkspaceState:
         path = Path(workspace.path).resolve()
         if path not in self._states:
             raise GitWorkspaceError("未知的 worktree")
-        return self._states[path]
+        state = self._states[path]
+        if state.workspace.branch != workspace.branch:
+            raise GitWorkspaceError("worktree 分支与已注册状态不匹配")
+        return state
 
     async def _resolve_commit(self, commit: str) -> str:
         if not commit or not isinstance(commit, str):

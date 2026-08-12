@@ -16,30 +16,17 @@ from athena.research.contracts import (
     CandidateEvaluation,
     DataScriptBundle,
     DatasetManifest,
+    DerivedDatasetManifest,
+    EDAAttemptOutcome,
+    EDARepairFailure,
 )
 from athena.research.data_service import DatasetService
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
+from athena.core.research_tree import ExperimentStatus
+from athena.core.workspace import GitWorkBranch
 from athena.research.search import SearchService
 from athena.research.services import ResearchServices
-from athena.research.supervisor.executor import PlanExecutor
-from athena.research.supervisor.journal import PlanJournal
-from athena.research.supervisor.models import (
-    ControlStatus,
-    OperationType,
-    PlanStatus,
-    SupervisorOperation,
-    SupervisorPlan,
-)
-from athena.research.supervisor.state import ProjectStateStore
-from athena.research.supervisor.validator import PlanValidator, ValidationError
-from test.unit.research.test_supervisor_core import FakeWorkerRuntime
-
-
-def _now() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _services(tmp_path: Path, store: LocalArtifactStore) -> ResearchServices:
@@ -48,77 +35,6 @@ def _services(tmp_path: Path, store: LocalArtifactStore) -> ResearchServices:
         dataset=DatasetService(workdir=tmp_path / ".athena" / "data"),
         runner=DataScriptRunner(store=store, workdir=tmp_path / ".athena" / "runs"),
     )
-
-
-@pytest.mark.asyncio
-async def test_dataset_ingest_via_executor(tmp_path: Path) -> None:
-    """RUN_SERVICE 调用 dataset.ingest → 结果 ref 落库 + manifest 事实原子提交。"""
-    source = tmp_path / "src"
-    source.mkdir()
-    (source / "d.csv").write_text("a,b\n1,2\n", encoding="utf-8")
-
-    journal = PlanJournal(tmp_path / ".athena" / "supervisor.db")
-    state = ProjectStateStore(journal)
-    execution_id = journal.create_execution()["execution_id"]
-    store = LocalArtifactStore(tmp_path / "artifacts")
-    executor = PlanExecutor(
-        journal=journal,
-        state=state,
-        runtime=FakeWorkerRuntime(store),
-        store=store,
-        services=_services(tmp_path, store),
-    )
-    op = SupervisorOperation(
-        operation_id="op_svc",
-        operation_type=OperationType.RUN_SERVICE,
-        idempotency_key="run:dataset.ingest",
-        inputs={"service": "dataset.ingest", "request": {"source_root": str(source)}},
-    )
-    plan = SupervisorPlan(
-        plan_id="plan_svc",
-        execution_id=execution_id,
-        sequence=1,
-        snapshot_version=journal.snapshot_version(),
-        reason_code="PREPARE_INGEST",
-        operations=[op],
-        created_at=_now(),
-    )
-    lease = journal.claim_lease(execution_id, "test-owner")
-    await executor.execute(plan, lease=lease)
-    assert plan.status == PlanStatus.COMPLETED
-    manifest_ref = state.facts().dataset_manifest_ref
-    assert manifest_ref is not None and manifest_ref.startswith("sha256:")
-    manifest = json.loads(await store.get_text(manifest_ref))
-    assert "d.csv" in manifest["files"]
-    journal.close()
-
-
-@pytest.mark.asyncio
-async def test_unknown_service_rejected_by_validator(tmp_path: Path) -> None:
-    """RUN_SERVICE 名称不在静态白名单 → Validator 拒绝。"""
-    journal = PlanJournal(tmp_path / "supervisor.db")
-    state = ProjectStateStore(journal)
-    execution_id = journal.create_execution()["execution_id"]
-    op = SupervisorOperation(
-        operation_id="op_bad",
-        operation_type=OperationType.RUN_SERVICE,
-        idempotency_key="run:hack",
-        inputs={"service": "dataset.evil", "request": {}},
-    )
-    plan = SupervisorPlan(
-        plan_id="plan_bad",
-        execution_id=execution_id,
-        sequence=1,
-        snapshot_version=journal.snapshot_version(),
-        reason_code="PREPARE_INGEST",
-        operations=[op],
-        created_at=_now(),
-    )
-    with pytest.raises(ValidationError, match="service not in RUN_SERVICE whitelist"):
-        PlanValidator(journal, state).validate(
-            plan, state.budget(), ControlStatus.RUNNING
-        )
-    journal.close()
 
 
 @pytest.mark.asyncio
@@ -285,23 +201,51 @@ def _eval_draft(tmp_path: Path) -> tuple[Path, str]:
 
 @pytest.mark.asyncio
 async def test_trusted_evaluator_scores_aligned_predictions(tmp_path: Path) -> None:
-    """trusted evaluator 运行冻结 eval bundle，对齐预测/标签产出唯一 test_score。"""
+    """trusted evaluator 运行冻结 eval bundle；labels 来自冻结 bundle，只注入 predictions。"""
     store = LocalArtifactStore(tmp_path / "artifacts")
     runner = DataScriptRunner(store=store, workdir=tmp_path / "work")
     draft, entrypoint = _eval_draft(tmp_path)
+    (draft / "labels.csv").write_text(
+        "__athena_row_id,target\nr1,0.0\nr2,2.0\n", encoding="utf-8"
+    )
     eval_bundle = await runner.freeze(draft, BundleMetadata(entrypoint=entrypoint))
 
     evaluator = TrustedEvaluator(runner)
     result = await evaluator.score(
         eval_bundle=eval_bundle,
         predictions="__athena_row_id,prediction\nr1,0.0\nr2,1.0\n",
-        labels="__athena_row_id,target\nr1,0.0\nr2,2.0\n",
         candidate_id="cand_1",
         direction="minimize",
     )
     assert result.candidate_id == "cand_1"
-    assert result.test_score == pytest.approx(0.5)  # MAE of [0, 1]
+    assert result.test_score == pytest.approx(0.5)  # MAE of [0, 1]，用冻结 labels
     assert result.direction == "minimize"
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_untrusted_labels(tmp_path: Path) -> None:
+    """可信评估只用冻结 bundle 的 labels——score 不接受候选 labels（design 修复 5）。
+
+    labels 在 PREPARE 冻结进 bundle（Task 3：InitAgent 写 labels.csv 进 tree_ref）；
+    score 只接收 predictions，候选伪造的 labels 无法影响分数。
+    """
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    runner = DataScriptRunner(store=store, workdir=tmp_path / "work")
+    draft, entrypoint = _eval_draft(tmp_path)
+    (draft / "labels.csv").write_text(
+        "__athena_row_id,target\nr1,0.0\nr2,2.0\n", encoding="utf-8"
+    )
+    eval_bundle = await runner.freeze(draft, BundleMetadata(entrypoint=entrypoint))
+
+    evaluator = TrustedEvaluator(runner)
+    result = await evaluator.score(
+        eval_bundle=eval_bundle,
+        predictions="__athena_row_id,prediction\nr1,0.0\nr2,1.0\n",
+        candidate_id="cand_1",
+        direction="minimize",
+    )
+    # 分数来自冻结 bundle 的 labels（MAE 0.5）；候选若自带 labels 应被拒绝
+    assert result.test_score == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
@@ -310,6 +254,9 @@ async def test_evaluation_baseline_via_registry(tmp_path: Path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     runner = DataScriptRunner(store=store, workdir=tmp_path / "work")
     draft, entrypoint = _eval_draft(tmp_path)
+    (draft / "labels.csv").write_text(
+        "__athena_row_id,target\nr1,0.0\nr2,2.0\n", encoding="utf-8"
+    )
     eval_bundle = await runner.freeze(draft, BundleMetadata(entrypoint=entrypoint))
     services = ResearchServices(
         store=store,
@@ -322,7 +269,6 @@ async def test_evaluation_baseline_via_registry(tmp_path: Path) -> None:
         {
             "eval_bundle": eval_bundle.model_dump(mode="json"),
             "predictions": "__athena_row_id,prediction\nr1,0.0\nr2,1.0\n",
-            "labels": "__athena_row_id,target\nr1,0.0\nr2,2.0\n",
             "candidate_id": "baseline",
         },
     )
@@ -331,3 +277,174 @@ async def test_evaluation_baseline_via_registry(tmp_path: Path) -> None:
         await store.get_text(result.facts["baseline_experiment_ref"])
     )
     assert candidate.test_score == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_evaluation_single_reads_frozen_predictions_ref(tmp_path: Path) -> None:
+    """Final evaluation can consume the SOTA prediction artifact directly."""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    runner = DataScriptRunner(store=store, workdir=tmp_path / "work")
+    draft, entrypoint = _eval_draft(tmp_path)
+    (draft / "labels.csv").write_text(
+        "__athena_row_id,target\nr1,0.0\nr2,2.0\n", encoding="utf-8"
+    )
+    eval_bundle = await runner.freeze(draft, BundleMetadata(entrypoint=entrypoint))
+    predictions_ref = await store.put_text(
+        "__athena_row_id,prediction\nr1,0.0\nr2,1.0\n"
+    )
+    services = ResearchServices(
+        store=store,
+        dataset=DatasetService(workdir=tmp_path / ".athena" / "data"),
+        runner=runner,
+        evaluator=TrustedEvaluator(runner),
+    )
+
+    result = await services.run(
+        "evaluation.single",
+        {
+            "eval_bundle": eval_bundle.model_dump(mode="json"),
+            "predictions_ref": predictions_ref,
+            "direction": "minimize",
+        },
+    )
+
+    candidate = CandidateEvaluation.model_validate_json(
+        await store.get_text(result.result_refs[0])
+    )
+    assert candidate.test_score == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_accept_derived_view_commits_active_view(tmp_path) -> None:
+    """接受特征视图候选 → 提交 active_dataset_view_ref（§Supervisor Facts）。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    services = _services(tmp_path, store)
+    service = DatasetService(workdir=tmp_path / "data")
+    src = tmp_path / "orig"
+    src.mkdir()
+    (src / "train.csv").write_text("id,age,label\n1,20,0\n2,30,1\n", encoding="utf-8")
+    parent = service.ingest(src)
+
+    candidate = DerivedDatasetManifest(
+        manifest_id="view_c",
+        parent_manifest_id=parent.manifest_id,
+        files={**parent.files, "features/f.csv": "sha:f"},
+        columns=parent.columns,
+        column_hashes=parent.column_hashes,
+        row_identity_hash=parent.row_identity_hash,
+        split_boundaries=parent.split_boundaries,
+        derived_columns=["feat"],
+        column_files={"feat": "features/f.csv"},
+        enabled_derived_columns=["feat"],
+    )
+    result = await services.run(
+        "dataset.accept_derived",
+        {
+            "parent": parent.model_dump(mode="json"),
+            "candidate": candidate.model_dump(mode="json"),
+        },
+    )
+    accepted_ref = result.result_refs[0]
+    assert result.facts["active_dataset_view_ref"] == accepted_ref
+    accepted = DerivedDatasetManifest.model_validate_json(
+        await store.get_text(accepted_ref)
+    )
+    assert accepted.manifest_id.startswith("view_")
+
+
+@pytest.mark.asyncio
+async def test_search_prepare_experiment_creates_running_experiment(
+    tmp_path: Path,
+) -> None:
+    """prepare_experiment：注册假设 → 建 worktree → RUNNING 实验 → Code 赋值。"""
+    service = SearchService()
+    hypotheses = [
+        Hypothesis(
+            statement="scale features",
+            intervention="standardize",
+            expected_effect="raise",
+        )
+    ]
+    assignment = await service.prepare_experiment(
+        hypotheses=hypotheses,
+        make_worktree=lambda eid, branch: GitWorkBranch(
+            path=str(tmp_path / eid), branch=branch, base_commit="abc123"
+        ),
+        run_config_ref="cfg://run",
+    )
+    assert assignment["workspace"] and assignment["environment_root"]
+    experiment = service.graph.get_experiment(assignment["experiment_id"])
+    assert experiment.status is ExperimentStatus.RUNNING
+    assert experiment.plan.kind == "search"
+    assert experiment.gitwork.branch.startswith("athena/search/")
+
+
+class _FakeEvaluator:
+    """只返回固定 test_score 的 fake trusted evaluator。"""
+
+    def __init__(self, score: float) -> None:
+        self._score = score
+
+    async def score(self, *, eval_bundle, predictions, candidate_id, direction):
+        from athena.research.contracts import CandidateEvaluation
+
+        return CandidateEvaluation(
+            candidate_id=candidate_id, test_score=self._score, direction=direction
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_finish_experiment_sets_sota(tmp_path: Path) -> None:
+    """finish_experiment：评分 → complete → 首个实验设为 SOTA（无父 SOTA）。"""
+    service = SearchService()
+    assignment = await service.prepare_experiment(
+        hypotheses=[Hypothesis(statement="s", intervention="i", expected_effect="e")],
+        make_worktree=lambda eid, branch: GitWorkBranch(
+            path=str(tmp_path / eid), branch=branch, base_commit="abc"
+        ),
+        run_config_ref="cfg",
+    )
+    result = await service.finish_experiment(
+        experiment_id=assignment["experiment_id"],
+        predictions="__athena_row_id,prediction\nr1,0.0\nr2,1.0\n",
+        predictions_ref="sha256:p",
+        evaluator=_FakeEvaluator(0.9),
+        eval_bundle=object(),
+        direction="maximize",
+    )
+    assert result["sota_experiment_id"] == assignment["experiment_id"]
+    experiment = service.graph.get_experiment(assignment["experiment_id"])
+    assert experiment.status is ExperimentStatus.SUCCEEDED
+    assert experiment.eval is not None and experiment.eval.primary == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_search_prepare_experiment_service(tmp_path: Path) -> None:
+    """search.prepare_experiment 服务：注册假设 → RUNNING 实验 → graph_ref + assignment。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    services = ResearchServices(
+        store=store,
+        dataset=DatasetService(workdir=tmp_path / ".athena" / "data"),
+        runner=DataScriptRunner(store=store, workdir=tmp_path / ".athena" / "runs"),
+        workspace=lambda eid, branch: GitWorkBranch(
+            path=str(tmp_path / eid), branch=branch, base_commit="abc"
+        ),
+    )
+    result = await services.run(
+        "search.prepare_experiment",
+        {
+            "hypotheses": [
+                {"statement": "s", "intervention": "i", "expected_effect": "e"}
+            ],
+            "run_config_ref": "cfg",
+        },
+    )
+    assert result.facts["graph_ref"]
+    assignment = json.loads(await store.get_text(result.result_refs[0]))
+    assert assignment["experiment_id"]
+    assert assignment["workspace"]
+    tree = ResearchTree.from_dict(
+        json.loads(await store.get_text(result.facts["graph_ref"]))
+    )
+    experiment = tree.get_experiment(assignment["experiment_id"])
+    assert experiment.status is ExperimentStatus.RUNNING

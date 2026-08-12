@@ -1,0 +1,256 @@
+"""Deterministic PREPARE phase boundary tests."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from athena.core.artifact_store import LocalArtifactStore
+from athena.core.workspace import GitDiff, GitWorkBranch
+from athena.execution.runtime import CommandResult
+from athena.research.contracts import CandidateEvaluation, DataScriptBundle
+from athena.research.supervisor.prepare import run_prepare_plan
+
+
+class _AgentRuntime:
+    def __init__(self, store: LocalArtifactStore) -> None:
+        self.store = store
+        self.created: list[str] = []
+        self.feedback: list[str] = []
+        self._responses: dict[str, str] = {}
+        self._next = 0
+
+    async def _response(self, run_id: str) -> None:
+        decision_ref = await self.store.put_text(
+            json.dumps({"decision": "submit", "reason": "ready", "suggestions": []})
+        )
+        self._responses[run_id] = json.dumps({"result_ref": decision_ref})
+
+    async def create_root(self, agent_type, task, *, name, agent_id):
+        del task, name
+        self.created.append(agent_type)
+        self._next += 1
+        run_id = f"run-{self._next}"
+        await self._response(run_id)
+        return agent_id, run_id
+
+    async def followup(self, agent_id, task):
+        assert agent_id == "prepare"
+        self.feedback.append(task["content"])
+        self._next += 1
+        run_id = f"run-{self._next}"
+        await self._response(run_id)
+        return run_id
+
+    async def wait_run(self, run_id, *, timeout=None):
+        del timeout
+        return type(
+            "Summary",
+            (),
+            {
+                "status": type("Status", (), {"value": "completed"})(),
+                "response_ref": self._responses[run_id],
+                "error": None,
+            },
+        )()
+
+
+class _Scripts:
+    async def freeze(self, workspace, metadata):
+        assert Path(workspace).name == "evaluator"
+        assert metadata.entrypoint == "eval.py"
+        return DataScriptBundle(
+            bundle_id="bundle-eval",
+            entrypoint="eval.py",
+            lock_ref="sha256:" + "1" * 64,
+            project_ref="sha256:" + "2" * 64,
+            source_ref="sha256:" + "3" * 64,
+            tree_ref="sha256:" + "4" * 64,
+            python_version="3.12",
+            environment_hash="5" * 64,
+        )
+
+
+class _Execution:
+    def __init__(self, root: Path) -> None:
+        self.project_root = root
+        self.environment_root = root
+
+    async def run(self, context, command=None, *, argv=None, **kwargs):
+        del context, command, argv, kwargs
+        return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
+
+
+class _Evaluator:
+    async def score(self, **kwargs):
+        del kwargs
+        return CandidateEvaluation(
+            candidate_id="prepare", test_score=0.75, direction="maximize"
+        )
+
+
+class _UnavailableEvaluator:
+    async def score(self, **kwargs):
+        del kwargs
+        raise ConnectionError("evaluator service unavailable")
+
+
+class _Git:
+    def __init__(self, *, missing_commit: bool = False) -> None:
+        self.missing_commit = missing_commit
+
+    async def diff(self, workspace):
+        del workspace
+        return GitDiff(ref="sha256:" + "6" * 64, paths=("model.py",))
+
+    async def commit(self, workspace, approved_diff, message):
+        del workspace, approved_diff, message
+        return None if self.missing_commit else "commit-baseline"
+
+
+class _Store:
+    def __init__(self, root: Path, *, missing_evidence: bool = False) -> None:
+        self.inner = LocalArtifactStore(root)
+        self.missing_evidence = missing_evidence
+
+    async def put_bytes(self, data):
+        return await self.inner.put_bytes(data)
+
+    async def get_bytes(self, ref):
+        return await self.inner.get_bytes(ref)
+
+    async def put_text(self, text):
+        if self.missing_evidence and '"metric"' in text and '"commit"' in text:
+            return None
+        return await self.inner.put_text(text)
+
+    async def get_text(self, ref):
+        return await self.inner.get_text(ref)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("missing", "expected_error"),
+    [
+        ("evaluator", "evaluator draft is missing"),
+        ("report", "PREPARE requires a declared, non-empty report output"),
+        ("predictions", "missing predictions output: outputs/predictions.csv"),
+        ("evidence", "trusted evidence is missing"),
+        ("commit", "trusted commit is missing"),
+    ],
+)
+async def test_prepare_result_requires_every_trusted_artifact(
+    tmp_path: Path, missing: str, expected_error: str
+) -> None:
+    workspace_path = tmp_path / "prepare"
+    (workspace_path / "evaluator").mkdir(parents=True)
+    (workspace_path / "evaluator" / "eval.py").write_text("pass\n", encoding="utf-8")
+    (workspace_path / "evaluator" / "labels.csv").write_text(
+        "id,label\n1,0\n", encoding="utf-8"
+    )
+    (workspace_path / "evaluator" / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (workspace_path / "model.py").write_text("pass\n", encoding="utf-8")
+    (workspace_path / "outputs").mkdir()
+    if missing != "predictions":
+        (workspace_path / "outputs" / "predictions.csv").write_text(
+            "id,prediction\n1,0\n", encoding="utf-8"
+        )
+    if missing != "report":
+        (workspace_path / "outputs" / "report.md").write_text(
+            "# Baseline\n", encoding="utf-8"
+        )
+    outputs = {
+        "predictions": "outputs/predictions.csv",
+        "report": "outputs/report.md",
+    }
+    if missing != "evaluator":
+        outputs["evaluator"] = "evaluator/eval.py"
+    (workspace_path / "experiment.json").write_text(
+        json.dumps(
+            {"version": 1, "commands": [["python", "model.py"]], "outputs": outputs}
+        ),
+        encoding="utf-8",
+    )
+    store = _Store(tmp_path / "artifacts", missing_evidence=missing == "evidence")
+    agents = _AgentRuntime(store.inner)
+    tree_ref = await store.put_text('{"experiments": []}')
+
+    with pytest.raises(RuntimeError, match="turn budget exhausted"):
+        await run_prepare_plan(
+            agents=agents,
+            scripts=_Scripts(),
+            evaluator=_Evaluator(),
+            git=_Git(missing_commit=missing == "commit"),
+            workspace=GitWorkBranch(
+                path=str(workspace_path), branch="prepare", base_commit="base"
+            ),
+            execution=_Execution(tmp_path),
+            store=store,
+            tree_ref=tree_ref,
+            task="build baseline",
+            max_turns=2,
+        )
+
+    assert agents.created == ["prepare"]
+    assert agents.feedback == [expected_error]
+
+
+@pytest.mark.asyncio
+async def test_prepare_surfaces_evaluator_infrastructure_failure_without_agent_repair(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "prepare"
+    (workspace_path / "evaluator").mkdir(parents=True)
+    (workspace_path / "evaluator" / "eval.py").write_text("pass\n", encoding="utf-8")
+    (workspace_path / "evaluator" / "labels.csv").write_text(
+        "id,label\n1,0\n", encoding="utf-8"
+    )
+    (workspace_path / "evaluator" / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (workspace_path / "model.py").write_text("pass\n", encoding="utf-8")
+    (workspace_path / "outputs").mkdir()
+    (workspace_path / "outputs" / "predictions.csv").write_text(
+        "id,prediction\n1,0\n", encoding="utf-8"
+    )
+    (workspace_path / "outputs" / "report.md").write_text(
+        "# Baseline\n", encoding="utf-8"
+    )
+    (workspace_path / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [["python", "model.py"]],
+                "outputs": {
+                    "predictions": "outputs/predictions.csv",
+                    "report": "outputs/report.md",
+                    "evaluator": "evaluator/eval.py",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agents = _AgentRuntime(store)
+    tree_ref = await store.put_text('{"experiments": []}')
+
+    with pytest.raises(RuntimeError, match="evaluator service unavailable"):
+        await run_prepare_plan(
+            agents=agents,
+            scripts=_Scripts(),
+            evaluator=_UnavailableEvaluator(),
+            git=_Git(),
+            workspace=GitWorkBranch(
+                path=str(workspace_path), branch="prepare", base_commit="base"
+            ),
+            execution=_Execution(tmp_path),
+            store=store,
+            tree_ref=tree_ref,
+            task="build baseline",
+            max_turns=2,
+        )
+
+    assert agents.created == ["prepare"]
+    assert agents.feedback == []

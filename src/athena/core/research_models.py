@@ -1,8 +1,8 @@
 """Models owned by Athena's core research tree."""
 
-from typing import List, Literal, Self, TypeAlias
+from typing import List, Literal, TypeAlias
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from athena.core.contracts import ArtifactRef, NonBlankText
 
@@ -22,21 +22,24 @@ class Hypothesis(BaseModel):
     expected_effect: NonBlankText = Field(description="预期指标如何变化")
     status: HypothesisStatus = "PROPOSED"
     evidence_refs: list[ArtifactRef] = Field(default_factory=list)
-    patience_grant: int = Field(default=0, ge=0)
-    patience_evidence_ref: ArtifactRef | None = None
     id: str | None = Field(default=None, description="Unique hypothesis identifier")
     parent_id: str | None = Field(
         default=None, description="Parent experiment ID in ResearchTree"
     )
+    supersedes: list[str] = Field(default_factory=list)
+    priority: float = Field(default=1000.0, allow_inf_nan=False)
+    order: int | None = Field(default=None, ge=0)
+    patience: int = Field(default=0, ge=0)
+    turn_limit: int | None = Field(default=None, ge=0)
     sources: list[str] = Field(
         default_factory=list, description="Paper URLs or model repos"
     )
 
-    @model_validator(mode="after")
-    def _validate_patience(self) -> Self:
-        if self.patience_grant and self.patience_evidence_ref is None:
-            raise ValueError("positive patience grant requires an evidence reference")
-        return self
+
+class HypothesisBatch(BaseModel):
+    """结构化 Ideator 输出：一组可验证/可证伪的假设（search.register_hypotheses 消费）。"""
+
+    hypotheses: list[Hypothesis] = Field(default_factory=list)
 
 
 class ExperimentPlan(BaseModel):

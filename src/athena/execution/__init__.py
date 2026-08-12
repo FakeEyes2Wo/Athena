@@ -1,4 +1,4 @@
-"""Source-independent execution observability."""
+"""Source-independent execution observability and shared execution runtime."""
 
 from athena.execution.events import (
     ExecutionEvent,
@@ -11,11 +11,23 @@ from athena.execution.events import (
     MonitorLimits,
 )
 from athena.execution.monitor import ExecutionMonitor
+from athena.execution.runtime import (
+    CommandExecutor,
+    CommandResult,
+    EnvironmentManager,
+    ExecutionContext,
+    ExecutionRuntime,
+)
 
 __all__ = [
+    "CommandExecutor",
+    "CommandResult",
+    "EnvironmentManager",
+    "ExecutionContext",
     "ExecutionEvent",
     "ExecutionEventKind",
     "ExecutionMonitor",
+    "ExecutionRuntime",
     "ExecutionSnapshot",
     "ExecutionState",
     "HealthEventSink",

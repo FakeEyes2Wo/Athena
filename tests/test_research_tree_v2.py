@@ -16,9 +16,10 @@ from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 
 
-def make_hypothesis(hypothesis_id: str) -> Hypothesis:
+def make_hypothesis(hypothesis_id: str, *, parent_id: str | None = None) -> Hypothesis:
     return Hypothesis(
         id=hypothesis_id,
+        parent_id=parent_id,
         statement=f"Hypothesis {hypothesis_id}",
         intervention=f"Apply intervention {hypothesis_id}",
         expected_effect="Improve the primary metric",
@@ -92,15 +93,17 @@ def test_experiment_has_only_canonical_v2_fields() -> None:
 
 def test_graph_owns_hypotheses_once_and_derives_breadth_first_children() -> None:
     tree = ResearchTree()
-    for hypothesis_id in ("hyp_root", "hyp_left", "hyp_right", "hyp_leaf"):
-        tree.add_hypothesis(make_hypothesis(hypothesis_id))
-
+    tree.add_hypothesis(make_hypothesis("hyp_root"))
     tree.add_experiment("exp_root", make_experiment("hyp_root", kind="baseline"))
+    tree.add_hypothesis(make_hypothesis("hyp_left", parent_id="exp_root"))
     tree.add_experiment("exp_left", make_experiment("hyp_left", parent_id="exp_root"))
+    tree.add_hypothesis(make_hypothesis("hyp_right", parent_id="exp_root"))
     tree.add_experiment("exp_right", make_experiment("hyp_right", parent_id="exp_root"))
+    tree.add_hypothesis(make_hypothesis("hyp_leaf", parent_id="exp_left"))
     tree.add_experiment("exp_leaf", make_experiment("hyp_leaf", parent_id="exp_left"))
 
-    assert tree.get_hypothesis("hyp_root") == make_hypothesis("hyp_root")
+    assert tree.get_hypothesis("hyp_root").id == "hyp_root"
+    assert tree.get_hypothesis("hyp_root").order == 0
     assert tree.get_experiment("exp_root").hypothesis_id == "hyp_root"
     assert tree.root_experiment_ids() == ["exp_root"]
     assert tree.list_children("exp_root") == ["exp_left", "exp_right"]
@@ -132,10 +135,7 @@ def test_graph_rejects_duplicate_and_missing_references_without_mutation() -> No
     with pytest.raises(KeyError, match="hyp_missing"):
         tree.add_experiment("exp_missing_hyp", make_experiment("hyp_missing"))
     with pytest.raises(KeyError, match="exp_missing"):
-        tree.add_experiment(
-            "exp_orphan",
-            make_experiment("hyp_root", parent_id="exp_missing"),
-        )
+        tree.add_hypothesis(make_hypothesis("hyp_orphan", parent_id="exp_missing"))
     with pytest.raises(ValueError, match="duplicate hypothesis id"):
         tree.add_hypothesis(make_hypothesis("hyp_root"))
 
@@ -219,11 +219,11 @@ def test_completion_requires_matching_finite_real_evaluation() -> None:
 
 def test_sota_requires_eligible_successful_experiment() -> None:
     tree = ResearchTree()
-    for hypothesis_id in ("hyp_baseline", "hyp_validation"):
-        tree.add_hypothesis(make_hypothesis(hypothesis_id))
+    tree.add_hypothesis(make_hypothesis("hyp_baseline"))
     tree.add_experiment(
         "exp_baseline", make_experiment("hyp_baseline", kind="baseline")
     )
+    tree.add_hypothesis(make_hypothesis("hyp_validation", parent_id="exp_baseline"))
     tree.add_experiment(
         "exp_validation",
         make_experiment("hyp_validation", parent_id="exp_baseline", kind="ablation"),
@@ -249,7 +249,7 @@ def fixture_payload() -> dict[str, object]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
-def test_v2_fixture_loads_and_round_trips_with_derived_children(
+def test_v2_fixture_loads_and_migrates_with_derived_children(
     tmp_path: Path,
 ) -> None:
     tree = ResearchTree.load(FIXTURE)
@@ -260,11 +260,14 @@ def test_v2_fixture_loads_and_round_trips_with_derived_children(
 
     target = tmp_path / "nested" / "research_tree.json"
     assert tree.save(target) == target
-    assert json.loads(target.read_text(encoding="utf-8")) == fixture_payload()
+    migrated = json.loads(target.read_text(encoding="utf-8"))
+    assert migrated["version"] == 3
+    assert migrated["hypotheses"]["hyp_baseline"]["order"] == 0
+    assert migrated["hypotheses"]["hyp_child"]["order"] == 1
     assert ResearchTree.load(target).to_dict() == tree.to_dict()
 
 
-@pytest.mark.parametrize("version", [None, 1, 3])
+@pytest.mark.parametrize("version", [None, 1, 4])
 def test_load_rejects_missing_v1_and_unknown_versions(version: int | None) -> None:
     payload = fixture_payload()
     if version is None:

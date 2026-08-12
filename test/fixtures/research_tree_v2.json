@@ -10,8 +10,6 @@
       "evidence_refs": [
         "artifact://data/train"
       ],
-      "patience_grant": 0,
-      "patience_evidence_ref": null,
       "id": "hyp_baseline",
       "parent_id": null,
       "sources": [
@@ -24,8 +22,6 @@
       "expected_effect": "Improve the primary metric",
       "status": "PROPOSED",
       "evidence_refs": [],
-      "patience_grant": 0,
-      "patience_evidence_ref": null,
       "id": "hyp_child",
       "parent_id": "exp_baseline",
       "sources": [

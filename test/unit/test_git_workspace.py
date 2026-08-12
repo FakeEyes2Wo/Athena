@@ -142,6 +142,62 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         )
         await self.manager.remove(workspace, delete_branch=True)
 
+    async def test_workspace_supports_multiple_reviewed_commits(self) -> None:
+        workspace = await self._create("athena/plan/h1")
+        path = Path(workspace.path)
+        model = path / "model.py"
+
+        model.write_text("v1\n", encoding="utf-8")
+        first_diff = await self.manager.diff(workspace)
+        first_commit = await self.manager.commit(workspace, first_diff, "score 0.80")
+
+        model.write_text("v2\n", encoding="utf-8")
+        second_diff = await self.manager.diff(workspace)
+        second_commit = await self.manager.commit(workspace, second_diff, "score 0.82")
+
+        self.assertNotEqual(first_commit, second_commit)
+        self.assertEqual(
+            second_commit,
+            self._git("rev-parse", "HEAD", cwd=path).stdout.strip(),
+        )
+        self.assertEqual("v2\n", self._git("show", "HEAD:model.py", cwd=path).stdout)
+
+    async def test_create_recovers_stable_branch_without_losing_commits(self) -> None:
+        workspace = await self._create("athena/plan/recover")
+        path = Path(workspace.path)
+        model = path / "model.py"
+        model.write_text("v1\n", encoding="utf-8")
+        reviewed = await self.manager.diff(workspace)
+        first_commit = await self.manager.commit(workspace, reviewed, "score 0.80")
+
+        async def write_recovered_diff(content: bytes) -> str:
+            digest = hashlib.sha256(content).hexdigest()
+            ref = f"artifact://git-diff/{digest}"
+            self.artifacts[ref] = content
+            return ref
+
+        recovered_manager = LocalGitWorkspace(
+            self.repo, self.worktree_root, write_recovered_diff
+        )
+        recovered = await recovered_manager.create(
+            self.base_commit, "athena/plan/recover"
+        )
+
+        self.assertEqual(workspace.path, recovered.path)
+        self.assertEqual(first_commit, recovered.base_commit)
+        self.assertEqual("v1\n", self._git("show", "HEAD:model.py", cwd=path).stdout)
+
+        model.write_text("v2\n", encoding="utf-8")
+        second_diff = await recovered_manager.diff(recovered)
+        second_commit = await recovered_manager.commit(
+            recovered, second_diff, "score 0.82"
+        )
+        self.assertNotEqual(first_commit, second_commit)
+        self.assertEqual(
+            second_commit,
+            self._git("rev-parse", "HEAD", cwd=path).stdout.strip(),
+        )
+
     async def test_diff_ignores_runtime_outputs_excluded_by_gitignore(self) -> None:
         workspace = await self._create("experiment/ignored-runtime")
         path = Path(workspace.path)
@@ -153,6 +209,60 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(b"run_experiment.py", self.artifacts[diff.ref])
         self.assertNotIn(b"diff --git a/runtime.log", self.artifacts[diff.ref])
+
+    async def test_restore_paths_restores_reviewed_output_and_preserves_source_change(
+        self,
+    ) -> None:
+        workspace = await self._create("experiment/restore-reviewed-output")
+        root = Path(workspace.path)
+        source = root / "solution.py"
+        output = root / "predictions.csv"
+        source.write_text("VERSION = 1\n", encoding="utf-8")
+        output.write_text("id,prediction\n1,0\n", encoding="utf-8")
+        reviewed = await self.manager.diff(workspace)
+
+        source.write_text("VERSION = 2\n", encoding="utf-8")
+        output.write_text("id,prediction\n1,1\n", encoding="utf-8")
+        await self.manager.restore_paths(workspace, ("predictions.csv",))
+
+        self.assertEqual("id,prediction\n1,0\n", output.read_text(encoding="utf-8"))
+        self.assertEqual("VERSION = 2\n", source.read_text(encoding="utf-8"))
+        self.assertNotEqual(reviewed, await self.manager.diff(workspace))
+
+    async def test_restore_paths_removes_execution_only_output(self) -> None:
+        workspace = await self._create("experiment/remove-generated-output")
+        root = Path(workspace.path)
+        source = root / "solution.py"
+        output = root / "predictions.csv"
+        source.write_text("VERSION = 1\n", encoding="utf-8")
+        reviewed = await self.manager.diff(workspace)
+
+        source.write_text("VERSION = 2\n", encoding="utf-8")
+        output.write_text("id,prediction\n1,1\n", encoding="utf-8")
+        await self.manager.restore_paths(workspace, ("predictions.csv",))
+
+        self.assertFalse(output.exists())
+        self.assertEqual("VERSION = 2\n", source.read_text(encoding="utf-8"))
+        self.assertNotEqual(reviewed, await self.manager.diff(workspace))
+
+    async def test_restore_paths_rejects_paths_outside_workspace(self) -> None:
+        workspace = await self._create("experiment/reject-output-escape")
+        outside = Path(self._temp.name) / "outside.csv"
+        outside.write_text("keep\n", encoding="utf-8")
+        await self.manager.diff(workspace)
+
+        for invalid in (str(outside), "../outside.csv", "nested/../outside.csv"):
+            with self.subTest(path=invalid):
+                with self.assertRaises(GitWorkspaceError):
+                    await self.manager.restore_paths(workspace, (invalid,))
+
+        self.assertEqual("keep\n", outside.read_text(encoding="utf-8"))
+
+    async def test_restore_paths_requires_reviewed_tree(self) -> None:
+        workspace = await self._create("experiment/restore-before-review")
+
+        with self.assertRaises(GitWorkspaceError):
+            await self.manager.restore_paths(workspace, ("predictions.csv",))
 
     async def test_dirty_remove_requires_explicit_force(self) -> None:
         workspace = await self._create("experiment/discard")
@@ -176,6 +286,14 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(GitWorkspaceError):
             await self.manager.create(self.base_commit, "already-exists")
 
+    async def test_create_is_idempotent(self) -> None:
+        """分支已存在且有 worktree → 幂等恢复返回同一 worktree，不重复创建。"""
+        first = await self.manager.create(self.base_commit, "experiment/e1")
+        self.created.append(first)
+        second = await self.manager.create(self.base_commit, "experiment/e1")
+        self.assertEqual(first.path, second.path)
+        self.assertEqual(first.branch, second.branch)
+
         forged = GitWorkBranch(
             path=str(Path(self._temp.name) / "outside"),
             branch="experiment/forged",
@@ -190,6 +308,12 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(GitWorkspaceError):
             await self.manager.diff(forged_inside)
 
+        forged_registered = first.model_copy(
+            update={"branch": "experiment/different-identity"}
+        )
+        with self.assertRaises(GitWorkspaceError):
+            await self.manager.diff(forged_registered)
+
         workspace = await self._create("experiment/no-review")
         with self.assertRaises(GitWorkspaceError):
             await self.manager.commit(
@@ -197,6 +321,102 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
                 GitDiff(ref="artifact://diff/missing", paths=()),
                 "not reviewed",
             )
+
+    async def test_create_preserves_active_review(self) -> None:
+        workspace = await self._create("athena/plan/preserve-review")
+        path = Path(workspace.path)
+        (path / "model.py").write_text("reviewed\n", encoding="utf-8")
+        approved = await self.manager.diff(workspace)
+
+        recovered = await self.manager.create(
+            self.base_commit, "athena/plan/preserve-review"
+        )
+        commit = await self.manager.commit(recovered, approved, "score 0.80")
+
+        self.assertEqual(
+            commit, self._git("rev-parse", "HEAD", cwd=path).stdout.strip()
+        )
+
+    async def test_create_preserves_accepted_commit_retry(self) -> None:
+        workspace = await self._create("athena/plan/preserve-retry")
+        path = Path(workspace.path)
+        (path / "model.py").write_text("accepted\n", encoding="utf-8")
+        approved = await self.manager.diff(workspace)
+        commit = await self.manager.commit(workspace, approved, "score 0.80")
+
+        recovered = await self.manager.create(
+            self.base_commit, "athena/plan/preserve-retry"
+        )
+
+        self.assertEqual(
+            commit,
+            await self.manager.commit(recovered, approved, "uncertain response retry"),
+        )
+
+    async def test_create_reports_commit_made_through_rehydrated_handle(self) -> None:
+        workspace = await self._create("athena/plan/rehydrated-handle")
+        path = Path(workspace.path)
+        (path / "model.py").write_text("accepted\n", encoding="utf-8")
+        approved = await self.manager.diff(workspace)
+        rehydrated = GitWorkBranch.model_validate(workspace.model_dump())
+
+        commit = await self.manager.commit(rehydrated, approved, "score 0.80")
+        recovered = await self.manager.create(
+            self.base_commit, "athena/plan/rehydrated-handle"
+        )
+
+        self.assertEqual(commit, recovered.base_commit)
+
+    async def test_commit_reconciles_installed_review_after_lost_update_response(
+        self,
+    ) -> None:
+        workspace = await self._create("athena/plan/uncertain-update")
+        path = Path(workspace.path)
+        (path / "model.py").write_text("reviewed\n", encoding="utf-8")
+        approved = await self.manager.diff(workspace)
+        original_git = self.manager._git
+        lost_response = False
+
+        async def uncertain_git(
+            *args: str, cwd: Path | None = None, check: bool = True
+        ) -> bytes:
+            nonlocal lost_response
+            result = await original_git(*args, cwd=cwd, check=check)
+            if (
+                args[:2] == ("update-ref", "refs/heads/athena/plan/uncertain-update")
+                and not lost_response
+            ):
+                lost_response = True
+                raise GitWorkspaceError("lost update-ref response")
+            return result
+
+        self.manager._git = uncertain_git  # type: ignore[method-assign]
+        with self.assertRaisesRegex(GitWorkspaceError, "lost update-ref response"):
+            await self.manager.commit(workspace, approved, "score 0.80")
+        self.manager._git = original_git  # type: ignore[method-assign]
+
+        installed = self._git("rev-parse", "HEAD", cwd=path).stdout.strip()
+        self.assertEqual(
+            installed,
+            await self.manager.commit(workspace, approved, "same reviewed commit"),
+        )
+
+        async def write_recovered_diff(content: bytes) -> str:
+            digest = hashlib.sha256(content).hexdigest()
+            ref = f"artifact://git-diff/{digest}"
+            self.artifacts[ref] = content
+            return ref
+
+        fresh_manager = LocalGitWorkspace(
+            self.repo, self.worktree_root, write_recovered_diff
+        )
+        recovered = await fresh_manager.create(
+            self.base_commit, "athena/plan/uncertain-update"
+        )
+        self.assertEqual(
+            installed,
+            await fresh_manager.commit(recovered, approved, "fresh recovery retry"),
+        )
 
     async def test_branch_delete_failure_can_be_retried(self) -> None:
         workspace = await self._create("experiment/retry-remove")

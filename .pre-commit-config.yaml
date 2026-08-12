@@ -16,3 +16,14 @@ repos:
     rev: 26.5.1
     hooks:
       - id: black
+
+  # Athena 代码规范（docs/代码规范.md 可机检规则）；仅覆盖生产代码 src/，
+  # 测试文件沿用其自身惯例（函数内 import 隔离等），后续如需可放开。
+  - repo: local
+    hooks:
+      - id: athena-code-style
+        name: athena 代码规范检查
+        entry: python scripts/check_code_style.py
+        language: system
+        types: [python]
+        files: ^src/

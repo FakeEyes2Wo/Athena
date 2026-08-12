@@ -16,7 +16,7 @@ class GitWorkspaceError(RuntimeError):
 
 
 class GitWorkBranch(BaseModel):
-    """The path, branch, and base commit for one Git worktree."""
+    """The path, branch, and current checkpoint commit for one Git worktree."""
 
     path: str
     branch: str
@@ -48,7 +48,7 @@ class GitWorkspace(ABC):
 
     @abstractmethod
     async def diff(self, workspace: GitWorkBranch) -> GitDiff:
-        """Store the binary diff from the workspace base commit."""
+        """Store the binary diff from the workspace's current HEAD."""
 
     @abstractmethod
     async def commit(
@@ -57,7 +57,15 @@ class GitWorkspace(ABC):
         approved_diff: GitDiff,
         message: str,
     ) -> CommitHash:
-        """Commit the last approved, unchanged workspace diff."""
+        """Commit the last approved, unchanged diff and begin a new review cycle."""
+
+    @abstractmethod
+    async def restore_paths(
+        self,
+        workspace: GitWorkBranch,
+        paths: tuple[str, ...],
+    ) -> None:
+        """Restore only these paths to the last reviewed tree."""
 
     @abstractmethod
     async def remove(

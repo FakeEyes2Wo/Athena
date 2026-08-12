@@ -6,7 +6,6 @@ mean、std，随后完整 train 再训练一次并在 test 上评估一次。tes
 时，整轮在启动前确定性切换为 single-test（不在运行中按结果临时降级）。
 """
 
-import math
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -65,11 +64,6 @@ class EvaluationPolicy:
         return "kfold-5"
 
 
-def kfold_stability(kfold_mean: float | None, kfold_std: float | None) -> bool:
-    """K-fold 只提供稳定性证据，不参与 SOTA 接受（供 UI/风险提示）。"""
-    return kfold_mean is not None and kfold_std is not None and math.isfinite(kfold_std)
-
-
 class TrustedEvaluator:
     """唯一可信 test/final-test evaluator：运行冻结 eval bundle 对齐预测与标签。
 
@@ -85,20 +79,19 @@ class TrustedEvaluator:
         *,
         eval_bundle: DataScriptBundle,
         predictions: str,
-        labels: str,
         candidate_id: str,
         direction: Literal["maximize", "minimize"],
     ) -> CandidateEvaluation:
-        """运行 eval 入口，对齐 predictions/labels 后产出唯一可信 test_score。"""
+        """运行 eval 入口，只注入 predictions；labels 来自冻结 bundle（design 修复 5）。"""
         result = await self._runner.run(
             eval_bundle,
-            request={"predictions": predictions, "labels": labels},
-            extra_files={"predictions.csv": predictions, "labels.csv": labels},
+            request={"predictions": predictions},
+            extra_files={"predictions.csv": predictions},
             output_schema={"primary": None},
         )
         primary = result.outputs.get("primary")
         if primary is None:
-            raise RuntimeError("eval produced no primary score")
+            raise ValueError("candidate evaluation produced no primary score")
         return CandidateEvaluation(
             candidate_id=candidate_id,
             test_score=float(primary),

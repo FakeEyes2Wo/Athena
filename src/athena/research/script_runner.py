@@ -38,14 +38,43 @@ class ScriptRunResult:
     strong_isolation: bool = False
 
 
+# 确定性 runner 的固定命令超时（秒）：防止冻结/评估脚本卡死无限挂起。
+# TODO(supervisor-security): 强隔离 runner 落地后，本地 workspace shell 语义随之替换。
+_COMMAND_TIMEOUT_S = 900
+
+
 def _run_cmd(cmd: list[str], *, cwd: Path) -> None:
-    """在给定目录运行命令；失败抛 ``CalledProcessError``。"""
-    subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True)
+    """在给定目录运行命令；失败抛 ``CalledProcessError``，超时抛 ``RuntimeError``。"""
+    try:
+        subprocess.run(
+            cmd,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_COMMAND_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"command timed out after {_COMMAND_TIMEOUT_S}s: {cmd[0]}"
+        ) from exc
 
 
 def _run_cmd_capture(cmd: list[str], *, cwd: Path) -> str:
-    """在给定目录运行命令并返回 stdout（去空白）。"""
-    result = subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True)
+    """在给定目录运行命令并返回 stdout（去空白）；超时抛 ``RuntimeError``。"""
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_COMMAND_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"command timed out after {_COMMAND_TIMEOUT_S}s: {cmd[0]}"
+        ) from exc
     return result.stdout.strip()
 
 
@@ -154,7 +183,8 @@ class DataScriptRunner:
             or bundle.tree_ref is None
         ):
             raise RuntimeError("bundle is not frozen (missing project/lock/tree refs)")
-        run_dir = Path(tempfile.mkdtemp(prefix="athena-script-run-"))
+        self._workdir.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(tempfile.mkdtemp(prefix="athena-script-run-", dir=self._workdir))
         (run_dir / "pyproject.toml").write_text(
             await self._store.get_text(bundle.project_ref), encoding="utf-8"
         )

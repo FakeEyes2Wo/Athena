@@ -93,6 +93,12 @@ class DerivedDatasetManifest(BaseModel):
 
     ``columns``/``column_hashes`` 为派生数据的全量列记录（含原始列），
     accept_derived 据此校验原始列未被改动。
+
+    增量特征（supervisor-incremental-feature-dataset §One Data Concept）：
+    ``files`` 记录每个已接受增量文件；``derived_columns`` 记录所有可用派生列；
+    ``column_files`` 把派生列映射到其所在增量文件（跨文件可解析）；
+    ``enabled_derived_columns`` 是唯一特征选择机制。禁用特征 = 新 manifest（不同 id），
+    不删除/改写文件。既有 manifest 这两个字段空默认 → 视为"无 enabled 特征"视图。
     """
 
     manifest_id: NonBlankText
@@ -103,6 +109,10 @@ class DerivedDatasetManifest(BaseModel):
     row_identity_hash: str | None = None
     split_boundaries: dict[str, object] = Field(default_factory=dict)
     derived_columns: list[str] = Field(default_factory=list)
+    column_files: dict[str, str] = Field(
+        default_factory=dict
+    )  # 列名 -> 增量文件相对路径
+    enabled_derived_columns: list[str] = Field(default_factory=list)
 
 
 class DataScriptBundle(BaseModel):
@@ -141,6 +151,37 @@ class EDAReview(BaseModel):
     decision: Literal["ACCEPT", "REVISE"]
     rubric: list[str] = Field(default_factory=list)
     findings: list[str] = Field(default_factory=list)
+
+
+class EDARepairFailure(BaseModel):
+    """EDA 脚本执行失败的紧凑记录（eda-auto-repair-design §Agent Outcome Contract）。
+
+    ``failure_signature`` 是 (command, exit_code, stderr) 的规范化哈希，供
+    Supervisor 识别重复失败并做有界退避。只保留最新一条失败记录。
+    """
+
+    attempt: int
+    command: list[str] = Field(default_factory=list)
+    exit_code: int | None = None
+    stderr: str = ""
+    failure_signature: str
+
+
+class EDAAttemptOutcome(BaseModel):
+    """DataAgent 一次 EDA 尝试的结果（成功 turn，不是失败 run）。
+
+    ``succeeded`` → ``bundle_ref`` 指向含 report.md/figures 的 DataAnalysis bundle；
+    ``repairable_failure`` → ``failure_ref`` 指向 :class:`EDARepairFailure`。
+    Supervisor 读此合同决定提升 EDA 或进入修复 follow-up（设计 §Plan State Machine）。
+    """
+
+    status: Literal["succeeded", "repairable_failure"]
+    execution_id: str
+    workspace: str
+    repair_count: int = 0
+    bundle_ref: ArtifactRef | None = None
+    failure_ref: ArtifactRef | None = None
+    failure_signature: str | None = None
 
 
 class BaselinePlan(BaseModel):
@@ -217,3 +258,7 @@ class ValidationResult(BaseModel):
     final_test_score: float | None = None
     generalization_gap: float | None = None
     generalization_warning: bool = False
+    sota_commit: str | None = None
+    validation_commit: str | None = None
+    predictions_ref: ArtifactRef | None = None
+    evidence_ref: ArtifactRef | None = None
