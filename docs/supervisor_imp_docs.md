@@ -10,6 +10,35 @@
 
 ## Current Snapshot
 
+> 最近巡检：2026-08-10 16:09:10 +08:00。冻结快照执行一次完整验证，结果为 `237 passed in 36.83s`。验证结束后检测到 `base_runner.py`（16:08:46）和 `runtime.py`（16:09:07）的并发写入；本快照不读取、不合并这些后续改动，也不据此重跑验证，留待下一轮审计。
+
+真实入口已从全新临时项目跑通：
+
+```powershell
+uv run .\src\main.py
+```
+
+该次运行耗时 87.2 秒，依次到达 `PREPARE -> SEARCH -> VALIDATE -> COMPLETED`。角色脚本通过通用列集合规则识别 `train.csv`/`test.csv`，得到 `target_column=Survived`；Init 和 EDA 均消费同一 target。`main.py` 只在 `(phase, status, state_version)` 改变时打印状态，失败 execution 返回非零退出码。
+
+本轮已确认并修复四个真实阻塞点：
+
+- DeepSeek V4 默认 thinking 会耗尽 token 而不返回工具调用；provider 通过官方 `thinking.type=disabled` 关闭 thinking。等待或 retry 不是根因。
+- DataAgent 已拆分 `role`/`eda`，LLM 只生成 `analysis.py`，框架使用 `sys.executable` 执行一次；不做脚本修复或重试。role proposal 使用 `DatasetRoleProposal.model_validate_json()` 后单独提交。
+- 冻结 evaluator 统一接收 `--request/--output`，`eval.py` 将结果写入 `result.json`；不再依赖 stdout 猜测结果。
+- Windows shell 子进程保留 home 变量并使用 `-NoProfile -NonInteractive`，真实 `pwsh` 调用返回码为 0、stderr 为空，不再触发 conda profile 的 `Could not determine home directory`。
+
+SEARCH 首版只有一组确定性 fallback 候选，因此首轮选出 SOTA 后立即提交 `SEARCH_STOP` 并进入 VALIDATE，避免固定幂等键重复生成空计划。这个行为用于先跑通主链路，不代表真实多轮搜索已经完成。
+
+仍未完成的生产能力：Ideator/Code 仍是确定性 fallback，不是真实训练/预测 Bundle；Reflection 入口仍使用确定性 fallback；DataAgent 仍固定 `analysis.py` 而未迁移到通用 `python-uv` Bundle；没有自动 API retry，首个 LLM 事件前的外部失败会让 execution 直接 FAILED；`strong_isolation=false`。这些限制不得通过新增兜底类、宽泛异常捕获或猜测性修复掩盖。
+
+冻结验证命令：
+
+```powershell
+.venv\Scripts\python.exe -m pytest test/unit/agent test/unit/research test/unit/test_agent.py test/unit/test_cli.py test/unit/test_init_agent.py test/unit/test_main.py tests/test_research_runtime.py tests/test_supervisor_recovery.py -q
+```
+
+## Previous Snapshot (2026-08-10 13:50)
+
 > 最近巡检：2026-08-10 13:50:02 +08:00。证据来自该时刻冻结的主工作树快照；排除 `.venv`、`node_modules`、`.worktrees`、`.superpowers` 和 `.claude/worktrees` 中的依赖、缓存及隔离副本。每次文档修改只对冻结快照运行一次验证，随后出现的并发改动留到下一轮。本轮已从全新临时项目运行真实入口并单独复现 DataAgent；两次均以失败终止，运行进程已停止。
 
 本计划以动态工作树为准，而不是仅根据设计文档或 Git 提交状态推断进度。当前实现状态如下：

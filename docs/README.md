@@ -2,18 +2,20 @@
 
 Status: current
 Owner: Athena maintainers
-Last verified: 2026-08-08
+Last verified: 2026-08-10
 Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `test/unit/`
 
 ## 首读
 
 | 文档 | 状态 | 用途 |
 |---|---|---|
-| [当前工程与目录](architecture/current.md) | current | 当前 owner、运行链与已验证边界 |
-| [目标架构](architecture/target.md) | approved | 依赖方向、长期约束与后续边界 |
-| [Research Runtime v2](architecture/research-runtime-v2.md) | approved | 研究图、工作流与运行时设计 |
+| [Supervisor 设计基线](supervisor_design.md) | current | 目标架构：研究流程、控制面、数据隔离与验收门（最终产品合同） |
+| [Supervisor 实现计划](supervisor_imp_docs.md) | current | 实现状态、任务拆分、全局约束与冻结验证命令 |
+| [代码规范](代码规范.md) | current | 导入/注释/异常/格式/测试约定 |
 | [可运行研究工作流](../README.md#run-the-complete-agent-workflow) | current | `src/main.py` 安装、认证、CLI 参数、产物和失败语义 |
 | [测试指南](operations/testing.md) | current | 本地测试层次与验收命令 |
+| [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
+| [Prompt 驱动 Agents 设计](architecture/2026-08-09-prompt-driven-agents-design.md) | current | Prompt 驱动 Agents 改造设计（历史） |
 
 ## 维护规则
 
