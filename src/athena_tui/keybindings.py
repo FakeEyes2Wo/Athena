@@ -19,4 +19,7 @@ def map_key(mode: str, key: str) -> tuple[str, object | None] | None:
         "esc": ("close_overlay", None),
         "c-c": ("quit", None),
         "enter": ("submit", None),
+        "c-j": ("insert_newline", None),
+        "s-enter": ("insert_newline", None),
+        "s-tab": ("toggle_mode", None),
     }.get(key)

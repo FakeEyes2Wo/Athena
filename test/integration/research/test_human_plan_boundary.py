@@ -11,6 +11,7 @@ from athena.core.agent.provider import StreamEvent
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
+from athena.research.contracts import ValidationResult
 from athena.research.runtime import ResearchRuntime
 
 
@@ -110,7 +111,18 @@ async def runtime(tmp_path: Path, monkeypatch):
     }.items():
         monkeypatch.setenv(name, value)
     provider = _HumanProvider()
-    instance = ResearchRuntime(project_root=tmp_path)
+
+    async def validate(_sota_commit: str, metric: float) -> ValidationResult:
+        return ValidationResult(
+            result_id="validation-key",
+            status="COMPLETED",
+            test_score=metric,
+            final_test_score=metric,
+            sota_commit=_sota_commit,
+            validation_commit=_sota_commit,
+        )
+
+    instance = ResearchRuntime(project_root=tmp_path, validation_phase=validate)
     instance.register_supervisor(provider=provider)
     base_commit = await instance._git.init()
     evaluator_ref = await instance._store.put_text('{"frozen":true}')
@@ -271,7 +283,7 @@ async def test_budget_extension_resumes_waiting_plan_before_new_plan(runtime):
 @pytest.mark.asyncio
 async def test_explicit_validate_and_stop_are_applied(runtime):
     await runtime.message("enter validation")
-    assert runtime.state.phase == "VALIDATE"
+    assert runtime.state.phase == "COMPLETED"
     assert await runtime.message("/stop") == "STOPPED"
 
 

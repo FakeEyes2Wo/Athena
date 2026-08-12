@@ -37,11 +37,13 @@ class TuiState:
     project_root: str = "."
     mode: str = COMPOSER
     status: str = "RUNNING"
-    phase: str = "SEARCH"
+    phase: str = "PREPARE"
     plans: tuple[dict[str, Any], ...] = ()
     search: dict[str, Any] | None = None
     sota: dict[str, Any] | None = None
     waiting: dict[str, Any] | None = None
+    manual_mode: bool = False
+    pending: tuple[dict[str, Any], ...] = ()
     history: tuple[HistoryEntry, ...] = ()
     last_output_seq: int = 0
     history_follow_tail: bool = True
@@ -69,15 +71,13 @@ def apply_snapshot(state: TuiState, event: object) -> TuiState:
         search=search,
         sota=None if sota is None else dict(sota),
         waiting=None if waiting is None else dict(waiting),
+        manual_mode=bool(getattr(event, "manual", False)),
+        pending=tuple(dict(h) for h in getattr(event, "pending", ())),
     )
 
 
 def apply_output(state: TuiState, event: object) -> TuiState:
-    """Append one new sequenced output event and ignore duplicate replay.
-
-    同一 agent 流的 ``text_delta`` 逐词到达：合并进上一条相同 source/plan 的
-    text 条目，避免 TUI 显示成 ``* agent 词`` 的碎片行。
-    """
+    """Append one ordered output, coalescing only adjacent LLM text deltas."""
     sequence = int(getattr(event, "seq"))
     if sequence <= state.last_output_seq:
         return state
@@ -92,16 +92,18 @@ def apply_output(state: TuiState, event: object) -> TuiState:
         truncated=bool(getattr(event, "truncated", False)),
     )
     history = state.history
-    if entry.source == "agent" and entry.channel == "text" and history:
-        last = history[-1]
-        if (
-            last.kind == "runtime"
-            and last.source == "agent"
-            and last.channel == "text"
-            and last.plan == entry.plan
-        ):
-            history = (*history[:-1], replace(last, text=last.text + entry.text))
-            entry = None
+    if entry.source == "agent" and entry.channel == "text" and entry.tool is None:
+        if history:
+            last = history[-1]
+            if (
+                last.kind == "runtime"
+                and last.source == "agent"
+                and last.channel == "text"
+                and last.plan == entry.plan
+                and last.tool is None
+            ):
+                history = (*history[:-1], replace(last, text=last.text + entry.text))
+                entry = None
     if entry is not None:
         history = (*history, entry)[-1000:]
     return replace(

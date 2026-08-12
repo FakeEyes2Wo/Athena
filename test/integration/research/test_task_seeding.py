@@ -12,7 +12,7 @@ from athena.research import ResearchRuntime
 
 
 def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRuntime:
-    """Fresh runtime 与 TUI 一致：不传 task/prepare_phase → 初始 phase=SEARCH。
+    """默认 runtime 从 SEARCH 开始；TUI auto-seed runtime 等待 PREPARE 任务。
 
     ``client=object()`` 让后台 supervisor 的 PREPARE 在首次 LLM 调用即失败，
     保证测试 hermetic（不 hit 真实 API、不依赖 git 执行结果）。
@@ -68,6 +68,23 @@ async def test_auto_seed_task_first_message_starts_prepare(
         assert runtime._task_text == "predict titanic survival"
         assert runtime._started is True
         assert runtime.state.phase == "PREPARE"
+    finally:
+        await _close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_auto_seed_runtime_reports_prepare_before_first_message(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path, auto_seed_task=True)
+    seen: list[tuple[str, dict[str, object]]] = []
+    try:
+        runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+        assert runtime.state.phase == "PREPARE"
+        assert seen[0][0] == "state"
+        assert seen[0][1]["phase"] == "PREPARE"
+        assert runtime._started is False
     finally:
         await _close(runtime)
 

@@ -16,7 +16,7 @@ from athena.core.tool_types import ToolContext, ToolSpec
 
 SUPERVISOR_AGENT_ID = "supervisor"
 SUPERVISOR_AGENT_TYPE = "supervisor"
-MAX_PLAN_TURNS = 200
+MAX_PLAN_TURNS = 12
 MAX_PATIENCE = 5
 MAX_CONCURRENCY = 4
 
@@ -44,8 +44,24 @@ class SupervisorActions(Protocol):
         """Record the validated next research phase."""
         ...
 
+    async def set_manual_mode(self, manual: bool) -> dict[str, object]:
+        """Toggle SEARCH scheduling between auto and manual hypothesis selection."""
+        ...
+
     async def record_guidance(self, text: str, scope: str) -> dict[str, object]:
         """Persist Human guidance at the selected Plan boundary."""
+        ...
+
+    async def read_state(self) -> dict[str, object]:
+        """Read-only snapshot of the current research phase and configuration."""
+        ...
+
+    async def read_plans(self) -> dict[str, object]:
+        """Read-only snapshot of running and waiting Plans."""
+        ...
+
+    async def dispatch_general(self, task: str) -> dict[str, object]:
+        """Dispatch one General Agent to do concrete work and return its result."""
         ...
 
 
@@ -97,11 +113,31 @@ class _PhaseDecision(BaseModel):
     decision: Literal["SEARCH", "VALIDATE"]
 
 
+class _ManualMode(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    manual: bool
+
+
 class _Guidance(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     text: str = Field(min_length=1)
     scope: Literal["next", "persistent"]
+
+
+class _NoInput(BaseModel):
+    """Empty input for read-only Supervisor tools."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class _GeneralTask(BaseModel):
+    """Task description for dispatching one General Agent."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    task: str = Field(min_length=1)
 
 
 class _ValidatedTool(BaseTool):
@@ -181,9 +217,25 @@ def supervisor_tool_registry(actions: SupervisorActions) -> ToolRegistry:
         """Forward the structured phase decision."""
         return await actions.set_phase_decision(value.decision)  # type: ignore[attr-defined]
 
+    async def set_manual(value: BaseModel) -> dict[str, object]:
+        """Forward the auto/manual mode toggle."""
+        return await actions.set_manual_mode(value.manual)  # type: ignore[attr-defined]
+
     async def remember(value: BaseModel) -> dict[str, object]:
         """Forward scoped Human research guidance."""
         return await actions.record_guidance(value.text, value.scope)  # type: ignore[attr-defined]
+
+    async def read_state(value: BaseModel) -> dict[str, object]:
+        """Forward the current phase/status/Search read-only snapshot."""
+        return await actions.read_state()
+
+    async def read_plans(value: BaseModel) -> dict[str, object]:
+        """Forward the running/waiting Plan read-only snapshot."""
+        return await actions.read_plans()
+
+    async def dispatch(value: BaseModel) -> dict[str, object]:
+        """Forward a General Agent dispatch task."""
+        return await actions.dispatch_general(value.task)  # type: ignore[attr-defined]
 
     definitions = (
         (
@@ -217,10 +269,34 @@ def supervisor_tool_registry(actions: SupervisorActions) -> ToolRegistry:
             decide_phase,
         ),
         (
+            "set_manual_mode",
+            "Toggle SEARCH between auto (priority queue) and manual hypothesis selection.",
+            _ManualMode,
+            set_manual,
+        ),
+        (
             "record_guidance",
             "Record research guidance for the next Plan or all future Plans.",
             _Guidance,
             remember,
+        ),
+        (
+            "read_state",
+            "Read the current research phase, status, and Search limits.",
+            _NoInput,
+            read_state,
+        ),
+        (
+            "read_plans",
+            "Read running and waiting Plan budgets and turn usage.",
+            _NoInput,
+            read_plans,
+        ),
+        (
+            "dispatch_general",
+            "Dispatch one General Agent to inspect, run, or fix something and report back.",
+            _GeneralTask,
+            dispatch,
         ),
     )
     for name, description, input_model, invoke in definitions:

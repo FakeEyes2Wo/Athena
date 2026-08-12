@@ -4,27 +4,28 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
-from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.agent.types import RunStatus
-from athena.core.tool_types import EmitEvent
-from athena.core.workspace import GitDiff, GitWorkBranch
-from athena.execution.runtime import ExecutionContext, ExecutionRuntime
-from athena.research.contracts import DataScriptBundle, ValidationResult
-from athena.research.evaluation import TrustedEvaluator
-from athena.research.supervisor.events import redact
-from athena.research.supervisor.experiment import ExperimentManifest
-from athena.research.validation import ValidationService
-from athena.core.workspace import GitWorkspace
 from athena.agents.validate_agent import (
     VALIDATE_AGENT_ID,
     VALIDATE_AGENT_TYPE,
     ValidationRepair,
 )
+from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
+from athena.core.tool_types import EmitEvent
+from athena.core.workspace import GitDiff, GitWorkBranch, GitWorkspace
+from athena.execution.runtime import ExecutionContext, ExecutionRuntime
+from athena.research.contracts import DataScriptBundle, ValidationResult
+from athena.research.evaluation import TrustedEvaluator
+from athena.research.supervisor.events import redact
+from athena.research.supervisor.experiment import (
+    load_agent_result,
+    read_experiment_manifest,
+)
+from athena.research.validation import ValidationService
 
 CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
 _MAX_REVIEW_DIFF_CHARS = 12_000
@@ -40,6 +41,10 @@ class ValidationInput(BaseModel):
     direction: Literal["maximize", "minimize"]
     final_evaluator_ref: ArtifactRef
     validation_key: str = Field(min_length=1)
+    # 只读 SOTA 上下文（假设/干预/预期效果/metric/commit），供 ValidateAgent
+    # 审阅 diff 时知晓被验证对象；绝不进入 validation_key（身份仍由
+    # commit+metric+direction+evaluator 决定）。
+    sota_context: dict[str, Any] | None = None
 
 
 class ValidationDiffReview(BaseModel):
@@ -229,12 +234,19 @@ async def _decode_repair(
     agents: AgentRuntime,
     store: ArtifactStore,
     *,
+    input: ValidationInput,
     feedback: str | None = None,
 ) -> ValidationRepair:
     task = {
         "content": feedback
         or "Run frozen-SOTA validation and repair runtime-only failures."
     }
+    if feedback is None and input.sota_context:
+        task["content"] = (
+            "Validating the trusted SOTA hypothesis:\n"
+            f"{json.dumps(input.sota_context, ensure_ascii=False)}\n\n"
+            + task["content"]
+        )
     if feedback is None:
         _agent_id, run_id = await agents.create_root(
             VALIDATE_AGENT_TYPE,
@@ -245,12 +257,10 @@ async def _decode_repair(
     else:
         run_id = await agents.followup(VALIDATE_AGENT_ID, task)
     summary = await agents.wait_run(run_id)
-    if summary.status is not RunStatus.COMPLETED or summary.response_ref is None:
+    repair = await load_agent_result(summary, store, ValidationRepair)
+    if repair is None:
         raise RuntimeError(summary.error or "validate Agent failed")
-    response = json.loads(summary.response_ref)
-    return ValidationRepair.model_validate_json(
-        await store.get_text(response["result_ref"])
-    )
+    return repair
 
 
 async def _execute_predictions(
@@ -262,12 +272,7 @@ async def _execute_predictions(
     publish: EmitEvent | None,
 ) -> ArtifactRef:
     workdir = Path(workspace.path)
-    manifest_path = workdir / "experiment.json"
-    if not manifest_path.is_file():
-        raise ValueError("validation Agent did not produce experiment.json")
-    manifest = ExperimentManifest.model_validate_json(
-        manifest_path.read_text(encoding="utf-8")
-    )
+    manifest = read_experiment_manifest(workdir)
     context = ExecutionContext(
         project_root=workdir,
         workspace_root=workdir,
@@ -400,7 +405,7 @@ async def run_validation_plan(
         return current
 
     if action == "run":
-        repair = await _decode_repair(agents, store)
+        repair = await _decode_repair(agents, store, input=input)
         while True:
             diff = await git.diff(workspace)
             preflight = await _deterministic_preflight(
@@ -413,6 +418,7 @@ async def run_validation_plan(
                 repair = await _decode_repair(
                     agents,
                     store,
+                    input=input,
                     feedback=f"Validation policy rejected the repair: {preflight.reason}",
                 )
                 continue
@@ -427,6 +433,7 @@ async def run_validation_plan(
                 repair = await _decode_repair(
                     agents,
                     store,
+                    input=input,
                     feedback=f"Independent review rejected the repair: {review.reason}",
                 )
                 continue
@@ -442,6 +449,7 @@ async def run_validation_plan(
                 repair = await _decode_repair(
                     agents,
                     store,
+                    input=input,
                     feedback="Validation workspace changed after independent review",
                 )
                 continue

@@ -333,6 +333,81 @@ class TestBaseAgent:
         with pytest.raises(RuntimeError, match="provider failed"):
             await agent.run(ctx)
 
+    async def test_function_call_is_emitted_before_tool_output_and_next_text(self):
+        class ProbeTool(BaseTool):
+            spec = ToolSpec(name="probe", description="probe", input_schema={})
+
+            async def execute(self, input: dict, ctx: ToolContext):
+                return "tool result"
+
+        class ToolThenTextProvider:
+            def __init__(self):
+                self.calls = 0
+
+            async def stream(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    yield StreamEvent(
+                        "function_call",
+                        {
+                            "call_id": "call-1",
+                            "name": "probe",
+                            "arguments": {"path": "data.csv"},
+                        },
+                    )
+                else:
+                    yield StreamEvent(
+                        "text_delta",
+                        {"delta": "continue", "accumulated": "continue"},
+                    )
+                yield StreamEvent("response_completed")
+
+        tools = ToolRegistry()
+        tools.register(ProbeTool())
+        agent = Agent(ResponsesProvider("model"), tools, "system")
+        agent.model = ToolThenTextProvider()
+        emitted: list[tuple[str, dict | None]] = []
+
+        async def emit(kind, _event_ref, data=None):
+            emitted.append((kind, data))
+
+        ctx = AgentContext(
+            AthenaThread(
+                thread_id="t1",
+                session_id="s1",
+                status="running",
+                context_ref="ctx://0",
+            ),
+            AthenaTurn(
+                turn_id="t1.1",
+                thread_id="t1",
+                request_ref="request",
+                status="running",
+            ),
+            emit,
+            tools,
+            asyncio.Event(),
+        )
+
+        await agent.run(ctx)
+
+        visible = [
+            (kind, data)
+            for kind, data in emitted
+            if kind
+            in {"agent/function_call", "tool/begin", "tool/end", "agent/text_delta"}
+        ]
+        assert [kind for kind, _data in visible] == [
+            "agent/function_call",
+            "tool/begin",
+            "tool/end",
+            "agent/text_delta",
+        ]
+        assert visible[0][1] == {
+            "name": "probe",
+            "arguments": {"path": "data.csv"},
+        }
+
     async def test_non_concurrency_safe_tool_is_a_barrier(self):
         timeline: list[str] = []
 

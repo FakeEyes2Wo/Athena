@@ -43,19 +43,8 @@ _HOST_VARS = frozenset(
     }
 )
 
-# Windows shell 探测顺序：Git Bash（agent 脚本为 POSIX/bash）→ PowerShell 7 →
-# 5.1 → cmd → PATH 上的 bash/sh；绝不自动路由到 WSL。
+# Windows shell 探测顺序：PowerShell 7 → 5.1 → cmd；绝不自动路由到 WSL。
 _WIN_SHELLS: tuple[tuple[str, list[str]], ...] = (
-    (
-        r"C:\Program Files\Git\bin\bash.exe",
-        ["--noprofile", "-c"],
-    ),
-    (
-        r"C:\Program Files\Git\usr\bin\bash.exe",
-        ["--noprofile", "-c"],
-    ),
-    ("bash", ["--noprofile", "-c"]),
-    ("sh", ["-c"]),
     (
         r"C:\Program Files\PowerShell\7\pwsh.exe",
         ["-NoProfile", "-NonInteractive", "-Command"],
@@ -151,19 +140,17 @@ class EnvironmentManager:
     def shell_parts(self) -> tuple[str, list[str]]:
         """返回 ``(shell 绝对路径, 启动参数)``。
 
-        Windows 优先 Git Bash（agent 脚本为 POSIX/bash）→ PowerShell → cmd；
-        Linux 顺序 bash → sh。name 候选经 ``shutil.which`` 解析，绝对路径经
-        ``is_file`` 校验。探测失败抛 ``RuntimeError``（由调用方决定降级或报错）。
+        Windows 顺序 PowerShell 7 → 5.1 → cmd，Linux 顺序 bash → sh。
+        探测失败抛 ``RuntimeError``（由调用方决定降级或报错）。
         """
         pool = _WIN_SHELLS if os.name == "nt" else _POSIX_SHELLS
         for shell, args in pool:
-            if Path(shell).is_absolute():
-                if Path(shell).is_file():
-                    return shell, args
-            else:
+            if os.name != "nt":
                 found = shutil.which(shell)
                 if found:
                     return found, args
+            elif Path(shell).is_file():
+                return shell, args
         raise RuntimeError(f"no shell found on {self.os_name}")
 
     def build_env(self) -> dict[str, str]:

@@ -263,6 +263,11 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
                             name=event.data["name"],
                             arguments=event.data.get("arguments", {}),
                         )
+                        await ctx.emit(
+                            "agent/function_call",
+                            f"event:{ctx.turn.turn_id}:{tc.call_id}",
+                            {"name": tc.name, "arguments": tc.arguments},
+                        )
                         idx = len(tool_calls)
                         tool_calls.append(tc)
                         tool_tasks.append(None)

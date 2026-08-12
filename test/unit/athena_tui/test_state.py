@@ -30,6 +30,10 @@ def snapshot(*, status: str, phase: str, attempts: int) -> StateEvent:
     )
 
 
+def test_tui_starts_in_prepare_until_runtime_snapshot_arrives() -> None:
+    assert TuiState().phase == "PREPARE"
+
+
 def test_state_snapshot_replaces_all_runtime_projection_fields() -> None:
     state = TuiState(
         mode=COMPOSER,
@@ -48,6 +52,24 @@ def test_state_snapshot_replaces_all_runtime_projection_fields() -> None:
     assert updated.search["attempts"] == 2
     assert updated.history == (HistoryEntry(kind="user", text="kept"),)
     assert updated.mode == COMPOSER
+
+
+def test_snapshot_projects_manual_mode_and_pending_hypotheses() -> None:
+    event = StateEvent(
+        status="WAITING",
+        phase="SEARCH",
+        plans=[],
+        search={"attempts": 0, "limit": 10, "successes": 0, "concurrency": 4},
+        sota=None,
+        waiting=None,
+        manual=True,
+        pending=[{"id": "hyp_1", "statement": "use XGBoost"}],
+    )
+
+    updated = apply_snapshot(TuiState(), event)
+
+    assert updated.manual_mode is True
+    assert updated.pending == ({"id": "hyp_1", "statement": "use XGBoost"},)
 
 
 def test_output_appends_once_in_sequence_order() -> None:
@@ -116,6 +138,53 @@ def test_user_submission_is_a_distinct_history_entry() -> None:
     updated = append_user_message(TuiState(), "line one\nline two")
 
     assert updated.history == (HistoryEntry(kind="user", text="line one\nline two"),)
+
+
+def test_adjacent_agent_text_deltas_merge_until_a_tool_output_breaks_the_stream() -> (
+    None
+):
+    state = apply_output(
+        TuiState(),
+        OutputEvent(seq=1, source="agent", channel="text", text="first", plan="p"),
+    )
+    state = apply_output(
+        state,
+        OutputEvent(seq=2, source="agent", channel="text", text="second", plan="p"),
+    )
+    state = apply_output(
+        state,
+        OutputEvent(seq=3, source="tool", channel="stdout", text="result", plan="p"),
+    )
+    state = apply_output(
+        state,
+        OutputEvent(seq=4, source="agent", channel="text", text="after", plan="p"),
+    )
+
+    assert [(entry.source, entry.text) for entry in state.history] == [
+        ("agent", "firstsecond"),
+        ("tool", "result"),
+        ("agent", "after"),
+    ]
+
+
+def test_agent_function_call_does_not_merge_with_preceding_text_delta() -> None:
+    state = apply_output(
+        TuiState(),
+        OutputEvent(seq=1, source="agent", channel="text", text="inspect", plan="p"),
+    )
+    state = apply_output(
+        state,
+        OutputEvent(
+            seq=2,
+            source="agent",
+            channel="text",
+            text="read_file(...)",
+            plan="p",
+            tool="read_file",
+        ),
+    )
+
+    assert [entry.text for entry in state.history] == ["inspect", "read_file(...)"]
 
 
 def test_scrolled_view_counts_new_output_until_tail_follow_resumes() -> None:

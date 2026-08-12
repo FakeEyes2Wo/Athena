@@ -47,6 +47,7 @@ def test_history_renders_user_runtime_tool_and_error_with_distinct_markers() -> 
     state = TuiState(
         history=(
             HistoryEntry(kind="user", text="try a forest"),
+            HistoryEntry(kind="runtime", source="supervisor", text="directing"),
             HistoryEntry(kind="runtime", source="agent", text="working"),
             HistoryEntry(kind="runtime", source="tool", channel="stdout", text="0.84"),
             HistoryEntry(kind="runtime", source="tool", channel="error", text="failed"),
@@ -56,9 +57,30 @@ def test_history_renders_user_runtime_tool_and_error_with_distinct_markers() -> 
     output = plain(render_history(state, 50))
 
     assert "› try a forest" in output
+    assert "◆ directing" in output
     assert "● working" in output
-    assert "tool · stdout" in output
+    assert "▸ tool · stdout" in output
     assert "! failed" in output
+
+
+def test_history_roles_have_distinct_semantic_styles() -> None:
+    state = TuiState(
+        history=(
+            HistoryEntry(kind="user", text="human"),
+            HistoryEntry(kind="runtime", source="supervisor", text="supervisor"),
+            HistoryEntry(kind="runtime", source="agent", text="agent"),
+            HistoryEntry(kind="runtime", source="tool", text="tool"),
+            HistoryEntry(kind="runtime", source="agent", channel="error", text="error"),
+        )
+    )
+
+    styles = {style for style, _text in render_history(state, 80)}
+
+    assert "class:history.user" in styles
+    assert "class:history.supervisor" in styles
+    assert "class:history.agent" in styles
+    assert "class:history.tool" in styles
+    assert "class:history.error" in styles
 
 
 def test_consecutive_text_from_the_same_source_suppresses_repeat_marker() -> None:

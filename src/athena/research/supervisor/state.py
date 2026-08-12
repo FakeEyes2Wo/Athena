@@ -19,6 +19,8 @@ class ResearchState(BaseModel):
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
+    # SEARCH 调度模式：False=自动按优先级出队；True=每个假设生成后等待人工选定。
+    manual_mode: bool = False
     plans: dict[str, PlanState] = Field(default_factory=dict)
     validation: dict[str, object] | None = None
     # PREPARE 产出的 EDA 工作区目录（Ideator 自行探索）；仅路径元数据，非 EDA 结果。

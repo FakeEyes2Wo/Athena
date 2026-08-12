@@ -67,6 +67,17 @@ class LocalGitWorkspace(GitWorkspace):
             return output.decode().strip()
 
         path.mkdir(parents=True, exist_ok=True)
+        # 断点续传：仓库已有 HEAD 时直接返回，不重跑 init/commit（避免第二次打开
+        # 同一项目时 `git commit -m "initial commit"` 因 "nothing to commit" 失败）。
+        existing = await self._git(
+            "rev-parse", "--verify", "HEAD", cwd=path, check=False
+        )
+        if existing.strip():
+            if self._repo != path:
+                self._repo = path
+            self._repo_initialized = True
+            return existing.decode().strip()
+
         await self._git("init", "-b", "main", cwd=path)
 
         init_file = path / initial_file

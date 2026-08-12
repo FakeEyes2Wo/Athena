@@ -11,7 +11,7 @@ Create all artifacts needed for a trusted baseline:
   only the trusted evaluator will read after freezing;
 - `experiment.json` at the workspace root with version `1`, argv-array
   `commands`, and workspace-relative `outputs` for `predictions`, `report`, and
-  the evaluator draft directory;
+  the evaluator entrypoint file (e.g. `evaluator/evaluate.py`);
 - non-empty predictions and Markdown report outputs.
 
 Never put a shell command string, score, label path, Git command, absolute

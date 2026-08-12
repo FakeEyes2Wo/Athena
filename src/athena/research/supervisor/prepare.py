@@ -3,19 +3,27 @@
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.agent.types import RunStatus
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
 from athena.core.workspace import GitWorkBranch, GitWorkspace
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
-from athena.research.supervisor.plans import wait_run_events
-from athena.research.supervisor.experiment import ExperimentManifest, PlanRunner
-from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
+from athena.research.supervisor.experiment import (
+    ExperimentManifest,
+    PlanRunner,
+    load_agent_result,
+    read_experiment_manifest,
+)
+from athena.research.supervisor.plans import (
+    PlanDecision,
+    PlanInput,
+    PlanState,
+    wait_run_events,
+)
 
 PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
@@ -41,22 +49,6 @@ def _workspace_output(root: Path, rel: str) -> Path:
     return candidate
 
 
-def _read_manifest(root: Path) -> ExperimentManifest:
-    path = root / "experiment.json"
-    if not path.is_file():
-        raise ValueError("experiment.json is missing")
-    try:
-        return ExperimentManifest.model_validate_json(path.read_text(encoding="utf-8"))
-    except ValidationError as exc:
-        first = exc.errors(
-            include_url=False, include_context=False, include_input=False
-        )[0]
-        location = ".".join(str(part) for part in first["loc"])
-        raise ValueError(
-            f"{location}: {first['msg']}" if location else first["msg"]
-        ) from exc
-
-
 async def _freeze_evaluator(
     *,
     root: Path,
@@ -68,27 +60,32 @@ async def _freeze_evaluator(
     if evaluator_rel is None:
         raise ValueError("evaluator draft is missing")
     evaluator_path = _workspace_output(root, evaluator_rel)
-    if not evaluator_path.is_file():
+    if evaluator_path.is_dir():
+        # manifest 声明的是 evaluator 目录；入口文件约定为 evaluate.py。
+        evaluator_root = evaluator_path
+        entrypoint = "evaluate.py"
+        if not (evaluator_root / entrypoint).is_file():
+            raise ValueError(
+                "outputs.evaluator directory must contain an entrypoint file "
+                f"named evaluate.py: {evaluator_rel!r}"
+            )
+    elif evaluator_path.is_file():
+        evaluator_root = evaluator_path.parent
+        entrypoint = evaluator_path.name
+    else:
         raise ValueError("evaluator draft is missing")
-    evaluator_root = evaluator_path.parent
     labels_path = evaluator_root / "labels.csv"
     if not labels_path.is_file() or not labels_path.stat().st_size:
         raise ValueError("evaluator labels are missing")
-    bundle = await scripts.freeze(
-        evaluator_root, BundleMetadata(entrypoint=evaluator_path.name)
-    )
+    bundle = await scripts.freeze(evaluator_root, BundleMetadata(entrypoint=entrypoint))
     return await store.put_text(bundle.model_dump_json())
 
 
 async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
-    status = getattr(summary.status, "value", summary.status)
-    if status != RunStatus.COMPLETED.value or summary.response_ref is None:
+    decision = await load_agent_result(summary, store, PlanDecision)
+    if decision is None:
         raise RuntimeError(summary.error or "prepare Agent run failed")
-    outer = json.loads(summary.response_ref)
-    result_ref = outer.get("result_ref")
-    if not isinstance(result_ref, str):
-        raise RuntimeError("prepare Agent returned no decision artifact")
-    return PlanDecision.model_validate_json(await store.get_text(result_ref))
+    return decision
 
 
 async def run_prepare_plan(
@@ -152,7 +149,7 @@ async def run_prepare_plan(
         if decision.decision == "abandon":
             raise RuntimeError(f"prepare Agent abandoned Plan: {decision.reason}")
         try:
-            manifest = _read_manifest(root)
+            manifest = read_experiment_manifest(root)
             evaluator_ref = await _freeze_evaluator(
                 root=root, manifest=manifest, scripts=scripts, store=store
             )

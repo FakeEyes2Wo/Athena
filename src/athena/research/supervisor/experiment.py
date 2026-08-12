@@ -9,7 +9,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -19,6 +19,7 @@ from pydantic import (
     model_validator,
 )
 
+from athena.core.agent.types import RunStatus
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
 from athena.core.workspace import GitWorkBranch, GitWorkspace
@@ -108,6 +109,39 @@ class ExperimentManifest(BaseModel):
         for key, rel in value.items():
             _validate_relative_path(rel, f"output {key}")
         return value
+
+
+def read_experiment_manifest(root: Path) -> ExperimentManifest:
+    """解析并校验 workspace 根 experiment.json，返回带可行动错误摘要的 manifest。"""
+    path = root / "experiment.json"
+    if not path.is_file():
+        raise ValueError("experiment.json is missing")
+    try:
+        return ExperimentManifest.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValidationError as exc:
+        raise ValueError(_manifest_validation_summary(exc)) from exc
+
+
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+async def load_agent_result(
+    summary: Any, store: ArtifactStore, model_type: type[_ModelT]
+) -> _ModelT | None:
+    """解包 RunSummary.response_ref → result_ref → store → Pydantic 模型。
+
+    仅当 status 非 COMPLETED、缺 response_ref 或缺 result_ref 时返回 None；JSON/
+    存储/模型解析异常照常抛出，由调用方按各自语义处理。三处 phase 共用，避免复制
+    status 判断与两层解包。
+    """
+    status = getattr(summary.status, "value", summary.status)
+    if status != RunStatus.COMPLETED.value or summary.response_ref is None:
+        return None
+    response = json.loads(summary.response_ref)
+    result_ref = response.get("result_ref") if isinstance(response, dict) else None
+    if not isinstance(result_ref, str):
+        return None
+    return model_type.model_validate_json(await store.get_text(result_ref))
 
 
 class PlanSettlement(BaseModel):
@@ -275,7 +309,7 @@ class PlanRunner:
         仅可信分数成功才提交修订并更新 best/stale_rounds。
         """
         try:
-            manifest = self._read_manifest()
+            manifest = read_experiment_manifest(self.workdir)
         except ValueError as exc:
             return await self._failure(
                 plan_id, "manifest_invalid", " ".join(str(exc).split())[:1000]
@@ -414,19 +448,6 @@ class PlanRunner:
             evidence_ref=evidence_ref,
             error=cleaned,
         )
-
-    def _read_manifest(self) -> ExperimentManifest:
-        """解析并校验 workspace 根 experiment.json；无效时返回 None。"""
-        path = self.workdir / "experiment.json"
-        if not path.is_file():
-            raise ValueError("experiment.json is missing")
-        try:
-            return ExperimentManifest.model_validate_json(
-                path.read_text(encoding="utf-8")
-            )
-        except ValidationError as exc:
-            # JSON 或契约校验失败 → 视为不可执行的 manifest
-            raise ValueError(_manifest_validation_summary(exc)) from exc
 
     async def _load_bundle(self, evaluator_ref: ArtifactRef) -> DataScriptBundle | None:
         """从 artifact 引用加载冻结评估 bundle；无效时返回 None。"""

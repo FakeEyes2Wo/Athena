@@ -57,6 +57,34 @@ async def test_preview_and_spilled_output_share_redaction(tmp_path) -> None:
     assert "[REDACTED]" in full
 
 
+@pytest.mark.asyncio
+async def test_tool_preview_and_spill_strip_terminal_control_sequences(
+    tmp_path,
+) -> None:
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    raw = (
+        "\x1b[36m进度\x1b[0m\r刷新\r\n"
+        "\x1b]0;private title\x07结果\x9b31m!\x9b0m\n"
+        "保留\tUnicode Ω\x00\x08\x7f�\n" + ("尾声" * 300)
+    )
+
+    event = await EventProjector(store).tool_output(stdout=raw)
+
+    full = await store.get_text(event.artifact_ref)
+    expected_prefix = "进度\n刷新\n结果!\n保留\tUnicode Ω\n"
+    assert event.text.startswith(expected_prefix)
+    assert full.startswith(expected_prefix)
+    assert "\x1b" not in event.text
+    assert "\x1b" not in full
+    assert "\x9b" not in full
+    assert "\r" not in full
+    assert "\x00" not in full
+    assert "\x08" not in full
+    assert "\x7f" not in full
+    assert "�" not in full
+    assert event.truncated is True
+
+
 def test_redact_masks_secret_patterns() -> None:
     cleaned = redact(
         "api_key=private1 access_token=private2 password=private3 "
@@ -99,7 +127,11 @@ def test_state_event_is_a_complete_replaceable_snapshot() -> None:
         "search",
         "sota",
         "waiting",
+        "manual",
+        "pending",
     }
+    assert event.manual is False
+    assert event.pending == []
 
 
 @pytest.mark.asyncio
@@ -122,6 +154,77 @@ async def test_runtime_projects_agent_text_callback_to_output(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_projects_llm_tool_llm_events_in_arrival_order(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    await runtime._project_agent_event(
+        "prepare",
+        "agent/function_call",
+        "event:call-1",
+        {"name": "shell_command", "arguments": {"command": "inspect data"}},
+    )
+    await runtime._project_agent_event(
+        "prepare",
+        "command/completed",
+        "event:tool-1",
+        CommandResult(
+            ok=True,
+            stdout="tool result",
+            stderr="",
+            exit_code=0,
+            truncated=False,
+        ).to_dict(),
+    )
+    await runtime._project_agent_event(
+        "prepare",
+        "agent/text_delta",
+        "event:text-1",
+        {"delta": "continue analysis", "accumulated": "continue analysis"},
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert [event["source"] for event in outputs] == ["agent", "tool", "agent"]
+    assert outputs[0]["text"] == "shell_command(...)"
+    assert outputs[0]["tool"] == "shell_command"
+    assert outputs[1]["text"] == "tool result"
+    assert outputs[2]["text"] == "continue analysis"
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_invent_agent_text_before_a_tool(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    await runtime._project_agent_event(
+        "prepare",
+        "agent/function_call",
+        "event:call-1",
+        {"name": "shell_command", "arguments": {"command": "inspect data"}},
+    )
+    await runtime._project_agent_event(
+        "prepare",
+        "command/completed",
+        "event:tool-1",
+        CommandResult(
+            ok=True,
+            stdout="tool result",
+            stderr="",
+            exit_code=0,
+            truncated=False,
+        ).to_dict(),
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert [(event["source"], event["text"]) for event in outputs] == [
+        ("agent", "shell_command(...)"),
+        ("tool", "tool result"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_control_transition_publishes_complete_state(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
     seen: list[tuple[str, dict]] = []
@@ -131,6 +234,17 @@ async def test_control_transition_publishes_complete_state(tmp_path) -> None:
 
     assert [kind for kind, _payload in seen] == ["state", "state"]
     assert seen[-1][1]["status"] == "WAITING"
+
+
+@pytest.mark.asyncio
+async def test_manual_and_auto_commands_toggle_mode(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    runtime.subscribe(lambda _kind, _payload: None)
+
+    assert await runtime.message("/manual") == "manual mode on"
+    assert runtime.state.manual_mode is True
+    assert await runtime.message("/auto") == "manual mode off"
+    assert runtime.state.manual_mode is False
 
 
 @pytest.mark.asyncio
@@ -287,3 +401,29 @@ async def test_completed_command_projects_one_safe_output_with_its_full_ref(
     assert len(event["text"].encode("utf-8")) <= 512
     assert "sk-this-must-not-leak" not in event["text"]
     assert event["artifact_ref"] == output_ref
+
+
+@pytest.mark.asyncio
+async def test_completed_command_replaces_an_unsanitized_full_output_ref(
+    tmp_path,
+) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+    unsafe_ref = await runtime._store.put_text("\x1b[32mcomplete\x1b[0m\r\nnext\x00�")
+
+    await runtime.project_command_result(
+        CommandResult(
+            ok=True,
+            stdout="\x1b[32mcomplete\x1b[0m\r\nnext\x00�",
+            stderr="",
+            exit_code=0,
+            truncated=True,
+            output_ref=unsafe_ref,
+        )
+    )
+
+    event = [payload for kind, payload in seen if kind == "output"][0]
+    assert event["text"] == "complete\nnext"
+    assert event["artifact_ref"] != unsafe_ref
+    assert await runtime._store.get_text(event["artifact_ref"]) == "complete\nnext"

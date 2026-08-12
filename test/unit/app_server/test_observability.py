@@ -47,6 +47,7 @@ async def test_agent_adapter_only_advances_explicit_progress_events() -> None:
 
     assert observer.monitor.snapshot("turn:1").last_progress_at == clock.utc
     assert AGENT_PROGRESS_EVENTS == {
+        "agent/function_call",
         "agent/text_delta",
         "tool/begin",
         "tool/end",

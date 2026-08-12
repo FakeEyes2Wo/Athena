@@ -8,6 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from athena.core.contracts import ArtifactRef
 
 _PREVIEW_BYTES = 512
+_ANSI_STRING = re.compile(
+    r"(?:\x1b(?:\]|P|X|\^|_)|[\x90\x98\x9d\x9e\x9f]).*?(?:\x07|\x1b\\|\x9c|$)",
+    re.DOTALL,
+)
+_ANSI_CSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
+_ANSI_ESCAPE = re.compile(r"\x1b[ -/]*[0-~]")
+_UNPRINTABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f�]")
 _SECRET_PATTERNS = (
     re.compile(
         r"(?i)(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\b\s*[=:]\s*)"
@@ -51,6 +58,8 @@ class StateEvent(BaseModel):
     search: dict[str, Any]
     sota: dict[str, Any] | None
     waiting: dict[str, Any] | None
+    manual: bool = False
+    pending: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def redact(text: str) -> str:
@@ -62,6 +71,15 @@ def redact(text: str) -> str:
         else:
             redacted = pattern.sub("[REDACTED]", redacted)
     return redacted
+
+
+def sanitize_terminal_text(text: str) -> str:
+    """Remove terminal controls while retaining readable Unicode and layout."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _ANSI_STRING.sub("", normalized)
+    normalized = _ANSI_CSI.sub("", normalized)
+    normalized = _ANSI_ESCAPE.sub("", normalized)
+    return _UNPRINTABLE.sub("", normalized)
 
 
 def _utf8_prefix(text: str, byte_limit: int) -> str:
@@ -125,8 +143,8 @@ class EventProjector:
         artifact_ref: ArtifactRef | None = None,
     ) -> OutputEvent:
         """Project a stderr-first bounded preview and spill full redacted output."""
-        safe_stderr = redact(stderr)
-        safe_stdout = redact(stdout)
+        safe_stderr = redact(sanitize_terminal_text(stderr))
+        safe_stdout = redact(sanitize_terminal_text(stdout))
         full = "\n".join(part for part in (safe_stderr, safe_stdout) if part)
         preview = _utf8_prefix(full, _PREVIEW_BYTES)
         truncated = len(full.encode("utf-8")) > _PREVIEW_BYTES

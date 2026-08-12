@@ -287,6 +287,18 @@ async def test_prepare_forwards_agent_text_delta_to_publisher(tmp_path: Path) ->
         assert len(text_events) == 1
         assert text_events[0][2] == {"delta": _answer(), "accumulated": _answer()}
         assert [event[0] for event in published].count("command/completed") == 1
+        kinds = [event[0] for event in published]
+        first_call = kinds.index("agent/function_call")
+        first_tool_end = kinds.index("tool/end")
+        final_text = kinds.index("agent/text_delta")
+        visible_agent_events = [
+            kind
+            for kind in kinds
+            if kind in {"agent/function_call", "tool/end", "agent/text_delta"}
+        ]
+        assert visible_agent_events[:2] == ["agent/function_call", "tool/end"]
+        assert visible_agent_events[-1] == "agent/text_delta"
+        assert first_call < first_tool_end < final_text
     finally:
         await harness.close()
 

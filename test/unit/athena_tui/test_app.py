@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pytest
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.clipboard import InMemoryClipboard
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.widgets import Frame
 
 from athena.research.supervisor.events import OutputEvent, StateEvent
 from athena_tui.app import AthenaApp, apply_event
@@ -142,27 +144,6 @@ async def test_submit_is_visible_while_supervisor_turn_is_running() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prompt_toolkit_enter_submits_text_before_buffer_reset() -> None:
-    """Catch scheduling submission after prompt-toolkit clears its buffer."""
-    runtime = FakeRuntime()
-    app = AthenaApp(
-        runtime,
-        Path("/tmp"),
-        input=DummyInput(),
-        output=DummyOutput(),
-    )
-    prompt_app = app._build()
-    app._composer.text = "continue"
-
-    app._composer.buffer.validate_and_handle()
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    assert runtime.messages == ["continue"]
-    await prompt_app.cancel_and_wait_for_background_tasks()
-
-
-@pytest.mark.asyncio
 async def test_real_keys_submit_cancel_confirmation_and_quit() -> None:
     runtime = FakeRuntime()
 
@@ -200,6 +181,90 @@ async def test_real_keys_submit_cancel_confirmation_and_quit() -> None:
     assert runtime.messages == ["continue"]
     assert app.state.mode == COMPOSER
     assert runtime.closed is True
+
+
+@pytest.mark.asyncio
+async def test_real_shift_enter_and_ctrl_j_insert_newlines_before_submit() -> None:
+    runtime = FakeRuntime()
+
+    async def wait_until(predicate) -> None:
+        async with asyncio.timeout(1):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    with create_pipe_input() as pipe_input:
+        app = AthenaApp(
+            runtime,
+            Path("/tmp"),
+            input=pipe_input,
+            output=DummyOutput(),
+        )
+
+        async def drive() -> None:
+            await wait_until(lambda: app._composer is not None)
+            pipe_input.send_text("line one")
+            await wait_until(lambda: app._composer.text == "line one")
+            pipe_input.send_text("\x1b[27;2;13~")
+            await wait_until(lambda: app._composer.text == "line one\n")
+            pipe_input.send_text("line two")
+            await wait_until(lambda: app._composer.text == "line one\nline two")
+            pipe_input.send_text("\n")
+            await wait_until(lambda: app._composer.text == "line one\nline two\n")
+            pipe_input.send_text("line three\r")
+            await wait_until(lambda: runtime.messages)
+            pipe_input.send_text("\x03")
+            await wait_until(lambda: app.state.mode == CONFIRMATION)
+            pipe_input.send_text("y")
+
+        code, _ = await asyncio.wait_for(
+            asyncio.gather(app.run(), asyncio.create_task(drive())), timeout=5
+        )
+
+    assert code == 0
+    assert runtime.messages == ["line one\nline two\nline three"]
+
+
+@pytest.mark.asyncio
+async def test_modal_keys_do_not_change_composer_draft() -> None:
+    runtime = FakeRuntime()
+
+    async def wait_until(predicate) -> None:
+        async with asyncio.timeout(2):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    with create_pipe_input() as pipe_input:
+        app = AthenaApp(
+            runtime,
+            Path("/tmp"),
+            input=pipe_input,
+            output=DummyOutput(),
+        )
+
+        async def drive() -> None:
+            pipe_input.send_text("?")
+            await wait_until(lambda: app.state.overlay is not None)
+            pipe_input.send_text("ignored")
+            await asyncio.sleep(0.05)
+            assert app._composer.text == ""
+            pipe_input.send_text("\x1b")
+            await wait_until(lambda: app.state.overlay is None)
+            pipe_input.send_text("/stop\r")
+            await wait_until(lambda: app.state.mode == CONFIRMATION)
+            pipe_input.send_text("ignored")
+            await asyncio.sleep(0.05)
+            assert app._composer.text == ""
+            pipe_input.send_text("n")
+            await wait_until(lambda: app.state.mode == COMPOSER)
+            pipe_input.send_text("\x03")
+            await wait_until(lambda: app.state.mode == CONFIRMATION)
+            pipe_input.send_text("y")
+
+        await asyncio.wait_for(
+            asyncio.gather(app.run(), asyncio.create_task(drive())), timeout=5
+        )
+
+    assert runtime.messages == []
 
 
 @pytest.mark.asyncio
@@ -339,13 +404,134 @@ def test_mouse_wheel_scrolls_only_output_viewport_and_resumes_tail() -> None:
     assert app._history_control.mouse_handler(wheel_up) is None
     assert app._history_scroll == 3
     assert app.state.history_follow_tail is False
-    assert app._history_control.mouse_handler(click) is NotImplemented
+    assert app._history_control.mouse_handler(click) is None
     assert app._history_scroll == 3
     assert app._history_control.mouse_handler(wheel_down) is None
     assert app._history_scroll == 0
     assert app.state.history_follow_tail is True
     assert app._app.mouse_support() is True
     assert app._composer.control is not app._history_control
+
+
+def test_mouse_drag_selects_output_text_without_stealing_composer_focus() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(
+        OutputEvent(seq=1, source="supervisor", channel="text", text="select me")
+    )
+    prompt_app = app._build()
+    app._history_fragments()
+    down = MouseEvent(
+        position=Point(x=0, y=0),
+        event_type=MouseEventType.MOUSE_DOWN,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+    move = MouseEvent(
+        position=Point(x=8, y=0),
+        event_type=MouseEventType.MOUSE_MOVE,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+    up = MouseEvent(
+        position=Point(x=8, y=0),
+        event_type=MouseEventType.MOUSE_UP,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+
+    app._history_control.mouse_handler(down)
+    app._history_control.mouse_handler(move)
+    app._history_control.mouse_handler(up)
+    selected = app._history_fragments()
+
+    assert any("class:history.selection" in style for style, _text in selected)
+    assert prompt_app.layout.current_control is app._composer.control
+
+
+def test_streaming_output_preserves_selection_and_frozen_viewport() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="select me"))
+    app._build()
+    app._start_history_selection(Point(x=0, y=0))
+    app._extend_history_selection(Point(x=8, y=0))
+    anchor = app._history_selection_anchor
+    cursor = app._history_selection_cursor
+
+    app._on_event(OutputEvent(seq=2, source="agent", channel="text", text=" later"))
+
+    assert app._history_selection_anchor == anchor
+    assert app._history_selection_cursor == cursor
+    assert app.state.history_follow_tail is False
+    assert app.state.unseen_output_count == 1
+    assert any(
+        "class:history.selection" in style for style, _text in app._history_fragments()
+    )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_copies_selected_output_instead_of_requesting_quit() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="copy me"))
+    prompt_app = app._build()
+    prompt_app.clipboard = InMemoryClipboard()
+    app._start_history_selection(Point(x=2, y=0))
+    app._extend_history_selection(Point(x=6, y=0))
+
+    await app.handle_key("c-c")
+
+    assert prompt_app.clipboard.get_data().text == "copy"
+    assert app.state.mode == COMPOSER
+
+
+def test_composer_is_multiline_bounded_and_framed() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    prompt_app = app._build()
+
+    assert app._composer.buffer.multiline() is True
+    assert isinstance(app._composer_pane, Frame)
+    assert app._composer_height() == 1
+    app._composer.text = "1\n2\n3\n4\n5\n6\n7"
+    assert app._composer_height() == 6
+    assert prompt_app.layout.current_control is app._composer.control
+
+
+@pytest.mark.asyncio
+async def test_handle_key_inserts_newlines_without_submitting() -> None:
+    runtime = FakeRuntime()
+    app = AthenaApp(runtime, Path("/tmp"), input=DummyInput(), output=DummyOutput())
+    app._build()
+    app._composer.buffer.set_document(
+        Document("line one", len("line one")), bypass_readonly=True
+    )
+
+    await app.handle_key("c-j")
+    app._composer.buffer.insert_text("line two")
+    await app.handle_key("s-enter")
+
+    assert app._composer.text == "line one\nline two\n"
+    assert runtime.messages == []
+
+
+@pytest.mark.asyncio
+async def test_question_mark_in_nonempty_draft_does_not_open_help() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._build()
+    app._composer.text = "why"
+
+    await app.handle_key("?")
+
+    assert app.state.overlay is None
+    assert app._composer.text == "why"
 
 
 @pytest.mark.asyncio

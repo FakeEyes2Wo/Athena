@@ -71,6 +71,24 @@ class _Scripts:
         )
 
 
+class _DirScripts:
+    """Freeze stub asserting the directory form resolves to evaluate.py."""
+
+    async def freeze(self, workspace, metadata):
+        assert Path(workspace).name == "evaluator"
+        assert metadata.entrypoint == "evaluate.py"
+        return DataScriptBundle(
+            bundle_id="bundle-eval",
+            entrypoint="evaluate.py",
+            lock_ref="sha256:" + "1" * 64,
+            project_ref="sha256:" + "2" * 64,
+            source_ref="sha256:" + "3" * 64,
+            tree_ref="sha256:" + "4" * 64,
+            python_version="3.12",
+            environment_hash="5" * 64,
+        )
+
+
 class _Execution:
     def __init__(self, root: Path) -> None:
         self.project_root = root
@@ -195,6 +213,69 @@ async def test_prepare_result_requires_every_trusted_artifact(
 
     assert agents.created == ["prepare"]
     assert agents.feedback == [expected_error]
+
+
+@pytest.mark.asyncio
+async def test_prepare_accepts_evaluator_directory_with_evaluate_py_entrypoint(
+    tmp_path: Path,
+) -> None:
+    """Regression: ``outputs.evaluator`` as a directory must resolve to the
+    ``evaluate.py`` entrypoint instead of looping forever on a missing draft."""
+    workspace_path = tmp_path / "prepare"
+    (workspace_path / "evaluator").mkdir(parents=True)
+    (workspace_path / "evaluator" / "evaluate.py").write_text(
+        "pass\n", encoding="utf-8"
+    )
+    (workspace_path / "evaluator" / "labels.csv").write_text(
+        "id,label\n1,0\n", encoding="utf-8"
+    )
+    (workspace_path / "evaluator" / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (workspace_path / "model.py").write_text("pass\n", encoding="utf-8")
+    (workspace_path / "outputs").mkdir()
+    (workspace_path / "outputs" / "predictions.csv").write_text(
+        "id,prediction\n1,0\n", encoding="utf-8"
+    )
+    (workspace_path / "outputs" / "report.md").write_text(
+        "# Baseline\n", encoding="utf-8"
+    )
+    (workspace_path / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [["python", "model.py"]],
+                "outputs": {
+                    "predictions": "outputs/predictions.csv",
+                    "report": "outputs/report.md",
+                    "evaluator": "evaluator",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = _Store(tmp_path / "artifacts")
+    agents = _AgentRuntime(store.inner)
+    tree_ref = await store.put_text('{"experiments": []}')
+
+    result = await run_prepare_plan(
+        agents=agents,
+        scripts=_DirScripts(),
+        evaluator=_Evaluator(),
+        git=_Git(),
+        workspace=GitWorkBranch(
+            path=str(workspace_path), branch="prepare", base_commit="base"
+        ),
+        execution=_Execution(tmp_path),
+        store=store,
+        tree_ref=tree_ref,
+        task="build baseline",
+        max_turns=2,
+    )
+
+    assert result.metric == 0.75
+    assert agents.created == ["prepare"]
+    assert agents.feedback == []
 
 
 @pytest.mark.asyncio

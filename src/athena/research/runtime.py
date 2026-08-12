@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 
+from athena.agents.general_agent import GeneralResult, register_general_agent
 from athena.agents.ideator_agent import register_ideator_agent
 from athena.agents.plan_agent import register_plan_agent
 from athena.agents.prepare_agent import register_prepare_agent
@@ -28,7 +29,12 @@ from athena.execution.runtime import CommandResult, ExecutionContext, ExecutionR
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import DataScriptRunner
-from athena.research.supervisor.events import EventProjector, StateEvent, redact
+from athena.research.supervisor.events import (
+    EventProjector,
+    StateEvent,
+    redact,
+    sanitize_terminal_text,
+)
 from athena.research.supervisor.experiment import PlanRunner, PlanTurnResult
 from athena.research.supervisor.prepare import PrepareResult, run_prepare_plan
 from athena.research.supervisor.plans import wait_run_events
@@ -104,7 +110,11 @@ class ResearchRuntime:
             if self._tree_path.is_file()
             else ResearchTree()
         )
-        initial_phase = "PREPARE" if prepare_phase is not None or task else "SEARCH"
+        initial_phase = (
+            "PREPARE"
+            if prepare_phase is not None or task or auto_seed_task
+            else "SEARCH"
+        )
         self._state = (
             ResearchState.load(self._state_path)
             if self._state_path.is_file()
@@ -145,6 +155,7 @@ class ResearchRuntime:
             run_plan_turn=self._run_plan_turn,
             run_supervisor_turn=self._run_supervisor_turn,
             run_ideator_turn=self._run_ideator_turn,
+            run_general_turn=self._run_general_turn,
             publish=self._publish_from_supervisor,
             auto_validate=auto_validate,
             direction=direction,
@@ -242,10 +253,41 @@ class ResearchRuntime:
         if command == "/pause":
             return await self._supervisor.pause()
         if command == "/resume":
+            await self._ensure_started()
             return await self._supervisor.resume()
+        if command == "/manual":
+            await self._ensure_started()
+            await self._supervisor.set_manual_mode(True)
+            return "manual mode on"
+        if command == "/auto":
+            await self._ensure_started()
+            await self._supervisor.set_manual_mode(False)
+            return "manual mode off"
+        if command.startswith("/select "):
+            await self._ensure_started()
+            hypothesis_id = command[len("/select ") :].strip()
+            if not hypothesis_id:
+                return "usage: /select <hypothesis_id>"
+            await self._supervisor.select_next_hypothesis(hypothesis_id)
+            return f"selected {hypothesis_id}"
         if self._auto_seed_task and not self._started:
             return await self.start_task(command)
-        return await self._supervisor.message(text)
+        answer = await self._supervisor.message(text)
+        # Interactive resume: a SupervisorAgent turn may transition an idle run
+        # into VALIDATE. Re-enter the phase machine to actually execute it; the
+        # live start() task (or auto_validate) handles the running case.
+        if self.state.phase == "VALIDATE" and (self._task is None or self._task.done()):
+            await self._supervisor.continue_phase()
+        return answer
+
+    async def _ensure_started(self) -> None:
+        """Start (and recover) the Supervisor loop once a trusted baseline exists.
+
+        No-op for a fresh project (no SOTA yet) so control commands never jump
+        straight into SEARCH without PREPARE.
+        """
+        if not self._started and self.tree.best_experiment_id() is not None:
+            await self.start()
 
     def subscribe(self, emit: EmitFn) -> str:
         """Subscribe and immediately receive one complete state snapshot."""
@@ -293,7 +335,7 @@ class ResearchRuntime:
         artifact_ref = result.output_ref
         if artifact_ref is not None:
             full = await self._store.get_text(artifact_ref)
-            safe_full = redact(full)
+            safe_full = redact(sanitize_terminal_text(full))
             if safe_full != full:
                 unsafe_ref = artifact_ref
                 artifact_ref = await self._store.put_text(safe_full)
@@ -324,6 +366,15 @@ class ResearchRuntime:
                 await self.publish_output(
                     source="agent", channel="text", text=text, plan=plan
                 )
+        elif kind == "agent/function_call":
+            name = str(payload.get("name") or "tool")
+            await self.publish_output(
+                source="agent",
+                channel="text",
+                text=f"{name}(...)",
+                plan=plan,
+                tool=name,
+            )
         elif kind == "command/completed":
             await self.project_command_result(CommandResult(**payload), plan=plan)
         elif kind == "tool/end":
@@ -408,6 +459,11 @@ class ResearchRuntime:
             for plan_id, plan in state.plans.items()
             if plan.turn_limit is not None and plan.turns_used >= plan.turn_limit
         ]
+        pending = [
+            {"id": h.id, "statement": h.statement}
+            for h in self.tree.pending_hypotheses()
+            if h.id is not None
+        ]
         return StateEvent(
             status=state.status,
             phase=state.phase,
@@ -424,6 +480,8 @@ class ResearchRuntime:
                 if waiting_ids
                 else None
             ),
+            manual=state.manual_mode,
+            pending=pending,
         )
 
     async def _run_supervisor_turn(self, text: str) -> str:
@@ -538,6 +596,40 @@ class ResearchRuntime:
         )
         return batch.hypotheses
 
+    async def _run_general_turn(self, task: str) -> dict[str, object]:
+        """Dispatch one General Agent rooted at the project and return its result."""
+        if self._provider is None:
+            raise RuntimeError("General Agent requires a registered Agent provider")
+        if not self._registry.contains("general"):
+            register_general_agent(
+                self._registry,
+                provider=self._provider,
+                artifacts=self._store,
+                project_root=self._root,
+                runtime=self._execution,
+            )
+        request = {"content": task, "context_refs": []}
+        _agent_id, run_id = await self._agents.create_root(
+            "general", request, name="general"
+        )
+        summary = await wait_run_events(
+            self._agents,
+            run_id,
+            lambda kind, ref, data: self._project_agent_event(
+                "general", kind, ref, data
+            ),
+        )
+        if summary.response_ref is None:
+            raise RuntimeError(summary.error or "General Agent turn failed")
+        envelope = json.loads(summary.response_ref)
+        result_ref = envelope.get("result_ref")
+        if not isinstance(result_ref, str):
+            raise RuntimeError("General Agent returned no result artifact")
+        result = GeneralResult.model_validate_json(
+            await self._store.get_text(result_ref)
+        )
+        return result.model_dump()
+
     async def _run_plan_turn(self, plan_id: str, state: Any) -> PlanTurnResult:
         if self._plan_turn.__name__ != "unavailable_plan_turn":
             return await self._plan_turn(plan_id, state)
@@ -614,6 +706,19 @@ class ResearchRuntime:
                 workspace=Path(workspace.path),
                 runtime=self._execution,
             )
+        sota_id = self.tree.best_experiment_id()
+        if sota_id is None:
+            raise RuntimeError("VALIDATE requires a trusted SOTA baseline")
+        experiment = self.tree.get_experiment(sota_id)
+        hypothesis = self.tree.get_hypothesis(experiment.hypothesis_id)
+        sota_context = {
+            "experiment_id": sota_id,
+            "statement": hypothesis.statement,
+            "intervention": hypothesis.intervention,
+            "expected_effect": hypothesis.expected_effect,
+            "commit": experiment.commit,
+            "metric": experiment.eval.primary if experiment.eval else None,
+        }
         frozen = ValidationInput(
             sota_commit=sota_commit,
             reference_metric=metric,
@@ -622,6 +727,7 @@ class ResearchRuntime:
             validation_key=validation_key(
                 sota_commit, metric, self._direction, evaluator_ref
             ),
+            sota_context=sota_context,
         )
         result_ref = None
         if self.state.validation is not None:

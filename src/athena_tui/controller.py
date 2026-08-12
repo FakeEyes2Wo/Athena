@@ -40,6 +40,11 @@ class TuiController:
         """Forward one composer message to the runtime command surface."""
         return await self._runtime.message(text)
 
+    async def toggle_manual_mode(self) -> str:
+        """Toggle SEARCH scheduling between auto and manual hypothesis selection."""
+        current = getattr(self._runtime.state, "manual_mode", False)
+        return await self.send_message("/auto" if current else "/manual")
+
     async def run(self) -> None:
         """Ensure the controller is connected without starting a poll loop."""
         await self.connect()

@@ -18,7 +18,7 @@ from athena.execution import (
 from athena.execution.events import utc_now as execution_utc_now
 
 AGENT_PROGRESS_EVENTS = frozenset(
-    {"agent/text_delta", TOOL_BEGIN, TOOL_END, TOOL_ERROR}
+    {"agent/function_call", "agent/text_delta", TOOL_BEGIN, TOOL_END, TOOL_ERROR}
 )
 
 

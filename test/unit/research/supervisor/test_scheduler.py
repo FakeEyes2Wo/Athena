@@ -188,6 +188,30 @@ def test_generate_fills_only_remaining_slots_and_attempt_budget() -> None:
     ]
 
 
+def test_manual_mode_does_not_auto_start_pending_hypotheses() -> None:
+    tree = _tree("h1", "h2")
+    state = _state(concurrency=2)
+
+    assert Scheduler().next_actions(state, tree, set(), manual=True) == []
+
+
+def test_manual_mode_generates_only_when_no_pending_hypotheses() -> None:
+    state = _state(concurrency=2)
+
+    assert Scheduler().next_actions(state, ResearchTree(), set(), manual=True) == [
+        ScheduleAction.Generate(2)
+    ]
+
+
+def test_manual_mode_starts_human_selected_hypothesis() -> None:
+    tree = _tree("h1", "h2")
+    state = _state(concurrency=2)
+
+    assert Scheduler().next_actions(
+        state, tree, set(), human_next="h2", manual=True
+    ) == [ScheduleAction.StartNextHypothesis("h2")]
+
+
 def test_fresh_search_asks_for_all_unfilled_slots() -> None:
     assert Scheduler().next_actions(_state(), ResearchTree(), set()) == [
         ScheduleAction.Generate(4)

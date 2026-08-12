@@ -10,17 +10,22 @@ from typing import Literal
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS, SupervisorActions
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
-from athena.core.agent.types import AgentCommandError, ErrorCode, RunStatus
+from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch, GitWorkspace
-from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.experiment import (
     PlanTurnResult,
     decide_settlement,
+    load_agent_result,
     load_best,
 )
-from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
+from athena.research.supervisor.plans import (
+    PlanDecision,
+    PlanInput,
+    PlanState,
+    wait_run_events,
+)
 from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.policy import Outcome
 from athena.research.supervisor.recovery import Recovery
@@ -33,6 +38,7 @@ Publish = Callable[[Literal["output", "state"], dict[str, object]], Awaitable[No
 PreparePhase = Callable[[], Awaitable[PrepareResult]]
 ValidationPhase = Callable[[CommitHash, float], Awaitable[object]]
 IdeatorTurn = Callable[[int], Awaitable[list[Hypothesis]]]
+GeneralTurn = Callable[[str], Awaitable[dict[str, object]]]
 PublishAgentEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 
 
@@ -77,6 +83,7 @@ class Supervisor(SupervisorActions):
         publish: Publish,
         auto_validate: bool = False,
         run_ideator_turn: IdeatorTurn | None = None,
+        run_general_turn: GeneralTurn | None = None,
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
         run_prepare_phase: PreparePhase | None = None,
@@ -99,6 +106,7 @@ class Supervisor(SupervisorActions):
         self._run_plan_turn = run_plan_turn
         self._run_supervisor_turn = run_supervisor_turn
         self._run_ideator_turn = run_ideator_turn
+        self._run_general_turn = run_general_turn
         self._publish = publish
         self._auto_validate = auto_validate
         self._run_prepare_phase = run_prepare_phase
@@ -110,6 +118,8 @@ class Supervisor(SupervisorActions):
         self._running: dict[str, asyncio.Task[_CompletedTurn]] = {}
         self._next_hypothesis_id: str | None = None
         self._stopped = False
+        # 手动模式下等待人工选定假设时，唤醒 run_search 循环的信号。
+        self._wake = asyncio.Event()
 
     @property
     def running_plan_ids(self) -> tuple[str, ...]:
@@ -236,6 +246,17 @@ class Supervisor(SupervisorActions):
             await self._run_prepare()
         else:
             await self.recover()
+        await self.continue_phase()
+
+    async def continue_phase(self) -> None:
+        """Execute the current phase for an idle run (interactive resume).
+
+        ``start()`` runs PREPARE→SEARCH→VALIDATE once. In interactive mode
+        (no ``auto_validate``) SEARCH parks at ``WAITING`` and the machine
+        returns; a later Human turn may transition the phase through
+        ``set_phase_decision`` or extend the Search budget. Re-enter the phase
+        machine here to actually run the chosen phase.
+        """
         if self.state.phase == "SEARCH":
             await self.run_search()
             if self._search_limit_reached():
@@ -406,6 +427,8 @@ class Supervisor(SupervisorActions):
             if not self._running:
                 if generated:
                     continue
+                if await self._wait_for_manual_selection():
+                    continue
                 return
             done, _pending = await asyncio.wait(
                 tuple(self._running.values()), return_when=asyncio.FIRST_COMPLETED
@@ -426,6 +449,26 @@ class Supervisor(SupervisorActions):
                 continue
             await self._apply_completed_turn(completed)
 
+    async def _wait_for_manual_selection(self) -> bool:
+        """Block the SEARCH loop until a Human selects a hypothesis in manual mode.
+
+        Returns True when scheduling should re-run (selection made or mode
+        switched back to auto), False when the loop should exit (not manual or
+        nothing pending to select from).
+        """
+        if not self.state.manual_mode:
+            return False
+        if self._next_hypothesis_id is not None:
+            return True
+        if not self.tree.pending_hypotheses():
+            return False
+        self.state.status = "WAITING"
+        self._save_state()
+        await self._publish_state()
+        self._wake.clear()
+        await self._wake.wait()
+        return not self._stopped
+
     async def _fill_slots(self) -> bool:
         """Apply Scheduler actions until all available slots are accounted for."""
         if self._stopped:
@@ -436,6 +479,7 @@ class Supervisor(SupervisorActions):
             self.tree,
             self._running,
             human_next=self._next_hypothesis_id,
+            manual=self.state.manual_mode,
         )
         for action in actions:
             if self._stopped:
@@ -504,18 +548,9 @@ class Supervisor(SupervisorActions):
                         plan_id, kind, ref, data
                     ),
                 )
-            if (
-                summary.status is not RunStatus.COMPLETED
-                or summary.response_ref is None
-            ):
+            decision = await load_agent_result(summary, self._store, PlanDecision)
+            if decision is None:
                 return _CompletedTurn(plan_id, None, None)
-            response = json.loads(summary.response_ref)
-            decision_ref = response.get("result_ref")
-            if not isinstance(decision_ref, str):
-                return _CompletedTurn(plan_id, None, None)
-            decision = PlanDecision.model_validate_json(
-                await self._store.get_text(decision_ref)
-            )
         except Exception:
             return _CompletedTurn(plan_id, None, None)
         if decision.decision == "abandon" and state.best_ref is None:
@@ -753,6 +788,10 @@ class Supervisor(SupervisorActions):
         if self.tree.experiment_for_hypothesis(hypothesis_id) is not None:
             raise ValueError(f"hypothesis already settled: {hypothesis_id}")
         self._next_hypothesis_id = hypothesis_id
+        if self.state.status == "WAITING":
+            self.state.status = "RUNNING"
+            self._save_state()
+        self._wake.set()
         return {"selected": hypothesis_id}
 
     async def configure_search(self, **payload: object) -> dict[str, object]:
@@ -817,8 +856,75 @@ class Supervisor(SupervisorActions):
     async def set_phase_decision(self, decision: str) -> dict[str, object]:
         if decision not in {"SEARCH", "VALIDATE"}:
             raise ValueError(f"invalid phase decision: {decision}")
+        if decision == "VALIDATE":
+            if self.tree.best_experiment_id() is None:
+                raise ValueError(
+                    "VALIDATE requires a trusted SOTA baseline from completed PREPARE"
+                )
+            if self.state.phase != "SEARCH":
+                raise ValueError(
+                    f"cannot VALIDATE from phase {self.state.phase}; run SEARCH first"
+                )
         await self._transition_phase(decision)
+        # 交互路径下 ``start()`` 的生命周期已结束（SEARCH 后停在 WAITING），
+        # 单写者在此直接把 VALIDATE 阶段跑完，否则只改 phase 标志永远到不了 COMPLETED。
+        if decision == "VALIDATE":
+            await self._run_validation()
         return {"decision": decision}
 
+    async def set_manual_mode(self, manual: bool) -> dict[str, object]:
+        """Toggle SEARCH scheduling between auto (priority queue) and manual.
 
-__all__ = ["IdeatorTurn", "PlanTurn", "Publish", "Supervisor", "SupervisorTurn"]
+        Manual mode pauses after each hypothesis batch and waits for
+        ``select_next_hypothesis``. Switching back to auto wakes the loop.
+        """
+        self.state.manual_mode = bool(manual)
+        if self.state.status == "WAITING":
+            self.state.status = "RUNNING"
+        self._save_state()
+        await self._publish_state()
+        self._wake.set()
+        return {"manual_mode": self.state.manual_mode}
+
+    async def read_state(self) -> dict[str, object]:
+        """Read-only snapshot of the current research phase and configuration."""
+        return {
+            "phase": self.state.phase,
+            "status": self.state.status,
+            "search_limit": self.state.search_limit,
+            "concurrency": self.state.concurrency,
+            "manual_mode": self.state.manual_mode,
+            "validation_pending": self.state.validation is not None,
+        }
+
+    async def read_plans(self) -> dict[str, object]:
+        """Read-only snapshot of running and waiting Plans."""
+        plans = [
+            {
+                "plan_id": plan_id,
+                "kind": plan.kind,
+                "turns_used": plan.turns_used,
+                "turn_limit": plan.turn_limit,
+                "patience": plan.patience,
+            }
+            for plan_id, plan in self.state.plans.items()
+        ]
+        return {"plans": plans, "running": list(self._running)}
+
+    async def dispatch_general(self, task: str) -> dict[str, object]:
+        """Dispatch one General Agent to do concrete work and return its result."""
+        if self._run_general_turn is None:
+            raise RuntimeError("General Agent dispatch is not configured")
+        if not task.strip():
+            raise ValueError("general task must be nonblank")
+        return await self._run_general_turn(task)
+
+
+__all__ = [
+    "GeneralTurn",
+    "IdeatorTurn",
+    "PlanTurn",
+    "Publish",
+    "Supervisor",
+    "SupervisorTurn",
+]

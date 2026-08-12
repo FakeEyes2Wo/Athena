@@ -320,7 +320,7 @@ class DataAgent(BaseAgent):
             if config is not None:
                 inner.config = replace(
                     config,
-                    max_turns=200,
+                    max_turns=1,
                     max_tokens=max(config.max_tokens, 8192),
                     tool_choice="required",
                 )
@@ -339,7 +339,7 @@ class DataAgent(BaseAgent):
             failure = EDARepairFailure(
                 attempt=int(request.get("repair_count", 0) or 0),
                 command=[
-                    sys.executable,
+                    _workspace_python(workspace),
                     ANALYSIS_ENTRYPOINT,
                     str(data_path),
                     str(target),

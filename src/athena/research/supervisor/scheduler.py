@@ -104,8 +104,13 @@ class Scheduler:
         running_ids: Iterable[str],
         *,
         human_next: str | None = None,
+        manual: bool = False,
     ) -> list[ScheduleAction]:
-        """Project slot-filling actions without mutating state, tree, or policy."""
+        """Project slot-filling actions without mutating state, tree, or policy.
+
+        ``manual`` 模式下不按策略优先级自动出队：只在没有待选假设时请求生成
+        候选，其余等待 ``human_next``（人工选定）再启一个。
+        """
         if state.phase != "SEARCH":
             return []
 
@@ -132,16 +137,29 @@ class Scheduler:
                 actions.append(ScheduleAction.StartNextHypothesis(human_next))
                 free_slots -= 1
                 create_budget -= 1
-            # 3. 策略优先级降序、FIFO 顺序升序的新假设队列
-            for hypothesis in self._queued(tree, state, human_next):
-                if free_slots == 0 or create_budget == 0:
-                    break
-                actions.append(ScheduleAction.StartNew(hypothesis.id))
-                free_slots -= 1
-                create_budget -= 1
-            # 4. 剩余空位全部请求 SupervisorAgent 生成新假设
-            if free_slots > 0 and create_budget > 0:
-                actions.append(ScheduleAction.Generate(min(free_slots, create_budget)))
+            if manual:
+                # 手动模式：跳过按优先级自动出队，仅当无待选假设时生成候选。
+                if (
+                    not tree.pending_hypotheses()
+                    and free_slots > 0
+                    and create_budget > 0
+                ):
+                    actions.append(
+                        ScheduleAction.Generate(min(free_slots, create_budget))
+                    )
+            else:
+                # 3. 策略优先级降序、FIFO 顺序升序的新假设队列
+                for hypothesis in self._queued(tree, state, human_next):
+                    if free_slots == 0 or create_budget == 0:
+                        break
+                    actions.append(ScheduleAction.StartNew(hypothesis.id))
+                    free_slots -= 1
+                    create_budget -= 1
+                # 4. 剩余空位全部请求 SupervisorAgent 生成新假设
+                if free_slots > 0 and create_budget > 0:
+                    actions.append(
+                        ScheduleAction.Generate(min(free_slots, create_budget))
+                    )
         return actions
 
     def _queued(

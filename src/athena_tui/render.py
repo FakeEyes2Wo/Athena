@@ -19,7 +19,8 @@ Enter 发送    Shift+Enter 换行    Ctrl+J 换行
 PageUp/PageDown 滚动输出    End 回到最新    Esc 返回
 
 控制
-/pause    /resume    /stop    /quit"""
+Tab+Shift 自动/手动    /select <id> 选假设
+/manual    /auto    /pause    /resume    /stop    /quit"""
 
 _WAITING_REASON_LABELS = {
     "turn_limit_exhausted": "计划轮次已用尽，需要指导",
@@ -170,7 +171,7 @@ def _history_block(
 
     if entry.source == "tool":
         label = entry.tool or "tool"
-        prefix_text = f"{label} · {entry.channel}  "
+        prefix_text = f"▸ {label} · {entry.channel}  "
         suffix = "  [已截断]" if entry.truncated else ""
         return (
             [("class:history.tool", prefix_text)],
@@ -185,11 +186,18 @@ def _history_block(
         and previous.channel == "text"
         and entry.channel == "text"
     )
-    marker = "  " if repeat else "● "
+    if entry.source == "supervisor":
+        marker_style = "class:history.supervisor.marker"
+        body_style = "class:history.supervisor"
+        marker = "  " if repeat else "◆ "
+    else:
+        marker_style = "class:history.agent.marker"
+        body_style = "class:history.agent"
+        marker = "  " if repeat else "● "
     return (
-        [("class:history.agent.marker", marker)],
-        [("class:history.agent.marker", "  ")],
-        [("class:history.agent", entry.text)],
+        [(marker_style, marker)],
+        [(marker_style, "  ")],
+        [(body_style, entry.text)],
     )
 
 
@@ -307,7 +315,8 @@ def render_header(state: TuiState, width: int) -> StyleAndTextTuples:
     """Render one prioritized product/project/phase/status row."""
     brand = ("class:header.brand", "Athena")
     separator = ("", "  ")
-    right_text = f"{state.phase} · {state.status}"
+    mode_label = "手动" if state.manual_mode else "自动"
+    right_text = f"{state.phase} · {state.status} · {mode_label}"
     right = (_PHASE_CLASS.get(state.status, "class:status.primary"), right_text)
     project = state.project_root
 
@@ -420,10 +429,21 @@ def _progress_line(state: TuiState, width: int) -> StyleAndTextTuples:
     return output
 
 
+def _manual_selection_line(state: TuiState, width: int) -> StyleAndTextTuples:
+    """Manual mode awaiting a Human hypothesis selection."""
+    ids = " ".join(str(h.get("id", "?")) for h in state.pending)
+    text = f"手动模式 · 待选 {len(state.pending)} 个假设 · /select <id>"
+    if ids:
+        text += f"  [{ids}]"
+    return _fit_one_line([("class:status.warning", text)], width)
+
+
 def render_status(state: TuiState, width: int) -> StyleAndTextTuples:
     """Render prioritized error/waiting/unseen/progress status."""
     if state.last_error:
         return _error_line(state.last_error, width)
+    if state.manual_mode and state.status == "WAITING" and state.pending:
+        return _manual_selection_line(state, width)
     if state.status == "WAITING" and state.waiting:
         return _waiting_line(state.waiting, width)
     if not state.history_follow_tail and state.unseen_output_count:

@@ -8,16 +8,20 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.layout import Dimension, HSplit, Layout, Window
 from prompt_toolkit.layout.containers import DynamicContainer
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.utils import get_cwidth
+from prompt_toolkit.widgets import Frame, TextArea
 
 from athena.research.supervisor.events import OutputEvent, StateEvent
 from athena_tui.controller import TuiController
 from athena_tui.render import (
+    HELP_TEXT,
+    composer_height,
     render_bottom_pane,
     render_header,
     render_history_lines,
@@ -38,26 +42,41 @@ from athena_tui.state import (
     set_history_follow,
 )
 
-_HELP = """快捷键
-PageUp/PageDown  滚动输出    End  回到尾部
-Esc              关闭帮助或取消确认
-Ctrl+C           退出 TUI
-
-命令
-/help  /pause  /resume  /stop  /quit"""
-
 _DEFAULT_SIZE = (24, 80)
-_FIXED_ROWS = 7
-# 鼠标滚轮每格回滚的行数。
+_FIXED_ROWS = 5
 _SCROLL_STEP = 3
-# 历史区顶部行偏移 = header 高度(2)，滚动条鼠标映射用。改布局须同步。
-_HISTORY_YPOS = 2
+_SHIFT_ENTER_SEQUENCES = {"\x1b[27;2;13~"}
 _STYLE = Style.from_dict(
     {
-        "composer": "bg:#1f2937 #f9fafb",
-        "status.running": "#22c55e",
-        "status.waiting": "#f59e0b",
-        "status.stopped": "#ef4444",
+        "header.brand": "bold",
+        "header.path": "#8b949e",
+        "phase.running": "#2dd4bf bold",
+        "phase.waiting": "#fbbf24 bold",
+        "phase.done": "#22c55e bold",
+        "phase.stopped": "#f87171 bold",
+        "history.user.marker": "#7dd3fc bold",
+        "history.user": "#7dd3fc",
+        "history.supervisor.marker": "#fbbf24 bold",
+        "history.supervisor": "#fbbf24",
+        "history.agent.marker": "#2dd4bf bold",
+        "history.agent": "#2dd4bf",
+        "history.tool": "#22c55e",
+        "history.error": "#f87171",
+        "history.selection": "reverse",
+        "history.ideator.title": "#7dd3fc bold",
+        "history.ideator.separator": "#475569",
+        "status.primary": "bold",
+        "status.secondary": "#8b949e",
+        "status.warning": "#fbbf24",
+        "status.error": "#f87171",
+        "status.unseen": "#7dd3fc",
+        "scrollbar": "#475569",
+        "composer": "",
+        "text-area.prompt": "#7dd3fc bold",
+        "frame.border": "#475569",
+        "frame.label": "#8b949e",
+        "composer-frame.focused frame.border": "#94a3b8",
+        "confirmation": "#fbbf24 bold",
     }
 )
 
@@ -72,12 +91,13 @@ def _join_lines(lines: tuple[StyleAndTextTuples, ...]) -> StyleAndTextTuples:
 
 
 class _HistoryControl(FormattedTextControl):
-    """History text with wheel and draggable-scrollbar mouse handling."""
+    """History text with selection, wheel, and scrollbar mouse handling."""
 
     def __init__(self, app: "AthenaApp") -> None:
         super().__init__(app._history_fragments)
         self._app = app
-        self._dragging = False
+        self._dragging_scrollbar = False
+        self._selecting = False
 
     def mouse_handler(self, mouse_event):
         app = self._app
@@ -89,17 +109,29 @@ class _HistoryControl(FormattedTextControl):
             app._scroll_history_down()
             return None
         if et == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
-            if mouse_event.position.x != app._render_width() - 1:
-                return NotImplemented  # 只响应最右侧滚动条列
-            self._dragging = True
-            app._jump_history_to(mouse_event.position.y)
-            return True
-        if et == MouseEventType.MOUSE_MOVE and self._dragging:
-            app._jump_history_to(mouse_event.position.y)
-            return True
+            if mouse_event.position.x == app._render_width() - 1:
+                self._dragging_scrollbar = True
+                app._clear_history_selection()
+                app._jump_history_to(mouse_event.position.y)
+                return None
+            self._selecting = True
+            app._start_history_selection(mouse_event.position)
+            return None
+        if et == MouseEventType.MOUSE_MOVE:
+            if self._dragging_scrollbar:
+                app._jump_history_to(mouse_event.position.y)
+                return None
+            if self._selecting and mouse_event.button != MouseButton.NONE:
+                app._extend_history_selection(mouse_event.position)
+                return None
         if et == MouseEventType.MOUSE_UP:
-            self._dragging = False
-            return True
+            if self._dragging_scrollbar:
+                self._dragging_scrollbar = False
+                return None
+            if self._selecting:
+                self._selecting = False
+                app._extend_history_selection(mouse_event.position)
+                return None
         return super().mouse_handler(mouse_event)
 
 
@@ -127,6 +159,9 @@ class AthenaApp:
         self._bottom = None
         self._history_control = None
         self._history_scroll = 0
+        self._history_selection_anchor = None
+        self._history_selection_cursor = None
+        self._history_selection_lines = None
         self._confirm_action = ""
         self._exit_code = 0
         self._input = input
@@ -145,24 +180,26 @@ class AthenaApp:
             self._clamp_history_scroll()
 
         if self._app is not None:
-            if self.state.mode == COMPOSER and self.state.overlay is None:
-                self._app.layout.focus(self._composer)
-            self._app.invalidate()
+            if self._history_selection_lines is None:
+                self._app.invalidate()
 
     async def handle_key(self, token: str) -> None:
         """Handle normalized keys; tests use the same path as prompt-toolkit."""
         if token == "pageup":
+            self._clear_history_selection(invalidate=False)
             page = max(1, self._history_height() - 1)
             max_scroll = max(0, self._history_line_count() - self._history_height())
             self._history_scroll = min(max_scroll, self._history_scroll + page)
             self.state = set_history_follow(self.state, False)
             return
         if token == "pagedown":
+            self._clear_history_selection(invalidate=False)
             page = max(1, self._history_height() - 1)
             self._history_scroll = max(0, self._history_scroll - page)
             self.state = set_history_follow(self.state, self._history_scroll == 0)
             return
         if token == "end":
+            self._clear_history_selection(invalidate=False)
             self._history_scroll = 0
             self.state = set_history_follow(self.state, True)
             return
@@ -180,13 +217,21 @@ class AthenaApp:
                 self.state = close_confirmation(self.state)
             return
         if token == "?":
-            self.state = open_overlay(self.state, _HELP)
+            if self._composer is None or not self._composer.text:
+                self.state = open_overlay(self.state, HELP_TEXT)
+            return
+        if token == "s-tab":
+            await self._controller.toggle_manual_mode()
             return
         if token == "c-c":
-            await self._request_quit()
+            if not self._copy_history_selection():
+                await self._request_quit()
             return
         if token == "enter":
             await self._submit_composer()
+            return
+        if token in {"c-j", "s-enter"} and self._composer is not None:
+            self._composer.buffer.insert_text("\n")
 
     async def _submit_composer(self) -> None:
         buffer = self._composer.buffer
@@ -199,7 +244,7 @@ class AthenaApp:
 
         if command == "/help":
             buffer.set_document(Document("", 0), bypass_readonly=True)
-            self.state = open_overlay(self.state, _HELP)
+            self.state = open_overlay(self.state, HELP_TEXT)
             return
         if command == "/quit":
             buffer.set_document(Document("", 0), bypass_readonly=True)
@@ -262,7 +307,13 @@ class AthenaApp:
         return _DEFAULT_SIZE[0]
 
     def _history_height(self) -> int:
-        return max(3, self._render_height() - _FIXED_ROWS)
+        return max(3, self._render_height() - _FIXED_ROWS - self._composer_height())
+
+    def _composer_height(self) -> int:
+        text = (
+            self._composer.text if self._composer is not None else self.state.composer
+        )
+        return composer_height(text, self._render_width())
 
     def _history_content_width(self) -> int:
         return max(1, self._render_width() - 1)
@@ -276,6 +327,7 @@ class AthenaApp:
         self._history_scroll = min(max_scroll, max(0, self._history_scroll))
 
     def _scroll_history_up(self, lines: int = _SCROLL_STEP) -> None:
+        self._clear_history_selection(invalidate=False)
         self._history_scroll += lines
         self._clamp_history_scroll()
         self.state = set_history_follow(self.state, self._history_scroll == 0)
@@ -283,6 +335,7 @@ class AthenaApp:
             self._app.invalidate()
 
     def _scroll_history_down(self, lines: int = _SCROLL_STEP) -> None:
+        self._clear_history_selection(invalidate=False)
         self._history_scroll = max(0, self._history_scroll - lines)
         self.state = set_history_follow(self.state, self._history_scroll == 0)
         if self._app is not None:
@@ -298,7 +351,15 @@ class AthenaApp:
             else max(0, total - self._history_scroll)
         )
         start = max(0, end - height)
-        visible = lines[start:end]
+        if self._history_selection_lines is not None:
+            lines = self._history_selection_lines
+            total = len(lines)
+            start = 0
+            end = total
+        visible = tuple(
+            self._apply_history_selection(line, row)
+            for row, line in enumerate(lines[start:end])
+        )
         if total <= height:
             # 内容不足一屏也显示轨道，让滚动条可见。
             return _join_lines(
@@ -313,6 +374,102 @@ class AthenaApp:
             in_thumb = top <= index < top + thumb_h
             rows.append([*line, ("class:scrollbar", "█" if in_thumb else "│")])
         return _join_lines(tuple(rows))
+
+    def _start_history_selection(self, point) -> None:
+        lines = render_history_lines(self.state, self._history_content_width())
+        height = self._history_height()
+        total = len(lines)
+        end = (
+            total
+            if self.state.history_follow_tail
+            else max(0, total - self._history_scroll)
+        )
+        start = max(0, end - height)
+        self._history_selection_lines = tuple(lines[start:end])
+        self.state = set_history_follow(self.state, False)
+        self._history_selection_anchor = point
+        self._history_selection_cursor = point
+        if self._app is not None:
+            self._app.invalidate()
+
+    def _extend_history_selection(self, point) -> None:
+        if self._history_selection_anchor is None:
+            return
+        self._history_selection_cursor = point
+        if self._app is not None:
+            self._app.invalidate()
+
+    def _clear_history_selection(self, *, invalidate: bool = True) -> None:
+        self._history_selection_anchor = None
+        self._history_selection_cursor = None
+        self._history_selection_lines = None
+        if invalidate and self._app is not None:
+            self._app.invalidate()
+
+    def _copy_history_selection(self) -> bool:
+        text = self._selected_history_text()
+        if not text or self._app is None:
+            return False
+        self._app.clipboard.set_text(text)
+        return True
+
+    def _selected_history_text(self) -> str:
+        anchor = self._history_selection_anchor
+        cursor = self._history_selection_cursor
+        lines = self._history_selection_lines
+        if anchor is None or cursor is None or lines is None or anchor == cursor:
+            return ""
+
+        first, last = sorted(((anchor.y, anchor.x), (cursor.y, cursor.x)))
+        selected_lines: list[str] = []
+        for row in range(first[0], min(last[0], len(lines) - 1) + 1):
+            start = first[1] if row == first[0] else 0
+            end = last[1] if row == last[0] else self._history_content_width()
+            column = 0
+            selected = ""
+            for _style, fragment in lines[row]:
+                for char in fragment:
+                    width = max(0, get_cwidth(char))
+                    char_end = column + width
+                    if char_end > start and column < end:
+                        selected += char
+                    column = char_end
+            selected_lines.append(selected.rstrip())
+        return "\n".join(selected_lines)
+
+    def _apply_history_selection(
+        self, line: StyleAndTextTuples, row: int
+    ) -> StyleAndTextTuples:
+        anchor = self._history_selection_anchor
+        cursor = self._history_selection_cursor
+        if anchor is None or cursor is None or anchor == cursor:
+            return line
+
+        first, last = sorted(((anchor.y, anchor.x), (cursor.y, cursor.x)))
+        if row < first[0] or row > last[0]:
+            return line
+        start = first[1] if row == first[0] else 0
+        end = last[1] if row == last[0] else self._history_content_width()
+        if end <= start:
+            return line
+
+        selected: StyleAndTextTuples = []
+        column = 0
+        for style, text in line:
+            for char in text:
+                width = max(0, get_cwidth(char))
+                char_end = column + width
+                in_selection = char_end > start and column < end
+                selected_style = (
+                    f"{style} class:history.selection" if in_selection else style
+                )
+                if selected and selected[-1][0] == selected_style:
+                    previous_style, previous_text = selected[-1]
+                    selected[-1] = (previous_style, previous_text + char)
+                else:
+                    selected.append((selected_style, char))
+                column = char_end
+        return selected
 
     def _jump_history_to(self, row: int) -> None:
         """把历史视图跳到滚动条上 ``row`` 行（内容相对坐标）对应的位置。"""
@@ -336,17 +493,13 @@ class AthenaApp:
         return self._composer_pane
 
     def _build(self) -> Application:
-        def accept_input(_buffer) -> bool:
-            """Schedule the shared Enter-key handler for accepted input."""
-            if self._app is not None:
-                self._app.create_background_task(self.handle_key("enter"))
-            return True
-
         self._composer = TextArea(
-            height=3,
-            prompt="> ",
-            multiline=False,
-            accept_handler=accept_input,
+            height=lambda: Dimension.exact(self._composer_height()),
+            prompt="› ",
+            multiline=True,
+            wrap_lines=True,
+            scrollbar=True,
+            dont_extend_height=True,
             style="class:composer",
         )
         self._composer.buffer.on_text_changed += lambda _buffer: setattr(
@@ -356,18 +509,16 @@ class AthenaApp:
             FormattedTextControl(
                 lambda: render_header(self.state, self._render_width())
             ),
-            height=2,
+            height=1,
             dont_extend_height=True,
         )
         self._history_control = _HistoryControl(self)
         history = Window(self._history_control, wrap_lines=True)
-        prompt = Window(
-            FormattedTextControl(
-                lambda: render_bottom_pane(self.state, self._render_width())
-            ),
-            dont_extend_height=True,
+        self._composer_pane = Frame(
+            self._composer,
+            title=lambda: render_bottom_pane(self.state, self._render_width()),
+            style="class:composer-frame.focused",
         )
-        self._composer_pane = HSplit([prompt, self._composer])
         self._confirmation_pane = Window(
             FormattedTextControl(
                 lambda: render_bottom_pane(self.state, self._render_width()),
@@ -385,7 +536,7 @@ class AthenaApp:
             FormattedTextControl(
                 lambda: render_status(self.state, self._render_width())
             ),
-            height=2,
+            height=1,
             dont_extend_height=True,
             style=lambda: f"class:status.{self.state.control_status.lower()}",
         )
@@ -415,18 +566,47 @@ class AthenaApp:
             add = keys.add(key) if when is None else keys.add(key, filter=when)
             add(handler)
 
-        for token in (
-            "pageup",
-            "pagedown",
-            "end",
-            "escape",
-            "c-c",
-        ):
-            bind(token, action="esc" if token == "escape" else token)
-        bind("?", when=Condition(lambda: self.state.mode == COMPOSER))
+        for token in ("pageup", "pagedown", "end", "c-c"):
+            bind(token)
+        bind(
+            "?",
+            when=Condition(
+                lambda: self.state.mode == COMPOSER
+                and self.state.overlay is None
+                and self._composer is not None
+                and not self._composer.text
+            ),
+        )
         confirmation = Condition(lambda: self.state.mode == CONFIRMATION)
+        modal = Condition(
+            lambda: self.state.mode == CONFIRMATION or self.state.overlay is not None
+        )
+
+        @keys.add(Keys.Any, filter=modal)
+        def ignore_modal_text(_event) -> None:
+            pass
+
+        bind("escape", action="esc", when=modal)
         bind("y", when=confirmation)
         bind("n", when=confirmation)
+
+        composer = Condition(
+            lambda: self.state.mode == COMPOSER and self.state.overlay is None
+        )
+
+        bind("s-tab", when=composer)
+
+        @keys.add("c-m", filter=composer, eager=True)
+        async def submit_or_newline(event) -> None:
+            if event.key_sequence[-1].data in _SHIFT_ENTER_SEQUENCES:
+                self._composer.buffer.insert_text("\n")
+            else:
+                await self.handle_key("enter")
+
+        @keys.add("c-j", filter=composer, eager=True)
+        def insert_newline(_event) -> None:
+            self._composer.buffer.insert_text("\n")
+
         return keys
 
     async def run(self) -> int:
