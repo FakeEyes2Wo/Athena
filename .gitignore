@@ -55,8 +55,9 @@ XH-202619.pdf
 !/data_analyze/EDA.md/
 !/data_analyze/EDA.md/.gitkeep
 
-# Titanic research-loop run output (e.g. titanic-123/artifacts)
-/examples/titanic-*/
+# Example research-loop run outputs (scratch); keep the committed titanic input
+/examples/*
+!/examples/titanic/
 .athena/
 
 # Isolated feature worktrees
