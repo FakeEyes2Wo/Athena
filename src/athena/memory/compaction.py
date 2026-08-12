@@ -12,12 +12,15 @@ from athena.memory.context_manager import ContextManager
 
 _SUMMARY_PART_CHARS = 300
 
+
 @dataclass(slots=True)
 class Compaction:
     """一次压缩的结果，包含回滚所需的原始消息。"""
+
     version: int
     summary: str
     original_items: list[ModelMessage]
+
 
 class Compactor:
     """将早期对话历史替换为 LLM 生成的摘要。
@@ -26,6 +29,7 @@ class Compactor:
         keep_recent: 保留最近多少 Token 的消息不被压缩。
         summary_model: 用于生成摘要的轻量模型 ID。
     """
+
     __slots__ = ("_keep_recent", "_summary_model")
 
     def __init__(self, keep_recent: int = 20_000, summary_model: str = "haiku") -> None:
@@ -67,7 +71,47 @@ class Compactor:
         return 0
 
     async def _summarize(self, items: list[ModelMessage], llm: Any) -> str:
-        """构造摘要 prompt，调用 LLM 生成摘要。"""
+        """构造摘要 prompt，调用 LLM 生成摘要。
+
+        支持两种客户端：
+        - OpenAI 兼容 client（``ResponsesProvider.client`` 或原生 AsyncOpenAI 的
+          ``chat.completions.create``）——memory-flow-fixes §生产压缩。
+        - 既有 ``messages.create`` client（Anthropic 格式）。
+        """
+        prompt = self._summary_prompt(items)
+        chat = getattr(getattr(llm, "client", None) or llm, "chat", None)
+        if chat is not None:
+            response = await chat.completions.create(
+                model=self._summary_model,
+                temperature=0.1,
+                max_tokens=2_000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            choices = getattr(response, "choices", None)
+            if choices and getattr(choices[0].message, "content", None):
+                return choices[0].message.content
+            raise ValueError("摘要模型未返回文本")
+
+        response = await llm.messages.create(
+            model=self._summary_model,
+            temperature=0.1,
+            max_tokens=2_000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        # Anthropic 格式 (content[0].text)；fallback 到 OpenAI 格式或纯字符串
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            return content
+        if content and hasattr(content[0], "text"):
+            return content[0].text
+        choices = getattr(response, "choices", None)
+        if choices:
+            return getattr(choices[0].message, "content", "")
+        raise ValueError("摘要模型未返回文本")
+
+    @staticmethod
+    def _summary_prompt(items: list[ModelMessage]) -> str:
+        """把早期消息渲染成摘要 prompt。"""
         parts = [
             "Summarize concisely (decisions, findings, code changes, "
             "hypotheses, results):\n\n"
@@ -90,23 +134,11 @@ class Compactor:
                             "\n",
                         )
                     )
+        return "".join(parts)
 
-        response = await llm.messages.create(
-            model=self._summary_model,
-            temperature=0.1,
-            max_tokens=2_000,
-            messages=[{"role": "user", "content": "".join(parts)}],
-        )
-        # Anthropic 格式 (content[0].text)；fallback 到 OpenAI 格式或纯字符串
-        content = getattr(response, "content", None)
-        if isinstance(content, str):
-            return content
-        if content and hasattr(content[0], "text"):
-            return content[0].text
-        choices = getattr(response, "choices", None)
-        if choices:
-            return getattr(choices[0].message, "content", "")
-        raise ValueError("摘要模型未返回文本")
 
 if __name__ == "__main__":
-    print("Compactor loaded.")
+    ctx = ContextManager(context_limit=100_000)
+    ctx.append(ModelRequest(parts=[SystemPromptPart(content="early conversation")]))
+    compactor = Compactor(keep_recent=5_000)
+    print(f"compact needed: {compactor.should_compact(ctx)}")

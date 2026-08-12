@@ -5,7 +5,7 @@ import inspect
 import traceback
 import types
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin
 
 from athena.core.tool_types import (
     TOOL_BEGIN,
@@ -34,7 +34,8 @@ class BaseTool(ABC):
     spec: ToolSpec
 
     @abstractmethod
-    async def execute(self, input: dict, ctx: ToolContext) -> Any: ...
+    async def execute(self, input: dict, ctx: ToolContext) -> Any:
+        """执行工具逻辑，返回原始数据（非 ToolResult）。"""
 
     async def _execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """将返回值或异常包装为 ``ToolResult``。
@@ -53,11 +54,16 @@ class BaseTool(ABC):
             )
 
     def invoke(self, **input: Any) -> ToolResult:
+        """同步入口：用独立事件循环执行一次调用。"""
         return asyncio.run(self.ainvoke(_sync_ctx(), **input))
 
     async def ainvoke(self, ctx: ToolContext, **input: Any) -> ToolResult:
         """生命周期：开始 → 执行 → 结束/错误。"""
-        await ctx.emit(TOOL_BEGIN, f"ev:{ctx.call_id}:begin", None)
+        event_data: dict[str, Any] = {"tool": ctx.tool_name}
+        path = input.get("path")
+        if isinstance(path, str):
+            event_data["path"] = path
+        await ctx.emit(TOOL_BEGIN, f"ev:{ctx.call_id}:begin", event_data)
         try:
             result = await self._execute(input, ctx)
         except asyncio.CancelledError:
@@ -67,7 +73,7 @@ class BaseTool(ABC):
         await ctx.emit(
             TOOL_END if result.success else TOOL_ERROR,
             f"ev:{ctx.call_id}:end",
-            None,
+            event_data,
         )
         return result
 
@@ -135,6 +141,7 @@ def tool(
     """
 
     def deco(fn: Any) -> BaseTool:
+        """把被装饰函数包装为 BaseTool 实例。"""
         spec_name = name or fn.__name__
         doc = inspect.cleandoc(fn.__doc__ or "")
         spec_desc = description if description is not None else (doc or fn.__name__)
@@ -151,6 +158,7 @@ def tool(
             )
 
             async def execute(self, input: dict, ctx: ToolContext) -> Any:
+                """透传调用原始函数。"""
                 return await fn(**input)
 
         _T.__name__ = fn.__name__
@@ -169,18 +177,21 @@ class ToolRegistry:
         self._sorted: list[BaseTool] = []
 
     def register(self, t: BaseTool) -> None:
+        """注册工具；重名报错，按名称维持排序。"""
         if t.spec.name in self._tools:
             raise KeyError(f"Tool '{t.spec.name}' already registered")
         self._tools[t.spec.name] = t
         self._sorted = sorted(self._tools.values(), key=lambda t: t.spec.name)
 
     def resolve(self, name: str) -> BaseTool:
+        """按名称取工具；未注册报 KeyError。"""
         if name not in self._tools:
             raise KeyError(f"Tool '{name}' not found")
         return self._tools[name]
 
     @property
     def specs(self) -> list[ToolSpec]:
+        """按名称排序的工具 spec 列表。"""
         return [t.spec for t in self._sorted]
 
     def __len__(self) -> int:

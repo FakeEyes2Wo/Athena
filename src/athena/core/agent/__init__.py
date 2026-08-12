@@ -7,7 +7,15 @@ from athena.core.agent.models import (
     StepOutcome,
     ToolCall,
 )
-from athena.core.agent.provider import ResponsesProvider, StreamEvent
+from athena.core.agent.provider import (
+    AnthropicProvider,
+    BaseProvider,
+    DeepSeekProvider,
+    OpenAIProvider,
+    ResponsesProvider,
+    StreamEvent,
+    create_provider,
+)
 from athena.core.agent.runtime import (
     Agent,
     BaseAgent,
@@ -24,7 +32,11 @@ __all__ = [
     "AgentContext",
     "AgentOutcome",
     "AgentRuntime",
+    "AnthropicProvider",
     "BaseAgent",
+    "BaseProvider",
+    "DeepSeekProvider",
+    "OpenAIProvider",
     "RequestUserInputTool",
     "ResponsesProvider",
     "StepOutcome",
@@ -33,4 +45,5 @@ __all__ = [
     "agent_runner",
     "create_agent",
     "create_code_agent",
+    "create_provider",
 ]

@@ -1071,7 +1071,7 @@ async def test_judge_failure_is_wrapped_once_without_fallback_or_audit(
         await task
 
     # A persistent judge failure exhausts all bounded retry attempts before surfacing.
-    assert str(raised.value.__cause__) == "turn failed: LookupError"
+    assert str(raised.value.__cause__) == "LookupError: judge unavailable"
     assert factory.judge_calls == 3
     assert artifacts.audit_payloads() == []
 

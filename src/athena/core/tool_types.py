@@ -43,6 +43,7 @@ class ToolSpec:
     max_result_chars: int = 50_000
 
     def to_openai_tool(self) -> dict:
+        """转为 OpenAI function tool schema dict。"""
         return {
             "type": "function",
             "function": {

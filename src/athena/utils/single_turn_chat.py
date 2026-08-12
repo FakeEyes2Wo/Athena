@@ -73,7 +73,7 @@ async def single_turn_chat(
     tools: ToolRegistry | None = None,
     system_prompt: str | None = None,
     client: "AsyncOpenAI | None" = None,
-    max_turns: int = 20,
+    max_turns: int = 200,
     max_tokens: int = 4096,
     temperature: float = 0.1,
     emit: EmitEvent | None = None,

@@ -2,8 +2,7 @@
 
 注册表保存 ``agent_type -> factory``；factory 每次按 ``agent_id`` 创建全新
 runtime binding（AgentSpec），保证同类型多个实例拥有独立状态。factory 是进程
-配置，不写入 GraphStore；首版只注册静态类型，动态创建新类型保留
-``TODO(dynamic-agent-type)``。
+配置，不写入 GraphStore；首版只注册静态类型，动态创建新类型不在首版合同内。
 """
 
 from typing import Callable

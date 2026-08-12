@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import aclosing
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
+
+from athena.core.retry import is_transient_error
 
 from pydantic_ai.messages import (
     ModelRequest,
@@ -28,7 +31,7 @@ from athena.core.agent.models import (
     StepOutcome,
     ToolCall,
 )
-from athena.core.agent.provider import ResponsesProvider
+from athena.core.agent.provider import BaseProvider, create_provider
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser, EmitEvent, ToolContext, ToolResult
@@ -43,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 _MAX_STRUCTURED_RETRIES = 3
 
+# LLM 响应流断线最多重连次数（supervisor_design §6.1）+ 退避基准秒数。
+_MAX_STREAM_RETRIES = 5
+_RETRY_BASE_DELAY = 1.0
+
 
 class BaseAgent(ABC):
     """Agent 抽象基类 — 定义 ``run`` 和 ``tool`` 统一契约。
@@ -54,9 +61,12 @@ class BaseAgent(ABC):
     description: str
 
     @abstractmethod
-    async def run(self, ctx: AgentContext) -> AgentOutcome: ...
+    async def run(self, ctx: AgentContext) -> AgentOutcome:
+        """运行业务 Agent 的一个 turn（BaseAgent 公共契约）。"""
+        ...
 
     async def tool(self, ctx: AgentContext, name: str, **inp: Any) -> ToolResult:
+        """按名称调用工具并返回 ToolResult（业务 Agent 编排用）。"""
         return await ctx.tools.resolve(name).ainvoke(
             ToolContext(name, f"{ctx.turn.turn_id}:{name}", ctx.emit, ctx.cancel), **inp
         )
@@ -72,7 +82,7 @@ class Agent(BaseAgent):
 
     def __init__(
         self,
-        model: ResponsesProvider,
+        model: BaseProvider,
         tools: ToolRegistry,
         system_prompt: str,
         config: AgentConfig | None = None,
@@ -89,13 +99,16 @@ class Agent(BaseAgent):
 
     @property
     def name(self) -> str:
+        """Agent 显示名（来自 config）。"""
         return self.config.name
 
     @property
     def description(self) -> str:
+        """Agent 描述（模型名）。"""
         return f"Agent: {self.model.model_name}"
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
+        """ReAct 循环：system 注入 → 多轮采样（工具调用/返回）直到纯文本输出。"""
         mem = ctx.memory
         if mem is None:
             mem = ctx.memory = ContextManager()
@@ -165,6 +178,15 @@ class Agent(BaseAgent):
         )
 
 
+async def _unknown_tool_result(name: str, available: list[str]) -> ToolResult:
+    """未知工具名 → 可恢复的工具错误，列出已注册工具供同一 turn 重试。"""
+    return ToolResult(
+        success=False,
+        error=f"unknown tool: {name}; available_tools={available}",
+        data={"available_tools": available},
+    )
+
+
 async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any] | None]) -> None:
     """取消并等待所有在途工具任务；吞掉取消引发的异常。"""
     pending = [t for t in tool_tasks if t is not None and not t.done()]
@@ -175,12 +197,35 @@ async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any] | None]) -> None
 
 
 async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
-    """单次 LLM 采样 + 工具执行 + 结果回写。
+    """单次 LLM 采样 + 工具执行 + 结果回写；对瞬时流错误自动重连。
+
+    Codex 式技术重试：LLM 响应流断线最多重连 ``_MAX_STREAM_RETRIES`` 次，指数
+    退避 + jitter；仅在尚未派发任何工具调用（无副作用）时重试，工具已执行后的
+    错误视为业务失败，原样返回。
+    """
+    retries_left = _MAX_STREAM_RETRIES
+    while True:
+        outcome, transient = await _sample_once(agent, ctx)
+        if not transient or retries_left <= 1:
+            return outcome
+        retries_left -= 1
+        delay = (
+            _RETRY_BASE_DELAY
+            * (2 ** (_MAX_STREAM_RETRIES - retries_left))
+            * (0.5 + random.random())
+        )
+        await asyncio.sleep(delay)
+
+
+async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bool]:
+    """单次采样步进；返回 (outcome, transient)。
 
     并发策略：
     - concurrency_safe 工具：创建 task 并等待 serial_barrier（如有），异步并行
     - 非 concurrency_safe 工具：先 gather 所有前置 task，自身成为 serial_barrier
       后续所有任务（无论是否安全）都必须等待它完成，保证串行顺序
+
+    ``transient=True`` 仅表示"瞬时流错误且尚未派发工具调用"（可安全重连）。
     """
     mem = ctx.memory
     assert mem is not None
@@ -222,7 +267,16 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
                         tool_calls.append(tc)
                         tool_tasks.append(None)
 
-                        tool = agent.tools.resolve(tc.name)
+                        try:
+                            tool = agent.tools.resolve(tc.name)
+                        except KeyError:
+                            # 未知工具名 → 可恢复工具错误（同一 turn 重试，不终止 worker）
+                            tool_tasks[idx] = asyncio.create_task(
+                                _unknown_tool_result(
+                                    tc.name, [spec.name for spec in agent.tools.specs]
+                                )
+                            )
+                            continue
                         tctx = ToolContext(
                             tc.name,
                             f"{ctx.turn.turn_id}:{tc.name}",
@@ -244,8 +298,14 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
                     case "error":
                         # 流错误：取消未完成的工具任务后返回 error 步进
                         await _cancel_tool_tasks(tool_tasks)
-                        return StepOutcome(
-                            kind="error", text=event.data.get("message", "")
+                        transient = not had_calls and is_transient_error(
+                            event.data.get("message", "")
+                        )
+                        return (
+                            StepOutcome(
+                                kind="error", text=event.data.get("message", "")
+                            ),
+                            transient,
                         )
 
     except asyncio.CancelledError:
@@ -255,7 +315,8 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
     except Exception as exc:  # Provider 流未预期异常 → 清理工具任务后返回错误
         logger.error("Provider stream 失败: %s", exc)
         await _cancel_tool_tasks(tool_tasks)
-        return StepOutcome(kind="error", text=f"{type(exc).__name__}: {exc}")
+        transient = not had_calls and is_transient_error(exc)
+        return StepOutcome(kind="error", text=f"{type(exc).__name__}: {exc}"), transient
 
     # 等待所有工具执行完成
     results: list[Any] = [None] * len(tool_tasks)
@@ -303,10 +364,10 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
     # 无工具调用且有文本 → 完成；有工具调用 → 继续下一轮
     if not had_calls and text:
         mem.append(ModelResponse(parts=[TextPart(content=text)]))
-        return StepOutcome(kind="done", text=text)
+        return StepOutcome(kind="done", text=text), False
     if had_calls:
-        return StepOutcome(kind="continue")
-    return StepOutcome(kind="done", text=text)
+        return StepOutcome(kind="continue"), False
+    return StepOutcome(kind="done", text=text), False
 
 
 def _dispatch_tool_call(
@@ -415,7 +476,7 @@ def create_agent(
     system_prompt: str,
     *,
     client: "AsyncOpenAI | None" = None,
-    max_turns: int = 20,
+    max_turns: int = 200,
     max_tokens: int = 4096,
     temperature: float = 0.1,
     name: str = "agent",
@@ -424,17 +485,18 @@ def create_agent(
 
     将分散的配置参数统一构造为 AgentConfig 和 Agent 对象。
     """
-    provider = ResponsesProvider(model, client=client)
+    provider = create_provider(model, client=client)
     config = AgentConfig(max_turns, max_tokens, temperature, name)
     return create_code_agent(provider, tools, system_prompt, config)
 
 
 def create_code_agent(
-    model: ResponsesProvider,
+    model: BaseProvider,
     tools: ToolRegistry,
     system_prompt: str,
     config: AgentConfig | None = None,
 ) -> Agent:
+    """构造代码 agent（Agent 别名，供组合根使用）。"""
     return Agent(model, tools, system_prompt, config)
 
 

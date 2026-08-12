@@ -32,7 +32,7 @@ from athena.core.workspace import GitWorkBranch
 from athena.research.models import MetricSpec, TaskMetaData
 from athena.research.project_runtime import ProjectRuntime
 
-# --- 硬编码变量 ---
+# 硬编码变量
 DATASET = Path("examples/titanic/train.csv").resolve()
 TARGET = "Survived"
 OUTPUT_DIR = Path("examples/titanic-run").resolve()

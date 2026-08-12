@@ -17,10 +17,11 @@ if TYPE_CHECKING:
 class AgentConfig:
     """Agent 运行配置 — 模型、系统提示、工具集和采样参数。"""
 
-    max_turns: int = 20
+    max_turns: int = 200
     max_tokens: int = 4096
     temperature: float = 0.1
     name: str = "code-agent"
+    tool_choice: Literal["auto", "required"] = "auto"
 
 
 @dataclass(slots=True)

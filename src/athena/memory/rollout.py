@@ -70,6 +70,12 @@ class RolloutRecorder:
 
         if append_to is not None:
             self._path = append_to
+            if append_to.exists() and append_to.stat().st_size > 0:
+                with append_to.open("rb+") as existing:
+                    existing.seek(-1, 2)
+                    if existing.read(1) != b"\n":
+                        existing.seek(0, 2)
+                        existing.write(b"\n")
             self._fd = open(append_to, "a", encoding="utf-8", newline="\n")
             self._seq = 0
             return append_to

@@ -9,6 +9,9 @@ load_dotenv()
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_PRO_MODEL = "deepseek-v4-pro"
+
+ALLOWED_PROVIDERS = ("deepseek", "openai", "anthropic")
 
 
 def _resolve(key: str, default: str | None = None) -> str | None:
@@ -29,6 +32,25 @@ def base_url() -> str:
 def model_name() -> str:
     """默认 deepseek-v4-flash（最便宜档位），可经 MODEL_NAME 覆盖。"""
     return _resolve("MODEL_NAME", DEFAULT_MODEL) or DEFAULT_MODEL
+
+
+def pro_model_name() -> str:
+    """Pro 档位模型（更贵但更强），可经 MODEL_PRO 覆盖。"""
+    return _resolve("MODEL_PRO", DEFAULT_PRO_MODEL) or DEFAULT_PRO_MODEL
+
+
+def provider_kind() -> str:
+    """LLM 后端类型：仅显式 LLM_PROVIDER 环境变量，不做 base_url/model 推断。
+
+    缺省 ``deepseek``（仓库现状）。非法值在构造期即抛 ``ValueError``。
+    """
+    kind = _resolve("LLM_PROVIDER", "deepseek")
+    if kind not in ALLOWED_PROVIDERS:
+        raise ValueError(
+            f"unsupported LLM_PROVIDER={kind!r}; "
+            f"expected one of {', '.join(ALLOWED_PROVIDERS)}"
+        )
+    return kind
 
 
 # 技术重试（supervisor_design §4.3）：LLM 响应流断线最多重连 5 次，指数退避 + jitter。

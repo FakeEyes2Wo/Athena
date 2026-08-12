@@ -98,6 +98,30 @@ class TestRolloutRecorder:
         assert p1 == p2
         assert len(p1.read_text().splitlines()) == 1
 
+    async def test_append_after_truncated_tail_preserves_new_complete_record(
+        self, tmp_project
+    ):
+        from athena.memory.rollout import RolloutRecorder, resume_context_sync
+
+        path = tmp_project / "agent.jsonl"
+        first = RolloutRecorder(tmp_project)
+        first.open_sync("stable-agent", append_to=path)
+        first.record(_user("complete-before-crash"))
+        await first.close()
+        with path.open("a", encoding="utf-8") as fd:
+            fd.write('{"seq":1,"msg":')
+
+        resumed = RolloutRecorder(tmp_project)
+        resumed.open_sync("stable-agent", append_to=path)
+        resumed.record(_user("complete-after-restart"))
+        await resumed.close()
+
+        context = resume_context_sync(path)
+        assert [item.parts[0].content for item in context.items] == [
+            "complete-before-crash",
+            "complete-after-restart",
+        ]
+
     async def test_thread_id_cannot_create_nested_paths(self, tmp_project):
         from athena.memory.rollout import RolloutRecorder
 

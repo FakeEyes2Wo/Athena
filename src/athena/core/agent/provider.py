@@ -3,11 +3,12 @@
 import asyncio
 import json
 import logging
+from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 from athena.core.agent import settings
@@ -28,30 +29,20 @@ class StreamEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
-class ResponsesProvider:
-    """OpenAI-compatible Chat Completions 流式调用。"""
-
-    def __init__(
-        self,
-        model: str,
-        *,
-        client: AsyncOpenAI | None = None,
-    ) -> None:
-        self._model_name = model
-        self._client = client
+class BaseProvider(ABC):
+    """LLM provider 稳定接口:模型名、client、流式 stream()。"""
 
     @property
+    @abstractmethod
     def model_name(self) -> str:
-        return self._model_name
+        """当前模型名。"""
 
     @property
+    @abstractmethod
     def client(self) -> AsyncOpenAI:
-        """返回注入的 client；未注入时按 settings（.env 的 DeepSeek 凭据）构造。"""
-        if self._client is None:
-            self._client = settings.get_client()
-        return self._client
+        """底层客户端(注入或按 settings 构造)。"""
 
-    # TODO: 这里弄一个stream和astream
+    @abstractmethod
     async def stream(
         self,
         config: "AgentConfig",
@@ -61,7 +52,74 @@ class ResponsesProvider:
         *,
         output_type: type | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        """流式调用 LLM,产出文本增量 / 工具调用 / 完成 / 错误事件。"""
+
+
+class ResponsesProvider(BaseProvider):
+    """OpenAI 兼容 Chat Completions 流式 provider。
+
+    ``provider_kind`` 决定结构化输出的适配方式:
+    - ``openai``: ``response_format={"type": "json_schema", ...}``(OpenAI 原生)。
+    - ``deepseek``: ``{"type": "json_object"}`` + 把 output_type 完整 schema 注入
+      prompt(DeepSeek 不支持 json_schema)。
+    缺省取 ``settings.provider_kind()``(仓库默认 deepseek),也可显式注入用于测试。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        client: AsyncOpenAI | None = None,
+        provider_kind: str | None = None,
+    ) -> None:
+        self._model_name = model
+        self._client = client
+        self.provider_kind = provider_kind or settings.provider_kind()
+
+    @property
+    def model_name(self) -> str:
+        """当前模型名。"""
+        return self._model_name
+
+    @property
+    def client(self) -> AsyncOpenAI:
+        """返回注入的 client；未注入时按 settings（.env 的 DeepSeek 凭据）构造。"""
+        if self._client is None:
+            self._client = settings.get_client()
+        return self._client
+
+    def _response_format(self, output_type: type) -> dict[str, Any] | None:
+        """按 provider 能力返回 response_format;不支持的 provider 返回 None。
+
+        - openai: json_schema 结构化输出(OpenAI 原生)。
+        - deepseek: json_object(合法 JSON 但无 schema 强制;schema 由
+          ``_schema_instruction`` 注入 prompt)。
+        """
+        if self.provider_kind == "openai":
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": output_type.__name__,
+                    "schema": output_type.model_json_schema(),
+                },
+            }
+        if self.provider_kind == "deepseek":
+            return {"type": "json_object"}
+        return None
+
+    async def stream(
+        self,
+        config: "AgentConfig",
+        tools: "ToolRegistry",
+        messages: list[ModelMessage],
+        cancel: asyncio.Event,
+        *,
+        output_type: type | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """流式调用 Chat Completions，产出文本增量 / 工具调用 / 完成事件。"""
         api_msgs = _to_api(messages)
+        if self.provider_kind == "deepseek" and output_type is not None:
+            api_msgs = [*api_msgs, _schema_instruction(output_type)]
         tool_defs = [spec.to_openai_tool() for spec in tools.specs]
 
         kw: dict = dict(
@@ -73,18 +131,24 @@ class ResponsesProvider:
             extra_body={"thinking": {"type": "disabled"}},
         )
         if output_type is not None:
-            kw["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": output_type.__name__,
-                    "schema": output_type.model_json_schema(),
-                },
-            }
+            response_format = self._response_format(output_type)
+            if response_format is not None:
+                kw["response_format"] = response_format
         if tool_defs:
             kw["tools"] = tool_defs
-            kw["tool_choice"] = "auto"
+            kw["tool_choice"] = config.tool_choice
 
-        stream = await self.client.chat.completions.create(**kw)
+        try:
+            stream = await self.client.chat.completions.create(**kw)
+        except BadRequestError as exc:
+            if not _response_format_unavailable(exc):
+                raise
+            logger.warning(
+                "provider does not support json_schema response_format; "
+                "retrying with prompt-guided JSON"
+            )
+            kw.pop("response_format", None)
+            stream = await self.client.chat.completions.create(**kw)
 
         # 流式处理：累积 text delta + 解析 tool call 增量
         bufs: dict[int, dict] = {}
@@ -157,6 +221,115 @@ class ResponsesProvider:
             kind="response_completed",
             data={"finish_reason": finish or "stop", "accumulated_text": text},
         )
+
+
+class OpenAIProvider(ResponsesProvider):
+    """OpenAI 后端:json_schema 结构化输出。"""
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        super().__init__(model, client=client, provider_kind="openai")
+
+
+class DeepSeekProvider(ResponsesProvider):
+    """DeepSeek 后端:json_object + schema 注入 prompt。"""
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        super().__init__(model, client=client, provider_kind="deepseek")
+
+
+_ANTHROPIC_NOT_IMPLEMENTED = (
+    "native Anthropic provider is not yet implemented; "
+    "set LLM_PROVIDER=deepseek|openai"
+)
+
+
+class AnthropicProvider(BaseProvider):
+    """原生 Anthropic provider 保留槽位(本轮未实现)。
+
+    构造即抛清晰错误,避免静默走错路径。原生实现需要 ``anthropic`` SDK 与
+    ``messages.create``/``output_schema`` 的独立流式形态,留作后续任务。
+    抽象成员 stub 仅用于通过 ABC 实例化检查;正常构造在 ``__init__`` 即抛错。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        client: object | None = None,
+    ) -> None:
+        raise NotImplementedError(_ANTHROPIC_NOT_IMPLEMENTED)
+
+    @property
+    def model_name(self) -> str:
+        raise NotImplementedError(_ANTHROPIC_NOT_IMPLEMENTED)
+
+    @property
+    def client(self) -> AsyncOpenAI:
+        raise NotImplementedError(_ANTHROPIC_NOT_IMPLEMENTED)
+
+    async def stream(
+        self,
+        config: "AgentConfig",
+        tools: "ToolRegistry",
+        messages: list[ModelMessage],
+        cancel: asyncio.Event,
+        *,
+        output_type: type | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        raise NotImplementedError(_ANTHROPIC_NOT_IMPLEMENTED)
+
+
+def create_provider(
+    model: str,
+    *,
+    client: AsyncOpenAI | None = None,
+) -> BaseProvider:
+    """按 ``settings.provider_kind()``(LLM_PROVIDER 环境变量)构造对应 provider。
+
+    仅显式选择,不做 base_url/model 前缀推断。
+    """
+    kind = settings.provider_kind()
+    if kind == "openai":
+        return OpenAIProvider(model, client=client)
+    if kind == "deepseek":
+        return DeepSeekProvider(model, client=client)
+    if kind == "anthropic":
+        return AnthropicProvider(model, client=client)
+    raise ValueError(f"unsupported LLM_PROVIDER={kind!r}")
+
+
+def _schema_instruction(output_type: type) -> dict[str, str]:
+    """构造把 output_type 完整 schema 注入 prompt 的 system 消息。
+
+    DeepSeek 的 ``json_object`` 模式不会把 schema 传给模型,必须显式放进
+    prompt;消息含 "JSON" 字样,同时满足 DeepSeek 要求 prompt 含 "json" 的前置条件。
+    """
+    return {
+        "role": "system",
+        "content": (
+            "Return a JSON object matching this schema:\n"
+            f"{json.dumps(output_type.model_json_schema(), ensure_ascii=False)}"
+        ),
+    }
+
+
+def _response_format_unavailable(exc: BadRequestError) -> bool:
+    message = str(exc).lower()
+    return (
+        exc.status_code == 400
+        and "response_format" in message
+        and ("unavailable" in message or "unsupported" in message)
+    )
 
 
 def _to_api(msgs: list[ModelMessage]) -> list[dict]:

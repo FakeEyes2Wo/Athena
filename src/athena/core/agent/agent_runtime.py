@@ -114,16 +114,22 @@ class AgentRuntime:
         type_registry: AgentTypeRegistry,
         project_root: Path | None = None,
         rollout_dir: Path | None = None,
+        compactor: Any = None,
+        llm: Any = None,
     ) -> None:
         self._registry = type_registry
         root = Path(project_root) if project_root is not None else Path.cwd()
-        from athena.app_server.thread_manager import RuntimeThreadManager
+        from athena.app_server.thread_manager import (
+            RuntimeThreadManager,
+        )  # 延迟导入避免循环依赖
 
         self._manager = RuntimeThreadManager(
             _ThreadRunner(self),
             project_root=root,
             rollout_dir=rollout_dir,
             ctx=ContextManager(),  # 每线程默认空记忆;rollout_dir 存在时由 _make_runtime 恢复覆盖
+            compactor=compactor,  # 生产压缩（memory-flow-fixes §生产压缩）
+            llm=llm,
             on_turn_terminal=self._on_turn_terminal,
         )
         self._records: dict[AgentId, _FacadeRecord] = {}
@@ -134,10 +140,20 @@ class AgentRuntime:
         self._human_waits: dict[str, AgentId] = {}
         self._agent_waits: dict[AgentId, list[AgentId]] = {}
         self._closed_agents: set[AgentId] = set()
+        self._create_lock = asyncio.Lock()
         self._paused = False
         self._closed = False
 
-    # ---- 生命周期 ----
+    def set_summarizer(self, compactor: Any, llm: Any) -> None:
+        """迟装配压缩组件（ResearchRuntime 在 register_defaults 时调用）。
+
+        compactor/llm 在 Thread 创建时经 RuntimeThreadManager._memory_kwargs
+        透传；本方法只替换该配置，不影响已创建的 Thread。
+        """
+        self._manager._memory_kwargs["compactor"] = compactor
+        self._manager._memory_kwargs["llm"] = llm
+
+    # 生命周期
 
     def start(self) -> None:
         """兼容入口;Thread 模型无需预热。"""
@@ -167,10 +183,31 @@ class AgentRuntime:
             # 队列派发语义内建到 ThreadRuntime 后。
             raise AgentCommandError(ErrorCode.CLOSED, "runtime paused")
 
-    # ---- 创建 / 消息 / 续跑 ----
+    # 创建 / 消息 / 续跑
 
-    async def create_root(self, agent_type: str, task: object, *, name: str = "root"):
-        return await self._spawn_agent(None, agent_type, task, name=name)
+    async def create_root(
+        self,
+        agent_type: str,
+        task: object,
+        *,
+        name: str = "root",
+        agent_id: str | None = None,
+    ):
+        if agent_id is None:
+            return await self._spawn_agent(None, agent_type, task, name=name)
+        self._require_agent_id(agent_id)
+        async with self._create_lock:
+            existing = self._records.get(agent_id)
+            if existing is not None:
+                self._require_same_type(existing, agent_type)
+                run_id = self._latest_run_id(agent_id)
+                if run_id is not None:
+                    return agent_id, run_id
+                req_ref = existing.spec.codec.encode_request(task)
+                return agent_id, await self._start_run(agent_id, req_ref)
+            return await self._spawn_agent(
+                None, agent_type, task, name=name, agent_id=agent_id
+            )
 
     async def spawn(
         self,
@@ -184,13 +221,15 @@ class AgentRuntime:
             raise AgentCommandError(ErrorCode.NOT_FOUND, f"unknown parent: {parent_id}")
         return await self._spawn_agent(parent_id, agent_type, task, name=name)
 
-    async def _spawn_agent(self, parent_id, agent_type, task, *, name):
+    async def _spawn_agent(
+        self, parent_id, agent_type, task, *, name, agent_id: str | None = None
+    ):
         self._check_open()
         if not self._registry.contains(agent_type):
             raise AgentCommandError(
                 ErrorCode.NOT_FOUND, f"unknown agent_type: {agent_type}"
             )
-        agent_id = uuid4().hex
+        agent_id = agent_id or uuid4().hex
         spec = self._registry.require_spec(agent_type, agent_id=agent_id)
         req_ref = spec.codec.encode_request(task)
         await self._manager.start(agent_id, req_ref, thread_id=agent_id)
@@ -215,18 +254,46 @@ class AgentRuntime:
         COMPAT: context_ref 用 agent_id 占位(不持久化旧 context_ref)。清理条件:
         会话恢复把 context_ref 一并持久化后。
         """
-        if agent_id in self._records:
-            return
-        spec = self._registry.require_spec(agent_type, agent_id=agent_id)
-        await self._manager.start(agent_id, agent_id, thread_id=agent_id)
-        self._records[agent_id] = _FacadeRecord(
-            agent_id=agent_id,
-            agent_type=agent_type,
-            spec=spec,
-            parent_id=None,
-            name=name or agent_type,
-            path=(name or agent_type,),
-        )
+        self._require_agent_id(agent_id)
+        async with self._create_lock:
+            existing = self._records.get(agent_id)
+            if existing is not None:
+                self._require_same_type(existing, agent_type)
+                return
+            spec = self._registry.require_spec(agent_type, agent_id=agent_id)
+            await self._manager.start(agent_id, agent_id, thread_id=agent_id)
+            self._records[agent_id] = _FacadeRecord(
+                agent_id=agent_id,
+                agent_type=agent_type,
+                spec=spec,
+                parent_id=None,
+                name=name or agent_type,
+                path=(name or agent_type,),
+            )
+
+    def _require_agent_id(self, agent_id: object) -> None:
+        try:
+            self._manager.require_safe_path_basename(agent_id, "agent_id")
+        except ValueError as exc:
+            raise AgentCommandError(ErrorCode.INVALID_REQUEST, str(exc)) from exc
+
+    @staticmethod
+    def _require_same_type(record: _FacadeRecord, agent_type: str) -> None:
+        if record.agent_type != agent_type:
+            raise AgentCommandError(
+                ErrorCode.INVALID_REQUEST,
+                f"agent_id {record.agent_id!r} is already bound to "
+                f"agent_type {record.agent_type!r}",
+            )
+
+    def _latest_run_id(self, agent_id: AgentId) -> RunId | None:
+        active = self._active_turn.get(agent_id)
+        if active is not None:
+            return active
+        for run_id, run_agent_id in reversed(self._run_agent.items()):
+            if run_agent_id == agent_id:
+                return run_id
+        return None
 
     async def followup(self, agent_id: AgentId, task: object) -> RunId:
         self._check_open()
@@ -237,7 +304,7 @@ class AgentRuntime:
         return await self._start_run(agent_id, req_ref)
 
     async def _start_run(self, agent_id: AgentId, req_ref: ArtifactRef) -> RunId:
-        from athena.app_server.exceptions import ClosedError
+        from athena.app_server.exceptions import ClosedError  # 延迟导入避免循环依赖
 
         self._check_open()
         try:
@@ -270,7 +337,7 @@ class AgentRuntime:
             )
         )
 
-    # ---- 等待 ----
+    # 等待
 
     async def wait_run(
         self, run_id: RunId, *, timeout: float | None = None
@@ -363,7 +430,7 @@ class AgentRuntime:
         )
         return RunSummary(run_id=run_id, agent_id=agent_id, status=status)
 
-    # ---- 中断 / 关闭 ----
+    # 中断 / 关闭
 
     async def interrupt(self, agent_id: AgentId, reason: str) -> None:
         run_id = self._active_turn.get(agent_id)
@@ -391,7 +458,7 @@ class AgentRuntime:
             raise KeyError(f"unknown run: {run_id}")
         await self._manager.interrupt(agent_id, run_id, reason)
 
-    # ---- 等待注册 / 唤醒 ----
+    # 等待注册 / 唤醒
 
     async def wait_for(self, agent_id: AgentId, target_ids: list[AgentId]) -> None:
         record = self._records.get(agent_id)
@@ -503,7 +570,7 @@ class AgentRuntime:
             await handle.shutdown_and_wait("agent close")
         self._closed_agents.update(order)
 
-    # ---- 查询 / 投影 ----
+    # 查询 / 投影
 
     def list_agents(self, path_prefix: AgentPath | None = None) -> list[AgentSnapshot]:
         snaps = []
@@ -554,7 +621,7 @@ class AgentRuntime:
             raise KeyError(f"unknown agent: {agent_id}")
         return rec.spec
 
-    # ---- 事件 ----
+    # 事件
 
     def run_events(
         self, run_id: RunId, after_sequence: int = 0
@@ -589,7 +656,7 @@ class AgentRuntime:
 
         return _gen()
 
-    # ---- 终态回调(供 ThreadManager 透传) ----
+    # 终态回调(供 ThreadManager 透传)
 
     def _on_turn_terminal(self, turn_id: str, terminal: "TurnTerminalState") -> None:
         """同步、无 await;更新状态并调度 wait 解析。"""
@@ -599,12 +666,15 @@ class AgentRuntime:
         self._active_turn.pop(agent_id, None)
         status = _terminal_to_run_status(terminal)
         self._last_terminal[agent_id] = status
+        error = terminal.exception_type
+        if error is not None and terminal.error_message:
+            error = f"{error}: {terminal.error_message}"
         self._run_summaries[turn_id] = RunSummary(
             run_id=turn_id,
             agent_id=agent_id,
             status=status,
             response_ref=terminal.result_ref,
-            error=terminal.exception_type,
+            error=error,
             reason="run interrupted" if terminal.cancelled else None,
         )
         if any(agent_id in targets for targets in self._agent_waits.values()):
