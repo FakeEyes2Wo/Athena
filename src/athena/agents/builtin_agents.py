@@ -18,97 +18,34 @@ Impl = Callable[[AgentContext], Awaitable[AgentOutcome]]
 
 
 class _JsonSinkAgent(BaseAgent):
-    """可选注入真实 run_impl 的 JSON Artifact Agent 基类。
+    """委托真实 run_impl 的 JSON Artifact Agent 基类。
 
-    子类只声明 ``_fallback(text) -> dict`` 缺省 payload;``run`` 优先委托
-    ``run_impl``,否则把 fallback 结果写为 JSON Artifact 并返回其 ref。
-
-    COMPAT: IdeatorAgent 确定性 fallback + run_impl 注入(首版无 LLM 的确定性骨架);
-    清理条件: 真实 Ideator 全量接线后。
+    ``run_impl`` 必填：生产不静默 fallback（real-search-worktree plan Task 3）。
     """
 
-    def __init__(self, store: ArtifactStore, *, run_impl: Impl | None = None) -> None:
+    def __init__(self, store: ArtifactStore, *, run_impl: Impl) -> None:
         self._store = store
         self._run_impl = run_impl
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
-        """生成候选结果并返回其 ArtifactRef；注入 run_impl 时委托真实实现。"""
-        if self._run_impl is not None:
-            return await self._run_impl(ctx)
-        result_ref = await self._store.put_text(
-            json.dumps(self._fallback(ctx.input_text or ""), ensure_ascii=False)
-        )
-        return AgentOutcome(result_ref=result_ref)
-
-    def _fallback(self, text: str) -> dict:
-        raise NotImplementedError
+        """委托 run_impl 返回其 AgentOutcome。"""
+        return await self._run_impl(ctx)
 
 
 class CodeAgent(_JsonSinkAgent):
-    """代码生成/修订 Agent（设计 registered-agent-catalog §4.5）。
+    """代码生成/修订 Agent（design registered-agent-catalog §4.5）。
 
-    同一 ``code`` 类型承担生成与基于失败证据的修订，修订 follow-up 原实例
-    保留工作区与尝试记忆。只产生候选 diff/运行 Artifact；Git 提交与接受由
-    确定性边界执行。缺省确定性：把输入写为 candidate diff。
+    run_impl 由 composition root 注入（production.code_run_impl）；结果只含
+    experiment_id/workspace/predictions_path/report_path，不接收 labels/score。
     """
-
-    def _fallback(self, text: str) -> dict:
-        """确定性占位：把输入写为候选 diff；附每候选 predictions/labels 供可信评估。
-
-        payload 带 ``baseline`` 标记时产出更弱的 baseline 预测（accuracy 0.5），
-        否则产出更强候选（accuracy 1.0）——让 SEARCH 候选能真实地优于 baseline。
-        ``test_score`` 仅保留给 VALIDATE 确定性路径（可信 final evaluator 接线
-        前的占位）；SEARCH 的候选分数由 ``evaluation.candidate_batch`` 运行冻结
-        eval bundle 产出，不再读取此字段。
-        """
-        try:
-            payload = json.loads(text)
-            is_baseline = bool(payload.get("baseline"))
-        except Exception:
-            is_baseline = False
-        if is_baseline:
-            predictions = "__athena_row_id,prediction\nr1,0.0\nr2,0.0\n"
-        else:
-            predictions = "__athena_row_id,prediction\nr1,0.0\nr2,1.0\n"
-        labels = "__athena_row_id,target\nr1,0.0\nr2,1.0\n"
-        return {
-            "diff": text,
-            "status": "candidate",
-            "predictions": predictions,
-            "labels": labels,
-            "candidates": [
-                {
-                    "candidate_id": "cand_fallback",
-                    "predictions": predictions,
-                    "labels": labels,
-                    "direction": "maximize",
-                    "test_score": 0.5,
-                },
-            ],
-        }
 
 
 class IdeatorAgent(_JsonSinkAgent):
-    """假设生成 Agent（设计 registered-agent-catalog §4.4）。
+    """假设生成 Agent（design registered-agent-catalog §4.4）。
 
-    每个实例生成可证伪 Hypothesis 并写入 Artifact，不覆盖历史假设；真实
-    Ideator 经 ``run_impl`` 接入（由 :func:`~athena.agents.production.ideator_run_impl`
-    构建）。缺省确定性：把输入综合为 PROPOSED Hypothesis（同时给出
-    ``hypotheses`` 列表供 SEARCH 注册服务消费）。
+    run_impl 由 composition root 注入（production.structured_ideator_run_impl），
+    以 HypothesisBatch 结构化输出，不静默 fallback。
     """
-
-    def _fallback(self, text: str) -> dict:
-        return {
-            "hypothesis": text,
-            "status": "PROPOSED",
-            "hypotheses": [
-                {
-                    "statement": text,
-                    "intervention": "fallback-change",
-                    "expected_effect": "raise primary metric",
-                },
-            ],
-        }
 
 
 class PlotAgent(BaseAgent):

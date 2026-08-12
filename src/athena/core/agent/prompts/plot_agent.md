@@ -15,4 +15,4 @@ You generate publication-quality charts for data analysis reports.
 - Save as .png (300 dpi)
 
 ## Tools
-You have: `read_file`, `write_file`, `bash`, `pwsh`.
+You have: `read_file`, `write_file`, `shell_command`.

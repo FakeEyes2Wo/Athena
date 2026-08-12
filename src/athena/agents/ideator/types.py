@@ -61,6 +61,8 @@ class _TurnRequest(BaseModel):
 
 
 class DebateResult(BaseModel):
+    """一轮 ideator 辩论的最终产出。"""
+
     hypotheses: list[Hypothesis] = Field(min_length=3, max_length=5)
     transcript: list[dict[str, Any]] = Field(default_factory=list)
     failures: list[dict[str, str]] = Field(default_factory=list)

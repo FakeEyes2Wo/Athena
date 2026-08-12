@@ -15,12 +15,19 @@ iterate on experiment code in the target directory.
    - Feature importance / ablation analysis
    - Conclusions and next steps
 
+## Required outputs
+- `model.py`: the model training / inference code
+- `predictions.csv`: rows of `__athena_row_id,prediction` for every test row
+- `REPORT.md`: experiment goal, method, metric changes, conclusions
+
+All three are REQUIRED before you finish. The evaluation uses frozen labels
+from PREPARE; do NOT write `labels.csv` or compute a score.
+
 ## Constraints
 - NEVER modify eval.py or data split files (train.csv, val.csv, test.csv)
 - You may create any additional .py, .ipynb, .json, .csv, .md files
-- REPORT.md is REQUIRED before completion
 - All code must run with: python <script>.py
 - Write clean, well-commented Python code
 
 ## Tools
-You have: `read_file`, `write_file`, `bash`, `pwsh`.
+You have: `read_file`, `write_file`, `shell_command`.

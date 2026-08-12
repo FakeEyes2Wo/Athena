@@ -1,8 +1,15 @@
-"""BaseAgent 业务契约经适配器在 AgentRuntime 上运行（设计 §4.2）。"""
+"""BaseAgent 业务契约经适配器在 AgentRuntime 上运行（设计 §4.2）。
+
+含 memory-flow-fixes §Mailbox To Memory 的 mailbox→memory 回归（信封 JSON 格式、
+与 trigger 完全一致时不重复追加）。
+"""
+
+import json
 
 import pytest
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 
-from athena.agents.base_runner import BaseAgentRunner
+from athena.agents.base_runner import BaseAgentRunner, _MAILBOX_PREFIX
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.models import AgentContext, AgentOutcome
 from athena.core.agent.registry import AgentTypeRegistry
@@ -128,4 +135,77 @@ async def test_checkpoint_prevents_redelivery_on_next_run(tmp_path) -> None:
     run3 = await rt.followup(agent_id, {"content": "third"})
     await rt.wait_run(run3, timeout=5)
     assert agent.recorded[2] == ["third"]  # note 已提交游标，不再重投
+    await rt.aclose()
+
+
+class MemoryProbeAgent(BaseAgent):
+    """记录每轮 memory 项；把非空 input_text 追加为用户消息（模拟业务 agent 写记忆）。"""
+
+    def __init__(self) -> None:
+        self.snapshots: list[list] = []
+
+    async def run(self, ctx: AgentContext) -> AgentOutcome:
+        if ctx.input_text:
+            ctx.memory.append(
+                ModelRequest(parts=[UserPromptPart(content=ctx.input_text)])
+            )
+        self.snapshots.append(ctx.memory.items)
+        return AgentOutcome(result_ref="result://ok")
+
+
+@pytest.mark.asyncio
+async def test_mailbox_only_wake_appends_json_envelope_to_memory(tmp_path) -> None:
+    """memory-flow-fixes：空唤醒把未读 mailbox 消息以稳定 JSON 信封落入 model memory。"""
+    agent = MemoryProbeAgent()
+    rt = _runtime(agent, tmp_path)
+    agent_id, run1 = await rt.create_root("echo", {"content": "first"})
+    await rt.wait_run(run1, timeout=5)
+
+    await rt.send_message(agent_id, "mail-only", ["artifact://evidence"])
+    run2 = await rt.followup(agent_id, {})  # 空唤醒：无 trigger，仅 mailbox 未读
+    await rt.wait_run(run2, timeout=5)
+
+    contents = [
+        part.content
+        for message in agent.snapshots[-1]
+        for part in message.parts
+        if isinstance(part, UserPromptPart)
+    ]
+    payload = json.loads(
+        next(
+            text for text in contents if text.startswith(f"{_MAILBOX_PREFIX}\n")
+        ).split("\n", 1)[1]
+    )
+    assert payload == {
+        "source": None,
+        "content": "mail-only",
+        "context_refs": ["artifact://evidence"],
+    }
+    await rt.aclose()
+
+
+@pytest.mark.asyncio
+async def test_matching_trigger_not_doubled_in_memory(tmp_path) -> None:
+    """memory-flow-fixes：mailbox 消息与当前 trigger 完全一致时不追加（不重复）。"""
+    agent = MemoryProbeAgent()
+    rt = _runtime(agent, tmp_path)
+    agent_id, run1 = await rt.create_root("echo", {"content": "first"})
+    await rt.wait_run(run1, timeout=5)
+
+    await rt.send_message(agent_id, "same", ["artifact://same"])
+    run2 = await rt.followup(
+        agent_id,
+        {"content": "same", "context_refs": ["artifact://same"]},
+    )
+    await rt.wait_run(run2, timeout=5)
+
+    # trigger 由业务 agent 追加为 input_text 用户消息（恰一次），无 mailbox 信封重复
+    contents = [
+        getattr(part, "content", "")
+        for message in agent.snapshots[-1]
+        for part in message.parts
+        if isinstance(part, UserPromptPart)
+    ]
+    assert sum(content == "same" for content in contents) == 1
+    assert not any(content.startswith(f"{_MAILBOX_PREFIX}\n") for content in contents)
     await rt.aclose()

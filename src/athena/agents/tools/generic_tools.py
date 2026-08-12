@@ -1,35 +1,18 @@
-"""通用文件/命令工具集（对齐 Pi：read_file / write_file / bash / pwsh）。
+"""通用文件工具集：read_file / write_file + 统一的 shell_command。
 
 沙箱约定：``read_file``/``write_file`` 限定 workspace 内（路径逃逸防护）；
-``bash``/``pwsh`` 以 workspace 为 cwd 执行。Python 脚本经 ``bash("python x.py")``
-覆盖。四个工具由 ``generic_tool_registry`` 用闭包捕获 workspace，一行 ``@tool``
-定义。
+命令执行统一走 ``ExecutionRuntime.shell_command``（shared-execution-runtime-design）。
+``generic_tool_registry`` 需要 ``runtime`` 才注册命令工具——bash/pwsh 已在迁移中
+移除（design §Tool Contract），无 runtime 的旧调用只得到文件工具。
 """
 
-import asyncio
-import os
-import shutil
-import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from athena.core.tool import ToolRegistry, tool
 
-# 保留宿主 PATH / home / 临时目录等运行环境变量；过滤凭据类（API key 等）。
-# 缺 USERPROFILE/HOME/HOMEDRIVE/HOMEPATH 时 conda/python 的 ``expanduser()``
-# 无法确定 home 目录（报 "Could not determine home directory"），pwsh/bash
-# 启动时加载用户 profile 里的 conda init 会失败并弹窗。
-_HostAllow = (
-    "PATH",
-    "SYSTEMROOT",
-    "SYSTEMDRIVE",
-    "WINDIR",
-    "TEMP",
-    "TMP",
-    "USERPROFILE",
-    "HOME",
-    "HOMEDRIVE",
-    "HOMEPATH",
-)
+if TYPE_CHECKING:
+    from athena.execution.runtime import ExecutionRuntime
 
 
 def _workspace_path(root: Path, path: str) -> Path:
@@ -39,155 +22,14 @@ def _workspace_path(root: Path, path: str) -> Path:
     return candidate
 
 
-def _shell_env() -> dict[str, str]:
-    """构造子进程环境：保留宿主 PATH 并把当前解释器 Scripts 前置。
+def generic_tool_registry(
+    workspace: Path, *, runtime: "ExecutionRuntime | None" = None
+) -> ToolRegistry:
+    """构造通用工具集：read_file / write_file + 可选 shell_command。
 
-    原型沿用宿主环境（supervisor_design §2.6 strong_isolation=false）：LLM 生成
-    脚本用 ``python analysis.py`` 运行，若 PATH 缺当前 venv 的 ``Scripts`` 目录，
-    ``python`` 会解析失败 → ReAct 循环反复修脚本而无法收尾。这里确保 ``python``/
-    ``uv`` 始终可解析。仍过滤凭据类变量，避免脚本读取宿主机密。
+    ``runtime`` 提供时注册统一命令工具 ``shell_command``（唯一命令工具，design
+    §Tool Contract）；缺省（旧调用/测试）只提供文件工具。
     """
-    env = {k: v for k, v in os.environ.items() if k in _HostAllow}
-    scripts = Path(sys.executable).resolve().parent
-    if "PATH" in env and str(scripts) not in env["PATH"]:
-        env["PATH"] = str(scripts) + os.pathsep + env["PATH"]
-    return env
-
-
-# 可经环境变量显式指定 shell 路径（对齐 Pi 的 shell_path 设置；优先于探测）。
-_ENV_SHELL = {"bash": "ATHENA_BASH_PATH", "pwsh": "ATHENA_PWSH_PATH"}
-
-# Windows 上可探测的 bash 候选，按优先级排列：
-# Git Bash 优先（与宿主共享 venv/PATH，LLM 的 ``python analysis.py`` 可用）；
-# WSL bash 是独立 Linux 环境（通常无宿主 pandas），默认不路由，仅作为可选项。
-_WIN_BASH_CANDIDATES = (
-    r"C:\Program Files\Git\usr\bin\bash.exe",
-    r"C:\Program Files\Git\bin\bash.exe",
-    r"C:\Program Files\Git\mingw64\bin\bash.exe",
-    r"C:\msys64\usr\bin\bash.exe",
-    r"C:\msys64\bin\bash.exe",
-)
-_WIN_PWSH_CANDIDATES = (
-    r"C:\Program Files\PowerShell\7\pwsh.exe",
-    r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
-    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-)
-_WIN_WSL_BASH = r"C:\Windows\System32\bash.exe"
-_WIN_CMD = r"C:\Windows\System32\cmd.exe"
-
-
-def _is_windows() -> bool:
-    return os.name == "nt"
-
-
-def _which(name: str) -> str | None:
-    """shutil.which 的 None 安全包装。"""
-    found = shutil.which(name)
-    return found if found else None
-
-
-def _shell_candidates(name: str) -> list[str]:
-    """返回某类 shell 在当前平台的可探测候选（按优先级排列，均验证存在）。
-
-    ``bash``：Windows 依次探测 Git Bash / MSYS2 / WSL bash / cmd；Unix 用
-    ``bash``→``sh``。``pwsh``：PowerShell 7 → 5.1 → PATH。返回列表不含重复
-    路径，未找到时为空列表（调用方决定降级或报错）。
-    """
-    candidates: list[str] = []
-    if _is_windows():
-        pool = _WIN_BASH_CANDIDATES if name == "bash" else _WIN_PWSH_CANDIDATES
-        for candidate in pool:
-            if Path(candidate).is_file() and candidate not in candidates:
-                candidates.append(candidate)
-        if name == "bash":
-            for extra in (_WIN_WSL_BASH, _WIN_CMD):
-                if Path(extra).is_file() and extra not in candidates:
-                    candidates.append(extra)
-    else:
-        found = _which("bash" if name == "bash" else "pwsh")
-        if found:
-            candidates.append(found)
-        if name == "bash":
-            sh_path = _which("sh")
-            if sh_path and sh_path not in candidates:
-                candidates.append(sh_path)
-    return candidates
-
-
-def _resolve_shell(name: str, env: dict[str, str] | None = None) -> str | None:
-    """返回确定的 shell 绝对路径（跨平台，参考 Codex/Pi）。
-
-    优先级：环境变量覆盖（``ATHENA_BASH_PATH``/``ATHENA_PWSH_PATH``）→
-    探测候选。Windows 下 ``bash`` 默认选 Git Bash（与宿主共享 venv/PATH），
-    明确避开 ``System32\\bash.exe``（WSL launcher 或独立 Linux 环境，无宿主
-    pandas）；要显式用 WSL 可设 ``ATHENA_BASH_PATH=C:\\Windows\\System32\\bash.exe``。
-    ``pwsh`` 优先 PowerShell 7/5.1。Unix 下 ``bash`` 用系统 bash（回退 ``sh``）；
-    ``pwsh`` 缺失时返回 None（由调用方降级为 bash），保证任何机器可用。
-    """
-    if env is None:
-        env = os.environ
-    override = env.get(_ENV_SHELL[name])
-    if override:
-        path = Path(override)
-        if path.is_file():
-            return str(path)
-        raise RuntimeError(f"configured {name} path not found: {override}")
-
-    candidates = _shell_candidates(name)
-    for candidate in candidates:
-        # Windows bash 默认候选不含 WSL/cmd；这里是探测顺序，跳过它们。
-        if name == "bash" and _is_windows():
-            wsl_or_cmd = candidate in (_WIN_WSL_BASH, _WIN_CMD)
-            if wsl_or_cmd:
-                continue
-        return candidate
-    if name == "bash":
-        # 回退：显式选 WSL 或 sh（Unix）
-        if _is_windows() and Path(_WIN_WSL_BASH).is_file():
-            return _WIN_WSL_BASH
-        return _which("sh")
-    return None
-
-
-async def _run_command(
-    root: Path, shell: str, args: list[str], command: str, timeout_s: int
-) -> dict:
-    """执行 shell 命令；``pwsh`` 在无 PowerShell 的平台（如 Unix）降级为 bash。
-
-    降级后参数换成 bash 风格（``--noprofile -c``），保证 ``pwsh`` 工具在
-    任何机器可用（对齐 Codex：Unix 统一走 POSIX shell）。
-    """
-    shell_path = _resolve_shell(shell)
-    if shell_path is None:
-        if shell == "pwsh":
-            shell_path = _resolve_shell("bash")
-            args = ["--noprofile", "-c"]
-        else:
-            raise RuntimeError(f"shell not found: {shell}")
-    proc = await asyncio.create_subprocess_exec(
-        shell_path,
-        *args,
-        command,
-        cwd=str(root.resolve()),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_shell_env(),
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except asyncio.TimeoutError as exc:
-        proc.kill()
-        await proc.wait()
-        raise TimeoutError(f"TIMEOUT after {timeout_s}s") from exc
-    return {
-        "returncode": proc.returncode or 0,
-        "stdout": stdout.decode("utf-8", errors="replace"),
-        "stderr": stderr.decode("utf-8", errors="replace"),
-    }
-
-
-def generic_tool_registry(workspace: Path) -> ToolRegistry:
-    """构造对齐 Pi 的最小通用工具集：read_file / write_file / bash / pwsh。"""
     root = workspace.resolve()
 
     @tool
@@ -213,31 +55,9 @@ def generic_tool_registry(workspace: Path) -> ToolRegistry:
         path_obj.write_text(content, encoding="utf-8")
         return {"path": str(path_obj)}
 
-    def _command_tool(shell: str, args: list[str], name: str, description: str):
-        @tool(name=name, description=description)
-        async def _cmd(command: str, timeout_s: int = 120) -> dict:
-            """Run a shell command in the workspace."""
-            return await _run_command(root, shell, args, command, timeout_s)
-
-        return _cmd
-
     reg = ToolRegistry()
     reg.register(read_file)
     reg.register(write_file)
-    reg.register(
-        _command_tool(
-            "bash",
-            ["--noprofile", "-c"],
-            "bash",
-            "Run a bash command in the workspace and return stdout/stderr/returncode",
-        )
-    )
-    reg.register(
-        _command_tool(
-            "pwsh",
-            ["-NoProfile", "-NonInteractive", "-Command"],
-            "pwsh",
-            "Run a PowerShell command in the workspace and return stdout/stderr/returncode",
-        )
-    )
+    if runtime is not None:
+        reg.register(runtime.shell_command_tool(root))
     return reg

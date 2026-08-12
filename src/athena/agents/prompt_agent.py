@@ -10,11 +10,15 @@ provider + 通用工具 + prompt 组装成 ``Agent``。
 """
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from athena.agents.tools.generic_tools import generic_tool_registry
-from athena.core.agent.provider import ResponsesProvider
+from athena.core.agent.provider import create_provider
 from athena.core.agent.runtime import Agent
 from athena.core.tool import ToolRegistry
+
+if TYPE_CHECKING:
+    from athena.execution.runtime import ExecutionRuntime
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "core" / "agent" / "prompts"
 
@@ -41,18 +45,23 @@ def build_llm_agent(
     client,
     workspace: Path,
     extra_tools: ToolRegistry | None = None,
+    runtime: "ExecutionRuntime | None" = None,
 ) -> Agent:
     """构造 ReAct LLM agent：system_prompt = prompt 文件，tools = 通用工具。
 
     ``extra_tools`` 可选追加业务工具（ToolRegistry 不支持批量 merge，逐个
-    register）；本任务 data/init/report 只依赖通用工具，不传。
+    register）。``runtime`` 提供时注册 ``shell_command`` 工具，并把简洁运行时
+    摘要注入 system prompt 开头（shared-execution-runtime-design §Agent Context）。
     """
-    tools = generic_tool_registry(workspace)
+    tools = generic_tool_registry(workspace, runtime=runtime)
     if extra_tools is not None:
         for spec in extra_tools.specs:
             tools.register(extra_tools.resolve(spec.name))
+    prompt = load_prompt(agent_type)
+    if runtime is not None:
+        prompt = runtime.runtime_summary(workspace) + "\n\n" + prompt
     return Agent(
-        ResponsesProvider(model, client=client),
+        create_provider(model, client=client),
         tools,
-        load_prompt(agent_type),
+        prompt,
     )

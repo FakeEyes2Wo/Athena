@@ -32,7 +32,13 @@ def _dataset(tmp_path: Path) -> Path:
 
 
 def _request(data_path: str, *, report: str | None = None) -> dict:
-    payload = {"data_path": data_path, "target": "label"}
+    payload = {
+        "data_path": data_path,
+        "target": "label",
+        "workspace": str(
+            Path(data_path).parent / ".athena" / "workspaces" / "data-agent"
+        ),
+    }
     if report is not None:
         payload["report"] = report
     return request_payload(payload)
@@ -167,4 +173,40 @@ async def test_revision_loop_failed_then_revised(tmp_path) -> None:
     # 旧版本保留，lineage 正确
     assert bundle.latest(analysis_id) == v2
     assert v1 != v2
+    await rt.aclose()
+
+
+@pytest.mark.asyncio
+async def test_revise_followup_recovers_task_and_workspace(tmp_path) -> None:
+    """REVISE follow-up（仅评审原因，无 data_path）沿用首次任务并复用 workspace 重跑。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    bundle = VersionedBundle(store)
+    data_agent = DataAgent(
+        store,
+        bundle,
+        owner_agent_id="agent_1",
+        model="fake",
+        inner_builder=fake_inner_builder,
+    )
+    dataset = str(_dataset(tmp_path))
+    rt = _runtime(tmp_path, data_agent, None)
+
+    # 首次运行（EDA kind）：产 report + figures + proposal，提交 v1
+    data_id, run1 = await rt.create_root("data", _request(dataset), name="data-root")
+    await rt.wait_run(run1, timeout=5)
+    v1 = data_agent.latest_ref
+    assert v1 is not None
+    ws1 = data_agent._workspace
+    assert ws1 is not None and ws1.is_dir()
+
+    # Supervisor REVISE：follow-up 只带评审原因（supervisor _followup_agent 的 payload）
+    run2 = await rt.followup(
+        data_id,
+        {"content": "role proposal 未通过评审：target 缺失", "context_refs": []},
+    )
+    summary = await rt.wait_run(run2, timeout=5)
+    assert summary.status == RunStatus.COMPLETED, summary.error
+    v2 = data_agent.latest_ref
+    assert v2 is not None and v2 != v1  # 沿用任务重跑，提交 v2
+    assert data_agent._workspace == ws1  # 复用同一 workspace（LLM 可读修自己的脚本）
     await rt.aclose()

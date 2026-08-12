@@ -1,15 +1,19 @@
 """Agent 抽象层的单元测试。"""
 
 import asyncio
+import json
 from dataclasses import fields
 from inspect import signature
 
 from pydantic import BaseModel
 from pydantic_ai.messages import ToolReturnPart
 import pytest
+import httpx
+from openai import BadRequestError
 
 import athena.core as core_api
 import athena.core.agent as agent_api
+from athena.core.agent import settings
 from athena.core.agent.models import (
     AgentConfig,
     AgentContext,
@@ -17,7 +21,13 @@ from athena.core.agent.models import (
     StepOutcome,
     ToolCall,
 )
-from athena.core.agent.provider import ResponsesProvider, StreamEvent
+from athena.core.agent.provider import (
+    DeepSeekProvider,
+    OpenAIProvider,
+    ResponsesProvider,
+    StreamEvent,
+    create_provider,
+)
 from athena.core.agent.runtime import (
     Agent,
     BaseAgent,
@@ -50,6 +60,10 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert agent_api.create_agent is create_agent
     assert agent_api.create_code_agent is create_code_agent
 
+    assert agent_api.create_provider is create_provider
+    assert agent_api.OpenAIProvider is OpenAIProvider
+    assert agent_api.DeepSeekProvider is DeepSeekProvider
+
     assert core_api.Agent is Agent
     assert core_api.AgentConfig is AgentConfig
     assert core_api.AgentContext is AgentContext
@@ -61,7 +75,7 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert core_api.create_agent is create_agent
 
 
-def test_code_agent_interface_has_four_parameters_and_four_fields() -> None:
+def test_code_agent_interface_has_four_parameters_and_five_fields() -> None:
     assert list(signature(create_code_agent).parameters) == [
         "model",
         "tools",
@@ -73,6 +87,7 @@ def test_code_agent_interface_has_four_parameters_and_four_fields() -> None:
         "max_tokens",
         "temperature",
         "name",
+        "tool_choice",
     ]
 
 
@@ -442,7 +457,7 @@ class _Out(BaseModel):
 @pytest.mark.asyncio
 async def test_stream_sets_response_format_when_output_type_given() -> None:
     client = _CaptureClient()
-    provider = ResponsesProvider("model", client=client)
+    provider = OpenAIProvider("model", client=client)
     events = [
         e
         async for e in provider.stream(
@@ -470,6 +485,74 @@ async def test_stream_omits_response_format_without_output_type() -> None:
     assert any(e.kind == "response_completed" for e in events)
 
 
+class _ResponseFormatFallbackClient:
+    def __init__(self, message: str) -> None:
+        self.calls: list[dict] = []
+        self.message = message
+
+    @property
+    def chat(self):
+        owner = self
+
+        class _Completions:
+            async def create(self, **kwargs):
+                owner.calls.append(kwargs)
+                if len(owner.calls) == 1:
+                    request = httpx.Request("POST", "https://example.test/chat")
+                    response = httpx.Response(400, request=request)
+                    raise BadRequestError(
+                        owner.message,
+                        response=response,
+                        body={"error": {"message": owner.message}},
+                    )
+
+                async def chunks():
+                    yield type("Chunk", (), {"choices": []})()
+
+                return chunks()
+
+        class _Chat:
+            completions = _Completions()
+
+        return _Chat()
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_without_unsupported_response_format() -> None:
+    client = _ResponseFormatFallbackClient(
+        "This response_format type is unavailable now"
+    )
+    provider = OpenAIProvider("model", client=client)
+
+    events = [
+        event
+        async for event in provider.stream(
+            AgentConfig(), ToolRegistry(), [], asyncio.Event(), output_type=_Out
+        )
+    ]
+
+    assert len(client.calls) == 2
+    assert client.calls[0]["response_format"]["type"] == "json_schema"
+    assert "response_format" not in client.calls[1]
+    assert any(event.kind == "response_completed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_retry_unrelated_bad_request() -> None:
+    client = _ResponseFormatFallbackClient("invalid model")
+    provider = ResponsesProvider("model", client=client)
+
+    with pytest.raises(BadRequestError, match="invalid model"):
+        _ = [
+            event
+            async for event in provider.stream(
+                AgentConfig(), ToolRegistry(), [], asyncio.Event(), output_type=_Out
+            )
+        ]
+
+    assert len(client.calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_stream_disables_deepseek_thinking_for_tool_execution() -> None:
     """工具 Agent 禁用默认 thinking，避免推理耗尽输出预算却未调用工具。"""
@@ -479,6 +562,95 @@ async def test_stream_disables_deepseek_thinking_for_tool_execution() -> None:
     await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
 
     assert client.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_stream_can_require_a_tool_call() -> None:
+    client = _CaptureClient()
+    provider = ResponsesProvider("model", client=client)
+    tools = ToolRegistry()
+    tools.register(_EchoTool())
+
+    await anext(
+        provider.stream(
+            AgentConfig(tool_choice="required"),
+            tools,
+            [],
+            asyncio.Event(),
+        )
+    )
+
+    assert client.kwargs["tool_choice"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_injects_schema_and_uses_json_object() -> None:
+    client = _CaptureClient()
+    provider = DeepSeekProvider("model", client=client)
+
+    events = [
+        e
+        async for e in provider.stream(
+            AgentConfig(), ToolRegistry(), [], asyncio.Event(), output_type=_Out
+        )
+    ]
+
+    assert client.kwargs["response_format"] == {"type": "json_object"}
+    msgs = client.kwargs["messages"]
+    assert msgs and msgs[-1]["role"] == "system"
+    assert "Return a JSON object matching this schema" in msgs[-1]["content"]
+    assert json.dumps(_Out.model_json_schema()) in msgs[-1]["content"]
+    assert any(e.kind == "response_completed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_does_not_inject_schema_message() -> None:
+    client = _CaptureClient()
+    provider = OpenAIProvider("model", client=client)
+
+    await anext(
+        provider.stream(
+            AgentConfig(), ToolRegistry(), [], asyncio.Event(), output_type=_Out
+        )
+    )
+
+    assert client.kwargs["messages"] == []
+    assert client.kwargs["response_format"]["type"] == "json_schema"
+
+
+def test_create_provider_routes_by_llm_provider_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    assert isinstance(create_provider("m"), DeepSeekProvider)
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    assert isinstance(create_provider("m"), OpenAIProvider)
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    with pytest.raises(NotImplementedError, match="LLM_PROVIDER"):
+        create_provider("m")
+
+    monkeypatch.setenv("LLM_PROVIDER", "bogus")
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        create_provider("m")
+
+
+def test_settings_provider_kind_default_and_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    assert settings.provider_kind() == "deepseek"
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    assert settings.provider_kind() == "openai"
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    assert settings.provider_kind() == "anthropic"
+
+    monkeypatch.setenv("LLM_PROVIDER", "bogus")
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        settings.provider_kind()
 
 
 class _StructuredOut(BaseModel):

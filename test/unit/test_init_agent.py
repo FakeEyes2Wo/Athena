@@ -9,10 +9,11 @@ payload ``{"task_understanding", "eval_script"}``。测试注入 ``fake_inner_bu
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from athena.agents.init_agent import EVAL_ENTRYPOINT, InitAgent
+from athena.agents.init_agent import EVAL_ENTRYPOINT, InitAgent, _validated_workspace
 from athena.core.agent.models import AgentContext
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.thread_models import AthenaThread, AthenaTurn
@@ -50,8 +51,15 @@ async def test_init_agent_payload_has_task_understanding_and_eval_script(
     """LLM 驱动：fake 内层写 task_understanding.md + eval.py → payload 双字段，eval 语法自检通过。"""
     store = LocalArtifactStore(tmp_path / "artifacts")
     agent = _agent(store)
+    workspace = tmp_path / "prepare-eval"
     ctx = _context(
-        json.dumps({"data_path": str(tmp_path / "dataset.csv"), "target": "label"})
+        json.dumps(
+            {
+                "data_path": str(tmp_path / "dataset.csv"),
+                "target": "label",
+                "workspace": str(workspace),
+            }
+        )
     )
 
     outcome = await agent.run(ctx)
@@ -71,6 +79,7 @@ async def test_init_agent_payload_has_task_understanding_and_eval_script(
     ws = Path(payload["eval_workspace"])
     assert (ws / "pyproject.toml").is_file()
     assert payload["eval_metadata"] == {"entrypoint": EVAL_ENTRYPOINT}
+    assert ws == workspace
 
 
 @pytest.mark.asyncio
@@ -89,5 +98,34 @@ async def test_init_agent_requires_target(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="target"):
         await agent.run(
-            _context(json.dumps({"data_path": str(tmp_path / "dataset.csv")}))
+            _context(
+                json.dumps(
+                    {
+                        "data_path": str(tmp_path / "dataset.csv"),
+                        "workspace": str(tmp_path / "prepare-eval"),
+                    }
+                )
+            )
         )
+
+
+@pytest.mark.asyncio
+async def test_init_agent_requires_an_assigned_workspace(tmp_path) -> None:
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agent = _agent(store)
+
+    with pytest.raises(ValueError, match="workspace"):
+        await agent.run(
+            _context(
+                json.dumps(
+                    {"data_path": str(tmp_path / "dataset.csv"), "target": "label"}
+                )
+            )
+        )
+
+
+def test_init_agent_rejects_workspace_outside_project_root(tmp_path) -> None:
+    """workspace 落在 project_root 之外 → 拒绝，不允许逃逸到系统 temp。"""
+    runtime = SimpleNamespace(project_root=str(tmp_path / "project"))
+    with pytest.raises(ValueError, match="outside project root"):
+        _validated_workspace(str(tmp_path / "outside"), runtime)

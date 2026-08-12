@@ -9,8 +9,10 @@ def test_settings_defaults_when_env_unset(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("BASE_URL", raising=False)
     monkeypatch.delenv("MODEL_NAME", raising=False)
+    monkeypatch.delenv("MODEL_PRO", raising=False)
     assert settings.base_url() == "https://api.deepseek.com"
     assert settings.model_name() == "deepseek-v4-flash"
+    assert settings.pro_model_name() == "deepseek-v4-pro"
     assert settings.api_key() is None
 
 
@@ -18,8 +20,10 @@ def test_settings_reads_env(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("BASE_URL", "https://api.deepseek.com")
     monkeypatch.setenv("MODEL_NAME", "deepseek-chat")
+    monkeypatch.setenv("MODEL_PRO", "deepseek-reasoner")
     assert settings.api_key() == "sk-test"
     assert settings.model_name() == "deepseek-chat"
+    assert settings.pro_model_name() == "deepseek-reasoner"
 
 
 def test_get_client_raises_without_key(monkeypatch):

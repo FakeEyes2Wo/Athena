@@ -32,13 +32,16 @@ from athena.retrieval.types import HFModelRef, PaperRef
 
 
 class _StructuredAgent(Protocol):
+    """结构化输出 agent 的最小接口。"""
+
     async def run(
         self,
         prompt: str,
         *,
         output_type: type[BaseModel],
         message_history: Sequence[ModelMessage] | None = None,
-    ) -> object: ...
+    ) -> object:
+        """按给定输出 schema 运行一次结构化生成。"""
 
 
 _OUTPUT_TYPES = {
@@ -58,6 +61,7 @@ class _DebateRunner:
         self._histories: dict[str, list[ModelMessage]] = {}
 
     async def put_request(self, stage, role, agent_index, prompt) -> ArtifactRef:
+        """把一轮请求写入 artifacts 并返回其引用。"""
         request = _TurnRequest(
             stage=stage,
             role=role,
@@ -67,6 +71,7 @@ class _DebateRunner:
         return await self._artifacts.put_text(request.model_dump_json())
 
     async def read_result(self, stage, result_ref) -> BaseModel:
+        """读取并校验某阶段的输出 artifact。"""
         schema = _OUTPUT_TYPES[stage]
         return schema.model_validate_json(await self._artifacts.get_text(result_ref))
 
@@ -76,6 +81,7 @@ class _DebateRunner:
     async def run_with_context(
         self, thread, turn, emit, memory, cancel
     ) -> AgentOutcome:
+        """执行单轮辩论；绑定 agent、保留历史、发出阶段事件。"""
         if cancel.is_set():
             raise asyncio.CancelledError
 
@@ -122,6 +128,8 @@ class _DebateRunner:
 
 
 class IdeatorConfig(BaseModel):
+    """辩论 ideator 的配置参数。"""
+
     model_config = ConfigDict(frozen=True)
 
     debater_count: int = Field(default=3, ge=2)
@@ -138,6 +146,8 @@ class IdeatorConfig(BaseModel):
 
 
 class Ideator:
+    """辩论式假设生成器：proposal → review → revision → judge。"""
+
     def __init__(self, *, agent_factory, artifacts, config=None) -> None:
         self._agent_factory = agent_factory
         self._artifacts = artifacts
@@ -252,6 +262,7 @@ class Ideator:
         models: list[HFModelRef],
         tree: ResearchTree,
     ) -> DebateResult:
+        """基于数据画像/论文/模型产出经辩论裁决的假设批次。"""
         context_payload = {
             "profile": profile.model_dump(mode="json"),
             "papers": [asdict(paper) for paper in papers],

@@ -38,7 +38,23 @@ DEFAULT_PERMISSIONS: dict[str, set[str]] = {
 }
 
 
-class _SpawnTool(BaseTool):
+class _RuntimeTool(BaseTool):
+    """持有 AgentRuntime 与目标 agent_id 的编排工具基类。
+
+    三个 wait/send 工具共用 ``(runtime, agent_id)`` 构造与存储；spawn 的
+    ``parent_id`` 语义不同、followup 无需目标 id，各自独立实现。
+    """
+
+    def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
+        self._runtime = runtime
+        self._agent_id = agent_id
+
+    async def execute(self, input: dict, ctx: ToolContext) -> dict:
+        """执行工具逻辑（子类实现）。"""
+        raise NotImplementedError
+
+
+class _SpawnTool(_RuntimeTool):
     """创建新 Agent 实例；类型经静态权限矩阵校验（§5.2）。"""
 
     spec = ToolSpec(
@@ -59,8 +75,7 @@ class _SpawnTool(BaseTool):
     def __init__(
         self, runtime: AgentRuntime, parent_id: AgentId, allowed: set[str]
     ) -> None:
-        self._runtime = runtime
-        self._parent = parent_id
+        super().__init__(runtime, agent_id=parent_id)
         self._allowed = allowed
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
@@ -71,12 +86,12 @@ class _SpawnTool(BaseTool):
                 f"agent_type {agent_type!r} not allowed for this agent"
             )
         agent_id, run_id = await self._runtime.spawn(
-            self._parent, agent_type, _task_payload(input), name=input.get("name")
+            self._agent_id, agent_type, _task_payload(input), name=input.get("name")
         )
         return {"agent_id": agent_id, "run_id": run_id}
 
 
-class _SendTool(BaseTool):
+class _SendTool(_RuntimeTool):
     """只投递消息，不触发目标 turn；source 为调用方 agent_id（§4.3）。"""
 
     spec = ToolSpec(
@@ -92,10 +107,6 @@ class _SendTool(BaseTool):
             "required": ["agent_id"],
         },
     )
-
-    def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
-        self._runtime = runtime
-        self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """向目标 Agent 投递消息，不触发目标 turn。"""
@@ -134,7 +145,7 @@ class _FollowupTool(BaseTool):
         return {"run_id": run_id}
 
 
-class _WaitForTool(BaseTool):
+class _WaitForTool(_RuntimeTool):
     """持久化登记对目标 Agent 的依赖等待并结束当前 turn。"""
 
     spec = ToolSpec(
@@ -147,17 +158,13 @@ class _WaitForTool(BaseTool):
         },
     )
 
-    def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
-        self._runtime = runtime
-        self._agent_id = agent_id
-
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """登记对目标 Agent 的持久化等待并结束当前 turn。"""
         await self._runtime.wait_for(self._agent_id, input["agent_ids"])
         raise _TurnEnded()
 
 
-class _WaitForHumanTool(BaseTool):
+class _WaitForHumanTool(_RuntimeTool):
     """持久化登记人工等待并结束当前 turn，返回稳定 request id。"""
 
     spec = ToolSpec(
@@ -171,10 +178,6 @@ class _WaitForHumanTool(BaseTool):
             },
         },
     )
-
-    def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
-        self._runtime = runtime
-        self._agent_id = agent_id
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """登记人工等待并结束当前 turn，返回稳定 request id。"""

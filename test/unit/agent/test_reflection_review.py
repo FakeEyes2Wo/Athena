@@ -257,3 +257,39 @@ async def test_built_run_impl_selects_output_contract_by_kind(tmp_path) -> None:
         await store.get_text(outcome.result_ref)
     )
     assert review.decision == "REVISE"
+
+
+async def test_built_run_impl_with_runtime_injects_summary_and_shell(
+    tmp_path, monkeypatch
+) -> None:
+    """runtime 提供时 reflection 内层 prompt 注入运行时摘要，工具含 shell_command。
+
+    只读评审不放 read/write/bash；shell_command 以 project_root 为 workspace。
+    """
+    from athena.execution.runtime import ExecutionRuntime
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    captured: dict[str, object] = {}
+
+    class FakeAgent:
+        def __init__(self, provider, tools, prompt, **kwargs):
+            del provider, kwargs
+            captured["prompt"] = prompt
+            captured["tools"] = tools
+            self.tools = tools
+
+        async def run(self, ctx):
+            del ctx
+            return AgentOutcome(result_ref="review-ref")
+
+    monkeypatch.setattr("athena.agents.reflection_agent.Agent", FakeAgent)
+    runtime = ExecutionRuntime(project_root=tmp_path, environment_root=tmp_path)
+    impl = build_reflection_run_impl(
+        store, model="fake", client=object(), runtime=runtime
+    )
+    outcome = await impl(_ctx())
+    assert str(captured["prompt"]).startswith("Runtime:")
+    names = {s.name for s in captured["tools"].specs}
+    assert "shell_command" in names
+    assert "write_file" not in names  # 只读评审不放写工具
+    assert outcome.result_ref == "review-ref"

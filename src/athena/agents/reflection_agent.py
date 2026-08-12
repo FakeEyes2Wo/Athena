@@ -11,17 +11,24 @@
 """
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from athena.agents.prompt_agent import load_prompt
 from athena.core.agent.models import AgentContext, AgentOutcome
-from athena.core.agent.provider import ResponsesProvider
+from athena.core.agent.provider import create_provider
 from athena.core.agent.runtime import Agent, BaseAgent
-from athena.core.contracts import ArtifactStore
+from athena.core.artifact_store import ArtifactIntegrityError, ArtifactNotFoundError
 from athena.core.bundle import DirectoryBundle, InvalidBundleError
+from athena.core.contracts import ArtifactStore
 from athena.core.tool import ToolRegistry
 from athena.research.contracts import DatasetRoleReview, EDAReview
+
+if TYPE_CHECKING:
+    from athena.execution.runtime import ExecutionRuntime
+
+logger = logging.getLogger(__name__)
 
 Impl = Callable[[AgentContext], Awaitable[AgentOutcome]]
 
@@ -56,7 +63,7 @@ class ReflectionAgent(BaseAgent):
         两阶段合同（supervisor_design §2.4）：``role`` 评审读 ``dataset_role_proposal.json``
         （proposal 是角色提议的产物，不要求图表）；``eda`` 评审读 ``report.md`` 且
         要求至少一张图。报告/产物为空或缺失 → REVISE。evidence_refs 指向实际读取的
-        report/图表，供 HumanRequest 展示与 Validator 引用。
+        report/图表，供 review output 展示与 validation evidence 引用。
         """
         report = ""
         evidence_refs: list[str] = []
@@ -117,11 +124,19 @@ async def _load_target_text(
             for name in ("report.md", "dataset_role_proposal.json", "eda_report.md"):
                 if name in files:
                     return await store.get_text(files[name])
-    except Exception:
-        pass
+    except (
+        InvalidBundleError,
+        json.JSONDecodeError,
+        ArtifactNotFoundError,
+        ArtifactIntegrityError,
+    ) as exc:
+        # 被评产物不是目录 Bundle / manifest 损坏 / ref 缺失 → 降级为纯文本读取
+        logger.debug("reflection target is not a readable bundle: %s", exc)
     try:
         return await store.get_text(ref)
-    except Exception:
+    except (ArtifactNotFoundError, ArtifactIntegrityError) as exc:
+        # ref 缺失或内容损坏 → 空文本（评审据此判 REVISE，不崩溃）
+        logger.debug("reflection target unreadable: %s", exc)
         return ""
 
 
@@ -131,6 +146,7 @@ def build_reflection_run_impl(
     model: str,
     client: Any = None,
     agent_builder: Callable[..., Agent] | None = None,
+    runtime: "ExecutionRuntime | None" = None,
 ) -> Impl:
     """装配真实 LLM 评审 run_impl（supervisor_design §2.4）。
 
@@ -139,9 +155,12 @@ def build_reflection_run_impl(
     产物，产出与确定性 fallback 同合同的扁平 decision payload。输出合同按请求
     里的 ``kind`` 选择：``eda`` → EDAReview，否则 DatasetRoleReview。
     ``agent_builder`` 为测试接缝（注入 fake provider 验证结构化路径）。
+    ``runtime`` 提供时注入运行时摘要并在工具集中注册 ``shell_command``（只读
+    评审不放 read/write 工具，shared-execution-runtime-design §Agent Context）。
     """
 
     async def run_impl(ctx: AgentContext) -> AgentOutcome:
+        """按请求评审被评产物，返回结构化 ACCEPT/REVISE 决策。"""
         request = json.loads(ctx.input_text or "{}")
         source_ref = request.get("data_analysis_ref") or request.get("report_ref")
         report_only = request.get("report_ref") is not None
@@ -157,10 +176,15 @@ def build_reflection_run_impl(
                 model=model, client=client, output_type=output_type, artifacts=store
             )
         else:
+            tools = ToolRegistry()
+            prompt = load_prompt("reflection")
+            if runtime is not None:
+                prompt = runtime.runtime_summary(runtime.project_root) + "\n\n" + prompt
+                tools.register(runtime.shell_command_tool(runtime.project_root))
             inner = Agent(
-                ResponsesProvider(model, client=client),
-                ToolRegistry(),
-                load_prompt("reflection"),
+                create_provider(model, client=client),
+                tools,
+                prompt,
                 output_type=output_type,
                 artifacts=store,
             )
