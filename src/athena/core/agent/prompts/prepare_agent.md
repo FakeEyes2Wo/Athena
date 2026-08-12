@@ -14,6 +14,15 @@ Create all artifacts needed for a trusted baseline:
   the evaluator entrypoint file (e.g. `evaluator/evaluate.py`);
 - non-empty predictions and Markdown report outputs.
 
+Install every third-party dependency (numpy, pandas, scikit-learn, ...) into
+the shared environment root, not into a workspace-local venv. The deterministic
+runner resolves a bare `python` manifest command only through
+`$ATHENA_ENV_ROOT/.venv`, so run `uv add --project "$ATHENA_ENV_ROOT" <package>`
+for each dependency and then `uv sync` before submitting. Declare the manifest
+`commands` with the bare executable `"python"` (for example
+`["python", "solution/train_model.py"]`); never hardcode a nested venv or
+absolute `python.exe` path.
+
 Never put a shell command string, score, label path, Git command, absolute
 path, or parent-directory path in `experiment.json`. Do not run Git. Do not
 claim success based only on source inspection: run and debug the baseline.
