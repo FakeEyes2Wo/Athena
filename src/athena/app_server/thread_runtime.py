@@ -291,7 +291,9 @@ class ThreadRuntime:
             TurnTerminalState(result_ref=result_ref, next_context_ref=next_context_ref),
         )
 
-    async def commit_failed(self, turn_id: str, exception_type: str) -> None:
+    async def commit_failed(
+        self, turn_id: str, exception_type: str, error_message: str | None = None
+    ) -> None:
         """记录 Turn 执行失败到 Journal。"""
         async with self.journal.condition:
             if self.active_turn is None or self.active_turn.turn_id != turn_id:
@@ -299,12 +301,17 @@ class ThreadRuntime:
             self.journal.append(self._make_lifecycle_event(turn_id, "turn_failed"))
             self.last_terminal_kind = "turn_failed"
             self._turn_done[turn_id].set_result(
-                TurnTerminalState(exception_type=exception_type)
+                TurnTerminalState(
+                    exception_type=exception_type, error_message=error_message
+                )
             )
             self._clear_active_turn(turn_id)
         await self._execution_observer.turn_failed(turn_id, exception_type)
         self._fire_turn_terminal(
-            turn_id, TurnTerminalState(exception_type=exception_type)
+            turn_id,
+            TurnTerminalState(
+                exception_type=exception_type, error_message=error_message
+            ),
         )
 
     async def commit_interrupted(self, turn_id: str, reason: str) -> None:
@@ -350,7 +357,10 @@ class ThreadRuntime:
         if terminal.cancelled:
             raise asyncio.CancelledError
         if terminal.exception_type is not None:
-            raise RuntimeError(f"turn failed: {terminal.exception_type}")
+            detail = terminal.exception_type
+            if terminal.error_message:
+                detail = f"{detail}: {terminal.error_message}"
+            raise RuntimeError(detail)
         if terminal.result_ref is None:
             raise RuntimeError("completed turn has no result reference")
         return terminal.result_ref
@@ -498,8 +508,10 @@ async def submission_loop(runtime: ThreadRuntime) -> None:
                 case RunnerSucceeded(turn_id=tid, result_ref=rr, next_context_ref=ncr):
                     await runtime.commit_completed(tid, rr, ncr)
 
-                case RunnerFailed(turn_id=tid, exception_type=et):
-                    await runtime.commit_failed(tid, et)
+                case RunnerFailed(
+                    turn_id=tid, exception_type=et, error_message=error_message
+                ):
+                    await runtime.commit_failed(tid, et, error_message)
 
                 case RunnerCancelled(turn_id=tid):
                     await runtime.commit_interrupted(tid, "runner_cancelled")
@@ -601,5 +613,9 @@ async def _run_turn(runtime: ThreadRuntime, turn: AthenaTurn) -> None:
         if runtime._ctx is not None and before_index is not None:
             runtime._ctx.rollback(before_index)
         await runtime.control_queue.put(
-            RunnerFailed(turn_id=turn.turn_id, exception_type=type(exc).__name__)
+            RunnerFailed(
+                turn_id=turn.turn_id,
+                exception_type=type(exc).__name__,
+                error_message=str(exc),
+            )
         )

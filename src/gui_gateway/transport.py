@@ -69,4 +69,5 @@ class WebSocketTransport:
             self._handler._runtime.unsubscribe(subscription_id)
 
     async def serve(self, host: str = "127.0.0.1", port: int = 0) -> Server:
+        """启动 WebSocket 服务器并返回 Server 句柄。"""
         return await serve(self.handle, host, port)

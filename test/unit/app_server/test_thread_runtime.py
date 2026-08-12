@@ -129,7 +129,7 @@ class ThreadRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_wait_turn_raises_for_failed_runner(self) -> None:
         async def failing_runner(thread, turn, emit):
             del thread, turn, emit
-            raise LookupError("broken")
+            raise RuntimeError("analysis.py failed: TypeError: labels")
 
         runtime = ThreadRuntime(
             "thread:1", "session:1", "artifact:context", failing_runner
@@ -139,7 +139,9 @@ class ThreadRuntimeTests(unittest.IsolatedAsyncioTestCase):
         try:
             await handle.submit(StartTurn("turn:1", "artifact:request"))
 
-            with self.assertRaisesRegex(RuntimeError, "LookupError"):
+            with self.assertRaisesRegex(
+                RuntimeError, "RuntimeError: analysis.py failed: TypeError: labels"
+            ):
                 await handle.wait_turn("turn:1")
         finally:
             await runtime.force_close()

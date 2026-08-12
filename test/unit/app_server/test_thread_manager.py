@@ -1,7 +1,11 @@
 import asyncio
 import unittest
+from pathlib import Path
+
+import pytest
 
 from athena.app_server.thread_manager import RuntimeThreadManager
+from athena.core.agent.types import AgentSpec, JsonCodec
 
 from ._support import BlockingRunner, eventually, immediate_runner
 
@@ -96,3 +100,74 @@ class RuntimeThreadManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.aclose("first")
         await manager.aclose("second")
         self.assertEqual(manager.state, "closed")
+
+
+async def test_research_runtime_writes_agent_recovery_log(
+    tmp_path: Path,
+) -> None:
+    from athena.research.runtime import ResearchRuntime
+
+    class EchoRunner:
+        async def run(self, request, *, session, emit):
+            return {"echo": request}
+
+    runtime = ResearchRuntime(project_root=tmp_path)
+    try:
+        runtime._registry.register(
+            "echo",
+            lambda _agent_id, _config=None: AgentSpec(
+                runner=EchoRunner(), codec=JsonCodec()
+            ),
+        )
+        _, run_id = await runtime._runtime.create_root(
+            "echo", {"content": "first"}, agent_id="hyp_vit"
+        )
+        await runtime._runtime.wait_run(run_id, timeout=5)
+
+        assert (tmp_path / ".athena" / "logs" / "agents" / "hyp_vit.jsonl").is_file()
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    "agent_id",
+    [
+        "../x",
+        "a/b",
+        "a\\b",
+        ".",
+        "..",
+        "a<b",
+        "a>b",
+        "a:b",
+        'a"b',
+        "a|b",
+        "a?b",
+        "a*b",
+        "a\x01b",
+        "name.",
+        "name ",
+        "CON",
+        "con.txt",
+        "PRN",
+        "aux.csv",
+        "NUL",
+        "COM1",
+        "com9.log",
+        "LPT1",
+        "lpt9.txt",
+    ],
+)
+async def test_rollout_rejects_agent_id_that_is_not_a_safe_basename(
+    tmp_path: Path, agent_id: str
+) -> None:
+    rollout_dir = tmp_path / "logs" / "agents"
+    manager = RuntimeThreadManager(immediate_runner, rollout_dir=rollout_dir)
+    try:
+        with pytest.raises(ValueError, match="safe path basename"):
+            await manager.start(agent_id, "artifact:context", thread_id=agent_id)
+
+        assert not rollout_dir.exists()
+        assert list(tmp_path.rglob("*.jsonl")) == []
+    finally:
+        await manager.aclose("test_cleanup")

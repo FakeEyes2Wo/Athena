@@ -73,6 +73,7 @@ class RunnerFailed:
 
     turn_id: str
     exception_type: str
+    error_message: str | None = None
 
 
 @dataclass(slots=True)
@@ -110,4 +111,5 @@ class TurnTerminalState:
     result_ref: ArtifactRef | None = None
     next_context_ref: ArtifactRef | None = None
     exception_type: str | None = None
+    error_message: str | None = None
     cancelled: bool = False

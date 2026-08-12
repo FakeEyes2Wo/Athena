@@ -5,40 +5,46 @@ from gui_gateway.handler import GuiRequestHandler
 
 class RecordingRuntime:
     def __init__(self) -> None:
-        self.calls = []
+        self.started = False
+        self.messages: list[str] = []
 
-    async def dispatch(self, method, params):
-        self.calls.append((method, params))
-        return {"forwarded": method}
+    async def start(self) -> None:
+        self.started = True
+
+    async def message(self, text: str) -> str:
+        self.messages.append(text)
+        return "accepted"
 
 
 @pytest.mark.asyncio
-async def test_handler_keeps_ping_local() -> None:
+async def test_handler_exposes_only_start_and_message() -> None:
     runtime = RecordingRuntime()
     handler = GuiRequestHandler(runtime)
+
     assert await handler.dispatch("ping", {}) == {"pong": True}
-    assert runtime.calls == []
+    assert await handler.dispatch("start", {}) == {"started": True}
+    assert await handler.dispatch("message", {"text": "try trees"}) == {
+        "response": "accepted"
+    }
+    assert runtime.started is True
+    assert runtime.messages == ["try trees"]
 
 
 @pytest.mark.asyncio
-async def test_handler_forwards_method_and_params_exactly() -> None:
+async def test_handler_maps_exact_controls_to_messages() -> None:
     runtime = RecordingRuntime()
     handler = GuiRequestHandler(runtime)
-    params = {"path": "tree.json"}
-    assert await handler.dispatch("tree_load", params) == {"forwarded": "tree_load"}
-    assert runtime.calls == [("tree_load", params)]
+
+    for method in ("pause", "resume", "stop"):
+        assert await handler.dispatch(method, {}) == {"status": "accepted"}
+
+    assert runtime.messages == ["/pause", "/resume", "/stop"]
 
 
-def test_handler_owns_no_research_state() -> None:
+@pytest.mark.asyncio
+async def test_handler_rejects_unknown_methods() -> None:
     handler = GuiRequestHandler(RecordingRuntime())
-    for name in (
-        "_tree",
-        "_budget",
-        "_active_task",
-        "_active_loop",
-        "_search_status",
-        "_validate",
-        "_reporter",
-        "_tree_add_node",
-    ):
-        assert not hasattr(handler, name)
+    with pytest.raises(ValueError, match="unsupported GUI method"):
+        await handler.dispatch("STATUS", {})
+    with pytest.raises(ValueError, match="message text"):
+        await handler.dispatch("message", {})

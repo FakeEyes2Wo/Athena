@@ -1,0 +1,156 @@
+"""Immutable local display state for the two-event TUI."""
+
+from dataclasses import dataclass, replace
+from typing import Any, Literal
+
+COMPOSER = "COMPOSER"
+CONFIRMATION = "CONFIRMATION"
+
+HistoryKind = Literal["user", "runtime"]
+OutputSource = Literal["supervisor", "agent", "tool"]
+OutputChannel = Literal["text", "stdout", "stderr", "error"]
+
+
+@dataclass(frozen=True)
+class HistoryEntry:
+    """One local display record; never serialized or sent to the runtime."""
+
+    kind: HistoryKind
+    text: str
+    source: OutputSource | None = None
+    channel: OutputChannel = "text"
+    plan: str | None = None
+    tool: str | None = None
+    truncated: bool = False
+
+    def __post_init__(self) -> None:
+        if self.kind == "user" and self.source is not None:
+            raise ValueError("user history has no runtime source")
+        if self.kind == "runtime" and self.source is None:
+            raise ValueError("runtime history requires source")
+
+
+@dataclass(frozen=True)
+class TuiState:
+    """Immutable rendering state derived from runtime events and local input."""
+
+    project_root: str = "."
+    mode: str = COMPOSER
+    status: str = "RUNNING"
+    phase: str = "SEARCH"
+    plans: tuple[dict[str, Any], ...] = ()
+    search: dict[str, Any] | None = None
+    sota: dict[str, Any] | None = None
+    waiting: dict[str, Any] | None = None
+    history: tuple[HistoryEntry, ...] = ()
+    last_output_seq: int = 0
+    history_follow_tail: bool = True
+    unseen_output_count: int = 0
+    composer: str = ""
+    overlay: str | None = None
+    last_error: str | None = None
+
+    @property
+    def control_status(self) -> str:
+        """Compatibility name used by prompt-toolkit styling."""
+        return self.status
+
+
+def apply_snapshot(state: TuiState, event: object) -> TuiState:
+    """Replace every runtime-owned field from one complete state event."""
+    search = dict(getattr(event, "search"))
+    sota = getattr(event, "sota")
+    waiting = getattr(event, "waiting")
+    return replace(
+        state,
+        status=str(getattr(event, "status")),
+        phase=str(getattr(event, "phase")),
+        plans=tuple(dict(plan) for plan in getattr(event, "plans")),
+        search=search,
+        sota=None if sota is None else dict(sota),
+        waiting=None if waiting is None else dict(waiting),
+    )
+
+
+def apply_output(state: TuiState, event: object) -> TuiState:
+    """Append one new sequenced output event and ignore duplicate replay.
+
+    同一 agent 流的 ``text_delta`` 逐词到达：合并进上一条相同 source/plan 的
+    text 条目，避免 TUI 显示成 ``* agent 词`` 的碎片行。
+    """
+    sequence = int(getattr(event, "seq"))
+    if sequence <= state.last_output_seq:
+        return state
+
+    entry = HistoryEntry(
+        kind="runtime",
+        text=str(getattr(event, "text")),
+        source=getattr(event, "source"),
+        channel=getattr(event, "channel"),
+        plan=getattr(event, "plan", None),
+        tool=getattr(event, "tool", None),
+        truncated=bool(getattr(event, "truncated", False)),
+    )
+    history = state.history
+    if entry.source == "agent" and entry.channel == "text" and history:
+        last = history[-1]
+        if (
+            last.kind == "runtime"
+            and last.source == "agent"
+            and last.channel == "text"
+            and last.plan == entry.plan
+        ):
+            history = (*history[:-1], replace(last, text=last.text + entry.text))
+            entry = None
+    if entry is not None:
+        history = (*history, entry)[-1000:]
+    return replace(
+        state,
+        history=history,
+        last_output_seq=sequence,
+        unseen_output_count=(
+            state.unseen_output_count
+            if state.history_follow_tail
+            else state.unseen_output_count + 1
+        ),
+    )
+
+
+def append_user_message(state: TuiState, text: str) -> TuiState:
+    """Append an immediate local echo of one submitted user message."""
+    entry = HistoryEntry(kind="user", text=text)
+    return replace(state, history=(*state.history, entry)[-1000:])
+
+
+def set_history_follow(state: TuiState, follow: bool) -> TuiState:
+    """Toggle tail following and clear unseen count when resuming."""
+    return replace(
+        state,
+        history_follow_tail=follow,
+        unseen_output_count=0 if follow else state.unseen_output_count,
+    )
+
+
+def set_error(state: TuiState, message: str | None) -> TuiState:
+    """Replace the transient local error."""
+    return replace(state, last_error=message)
+
+
+def open_overlay(state: TuiState, text: str) -> TuiState:
+    """Open a local informational overlay while retaining composer/history."""
+    return replace(state, overlay=text)
+
+
+def close_overlay(state: TuiState) -> TuiState:
+    """Close the current local informational overlay."""
+    return replace(state, overlay=None)
+
+
+def open_confirmation(state: TuiState, text: str) -> TuiState:
+    """Enter local confirmation mode with the supplied prompt."""
+    return replace(state, mode=CONFIRMATION, overlay=text)
+
+
+def close_confirmation(state: TuiState) -> TuiState:
+    """Return from local confirmation mode to the composer."""
+    return replace(state, mode=COMPOSER, overlay=None)

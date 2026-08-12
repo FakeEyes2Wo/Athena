@@ -53,7 +53,7 @@ class RuntimeThreadManager:
         self._lock = asyncio.Lock()
         self._handles: dict[str, ThreadHandle] = {}
         self._state: str = "alive"
-        self._close_future: asyncio.Future[None] = asyncio.Future()
+        self._close_future: asyncio.Future[None] | None = None
         self._memory_kwargs = {
             "ctx": ctx,
             "compactor": compactor,
@@ -113,6 +113,8 @@ class RuntimeThreadManager:
         """
         self._require_ref(session_id, "session_id")
         self._require_ref(context_ref, "context_ref")
+        if self._rollout_dir is not None:
+            self.require_safe_path_basename(session_id, "session_id")
         thread_id = thread_id or str(uuid4())
         self._require_ref(thread_id, "thread_id")
         # 先检查状态 — 避免创建 runtime 后因状态不对而泄漏后台任务
@@ -220,6 +222,8 @@ class RuntimeThreadManager:
         """关闭所有 Thread 并清理资源。"""
         should_shutdown = False
         async with self._lock:
+            if self._close_future is None:
+                self._close_future = asyncio.get_running_loop().create_future()
             if self._state != "alive":
                 # 不持锁等待 — 避免与执行关闭的线程死锁
                 pass
@@ -228,6 +232,7 @@ class RuntimeThreadManager:
                 handles = list(self._handles.values())
                 should_shutdown = True
         if not should_shutdown:
+            assert self._close_future is not None
             await self._close_future
             return
         results = await asyncio.gather(
@@ -239,6 +244,7 @@ class RuntimeThreadManager:
         async with self._lock:
             self._state = "closed"
             self._handles.clear()
+            assert self._close_future is not None
             if not self._close_future.done():
                 self._close_future.set_result(None)
 
@@ -246,6 +252,24 @@ class RuntimeThreadManager:
     def _require_ref(value: object, name: str) -> None:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
+
+    @staticmethod
+    def require_safe_path_basename(value: object, name: str) -> str:
+        RuntimeThreadManager._require_ref(value, name)
+        assert isinstance(value, str)
+        stem = value.split(".", 1)[0].upper()
+        reserved_stems = {"CON", "PRN", "AUX", "NUL"} | {
+            f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)
+        }
+        if (
+            value in {".", ".."}
+            or Path(value).name != value
+            or any(ord(char) < 32 or char in '<>:"/\\|?*' for char in value)
+            or value.endswith((".", " "))
+            or stem in reserved_stems
+        ):
+            raise ValueError(f"{name} must be a safe path basename")
+        return value
 
     @property
     def state(self) -> str:
