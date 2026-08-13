@@ -35,14 +35,17 @@ def _subscribe(runtime: ResearchRuntime) -> None:
 
     def flush_agent() -> None:
         nonlocal agent_buf, agent_plan
-        if agent_buf:
-            head = "".join(agent_buf)
+        head = "".join(agent_buf)
+        # 先清空再打印：GBK 控制台遇到 LLM 输出里的非 GBK 字符会抛
+        # UnicodeEncodeError，若此时缓冲区未清，之后每个事件都在同一处再抛，
+        # 输出永久静默——看起来就像"卡住进不了 SEARCH"。
+        agent_buf = []
+        agent_plan = None
+        if head:
             print(
                 f"[agent] {head[:400]}..." if len(head) > 400 else f"[agent] {head}",
                 flush=True,
             )
-        agent_buf = []
-        agent_plan = None
 
     def on_event(kind: str, payload: dict) -> None:
         nonlocal agent_buf, agent_plan
@@ -98,6 +101,10 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # LLM 输出常含非 GBK 字符（emoji/✓/→）；中文 Windows 控制台默认 GBK 编码，
+    # 直接 print 会抛 UnicodeEncodeError。降级为替换字符，保证进度始终可见。
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
     args = _parse(sys.argv[1:] if argv is None else argv)
     return asyncio.run(_run(args))
 

@@ -259,6 +259,11 @@ class EnvironmentManager:
                 cwd=str(self._environment_root),
                 capture_output=True,
                 text=True,
+                # uv 输出含框线字符等非 GBK 字节；不指定编码会按 locale 解码，在中文
+                # Windows 上于读取线程抛 UnicodeDecodeError——异常不向上传播，调用方
+                # 只拿到空输出，失败原因静默丢失。
+                encoding="utf-8",
+                errors="replace",
                 timeout=300,
             )
         except subprocess.TimeoutExpired:
@@ -310,7 +315,12 @@ class EnvironmentManager:
             return "missing"
         try:
             proc = subprocess.run(
-                [found, "--version"], capture_output=True, text=True, timeout=5
+                [found, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
             )
             return (proc.stdout or proc.stderr).strip().splitlines()[0]
         except (OSError, subprocess.TimeoutExpired):
@@ -591,9 +601,17 @@ class ExecutionRuntime:
         """注入 system prompt 的简洁运行时块。"""
         return self._env.runtime_summary(Path(workspace_root))
 
-    def ensure_environment(self) -> None:
-        """确保共享环境根已初始化（含可被 uv 使用的 pyproject.toml）。"""
+    def ensure_environment(self) -> dict[str, object]:
+        """确保共享环境根就绪：pyproject.toml 与真实存在的 ``.venv``；返回 sync 结果。
+
+        只补 pyproject.toml 不够。``build_env`` 仅在 ``environment_root/.venv``
+        已存在时才前置它，否则裸 ``python`` 落到宿主 PATH 上的解释器——``uv run``
+        启动时那正是 Athena 自己的 venv（含 pandas），直接启动时则是 conda base。
+        agent 的依赖自检因此假阳性；等它的 ``uv add`` 顺带建出 venv，解释器突然
+        切换，刚"通过"的 import 变成 ModuleNotFoundError，PREPARE 白烧轮次。
+        """
         self._env.ensure_project()
+        return self._env.sync()
 
     async def run(
         self,

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,41 @@ def test_ensure_environment_creates_minimal_pyproject_when_missing(
     content = pyproject.read_text(encoding="utf-8")
     assert "[project]" in content
     assert "dependencies = []" in content
+
+
+def test_ensure_environment_materializes_venv_for_deterministic_python(
+    tmp_path: Path,
+) -> None:
+    """环境根 .venv 必须在 agent 首条命令前就绪，否则裸 python 落到宿主解释器。
+
+    build_env 只在 .venv 已存在时才前置它；仅补 pyproject.toml 不建 venv，会让
+    agent 的依赖自检打到宿主 PATH 上的解释器（假阳性），等它的 uv add 顺带建出
+    venv 后解释器突然切换，刚"通过"的 import 变成 ModuleNotFoundError。
+    """
+    if shutil.which("uv") is None:
+        pytest.skip("uv not on PATH")
+
+    result = _runtime(tmp_path).ensure_environment()
+
+    assert result["ready"] is True
+    bindir = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    assert bindir.is_dir()
+    env = EnvironmentManager(
+        project_root=tmp_path, environment_root=tmp_path
+    ).build_env()
+    assert env["PATH"].split(os.pathsep)[0] == str(bindir)
+
+
+def test_ensure_environment_reports_failure_instead_of_raising(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """uv 不可用时如实返回 not ready，而不是抛异常或假装环境就绪。"""
+    monkeypatch.setattr("athena.execution.runtime.shutil.which", lambda name: None)
+
+    result = _runtime(tmp_path).ensure_environment()
+
+    assert result["ready"] is False
+    assert "uv" in str(result["error"])
 
 
 def test_ensure_environment_is_idempotent_and_preserves_existing(

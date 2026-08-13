@@ -345,6 +345,5 @@ async def test_prepare_eval_script_failure_retries_without_agent_repair(
         )
 
     assert agents.created == ["prepare"]
-    assert agents.feedback == [
-        "metric.json eval script failed or produced no primary score"
-    ]
+    # 反馈必须带上 eval 脚本的真实退出码与 stderr，agent 才可能自修。
+    assert agents.feedback == ["evaluator/eval.py failed (exit 1): boom"]

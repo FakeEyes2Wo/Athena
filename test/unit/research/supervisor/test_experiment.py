@@ -827,6 +827,58 @@ async def test_run_turn_invalid_manifest_is_rejected(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_execution_failure_surfaces_timeout_reason(tmp_path) -> None:
+    """超时的 exit_code 是 -1、stderr 为空，必须带上 error 才不是无信息报错。"""
+    execution = _FakeExecution(
+        [CommandResult(ok=False, stdout="", stderr="", exit_code=-1, error="timeout")]
+    )
+    runner, plan_input, _, branch, _ = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "execution_failed"
+    assert "timeout" in result.error
+
+
+@pytest.mark.asyncio
+async def test_prepare_scoring_failure_reports_eval_script_stderr(tmp_path) -> None:
+    """eval 脚本失败时把 stderr 交给 agent，否则它无从自修（只看到"失败了"）。"""
+    execution = _FakeExecution(
+        [
+            CommandResult(ok=True, stdout="ok", stderr="", exit_code=0),
+            CommandResult(
+                ok=False,
+                stdout="",
+                stderr="ModuleNotFoundError: No module named 'pandas'",
+                exit_code=1,
+            ),
+        ]
+    )
+    runner, plan_input, _, branch, store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator()
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    Path(branch.path, "REPORT.md").write_text("baseline", encoding="utf-8")
+    Path(branch.path, "metric.json").write_text(
+        json.dumps({"eval_script": "evaluator/evaluate.py"}), encoding="utf-8"
+    )
+    state = PlanState(kind="PREPARE", context_ref=_REF, turns_used=1, turn_limit=12)
+
+    result = await runner.run_turn("prepare", state, plan_input)
+
+    assert result.kind == "scoring_failed"
+    assert "ModuleNotFoundError" in result.error
+    evidence = json.loads(await store.get_text(result.evidence_ref))
+    assert "ModuleNotFoundError" in evidence["error"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_requires_report_before_scoring(tmp_path) -> None:
     execution = _FakeExecution(
         [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]

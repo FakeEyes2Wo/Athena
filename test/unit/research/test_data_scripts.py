@@ -5,6 +5,7 @@
 
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -144,6 +145,26 @@ async def test_freeze_rejects_missing_declared_entrypoint(tmp_path) -> None:
         await runner.freeze(
             tmp_path / "draft", BundleMetadata(entrypoint="src/nope.py")
         )
+
+
+def test_run_cmd_failure_reports_stderr(tmp_path) -> None:
+    """失败必须带上 stderr：只报"exit status 1"时 agent 无从自修，白烧 PREPARE 轮次。
+
+    真实案例：evaluator/pyproject.toml 声明了 hatchling build-system 却没有包布局，
+    ``uv run python --version`` 退出 1，hatchling 的解释被 CalledProcessError 吞掉，
+    PREPARE 连烧 10 轮同一个错，最终 budget 耗尽、永远进不了 SEARCH。
+    """
+    script = tmp_path / "boom.py"
+    script.write_text(
+        "import sys; sys.stderr.write('hatchling: unable to determine files'); "
+        "sys.exit(1)",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(subprocess.SubprocessError, match="hatchling"):
+        _run_cmd([sys.executable, str(script)], cwd=tmp_path)
+    with pytest.raises(subprocess.SubprocessError, match="hatchling"):
+        _run_cmd_capture([sys.executable, str(script)], cwd=tmp_path)
 
 
 def test_run_cmd_timeout_raises_clear_error(tmp_path, monkeypatch) -> None:

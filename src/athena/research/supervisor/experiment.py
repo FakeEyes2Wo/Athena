@@ -340,8 +340,11 @@ class PlanRunner:
                 emit=emit,
             )
             if not result.ok:
+                # 超时的 exit_code 是 -1 且 stderr 为空，不带 error 就成了无信息报错。
+                reason = f" [{result.error}]" if result.error else ""
                 error = (
-                    f"command failed (exit {result.exit_code}): {result.stderr[:200]}"
+                    f"command failed (exit {result.exit_code}){reason}: "
+                    f"{result.stderr[:200]}"
                 )
                 if "ModuleNotFoundError" in result.stderr:
                     error += (
@@ -369,12 +372,12 @@ class PlanRunner:
             )
 
         if state.kind == "PREPARE":
-            metric = await self._prepare_metric(plan_id)
+            metric, reason = await self._prepare_metric(plan_id)
             if metric is None:
                 return await self._failure(
                     plan_id,
                     "scoring_failed",
-                    "metric.json eval script failed or produced no primary score",
+                    reason,
                     predictions_ref=predictions_ref,
                 )
         else:
@@ -448,22 +451,25 @@ class PlanRunner:
             report_ref=report_ref,
         )
 
-    async def _prepare_metric(self, plan_id: str) -> float | None:
-        """运行 metric.json 指定的 eval 脚本，解析其 stdout 的 primary 分数。
+    async def _prepare_metric(self, plan_id: str) -> tuple[float | None, str]:
+        """运行 metric.json 指定的 eval 脚本，返回 ``(primary 分数, 失败原因)``。
 
         PREPARE 基线不再走冻结评估器 + ``--request/--output``；Agent 直接写
         ``metric.json``（如 ``{"eval_script": "evaluator/evaluate.py"}``），eval
         脚本以 workspace 为 cwd 读取 labels.csv 与 predictions.csv，打印一行
         ``{"primary": <float>}``。
+
+        原因必须回传：只说"打分失败"时 agent 看不到 ModuleNotFoundError/超时，
+        无从自修，只能把 12 轮预算耗在同一个错误上，最终进不了 SEARCH。
         """
         spec_path = self.workdir / "metric.json"
         if not spec_path.is_file():
-            return None
+            return None, "metric.json is missing"
         try:
             spec = json.loads(spec_path.read_text(encoding="utf-8"))
             eval_script = spec["eval_script"]
-        except (OSError, ValueError, KeyError):
-            return None
+        except (OSError, ValueError, KeyError) as exc:
+            return None, f"metric.json is unreadable or has no eval_script: {exc}"
         result = await self._execution.run(
             self._context,
             argv=["python", eval_script],
@@ -471,14 +477,21 @@ class PlanRunner:
             workdir=str(self.workdir),
         )
         if not result.ok:
-            return None
+            reason = f" [{result.error}]" if result.error else ""
+            return None, (
+                f"{eval_script} failed (exit {result.exit_code}){reason}: "
+                f"{result.stderr[:500]}"
+            )
         lines = [line for line in result.stdout.splitlines() if line.strip()]
         if not lines:
-            return None
+            return None, f"{eval_script} printed no output; expected {{'primary': ...}}"
         try:
-            return float(json.loads(lines[-1])["primary"])
+            return float(json.loads(lines[-1])["primary"]), ""
         except (ValueError, KeyError, TypeError):
-            return None
+            return None, (
+                f"{eval_script} last stdout line is not {{'primary': <float>}}: "
+                f"{lines[-1][:200]}"
+            )
 
     async def _failure(
         self,

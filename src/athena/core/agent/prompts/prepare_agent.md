@@ -21,6 +21,22 @@ Create all artifacts needed for a trusted baseline:
   directory) and `predictions.csv` (the working directory), compute the primary
   metric, and print exactly one line `{"primary": <float>}` to stdout (nothing
   else);
+- a `pyproject.toml` **inside the eval script's own directory** (e.g.
+  `evaluator/pyproject.toml`). The evaluator is frozen as a standalone uv
+  project, so this file is mandatory — without it PREPARE cannot freeze the
+  evaluator and the turn fails. Declare only `[project]` with `name`,
+  `version`, `requires-python`, and the `dependencies` the eval script imports.
+  **Never add a `[build-system]` table** (to the evaluator or the workspace
+  root): it makes uv build the directory as an installable package, and with no
+  package layout the build fails, which fails the whole turn. Example:
+
+  ```toml
+  [project]
+  name = "evaluator"
+  version = "0.1.0"
+  requires-python = ">=3.11"
+  dependencies = ["pandas"]
+  ```
 - `experiment.json` at the workspace root with version `1`, `commands` as a
   **list of argv arrays** (e.g. `"commands": [["python", "solution/train_model.py"]]`
   — note the double brackets around each command), and workspace-relative

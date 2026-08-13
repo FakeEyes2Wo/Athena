@@ -245,6 +245,10 @@ class ResearchRuntime:
         """
         if self._task is not None and not self._task.done():
             return self._task
+        # 环境根 venv 必须先于任何 agent 命令存在，否则裸 python 落到宿主解释器。
+        # 放在 start() 而非只在 PREPARE：续跑（state.phase 已是 SEARCH）不经过
+        # PREPARE，venv 被删或项目被拷贝后同样会退化到宿主解释器。
+        await asyncio.to_thread(self._execution.ensure_environment)
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
         self._task = asyncio.create_task(self._supervisor.start())
