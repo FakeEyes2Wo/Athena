@@ -9,7 +9,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import CandidateEvaluation, DataScriptBundle
-from athena.research.supervisor.prepare import run_prepare_plan
+from athena.research.supervisor.prepare import _freeze_evaluator, run_prepare_plan
 
 
 class _AgentRuntime:
@@ -84,6 +84,34 @@ class _DirScripts:
             project_ref="sha256:" + "2" * 64,
             source_ref="sha256:" + "3" * 64,
             tree_ref="sha256:" + "4" * 64,
+            python_version="3.12",
+            environment_hash="5" * 64,
+        )
+
+
+class _TreeScripts:
+    """Freeze stub that builds a real tree manifest (rel path -> content ref)."""
+
+    def __init__(self, store: LocalArtifactStore) -> None:
+        self.store = store
+
+    async def freeze(self, workspace, metadata):
+        assert Path(workspace).name == "evaluator"
+        assert metadata.entrypoint == "evaluate.py"
+        tree: dict[str, str] = {}
+        for path in sorted(Path(workspace).rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(workspace).as_posix()
+            tree[rel] = await self.store.put_bytes(path.read_bytes())
+        tree_ref = await self.store.put_text(json.dumps(tree, ensure_ascii=False))
+        return DataScriptBundle(
+            bundle_id="bundle-eval",
+            entrypoint="evaluate.py",
+            lock_ref="sha256:" + "1" * 64,
+            project_ref="sha256:" + "2" * 64,
+            source_ref="sha256:" + "3" * 64,
+            tree_ref=tree_ref,
             python_version="3.12",
             environment_hash="5" * 64,
         )
@@ -220,6 +248,35 @@ async def test_prepare_result_requires_every_trusted_artifact(
 
     assert agents.created == ["prepare"]
     assert agents.feedback == [expected_error]
+
+
+@pytest.mark.asyncio
+async def test_freeze_evaluator_accepts_labels_directory_and_handoff(
+    tmp_path: Path,
+) -> None:
+    """Labels may be a ``labels/`` directory (no labels.csv); HANDOFF.md is bundled."""
+    workspace_path = tmp_path / "prepare"
+    evaluator = workspace_path / "evaluator"
+    (evaluator / "labels").mkdir(parents=True)
+    (evaluator / "labels" / "truth.csv").write_text("id,label\n1,0\n", encoding="utf-8")
+    (evaluator / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    (workspace_path / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluator/evaluate.py"}), encoding="utf-8"
+    )
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    evaluator_ref = await _freeze_evaluator(
+        root=workspace_path, scripts=_TreeScripts(store), store=store
+    )
+
+    bundle = DataScriptBundle.model_validate_json(await store.get_text(evaluator_ref))
+    tree = json.loads(await store.get_text(bundle.tree_ref))
+    assert "labels/truth.csv" in tree
+    assert "HANDOFF.md" in tree
 
 
 @pytest.mark.asyncio

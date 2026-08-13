@@ -51,6 +51,13 @@ async def _freeze_evaluator(
     scripts: DataScriptRunner,
     store: ArtifactStore,
 ) -> ArtifactRef:
+    """Freeze the evaluator directory (metric.json's eval_script) into a bundle.
+
+    Labels may be a ``labels.csv`` file or a non-empty ``labels/`` directory.
+    ``freeze`` walks the whole evaluator directory (``rglob("*")``), so an
+    ``evaluator/HANDOFF.md`` — the self-describing eval spec — is bundled
+    alongside the evaluator code for SEARCH to read.
+    """
     spec_path = root / "metric.json"
     if not spec_path.is_file():
         raise ValueError("metric.json is missing")
@@ -74,11 +81,15 @@ async def _freeze_evaluator(
         entrypoint = evaluator_path.name
     else:
         raise ValueError("eval_script is missing")
-    labels_path = evaluator_root / "labels.csv"
-    if not labels_path.is_file() or not labels_path.stat().st_size:
+    labels_file = evaluator_root / "labels.csv"
+    labels_dir = evaluator_root / "labels"
+    if not (
+        (labels_file.is_file() and labels_file.stat().st_size)
+        or (labels_dir.is_dir() and any(p.is_file() for p in labels_dir.rglob("*")))
+    ):
         raise ValueError(
-            "eval labels are missing: labels.csv must sit next to the eval script "
-            f"(same directory as {evaluator_rel!r})"
+            "eval labels are missing: labels.csv or a non-empty labels/ dir must "
+            f"sit next to the eval script (same directory as {evaluator_rel!r})"
         )
     bundle = await scripts.freeze(evaluator_root, BundleMetadata(entrypoint=entrypoint))
     return await store.put_text(bundle.model_dump_json())
