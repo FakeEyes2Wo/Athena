@@ -176,3 +176,27 @@ athena_ts/
 - **git 子进程**：Windows 环境 git 行为差异（路径、换行），测试覆盖 Windows。
 - **`research-tree-scheduling` 测试归属**：树在 M0，但调度语义可能隐含 supervisor 约定——若测试依赖 M2 模块，则迁至 M2 spec。
 - M1–M5 spec 各自在对应里程碑启动时编写。
+
+## 11. M0 实施增补（2026-08-13 实现记录）
+
+M0 实现完成（`athena_ts/packages/athena-core`，vitest 79 全绿、`tsc --noEmit` 无错误）。以下为实施中相对本 spec/plan 的偏差，均不影响 zod 模型层或行为对拍。
+
+### 范围增补
+- `models/research-data-models.ts`（`research/data_models.py` 79 LOC）并入 M0 模型层（支撑 `test_core_model_contracts` 对拍）。
+- `tests/test_core_public_api.py` 实际只测 M1 符号（`core.__all__`/`agent.__all__`）→ 移至 M1。
+- `test/unit/test_artifact_store.py`、`test/unit/test_retry.py`（M0 子集）补充进 M0 对拍清单。
+
+### cordis@4.0.0-rc.8 偏差（仅组合层）
+- **打包与 NodeNext 不兼容**：rc.8 的 `lib/` 只有打包后的 `index.js` + 各子模块 `.d.ts`（无 `lib/context.js` 等子模块 `.js`），`import { Context } from "cordis"` 在 `moduleResolution: NodeNext` 下被判定为"仅类型"。**故 `tsconfig.base.json` 采用 `module: ESNext` + `moduleResolution: Bundler`**（运行时仍输出合法 Node ESM，`.js` 扩展名 import 不变）。这是对 §3 锁定 `NodeNext` 的唯一偏离。
+- **服务注册 API**：rc.8 的 `Service` 构造函数为 `(ctx, name)`（2 参，非 spec §4 示例的 3 参 immediate）；服务经 `ctx.provide(name, value)` 在插件 fiber 内注册，且需 `await ctx.plugin(...)` 后可用。故 `createAthenaApp()` 为 **async**（返回 `Promise<Context>`），三服务为普通类 `LocalArtifactStore`/`LocalGitWorkspace` + `workspace` 对象，非 `Service` 子类。
+
+### zod v4 语义偏差
+- **`z.number()` 在 v4 始终拒绝 `NaN`/`Infinity`**（`ZodNumber.isFinite` 硬编码为 true，`.finite()` 为 no-op）。因此：
+  - `Hypothesis.priority` 的 `allow_inf_nan=False` 语义由基类拒绝（消息为 `expected number` 而非 pydantic 的 `finite`）；`research-tree-scheduling` 对拍改断言 `expected number`。
+  - Python `EvalResult.primary`（`float`，允许 inf）在 TS 侧仍为 `z.number()`（拒绝 inf），故 `complete_experiment` 的 `math.isfinite` 手动检查在 TS 里前置拦截（测试以纯对象构造 `successfulEval(primary=Infinity)` 绕过 schema，使 `Number.isFinite` 检查抛原文 `evaluation primary metric must be finite`）。`Experiment` superRefine 中的 finite 分支因 schema 前置拒绝成为死代码，保留以对齐 Python 结构。
+- **`z.record` 需 2 参**（`z.record(key, value)`，无 1 参重载），映射 `dict[str, …]` 时显式写 `z.record(z.string(), …)`。
+
+### 其他
+- **`TimeoutError` 非 Node 全局**（Node 24 无此全局）：在 `services/retry.ts` 内定义并导出，对齐 Python 内建 `TimeoutError`。
+- **`atomicWriteJson` fsync**：Windows 上只读 fd 的 `fsyncSync` 抛 EPERM，改为打开写句柄（`openSync(tmp, "w")` → `writeFileSync(fd, …)` → `fsyncSync(fd)`）。
+- **git-workspace 测试**：Windows git 默认 `core.autocrlf` 会在 `restore` 时改写 LF，测试 repo 增加 `git config core.autocrlf false`（断言不变）。

@@ -1,0 +1,96 @@
+{
+  "version": 2,
+  "sota_id": "exp_baseline",
+  "hypotheses": {
+    "hyp_baseline": {
+      "statement": "Establish a reproducible baseline",
+      "intervention": "Train the default model",
+      "expected_effect": "Produce the reference primary metric",
+      "status": "SUPPORTED",
+      "evidence_refs": [
+        "artifact://data/train"
+      ],
+      "id": "hyp_baseline",
+      "parent_id": null,
+      "sources": [
+        "common_knowledge"
+      ]
+    },
+    "hyp_child": {
+      "statement": "Try calibrated features",
+      "intervention": "Add calibrated aggregate features",
+      "expected_effect": "Improve the primary metric",
+      "status": "PROPOSED",
+      "evidence_refs": [],
+      "id": "hyp_child",
+      "parent_id": "exp_baseline",
+      "sources": [
+        "https://example.test/paper"
+      ]
+    }
+  },
+  "experiments": {
+    "exp_baseline": {
+      "parent_id": null,
+      "hypothesis_id": "hyp_baseline",
+      "commit": "0000000000000000000000000000000000000000",
+      "plan": {
+        "kind": "baseline",
+        "change": "Train the default model",
+        "rubrics": [
+          "Uses the frozen validation protocol"
+        ],
+        "run_config_ref": "artifact://runs/exp_baseline/config",
+        "budget": {
+          "max_trials": 1
+        },
+        "acceptance_rule": "The evaluator completes"
+      },
+      "gitwork": {
+        "path": "C:/worktrees/exp_baseline",
+        "branch": "baseline/exp_baseline",
+        "base_commit": "0000000000000000000000000000000000000000"
+      },
+      "status": "SUCCEEDED",
+      "eval": {
+        "experiment_id": "exp_baseline",
+        "primary": 0.75,
+        "secondary": {},
+        "per_sample": "artifact://samples/exp_baseline"
+      },
+      "verdict": null,
+      "artifacts": {
+        "diff": "artifact://diffs/exp_baseline",
+        "logs": "artifact://logs/exp_baseline"
+      },
+      "error": null
+    },
+    "exp_child": {
+      "parent_id": "exp_baseline",
+      "hypothesis_id": "hyp_child",
+      "commit": "1111111111111111111111111111111111111111",
+      "plan": {
+        "kind": "search",
+        "change": "Add calibrated aggregate features",
+        "rubrics": [
+          "Uses the frozen validation protocol"
+        ],
+        "run_config_ref": "artifact://runs/exp_child/config",
+        "budget": {
+          "max_trials": 1
+        },
+        "acceptance_rule": "The evaluator completes"
+      },
+      "gitwork": {
+        "path": "C:/worktrees/exp_child",
+        "branch": "experiment/exp_child",
+        "base_commit": "0000000000000000000000000000000000000000"
+      },
+      "status": "PENDING",
+      "eval": null,
+      "verdict": null,
+      "artifacts": {},
+      "error": null
+    }
+  }
+}
