@@ -7,6 +7,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from athena.core.research_models import Hypothesis
+from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.runtime import ResearchRuntime
 
 
@@ -28,7 +29,7 @@ def _hypothesis(label: str) -> Hypothesis:
     ],
 )
 def test_ideator_allocations_cap_workers_at_three(count, expected) -> None:
-    assert ResearchRuntime._ideator_allocations(count) == expected
+    assert AgentTurnRunner._ideator_allocations(count) == expected
 
 
 @pytest.mark.asyncio
@@ -49,9 +50,10 @@ async def test_ideator_turn_runs_actual_lane_count_concurrently_and_merges_in_or
         await asyncio.wait_for(all_started.wait(), timeout=1)
         return [_hypothesis(label)] * target
 
-    runtime._run_ideator_lane = MethodType(run_lane, runtime)
+    runner = AgentTurnRunner(runtime)
+    runner._run_ideator_lane = MethodType(run_lane, runner)
 
-    hypotheses = await runtime._run_ideator_turn(4)
+    hypotheses = await runner.run_ideator_turn(4)
 
     assert started == [
         ("ideator-1", 2),
@@ -126,10 +128,11 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
         assert channel == "error"
         errors.append((plan, text))
 
-    runtime._run_ideator_lane = MethodType(run_lane, runtime)
+    runner = AgentTurnRunner(runtime)
+    runner._run_ideator_lane = MethodType(run_lane, runner)
     runtime.publish_output = publish_output
 
-    hypotheses = await runtime._run_ideator_turn(3)
+    hypotheses = await runner.run_ideator_turn(3)
 
     assert [item.intervention for item in hypotheses] == [
         "change ideator-1",
@@ -139,14 +142,15 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
 
 
 @pytest.mark.asyncio
-async def test_ideator_turn_resolves_relative_eda_dir_against_athena(tmp_path) -> None:
+async def test_ideator_turn_resolves_relative_eda_dir_against_project_root(
+    tmp_path,
+) -> None:
     runtime = ResearchRuntime.__new__(ResearchRuntime)
     runtime._provider = object()
     runtime._root = tmp_path
-    runtime._athena = tmp_path / ".athena"
-    workspace = runtime._athena / "workspaces" / "athena-abc123"
+    workspace = tmp_path / "workspaces" / "eda"
     workspace.mkdir(parents=True)
-    runtime._state = SimpleNamespace(eda_dir="workspaces/athena-abc123")
+    runtime._state = SimpleNamespace(eda_dir="workspaces/eda")
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     resolved: list[str] = []
 
@@ -154,9 +158,10 @@ async def test_ideator_turn_resolves_relative_eda_dir_against_athena(tmp_path) -
         resolved.append(str(eda_dir))
         return [_hypothesis(label)]
 
-    runtime._run_ideator_lane = MethodType(run_lane, runtime)
+    runner = AgentTurnRunner(runtime)
+    runner._run_ideator_lane = MethodType(run_lane, runner)
 
-    hypotheses = await runtime._run_ideator_turn(1)
+    hypotheses = await runner.run_ideator_turn(1)
 
     assert resolved == [str(workspace.resolve())]
     assert [item.intervention for item in hypotheses] == ["change ideator-1"]

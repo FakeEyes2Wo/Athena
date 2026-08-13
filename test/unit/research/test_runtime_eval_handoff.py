@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
-from athena.research.runtime import ResearchRuntime, _read_eval_handoff
+from athena.research.runtime import ResearchRuntime
+from athena.research.agent_turn_runner import AgentTurnRunner, _read_eval_handoff
 
 _HANDOFF = "# Eval contract\n\npredictions/predictions.csv: header,id,target\n"
 
@@ -55,6 +56,7 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
     runtime = ResearchRuntime.__new__(ResearchRuntime)
     runtime._store = store
     runtime._supervisor = SimpleNamespace(evaluator_ref=evaluator_ref)
+    runner = AgentTurnRunner(runtime)
 
     captured: dict[str, object] = {}
 
@@ -65,7 +67,7 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
     runtime._agents = SimpleNamespace(create_root=create_root)
 
     with pytest.raises(RuntimeError, match="stop after capture"):
-        await runtime._run_ideator_lane("ideator-1", 1, Path(tmp_path))
+        await runner._run_ideator_lane("ideator-1", 1, Path(tmp_path))
 
     request = captured["request"]
     assert request["context_refs"], "eval_handoff context ref should be attached"
