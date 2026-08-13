@@ -22,12 +22,12 @@ from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import ResponsesProvider
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
-from athena.core.contracts import ArtifactRef, new_id
+from athena.core.contracts import ArtifactRef, ArtifactStore, new_id
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.core.research_tree import ResearchTree
 from athena.execution.runtime import CommandResult, ExecutionContext, ExecutionRuntime
-from athena.research.contracts import ValidationResult
+from athena.research.contracts import DataScriptBundle, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.events import (
@@ -65,6 +65,38 @@ EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
 PreparePhase = Callable[[], Awaitable[PrepareResult]]
 ValidationPhase = Callable[[str, float], Awaitable[ValidationResult]]
 PlanTurn = Callable[[str, ResearchState], Awaitable[PlanTurnResult]]
+
+
+async def _read_eval_handoff(
+    store: ArtifactStore, evaluator_ref: ArtifactRef | None
+) -> str:
+    """Read the evaluator ``HANDOFF.md`` from a frozen bundle (empty when absent).
+
+    HANDOFF.md 是 eval 合同的权威自描述（predictions 设置格式 + 判定标准），
+    随 ``_freeze_evaluator`` 冻结进 bundle 的源码树。系统不解析它，只在 SEARCH
+    propose/hypothesis 阶段透传给 ideator 阅读；缺失或不可读时返回空串。
+    """
+    if evaluator_ref is None:
+        return ""
+    try:
+        bundle = DataScriptBundle.model_validate_json(
+            await store.get_text(evaluator_ref)
+        )
+    except (ValueError, OSError):
+        return ""
+    if bundle.tree_ref is None:
+        return ""
+    try:
+        tree = json.loads(await store.get_text(bundle.tree_ref))
+    except (ValueError, OSError):
+        return ""
+    handoff_ref = tree.get("HANDOFF.md")
+    if not isinstance(handoff_ref, str):
+        return ""
+    try:
+        return await store.get_text(handoff_ref)
+    except (ValueError, OSError):
+        return ""
 
 
 class ResearchRuntime:
@@ -704,15 +736,26 @@ class ResearchRuntime:
         self, label: str, target: int, eda_dir: Path
     ) -> list[Hypothesis]:
         """Run one independent Ideator and return its structured batch."""
-        request = {
-            "content": (
-                f"Inspect the EDA workspace at {eda_dir} without modifying any "
-                "files, then propose up to "
-                f"{target} falsifiable hypotheses that could improve the primary "
-                "metric. Return the hypotheses as structured output."
-            ),
-            "context_refs": [],
-        }
+        content = (
+            f"Inspect the EDA workspace at {eda_dir} without modifying any "
+            "files, then propose up to "
+            f"{target} falsifiable hypotheses that could improve the primary "
+            "metric. Return the hypotheses as structured output."
+        )
+        context_refs: list[ArtifactRef] = []
+        handoff = await _read_eval_handoff(self._store, self._supervisor.evaluator_ref)
+        if handoff:
+            context_refs.append(
+                await self._store.put_text(
+                    json.dumps({"eval_handoff": handoff}, ensure_ascii=False)
+                )
+            )
+            content += (
+                "\n\nThe evaluator contract (predictions directory layout and "
+                "scoring criteria) is attached as context; read it before "
+                "proposing hypotheses."
+            )
+        request = {"content": content, "context_refs": context_refs}
         _agent_id, run_id = await self._agents.create_root(
             "ideator", request, name=label
         )
