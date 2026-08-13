@@ -296,10 +296,15 @@ class EnvironmentManager:
             shell_name = Path(self.shell_parts()[0]).name
         except RuntimeError as exc:
             return f"Runtime:\n- environment needs repair: {exc}"
+        # PowerShell 5.1（powershell.exe）不支持 ``&&``；给 agent 明示避免其生成
+        # ``cmd1 && cmd2`` 触发解析错误、浪费轮次（pwsh 7 支持 &&，无需提示）。
+        shell_line = f"- Shell: {shell_name}"
+        if shell_name == "powershell.exe":
+            shell_line += ' (chain with ";" not "&&")'
         return (
             "Runtime:\n"
             f"- OS: {self.os_name}\n"
-            f"- Shell: {shell_name}\n"
+            f"{shell_line}\n"
             f"- Workspace: {workspace_root}\n"
             f"- Python: {python}, {state}\n"
             f'- Add dependencies with: uv add --project "$ATHENA_ENV_ROOT" <package>'
