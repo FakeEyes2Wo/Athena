@@ -89,6 +89,23 @@ def _utf8_prefix(text: str, byte_limit: int) -> str:
     return encoded[:byte_limit].decode("utf-8", errors="ignore")
 
 
+def truncate_middle(text: str, max_chars: int) -> str:
+    """Middle-truncate ``text`` to roughly ``max_chars`` while preserving both ends.
+
+    Mirrors codex's ``truncate_middle_chars``: keep the head and tail and replace
+    the middle with a ``…N chars truncated…`` marker, so a long shell command stays
+    readable (program + first flags on the left, paths/targets on the right)
+    without flooding the transcript. Character-counted because it targets terminal
+    display rather than an LLM byte budget.
+    """
+    if not text or max_chars <= 0 or len(text) <= max_chars:
+        return text
+    left = max_chars // 2
+    right = max_chars - left
+    removed = len(text) - max_chars
+    return f"{text[:left]}…{removed} chars truncated…{text[len(text) - right:]}"
+
+
 class EventProjector:
     """Create safe runtime records while retaining full tool output as artifacts."""
 
@@ -99,6 +116,16 @@ class EventProjector:
     def _next_sequence(self) -> int:
         self._sequence += 1
         return self._sequence
+
+    def resume(self, sequence: int) -> None:
+        """Resume the sequence counter past replayed history.
+
+        Called on restart after replaying persisted output records, so newly
+        projected events continue from ``sequence + 1`` instead of colliding
+        with (and being deduplicated against) the restored TUI history.
+        """
+        if sequence > self._sequence:
+            self._sequence = sequence
 
     def output(
         self,

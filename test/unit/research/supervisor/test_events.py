@@ -11,6 +11,7 @@ from athena.research.supervisor.events import (
     OutputEvent,
     StateEvent,
     redact,
+    truncate_middle,
 )
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.plans import PlanState
@@ -97,6 +98,32 @@ def test_redact_masks_secret_patterns() -> None:
     assert "private4" not in cleaned
     assert "sk-livevalue-abcdef" not in cleaned
     assert cleaned.count("[REDACTED]") == 5
+
+
+def test_truncate_middle_leaves_short_text_untouched() -> None:
+    assert truncate_middle("inspect data", 200) == "inspect data"
+
+
+def test_truncate_middle_preserves_head_and_tail_with_marker() -> None:
+    command = "python train.py --epochs 100 --batch-size 128 --save-dir ./output"
+    result = truncate_middle(command, 40)
+
+    assert result.startswith("python train.py")
+    assert result.endswith("--save-dir ./output")
+    assert "chars truncated" in result
+
+
+def test_truncate_middle_reports_removed_char_count() -> None:
+    result = truncate_middle("a" * 100, 60)
+
+    assert "40 chars truncated" in result
+
+
+def test_truncate_middle_is_unicode_safe() -> None:
+    result = truncate_middle("命令" * 50, 20)
+
+    assert "chars truncated" in result
+    assert result.encode("utf-8").decode("utf-8") == result
 
 
 def test_output_sequence_is_process_local_and_monotonic(tmp_path) -> None:
@@ -222,6 +249,31 @@ async def test_runtime_does_not_invent_agent_text_before_a_tool(tmp_path) -> Non
         ("agent", 'shell_command({"command": "inspect data"})'),
         ("tool", "tool result"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_long_shell_command_is_middle_truncated_in_function_call(
+    tmp_path,
+) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    command = "python train.py " + "--very-long-argument " * 40
+    await runtime._project_agent_event(
+        "prepare",
+        "agent/function_call",
+        "event:call-1",
+        {"name": "shell_command", "arguments": {"command": command, "timeout_s": 120}},
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert len(outputs) == 1
+    text = outputs[0]["text"]
+    assert "chars truncated" in text
+    assert text.startswith('shell_command({"command": "python train.py')
+    assert '"timeout_s": 120' in text
+    assert command not in text  # 完整超长命令不再原样刷屏
 
 
 @pytest.mark.asyncio

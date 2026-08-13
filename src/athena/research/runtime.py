@@ -35,6 +35,7 @@ from athena.research.supervisor.events import (
     StateEvent,
     redact,
     sanitize_terminal_text,
+    truncate_middle,
 )
 from athena.research.supervisor.experiment import (
     PlanRunner,
@@ -56,6 +57,9 @@ from athena.research.supervisor.validation import (
 from athena.utils.single_turn_chat import single_turn_chat
 
 logger = logging.getLogger(__name__)
+
+# shell_command 展示文本的字符上限：超长命令居中截断，保留首尾（对齐 codex）。
+_MAX_COMMAND_CHARS = 400
 
 EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
 PreparePhase = Callable[[], Awaitable[PrepareResult]]
@@ -411,6 +415,14 @@ class ResearchRuntime:
             name = str(payload.get("name") or "tool")
             args = payload.get("arguments")
             if args:
+                # 超长 shell 命令居中截断，保留首尾（程序名+开头参数在左、路径/目标在右）。
+                if (
+                    name == "shell_command"
+                    and isinstance(args, dict)
+                    and isinstance(args.get("command"), str)
+                ):
+                    command = truncate_middle(args["command"], _MAX_COMMAND_CHARS)
+                    args = {**args, "command": command}
                 try:
                     args_text = json.dumps(args, ensure_ascii=False)
                 except (TypeError, ValueError):
