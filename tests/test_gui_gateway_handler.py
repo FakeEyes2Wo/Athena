@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from gui_gateway.handler import GuiRequestHandler
@@ -7,6 +9,7 @@ class RecordingRuntime:
     def __init__(self) -> None:
         self.started = False
         self.messages: list[str] = []
+        self.tree_path = Path("/tmp/athena-runtime")
 
     async def start(self) -> None:
         self.started = True
