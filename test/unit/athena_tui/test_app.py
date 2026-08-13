@@ -373,7 +373,7 @@ def test_mouse_wheel_scrolls_only_output_viewport_and_resumes_tail() -> None:
     app = AthenaApp(
         FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
     )
-    for sequence in range(1, 50):
+    for sequence in range(1, 100):
         app._on_event(
             OutputEvent(
                 seq=sequence,

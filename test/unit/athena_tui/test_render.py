@@ -118,6 +118,31 @@ def test_dynamic_text_is_not_interpreted_as_style_markup() -> None:
     assert "[red]literal" in fragment_list_to_text(output)
 
 
+def test_trailing_newline_does_not_render_an_extra_blank_line() -> None:
+    """末尾换行是行终止符，不应渲染成一条多余的空行。"""
+    state = TuiState(
+        history=(HistoryEntry(kind="runtime", source="agent", text="hello\n"),)
+    )
+
+    lines = render_history_lines(state, 80)
+
+    assert len(lines) == 1
+    assert "hello" in fragment_list_to_text(lines[0])
+
+
+def test_internal_blank_line_is_preserved() -> None:
+    """文本中间的 ``\\n\\n`` 仍保留为一个空行。"""
+    state = TuiState(
+        history=(HistoryEntry(kind="runtime", source="agent", text="a\n\nb"),)
+    )
+
+    lines = render_history_lines(state, 80)
+
+    assert len(lines) == 3
+    assert "a" in fragment_list_to_text(lines[0])
+    assert "b" in fragment_list_to_text(lines[2])
+
+
 @pytest.mark.parametrize(("count", "expected_titles"), [(2, 2), (3, 3)])
 def test_ideator_debate_uses_exact_actual_lane_count(count, expected_titles) -> None:
     state = TuiState(

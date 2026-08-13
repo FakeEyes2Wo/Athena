@@ -95,6 +95,8 @@ def _wrap_block(
     logical_lines: list[Fragments] = [[]]
     for style, text in body:
         pieces = text.split("\n")
+        if pieces and pieces[-1] == "":
+            pieces = pieces[:-1]  # 末尾换行的空片段不渲染成多余空行
         for index, piece in enumerate(pieces):
             if piece:
                 logical_lines[-1].append((style, piece))
