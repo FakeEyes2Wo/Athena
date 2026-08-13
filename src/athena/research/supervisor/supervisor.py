@@ -789,12 +789,16 @@ class Supervisor(SupervisorActions):
             await asyncio.gather(*self._running.values(), return_exceptions=True)
         self._running.clear()
 
-    async def propose_hypothesis(self, **payload: object) -> dict[str, object]:
+    def _sota_parent(self) -> tuple[str, Hypothesis]:
+        """Return (sota_experiment_id, sota_hypothesis) for seeding hypotheses."""
         parent_id = self.tree.best_experiment_id()
         if parent_id is None:
-            raise ValueError("cannot propose SEARCH hypothesis without a SOTA")
+            raise ValueError("cannot propose SEARCH hypotheses without a SOTA")
         parent_experiment = self.tree.get_experiment(parent_id)
-        parent_hypothesis = self.tree.get_hypothesis(parent_experiment.hypothesis_id)
+        return parent_id, self.tree.get_hypothesis(parent_experiment.hypothesis_id)
+
+    async def propose_hypothesis(self, **payload: object) -> dict[str, object]:
+        parent_id, parent_hypothesis = self._sota_parent()
         hypothesis = Hypothesis.model_validate(
             {
                 **payload,
@@ -814,11 +818,7 @@ class Supervisor(SupervisorActions):
 
         批量登记：统一挂在当前 SOTA 下并播种优先级，单次保存/发布。
         """
-        parent_id = self.tree.best_experiment_id()
-        if parent_id is None:
-            raise ValueError("cannot register SEARCH hypotheses without a SOTA")
-        parent_experiment = self.tree.get_experiment(parent_id)
-        parent_hypothesis = self.tree.get_hypothesis(parent_experiment.hypothesis_id)
+        parent_id, parent_hypothesis = self._sota_parent()
         hypothesis_ids: list[str] = []
         for hypothesis in hypotheses:
             payload = hypothesis.model_dump()
