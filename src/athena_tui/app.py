@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.clipboard import Clipboard, InMemoryClipboard
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
@@ -90,6 +91,16 @@ def _join_lines(lines: tuple[StyleAndTextTuples, ...]) -> StyleAndTextTuples:
     return output
 
 
+def _create_system_clipboard() -> Clipboard:
+    try:
+        from prompt_toolkit.clipboard.pyperclip import (
+            PyperclipClipboard,
+        )  # 延迟导入避免循环依赖
+    except ImportError:
+        return InMemoryClipboard()
+    return PyperclipClipboard()
+
+
 class _HistoryControl(FormattedTextControl):
     """History text with selection, wheel, and scrollbar mouse handling."""
 
@@ -100,6 +111,7 @@ class _HistoryControl(FormattedTextControl):
         self._selecting = False
 
     def mouse_handler(self, mouse_event):
+        """Handle scroll/selection mouse events on the history view."""
         app = self._app
         et = mouse_event.event_type
         if et == MouseEventType.SCROLL_UP:
@@ -151,6 +163,8 @@ class AthenaApp:
         self, runtime: object, project_root, *, input=None, output=None
     ) -> None:
         self.state = TuiState(project_root=str(project_root))
+        self._runtime = runtime
+        self._restore_history(runtime)
         self._app: Application | None = None
         self._composer: TextArea | None = None
         self._composer_pane = None
@@ -167,6 +181,31 @@ class AthenaApp:
         self._input = input
         self._output = output
         self._controller = TuiController(runtime, emit=self._on_event)
+
+    def _restore_history(self, runtime: object) -> None:
+        """重放持久化的会话记录重建历史，实现断点续传（codex-like resume）。
+
+        runtime 无 ``replay_output_events``（测试 stub）或历史缺失时静默跳过。
+        记录按 ``type`` 区分：``user`` 还原为用户消息，其余按 OutputEvent 还原。
+        """
+        replay = getattr(runtime, "replay_output_events", None)
+        if replay is None:
+            return
+        try:
+            records = replay()
+        except Exception:
+            return
+        for record in records:
+            if record.get("type") == "user":
+                self.state = append_user_message(
+                    self.state, str(record.get("text", ""))
+                )
+                continue
+            try:
+                event = OutputEvent.model_validate(record)
+            except Exception:
+                continue
+            self.state = apply_output(self.state, event)
 
     def _on_event(self, event: OutputEvent | StateEvent) -> None:
         width = self._history_content_width()
@@ -260,6 +299,12 @@ class AthenaApp:
         self._history_scroll = 0
         self.state = set_history_follow(self.state, True)
         self.state = set_error(append_user_message(self.state, draft), None)
+        persist = getattr(self._runtime, "persist_user_message", None)
+        if persist is not None:
+            try:
+                persist(draft)
+            except Exception:
+                pass
         if self._app is not None:
             self._app.invalidate()
 
@@ -273,7 +318,7 @@ class AthenaApp:
                 self._app.invalidate()
 
     async def _request_quit(self) -> None:
-        if self.state.control_status in {"STOPPED", "COMPLETED"}:
+        if self.state.control_status in {"STOPPED", "COMPLETED", "FAILED"}:
             if self._app is not None:
                 self._app.exit(result=0)
             return
@@ -410,7 +455,11 @@ class AthenaApp:
         text = self._selected_history_text()
         if not text or self._app is None:
             return False
-        self._app.clipboard.set_text(text)
+        try:
+            self._app.clipboard.set_text(text)
+        except Exception:
+            self._app.clipboard = InMemoryClipboard()
+            self._app.clipboard.set_text(text)
         return True
 
     def _selected_history_text(self) -> str:
@@ -549,6 +598,7 @@ class AthenaApp:
             mouse_support=True,
             input=self._input,
             output=self._output,
+            clipboard=_create_system_clipboard(),
             style=_STYLE,
         )
         return self._app
@@ -584,7 +634,7 @@ class AthenaApp:
 
         @keys.add(Keys.Any, filter=modal)
         def ignore_modal_text(_event) -> None:
-            pass
+            """Swallow arbitrary keys while a modal overlay is open."""
 
         bind("escape", action="esc", when=modal)
         bind("y", when=confirmation)
@@ -598,6 +648,7 @@ class AthenaApp:
 
         @keys.add("c-m", filter=composer, eager=True)
         async def submit_or_newline(event) -> None:
+            """Submit on plain Enter, insert a newline on Shift+Enter."""
             if event.key_sequence[-1].data in _SHIFT_ENTER_SEQUENCES:
                 self._composer.buffer.insert_text("\n")
             else:
@@ -605,6 +656,7 @@ class AthenaApp:
 
         @keys.add("c-j", filter=composer, eager=True)
         def insert_newline(_event) -> None:
+            """Insert a newline at the composer cursor (Ctrl+J fallback)."""
             self._composer.buffer.insert_text("\n")
 
         return keys
