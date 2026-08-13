@@ -58,6 +58,7 @@ XH-202619.pdf
 # Example research-loop run outputs (scratch)
 /examples/*
 .athena/
+workspaces/
 
 # Isolated feature worktrees
 .worktrees/
@@ -71,4 +72,5 @@ athena-rust/target/
 .claude/loop_state/
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+.aris/
 _smoke_artifacts/

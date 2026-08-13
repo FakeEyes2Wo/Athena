@@ -14,6 +14,7 @@ from athena.research.paper_markdown.schemas import (
 
 OVERLAP_KINDS = {"abstract", "list", "paragraph"}
 ATOMIC_ELEMENT_KINDS = {"bibliography", "equation", "figure", "table"}
+_ELEMENT_SEPARATOR = "\n\n"
 
 
 @dataclass(slots=True)
@@ -45,8 +46,8 @@ def full_markdown(
     offset = 0
     for element in elements:
         if parts:
-            parts.append("\n\n")
-            offset += 2
+            parts.append(_ELEMENT_SEPARATOR)
+            offset += len(_ELEMENT_SEPARATOR)
         start = offset
         parts.append(element.markdown)
         offset += len(element.markdown)
@@ -113,7 +114,7 @@ def draft_chunk(
         ),
         heading_path,
     )
-    content_text = "\n\n".join(element.markdown for element in elements)
+    content_text = _ELEMENT_SEPARATOR.join(element.markdown for element in elements)
     if heading_path and not any(element.kind == "heading" for element in elements):
         content_text = f"> Section: {' / '.join(heading_path)}\n\n{content_text}"
     retrieval_text = content_text
@@ -122,7 +123,9 @@ def draft_chunk(
         content = list(elements)
         while content and content[0].kind == "heading":
             content.pop(0)
-        retrieval_body = "\n\n".join(element.markdown for element in content)
+        retrieval_body = _ELEMENT_SEPARATOR.join(
+            element.markdown for element in content
+        )
         section = f"> Section: {' / '.join(semantic_heading_path)}"
         retrieval_text = section + (f"\n\n{retrieval_body}" if retrieval_body else "")
     start = min(spans[element.element_id][0] for element in elements)
@@ -177,7 +180,9 @@ def build_chunks(
             else []
         )
         current = [element for element in overlap if element.kind in OVERLAP_KINDS]
-        current_chars = sum(len(element.markdown) + 2 for element in current)
+        current_chars = sum(
+            len(element.markdown) + len(_ELEMENT_SEPARATOR) for element in current
+        )
         current_section = tuple(current[-1].heading_path) if current else ()
 
     for element in elements:
@@ -192,12 +197,14 @@ def build_chunks(
         if starts_section:
             flush(keep_overlap=False)
         exceeds_target = (
-            current and current_chars + len(element.markdown) + 2 > config.target_chars
+            current
+            and current_chars + len(element.markdown) + len(_ELEMENT_SEPARATOR)
+            > config.target_chars
         )
         if exceeds_target:
             flush(keep_overlap=True)
         current.append(element)
-        current_chars += len(element.markdown) + 2
+        current_chars += len(element.markdown) + len(_ELEMENT_SEPARATOR)
         current_section = section or current_section
         if is_atomic:
             flush(keep_overlap=False)

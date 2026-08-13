@@ -1,6 +1,6 @@
 """Models owned by Athena's core research tree."""
 
-from typing import List, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -52,7 +52,7 @@ class ExperimentPlan(BaseModel):
     change: str = Field(
         description="根据假设，Plan应该如何改变目录从而完成我们的实验部分"
     )
-    rubrics: List[str] = Field(
+    rubrics: list[str] = Field(
         default_factory=list,
         description="我们建立Plan过后，这个Plan应该实现到什么程度的评价指标",
     )

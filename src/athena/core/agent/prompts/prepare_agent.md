@@ -10,30 +10,21 @@ every code and artifact file into it using **relative** paths — `write_file` a
 dataset named in the task lives **outside** this workspace: read or copy it via
 `shell_command` with its absolute path, never through `write_file`/`read_file`.
 
+The evaluator contract has already been frozen by a separate evaluator step and
+is attached as context. Do **not** write `metric.json`, an evaluator script, or
+labels yourself — read the evaluator contract from the context to learn the
+exact `predictions/` layout and scoring criteria your baseline must satisfy.
+
 Create all artifacts needed for a trusted baseline:
 
 - arbitrary multi-file baseline source code;
-- a `metric.json` at the workspace root declaring the eval script (e.g.
-  `{"eval_script": "evaluator/evaluate.py"}`), plus the eval script itself next
-  to a `labels.csv` (or a `labels/` directory) in the same directory (e.g.
-  `evaluator/labels.csv`). The eval script runs with the workspace as its
-  working directory after the manifest produces the `predictions/` directory;
-  it must read `labels` (its own directory) and the `predictions/` directory
-  (at the `outputs.predictions` path), compute the primary metric, and print
-  exactly one line `{"primary": <float>}` to stdout (nothing else);
-- an `evaluator/HANDOFF.md` describing the eval contract: (a) the layout of the
-  `predictions/` directory and the format of each file in it (the setup
-  format), and (b) how the primary metric is computed and what counts as
-  correct vs. incorrect (the judgment criteria). This handoff is the
-  authoritative spec the `predictions/` directory must satisfy;
 - `experiment.json` at the workspace root with version `1`, `commands` as a
   **list of argv arrays** (e.g. `"commands": [["python", "solution/train_model.py"]]`
   — note the double brackets around each command), and workspace-relative
   `outputs` for `predictions` (a directory, pointed to by `outputs.predictions`
-  via its relative path) and `report` (the eval script is declared in
-  `metric.json`, not `experiment.json`);
-- a non-empty `predictions/` directory (any number of files, any format) and a
-  Markdown report output.
+  via its relative path) and `report` (a Markdown report file);
+- a non-empty `predictions/` directory (any number of files, any format)
+  matching the frozen evaluator contract, and a Markdown report output.
 
 Install every third-party dependency (numpy, pandas, scikit-learn, ...) into
 the shared environment root, not into a workspace-local venv. The deterministic
@@ -60,9 +51,10 @@ re-exploring the whole workspace. Record at minimum:
   one-paragraph summary of the approach.
 - **How to run the baseline**: the exact `experiment.json` `commands` and how
   dependencies resolve (`$ATHENA_ENV_ROOT`).
-- **How to evaluate**: the evaluator entrypoint and its run command.
-- **Key files**: `experiment.json`, baseline source directory, evaluator
-  directory, the `predictions/` directory, labels.
+- **How to evaluate**: the frozen evaluator entrypoint and its run command
+  (read from the evaluator contract context, not from this workspace).
+- **Key files**: `experiment.json`, baseline source directory, the
+  `predictions/` directory, report.
 - **Known limitations and improvement ideas** SEARCH should prioritize.
 
 Keep it concise and concrete; SEARCH reads this file, not the whole workspace.
@@ -74,9 +66,9 @@ Return exactly one structured PlanDecision after the tools finish:
 ```
 
 - `submit` ends PREPARE and advances the research to SEARCH. Use `submit`
-  whenever the evaluator draft, manifest, predictions, report, handoff
-  document, and baseline execution are all ready. **Do NOT use `continue` to
-  mean "move on to SEARCH"** — that is exactly what `submit` is for.
+  whenever the manifest, predictions, report, handoff document, and baseline
+  execution are all ready. **Do NOT use `continue` to mean "move on to SEARCH"**
+  — that is exactly what `submit` is for.
 - `continue` stays in PREPARE to keep repairing the same baseline; it does NOT
   advance to SEARCH. Use it only when a concrete defect still needs work.
 - `abandon` gives up on the Plan when no trusted baseline is achievable.

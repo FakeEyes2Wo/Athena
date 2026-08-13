@@ -99,15 +99,22 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     tmp_path: Path, monkeypatch
 ) -> None:
     captured = {}
+    evaluator_captured = {}
+    frozen_ref = {}
+
+    async def run_evaluator_plan(**kwargs):
+        evaluator_captured.update(kwargs)
+        frozen_ref["evaluator"] = await kwargs["store"].put_text(
+            DataScriptBundle(
+                bundle_id="prepare-evaluator", entrypoint="evaluate.py"
+            ).model_dump_json()
+        )
+        return frozen_ref["evaluator"]
 
     async def run_prepare_plan(**kwargs):
         captured.update(kwargs)
         return PrepareResult(
-            evaluator_ref=await kwargs["store"].put_text(
-                DataScriptBundle(
-                    bundle_id="prepare-evaluator", entrypoint="eval.py"
-                ).model_dump_json()
-            ),
+            evaluator_ref=kwargs["evaluator_ref"],
             metric=0.71,
             commit=kwargs["workspace"].base_commit,
             predictions_ref=await kwargs["store"].put_text("predictions"),
@@ -116,24 +123,37 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
         )
 
     monkeypatch.setattr(
-        "athena.research.runtime.run_prepare_plan", run_prepare_plan, raising=False
+        "athena.research.phase_runner.run_evaluator_plan",
+        run_evaluator_plan,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "athena.research.phase_runner.run_prepare_plan", run_prepare_plan, raising=False
     )
     runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
     runtime.register_supervisor(provider=object())
     await runtime._git.init()
     runtime._agents.start()
 
-    result = await runtime._run_prepare_phase()
+    result = await runtime._phase_runner.run_prepare_phase()
 
     assert result.metric == pytest.approx(0.71)
+    assert evaluator_captured["agents"] is runtime._agents
+    assert evaluator_captured["scripts"] is runtime._scripts
+    assert evaluator_captured["store"] is runtime._store
+    assert evaluator_captured["execution"] is runtime._execution
+    assert evaluator_captured["task"] == "predict survival"
+    assert evaluator_captured["evaluator_dir"] == (
+        runtime._root / "workspaces" / "evaluator"
+    )
     assert captured["agents"] is runtime._agents
-    assert captured["scripts"] is runtime._scripts
     assert captured["evaluator"] is runtime._evaluator
     assert captured["git"] is runtime._git
     assert captured["execution"] is runtime._execution
     assert captured["store"] is runtime._store
     assert captured["task"] == "predict survival"
     assert captured["workspace"].branch == "athena/prepare"
+    assert captured["evaluator_ref"] == frozen_ref["evaluator"]
     assert json.loads(await runtime._store.get_text(captured["tree_ref"])) == (
         runtime.tree.to_dict()
     )
@@ -162,7 +182,7 @@ async def test_default_validation_adapter_uses_frozen_inputs_and_supervisor_chec
         )
 
     monkeypatch.setattr(
-        "athena.research.runtime.run_validation_plan",
+        "athena.research.phase_runner.run_validation_plan",
         run_validation_plan,
         raising=False,
     )
@@ -210,7 +230,7 @@ async def test_default_validation_adapter_uses_frozen_inputs_and_supervisor_chec
     )
     runtime.tree.set_sota("exp_baseline")
 
-    result = await runtime._run_validation_phase(base_commit, 0.82)
+    result = await runtime._phase_runner.run_validation_phase(base_commit, 0.82)
 
     validation_input = captured["input"]
     assert result.final_test_score == pytest.approx(0.79)
@@ -237,19 +257,19 @@ async def test_completed_command_emits_one_redacted_full_output_reference(
     full = f"stdout-tail\nstderr-tail\nOPENAI_API_KEY={secret}\n" + ("x" * 700)
     raw_ref = await runtime._store.put_text(full)
 
-    await runtime._project_agent_event(
+    await runtime._events_bus.project_agent_event(
         "hyp_1",
         "command/stdout",
         "exec:run",
         {"delta": "ignored stream delta"},
     )
-    await runtime._project_agent_event(
+    await runtime._events_bus.project_agent_event(
         "hyp_1",
         "command/stderr",
         "exec:run",
         {"delta": "ignored stream delta"},
     )
-    await runtime._project_agent_event(
+    await runtime._events_bus.project_agent_event(
         "hyp_1",
         "command/completed",
         "exec:run",

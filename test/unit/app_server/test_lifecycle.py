@@ -3,6 +3,7 @@ import unittest
 
 import pytest
 
+from athena.app_server.exceptions import RpcException
 from athena.app_server.lifecycle import AppServer
 from athena.app_server.thread_manager import RuntimeThreadManager
 
@@ -83,7 +84,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_initialize_rolls_back_started_components(self) -> None:
         manager = RuntimeThreadManager(immediate_runner)
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RpcException):
             await asyncio.wait_for(
                 AppServer.create(
                     manager,

@@ -323,7 +323,18 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
         transient = not had_calls and is_transient_error(exc)
         return StepOutcome(kind="error", text=f"{type(exc).__name__}: {exc}"), transient
 
-    # 等待所有工具执行完成
+    outcome = await _finalize_step(mem, tool_calls, tool_tasks, text, had_calls)
+    return outcome, False
+
+
+async def _finalize_step(
+    mem: ContextManager,
+    tool_calls: list[ToolCall],
+    tool_tasks: list[asyncio.Task[Any] | None],
+    text: str,
+    had_calls: bool,
+) -> StepOutcome:
+    """收集工具结果、写回消息历史，并决定下一步的 StepOutcome。"""
     results: list[Any] = [None] * len(tool_tasks)
     if tool_tasks:
         gathered = await asyncio.gather(
@@ -369,10 +380,10 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
     # 无工具调用且有文本 → 完成；有工具调用 → 继续下一轮
     if not had_calls and text:
         mem.append(ModelResponse(parts=[TextPart(content=text)]))
-        return StepOutcome(kind="done", text=text), False
+        return StepOutcome(kind="done", text=text)
     if had_calls:
-        return StepOutcome(kind="continue"), False
-    return StepOutcome(kind="done", text=text), False
+        return StepOutcome(kind="continue")
+    return StepOutcome(kind="done", text=text)
 
 
 def _dispatch_tool_call(

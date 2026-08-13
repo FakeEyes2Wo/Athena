@@ -211,23 +211,11 @@ class AthenaClient:
         await worker.start()
         client = cls(transport, worker, owns_transport=True)
         try:
-            init_resp = await client._raw_request(
-                Method.INITIALIZE,
-                0,
-                {
-                    "client_name": client_name,
-                    "client_version": client_version,
-                    "protocol_version": protocol_version,
-                },
-                startup_timeout,
+            await client._initialize(
+                client_name, client_version, protocol_version, startup_timeout
             )
-            if "error" in init_resp:
-                raise RpcException(
-                    init_resp["error"].get("code", -1),
-                    init_resp["error"].get("message", "initialize failed"),
-                )
         except asyncio.TimeoutError:
-            # 等待 initialize 响应超时 → 清理资源并提示使用 AppServer.create()
+            # 独立启动无外部 AppServer → 握手超时，清理资源并提示改用 create()
             await client._cleanup()
             raise RuntimeError(
                 "server did not respond — standalone start() requires an "
@@ -237,14 +225,39 @@ class AthenaClient:
             # 初始化握手未预期异常 → 清理资源后原样传播
             await client._cleanup()
             raise
-        await client.notify(Method.INITIALIZED)
-        try:
-            await asyncio.wait_for(transport.wait_ready(), timeout=startup_timeout)
-        except asyncio.TimeoutError:
-            # Server ready 信号超时 → 清理资源
-            await client._cleanup()
-            raise RuntimeError("server did not become ready in time")
         return client
+
+    async def _initialize(
+        self,
+        client_name: str,
+        client_version: str,
+        protocol_version: int,
+        timeout: float,
+    ) -> None:
+        """发送 reserved request_id=0 的 initialize 握手并等待 ready 信号。
+
+        ``AppServer.create`` 与独立 ``start`` 共用。协议错误抛 ``RpcException``，
+        超时抛 ``asyncio.TimeoutError``——调用方自行决定清理与文案。
+        """
+        init_resp = await self._raw_request(
+            Method.INITIALIZE,
+            0,
+            {
+                "client_name": client_name,
+                "client_version": client_version,
+                "protocol_version": protocol_version,
+            },
+            timeout,
+        )
+        if "error" in init_resp:
+            err = init_resp["error"]
+            raise RpcException(
+                err.get("code", -1),
+                err.get("message", "initialize failed"),
+                err.get("data"),
+            )
+        await self.notify(Method.INITIALIZED)
+        await asyncio.wait_for(self._transport.wait_ready(), timeout=timeout)
 
     async def request(
         self,

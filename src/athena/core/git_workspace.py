@@ -89,8 +89,14 @@ class LocalGitWorkspace(GitWorkspace):
         self._repo_initialized = True
         return commit_hash
 
-    async def create(self, base_commit: CommitHash, branch: str) -> GitWorkBranch:
-        """为分支创建 worktree；分支已存在时幂等返回现有 worktree。"""
+    async def create(
+        self, base_commit: CommitHash, branch: str, *, name: str | None = None
+    ) -> GitWorkBranch:
+        """为分支创建 worktree；分支已存在时幂等返回现有 worktree。
+
+        ``name`` 指定固定的 worktree 目录名（如 ``eda``），缺省用随机
+        ``athena-{uuid}``；用于需要稳定路径的 EDA 等，而非按实验随机的 worktree。
+        """
         async with self._lock:
             commit = await self._resolve_commit(base_commit)
             self._validate_branch(branch)
@@ -119,7 +125,13 @@ class LocalGitWorkspace(GitWorkspace):
                 else:
                     raise GitWorkspaceError(f"分支已存在但无 worktree：{branch}")
 
-            path = self._root / f"athena-{uuid4().hex}"
+            if name is None:
+                dirname = f"athena-{uuid4().hex}"
+            elif not name or name in (".", "..") or "/" in name or "\\" in name:
+                raise GitWorkspaceError("非法 worktree 目录名")
+            else:
+                dirname = name
+            path = self._root / dirname
             branch_ref = f"refs/heads/{branch}"
             try:
                 await self._git("update-ref", branch_ref, commit, "0" * 40)

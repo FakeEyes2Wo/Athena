@@ -88,6 +88,25 @@ _ALLOWED_TRANSITIONS: dict[ExperimentStatus, set[ExperimentStatus]] = {
 }
 
 
+def _parent_chain(
+    experiment_id: str, experiments: Mapping[str, Experiment]
+) -> list[str]:
+    """Return the ancestor id chain from ``experiment_id`` up to the root.
+
+    Includes the starting id; raises ``ValueError`` on a parent cycle.
+    """
+    path: list[str] = []
+    visited: set[str] = set()
+    current_id: str | None = experiment_id
+    while current_id is not None:
+        if current_id in visited:
+            raise ValueError("experiment parent cycle")
+        visited.add(current_id)
+        path.append(current_id)
+        current_id = experiments[current_id].parent_id
+    return path
+
+
 class ResearchTree:
     """Own hypotheses, experiment records, relationships, and selected SOTA."""
 
@@ -221,17 +240,8 @@ class ResearchTree:
 
     def experiment_path(self, experiment_id: str) -> list[str]:
         """从根到该实验的祖先链（含自身）；存在循环时报错。"""
-        path: list[str] = []
-        visited: set[str] = set()
-        current_id: str | None = experiment_id
-        while current_id is not None:
-            if current_id in visited:
-                raise ValueError("experiment parent cycle")
-            visited.add(current_id)
-            experiment = self.get_experiment(current_id)
-            path.append(current_id)
-            current_id = experiment.parent_id
-        return list(reversed(path))
+        self.get_experiment(experiment_id)
+        return list(reversed(_parent_chain(experiment_id, self._experiments)))
 
     def hypotheses_path(self, experiment_id: str) -> list[Hypothesis]:
         """按祖先链顺序返回每级实验对应的假设。"""
@@ -521,13 +531,7 @@ class ResearchTree:
                 children[experiment.parent_id].append(experiment_id)
 
         for experiment_id in experiments:
-            visited: set[str] = set()
-            current_id: str | None = experiment_id
-            while current_id is not None:
-                if current_id in visited:
-                    raise ValueError("experiment parent cycle")
-                visited.add(current_id)
-                current_id = experiments[current_id].parent_id
+            _parent_chain(experiment_id, experiments)
         return children
 
     def save(self, path: str | Path) -> Path:

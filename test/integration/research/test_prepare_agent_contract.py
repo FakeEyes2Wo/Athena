@@ -1,4 +1,4 @@
-"""One-Agent PREPARE integration contract."""
+"""Two-step PREPARE integration contract (evaluator freeze + experiment baseline)."""
 
 import json
 import subprocess
@@ -6,22 +6,88 @@ from pathlib import Path
 
 import pytest
 
-from athena.agents.prepare_agent import register_prepare_agent
+from athena.agents.prepare_agent import register_evaluator_agent, register_prepare_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.execution.runtime import CommandResult, ExecutionRuntime
+from athena.research.contracts import DataScriptBundle
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import DataScriptRunner
-from athena.research.supervisor.prepare import run_prepare_plan
+from athena.research.supervisor.prepare import run_evaluator_plan, run_prepare_plan
+
+_EVALUATE_SCRIPT = (
+    "import csv, json\n"
+    "from pathlib import Path\n"
+    "labels = {r[0]: r[1] for r in list(csv.reader("
+    "open(Path(__file__).with_name('labels.csv'))))[1:]}\n"
+    "preds = {r[0]: r[1] for r in list(csv.reader("
+    "open('predictions/predictions.csv')))[1:]}\n"
+    "score = sum(preds[k] == labels[k] for k in preds) / len(preds)\n"
+    "print(json.dumps({'primary': score}))\n"
+)
 
 
-def _answer() -> str:
+def _submit_answer() -> str:
     return json.dumps(
         {"decision": "submit", "reason": "baseline ready", "suggestions": []}
     )
+
+
+class _EvaluatorProvider:
+    model_name = "evaluator-integration"
+
+    def __init__(self, *, missing: str | None = None) -> None:
+        self.missing = missing
+        self.calls = 0
+        self._actions: list[tuple[str, str] | None] = []
+
+    def _valid_actions(self) -> list[tuple[str, str] | None]:
+        actions: list[tuple[str, str] | None] = [
+            ("metric.json", '{"eval_script": "evaluate.py"}'),
+            (
+                "pyproject.toml",
+                "[project]\nname = 'eval'\nversion = '0.1.0'\n"
+                "requires-python = '>=3.11'\ndependencies = []\n",
+            ),
+            ("evaluate.py", _EVALUATE_SCRIPT),
+            ("labels.csv", "id,label\nr1,0\nr2,1\n"),
+            (
+                "HANDOFF.md",
+                "# Eval contract\npredictions/predictions.csv (id,prediction); "
+                "accuracy over aligned ids\n",
+            ),
+            None,
+        ]
+        if self.missing == "labels":
+            actions = [a for a in actions if a is None or a[0] != "labels.csv"]
+        if self.missing == "evaluator":
+            actions = [a for a in actions if a is None or a[0] != "metric.json"]
+        return actions
+
+    async def stream(self, _config, _tools, _messages, _cancel, **_kwargs):
+        self.calls += 1
+        if not self._actions:
+            self._actions = self._valid_actions()
+        action = self._actions.pop(0)
+        if action is None:
+            answer = _submit_answer()
+            yield StreamEvent(
+                kind="text_delta", data={"delta": answer, "accumulated": answer}
+            )
+        else:
+            path, content = action
+            yield StreamEvent(
+                kind="function_call",
+                data={
+                    "call_id": f"write-{self.calls}",
+                    "name": "write_file",
+                    "arguments": {"path": path, "content": content},
+                },
+            )
+        yield StreamEvent(kind="response_completed", data={"finish_reason": "stop"})
 
 
 class _PrepareProvider:
@@ -38,32 +104,14 @@ class _PrepareProvider:
         self._actions: list[tuple[str, str] | None] = []
 
     def _valid_actions(self) -> list[tuple[str, str] | None]:
-        outputs = {
-            "predictions": "outputs/predictions",
-            "report": "outputs/report.md",
-        }
+        outputs = {"predictions": "predictions", "report": "report.md"}
         if self.missing == "report":
             outputs.pop("report")
-        actions: list[tuple[str, str] | None] = [
-            ("metric.json", '{"eval_script": "evaluator/eval.py"}'),
-            (
-                "evaluator/pyproject.toml",
-                "[project]\nname='prepare-eval'\nversion='0.1.0'\n"
-                "requires-python='>=3.11'\ndependencies=[]\n",
-            ),
-            (
-                "evaluator/eval.py",
-                "import csv,json,sys\n"
-                "pred={r[0]:r[1] for r in list(csv.reader(open('predictions.csv')))[1:]}\n"
-                "lab={r[0]:r[1] for r in list(csv.reader(open('labels.csv')))[1:]}\n"
-                "score=sum(pred[k]==lab[k] for k in pred)/len(pred)\n"
-                "json.dump({'primary':score},open(sys.argv[sys.argv.index('--output')+1],'w'))\n",
-            ),
-            ("evaluator/labels.csv", "id,label\nr1,0\nr2,1\n"),
+        return [
             ("solution/features.py", "def feature(value):\n    return int(value)\n"),
             (
                 "solution/model.py",
-                "from solution.features import feature\n" "assert feature('1') == 1\n",
+                "from solution.features import feature\nassert feature('1') == 1\n",
             ),
             (
                 "experiment.json",
@@ -77,19 +125,6 @@ class _PrepareProvider:
             ),
             None,
         ]
-        if self.missing == "labels":
-            actions = [
-                action
-                for action in actions
-                if action is None or action[0] != "evaluator/labels.csv"
-            ]
-        if self.missing == "evaluator":
-            actions = [
-                action
-                for action in actions
-                if action is None or action[0] != "metric.json"
-            ]
-        return actions
 
     @staticmethod
     def _message_text(messages) -> str:
@@ -102,12 +137,7 @@ class _PrepareProvider:
     async def stream(self, _config, _tools, messages, _cancel, **_kwargs):
         self.calls += 1
         text = self._message_text(messages)
-        for marker in (
-            "experiment.json",
-            "metric.json",
-            "eval labels are missing",
-            "report output",
-        ):
+        for marker in ("experiment.json", "report output"):
             if marker in text:
                 self.feedback_seen = text
         if not self._actions:
@@ -121,7 +151,7 @@ class _PrepareProvider:
                 self._actions = self._valid_actions()
         action = self._actions.pop(0)
         if action is None:
-            answer = _answer()
+            answer = _submit_answer()
             yield StreamEvent(
                 kind="text_delta", data={"delta": answer, "accumulated": answer}
             )
@@ -154,25 +184,14 @@ class _ManifestExecution:
         assert argv is not None
         self.argv_calls.append(argv)
         root = context.workspace_root
-        if argv[0] == "python" and argv[1] == "evaluator/eval.py":
-            # metric.json 的 eval_script：直接评分，返回 primary 分数。
-            result = CommandResult(
-                ok=True, stdout='{"primary": 1.0}\n', stderr="", exit_code=0
-            )
-            if emit is not None:
-                await emit("command/completed", "exec:prepare", result.to_dict())
-            return result
         assert (root / "solution" / "features.py").is_file()
         assert (root / "solution" / "model.py").is_file()
-        (root / "outputs").mkdir(exist_ok=True)
+        (root / "predictions").mkdir(parents=True, exist_ok=True)
         if not self.missing_predictions:
-            (root / "outputs" / "predictions").mkdir(parents=True, exist_ok=True)
-            (root / "outputs" / "predictions" / "predictions.csv").write_text(
+            (root / "predictions" / "predictions.csv").write_text(
                 "id,prediction\nr1,0\nr2,1\n", encoding="utf-8"
             )
-        (root / "outputs" / "report.md").write_text(
-            "# PREPARE baseline\n", encoding="utf-8"
-        )
+        (root / "report.md").write_text("# PREPARE baseline\n", encoding="utf-8")
         result = CommandResult(ok=True, stdout="", stderr="", exit_code=0)
         if emit is not None:
             await emit("command/completed", "exec:prepare", result.to_dict())
@@ -186,12 +205,16 @@ class _Harness:
         *,
         invalid_first: bool = False,
         missing: str | None = None,
+        evaluator_missing: str | None = None,
     ) -> None:
         self.tmp_path = tmp_path
         self.repo = tmp_path / "repo"
         self.worktrees = tmp_path / "worktrees"
         self.store = LocalArtifactStore(tmp_path / "artifacts")
-        self.provider = _PrepareProvider(invalid_first=invalid_first, missing=missing)
+        self.prepare_provider = _PrepareProvider(
+            invalid_first=invalid_first, missing=missing
+        )
+        self.evaluator_provider = _EvaluatorProvider(missing=evaluator_missing)
         self.missing = missing
 
     def _git(self, *args: str) -> str:
@@ -218,21 +241,7 @@ class _Harness:
         self.git = LocalGitWorkspace(self.repo, self.worktrees, write_diff)
         self.branch = await self.git.create(base, "athena/prepare")
         workspace = Path(self.branch.path)
-        runtime = ExecutionRuntime(project_root=workspace, store=self.store)
-        registry = AgentTypeRegistry()
-        register_prepare_agent(
-            registry,
-            provider=self.provider,
-            artifacts=self.store,
-            workspace=workspace,
-            runtime=runtime,
-        )
-        self.agents = AgentRuntime(
-            type_registry=registry,
-            project_root=self.tmp_path,
-            rollout_dir=self.tmp_path / ".athena" / "logs" / "agents",
-        )
-        self.agents.start()
+        self.runtime = ExecutionRuntime(project_root=workspace, store=self.store)
         self.scripts = DataScriptRunner(
             store=self.store, workdir=self.tmp_path / ".athena" / "script-runs"
         )
@@ -241,15 +250,60 @@ class _Harness:
         )
         self.tree_ref = await self.store.put_text('{"experiments": []}')
 
+    def _agent_runtime(self, registry: AgentTypeRegistry) -> AgentRuntime:
+        return AgentRuntime(
+            type_registry=registry,
+            project_root=self.tmp_path,
+            rollout_dir=self.tmp_path / ".athena" / "logs" / "agents",
+        )
+
+    async def freeze_evaluator(self, *, max_turns: int = 3) -> str:
+        evaluator_dir = self.tmp_path / "evaluator"
+        evaluator_dir.mkdir(parents=True, exist_ok=True)
+        registry = AgentTypeRegistry()
+        register_evaluator_agent(
+            registry,
+            provider=self.evaluator_provider,
+            artifacts=self.store,
+            workspace=evaluator_dir,
+            runtime=self.runtime,
+        )
+        agents = self._agent_runtime(registry)
+        agents.start()
+        try:
+            return await run_evaluator_plan(
+                agents=agents,
+                scripts=self.scripts,
+                store=self.store,
+                evaluator_dir=evaluator_dir,
+                execution=self.execution,
+                task="write the evaluator",
+                max_turns=max_turns,
+            )
+        finally:
+            await agents.aclose()
+
     async def run(self, *, max_turns: int = 3, publish=None):
+        evaluator_ref = await self.freeze_evaluator()
+        workspace = Path(self.branch.path)
+        registry = AgentTypeRegistry()
+        register_prepare_agent(
+            registry,
+            provider=self.prepare_provider,
+            artifacts=self.store,
+            workspace=workspace,
+            runtime=self.runtime,
+        )
+        self.agents = self._agent_runtime(registry)
+        self.agents.start()
         return await run_prepare_plan(
             agents=self.agents,
-            scripts=self.scripts,
             evaluator=TrustedEvaluator(self.scripts),
             git=self.git,
             workspace=self.branch,
             execution=self.execution,
             store=self.store,
+            evaluator_ref=evaluator_ref,
             tree_ref=self.tree_ref,
             task="inspect data and build a trusted baseline",
             max_turns=max_turns,
@@ -257,8 +311,26 @@ class _Harness:
         )
 
     async def close(self) -> None:
-        await self.agents.aclose()
+        if getattr(self, "agents", None) is not None:
+            await self.agents.aclose()
         await self.git.remove(self.branch, delete_branch=True, force=True)
+
+
+@pytest.mark.asyncio
+async def test_evaluator_plan_freezes_a_bundle(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    await harness.start()
+    try:
+        evaluator_ref = await harness.freeze_evaluator()
+        bundle = DataScriptBundle.model_validate_json(
+            await harness.store.get_text(evaluator_ref)
+        )
+        tree = json.loads(await harness.store.get_text(bundle.tree_ref))
+        assert "evaluate.py" in tree
+        assert "labels.csv" in tree
+        assert "HANDOFF.md" in tree
+    finally:
+        await harness.close()
 
 
 @pytest.mark.asyncio
@@ -268,8 +340,8 @@ async def test_prepare_repairs_same_plan_and_submits_outputs(tmp_path: Path) -> 
     try:
         result = await harness.run()
         assert result.metric == 1.0
-        assert "commands" in harness.provider.feedback_seen
-        assert (Path(harness.branch.path) / "outputs" / "report.md").is_file()
+        assert "commands" in harness.prepare_provider.feedback_seen
+        assert (Path(harness.branch.path) / "report.md").is_file()
     finally:
         await harness.close()
 
@@ -302,7 +374,10 @@ async def test_prepare_forwards_agent_text_delta_to_publisher(tmp_path: Path) ->
         await harness.run(publish=publish)
         text_events = [event for event in published if event[0] == "agent/text_delta"]
         assert len(text_events) == 1
-        assert text_events[0][2] == {"delta": _answer(), "accumulated": _answer()}
+        assert text_events[0][2] == {
+            "delta": _submit_answer(),
+            "accumulated": _submit_answer(),
+        }
         assert [event[0] for event in published].count("command/completed") == 1
         kinds = [event[0] for event in published]
         first_call = kinds.index("agent/function_call")
@@ -327,10 +402,7 @@ async def test_prepare_accepts_an_arbitrary_multifile_solution(tmp_path: Path) -
     try:
         result = await harness.run()
         assert result.metric == 1.0
-        assert harness.execution.argv_calls == [
-            ["python", "solution/model.py"],
-            ["python", "evaluator/eval.py"],
-        ]
+        assert harness.execution.argv_calls == [["python", "solution/model.py"]]
     finally:
         await harness.close()
 
@@ -342,14 +414,28 @@ async def test_invalid_manifest_is_repaired_by_the_same_agent(tmp_path: Path) ->
     try:
         await harness.run()
         assert len(harness.agents.list_agents()) == 1
-        assert harness.provider.turn == 2
+        assert harness.prepare_provider.turn == 2
     finally:
         await harness.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["labels", "evaluator", "report", "predictions"])
-async def test_missing_labels_evaluator_report_or_predictions_cannot_submit(
+@pytest.mark.parametrize("missing", ["labels", "evaluator"])
+async def test_missing_labels_or_evaluator_cannot_submit(
+    tmp_path: Path, missing: str
+) -> None:
+    harness = _Harness(tmp_path, evaluator_missing=missing)
+    await harness.start()
+    try:
+        with pytest.raises(RuntimeError, match="turn budget exhausted"):
+            await harness.freeze_evaluator(max_turns=1)
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["report", "predictions"])
+async def test_missing_report_or_predictions_cannot_submit(
     tmp_path: Path, missing: str
 ) -> None:
     harness = _Harness(tmp_path, missing=missing)

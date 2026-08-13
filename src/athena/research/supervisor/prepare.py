@@ -28,6 +28,8 @@ from athena.research.supervisor.plans import (
 
 PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
+EVALUATOR_AGENT_ID = "evaluator"
+EVALUATOR_PLAN_ID = "evaluator"
 
 
 class PrepareResult(BaseModel):
@@ -107,21 +109,101 @@ async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
     return decision
 
 
-async def run_prepare_plan(
+async def run_evaluator_plan(
     *,
     agents: AgentRuntime,
     scripts: DataScriptRunner,
+    store: ArtifactStore,
+    evaluator_dir: Path,
+    execution: ExecutionRuntime,
+    task: str,
+    max_turns: int,
+    publish: EmitEvent | None = None,
+) -> ArtifactRef:
+    """Run and repair one evaluator Agent until a frozen evaluator bundle exists."""
+
+    if max_turns < 1:
+        raise ValueError("max_turns must be at least 1")
+    root = Path(evaluator_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    # 与 experiment 步骤一样，先补环境根 pyproject.toml，避免 agent 的
+    # `uv add --project "$ATHENA_ENV_ROOT"` 因缺 pyproject 失败。
+    execution.ensure_environment()
+
+    context_ref = await store.put_text(
+        json.dumps(
+            {
+                "plan_id": EVALUATOR_PLAN_ID,
+                "task": task,
+            },
+            ensure_ascii=False,
+        )
+    )
+    agent_id, run_id = await agents.create_root(
+        "evaluator",
+        {"content": task, "context_refs": [context_ref]},
+        agent_id=EVALUATOR_AGENT_ID,
+        name=EVALUATOR_PLAN_ID,
+    )
+    if agent_id != EVALUATOR_AGENT_ID:
+        raise RuntimeError(f"evaluator Agent id must be {EVALUATOR_AGENT_ID}")
+
+    feedback: str | None = None
+    for turn in range(max_turns):
+        if turn:
+            run_id = await agents.followup(
+                EVALUATOR_AGENT_ID,
+                {"content": feedback, "context_refs": []},
+            )
+        summary = await wait_run_events(agents, run_id, publish)
+        try:
+            decision = await _decision_from_summary(summary, store)
+        except (OSError, RuntimeError, ValueError) as exc:
+            # Agent 输出无效 → 转为反馈重试；真实 abort 由 decision == abandon 处理。
+            feedback = (
+                "previous evaluator turn did not produce a valid decision: "
+                f"{' '.join(str(exc).split())[:1000]}"
+            )
+            continue
+        if decision.decision == "abandon":
+            raise RuntimeError(f"evaluator Agent abandoned Plan: {decision.reason}")
+        try:
+            evaluator_ref = await _freeze_evaluator(
+                root=root, scripts=scripts, store=store
+            )
+            if decision.decision != "submit":
+                raise ValueError(
+                    "evaluator frozen successfully but the decision was "
+                    f"{decision.decision!r}. Return submit to advance to the "
+                    "experiment step."
+                )
+            return evaluator_ref
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            # 覆盖 evaluator 冻结（uv lock）的子进程失败 → 转成同 Plan 的反馈重试。
+            feedback = " ".join(str(exc).split())[:1000]
+
+    raise RuntimeError("evaluator turn budget exhausted without a frozen evaluator")
+
+
+async def run_prepare_plan(
+    *,
+    agents: AgentRuntime,
     evaluator: TrustedEvaluator,
     git: GitWorkspace,
     workspace: GitWorkBranch,
     execution: ExecutionRuntime,
     store: ArtifactStore,
+    evaluator_ref: ArtifactRef,
     tree_ref: ArtifactRef,
     task: str,
     max_turns: int,
     publish: EmitEvent | None = None,
 ) -> PrepareResult:
-    """Run and repair one stable PREPARE Agent until a trusted baseline exists."""
+    """Run and repair one stable PREPARE Agent until a trusted baseline exists.
+
+    ``evaluator_ref`` 是步骤 1 冻结的评估器 bundle；本步骤只产出 experiment 侧
+    产物（experiment.json/solution/predictions/report/handoff）并用它可信打分。
+    """
 
     if max_turns < 1:
         raise ValueError("max_turns must be at least 1")
@@ -172,9 +254,6 @@ async def run_prepare_plan(
         if decision.decision == "abandon":
             raise RuntimeError(f"prepare Agent abandoned Plan: {decision.reason}")
         try:
-            evaluator_ref = await _freeze_evaluator(
-                root=root, scripts=scripts, store=store
-            )
             runner = PlanRunner(
                 execution=execution,
                 store=store,
@@ -240,12 +319,20 @@ async def run_prepare_plan(
             subprocess.SubprocessError,
             GitWorkspaceError,
         ) as exc:
-            # 覆盖 evaluator 冻结（uv lock）的子进程失败与可信打分后的 git diff/commit
-            # 失败（GitWorkspaceError），转成同 Plan 的反馈重试；evaluator_infrastructure_failed
+            # 覆盖可信打分后的 git diff/commit 失败（GitWorkspaceError）与
+            # subprocess 失败，转成同 Plan 的反馈重试；evaluator_infrastructure_failed
             # 仍走 RuntimeError 上抛（终端），由 Supervisor.start 统一观测，不在此处吞掉。
             feedback = " ".join(str(exc).split())[:1000]
 
     raise RuntimeError("prepare turn budget exhausted without a trusted baseline")
 
 
-__all__ = ["PREPARE_AGENT_ID", "PREPARE_PLAN_ID", "PrepareResult", "run_prepare_plan"]
+__all__ = [
+    "PREPARE_AGENT_ID",
+    "PREPARE_PLAN_ID",
+    "EVALUATOR_AGENT_ID",
+    "EVALUATOR_PLAN_ID",
+    "PrepareResult",
+    "run_evaluator_plan",
+    "run_prepare_plan",
+]

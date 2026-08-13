@@ -386,6 +386,63 @@ class ThreadRuntime:
                 # 队列已排空 → 所有待处理提交已处理完毕
                 break
 
+    async def _handle_start_turn(
+        self, msg: Submission, tid: str, req_ref: ArtifactRef
+    ) -> None:
+        """接受并派发一个 Turn；Thread 已有活跃 Turn 时拒绝并发启动。"""
+        try:
+            turn = await self.accept_turn(StartTurn(turn_id=tid, request_ref=req_ref))
+            self.spawn_turn(turn)
+            if not msg.reply.done():
+                msg.reply.set_result(turn)
+        except RuntimeError as e:
+            if not msg.reply.done():
+                msg.reply.set_exception(e)
+
+    async def _handle_interrupt(self, msg: Submission, tid: str, reason: str) -> None:
+        """中断活跃 Turn 并取消其 runner；无匹配活跃 Turn 时回复错误。"""
+        if self.active_turn is None or self.active_turn.turn_id != tid:
+            if not msg.reply.done():
+                msg.reply.set_exception(RuntimeError(f"no active turn {tid}"))
+            return
+        runner_task = self.active_turn.runner_task
+        await self.commit_interrupted(tid, reason)
+        if runner_task is not None:
+            runner_task.cancel()
+            try:
+                await runner_task
+            except asyncio.CancelledError:
+                pass
+        if not msg.reply.done():
+            msg.reply.set_result(None)
+
+    async def _handle_fork_snapshot(self, msg: Submission, after: str | None) -> None:
+        """返回指定 Turn 的上下文快照；after 不存在时回复错误。"""
+        try:
+            ctx = self.completed_snapshot(after)
+        except KeyError as e:
+            if not msg.reply.done():
+                msg.reply.set_exception(e)
+            return
+        if not msg.reply.done():
+            msg.reply.set_result(ctx)
+
+    async def _handle_shutdown(self, msg: Submission, reason: str) -> None:
+        """中断活跃 Turn 并取消其 runner，随后回复完成。"""
+        runner_task = None
+        if self.active_turn is not None:
+            tid = self.active_turn.turn_id
+            runner_task = self.active_turn.runner_task
+            await self.commit_interrupted(tid, reason)
+        if runner_task is not None:
+            runner_task.cancel()
+            try:
+                await asyncio.shield(runner_task)
+            except asyncio.CancelledError:
+                pass
+        if not msg.reply.done():
+            msg.reply.set_result(None)
+
 
 class ThreadHandle:
     """ThreadRuntime 公开边界 — 不含 Queue/Task/锁。"""
@@ -445,66 +502,16 @@ async def submission_loop(runtime: ThreadRuntime) -> None:
 
             match msg:
                 case Submission(op=StartTurn(turn_id=tid, request_ref=req_ref)):
-                    try:
-                        turn = await runtime.accept_turn(
-                            StartTurn(turn_id=tid, request_ref=req_ref)
-                        )
-                        runtime.spawn_turn(turn)
-                        if not msg.reply.done():
-                            msg.reply.set_result(turn)
-                    except RuntimeError as e:
-                        # Thread 已有活跃 Turn → 拒绝并发启动
-                        if not msg.reply.done():
-                            msg.reply.set_exception(e)
+                    await runtime._handle_start_turn(msg, tid, req_ref)
 
                 case Submission(op=InterruptTurn(turn_id=tid, reason=reason)):
-                    if (
-                        runtime.active_turn is None
-                        or runtime.active_turn.turn_id != tid
-                    ):
-                        if not msg.reply.done():
-                            msg.reply.set_exception(
-                                RuntimeError(f"no active turn {tid}")
-                            )
-                        continue
-                    runner_task = runtime.active_turn.runner_task
-                    await runtime.commit_interrupted(tid, reason)
-                    if runner_task is not None:
-                        runner_task.cancel()
-                        try:
-                            await runner_task
-                        except asyncio.CancelledError:
-                            # runner 已被 cancel 并等待完毕 → 预期行为
-                            pass
-                    if not msg.reply.done():
-                        msg.reply.set_result(None)
+                    await runtime._handle_interrupt(msg, tid, reason)
 
                 case Submission(op=GetForkSnapshot(after_turn_id=after)):
-                    try:
-                        ctx = runtime.completed_snapshot(after)
-                    except KeyError as e:
-                        # after_turn_id 指向的 Turn 不存在于已完成记录中
-                        if not msg.reply.done():
-                            msg.reply.set_exception(e)
-                        continue
-                    if not msg.reply.done():
-                        msg.reply.set_result(ctx)
+                    await runtime._handle_fork_snapshot(msg, after)
 
                 case Submission(op=ShutdownThread(reason=reason)):
-                    runner_task = None
-                    if runtime.active_turn is not None:
-                        tid = runtime.active_turn.turn_id
-                        runner_task = runtime.active_turn.runner_task
-                        await runtime.commit_interrupted(tid, reason)
-                    if runner_task is not None:
-                        runner_task.cancel()
-                        try:
-                            await asyncio.shield(runner_task)
-                        except asyncio.CancelledError:
-                            # 关闭中断后等待被 cancel 的 runner → 预期行为
-                            pass
-                    if not msg.reply.done():
-                        msg.reply.set_result(None)
+                    await runtime._handle_shutdown(msg, reason)
                     return
 
                 # Runner 完成信号 — 由 _run_turn 发送到 control_queue

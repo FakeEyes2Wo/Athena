@@ -155,20 +155,9 @@ class AppServer:
             )
             await client._worker.start()
             stack.push_async_callback(client._cleanup)
-            init_resp = await client._raw_request(
-                "initialize",
-                0,
-                {
-                    "client_name": client_name,
-                    "client_version": client_version,
-                    "protocol_version": protocol_version,
-                },
-                startup_timeout,
+            await client._initialize(
+                client_name, client_version, protocol_version, startup_timeout
             )
-            if "error" in init_resp:
-                raise RuntimeError(f"initialize failed: {init_resp['error']}")
-            await client.notify("initialized")
-            await asyncio.wait_for(transport.wait_ready(), timeout=startup_timeout)
             return cls(
                 transport=transport,
                 server=server,
@@ -186,13 +175,7 @@ class AppServer:
             raise
 
     async def shutdown(self, timeout=DEFAULT_SHUTDOWN_TIMEOUT) -> None:
-        try:
-            await asyncio.wait_for(
-                self.client.request("server/shutdown", timeout=timeout), timeout=timeout
-            )
-        except Exception:
-            # 关闭请求失败（Server 可能已关闭）→ 忽略，继续清理本地资源
-            pass
+        await self.client.shutdown(timeout=timeout)
         await self._exit_stack.aclose()
         if self._owns_manager and hasattr(self.manager, "aclose"):
             await self.manager.aclose("server_shutdown")
