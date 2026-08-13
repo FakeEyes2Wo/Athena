@@ -10,6 +10,7 @@ EDA/训练/评估业务决策；安全隔离与远程执行是显式未来工作
 import asyncio
 import codecs
 import hashlib
+import locale
 import os
 import shutil
 import signal
@@ -328,6 +329,64 @@ async def _dispatch(
         await result
 
 
+def _stream_fallback_encoding() -> str:
+    """子进程输出非合法 UTF-8 时的回退解码编码。
+
+    Windows 上 PowerShell 与原生控制台程序按系统代码页输出（中文系统为
+    cp936/GBK），而 Python 子进程被 ``build_env`` 强制为 UTF-8，因此单一
+    编码无法覆盖全部输出。返回系统代码页作为回退；非 Windows 平台 UTF-8
+    即常态，回退为 utf-8（等价于不改变现有行为）。
+    """
+    if os.name != "nt":
+        return "utf-8"
+    return locale.getpreferredencoding(False) or "utf-8"
+
+
+class _StreamDecoder:
+    """把一条子进程输出流按 UTF-8 或系统代码页增量解码。
+
+    一次命令可能混出两种编码：Python 子进程被 ``PYTHONIOENCODING``/``PYTHONUTF8``
+    强制 UTF-8，而 PowerShell 自身 stdout 与解析错误 stderr 走控制台代码页
+    （中文 Windows 为 GBK）。两者共享 ASCII，故先按字节缓冲，直到出现首个
+    非 ASCII 字节才判定：字节序列合法 UTF-8 则选 utf-8，否则选回退编码。
+    单条流内真正混合编码（罕见）时少数部分退化为 U+FFFD，与旧行为一致。
+    """
+
+    def __init__(self, fallback_encoding: str) -> None:
+        self._fallback = fallback_encoding
+        self._buf = bytearray()  # 编码未判定期间缓冲的原始字节
+        self._decoder = None  # 编码判定后启用的增量解码器
+
+    def decode(self, raw: bytes, final: bool = False) -> str:
+        if self._decoder is not None:
+            return self._decoder.decode(raw, final=final)
+        self._buf.extend(raw)
+        # 纯 ASCII 在任意候选编码下都相同：保持缓冲、暂不判定，避免把后续
+        # GBK 误判为 UTF-8（空/纯 ASCII 也走这里，开销极小）。
+        if not final and self._buf.isascii():
+            return ""
+        encoding = self._classify(final)
+        if encoding is None:
+            return ""
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
+        pending = bytes(self._buf)
+        self._buf.clear()
+        return self._decoder.decode(pending, final=final)
+
+    def _classify(self, final: bool) -> str | None:
+        data = bytes(self._buf)
+        try:
+            data.decode("utf-8", "strict")
+        except UnicodeDecodeError as exc:
+            if exc.reason == "unexpected end of data":
+                # 多字节 UTF-8 字符跨 pipe 分块被截断：等待更多字节；final 时
+                # 流以截断 UTF-8 收尾，仍选 utf-8 并靠 errors="replace" 兜底。
+                return None if not final else "utf-8"
+            # 真正非法的 UTF-8（如 GBK/cp936）→ 回退到系统代码页。
+            return self._fallback
+        return "utf-8"
+
+
 class CommandExecutor:
     """在选定 shell 中执行命令；流式事件、超时/取消、进程树终止与有界输出。
 
@@ -342,6 +401,7 @@ class CommandExecutor:
     ) -> None:
         self._env = env
         self._persist = persist
+        self._fallback_encoding = _stream_fallback_encoding()
 
     def _spawn_flags(self) -> tuple[int, bool]:
         """Windows 用独立进程组（taskkill 可杀整树）；POSIX 用新会话。"""
@@ -459,11 +519,12 @@ class CommandExecutor:
         ) -> int:
             """读取流式输出：边 hash 完整输出边累积有界头部，返回本流字符数。
 
-            用增量解码器跨 chunk 解码，避免多字节 UTF-8（如中文）在 chunk 边界
-            被撕裂成 U+FFFD。
+            用 ``_StreamDecoder`` 跨 chunk 解码：优先 UTF-8，遇到 GBK 等系统
+            代码页字节时回退解码，既避免多字节字符在 chunk 边界被撕裂成 U+FFFD，
+            也修正中文 Windows 上 PowerShell/原生命令输出的 mojibake。
             """
             length = 0
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            decoder = _StreamDecoder(self._fallback_encoding)
 
             async def emit_decoded(text: str) -> None:
                 nonlocal length
