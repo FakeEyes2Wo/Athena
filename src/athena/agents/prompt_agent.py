@@ -6,15 +6,22 @@
 - 外层：Python 编排器（data/init/report）收集产物、提交 Bundle/Artifact。
 
 本模块只做内层构建：``load_prompt`` 读取固定格式 md；``build_llm_agent`` 把
-provider + 通用工具 + prompt 组装成 ``Agent``。
+provider + 通用工具 + prompt 组装成 ``Agent``；``register_prompt_agent`` 统一
+各 ``register_*_agent`` 的工厂共性。
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from athena.agents.base_runner import BaseAgentRunner
 from athena.agents.tools.generic_tools import generic_tool_registry
+from athena.core.agent.models import AgentConfig
 from athena.core.agent.provider import create_provider
+from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.runtime import Agent
+from athena.core.agent.types import AgentSpec, JsonCodec
+from athena.core.contracts import ArtifactStore
 from athena.core.tool import ToolRegistry
 
 if TYPE_CHECKING:
@@ -65,3 +72,40 @@ def build_llm_agent(
         tools,
         prompt,
     )
+
+
+def register_prompt_agent(
+    registry: AgentTypeRegistry,
+    *,
+    agent_type: str,
+    output_type: type,
+    workspace: Path | Callable[[str], Path],
+    runtime: "ExecutionRuntime",
+    provider: object,
+    artifacts: ArtifactStore,
+    name: str | None = None,
+) -> None:
+    """注册 prompt-driven ReAct Agent 工厂（各 ``register_*_agent`` 的共性）。
+
+    ``workspace`` 可为固定 ``Path`` 或 ``Callable[[agent_id], Path]``（plan 按
+    每个 hypothesis 动态解析工作区）；``name`` 支持 ``{agent_id}`` 占位符，缺省
+    为 ``f"{agent_type}-agent"``。max_turns 统一用 ``AgentConfig`` 默认 200。
+    """
+
+    def factory(agent_id: str, _config: str | None = None) -> AgentSpec:
+        root = workspace(agent_id) if callable(workspace) else workspace
+        tools = generic_tool_registry(root, runtime=runtime)
+        agent = Agent(
+            provider,
+            tools,
+            load_prompt(agent_type),
+            AgentConfig(name=(name or f"{agent_type}-agent").format(agent_id=agent_id)),
+            output_type=output_type,
+            artifacts=artifacts,
+        )
+        return AgentSpec(
+            runner=BaseAgentRunner(agent, tools=tools, agent_type=agent_type),
+            codec=JsonCodec(),
+        )
+
+    registry.register(agent_type, factory)

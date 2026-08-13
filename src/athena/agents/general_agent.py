@@ -11,19 +11,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from athena.agents.base_runner import BaseAgentRunner
-from athena.agents.prompt_agent import load_prompt
-from athena.agents.tools.generic_tools import generic_tool_registry
-from athena.core.agent.models import AgentConfig
+from athena.agents.prompt_agent import register_prompt_agent
 from athena.core.agent.registry import AgentTypeRegistry
-from athena.core.agent.runtime import Agent
-from athena.core.agent.types import AgentSpec, JsonCodec
 from athena.core.contracts import ArtifactStore
 from athena.execution.runtime import ExecutionRuntime
 
 GENERAL_AGENT_TYPE = "general"
-# 杂活可能要多轮探索/修复；与 ideator/plan 一致放宽到 200。
-GENERAL_MAX_TURNS = 200
 
 
 class GeneralResult(BaseModel):
@@ -49,32 +42,19 @@ def register_general_agent(
     ``project_root`` 内，不绑定任何具体 workspace；模型按派发请求自由探索、
     生成或修复，最后输出 ``GeneralResult``（``result`` 文本 + 可选的 ``files``）。
     """
-
-    def factory(_agent_id: str, _config: str | None = None) -> AgentSpec:
-        tools = generic_tool_registry(project_root, runtime=runtime)
-        agent = Agent(
-            provider,
-            tools,
-            load_prompt(GENERAL_AGENT_TYPE),
-            AgentConfig(name="general-agent", max_turns=GENERAL_MAX_TURNS),
-            output_type=GeneralResult,
-            artifacts=artifacts,
-        )
-        return AgentSpec(
-            runner=BaseAgentRunner(
-                agent,
-                tools=tools,
-                agent_type=GENERAL_AGENT_TYPE,
-            ),
-            codec=JsonCodec(),
-        )
-
-    registry.register(GENERAL_AGENT_TYPE, factory)
+    register_prompt_agent(
+        registry,
+        agent_type=GENERAL_AGENT_TYPE,
+        output_type=GeneralResult,
+        workspace=project_root,
+        runtime=runtime,
+        provider=provider,
+        artifacts=artifacts,
+    )
 
 
 __all__ = [
     "GENERAL_AGENT_TYPE",
-    "GENERAL_MAX_TURNS",
     "GeneralResult",
     "register_general_agent",
 ]
