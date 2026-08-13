@@ -11,6 +11,14 @@ from athena.core.contracts import ArtifactRef, CommitHash
 BinaryDiffWriter = Callable[[bytes], Awaitable[ArtifactRef]]
 
 
+def resolve_workspace_path(root: Path, rel: str) -> Path:
+    """Resolve a workspace-relative path and reject escape outside ``root``."""
+    candidate = (root / rel).resolve()
+    if not candidate.is_relative_to(root.resolve()):
+        raise ValueError(f"path escapes workspace: {rel}")
+    return candidate
+
+
 class GitWorkspaceError(RuntimeError):
     """Raised when a Git workspace operation cannot be completed."""
 

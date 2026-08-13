@@ -9,7 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
-from athena.core.workspace import GitWorkBranch, GitWorkspace, GitWorkspaceError
+from athena.core.workspace import (
+    GitWorkBranch,
+    GitWorkspace,
+    GitWorkspaceError,
+    resolve_workspace_path,
+)
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
@@ -39,10 +44,10 @@ class PrepareResult(BaseModel):
 
 
 def _workspace_output(root: Path, rel: str) -> Path:
-    candidate = (root / rel).resolve()
-    if not candidate.is_relative_to(root.resolve()):
-        raise ValueError(f"output path escapes workspace: {rel}")
-    return candidate
+    try:
+        return resolve_workspace_path(root, rel)
+    except ValueError as exc:
+        raise ValueError(f"output path escapes workspace: {rel}") from exc
 
 
 async def _freeze_evaluator(

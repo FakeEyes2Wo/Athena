@@ -10,19 +10,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from athena.core.tool import ToolRegistry, tool
+from athena.core.workspace import resolve_workspace_path
 
 if TYPE_CHECKING:
     from athena.execution.runtime import ExecutionRuntime
 
 
 def _workspace_path(root: Path, path: str) -> Path:
-    candidate = (root / path).resolve()
-    if not candidate.is_relative_to(root):
+    try:
+        return resolve_workspace_path(root, path)
+    except ValueError as exc:
         raise ValueError(
-            f"path escapes workspace: {path}. Use a relative path inside your "
-            f"workspace ({root}); reach external files via shell_command instead."
-        )
-    return candidate
+            f"{exc} Use a relative path inside your workspace ({root}); "
+            "reach external files via shell_command instead."
+        ) from None
 
 
 def generic_tool_registry(
