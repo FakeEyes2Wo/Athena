@@ -31,6 +31,7 @@ _PHASE_CLASS = {
     "WAITING": "class:phase.waiting",
     "COMPLETED": "class:phase.done",
     "STOPPED": "class:phase.stopped",
+    "FAILED": "class:phase.stopped",
 }
 
 _IDEATOR_PLAN = re.compile(r"^ideator-([1-9][0-9]*)$")
@@ -275,6 +276,7 @@ def render_history_lines(state: TuiState, width: int) -> tuple[StyleAndTextTuple
     output: list[StyleAndTextTuples] = []
     ordinary: list[HistoryEntry] = []
     ideators: dict[int, list[HistoryEntry]] = {}
+    lane_count = 0
 
     def flush_ordinary() -> None:
         if ordinary:
@@ -282,10 +284,19 @@ def render_history_lines(state: TuiState, width: int) -> tuple[StyleAndTextTuple
             ordinary.clear()
 
     def flush_board() -> None:
-        if ideators:
-            lanes = [(number, ideators[number]) for number in sorted(ideators)]
+        nonlocal lane_count
+        if lane_count <= 1:
+            # 单 lane 不分屏：按普通条目渲染，不产生 "Ideator N" 标题栏。
+            for entries in ideators.values():
+                output.extend(_render_entry_lines(entries, width))
+        elif ideators:
+            lanes = [
+                (number, ideators.get(number, []))
+                for number in range(1, lane_count + 1)
+            ]
             output.extend(_render_ideator_board(lanes, width))
-            ideators.clear()
+        ideators.clear()
+        lane_count = 0
 
     for entry in state.history:
         number = _ideator_number(entry)
@@ -294,6 +305,8 @@ def render_history_lines(state: TuiState, width: int) -> tuple[StyleAndTextTuple
             ordinary.append(entry)
         elif number <= _MAX_IDEATOR_LANES:
             flush_ordinary()
+            batch_lanes = entry.ideator_lanes or number
+            lane_count = max(lane_count, batch_lanes)
             ideators.setdefault(number, []).append(entry)
     flush_board()
     flush_ordinary()

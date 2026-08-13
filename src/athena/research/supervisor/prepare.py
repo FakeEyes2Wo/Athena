@@ -1,6 +1,7 @@
 """Narrow one-Agent PREPARE phase execution."""
 
 import json
+import subprocess
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -8,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
-from athena.core.workspace import GitWorkBranch, GitWorkspace
+from athena.core.workspace import GitWorkBranch, GitWorkspace, GitWorkspaceError
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
@@ -40,6 +41,15 @@ class PrepareResult(BaseModel):
     predictions_ref: ArtifactRef
     evidence_ref: ArtifactRef
     report_ref: ArtifactRef
+
+
+def _read_manifest(root: Path) -> ExperimentManifest:
+    """向后兼容别名：历史探针/文档引用 ``prepare._read_manifest``。
+
+    规范实现已提升为 ``experiment.read_experiment_manifest``；此处仅委托，
+    避免旧引用 ``ImportError``，不复制解析逻辑。
+    """
+    return read_experiment_manifest(root)
 
 
 def _workspace_output(root: Path, rel: str) -> Path:
@@ -76,7 +86,12 @@ async def _freeze_evaluator(
         raise ValueError("evaluator draft is missing")
     labels_path = evaluator_root / "labels.csv"
     if not labels_path.is_file() or not labels_path.stat().st_size:
-        raise ValueError("evaluator labels are missing")
+        raise ValueError(
+            "evaluator labels are missing: labels.csv must sit in the evaluator "
+            f"directory next to the entrypoint (same directory as "
+            f"{evaluator_rel!r}), so the frozen evaluator can read it at "
+            "scoring time"
+        )
     bundle = await scripts.freeze(evaluator_root, BundleMetadata(entrypoint=entrypoint))
     return await store.put_text(bundle.model_dump_json())
 
@@ -108,6 +123,10 @@ async def run_prepare_plan(
         raise ValueError("max_turns must be at least 1")
     root = Path(workspace.path).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    # 初始化共享环境根（补 pyproject.toml），否则 agent 的
+    # `uv add --project "$ATHENA_ENV_ROOT"` 会因缺 pyproject 失败，退到本地 venv，
+    # 确定性 runner 的裸 python 再解析到无依赖解释器 → ModuleNotFoundError 死循环。
+    execution.ensure_environment()
 
     context_ref = await store.put_text(
         json.dumps(
@@ -198,7 +217,12 @@ async def run_prepare_plan(
             if outcome.metric is None:
                 raise ValueError("trusted metric is missing")
             if decision.decision != "submit":
-                raise ValueError("Agent must submit the validated baseline")
+                raise ValueError(
+                    "baseline validated successfully "
+                    f"(metric {outcome.metric:.4f}) but the decision was "
+                    f"{decision.decision!r}. Return submit to advance to SEARCH; "
+                    "continue means keep repairing this baseline, not move on."
+                )
             return PrepareResult(
                 evaluator_ref=evaluator_ref,
                 metric=outcome.metric,
@@ -207,7 +231,15 @@ async def run_prepare_plan(
                 evidence_ref=outcome.evidence_ref,
                 report_ref=outcome.report_ref,
             )
-        except (OSError, ValueError) as exc:
+        except (
+            OSError,
+            ValueError,
+            subprocess.SubprocessError,
+            GitWorkspaceError,
+        ) as exc:
+            # 覆盖 evaluator 冻结（uv lock）的子进程失败与可信打分后的 git diff/commit
+            # 失败（GitWorkspaceError），转成同 Plan 的反馈重试；evaluator_infrastructure_failed
+            # 仍走 RuntimeError 上抛（终端），由 Supervisor.start 统一观测，不在此处吞掉。
             feedback = " ".join(str(exc).split())[:1000]
 
     raise RuntimeError("prepare turn budget exhausted without a trusted baseline")

@@ -118,7 +118,7 @@ def test_dynamic_text_is_not_interpreted_as_style_markup() -> None:
     assert "[red]literal" in fragment_list_to_text(output)
 
 
-@pytest.mark.parametrize(("count", "expected_titles"), [(1, 1), (2, 2), (3, 3)])
+@pytest.mark.parametrize(("count", "expected_titles"), [(2, 2), (3, 3)])
 def test_ideator_debate_uses_exact_actual_lane_count(count, expected_titles) -> None:
     state = TuiState(
         history=tuple(
@@ -140,6 +140,55 @@ def test_ideator_debate_uses_exact_actual_lane_count(count, expected_titles) -> 
         assert f"Ideator {index}" in output
         assert f"proposal {index}" in output
     assert all(get_cwidth(plain(line)) <= 120 for line in lines)
+
+
+def test_single_ideator_renders_inline_without_board_title() -> None:
+    state = TuiState(
+        history=(
+            HistoryEntry(
+                kind="runtime",
+                source="agent",
+                plan="ideator-1",
+                text="proposal 1",
+                ideator_lanes=1,
+            ),
+        )
+    )
+
+    output = "\n".join(plain(line) for line in render_history_lines(state, 120))
+
+    assert "proposal 1" in output
+    assert "Ideator 1" not in output
+
+
+def test_ideator_board_reserves_empty_lanes_from_announced_count() -> None:
+    state = TuiState(
+        history=(
+            HistoryEntry(
+                kind="runtime",
+                source="agent",
+                plan="ideator-1",
+                text="proposal 1",
+                ideator_lanes=3,
+            ),
+            HistoryEntry(
+                kind="runtime",
+                source="agent",
+                plan="ideator-2",
+                text="proposal 2",
+                ideator_lanes=3,
+            ),
+        )
+    )
+
+    output = "\n".join(plain(line) for line in render_history_lines(state, 120))
+
+    assert output.count("Ideator ") == 3
+    assert "Ideator 1" in output
+    assert "Ideator 2" in output
+    assert "Ideator 3" in output  # 预留的空 lane 也渲染标题，固定 3 分屏
+    assert "proposal 1" in output
+    assert "proposal 2" in output
 
 
 def test_ideator_debate_caps_display_at_first_three_lanes() -> None:
@@ -209,8 +258,8 @@ def test_output_after_debate_remains_after_board_in_history_order() -> None:
 
     output = "\n".join(plain(line) for line in render_history_lines(state, 80))
 
-    assert output.index("before") < output.index("Ideator 1")
-    assert output.index("Ideator 1") < output.index("after")
+    assert output.index("before") < output.index("proposal")
+    assert output.index("proposal") < output.index("after")
 
 
 def test_separate_debate_rounds_render_as_separate_boards() -> None:
@@ -228,7 +277,6 @@ def test_separate_debate_rounds_render_as_separate_boards() -> None:
 
     output = "\n".join(plain(line) for line in render_history_lines(state, 80))
 
-    assert output.count("Ideator 1") == 2
     assert output.index("round one") < output.index("between")
     assert output.index("between") < output.index("round two")
 

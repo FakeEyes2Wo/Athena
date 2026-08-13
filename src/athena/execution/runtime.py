@@ -153,21 +153,27 @@ class EnvironmentManager:
                 return shell, args
         raise RuntimeError(f"no shell found on {self.os_name}")
 
-    def build_env(self) -> dict[str, str]:
-        """构造子进程环境：白名单宿主变量 + 环境根 venv 前置 PATH + UTF-8。
+    def build_env(self, workspace_root: Path | None = None) -> dict[str, str]:
+        """构造子进程环境：白名单宿主变量 + 环境根/workspace venv 前置 PATH + UTF-8。
 
         ``ATHENA_ENV_ROOT`` 指向含 ``pyproject.toml``/``uv.lock`` 的环境根，
-        供 agent 用 ``uv add --project "$ATHENA_ENV_ROOT"`` 动态加依赖。
+        供 agent 用 ``uv add --project "$ATHENA_ENV_ROOT"`` 动态加依赖。环境根
+        venv 优先，其次 workspace 本地 venv（agent 用 ``uv sync`` 就地装的依赖
+        也能被裸 ``python`` 解析到），避免 ``import numpy`` 类 ModuleNotFoundError。
         """
         env = {
             key.upper(): value
             for key, value in self._host.items()
             if key.upper() in _HOST_VARS
         }
-        bindir = (
-            self._environment_root / ".venv" / ("Scripts" if os.name == "nt" else "bin")
-        )
-        entries: list[str] = [str(bindir)] if bindir.is_dir() else []
+        bindirs: list[str] = []
+        for root in (self._environment_root, workspace_root):
+            if root is None:
+                continue
+            bindir = Path(root) / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+            if bindir.is_dir():
+                bindirs.append(str(bindir))
+        entries: list[str] = bindirs
         entries.extend(p for p in env.get("PATH", "").split(os.pathsep) if p)
         env["PATH"] = os.pathsep.join(dict.fromkeys(entries))
         env["PYTHONUTF8"] = "1"
@@ -195,6 +201,27 @@ class EnvironmentManager:
                 digest.update(path.read_bytes())
         digest.update(self.tool_versions().get("python", "unknown").encode())
         return digest.hexdigest()[:16]
+
+    def ensure_project(self) -> None:
+        """确保环境根有可被 ``uv add --project`` 使用的 pyproject.toml（首次初始化）。
+
+        PREPARE agent 依赖 ``uv add --project "$ATHENA_ENV_ROOT" <package>`` 装依赖；
+        空环境根没有 pyproject.toml 会让该命令报 ``No pyproject.toml found``，agent
+        因而退到 workspace 本地 venv，确定性 runner 的裸 ``python`` 解析到无依赖解释器
+        （``train_model.py`` 在 import numpy 处 ModuleNotFoundError 死循环）。幂等。
+        """
+        pyproject = self._environment_root / "pyproject.toml"
+        if pyproject.is_file():
+            return
+        pyproject.parent.mkdir(parents=True, exist_ok=True)
+        pyproject.write_text(
+            "[project]\n"
+            'name = "athena-environment"\n'
+            'version = "0.1.0"\n'
+            'requires-python = ">=3.11"\n'
+            "dependencies = []\n",
+            encoding="utf-8",
+        )
 
     def sync(self, *, frozen: bool = False) -> dict[str, object]:
         """在环境根运行 ``uv sync``（frozen 时 ``--frozen``）；返回 ``{ready, error?}``。
@@ -333,6 +360,19 @@ class CommandExecutor:
             except ProcessLookupError:
                 pass
 
+    def _resolve_executable(self, argv: list[str]) -> list[str]:
+        """把 argv[0] 的裸可执行名解析为环境 PATH 里的绝对路径。
+
+        Windows ``CreateProcess`` 对无路径、无扩展名的可执行名（如裸 ``python``）
+        按「父进程目录 → 当前目录 → System → PATH」搜索，未必落到 ``build_env``
+        前置的 venv，使 manifest 的裸 ``python`` 解析到无依赖解释器
+        （``ModuleNotFoundError`` 死循环）。这里用环境 PATH 显式解析，绕开
+        CreateProcess 的搜索歧义；已含路径或未找到时原样返回，交给
+        ``create_subprocess_exec`` 处理。
+        """
+        resolved = shutil.which(argv[0], path=self._env.get("PATH", ""))
+        return [resolved, *argv[1:]] if resolved else argv
+
     async def run(
         self,
         *,
@@ -355,6 +395,7 @@ class CommandExecutor:
         await _dispatch(emit, "command/started", "exec:run", {"command": display})
         try:
             if argv is not None:
+                argv = self._resolve_executable(argv)
                 proc = await asyncio.create_subprocess_exec(
                     *argv,
                     cwd=str(workdir),
@@ -512,6 +553,10 @@ class ExecutionRuntime:
         """注入 system prompt 的简洁运行时块。"""
         return self._env.runtime_summary(Path(workspace_root))
 
+    def ensure_environment(self) -> None:
+        """确保共享环境根已初始化（含可被 uv 使用的 pyproject.toml）。"""
+        self._env.ensure_project()
+
     async def run(
         self,
         context: ExecutionContext,
@@ -542,7 +587,9 @@ class ExecutionRuntime:
                 """把完整命令输出写为证据 artifact，返回其 ref。"""
                 return await self._store.put_text(full_text)
 
-        executor = CommandExecutor(env=self._env.build_env(), persist=persist)
+        executor = CommandExecutor(
+            env=self._env.build_env(context.workspace_root), persist=persist
+        )
         return await executor.run(
             command=command,
             argv=argv,

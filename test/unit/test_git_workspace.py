@@ -1,6 +1,7 @@
 """真实临时仓库上的 LocalGitWorkspace 单元测试。"""
 
 import hashlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -322,6 +323,50 @@ class LocalGitWorkspaceTest(unittest.IsolatedAsyncioTestCase):
                 "not reviewed",
             )
 
+    async def test_create_rebuilds_stale_worktree_after_project_copy(self) -> None:
+        """复制/迁移项目后 worktree 注册指向旧路径 → create 重建 fresh worktree。"""
+        await self._create("athena/prepare")
+
+        copy_root = Path(self._temp.name) / "copy"
+        copied_repo = copy_root / "repo"
+        copied_worktrees = copy_root / "worktrees"
+        shutil.copytree(self.repo, copied_repo)
+
+        async def write_diff(content: bytes) -> str:
+            digest = hashlib.sha256(content).hexdigest()
+            ref = f"artifact://git-diff-copy/{digest}"
+            self.artifacts[ref] = content
+            return ref
+
+        copied = LocalGitWorkspace(copied_repo, copied_worktrees, write_diff)
+        fresh = await copied.create(self.base_commit, "athena/prepare")
+        self.assertTrue(Path(fresh.path).is_relative_to(copied_worktrees.resolve()))
+        self.assertTrue(Path(fresh.path).is_dir())
+
+    async def test_init_creates_nested_repo_instead_of_walking_up(self) -> None:
+        """空 repo 目录位于父 git 仓库内时，init 必须就地建 .git，不能向上走到父仓。"""
+        nested = self.repo / "nested-project" / "repo"
+        nested.mkdir(parents=True)
+
+        async def write_diff(content: bytes) -> str:
+            digest = hashlib.sha256(content).hexdigest()
+            ref = f"artifact://git-diff-nested/{digest}"
+            self.artifacts[ref] = content
+            return ref
+
+        manager = LocalGitWorkspace(
+            nested, self.repo / "nested-project" / "worktrees", write_diff
+        )
+        commit = await manager.init()
+        # 就地建 .git，而不是沿用父仓 self.repo 的 HEAD
+        self.assertTrue((nested / ".git").is_dir())
+        self.assertEqual(
+            commit, self._git("rev-parse", "HEAD", cwd=nested).stdout.strip()
+        )
+        workspace = await manager.create(commit, "athena/prepare")
+        self.assertTrue(Path(workspace.path).is_dir())
+        await manager.remove(workspace, delete_branch=True, force=True)
+
     async def test_create_preserves_active_review(self) -> None:
         workspace = await self._create("athena/plan/preserve-review")
         path = Path(workspace.path)
@@ -462,6 +507,56 @@ async def test_diff_reports_paths_including_deletions(tmp_path) -> None:
     (p / "old.py").unlink()
     diff2 = await workspace.diff(branch)
     assert "old.py" in diff2.paths
+
+
+@pytest.mark.asyncio
+async def test_init_does_not_walk_up_to_parent_repo(tmp_path: Path) -> None:
+    """项目 .athena/repo 位于外层源码仓工作树内时，init 不得误用外层仓。
+
+    回归：空目录里的 `git rev-parse HEAD` 会向上走到父仓、误判成"已初始化"，
+    导致后续 git 操作打在父仓上（branch 冲突 reference already exists）。
+    """
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main", str(parent)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(parent), "config", "user.name", "Athena Test"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(parent), "config", "user.email", "athena@example.invalid"],
+        check=True,
+        capture_output=True,
+    )
+    (parent / "seed.txt").write_text("seed", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(parent), "add", "seed.txt"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(parent), "commit", "--no-gpg-sign", "-m", "seed"],
+        check=True,
+        capture_output=True,
+    )
+    parent_head = subprocess.run(
+        ["git", "-C", str(parent), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    child = parent / "child"
+    child.mkdir()
+    manager = LocalGitWorkspace(
+        child / "repo", child / "workspaces", lambda b: f"artifact://d/{len(b)}"
+    )
+
+    commit = await manager.init()
+
+    assert commit != parent_head  # 不是外层仓的 HEAD
+    assert (child / "repo" / ".git").is_dir()  # 真正初始化了子仓
 
 
 if __name__ == "__main__":

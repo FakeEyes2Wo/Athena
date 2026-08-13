@@ -136,3 +136,27 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
         "change ideator-3",
     ]
     assert errors == [("ideator-2", "Ideator 2 failed: offline")]
+
+
+@pytest.mark.asyncio
+async def test_ideator_turn_resolves_relative_eda_dir_against_athena(tmp_path) -> None:
+    runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._provider = object()
+    runtime._root = tmp_path
+    runtime._athena = tmp_path / ".athena"
+    workspace = runtime._athena / "workspaces" / "athena-abc123"
+    workspace.mkdir(parents=True)
+    runtime._state = SimpleNamespace(eda_dir="workspaces/athena-abc123")
+    runtime._registry = SimpleNamespace(contains=lambda _name: True)
+    resolved: list[str] = []
+
+    async def run_lane(self, label: str, _target: int, eda_dir):
+        resolved.append(str(eda_dir))
+        return [_hypothesis(label)]
+
+    runtime._run_ideator_lane = MethodType(run_lane, runtime)
+
+    hypotheses = await runtime._run_ideator_turn(1)
+
+    assert resolved == [str(workspace.resolve())]
+    assert [item.intervention for item in hypotheses] == ["change ideator-1"]

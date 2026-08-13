@@ -49,6 +49,33 @@ def test_build_env_places_venv_first(tmp_path: Path) -> None:
     assert env["ATHENA_ENV_ROOT"] == str(tmp_path)
 
 
+def test_ensure_environment_creates_minimal_pyproject_when_missing(
+    tmp_path: Path,
+) -> None:
+    """环境根无 pyproject.toml 时，ensure_environment 补一份可被 uv 使用的项目文件。"""
+    assert not (tmp_path / "pyproject.toml").exists()
+
+    _runtime(tmp_path).ensure_environment()
+
+    pyproject = tmp_path / "pyproject.toml"
+    assert pyproject.is_file()
+    content = pyproject.read_text(encoding="utf-8")
+    assert "[project]" in content
+    assert "dependencies = []" in content
+
+
+def test_ensure_environment_is_idempotent_and_preserves_existing(
+    tmp_path: Path,
+) -> None:
+    """已有 pyproject.toml 时不动它（幂等，避免覆盖 agent 写入的依赖声明）。"""
+    existing = tmp_path / "pyproject.toml"
+    existing.write_text("custom-project", encoding="utf-8")
+
+    _runtime(tmp_path).ensure_environment()
+
+    assert existing.read_text(encoding="utf-8") == "custom-project"
+
+
 def test_runtime_summary_reports_platform_and_python(tmp_path: Path) -> None:
     """运行时摘要包含 OS / Shell / Python 与加依赖提示。"""
     summary = _runtime(tmp_path).runtime_summary(tmp_path)
@@ -185,6 +212,22 @@ async def test_missing_shell_reports_error(tmp_path: Path) -> None:
     )
     assert not result.ok
     assert result.error == "shell_not_found"
+
+
+def test_resolve_executable_resolves_bare_name(monkeypatch) -> None:
+    """裸可执行名按 env PATH 解析为绝对路径；已含路径/未找到则原样返回。"""
+    monkeypatch.setattr(
+        "athena.execution.runtime.shutil.which",
+        lambda name, path: f"{path}/python.exe" if name == "python" else None,
+    )
+    executor = CommandExecutor(env={"PATH": "/fake/venv"})
+    assert executor._resolve_executable(["python", "a", "b"]) == [
+        "/fake/venv/python.exe",
+        "a",
+        "b",
+    ]
+    assert executor._resolve_executable(["/abs/python", "a"]) == ["/abs/python", "a"]
+    assert executor._resolve_executable(["missing", "a"]) == ["missing", "a"]
 
 
 @pytest.mark.asyncio

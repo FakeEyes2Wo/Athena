@@ -1,10 +1,13 @@
 """Immutable local display state for the two-event TUI."""
 
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 COMPOSER = "COMPOSER"
 CONFIRMATION = "CONFIRMATION"
+
+_IDEATOR_PLAN = re.compile(r"^ideator-[1-9][0-9]*$")
 
 HistoryKind = Literal["user", "runtime"]
 OutputSource = Literal["supervisor", "agent", "tool"]
@@ -22,6 +25,7 @@ class HistoryEntry:
     plan: str | None = None
     tool: str | None = None
     truncated: bool = False
+    ideator_lanes: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind == "user" and self.source is not None:
@@ -82,14 +86,20 @@ def apply_output(state: TuiState, event: object) -> TuiState:
     if sequence <= state.last_output_seq:
         return state
 
+    plan = getattr(event, "plan", None)
+    ideator_lanes = None
+    if isinstance(plan, str) and _IDEATOR_PLAN.fullmatch(plan):
+        ideator_lanes = (state.search or {}).get("ideator_lanes") or None
+
     entry = HistoryEntry(
         kind="runtime",
         text=str(getattr(event, "text")),
         source=getattr(event, "source"),
         channel=getattr(event, "channel"),
-        plan=getattr(event, "plan", None),
+        plan=plan,
         tool=getattr(event, "tool", None),
         truncated=bool(getattr(event, "truncated", False)),
+        ideator_lanes=ideator_lanes,
     )
     history = state.history
     if entry.source == "agent" and entry.channel == "text" and entry.tool is None:

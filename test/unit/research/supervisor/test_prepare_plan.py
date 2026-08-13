@@ -94,6 +94,9 @@ class _Execution:
         self.project_root = root
         self.environment_root = root
 
+    def ensure_environment(self) -> None:
+        pass
+
     async def run(self, context, command=None, *, argv=None, **kwargs):
         del context, command, argv, kwargs
         return CommandResult(ok=True, stdout="", stderr="", exit_code=0)

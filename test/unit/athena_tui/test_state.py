@@ -187,6 +187,43 @@ def test_agent_function_call_does_not_merge_with_preceding_text_delta() -> None:
     assert [entry.text for entry in state.history] == ["inspect", "read_file(...)"]
 
 
+def test_ideator_output_is_stamped_with_announced_lane_count() -> None:
+    state = apply_snapshot(
+        TuiState(),
+        StateEvent(
+            status="SEARCH",
+            phase="SEARCH",
+            plans=[],
+            search={
+                "attempts": 0,
+                "limit": 10,
+                "successes": 0,
+                "concurrency": 4,
+                "ideator_lanes": 3,
+            },
+            sota=None,
+            waiting=None,
+        ),
+    )
+    state = apply_output(
+        state,
+        OutputEvent(
+            seq=1, source="agent", channel="text", text="proposal", plan="ideator-1"
+        ),
+    )
+
+    assert state.history[-1].ideator_lanes == 3
+
+
+def test_non_ideator_output_is_not_stamped_with_lane_count() -> None:
+    state = apply_output(
+        TuiState(),
+        OutputEvent(seq=1, source="agent", channel="text", text="hi", plan="plan-1"),
+    )
+
+    assert state.history[-1].ideator_lanes is None
+
+
 def test_scrolled_view_counts_new_output_until_tail_follow_resumes() -> None:
     state = set_history_follow(TuiState(), False)
     state = apply_output(

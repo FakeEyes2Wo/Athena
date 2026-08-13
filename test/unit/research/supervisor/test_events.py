@@ -186,7 +186,7 @@ async def test_runtime_projects_llm_tool_llm_events_in_arrival_order(tmp_path) -
 
     outputs = [payload for kind, payload in seen if kind == "output"]
     assert [event["source"] for event in outputs] == ["agent", "tool", "agent"]
-    assert outputs[0]["text"] == "shell_command(...)"
+    assert outputs[0]["text"] == 'shell_command({"command": "inspect data"})'
     assert outputs[0]["tool"] == "shell_command"
     assert outputs[1]["text"] == "tool result"
     assert outputs[2]["text"] == "continue analysis"
@@ -219,9 +219,74 @@ async def test_runtime_does_not_invent_agent_text_before_a_tool(tmp_path) -> Non
 
     outputs = [payload for kind, payload in seen if kind == "output"]
     assert [(event["source"], event["text"]) for event in outputs] == [
-        ("agent", "shell_command(...)"),
+        ("agent", 'shell_command({"command": "inspect data"})'),
         ("tool", "tool result"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_ideator_projects_only_llm_text_and_hides_tool_calls(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    await runtime._project_agent_event(
+        "ideator-1",
+        "agent/function_call",
+        "event:call-1",
+        {"name": "read_file", "arguments": {"path": "eda.csv"}},
+    )
+    await runtime._project_agent_event(
+        "ideator-1",
+        "command/completed",
+        "event:tool-1",
+        CommandResult(
+            ok=True, stdout="tool result", stderr="", exit_code=0, truncated=False
+        ).to_dict(),
+    )
+    await runtime._project_agent_event(
+        "ideator-1",
+        "agent/text_delta",
+        "event:text-1",
+        {"delta": "eda shows drift\n", "accumulated": "eda shows drift\n"},
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert [event["source"] for event in outputs] == ["agent"]
+    assert outputs[0]["text"] == "eda shows drift"
+    assert outputs[0]["tool"] is None
+
+
+@pytest.mark.asyncio
+async def test_ideator_trailing_newline_is_stripped_from_text(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    await runtime._project_agent_event(
+        "ideator-2",
+        "agent/text_delta",
+        "event:text-1",
+        {"delta": "first token\n"},
+    )
+    await runtime._project_agent_event(
+        "ideator-2",
+        "agent/text_delta",
+        "event:text-2",
+        {"delta": "second token\n"},
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert [event["text"] for event in outputs] == ["first token", "second token"]
+
+
+def test_state_projection_includes_announced_ideator_lane_count(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    runtime._ideator_lanes = 3
+
+    event = runtime._state_event()
+
+    assert event.search["ideator_lanes"] == 3
 
 
 @pytest.mark.asyncio
@@ -258,6 +323,44 @@ async def test_search_configuration_publishes_complete_state(tmp_path) -> None:
     assert [kind for kind, _payload in seen] == ["state", "state"]
     assert seen[-1][1]["search"]["limit"] == 6
     assert seen[-1][1]["search"]["concurrency"] == 2
+
+
+@pytest.mark.asyncio
+async def test_supervisor_bare_output_is_projected_with_seq(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    await runtime._publish_from_supervisor(
+        "output",
+        {
+            "source": "supervisor",
+            "channel": "text",
+            "text": "PREPARE completed with trusted metric 0.83.",
+        },
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert len(outputs) == 1
+    event = OutputEvent.model_validate(outputs[0])  # 不再缺 seq
+    assert event.seq >= 1
+    assert event.text == "PREPARE completed with trusted metric 0.83."
+
+
+@pytest.mark.asyncio
+async def test_supervisor_bare_output_without_text_still_projects(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    await runtime._publish_from_supervisor(
+        "output", {"source": "supervisor", "channel": "text"}
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert len(outputs) == 1
+    event = OutputEvent.model_validate(outputs[0])
+    assert event.text == ""
 
 
 def test_state_projection_reads_successes_and_sota_from_research_tree(tmp_path) -> None:

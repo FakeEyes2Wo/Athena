@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import inspect
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -67,23 +68,19 @@ class LocalGitWorkspace(GitWorkspace):
             return output.decode().strip()
 
         path.mkdir(parents=True, exist_ok=True)
-        # 断点续传：仓库已有 HEAD 时直接返回，不重跑 init/commit（避免第二次打开
+        # 断点续传：仓库已初始化时直接返回，不重跑 init/commit（避免第二次打开
         # 同一项目时 `git commit -m "initial commit"` 因 "nothing to commit" 失败）。
-        existing = await self._git(
-            "rev-parse", "--verify", "HEAD", cwd=path, check=False
-        )
-        if existing.strip():
-            if self._repo != path:
-                self._repo = path
-            self._repo_initialized = True
-            return existing.decode().strip()
+        # 注意不能用 `git rev-parse HEAD` 探测是否已初始化——项目 .athena/repo 位于
+        # Athena 源码仓的工作树内，空目录会让 rev-parse 向上走到源码仓、误判成
+        # "已初始化"，导致所有项目的 git 操作都打在源码仓上（branch 冲突：
+        # reference already exists）。必须确认本目录自己就是 git 仓库。
+        if not (path / ".git").exists():
+            await self._git("init", "-b", "main", cwd=path)
 
-        await self._git("init", "-b", "main", cwd=path)
-
-        init_file = path / initial_file
-        init_file.write_text(initial_content)
-        await self._git("add", "-A", cwd=path)
-        await self._git("commit", "-m", "initial commit", cwd=path)
+            init_file = path / initial_file
+            init_file.write_text(initial_content)
+            await self._git("add", "-A", cwd=path)
+            await self._git("commit", "-m", "initial commit", cwd=path)
 
         output = await self._git("rev-parse", "HEAD", cwd=path)
         commit_hash = output.decode().strip()
@@ -105,8 +102,22 @@ class LocalGitWorkspace(GitWorkspace):
                 # 幂等恢复：分支已存在 → 返回匹配的现有 worktree（design §idempotent）
                 workspace = await self._find_worktree(branch)
                 if workspace is not None:
-                    return workspace
-                raise GitWorkspaceError(f"分支已存在但无 worktree：{branch}")
+                    if Path(workspace.path).is_relative_to(self._root):
+                        return workspace
+                    # 项目被复制/迁移后，worktree 注册仍指向旧项目路径（如
+                    # hell），直接复用会因路径越界在 runtime 的 relative_to 处
+                    # 崩溃。git worktree remove/prune 都无法清除跨仓库的陈旧
+                    # 注册，需直接删注册目录（不删旧项目目录），并删 ref 绕过
+                    # 「分支已签出」保护，随后走下方重建 fresh worktree。
+                    registration = (
+                        self._repo / ".git" / "worktrees" / Path(workspace.path).name
+                    )
+                    shutil.rmtree(registration, ignore_errors=True)
+                    await self._git(
+                        "update-ref", "-d", f"refs/heads/{branch}", check=False
+                    )
+                else:
+                    raise GitWorkspaceError(f"分支已存在但无 worktree：{branch}")
 
             path = self._root / f"athena-{uuid4().hex}"
             branch_ref = f"refs/heads/{branch}"

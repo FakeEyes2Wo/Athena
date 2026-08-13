@@ -14,6 +14,7 @@ from athena.agents.prepare_agent import register_prepare_agent
 from athena.agents.supervisor_agent import (
     MAX_PLAN_TURNS,
     SUPERVISOR_AGENT_ID,
+    SupervisorAnswer,
     register_supervisor_agent,
 )
 from athena.agents.validate_agent import register_validate_agent
@@ -35,7 +36,11 @@ from athena.research.supervisor.events import (
     redact,
     sanitize_terminal_text,
 )
-from athena.research.supervisor.experiment import PlanRunner, PlanTurnResult
+from athena.research.supervisor.experiment import (
+    PlanRunner,
+    PlanTurnResult,
+    load_agent_result,
+)
 from athena.research.supervisor.prepare import PrepareResult, run_prepare_plan
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.recovery import Recovery
@@ -82,8 +87,15 @@ class ResearchRuntime:
         self._athena = self._root / ".athena"
         self._state_path = self._athena / "state.json"
         self._tree_path = self._athena / "research_tree.json"
+        self._output_log_path = self._athena / "logs" / "output.jsonl"
         self._store = LocalArtifactStore(self._athena / "artifacts")
         self._events = EventProjector(self._store)
+        # 断点续传：恢复历史输出序列号，避免重启后新事件与重放历史 seq 冲突
+        # 而被 TUI 去重丢弃。
+        for record in self.replay_output_events():
+            seq = record.get("seq")
+            if isinstance(seq, int):
+                self._events.resume(seq)
         self._registry = AgentTypeRegistry()
         self._agents = AgentRuntime(
             type_registry=self._registry,
@@ -125,10 +137,17 @@ class ResearchRuntime:
                 concurrency=concurrency,
             )
         )
+        # 断点续传保护：跨目录拷贝来的 state 会携带旧项目的 eda_dir，使 PREPARE
+        # 工作区/EDA 目录落到别的项目。强制校验其属于当前 project_root，否则置空
+        # 让 PREPARE 按本项目重建——本项目只保留自身信息，唯一允许跨目录的是数据集源。
+        eda_dir = self._state.eda_dir
+        if eda_dir is not None and not Path(eda_dir).is_relative_to(self._root):
+            self._state.eda_dir = None
         self._subscribers: dict[str, EmitFn] = {}
         self._subscriber_ready: dict[str, asyncio.Task[object]] = {}
         self._task: asyncio.Task[None] | None = None
         self._started = False
+        self._ideator_lanes = 0
         self._auto_seed_task = auto_seed_task
         self._provider: object | None = None
         self._task_text = task
@@ -351,6 +370,21 @@ class ResearchRuntime:
         )
         await self._publish("output", event.model_dump(mode="json"))
 
+    @staticmethod
+    def _is_ideator_plan(plan: str) -> bool:
+        """True when ``plan`` labels a concurrent Ideator lane (``ideator-N``)."""
+        return plan.startswith("ideator-")
+
+    async def _publish_ideator_state(self) -> None:
+        """Announce the current Ideator lane count before lanes start streaming.
+
+        Best-effort: no-op when the runtime is not fully constructed or has no
+        subscribers (focused ``__new__`` tests drive lanes directly).
+        """
+        if not getattr(self, "_subscribers", None):
+            return
+        await self._publish("state", self._state_event().model_dump(mode="json"))
+
     async def _project_agent_event(
         self,
         plan: str,
@@ -359,23 +393,41 @@ class ResearchRuntime:
         data: dict[str, Any] | None = None,
     ) -> None:
         payload = data or {}
+        ideator = self._is_ideator_plan(plan)
         if kind == "agent/text_delta":
             text = str(payload.get("delta") or payload.get("accumulated") or "")
+            if ideator:
+                # Ideator 的流式 delta 常以换行结尾，逐 token 刷屏；去掉末尾换行。
+                text = text.rstrip("\n\r")
             # 流式 deltas 常为纯空白（换行/缩进），显示无信息量且会刷出空行。
             if text.strip():
                 await self.publish_output(
                     source="agent", channel="text", text=text, plan=plan
                 )
         elif kind == "agent/function_call":
+            # Ideator 只展示 LLM 话语，工具调用不进入显示流，便于阅读。
+            if ideator:
+                return
             name = str(payload.get("name") or "tool")
+            args = payload.get("arguments")
+            if args:
+                try:
+                    args_text = json.dumps(args, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    args_text = str(args)
+                text = f"{name}({args_text})"
+            else:
+                text = f"{name}()"
             await self.publish_output(
                 source="agent",
                 channel="text",
-                text=f"{name}(...)",
+                text=text,
                 plan=plan,
                 tool=name,
             )
         elif kind == "command/completed":
+            if ideator:
+                return
             await self.project_command_result(CommandResult(**payload), plan=plan)
         elif kind == "tool/end":
             tool = str(payload.get("tool") or "")
@@ -410,11 +462,25 @@ class ResearchRuntime:
     ) -> None:
         if kind == "state":
             payload = self._state_event().model_dump(mode="json")
+        elif kind == "output":
+            # Supervisor 的 output 是裸 dict（无 seq/type），统一经 EventProjector
+            # 投影成合法 OutputEvent；缺 key 时给安全默认值，避免裸 dict 漏到 TUI 的
+            # OutputEvent.model_validate 触发 "Field required [seq]"。
+            event = self._events.output(
+                source=payload.get("source", "supervisor"),
+                channel=payload.get("channel", "text"),
+                text=str(payload.get("text", "")),
+                plan=payload.get("plan"),
+                tool=payload.get("tool"),
+            )
+            payload = event.model_dump(mode="json")
         await self._publish(kind, payload)
 
     async def _publish(self, kind: str, payload: dict[str, object]) -> None:
         if kind not in {"output", "state"}:
             raise ValueError("runtime events must be output or state")
+        if kind == "output":
+            self._persist_output(payload)
 
         async def invoke(subscription_id: str, emit: EmitFn) -> None:
             try:
@@ -434,6 +500,43 @@ class ResearchRuntime:
         await asyncio.gather(
             *(invoke(key, emit) for key, emit in list(self._subscribers.items()))
         )
+
+    def _append_log(self, record: dict[str, object]) -> None:
+        """Append one session record to the TUI-resume log (best-effort)."""
+        try:
+            self._output_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._output_log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            logger.exception("failed to persist session record")
+
+    def _persist_output(self, payload: dict[str, object]) -> None:
+        """Append one output record to the TUI-resume log."""
+        self._append_log(payload)
+
+    def persist_user_message(self, text: str) -> None:
+        """Append one Human message to the resume log, sharing the output seq.
+
+        User and output records interleave in the same log so a restart can
+        rebuild the exact conversation order (codex-like resume).
+        """
+        self._append_log(
+            {"type": "user", "seq": self._events._next_sequence(), "text": text}
+        )
+
+    def replay_output_events(self) -> list[dict[str, object]]:
+        """Return persisted session records in order for TUI history restore."""
+        if not self._output_log_path.is_file():
+            return []
+        events: list[dict[str, object]] = []
+        for line in self._output_log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning("skipping malformed output log line")
+        return events
 
     def _state_event(self) -> StateEvent:
         state = self.state
@@ -473,6 +576,7 @@ class ResearchRuntime:
                 "limit": state.search_limit,
                 "successes": successes,
                 "concurrency": state.concurrency,
+                "ideator_lanes": self._ideator_lanes,
             },
             sota=sota,
             waiting=(
@@ -498,15 +602,13 @@ class ResearchRuntime:
                 name=SUPERVISOR_AGENT_ID,
             )
         summary = await self._agents.wait_run(run_id)
-        if summary.response_ref is None:
+        result = await load_agent_result(summary, self._store, SupervisorAnswer)
+        if result is None:
             raise RuntimeError(summary.error or "SupervisorAgent turn failed")
-        envelope = json.loads(summary.response_ref)
-        result_ref = envelope.get("result_ref")
-        if not isinstance(result_ref, str):
-            raise RuntimeError("SupervisorAgent returned no result artifact")
-        answer = json.loads(await self._store.get_text(result_ref))["answer"]
-        await self.publish_output(source="supervisor", channel="text", text=str(answer))
-        return str(answer)
+        await self.publish_output(
+            source="supervisor", channel="text", text=result.answer
+        )
+        return result.answer
 
     async def _run_ideator_turn(self, count: int) -> list[Hypothesis]:
         """Run up to three Ideators against the EDA directory concurrently.
@@ -520,6 +622,19 @@ class ResearchRuntime:
         eda_dir = self._state.eda_dir
         if not eda_dir:
             raise RuntimeError("EDA workspace not captured; PREPARE must run first")
+        eda_path = Path(eda_dir)
+        # 相对 .athena 的路径（新契约）解析为绝对；旧 state 遗留的绝对路径原样保留。
+        if not eda_path.is_absolute():
+            eda_path = (self._athena / eda_dir).resolve()
+        root = getattr(self, "_root", None)
+        if not eda_path.is_dir() or (
+            root is not None and not eda_path.is_relative_to(root)
+        ):
+            raise RuntimeError(
+                "EDA workspace is stale or points outside this project "
+                f"({eda_dir}); reset the project and re-run PREPARE"
+            )
+        eda_dir = str(eda_path)
         if not self._registry.contains("ideator"):
             register_ideator_agent(
                 self._registry,
@@ -529,6 +644,8 @@ class ResearchRuntime:
                 runtime=self._execution,
             )
         allocations = self._ideator_allocations(count)
+        self._ideator_lanes = len(allocations)
+        await self._publish_ideator_state()
         lane_results = await asyncio.gather(
             *(
                 self._run_ideator_lane(f"ideator-{index}", target, Path(eda_dir))
@@ -585,15 +702,9 @@ class ResearchRuntime:
             run_id,
             lambda kind, ref, data: self._project_agent_event(label, kind, ref, data),
         )
-        if summary.response_ref is None:
+        batch = await load_agent_result(summary, self._store, HypothesisBatch)
+        if batch is None:
             raise RuntimeError(summary.error or "Ideator turn failed")
-        envelope = json.loads(summary.response_ref)
-        result_ref = envelope.get("result_ref")
-        if not isinstance(result_ref, str):
-            raise RuntimeError("Ideator returned no result artifact")
-        batch = HypothesisBatch.model_validate_json(
-            await self._store.get_text(result_ref)
-        )
         return batch.hypotheses
 
     async def _run_general_turn(self, task: str) -> dict[str, object]:
@@ -619,15 +730,9 @@ class ResearchRuntime:
                 "general", kind, ref, data
             ),
         )
-        if summary.response_ref is None:
+        result = await load_agent_result(summary, self._store, GeneralResult)
+        if result is None:
             raise RuntimeError(summary.error or "General Agent turn failed")
-        envelope = json.loads(summary.response_ref)
-        result_ref = envelope.get("result_ref")
-        if not isinstance(result_ref, str):
-            raise RuntimeError("General Agent returned no result artifact")
-        result = GeneralResult.model_validate_json(
-            await self._store.get_text(result_ref)
-        )
         return result.model_dump()
 
     async def _run_plan_turn(self, plan_id: str, state: Any) -> PlanTurnResult:
@@ -658,7 +763,11 @@ class ResearchRuntime:
         base_commit = await self._git.init()
         workspace = await self._git.create(base_commit, "athena/prepare")
         # 只把 EDA 目录路径交给 supervisor 持有的持久化 state；EDA 结果不进 SEARCH。
-        self._state.eda_dir = str(Path(workspace.path).resolve())
+        # 存相对 .athena 的路径而非绝对路径：state 才项目自包含，复制/迁移项目后
+        # 不会残留指向旧项目（如 hell）的绝对 eda_dir。
+        self._state.eda_dir = str(
+            Path(workspace.path).resolve().relative_to(self._athena.resolve())
+        )
         self._state.save(self._state_path)
         if not self._registry.contains("prepare"):
             register_prepare_agent(
