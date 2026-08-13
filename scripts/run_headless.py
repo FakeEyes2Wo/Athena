@@ -73,6 +73,10 @@ def _subscribe(runtime: ResearchRuntime) -> None:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    # 数据路径预检：拼错/缺失的 --data 应在跑 LLM 之前立刻失败，而非白烧一轮。
+    if args.data and not Path(args.data).exists():
+        print(f"error: data path does not exist: {args.data}", file=sys.stderr)
+        return 2
     task_text = args.task
     if args.data:
         task_text = f"{task_text}\n数据集路径: {args.data}"
