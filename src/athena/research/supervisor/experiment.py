@@ -26,6 +26,7 @@ from athena.core.workspace import GitWorkBranch, GitWorkspace
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.contracts import DataScriptBundle
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.plans import (
     PlanBest,
@@ -350,15 +351,18 @@ class PlanRunner:
                     )
                 return await self._failure(plan_id, "execution_failed", error)
 
-        predictions_path = self.workdir / manifest.outputs["predictions"]
-        if not predictions_path.is_file() or not predictions_path.stat().st_size:
+        predictions_root = manifest.outputs["predictions"]
+        predictions_dir = self.workdir / predictions_root
+        if not predictions_dir.is_dir() or not any(
+            p.is_file() for p in predictions_dir.rglob("*")
+        ):
             return await self._failure(
                 plan_id,
                 "output_failed",
-                f"missing predictions output: {manifest.outputs['predictions']}",
+                f"missing predictions directory: {predictions_root}",
             )
-        predictions = predictions_path.read_text(encoding="utf-8")
-        predictions_ref = await self._store.put_text(predictions)
+        predictions_ref = await pack_directory(self._store, predictions_dir)
+        predictions = await load_directory(self._store, predictions_ref)
         report_ref = await self._store_report(manifest)
         if state.kind == "PREPARE" and report_ref is None:
             return await self._failure(
@@ -392,7 +396,7 @@ class PlanRunner:
                     predictions=predictions,
                     candidate_id=plan_id,
                     direction=self._direction,
-                    predictions_path=manifest.outputs["predictions"],
+                    predictions_root=predictions_root,
                 )
             except ValueError as exc:
                 # 候选输出导致评估失败 → 同 Plan 修复，不产生可信分数

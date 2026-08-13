@@ -1,6 +1,7 @@
 """Experiment manifest validation and trusted patience logic tests."""
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.execution.runtime import CommandResult, ExecutionContext
 from athena.research.contracts import CandidateEvaluation, DataScriptBundle
+from athena.research.script_runner import load_directory
 from athena.research.supervisor.experiment import (
     ExperimentManifest,
     PlanRunner,
@@ -177,16 +179,16 @@ def _write_manifest(
 ) -> None:
     workdir = Path(branch.path)
     outputs = outputs or {
-        "predictions": "outputs/predictions.csv",
+        "predictions": "outputs/predictions",
         "report": "report.md",
     }
     (workdir / "experiment.json").write_text(
         json.dumps({"version": 1, "commands": commands, "outputs": outputs}),
         encoding="utf-8",
     )
-    predictions_path = workdir / outputs["predictions"]
-    predictions_path.parent.mkdir(parents=True, exist_ok=True)
-    predictions_path.write_text(predictions, encoding="utf-8")
+    predictions_dir = workdir / outputs["predictions"]
+    predictions_dir.mkdir(parents=True, exist_ok=True)
+    (predictions_dir / "predictions.csv").write_bytes(predictions.encode("utf-8"))
     (workdir / "report.md").write_text("# report\n", encoding="utf-8")
 
 
@@ -581,6 +583,11 @@ async def test_run_turn_executes_manifest_scores_and_commits(tmp_path) -> None:
     assert workspace.messages == ["plan h1 trusted score 0.9100"]
     assert execution.calls == [[sys.executable, "-c", "print('train')"]]
     assert execution.workdirs == [str(Path(branch.path))]
+    assert result.predictions_ref is not None
+    predictions_tree = await load_directory(store, result.predictions_ref)
+    assert predictions_tree == {
+        "predictions.csv": b"__athena_row_id,prediction\nrow_1,1\nrow_2,0\n"
+    }
 
 
 @pytest.mark.asyncio
@@ -653,8 +660,8 @@ async def test_run_turn_missing_predictions_returns_evidence_without_scoring(
         tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
     )
     _write_manifest(branch, commands=[[sys.executable, "predict.py"]])
-    # remove the predictions file the manifest promises to produce
-    (Path(branch.path) / "outputs" / "predictions.csv").unlink()
+    # remove the predictions directory the manifest promises to produce
+    shutil.rmtree(Path(branch.path) / "outputs" / "predictions")
     state = PlanState(
         kind="SEARCH",
         context_ref=_REF,
@@ -703,8 +710,8 @@ async def test_run_turn_scoring_failure_does_not_increment_stale(tmp_path) -> No
     assert result.predictions_ref is not None
     assert workspace.messages == []
     assert state.stale_rounds == 2
-    predictions = await store.get_text(result.predictions_ref)
-    assert predictions == "id,pred\n"
+    predictions = await load_directory(store, result.predictions_ref)
+    assert predictions == {"predictions.csv": b"id,pred\n"}
 
 
 @pytest.mark.asyncio
@@ -838,7 +845,7 @@ async def test_prepare_requires_report_before_scoring(tmp_path) -> None:
     _write_manifest(
         branch,
         commands=[[sys.executable, "predict.py"]],
-        outputs={"predictions": "outputs/predictions.csv"},
+        outputs={"predictions": "outputs/predictions"},
     )
     state = PlanState(
         kind="PREPARE",
