@@ -83,17 +83,20 @@ class TrustedEvaluator:
         predictions: str,
         candidate_id: str,
         direction: Literal["maximize", "minimize"],
+        predictions_path: str = "predictions.csv",
     ) -> CandidateEvaluation:
         """运行 eval 入口，只注入 predictions；labels 来自冻结 bundle（design 修复 5）。
 
         评估脚本崩溃/超时/缺字段/非有限分数，都视为该候选的评分失败（ValueError），
         由上层按 ``scoring_failed`` 重试，而不是误判成 evaluator 基础设施故障而终止。
+        ``predictions_path`` 是 eval 脚本读取预测的相对路径（与 manifest 的
+        ``outputs.predictions`` 一致），runner 据此注入，支持嵌套目录。
         """
         try:
             result = await self._runner.run(
                 eval_bundle,
                 request={"predictions": predictions},
-                extra_files={"predictions.csv": predictions},
+                extra_files={predictions_path: predictions},
                 output_schema={"primary": None},
             )
         except (subprocess.SubprocessError, RuntimeError) as exc:

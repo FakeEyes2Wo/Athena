@@ -126,20 +126,16 @@ def fake_inner_builder(agent_type, *, model, client, workspace, runtime=None):
 
 
 def make_project(tmp_path: Path) -> ResearchRuntime:
-    """带 DeepSeek model + fake 内层 LLM 的组合根（LLM 相关测试的入口）。
+    """带 DeepSeek model + fake 流式 client 的组合根（LLM 相关测试的入口）。
 
-    ``register_defaults`` 要求显式传 ``model``（无 model 报错）；测试统一经
-    此 helper 用 ``settings.model_name()`` 装配，并注入 ``fake_inner_builder``
-    让 data agent 的内层 LLM 用 fake provider 收尾（单测不 hit 真实 API）。
+    ``register_defaults`` 已随 agent 注册改为按 phase 懒注册而移除；现在只需
+    ``model`` + ``client``，supervisor 在 ``__init__`` 内注册，其余 agent 懒注册。
     """
-    runtime = ResearchRuntime(project_root=tmp_path)
-    runtime.register_defaults(
+    return ResearchRuntime(
+        project_root=tmp_path,
         model=settings.model_name(),
-        inner_builder=fake_inner_builder,
-        # ideator/code/reflection 走真实 run_impl 但用 fake 模型，不 hit 真实 API
         client=FakeStreamingClient(),
     )
-    return runtime
 
 
 # FakeStreamingClient：ResponsesProvider 兼容的 fake 模型（real-search-worktree Task 3）

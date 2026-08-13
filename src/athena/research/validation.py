@@ -12,29 +12,11 @@ import math
 from collections.abc import Mapping, Sequence
 
 from athena.core.contracts import new_id
-from athena.research.contracts import FinalTestAttempt, ValidationResult
+from athena.research.contracts import ValidationResult
 
 # 与 search.py 的 SOTA tie tolerance 一致（design §2.5 "EvalSpec 已有的 math.isclose tolerance"）。
 _TIE_REL_TOL = 1e-9
 _TIE_ABS_TOL = 1e-12
-
-# final-test 崩溃恢复动作（design §2.5）：score 已存在时只提交，不再训练/预测/评分。
-RECOVERY_COMMIT = (
-    "commit"  # SCORED + score_ref → 只执行 SCORED→COMMITTED compare-and-set
-)
-RECOVERY_EVALUATE = "evaluate"  # 尚无 score → 需 trusted evaluator 评分
-
-
-def final_test_recovery_action(attempt: FinalTestAttempt) -> str:
-    """崩溃恢复决策：从已到达的耐久状态决定下一步动作。
-
-    ``SCORED`` 且已有 ``score_ref`` → 返回 ``RECOVERY_COMMIT``，调用方只做
-    SCORED→COMMITTED 的 CAS，**不调用 evaluator**（不重训/不重预测/不重评分）。
-    其余状态返回 ``RECOVERY_EVALUATE``，由 trusted evaluator 推进（调用方计数）。
-    """
-    if attempt.status == "SCORED" and attempt.score_ref is not None:
-        return RECOVERY_COMMIT
-    return RECOVERY_EVALUATE
 
 
 def generalization_gap(

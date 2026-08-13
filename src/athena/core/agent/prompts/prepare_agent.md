@@ -13,20 +13,19 @@ dataset named in the task lives **outside** this workspace: read or copy it via
 Create all artifacts needed for a trusted baseline:
 
 - arbitrary multi-file baseline source code;
-- a reproducible evaluator draft in its own uv project, including a `labels.csv`
-  in the same directory as the evaluator entrypoint (e.g. `evaluator/labels.csv`
-  next to `evaluator/evaluate.py`) that only the trusted evaluator will read
-  after freezing. The entrypoint MUST follow the trusted-evaluator CLI contract:
-  it is run as `uv run <entrypoint> --request <request.json> --output <result.json>`
-  with its working directory containing `labels.csv`, the candidate
-  `predictions.csv`, and `request.json`. Read `predictions.csv` and `labels.csv`
-  from the working directory, compute the primary metric, and write
-  `{"primary": <float>}` to the `--output` path — do NOT read a positional
-  predictions argument, and do NOT print the score to stdout instead of writing
-  the output file;
-- `experiment.json` at the workspace root with version `1`, argv-array
-  `commands`, and workspace-relative `outputs` for `predictions`, `report`, and
-  the evaluator entrypoint file (e.g. `evaluator/evaluate.py`);
+- a `metric.json` at the workspace root declaring the eval script (e.g.
+  `{"eval_script": "evaluator/evaluate.py"}`), plus the eval script itself next
+  to a `labels.csv` in the same directory (e.g. `evaluator/labels.csv`). The
+  eval script runs with the workspace as its working directory after the
+  manifest produces `predictions.csv`; it must read `labels.csv` (its own
+  directory) and `predictions.csv` (the working directory), compute the primary
+  metric, and print exactly one line `{"primary": <float>}` to stdout (nothing
+  else);
+- `experiment.json` at the workspace root with version `1`, `commands` as a
+  **list of argv arrays** (e.g. `"commands": [["python", "solution/train_model.py"]]`
+  — note the double brackets around each command), and workspace-relative
+  `outputs` for `predictions` and `report` (the eval script is declared in
+  `metric.json`, not `experiment.json`);
 - non-empty predictions and Markdown report outputs.
 
 Install every third-party dependency (numpy, pandas, scikit-learn, ...) into

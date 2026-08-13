@@ -2,7 +2,7 @@ import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import asdict
-from typing import Any, Protocol
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_ai import AgentRunResult
@@ -30,20 +30,6 @@ from athena.agents.ideator.types import (
 )
 from athena.retrieval.types import HFModelRef, PaperRef
 
-
-class _StructuredAgent(Protocol):
-    """结构化输出 agent 的最小接口。"""
-
-    async def run(
-        self,
-        prompt: str,
-        *,
-        output_type: type[BaseModel],
-        message_history: Sequence[ModelMessage] | None = None,
-    ) -> object:
-        """按给定输出 schema 运行一次结构化生成。"""
-
-
 _OUTPUT_TYPES = {
     "proposal": _ProposalBatch,
     "review": _ReviewBatch,
@@ -56,7 +42,7 @@ class _DebateRunner:
     def __init__(self, *, agent_factory, artifacts: ArtifactStore) -> None:
         self._agent_factory = agent_factory
         self._artifacts = artifacts
-        self._agents: dict[str, _StructuredAgent] = {}
+        self._agents: dict[str, Any] = {}
         self._bindings: dict[str, tuple[str, int]] = {}
         self._histories: dict[str, list[ModelMessage]] = {}
 

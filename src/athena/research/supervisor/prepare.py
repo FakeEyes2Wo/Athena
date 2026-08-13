@@ -13,12 +13,7 @@ from athena.core.workspace import GitWorkBranch, GitWorkspace, GitWorkspaceError
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
-from athena.research.supervisor.experiment import (
-    ExperimentManifest,
-    PlanRunner,
-    load_agent_result,
-    read_experiment_manifest,
-)
+from athena.research.supervisor.experiment import PlanRunner, load_agent_result
 from athena.research.supervisor.plans import (
     PlanDecision,
     PlanInput,
@@ -43,15 +38,6 @@ class PrepareResult(BaseModel):
     report_ref: ArtifactRef
 
 
-def _read_manifest(root: Path) -> ExperimentManifest:
-    """向后兼容别名：历史探针/文档引用 ``prepare._read_manifest``。
-
-    规范实现已提升为 ``experiment.read_experiment_manifest``；此处仅委托，
-    避免旧引用 ``ImportError``，不复制解析逻辑。
-    """
-    return read_experiment_manifest(root)
-
-
 def _workspace_output(root: Path, rel: str) -> Path:
     candidate = (root / rel).resolve()
     if not candidate.is_relative_to(root.resolve()):
@@ -62,35 +48,37 @@ def _workspace_output(root: Path, rel: str) -> Path:
 async def _freeze_evaluator(
     *,
     root: Path,
-    manifest: ExperimentManifest,
     scripts: DataScriptRunner,
     store: ArtifactStore,
 ) -> ArtifactRef:
-    evaluator_rel = manifest.outputs.get("evaluator")
-    if evaluator_rel is None:
-        raise ValueError("evaluator draft is missing")
+    spec_path = root / "metric.json"
+    if not spec_path.is_file():
+        raise ValueError("metric.json is missing")
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        evaluator_rel = spec["eval_script"]
+    except (OSError, ValueError, KeyError):
+        raise ValueError("metric.json must declare eval_script")
     evaluator_path = _workspace_output(root, evaluator_rel)
     if evaluator_path.is_dir():
-        # manifest 声明的是 evaluator 目录；入口文件约定为 evaluate.py。
+        # eval_script 声明的是目录；入口文件约定为 evaluate.py。
         evaluator_root = evaluator_path
         entrypoint = "evaluate.py"
         if not (evaluator_root / entrypoint).is_file():
             raise ValueError(
-                "outputs.evaluator directory must contain an entrypoint file "
+                "eval_script directory must contain an entrypoint file "
                 f"named evaluate.py: {evaluator_rel!r}"
             )
     elif evaluator_path.is_file():
         evaluator_root = evaluator_path.parent
         entrypoint = evaluator_path.name
     else:
-        raise ValueError("evaluator draft is missing")
+        raise ValueError("eval_script is missing")
     labels_path = evaluator_root / "labels.csv"
     if not labels_path.is_file() or not labels_path.stat().st_size:
         raise ValueError(
-            "evaluator labels are missing: labels.csv must sit in the evaluator "
-            f"directory next to the entrypoint (same directory as "
-            f"{evaluator_rel!r}), so the frozen evaluator can read it at "
-            "scoring time"
+            "eval labels are missing: labels.csv must sit next to the eval script "
+            f"(same directory as {evaluator_rel!r})"
         )
     bundle = await scripts.freeze(evaluator_root, BundleMetadata(entrypoint=entrypoint))
     return await store.put_text(bundle.model_dump_json())
@@ -168,9 +156,8 @@ async def run_prepare_plan(
         if decision.decision == "abandon":
             raise RuntimeError(f"prepare Agent abandoned Plan: {decision.reason}")
         try:
-            manifest = read_experiment_manifest(root)
             evaluator_ref = await _freeze_evaluator(
-                root=root, manifest=manifest, scripts=scripts, store=store
+                root=root, scripts=scripts, store=store
             )
             runner = PlanRunner(
                 execution=execution,

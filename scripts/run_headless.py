@@ -20,6 +20,12 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--task", required=True, help="研究任务（自然语言）")
     parser.add_argument("--data", help="输入数据路径；给出时并入任务文本")
+    parser.add_argument(
+        "--search-limit",
+        type=int,
+        default=10,
+        help="SEARCH 尝试次数上限；加速验证可调小（如 2）",
+    )
     return parser.parse_args(argv)
 
 
@@ -75,6 +81,7 @@ async def _run(args: argparse.Namespace) -> int:
         model=settings.model_name(),
         task=task_text,
         auto_validate=True,
+        search_limit=args.search_limit,
     )
     _subscribe(runtime)
     try:

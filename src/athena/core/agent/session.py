@@ -72,9 +72,11 @@ class RunSession:
         return self._memory_view
 
     def receive_messages(self) -> list[AgentMessage]:
-        unread = list(self._mailbox)
-        self._mailbox.clear()
-        return unread
+        # 只读不删：turn 失败时（memory 已回滚）未读消息须保留待重试，
+        # 由 checkpoint() 在正常返回/进入等待后才提交消费。
+        return list(self._mailbox)
 
     def checkpoint(self) -> None:
-        pass  # COMPAT: mailbox 读即清,游标推进为空操作;清理条件: BaseAgentRunner 不再依赖 session.checkpoint 后
+        # 提交 mailbox 消费：仅正常返回或进入持久化等待后调用，失败路径不调用，
+        # 故在此才清空，保证失败 turn 的消息不被吞掉。
+        self._mailbox.clear()

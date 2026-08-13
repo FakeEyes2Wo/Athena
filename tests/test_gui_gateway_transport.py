@@ -9,6 +9,14 @@ import websockets
 pytestmark = pytest.mark.asyncio
 
 
+async def _recv_response(ws) -> dict[str, Any]:
+    """读取直到收到 RPC 响应，跳过服务端推送的 ``kind`` 事件（state 广播）。"""
+    while True:
+        resp = json.loads(await ws.recv())
+        if "kind" not in resp:
+            return resp
+
+
 async def test_server_starts_and_prints_port() -> None:
     """服务端启动并返回有效端口，接受 WS 连接并响应 ping。"""
     from gui_gateway.__main__ import start_server
@@ -18,7 +26,7 @@ async def test_server_starts_and_prints_port() -> None:
 
     async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
         await ws.send(json.dumps({"request_id": 1, "method": "ping", "params": {}}))
-        resp: dict[str, Any] = json.loads(await ws.recv())
+        resp = await _recv_response(ws)
         assert resp["request_id"] == 1
         assert "result" in resp
         assert resp["result"] == {"pong": True}
@@ -37,7 +45,7 @@ async def test_unknown_method_returns_error() -> None:
         await ws.send(
             json.dumps({"request_id": 2, "method": "unknown_method", "params": {}})
         )
-        resp: dict[str, Any] = json.loads(await ws.recv())
+        resp = await _recv_response(ws)
         assert resp["request_id"] == 2
         assert resp["error"]["code"] == -32602
         assert resp["error"]["message"] == "request failed"
@@ -54,7 +62,7 @@ async def test_invalid_json_returns_error() -> None:
 
     async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
         await ws.send("not valid json")
-        resp: dict[str, Any] = json.loads(await ws.recv())
+        resp = await _recv_response(ws)
         assert "error" in resp
 
     server.close()

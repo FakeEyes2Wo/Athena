@@ -175,6 +175,7 @@ async def test_executes_tools_and_forwards_events():
     assert result == "final answer"
     assert calls == ["value"]
     assert [event[0] for event in events] == [
+        "agent/function_call",
         "tool/begin",
         "tool/end",
         "agent/text_delta",

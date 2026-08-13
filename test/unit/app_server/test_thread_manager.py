@@ -119,10 +119,10 @@ async def test_research_runtime_writes_agent_recovery_log(
                 runner=EchoRunner(), codec=JsonCodec()
             ),
         )
-        _, run_id = await runtime._runtime.create_root(
+        _, run_id = await runtime._agents.create_root(
             "echo", {"content": "first"}, agent_id="hyp_vit"
         )
-        await runtime._runtime.wait_run(run_id, timeout=5)
+        await runtime._agents.wait_run(run_id, timeout=5)
 
         assert (tmp_path / ".athena" / "logs" / "agents" / "hyp_vit.jsonl").is_file()
     finally:

@@ -24,7 +24,9 @@ def test_session_view_exposes_runtime_contract():
     assert sess.memory.raw is memory  # BaseAgentRunner 依赖 .raw
     unread = sess.receive_messages()
     assert [m.content for m in unread] == ["hi"]
-    assert sess.receive_messages() == []  # 读即清(=checkpoint)
-    sess.checkpoint()  # 空操作,不抛
+    # receive_messages 只读不删：失败 turn 的未读消息须保留待重试
+    assert [m.content for m in sess.receive_messages()] == ["hi"]
+    sess.checkpoint()  # 提交消费 → 清空 mailbox
+    assert sess.receive_messages() == []
     with pytest.raises(AttributeError):
         sess.memory.append(None)  # 只读视图禁止写

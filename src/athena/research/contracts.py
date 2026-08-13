@@ -8,7 +8,7 @@ EvalSpec、EDA、baseline、候选评估、ranking、ablation 与 final-test。�
 首版只冻结合同的形状与硬约束（enum/范围/非空），业务语义由 LLM 生成的脚本承担。
 """
 
-from typing import Literal, Protocol
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,12 +45,6 @@ class ServiceResult(BaseModel):
     result_refs: list[ArtifactRef] = Field(default_factory=list)
     facts: dict[str, object] = Field(default_factory=dict)
     evidence_refs: list[ArtifactRef] = Field(default_factory=list)
-
-
-class SupervisorServices(Protocol):
-    """Executor 的 RUN_SERVICE 静态服务注册契约（supervisor_design §5 白名单）。"""
-
-    async def run(self, service: str, request: dict[str, object]) -> ServiceResult: ...
 
 
 class DatasetRoleProposal(BaseModel):
@@ -184,13 +178,6 @@ class EDAAttemptOutcome(BaseModel):
     failure_signature: str | None = None
 
 
-class BaselinePlan(BaseModel):
-    """Baseline Ideator 的方向与唯一推荐（CodeAgent 只实现 recommendation）。"""
-
-    directions: list[str] = Field(default_factory=list)
-    recommendation: str
-
-
 class CandidateEvaluation(BaseModel):
     """单个候选实验的评估结果（trusted evaluator 产出）。"""
 
@@ -209,14 +196,6 @@ class RankingRound(BaseModel):
     deferred_ids: list[str] = Field(default_factory=list)
     scores: dict[str, float] = Field(default_factory=dict)
     sota_experiment_id: str | None = None
-
-
-class AblationSummary(BaseModel):
-    """VALIDATE ablation 汇总（FULL_LINEAGE/BASELINE_ONLY 的 leave-one-out 结果）。"""
-
-    summary_id: NonBlankText
-    status: Literal["COMPLETE", "PARTIAL"]
-    items: list[dict[str, object]] = Field(default_factory=list)
 
 
 class FinalTestAttempt(BaseModel):
@@ -261,4 +240,5 @@ class ValidationResult(BaseModel):
     sota_commit: str | None = None
     validation_commit: str | None = None
     predictions_ref: ArtifactRef | None = None
+    predictions_path: str | None = None
     evidence_ref: ArtifactRef | None = None

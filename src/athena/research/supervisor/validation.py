@@ -272,7 +272,7 @@ async def _execute_predictions(
     workspace: GitWorkBranch,
     store: ArtifactStore,
     publish: EmitEvent | None,
-) -> ArtifactRef:
+) -> tuple[ArtifactRef, str]:
     workdir = Path(workspace.path)
     manifest = read_experiment_manifest(workdir)
     context = ExecutionContext(
@@ -290,10 +290,12 @@ async def _execute_predictions(
             )
             if not result.ok:
                 raise RuntimeError(result.stderr or "validation command failed")
-        predictions_path = workdir / manifest.outputs["predictions"]
+        rel_path = manifest.outputs["predictions"]
+        predictions_path = workdir / rel_path
         if not predictions_path.is_file() or not predictions_path.stat().st_size:
             raise ValueError("validation predictions output is missing")
-        return await store.put_text(predictions_path.read_text(encoding="utf-8"))
+        ref = await store.put_text(predictions_path.read_text(encoding="utf-8"))
+        return ref, rel_path
     finally:
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
 
@@ -337,6 +339,7 @@ async def _score_result(
         predictions=predictions,
         candidate_id=input.validation_key,
         direction=input.direction,
+        predictions_path=current.predictions_path or "predictions.csv",
     )
     review_evidence = {}
     if current.evidence_ref is not None:
@@ -440,7 +443,7 @@ async def run_validation_plan(
                 )
                 continue
             reviewed_diff = diff
-            predictions_ref = await _execute_predictions(
+            predictions_ref, predictions_path = await _execute_predictions(
                 execution=execution,
                 git=git,
                 workspace=workspace,
@@ -476,6 +479,7 @@ async def run_validation_plan(
             test_score=input.reference_metric,
             sota_commit=input.sota_commit,
             predictions_ref=predictions_ref,
+            predictions_path=predictions_path,
             evidence_ref=review_evidence_ref,
         )
         await _save_result(current, store, checkpoint)

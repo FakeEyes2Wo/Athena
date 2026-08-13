@@ -27,9 +27,13 @@ uv run Athena-cli run --project .athena/titanic-run \
   --data examples/titanic/train.csv --task "预测泰坦尼克号乘客是否存活" --mode auto
 uv run Athena-cli status|pause|resume|stop --project .athena/titanic-run
 
-# headless（跑完即退）
-uv run python scripts/run_headless.py --project .athena/titanic-run \
-  --task "..." --data examples/titanic/train.csv
+# headless（跑完即退）：真实 LLM 全流程 PREPARE→SEARCH→VALIDATE
+# `--data` 须为绝对路径——数据集在 workspace 之外，PREPARE Agent 用该绝对路径读取
+# `--search-limit` 默认 10，加速验证可调小（如 2）
+uv run python scripts/run_headless.py \
+  --project .athena/titanic-run \
+  --task "Predict Titanic passenger survival (target = Survived: 0 died, 1 survived). Build a baseline model and improve it." \
+  --data "$(pwd)/examples/titanic"
 
 # 零配置演示
 uv run python src/main.py

@@ -1,6 +1,5 @@
 """Single-composer prompt-toolkit application for Athena research conversations."""
 
-import asyncio
 from dataclasses import replace
 
 from prompt_toolkit.application import Application

@@ -437,7 +437,10 @@ async def submission_loop(runtime: ThreadRuntime) -> None:
     - RuntimeSignal（RunnerSucceeded / RunnerFailed / RunnerCancelled）
     """
     try:
-        while runtime.state not in ("closing", "closed"):
+        # 只在 "closed" 退出：shutdown() 先置 "closing" 再入队 ShutdownThread，
+        # 若 while 在 "closing" 提前退出会漏掉该消息、跳过 commit_interrupted，
+        # 使活跃 Turn 的 _turn_done 悬挂。正常退出由 ShutdownThread 分支 return。
+        while runtime.state != "closed":
             msg = await runtime._merged.get()
 
             match msg:

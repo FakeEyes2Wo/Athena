@@ -18,7 +18,10 @@ if TYPE_CHECKING:
 def _workspace_path(root: Path, path: str) -> Path:
     candidate = (root / path).resolve()
     if not candidate.is_relative_to(root):
-        raise ValueError(f"path escapes workspace: {path}")
+        raise ValueError(
+            f"path escapes workspace: {path}. Use a relative path inside your "
+            f"workspace ({root}); reach external files via shell_command instead."
+        )
     return candidate
 
 

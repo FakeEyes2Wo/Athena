@@ -90,16 +90,21 @@ class _DirScripts:
 
 
 class _Execution:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, fail_eval: bool = False) -> None:
         self.project_root = root
         self.environment_root = root
+        self.fail_eval = fail_eval
 
     def ensure_environment(self) -> None:
         pass
 
     async def run(self, context, command=None, *, argv=None, **kwargs):
-        del context, command, argv, kwargs
-        return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
+        del context, command, kwargs
+        if self.fail_eval and argv and "eval" in argv[1]:
+            return CommandResult(ok=False, stdout="", stderr="boom", exit_code=1)
+        return CommandResult(
+            ok=True, stdout='{"primary": 0.75}', stderr="", exit_code=0
+        )
 
 
 class _Evaluator:
@@ -108,12 +113,6 @@ class _Evaluator:
         return CandidateEvaluation(
             candidate_id="prepare", test_score=0.75, direction="maximize"
         )
-
-
-class _UnavailableEvaluator:
-    async def score(self, **kwargs):
-        del kwargs
-        raise ConnectionError("evaluator service unavailable")
 
 
 class _Git:
@@ -153,7 +152,7 @@ class _Store:
 @pytest.mark.parametrize(
     ("missing", "expected_error"),
     [
-        ("evaluator", "evaluator draft is missing"),
+        ("evaluator", "metric.json is missing"),
         ("report", "PREPARE requires a declared, non-empty report output"),
         ("predictions", "missing predictions output: outputs/predictions.csv"),
         ("evidence", "trusted evidence is missing"),
@@ -182,18 +181,23 @@ async def test_prepare_result_requires_every_trusted_artifact(
         (workspace_path / "outputs" / "report.md").write_text(
             "# Baseline\n", encoding="utf-8"
         )
-    outputs = {
-        "predictions": "outputs/predictions.csv",
-        "report": "outputs/report.md",
-    }
-    if missing != "evaluator":
-        outputs["evaluator"] = "evaluator/eval.py"
     (workspace_path / "experiment.json").write_text(
         json.dumps(
-            {"version": 1, "commands": [["python", "model.py"]], "outputs": outputs}
+            {
+                "version": 1,
+                "commands": [["python", "model.py"]],
+                "outputs": {
+                    "predictions": "outputs/predictions.csv",
+                    "report": "outputs/report.md",
+                },
+            }
         ),
         encoding="utf-8",
     )
+    if missing != "evaluator":
+        (workspace_path / "metric.json").write_text(
+            json.dumps({"eval_script": "evaluator/eval.py"}), encoding="utf-8"
+        )
     store = _Store(tmp_path / "artifacts", missing_evidence=missing == "evidence")
     agents = _AgentRuntime(store.inner)
     tree_ref = await store.put_text('{"experiments": []}')
@@ -251,11 +255,13 @@ async def test_prepare_accepts_evaluator_directory_with_evaluate_py_entrypoint(
                 "outputs": {
                     "predictions": "outputs/predictions.csv",
                     "report": "outputs/report.md",
-                    "evaluator": "evaluator",
                 },
             }
         ),
         encoding="utf-8",
+    )
+    (workspace_path / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluator/evaluate.py"}), encoding="utf-8"
     )
     store = _Store(tmp_path / "artifacts")
     agents = _AgentRuntime(store.inner)
@@ -282,7 +288,7 @@ async def test_prepare_accepts_evaluator_directory_with_evaluate_py_entrypoint(
 
 
 @pytest.mark.asyncio
-async def test_prepare_surfaces_evaluator_infrastructure_failure_without_agent_repair(
+async def test_prepare_eval_script_failure_retries_without_agent_repair(
     tmp_path: Path,
 ) -> None:
     workspace_path = tmp_path / "prepare"
@@ -310,26 +316,28 @@ async def test_prepare_surfaces_evaluator_infrastructure_failure_without_agent_r
                 "outputs": {
                     "predictions": "outputs/predictions.csv",
                     "report": "outputs/report.md",
-                    "evaluator": "evaluator/eval.py",
                 },
             }
         ),
         encoding="utf-8",
     )
+    (workspace_path / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluator/eval.py"}), encoding="utf-8"
+    )
     store = LocalArtifactStore(tmp_path / "artifacts")
     agents = _AgentRuntime(store)
     tree_ref = await store.put_text('{"experiments": []}')
 
-    with pytest.raises(RuntimeError, match="evaluator service unavailable"):
+    with pytest.raises(RuntimeError, match="turn budget exhausted"):
         await run_prepare_plan(
             agents=agents,
             scripts=_Scripts(),
-            evaluator=_UnavailableEvaluator(),
+            evaluator=_Evaluator(),
             git=_Git(),
             workspace=GitWorkBranch(
                 path=str(workspace_path), branch="prepare", base_commit="base"
             ),
-            execution=_Execution(tmp_path),
+            execution=_Execution(tmp_path, fail_eval=True),
             store=store,
             tree_ref=tree_ref,
             task="build baseline",
@@ -337,4 +345,6 @@ async def test_prepare_surfaces_evaluator_infrastructure_failure_without_agent_r
         )
 
     assert agents.created == ["prepare"]
-    assert agents.feedback == []
+    assert agents.feedback == [
+        "metric.json eval script failed or produced no primary score"
+    ]

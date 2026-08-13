@@ -124,13 +124,6 @@ def _wrap_block(
     return tuple(output)
 
 
-def wrap_fragments(
-    fragments: StyleAndTextTuples, width: int
-) -> tuple[StyleAndTextTuples, ...]:
-    """Wrap styled fragments without losing style or Unicode cell width."""
-    return _wrap_block([], [], list(fragments), width)
-
-
 def _truncate_right(text: str, width: int) -> str:
     if width <= 0 or _cell_width(text) <= width:
         return text

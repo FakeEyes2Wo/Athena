@@ -46,7 +46,7 @@ async def test_submit_settles_historical_best_not_branch_tip(harness: _Harness):
     await harness.finish("h1", 0.85, decision="continue")
     await _wait_next_turn(harness, "h1", 2)
     await harness.finish("h1", 0.82, decision="submit")
-    await _eventually(lambda: harness.tree.experiment_for_hypothesis("h1") is not None)
+    await _eventually(lambda: "h1" not in harness.state.plans)
 
     experiment_id = harness.tree.experiment_for_hypothesis("h1")
     experiment = harness.tree.get_experiment(experiment_id)
@@ -65,7 +65,7 @@ async def test_patience_exhaustion_settles_historical_best(harness: _Harness):
         await harness.finish("h1", metric, decision="continue")
         if turn < 3:
             await _wait_next_turn(harness, "h1", turn + 1)
-    await _eventually(lambda: harness.tree.experiment_for_hypothesis("h1") is not None)
+    await _eventually(lambda: "h1" not in harness.state.plans)
 
     experiment = harness.tree.get_experiment(
         harness.tree.experiment_for_hypothesis("h1")
@@ -80,7 +80,7 @@ async def test_turn_exhaustion_with_best_settles(harness: _Harness):
     await harness.finish("h1", 0.81, decision="continue")
     await _wait_next_turn(harness, "h1", 2)
     await harness.finish("h1", 0.82, decision="continue")
-    await _eventually(lambda: harness.tree.experiment_for_hypothesis("h1") is not None)
+    await _eventually(lambda: "h1" not in harness.state.plans)
 
     experiment = harness.tree.get_experiment(
         harness.tree.experiment_for_hypothesis("h1")
@@ -105,7 +105,7 @@ async def test_turn_exhaustion_without_best_waits_and_releases_slot(
 async def test_abandon_without_best_settles_loss(harness: _Harness):
     await _start_one(harness)
     await harness.finish("h1", None, decision="abandon", kind="execution_failed")
-    await _eventually(lambda: harness.tree.experiment_for_hypothesis("h1") is not None)
+    await _eventually(lambda: "h1" not in harness.state.plans)
 
     experiment = harness.tree.get_experiment(
         harness.tree.experiment_for_hypothesis("h1")

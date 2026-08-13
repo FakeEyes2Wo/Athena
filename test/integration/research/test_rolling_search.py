@@ -359,9 +359,9 @@ async def test_out_of_order_results_use_each_frozen_reference(harness: _Harness)
     await _eventually(lambda: set(harness.gates) == {"h1", "h2"})
 
     await harness.finish("h2", 0.79)
-    await _eventually(lambda: harness.tree.experiment_for_hypothesis("h2") is not None)
+    await _eventually(lambda: "h2" not in harness.state.plans)
     await harness.finish("h1", 0.81)
-    await _eventually(lambda: harness.tree.experiment_for_hypothesis("h1") is not None)
+    await _eventually(lambda: "h1" not in harness.state.plans)
 
     assert harness.tree.get_hypothesis("h2").priority == 984.0
     assert harness.tree.get_hypothesis("h1").priority == 1016.0
@@ -385,17 +385,11 @@ async def test_minimize_settlement_uses_frozen_tolerance_and_updates_sota(
         await _eventually(lambda: set(minimized.gates) == {"h1", "h2", "h3"})
 
         await minimized.finish("h1", 0.78)
-        await _eventually(
-            lambda: minimized.tree.experiment_for_hypothesis("h1") is not None
-        )
+        await _eventually(lambda: "h1" not in minimized.state.plans)
         await minimized.finish("h2", 0.795)
-        await _eventually(
-            lambda: minimized.tree.experiment_for_hypothesis("h2") is not None
-        )
+        await _eventually(lambda: "h2" not in minimized.state.plans)
         await minimized.finish("h3", 0.82)
-        await _eventually(
-            lambda: minimized.tree.experiment_for_hypothesis("h3") is not None
-        )
+        await _eventually(lambda: "h3" not in minimized.state.plans)
 
         assert minimized.tree.get_hypothesis("h1").priority == 1016.0
         assert minimized.tree.get_hypothesis("h2").priority == 1000.0
@@ -415,9 +409,7 @@ async def test_supervisor_settlement_uses_the_scheduler_policy(harness: _Harness
         customized.task = asyncio.create_task(customized.supervisor.run_search())
         await _eventually(lambda: "h1" in customized.gates)
         await customized.finish("h1", 0.81)
-        await _eventually(
-            lambda: customized.tree.experiment_for_hypothesis("h1") is not None
-        )
+        await _eventually(lambda: "h1" not in customized.state.plans)
 
         assert customized.tree.get_hypothesis("h1").priority == 1032.0
     finally:

@@ -392,6 +392,7 @@ class PlanRunner:
                     predictions=predictions,
                     candidate_id=plan_id,
                     direction=self._direction,
+                    predictions_path=manifest.outputs["predictions"],
                 )
             except ValueError as exc:
                 # 候选输出导致评估失败 → 同 Plan 修复，不产生可信分数

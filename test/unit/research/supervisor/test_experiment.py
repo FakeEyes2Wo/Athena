@@ -113,6 +113,7 @@ class _FakeEvaluator:
         predictions: str,
         candidate_id: str,
         direction: str,
+        predictions_path: str = "predictions.csv",
     ) -> CandidateEvaluation:
         if self._error is not None:
             raise self._error

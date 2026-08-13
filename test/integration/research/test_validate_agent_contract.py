@@ -107,6 +107,7 @@ class _Evaluator:
         predictions: str,
         candidate_id: str,
         direction: str,
+        predictions_path: str = "predictions.csv",
     ):
         del predictions
         self.calls += 1

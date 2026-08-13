@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from athena.core.artifact_store import ArtifactNotFoundError
+from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_tree import Experiment, ExperimentStatus
+from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import DataScriptBundle, ValidationResult
 from athena.research.runtime import ResearchRuntime
@@ -173,6 +176,39 @@ async def test_default_validation_adapter_uses_frozen_inputs_and_supervisor_chec
         ).model_dump_json()
     )
     runtime.supervisor._evaluator_ref = evaluator_ref
+    evidence_ref = await runtime._store.put_text("baseline evidence")
+    runtime.tree.add_hypothesis(
+        Hypothesis(
+            id="baseline",
+            statement="baseline",
+            intervention="fit baseline",
+            expected_effect="establish reference",
+        )
+    )
+    runtime.tree.add_experiment(
+        "exp_baseline",
+        Experiment(
+            hypothesis_id="baseline",
+            commit=base_commit,
+            plan=ExperimentPlan(
+                kind="baseline",
+                change="baseline",
+                run_config_ref=evaluator_ref,
+                budget={},
+                acceptance_rule="trusted score",
+            ),
+            gitwork=GitWorkBranch(
+                path=str(tmp_path), branch="main", base_commit=base_commit
+            ),
+            status=ExperimentStatus.SUCCEEDED,
+            eval=EvalResult(
+                experiment_id="exp_baseline",
+                primary=0.82,
+                per_sample=evidence_ref,
+            ),
+        ),
+    )
+    runtime.tree.set_sota("exp_baseline")
 
     result = await runtime._run_validation_phase(base_commit, 0.82)
 

@@ -41,13 +41,11 @@ class _PrepareProvider:
         outputs = {
             "predictions": "outputs/predictions.csv",
             "report": "outputs/report.md",
-            "evaluator": "evaluator/eval.py",
         }
-        if self.missing == "evaluator":
-            outputs.pop("evaluator")
         if self.missing == "report":
             outputs.pop("report")
         actions: list[tuple[str, str] | None] = [
+            ("metric.json", '{"eval_script": "evaluator/eval.py"}'),
             (
                 "evaluator/pyproject.toml",
                 "[project]\nname='prepare-eval'\nversion='0.1.0'\n"
@@ -85,6 +83,12 @@ class _PrepareProvider:
                 for action in actions
                 if action is None or action[0] != "evaluator/labels.csv"
             ]
+        if self.missing == "evaluator":
+            actions = [
+                action
+                for action in actions
+                if action is None or action[0] != "metric.json"
+            ]
         return actions
 
     @staticmethod
@@ -100,8 +104,8 @@ class _PrepareProvider:
         text = self._message_text(messages)
         for marker in (
             "experiment.json",
-            "evaluator draft is missing",
-            "evaluator labels are missing",
+            "metric.json",
+            "eval labels are missing",
             "report output",
         ):
             if marker in text:
@@ -141,11 +145,23 @@ class _ManifestExecution:
         self.missing_predictions = missing_predictions
         self.argv_calls: list[list[str]] = []
 
+    def ensure_environment(self) -> None:
+        """Stub：测试不涉及真实共享环境初始化。"""
+        return None
+
     async def run(self, context, command=None, *, argv=None, emit=None, **_kwargs):
         assert command is None
         assert argv is not None
         self.argv_calls.append(argv)
         root = context.workspace_root
+        if argv[0] == "python" and argv[1] == "evaluator/eval.py":
+            # metric.json 的 eval_script：直接评分，返回 primary 分数。
+            result = CommandResult(
+                ok=True, stdout='{"primary": 1.0}\n', stderr="", exit_code=0
+            )
+            if emit is not None:
+                await emit("command/completed", "exec:prepare", result.to_dict())
+            return result
         assert (root / "solution" / "features.py").is_file()
         assert (root / "solution" / "model.py").is_file()
         (root / "outputs").mkdir(exist_ok=True)
@@ -310,7 +326,10 @@ async def test_prepare_accepts_an_arbitrary_multifile_solution(tmp_path: Path) -
     try:
         result = await harness.run()
         assert result.metric == 1.0
-        assert harness.execution.argv_calls == [["python", "solution/model.py"]]
+        assert harness.execution.argv_calls == [
+            ["python", "solution/model.py"],
+            ["python", "evaluator/eval.py"],
+        ]
     finally:
         await harness.close()
 

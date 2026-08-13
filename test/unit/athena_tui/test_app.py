@@ -3,8 +3,10 @@
 import asyncio
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+import athena_tui.app as app_module
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.clipboard import InMemoryClipboard
 from prompt_toolkit.data_structures import Point
@@ -406,8 +408,10 @@ def test_mouse_wheel_scrolls_only_output_viewport_and_resumes_tail() -> None:
     assert app.state.history_follow_tail is False
     assert app._history_control.mouse_handler(click) is None
     assert app._history_scroll == 3
+    assert app._history_selection_lines is not None
     assert app._history_control.mouse_handler(wheel_down) is None
     assert app._history_scroll == 0
+    assert app._history_selection_lines is None
     assert app.state.history_follow_tail is True
     assert app._app.mouse_support() is True
     assert app._composer.control is not app._history_control
@@ -455,11 +459,13 @@ def test_streaming_output_preserves_selection_and_frozen_viewport() -> None:
         FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
     )
     app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="select me"))
-    app._build()
+    prompt_app = app._build()
     app._start_history_selection(Point(x=0, y=0))
     app._extend_history_selection(Point(x=8, y=0))
+    prompt_app.invalidate = Mock()
     anchor = app._history_selection_anchor
     cursor = app._history_selection_cursor
+    focused = prompt_app.layout.current_control
 
     app._on_event(OutputEvent(seq=2, source="agent", channel="text", text=" later"))
 
@@ -467,9 +473,37 @@ def test_streaming_output_preserves_selection_and_frozen_viewport() -> None:
     assert app._history_selection_cursor == cursor
     assert app.state.history_follow_tail is False
     assert app.state.unseen_output_count == 1
+    assert prompt_app.layout.current_control is focused
+    prompt_app.invalidate.assert_not_called()
     assert any(
         "class:history.selection" in style for style, _text in app._history_fragments()
     )
+
+
+@pytest.mark.asyncio
+async def test_selection_coordinates_are_relative_to_scrolled_viewport() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._history_height = lambda: 3
+    for sequence in range(1, 7):
+        app._on_event(
+            OutputEvent(
+                seq=sequence,
+                source="supervisor",
+                channel="text",
+                text=f"line {sequence}",
+            )
+        )
+    prompt_app = app._build()
+    prompt_app.clipboard = InMemoryClipboard()
+    await app.handle_key("pageup")
+    app._start_history_selection(Point(x=2, y=0))
+    app._extend_history_selection(Point(x=8, y=0))
+
+    await app.handle_key("c-c")
+
+    assert prompt_app.clipboard.get_data().text == "line 2"
 
 
 @pytest.mark.asyncio
@@ -486,6 +520,108 @@ async def test_ctrl_c_copies_selected_output_instead_of_requesting_quit() -> Non
     await app.handle_key("c-c")
 
     assert prompt_app.clipboard.get_data().text == "copy"
+    assert app.state.mode == COMPOSER
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_with_empty_history_selection_still_requests_quit() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="text"))
+    app._build()
+    app._start_history_selection(Point(x=2, y=0))
+
+    await app.handle_key("c-c")
+
+    assert app.state.mode == CONFIRMATION
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_copies_cjk_using_display_columns() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(
+        OutputEvent(seq=1, source="agent", channel="text", text="\u4f60\u597dabc")
+    )
+    prompt_app = app._build()
+    prompt_app.clipboard = InMemoryClipboard()
+    app._start_history_selection(Point(x=2, y=0))
+    app._extend_history_selection(Point(x=6, y=0))
+
+    await app.handle_key("c-c")
+
+    assert prompt_app.clipboard.get_data().text == "\u4f60\u597d"
+
+
+@pytest.mark.asyncio
+async def test_end_clears_streaming_selection_and_restores_live_tail() -> None:
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="frozen"))
+    app._build()
+    app._start_history_selection(Point(x=2, y=0))
+    app._extend_history_selection(Point(x=8, y=0))
+    app._on_event(OutputEvent(seq=2, source="agent", channel="text", text=" live"))
+
+    await app.handle_key("end")
+
+    assert app._history_selection_lines is None
+    assert app.state.history_follow_tail is True
+    assert app.state.unseen_output_count == 0
+    assert "live" in fragment_list_to_text(app._history_fragments())
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_prefers_system_clipboard(monkeypatch) -> None:
+    system_clipboard = InMemoryClipboard()
+    monkeypatch.setattr(
+        app_module,
+        "_create_system_clipboard",
+        lambda: system_clipboard,
+        raising=False,
+    )
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="copy me"))
+    app._build()
+    app._start_history_selection(Point(x=2, y=0))
+    app._extend_history_selection(Point(x=9, y=0))
+
+    await app.handle_key("c-c")
+
+    assert system_clipboard.get_data().text == "copy me"
+    assert app.state.mode == COMPOSER
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_falls_back_when_system_clipboard_is_unavailable(
+    monkeypatch,
+) -> None:
+    class UnavailableClipboard(InMemoryClipboard):
+        def set_data(self, _data) -> None:
+            raise RuntimeError("clipboard unavailable")
+
+    monkeypatch.setattr(
+        app_module,
+        "_create_system_clipboard",
+        UnavailableClipboard,
+        raising=False,
+    )
+    app = AthenaApp(
+        FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
+    )
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="copy me"))
+    prompt_app = app._build()
+    app._start_history_selection(Point(x=2, y=0))
+    app._extend_history_selection(Point(x=9, y=0))
+
+    await app.handle_key("c-c")
+
+    assert prompt_app.clipboard.get_data().text == "copy me"
     assert app.state.mode == COMPOSER
 
 
