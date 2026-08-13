@@ -10,8 +10,7 @@ from dataclasses import replace
 
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
-_MAX_TOOL_RESULT_CHARS = 50_000
-_TRUNCATION_MARKER = "\n... [TRUNCATED] ...\n"
+from athena.core.tool_types import truncate_text
 
 
 class ContextManager:
@@ -93,11 +92,7 @@ class ContextManager:
 
     @staticmethod
     def _prepare(msg: ModelMessage) -> ModelMessage:
-        """预处理消息：深拷贝 parts 并截断过长工具返回。
-
-        截断策略：保留头尾各半，中间插入截断标记。
-        这样既保留 prompt 上下文（头部），又保留最终输出（尾部）。
-        """
+        """预处理消息：深拷贝 parts，过长工具返回用 truncate_text 保留头尾各半。"""
         if not isinstance(msg, ModelRequest):
             return replace(msg, parts=list(msg.parts))
         parts = list(msg.parts)
@@ -106,14 +101,7 @@ class ContextManager:
             if getattr(part, "part_kind", None) == "tool-return" and isinstance(
                 content, str
             ):
-                if len(content) > _MAX_TOOL_RESULT_CHARS:
-                    budget = _MAX_TOOL_RESULT_CHARS - len(_TRUNCATION_MARKER)
-                    head = budget // 2
-                    tail = budget - head
-                    parts[i] = replace(
-                        part,
-                        content=(content[:head] + _TRUNCATION_MARKER + content[-tail:]),
-                    )
+                parts[i] = replace(part, content=truncate_text(content))
         return replace(msg, parts=parts)
 
     @staticmethod

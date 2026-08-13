@@ -10,6 +10,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
+from athena.core.artifact_store import ArtifactNotFoundError
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
@@ -74,10 +75,7 @@ class ResearchServices:
         self._search = search
         self._evaluator = evaluator
         self._workspace = workspace
-
-    async def run(self, service: str, request: dict[str, object]) -> ServiceResult:
-        """按白名单服务名分发请求并返回 ServiceResult。"""
-        handler = {
+        self._dispatch = {
             "dataset.ingest": self._dataset_ingest,
             "dataset.freeze_roles_and_splits": self._dataset_freeze_roles_and_splits,
             "dataset.accept_derived": self._dataset_accept_derived,
@@ -92,7 +90,11 @@ class ResearchServices:
             "search.freeze_ranking_round": self._search_freeze_ranking_round,
             "eda.attempt.outcome": self._eda_attempt_outcome,
             "role.attempt.outcome": self._role_attempt_outcome,
-        }.get(service)
+        }
+
+    async def run(self, service: str, request: dict[str, object]) -> ServiceResult:
+        """按白名单服务名分发请求并返回 ServiceResult。"""
+        handler = self._dispatch.get(service)
         if handler is None:
             raise ValueError(f"service not registered: {service}")
         return await handler(request)
@@ -155,8 +157,9 @@ class ResearchServices:
         if isinstance(raw_previous, dict):
             try:
                 previous = DerivedDatasetManifest.model_validate(raw_previous)
-            except Exception:
-                previous = None  # 原始视图（无派生历史）→ 无 previous
+            except ValueError:
+                # previous 不是合法 DerivedDatasetManifest → 视为原始视图（无派生历史）
+                previous = None
         accepted = self._dataset.accept_derived(parent, candidate, previous=previous)
         accepted_ref = await self._store.put_text(accepted.model_dump_json())
         return ServiceResult(
@@ -253,7 +256,8 @@ class ResearchServices:
                 return ResearchTree.from_dict(
                     json.loads(await self._store.get_text(graph_ref))
                 )
-            except Exception:
+            except (ValueError, KeyError, ArtifactNotFoundError):
+                # 图缺失或内容不是合法 ResearchTree → 视为全新图
                 pass
         return ResearchTree()
 
