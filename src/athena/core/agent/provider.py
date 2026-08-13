@@ -29,6 +29,86 @@ class StreamEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+_DSML_KINDS = ("tool_use_error", "tool_calls", "tool_call", "function_calls")
+_DSML_BARS = ("|", "｜")
+
+_DSML_OPEN_TOKENS = tuple(
+    f"<{bar}DSML{bar}{kind}>" for bar in _DSML_BARS for kind in _DSML_KINDS
+)
+_DSML_CLOSE_TOKENS = tuple(
+    f"</{bar}DSML{bar}{kind}>" for bar in _DSML_BARS for kind in _DSML_KINDS
+)
+
+
+class _DeepSeekTextFilter:
+    """剥离 deepseek 的 DSML tool-call 传输语法，防止泄漏进可见文本。
+
+    DeepSeek 在 ``tool_choice=auto`` + 流式下会间歇性把 ``<｜DSML｜tool_calls>``
+    等标记片段泄漏进 ``content``，污染结构化输出（json_object）。原生
+    ``delta.tool_calls`` 仍是权威工具调用来源；本过滤器只负责清理文本，跨
+    chunk 边界缓冲 open/close token 以防误删。
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside = False
+
+    def push(self, chunk: str) -> str:
+        """喂入一段增量，返回可安全发出的干净文本。"""
+        self._buffer += chunk
+        return self._consume(final=False)
+
+    def flush(self) -> str:
+        """结束流：返回剩余干净文本，丢弃未闭合的 DSML 块。"""
+        return self._consume(final=True)
+
+    def _consume(self, *, final: bool) -> str:
+        out: list[str] = []
+        max_open = max(len(t) for t in _DSML_OPEN_TOKENS)
+        max_close = max(len(t) for t in _DSML_CLOSE_TOKENS)
+        while self._buffer:
+            if self._inside:
+                close = self._find_earliest(self._buffer, _DSML_CLOSE_TOKENS)
+                if close is not None:
+                    index, token = close
+                    self._buffer = self._buffer[index + len(token) :]
+                    self._inside = False
+                    continue
+                keep = 0 if final else min(len(self._buffer), max_close - 1)
+                self._buffer = self._buffer[len(self._buffer) - keep :]
+                if final:
+                    self._inside = False
+                return "".join(out)
+            opened = self._find_earliest(self._buffer, _DSML_OPEN_TOKENS)
+            if opened is not None:
+                index, token = opened
+                if index:
+                    out.append(self._buffer[:index])
+                self._buffer = self._buffer[index + len(token) :]
+                self._inside = True
+                continue
+            if final:
+                out.append(self._buffer)
+                self._buffer = ""
+                return "".join(out)
+            emit_len = len(self._buffer) - min(len(self._buffer), max_open - 1)
+            if emit_len <= 0:
+                return "".join(out)
+            out.append(self._buffer[:emit_len])
+            self._buffer = self._buffer[emit_len:]
+            return "".join(out)
+        return "".join(out)
+
+    @staticmethod
+    def _find_earliest(text: str, tokens: tuple[str, ...]) -> tuple[int, str] | None:
+        best: tuple[int, str] | None = None
+        for token in tokens:
+            index = text.find(token)
+            if index != -1 and (best is None or index < best[0]):
+                best = (index, token)
+        return best
+
+
 class BaseProvider(ABC):
     """LLM provider 稳定接口:模型名、client、流式 stream()。"""
 
@@ -154,6 +234,9 @@ class ResponsesProvider(BaseProvider):
         bufs: dict[int, dict] = {}
         finish: str = ""
         text = ""
+        dsml_filter = (
+            _DeepSeekTextFilter() if self.provider_kind == "deepseek" else None
+        )
 
         try:
             async for chunk in stream:
@@ -165,11 +248,17 @@ class ResponsesProvider(BaseProvider):
                     if c.finish_reason:
                         finish = c.finish_reason
                     if d.content:
-                        text += d.content
-                        yield StreamEvent(
-                            kind="text_delta",
-                            data={"delta": d.content, "accumulated": text},
+                        delta = (
+                            dsml_filter.push(d.content)
+                            if dsml_filter is not None
+                            else d.content
                         )
+                        if delta:
+                            text += delta
+                            yield StreamEvent(
+                                kind="text_delta",
+                                data={"delta": delta, "accumulated": text},
+                            )
                     if d.tool_calls:
                         for t in d.tool_calls:
                             i = t.index
@@ -216,6 +305,15 @@ class ResponsesProvider(BaseProvider):
                 kind="error", data={"message": f"{type(exc).__name__}: {exc}"}
             )
             return
+
+        if dsml_filter is not None:
+            tail = dsml_filter.flush()
+            if tail:
+                text += tail
+                yield StreamEvent(
+                    kind="text_delta",
+                    data={"delta": tail, "accumulated": text},
+                )
 
         yield StreamEvent(
             kind="response_completed",
