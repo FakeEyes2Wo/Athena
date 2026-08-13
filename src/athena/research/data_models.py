@@ -1,27 +1,25 @@
-"""研究域数据模型与 EDA 采样服务（原 ``athena.data`` 折叠迁入）。
+"""研究域数据模型（原 ``athena.data`` 与 ``research.models`` 折叠迁入）。
 
 原 ``src/athena/data/`` 包在 agent 子系统迁移中整体删除；其中仍被使用的代码
-折入本模块（初置 ``agents/data_models.py``，后归入 research 域）：
+折入本模块。``MetricSpec``/``TaskMetaData`` 原在 ``research/models.py``，现与
+其余研究域数据模型合并于此：
 
 - ``DataProfile``/``ColumnSummary``：真实 Ideator 的输入类型
   （``agents/ideator/ideator.py``），描述数据集画像；
 - ``DataCard``：数据集卡片，被 ``scripts/export_rust_contract_fixtures.py``
   用作跨语言契约固件；
-- ``SampleRef`` + ``create_analysis_samples``：DataAgent 的 EDA 采样服务
-  （data-analysis §7.1）：大数据集按项目 EDA 上限生成恰好三项可复现样本。
+- ``MetricSpec``/``TaskMetaData``：任务元数据与评估指标规格，同样被 Rust
+  跨语言契约固件消费。
 
-随原包弃用的代码（``operations.py`` 的 split/clean、``ProcessingLog``/
-``ProcessingRecord``/``SplitManifest`` 等）消费方在 World A 迁移中一并删除，
-不再保留。
+随原包弃用的代码（``SampleRef``/``create_analysis_samples`` 的 EDA 采样服务、
+``operations.py`` 的 split/clean 等）消费方在 World A 迁移中一并删除，不再保留。
 """
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from typing import Literal
 
-import pandas as pd
 from pydantic import BaseModel, Field
 
-from athena.core.contracts import ArtifactRef
+from athena.core.contracts import ArtifactRef, NonBlankText
 
 
 class DataCard(BaseModel):
@@ -56,36 +54,18 @@ class DataProfile(BaseModel):
     issue_summary: str = ""
 
 
-@dataclass(frozen=True)
-class SampleRef:
-    """可复现 EDA 样本：固定 seed + 采样结果的 Artifact 引用。"""
+class MetricSpec(BaseModel):
+    """评估指标规格 — 名称和优化方向。"""
 
-    seed: int
-    artifact: ArtifactRef
-
-
-ANALYSIS_SEEDS = (17, 42, 97)
+    name: NonBlankText
+    direction: Literal["maximize", "minimize"]
 
 
-def create_analysis_samples(
-    frame: pd.DataFrame,
-    *,
-    put_frame: Callable[[pd.DataFrame], ArtifactRef],
-    sample_size: int = 10_000,
-    eda_cap: int = 100_000,
-) -> list[SampleRef]:
-    """按项目 EDA 上限生成确定性样本（data-analysis §7.1）。
+class TaskMetaData(BaseModel):
+    """任务元数据 — 描述 ML 任务类型、数据格式和评估约束。"""
 
-    超过 ``eda_cap`` 时用三个已记录且互不相同的 seed 生成恰好三项等规模样本；
-    否则使用单一固定 seed。采样只服务 EDA，不改变 train/validation/test。
-    """
-    seeds = ANALYSIS_SEEDS if len(frame) > eda_cap else (ANALYSIS_SEEDS[0],)
-    return [
-        SampleRef(
-            seed=seed,
-            artifact=put_frame(
-                frame.sample(min(sample_size, len(frame)), random_state=seed)
-            ),
-        )
-        for seed in seeds
-    ]
+    task_type: str
+    data_type: str
+    target_vars: list[str] = Field(default_factory=list)
+    primary_metric: MetricSpec
+    constraints: list[str] = Field(default_factory=list)

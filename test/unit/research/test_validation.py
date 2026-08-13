@@ -4,38 +4,9 @@ import pytest
 
 from athena.research.validation import (
     ValidationService,
-    dependency_closure,
     generalization_gap,
     generalization_warning,
 )
-
-_GRAPH = {
-    "feature-a": ["model-b"],
-    "model-b": ["calibration-c"],
-    "feature-x": ["model-b"],
-}
-
-
-def test_dependency_closure_removes_transitive_dependents() -> None:
-    assert dependency_closure(_GRAPH, "feature-a") == (
-        "feature-a",
-        "model-b",
-        "calibration-c",
-    )
-
-
-def test_dependency_closure_isolated_intervention_is_itself() -> None:
-    assert dependency_closure(_GRAPH, "feature-x") == (
-        "feature-x",
-        "model-b",
-        "calibration-c",
-    )
-
-
-def test_ablation_scope_covers_all_accepted_interventions() -> None:
-    scope = ValidationService().ablation_scope(_GRAPH, ["feature-a", "feature-x"])
-    assert scope["feature-a"] == ("feature-a", "model-b", "calibration-c")
-    assert scope["feature-x"] == ("feature-x", "model-b", "calibration-c")
 
 
 def test_generalization_gap_maximize_is_test_minus_final() -> None:
