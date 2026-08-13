@@ -10,14 +10,11 @@ from typing import Any, Literal
 from athena.agents.general_agent import GeneralResult, register_general_agent
 from athena.agents.ideator_agent import register_ideator_agent
 from athena.agents.plan_agent import register_plan_agent
-from athena.agents.prepare_agent import register_evaluator_agent, register_prepare_agent
 from athena.agents.supervisor_agent import (
-    MAX_PLAN_TURNS,
     SUPERVISOR_AGENT_ID,
     SupervisorAnswer,
     register_supervisor_agent,
 )
-from athena.agents.validate_agent import register_validate_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import ResponsesProvider
 from athena.core.agent.registry import AgentTypeRegistry
@@ -26,34 +23,20 @@ from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.core.research_tree import ResearchTree
-from athena.execution.runtime import CommandResult, ExecutionContext, ExecutionRuntime
+from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.research.contracts import DataScriptBundle, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime_events import RuntimeEvents
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.events import EventProjector
-from athena.research.supervisor.experiment import (
-    PlanRunner,
-    PlanTurnResult,
-    load_agent_result,
-)
-from athena.research.supervisor.prepare import (
-    PrepareResult,
-    run_evaluator_plan,
-    run_prepare_plan,
-)
+from athena.research.supervisor.experiment import PlanTurnResult, load_agent_result
+from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
-from athena.research.supervisor.validation import (
-    ValidationDiffReview,
-    ValidationInput,
-    run_validation_plan,
-    validation_key,
-)
-from athena.utils.single_turn_chat import single_turn_chat
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +186,7 @@ class ResearchRuntime:
             raise RuntimeError("SEARCH Plan execution is not configured")
 
         self._plan_turn = plan_turn or unavailable_plan_turn
+        self._phase_runner = PhaseRunner(self)
         self._supervisor = Supervisor(
             project_root=self._root,
             state=self._state,
@@ -213,7 +197,7 @@ class ResearchRuntime:
             scheduler=Scheduler(),
             recovery=Recovery(),
             evaluator_ref=self._baseline_evaluator_ref(),
-            run_plan_turn=self._run_plan_turn,
+            run_plan_turn=self._phase_runner.run_plan_turn,
             run_supervisor_turn=self._run_supervisor_turn,
             run_ideator_turn=self._run_ideator_turn,
             run_general_turn=self._run_general_turn,
@@ -221,8 +205,8 @@ class ResearchRuntime:
             auto_validate=auto_validate,
             direction=direction,
             tolerance=tolerance,
-            run_prepare_phase=self._run_prepare_phase,
-            run_validation_phase=self._run_validation_phase,
+            run_prepare_phase=self._phase_runner.run_prepare_phase,
+            run_validation_phase=self._phase_runner.run_validation_phase,
             publish_agent_event=self._events_bus.project_agent_event,
         )
         self._events_bus.attach_supervisor(self._supervisor)
@@ -555,172 +539,6 @@ class ResearchRuntime:
         if result is None:
             raise RuntimeError(summary.error or "General Agent turn failed")
         return result.model_dump()
-
-    async def _run_plan_turn(self, plan_id: str, state: Any) -> PlanTurnResult:
-        if self._plan_turn.__name__ != "unavailable_plan_turn":
-            return await self._plan_turn(plan_id, state)
-        plan_input = await self._supervisor.plan_input(plan_id)
-        runner = PlanRunner(
-            execution=self._execution,
-            store=self._store,
-            evaluator=self._evaluator,
-            workspace=self._git,
-            branch=self._supervisor.workspace(plan_id),
-            context=ExecutionContext(
-                project_root=self._root,
-                workspace_root=self._supervisor.workspace_path(plan_id),
-                environment_root=self._root,
-                experiment_id=plan_id,
-            ),
-            direction=plan_input.direction,
-        )
-        return await runner.run_turn(plan_id, state, plan_input)
-
-    async def _run_prepare_phase(self) -> PrepareResult:
-        if self._prepare_phase is not None:
-            return await self._prepare_phase()
-        if self._provider is None:
-            raise RuntimeError("PREPARE requires a registered Agent provider")
-        base_commit = await self._git.init()
-        workspace = await self._git.create(base_commit, "athena/prepare", name="eda")
-        # 只把 EDA 目录路径交给 supervisor 持有的持久化 state；EDA 结果不进 SEARCH。
-        # 存相对项目根的路径而非绝对路径：state 才项目自包含，复制/迁移项目后
-        # 不会残留指向旧项目（如 hell）的绝对 eda_dir。
-        self._state.eda_dir = str(
-            Path(workspace.path).resolve().relative_to(self._root.resolve())
-        )
-        self._state.save(self._state_path)
-        # 步骤 1：evaluator agent 在 workspaces/evaluator/（普通目录，非 git worktree）
-        # 写评估器并冻结成 DataScriptBundle，得到 evaluator_ref。
-        evaluator_dir = Path(self._root / "workspaces" / "evaluator")
-        if not self._registry.contains("evaluator"):
-            register_evaluator_agent(
-                self._registry,
-                provider=self._provider,
-                artifacts=self._store,
-                workspace=evaluator_dir,
-                runtime=self._execution,
-            )
-        evaluator_ref = await run_evaluator_plan(
-            agents=self._agents,
-            scripts=self._scripts,
-            store=self._store,
-            evaluator_dir=evaluator_dir,
-            execution=self._execution,
-            task=self._task_text,
-            max_turns=MAX_PLAN_TURNS,
-            publish=lambda kind, ref, data: self._events_bus.project_agent_event(
-                "evaluator", kind, ref, data
-            ),
-        )
-        # 步骤 2：experiment/prepare agent 在 EDA worktree 写 experiment 产物并用
-        # 步骤 1 冻结的 bundle 可信打分，提交 baseline。
-        if not self._registry.contains("prepare"):
-            register_prepare_agent(
-                self._registry,
-                provider=self._provider,
-                artifacts=self._store,
-                workspace=Path(workspace.path),
-                runtime=self._execution,
-            )
-        tree_ref = await self._store.put_text(
-            json.dumps(self.tree.to_dict(), ensure_ascii=False, sort_keys=True)
-        )
-        return await run_prepare_plan(
-            agents=self._agents,
-            evaluator=self._evaluator,
-            git=self._git,
-            workspace=workspace,
-            execution=self._execution,
-            store=self._store,
-            evaluator_ref=evaluator_ref,
-            tree_ref=tree_ref,
-            task=self._task_text,
-            max_turns=MAX_PLAN_TURNS,
-            publish=lambda kind, ref, data: self._events_bus.project_agent_event(
-                "prepare", kind, ref, data
-            ),
-        )
-
-    async def _run_validation_phase(
-        self, sota_commit: str, metric: float
-    ) -> ValidationResult:
-        if self._validation_phase is not None:
-            return await self._validation_phase(sota_commit, metric)
-        if self._provider is None:
-            raise RuntimeError("VALIDATE requires a registered Agent provider")
-        evaluator_ref = self._supervisor.evaluator_ref
-        if evaluator_ref is None:
-            raise RuntimeError("VALIDATE requires a frozen evaluator")
-        workspace = await self._git.create(sota_commit, "athena/validate")
-        if not self._registry.contains("validate"):
-            register_validate_agent(
-                self._registry,
-                provider=self._provider,
-                artifacts=self._store,
-                workspace=Path(workspace.path),
-                runtime=self._execution,
-            )
-        sota_id = self.tree.best_experiment_id()
-        if sota_id is None:
-            raise RuntimeError("VALIDATE requires a trusted SOTA baseline")
-        experiment = self.tree.get_experiment(sota_id)
-        hypothesis = self.tree.get_hypothesis(experiment.hypothesis_id)
-        sota_context = {
-            "experiment_id": sota_id,
-            "statement": hypothesis.statement,
-            "intervention": hypothesis.intervention,
-            "expected_effect": hypothesis.expected_effect,
-            "commit": experiment.commit,
-            "metric": experiment.eval.primary if experiment.eval else None,
-        }
-        frozen = ValidationInput(
-            sota_commit=sota_commit,
-            reference_metric=metric,
-            direction=self._direction,
-            final_evaluator_ref=evaluator_ref,
-            validation_key=validation_key(
-                sota_commit, metric, self._direction, evaluator_ref
-            ),
-            sota_context=sota_context,
-        )
-        result_ref = None
-        if self.state.validation is not None:
-            candidate = self.state.validation.get("result_ref")
-            if isinstance(candidate, str):
-                result_ref = candidate
-        return await run_validation_plan(
-            input=frozen,
-            agents=self._agents,
-            git=self._git,
-            workspace=workspace,
-            execution=self._execution,
-            evaluator=self._evaluator,
-            store=self._store,
-            independent_review=self._review_validation_diff,
-            result_ref=result_ref,
-            checkpoint=self._supervisor.checkpoint_validation,
-            publish=lambda kind, ref, data: self._events_bus.project_agent_event(
-                "validate", kind, ref, data
-            ),
-        )
-
-    async def _review_validation_diff(self, prompt: str) -> ValidationDiffReview:
-        if self._model is None:
-            raise RuntimeError("independent validation review requires a model")
-        answer = await single_turn_chat(
-            prompt,
-            model=self._model,
-            client=self._client,
-            system_prompt=(
-                "Independently review the proposed VALIDATE diff. Accept only "
-                "runtime compatibility repairs and reject changes to model, data, "
-                "features, preprocessing, training, or final-label access. Return "
-                'JSON only: {"accepted":true|false,"reason":"..."}.'
-            ),
-            max_turns=200,
-        )
-        return ValidationDiffReview.model_validate_json(answer)
 
     def _baseline_evaluator_ref(self) -> ArtifactRef | None:
         baselines = self._tree.experiments(kind="baseline")
