@@ -3,6 +3,7 @@
 使用动态脚本名与最小 uv 项目布局，不包含任何数据集知识。
 """
 
+import json
 import subprocess
 
 import pytest
@@ -56,9 +57,13 @@ async def test_frozen_bundle_uses_declared_entrypoint_and_uv(tmp_path) -> None:
     assert bundle.tree_ref is not None  # 完整源码树已固化
     assert bundle.python_version is not None and bundle.python_version.startswith("3.")
     assert bundle.environment_hash is not None
-    assert runner.command(bundle)[0:3] == ["uv", "run", "--frozen"]
+    assert runner.command(bundle)[0:2] == ["uv", "run"]  # 不再 --frozen
     # 动态脚本名：frozen 命令只认声明 entrypoint，不按文件约定
     assert _ENTRYPOINT in runner.command(bundle)
+    # 冻结的 entrypoint 头部写了「不能动」标记
+    tree = json.loads(await store.get_text(bundle.tree_ref))
+    entrypoint_bytes = await store.get_bytes(tree[_ENTRYPOINT])
+    assert entrypoint_bytes.startswith(b"# ATHENA-FROZEN")
 
 
 @pytest.mark.asyncio
@@ -115,4 +120,4 @@ def test_run_cmd_timeout_raises_clear_error(tmp_path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="timed out"):
         _run_cmd(["uv", "lock"], cwd=tmp_path)
     with pytest.raises(RuntimeError, match="timed out"):
-        _run_cmd_capture(["uv", "run", "--frozen", "python", "--version"], cwd=tmp_path)
+        _run_cmd_capture(["uv", "run", "python", "--version"], cwd=tmp_path)
