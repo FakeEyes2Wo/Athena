@@ -39,7 +39,7 @@ class _PrepareProvider:
 
     def _valid_actions(self) -> list[tuple[str, str] | None]:
         outputs = {
-            "predictions": "outputs/predictions.csv",
+            "predictions": "outputs/predictions",
             "report": "outputs/report.md",
         }
         if self.missing == "report":
@@ -166,7 +166,8 @@ class _ManifestExecution:
         assert (root / "solution" / "model.py").is_file()
         (root / "outputs").mkdir(exist_ok=True)
         if not self.missing_predictions:
-            (root / "outputs" / "predictions.csv").write_text(
+            (root / "outputs" / "predictions").mkdir(parents=True, exist_ok=True)
+            (root / "outputs" / "predictions" / "predictions.csv").write_text(
                 "id,prediction\nr1,0\nr2,1\n", encoding="utf-8"
             )
         (root / "outputs" / "report.md").write_text(

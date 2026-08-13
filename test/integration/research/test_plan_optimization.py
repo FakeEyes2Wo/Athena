@@ -10,7 +10,11 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
-from athena.research.script_runner import BundleMetadata, DataScriptRunner
+from athena.research.script_runner import (
+    BundleMetadata,
+    DataScriptRunner,
+    load_directory,
+)
 from athena.research.supervisor.experiment import PlanRunner, load_best
 from athena.research.supervisor.plans import PlanInput, PlanState
 
@@ -22,7 +26,7 @@ import csv, json, sys
 def main():
     out = open(sys.argv[sys.argv.index('--output') + 1], 'w')
     preds = {}
-    with open('outputs/predictions.csv', encoding='utf-8') as f:
+    with open('outputs/predictions/predictions.csv', encoding='utf-8') as f:
         for line in f:
             parts = line.strip().split(',')
             if len(parts) >= 2 and parts[0] != '__athena_row_id':
@@ -89,8 +93,8 @@ async def test_plan_turn_executes_manifest_scores_and_commits(
 
     (workdir / "predict.py").write_text(
         "from pathlib import Path\n"
-        "Path('outputs').mkdir(exist_ok=True)\n"
-        "Path('outputs/predictions.csv').write_text("
+        "Path('outputs/predictions').mkdir(parents=True, exist_ok=True)\n"
+        "Path('outputs/predictions/predictions.csv').write_text("
         "'__athena_row_id,prediction\\nrow_1,1\\nrow_2,0\\n')\n",
         encoding="utf-8",
     )
@@ -100,7 +104,7 @@ async def test_plan_turn_executes_manifest_scores_and_commits(
                 "version": 1,
                 "commands": [[sys.executable, "predict.py"]],
                 "outputs": {
-                    "predictions": "outputs/predictions.csv",
+                    "predictions": "outputs/predictions",
                     "report": "report.md",
                 },
             }
@@ -141,8 +145,8 @@ async def test_plan_turn_executes_manifest_scores_and_commits(
     assert best.metric == 1.0
     assert best.commit == result.commit
 
-    predictions = await store.get_text(result.predictions_ref)
-    assert "row_1,1" in predictions
+    predictions = await load_directory(store, result.predictions_ref)
+    assert b"row_1,1" in predictions["predictions.csv"]
 
     # the trusted revision is committed on the Plan branch
     assert (workdir / "predict.py").is_file()
