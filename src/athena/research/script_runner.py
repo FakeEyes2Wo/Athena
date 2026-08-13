@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from athena.core.contracts import ArtifactStore, new_id
+from athena.core.contracts import ArtifactRef, ArtifactStore, new_id
 from athena.research.contracts import DataScriptBundle
 
 
@@ -88,6 +88,30 @@ def _validate_schema(payload: dict[str, object], schema: dict[str, object]) -> N
     missing = [key for key in schema if key not in payload]
     if missing:
         raise RuntimeError(f"bundle output missing schema fields: {missing}")
+
+
+async def pack_directory(store: ArtifactStore, root: Path) -> ArtifactRef:
+    """把 root 目录整树存为清单 artifact；返回指向清单 JSON 的 ref。
+
+    复用 freeze 的 tree 模式：遍历 root.rglob("*") 的文件，逐文件 store.put_bytes，
+    得到 {"<相对路径>": <bytes_ref>}，再 store.put_text(json.dumps(...)) 返回清单 ref。
+    相对路径用 path.relative_to(root).as_posix()。
+    """
+    tree: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        tree[rel] = await store.put_bytes(path.read_bytes())
+    return await store.put_text(json.dumps(tree, ensure_ascii=False))
+
+
+async def load_directory(store: ArtifactStore, ref: ArtifactRef) -> dict[str, bytes]:
+    """从 pack_directory 的清单 ref 读回 {相对路径: bytes}。"""
+    tree = json.loads(await store.get_text(ref))
+    return {
+        rel: await store.get_bytes(content_ref) for rel, content_ref in tree.items()
+    }
 
 
 def _read_output(output_path: Path, stdout: str) -> dict[str, object]:
@@ -197,13 +221,13 @@ class DataScriptRunner:
         request: dict[str, object],
         output_schema: dict[str, object] | None = None,
         *,
-        extra_files: dict[str, str] | None = None,
+        extra_files: dict[str, bytes] | None = None,
     ) -> ScriptRunResult:
         """执行冻结 bundle；重建冻结项目上下文并读取/校验 output.json。
 
         在隔离工作目录重建完整源码树 + pyproject.toml + uv.lock 后，先
         ``uv sync --frozen`` 再 ``uv run --frozen`` 执行（只允许这两个 FROZEN 命令）。
-        ``extra_files`` 注入相对路径文本文件（如 predictions.csv/labels.csv），
+        ``extra_files`` 注入相对路径字节文件（如 predictions 目录树/labels），
         供 trusted evaluator 在对齐后运行 eval 入口。
         """
         if (
@@ -228,7 +252,7 @@ class DataScriptRunner:
         for rel, content in (extra_files or {}).items():
             target = run_dir / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            target.write_bytes(content)
         request_path = run_dir / "request.json"
         output_path = run_dir / "result.json"
         request_path.write_text(

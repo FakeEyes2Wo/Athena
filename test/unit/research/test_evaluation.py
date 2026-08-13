@@ -28,9 +28,10 @@ async def test_score_rejects_non_finite_metric() -> None:
         with pytest.raises(ValueError, match="finite"):
             await _evaluator({"primary": bad}).score(
                 eval_bundle=None,  # type: ignore[arg-type]
-                predictions="",
+                predictions={},
                 candidate_id="c",
                 direction="maximize",
+                predictions_root="predictions",
             )
 
 
@@ -40,9 +41,10 @@ async def test_score_rejects_non_scalar_metric() -> None:
         with pytest.raises(ValueError, match="number"):
             await _evaluator({"primary": bad}).score(
                 eval_bundle=None,  # type: ignore[arg-type]
-                predictions="",
+                predictions={},
                 candidate_id="c",
                 direction="maximize",
+                predictions_root="predictions",
             )
 
 
@@ -50,9 +52,10 @@ async def test_score_rejects_non_scalar_metric() -> None:
 async def test_score_accepts_finite_number_and_numeric_string() -> None:
     result = await _evaluator({"primary": 0.84}).score(
         eval_bundle=None,  # type: ignore[arg-type]
-        predictions="",
+        predictions={},
         candidate_id="c",
         direction="maximize",
+        predictions_root="predictions",
     )
     assert result.test_score == 0.84
     assert math.isfinite(result.test_score)

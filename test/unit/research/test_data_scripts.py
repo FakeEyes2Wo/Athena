@@ -14,6 +14,8 @@ from athena.research.script_runner import (
     DataScriptRunner,
     _run_cmd,
     _run_cmd_capture,
+    load_directory,
+    pack_directory,
 )
 
 _ENTRYPOINT = "src/inspect_anything.py"
@@ -63,6 +65,44 @@ def _stdout_draft(tmp_path) -> None:
         "dependencies = []\n",
         encoding="utf-8",
     )
+
+
+@pytest.mark.asyncio
+async def test_pack_load_directory_roundtrip(tmp_path) -> None:
+    """pack_directory → load_directory 往返 {相对路径: bytes} 一致。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    preds = tmp_path / "preds"
+    (preds / "sub").mkdir(parents=True)
+    (preds / "a.csv").write_bytes(b"id,pred\n1,0\n")
+    (preds / "sub" / "b.bin").write_bytes(b"\x00\x01\xff")
+
+    ref = await pack_directory(store, preds)
+    loaded = await load_directory(store, ref)
+
+    assert loaded == {
+        "a.csv": b"id,pred\n1,0\n",
+        "sub/b.bin": b"\x00\x01\xff",
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_injects_bytes_and_nested(tmp_path) -> None:
+    """extra_files 以字节注入并支持嵌套目录。"""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    workdir = tmp_path / "work"
+    runner = DataScriptRunner(store=store, workdir=workdir)
+    _stdout_draft(tmp_path)
+    bundle = await runner.freeze(
+        tmp_path / "draft", BundleMetadata(entrypoint=_ENTRYPOINT)
+    )
+
+    await runner.run(bundle, {}, extra_files={"sub/b.bin": b"\x00\x01\xff"})
+
+    run_dirs = list(workdir.iterdir())
+    assert len(run_dirs) == 1
+    injected = run_dirs[0] / "sub" / "b.bin"
+    assert injected.is_file()
+    assert injected.read_bytes() == b"\x00\x01\xff"
 
 
 @pytest.mark.asyncio

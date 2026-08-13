@@ -104,10 +104,11 @@ class _Evaluator:
         self,
         *,
         eval_bundle: DataScriptBundle,
-        predictions: str,
+        predictions: dict[str, bytes],
         candidate_id: str,
         direction: str,
-        predictions_path: str = "predictions.csv",
+        predictions_root: str = "predictions.csv",
+        predictions_path: str = "predictions.csv",  # 兼容旧调用，Task 4 落定后移除
     ):
         del predictions
         self.calls += 1
