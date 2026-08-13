@@ -189,6 +189,41 @@ table、equation 或低文本 page，包含：
 
 视觉适配器无法可靠解释时应抛出异常。它不应把 caption 原样返回后伪装为模型理解。
 
+### 预览渲染与格式覆盖
+
+`asset_ref` 交出去之前一律先规范成 PNG。格式判定按魔数，不信上游声明的 media type——TeX 里
+`\includegraphics` 的扩展名只是作者的写法。`sniff_media_type` 识别 PDF、PostScript（含
+DOS-EPS 二进制封装头）、PNG、JPEG、GIF、BMP、TIFF、WebP、JPEG 2000、PSD、PNM 家族与 SVG。
+
+渲染分两条路：
+
+| 路径 | 覆盖 | 说明 |
+| --- | --- | --- |
+| MuPDF | PDF、SVG 与全部常见位图 | 先按文档打开，失败再退到位图解码器 |
+| Ghostscript | EPS / PS | MuPDF 一条路都不通，见下 |
+
+PostScript 必须外挂 Ghostscript。实测 `fitz.open` 对 `filetype` 取 `ps`/`eps`/`pdf`/`None`
+全部抛 `FileDataError`，`fitz.Pixmap` 报 `unknown image file format`；而 PostScript 是图灵
+完备语言，没有纯 Python 的替代实现。渲染时必须带 `-dEPSCrop`——不加的话 EPS 会被摊到整页纸
+上，图缩在角落，模型读到的几乎全是空白。
+
+可执行文件由组合根发现后注入（`ATHENA_GHOSTSCRIPT` 优先，否则按 PATH 找
+`gs`/`gswin64c`/`gswin32c`/`mgs`/`rungs`），`paper_markdown` 自己不查 PATH、不读环境变量。
+装了 TeX 发行版的机器通常已经有了：MiKTeX 与 TeX Live 都自带一份。
+
+渲染不出来时记 `visual_preview_unavailable`，`reason` 区分四种情况：`empty_asset`、
+`ghostscript_missing`、`ghostscript_failed`、`unsupported_format`。这个区分不是装饰——
+"这个格式我们不支持"补上依赖能全部救回，"这张图坏了"只能认了，混成一个标签下游就没法判断。
+
+**渲不出预览的图不会把原始字节内联给模型。** 只有 `VISION_READABLE`（png/jpeg/gif/bmp/webp）
+里的格式可以直接发；其余走纯文本调用，退回 caption 与结构化证据。真机上曾有 59 张 EPS 被原样
+base64 成 `data:application/postscript` 发出去，模型全部拒收——白花 59 次调用，还把失败计数
+抬高到看不出真正的模型故障。
+
+真机基线（44 篇论文、1347 张图）：png 923、pdf 189、PDF 页面区域 145、EPS 59、jpeg 27。
+接入 Ghostscript 后，五篇 EPS 密集的老论文从 1/16、4/18、11/16、2/21、4/10 全部变成 100%
+解读，视觉失败从 63 降到 0。
+
 ### StructureRefiner
 
 `StructureRefiner` 只在解析器为元素写入明确的 `repair_issue_codes` 时调用。请求包含原始
@@ -287,8 +322,14 @@ RAG 摄取模块应：
 | 状态 | 含义 | 摄取建议 |
 | --- | --- | --- |
 | `pass` | 没有 warning/error 诊断 | 可进入常规索引 |
-| `degraded` | 至少有一个 warning/error | 由质量策略按 code 接纳、隔离或重跑 |
+| `pass_with_notes` | 内容完整，只是记账不理想——chunk 超出目标大小、一个 chunk 含多个视觉、`\input` 大小写与磁盘不符但已找回等 | 可进入常规索引；重跑不会改善 |
+| `degraded` | 内容确实没进语料——视觉解释缺失或失败、`\input` 未解析、表格/公式 Markdown 失效、入口靠弱推断选出 | 由质量策略按 code 接纳、隔离或重跑 |
 | `unknown` | 旧产物没有完整质量结论 | 按保守策略处理 |
+
+分级按**内容是否真的丢了**，不按"有没有 warning"。旧规则是任何 warning 都降级，于是"整个
+视觉模态缺失"和"某个 chunk 比目标大 40%"拿到同一个标签，摄取侧无法判断重跑是否有意义。
+代码归类见 `quality.CONTENT_LOSS_CODES` 与 `BOOKKEEPING_CODES`；未登记的新代码按 `degraded`
+处理，且有覆盖测试强制显式归类。
 
 典型显式失败包括：
 
@@ -415,11 +456,99 @@ PDF fallback 的同链路回归入口位于：
 导出文件只用于人工检查，不参与转换结果生成；PDF 在未注入视觉解释器时会明确保持
 `best_effort/degraded`，不会伪造视觉 retrieval unit。
 
+### 视觉解释并发（2026-08-03）
+
+每张图表是一次模型往返，此前 `enrich_visuals` 是 `for` 循环里逐张 `await`，转换耗时与
+图表数线性相关。改为在信号量约束下 `gather`，顺序敏感的三件事——占位符替换、heading
+归属、诊断合并——留在 gather 之后按源顺序完成，产物与串行版本一致。
+
+在同一端点上实测：单次调用隔离 30.2 秒；6 路并发墙钟 119.9 秒而逐次延迟之和 431.0 秒，
+即有效并行度 3.60×（并发下单次延迟从 36 秒升到 120 秒，因此拿不满 6×）。**上游本身确实
+慢，但线性增长是编排造成的。**
+
+真实链路前后对照：
+
+| | 修改前 | 修改后 |
+| --- | ---: | ---: |
+| 转换总耗时 | 3637.4s | 669.5s |
+| 图表数 | 58 | 44 |
+| **单张摊薄** | **62.7 s/张** | **15.2 s/张** |
+
+最干净的单篇对照是 `arxiv:2210.13701`：两轮同为 22 张图，**1776.1s → 401.3s（4.4×）**。
+
+并发度由 `visual_concurrency` 配置（默认 6），`PaperMarkdownTool` 透传——合适的并发度依
+端点特性而定，不该由工具替调用方决定。
+
+### 一条被否决的借鉴：chunk 级断言标签（2026-08-03）
+
+试过在转换期给每个 chunk 生成一行断言标签，供下游 `paper_rag` 做廉价扫描层。**已否决，
+代码未保留**，结论与数据记在 [paper_rag 文档](paper_rag_tool_ch.md)。
+
+这里只记与本模块有关的那一条代价：**"一篇论文一次模型请求"在真实论文上不成立。**
+Attention Is All You Need 有 86 个 chunk，一次请求 48KB prompt，**>300 秒未返回**；同一篇
+的 12 张图表在 6 路并发下总共只要约 180 秒。也就是说打标签一项就超过了整篇视觉解释的总和，
+必须由适配器分批才能跑完，于是"一次调用"这个卖点本身也没剩下。
+
+定因过程值得记下来，因为前三个猜测全错：端点被单独探针测过是健康的（文本 4.6s、图像
+8.9s、编码 0.1s）；图片并不大（最大 1.6MB，多数 <500KB）；把并发从 6 拉到 16 反而更慢。
+真因只有把每一段单独计时才暴露出来。**教训是定因要逐段计时，不要逐个猜。**
+
+顺带发现并已修的一处：视觉解释器此前没有 `max_tokens` 上限，模型会为一张表写很长的
+`structured_data`，单张耗时 63–99 秒。
+
+### `\input` 大小写回退（2026-08-03）
+
+arXiv 包多来自大小写不敏感的文件系统，源码写 `\input{prompts/ALFWorld}` 而磁盘上是
+`alfworld.tex` 很常见。此前解析失败会把宏原样写回正文，内容静默丢失：ReAct
+（arXiv:2210.03629）因此丢掉附录里 6789 字符的提示词，而全篇只留下一条 warning。
+
+改为精确匹配优先、失败后做一次不区分大小写回退，命中时记 `tex_include_case_mismatch`
+而不是静默吞掉；同名多候选按名称排序取定。真实包复核：该篇由 `degraded` 转
+`pass_with_notes`，提示词正文确认恢复。
+
+极端情况下若对不上的是主 `\input` 链，丢的会是大半篇论文，因此这条不是个案修补。
+
+### PDF-wrapper 投稿的 TeX 回退（2026-08-04）
+
+有一类 arXiv 投稿的源码包里只有一个 stub `.tex`，用 `\includepdf[pages=1-last]{X.pdf}`
+套着同包内的真实 PDF。TeX 通道对它产出的正文接近为空却不报错：`arxiv:1412.6980`（Adam）
+的包里是 298 字节的 `arxiv.tex` 加 534KB 的外部 PDF，转换结果 29 个字符、0 条诊断、质量
+门禁判 `pass`。**静默的全文丢失比转换报错危险得多**——报错会被计入失败率，"成功但空"会带着
+`pass` 一路进语料，让检索以为这篇论文已经覆盖。
+
+判据不能只看体量：`PLAIN_TEX` 夹具的合法极简文档是 33 字符，Adam 的空壳是 29 字符，**单看
+大小无法区分**。因此要求同时满足两条：源码里出现 `\includepdf`，且 TeX 正文小于
+`MIN_TEX_BODY_CHARS`。命中后取包内最大的、以 `%PDF-` 开头的文件走 PDF 通道，记一条 info
+级 `tex_body_empty_pdf_used`；包里找不到 PDF 时原样返回 TeX 结果，不报错——那只是一篇短论文。
+
+### 视觉格式覆盖与 Ghostscript（2026-08-04）
+
+真机上 44 篇论文的 1347 张图里有 59 张 EPS 完全读不了：`render_preview` 只认 PDF/PNG/JPEG/
+SVG 四种，EPS 返回 `None`，而处理器随后仍把 EPS 原始字节 base64 成
+`data:application/postscript` 发给视觉模型，模型全部拒收。**59 次调用白花，且失败计数被
+抬高到看不出真正的模型故障。**
+
+三处一起改：格式判定改按魔数、PostScript 外挂 Ghostscript、渲不出预览的格式不再内联原图。
+细节见上文「预览渲染与格式覆盖」。五篇 EPS 密集的老论文验证前后：
+
+| 论文 | 修复前 | 修复后 |
+| --- | ---: | ---: |
+| `arxiv:0810.3619` | 1/16 | 16/16 |
+| `arxiv:1305.1363` | 4/18 | 18/18 |
+| `arxiv:1307.5730` | 11/16 | 16/16 |
+| `arxiv:1503.03893` | 2/21 | 21/21 |
+| `arxiv:1710.00760` | 4/10 | 10/10 |
+
+五篇全部由 `degraded` 转 `pass_with_notes`，`visual_interpretation_failed` 消失，视觉失败
+从 63 降到 0。
+
 ## 已知限制
 
 - 复杂自定义 TeX 宏和非常规表格可能只能部分确定性展开；
 - PDF 的阅读顺序、公式和无框表格无法达到 TeX Source 的可靠度；
 - 图片中的数值、趋势和关系依赖实际注入的视觉模型；
+- EPS/PS 插图需要环境里有 Ghostscript，缺失时记 `visual_preview_unavailable` 并退回
+  caption 证据——不会静默丢图，但图里的数据确实没进语料；
 - `best_effort` 结果可能适合文本 RAG，但不代表多模态质量通过；
 - Athena 完整运行时仍需负责工具注册、上游来源交接和下游 RAG 摄取。
 

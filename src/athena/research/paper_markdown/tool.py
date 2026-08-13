@@ -8,7 +8,10 @@ from athena.research.paper_markdown.interfaces import (
     StructureRefiner,
     VisualInterpreter,
 )
-from athena.research.paper_markdown.processor import PaperProcessor
+from athena.research.paper_markdown.processor import (
+    DEFAULT_VISUAL_CONCURRENCY,
+    PaperProcessor,
+)
 from athena.research.paper_markdown.schemas import PaperConversionRequest
 from athena.core.contracts import ArtifactStore
 
@@ -48,12 +51,16 @@ class PaperMarkdownTool(BaseTool):
         artifacts: ArtifactStore,
         visual_interpreter: VisualInterpreter | None,
         structure_refiner: StructureRefiner | None = None,
+        visual_concurrency: int = DEFAULT_VISUAL_CONCURRENCY,
+        ghostscript: str | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.processor = PaperProcessor(
             artifacts,
             visual_interpreter,
             structure_refiner,
+            visual_concurrency=visual_concurrency,
+            ghostscript=ghostscript,
         )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:

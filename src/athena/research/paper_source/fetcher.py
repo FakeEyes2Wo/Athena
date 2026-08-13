@@ -22,6 +22,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from athena.core.artifact_store import ArtifactIntegrityError, ArtifactNotFoundError
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.research.paper_markdown.schemas import (
     PaperConversionRequest,
@@ -39,7 +40,11 @@ from athena.research.paper_source.arxiv import (
     ArxivResolution,
     versioned_locator,
 )
-from athena.research.paper_source.http import HostRateLimiter, HttpResponse
+from athena.research.paper_source.http import (
+    HostRateLimiter,
+    HttpResponse,
+    HttpTransportError,
+)
 from athena.research.paper_source.openalex import OpenAlexClient, OpenAlexWork
 from athena.research.paper_source.schemas import (
     PaperIdentity,
@@ -49,10 +54,6 @@ from athena.research.paper_source.schemas import (
     PaperSourceRequest,
     PaperSourceResult,
     PaperSourceStats,
-)
-from athena.core.artifact_store import (
-    ArtifactIntegrityError,
-    ArtifactNotFoundError,
 )
 
 TEX_MARKERS = (b"\\documentclass", b"\\begin{document}", b"\\section", b"\\input{")
@@ -268,18 +269,38 @@ class PaperSourceFetcher:
         resolution = await self._resolve_versions(accepted, diagnostics)
 
         # 阶段 3：逐篇取源并生成转换请求（唯一按篇计费的阶段）
+        #
+        # ``stop_after_fetched`` 让调用方按"要几篇成功的"下单，而不是按"试几篇"。取源
+        # 成功率按通道差一倍——实测六轮 arXiv 81/89 = 91%，期刊 17/36 = 47%（出版商反爬：
+        # IEEE 返回 0 字节，MDPI 与 ACM 403）——而交付集合的通道构成每轮都不同，任何固定
+        # 的超额系数都会在构成变化时失准。这里顺序尝试、够数即停，多余的候选一次都不下载。
         records: list[PaperSourceRecord] = []
+        target = request.policy.stop_after_fetched
+        fetched_so_far = 0
         for index, paper in enumerate(accepted):
             if cancel is not None and cancel.is_set():
                 raise asyncio.CancelledError
-            records.append(
-                await self._fetch_one(index, paper, request.policy, resolution)
+            if target and fetched_so_far >= target:
+                break
+            record = await self._fetch_one(index, paper, request.policy, resolution)
+            records.append(record)
+            if record.status == "fetched":
+                fetched_so_far += 1
+        if target and len(records) < len(accepted):
+            diagnostics.append(
+                diagnostic(
+                    "info",
+                    "paper_source.stopped_after_target",
+                    f"Stopped after {fetched_so_far} papers were fetched; "
+                    f"{len(accepted) - len(records)} candidates were never attempted.",
+                )
             )
 
         # 阶段 4：汇总统计
         stats = PaperSourceStats(
             requested=len(request.papers),
             accepted=len(accepted),
+            attempted=len(records),
             fetched=sum(1 for record in records if record.status == "fetched"),
             skipped=sum(1 for record in records if record.status == "skipped"),
             failed=sum(1 for record in records if record.status == "failed"),
@@ -303,7 +324,19 @@ class PaperSourceFetcher:
                 ordered.append(arxiv_id)
         if not ordered:
             return ArxivResolution()
-        resolution = await self.arxiv.resolve_batch(ordered)
+        try:
+            resolution = await self.arxiv.resolve_batch(ordered)
+        except HttpTransportError as error:
+            # 版本解析发生在逐篇取源之前，异常逃出去等于整批一篇都拿不到。退回空解析：
+            # 各篇按未钉版本继续，由 version_unresolved 那条既有策略决定跳过还是放宽。
+            diagnostics.append(
+                diagnostic(
+                    "error",
+                    "paper_source.transport_failed",
+                    f"arXiv metadata lookup was unreachable: {error}",
+                )
+            )
+            return ArxivResolution()
         for message in resolution.errors:
             diagnostics.append(
                 diagnostic("error", "paper_source.arxiv_lookup_failed", message)
@@ -335,7 +368,22 @@ class PaperSourceFetcher:
         metadata = self._build_metadata(
             paper, identity, resolved, paper_key, diagnostics
         )
-        outcome = await self._download(paper, identity, version, policy, diagnostics)
+        try:
+            outcome = await self._download(
+                paper, identity, version, policy, diagnostics
+            )
+        except HttpTransportError as error:
+            # 这一篇的某个通道在传输层失败（重试耗尽后抛出）→ 只让这一篇失败。取源是
+            # 逐篇循环，异常逃出去会让已经取到的论文一起丢掉，而取源恰恰是唯一按篇计费
+            # 的阶段：50 篇跑到第 12 篇挂掉，前 11 篇的下载就白花了。
+            diagnostics.append(
+                diagnostic(
+                    "error",
+                    "paper_source.transport_failed",
+                    f"Every channel for {paper_key} was unreachable: {error}",
+                )
+            )
+            outcome = ChannelOutcome(attempted=True)
         record = PaperSourceRecord(
             ref_index=index,
             paper_key=paper_key,
@@ -600,7 +648,20 @@ class PaperSourceFetcher:
         cached = await self._cached_payload(locator, channel)
         if cached:
             return ChannelOutcome(cached, True)
-        response = await self.http.get(url)
+        try:
+            response = await self.http.get(url)
+        except HttpTransportError as error:
+            # 上游线索指向的第三方主机不可达（DNS/TLS/超时）→ 记一条诊断继续试下一个
+            # 候选。这些 URL 来自检索后端，域名完全不可控，一个握手超时不该让整批取源
+            # 中断，更不该让同一篇论文放弃 OpenAlex 通道。
+            diagnostics.append(
+                diagnostic(
+                    "warning",
+                    "paper_source.transport_failed",
+                    f"Download hint {url} was unreachable: {error}",
+                )
+            )
+            return ChannelOutcome(attempted=True)
         if not response.ok:
             diagnostics.append(
                 diagnostic(

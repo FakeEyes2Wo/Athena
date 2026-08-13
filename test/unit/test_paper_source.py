@@ -21,6 +21,7 @@ from athena.research.paper_source.http import (
     DEFAULT_BUCKET_INTERVALS,
     HostRateLimiter,
     HttpResponse,
+    HttpTransportError,
     rate_limit_bucket,
 )
 from athena.research.paper_source.schemas import (
@@ -116,10 +117,17 @@ class FakeTransport:
         return HttpResponse(status=404, url=url, body=b"not found")
 
     def _take(self, prefix: str, url: str) -> HttpResponse:
-        """Pop the next queued response for a prefix, keeping the last one sticky."""
+        """Pop the next queued response for a prefix, keeping the last one sticky.
+
+        A route may also be an exception instance, which is raised instead of
+        returned; that is how transport-layer failures (DNS, TLS, timeout) are
+        simulated, since those never produce a response at all.
+        """
         route = self.routes[prefix]
         if isinstance(route, list):
-            return route.pop(0) if len(route) > 1 else route[0]
+            route = route.pop(0) if len(route) > 1 else route[0]
+        if isinstance(route, Exception):
+            raise route
         return route
 
     def count(self, prefix: str) -> int:
@@ -283,6 +291,43 @@ class RateLimiterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(503, response.status)
         self.assertEqual(4, rate_limited.request_count)
 
+    async def test_retries_a_transport_failure_just_like_a_429(self) -> None:
+        """超时与 429 一样是瞬时故障，必须重试。
+
+        真机命中：``export.arxiv.org`` 的批量版本解析是整批一次请求，它一超时，这一批
+        所有 arXiv 论文都会因 ``version_unresolved`` 被跳过——13 篇里当场丢掉 9 篇。
+        """
+        transport = FakeTransport(
+            {
+                "https://arxiv.org/src/": [
+                    HttpTransportError("timed out"),
+                    HttpTransportError("timed out"),
+                    ok(b"%PDF-1.5"),
+                ]
+            }
+        )
+        sleeps: list[float] = []
+
+        response = await limiter(transport, sleeps).get(SRC_URL)
+
+        self.assertEqual(200, response.status)
+        self.assertEqual(3, transport.count("https://arxiv.org/src/"))
+        self.assertEqual(2, len(sleeps))
+
+    async def test_a_transport_failure_still_surfaces_once_retries_run_out(
+        self,
+    ) -> None:
+        """持续不可达要如实上抛，由调用方按段决定降级——不能重试到永远也不能吞掉。"""
+        transport = FakeTransport(
+            {"https://arxiv.org/src/": HttpTransportError("timed out")}
+        )
+        rate_limited = limiter(transport, [])
+
+        with self.assertRaises(HttpTransportError):
+            await rate_limited.get(SRC_URL)
+
+        self.assertEqual(4, rate_limited.request_count)
+
     async def test_serializes_concurrent_requests_per_bucket(self) -> None:
         transport = FakeTransport({"https://arxiv.org/": ok(b"%PDF-1.5")})
         rate_limited = limiter(transport, [])
@@ -360,6 +405,60 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
                 )
             ],
             policy=PaperSourcePolicy(**policy),
+        )
+
+    async def test_an_unreachable_hint_host_does_not_abort_the_batch(self) -> None:
+        """真机命中：一条 doi.org 线索 TLS 握手超时，异常一路逃到 run_survey 打断全程。
+
+        线索 URL 来自检索后端，域名完全不可控。取源是唯一按篇计费的阶段，跑到一半崩掉
+        等于前面下载的都白花，因此传输层失败只能降级成诊断。
+        """
+        fetcher, transport = self.build(
+            {
+                QUERY_URL: ok(ATOM_FEED),
+                SRC_URL: ok(self.source),
+                "https://dead.example": HttpTransportError("handshake timed out"),
+            }
+        )
+        request = PaperSourceRequest(
+            papers=[
+                PaperRef(
+                    identity=PaperIdentity(doi="10.18845/tm.v37i7.7295"),
+                    hints=[SourceHint(url="https://dead.example/x.pdf", kind="oa_pdf")],
+                ),
+                PaperRef(identity=PaperIdentity(arxiv_id="arXiv:2501.10120")),
+            ],
+            policy=PaperSourcePolicy(),
+        )
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual("failed", result.records[0].status)
+        self.assertEqual("fetched", result.records[1].status)
+        self.assertIn(
+            "paper_source.transport_failed",
+            {item.code for item in result.records[0].diagnostics},
+        )
+
+    async def test_an_unreachable_metadata_endpoint_still_lets_papers_through(
+        self,
+    ) -> None:
+        """版本解析在逐篇取源之前，异常逃出去等于整批一篇都拿不到。"""
+        fetcher, _ = self.build(
+            {
+                QUERY_URL: HttpTransportError("arxiv.org unreachable"),
+                # 版本没解析出来，下载走的是不带 v2 的定位符
+                "https://arxiv.org/src/2501.10120": ok(self.source),
+            }
+        )
+
+        result = await fetcher.fetch(self.pasa_request(allow_unpinned_version=True))
+
+        self.assertEqual("fetched", result.records[0].status)
+        self.assertFalse(result.records[0].version_pinned)
+        self.assertIn(
+            "paper_source.transport_failed",
+            {item.code for item in result.diagnostics},
         )
 
     async def test_pins_resolved_version_and_emits_conversion_request(self) -> None:
@@ -583,6 +682,67 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, result.stats.accepted)
         self.assertIn(
             "paper_source.max_papers_truncated",
+            [item.code for item in result.diagnostics],
+        )
+
+    async def test_fetching_stops_once_the_success_target_is_met(self) -> None:
+        """按"要几篇成功的"下单，够数就不再下载后面的候选。
+
+        成功率按通道差一倍（实测 arXiv 91%、期刊 47%），而候选的通道构成每轮都不同，
+        任何固定的超额系数都会随构成失准——真机上失准过一次，13 篇候选里 5 篇取不到。
+        """
+        fetcher, transport = self.build(
+            {QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(self.source)}
+        )
+        request = self.pasa_request(max_papers=5, stop_after_fetched=1)
+        for extra in ("1706.03762", "1512.03385", "2009.02040"):
+            request.papers.append(PaperRef(identity=PaperIdentity(arxiv_id=extra)))
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual(4, result.stats.accepted)
+        self.assertEqual(1, result.stats.attempted)
+        self.assertEqual(1, result.stats.fetched)
+        self.assertEqual(1, len(result.records))
+        self.assertIn(
+            "paper_source.stopped_after_target",
+            [item.code for item in result.diagnostics],
+        )
+
+    async def test_failures_do_not_count_towards_the_success_target(self) -> None:
+        """失败的候选要继续往下试，否则"够数即停"就退化成"试够几次即停"。"""
+        fetcher, _ = self.build(
+            {
+                QUERY_URL: ok(ATOM_FEED),
+                "https://arxiv.org/src/2501.10120": HttpResponse(
+                    status=404, url="", body=b""
+                ),
+                "https://arxiv.org/src/": ok(self.source),
+            }
+        )
+        request = self.pasa_request(
+            max_papers=5, stop_after_fetched=1, allow_unpinned_version=True
+        )
+        request.papers.append(PaperRef(identity=PaperIdentity(arxiv_id="1706.03762")))
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual(2, result.stats.attempted)
+        self.assertEqual(1, result.stats.fetched)
+        self.assertEqual(1, result.stats.failed)
+
+    async def test_no_target_attempts_every_accepted_paper(self) -> None:
+        """默认 0 保持原行为：接受几篇就试几篇。"""
+        fetcher, _ = self.build({QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(self.source)})
+        request = self.pasa_request(max_papers=5)
+        request.papers.append(PaperRef(identity=PaperIdentity(arxiv_id="1706.03762")))
+
+        result = await fetcher.fetch(request)
+
+        self.assertEqual(2, result.stats.accepted)
+        self.assertEqual(2, result.stats.attempted)
+        self.assertNotIn(
+            "paper_source.stopped_after_target",
             [item.code for item in result.diagnostics],
         )
 

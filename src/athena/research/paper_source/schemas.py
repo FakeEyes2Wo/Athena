@@ -231,7 +231,19 @@ class PaperSourcePolicy(BaseModel):
         ),
     )
     max_papers: int = Field(
-        default=50, ge=1, le=500, description="Hard cap on papers fetched per request."
+        default=50,
+        ge=1,
+        le=500,
+        description="Hard cap on papers attempted per request.",
+    )
+    stop_after_fetched: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Stop attempting once this many papers have usable bytes; 0 attempts "
+            "every accepted paper. Lets a caller ask for N papers without guessing "
+            "the failure rate, which differs sharply by channel."
+        ),
     )
     visual_policy: VisualPolicy = Field(
         default="required",
@@ -320,7 +332,14 @@ class PaperSourceStats(BaseModel):
 
     requested: int = Field(ge=0, description="Papers supplied by the upstream.")
     accepted: int = Field(
-        ge=0, description="Papers attempted after the max_papers cap."
+        ge=0, description="Papers eligible to attempt after the max_papers cap."
+    )
+    attempted: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Papers actually attempted; below accepted when stop_after_fetched hit."
+        ),
     )
     fetched: int = Field(ge=0, description="Papers with usable stored source bytes.")
     skipped: int = Field(ge=0, description="Papers rejected by policy before download.")

@@ -103,9 +103,25 @@ sha256:dd3a498795a7586920d4256ccc08d0c58061e3f7c140f53092d0cd6a2c4cae5b
 2. `best_effort` 且解释不可用的表格不再生成重复视觉 retrieval unit；正文表格 chunk
    是其唯一文本检索单元。
 3. 有新增解释的视觉单元继续独立索引，并携带父 chunk 与章节元数据。
-4. `PaperContent` 暴露 `quality_status` 和 `quality_codes`。任何 warning/error 都产生
-   `degraded`，旧 schema 产物读取时为 `unknown`。
-5. `best_effort` 可以生成降级产物，但不得被标记为通过；`required` 仍要求视觉解释器。
+4. `PaperContent` 暴露 `quality_status` 和 `quality_codes`。状态按**内容是否真的丢了**
+   分三档，而不是按"有没有 warning"：
+
+   | 状态 | 含义 |
+   | --- | --- |
+   | `pass` | 没有 warning/error |
+   | `pass_with_notes` | 内容完整，只是记账不理想——chunk 超出目标大小、一个 chunk 含多个视觉、标签图不完整等 |
+   | `degraded` | 内容确实没进语料——视觉解释缺失或失败、`\input` 未解析、表格/公式 Markdown 失效、入口文件靠弱推断选出 |
+
+   旧 schema 产物读取时为 `unknown`。分级理由：此前"任何 warning 都降级"让"整个视觉模态
+   缺失"和"某个 chunk 比目标大 40%"拿到同一标签，下游看到 `degraded` 无法判断要不要重跑。
+   实测一轮三篇全是 `degraded`，而语料完整、链接无悬空、检索正常；改判后这三篇变成
+   `pass_with_notes`，另一轮里一篇 `tex_include_missing` 的论文**仍然是 `degraded`**——
+   那才是真的少了内容。
+
+   代码归类见 `quality.CONTENT_LOSS_CODES` 与 `BOOKKEEPING_CODES`；未登记的新代码按
+   `degraded` 处理（漏报比误报危险），且有覆盖测试强制新代码显式归类。
+5. `best_effort` 可以生成降级产物，但不得被标记为 `pass`；`required` 仍要求视觉解释器。
+   注意视觉解释缺失属于内容缺失，因此仍是 `degraded`，不会落到 `pass_with_notes`。
 
 ## 验收标准
 
@@ -273,8 +289,9 @@ PaSa 活动源码含 43 个有效 label，产物含 42 个，但集合并不等�
 图片只有 caption，无法提供曲线数值、趋势和图内关系等额外语义。
 
 这不是下载或模型供应商问题的工具内替代实现点。工具必须继续保留视觉解释注入接口：
-`required` 在解释不可用时拒绝产出，`best_effort` 允许生成明确的 degraded 产物；不得
-把 caption fallback 伪装为视觉理解。生产多模态验收必须由调用方注入解释器后重跑。
+`required` 在解释不可用时拒绝产出，`best_effort` 允许生成明确的 degraded 产物——视觉
+解释缺失是内容缺失，不会被分级规则降格成 `pass_with_notes`；不得把 caption fallback
+伪装为视觉理解。生产多模态验收必须由调用方注入解释器后重跑。
 
 ### 15. 论文原文存在低强度重复
 
@@ -302,7 +319,9 @@ PaSa 活动源码含 43 个有效 label，产物含 42 个，但集合并不等�
 3. TeX parser 从活动 document AST 独立收集 source labels 和 cross-reference targets，
    供质量门禁与元素 metadata 交叉验证。
 4. 活动 label 集与元素持久化 label 集不一致时产生稳定诊断；任何 cross-reference target
-   无法在持久化 label 集中解析时产生独立诊断并把产物标记为 degraded。
+   无法在持久化 label 集中解析时产生独立诊断。这两条属于记账类（`rag_label_graph_incomplete`、
+   `rag_cross_reference_unresolved`）——正文并没有丢，因此产物为 `pass_with_notes` 而非
+   `degraded`。
 
 ## 三次验收标准
 
@@ -390,7 +409,7 @@ label。消费者只能重新解析 `[label]` 文本，无法可靠区分普通�
 2. chunk 只聚合其实际元素包含的 reference keys；overlap 不得引入其他章节的引用边。
 3. `PaperChunk.reference_keys` 持久化局部边；正文 retrieval metadata 暴露同名字段。
 4. 元素 reference keys 的全集必须与活动 document AST 的 reference targets 一致，否则
-   产生稳定诊断并把产物标记为 degraded。
+   产生稳定诊断（`rag_reference_edges_incomplete`，记账类，产物为 `pass_with_notes`）。
 
 ### Multicolumn 去重
 
@@ -582,7 +601,7 @@ PaSa PDF。确定性文本和结构问题的修复结果如下：
   索引。独立单行公式仍按既有 `equation` 视觉协议处理，行内公式不产生视觉任务。
 - 质量门禁新增 `rag_control_character`、`rag_bibliography_fragment`、
   `rag_appendix_heading_unparsed` 检查；这些问题即使绕过 PDF parser 直接进入文档，也会
-  使结果保持 degraded。视觉解释器未注入仍会记录 `visual_interpretation_unavailable`，
+  被记录下来。按当前分级它们属于记账类，产物为 `pass_with_notes`。视觉解释器未注入仍会记录 `visual_interpretation_unavailable`，
   本轮不把它误判为 VLM 通过。
 
 PaSa 正式产物当前为 103 个 retrieval unit、25 个视觉对象（20 表、3 图、2 公式），
@@ -590,3 +609,53 @@ PaSa 正式产物当前为 103 个 retrieval unit、25 个视觉对象（20 表�
 字符区间回放通过，103 个 unit ID 均带 `arxiv:2501.10120:` namespace。非视觉 lexical
 probe 可以召回数据集、主结果、附录表格、prompt 和参考文献证据；公式 VLM 未注入时只
 保留两个可确定提取的独立公式和降级诊断，不以伪造文本替代视觉解释。
+
+## 六次审计：50 篇真实语料上的门禁误判（2026-08-04）
+
+前五次审计都在单篇论文上做。这一轮第一次拿全链路批量产物核对——一次 AI4S 式调研的
+44 篇转换结果——暴露的问题不在解析器，而在**门禁本身判得太狠**。
+
+### 26. `split` 环境被判成不支持的对齐标记
+
+`MATH_ALIGNMENT` 的正则只列了 `aligned|gathered|cases|array|\w*matrix`，漏掉 amsmath
+的其余对齐环境。真机上 8 个用 `split` 的合法公式被记 `rag_math_markdown_invalid`，
+连累三篇论文判 `degraded` 挡在语料外。
+
+逐条核对那 8 处：60 个公式 chunk、0 个空 body，KaTeX 渲染正常，**正文一个字都没丢**。
+
+改为把环境名抽成 `ALIGNMENT_ENVIRONMENTS` 常量，补齐 14 个环境并支持星号变体
+（`align*`、`alignat*`、`eqnarray*`），按长度降序排列避免前缀互吞。裸 `&`（无环境）与
+残留 `\label` 仍然报警——放宽识别不等于关掉这条检查。
+
+### 27. `degraded` 一票否决与论文规模无关
+
+`grade_quality` 是存在性判定：出现**一条**内容缺失诊断就否决整篇。85 个 chunk 的论文因
+1 条诊断出局，而 `paper_rag` 本身是 chunk 级检索——坏掉的公式或表格 chunk 根本不会被捞
+出来，局部缺陷不该否决整篇。
+
+实测一轮里 5 篇被挡的论文逐条核对后：4 篇是误判（3 篇 `split`、1 篇表格已由视觉解读
+覆盖），只有 1 篇 `tex_bibliography_unresolved` 是真实但很窄的损失（正文完整）。
+
+因此把判断从质量门禁移到**流水线的语料门禁**：`SurveyPipeline._indexable` 默认接受
+`degraded`，只保留 `suspect_empty` 一票否决——后者表达的是另一件事，正文根本没提取出来，
+空壳既提供不了证据又会让语料看起来已覆盖这篇论文。需要干净语料的评测可用
+`strict_quality=True` 恢复严格口径。
+
+`grade_quality` 的三档分级本身不变：它描述事实，由消费者决定怎么用。
+
+### 28. 视觉预览失败没有独立的诊断码
+
+图渲染不出来时此前只会在调用模型失败后记 `visual_interpretation_failed`，而"格式不支持"
+和"模型故障"是两回事。新增 `visual_preview_unavailable`（归入 `CONTENT_LOSS_CODES`），
+`reason` 区分 `empty_asset` / `ghostscript_missing` / `ghostscript_failed` /
+`unsupported_format`。补上 Ghostscript 后 63 次视觉失败降为 0，详见
+[paper_markdown 文档](paper_markdown_tool_ch.md)。
+
+### 六次验收标准
+
+- `split` 及其余 14 个 amsmath 对齐环境（含星号变体）不再触发 `rag_math_markdown_invalid`；
+  无环境的裸 `&` 与残留 `\label` 仍然触发；
+- 语料门禁默认放行 `degraded`，`suspect_empty` 仍被拒；`strict_quality` 可恢复严格口径；
+- 每个新增诊断码都在 `CONTENT_LOSS_CODES` 或 `BOOKKEEPING_CODES` 里有归属
+  （`test_every_emitted_code_is_classified` 保证）；
+- 真机复核：`arxiv:1908.01672` 与 `arxiv:2407.14381` 由 `degraded` 转 `pass`。

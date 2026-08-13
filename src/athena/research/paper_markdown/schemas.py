@@ -5,11 +5,15 @@
 或视觉单元增量加载。
 """
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
-from athena.core.contracts import ArtifactRef, ArtifactStore
+from athena.core.contracts import ArtifactRef
+
+if TYPE_CHECKING:
+    from athena.core.contracts import ArtifactStore
+
 
 SourceKind = Literal["tex", "pdf"]
 ElementKind = Literal[
@@ -29,7 +33,7 @@ VisualKind = Literal["figure", "table", "equation", "page"]
 TexSourceFormat = Literal["auto", "tar", "tar.gz", "zip", "gzip", "plain"]
 VisualPolicy = Literal["required", "best_effort"]
 InterpretationStatus = Literal["interpreted", "unavailable", "unknown"]
-QualityStatus = Literal["pass", "degraded", "unknown"]
+QualityStatus = Literal["pass", "pass_with_notes", "degraded", "unknown"]
 
 
 class ChunkingConfig(BaseModel):

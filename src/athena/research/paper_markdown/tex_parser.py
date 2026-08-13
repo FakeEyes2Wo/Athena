@@ -80,6 +80,10 @@ FIGURE_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".svg", ".eps")
 CITATION_PATTERN = re.compile(
     r"\\(?:cite|citep|citet|citealp|citeauthor|parencite|textcite)\w*\s*(?:\[[^]]*\]\s*)*\{([^}]+)\}"
 )
+IMAGE_PATH = re.compile(r"\S*\.(?:png|jpe?g|pdf|eps|svg|gif|tif{1,2})\b", re.IGNORECASE)
+INLINE_MARKUP = re.compile(r"[`*_]{1,3}")
+# 只剥标题最前面的"会场缩写 + 四位年份"，避免误伤 "BERT 2018 revisited" 这类正文标题
+VENUE_PREFIX = re.compile(r"^(?:[A-Z][A-Za-z&.\-]{1,14}\s*)?[A-Z]{2,12}\s*'?\d{2,4}\b")
 LABEL_PATTERN = re.compile(r"\\label\s*\{([^}]+)\}")
 REFERENCE_PATTERN = re.compile(r"\\(?:ref|eqref|autoref|cref|Cref)\s*\{([^}]+)\}")
 GRAPHICSPATH_PATTERN = re.compile(r"\\graphicspath\s*\{((?:\s*\{[^{}]*\}\s*)+)\}")
@@ -571,6 +575,25 @@ def clean_inline(text: str) -> str:
     """规整段落内部空白，同时保留显式换行。"""
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line).strip()
+
+
+def normalize_title(value: str) -> str:
+    """把渲染后的 ``\\title`` 压成一行纯文本标题，去掉排版夹带的内容。
+
+    ``\\title{}`` 的参数经常不只有标题：作者会把会场名、占位图标、换行排版一起塞进去，
+    而渲染器忠实地把它们都渲染出来。标题还会流进 ``PaperContent.title`` 和交给
+    paper_source 的 ``upstream_metadata``，后者用它做身份校验，脏标题会引发误报的
+    ``title_mismatch``，所以这里按元数据口径再规整一次，正文标题也用同一个值。
+
+    三类夹带各有来源：图片路径来自用户自定义宏（``\\icon`` → ``\\img{...}``）里未知宏
+    的花括号组直落为字面文本；会场名是作者真的写在 ``\\title{}`` 里的；换行则是标题本
+    身的 ``\\\\``。``normalize_title("`ReAct`: Synergizing")`` 返回
+    ``"ReAct: Synergizing"``。
+    """
+    text = IMAGE_PATH.sub(" ", value)
+    text = INLINE_MARKUP.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return VENUE_PREFIX.sub("", text).strip(" :-—")
 
 
 def clean_author_name(value: str) -> str:
@@ -1353,7 +1376,7 @@ class TexPaperParser:
             ).get_latex_nodes()
         except Exception as error:
             raise ValueError(f"Failed to parse TeX source: {error}") from error
-        title = self.macro_value(nodes, "title")
+        title = normalize_title(self.macro_value(nodes, "title"))
         authors = self.author_values(nodes)
         document = next(
             (

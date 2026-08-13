@@ -15,7 +15,12 @@ from athena.research.paper_markdown.schemas import (
 )
 from athena.research.paper_rag.contextual import contextualize_entries
 from athena.research.paper_rag.index import (
+    SEMANTIC_MARGIN_THRESHOLD,
+    SEMANTIC_PROBES,
+    NonSemanticEmbedderError,
     build_corpus_index,
+    require_semantic_embedder,
+    semantic_margin,
     display_math_close,
     is_indexable,
     split_sentences,
@@ -24,15 +29,22 @@ from athena.research.paper_rag.schemas import PaperCorpusIndex
 from athena.research.paper_rag.search import (
     ALREADY_READ_NOTICE,
     RetrievalSession,
+    citation_links,
     keyword_search,
     read_chunks,
+    paper_namespace,
+    section_search,
     self_contained_weight,
     semantic_search,
+    visual_links,
 )
 from athena.research.paper_rag.tool import (
     PaperChunkReadTool,
+    PaperCitesTool,
     PaperKeywordSearchTool,
+    PaperSectionSearchTool,
     PaperSemanticSearchTool,
+    PaperVisualOfTool,
 )
 from athena.core.artifact_store import LocalArtifactStore
 
@@ -53,6 +65,48 @@ class FakeEmbedder:
             [float(text.lower().count(word)) for word in self.vocabulary]
             for text in texts
         ]
+
+
+class BagOfWordsEmbedder:
+    """The lexical placeholder earlier runs had to use; kept as the negative case."""
+
+    model = "bag-of-words"
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        vocabulary: dict[str, int] = {}
+        for text in texts:
+            for token in text.lower().split():
+                vocabulary.setdefault(token.strip(".,"), len(vocabulary))
+        vectors = []
+        for text in texts:
+            vector = [0.0] * max(len(vocabulary), 1)
+            for token in text.lower().split():
+                vector[vocabulary[token.strip(".,")]] += 1.0
+            vectors.append(vector)
+        return vectors
+
+
+class SemanticStubEmbedder:
+    """Places each probe anchor beside its paraphrase and away from the distractor."""
+
+    model = "semantic-stub"
+
+    def __init__(self) -> None:
+        self.placement: dict[str, list[float]] = {}
+        for index, (anchor, paraphrase, unrelated) in enumerate(SEMANTIC_PROBES):
+            topic = [0.0] * (len(SEMANTIC_PROBES) + 1)
+            topic[index] = 1.0
+            self.placement[anchor] = list(topic)
+            near = list(topic)
+            near[-1] = 0.3
+            self.placement[paraphrase] = near
+            far = [0.0] * (len(SEMANTIC_PROBES) + 1)
+            far[-1] = 1.0
+            self.placement[unrelated] = far
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        width = len(SEMANTIC_PROBES) + 1
+        return [self.placement.get(text, [0.0] * width) for text in texts]
 
 
 async def noop_emit(kind: str, ref: str, data: dict | None = None) -> None:
@@ -95,6 +149,43 @@ async def make_paper(
         diagnostics_ref=await store.put_text("[]"),
         chunks=chunks,
     )
+
+
+CITED_TITLE = "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"
+
+
+async def make_citing_pair(store: LocalArtifactStore) -> list[PaperContent]:
+    """Two papers where the second cites the first, with a real bibliography chunk."""
+    cited = await make_paper(store, "p-cited", CITED_TITLE, ["We introduce RAG."])
+    cited.chunks[0].kind = "abstract"
+    citing = await make_paper(
+        store,
+        "p-citing",
+        "Few-shot Learning with Retrieval Augmented Language Models",
+        ["We build on retrieval augmentation [@lewis2020].", "Unrelated closing text."],
+    )
+    citing.chunks[0].citation_keys = ["lewis2020"]
+    reference = (
+        "## References\n\n- [@lewis2020] Patrick Lewis, Ethan Perez, and others. "
+        f"{CITED_TITLE}. NeurIPS 2020."
+    )
+    outside = (
+        "## References\n\n- [@vaswani2017] Ashish Vaswani and others. "
+        "Attention Is All You Need. NeurIPS 2017."
+    )
+    for position, text in enumerate((reference, outside), start=len(citing.chunks)):
+        citing.chunks.append(
+            PaperChunk(
+                chunk_id=f"b{position}",
+                kind="bibliography",
+                content_ref=await store.put_text(text),
+                heading_path=["References"],
+                char_start=0,
+                char_end=len(text),
+                token_estimate=len(text) // 4,
+            )
+        )
+    return [cited, citing]
 
 
 async def make_illustrated_paper(
@@ -326,9 +417,9 @@ class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
         by_id = {entry.chunk_id: entry for entry in index.entries}
 
         self.assertIn("p1:figure-1", by_id)
-        self.assertEqual(["p1:figure-1"], by_id["p1:c0"].related_ids)
-        self.assertEqual(["p1:c0"], by_id["p1:figure-1"].related_ids)
-        self.assertEqual([], by_id["p1:c1"].related_ids)
+        self.assertEqual(["p1:figure-1"], by_id["p1:c0"].visual_ids)
+        self.assertEqual(["p1:c0"], by_id["p1:figure-1"].visual_ids)
+        self.assertEqual([], by_id["p1:c1"].visual_ids)
 
     async def test_links_to_uninterpreted_visuals_are_dropped(self) -> None:
         paper = await make_illustrated_paper(self.store, "unavailable")
@@ -341,7 +432,7 @@ class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
 
         # 视觉单元没进语料，指向它的链接必须一并剔除，否则 Agent 会读到 not_found
         self.assertNotIn("p1:figure-1", by_id)
-        self.assertEqual([], by_id["p1:c0"].related_ids)
+        self.assertEqual([], by_id["p1:c0"].visual_ids)
 
     async def test_embedder_records_model_and_persists_one_vector_per_sentence(
         self,
@@ -481,12 +572,12 @@ class ChunkReadTest(unittest.IsolatedAsyncioTestCase):
 
         hits = keyword_search(corpus, ["retrieval accuracy"], 5)
         target = next(hit for hit in hits if hit.chunk_id == "p1:c0")
-        figure = read_chunks(corpus, session, target.related_ids, False)
+        figure = read_chunks(corpus, session, target.visual_ids, False)
 
-        self.assertEqual(["p1:figure-1"], target.related_ids)
+        self.assertEqual(["p1:figure-1"], target.visual_ids)
         self.assertEqual("read", figure[0].status)
         self.assertIn("plots retrieval accuracy", figure[0].text)
-        self.assertEqual(["p1:c0"], figure[0].related_ids)
+        self.assertEqual(["p1:c0"], figure[0].visual_ids)
 
     async def test_unknown_chunk_id_is_reported_not_raised(self) -> None:
         chunks = read_chunks(self.corpus, self.session, ["p1:missing"], False)
@@ -587,9 +678,441 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(result.data["hits"]))
 
 
+class BibliographyAsCitationEdgeTest(unittest.IsolatedAsyncioTestCase):
+    """References carry more value as graph edges than as retrievable passages.
+
+    SciRAG (EACL 2026) calls indexing them as plain text a superficial use of the
+    citation structure; here they leave the retrievable set and reappear as links
+    from the citing chunk to the cited paper.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp())
+        self.papers = await make_citing_pair(self.store)
+
+    async def load(self, **kwargs) -> PaperCorpusIndex:
+        ref = await build_corpus_index(self.store, self.papers, **kwargs)
+        return PaperCorpusIndex.model_validate_json(await self.store.get_text(ref))
+
+    async def test_bibliography_is_not_a_retrieval_unit_by_default(self) -> None:
+        index = await self.load()
+        self.assertNotIn("bibliography", {entry.kind for entry in index.entries})
+
+    async def test_bibliography_can_be_restored_for_comparison(self) -> None:
+        index = await self.load(index_bibliography=True)
+        kinds = [entry.kind for entry in index.entries]
+        self.assertEqual(2, kinds.count("bibliography"))
+
+    async def test_citing_chunk_links_to_the_cited_paper(self) -> None:
+        index = await self.load()
+        citing = next(entry for entry in index.entries if "[@lewis2020]" in entry.text)
+        target = next(entry for entry in index.entries if entry.paper_id == "p-cited")
+        self.assertIn(target.chunk_id, citing.cited_ids)
+
+    async def test_the_link_lands_on_the_abstract_of_the_cited_paper(self) -> None:
+        index = await self.load()
+        citing = next(entry for entry in index.entries if "[@lewis2020]" in entry.text)
+        landed = next(
+            entry for entry in index.entries if entry.chunk_id == citing.cited_ids[0]
+        )
+        self.assertEqual("abstract", landed.kind)
+
+    async def test_references_outside_the_corpus_create_no_edge(self) -> None:
+        index = await self.load()
+        for entry in index.entries:
+            self.assertTrue(
+                all(
+                    item in {e.chunk_id for e in index.entries}
+                    for item in entry.cited_ids
+                )
+            )
+        citing = next(entry for entry in index.entries if "[@lewis2020]" in entry.text)
+        self.assertEqual(1, len(citing.cited_ids))
+
+    async def test_dropping_bibliography_shrinks_the_sentence_index(self) -> None:
+        without = await self.load()
+        with_bibliography = await self.load(index_bibliography=True)
+        self.assertLess(len(without.sentences), len(with_bibliography.sentences))
+        self.assertLess(len(without.entries), len(with_bibliography.entries))
+
+
 class ContextualSkeletonTest(unittest.IsolatedAsyncioTestCase):
     async def test_reserved_entry_point_refuses_instead_of_silently_passing_through(
         self,
     ) -> None:
         with self.assertRaises(NotImplementedError):
             await contextualize_entries([], "document", None)
+
+
+class SemanticEmbedderGuardTest(unittest.IsolatedAsyncioTestCase):
+    """A lexical stand-in builds a corpus that looks fine and retrieves noise.
+
+    Measured on the same corpus, lexical vs neural encoding differ by 8.7x in MRR
+    (0.048 vs 0.417) with R@1 of 0.025, so an accidental injection is not a small
+    regression. The probe pairs share no content words between anchor and
+    paraphrase, which is exactly what a bag-of-words encoder cannot bridge.
+    """
+
+    async def test_a_lexical_encoder_is_rejected(self) -> None:
+        with self.assertRaises(NonSemanticEmbedderError):
+            await require_semantic_embedder(BagOfWordsEmbedder())
+
+    async def test_the_rejection_names_the_model_and_the_threshold(self) -> None:
+        with self.assertRaises(NonSemanticEmbedderError) as caught:
+            await require_semantic_embedder(BagOfWordsEmbedder())
+        message = str(caught.exception)
+        self.assertIn("bag-of-words", message)
+        self.assertIn(str(SEMANTIC_MARGIN_THRESHOLD), message)
+
+    async def test_a_semantic_encoder_is_accepted(self) -> None:
+        margin = await require_semantic_embedder(SemanticStubEmbedder())
+        self.assertGreaterEqual(margin, SEMANTIC_MARGIN_THRESHOLD)
+
+    async def test_margin_is_reported_without_raising(self) -> None:
+        self.assertLess(await semantic_margin(BagOfWordsEmbedder()), 0.25)
+        self.assertGreater(await semantic_margin(SemanticStubEmbedder()), 0.25)
+
+
+class TypedEdgeTest(unittest.IsolatedAsyncioTestCase):
+    """Text/visual links and citation links are different relations.
+
+    Merged into one untyped list an agent can only follow them blindly; separated,
+    "look at the figure this passage discusses" and "find who cites this paper" are
+    two nameable actions with different answers.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    async def load_illustrated(self):
+        paper = await make_illustrated_paper(self.store, "interpreted")
+        return await self.session.load(
+            self.store, await build_corpus_index(self.store, [paper])
+        )
+
+    async def load_citing(self):
+        return await self.session.load(
+            self.store,
+            await build_corpus_index(self.store, await make_citing_pair(self.store)),
+        )
+
+    async def test_the_two_relations_live_in_separate_fields(self) -> None:
+        corpus = await self.load_citing()
+        citing = next(
+            entry for entry in corpus.index.entries if "[@lewis2020]" in entry.text
+        )
+
+        self.assertEqual([], citing.visual_ids)
+        self.assertEqual(1, len(citing.cited_ids))
+
+    async def test_visual_links_walk_in_both_directions(self) -> None:
+        corpus = await self.load_illustrated()
+
+        forward = visual_links(corpus, ["p1:c0"])
+        backward = visual_links(corpus, ["p1:figure-1"])
+
+        self.assertEqual(["p1:figure-1"], [hit.chunk_id for hit in forward])
+        self.assertEqual(["p1:c0"], [hit.chunk_id for hit in backward])
+
+    async def test_traversal_hits_carry_an_orienting_snippet(self) -> None:
+        corpus = await self.load_illustrated()
+
+        hit = visual_links(corpus, ["p1:c0"])[0]
+
+        self.assertIn("Figure 1", hit.snippet)
+        self.assertEqual("visual:figure", hit.kind)
+
+    async def test_unknown_and_repeated_ids_are_skipped_not_reported(self) -> None:
+        corpus = await self.load_illustrated()
+
+        hits = visual_links(corpus, ["p1:c0", "p1:c0", "p1:missing"])
+
+        self.assertEqual(["p1:figure-1"], [hit.chunk_id for hit in hits])
+
+    async def test_forward_citation_reaches_the_cited_paper(self) -> None:
+        corpus = await self.load_citing()
+        citing = next(
+            entry for entry in corpus.index.entries if "[@lewis2020]" in entry.text
+        )
+
+        hits = citation_links(corpus, [citing.chunk_id], "cites")
+
+        self.assertEqual(1, len(hits))
+        self.assertEqual("p-cited", hits[0].paper_id)
+
+    async def test_reverse_citation_finds_who_cites_the_paper(self) -> None:
+        corpus = await self.load_citing()
+
+        hits = citation_links(corpus, ["p-cited:c0"], "cited_by")
+
+        self.assertEqual(1, len(hits))
+        self.assertEqual("p-citing", hits[0].paper_id)
+        self.assertIn("[@lewis2020]", hits[0].snippet)
+
+    async def test_reverse_citation_accepts_any_chunk_of_the_cited_paper(self) -> None:
+        """Edges land on the paper anchor, so a mid-body id must still resolve."""
+        papers = await make_citing_pair(self.store)
+        papers[0].chunks.append(
+            PaperChunk(
+                chunk_id="c9",
+                kind="paragraph",
+                content_ref=await self.store.put_text("A later section of the paper."),
+                heading_path=["Method"],
+                char_start=0,
+                char_end=30,
+                token_estimate=8,
+            )
+        )
+        corpus = await self.session.load(
+            self.store, await build_corpus_index(self.store, papers)
+        )
+
+        hits = citation_links(corpus, ["p-cited:c9"], "cited_by")
+
+        self.assertEqual(["p-citing"], [hit.paper_id for hit in hits])
+
+
+class SectionSearchTest(unittest.IsolatedAsyncioTestCase):
+    """Contrary evidence sits in a comparable section of a different paper.
+
+    Semantic search ranks text that agrees with the query highest because agreement
+    is what similarity measures; a structural entry point does not have that bias.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    async def corpus(self):
+        papers = []
+        for name in ("pa", "pb"):
+            paper = await make_paper(
+                self.store, name, f"Paper {name}", ["Method text.", "Limits text."]
+            )
+            paper.chunks[1].heading_path = ["Limitations"]
+            papers.append(paper)
+        return await self.session.load(
+            self.store, await build_corpus_index(self.store, papers)
+        )
+
+    async def test_a_heading_spans_every_paper_by_default(self) -> None:
+        hits = section_search(await self.corpus(), "limitations", [], 10)
+
+        self.assertEqual({"pa", "pb"}, {hit.paper_id for hit in hits})
+
+    async def test_matching_is_case_insensitive_and_partial(self) -> None:
+        hits = section_search(await self.corpus(), "LIMIT", [], 10)
+
+        self.assertEqual(2, len(hits))
+
+    async def test_paper_ids_restrict_the_slice(self) -> None:
+        hits = section_search(await self.corpus(), "limitations", ["pa"], 10)
+
+        self.assertEqual(["pa"], [hit.paper_id for hit in hits])
+
+    async def test_an_unknown_heading_returns_nothing_rather_than_guessing(
+        self,
+    ) -> None:
+        self.assertEqual([], section_search(await self.corpus(), "appendix", [], 10))
+
+
+class TypedOperatorToolTest(unittest.IsolatedAsyncioTestCase):
+    """The operator boundary: which tool the agent picks is the routing decision."""
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+        self.embedder = FakeEmbedder(VOCABULARY)
+
+    async def test_visual_of_tool_round_trips_through_the_registry(self) -> None:
+        paper = await make_illustrated_paper(self.store, "interpreted")
+        corpus_ref = await build_corpus_index(self.store, [paper])
+        registry = ToolRegistry()
+        registry.register(PaperVisualOfTool(self.store, self.session))
+
+        result = await registry.resolve("paper_visual_of").ainvoke(
+            context("paper_visual_of"), corpus_ref=corpus_ref, chunk_ids=["p1:c0"]
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual("p1:figure-1", result.data["hits"][0]["chunk_id"])
+
+    async def test_cites_tool_reports_the_direction_it_walked(self) -> None:
+        corpus_ref = await build_corpus_index(
+            self.store, await make_citing_pair(self.store)
+        )
+        tool = PaperCitesTool(self.store, self.session)
+
+        result = await tool.ainvoke(
+            context("paper_cites"),
+            corpus_ref=corpus_ref,
+            chunk_ids=["p-cited:c0"],
+            direction="cited_by",
+        )
+
+        self.assertEqual("cited_by", result.data["direction"])
+        self.assertEqual("p-citing", result.data["hits"][0]["paper_id"])
+
+    async def test_cites_tool_rejects_an_unknown_direction(self) -> None:
+        corpus_ref = await build_corpus_index(
+            self.store, await make_citing_pair(self.store)
+        )
+        tool = PaperCitesTool(self.store, self.session)
+
+        result = await tool.ainvoke(
+            context("paper_cites"),
+            corpus_ref=corpus_ref,
+            chunk_ids=["p-cited:c0"],
+            direction="sideways",
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("direction", result.error)
+
+    async def test_section_tool_requires_a_heading(self) -> None:
+        corpus_ref = await build_corpus_index(
+            self.store,
+            [await make_paper(self.store, "p1", "Paper One", ["Plain text."])],
+        )
+        tool = PaperSectionSearchTool(self.store, self.session)
+
+        result = await tool.ainvoke(
+            context("paper_section_search"), corpus_ref=corpus_ref, heading="  "
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("heading", result.error)
+
+
+class NamespacedIdTest(unittest.IsolatedAsyncioTestCase):
+    """Real paper keys carry a prefix, so the namespace is not the first segment.
+
+    A left split turns every arxiv paper into the namespace "arxiv", which made
+    reverse citation return the citing chunks of the whole corpus instead of the
+    ones citing the paper asked about. Caught by a live run, not by the fixtures,
+    because the fixtures used bare ids.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    def test_namespace_keeps_the_prefixed_paper_key(self) -> None:
+        self.assertEqual("arxiv:1706.03762", paper_namespace("arxiv:1706.03762:c0"))
+        self.assertEqual("doi:10.1145/x", paper_namespace("doi:10.1145/x:chunk-a"))
+        self.assertEqual("p1", paper_namespace("p1:c0"))
+
+    async def test_reverse_citation_does_not_leak_across_papers(self) -> None:
+        """Two prefixed papers citing a third: asking about one must not return both."""
+        cited = await make_paper(
+            self.store, "arxiv:1000.0001", CITED_TITLE, ["We introduce RAG."]
+        )
+        cited.chunks[0].kind = "abstract"
+        other = await make_paper(
+            self.store,
+            "arxiv:2000.0002",
+            "An Unrelated Paper About Grasping Objects",
+            ["Nothing to do with retrieval."],
+        )
+        papers = [cited, other]
+        for index, citing_id in enumerate(("arxiv:3000.0003", "arxiv:4000.0004")):
+            citing = await make_paper(
+                self.store,
+                citing_id,
+                f"Citing Paper Number {index} With A Sufficiently Long Title",
+                [f"We build on retrieval augmentation [@lewis{index}]."],
+            )
+            citing.chunks[0].citation_keys = [f"lewis{index}"]
+            reference = (
+                f"## References\n\n- [@lewis{index}] Patrick Lewis and others. "
+                f"{CITED_TITLE}. NeurIPS 2020."
+            )
+            citing.chunks.append(
+                PaperChunk(
+                    chunk_id="b1",
+                    kind="bibliography",
+                    content_ref=await self.store.put_text(reference),
+                    heading_path=["References"],
+                    char_start=0,
+                    char_end=len(reference),
+                    token_estimate=len(reference) // 4,
+                )
+            )
+            papers.append(citing)
+        corpus = await self.session.load(
+            self.store, await build_corpus_index(self.store, papers)
+        )
+
+        hits = citation_links(corpus, ["arxiv:1000.0001:c0"], "cited_by")
+        empty = citation_links(corpus, ["arxiv:2000.0002:c0"], "cited_by")
+
+        self.assertEqual(
+            {"arxiv:3000.0003", "arxiv:4000.0004"}, {hit.paper_id for hit in hits}
+        )
+        self.assertEqual([], empty)
+
+
+class SectionRoundRobinTest(unittest.IsolatedAsyncioTestCase):
+    """The section operator exists to compare papers, so one paper must not fill it.
+
+    A live run returned ten Ablation chunks drawn from a single paper while nine
+    other papers had an Ablation section, which defeats the point of the operator.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    async def corpus(self, heavy: int, light: int):
+        papers = [
+            await make_paper(
+                self.store,
+                "heavy",
+                "Heavy Paper",
+                [f"Ablation detail number {index}." for index in range(heavy)],
+            )
+        ]
+        for index in range(light):
+            papers.append(
+                await make_paper(
+                    self.store,
+                    f"light{index}",
+                    f"Light Paper {index}",
+                    ["A single ablation paragraph."],
+                )
+            )
+        for paper in papers:
+            for chunk in paper.chunks:
+                chunk.heading_path = ["Ablation"]
+        return await self.session.load(
+            self.store, await build_corpus_index(self.store, papers)
+        )
+
+    async def test_every_paper_gets_a_slot_before_any_gets_a_second(self) -> None:
+        hits = section_search(await self.corpus(heavy=20, light=4), "ablation", [], 5)
+
+        self.assertEqual(5, len(hits))
+        self.assertEqual(5, len({hit.paper_id for hit in hits}))
+
+    async def test_a_deeper_budget_returns_to_the_richest_paper(self) -> None:
+        """Three papers, budget six: one each, then the surplus goes where it exists."""
+        hits = section_search(await self.corpus(heavy=20, light=2), "ablation", [], 6)
+
+        counts: dict[str, int] = {}
+        for hit in hits:
+            counts[hit.paper_id] = counts.get(hit.paper_id, 0) + 1
+
+        self.assertEqual({"heavy", "light0", "light1"}, set(counts))
+        self.assertEqual(1, counts["light0"])
+        self.assertEqual(1, counts["light1"])
+        self.assertEqual(4, counts["heavy"])
+        self.assertEqual({"heavy", "light0", "light1"}, {h.paper_id for h in hits[:3]})
+
+    async def test_restricting_to_one_paper_still_returns_its_chunks(self) -> None:
+        hits = section_search(
+            await self.corpus(heavy=8, light=3), "ablation", ["heavy"], 5
+        )
+
+        self.assertEqual({"heavy"}, {hit.paper_id for hit in hits})
+        self.assertEqual(5, len(hits))

@@ -17,6 +17,22 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
 | [Prompt 驱动 Agents 设计](architecture/2026-08-09-prompt-driven-agents-design.md) | current | Prompt 驱动 Agents 改造设计（历史） |
 
+## Academic Survey
+
+一句主题 → 一个可检索的论文语料库。四段流水线各有一篇工具文档，组合根与全链路合在一篇。
+
+| 文档 | 状态 | 用途 |
+|---|---|---|
+| [全链路：组合根与流水线](academic_survey_ch.md) | current | 三个入口、环境变量、成本账与真机失败清单 |
+| [PaperScout Agent](paper_scout_agent_ch.md) | current | 多轮 search/expand 检索、打分门槛纪律 |
+| [PaperScout 复现](paper_scout_reproduction_ch.md) | current | 与论文口径的对照与偏差 |
+| [paper_source 工具](paper_source_tool_ch.md) | current | 取源通道、版本固定与限流 |
+| [paper_source 上游契约](paper_source_upstream_contract_ch.md) | current | 交给取源的 `PaperRef` 长什么样 |
+| [paper_markdown 工具](paper_markdown_tool_ch.md) | current | TeX/PDF → 带图表解读的 Markdown |
+| [paper_markdown 输出](paper_markdown_rag_output_ch.md) | current | chunk 与视觉单元的落盘形态 |
+| [paper_markdown 质量](paper_markdown_rag_quality_ch.md) | current | 质量门禁判定与诊断码 |
+| [paper_rag 工具](paper_rag_tool_ch.md) | current | 两个检索算子 + 三个遍历算子 + 整篇读取 |
+
 ## 维护规则
 
 Canonical model owners are `athena.core.contracts`,
