@@ -155,13 +155,28 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
         ),
     )
     print_report(report)
-    if args.out:
-        Path(args.out).write_text(
+    _write_report(report, args.out)
+    return 0 if report.converted() else 1
+
+
+def _write_report(report, path: str) -> None:
+    """把报告落到 ``--out``；写不进去只报错，不抹掉已经跑完的那一轮。
+
+    全链路要跑十几分钟并真的花钱，而报告此时已经打在屏幕上了。让一个打错的路径
+    以 traceback 结束整条命令，丢的是唯一一份成本账，而不是那个路径。
+    """
+    if not path:
+        return
+    try:
+        Path(path).write_text(
             json.dumps(report.model_dump(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        print(f"\n报告已写入 {args.out}")
-    return 0 if report.converted() else 1
+    except OSError as error:
+        # 路径不存在/无权限/盘满 → 报告已打印，只提示写入失败
+        print(f"\n报告写入失败（{path}）：{error}", file=sys.stderr)
+        return
+    print(f"\n报告已写入 {path}")
 
 
 async def _dispatch_command(args: argparse.Namespace) -> int:
