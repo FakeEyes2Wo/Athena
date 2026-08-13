@@ -6,9 +6,11 @@ import pytest
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.research.contracts import ValidationResult
+from athena.research.script_runner import load_directory
 from athena.research.supervisor.validation import (
     ValidationDiffReview,
     ValidationInput,
+    _execute_predictions,
     recovery_action,
     review_validation_diff,
     validation_key,
@@ -393,3 +395,97 @@ async def test_validation_rejects_binary_diff_without_llm_review(tmp_path) -> No
 
     assert result.accepted is False
     assert reviewer_called is False
+
+
+class _StubExecution:
+    def __init__(self, environment_root: Path) -> None:
+        self.environment_root = environment_root
+
+    async def run(self, context, command=None, *, argv=None, **kwargs):
+        del context, command, argv, kwargs
+
+        class _Ok:
+            ok = True
+            stdout = ""
+            stderr = ""
+            exit_code = 0
+
+        return _Ok()
+
+
+class _StubGit:
+    def __init__(self) -> None:
+        self.restored: list[tuple[str, ...]] = []
+
+    async def restore_paths(self, workspace, paths) -> None:
+        del workspace
+        self.restored.append(tuple(paths))
+
+
+@pytest.mark.asyncio
+async def test_execute_predictions_packs_predictions_directory(tmp_path) -> None:
+    workdir = tmp_path / "validate"
+    (workdir / "predictions" / "nested").mkdir(parents=True)
+    (workdir / "predictions" / "pred.csv").write_bytes(b"id,pred\n1,0\n")
+    (workdir / "predictions" / "nested" / "mask.bin").write_bytes(b"\x00\x01\x02")
+    (workdir / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [],
+                "outputs": {"predictions": "predictions", "report": "REPORT.md"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    workspace = GitWorkBranch(
+        path=str(workdir), branch="validate", base_commit="sota-a"
+    )
+    git = _StubGit()
+
+    ref, rel_path = await _execute_predictions(
+        execution=_StubExecution(workdir),
+        git=git,
+        workspace=workspace,
+        store=store,
+        publish=None,
+    )
+
+    assert rel_path == "predictions"
+    assert await load_directory(store, ref) == {
+        "pred.csv": b"id,pred\n1,0\n",
+        "nested/mask.bin": b"\x00\x01\x02",
+    }
+    assert git.restored == [("predictions", "REPORT.md")]
+
+
+@pytest.mark.asyncio
+async def test_execute_predictions_rejects_missing_directory(tmp_path) -> None:
+    workdir = tmp_path / "validate"
+    workdir.mkdir(parents=True)
+    (workdir / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [],
+                "outputs": {"predictions": "predictions"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    workspace = GitWorkBranch(
+        path=str(workdir), branch="validate", base_commit="sota-a"
+    )
+    git = _StubGit()
+
+    with pytest.raises(ValueError, match="predictions output is missing"):
+        await _execute_predictions(
+            execution=_StubExecution(workdir),
+            git=git,
+            workspace=workspace,
+            store=store,
+            publish=None,
+        )
+    assert git.restored == [("predictions",)]

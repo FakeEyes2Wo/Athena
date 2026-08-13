@@ -20,6 +20,7 @@ from athena.core.workspace import GitDiff, GitWorkBranch, GitWorkspace
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.contracts import DataScriptBundle, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.experiment import (
     load_agent_result,
@@ -291,10 +292,10 @@ async def _execute_predictions(
             if not result.ok:
                 raise RuntimeError(result.stderr or "validation command failed")
         rel_path = manifest.outputs["predictions"]
-        predictions_path = workdir / rel_path
-        if not predictions_path.is_file() or not predictions_path.stat().st_size:
+        predictions_dir = workdir / rel_path
+        if not predictions_dir.is_dir() or not any(predictions_dir.iterdir()):
             raise ValueError("validation predictions output is missing")
-        ref = await store.put_text(predictions_path.read_text(encoding="utf-8"))
+        ref = await pack_directory(store, predictions_dir)
         return ref, rel_path
     finally:
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
@@ -333,13 +334,13 @@ async def _score_result(
     bundle = DataScriptBundle.model_validate_json(
         await store.get_text(input.final_evaluator_ref)
     )
-    predictions = await store.get_text(current.predictions_ref)
+    predictions = await load_directory(store, current.predictions_ref)
     evaluation = await evaluator.score(
         eval_bundle=bundle,
         predictions=predictions,
         candidate_id=input.validation_key,
         direction=input.direction,
-        predictions_path=current.predictions_path or "predictions.csv",
+        predictions_root=current.predictions_path or "predictions",
     )
     review_evidence = {}
     if current.evidence_ref is not None:

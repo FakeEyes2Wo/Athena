@@ -58,7 +58,7 @@ class _RepairProvider:
                             {
                                 "version": 1,
                                 "commands": [["python", "predict.py"]],
-                                "outputs": {"predictions": "predictions.csv"},
+                                "outputs": {"predictions": "predictions"},
                             }
                         ),
                     },
@@ -159,10 +159,12 @@ class _Harness:
         )
         (self.repo / "predict.py").write_text(
             "from pathlib import Path\n"
-            "Path('predictions.csv').write_text('id,pred\\n1,0\\n', encoding='utf-8')\n",
+            "Path('predictions').mkdir(parents=True, exist_ok=True)\n"
+            "Path('predictions/pred.csv').write_text('id,pred\\n1,0\\n', encoding='utf-8')\n",
             encoding="utf-8",
         )
-        (self.repo / "predictions.csv").write_text(
+        (self.repo / "predictions").mkdir()
+        (self.repo / "predictions" / "pred.csv").write_text(
             "id,pred\nreviewed,1\n", encoding="utf-8"
         )
         self._git("add", "-A")
@@ -254,9 +256,9 @@ async def test_validate_uses_stable_validate_agent_plan_and_workspace(tmp_path) 
     assert result.sota_commit == harness.input.sota_commit
     assert result.validation_commit != result.sota_commit
     assert harness.review_execution_counts == [0]
-    assert "predictions.csv" in harness.review_prompts[-1]
-    assert harness.restore_calls == [("predictions.csv",)]
-    assert (Path(harness.branch.path) / "predictions.csv").read_text(
+    assert "predictions" in harness.review_prompts[-1]
+    assert harness.restore_calls == [("predictions",)]
+    assert (Path(harness.branch.path) / "predictions" / "pred.csv").read_text(
         encoding="utf-8"
     ) == "id,pred\nreviewed,1\n"
     assert len(harness.checkpoints) == 3
