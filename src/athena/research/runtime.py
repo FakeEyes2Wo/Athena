@@ -144,9 +144,14 @@ class ResearchRuntime:
         # 断点续传保护：跨目录拷贝来的 state 会携带旧项目的 eda_dir，使 PREPARE
         # 工作区/EDA 目录落到别的项目。强制校验其属于当前 project_root，否则置空
         # 让 PREPARE 按本项目重建——本项目只保留自身信息，唯一允许跨目录的是数据集源。
+        # eda_dir 存的是相对 .athena 的路径（见 _run_prepare_phase），先解析成绝对再校验。
         eda_dir = self._state.eda_dir
-        if eda_dir is not None and not Path(eda_dir).is_relative_to(self._root):
-            self._state.eda_dir = None
+        if eda_dir is not None:
+            eda_path = Path(eda_dir)
+            if not eda_path.is_absolute():
+                eda_path = (self._athena / eda_dir).resolve()
+            if not eda_path.is_relative_to(self._root):
+                self._state.eda_dir = None
         self._subscribers: dict[str, EmitFn] = {}
         self._subscriber_ready: dict[str, asyncio.Task[object]] = {}
         self._task: asyncio.Task[None] | None = None

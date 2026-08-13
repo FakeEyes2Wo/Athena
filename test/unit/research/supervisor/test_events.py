@@ -1,5 +1,7 @@
 """Two-event runtime projection and tool-output safety tests."""
 
+import json
+
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
@@ -582,3 +584,43 @@ async def test_completed_command_replaces_an_unsanitized_full_output_ref(
     assert event["text"] == "complete\nnext"
     assert event["artifact_ref"] != unsafe_ref
     assert await runtime._store.get_text(event["artifact_ref"]) == "complete\nnext"
+
+
+def _state_json(eda_dir: str | None) -> str:
+    return json.dumps(
+        {
+            "status": "RUNNING",
+            "phase": "SEARCH",
+            "search_limit": 10,
+            "concurrency": 4,
+            "manual_mode": False,
+            "plans": {},
+            "validation": None,
+            "eda_dir": eda_dir,
+        }
+    )
+
+
+def test_init_preserves_relative_eda_dir_within_project(tmp_path) -> None:
+    """相对 .athena 的 eda_dir（本项目自己的 workspace）不得被 resume 守卫清空。"""
+    athena = tmp_path / ".athena"
+    athena.mkdir()
+    (athena / "state.json").write_text(
+        _state_json("workspaces/athena-abc"), encoding="utf-8"
+    )
+
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    assert runtime._state.eda_dir == "workspaces/athena-abc"
+
+
+def test_init_nulls_stale_absolute_eda_dir_outside_project(tmp_path) -> None:
+    """跨目录拷贝来的绝对 eda_dir（指向别的项目）仍应被清空。"""
+    athena = tmp_path / ".athena"
+    athena.mkdir()
+    stale = tmp_path.parent / "other" / ".athena" / "workspaces" / "athena-xyz"
+    (athena / "state.json").write_text(_state_json(str(stale)), encoding="utf-8")
+
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    assert runtime._state.eda_dir is None
