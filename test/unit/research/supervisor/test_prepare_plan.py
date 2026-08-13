@@ -182,7 +182,7 @@ class _Store:
     [
         ("evaluator", "metric.json is missing"),
         ("report", "PREPARE requires a declared, non-empty report output"),
-        ("predictions", "missing predictions output: outputs/predictions.csv"),
+        ("predictions", "missing predictions directory: outputs/predictions"),
         ("evidence", "trusted evidence is missing"),
         ("commit", "trusted commit is missing"),
     ],
@@ -200,9 +200,9 @@ async def test_prepare_result_requires_every_trusted_artifact(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
     (workspace_path / "model.py").write_text("pass\n", encoding="utf-8")
-    (workspace_path / "outputs").mkdir()
+    (workspace_path / "outputs" / "predictions").mkdir(parents=True)
     if missing != "predictions":
-        (workspace_path / "outputs" / "predictions.csv").write_text(
+        (workspace_path / "outputs" / "predictions" / "predictions.csv").write_text(
             "id,prediction\n1,0\n", encoding="utf-8"
         )
     if missing != "report":
@@ -215,7 +215,7 @@ async def test_prepare_result_requires_every_trusted_artifact(
                 "version": 1,
                 "commands": [["python", "model.py"]],
                 "outputs": {
-                    "predictions": "outputs/predictions.csv",
+                    "predictions": "outputs/predictions",
                     "report": "outputs/report.md",
                 },
             }
@@ -297,8 +297,8 @@ async def test_prepare_accepts_evaluator_directory_with_evaluate_py_entrypoint(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
     (workspace_path / "model.py").write_text("pass\n", encoding="utf-8")
-    (workspace_path / "outputs").mkdir()
-    (workspace_path / "outputs" / "predictions.csv").write_text(
+    (workspace_path / "outputs" / "predictions").mkdir(parents=True)
+    (workspace_path / "outputs" / "predictions" / "predictions.csv").write_text(
         "id,prediction\n1,0\n", encoding="utf-8"
     )
     (workspace_path / "outputs" / "report.md").write_text(
@@ -310,7 +310,7 @@ async def test_prepare_accepts_evaluator_directory_with_evaluate_py_entrypoint(
                 "version": 1,
                 "commands": [["python", "model.py"]],
                 "outputs": {
-                    "predictions": "outputs/predictions.csv",
+                    "predictions": "outputs/predictions",
                     "report": "outputs/report.md",
                 },
             }
@@ -358,8 +358,8 @@ async def test_prepare_eval_script_failure_retries_without_agent_repair(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
     (workspace_path / "model.py").write_text("pass\n", encoding="utf-8")
-    (workspace_path / "outputs").mkdir()
-    (workspace_path / "outputs" / "predictions.csv").write_text(
+    (workspace_path / "outputs" / "predictions").mkdir(parents=True)
+    (workspace_path / "outputs" / "predictions" / "predictions.csv").write_text(
         "id,prediction\n1,0\n", encoding="utf-8"
     )
     (workspace_path / "outputs" / "report.md").write_text(
@@ -371,7 +371,7 @@ async def test_prepare_eval_script_failure_retries_without_agent_repair(
                 "version": 1,
                 "commands": [["python", "model.py"]],
                 "outputs": {
-                    "predictions": "outputs/predictions.csv",
+                    "predictions": "outputs/predictions",
                     "report": "outputs/report.md",
                 },
             }
