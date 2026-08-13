@@ -78,27 +78,27 @@ class Compactor:
           ``chat.completions.create``）——memory-flow-fixes §生产压缩。
         - 既有 ``messages.create`` client（Anthropic 格式）。
         """
-        prompt = self._summary_prompt(items)
+        payload = {
+            "model": self._summary_model,
+            "temperature": 0.1,
+            "max_tokens": 2_000,
+            "messages": [{"role": "user", "content": self._summary_prompt(items)}],
+        }
         chat = getattr(getattr(llm, "client", None) or llm, "chat", None)
         if chat is not None:
-            response = await chat.completions.create(
-                model=self._summary_model,
-                temperature=0.1,
-                max_tokens=2_000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            choices = getattr(response, "choices", None)
-            if choices and getattr(choices[0].message, "content", None):
-                return choices[0].message.content
-            raise ValueError("摘要模型未返回文本")
+            response = await chat.completions.create(**payload)
+        else:
+            response = await llm.messages.create(**payload)
+        return self._extract_text(response)
 
-        response = await llm.messages.create(
-            model=self._summary_model,
-            temperature=0.1,
-            max_tokens=2_000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        # Anthropic 格式 (content[0].text)；fallback 到 OpenAI 格式或纯字符串
+    @staticmethod
+    def _extract_text(response: Any) -> str:
+        """从 LLM 响应中提取摘要文本。
+
+        兼容 ``content`` 为字符串、``content[0].text``（Anthropic ContentBlock）
+        与 ``choices[0].message.content``（OpenAI chat.completions）三种形态；
+        均无法提取时抛 ValueError。
+        """
         content = getattr(response, "content", None)
         if isinstance(content, str):
             return content
