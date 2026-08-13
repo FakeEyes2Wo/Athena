@@ -1,12 +1,12 @@
 """Atomic persistence for the autonomous Supervisor's ``state.json``."""
 
 import json
-import os
 from pathlib import Path
 from typing import Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from athena.core.persistence import atomic_write_json
 from athena.research.supervisor.plans import PlanState
 
 
@@ -41,21 +41,7 @@ class ResearchState(BaseModel):
 
     def save(self, path: str | Path) -> Path:
         """Atomically replace ``path`` with this validated state."""
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f"{target.name}.tmp")
-        try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-                payload = self.model_dump(mode="json")
-                json.dump(payload, stream, ensure_ascii=False, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-        return target
+        return atomic_write_json(path, self.model_dump(mode="json"))
 
     @classmethod
     def load(cls, path: str | Path) -> "ResearchState":

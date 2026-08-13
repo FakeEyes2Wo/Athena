@@ -247,7 +247,7 @@ def test_save_removes_temporary_file_when_replace_fails(
     def fail_replace(source: Path, target: Path) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr("athena.research.supervisor.state.os.replace", fail_replace)
+    monkeypatch.setattr("athena.core.persistence.os.replace", fail_replace)
 
     with pytest.raises(OSError, match="replace failed"):
         _search_state().save(path)

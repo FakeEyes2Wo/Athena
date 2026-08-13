@@ -2,7 +2,6 @@
 
 import json
 import math
-import os
 from collections import deque
 from enum import StrEnum
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import Any, Mapping
 from pydantic import BaseModel, Field, model_validator
 
 from athena.core.contracts import ArtifactRef, CommitHash, new_id
+from athena.core.persistence import atomic_write_json
 from athena.core.research_models import (
     ComparisonVerdict,
     EvalResult,
@@ -532,25 +532,7 @@ class ResearchTree:
 
     def save(self, path: str | Path) -> Path:
         """原子写 JSON 到目标路径，返回目标路径。"""
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f"{target.name}.tmp")
-        try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-                json.dump(
-                    self.to_dict(),
-                    stream,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-        return target
+        return atomic_write_json(path, self.to_dict())
 
     @classmethod
     def load(cls, path: str | Path) -> "ResearchTree":
