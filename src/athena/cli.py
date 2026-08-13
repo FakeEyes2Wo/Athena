@@ -27,6 +27,17 @@ def _runtime(project_root: str, **options: Any) -> ResearchRuntime:
     )
 
 
+def _non_negative_int(value: str) -> int:
+    """argparse ``type``：把 ``--max-search-experiments`` 约束为非负整数。
+
+    负值在解析期就失败（exit 2），而非把 -1 之类一路传进 runtime 造成怪异行为。
+    """
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be a non-negative integer, got {value}")
+    return parsed
+
+
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
     task_lines = [args.task or "", f"Dataset path: {args.data}"]
@@ -40,37 +51,81 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     task_lines.extend(f"{label}: {value}" for label, value in optional_context if value)
     return {
         "task": "\n".join(line for line in task_lines if line),
-        "search_limit": args.max_search_experiments or 10,
+        "search_limit": (
+            args.max_search_experiments
+            if args.max_search_experiments is not None
+            else 10
+        ),
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
     }
 
 
-def _render_event(kind: str, payload: dict[str, object]) -> None:
-    if kind == "output":
-        source = payload.get("source", "runtime")
-        text = payload.get("text", "")
-        if text:
-            print(f"{source}> {text}", flush=True)
-        return
-    if kind == "state":
+class _EventRenderer:
+    """Render runtime events to stdout, coalescing agent text fragments.
+
+    The Supervisor streams agent text as many tiny ``output`` events (token by
+    token); printing each floods stdout with fragments (``agent> on.``). Buffer
+    ``source == "agent"`` text and flush one coherent ``agent> …`` line when the
+    plan changes or a non-agent event arrives (mirrors ``scripts/run_headless.py``).
+    """
+
+    def __init__(self) -> None:
+        self._agent_buf: list[str] = []
+        self._agent_plan: object | None = None
+
+    def _flush_agent(self) -> None:
+        if not self._agent_buf:
+            return
+        head = "".join(self._agent_buf)
         print(
-            f"phase={payload.get('phase', '-')} "
-            f"status={payload.get('status', '-')}",
+            f"agent> {head[:400]}..." if len(head) > 400 else f"agent> {head}",
             flush=True,
         )
-        return
-    raise ValueError(f"unsupported runtime event kind: {kind}")
+        self._agent_buf = []
+        self._agent_plan = None
+
+    def render(self, kind: str, payload: dict[str, object]) -> None:
+        if kind == "output":
+            source = payload.get("source", "runtime")
+            channel = payload.get("channel", "text")
+            text = payload.get("text", "")
+            if source == "agent" and channel == "text":
+                plan = payload.get("plan")
+                if self._agent_buf and plan != self._agent_plan:
+                    self._flush_agent()
+                self._agent_plan = plan
+                if text:
+                    self._agent_buf.append(text)
+                return
+            self._flush_agent()
+            if text:
+                print(f"{source}> {text}", flush=True)
+            return
+        if kind == "state":
+            self._flush_agent()
+            print(
+                f"phase={payload.get('phase', '-')} "
+                f"status={payload.get('status', '-')}",
+                flush=True,
+            )
+            return
+        raise ValueError(f"unsupported runtime event kind: {kind}")
 
 
 async def _cmd_run(args: argparse.Namespace) -> int:
+    # 数据路径预检：拼错/缺失的 --data 应在跑 LLM 之前立刻失败，而非白烧一轮。
+    if not Path(args.data).exists():
+        print(f"error: data path does not exist: {args.data}", file=sys.stderr)
+        return 2
     runtime = _runtime(args.project, **_runtime_options(args))
     terminal = asyncio.Event()
     exit_code = 0
+    renderer = _EventRenderer()
 
     def receive(kind: str, payload: dict[str, object]) -> None:
         nonlocal exit_code
-        _render_event(kind, payload)
+        renderer.render(kind, payload)
         if kind != "state":
             return
         status = payload.get("status")
@@ -84,8 +139,17 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     subscription_id = runtime.subscribe(receive)
     try:
         await runtime.start()
-        await terminal.wait()
+        # 无界等待在 CI/批处理下会卡死；--timeout 让运行时长可被限定。
+        await asyncio.wait_for(terminal.wait(), timeout=args.timeout)
         return exit_code
+    except asyncio.TimeoutError:
+        print(f"run timed out after {args.timeout}s", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        # 启动或执行失败（缺 API key、git 初始化失败、模型连接失败等）：
+        # 打印一行干净错误而非裸 traceback，返回非零退出码供脚本判失败。
+        print(f"RUN FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     finally:
         runtime.unsubscribe(subscription_id)
         await runtime.aclose()
@@ -203,12 +267,22 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--direction", choices=["maximize", "minimize"], help="metric direction"
     )
-    run.add_argument("--mode", choices=["interactive", "auto"], default="interactive")
+    # CLI 是无交互输入的 headless 适配器；``interactive``（手动批准 VALIDATE）在
+    # 这里没有 stdin 循环可驱动，会停在 WAITING 永久挂起。默认 ``auto`` 让一次跑完。
+    run.add_argument("--mode", choices=["interactive", "auto"], default="auto")
     run.add_argument(
         "--kfold", choices=["required", "auto", "disabled"], default="auto"
     )
     run.add_argument(
-        "--max-search-experiments", type=int, help="maximum SEARCH attempts"
+        "--max-search-experiments",
+        type=_non_negative_int,
+        help="maximum SEARCH attempts",
+    )
+    run.add_argument(
+        "--timeout",
+        type=_non_negative_int,
+        default=None,
+        help="abort the run after N seconds (unbounded by default)",
     )
     _add_survey_parser(subparsers)
     for name in ("status", "pause", "resume", "stop"):

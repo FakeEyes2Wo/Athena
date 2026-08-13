@@ -103,12 +103,51 @@ def test_run_options_configure_runtime_constructor() -> None:
     }
 
 
+def test_run_defaults_to_auto_validate_for_headless_cli() -> None:
+    args = cli._build_parser().parse_args(["run", "--project", "p", "--data", "d"])
+    assert args.mode == "auto"
+    assert cli._runtime_options(args)["auto_validate"] is True
+
+
+def test_run_preserves_zero_search_limit() -> None:
+    args = cli._build_parser().parse_args(
+        ["run", "--project", "p", "--data", "d", "--max-search-experiments", "0"]
+    )
+    assert cli._runtime_options(args)["search_limit"] == 0
+
+
+def test_run_rejects_negative_search_limit() -> None:
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(
+            ["run", "--project", "p", "--data", "d", "--max-search-experiments", "-1"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_times_out_when_workflow_hangs(monkeypatch, capsys, tmp_path) -> None:
+    class HangingRuntime(FakeRuntime):
+        async def start(self) -> None:
+            self.calls.append("start")
+            # 不发布终态事件，模拟永远跑不完的工作流
+
+    data = tmp_path / "train.csv"
+    data.write_text("x,y\n1,0\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_runtime", lambda _project, **_options: HangingRuntime())
+    args = cli._build_parser().parse_args(
+        ["run", "--project", "p", "--data", str(data), "--timeout", "1"]
+    )
+    assert await cli._cmd_run(args) == 1
+    assert "timed out" in capsys.readouterr().err
+
+
 @pytest.mark.asyncio
 async def test_run_subscribes_before_start_and_waits_for_terminal_state(
-    monkeypatch, capsys
+    monkeypatch, capsys, tmp_path
 ) -> None:
     runtime = FakeRuntime()
     captured: dict[str, object] = {}
+    data = tmp_path / "train.csv"
+    data.write_text("x,y\n1,0\n", encoding="utf-8")
 
     def build(project: str, **options: object) -> FakeRuntime:
         captured.update({"project": project, **options})
@@ -116,16 +155,28 @@ async def test_run_subscribes_before_start_and_waits_for_terminal_state(
 
     monkeypatch.setattr(cli, "_runtime", build)
     args = cli._build_parser().parse_args(
-        ["run", "--project", "p", "--data", "d", "--task", "task"]
+        ["run", "--project", "p", "--data", str(data), "--task", "task"]
     )
 
     assert await cli._cmd_run(args) == 0
     assert runtime.calls[:2] == ["subscribe", "start"]
     assert runtime.closed is True
-    assert captured["task"] == "task\nDataset path: d"
+    assert captured["task"] == f"task\nDataset path: {data}"
     output = capsys.readouterr().out
     assert "agent> working" in output
     assert "phase=COMPLETED status=COMPLETED" in output
+
+
+def test_event_renderer_coalesces_agent_fragments(capsys) -> None:
+    renderer = cli._EventRenderer()
+    renderer.render(
+        "output", {"source": "agent", "channel": "text", "text": "hel", "plan": "p"}
+    )
+    renderer.render(
+        "output", {"source": "agent", "channel": "text", "text": "lo", "plan": "p"}
+    )
+    renderer.render("state", {"phase": "SEARCH", "status": "RUNNING"})
+    assert capsys.readouterr().out == "agent> hello\nphase=SEARCH status=RUNNING\n"
 
 
 @pytest.mark.asyncio
