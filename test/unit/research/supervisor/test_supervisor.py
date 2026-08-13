@@ -19,6 +19,7 @@ from athena.execution.runtime import ExecutionRuntime
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
+from athena.research.supervisor.supervisor import _final_report_text
 
 
 class _SubmitProvider:
@@ -170,3 +171,22 @@ async def test_new_plan_freezes_evaluator_tree_and_human_context(
     assert persisted.plans["hyp_vit"].turns_used == 0
     await supervisor.stop()
     await agents.aclose()
+
+
+def test_final_report_text_surfaces_validation_metrics() -> None:
+    text = _final_report_text(
+        {
+            "final_test_score": 0.81234,
+            "generalization_gap": 0.0257,
+            "generalization_warning": True,
+        }
+    )
+
+    assert text.startswith("VALIDATE completed")
+    assert "final test score 0.8123" in text
+    assert "generalization gap 0.0257" in text
+    assert "generalization warning" in text
+
+
+def test_final_report_text_is_minimal_without_metrics() -> None:
+    assert _final_report_text({}) == "VALIDATE completed"

@@ -63,6 +63,27 @@ def _compare_metric(
     return Outcome.DRAW
 
 
+def _final_report_text(validation: dict) -> str:
+    """Format the frozen VALIDATE conclusion into a readable final report."""
+    parts = ["VALIDATE completed"]
+
+    def metric(key: str) -> str | None:
+        value = validation.get(key)
+        if value is None:
+            return None
+        return f"{value:.4f}" if isinstance(value, float) else str(value)
+
+    final_score = metric("final_test_score")
+    if final_score is not None:
+        parts.append(f"final test score {final_score}")
+    gap = metric("generalization_gap")
+    if gap is not None:
+        parts.append(f"generalization gap {gap}")
+    if validation.get("generalization_warning"):
+        parts.append("generalization warning")
+    return " · ".join(parts)
+
+
 @dataclass(frozen=True)
 class _CompletedTurn:
     plan_id: str
@@ -401,7 +422,7 @@ class Supervisor(SupervisorActions):
             {
                 "source": "supervisor",
                 "channel": "text",
-                "text": "VALIDATE completed.",
+                "text": _final_report_text(self.state.validation),
             },
         )
         await self._publish_state()

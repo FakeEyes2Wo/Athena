@@ -81,6 +81,7 @@ async def test_run_does_not_auto_start_and_enables_task_seeding(monkeypatch) -> 
     assert await entrypoint._run(args) == 7
     assert calls == ["app"]
     assert seen.get("auto_seed_task") is True
+    assert seen.get("auto_validate") is True
 
 
 @pytest.mark.asyncio
