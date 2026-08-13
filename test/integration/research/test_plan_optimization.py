@@ -22,7 +22,7 @@ import csv, json, sys
 def main():
     out = open(sys.argv[sys.argv.index('--output') + 1], 'w')
     preds = {}
-    with open('predictions.csv', encoding='utf-8') as f:
+    with open('outputs/predictions.csv', encoding='utf-8') as f:
         for line in f:
             parts = line.strip().split(',')
             if len(parts) >= 2 and parts[0] != '__athena_row_id':
