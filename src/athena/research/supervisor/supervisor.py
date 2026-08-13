@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,8 +30,14 @@ from athena.research.supervisor.plans import (
 from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.policy import Outcome
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import ScheduleKind, Scheduler
+from athena.research.supervisor.scheduler import (
+    ScheduleKind,
+    Scheduler,
+    count_search_attempts,
+)
 from athena.research.supervisor.state import ResearchState
+
+logger = logging.getLogger(__name__)
 
 PlanTurn = Callable[[str, PlanState], Awaitable[PlanTurnResult]]
 SupervisorTurn = Callable[[str], Awaitable[str]]
@@ -120,6 +127,8 @@ class Supervisor(SupervisorActions):
         self._stopped = False
         # 手动模式下等待人工选定假设时，唤醒 run_search 循环的信号。
         self._wake = asyncio.Event()
+        # SEARCH 调度循环的后台任务（供 WAITING→RUNNING 重入）；首轮由 start() 直接 await。
+        self._search_task: asyncio.Task | None = None
 
     @property
     def running_plan_ids(self) -> tuple[str, ...]:
@@ -158,7 +167,11 @@ class Supervisor(SupervisorActions):
         if hypothesis_id in self.state.plans:
             return hypothesis_id
         hypothesis = self.tree.get_hypothesis(hypothesis_id)
-        if self.tree.experiment_for_hypothesis(hypothesis_id) is not None:
+        existing = self.tree.experiment_for_hypothesis(hypothesis_id)
+        if existing is not None and self.tree.get_experiment(existing).status in {
+            ExperimentStatus.SUCCEEDED,
+            ExperimentStatus.FAILED,
+        }:
             raise ValueError(f"hypothesis already settled: {hypothesis_id}")
 
         reference_id = hypothesis.parent_id or self.tree.best_experiment_id()
@@ -193,6 +206,24 @@ class Supervisor(SupervisorActions):
         context_ref = await self._store.put_text(plan_input.model_dump_json())
         branch = await self._workspaces.create(reference.commit, hypothesis_id)
         self._branches[hypothesis_id] = branch
+        experiment_id = f"exp_{hypothesis_id}"
+        self.tree.add_experiment(
+            experiment_id,
+            Experiment(
+                parent_id=hypothesis.parent_id,
+                hypothesis_id=hypothesis_id,
+                commit=reference.commit,
+                plan=ExperimentPlan(
+                    kind="search",
+                    change=hypothesis.intervention,
+                    run_config_ref=context_ref,
+                    budget={},
+                    acceptance_rule="trusted score",
+                ),
+                gitwork=branch,
+            ),
+        )
+        self.tree.transition_experiment(experiment_id, ExperimentStatus.RUNNING)
         self.state.plans[hypothesis_id] = PlanState(
             kind="SEARCH",
             context_ref=context_ref,
@@ -239,14 +270,36 @@ class Supervisor(SupervisorActions):
             "state", {"type": "state", **self.state.model_dump(mode="json")}
         )
 
+    async def _persist_state(self) -> None:
+        """Save durable state and publish one snapshot to subscribers."""
+        self._save_state()
+        await self._publish_state()
+
     async def start(self) -> None:
         """Start the Supervisor lifecycle."""
         self._stopped = False
-        if self.state.phase == "PREPARE":
-            await self._run_prepare()
-        else:
-            await self.recover()
-        await self.continue_phase()
+        try:
+            if self.state.phase == "PREPARE":
+                await self._run_prepare()
+            else:
+                await self.recover()
+            await self.continue_phase()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 阶段执行失败（如 evaluator 基础设施不可用）在此统一观测：置 FAILED
+            # 并发布，避免被 fire-and-forget 的 supervisor task 吞掉、阶段卡在 PREPARE。
+            self.state.status = "FAILED"
+            self._save_state()
+            await self._publish(
+                "output",
+                {
+                    "source": "supervisor",
+                    "channel": "error",
+                    "text": f"research failed: {exc}",
+                },
+            )
+            await self._publish_state()
 
     async def continue_phase(self) -> None:
         """Execute the current phase for an idle run (interactive resume).
@@ -259,13 +312,11 @@ class Supervisor(SupervisorActions):
         """
         if self.state.phase == "SEARCH":
             await self.run_search()
-            if self._search_limit_reached():
-                if self._auto_validate:
-                    await self._transition_phase("VALIDATE")
-                elif self.state.status == "RUNNING":
-                    self.state.status = "WAITING"
-                    self._save_state()
-                    await self._publish_state()
+            if self._auto_validate:
+                await self._transition_phase("VALIDATE")
+            elif self._search_limit_reached() and self.state.status == "RUNNING":
+                self.state.status = "WAITING"
+                await self._persist_state()
         if self.state.phase == "VALIDATE":
             await self._run_validation()
 
@@ -358,19 +409,15 @@ class Supervisor(SupervisorActions):
     async def _transition_phase(self, phase: Literal["SEARCH", "VALIDATE"]) -> None:
         self.state.phase = phase
         self.state.status = "RUNNING"
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
 
     async def checkpoint_validation(self, result_ref: ArtifactRef) -> None:
         """Persist one recoverable VALIDATE result through the single writer."""
         self.state.validation = {"result_ref": result_ref}
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
 
     def _search_limit_reached(self) -> bool:
-        attempts = len(self.tree.experiments(kind="search")) + sum(
-            plan.kind == "SEARCH" for plan in self.state.plans.values()
-        )
+        attempts = count_search_attempts(self.state, self.tree)
         return attempts >= self.state.search_limit and not self._running
 
     async def recover(self, state: ResearchState | None = None) -> ResearchState:
@@ -415,9 +462,34 @@ class Supervisor(SupervisorActions):
                 await self._agents.resume_agent(
                     plan_id, agent_type="plan", name=plan_id
                 )
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
         return self.state
+
+    def _spawn_search(self) -> None:
+        """(重新)进入 SEARCH 调度循环（当前空闲且 RUNNING 时）。
+
+        auto 模式下 ``run_search`` 达到 search_limit 后返回、状态置 WAITING，随后
+        ``/resume``、``configure_search``、``update_waiting_plan_budget`` 会把状态改回
+        RUNNING，但若不在此重新拉起后台调度任务，就永远不再推进（静默 liveness 失败）。
+        """
+        if (
+            self.state.phase == "SEARCH"
+            and self.state.status == "RUNNING"
+            and not self._stopped
+            and (self._search_task is None or self._search_task.done())
+        ):
+            task = asyncio.create_task(self.run_search())
+            task.add_done_callback(self._on_search_done)
+            self._search_task = task
+
+    @staticmethod
+    def _on_search_done(task: asyncio.Task) -> None:
+        """检索后台 SEARCH 任务的异常，避免 'Task exception was never retrieved'。"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("SEARCH scheduling loop crashed: %r", exc)
 
     async def run_search(self) -> None:
         """Run rolling SEARCH scheduling."""
@@ -463,8 +535,7 @@ class Supervisor(SupervisorActions):
         if not self.tree.pending_hypotheses():
             return False
         self.state.status = "WAITING"
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
         self._wake.clear()
         await self._wake.wait()
         return not self._stopped
@@ -524,8 +595,7 @@ class Supervisor(SupervisorActions):
         state = self.state.plans[plan_id]
         state = state.model_copy(update={"turns_used": state.turns_used + 1})
         self.state.plans[plan_id] = state
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
         try:
             run_id = await self._agents.followup(
                 plan_id,
@@ -567,8 +637,7 @@ class Supervisor(SupervisorActions):
         if completed.decision is None:
             if state.turn_limit is not None and state.turns_used >= state.turn_limit:
                 self.state.status = "WAITING"
-            self._save_state()
-            await self._publish_state()
+            await self._persist_state()
             return
         if completed.decision.decision == "abandon" and state.best_ref is None:
             await self._settle_plan(plan_id, None, completed.result)
@@ -582,8 +651,13 @@ class Supervisor(SupervisorActions):
         if settlement.action == "continue":
             self._save_state()
         elif settlement.action == "wait":
-            self.state.status = "WAITING"
-            self._save_state()
+            if self._auto_validate:
+                # auto 模式无人补充缺失的 report / 延长预算 → 用历史 best 结算，
+                # 释放并发槽让调度器继续 GENERATE，搜索得以收敛（否则死锁）。
+                await self._settle_plan(plan_id, state.best_ref, completed.result)
+            else:
+                self.state.status = "WAITING"
+                self._save_state()
         else:
             await self._settle_plan(plan_id, settlement.best_ref, completed.result)
         await self._publish_state()
@@ -597,22 +671,12 @@ class Supervisor(SupervisorActions):
         """Persist one final Experiment before removing the active Plan."""
         plan_input = await self.plan_input(plan_id)
         hypothesis = self.tree.get_hypothesis(plan_id)
-        branch = self._branches[plan_id]
         experiment_id = f"exp_{plan_id}"
+        primary: float | None = None
         if best_ref is None:
-            experiment = Experiment(
-                parent_id=hypothesis.parent_id,
-                hypothesis_id=plan_id,
-                commit=branch.base_commit,
-                plan=ExperimentPlan(
-                    kind="search",
-                    change=hypothesis.intervention,
-                    run_config_ref=self.state.plans[plan_id].context_ref,
-                    budget={},
-                    acceptance_rule="trusted score",
-                ),
-                gitwork=branch,
-                status=ExperimentStatus.FAILED,
+            self.tree.transition_experiment(
+                experiment_id,
+                ExperimentStatus.FAILED,
                 error="settled without a trusted result",
             )
             outcome = Outcome.LOSS
@@ -645,34 +709,25 @@ class Supervisor(SupervisorActions):
             if "report" not in artifacts and result is not None:
                 if result.report_ref is not None:
                     artifacts["report"] = result.report_ref
-            experiment = Experiment(
-                parent_id=hypothesis.parent_id,
-                hypothesis_id=plan_id,
-                commit=best.commit,
-                plan=ExperimentPlan(
-                    kind="search",
-                    change=hypothesis.intervention,
-                    run_config_ref=self.state.plans[plan_id].context_ref,
-                    budget={},
-                    acceptance_rule="trusted score",
-                ),
-                gitwork=branch,
-                status=ExperimentStatus.SUCCEEDED,
+            primary = best.metric
+            self.tree.complete_experiment(
+                experiment_id,
                 eval=EvalResult(
                     experiment_id=experiment_id,
                     primary=best.metric,
                     per_sample=evidence_ref,
                 ),
+                verdict=None,
                 artifacts=artifacts,
+                commit=best.commit,
             )
-        self.tree.add_experiment(experiment_id, experiment)
         hypothesis.priority = self._scheduler.settle(
             plan_input.reference_priority, outcome
         )
         self.tree.update_hypothesis_status(
             plan_id, "SUPPORTED" if outcome is Outcome.WIN else "REFUTED"
         )
-        if experiment.status is ExperimentStatus.SUCCEEDED:
+        if primary is not None:
             sota_id = self.tree.best_experiment_id()
             if sota_id is None:
                 self.tree.set_sota(experiment_id)
@@ -681,7 +736,7 @@ class Supervisor(SupervisorActions):
                 if (
                     sota.eval is None
                     or _compare_metric(
-                        experiment.eval.primary,
+                        primary,
                         sota.eval.primary,
                         plan_input.direction,
                         plan_input.tolerance,
@@ -701,24 +756,22 @@ class Supervisor(SupervisorActions):
         """Pause new Agent dispatch while retaining durable unfinished work."""
         self.state.status = "WAITING"
         self._agents.pause()
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
         return self.state.status
 
     async def resume(self) -> str:
         """Resume Agent dispatch after an explicit Human command."""
         self._agents.resume()
         self.state.status = "RUNNING"
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
+        self._spawn_search()
         return self.state.status
 
     async def request_stop(self) -> str:
         """Persist an explicit Human stop and cancel locally running Plans."""
         await self.stop()
         self.state.status = "STOPPED"
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
         return self.state.status
 
     async def stop(self) -> None:
@@ -772,6 +825,7 @@ class Supervisor(SupervisorActions):
             payload.update(
                 {
                     "id": None,
+                    "order": None,
                     "parent_id": parent_id,
                     "priority": self._scheduler.seed(parent_hypothesis),
                 }
@@ -785,7 +839,11 @@ class Supervisor(SupervisorActions):
 
     async def select_next_hypothesis(self, hypothesis_id: str) -> dict[str, object]:
         self.tree.get_hypothesis(hypothesis_id)
-        if self.tree.experiment_for_hypothesis(hypothesis_id) is not None:
+        existing = self.tree.experiment_for_hypothesis(hypothesis_id)
+        if existing is not None and self.tree.get_experiment(existing).status in {
+            ExperimentStatus.SUCCEEDED,
+            ExperimentStatus.FAILED,
+        }:
             raise ValueError(f"hypothesis already settled: {hypothesis_id}")
         self._next_hypothesis_id = hypothesis_id
         if self.state.status == "WAITING":
@@ -807,8 +865,8 @@ class Supervisor(SupervisorActions):
             if value < 1:
                 raise ValueError("concurrency must be at least 1")
             self.state.concurrency = value
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
+        self._spawn_search()
         return {
             "search_limit": self.state.search_limit,
             "concurrency": self.state.concurrency,
@@ -849,8 +907,8 @@ class Supervisor(SupervisorActions):
             raise ValueError("at least one Plan budget must be provided")
         self.state.plans[plan_id] = plan.model_copy(update=updates)
         self.state.status = "RUNNING"
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
+        self._spawn_search()
         return {"plan_id": plan_id, **updates}
 
     async def set_phase_decision(self, decision: str) -> dict[str, object]:
@@ -866,9 +924,11 @@ class Supervisor(SupervisorActions):
                     f"cannot VALIDATE from phase {self.state.phase}; run SEARCH first"
                 )
         await self._transition_phase(decision)
-        # 交互路径下 ``start()`` 的生命周期已结束（SEARCH 后停在 WAITING），
-        # 单写者在此直接把 VALIDATE 阶段跑完，否则只改 phase 标志永远到不了 COMPLETED。
-        if decision == "VALIDATE":
+        if decision == "SEARCH":
+            self._spawn_search()
+        elif decision == "VALIDATE":
+            # 交互路径下 ``start()`` 的生命周期已结束（SEARCH 后停在 WAITING），
+            # 单写者在此直接把 VALIDATE 阶段跑完，否则只改 phase 标志永远到不了 COMPLETED。
             await self._run_validation()
         return {"decision": decision}
 
@@ -881,8 +941,7 @@ class Supervisor(SupervisorActions):
         self.state.manual_mode = bool(manual)
         if self.state.status == "WAITING":
             self.state.status = "RUNNING"
-        self._save_state()
-        await self._publish_state()
+        await self._persist_state()
         self._wake.set()
         return {"manual_mode": self.state.manual_mode}
 

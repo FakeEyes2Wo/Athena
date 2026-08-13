@@ -158,9 +158,13 @@ def test_state_event_is_a_complete_replaceable_snapshot() -> None:
         "waiting",
         "manual",
         "pending",
+        "validation",
+        "eda_dir",
     }
     assert event.manual is False
     assert event.pending == []
+    assert event.validation is None
+    assert event.eda_dir is None
 
 
 @pytest.mark.asyncio

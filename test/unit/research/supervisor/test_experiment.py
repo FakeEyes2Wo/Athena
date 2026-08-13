@@ -385,6 +385,23 @@ def test_submit_settles_historical_best() -> None:
 
 def test_final_settlement_waits_for_report() -> None:
     state = PlanState(
+        kind="PREPARE",
+        context_ref=_REF,
+        turns_used=3,
+        turn_limit=12,
+    )
+
+    settlement = decide_settlement(
+        state, PlanDecision(decision="submit", reason="done")
+    )
+
+    assert settlement.action == "wait"
+    assert settlement.reason == "report required before settlement"
+
+
+def test_search_settles_without_report() -> None:
+    """SEARCH 的 report 输出是可选的，缺失不应把 settle 卡成 wait。"""
+    state = PlanState(
         kind="SEARCH",
         context_ref=_REF,
         turns_used=3,
@@ -397,30 +414,18 @@ def test_final_settlement_waits_for_report() -> None:
         state, PlanDecision(decision="submit", reason="done")
     )
 
-    assert settlement.action == "wait"
-    assert settlement.reason == "report required before settlement"
+    assert settlement.action == "settle"
 
 
-@pytest.mark.parametrize(
-    ("state_updates", "decision"),
-    [
-        ({"turns_used": 3}, "abandon"),
-        ({"turns_used": 3, "stale_rounds": 4}, "continue"),
-        ({"turns_used": 12}, "continue"),
-    ],
-)
-def test_every_final_settlement_waits_for_report(
-    state_updates: dict[str, int], decision: str
-) -> None:
-    """每种会 settle 的路径在 report 缺失时都必须改为 wait。"""
+@pytest.mark.parametrize("decision", ["submit", "abandon"])
+def test_every_final_settlement_waits_for_report(decision: str) -> None:
+    """PREPARE 的 submit/abandon 在 report 缺失时都必须改为 wait。"""
     state = PlanState(
-        kind="SEARCH",
+        kind="PREPARE",
         context_ref=_REF,
-        turns_used=1,
+        turns_used=3,
         turn_limit=12,
-        patience=4,
-        best_ref=_OTHER_REF,
-    ).model_copy(update=state_updates)
+    )
 
     settlement = decide_settlement(state, _decision(decision))
 
@@ -787,7 +792,7 @@ async def test_run_turn_invalid_manifest_is_rejected(tmp_path) -> None:
         json.dumps(
             {
                 "version": 1,
-                "commands": [secret_command],
+                "commands": secret_command,
                 "outputs": {"predictions": "outputs/predictions.csv"},
             }
         ),
@@ -806,7 +811,7 @@ async def test_run_turn_invalid_manifest_is_rejected(tmp_path) -> None:
     assert result.kind == "manifest_invalid"
     assert result.next_state is None
     assert result.error is not None
-    assert "commands.0" in result.error
+    assert "commands" in result.error
     assert "valid array" in result.error
     assert secret_command not in result.error
     assert str(Path(branch.path)) not in result.error

@@ -121,7 +121,19 @@ class LocalGitWorkspace(GitWorkspace):
 
             path = self._root / f"athena-{uuid4().hex}"
             branch_ref = f"refs/heads/{branch}"
-            await self._git("update-ref", branch_ref, commit, "0" * 40)
+            try:
+                await self._git("update-ref", branch_ref, commit, "0" * 40)
+            except GitWorkspaceError as exc:
+                # 并发进程在 show-ref 与本行之间创建了同名分支（per-instance 锁无法
+                # 跨进程互斥）→ 幂等恢复现有 worktree，而不是裸抛 reference already exists。
+                if "already exists" not in str(exc):
+                    raise
+                workspace = await self._find_worktree(branch)
+                if workspace is not None and Path(workspace.path).is_relative_to(
+                    self._root
+                ):
+                    return workspace
+                raise
             try:
                 await self._git("worktree", "add", str(path), branch)
             except Exception:

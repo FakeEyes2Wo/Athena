@@ -29,6 +29,8 @@ from athena.research.validation import ValidationService
 
 CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
 _MAX_REVIEW_DIFF_CHARS = 12_000
+# 校验修复循环的迭代上限，防止 preflight/review/工作区变化互相拉锯造成无限烧 token。
+_MAX_VALIDATION_REPAIR_ATTEMPTS = 16
 
 
 class ValidationInput(BaseModel):
@@ -406,7 +408,7 @@ async def run_validation_plan(
 
     if action == "run":
         repair = await _decode_repair(agents, store, input=input)
-        while True:
+        for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
             diff = await git.diff(workspace)
             preflight = await _deterministic_preflight(
                 workspace=workspace,
@@ -454,6 +456,11 @@ async def run_validation_plan(
                 )
                 continue
             break
+        else:
+            raise RuntimeError(
+                "validation repair budget exhausted after "
+                f"{_MAX_VALIDATION_REPAIR_ATTEMPTS} attempts"
+            )
         review_evidence_ref = await store.put_text(
             json.dumps(
                 {

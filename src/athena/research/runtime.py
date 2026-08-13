@@ -603,6 +603,8 @@ class ResearchRuntime:
             ),
             manual=state.manual_mode,
             pending=pending,
+            validation=state.validation,
+            eda_dir=state.eda_dir,
         )
 
     async def _run_supervisor_turn(self, text: str) -> str:

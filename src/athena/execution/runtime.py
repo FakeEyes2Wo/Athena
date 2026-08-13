@@ -8,6 +8,7 @@ EDA/训练/评估业务决策；安全隔离与远程执行是显式未来工作
 """
 
 import asyncio
+import codecs
 import hashlib
 import os
 import shutil
@@ -40,6 +41,23 @@ _HOST_VARS = frozenset(
         "HOME",
         "HOMEDRIVE",
         "HOMEPATH",
+        # uv/pip/git 联网、私有索引、自签证书与代理所需；缺失会让他们在代理/镜像
+        # 环境下静默失败。
+        "UV_INDEX_URL",
+        "UV_CACHE_DIR",
+        "UV_LINK_MODE",
+        "UV_NO_CACHE",
+        "UV_PYTHON",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
     }
 )
 
@@ -340,11 +358,13 @@ class CommandExecutor:
         """
         name = Path(shell).name.lower()
         if "powershell" in name or "pwsh" in name:
+            # 用换行而非 `;` 分隔 exit：command 以 `# 注释` 结尾时，`; exit ...`
+            # 会被吞进注释导致真实非零退出码被误判成 0。
             return (
                 "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
                 "$OutputEncoding=[Text.Encoding]::UTF8;"
                 + command
-                + "; exit $LASTEXITCODE"
+                + "\nexit $LASTEXITCODE"
             )
         return command
 
@@ -437,18 +457,30 @@ class CommandExecutor:
             head: list[str],
             full: list[str] | None,
         ) -> int:
-            """读取流式输出：边 hash 完整输出边累积有界头部，返回本流字符数。"""
+            """读取流式输出：边 hash 完整输出边累积有界头部，返回本流字符数。
+
+            用增量解码器跨 chunk 解码，避免多字节 UTF-8（如中文）在 chunk 边界
+            被撕裂成 U+FFFD。
+            """
             length = 0
-            async for raw in stream:
-                digest.update(raw)
-                line = raw.decode("utf-8", errors="replace")
-                await _dispatch(emit, kind, "exec:out", {"delta": line})
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+            async def emit_decoded(text: str) -> None:
+                nonlocal length
+                if not text:
+                    return
+                await _dispatch(emit, kind, "exec:out", {"delta": text})
                 if length < MAX_OUTPUT_CHARS:
                     room = MAX_OUTPUT_CHARS - length
-                    head.append(line[:room])
-                    length = min(MAX_OUTPUT_CHARS, length + len(line))
+                    head.append(text[:room])
+                    length = min(MAX_OUTPUT_CHARS, length + len(text))
                 if full is not None:
-                    full.append(line)
+                    full.append(text)
+
+            async for raw in stream:
+                digest.update(raw)
+                await emit_decoded(decoder.decode(raw))
+            await emit_decoded(decoder.decode(b"", final=True))
             return length
 
         readers = [
@@ -463,7 +495,13 @@ class CommandExecutor:
             returncode = await asyncio.wait_for(proc.wait(), timeout=timeout_s)
         except asyncio.TimeoutError:
             self._terminate(proc)  # 超时 → 终止整个进程树
-            await asyncio.gather(*readers, return_exceptions=True)
+            # drain 也要有界：孙进程可能脱离进程组仍霸占管道，导致 gather 永久挂起。
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*readers, return_exceptions=True), timeout=5
+                )
+            except asyncio.TimeoutError:
+                pass
             return CommandResult(
                 ok=False,
                 stdout="".join(out_head),

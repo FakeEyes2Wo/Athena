@@ -6,6 +6,8 @@ mean、std，随后完整 train 再训练一次并在 test 上评估一次。tes
 时，整轮在启动前确定性切换为 single-test（不在运行中按结果临时降级）。
 """
 
+import math
+import subprocess
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -82,18 +84,37 @@ class TrustedEvaluator:
         candidate_id: str,
         direction: Literal["maximize", "minimize"],
     ) -> CandidateEvaluation:
-        """运行 eval 入口，只注入 predictions；labels 来自冻结 bundle（design 修复 5）。"""
-        result = await self._runner.run(
-            eval_bundle,
-            request={"predictions": predictions},
-            extra_files={"predictions.csv": predictions},
-            output_schema={"primary": None},
-        )
+        """运行 eval 入口，只注入 predictions；labels 来自冻结 bundle（design 修复 5）。
+
+        评估脚本崩溃/超时/缺字段/非有限分数，都视为该候选的评分失败（ValueError），
+        由上层按 ``scoring_failed`` 重试，而不是误判成 evaluator 基础设施故障而终止。
+        """
+        try:
+            result = await self._runner.run(
+                eval_bundle,
+                request={"predictions": predictions},
+                extra_files={"predictions.csv": predictions},
+                output_schema={"primary": None},
+            )
+        except (subprocess.SubprocessError, RuntimeError) as exc:
+            raise ValueError(f"evaluator failed to produce a score: {exc}") from exc
         primary = result.outputs.get("primary")
         if primary is None:
             raise ValueError("candidate evaluation produced no primary score")
+        if isinstance(primary, bool) or not isinstance(primary, (int, float, str)):
+            raise ValueError(
+                f"primary score must be a number, got {type(primary).__name__}"
+            )
+        try:
+            metric = float(primary)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"primary score must be numeric, got {primary!r}"
+            ) from None
+        if not math.isfinite(metric):
+            raise ValueError(f"primary score must be finite, got {primary!r}")
         return CandidateEvaluation(
             candidate_id=candidate_id,
-            test_score=float(primary),
+            test_score=metric,
             direction=direction,
         )

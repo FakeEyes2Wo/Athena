@@ -187,6 +187,27 @@ class ResponsesProvider(BaseProvider):
             return {"type": "json_object"}
         return None
 
+    @staticmethod
+    def _assemble_function_calls(bufs: dict[int, dict]) -> list[StreamEvent]:
+        """把缓冲的工具调用按 index 顺序组装为 function_call 事件。"""
+        events: list[StreamEvent] = []
+        for i in sorted(bufs):
+            b = bufs[i]
+            if not (b["id"] and b["name"]):
+                continue
+            try:
+                args = json.loads(b["arguments"]) if b["arguments"] else {}
+            except json.JSONDecodeError:
+                # LLM 返回了非 JSON 格式的工具参数，视为空参数
+                args = {}
+            events.append(
+                StreamEvent(
+                    kind="function_call",
+                    data={"call_id": b["id"], "name": b["name"], "arguments": args},
+                )
+            )
+        return events
+
     async def stream(
         self,
         config: "AgentConfig",
@@ -278,24 +299,8 @@ class ResponsesProvider(BaseProvider):
 
                 # tool_calls finish：组装并发出所有缓冲的函数调用
                 if finish == "tool_calls":
-                    for i in sorted(bufs):
-                        b = bufs[i]
-                        if b["id"] and b["name"]:
-                            try:
-                                args = (
-                                    json.loads(b["arguments"]) if b["arguments"] else {}
-                                )
-                            except json.JSONDecodeError:
-                                # LLM 返回了非 JSON 格式的工具参数，视为空参数
-                                args = {}
-                            yield StreamEvent(
-                                kind="function_call",
-                                data={
-                                    "call_id": b["id"],
-                                    "name": b["name"],
-                                    "arguments": args,
-                                },
-                            )
+                    for event in self._assemble_function_calls(bufs):
+                        yield event
                     finish = ""
                     bufs.clear()
 
@@ -305,6 +310,11 @@ class ResponsesProvider(BaseProvider):
                 kind="error", data={"message": f"{type(exc).__name__}: {exc}"}
             )
             return
+
+        # 流结束仍残留缓冲的工具调用（finish 非 tool_calls，如 length 截断或空尾部
+        # chunk）——不能静默丢弃，否则 agent 空转成功或报误导性的结构化输出错误。
+        for event in self._assemble_function_calls(bufs):
+            yield event
 
         if dsml_filter is not None:
             tail = dsml_filter.flush()

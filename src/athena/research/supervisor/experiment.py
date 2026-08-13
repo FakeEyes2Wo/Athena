@@ -42,8 +42,11 @@ _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
 
 
 def _validate_relative_path(path: str, label: str) -> None:
-    """拒绝绝对路径、空段与 ``..`` 逃逸的 workspace 相对路径。"""
+    """拒绝绝对路径、驱动器相对路径、空段与 ``..`` 逃逸的 workspace 相对路径。"""
     if os.path.isabs(path):
+        raise ValueError(f"{label} path must be relative to the workspace")
+    # Windows 驱动器相对路径（如 "C:foo"）isabs 为 False，但会落到 C: 盘当前目录。
+    if os.path.splitdrive(path)[0]:
         raise ValueError(f"{label} path must be relative to the workspace")
     parts = path.replace("\\", "/").split("/")
     if any(part in ("", ".", "..") for part in parts):
@@ -91,13 +94,25 @@ class ExperimentManifest(BaseModel):
             raise ValueError("only manifest version 1 is supported")
         return value
 
+    @field_validator("commands", mode="before")
+    @classmethod
+    def _coerce_single_command(cls, value: object) -> object:
+        # Agent 常把单条命令写成扁平数组 ["python", "x.py"]，兼容为 [["python", "x.py"]]。
+        if isinstance(value, list) and value and isinstance(value[0], str):
+            return [value]
+        return value
+
     @field_validator("commands")
     @classmethod
     def _validate_commands(cls, value: list[list[str]]) -> list[list[str]]:
         for argv in value:
             if not argv or any(not part.strip() for part in argv):
                 raise ValueError("each command must be a non-empty argv array")
-            if argv[0].lower() in _FORBIDDEN_EXECUTABLES:
+            # 用 basename 判断，杜绝绝对路径绕过（如 /usr/bin/git、C:\\...\\git.exe）。
+            if (
+                os.path.basename(argv[0].replace("\\", "/")).lower()
+                in _FORBIDDEN_EXECUTABLES
+            ):
                 raise ValueError("manifest cannot run git commands")
         return value
 
@@ -257,7 +272,8 @@ def decide_settlement(
             )
     else:
         settlement = PlanSettlement(action="continue")
-    if settlement.action == "settle" and report_ref is None:
+    # 只有 PREPARE 强制要求 report；SEARCH 的 report 输出是可选的，缺失不应卡住 settle。
+    if settlement.action == "settle" and state.kind == "PREPARE" and report_ref is None:
         return PlanSettlement(action="wait", reason="report required before settlement")
     return settlement
 
@@ -327,6 +343,11 @@ class PlanRunner:
                 error = (
                     f"command failed (exit {result.exit_code}): {result.stderr[:200]}"
                 )
+                if "ModuleNotFoundError" in result.stderr:
+                    error += (
+                        ' Run "uv sync --project $ATHENA_ENV_ROOT" to install the '
+                        "declared dependencies into the environment venv, then retry."
+                    )
                 return await self._failure(plan_id, "execution_failed", error)
 
         predictions_path = self.workdir / manifest.outputs["predictions"]
@@ -347,38 +368,48 @@ class PlanRunner:
                 predictions_ref=predictions_ref,
             )
 
-        bundle = await self._load_bundle(plan_input.evaluator_ref)
-        if bundle is None:
-            return await self._failure(
-                plan_id,
-                "scoring_failed",
-                "frozen evaluator artifact is invalid",
-                predictions_ref=predictions_ref,
-            )
-        try:
-            evaluation = await self._evaluator.score(
-                eval_bundle=bundle,
-                predictions=predictions,
-                candidate_id=plan_id,
-                direction=self._direction,
-            )
-        except ValueError as exc:
-            # 候选输出导致评估失败 → 同 Plan 修复，不产生可信分数
-            return await self._failure(
-                plan_id,
-                "scoring_failed",
-                str(exc),
-                predictions_ref=predictions_ref,
-            )
-        except Exception as exc:
-            return await self._failure(
-                plan_id,
-                "evaluator_infrastructure_failed",
-                str(exc),
-                predictions_ref=predictions_ref,
-            )
+        if state.kind == "PREPARE":
+            metric = await self._prepare_metric(plan_id)
+            if metric is None:
+                return await self._failure(
+                    plan_id,
+                    "scoring_failed",
+                    "metric.json eval script failed or produced no primary score",
+                    predictions_ref=predictions_ref,
+                )
+        else:
+            bundle = await self._load_bundle(plan_input.evaluator_ref)
+            if bundle is None:
+                return await self._failure(
+                    plan_id,
+                    "scoring_failed",
+                    "frozen evaluator artifact is invalid",
+                    predictions_ref=predictions_ref,
+                )
+            try:
+                evaluation = await self._evaluator.score(
+                    eval_bundle=bundle,
+                    predictions=predictions,
+                    candidate_id=plan_id,
+                    direction=self._direction,
+                )
+            except ValueError as exc:
+                # 候选输出导致评估失败 → 同 Plan 修复，不产生可信分数
+                return await self._failure(
+                    plan_id,
+                    "scoring_failed",
+                    str(exc),
+                    predictions_ref=predictions_ref,
+                )
+            except Exception as exc:
+                return await self._failure(
+                    plan_id,
+                    "evaluator_infrastructure_failed",
+                    str(exc),
+                    predictions_ref=predictions_ref,
+                )
+            metric = evaluation.test_score
 
-        metric = evaluation.test_score
         diff = await self._workspace.diff(self._branch)
         commit = await self._workspace.commit(
             self._branch, diff, f"plan {plan_id} trusted score {metric:.4f}"
@@ -415,6 +446,38 @@ class PlanRunner:
             evidence_ref=evidence_ref,
             report_ref=report_ref,
         )
+
+    async def _prepare_metric(self, plan_id: str) -> float | None:
+        """运行 metric.json 指定的 eval 脚本，解析其 stdout 的 primary 分数。
+
+        PREPARE 基线不再走冻结评估器 + ``--request/--output``；Agent 直接写
+        ``metric.json``（如 ``{"eval_script": "evaluator/evaluate.py"}``），eval
+        脚本以 workspace 为 cwd 读取 labels.csv 与 predictions.csv，打印一行
+        ``{"primary": <float>}``。
+        """
+        spec_path = self.workdir / "metric.json"
+        if not spec_path.is_file():
+            return None
+        try:
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            eval_script = spec["eval_script"]
+        except (OSError, ValueError, KeyError):
+            return None
+        result = await self._execution.run(
+            self._context,
+            argv=["python", eval_script],
+            timeout_s=self._timeout_s,
+            workdir=str(self.workdir),
+        )
+        if not result.ok:
+            return None
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            return None
+        try:
+            return float(json.loads(lines[-1])["primary"])
+        except (ValueError, KeyError, TypeError):
+            return None
 
     async def _failure(
         self,

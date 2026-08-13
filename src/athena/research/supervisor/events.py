@@ -60,6 +60,9 @@ class StateEvent(BaseModel):
     waiting: dict[str, Any] | None
     manual: bool = False
     pending: list[dict[str, Any]] = Field(default_factory=list)
+    # VALIDATE 结果与 EDA 目录路径（与 state.json 同源，供订阅方/续跑快照观测）。
+    validation: dict[str, Any] | None = None
+    eda_dir: str | None = None
 
 
 def redact(text: str) -> str:
