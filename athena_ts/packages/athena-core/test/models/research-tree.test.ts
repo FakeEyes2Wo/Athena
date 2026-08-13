@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { parseOrThrow } from "../../src/errors.js"
 import {
   ComparisonVerdictSchema,
+  EvalResultSchema,
   HypothesisSchema,
 } from "../../src/models/research-models.js"
 import type { EvalResult, Hypothesis } from "../../src/models/research-models.js"
@@ -65,12 +66,12 @@ function makeExperiment(
 }
 
 function successfulEval(experimentId: string, primary = 0.75): EvalResult {
-  return {
+  return parseOrThrow(EvalResultSchema, {
     experiment_id: experimentId,
     primary,
     secondary: {},
     per_sample: `artifact://samples/${experimentId}`,
-  }
+  })
 }
 
 function complete(

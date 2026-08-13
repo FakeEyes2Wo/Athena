@@ -298,9 +298,7 @@ describe("ResearchTree scheduling and selective inheritance", () => {
 
   for (const priority of [NaN, Infinity, -Infinity]) {
     it(`hypothesis priority must be finite (${priority})`, () => {
-      expect(() => _hypothesis("h_poison", { priority })).toThrow(
-        /expected number/,
-      )
+      expect(() => _hypothesis("h_poison", { priority })).toThrow(/finite/)
     })
   }
 
