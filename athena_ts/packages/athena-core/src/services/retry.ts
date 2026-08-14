@@ -75,7 +75,8 @@ export async function retryAsync<T>(
       const error = err as Error
       if (attempt === attempts - 1 || !classify(error)) throw error
       const delay = Math.min(maxDelay, baseDelay * 2 ** attempt) * (0.5 + Math.random())
-      await new Promise((resolve) => setTimeout(resolve, delay))
+      // 退避单位对齐 Python `asyncio.sleep(delay)`（秒）；setTimeout 收毫秒，须 ×1000。
+      await new Promise((resolve) => setTimeout(resolve, delay * 1000))
     }
   }
   throw new Error("unreachable")
