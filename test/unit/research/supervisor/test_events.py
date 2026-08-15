@@ -160,6 +160,7 @@ def test_state_event_is_a_complete_replaceable_snapshot() -> None:
         "pending",
         "validation",
         "eda_dir",
+        "task_understanding",
     }
     assert event.manual is False
     assert event.pending == []

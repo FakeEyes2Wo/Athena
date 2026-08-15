@@ -76,7 +76,7 @@ class PhaseRunner:
         )
         rt._state.save(rt._state_path)
         # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结。
-        evaluator_dir = Path(rt._root / "workspaces" / "evaluator")
+        evaluator_dir = rt._workspaces_root / "evaluator"
         if not rt._registry.contains("evaluator"):
             register_evaluator_agent(
                 rt._registry,
@@ -84,6 +84,7 @@ class PhaseRunner:
                 artifacts=rt._store,
                 workspace=evaluator_dir,
                 runtime=rt._execution,
+                extra_tools=rt.kaggle_tools("evaluator"),
             )
         evaluator_ref = await run_evaluator_plan(
             agents=rt._agents,
@@ -105,6 +106,7 @@ class PhaseRunner:
                 artifacts=rt._store,
                 workspace=Path(workspace.path),
                 runtime=rt._execution,
+                extra_tools=rt.kaggle_tools("prepare"),
             )
         tree_ref = await rt._store.put_text(
             json.dumps(rt.tree.to_dict(), ensure_ascii=False, sort_keys=True)

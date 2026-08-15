@@ -5,6 +5,7 @@ from athena.core.research_tree import Experiment, ResearchTree
 from athena.research.supervisor.plans import PlanState
 from athena.research.supervisor.scheduler import (
     ScheduleAction,
+    ScheduleKind,
     Scheduler,
     count_search_attempts,
 )
@@ -216,6 +217,32 @@ def test_fresh_search_asks_for_all_unfilled_slots() -> None:
     assert Scheduler().next_actions(_state(), ResearchTree(), set()) == [
         ScheduleAction.Generate(4)
     ]
+
+
+def test_near_duplicate_hypotheses_selected_once_but_both_stay_pending() -> None:
+    tree = ResearchTree()
+    for order, hypothesis_id in enumerate(("h1", "h2")):
+        tree.add_hypothesis(
+            Hypothesis(
+                id=hypothesis_id,
+                statement="scale numeric features",
+                intervention="standardize all inputs",
+                expected_effect="improve trusted metric",
+                priority=1000.0,
+                order=order,
+            )
+        )
+    state = _state(concurrency=2, search_limit=2)
+
+    actions = Scheduler().next_actions(state, tree, set())
+
+    started = [
+        action.hypothesis_id
+        for action in actions
+        if action.kind is ScheduleKind.START_NEW
+    ]
+    assert started == ["h1"]
+    assert {h.id for h in tree.pending_hypotheses()} == {"h1", "h2"}
 
 
 def test_prepare_plan_does_not_count_as_search_attempt() -> None:

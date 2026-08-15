@@ -63,6 +63,8 @@ class StateEvent(BaseModel):
     # VALIDATE 结果与 EDA 目录路径（与 state.json 同源，供订阅方/续跑快照观测）。
     validation: dict[str, Any] | None = None
     eda_dir: str | None = None
+    # Supervisor 结构化任务理解（GUI 意图预览据此更新）。
+    task_understanding: dict[str, Any] | None = None
 
 
 def redact(text: str) -> str:

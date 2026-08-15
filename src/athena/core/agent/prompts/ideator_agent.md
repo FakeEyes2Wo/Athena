@@ -18,12 +18,19 @@ SEARCH. Use it as your starting context.
    repeat it.
 3. Propose **1-5 falsifiable hypotheses** that could improve the primary metric.
 
-Return a JSON object with a `hypotheses` array. Each hypothesis must have:
+Return a JSON object with a `hypotheses` array and an optional `eda_request`
+string. Each hypothesis must have:
 
 - `statement`: why you believe the change may help (causal, testable claim)
 - `intervention`: exactly what the experiment will change (feature, model,
   preprocessing, hyperparameter)
 - `expected_effect`: how you expect the primary metric to change
+
+When the existing EDA is insufficient to ground a hypothesis, put a concise,
+specific request into `eda_request` (for example "correlation between feature X
+and the target", "distribution shift of feature Y between train and test"). The
+system then runs a Data Agent to append that analysis to the EDA report before
+the next round. Set `eda_request` to null when the current EDA is sufficient.
 
 Keep hypotheses **falsifiable**: an experiment could plausibly refute them.
 Prefer incremental, well-motivated changes over vague or unfalsifiable claims.

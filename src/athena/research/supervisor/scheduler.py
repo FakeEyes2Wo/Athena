@@ -10,8 +10,8 @@ from athena.research.supervisor.policy import (
     EloPolicy,
     HypothesisPolicy,
     Outcome,
-    queue_order,
 )
+from athena.research.supervisor.ranker import Selector
 from athena.research.supervisor.state import ResearchState
 
 _TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
@@ -57,7 +57,7 @@ class ScheduleAction:
 
     @classmethod
     def Generate(cls, count: int) -> "ScheduleAction":
-        """Ask the SupervisorAgent for exactly ``count`` new Hypotheses."""
+        """Ask for at least ``count`` new Hypotheses; the Ideator returns a full batch."""
         return cls(kind=ScheduleKind.GENERATE, count=count)
 
 
@@ -86,8 +86,13 @@ def _is_ready(turns_used: int, turn_limit: int | None) -> bool:
 class Scheduler:
     """Fill SEARCH concurrency slots in a fixed deterministic order."""
 
-    def __init__(self, policy: HypothesisPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: HypothesisPolicy | None = None,
+        selector: Selector | None = None,
+    ) -> None:
         self._policy = policy or EloPolicy()
+        self._selector = selector or Selector(self._policy)
 
     def seed(self, parent: Hypothesis | None) -> float:
         """Seed one hypothesis through the scheduler's policy."""
@@ -96,6 +101,12 @@ class Scheduler:
     def settle(self, reference_priority: float, outcome: Outcome) -> float:
         """Settle one hypothesis through the scheduler's policy."""
         return self._policy.settle(reference_priority, outcome)
+
+    def deduplicate(
+        self, candidates: list[Hypothesis], existing: list[Hypothesis]
+    ) -> list[Hypothesis]:
+        """Drop candidates too similar to the graph before registration."""
+        return self._selector.deduplicate(candidates, existing)
 
     def next_actions(
         self,
@@ -165,17 +176,16 @@ class Scheduler:
     def _queued(
         self, tree: ResearchTree, state: ResearchState, human_next: str | None
     ) -> list[Hypothesis]:
+        executed = {experiment.hypothesis_id for experiment in tree.experiments()}
         candidates = [
             hypothesis
             for hypothesis in tree.pending_hypotheses()
             if hypothesis.id is not None
             and hypothesis.id not in state.plans
             and hypothesis.id != human_next
-            and tree.experiment_for_hypothesis(hypothesis.id) is None
+            and hypothesis.id not in executed
         ]
-        return sorted(
-            candidates,
-            key=lambda hypothesis: queue_order(
-                self._policy.priority(hypothesis, tree), hypothesis.order
-            ),
-        )
+        # 去重只作用于"本轮选择"：同一轮不并行启动近似重复的新假设，但所有假设
+        # 仍保留在 graph（PROPOSED）中，后续轮次仍可重新排名并选中。
+        candidates = self._selector.deduplicate(candidates, [])
+        return self._selector.rank(tree, candidates)

@@ -84,17 +84,27 @@ def register_prompt_agent(
     provider: object,
     artifacts: ArtifactStore,
     name: str | None = None,
+    extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
 ) -> None:
     """注册 prompt-driven ReAct Agent 工厂（各 ``register_*_agent`` 的共性）。
 
     ``workspace`` 可为固定 ``Path`` 或 ``Callable[[agent_id], Path]``（plan 按
     每个 hypothesis 动态解析工作区）；``name`` 支持 ``{agent_id}`` 占位符，缺省
     为 ``f"{agent_type}-agent"``。max_turns 统一用 ``AgentConfig`` 默认 200。
+
+    ``extra_tools`` 可选追加业务工具（如 Kaggle 工具）：``ToolRegistry`` 不支持
+    批量 merge，逐个 register。也可以是零参 callable，在 factory 创建实例时惰性
+    求值——用于工具是否可用取决于运行时状态（如 Supervisor 是否接入 Kaggle）的
+    场景。
     """
 
     def factory(agent_id: str, _config: str | None = None) -> AgentSpec:
         root = workspace(agent_id) if callable(workspace) else workspace
         tools = generic_tool_registry(root, runtime=runtime)
+        resolved = extra_tools() if callable(extra_tools) else extra_tools
+        if resolved is not None:
+            for spec in resolved.specs:
+                tools.register(resolved.resolve(spec.name))
         agent = Agent(
             provider,
             tools,

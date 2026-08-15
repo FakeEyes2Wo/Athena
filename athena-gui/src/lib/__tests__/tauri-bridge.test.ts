@@ -24,7 +24,7 @@ describe("subscribeToPipelineEvents", () => {
     invokeMock.mockReset();
     listenMock.mockReset();
     listenMock.mockImplementation((name, handler) => {
-      if (name === "chat/token") {
+      if (name === "state") {
         handler({ payload: { data: { phase: "SEARCH" } } });
       }
       return Promise.resolve(() => {});
@@ -40,7 +40,7 @@ describe("subscribeToPipelineEvents", () => {
     });
   });
 
-  it("subscribes to all frontend-relevant event kinds", async () => {
+  it("subscribes to the backend state/output event channels", async () => {
     const unlisten = await subscribeToPipelineEvents(() => {});
 
     expect(listenMock.mock.calls.map(([name]) => name)).toEqual([...PIPELINE_EVENT_NAMES]);
@@ -55,7 +55,7 @@ describe("subscribeToPipelineEvents", () => {
     });
 
     expect(received[0]).toMatchObject({
-      kind: "chat/token",
+      kind: "state",
       data: { phase: "SEARCH" },
     });
   });

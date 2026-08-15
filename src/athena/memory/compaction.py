@@ -11,6 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 from athena.memory.context_manager import ContextManager
 
 _SUMMARY_PART_CHARS = 300
+HISTORY_SUMMARY_PREFIX = "[HISTORY SUMMARY]\n"
 
 
 @dataclass(slots=True)
@@ -56,7 +57,7 @@ class Compactor:
             raise RuntimeError("压缩过程中上下文被并发修改")
 
         summary_msg = ModelRequest(
-            parts=[SystemPromptPart(content=f"[HISTORY SUMMARY]\n{summary}")]
+            parts=[SystemPromptPart(content=f"{HISTORY_SUMMARY_PREFIX}{summary}")]
         )
         ctx.replace_range(0, split, [summary_msg])
         return Compaction(version=ctx.version, summary=summary, original_items=old)
@@ -135,10 +136,3 @@ class Compactor:
                         )
                     )
         return "".join(parts)
-
-
-if __name__ == "__main__":
-    ctx = ContextManager(context_limit=100_000)
-    ctx.append(ModelRequest(parts=[SystemPromptPart(content="early conversation")]))
-    compactor = Compactor(keep_recent=5_000)
-    print(f"compact needed: {compactor.should_compact(ctx)}")

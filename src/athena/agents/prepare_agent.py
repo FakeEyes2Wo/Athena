@@ -5,6 +5,7 @@ from pathlib import Path
 from athena.agents.prompt_agent import register_prompt_agent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.contracts import ArtifactStore
+from athena.core.tool import ToolRegistry
 from athena.execution.runtime import ExecutionRuntime
 from athena.research.supervisor.plans import PlanDecision
 
@@ -21,8 +22,13 @@ def register_prepare_agent(
     artifacts: ArtifactStore,
     workspace: Path,
     runtime: ExecutionRuntime,
+    extra_tools: ToolRegistry | None = None,
 ) -> None:
-    """Register a fresh PREPARE Agent factory with real workspace tools."""
+    """Register a fresh PREPARE Agent factory with real workspace tools.
+
+    ``extra_tools`` 追加领域工具（如 Kaggle），让 PREPARE 在做任务理解时能自行
+    决定是否连接竞赛、下载数据并合成 SOTA 方案。
+    """
     register_prompt_agent(
         registry,
         agent_type=PREPARE_AGENT_TYPE,
@@ -31,6 +37,7 @@ def register_prepare_agent(
         runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        extra_tools=extra_tools,
     )
 
 
@@ -41,8 +48,13 @@ def register_evaluator_agent(
     artifacts: ArtifactStore,
     workspace: Path,
     runtime: ExecutionRuntime,
+    extra_tools: ToolRegistry | None = None,
 ) -> None:
-    """Register a fresh evaluator Agent factory writing the eval script draft."""
+    """Register a fresh evaluator Agent factory writing the eval script draft.
+
+    ``extra_tools`` 追加领域工具（如 Kaggle），让 evaluator 能查竞赛评估指标并
+    取训练数据生成 ``labels.csv``。
+    """
     register_prompt_agent(
         registry,
         agent_type=EVALUATOR_AGENT_TYPE,
@@ -51,6 +63,7 @@ def register_evaluator_agent(
         runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        extra_tools=extra_tools,
     )
 
 

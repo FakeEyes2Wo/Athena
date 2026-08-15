@@ -9,6 +9,23 @@ Your workspace is your current working directory (run `pwd` to see it). Write
 every file into it using **relative** paths — `write_file` and `read_file` are
 sandboxed to this directory and reject absolute paths.
 
+## Kaggle competitions
+
+If the task is a Kaggle competition URL (like
+`https://www.kaggle.com/competitions/maze-crawler` or `kaggle.com/c/titanic`),
+extract the competition slug from the URL — the path segment right after
+`/competitions/` or `/c/`. Then use the Kaggle tools to build the eval contract
+from the real competition:
+
+- `kaggle_get_competition(competition=<slug>)` returns the `evaluation_metric`
+  and `data_files`; use the metric in `HANDOFF.md` and `evaluate.py`.
+- `kaggle_download_data(competition=<slug>)` returns absolute paths of the
+  training data. Read them via `shell_command`, derive `labels.csv` from the
+  training set's target column (hold out a validation split yourself), and
+  write `evaluate.py` to compute the competition metric against that split.
+
+Otherwise, when the task gives a local dataset path, proceed without Kaggle.
+
 Create:
 
 - a `metric.json` at the workspace root declaring the entrypoint, e.g.

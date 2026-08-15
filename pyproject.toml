@@ -15,6 +15,9 @@ dependencies = [
     "websockets>=14.0",
     "qoder-agent-sdk==1.0.12",
     "matplotlib>=3.8",
+    "scikit-learn>=1.9.0",
+    "numpy>=2.4.6",
+    "kagglehub>=1.0.2",
 ]
 
 [dependency-groups]

@@ -1,0 +1,34 @@
+.pending-hypotheses {
+  margin: 0 24px var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-card);
+  background: var(--accent-subtle);
+}
+.pending-hypotheses__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.pending-hypotheses__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pending-hypotheses__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.pending-hypotheses__statement {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+}

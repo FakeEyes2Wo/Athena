@@ -8,7 +8,7 @@ snapshot/items_since/rollback 构成版本化快照协议：
 
 from dataclasses import replace
 
-from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest
 
 from athena.core.tool_types import truncate_text
 
@@ -116,10 +116,3 @@ class ContextManager:
             if a is not None:
                 total += len(str(a))
         return max(1, total // 4)
-
-
-if __name__ == "__main__":
-    ctx = ContextManager(context_limit=100_000)
-    msg = ModelRequest(parts=[SystemPromptPart(content="Hello")])
-    ctx.append(msg)
-    print(f"Tokens: {ctx.tokens}, Items: {len(ctx.items)}")

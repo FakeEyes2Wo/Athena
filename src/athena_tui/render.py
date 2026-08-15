@@ -1,13 +1,12 @@
 """Codex-inspired responsive rendering for the two-event TUI."""
 
-import re
 from collections.abc import Iterable
 from pathlib import Path
 
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.utils import get_cwidth
 
-from athena_tui.state import CONFIRMATION, HistoryEntry, TuiState
+from athena_tui.state import CONFIRMATION, HistoryEntry, TuiState, _IDEATOR_PLAN
 
 Fragment = tuple[str, str]
 Fragments = list[Fragment]
@@ -34,7 +33,6 @@ _PHASE_CLASS = {
     "FAILED": "class:phase.stopped",
 }
 
-_IDEATOR_PLAN = re.compile(r"^ideator-([1-9][0-9]*)$")
 _MAX_IDEATOR_LANES = 3
 _MIN_IDEATOR_LANE_WIDTH = 24
 
@@ -310,13 +308,7 @@ def render_history_lines(state: TuiState, width: int) -> tuple[StyleAndTextTuple
 
 def render_history(state: TuiState, width: int) -> StyleAndTextTuples:
     """Join visual history lines for a FormattedTextControl."""
-    lines = render_history_lines(state, width)
-    output: StyleAndTextTuples = []
-    for index, line in enumerate(lines):
-        if index:
-            output.append(("", "\n"))
-        output.extend(line)
-    return output
+    return join_lines(render_history_lines(state, width))
 
 
 def render_header(state: TuiState, width: int) -> StyleAndTextTuples:
@@ -475,7 +467,8 @@ def _composer_hint(width: int) -> str:
     return hint
 
 
-def _join_lines(lines: tuple[StyleAndTextTuples, ...]) -> StyleAndTextTuples:
+def join_lines(lines: tuple[StyleAndTextTuples, ...]) -> StyleAndTextTuples:
+    """Flatten visual lines into one fragment list separated by newlines."""
     output: StyleAndTextTuples = []
     for index, line in enumerate(lines):
         if index:
@@ -488,9 +481,9 @@ def render_bottom_pane(state: TuiState, width: int) -> StyleAndTextTuples:
     """Render composer hints, help, or confirmation."""
     if state.mode == CONFIRMATION:
         text = f"{state.overlay or ''}  Y 确认 · N/Esc 取消"
-        return _join_lines(_wrap_block([], [], [("class:confirmation", text)], width))
+        return join_lines(_wrap_block([], [], [("class:confirmation", text)], width))
     if state.overlay:
-        return _join_lines(_wrap_block([], [], [("", state.overlay)], width))
+        return join_lines(_wrap_block([], [], [("", state.overlay)], width))
     hint = _composer_hint(width)
     if not hint:
         return []

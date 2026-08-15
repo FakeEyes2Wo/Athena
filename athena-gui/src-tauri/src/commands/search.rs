@@ -8,26 +8,26 @@ pub async fn start_search(
     state: State<'_, Arc<PythonBridge>>,
     config: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    state.call("SEARCH_START", config).await
+    state.call("start_search", json!({"config": config})).await
 }
 
 #[tauri::command]
 pub async fn pause_search(
     state: State<'_, Arc<PythonBridge>>,
 ) -> Result<serde_json::Value, String> {
-    state.call("SEARCH_PAUSE", json!({})).await
+    state.call("pause", json!({})).await
 }
 
 #[tauri::command]
 pub async fn resume_search(
     state: State<'_, Arc<PythonBridge>>,
 ) -> Result<serde_json::Value, String> {
-    state.call("SEARCH_RESUME", json!({})).await
+    state.call("resume", json!({})).await
 }
 
 #[tauri::command]
 pub async fn stop_search(
     state: State<'_, Arc<PythonBridge>>,
 ) -> Result<serde_json::Value, String> {
-    state.call("SEARCH_STOP", json!({})).await
+    state.call("stop", json!({})).await
 }

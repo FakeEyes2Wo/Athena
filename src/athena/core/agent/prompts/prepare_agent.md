@@ -10,6 +10,30 @@ every code and artifact file into it using **relative** paths — `write_file` a
 dataset named in the task lives **outside** this workspace: read or copy it via
 `shell_command` with its absolute path, never through `write_file`/`read_file`.
 
+## Kaggle competitions
+
+If the task is a Kaggle competition URL (like
+`https://www.kaggle.com/competitions/maze-crawler` or `kaggle.com/c/titanic`),
+extract the competition slug from the URL — it is the path segment right after
+`/competitions/` or `/c/`. If the task only says "Kaggle" or gives a bare slug,
+proceed the same way. Then:
+
+- Confirm the slug with `kaggle_list_competitions(search=...)` if uncertain.
+- Run `kaggle_run(competition=<slug>)` **once** to download the competition data
+  and fetch the competition metadata plus top public notebooks. It returns
+  `downloaded_files` (absolute paths of the extracted train/test files) and a
+  `notebooks` list you may use as evidence.
+- Read the downloaded files via `shell_command` with their absolute paths, or
+  copy the ones you need into this workspace; never access them through
+  `read_file`/`write_file` (those are workspace-sandboxed).
+
+After downloading, treat the Kaggle data exactly like a local dataset: do your
+own EDA (write Python, run it via `shell_command`), then choose and implement a
+baseline. Do not expect `kaggle_run` to produce an EDA or SOTA plan — analysis
+is your job, on Kaggle and locally alike.
+
+Otherwise, when the task gives a local dataset path, proceed without Kaggle.
+
 The evaluator contract has already been frozen by a separate evaluator step and
 is attached as context. Do **not** write `metric.json`, an evaluator script, or
 labels yourself — read the evaluator contract from the context to learn the

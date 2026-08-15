@@ -4,10 +4,12 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from athena.research.supervisor.events import OutputEvent, StateEvent
+
 COMPOSER = "COMPOSER"
 CONFIRMATION = "CONFIRMATION"
 
-_IDEATOR_PLAN = re.compile(r"^ideator-[1-9][0-9]*$")
+_IDEATOR_PLAN = re.compile(r"^ideator-(?:\d+-)?([1-9][0-9]*)$")
 
 HistoryKind = Literal["user", "runtime"]
 OutputSource = Literal["supervisor", "agent", "tool"]
@@ -62,43 +64,39 @@ class TuiState:
         return self.status
 
 
-def apply_snapshot(state: TuiState, event: object) -> TuiState:
+def apply_snapshot(state: TuiState, event: StateEvent) -> TuiState:
     """Replace every runtime-owned field from one complete state event."""
-    search = dict(getattr(event, "search"))
-    sota = getattr(event, "sota")
-    waiting = getattr(event, "waiting")
     return replace(
         state,
-        status=str(getattr(event, "status")),
-        phase=str(getattr(event, "phase")),
-        plans=tuple(dict(plan) for plan in getattr(event, "plans")),
-        search=search,
-        sota=None if sota is None else dict(sota),
-        waiting=None if waiting is None else dict(waiting),
-        manual_mode=bool(getattr(event, "manual", False)),
-        pending=tuple(dict(h) for h in getattr(event, "pending", ())),
+        status=event.status,
+        phase=event.phase,
+        plans=tuple(dict(plan) for plan in event.plans),
+        search=dict(event.search),
+        sota=None if event.sota is None else dict(event.sota),
+        waiting=None if event.waiting is None else dict(event.waiting),
+        manual_mode=event.manual,
+        pending=tuple(dict(h) for h in event.pending),
     )
 
 
-def apply_output(state: TuiState, event: object) -> TuiState:
+def apply_output(state: TuiState, event: OutputEvent) -> TuiState:
     """Append one ordered output, coalescing only adjacent LLM text deltas."""
-    sequence = int(getattr(event, "seq"))
-    if sequence <= state.last_output_seq:
+    if event.seq <= state.last_output_seq:
         return state
 
-    plan = getattr(event, "plan", None)
+    plan = event.plan
     ideator_lanes = None
     if isinstance(plan, str) and _IDEATOR_PLAN.fullmatch(plan):
         ideator_lanes = (state.search or {}).get("ideator_lanes") or None
 
     entry = HistoryEntry(
         kind="runtime",
-        text=str(getattr(event, "text")),
-        source=getattr(event, "source"),
-        channel=getattr(event, "channel"),
+        text=event.text,
+        source=event.source,
+        channel=event.channel,
         plan=plan,
-        tool=getattr(event, "tool", None),
-        truncated=bool(getattr(event, "truncated", False)),
+        tool=event.tool,
+        truncated=event.truncated,
         ideator_lanes=ideator_lanes,
     )
     history = state.history
@@ -119,7 +117,7 @@ def apply_output(state: TuiState, event: object) -> TuiState:
     return replace(
         state,
         history=history,
-        last_output_seq=sequence,
+        last_output_seq=event.seq,
         unseen_output_count=(
             state.unseen_output_count
             if state.history_follow_tail

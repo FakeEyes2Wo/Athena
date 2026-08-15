@@ -9,16 +9,18 @@ describe("ui model bootstrap", () => {
       "experiment-log",
       "diff",
       "files",
+      "eda-report",
       "report",
+      "hypothesis-graph",
+      "algorithms",
+      "settings",
+      "llm-io",
+      "experiments",
     ]);
 
     expect(createEmptyPipelineViewModel()).toMatchObject({
       phase: "idle",
       status: "idle",
-      contextSurface: {
-        isOpen: false,
-        activePanel: "metrics",
-      },
       messages: [],
     });
   });

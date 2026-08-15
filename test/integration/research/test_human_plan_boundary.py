@@ -288,6 +288,18 @@ async def test_explicit_validate_and_stop_are_applied(runtime):
 
 
 @pytest.mark.asyncio
+async def test_start_validation_transitions_search_to_completed(runtime):
+    """GUI ``start_validation`` runs VALIDATE from a parked SEARCH phase."""
+    runtime._started = True  # 模拟 start_search 已启动、SEARCH 后停在 WAITING 的交互路径
+    assert runtime.state.phase == "SEARCH"
+
+    assert await runtime.start_validation() == "COMPLETED"
+    assert runtime.state.phase == "COMPLETED"
+    assert runtime.state.validation is not None
+    assert runtime.state.validation["final_test_score"] == 0.8
+
+
+@pytest.mark.asyncio
 async def test_ordinary_prose_containing_stop_is_not_a_command(runtime):
     calls = runtime.supervisor_provider.calls
     await runtime.message("please stop overfitting, but continue research")

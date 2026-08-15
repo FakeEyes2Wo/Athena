@@ -20,6 +20,7 @@ from athena.research.paper_rag.schemas import (
     CorpusSentence,
     PaperCorpusIndex,
 )
+from athena.research.paper_scout.pool import title_key
 from athena.core.contracts import ArtifactStore
 
 SENTENCE_END = re.compile(r"[.!?](?=\s)")
@@ -320,12 +321,6 @@ async def require_semantic_embedder(embedder: TextEmbedder) -> float:
             f"{SEMANTIC_MARGIN_THRESHOLD}. Inject a neural text embedder."
         )
     return margin
-
-
-def title_key(title: str) -> str:
-    """把标题规范化成匹配键；``title_key("Attention Is All You Need!")`` 返回
-    ``"attentionisallyouneed"``。"""
-    return "".join(character for character in title if character.isalnum()).lower()
 
 
 def paper_anchors(units_by_paper: list[list[RetrievalUnit]]) -> dict[str, str]:

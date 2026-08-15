@@ -33,6 +33,12 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [paper_markdown 质量](paper_markdown_rag_quality_ch.md) | current | 质量门禁判定与诊断码 |
 | [paper_rag 工具](paper_rag_tool_ch.md) | current | 两个检索算子 + 三个遍历算子 + 整篇读取 |
 
+## Kaggle 与 Supervisor 人类门
+
+| 文档 | 状态 | 用途 |
+|---|---|---|
+| [Kaggle 接入与 Supervisor 人类门](kaggle_supervisor_gate_ch.md) | current | 下载/预算/VALIDATE 三个门、假设监控、每 Agent 最少 Kaggle 工具 |
+
 ## 维护规则
 
 Canonical model owners are `athena.core.contracts`,

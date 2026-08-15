@@ -4,7 +4,7 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "build": "tsc --build packages/athena-core",
+    "build": "tsc -p packages/athena-core && tsc -p packages/athena-agent && tsc -p packages/athena-research",
     "test": "vitest run"
   },
   "devDependencies": {

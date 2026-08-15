@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from athena.core.agent import settings
+from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.survey import (
@@ -223,6 +224,65 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
     return 0 if report.converted() else 1
 
 
+def _print_kaggle_check(stack) -> int:
+    print("Kaggle 装配自检")
+    print(f"  下载根目录: {stack.download_root}")
+    print(f"  凭据: {'已配置' if stack.client.configured else '未配置'}")
+    return 0
+
+
+def _print_kaggle_report(report) -> None:
+    competition = report.competition
+    print(f"\n竞赛：{report.competition_ref}")
+    print(f"  状态: {report.status}")
+    if competition is not None:
+        print(f"  标题: {competition.title}")
+        print(f"  评估指标: {competition.evaluation_metric or '（未给出）'}")
+        print(f"  截止: {competition.deadline or '（未给出）'}")
+    print(f"  下载文件: {len(report.downloaded_files)} 个")
+    print(f"  notebook 证据: {len(report.notebooks)} 条")
+    print(f"  耗时: {report.total_seconds}s  http={report.http_requests}")
+    for warning in report.warnings:
+        print(f"  - {warning}")
+
+
+async def _cmd_kaggle(args: argparse.Namespace) -> int:
+    """跑一次 Kaggle 竞赛取数，或只做装配自检 / 列出竞赛。
+
+    ``--check`` 不发起任何网络请求；``--list`` 列出竞赛摘要；否则对
+    ``--competition`` 走 connect → download → search notebooks 取数流程。
+    """
+    stack = build_kaggle_stack(download_root=args.download_dir)
+    if args.check:
+        return _print_kaggle_check(stack)
+    if args.list:
+        raw = await stack.client.list_competitions(
+            search=args.search, sort_by=args.sort_by
+        )
+        for item in raw:
+            print(
+                f"{item.get('ref', '')}\t{item.get('title', '')}"
+                f"\t{item.get('deadline', '')}\t{item.get('reward', '')}"
+            )
+        return 0
+    if not args.competition.strip():
+        print("需要 --competition，或用 --list / --check。", file=sys.stderr)
+        return 2
+    report = await run_kaggle(
+        stack.client,
+        stack.artifacts,
+        stack.download_root,
+        KaggleRunRequest(
+            competition=args.competition,
+            download_subdir=args.download_subdir,
+            max_notebooks=min(args.max_notebooks, 50),
+        ),
+    )
+    _print_kaggle_report(report)
+    _write_report(report, args.out)
+    return 0 if report.status != "empty" else 1
+
+
 def _write_report(report, path: str) -> None:
     """把报告落到 ``--out``；写不进去只报错，不抹掉已经跑完的那一轮。
 
@@ -248,6 +308,8 @@ async def _dispatch_command(args: argparse.Namespace) -> int:
         return await _cmd_run(args)
     if args.command == "survey":
         return await _cmd_survey(args)
+    if args.command == "kaggle":
+        return await _cmd_kaggle(args)
     if args.command == "status":
         return await _cmd_status(args)
     return await _cmd_control(args)
@@ -285,6 +347,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="abort the run after N seconds (unbounded by default)",
     )
     _add_survey_parser(subparsers)
+    _add_kaggle_parser(subparsers)
     for name in ("status", "pause", "resume", "stop"):
         subparsers.add_parser(name).add_argument(
             "--project", required=True, help="project root"
@@ -379,6 +442,31 @@ def _add_survey_parser(subparsers) -> None:
     )
     survey.add_argument("--out", default="", help="把 SurveyReport JSON 写到该路径")
     survey.add_argument("--check", action="store_true", help="只做装配自检")
+
+
+def _add_kaggle_parser(subparsers) -> None:
+    """挂上 ``kaggle`` 子命令：连接竞赛 → 下载 → 检索 notebook，或列出竞赛 / 自检。"""
+    kaggle = subparsers.add_parser("kaggle", help="fetch a Kaggle competition's data")
+    kaggle.add_argument("--competition", default="", help="竞赛 slug，如 titanic")
+    kaggle.add_argument(
+        "--download-dir", default="", help="下载根目录，默认 cwd/kaggle-data"
+    )
+    kaggle.add_argument(
+        "--download-subdir", default="", help="下载子目录，默认竞赛 slug"
+    )
+    kaggle.add_argument(
+        "--max-notebooks",
+        type=_non_negative_int,
+        default=10,
+        help="notebook 证据数（0-50）",
+    )
+    kaggle.add_argument("--list", action="store_true", help="列出竞赛而不是跑流水线")
+    kaggle.add_argument("--search", default="", help="--list 时的标题过滤词")
+    kaggle.add_argument(
+        "--sort-by", default="latestDeadline", help="--list 排序字段"
+    )
+    kaggle.add_argument("--check", action="store_true", help="只做装配自检")
+    kaggle.add_argument("--out", default="", help="把报告 JSON 写到该路径")
 
 
 def main(argv: list[str] | None = None) -> int:

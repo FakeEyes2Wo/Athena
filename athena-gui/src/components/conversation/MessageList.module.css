@@ -1,0 +1,132 @@
+.message-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-lg) 24px;
+  scroll-behavior: smooth;
+}
+
+.message-bubble {
+  padding: var(--space-md) var(--space-lg);
+  margin-bottom: var(--space-md);
+  border-radius: var(--radius-bubble);
+  font-size: 14px;
+  line-height: 1.55;
+  font-weight: 400;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-bubble--user {
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.message-bubble--supervisor {
+  background: var(--warning-subtle);
+  border: 1px solid var(--warning);
+}
+
+.message-bubble--agent {
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+}
+
+.marker {
+  font-weight: 700;
+  margin-right: 8px;
+  font-size: 12px;
+}
+
+.marker--supervisor {
+  color: var(--warning);
+}
+
+.marker--agent {
+  color: var(--info);
+}
+
+.tool-call {
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-bubble);
+  padding: 8px 12px;
+  background: var(--surface-muted);
+  font-size: 13px;
+}
+
+.tool-call__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+}
+
+.tool-call :global(.code-block) {
+  margin: 0;
+  font-size: 11px;
+}
+
+.tool-output {
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-bubble);
+  padding: 8px 12px;
+  background: var(--surface-muted);
+}
+
+.tool-output summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  list-style: none;
+}
+
+.tool-output summary::before {
+  content: "";
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 5px solid var(--text-secondary);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  margin-right: 6px;
+  transition: transform var(--dur) var(--ease);
+}
+
+.tool-output[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.tool-output summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-output :global(.code-block) {
+  margin: 8px 0 0;
+  font-size: 11px;
+}
+
+.ideator-lane {
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--chart-3);
+  border-radius: var(--radius-bubble);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--surface);
+}
+
+.ideator-lane__title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--chart-3);
+  margin-bottom: var(--space-sm);
+}

@@ -155,6 +155,10 @@ class ResearchTree:
         except KeyError as exc:
             raise KeyError(f"unknown hypothesis id: {hypothesis_id}") from exc
 
+    def hypotheses(self) -> list[Hypothesis]:
+        """返回所有已登记假设（任意状态）。"""
+        return list(self._hypotheses.values())
+
     def pending_hypotheses(self) -> list[Hypothesis]:
         """返回状态为 PROPOSED 的待选假设。"""
         return [

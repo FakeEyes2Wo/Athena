@@ -1,0 +1,43 @@
+/** @athena/research 公开面（M2：固定确定性 SEARCH 调度器 + 数据/评估服务层）。 */
+
+export * from "./contracts.js"
+export * from "./supervisor/policy.js"
+export * from "./supervisor/plans.js"
+export { ResearchState } from "./supervisor/state.js"
+export { ScheduleKind, ScheduleAction, Scheduler, countSearchAttempts } from "./supervisor/scheduler.js"
+export type { NextActionsOptions } from "./supervisor/scheduler.js"
+export { Recovery } from "./supervisor/recovery.js"
+export { DataScriptRunner, BundleMetadata, ScriptRunResult, packDirectory, loadDirectory } from "./script_runner.js"
+export { TrustedEvaluator, ScoringError } from "./evaluation.js"
+export type { EvaluatorRunner, Scorer } from "./evaluation.js"
+export { CommandResult, ExecutionContext, LocalExecutionRuntime } from "./execution.js"
+export type { ExecutionRuntime } from "./execution.js"
+export {
+  PlanRunner,
+  PlanTurnResultSchema,
+  applyTrustedScore,
+  decideSettlement,
+  loadBest,
+  readExperimentManifest,
+} from "./supervisor/experiment.js"
+export type { Direction, ExperimentManifest, PlanSettlement, PlanTurnResult } from "./supervisor/experiment.js"
+export {
+  redact,
+  sanitizeTerminalText,
+  truncateMiddle,
+  EventProjector,
+  OutputEventSchema,
+  StateEventSchema,
+} from "./supervisor/events.js"
+export type { OutputEvent, StateEvent } from "./supervisor/events.js"
+export { ValidationService, generalizationGap, generalizationWarning } from "./validation.js"
+export { runValidationPlan } from "./supervisor/validation.js"
+export { PrepareResultSchema, freezeEvaluator, runEvaluatorPlan, runPreparePlan } from "./supervisor/prepare.js"
+export type { PrepareResult, AgentTurn } from "./supervisor/prepare.js"
+export { FixedFlowSupervisor } from "./supervisor/supervisor.js"
+export type { CompletedTurn, SupervisorWorkers, PlanTurn, PlanAgentTurn, IdeatorTurn, PreparePhase, ValidationPhase } from "./supervisor/supervisor.js"
+export { WorkerRunner, zodOutputType, PlanDecisionOutputType, HypothesisBatchOutputType } from "./worker.js"
+export type { WorkerRunnerOptions } from "./worker.js"
+export { ResearchRuntime } from "./runtime.js"
+export type { ResearchRuntimeOptions } from "./runtime.js"
+export { makeShellTool, commandResultDict } from "./shell.js"

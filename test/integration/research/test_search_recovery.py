@@ -102,7 +102,7 @@ async def test_turn_exhaustion_without_best_waits_and_releases_slot(
 
 
 @pytest.mark.asyncio
-async def test_abandon_without_best_settles_loss(harness: _Harness):
+async def test_abandon_without_best_marks_inconclusive(harness: _Harness):
     await _start_one(harness)
     await harness.finish("h1", None, decision="abandon", kind="execution_failed")
     await _eventually(lambda: "h1" not in harness.state.plans)
@@ -111,7 +111,10 @@ async def test_abandon_without_best_settles_loss(harness: _Harness):
         harness.tree.experiment_for_hypothesis("h1")
     )
     assert experiment.status.value == "FAILED"
-    assert harness.tree.get_hypothesis("h1").priority == 984.0
+    hypothesis = harness.tree.get_hypothesis("h1")
+    # 无有效 test 证据不按胜负更新评级：状态为 INCONCLUSIVE，优先级保持不变。
+    assert hypothesis.status == "INCONCLUSIVE"
+    assert hypothesis.priority == 1000.0
     assert "h1" not in harness.state.plans
 
 

@@ -8,5 +8,13 @@ pub async fn send_message(
     state: State<'_, Arc<PythonBridge>>,
     message: String,
 ) -> Result<serde_json::Value, String> {
-    state.call("PARSE_INTENT", json!({"message": message})).await
+    state.call("parse_intent", json!({"message": message})).await
+}
+
+#[tauri::command]
+pub async fn message(
+    state: State<'_, Arc<PythonBridge>>,
+    text: String,
+) -> Result<serde_json::Value, String> {
+    state.call("message", json!({"text": text})).await
 }

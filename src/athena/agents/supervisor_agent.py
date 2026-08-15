@@ -10,9 +10,10 @@ from athena.agents.orchestration import RunToolProjector
 from athena.agents.prompt_agent import load_prompt
 from athena.core.agent.models import AgentConfig
 from athena.core.agent.runtime import Agent
+from athena.core.agent.tools.user_input import RequestUserInputTool
 from athena.core.agent.types import AgentSpec, JsonCodec
 from athena.core.tool import BaseTool, ToolRegistry
-from athena.core.tool_types import ToolContext, ToolSpec
+from athena.core.tool_types import AskUser, ToolContext, ToolSpec
 
 SUPERVISOR_AGENT_ID = "supervisor"
 SUPERVISOR_AGENT_TYPE = "supervisor"
@@ -46,6 +47,20 @@ class SupervisorActions(Protocol):
 
     async def set_manual_mode(self, manual: bool) -> dict[str, object]:
         """Toggle SEARCH scheduling between auto and manual hypothesis selection."""
+        ...
+
+    async def set_kaggle_enabled(
+        self, enabled: bool, download: bool = True
+    ) -> dict[str, object]:
+        """Enable Kaggle tools and set whether to download data locally."""
+        ...
+
+    async def record_task_understanding(self, **payload: object) -> dict[str, object]:
+        """Persist the structured task understanding for the GUI intent preview."""
+        ...
+
+    async def read_hypotheses(self) -> dict[str, object]:
+        """Read-only snapshot of pending hypotheses and current SOTA."""
         ...
 
     async def record_guidance(self, text: str, scope: str) -> dict[str, object]:
@@ -117,6 +132,27 @@ class _ManualMode(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     manual: bool
+
+
+class _KaggleConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool
+    download: bool = True
+
+
+class _TaskUnderstanding(BaseModel):
+    """Structured task understanding recorded on the first task-understanding turn."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    title: str = ""
+    dataset: str = ""
+    target: str = ""
+    task_type: str = "other"
+    primary_metric: str = "accuracy"
+    direction: Literal["maximize", "minimize"] = "maximize"
+    evaluation_plan: str = ""
 
 
 class _Guidance(BaseModel):
@@ -221,6 +257,20 @@ def supervisor_tool_registry(actions: SupervisorActions) -> ToolRegistry:
         """Forward the auto/manual mode toggle."""
         return await actions.set_manual_mode(value.manual)  # type: ignore[attr-defined]
 
+    async def set_kaggle(value: BaseModel) -> dict[str, object]:
+        """Forward the Kaggle tool attachment + download decision."""
+        return await actions.set_kaggle_enabled(  # type: ignore[attr-defined]
+            value.enabled, value.download
+        )
+
+    async def record_understanding(value: BaseModel) -> dict[str, object]:
+        """Forward the structured task understanding."""
+        return await actions.record_task_understanding(**value.model_dump())
+
+    async def read_hyps(value: BaseModel) -> dict[str, object]:
+        """Forward the read-only hypothesis snapshot."""
+        return await actions.read_hypotheses()
+
     async def remember(value: BaseModel) -> dict[str, object]:
         """Forward scoped Human research guidance."""
         return await actions.record_guidance(value.text, value.scope)  # type: ignore[attr-defined]
@@ -275,6 +325,27 @@ def supervisor_tool_registry(actions: SupervisorActions) -> ToolRegistry:
             set_manual,
         ),
         (
+            "configure_kaggle",
+            "Enable or disable Kaggle tools for this run, and choose whether to download "
+            "the competition dataset locally. Enable when the task is a Kaggle competition.",
+            _KaggleConfiguration,
+            set_kaggle,
+        ),
+        (
+            "record_task_understanding",
+            "Record the structured task understanding (title, dataset, target, task type, "
+            "primary metric + direction, evaluation plan) for the GUI intent preview. "
+            "Call this on the first task-understanding turn.",
+            _TaskUnderstanding,
+            record_understanding,
+        ),
+        (
+            "read_hypotheses",
+            "Read the pending hypotheses, their priorities and the current SOTA.",
+            _NoInput,
+            read_hyps,
+        ),
+        (
             "record_guidance",
             "Record research guidance for the next Plan or all future Plans.",
             _Guidance,
@@ -308,6 +379,8 @@ def supervisor_tool_registry(actions: SupervisorActions) -> ToolRegistry:
                 invoke=invoke,
             )
         )
+    # Supervisor 是唯一人类交互出口：同步向人类提问（依赖注入的 ask_user）。
+    registry.register(RequestUserInputTool())
     return registry
 
 
@@ -317,8 +390,13 @@ def register_supervisor_agent(
     provider: Any,
     artifacts,
     actions: SupervisorActions,
+    ask_user: Any = None,
 ) -> None:
-    """Register a fresh SupervisorAgent factory through AgentTypeRegistry."""
+    """Register a fresh SupervisorAgent factory through AgentTypeRegistry.
+
+    ``ask_user`` 是 ``(thread, turn) -> (prompt) -> 回答`` 的工厂，供
+    ``request_user_input`` 工具阻塞等待人类回答；未提供则该工具报错。
+    """
 
     def factory(_agent_id: str, _config: str | None = None) -> AgentSpec:
         """Construct one SupervisorAgent specification."""
@@ -338,6 +416,7 @@ def register_supervisor_agent(
                 tools=tools,
                 projector=projector,
                 agent_type=SUPERVISOR_AGENT_TYPE,
+                ask_user=ask_user,
             ),
             codec=JsonCodec(),
         )

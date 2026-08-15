@@ -1,0 +1,108 @@
+/* 统一 App Shell：顶栏(52px) + 功能轨(48px) + 上下文侧栏(232px) + 主工作区 + 抽屉。 */
+
+.shell {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 52px 1fr;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* ===== 顶栏 ===== */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: 0 var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.topbar__collapse {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.topbar__collapse:hover {
+  background: var(--surface-muted);
+  color: var(--text-primary);
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.topbar__mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--chart-4));
+}
+
+.topbar__status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.status-dot[data-status="running"] {
+  background: var(--success);
+}
+
+.status-dot[data-status="paused"] {
+  background: var(--warning);
+}
+
+.status-dot[data-status="completed"] {
+  background: var(--info);
+}
+
+.status-dot[data-status="error"] {
+  background: var(--danger);
+}
+
+/* ===== 主体 ===== */
+.body {
+  min-height: 0;
+  display: flex;
+  position: relative;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* 面板内容撑满主区（图/表类面板需要确定高度）。 */
+.main > * {
+  flex: 1;
+  min-height: 0;
+}

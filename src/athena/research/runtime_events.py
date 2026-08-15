@@ -27,6 +27,9 @@ from athena.research.supervisor.supervisor import Supervisor
 
 logger = logging.getLogger(__name__)
 
+# shell_command 展示文本的字符上限：超长命令居中截断，保留首尾（对齐 codex）。
+_MAX_COMMAND_CHARS = 400
+
 EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
 
 
@@ -38,15 +41,20 @@ class RuntimeEvents:
         *,
         events: EventProjector,
         store: ArtifactStore,
-        output_log_path: Path,
+        sessions_dir: Path,
     ) -> None:
         self._events = events
         self._store = store
-        self._output_log_path = output_log_path
+        self._sessions_dir = sessions_dir
         self._supervisor: Supervisor | None = None
         self._ideator_lanes = 0
         self._subscribers: dict[str, EmitFn] = {}
         self._subscriber_ready: dict[str, asyncio.Task[object]] = {}
+
+    @property
+    def _log_path(self) -> Path:
+        """This runtime's transcript file (one transcript per runtime)."""
+        return self._sessions_dir / "default.jsonl"
 
     def attach_supervisor(self, supervisor: Supervisor) -> None:
         """Inject the Supervisor after construction (breaks the build cycle)."""
@@ -163,7 +171,7 @@ class RuntimeEvents:
                     and isinstance(args, dict)
                     and isinstance(args.get("command"), str)
                 ):
-                    command = truncate_middle(args["command"], 400)
+                    command = truncate_middle(args["command"], _MAX_COMMAND_CHARS)
                     args = {**args, "command": command}
                 try:
                     args_text = json.dumps(args, ensure_ascii=False)
@@ -255,26 +263,37 @@ class RuntimeEvents:
         )
 
     def _append_log(self, record: dict[str, object]) -> None:
-        """Append one session record to the TUI-resume log (best-effort)."""
+        """Append one session record to the active session's transcript (best-effort)."""
         try:
-            self._output_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._output_log_path.open("a", encoding="utf-8") as stream:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception:
             logger.exception("failed to persist session record")
 
     def persist_user_message(self, text: str) -> None:
-        """Append one Human message to the resume log, sharing the output seq."""
+        """Append one Human message to the active session, sharing the output seq."""
         self._append_log(
             {"type": "user", "seq": self._events._next_sequence(), "text": text}
         )
 
+    def resume_sequence(self) -> None:
+        """Resume the seq counter past this runtime's persisted transcript."""
+        max_seq = -1
+        for record in self.replay_output_events():
+            seq = record.get("seq")
+            if isinstance(seq, int) and seq > max_seq:
+                max_seq = seq
+        if max_seq >= 0:
+            self._events.resume(max_seq)
+
     def replay_output_events(self) -> list[dict[str, object]]:
-        """Return persisted session records in order for TUI history restore."""
-        if not self._output_log_path.is_file():
+        """Return this runtime's persisted transcript records."""
+        path = self._log_path
+        if not path.is_file():
             return []
         events: list[dict[str, object]] = []
-        for line in self._output_log_path.read_text(encoding="utf-8").splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             try:
@@ -335,4 +354,5 @@ class RuntimeEvents:
             pending=pending,
             validation=state.validation,
             eda_dir=state.eda_dir,
+            task_understanding=state.task_understanding,
         )

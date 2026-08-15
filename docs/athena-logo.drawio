@@ -1,0 +1,25 @@
+<mxfile host="app.diagrams.net" agent="Athena" version="24.7.17">
+  <diagram id="athena-logo" name="Athena 品牌标记">
+    <mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 圆角方砖：蓝 → 紫 渐变（对应 App 顶栏 --accent → --chart-4） -->
+        <mxCell id="tile" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2563EB;gradientColor=#7C3AED;gradientDirection=south;strokeColor=none;arcSize=22;shadow=0;" vertex="1" parent="1">
+          <mxGeometry x="120" y="120" width="120" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- 白色四角星（sparkle），与 App 的 Sparkles 图标一致 -->
+        <mxCell id="spark" value="✦" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=56;fontColor=#FFFFFF;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="120" y="120" width="120" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- 品牌字标 -->
+        <mxCell id="wordmark" value="Athena" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontColor=#0F172A;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="120" y="256" width="120" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

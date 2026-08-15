@@ -19,12 +19,17 @@ class ResearchState(BaseModel):
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
+    # 每轮 ideation 的并行 lane 数与每 lane 假设数（与 SEARCH 并发度解耦）。
+    ideator_count: int = Field(default=3, ge=1, le=8)
+    hypotheses_per_ideator: int = Field(default=2, ge=1, le=5)
     # SEARCH 调度模式：False=自动按优先级出队；True=每个假设生成后等待人工选定。
     manual_mode: bool = False
     plans: dict[str, PlanState] = Field(default_factory=dict)
     validation: dict[str, object] | None = None
     # PREPARE 产出的 EDA 工作区目录（Ideator 自行探索）；仅路径元数据，非 EDA 结果。
     eda_dir: str | None = None
+    # Supervisor 在首个 task-understanding turn 产出的结构化任务理解（供 GUI 意图预览）。
+    task_understanding: dict[str, object] | None = None
 
     @model_validator(mode="after")
     def _validate_plan_keys(self) -> "ResearchState":

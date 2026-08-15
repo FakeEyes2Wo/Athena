@@ -17,6 +17,7 @@ from athena.core.agent.runtime import BaseAgent
 from athena.core.agent.types import AgentMessage
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
+from athena.core.tool_types import AskUser
 
 _MAILBOX_PREFIX = "[ATHENA MAILBOX MESSAGE]"
 
@@ -71,11 +72,13 @@ class BaseAgentRunner:
         tools: ToolRegistry | None = None,
         projector: RunToolProjector | None = None,
         agent_type: str = "agent",
+        ask_user: "Callable[[AthenaThread, AthenaTurn], AskUser | None] | None" = None,
     ) -> None:
         self._agent = agent
         self._base_tools = tools or ToolRegistry()
         self._projector = projector
         self._agent_type = agent_type
+        self._ask_user = ask_user
 
     async def run(self, request, *, session, emit) -> dict:
         """构造 AgentContext 并运行业务 Agent，返回持久化引用。
@@ -104,25 +107,28 @@ class BaseAgentRunner:
             if self._projector is not None
             else self._base_tools
         )
+        thread = AthenaThread(
+            thread_id=session.agent_id,
+            session_id=session.agent_id,
+            status="running",
+            context_ref=session.context_ref,
+        )
+        turn = AthenaTurn(
+            turn_id=f"{session.agent_id}-turn",
+            thread_id=session.agent_id,
+            request_ref=session.context_ref,
+            status="running",
+        )
         ctx = AgentContext(
-            thread=AthenaThread(
-                thread_id=session.agent_id,
-                session_id=session.agent_id,
-                status="running",
-                context_ref=session.context_ref,
-            ),
-            turn=AthenaTurn(
-                turn_id=f"{session.agent_id}-turn",
-                thread_id=session.agent_id,
-                request_ref=session.context_ref,
-                status="running",
-            ),
+            thread=thread,
+            turn=turn,
             emit=emit,
             tools=tools,
             cancel=asyncio.Event(),
             memory=session.memory.raw,
             input_text=input_text,  # 迁移期兼容视图：仅当前触发消息 content
             messages=messages,
+            ask_user=self._ask_user(thread, turn) if self._ask_user else None,
         )
         try:
             outcome = await self._agent.run(ctx)

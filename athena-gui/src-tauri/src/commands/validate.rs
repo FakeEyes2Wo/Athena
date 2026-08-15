@@ -7,12 +7,12 @@ use serde_json::json;
 pub async fn start_validation(
     state: State<'_, Arc<PythonBridge>>,
 ) -> Result<serde_json::Value, String> {
-    state.call("VALIDATE_START", json!({})).await
+    state.call("start_validation", json!({})).await
 }
 
 #[tauri::command]
 pub async fn generate_report(
     state: State<'_, Arc<PythonBridge>>,
 ) -> Result<serde_json::Value, String> {
-    state.call("REPORT_GENERATE", json!({})).await
+    state.call("generate_report", json!({})).await
 }

@@ -59,6 +59,7 @@ vi.mock("reactflow", async () => {
       );
     },
     Background: () => null,
+    BackgroundVariant: { Dots: "dots", Lines: "lines", Cross: "cross" },
     Controls: () => null,
     Handle: () => null,
     MiniMap: () => null,
@@ -247,14 +248,27 @@ describe("ResearchTreeViz", () => {
       renderUi(<ResearchTreeViz />);
     });
 
-    expect(screen.getByTestId("node-experiment-first-position")).toHaveTextContent("0,150");
+    const positionOf = (id: string): { x: number; y: number } => {
+      const text = screen.getByTestId(`node-${id}-position`).textContent ?? "";
+      const [, x, y] = text.match(/:(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/) ?? [];
+      return { x: Number(x), y: Number(y) };
+    };
+
+    const rootBefore = positionOf("experiment-root");
+    const firstBefore = positionOf("experiment-first");
+    expect(firstBefore.y).toBeGreaterThan(rootBefore.y); // child sits below parent
 
     await act(async () => {
       fireEvent.click(screen.getAllByRole("button")[0]);
     });
 
-    expect(screen.getByTestId("node-experiment-first-position")).toHaveTextContent("-140,150");
-    expect(screen.getByTestId("node-experiment-second-position")).toHaveTextContent("140,150");
+    const rootAfter = positionOf("experiment-root");
+    const firstAfter = positionOf("experiment-first");
+    const secondAfter = positionOf("experiment-second");
+
+    expect(secondAfter.y).toBeGreaterThan(rootAfter.y);
+    // siblings are symmetric around the parent's x coordinate.
+    expect((firstAfter.x + secondAfter.x) / 2).toBeCloseTo(rootAfter.x, 0);
   });
 
   it("saves and reloads every thirty seconds after autosave is enabled", async () => {

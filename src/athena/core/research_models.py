@@ -10,6 +10,7 @@ HypothesisStatus: TypeAlias = Literal[
     "PROPOSED",  # 刚刚提出假设
     "SUPPORTED",  # 支持假设
     "REFUTED",  # 不支持假设
+    "INCONCLUSIVE",  # 实验无有效证据，无法支持或证伪
     "REJECTED",  # 彻底拒绝
 ]
 
@@ -31,15 +32,34 @@ class Hypothesis(BaseModel):
     order: int | None = Field(default=None, ge=0)
     patience: int = Field(default=0, ge=0)
     turn_limit: int | None = Field(default=None, ge=0)
+    cost: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Normalized expected cost of running this intervention",
+    )
     sources: list[str] = Field(
         default_factory=list, description="Paper URLs or model repos"
     )
 
 
 class HypothesisBatch(BaseModel):
-    """结构化 Ideator 输出：一组可验证/可证伪的假设（search.register_hypotheses 消费）。"""
+    """结构化 Ideator 输出：一组可验证/可证伪的假设（search.register_hypotheses 消费）。
+
+    ``eda_request`` 是可选的自然语言补充 EDA 请求：Ideator 认为现有 EDA 不足以
+    支撑可靠假设时填写，触发 SEARCH 阶段动态调用 Data Agent 把补充分析写回
+    EDA 目录；为 null/空则不需要补充。
+    """
 
     hypotheses: list[Hypothesis] = Field(default_factory=list)
+    eda_request: str | None = Field(
+        default=None, description="Optional additional-EDA request for the Data Agent"
+    )
+
+
+class EdaResult(BaseModel):
+    """Data Agent 动态 EDA 的结构化输出：本次补充分析写了什么。"""
+
+    summary: NonBlankText = Field(description="One-sentence summary of what was added")
 
 
 class ExperimentPlan(BaseModel):

@@ -37,6 +37,11 @@ describe("LocalGitWorkspace", () => {
     return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8" }).trim()
   }
 
+  /** 保留原始输出（含末尾换行），等价 Python 测试里 ``.stdout``。 */
+  function gitRaw(cwd: string, ...args: string[]): string {
+    return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8" })
+  }
+
   function writeDiff(content: Buffer): string {
     const digest = createHash("sha256").update(content).digest("hex")
     const ref = `artifact://git-diff/${digest}`
@@ -116,8 +121,8 @@ describe("LocalGitWorkspace", () => {
     )
     rmSync(surprise)
     const commit = await manager.commit(workspace, secondDiff, "checkpoint approved diff")
-    const saved = git(p, "show", `${commit}:new.txt`)
-    expect(saved).toBe("approved version")
+    const saved = gitRaw(p, "show", `${commit}:new.txt`)
+    expect(saved).toBe("approved version\n")
     expect(git(p, "status", "--porcelain")).toBe("")
     expect(commit).toBe(
       await manager.commit(workspace, secondDiff, "idempotent retry after uncertain response"),
@@ -161,7 +166,7 @@ describe("LocalGitWorkspace", () => {
 
     expect(firstCommit).not.toBe(secondCommit)
     expect(secondCommit).toBe(git(p, "rev-parse", "HEAD"))
-    expect(git(p, "show", "HEAD:model.py")).toBe("v2")
+    expect(gitRaw(p, "show", "HEAD:model.py")).toBe("v2\n")
   })
 
   it("test_create_recovers_stable_branch_without_losing_commits", async () => {
@@ -184,7 +189,7 @@ describe("LocalGitWorkspace", () => {
 
     expect(workspace.path).toBe(recovered.path)
     expect(firstCommit).toBe(recovered.base_commit)
-    expect(git(p, "show", "HEAD:model.py")).toBe("v1")
+    expect(gitRaw(p, "show", "HEAD:model.py")).toBe("v1\n")
 
     writeFileSync(model, "v2\n", "utf-8")
     const secondDiff = await recoveredManager.diff(recovered)

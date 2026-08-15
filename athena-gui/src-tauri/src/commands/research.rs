@@ -23,3 +23,10 @@ pub async fn tree_load(
 ) -> Result<serde_json::Value, String> {
     state.call("tree_load", json!({})).await
 }
+
+#[tauri::command]
+pub async fn eda_report(
+    state: State<'_, Arc<PythonBridge>>,
+) -> Result<serde_json::Value, String> {
+    state.call("eda_report", json!({})).await
+}

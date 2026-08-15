@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
     SystemPromptPart,
 )
 
+from athena.memory.compaction import HISTORY_SUMMARY_PREFIX
 from athena.memory.context_manager import ContextManager
 
 
@@ -178,7 +179,7 @@ def _resume_context_sync(rollout_path: Path) -> ContextManager:
                 ctx.append(
                     ModelRequest(
                         parts=[
-                            SystemPromptPart(content=f"[HISTORY SUMMARY]\n{summary}")
+                            SystemPromptPart(content=f"{HISTORY_SUMMARY_PREFIX}{summary}")
                         ]
                     )
                 )
@@ -196,7 +197,3 @@ def _resume_context_sync(rollout_path: Path) -> ContextManager:
                 ctx.append(message)
 
     return ctx
-
-
-if __name__ == "__main__":
-    print("RolloutRecorder loaded.")

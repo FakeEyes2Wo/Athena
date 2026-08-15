@@ -1,0 +1,26 @@
+# Athena research preset（DSH agent 组合片段，供 base/web 组合 include）
+
+# 挂载方式：把本文件的 Athena 行并入 DSH 的 agent preset（或作为独立 preset）。
+# 研究域 Service 全部按 entry-local realm 隔离，避免跨 session 共享可变实例。
+
+- id: athena-research
+  name: cordis:group
+  group: true
+  isolate:
+    researchStore: true
+    researchTree: true
+    researchState: true
+    researchScheduler: true
+    researchEvaluator: true
+    researchScriptRunner: true
+    researchGit: true
+    researchSupervisor: true
+  config:
+    - id: research-services
+      name: '@athena/dsh'
+      config:
+        projectRoot: '{{cwd}}'
+        searchLimit: 10
+        concurrency: 4
+        direction: maximize
+        tolerance: 0.0

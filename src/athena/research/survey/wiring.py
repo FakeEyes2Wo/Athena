@@ -41,7 +41,10 @@ from athena.research.paper_rag.tool import (
     PaperSemanticSearchTool,
     PaperVisualOfTool,
 )
-from athena.research.paper_scout.backends import build_default_backends
+from athena.research.paper_scout.backends import (
+    SEMANTIC_SCHOLAR_INTERVAL,
+    build_default_backends,
+)
 from athena.research.paper_source.http import HostRateLimiter, UrllibTransport
 from athena.research.paper_source.tool import PaperFetchTool
 from athena.research.survey.tool import PaperSurveyTool
@@ -63,7 +66,6 @@ DEFAULT_EMBED_CONCURRENCY = 4
 EMBED_MAX_RETRIES = 5
 EMBED_BACKOFF_SECONDS = 2.0
 DEFAULT_VISION_TIMEOUT = 180.0
-SEMANTIC_SCHOLAR_INTERVAL = 1.1
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 VISUAL_PROMPT = """You are reading one visual element from a scientific paper. \

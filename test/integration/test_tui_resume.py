@@ -18,7 +18,7 @@ async def test_runtime_persists_and_replays_output_events(tmp_path: Path) -> Non
     await runtime.publish_output(source="tool", channel="stdout", text="second")
     await runtime.aclose()
 
-    log_path = tmp_path / ".athena" / "logs" / "output.jsonl"
+    log_path = tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl"
     assert log_path.is_file()
     lines = [
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()

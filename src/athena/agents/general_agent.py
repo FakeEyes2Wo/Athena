@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from athena.agents.prompt_agent import register_prompt_agent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.contracts import ArtifactStore
+from athena.core.tool import ToolRegistry
 from athena.execution.runtime import ExecutionRuntime
 
 GENERAL_AGENT_TYPE = "general"
@@ -35,12 +36,14 @@ def register_general_agent(
     artifacts: ArtifactStore,
     project_root: Path,
     runtime: ExecutionRuntime,
+    extra_tools: ToolRegistry | None = None,
 ) -> None:
     """Register a fresh General Agent factory rooted at ``project_root``.
 
     工具（``read_file`` / ``write_file`` / ``shell_command``）沙箱限定在
     ``project_root`` 内，不绑定任何具体 workspace；模型按派发请求自由探索、
     生成或修复，最后输出 ``GeneralResult``（``result`` 文本 + 可选的 ``files``）。
+    ``extra_tools`` 追加领域工具（如 Kaggle），使其与通用工具并列可调。
     """
     register_prompt_agent(
         registry,
@@ -50,6 +53,7 @@ def register_general_agent(
         runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        extra_tools=extra_tools,
     )
 
 

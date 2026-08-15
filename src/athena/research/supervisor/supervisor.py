@@ -28,6 +28,7 @@ from athena.research.supervisor.plans import (
     wait_run_events,
 )
 from athena.research.supervisor.prepare import PrepareResult
+from athena.research.report import build_final_report
 from athena.research.supervisor.policy import Outcome
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import (
@@ -98,6 +99,7 @@ class Supervisor(SupervisorActions):
         self,
         *,
         project_root: Path,
+        state_root: Path | None = None,
         state: ResearchState,
         tree: ResearchTree,
         store: ArtifactStore,
@@ -119,8 +121,11 @@ class Supervisor(SupervisorActions):
         publish_agent_event: PublishAgentEvent | None = None,
     ) -> None:
         self._project_root = Path(project_root)
-        self._state_path = self._project_root / ".athena" / "state.json"
-        self._tree_path = self._project_root / ".athena" / "research_tree.json"
+        _athena = (
+            Path(state_root) if state_root is not None else self._project_root / ".athena"
+        )
+        self._state_path = _athena / "state.json"
+        self._tree_path = _athena / "research_tree.json"
         self.state = state
         self.tree = tree
         self._store = store
@@ -146,6 +151,8 @@ class Supervisor(SupervisorActions):
         self._running: dict[str, asyncio.Task[_CompletedTurn]] = {}
         self._next_hypothesis_id: str | None = None
         self._stopped = False
+        # None=关闭, True=接入且下载, False=接入但不下载（任务理解阶段由 SupervisorAgent 决定）。
+        self._kaggle_download: bool | None = None
         # 手动模式下等待人工选定假设时，唤醒 run_search 循环的信号。
         self._wake = asyncio.Event()
         # SEARCH 调度循环的后台任务（供 WAITING→RUNNING 重入）；首轮由 start() 直接 await。
@@ -165,6 +172,43 @@ class Supervisor(SupervisorActions):
     def evaluator_ref(self) -> ArtifactRef | None:
         """Return the frozen evaluator owned by the current research run."""
         return self._evaluator_ref
+
+    @property
+    def kaggle_enabled(self) -> bool:
+        return self._kaggle_download is not None
+
+    @property
+    def kaggle_download(self) -> bool:
+        return self._kaggle_download is not False
+
+    async def set_kaggle_enabled(
+        self, enabled: bool, download: bool = True
+    ) -> dict[str, object]:
+        self._kaggle_download = bool(download) if enabled else None
+        return {"kaggle_enabled": self.kaggle_enabled, "download": self.kaggle_download}
+
+    async def record_task_understanding(self, **payload: object) -> dict[str, object]:
+        """Persist the Supervisor's structured task understanding and surface it."""
+        self.state.task_understanding = dict(payload)
+        await self._persist_state()
+        return {"recorded": True, "task_understanding": self.state.task_understanding}
+
+    async def read_hypotheses(self) -> dict[str, object]:
+        """Read-only snapshot of pending hypotheses, SOTA and SEARCH attempts."""
+        pending = [
+            {
+                "id": hypothesis.id,
+                "statement": hypothesis.statement,
+                "priority": hypothesis.priority,
+            }
+            for hypothesis in self.tree.pending_hypotheses()
+        ]
+        return {
+            "pending": pending,
+            "sota": self.tree.best_experiment_id(),
+            "attempts": count_search_attempts(self.state, self.tree),
+            "search_limit": self.state.search_limit,
+        }
 
     async def record_guidance(self, text: str, scope: str) -> dict[str, object]:
         """Record guidance that will be frozen only into later Plan inputs."""
@@ -338,8 +382,26 @@ class Supervisor(SupervisorActions):
             elif self._search_limit_reached() and self.state.status == "RUNNING":
                 self.state.status = "WAITING"
                 await self._persist_state()
+                await self._budget_gate()
         if self.state.phase == "VALIDATE":
             await self._run_validation()
+
+    async def _budget_gate(self) -> None:
+        """交互模式下预算用尽：Supervisor 汇总假设并向人类提出具体决策。
+
+        走异步 message 循环——Supervisor 用 answer 问「+N 次 / validate / stop」，
+        人类下一条 message 回复后，Supervisor 再调 configure_search / set_phase_decision。
+        """
+        prompt = (
+            "SEARCH budget is exhausted. Read read_hypotheses, then in your answer "
+            "ask the human one concrete question: how many more search attempts to "
+            "add (a number), or 'validate' to proceed to VALIDATE, or 'stop'."
+        )
+        try:
+            await self._run_supervisor_turn(prompt)
+        except Exception:
+            # 门失败不阻断：状态已 WAITING，人类仍可手动 configure_search / set_phase_decision
+            pass
 
     async def _run_prepare(self) -> None:
         if self._run_prepare_phase is None:
@@ -409,11 +471,14 @@ class Supervisor(SupervisorActions):
         if sota.eval is None:
             raise RuntimeError("VALIDATE requires a trusted SOTA metric")
         result = await self._run_validation_phase(sota.commit, sota.eval.primary)
-        self.state.validation = (
-            result.model_dump(mode="json")
-            if hasattr(result, "model_dump")
-            else dict(result)
+        validation = result.model_dump(mode="json")
+        # VALIDATE 完成后生成并持久化最终报告：内容寻址 Artifact 供 GUI/审计读取，
+        # ``report_ref`` 写入 state.validation，最终文本也发布到会话流。
+        report_ref = await self._store.put_text(
+            build_final_report(self.tree, validation)
         )
+        validation["report_ref"] = report_ref
+        self.state.validation = validation
         self.state.phase = "COMPLETED"
         self.state.status = "COMPLETED"
         self._save_state()
@@ -426,6 +491,15 @@ class Supervisor(SupervisorActions):
             },
         )
         await self._publish_state()
+        # Kaggle 竞赛：COMPLETED 后让 SupervisorAgent 自行决定是否提交最终预测。
+        if self.kaggle_enabled:
+            try:
+                await self._run_supervisor_turn(
+                    "Research is COMPLETED. If this run targeted a Kaggle competition, "
+                    "dispatch a General Agent to submit the final predictions."
+                )
+            except Exception:
+                logger.warning("post-COMPLETED supervisor turn failed", exc_info=True)
 
     async def _transition_phase(self, phase: Literal["SEARCH", "VALIDATE"]) -> None:
         self.state.phase = phase
@@ -589,8 +663,10 @@ class Supervisor(SupervisorActions):
                     hypotheses = await self._run_ideator_turn(action.count)
                     if self._stopped:
                         return generated
-                    await self.register_hypotheses(hypotheses)
-                    generated = len(hypotheses) > 0
+                    registered = await self.register_hypotheses(hypotheses)
+                    # 以"实际入图数量"判断本轮是否产出了新候选，避免 ideator 返回
+                    # 但全部被过滤时把 SEARCH 循环拖成空转（无法推进到 VALIDATE）。
+                    generated = len(registered["hypothesis_ids"]) > 0
                 continue
             plan_id = action.plan_id or action.hypothesis_id
             if plan_id is None:
@@ -694,13 +770,13 @@ class Supervisor(SupervisorActions):
         hypothesis = self.tree.get_hypothesis(plan_id)
         experiment_id = f"exp_{plan_id}"
         primary: float | None = None
+        outcome: Outcome | None = None
         if best_ref is None:
             self.tree.transition_experiment(
                 experiment_id,
                 ExperimentStatus.FAILED,
                 error="settled without a trusted result",
             )
-            outcome = Outcome.LOSS
         else:
             best = await load_best(best_ref, self._store)
             reference = plan_input.reference_metric
@@ -742,12 +818,16 @@ class Supervisor(SupervisorActions):
                 artifacts=artifacts,
                 commit=best.commit,
             )
-        hypothesis.priority = self._scheduler.settle(
-            plan_input.reference_priority, outcome
-        )
-        self.tree.update_hypothesis_status(
-            plan_id, "SUPPORTED" if outcome is Outcome.WIN else "REFUTED"
-        )
+        if outcome is None:
+            # 实验无有效证据：标记 INCONCLUSIVE，不按胜负更新评级。
+            self.tree.update_hypothesis_status(plan_id, "INCONCLUSIVE")
+        else:
+            hypothesis.priority = self._scheduler.settle(
+                plan_input.reference_priority, outcome
+            )
+            self.tree.update_hypothesis_status(
+                plan_id, "SUPPORTED" if outcome is Outcome.WIN else "REFUTED"
+            )
         if primary is not None:
             sota_id = self.tree.best_experiment_id()
             if sota_id is None:
@@ -835,25 +915,27 @@ class Supervisor(SupervisorActions):
     async def register_hypotheses(
         self, hypotheses: list[Hypothesis]
     ) -> dict[str, object]:
-        """Register one Ideator's HypothesisBatch in one atomic write.
+        """Register every Ideator hypothesis into the graph in one write.
 
-        批量登记：统一挂在当前 SOTA 下并播种优先级，单次保存/发布。
+        每个 Ideator 生成的假设都进入 graph（含多 lane 的近似重复候选），统一
+        挂在当前 SOTA 下并播种优先级后单次保存/发布。去重只发生在排序/选择阶段
+        （见 ``Scheduler._queued``），不在入图时丢弃任何结构有效的假设。
         """
         parent_id, parent_hypothesis = self._sota_parent()
-        hypothesis_ids: list[str] = []
-        for hypothesis in hypotheses:
-            payload = hypothesis.model_dump()
-            payload.update(
-                {
-                    "id": None,
-                    "order": None,
-                    "parent_id": parent_id,
-                    "priority": self._scheduler.seed(parent_hypothesis),
-                }
+        priority = self._scheduler.seed(parent_hypothesis)
+        hypothesis_ids = [
+            self.tree.add_hypothesis(
+                hypothesis.model_copy(
+                    update={
+                        "id": None,
+                        "order": None,
+                        "parent_id": parent_id,
+                        "priority": priority,
+                    }
+                )
             )
-            hypothesis_ids.append(
-                self.tree.add_hypothesis(Hypothesis.model_validate(payload))
-            )
+            for hypothesis in hypotheses
+        ]
         self.tree.save(self._tree_path)
         await self._publish_state()
         return {"hypothesis_ids": hypothesis_ids}
@@ -886,6 +968,9 @@ class Supervisor(SupervisorActions):
             if value < 1:
                 raise ValueError("concurrency must be at least 1")
             self.state.concurrency = value
+        # 交互模式下预算用尽停在 WAITING：追加预算即恢复 SEARCH。
+        if self.state.phase == "SEARCH" and self.state.status == "WAITING":
+            self.state.status = "RUNNING"
         await self._persist_state()
         self._spawn_search()
         return {

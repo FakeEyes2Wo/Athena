@@ -1,0 +1,33 @@
+/* Topbar workspace switcher (CSS module). */
+
+.switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  max-width: 100%;
+  padding: 5px 12px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.switcher:hover {
+  background: var(--surface-elevated);
+  border-color: var(--border-strong);
+}
+.name {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+}

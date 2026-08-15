@@ -11,6 +11,7 @@ from athena.agents.prompt_agent import register_prompt_agent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.contracts import ArtifactStore
 from athena.core.research_models import HypothesisBatch
+from athena.core.tool import ToolRegistry
 from athena.execution.runtime import ExecutionRuntime
 
 IDEATOR_AGENT_TYPE = "ideator"
@@ -23,6 +24,7 @@ def register_ideator_agent(
     artifacts: ArtifactStore,
     workspace: Path,
     runtime: ExecutionRuntime,
+    extra_tools: ToolRegistry | None = None,
 ) -> None:
     """Register a fresh Ideator Agent factory bound to the EDA workspace."""
     register_prompt_agent(
@@ -33,6 +35,7 @@ def register_ideator_agent(
         runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        extra_tools=extra_tools,
     )
 
 

@@ -25,21 +25,42 @@ pub struct PythonBridge {
 
 impl PythonBridge {
     /// Spawn the Python GUI gateway, connect via WebSocket, and return a ready bridge.
-    pub async fn start() -> Result<Self, String> {
-        // 1. Spawn Python process from repo root.
-        //    CARGO_MANIFEST_DIR = <repo>/athena-gui/src-tauri
+    ///
+    /// Release 模式下优先使用打包进 resources 的 ``gui_gateway(.exe)``；找不到时
+    /// 退回开发模式 ``uv run python -m gui_gateway``。
+    pub async fn start(resource_dir: Option<std::path::PathBuf>) -> Result<Self, String> {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir
             .parent() // src-tauri -> athena-gui
             .and_then(|p| p.parent()) // athena-gui -> repo root
             .unwrap_or(manifest_dir);
-        let mut child = Command::new("uv")
-            .args(["run", "python", "-m", "gui_gateway"])
-            .current_dir(&repo_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn Python: {}", e))?;
+
+        let exe_name = if cfg!(windows) {
+            "gui_gateway.exe"
+        } else {
+            "gui_gateway"
+        };
+        let bundled = resource_dir
+            .as_ref()
+            .map(|rd| rd.join(exe_name))
+            .filter(|p| p.is_file());
+
+        let mut child = if let Some(exe) = bundled {
+            Command::new(&exe)
+                .current_dir(&repo_root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn bundled gateway: {}", e))?
+        } else {
+            Command::new("uv")
+                .args(["run", "python", "-m", "gui_gateway"])
+                .current_dir(&repo_root)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn Python: {}", e))?
+        };
 
         // 2. Read port from first line of stdout
         let stdout = child.stdout.take().ok_or("No stdout")?;

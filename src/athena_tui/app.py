@@ -22,6 +22,7 @@ from athena_tui.controller import TuiController
 from athena_tui.render import (
     HELP_TEXT,
     composer_height,
+    join_lines,
     render_bottom_pane,
     render_header,
     render_history_lines,
@@ -79,15 +80,6 @@ _STYLE = Style.from_dict(
         "confirmation": "#fbbf24 bold",
     }
 )
-
-
-def _join_lines(lines: tuple[StyleAndTextTuples, ...]) -> StyleAndTextTuples:
-    output: StyleAndTextTuples = []
-    for index, line in enumerate(lines):
-        if index:
-            output.append(("", "\n"))
-        output.extend(line)
-    return output
 
 
 def _create_system_clipboard() -> Clipboard:
@@ -406,7 +398,7 @@ class AthenaApp:
         )
         if total <= height:
             # 内容不足一屏也显示轨道，让滚动条可见。
-            return _join_lines(
+            return join_lines(
                 tuple([*line, ("class:scrollbar", "│")] for line in visible)
             )
         scroll = 0 if self.state.history_follow_tail else self._history_scroll
@@ -417,7 +409,7 @@ class AthenaApp:
         for index, line in enumerate(visible):
             in_thumb = top <= index < top + thumb_h
             rows.append([*line, ("class:scrollbar", "█" if in_thumb else "│")])
-        return _join_lines(tuple(rows))
+        return join_lines(tuple(rows))
 
     def _start_history_selection(self, point) -> None:
         lines = render_history_lines(self.state, self._history_content_width())

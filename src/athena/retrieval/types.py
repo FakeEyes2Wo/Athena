@@ -26,10 +26,3 @@ class HFModelRef:
     task_match: str = ""
     digest: str = ""
     artifact: str = ""
-
-
-if __name__ == "__main__":
-    paper = PaperRef(title="Attention Is All You Need", source="arxiv")
-    model = HFModelRef(repo="bert-base-uncased")
-    print(f"Paper: {paper}")
-    print(f"Model: {model}")

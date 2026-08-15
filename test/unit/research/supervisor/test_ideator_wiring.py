@@ -110,6 +110,36 @@ async def test_register_hypotheses_batches_under_current_sota(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_register_hypotheses_keeps_near_duplicate_hypotheses(
+    tmp_path: Path,
+) -> None:
+    """每个 Ideator 生成的假设都必须进入 graph，即使近似重复也不在入图时丢弃。"""
+    supervisor = await _make_supervisor(tmp_path)
+    batch = [
+        Hypothesis(
+            statement="scale features",
+            intervention="standardize numeric inputs",
+            expected_effect="raise primary metric",
+        ),
+        Hypothesis(
+            statement="scale features",
+            intervention="standardize numeric inputs",
+            expected_effect="raise primary metric",
+        ),
+    ]
+
+    result = await supervisor.register_hypotheses(batch)
+
+    assert len(result["hypothesis_ids"]) == 2
+    pending = [
+        hypothesis
+        for hypothesis in supervisor.tree.pending_hypotheses()
+        if hypothesis.id in result["hypothesis_ids"]
+    ]
+    assert len(pending) == 2
+
+
+@pytest.mark.asyncio
 async def test_generate_runs_ideator_turn_and_registers(tmp_path: Path) -> None:
     calls: list[int] = []
 
