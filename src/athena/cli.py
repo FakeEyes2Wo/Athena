@@ -43,6 +43,7 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "search_limit": args.max_search_experiments or 10,
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
+        "ideation": args.ideation,
     }
 
 
@@ -209,6 +210,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--max-search-experiments", type=int, help="maximum SEARCH attempts"
+    )
+    run.add_argument(
+        "--ideation",
+        choices=["gated", "baseline"],
+        default="gated",
+        help=(
+            "hypothesis intake: 'gated' runs the Idea Generation quality gate "
+            "(structural + falsifiability checks, review perspectives, ranking) "
+            "before hypotheses enter the tree; 'baseline' is the ablation control "
+            "that registers Ideator output as-is"
+        ),
     )
     _add_survey_parser(subparsers)
     for name in ("status", "pause", "resume", "stop"):
