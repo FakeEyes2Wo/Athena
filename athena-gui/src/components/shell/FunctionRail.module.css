@@ -1,7 +1,7 @@
 /* 功能轨：48px 图标导航列。 */
 
 .rail {
-  width: 48px;
+  width: 52px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -14,10 +14,16 @@
 .list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
+  gap: 6px;
   list-style: none;
   margin: 0;
-  padding: 0 var(--space-xs);
+  padding: 0 7px;
+}
+
+.list--bottom {
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-sm);
 }
 
 .item {
@@ -26,21 +32,34 @@
   display: grid;
   place-items: center;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: 12px;
   background: transparent;
   color: var(--text-tertiary);
   cursor: pointer;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 
 .item:hover {
   background: var(--surface-muted);
   color: var(--text-primary);
+  transform: translateY(-1px);
 }
 
 .item--active {
   background: var(--accent-subtle);
   color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-soft), var(--shadow-xs);
+}
+
+.item--active:hover {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  transform: none;
+}
+
+.item:active {
+  transform: translateY(0);
 }
 
 .item:focus-visible {

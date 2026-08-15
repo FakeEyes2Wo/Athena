@@ -17,7 +17,9 @@ export function FunctionRail({ module, onSelect }: FunctionRailProps) {
           <RailButton key={item.key} item={item} active={module === item.key} onSelect={onSelect} />
         ))}
       </ul>
-      <RailButton item={SETTINGS_MODULE} active={module === "settings"} onSelect={onSelect} />
+      <ul className={`${styles.list} ${styles["list--bottom"]}`}>
+        <RailButton item={SETTINGS_MODULE} active={module === "settings"} onSelect={onSelect} />
+      </ul>
     </nav>
   );
 }

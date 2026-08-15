@@ -111,6 +111,9 @@
 .tool-output :global(.code-block) {
   margin: 8px 0 0;
   font-size: 11px;
+  background: transparent;
+  border: none;
+  padding: 4px 0 0;
 }
 
 .ideator-lane {
