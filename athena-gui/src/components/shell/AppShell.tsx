@@ -78,7 +78,9 @@ export function AppShell({ currentRoot, onSwitchWorkspace, pipeline }: AppShellP
           {module === "session" ? (
             <ConversationPane pipeline={pipeline} />
           ) : (
-            <PanelView panel={def.panel} />
+            <div className={styles["main-panel"]}>
+              <PanelView panel={def.panel} />
+            </div>
           )}
         </main>
         {drawerPanel && (

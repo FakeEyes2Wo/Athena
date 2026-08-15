@@ -328,8 +328,9 @@ select {
 }
 .detail-panel h3 {
   margin: 0 0 var(--space-xs);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 .detail-panel p {
   margin: 0;
@@ -346,8 +347,9 @@ select {
 }
 .panel-toolbar h3 {
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 .panel-toolbar__actions {
   display: flex;

@@ -106,3 +106,11 @@
   flex: 1;
   min-height: 0;
 }
+
+/* 详情面板容器：与左侧工作区保持呼吸感，标题不被挤压。 */
+.main-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 28px;
+}
