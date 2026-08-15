@@ -35,8 +35,6 @@ uv run python scripts/run_headless.py \
   --task "Predict Titanic passenger survival (target = Survived: 0 died, 1 survived). Build a baseline model and improve it." \
   --data "$(pwd)/examples/titanic"
 
-# 零配置演示
-uv run python src/main.py
 ```
 
 ## TUI 引导
