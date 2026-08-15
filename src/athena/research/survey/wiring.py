@@ -20,7 +20,7 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from openai import AsyncOpenAI, RateLimitError
@@ -33,9 +33,11 @@ from athena.research.paper_markdown.interfaces import (
     VisualInterpretationRequest,
 )
 from athena.research.paper_markdown.tool import PaperMarkdownTool
+from athena.research.paper_rag.search import CorpusCache, RetrievalSession
 from athena.research.paper_rag.tool import (
     PaperChunkReadTool,
     PaperCitesTool,
+    PaperCorpusOverviewTool,
     PaperKeywordSearchTool,
     PaperSectionSearchTool,
     PaperSemanticSearchTool,
@@ -319,6 +321,10 @@ class SurveyStack:
     因此不在装配期强制要求。
 
     ``scorer_model`` 为空串表示打分沿用 ``model``，用 ``effective_scorer_model()`` 取值。
+
+    ``corpus_cache`` 挂在 stack 上而不是每套工具各建一个：一次运行里可能有多个 Agent
+    读同一份语料（三条 Ideator lane 各拿一套工具），解码后的语料是只读的，共享一份
+    才不会把内存乘以并发度。
     """
 
     artifacts: LocalArtifactStore
@@ -332,6 +338,7 @@ class SurveyStack:
     semantic_scholar_api_key: str = ""
     openalex_api_key: str = ""
     ghostscript: str = ""
+    corpus_cache: CorpusCache = field(default_factory=CorpusCache)
 
     def effective_scorer_model(self) -> str:
         """实际用于打分的模型名；未单独配置时就是策略模型。"""
@@ -352,6 +359,7 @@ def build_survey_stack(
     model: str = "",
     scorer_model: str = "",
     client: AsyncOpenAI | None = None,
+    artifacts: LocalArtifactStore | None = None,
     enable_embedder: bool = True,
     enable_vision: bool = True,
 ) -> SurveyStack:
@@ -360,10 +368,14 @@ def build_survey_stack(
     编码器与视觉模型各自需要一个模型名；对应环境变量缺失时该能力保持关闭而不是
     报错——链路在降级形态下仍然完整可跑，把它做成硬错误只会让首次接入寸步难行。
 
+    ``artifacts`` 让调用方注入已有的 artifact 存储。缺省按 ``ATHENA_ARTIFACT_ROOT``
+    自建一份，独立跑 survey 时正确；但 ``ResearchRuntime`` 的存储在项目目录下，不注入
+    的话建好的 ``corpus_ref`` 在 loop 里根本取不到——是两个库，不是一个。
+
     缺 LLM 凭据时由 ``settings.get_client()`` 抛错，不在这里重复判断。
     """
     resolved_client = build_client(client)
-    artifacts = build_artifact_store(artifact_root)
+    store = artifacts if artifacts is not None else build_artifact_store(artifact_root)
     contact = os.environ.get(CONTACT_EMAIL_ENV, "")
     http = HostRateLimiter(
         transport=UrllibTransport(),
@@ -377,9 +389,9 @@ def build_survey_stack(
         embedder = OpenAIEmbedder(resolved_client, embedding_model)
     interpreter = None
     if enable_vision and vision_model:
-        interpreter = VisionInterpreter(resolved_client, vision_model, artifacts)
+        interpreter = VisionInterpreter(resolved_client, vision_model, store)
     return SurveyStack(
-        artifacts=artifacts,
+        artifacts=store,
         client=resolved_client,
         model=resolve_model(model),
         http=http,
@@ -394,39 +406,52 @@ def build_survey_stack(
 
 
 def build_survey_tools(
-    stack: SurveyStack, *, include_survey: bool = True
+    stack: SurveyStack,
+    *,
+    include_survey: bool = True,
+    include_producers: bool = True,
 ) -> ToolRegistry:
-    """注册全链路、取源、转换与六个检索算子，返回可直接交给 Agent 的工具表。
+    """注册全链路、取源、转换与七个检索算子，返回可直接交给 Agent 的工具表。
+
+    七个检索算子共用**一个** ``RetrievalSession``：会话既是语料缓存的入口，也是"本
+    会话已读过哪些 chunk"的账本。每个工具各建一个会话时，两件事都会坏——同一份语料
+    被解码七次，而 ``paper_chunk_read`` 的去重也只对它自己成立。
 
     ``paper_semantic_search`` 只在装配了编码器时注册：没有编码器时它会在每次调用
     时抛错，注册一个必然失败的工具只会诱导模型反复重试。
 
-    ``include_survey=False`` 去掉 ``paper_survey``，留给已经拿到 ``corpus_ref``、
-    只需要读语料的 Agent——把一个几分钟起步的工具摆在那里，模型迟早会去按它。
+    ``include_survey=False`` 去掉 ``paper_survey``，``include_producers=False`` 再去掉
+    取源与转换，留给已经拿到 ``corpus_ref``、只需要读语料的 Agent——把一个几分钟起步
+    的工具摆在那里，模型迟早会去按它。
     """
     tools = ToolRegistry()
+    session = RetrievalSession(stack.corpus_cache)
     if include_survey:
         tools.register(PaperSurveyTool(stack))
-    tools.register(
-        PaperFetchTool(
-            stack.artifacts,
-            http=stack.http,
-            contact_email=stack.contact_email or None,
-            openalex_api_key=stack.openalex_api_key or None,
+    if include_producers:
+        tools.register(
+            PaperFetchTool(
+                stack.artifacts,
+                http=stack.http,
+                contact_email=stack.contact_email or None,
+                openalex_api_key=stack.openalex_api_key or None,
+            )
         )
-    )
-    tools.register(
-        PaperMarkdownTool(
-            stack.artifacts,
-            stack.visual_interpreter,
-            ghostscript=stack.ghostscript or None,
+        tools.register(
+            PaperMarkdownTool(
+                stack.artifacts,
+                stack.visual_interpreter,
+                ghostscript=stack.ghostscript or None,
+            )
         )
-    )
-    tools.register(PaperKeywordSearchTool(stack.artifacts))
-    tools.register(PaperChunkReadTool(stack.artifacts))
-    tools.register(PaperVisualOfTool(stack.artifacts))
-    tools.register(PaperCitesTool(stack.artifacts))
-    tools.register(PaperSectionSearchTool(stack.artifacts))
+    tools.register(PaperCorpusOverviewTool(stack.artifacts, session))
+    tools.register(PaperKeywordSearchTool(stack.artifacts, session))
+    tools.register(PaperChunkReadTool(stack.artifacts, session))
+    tools.register(PaperVisualOfTool(stack.artifacts, session))
+    tools.register(PaperCitesTool(stack.artifacts, session))
+    tools.register(PaperSectionSearchTool(stack.artifacts, session))
     if stack.embedder is not None:
-        tools.register(PaperSemanticSearchTool(stack.artifacts, stack.embedder))
+        tools.register(
+            PaperSemanticSearchTool(stack.artifacts, stack.embedder, session)
+        )
     return tools

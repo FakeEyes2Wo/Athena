@@ -56,8 +56,8 @@ class PaperCorpusIndex(BaseModel):
     新编码句子，不存在需要维护的离线图或倒排结构。
     """
 
-    schema_version: Literal["1.0"] = Field(
-        default="1.0", description="PaperCorpusIndex schema version."
+    schema_version: Literal["1.0", "1.1"] = Field(
+        default="1.1", description="PaperCorpusIndex schema version."
     )
     entries: list[CorpusEntry] = Field(description="Ordered chunks, grouped by paper.")
     sentences: list[CorpusSentence] = Field(
@@ -66,6 +66,13 @@ class PaperCorpusIndex(BaseModel):
     embedding_ref: ArtifactRef | None = Field(
         default=None,
         description="Artifact holding one unit-length vector per sentence; absent when no embedder was supplied.",
+    )
+    embedding_format: Literal["json", "float32"] = Field(
+        default="json",
+        description=(
+            "On-disk layout of embedding_ref: 'float32' is a numpy buffer, 'json' is "
+            "the 1.0 text encoding kept only for corpora built before the change."
+        ),
     )
     embedding_model: str = Field(
         default="",
@@ -102,6 +109,41 @@ class SearchHit(BaseModel):
     cited_ids: list[str] = Field(
         default_factory=list,
         description="In-corpus papers this chunk cites, for paper_cites.",
+    )
+
+
+class PaperSummary(BaseModel):
+    """语料里一篇论文的门面：够 Agent 判断"值不值得往里读"，且不必读正文。"""
+
+    paper_id: str = Field(description="Canonical paper id; the key to cite in sources.")
+    title: str = Field(default="", description="Paper title.")
+    anchor_chunk_id: str = Field(
+        description="Chunk to read first — the abstract when the paper has one."
+    )
+    abstract: str = Field(
+        default="", description="Opening text of the anchor chunk, truncated."
+    )
+    chunks: int = Field(ge=0, description="Number of retrievable chunks in this paper.")
+    sections: list[str] = Field(
+        default_factory=list,
+        description="Top-level section names present, in document order; the headings "
+        "paper_section_search will actually match for this paper.",
+    )
+
+
+class CorpusOverview(BaseModel):
+    """一次 ``paper_corpus_overview`` 的结果：语料规模 + 逐篇门面。"""
+
+    papers: int = Field(ge=0, description="Papers in the corpus, before any filter.")
+    chunks: int = Field(ge=0, description="Retrievable chunks in the corpus.")
+    semantic_search: bool = Field(
+        description="Whether the corpus carries sentence embeddings."
+    )
+    embedding_model: str = Field(
+        default="", description="Embedder identity when semantic search is available."
+    )
+    summaries: list[PaperSummary] = Field(
+        default_factory=list, description="One entry per paper returned."
     )
 
 

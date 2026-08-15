@@ -18,6 +18,7 @@ from athena.research.paper_rag.interfaces import TextEmbedder
 from athena.research.paper_rag.search import (
     RetrievalSession,
     citation_links,
+    corpus_overview,
     keyword_search,
     read_chunks,
     section_search,
@@ -28,6 +29,8 @@ from athena.core.contracts import ArtifactStore
 
 DEFAULT_TOP_K = 5
 MAX_TOP_K = 20
+DEFAULT_OVERVIEW_PAPERS = 30
+MAX_OVERVIEW_PAPERS = 100
 CORPUS_REF_SCHEMA = {
     "type": "string",
     "minLength": 1,
@@ -74,6 +77,77 @@ def resolve_top_k(input: dict) -> int:
     if not isinstance(value, int) or value < 1:
         return DEFAULT_TOP_K
     return min(value, MAX_TOP_K)
+
+
+def resolve_max_papers(input: dict) -> int:
+    """取出并夹紧 ``max_papers``，与 ``resolve_top_k`` 同一条边界兜底约定。"""
+    value = input.get("max_papers", DEFAULT_OVERVIEW_PAPERS)
+    if not isinstance(value, int) or value < 1:
+        return DEFAULT_OVERVIEW_PAPERS
+    return min(value, MAX_OVERVIEW_PAPERS)
+
+
+class PaperCorpusOverviewTool(BaseTool):
+    """列出语料里有哪些论文，是拿到 ``corpus_ref`` 之后的第一步。
+
+    其余算子都要求先知道点什么（关键词、查询、chunk id、章节名）；没有一个不需要前提
+    的入口时，Agent 的第一次检索只能是猜。
+    """
+
+    spec = ToolSpec(
+        name="paper_corpus_overview",
+        description=(
+            "List what is in a paper corpus: every paper's id, title, the opening of "
+            "its abstract, how many chunks it has, and which section names it "
+            "actually uses. Call this first when you are handed a corpus_ref — the "
+            "other paper_* tools all need a keyword, query, chunk id or heading you "
+            "do not have yet. The paper_id values it returns are the keys to record "
+            "in a hypothesis's sources field."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "corpus_ref": CORPUS_REF_SCHEMA,
+                "paper_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Restrict to these papers; omit to list them all.",
+                },
+                "max_papers": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_OVERVIEW_PAPERS,
+                    "default": DEFAULT_OVERVIEW_PAPERS,
+                    "description": "Number of papers to describe.",
+                },
+            },
+            "required": ["corpus_ref"],
+            "additionalProperties": False,
+        },
+    )
+
+    def __init__(
+        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
+    ) -> None:
+        self.artifacts = artifacts
+        self.session = session or RetrievalSession()
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """列出语料内容。"""
+        corpus_ref = require_corpus_ref(input)
+        paper_ids = input.get("paper_ids") or []
+        if not isinstance(paper_ids, list):
+            raise ValueError("paper_ids must be an array of paper identifiers.")
+        if ctx.cancel.is_set():
+            raise asyncio.CancelledError
+
+        corpus = await self.session.load(self.artifacts, corpus_ref)
+        overview = corpus_overview(
+            corpus,
+            [item for item in paper_ids if isinstance(item, str)],
+            resolve_max_papers(input),
+        )
+        return ToolResult(data=overview.model_dump())
 
 
 class PaperKeywordSearchTool(BaseTool):
@@ -187,7 +261,9 @@ class PaperSemanticSearchTool(BaseTool):
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref)
+        # 唯一需要句向量的算子，因此也是唯一传 vectors=True 的调用点：其余五个算子
+        # 不该为一份用不到的向量矩阵付装载代价。
+        corpus = await self.session.load(self.artifacts, corpus_ref, vectors=True)
         if corpus.index.embedding_ref is None:
             return ToolResult(
                 data={"hits": []},
@@ -322,8 +398,11 @@ class PaperVisualOfTool(BaseTool):
 class PaperCitesTool(BaseTool):
     """沿引用边走一步，正向或反向。
 
-    反向边（谁引用了这篇）是本工具组里唯一能系统性找到"后续工作如何评价它"的通道；
-    语义检索按定义会优先返回与查询措辞一致、也就是同意它的文本。
+    反向边（谁引用了这篇）能直接给出"后续工作如何评价它"，语义检索按定义会优先返回
+    与查询措辞一致、也就是同意它的文本。但这条边只在语料内部成立：一份按主题抓来的
+    语料里，论文之间互相引用本来就稀疏（实测 44 篇里只有 11 篇引到了语料内的另一篇）。
+    因此工具描述如实说明"多数 chunk 没有引用边"，让模型在空结果时改走章节检索，而不是
+    反复重试同一个算子。
     """
 
     spec = ToolSpec(
@@ -332,10 +411,12 @@ class PaperCitesTool(BaseTool):
             "Follow citation edges one step within the corpus. direction=cites "
             "returns the in-corpus papers the given chunks cite. direction=cited_by "
             "returns the chunks elsewhere in the corpus that cite the paper those "
-            "chunks belong to — this is how you find later work that extends, "
-            "qualifies, or disputes a claim, which similarity search will not "
-            "surface because disagreeing text is worded differently from the claim. "
-            "Only citations resolvable inside the corpus have edges."
+            "chunks belong to. Edges exist only where one corpus paper's reference "
+            "list names another corpus paper, which on a topically gathered corpus "
+            "is sparse — most chunks have no edge and an empty result is normal, not "
+            "an error. When this returns nothing and you need evidence that "
+            "qualifies or disputes a claim, use paper_section_search on Limitations "
+            "or Ablation instead."
         ),
         input_schema={
             "type": "object",

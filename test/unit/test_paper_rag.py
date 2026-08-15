@@ -1,6 +1,7 @@
 """Tests for the A-RAG hierarchical retrieval interfaces."""
 
 import asyncio
+import json
 import tempfile
 import unittest
 
@@ -24,12 +25,18 @@ from athena.research.paper_rag.index import (
     display_math_close,
     is_indexable,
     split_sentences,
+    title_matches,
+    unpack_vectors,
 )
+from athena.research.paper_scout.pool import title_key
 from athena.research.paper_rag.schemas import PaperCorpusIndex
 from athena.research.paper_rag.search import (
     ALREADY_READ_NOTICE,
+    CorpusCache,
     RetrievalSession,
     citation_links,
+    corpus_overview,
+    heading_variants,
     keyword_search,
     read_chunks,
     paper_namespace,
@@ -41,6 +48,7 @@ from athena.research.paper_rag.search import (
 from athena.research.paper_rag.tool import (
     PaperChunkReadTool,
     PaperCitesTool,
+    PaperCorpusOverviewTool,
     PaperKeywordSearchTool,
     PaperSectionSearchTool,
     PaperSemanticSearchTool,
@@ -444,11 +452,56 @@ class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
 
         corpus_ref = await build_corpus_index(self.store, [paper], embedder)
         session = RetrievalSession()
-        corpus = await session.load(self.store, corpus_ref)
+        corpus = await session.load(self.store, corpus_ref, vectors=True)
 
         self.assertEqual("fake-embed-1", corpus.index.embedding_model)
+        self.assertEqual("float32", corpus.index.embedding_format)
         self.assertEqual(len(corpus.index.sentences), len(corpus.vectors))
         self.assertEqual([2], embedder.batches)
+
+    async def test_only_semantic_search_pays_for_loading_the_sentence_vectors(
+        self,
+    ) -> None:
+        """向量是语料里最贵的部分；不需要它的算子不该被迫装载它。"""
+        paper = await make_paper(
+            self.store, "p1", "Paper One", ["Retrieval works. Grasping differs."]
+        )
+        corpus_ref = await build_corpus_index(
+            self.store, [paper], FakeEmbedder(VOCABULARY)
+        )
+        session = RetrievalSession()
+
+        without = await session.load(self.store, corpus_ref)
+        self.assertFalse(without.has_vectors())
+
+        withvectors = await session.load(self.store, corpus_ref, vectors=True)
+        self.assertTrue(withvectors.has_vectors())
+        self.assertIs(without, withvectors)
+
+    async def test_legacy_json_vectors_still_load_into_the_same_matrix(self) -> None:
+        """1.0 语料的向量在磁盘上是 JSON 文本；换格式不能把已有语料变成砖头。"""
+        paper = await make_paper(self.store, "p1", "Paper One", ["Retrieval works."])
+        corpus_ref = await build_corpus_index(
+            self.store, [paper], FakeEmbedder(VOCABULARY)
+        )
+        index = PaperCorpusIndex.model_validate_json(
+            await self.store.get_text(corpus_ref)
+        )
+        vectors = unpack_vectors(await self.store.get_bytes(index.embedding_ref))
+        legacy = index.model_copy(
+            update={
+                "schema_version": "1.0",
+                "embedding_format": "json",
+                "embedding_ref": await self.store.put_text(
+                    json.dumps(vectors.tolist())
+                ),
+            }
+        )
+        legacy_ref = await self.store.put_text(legacy.model_dump_json())
+
+        corpus = await RetrievalSession().load(self.store, legacy_ref, vectors=True)
+
+        self.assertEqual(vectors.shape, corpus.vectors.shape)
 
 
 class SearchTest(unittest.IsolatedAsyncioTestCase):
@@ -459,7 +512,9 @@ class SearchTest(unittest.IsolatedAsyncioTestCase):
     async def load(self, texts: list[str], embedder: FakeEmbedder | None = None):
         paper = await make_paper(self.store, "p1", "Paper One", texts)
         corpus_ref = await build_corpus_index(self.store, [paper], embedder)
-        return await self.session.load(self.store, corpus_ref)
+        return await self.session.load(
+            self.store, corpus_ref, vectors=embedder is not None
+        )
 
     async def test_longer_keywords_outrank_more_frequent_short_ones(self) -> None:
         corpus = await self.load(["RAG RAG RAG.", "Hierarchical retrieval."])
@@ -734,6 +789,145 @@ class BibliographyAsCitationEdgeTest(unittest.IsolatedAsyncioTestCase):
         with_bibliography = await self.load(index_bibliography=True)
         self.assertLess(len(without.sentences), len(with_bibliography.sentences))
         self.assertLess(len(without.entries), len(with_bibliography.entries))
+
+    async def test_a_reference_that_misspells_the_title_still_links(self) -> None:
+        """真实语料里作者拼错自己题目的引用不止一处；整题包含对一个字符全或无。"""
+        typo = self.papers[1].chunks[2]
+        typo.content_ref = await self.store.put_text(
+            "## References\n\n- [@lewis2020] Patrick Lewis and others. "
+            "Retrieval-Augmented Generation for Knowledge-Intensiv NLP Tasks. "
+            "NeurIPS 2020."
+        )
+        index = await self.load()
+
+        citing = next(entry for entry in index.entries if "[@lewis2020]" in entry.text)
+        target = next(entry for entry in index.entries if entry.paper_id == "p-cited")
+        self.assertIn(target.chunk_id, citing.cited_ids)
+
+    async def test_a_short_generic_title_never_matches_loosely(self) -> None:
+        """放宽匹配的唯一风险来自短标题；40 字符的连续段长度让它们结构上够不到。
+
+        标题规范化后只有 29 字符，因此**只有**整题包含能让它命中；一个字符的出入就该
+        判定为不同论文，而不是像长标题那样被连续段规则救回来。
+        """
+        short = title_key("Enhanced Cost-sensitive Ensemble")
+        near_miss = title_key(
+            "Raza A and others. Novel class probability features for optimizing "
+            "network attack detection with enhance cost sensitive ensembles. "
+            "IEEE Access 2023."
+        )
+        exact = title_key(
+            "Raza A and others. Enhanced Cost-sensitive Ensemble. IEEE Access 2023."
+        )
+
+        self.assertFalse(title_matches(short, near_miss))
+        self.assertTrue(title_matches(short, exact))
+
+
+class CorpusOverviewTest(unittest.IsolatedAsyncioTestCase):
+    """拿到 corpus_ref 之后的第一步，也是 ``sources`` 合法取值的唯一来源。"""
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+        first = await make_paper(
+            self.store, "p1", "Paper One", ["We introduce A.", "Ablation on A."]
+        )
+        first.chunks[0].kind = "abstract"
+        first.chunks[1].heading_path = ["Ablation Study"]
+        second = await make_paper(self.store, "p2", "Paper Two", ["We introduce B."])
+        corpus_ref = await build_corpus_index(self.store, [first, second])
+        self.corpus_ref = corpus_ref
+        self.corpus = await self.session.load(self.store, corpus_ref)
+
+    async def test_every_paper_is_listed_with_the_key_to_cite(self) -> None:
+        overview = corpus_overview(self.corpus, [], 30)
+
+        self.assertEqual(2, overview.papers)
+        self.assertEqual(["p1", "p2"], [item.paper_id for item in overview.summaries])
+        self.assertEqual(
+            ["Paper One", "Paper Two"], [i.title for i in overview.summaries]
+        )
+
+    async def test_the_anchor_is_the_abstract_when_the_paper_has_one(self) -> None:
+        overview = corpus_overview(self.corpus, [], 30)
+
+        first = overview.summaries[0]
+        self.assertEqual("p1:c0", first.anchor_chunk_id)
+        self.assertEqual("We introduce A.", first.abstract)
+        self.assertEqual(2, first.chunks)
+
+    async def test_it_reports_the_section_names_that_actually_exist(self) -> None:
+        """章节名靠猜是这个语料上最容易空手而归的一步。"""
+        overview = corpus_overview(self.corpus, [], 30)
+
+        self.assertEqual(["Method", "Ablation Study"], overview.summaries[0].sections)
+
+    async def test_paper_ids_narrow_the_listing_without_changing_the_totals(
+        self,
+    ) -> None:
+        overview = corpus_overview(self.corpus, ["p2"], 30)
+
+        self.assertEqual(2, overview.papers)
+        self.assertEqual(["p2"], [item.paper_id for item in overview.summaries])
+
+    async def test_the_tool_reports_whether_semantic_search_is_available(self) -> None:
+        tool = PaperCorpusOverviewTool(self.store, self.session)
+
+        result = await tool.ainvoke(
+            context("paper_corpus_overview"), corpus_ref=self.corpus_ref
+        )
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.data["semantic_search"])
+        self.assertEqual(2, len(result.data["summaries"]))
+
+    async def test_the_overview_never_loads_the_sentence_vectors(self) -> None:
+        """一次"里面有什么"的问询不该把语料里最贵的部分拖进内存。"""
+        session = RetrievalSession()
+        paper = await make_paper(self.store, "p3", "Paper Three", ["Retrieval works."])
+        corpus_ref = await build_corpus_index(
+            self.store, [paper], FakeEmbedder(VOCABULARY)
+        )
+        tool = PaperCorpusOverviewTool(self.store, session)
+
+        await tool.ainvoke(context("paper_corpus_overview"), corpus_ref=corpus_ref)
+
+        self.assertFalse((await session.load(self.store, corpus_ref)).has_vectors())
+
+
+class SectionAliasTest(unittest.IsolatedAsyncioTestCase):
+    """论文对同一部分的叫法不统一；按字面匹配会让跨论文对比这个算子存在的理由落空。"""
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        papers = []
+        for index, heading in enumerate(
+            ("Limitations", "Threats to Validity", "Shortcomings"), start=1
+        ):
+            paper = await make_paper(
+                self.store, f"p{index}", f"Paper {index}", [f"Caveat {index}."]
+            )
+            paper.chunks[0].heading_path = [heading]
+            papers.append(paper)
+        corpus_ref = await build_corpus_index(self.store, papers)
+        self.corpus = await RetrievalSession().load(self.store, corpus_ref)
+
+    def test_one_heading_reaches_every_paper_that_uses_a_synonym(self) -> None:
+        hits = section_search(self.corpus, "Limitations", [], 10)
+
+        self.assertEqual({"p1", "p2", "p3"}, {hit.paper_id for hit in hits})
+
+    def test_an_unregistered_heading_keeps_its_exact_meaning(self) -> None:
+        self.assertEqual(("appendix",), heading_variants("Appendix"))
+        self.assertEqual([], section_search(self.corpus, "Appendix", [], 10))
+
+    def test_the_query_itself_always_stays_in_the_variants(self) -> None:
+        """别名只放宽范围：登记过的组也不能把用户写的那个标题挤出去。"""
+        self.assertIn(
+            "limitations and future work",
+            heading_variants("Limitations and Future Work"),
+        )
 
 
 class ContextualSkeletonTest(unittest.IsolatedAsyncioTestCase):

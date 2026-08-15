@@ -8,9 +8,12 @@
 落，Markdown 结构行占了相当比例，放任它们与正文句平权参与检索会系统性地劣化排序。
 """
 
+import io
 import json
 import math
 import re
+
+import numpy
 
 from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import PaperContent, RetrievalUnit
@@ -49,6 +52,7 @@ BIBLIOGRAPHY_KIND = "bibliography"
 ABSTRACT_KIND = "abstract"
 CITATION_KEY = re.compile(r"\[@([^\]\s]+)\]")
 MIN_TITLE_MATCH_CHARS = 20
+MIN_TITLE_RUN_CHARS = 40
 HEADING_PATH_PREFIX = "> Section:"
 TABLE_DELIMITER = re.compile(r"^\|[\s\-:|]+\|?$")
 DISPLAY_MATH_FENCES = {"$$": "$$", "\\[": "\\]"}
@@ -262,6 +266,32 @@ def visual_link_ids(unit: RetrievalUnit) -> list[str]:
     return [f"{namespace}:{item}" for item in linked.split(",") if item]
 
 
+def pack_vectors(vectors: list[list[float]]) -> bytes:
+    """把归一化后的向量打包成 float32 numpy 缓冲。
+
+    1.0 的 JSON 文本编码在真实语料上不可用：44 篇论文的 36920 条句向量落盘 800 MB，
+    ``json.loads`` 要 10 秒，解码成 ``list[list[float]]`` 常驻 1.15 GB（每个 Python
+    float 24 字节）。同一批向量按 float32 打包是 144 MB、装载 0.02 秒、常驻 144 MB，
+    而 float32 与 float64 的差异在 1e-7 量级，对 top-k 排序没有影响。
+    """
+    buffer = io.BytesIO()
+    numpy.save(buffer, numpy.asarray(vectors, dtype=numpy.float32), allow_pickle=False)
+    return buffer.getvalue()
+
+
+def unpack_vectors(data: bytes) -> numpy.ndarray:
+    """读回 ``pack_vectors`` 写下的缓冲，得到 ``(句数, 维度)`` 的 float32 矩阵。"""
+    return numpy.load(io.BytesIO(data), allow_pickle=False)
+
+
+def decode_json_vectors(text: str) -> numpy.ndarray:
+    """读回 1.0 语料的 JSON 向量，仍归一成同一种内存表示。
+
+    磁盘格式有两种，内存表示只有一种：旧语料只是多付一次解析，检索路径无需分支。
+    """
+    return numpy.asarray(json.loads(text), dtype=numpy.float32)
+
+
 async def embed_texts(
     store: ArtifactStore, texts: list[str], embedder: TextEmbedder
 ) -> ArtifactRef:
@@ -270,7 +300,7 @@ async def embed_texts(
     for start in range(0, len(texts), EMBED_BATCH):
         batch = await embedder.embed(texts[start : start + EMBED_BATCH])
         vectors.extend(normalize(vector) for vector in batch)
-    return await store.put_text(json.dumps(vectors))
+    return await store.put_bytes(pack_vectors(vectors))
 
 
 async def embed_sentences(
@@ -335,14 +365,39 @@ def paper_anchors(units_by_paper: list[list[RetrievalUnit]]) -> dict[str, str]:
     return anchors
 
 
+def title_matches(key: str, normalized: str) -> bool:
+    """一条参考文献的规范化文本是否指向标题规范化为 ``key`` 的论文。
+
+    先试整题包含，这是干净的情形。真实语料里大量引用过不了这一关，原因不是引错了论文
+    而是标题本身有出入：作者拼错自己的题目（``hetergeneous`` vs ``heterogeneous``）、
+    引用的是 arXiv 版而语料收的是会议版（多出一个 ``representation``）。整题包含对这
+    一个字符的差别是全或无的。
+
+    因此再试一条：标题里存在一段 ``MIN_TITLE_RUN_CHARS`` 长的连续规范化字符出现在参考
+    文献里，就算命中。阈值取 40 是有依据的——44 篇真实语料上它恰好补回三条人工核对为
+    真的引用（10→11 篇引用方、8→10 篇被引方），且不引入任何误连；同时它天然排除短标题
+    （"Enhanced Cost-sensitive Ensemble" 规范化后只有 29 字符，永远够不到 40），而短标题
+    正是宽松匹配下误连的唯一来源。
+    """
+    if len(key) >= MIN_TITLE_MATCH_CHARS and key in normalized:
+        return True
+    if len(key) < MIN_TITLE_RUN_CHARS:
+        return False
+    return any(
+        key[start : start + MIN_TITLE_RUN_CHARS] in normalized
+        for start in range(len(key) - MIN_TITLE_RUN_CHARS + 1)
+    )
+
+
 def citation_edges(
     units_by_paper: list[list[RetrievalUnit]], anchors: dict[str, str]
 ) -> dict[tuple[str, str], str]:
     """把参考文献条目解析成 ``(命名空间, 引用键) → 被引论文落点`` 的边。
 
-    只认语料内部的引用：一条参考文献的文本里若包含语料中某篇论文的规范化标题，就把该
-    条目的引用键连到那篇论文。跨出语料的引用没有落点，留着只会变成 ``not_found``。
-    标题短于 ``MIN_TITLE_MATCH_CHARS`` 时不参与匹配，避免"RAG"这类短名误连。
+    只认语料内部的引用：一条参考文献的文本若被 ``title_matches`` 判定指向语料中某篇论
+    文，就把该条目的引用键连到那篇论文。跨出语料的引用没有落点，留着只会变成
+    ``not_found``。标题短于 ``MIN_TITLE_MATCH_CHARS`` 时不参与匹配，避免"RAG"这类短名
+    误连。
     """
     catalogue = [
         (title_key(units[0].metadata.get("title", "")), namespace)
@@ -364,7 +419,7 @@ def citation_edges(
                 (
                     anchors[cited]
                     for key, cited in catalogue
-                    if cited != namespace and key in normalized
+                    if cited != namespace and title_matches(key, normalized)
                 ),
                 None,
             )
@@ -448,5 +503,6 @@ async def build_corpus_index(
     index = PaperCorpusIndex(entries=entries, sentences=sentences)
     if embedder is not None:
         index.embedding_ref = await embed_sentences(store, index, embedder)
+        index.embedding_format = "float32"
         index.embedding_model = embedder.model
     return await store.put_text(index.model_dump_json())
