@@ -132,7 +132,7 @@ async def test_baseline_mode_registers_ideator_output_untouched(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gated_mode_sends_drafts_through_the_gate(monkeypatch):
+async def test_ideageneration_mode_sends_drafts_through_the_gate(monkeypatch):
     kept = [Hypothesis(statement="kept", intervention="i", expected_effect="e")]
     called = {"gate": 0}
 
@@ -147,7 +147,7 @@ async def test_gated_mode_sends_drafts_through_the_gate(monkeypatch):
         disconfirming_observations=["d"],
     )
 
-    result = await _runner("gated")._finish_ideator_batch(
+    result = await _runner("ideageneration")._finish_ideator_batch(
         IdeatorHypothesisBatch(hypotheses=[draft])
     )
 

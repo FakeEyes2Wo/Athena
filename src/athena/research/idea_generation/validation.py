@@ -13,18 +13,6 @@ from athena.research.idea_generation.idea_schemas import HypothesisPackage, Vali
 
 BUILTIN_VERIFIERS: tuple[VerifierSpec, ...] = (
     VerifierSpec(
-        verifier_type="controlled_experiment_ttest",
-        applicable_domains=["biology", "medicine", "psychology"],
-        observable_vars=["intervention_group_outcome", "control_group_outcome"],
-        statistical_assumptions=["independent samples", "approximately normal residuals"],
-        success_condition="two-sided t-test p < 0.05 in the predicted direction",
-        failure_condition="p >= 0.05 or effect in the opposite direction",
-        inconclusive_condition="sample size below the pre-registered minimum",
-        cost_ref="unestimated",
-        supports_auto_exec=False,
-        requires_human_approval=True,
-    ),
-    VerifierSpec(
         verifier_type="ablation_replication",
         applicable_domains=["machine_learning", "ai4s"],
         observable_vars=["metric_before_ablation", "metric_after_ablation"],
@@ -35,18 +23,6 @@ BUILTIN_VERIFIERS: tuple[VerifierSpec, ...] = (
         cost_ref="unestimated",
         supports_auto_exec=True,
         requires_human_approval=False,
-    ),
-    VerifierSpec(
-        verifier_type="historical_backtest",
-        applicable_domains=["finance", "economics", "time_series"],
-        observable_vars=["backtest_return", "benchmark_return"],
-        statistical_assumptions=["no lookahead bias", "point-in-time data snapshot"],
-        success_condition="backtest outperforms benchmark net of transaction costs",
-        failure_condition="backtest underperforms benchmark",
-        inconclusive_condition="insufficient historical data to cover one full market cycle",
-        cost_ref="unestimated",
-        supports_auto_exec=False,
-        requires_human_approval=True,
     ),
 )
 

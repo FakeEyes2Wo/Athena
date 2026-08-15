@@ -83,15 +83,15 @@ class ResearchRuntime:
         auto_validate: bool = False,
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
-        ideation: Literal["gated", "baseline"] = "gated",
+        ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration",
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
         ask_user: AskUser | None = None,
     ) -> None:
-        # 消融开关：``gated`` 走 Idea Generation 门禁，``baseline`` 走 main 原有的
-        # "产出即入库"。输出契约与 prompt 在 agent 注册时绑定，故一路传到
-        # register_ideator_agent，不只是出口处分支。
+        # 消融开关：``ideageneration`` 走 Idea Generation 门禁，``baseline`` 走 main
+        # 原有的"产出即入库"，``debate`` 走辩论式 Ideator。输出契约与 prompt 在 agent
+        # 注册时绑定，故一路传到 register_ideator_agent，不只是出口处分支。
         self._ideation = ideation
         self._root = Path(project_root or ".").resolve()
         self._athena = (

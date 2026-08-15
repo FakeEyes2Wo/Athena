@@ -1,11 +1,11 @@
-"""gatekeeper：整条 Idea Generation 流水线里唯一产出 GateVerdict 的地方。
+"""gatekeeper：整条 Idea Generation light pipeline 里唯一产出 GateVerdict 的地方。
 
 两个门：
-- pre_gate（步骤 [4]，2 项 rubric）：只看结构完整性与可证伪性，任一不满足 -> REVISE。它是
-  廉价前置筛子，跑在昂贵的检索/审阅步骤之前，不合格的候选直接淘汰。
-- hard_gate（步骤 [8]，5 + len(REVIEW_PERSPECTIVES) 项 rubric）：在 pre_gate 两项之上追加
-  novelty_ok/verifier_ok/risk_total，外加每个审阅视角一项 risk_ok_<perspective>，产出
-  gate_phase="full" 的终审判决。
+- pre_gate（2 项 rubric）：只看结构完整性与可证伪性，任一不满足 -> REVISE。它是廉价前置
+  筛子，跑在昂贵的审阅步骤之前，不合格的候选直接淘汰。
+- light_hard_gate（4 + 视角数 项 rubric）：在 pre_gate 两项之上追加 verifier_ok /
+  risk_total，外加每个审阅视角一项 risk_ok_<perspective>，产出 gate_phase="full" 的终审
+  判决。
 
 设计参考：verdict 判定本质是准入谓词（对应 AutoSOTA 论文里的 Adm(h)——逐项校验是否保持
 评估完整性，不满足则拒绝/退回修改，而不是给一个模糊的总分）；itemized rubric + 强制 REVISE
@@ -18,19 +18,14 @@ from athena.research.idea_generation.idea_schemas import (
     FalsifiabilityReport,
     GateDecision,
     GateVerdict,
-    NoveltyEvidenceReport,
     RubricItemScore,
     SkepticReport,
     StructuralCheckReport,
     ValidationPlan,
 )
-from athena.research.idea_generation.review_board import REVIEW_PERSPECTIVES
 
 
 # ====== 常量 ======
-
-NOVELTY_OVERLAP_THRESHOLD: float = 0.7
-"""facet_overlap 均值达到或超过此阈值,判定为与已有工作重叠过高(不够新颖)。"""
 
 MAX_TOLERATED_RISKS: int = 6
 """单个视角"未处理风险"条数上限。
@@ -56,9 +51,6 @@ def max_total_risks(perspective_count: int) -> int:
     因此取 ``单项上限 × 视角数 - 1``（恰好满足不等式的最大值）：双视角 11、三视角 17。
     实测双视角总量为 9-10，落在放行区间内；只有当每个视角都逼近单项上限时才触发。
 
-    初版把它写成常量 ``MAX_TOLERATED_RISKS + 1``，在单项上限调到 6 之后会退化成 7 —
-    低于实测总量 9-10，等于把单项放宽的效果又整个吃掉。随视角数缩放才是正确形态。
-
     Example:
         >>> max_total_risks(2)
         11
@@ -73,8 +65,9 @@ def max_total_risks(perspective_count: int) -> int:
 def structural_rubric_scores(
     structural: StructuralCheckReport, falsifiability: FalsifiabilityReport
 ) -> tuple[bool, RubricItemScore, RubricItemScore]:
-    """产出 pre_gate 与 hard_gate 共用的前两项 rubric（evidence_traceable / falsifiable），
-    外加 evidence_traceable 这个派生判定本身（它不是报告上的现成字段，是两个布尔的合取）。
+    """产出 pre_gate 与 light_hard_gate 共用的前两项 rubric（evidence_traceable /
+    falsifiable），外加 evidence_traceable 这个派生判定本身（它不是报告上的现成字段，是
+    两个布尔的合取）。
 
     两个门必须对同一份报告给出完全一致的评分与证据文案，写两遍会在后续改动时悄悄分叉，
     因此收敛到一处。
@@ -155,156 +148,21 @@ def pre_gate(structural: StructuralCheckReport, falsifiability: FalsifiabilityRe
     )
 
 
-def hard_gate(
-    structural: StructuralCheckReport,
-    falsifiability: FalsifiabilityReport,
-    novelty: NoveltyEvidenceReport,
-    reviews: list[SkepticReport],
-    validation_plan: ValidationPlan,
-) -> GateDecision:
-    """依据 4 份报告 + 每视角一份 review 产出 hard_gate 阶段的 GateDecision(gate_phase="full")。
-
-    判定优先级（从上到下短路，blocking_factor 记第一个拦住它的项）：
-    1. 结构/可证伪性问题 -> REVISE（设计上可修正）
-    2. facet_overlap 为空（新颖性缺证据）-> REVISE
-    3. facet_overlap 均值超阈值 -> REJECT
-    4. 任一视角 fatal_flaw_found -> REJECT
-    5. 任一视角 failed 或风险超阈值 -> REVISE
-    6. 跨视角风险总数超 max_total_risks(视角数) -> REVISE
-    7. 无可用 verifier -> EXPLORATORY
-    8. 全过 -> PASS
-
-    第 4/5 步按 REVIEW_PERSPECTIVES 的顺序扫描,且 reviews 在函数内部重排——把"按视角顺序"
-    这个确定性承诺寄托在调用方（asyncio.gather 的入参顺序）身上等于没有承诺。
-
-    Example:
-        >>> hard_gate(structural, falsifiability, novelty, reviews, plan).gate_phase  # doctest: +SKIP
-        'full'
-    """
-    expected_perspectives = {p.perspective_id for p in REVIEW_PERSPECTIVES}
-    got_perspectives = {r.perspective for r in reviews}
-    # 集合相等只保证"覆盖到的视角种类对"，不保证"每个视角恰好一份"——比如传两份 methodology
-    # 加各一份其余视角，集合比较照样通过，随后 by_perspective 字典推导会静默丢弃前一份
-    # methodology，把它的风险/fatal 标记吃掉。长度检查把"exactly one"落到实处。
-    if got_perspectives != expected_perspectives or len(reviews) != len(REVIEW_PERSPECTIVES):
-        raise ValueError(
-            "hard_gate requires exactly one review per perspective; expected "
-            f"{sorted(expected_perspectives)}, got {len(reviews)} review(s) for "
-            f"{sorted(got_perspectives)}"
-        )
-
-    idea_ids = {structural.idea_id, falsifiability.idea_id, novelty.idea_id,
-                validation_plan.idea_id} | {r.idea_id for r in reviews}
-    if len(idea_ids) != 1:
-        raise ValueError(f"reports refer to different ideas: {sorted(idea_ids)}")
-    idea_id = structural.idea_id
-
-    evidence_traceable_ok, evidence_traceable_score, falsifiable_score = structural_rubric_scores(
-        structural, falsifiability
-    )
-
-    # facet_overlap 为空 = 检索侧一项重叠度都没打出来，此时"新颖"是没有证据支撑的默认值，
-    # 不能当成通过——否则均值 0.0 会让"什么都没查到"自动拿满分。这种情况判 REVISE。
-    novelty_evidence_missing = not novelty.facet_overlap
-    mean_overlap = (
-        sum(novelty.facet_overlap.values()) / len(novelty.facet_overlap)
-        if novelty.facet_overlap else 0.0
-    )
-    novelty_ok = not novelty_evidence_missing and mean_overlap < NOVELTY_OVERLAP_THRESHOLD
-    novelty_score = RubricItemScore(
-        item="novelty_ok", score=1.0 if novelty_ok else 0.0,
-        evidence=(
-            f"no facet_overlap scores were produced, so novelty is unsupported by evidence "
-            f"(uncertainty={novelty.uncertainty:.2f})"
-            if novelty_evidence_missing
-            else f"mean facet_overlap={mean_overlap:.2f} (threshold {NOVELTY_OVERLAP_THRESHOLD}), "
-                 f"uncertainty={novelty.uncertainty:.2f}; "
-                 f"nearest_work={[w.ref_id for w in novelty.nearest_work]}"
-        ),
-    )
-
-    verifier_ok = validation_plan.verifier is not None
-    verifier_score = RubricItemScore(
-        item="verifier_ok", score=1.0 if verifier_ok else 0.0,
-        evidence=(
-            f"verifier={validation_plan.verifier.verifier_type}" if verifier_ok
-            else "no verifier matched; validation plan is EXPLORATORY"
-        ),
-    )
-
-    by_perspective = {r.perspective: r for r in reviews}
-    ordered = [by_perspective[p.perspective_id] for p in REVIEW_PERSPECTIVES]
-    total_risks = sum(len(r.unaddressed_risks) for r in ordered)
-    failed_count = sum(1 for r in ordered if r.failed)
-    total_note = f"cross-perspective total unaddressed risks: {total_risks}"
-
-    risk_scores = [
-        RubricItemScore(
-            item=f"risk_ok_{review.perspective}",
-            score=1.0 if perspective_ok(review) else 0.0,
-            evidence=(
-                f"failed={review.failed}; fatal_flaw_found={review.fatal_flaw_found}; "
-                f"unaddressed_risks={len(review.unaddressed_risks)} "
-                f"(tolerance {MAX_TOLERATED_RISKS}): {review.unaddressed_risks}; {total_note}"
-            ),
-        )
-        for review in ordered
-    ]
-    ceiling = max_total_risks(len(ordered))
-    total_ok = total_risks <= ceiling
-    incomplete_note = (
-        f" (incomplete: {failed_count} perspective(s) failed)" if failed_count else ""
-    )
-    risk_total_score = RubricItemScore(
-        item="risk_total", score=1.0 if total_ok else 0.0,
-        evidence=f"{total_note} (ceiling {ceiling}){incomplete_note}",
-    )
-
-    item_scores = [evidence_traceable_score, falsifiable_score, novelty_score,
-                   verifier_score, risk_total_score, *risk_scores]
-
-    fatal = next((r for r in ordered if r.fatal_flaw_found), None)
-    blocked = next((r for r in ordered if not perspective_ok(r)), None)
-
-    if not evidence_traceable_ok or not falsifiability.is_falsifiable:
-        verdict = GateVerdict.REVISE
-        blocking_factor = "evidence_traceable" if not evidence_traceable_ok else "falsifiable"
-    elif novelty_evidence_missing:
-        verdict, blocking_factor = GateVerdict.REVISE, "novelty_ok"
-    elif not novelty_ok:
-        verdict, blocking_factor = GateVerdict.REJECT, "novelty_ok"
-    elif fatal is not None:
-        verdict, blocking_factor = GateVerdict.REJECT, f"risk_ok_{fatal.perspective}"
-    elif blocked is not None:
-        verdict, blocking_factor = GateVerdict.REVISE, f"risk_ok_{blocked.perspective}"
-    elif not total_ok:
-        verdict, blocking_factor = GateVerdict.REVISE, "risk_total"
-    elif not verifier_ok:
-        verdict, blocking_factor = GateVerdict.EXPLORATORY, "verifier_ok"
-    else:
-        verdict, blocking_factor = GateVerdict.PASS, None
-
-    return GateDecision(
-        idea_id=idea_id, gate_phase="full", verdict=verdict,
-        rubric_version=GATE_RUBRIC_VERSION, item_scores=item_scores,
-        blocking_factor=blocking_factor,
-    )
-
-
 def light_hard_gate(
     structural: StructuralCheckReport,
     falsifiability: FalsifiabilityReport,
     reviews: list[SkepticReport],
     validation_plan: ValidationPlan,
 ) -> GateDecision:
-    """hard_gate 的无语料变体：跳过 novelty_ok 与 domain_consistency，只用
-    evidence_traceable/falsifiable + 传入的 review 视角（调用方决定用哪些，通常是
-    methodology+statistics）+ verifier_ok。
+    """依据结构/可证伪性报告、每视角一份 review、验证方案产出终审 GateDecision。
 
-    没有 novelty_ok 项时,原判定优先级里"facet_overlap 缺失/超阈值"两步天然不存在;其余
-    优先级顺序与 hard_gate 一致：结构/可证伪性 -> 任一视角 fatal_flaw_found（REJECT）->
-    任一视角风险超阈值/失败（REVISE）-> 跨视角风险总数超阈值（REVISE）-> 无 verifier
-    （EXPLORATORY）-> PASS。用于还没接文献语料（paper_rag corpus_ref）的场景。
+    判定优先级（从上到下短路，blocking_factor 记第一个拦住它的项）：
+    1. 结构/可证伪性问题 -> REVISE（设计上可修正）
+    2. 任一视角 fatal_flaw_found -> REJECT
+    3. 任一视角 failed 或风险超阈值 -> REVISE
+    4. 跨视角风险总数超 max_total_risks(视角数) -> REVISE
+    5. 无可用 verifier -> EXPLORATORY
+    6. 全过 -> PASS
 
     Example:
         >>> light_hard_gate(structural, falsifiability, reviews, plan).gate_phase  # doctest: +SKIP

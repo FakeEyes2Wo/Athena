@@ -1,5 +1,5 @@
 """步骤 [4] 的两项审计：均只产出报告，不产出 verdict（判断权集中在 gatekeeper）。两份报告
-既喂给 pre_gate 做廉价前置筛选，也作为 hard_gate 五项 rubric 里的前两项。"""
+既喂给 pre_gate 做廉价前置筛选，也作为 light_hard_gate rubric 里的前两项。"""
 
 from athena.core.contracts import ArtifactStore
 

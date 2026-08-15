@@ -35,7 +35,7 @@ class _Agents:
 
 def _runner(agents: _Agents, tmp_path) -> AgentTurnRunner:
     runtime = SimpleNamespace(
-        _agents=agents, _model="m", _store=SimpleNamespace(), _ideation="gated",
+        _agents=agents, _model="m", _store=SimpleNamespace(), _ideation="ideageneration",
         _supervisor=SimpleNamespace(evaluator_ref=None),
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         publish_output=_noop_publish,

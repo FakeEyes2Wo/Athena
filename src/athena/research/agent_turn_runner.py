@@ -140,6 +140,8 @@ class AgentTurnRunner:
         rt = self._runtime
         if rt._provider is None:
             raise RuntimeError("Ideator requires a registered Agent provider")
+        if getattr(rt, "_ideation", "ideageneration") == "debate":
+            return await self._run_debate_ideator_turn(count)
         eda_dir = self._resolve_eda_dir(rt)
         if not rt._registry.contains("ideator"):
             register_ideator_agent(
@@ -149,7 +151,7 @@ class AgentTurnRunner:
                 workspace=Path(eda_dir),
                 runtime=rt._execution,
                 extra_tools=rt.kaggle_tools("ideator"),
-                gated=getattr(rt, "_ideation", "gated") == "gated",
+                gated=getattr(rt, "_ideation", "ideageneration") == "ideageneration",
             )
         ideator_count = rt._state.ideator_count
         hypotheses_per_ideator = rt._state.hypotheses_per_ideator
@@ -286,7 +288,7 @@ class AgentTurnRunner:
             )
         request = {"content": content, "context_refs": context_refs}
         agent_id, run_id = await rt._agents.create_root("ideator", request, name=label)
-        gated = getattr(rt, "_ideation", "gated") == "gated"
+        gated = getattr(rt, "_ideation", "ideageneration") == "ideageneration"
         schema = IdeatorHypothesisBatch if gated else HypothesisBatch
 
         # 门禁全拒时带理由重新提案：拒绝本身就是给生成侧的有效信号。上限是硬的——
@@ -332,12 +334,12 @@ class AgentTurnRunner:
     ) -> list[Hypothesis]:
         """按消融模式决定 Ideator 产出如何进入 ResearchTree。
 
-        ``gated``：跑 Idea Generation 门禁（pre_gate + 视角审阅 + hard_gate + pairwise
-        排序），不合格的候选直接丢弃，不静默放行。
+        ``ideageneration``：跑 Idea Generation 门禁（pre_gate + 视角审阅 +
+        light_hard_gate），不合格的候选直接丢弃，不静默放行。
         ``baseline``：main 原有行为，产出即入库，作为消融对照组。
         """
         rt = self._runtime
-        if getattr(rt, "_ideation", "gated") != "gated":
+        if getattr(rt, "_ideation", "ideageneration") != "ideageneration":
             return list(batch.hypotheses)
 
         async def progress(message: str) -> None:  # noqa: D401
@@ -354,6 +356,50 @@ class AgentTurnRunner:
             batch.hypotheses, model=rt._model, artifacts=rt._store, progress=progress,
             rejections=rejections,
         )
+
+    async def _run_debate_ideator_turn(self, count: int) -> list[Hypothesis]:
+        """Run the debate-based Ideator (proposal -> review -> revision -> judge).
+
+        This is the pre-migration ideator preserved behind ``--ideation debate``. It
+        consumes the shared ResearchTree directly and returns hypotheses in judge order;
+        there is no pipeline-local ranking either.
+        """
+        from athena.agents.ideator import Ideator
+        from athena.research.data_models import DataProfile
+        from athena.research.idea_generation.structured_chat import (
+            single_turn_structured_chat,
+        )
+
+        rt = self._runtime
+
+        class _StructuredResult:
+            def __init__(self, value: object) -> None:
+                self.output = value
+
+        class _DebateAgentAdapter:
+            async def run(self, prompt, output_type=None, message_history=None):
+                value = await single_turn_structured_chat(
+                    prompt, output_type, model=rt._model, artifacts=rt._store,
+                )
+                return _StructuredResult(value)
+
+        def agent_factory(_role: str, _agent_index: int):
+            return _DebateAgentAdapter()
+
+        # 辩论 Ideator 的完整输入（DataProfile/papers/models）在 EDA-only 的 SEARCH
+        # 组合根里没有现成来源；这里给最小画像 + 空文献/模型列表，保证模式可运行，
+        # 后续接入 PREPARE 的 DataProfile 构建器后可替换为真实输入。
+        profile = DataProfile(row_count=0, col_count=0, task_type_hint="eda_workspace")
+        ideator = Ideator(agent_factory=agent_factory, artifacts=rt._store)
+        try:
+            result = await ideator.generate(profile, [], [], rt.tree)
+        except Exception as error:  # noqa: BLE001 - debate 失败按 lane 失败上报
+            await rt.publish_output(
+                source="agent", channel="error", plan="ideator-debate",
+                text=f"Debate Ideator failed: {error}",
+            )
+            return []
+        return result.hypotheses[:count]
 
     async def run_general_turn(self, task: str) -> dict[str, object]:
         """Dispatch one General Agent rooted at the project and return its result."""
