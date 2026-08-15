@@ -24,6 +24,7 @@ from athena.core.agent.models import AgentContext
 from athena.core.contracts import ArtifactRef
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
+from athena.core.tool_types import EmitEvent
 from athena.research.paper_markdown.processor import (
     PaperProcessor,
     VisualInterpretationRequiredError,
@@ -340,7 +341,13 @@ class SurveyPipeline:
     ``SurveyReport``，而不是在半路抛异常丢掉已经付出的成本。
     """
 
-    def __init__(self, stack: "SurveyStack", request: SurveyRequest) -> None:
+    def __init__(
+        self,
+        stack: "SurveyStack",
+        request: SurveyRequest,
+        *,
+        emit: EmitEvent | None = None,
+    ) -> None:
         self.stack = stack
         self.request = request
         self.report = SurveyReport(query=request.query, status="empty")
@@ -349,15 +356,34 @@ class SurveyPipeline:
         self._conversion_keys: dict[str, str] = {}
         # 取源可以多要几篇垫底，转换不能——转换才是花钱的那一段
         self._convert_cap = request.max_papers
+        # 独立跑时事实全部落在 SurveyReport 里；接进 loop 后它是个十几分钟的后台任务，
+        # 没有逐段回报的话，外部无法区分"正在取第 7 篇"与"卡死了"。
+        self._emit = emit or _silent_emit
 
     async def run(self) -> SurveyReport:
         """执行全链路，返回逐篇结果与成本账。"""
         started = time.monotonic()
         source_request_ref = await self._scout()
+        await self._emit(
+            "survey/scouted",
+            self.report.scout_result_ref or "",
+            {"delivered": len(self._outcomes)},
+        )
         if source_request_ref is not None:
             source_result = await self._fetch(source_request_ref)
+            await self._emit("survey/fetched", "", {"fetched": self._fetched()})
             papers = await self._convert(source_result)
+            await self._emit(
+                "survey/converted",
+                "",
+                {"converted": self._converted(), "papers": len(papers)},
+            )
             await self._index(papers)
+            await self._emit(
+                "survey/indexed",
+                self.report.corpus_ref or "",
+                {"indexed": self._indexed()},
+            )
         self.report.timings.total_seconds = round(time.monotonic() - started, 3)
         self.report.http_requests = self.stack.http.request_count
         self._collect_model_costs()
@@ -747,6 +773,28 @@ class SurveyPipeline:
             self.report.embed_calls = embedder.calls
             self.report.embedded_texts = embedder.embedded
 
+    def _fetched(self) -> int:
+        """已取回源文件的篇数。
+
+        逐段计数只能从 ``self._outcomes`` 数：``report.papers`` 要到 ``run`` 收尾时
+        才成型，在各段中途读 ``report`` 上的汇总恒为 0。
+        """
+        return sum(
+            1 for item in self._outcomes.values() if item.fetch_status == "fetched"
+        )
+
+    def _converted(self) -> int:
+        """已转换成 Markdown 的篇数。"""
+        return sum(
+            1
+            for item in self._outcomes.values()
+            if item.conversion_status == "converted"
+        )
+
+    def _indexed(self) -> int:
+        """已进入语料索引的篇数。"""
+        return sum(1 for item in self._outcomes.values() if item.indexed)
+
     def _agent_context(self, request_ref: ArtifactRef) -> AgentContext:
         """构造 PaperScout 需要的最小 Turn 上下文。
 
@@ -768,7 +816,9 @@ class SurveyPipeline:
         return AgentContext(
             thread=thread,
             turn=turn,
-            emit=_silent_emit,
+            # 检索是全链路里最慢的一段（实测约占墙钟 70%），PaperScout 自己的
+            # started/step/completed 事件是这段唯一的进度来源，必须往外传
+            emit=self._emit,
             tools=ToolRegistry(),
             cancel=asyncio.Event(),
         )
@@ -778,6 +828,8 @@ async def _silent_emit(_kind: str, _ref: str, _data: dict | None = None) -> None
     """默认事件汇：全链路驱动不订阅事件流，事实全部落在 SurveyReport 里。"""
 
 
-async def run_survey(stack: "SurveyStack", request: SurveyRequest) -> SurveyReport:
+async def run_survey(
+    stack: "SurveyStack", request: SurveyRequest, *, emit: EmitEvent | None = None
+) -> SurveyReport:
     """跑一次完整的 Academic Survey，返回逐篇结果与成本账。"""
-    return await SurveyPipeline(stack, request).run()
+    return await SurveyPipeline(stack, request, emit=emit).run()

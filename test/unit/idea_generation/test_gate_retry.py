@@ -39,12 +39,19 @@ def _runner(agents: _Agents, tmp_path) -> AgentTurnRunner:
         _supervisor=SimpleNamespace(evaluator_ref=None),
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         publish_output=_noop_publish,
+        survey_corpus_ref=lambda: None,
+        corpus_paper_ids=_no_corpus,
     )
     return AgentTurnRunner(runtime)
 
 
 async def _noop_publish(**_kwargs) -> None:
     pass
+
+
+async def _no_corpus() -> set[str]:
+    """没开文献调研的运行：引用校验无从比对，应原样放行。"""
+    return set()
 
 
 def _patch_turn(monkeypatch, kept_per_attempt):

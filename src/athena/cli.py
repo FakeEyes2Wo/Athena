@@ -11,6 +11,7 @@ from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
+from athena.research.runtime import DEFAULT_SURVEY_PAPERS
 from athena.research.survey import (
     SurveyRequest,
     build_survey_stack,
@@ -60,6 +61,9 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
         "ideation": args.ideation,
+        "survey": args.survey,
+        "survey_query": args.survey_query or "",
+        "survey_max_papers": args.survey_papers,
     }
 
 
@@ -358,6 +362,26 @@ def _build_parser() -> argparse.ArgumentParser:
             "that registers Ideator output as-is; 'debate' uses the debate-based "
             "Ideator (proposal -> review -> revision -> judge)"
         ),
+    )
+    # 默认关：一次调研是十几分钟的模型往返，不能由默认值替用户决定花这笔钱。
+    run.add_argument(
+        "--survey",
+        action="store_true",
+        help=(
+            "build a literature corpus in the background and let Ideators read it; "
+            "off by default because one survey costs ~15 minutes of model calls"
+        ),
+    )
+    run.add_argument(
+        "--survey-query",
+        default="",
+        help="literature search topic; derived from --task when omitted",
+    )
+    run.add_argument(
+        "--survey-papers",
+        type=_non_negative_int,
+        default=DEFAULT_SURVEY_PAPERS,
+        help="papers to convert and index for the corpus",
     )
     _add_survey_parser(subparsers)
     _add_kaggle_parser(subparsers)

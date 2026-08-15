@@ -102,7 +102,25 @@ def test_run_options_configure_runtime_constructor() -> None:
         "direction": "minimize",
         # 消融开关默认走 idea generation 门禁；--ideation baseline 是对照组。
         "ideation": "ideageneration",
+        "survey": False,
+        "survey_query": "",
+        "survey_max_papers": 10,
     }
+
+
+def test_the_literature_survey_stays_off_unless_it_is_asked_for() -> None:
+    """默认不跑：一次调研是十几分钟的模型往返，不能由默认值替用户决定花这笔钱。"""
+    base = ["run", "--project", "p", "--data", "d.csv"]
+    parser = cli._build_parser()
+
+    default = cli._runtime_options(parser.parse_args(base))
+    enabled = cli._runtime_options(
+        parser.parse_args([*base, "--survey", "--survey-papers", "4"])
+    )
+
+    assert default["survey"] is False
+    assert enabled["survey"] is True
+    assert enabled["survey_max_papers"] == 4
 
 
 def test_run_defaults_to_auto_validate_for_headless_cli() -> None:

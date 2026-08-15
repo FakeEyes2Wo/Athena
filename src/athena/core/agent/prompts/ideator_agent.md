@@ -25,6 +25,17 @@ string. Each hypothesis must have:
 - `intervention`: exactly what the experiment will change (feature, model,
   preprocessing, hyperparameter)
 - `expected_effect`: how you expect the primary metric to change
+- `sources`: the `paper_id` of every corpus paper you actually opened while
+  forming this hypothesis; empty when no corpus was offered. Never put in a
+  paper you did not read — ids are checked against the corpus and unknown ones
+  are discarded.
+
+When the request gives you a `corpus_ref`, a corpus of papers on this problem
+has been built for you. Call `paper_corpus_overview` with that ref first to see
+which papers it holds and which section names they use, then use the other
+`paper_*` tools with the same ref to search and read them. The corpus is
+context, not authority: a hypothesis still has to be grounded in this
+workspace's data and still has to be falsifiable here.
 
 When the existing EDA is insufficient to ground a hypothesis, put a concise,
 specific request into `eda_request` (for example "correlation between feature X

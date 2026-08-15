@@ -52,6 +52,21 @@ def _regenerate_prompt(rejections: list[str], target: int) -> str:
     )
 
 
+def _merged(*registries: ToolRegistry | None) -> ToolRegistry | None:
+    """合并若干可选工具表；全为空时返回 ``None``。
+
+    ``ToolRegistry`` 不支持批量 merge，只能逐个 resolve/register。
+    """
+    present = [registry for registry in registries if registry is not None]
+    if not present:
+        return None
+    merged = ToolRegistry()
+    for registry in present:
+        for spec in registry.specs:
+            merged.register(registry.resolve(spec.name))
+    return merged
+
+
 async def _read_eval_handoff(
     store: ArtifactStore, evaluator_ref: ArtifactRef | None
 ) -> str:
@@ -151,7 +166,10 @@ class AgentTurnRunner:
                 artifacts=rt._store,
                 workspace=Path(eda_dir),
                 runtime=rt._execution,
-                extra_tools=rt.kaggle_tools("ideator"),
+                # 惰性求值：ideator 只注册一次，而工具的可用性是随时间变的——语料要
+                # 十几分钟才建好，Kaggle 是否接入也取决于 Supervisor 后来的决定。传
+                # 一个已经求好值的 registry，等于把第一轮的可用性冻结到运行结束。
+                extra_tools=self._ideator_tools,
                 gated=getattr(rt, "_ideation", "ideageneration") == "ideageneration",
             )
         ideator_count = rt._state.ideator_count
@@ -264,6 +282,16 @@ class AgentTurnRunner:
         registry.register(WebSearchTool())
         return registry
 
+    def _ideator_tools(self) -> ToolRegistry | None:
+        """Ideator 的工具：Kaggle（若接入）+ 文献语料的只读检索算子（若已建好）。
+
+        每次创建 Ideator 实例时重新求值，因此语料建好之后的那一轮自动拿到检索算子，
+        不需要重新注册 agent 类型。
+        """
+        return _merged(
+            self._runtime.kaggle_tools("ideator"), self._runtime.corpus_tools()
+        )
+
     @staticmethod
     def _ideator_allocations(count: int, lanes: int) -> tuple[int, ...]:
         """Distribute one requested batch across at most ``lanes`` ideator lanes."""
@@ -296,6 +324,15 @@ class AgentTurnRunner:
                 "\n\nThe evaluator contract (predictions directory layout and "
                 "scoring criteria) is attached as context; read it before "
                 "proposing hypotheses."
+            )
+        corpus_ref = rt.survey_corpus_ref()
+        if corpus_ref is not None:
+            content += (
+                f"\n\nA literature corpus is available for this task. Call "
+                f"paper_corpus_overview with corpus_ref={corpus_ref!r} first to see "
+                "which papers it holds, then use the other paper_* tools with the "
+                "same corpus_ref to search and read them. Record the paper ids you "
+                "actually read in each hypothesis's sources field."
             )
         request = {"content": content, "context_refs": context_refs}
         agent_id, run_id = await rt._agents.create_root("ideator", request, name=label)
@@ -351,7 +388,7 @@ class AgentTurnRunner:
         """
         rt = self._runtime
         if getattr(rt, "_ideation", "ideageneration") != "ideageneration":
-            return list(batch.hypotheses)
+            return await self._verify_sources(list(batch.hypotheses))
 
         async def progress(message: str) -> None:  # noqa: D401
             """把门禁进度投影成普通输出事件。
@@ -363,10 +400,42 @@ class AgentTurnRunner:
             if publish is not None:
                 await publish(source="agent", channel="text", text=f"gate> {message}")
 
-        return await run_light_pipeline(
+        kept = await run_light_pipeline(
             batch.hypotheses, model=rt._model, artifacts=rt._store, progress=progress,
             rejections=rejections,
         )
+        return await self._verify_sources(kept)
+
+    async def _verify_sources(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+        """去掉引不到语料的 paper id，只保留真实读过的那些。
+
+        ``ranker.rubric_prior`` 给"有引用"加 0.3（在总分里占 0.12），也就是说凭空写一个
+        paper id 就能让候选往前排。这条奖励只有在引用可核验时才成立，否则它奖励的是幻觉。
+        校验必须在入图之前做——进了图就是排序的输入了。
+
+        没有语料时整段跳过：此时 ``sources`` 按 schema 本就该为空，不该顺手清掉别的来源
+        写进去的内容。
+        """
+        rt = self._runtime
+        known = await rt.corpus_paper_ids()
+        if not known:
+            return hypotheses
+        verified: list[Hypothesis] = []
+        dropped = 0
+        for hypothesis in hypotheses:
+            kept = [source for source in hypothesis.sources if source in known]
+            dropped += len(hypothesis.sources) - len(kept)
+            verified.append(hypothesis.model_copy(update={"sources": kept}))
+        if dropped:
+            await rt.publish_output(
+                source="agent",
+                channel="error",
+                text=(
+                    f"dropped {dropped} citation(s) that name no paper in the corpus; "
+                    "only verifiable sources count towards a hypothesis's priority"
+                ),
+            )
+        return verified
 
     async def _run_debate_ideator_turn(self, count: int) -> list[Hypothesis]:
         """Run the debate-based Ideator (proposal -> review -> revision -> judge).

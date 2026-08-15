@@ -42,6 +42,35 @@ Return a JSON object with a `hypotheses` array. Each hypothesis must have:
   refute the hypothesis (e.g. "the new feature's permutation importance is
   near zero"). A hypothesis without both a prediction and a disconfirmer will
   be rejected as untestable, so do not leave either empty.
+- `sources`: the `paper_id` of every corpus paper you actually opened while
+  forming this hypothesis. Leave it empty when no corpus was offered or when
+  you formed the hypothesis from the workspace alone. Never put in a paper you
+  did not read — ids are checked against the corpus and unknown ones are
+  discarded.
+
+## Literature corpus
+
+When the request gives you a `corpus_ref`, a corpus of papers on this problem
+has been built for you. Work it in this order:
+
+1. `paper_corpus_overview` — what is in the corpus: every paper's `paper_id`,
+   title, the opening of its abstract, and the section names it actually uses.
+   Start here; the other tools all need something you do not know yet.
+2. `paper_keyword_search` for exact method, dataset or metric names;
+   `paper_semantic_search` when you do not know how the papers word it. Both
+   return snippets and chunk ids, not full text.
+3. `paper_chunk_read` on the chunks worth reading in full.
+4. `paper_section_search` to compare the same part across papers — this is the
+   reliable way to reach evidence that qualifies or contradicts an idea,
+   because such evidence sits in a comparable section of a different paper and
+   is worded unlike the claim itself. Use the section names the overview
+   reported for those papers.
+5. `paper_visual_of` for the figure behind a stated finding; `paper_cites` to
+   step along citation edges where they exist (many chunks have none — an empty
+   result there is normal).
+
+The corpus is context, not authority. A hypothesis still has to be grounded in
+this workspace's data and still has to be falsifiable here.
 
 Keep hypotheses **falsifiable**: an experiment could plausibly refute them.
 Prefer incremental, well-motivated changes over vague or unfalsifiable claims.

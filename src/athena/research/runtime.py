@@ -28,6 +28,7 @@ from athena.kaggle import (
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.paper_rag.search import corpus_paper_ids
 from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime_events import RuntimeEvents
 from athena.research.script_runner import DataScriptRunner
@@ -38,6 +39,14 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
+from athena.research.survey import (
+    SurveyRequest,
+    SurveyStack,
+    build_survey_stack,
+    build_survey_tools,
+    run_survey,
+)
+from athena.utils.single_turn_chat import single_turn_chat
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +62,16 @@ MODEL_CONNECTION_ENV_VARS: dict[str, str] = {
 """模型连接字段 → 环境变量名；provider 只允许 deepseek/openai/qwen。"""
 
 ALLOWED_MODEL_PROVIDERS = ("deepseek", "openai", "qwen")
+
+DEFAULT_SURVEY_PAPERS = 10
+SURVEY_PLAN_LABEL = "survey"
+SURVEY_QUERY_PROMPT = (
+    "Turn the following machine-learning research task into one English literature "
+    "search topic for an academic paper search engine. Name the problem type, data "
+    "modality and the methods worth surveying. Drop dataset paths, column names, "
+    "file names and metric values. Answer with the topic sentence only, no preamble "
+    "and no quotes."
+)
 
 
 def _mask_secret(value: str | None) -> str:
@@ -124,6 +143,9 @@ class ResearchRuntime:
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
         ideation: Literal["gated", "baseline"] = "gated",
+        survey: bool = False,
+        survey_query: str = "",
+        survey_max_papers: int = DEFAULT_SURVEY_PAPERS,
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
@@ -133,6 +155,13 @@ class ResearchRuntime:
         # "产出即入库"。输出契约与 prompt 在 agent 注册时绑定，故一路传到
         # register_ideator_agent，不只是出口处分支。
         self._ideation = ideation
+        # 文献调研默认关闭：一次调研是十几分钟的模型往返，不能由默认值替用户决定
+        # 花这笔钱。开启后它作为后台任务与 PREPARE 并行，SEARCH 绝不为它停等。
+        self._survey_enabled = survey
+        self._survey_query = survey_query
+        self._survey_max_papers = survey_max_papers
+        self._survey_stack: SurveyStack | None = None
+        self._survey_task: asyncio.Task[None] | None = None
         self._root = Path(project_root or ".").resolve()
         self._athena = (
             Path(state_root).resolve()
@@ -335,6 +364,136 @@ class ResearchRuntime:
             return None
         return build_kaggle_tools(stack, names=names)
 
+    # ── 文献语料：一次性构建，Ideator 只读 ──────────────────────────────
+
+    def survey_corpus_ref(self) -> str | None:
+        """当前可用的论文语料引用；还没建好时返回 ``None``。
+
+        刻意不 await：SEARCH 绝不为调研停等。调研跑十几分钟，而 ideation 每一轮都要
+        取一次；在这里等一下，就等于把语料从"可选增益"变成"关键路径"。前几轮拿不到
+        语料的 Ideator 照常只凭 EDA 提假设，语料建好后自动生效。
+
+        读 ``self.state`` 而不是 ``self._state``：``Recovery.reconcile`` 会用
+        ``model_copy`` 换掉状态对象，写在旧对象上的字段会被覆盖掉。
+        """
+        return self.state.corpus_ref
+
+    def corpus_tools(self) -> ToolRegistry | None:
+        """语料的只读检索算子；没有语料时返回 ``None``。
+
+        只给读的那一组：``paper_survey``/``paper_fetch``/``paper_markdown`` 会写出
+        新语料，摆在 Ideator 面前迟早会被按下去，而一次全链路是十几分钟起步。
+        """
+        if self.survey_corpus_ref() is None or self._survey_stack is None:
+            return None
+        return build_survey_tools(
+            self._survey_stack, include_survey=False, include_producers=False
+        )
+
+    async def corpus_paper_ids(self) -> set[str]:
+        """语料里真实存在的 paper id；假设引用的合法取值就是这一组。"""
+        corpus_ref = self.survey_corpus_ref()
+        if corpus_ref is None or self._survey_stack is None:
+            return set()
+        corpus = await self._survey_stack.corpus_cache.load(self._store, corpus_ref)
+        return corpus_paper_ids(corpus)
+
+    def _ensure_survey_stack(self) -> SurveyStack:
+        """装配调研依赖，artifact 存储复用本项目的那一份。
+
+        不注入的话 ``build_survey_stack`` 会按 ``ATHENA_ARTIFACT_ROOT`` 自建一份，于是
+        语料写在一个库里、loop 到另一个库里去取——``corpus_ref`` 会一直取不到。
+        """
+        if self._survey_stack is None:
+            self._survey_stack = build_survey_stack(
+                artifacts=self._store, client=self._client
+            )
+        return self._survey_stack
+
+    def _start_survey(self) -> None:
+        """开启后台调研；未启用、已在跑或已有语料时都是空操作。"""
+        if not self._survey_enabled or self._survey_task is not None:
+            return
+        if self.state.corpus_ref is not None:
+            return
+        self._survey_task = asyncio.create_task(self._run_survey())
+
+    async def _survey_topic(self) -> str:
+        """确定检索主题：显式指定优先，否则把任务描述改写成一句检索式。
+
+        任务描述里混着数据集路径、列名和指标值，直接丢给论文检索后端只会召回噪声。
+        改写失败时退回任务原文——降级检索也好过不检索。
+        """
+        if self._survey_query.strip():
+            return self._survey_query.strip()
+        task = self._task_text.strip()
+        if not task or self._model is None:
+            return task
+        try:
+            topic = await single_turn_chat(
+                task,
+                model=self._model,
+                client=self._client,
+                system_prompt=SURVEY_QUERY_PROMPT,
+                max_tokens=200,
+            )
+        except Exception:  # noqa: BLE001 - 改写失败退回原文，不阻断调研
+            logger.warning(
+                "survey topic rewrite failed; using the raw task", exc_info=True
+            )
+            return task
+        return topic.strip() or task
+
+    async def _run_survey(self) -> None:
+        """跑一次全链路并把 ``corpus_ref`` 记到 Supervisor 持有的 state 上。
+
+        整段包在 try 里：调研是可选增益，它失败不该动摇 PREPARE/SEARCH。失败作为一条
+        error 输出发布出去，而不是只落在日志里——用户开了这个开关就该知道它的结果。
+        """
+        try:
+            topic = await self._survey_topic()
+            stack = self._ensure_survey_stack()
+            await self.publish_output(
+                source="tool", channel="text", plan=SURVEY_PLAN_LABEL,
+                tool="paper_survey", text=f"literature survey started: {topic}",
+            )
+            report = await run_survey(
+                stack,
+                SurveyRequest(query=topic, max_papers=self._survey_max_papers),
+                emit=self._survey_event,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 调研失败必须降级而不是中断研究
+            await self.publish_output(
+                source="tool", channel="error", plan=SURVEY_PLAN_LABEL,
+                tool="paper_survey", text=f"literature survey failed: {exc}",
+            )
+            logger.warning("literature survey failed", exc_info=True)
+            return
+        if report.corpus_ref is None:
+            await self.publish_output(
+                source="tool", channel="error", plan=SURVEY_PLAN_LABEL,
+                tool="paper_survey",
+                text=f"literature survey built no corpus (status={report.status})",
+            )
+            return
+        self.state.corpus_ref = report.corpus_ref
+        self.state.save(self._state_path)
+        await self.publish_output(
+            source="tool", channel="text", plan=SURVEY_PLAN_LABEL, tool="paper_survey",
+            text=(
+                f"literature corpus ready: {report.converted()} papers, "
+                f"{report.corpus_ref}"
+            ),
+        )
+
+    async def _survey_event(
+        self, kind: str, ref: str, data: dict[str, Any] | None = None
+    ) -> None:
+        """把调研的分段进度投影成普通输出事件。"""
+        await self._events_bus.project_agent_event(SURVEY_PLAN_LABEL, kind, ref, data)
+
     # ── GUI 门面扩展：树持久化与运行设置（供 gui_gateway 只读/控制）────────
 
     @property
@@ -472,6 +631,8 @@ class ResearchRuntime:
             return self._task
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
+        # 与 PREPARE 并行起跑：调研要十几分钟，而 PREPARE 也不快，串起来等于白等一遍
+        self._start_survey()
         # 任务理解：让 SupervisorAgent 在 PREPARE 之前读一遍任务，自行决定是否
         # 经 ``configure_kaggle`` 接入 Kaggle 工具。失败只降级为默认关闭，不阻断。
         if (
@@ -629,6 +790,10 @@ class ResearchRuntime:
                 ready.cancel()
         self._events_bus._subscriber_ready.clear()
         self._events_bus._subscribers.clear()
+        # 先取消调研：它是后台任务，Supervisor 停了也不会自己结束
+        if self._survey_task is not None and not self._survey_task.done():
+            self._survey_task.cancel()
+            await asyncio.gather(self._survey_task, return_exceptions=True)
         await self._supervisor.stop()
         if self._task is not None and not self._task.done():
             self._task.cancel()

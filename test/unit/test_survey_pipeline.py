@@ -286,7 +286,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             await embedder.embed(["probe"])
         return "sha256:" + "9" * 64
 
-    async def run_pipeline(self, **overrides):
+    async def run_pipeline(self, *, emit=None, **overrides):
         request = SurveyRequest(query="tabular auc", **overrides)
         with mock.patch.multiple(
             pipeline_module,
@@ -296,7 +296,31 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             GradedRelevanceScorer=mock.MagicMock(),
             build_corpus_index=self.fake_index,
         ):
-            return await SurveyPipeline(self.stack, request).run()
+            return await SurveyPipeline(self.stack, request, emit=emit).run()
+
+    async def test_each_stage_reports_progress_to_a_subscribed_emit(self) -> None:
+        """接进 loop 后这是个十几分钟的后台任务；没有逐段回报就分不出慢和死。"""
+        events: list[tuple[str, dict | None]] = []
+
+        async def emit(kind: str, _ref: str, data: dict | None = None) -> None:
+            events.append((kind, data))
+
+        await self.run_pipeline(emit=emit)
+
+        stages = [kind for kind, _ in events if kind.startswith("survey/")]
+        self.assertEqual(
+            ["survey/scouted", "survey/fetched", "survey/converted", "survey/indexed"],
+            stages,
+        )
+        by_kind = dict(events)
+        self.assertEqual(2, by_kind["survey/converted"]["converted"])
+        self.assertEqual(2, by_kind["survey/indexed"]["indexed"])
+
+    async def test_progress_is_optional_and_absent_by_default(self) -> None:
+        """独立跑时事实全部落在 SurveyReport 里，不该强迫调用方订阅事件。"""
+        report = await self.run_pipeline()
+
+        self.assertEqual("complete", report.status)
 
     async def test_happy_path_carries_every_paper_to_the_index(self) -> None:
         report = await self.run_pipeline()

@@ -8,6 +8,7 @@ premises/predictions/disconfirmers 的富结构）结构化输出一组假设。
 light_hard_gate，再由 ``Supervisor.register_hypotheses`` 写入图。
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from athena.agents.prompt_agent import register_prompt_agent
@@ -29,7 +30,7 @@ def register_ideator_agent(
     artifacts: ArtifactStore,
     workspace: Path,
     runtime: ExecutionRuntime,
-    extra_tools: ToolRegistry | None = None,
+    extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
     gated: bool = True,
 ) -> None:
     """Register a fresh Ideator Agent factory bound to the EDA workspace.
@@ -40,6 +41,9 @@ def register_ideator_agent(
     ``ideator_agent.md``——产出即入库，不过门禁。
 
     输出契约与 prompt 都在注册时绑定，所以开关必须在这一层，不能只在出口处分支。
+
+    ``extra_tools`` 传零参 callable 时按 Agent 实例惰性求值：ideator 只注册一次，而
+    文献语料要十几分钟才建好，冻结注册时刻的工具表等于让语料永远接不进来。
     """
     register_prompt_agent(
         registry,

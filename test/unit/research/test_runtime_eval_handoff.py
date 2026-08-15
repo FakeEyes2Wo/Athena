@@ -55,7 +55,9 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
 
     runtime = ResearchRuntime.__new__(ResearchRuntime)
     runtime._store = store
-    runtime._supervisor = SimpleNamespace(evaluator_ref=evaluator_ref)
+    runtime._supervisor = SimpleNamespace(
+        evaluator_ref=evaluator_ref, state=SimpleNamespace(corpus_ref=None)
+    )
     runner = AgentTurnRunner(runtime)
 
     captured: dict[str, object] = {}

@@ -104,10 +104,20 @@ def test_gated_prompt_demands_the_rich_fields():
 
 # ====== 出口分支：门禁只在 gated 侧跑 ======
 
+async def _no_corpus() -> set[str]:
+    """没开文献调研的运行：引用校验无从比对，应原样放行。"""
+    return set()
+
+
 def _runner(ideation: str) -> AgentTurnRunner:
-    """AgentTurnRunner 只需要 runtime 上的三个字段就能做出口分支。"""
+    """AgentTurnRunner 只需要 runtime 上的这几个字段就能做出口分支。"""
     return AgentTurnRunner(
-        SimpleNamespace(_model="fake-model", _store=SimpleNamespace(), _ideation=ideation)
+        SimpleNamespace(
+            _model="fake-model",
+            _store=SimpleNamespace(),
+            _ideation=ideation,
+            corpus_paper_ids=_no_corpus,
+        )
     )
 
 
