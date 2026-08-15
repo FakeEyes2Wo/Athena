@@ -1,0 +1,274 @@
+"""多视角并行审阅（ReviewBoard，步骤 [6]）：三个各自独立上下文、独立工具权限的视角，每个
+视角在 hard_gate 里各占一项 rubric。
+
+呼应 Co-Scientist"生成与审阅分离、审阅侧不看生成侧自评概率"的设计：三个视角的 prompt 都不
+携带 sampling_probability。
+"""
+
+import asyncio
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from athena.core.agent import Agent, create_agent
+from athena.core.artifact_store import ArtifactIntegrityError, ArtifactNotFoundError
+from athena.core.contracts import ArtifactRef, ArtifactStore
+from athena.core.tool import ToolRegistry
+from athena.research.idea_generation.evidence_retrieval import limited_by, run_retrieval_agent
+from athena.research.idea_generation.prompts import (
+    DOMAIN_CONSISTENCY_QUESTION_TEMPLATE,
+    DOMAIN_CONSISTENCY_SUMMARY_PROMPT_TEMPLATE,
+    REVIEW_DOMAIN_CONSISTENCY_SYSTEM_PROMPT,
+    REVIEW_METHODOLOGY_SYSTEM_PROMPT,
+    REVIEW_PERSPECTIVE_HEADER_TEMPLATE,
+    REVIEW_STATISTICS_SYSTEM_PROMPT,
+    SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE,
+)
+from athena.research.idea_generation.idea_schemas import (
+    HypothesisPackage,
+    NoveltyEvidenceReport,
+    SkepticJudgment,
+    SkepticReport,
+)
+from athena.research.idea_generation.structured_chat import single_turn_structured_chat
+
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
+
+
+# ====== 视角定义 ======
+
+@dataclass(frozen=True)
+class ReviewPerspective:
+    """一个审阅视角：id 同时用作 rubric 项后缀 risk_ok_<perspective_id>。
+
+    Example:
+        >>> ReviewPerspective("methodology", "system prompt", needs_retrieval=False).needs_retrieval
+        False
+    """
+    perspective_id: str
+    system_prompt: str
+    needs_retrieval: bool
+
+
+REVIEW_PERSPECTIVES: tuple[ReviewPerspective, ...] = (
+    ReviewPerspective("methodology", REVIEW_METHODOLOGY_SYSTEM_PROMPT, needs_retrieval=False),
+    ReviewPerspective("statistics", REVIEW_STATISTICS_SYSTEM_PROMPT, needs_retrieval=False),
+    ReviewPerspective(
+        "domain_consistency", REVIEW_DOMAIN_CONSISTENCY_SYSTEM_PROMPT, needs_retrieval=True
+    ),
+)
+"""视角顺序是稳定的：hard_gate 按此顺序扫描以确定 blocking_factor，保证同样输入下判定确定。"""
+
+
+# ====== Agent 工厂 ======
+
+def build_domain_consistency_agent(
+    model: str, tools: ToolRegistry, *, client: "AsyncOpenAI | None" = None,
+) -> Agent:
+    """构造配好 REVIEW_DOMAIN_CONSISTENCY_SYSTEM_PROMPT 的 Agent，供 domain_consistency 视角使用。
+
+    Example:
+        >>> agent = build_domain_consistency_agent("gpt-4o-mini", tools)  # doctest: +SKIP
+    """
+    return create_agent(
+        model=model, tools=tools, system_prompt=REVIEW_DOMAIN_CONSISTENCY_SYSTEM_PROMPT,
+        client=client, name="domain_consistency_reviewer",
+    )
+
+
+# ====== 单视角审阅 ======
+
+def format_premise_lines(package: HypothesisPackage) -> str:
+    """把 supported_premises 格式化成逐行文本，供审阅 prompt 与修订 prompt 共用。
+
+    Example:
+        >>> format_premise_lines(package)  # doctest: +SKIP
+        '- [supported_premise] X correlates with Y (refs: ev-0)'
+    """
+    return "\n".join(
+        f"- [{premise.role.value}] {premise.claim} (refs: {', '.join(premise.supporting_refs) or '-'})"
+        for premise in package.supported_premises
+    ) or "(no supported premises)"
+
+
+def build_review_prompt(package: HypothesisPackage, perspective: ReviewPerspective) -> str:
+    """拼装单视角审阅 prompt。刻意只取 novel_hypothesis / supported_premises /
+    predicted_observations / disconfirming_observations —— 不传 sampling_probability。
+
+    Example:
+        >>> build_review_prompt(package, REVIEW_PERSPECTIVES[0]).startswith("You are")  # doctest: +SKIP
+        True
+    """
+    premise_lines = format_premise_lines(package)
+    return "\n\n".join([
+        perspective.system_prompt,
+        REVIEW_PERSPECTIVE_HEADER_TEMPLATE.format(perspective_id=perspective.perspective_id)
+        + SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE.format(
+            novel_hypothesis=package.novel_hypothesis,
+            supported_premises=premise_lines,
+            predicted_observations="\n".join(f"- {o}" for o in package.predicted_observations),
+            disconfirming_observations="\n".join(
+                f"- {o}" for o in package.disconfirming_observations
+            ),
+        ),
+    ])
+
+
+async def read_prior_transcript(
+    novelty: NoveltyEvidenceReport, artifacts: ArtifactStore
+) -> str:
+    """取回 [5] 的检索转录供 domain_consistency 复用；取不到就返回空串退回完整检索。
+
+    Example:
+        >>> await read_prior_transcript(novelty, store)  # doctest: +SKIP
+        'earlier retrieval notes'
+    """
+    if not novelty.query_log_ref:
+        return ""
+    try:
+        return await artifacts.get_text(novelty.query_log_ref)
+    except (ArtifactNotFoundError, ArtifactIntegrityError):
+        return ""
+
+
+def build_perspective_input(
+    package: HypothesisPackage,
+    perspective: ReviewPerspective,
+    *,
+    corpus_ref: ArtifactRef,
+    prior_transcript: str = "",
+) -> str:
+    """一个视角实际消费的输入：非检索视角是单轮审阅 prompt，检索视角是给 Agent 的检索提问。
+    **这是视角输入的唯一构造点。**
+
+    Example:
+        >>> build_perspective_input(package, REVIEW_PERSPECTIVES[0],
+        ...     corpus_ref="sha256:" + "c" * 64).startswith("You are")  # doctest: +SKIP
+        True
+    """
+    if not perspective.needs_retrieval:
+        return build_review_prompt(package, perspective)
+    return DOMAIN_CONSISTENCY_QUESTION_TEMPLATE.format(
+        novel_hypothesis=package.novel_hypothesis,
+        corpus_ref=corpus_ref,
+        prior_retrieval=prior_transcript or "(none; search from scratch)",
+    )
+
+
+async def review_one_perspective(
+    package: HypothesisPackage,
+    perspective: ReviewPerspective,
+    *,
+    novelty: NoveltyEvidenceReport,
+    domain_review_agent: Agent | None,
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+    llm_sem: asyncio.Semaphore | None = None,
+    retrieval_sem: asyncio.Semaphore | None = None,
+    model: str,
+) -> SkepticReport:
+    """跑一个视角的审阅。needs_retrieval=False 走单轮调用；True 走两阶段（Agent 检索循环 →
+    single_turn_structured_chat 转结构化），并复用 [5] 的检索转录作起始上下文。
+
+    Example:
+        >>> report = await review_one_perspective(package, REVIEW_PERSPECTIVES[0],
+        ...     novelty=novelty, domain_review_agent=agent, artifacts=store,
+        ...     corpus_ref=ref, model="m")  # doctest: +SKIP
+        >>> report.perspective  # doctest: +SKIP
+        'methodology'
+    """
+    if not perspective.needs_retrieval:
+        prompt = build_perspective_input(package, perspective, corpus_ref=corpus_ref)
+        async with limited_by(llm_sem):
+            judgment = await single_turn_structured_chat(
+                prompt, SkepticJudgment, model=model, artifacts=artifacts,
+            )
+        return SkepticReport(
+            idea_id=package.idea_id, perspective=perspective.perspective_id,
+            critique=judgment.critique, unaddressed_risks=judgment.unaddressed_risks,
+            fatal_flaw_found=judgment.fatal_flaw_found,
+            input_ref=await artifacts.put_text(prompt),
+        )
+
+    assert domain_review_agent is not None, "domain_consistency perspective requires an Agent"
+    prior_transcript = await read_prior_transcript(novelty, artifacts)
+    question = build_perspective_input(
+        package, perspective, corpus_ref=corpus_ref, prior_transcript=prior_transcript
+    )
+    async with limited_by(retrieval_sem):
+        collected_text, _channels = await run_retrieval_agent(domain_review_agent, question)
+    transcript_ref = await artifacts.put_text(collected_text or "(agent produced no text)")
+    async with limited_by(llm_sem):
+        judgment = await single_turn_structured_chat(
+            DOMAIN_CONSISTENCY_SUMMARY_PROMPT_TEMPLATE.format(analysis=collected_text),
+            SkepticJudgment, model=model, artifacts=artifacts,
+        )
+    return SkepticReport(
+        idea_id=package.idea_id, perspective=perspective.perspective_id,
+        critique=judgment.critique, unaddressed_risks=judgment.unaddressed_risks,
+        fatal_flaw_found=judgment.fatal_flaw_found, transcript_ref=transcript_ref,
+        input_ref=await artifacts.put_text(question),
+    )
+
+
+async def review_or_degrade(
+    package: HypothesisPackage, perspective: ReviewPerspective, **kwargs
+) -> SkepticReport:
+    """跑一次视角审阅；失败就把异常映射成 failed=True 的 SkepticReport，从不向外抛。
+
+    Example:
+        >>> report = await review_or_degrade(package, REVIEW_PERSPECTIVES[0], novelty=novelty,
+        ...     domain_review_agent=agent, artifacts=store, corpus_ref=ref, model="m")  # doctest: +SKIP
+        >>> report.failed  # doctest: +SKIP
+        False
+    """
+    try:
+        return await review_one_perspective(package, perspective, **kwargs)
+    except Exception as error:  # noqa: BLE001 - provider 报错形态不定，直接降级
+        return SkepticReport(
+            idea_id=package.idea_id, perspective=perspective.perspective_id,
+            critique=f"review failed: {error}",
+            unaddressed_risks=[], fatal_flaw_found=False, failed=True,
+        )
+
+
+# ====== 审阅委员会 ======
+
+async def review_board(
+    package: HypothesisPackage,
+    novelty: NoveltyEvidenceReport,
+    *,
+    domain_review_agent: Agent | None,
+    artifacts: ArtifactStore,
+    corpus_ref: ArtifactRef,
+    llm_sem: asyncio.Semaphore | None = None,
+    retrieval_sem: asyncio.Semaphore | None = None,
+    model: str,
+) -> list[SkepticReport]:
+    """对一个候选跑齐 REVIEW_PERSPECTIVES 的全部视角，返回与常量同序的报告列表。三个视角并发
+    执行（asyncio.gather 保序），并发度受 llm_sem/retrieval_sem 约束。
+
+    Example:
+        >>> reports = await review_board(package, novelty, domain_review_agent=agent,
+        ...     artifacts=store, corpus_ref=ref, model="m")  # doctest: +SKIP
+        >>> [r.perspective for r in reports]  # doctest: +SKIP
+        ['methodology', 'statistics', 'domain_consistency']
+    """
+    outcomes = await asyncio.gather(*[
+        review_or_degrade(
+            package, perspective, novelty=novelty,
+            domain_review_agent=domain_review_agent, artifacts=artifacts,
+            corpus_ref=corpus_ref, llm_sem=llm_sem, retrieval_sem=retrieval_sem,
+            model=model,
+        )
+        for perspective in REVIEW_PERSPECTIVES
+    ], return_exceptions=True)
+
+    return [
+        outcome if isinstance(outcome, SkepticReport) else SkepticReport(
+            idea_id=package.idea_id, perspective=perspective.perspective_id,
+            critique=f"review failed: {outcome}", unaddressed_risks=[],
+            fatal_flaw_found=False, failed=True,
+        )
+        for perspective, outcome in zip(REVIEW_PERSPECTIVES, outcomes)
+    ]

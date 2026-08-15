@@ -59,6 +59,7 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         ),
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
+        "ideation": args.ideation,
     }
 
 
@@ -345,6 +346,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_non_negative_int,
         default=None,
         help="abort the run after N seconds (unbounded by default)",
+    )
+    run.add_argument(
+        "--ideation",
+        choices=["gated", "baseline"],
+        default="gated",
+        help=(
+            "hypothesis intake: 'gated' runs the Idea Generation quality gate "
+            "(structural + falsifiability checks, review perspectives, ranking) "
+            "before hypotheses enter the tree; 'baseline' is the ablation control "
+            "that registers Ideator output as-is"
+        ),
     )
     _add_survey_parser(subparsers)
     _add_kaggle_parser(subparsers)

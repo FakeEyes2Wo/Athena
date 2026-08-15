@@ -85,6 +85,7 @@ def register_prompt_agent(
     artifacts: ArtifactStore,
     name: str | None = None,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
+    prompt_agent_type: str | None = None,
 ) -> None:
     """注册 prompt-driven ReAct Agent 工厂（各 ``register_*_agent`` 的共性）。
 
@@ -96,6 +97,10 @@ def register_prompt_agent(
     批量 merge，逐个 register。也可以是零参 callable，在 factory 创建实例时惰性
     求值——用于工具是否可用取决于运行时状态（如 Supervisor 是否接入 Kaggle）的
     场景。
+
+    ``prompt_agent_type`` 让 prompt 文件名与注册名解耦，缺省二者相同。ideator 的
+    消融开关要在同一个注册名下切换两份不同契约的 prompt（``ideator_agent.md`` 与
+    ``ideator_gated_agent.md``），是目前唯一的用例。
     """
 
     def factory(agent_id: str, _config: str | None = None) -> AgentSpec:
@@ -108,7 +113,7 @@ def register_prompt_agent(
         agent = Agent(
             provider,
             tools,
-            load_prompt(agent_type),
+            load_prompt(prompt_agent_type or agent_type),
             AgentConfig(name=(name or f"{agent_type}-agent").format(agent_id=agent_id)),
             output_type=output_type,
             artifacts=artifacts,

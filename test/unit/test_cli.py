@@ -100,6 +100,8 @@ def test_run_options_configure_runtime_constructor() -> None:
         "search_limit": 3,
         "auto_validate": True,
         "direction": "minimize",
+        # 消融开关默认走门禁；--ideation baseline 是对照组。
+        "ideation": "gated",
     }
 
 
@@ -138,6 +140,14 @@ async def test_run_times_out_when_workflow_hangs(monkeypatch, capsys, tmp_path) 
     )
     assert await cli._cmd_run(args) == 1
     assert "timed out" in capsys.readouterr().err
+
+
+def test_ideation_ablation_flag_reaches_the_runtime_constructor() -> None:
+    """--ideation baseline 必须真的传到 runtime，否则消融开关是摆设。"""
+    args = cli._build_parser().parse_args(
+        ["run", "--project", "p", "--data", "d.csv", "--ideation", "baseline"]
+    )
+    assert cli._runtime_options(args)["ideation"] == "baseline"
 
 
 @pytest.mark.asyncio
