@@ -41,8 +41,7 @@ from athena.research.supervisor.supervisor import Supervisor
 
 logger = logging.getLogger(__name__)
 
-# GUI settings_set 白名单字段；与 ``athena/gui/settings.py`` 的 ``WRITABLE_FIELDS``
-# 一致（契约测试 tests/test_gui_protocol_contract.py 断言二者相等）。
+# GUI settings_set 白名单字段。
 # direction / tolerance / auto_validate 为构造期参数，改动后仅影响后续 plan。
 MODEL_CONNECTION_ENV_VARS: dict[str, str] = {
     "provider": "LLM_PROVIDER",

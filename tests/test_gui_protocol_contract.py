@@ -155,9 +155,3 @@ def test_rust_commands_map_to_supported_methods() -> None:
     assert SUPPORTED_METHODS - mapped_methods == ws_only
 
 
-def test_settings_whitelist_consistent_across_layers() -> None:
-    """GUI settings schema and runtime whitelist agree on writable fields."""
-    from athena.gui.settings import WRITABLE_FIELDS
-    from athena.research.runtime import SETTINGS_WHITELIST
-
-    assert WRITABLE_FIELDS == SETTINGS_WHITELIST

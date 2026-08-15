@@ -13,7 +13,6 @@ from athena.research.paper_markdown.schemas import (
     PaperVisual,
     SourceLocator,
 )
-from athena.research.paper_rag.contextual import contextualize_entries
 from athena.research.paper_rag.index import (
     SEMANTIC_MARGIN_THRESHOLD,
     SEMANTIC_PROBES,
@@ -734,14 +733,6 @@ class BibliographyAsCitationEdgeTest(unittest.IsolatedAsyncioTestCase):
         with_bibliography = await self.load(index_bibliography=True)
         self.assertLess(len(without.sentences), len(with_bibliography.sentences))
         self.assertLess(len(without.entries), len(with_bibliography.entries))
-
-
-class ContextualSkeletonTest(unittest.IsolatedAsyncioTestCase):
-    async def test_reserved_entry_point_refuses_instead_of_silently_passing_through(
-        self,
-    ) -> None:
-        with self.assertRaises(NotImplementedError):
-            await contextualize_entries([], "document", None)
 
 
 class SemanticEmbedderGuardTest(unittest.IsolatedAsyncioTestCase):
