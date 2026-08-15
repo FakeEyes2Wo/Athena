@@ -30,6 +30,9 @@ data, and list top public notebooks; it returns absolute file paths plus a
 re-downloading, and do your own analysis (EDA, baseline) with your shell and
 file tools, exactly as for a local dataset.
 
+You can also call `web_search(query=..., max_results=...)` to look up current
+methods, libraries, documentation or facts on the public web.
+
 ## Output
 
 Finish every turn with JSON matching `{"result": "..."}`. The `result` field is

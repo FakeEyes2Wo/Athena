@@ -1,4 +1,4 @@
-"""Composition root for Athena's autonomous research Supervisor."""
+﻿"""Composition root for Athena's autonomous research Supervisor."""
 
 import asyncio
 import json
@@ -24,7 +24,6 @@ from athena.kaggle import (
     KaggleStack,
     build_kaggle_stack,
     build_kaggle_tools,
-    kaggle_slug_from_task,
 )
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
@@ -247,12 +246,18 @@ class ResearchRuntime:
         if self._provider is not None:
             raise ValueError("SupervisorAgent provider is already registered")
         self._provider = provider
+        # 只读 stack 供 Supervisor 的 kaggle_get_competition 查主指标（不缓存，
+        # 避免提前固化 download 标志）。
+        supervisor_kaggle = build_kaggle_stack(
+            download_root=self._root, artifacts=self._store, download=True
+        )
         register_supervisor_agent(
             self._registry,
             provider=provider,
             artifacts=self._store,
             actions=self._supervisor,
             ask_user=(lambda _t, _u: self._ask_user) if self._ask_user is not None else None,
+            kaggle_stack=supervisor_kaggle,
         )
         register_plan_agent(
             self._registry,
@@ -288,30 +293,6 @@ class ResearchRuntime:
         if not stack.client.configured:
             return None
         return build_kaggle_tools(stack, names=names)
-
-    async def _enrich_kaggle_metric(self, task: str) -> str:
-        """任务文本带 Kaggle URL 时，把竞赛主指标注入，供 Supervisor 任务理解使用。
-
-        确定性取数（不缓存 stack，避免提前固化 ``download`` 标志）；失败静默降级。
-        """
-        slug = kaggle_slug_from_task(task)
-        if not slug:
-            return task
-        try:
-            stack = build_kaggle_stack(
-                download_root=self._root, artifacts=self._store, download=True
-            )
-            if not stack.client.configured:
-                return task
-            raw = await stack.client.get_competition(slug)
-        except Exception:
-            return task
-        metric = str(
-            raw.get("evaluationMetric") or raw.get("evaluation_metric", "")
-        ).strip()
-        if not metric:
-            return task
-        return f"{task}\n\n[Kaggle] competition '{slug}' primary metric: {metric}"
 
     # ── GUI 门面扩展：树持久化与运行设置（供 gui_gateway 只读/控制）────────
 
@@ -426,8 +407,7 @@ class ResearchRuntime:
             and self._task_text.strip()
         ):
             try:
-                task_text = await self._enrich_kaggle_metric(self._task_text)
-                await self._agent_turns.run_supervisor_turn(task_text)
+                await self._agent_turns.run_supervisor_turn(self._task_text)
             except Exception:
                 logger.warning(
                     "supervisor task-understanding turn failed; Kaggle tools stay off",

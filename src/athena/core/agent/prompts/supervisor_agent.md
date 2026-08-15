@@ -39,6 +39,11 @@ best structured understanding of the task: a short `title`, the `dataset`
 and an `evaluation_plan`. Derive these from the task text and any dataset path it
 names; leave a field empty when unknown rather than guessing.
 
+If the task is a Kaggle competition, call `kaggle_get_competition` with the slug
+before `record_task_understanding`, read its `evaluation_metric`, and record that
+exact metric name (lowercased, e.g. `panoptic_quality`) as `primary_metric` —
+never guess `accuracy` for a competition you have not queried.
+
 Reflect before finalizing: re-read the task, confirm whether a competition slug
 is present and correctly parsed from any URL, and double-check that
 `enabled`/`download` match the task's real needs. If your first judgment was

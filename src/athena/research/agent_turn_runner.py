@@ -1,4 +1,4 @@
-"""Agent turn execution for the research runtime (Supervisor / Ideator / General).
+﻿"""Agent turn execution for the research runtime (Supervisor / Ideator / General).
 
 拆自 ``ResearchRuntime``：把"运行一个 Agent turn 并解包结构化结果"的逻辑
 集中到 ``AgentTurnRunner``。持有 ``runtime`` 引用访问组合根的共享基础设施。
@@ -21,6 +21,7 @@ from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.plans import wait_run_events
+from athena.retrieval.web_search import WebSearchTool
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -253,6 +254,16 @@ class AgentTurnRunner:
         """General Agent 需要全量 Kaggle 工具。"""
         return self._runtime.kaggle_tools("general")
 
+    def _general_tools(self) -> ToolRegistry:
+        """General Agent 的工具：Kaggle（若接入）+ 网页搜索。"""
+        registry = ToolRegistry()
+        kaggle = self._kaggle_tools()
+        if kaggle is not None:
+            for spec in kaggle.specs:
+                registry.register(kaggle.resolve(spec.name))
+        registry.register(WebSearchTool())
+        return registry
+
     @staticmethod
     def _ideator_allocations(count: int, lanes: int) -> tuple[int, ...]:
         """Distribute one requested batch across at most ``lanes`` ideator lanes."""
@@ -413,7 +424,7 @@ class AgentTurnRunner:
                 artifacts=rt._store,
                 project_root=rt._root,
                 runtime=rt._execution,
-                extra_tools=self._kaggle_tools(),
+                extra_tools=self._general_tools(),
             )
         request = {"content": task, "context_refs": []}
         _agent_id, run_id = await rt._agents.create_root(

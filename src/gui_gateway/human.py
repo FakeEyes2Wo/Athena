@@ -20,7 +20,11 @@ class HumanRequestBroker:
         request_id = uuid4().hex
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[request_id] = (prompt, future)
-        return await future
+        try:
+            return await future
+        finally:
+            # 取消/超时也要清理，否则前端稍后 human_reply 会命中已结束的 Future。
+            self._pending.pop(request_id, None)
 
     def pending(self) -> list[dict]:
         """Return the outstanding questions in insertion order."""
@@ -30,9 +34,12 @@ class HumanRequestBroker:
         ]
 
     def reply(self, request_id: str, answer: str) -> bool:
-        """Resolve an outstanding question; False when the id is unknown."""
+        """Resolve an outstanding question; False when the id is unknown or already settled."""
         entry = self._pending.pop(request_id, None)
         if entry is None:
             return False
-        entry[1].set_result(answer)
+        future = entry[1]
+        if future.done():
+            return False
+        future.set_result(answer)
         return True

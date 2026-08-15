@@ -14,6 +14,7 @@ from athena.core.agent.tools.user_input import RequestUserInputTool
 from athena.core.agent.types import AgentSpec, JsonCodec
 from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import AskUser, ToolContext, ToolSpec
+from athena.kaggle.tool import KaggleGetCompetitionTool
 
 SUPERVISOR_AGENT_ID = "supervisor"
 SUPERVISOR_AGENT_TYPE = "supervisor"
@@ -150,7 +151,9 @@ class _TaskUnderstanding(BaseModel):
     dataset: str = ""
     target: str = ""
     task_type: str = "other"
-    primary_metric: str = "accuracy"
+    primary_metric: str = Field(
+        default="accuracy", pattern=r"^[a-z][a-z0-9_]*$"
+    )
     direction: Literal["maximize", "minimize"] = "maximize"
     evaluation_plan: str = ""
 
@@ -205,19 +208,22 @@ class _ValidatedTool(BaseTool):
 class SupervisorToolProjector(RunToolProjector):
     """Project the Supervisor's deterministic tools into every Agent turn."""
 
-    def __init__(self, actions: SupervisorActions) -> None:
+    def __init__(self, actions: SupervisorActions, kaggle_stack: Any = None) -> None:
         super().__init__(permissions={SUPERVISOR_AGENT_TYPE: set()})
         self._actions = actions
+        self._kaggle_stack = kaggle_stack
 
     def build(self, agent_type: str, session) -> ToolRegistry:
         """Build the Supervisor tool set for one Agent turn."""
         del session
         if agent_type != SUPERVISOR_AGENT_TYPE:
             raise ValueError(f"unsupported agent_type: {agent_type}")
-        return supervisor_tool_registry(self._actions)
+        return supervisor_tool_registry(self._actions, self._kaggle_stack)
 
 
-def supervisor_tool_registry(actions: SupervisorActions) -> ToolRegistry:
+def supervisor_tool_registry(
+    actions: SupervisorActions, kaggle_stack: Any = None
+) -> ToolRegistry:
     """Build only the decision tools a SupervisorAgent is allowed to call."""
 
     registry = ToolRegistry()
@@ -381,6 +387,9 @@ def supervisor_tool_registry(actions: SupervisorActions) -> ToolRegistry:
         )
     # Supervisor 是唯一人类交互出口：同步向人类提问（依赖注入的 ask_user）。
     registry.register(RequestUserInputTool())
+    # 供 Supervisor 在任务理解时查询竞赛主指标（LLM 决定，非程序决定）。
+    if kaggle_stack is not None:
+        registry.register(KaggleGetCompetitionTool(kaggle_stack))
     return registry
 
 
@@ -391,17 +400,19 @@ def register_supervisor_agent(
     artifacts,
     actions: SupervisorActions,
     ask_user: Any = None,
+    kaggle_stack: Any = None,
 ) -> None:
     """Register a fresh SupervisorAgent factory through AgentTypeRegistry.
 
     ``ask_user`` 是 ``(thread, turn) -> (prompt) -> 回答`` 的工厂，供
     ``request_user_input`` 工具阻塞等待人类回答；未提供则该工具报错。
+    ``kaggle_stack`` 提供时给 Supervisor 挂上 ``kaggle_get_competition``。
     """
 
     def factory(_agent_id: str, _config: str | None = None) -> AgentSpec:
         """Construct one SupervisorAgent specification."""
-        projector = SupervisorToolProjector(actions)
-        tools = supervisor_tool_registry(actions)
+        projector = SupervisorToolProjector(actions, kaggle_stack)
+        tools = supervisor_tool_registry(actions, kaggle_stack)
         agent = Agent(
             provider,
             tools,
