@@ -5,6 +5,7 @@ SEARCH 空槽需要新假设时，ResearchRuntime 派一个 Ideator Agent：工�
 结构化输出一组假设，经 ``Supervisor.register_hypotheses`` 写入图。
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from athena.agents.base_runner import BaseAgentRunner
@@ -16,6 +17,7 @@ from athena.core.agent.runtime import Agent
 from athena.core.agent.types import AgentSpec, JsonCodec
 from athena.core.contracts import ArtifactStore
 from athena.core.research_models import HypothesisBatch
+from athena.core.tool import ToolRegistry
 from athena.execution.runtime import ExecutionRuntime
 
 IDEATOR_AGENT_TYPE = "ideator"
@@ -30,15 +32,22 @@ def register_ideator_agent(
     artifacts: ArtifactStore,
     workspace: Path,
     runtime: ExecutionRuntime,
+    extra_tools: Callable[[ToolRegistry], None] | None = None,
 ) -> None:
     """Register a fresh Ideator Agent factory bound to the EDA workspace.
 
     ``workspace`` 是 PREPARE 产出的 EDA 目录：工具（read_file / write_file /
     shell_command）都沙箱限定在该目录内，模型自行探索后输出 HypothesisBatch。
+
+    ``extra_tools`` 在每次建实例时被调用，可往该实例的工具表里追加工具。之所以是
+    回调而不是一张现成的表：注册只发生一次，而可用工具会变——论文语料要到后台
+    调研跑完才存在，届时本类型早已注册，回调让每条 lane 按当时的实际情况装配。
     """
 
     def factory(_agent_id: str, _config: str | None = None) -> AgentSpec:
         tools = generic_tool_registry(workspace, runtime=runtime)
+        if extra_tools is not None:
+            extra_tools(tools)
         agent = Agent(
             provider,
             tools,

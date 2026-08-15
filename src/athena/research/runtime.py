@@ -26,6 +26,7 @@ from athena.core.contracts import ArtifactRef, new_id
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.core.research_tree import ResearchTree
+from athena.core.tool import ToolRegistry
 from athena.execution.runtime import CommandResult, ExecutionContext, ExecutionRuntime
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
@@ -54,6 +55,13 @@ from athena.research.supervisor.validation import (
     run_validation_plan,
     validation_key,
 )
+from athena.research.survey import (
+    SurveyRequest,
+    SurveyStack,
+    build_survey_stack,
+    build_survey_tools,
+    run_survey,
+)
 from athena.utils.single_turn_chat import single_turn_chat
 
 logger = logging.getLogger(__name__)
@@ -65,6 +73,17 @@ EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
 PreparePhase = Callable[[], Awaitable[PrepareResult]]
 ValidationPhase = Callable[[str, float], Awaitable[ValidationResult]]
 PlanTurn = Callable[[str, ResearchState], Awaitable[PlanTurnResult]]
+
+SURVEY_PLAN_LABEL = "survey"
+# 由研究任务提炼文献检索式的提示。任务原文不能直接当检索式：它带着数据集路径、
+# 目标列名这些只对本机有意义的行，而 PaperScout 会把整段原样交给相关性打分模型。
+SURVEY_QUERY_PROMPT = (
+    "Turn the following machine-learning research task into one English literature "
+    "search topic for an academic paper search engine. Name the problem type, data "
+    "modality and the methods worth surveying. Drop dataset paths, column names, "
+    "file names and metric values. Answer with the topic sentence only, no "
+    "preamble and no quotes."
+)
 
 
 class ResearchRuntime:
@@ -86,6 +105,9 @@ class ResearchRuntime:
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
+        survey: bool = False,
+        survey_query: str = "",
+        survey_max_papers: int = 10,
     ) -> None:
         self._root = Path(project_root or ".").resolve()
         self._athena = self._root / ".athena"
@@ -165,6 +187,11 @@ class ResearchRuntime:
         self._direction = direction
         self._prepare_phase = prepare_phase
         self._validation_phase = validation_phase
+        self._survey_enabled = survey
+        self._survey_query = survey_query
+        self._survey_max_papers = survey_max_papers
+        self._survey_stack: SurveyStack | None = None
+        self._survey_task: asyncio.Task[None] | None = None
 
         async def unavailable_plan_turn(_plan_id: str, _state: Any) -> PlanTurnResult:
             raise RuntimeError("SEARCH Plan execution is not configured")
@@ -247,9 +274,154 @@ class ResearchRuntime:
             return self._task
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
+        self._start_survey()
         self._task = asyncio.create_task(self._supervisor.start())
         self._started = True
         return self._task
+
+    def _start_survey(self) -> None:
+        """把文献调研作为后台任务起掉，与 PREPARE 并行。
+
+        放在这里而不是 SEARCH 里，是因为检索式只取决于研究任务本身，不取决于
+        PREPARE 造出什么样的 baseline——等 handoff 没有额外信息，却要白等一个
+        多分钟的阶段。已经有语料（断点续传）时不重复付费。
+        """
+        if not self._survey_enabled or self._survey_task is not None:
+            return
+        if self.state.corpus_ref is not None:
+            return
+        self._survey_task = asyncio.create_task(self._run_survey())
+
+    def survey_corpus_ref(self) -> str | None:
+        """当前可用的论文语料引用；后台调研尚未完成时返回 ``None``。
+
+        刻意不 await：SEARCH 绝不为调研停等。第一轮 ideation 若赶在语料建好之前，
+        就照常只看数据集，从下一轮起自动带上文献。
+
+        读的是 Supervisor 持有的那份 state：``recover()`` 会用 ``model_copy`` 换掉
+        状态对象，写在旧对象上的字段会被单写者的下一次保存覆盖掉。
+        """
+        return self.state.corpus_ref
+
+    async def _survey_topic(self) -> str:
+        """本次调研的检索式：显式参数优先，否则由研究任务提炼一句主题。"""
+        if self._survey_query.strip():
+            return self._survey_query.strip()
+        if self._model is None:
+            raise RuntimeError(
+                "literature survey requires a model or an explicit query"
+            )
+        topic = await single_turn_chat(
+            self._task_text,
+            model=self._model,
+            client=self._client,
+            system_prompt=SURVEY_QUERY_PROMPT,
+        )
+        return topic.strip()
+
+    async def _run_survey(self) -> None:
+        """跑一次全链路调研并把语料引用写进持久状态。
+
+        任何失败都只发布成一条错误输出：文献是 ideation 的增益而不是前提，
+        让它中断 PREPARE/SEARCH 会把一个可选能力变成单点故障。
+        """
+        try:
+            topic = await self._survey_topic()
+            stack = self._ensure_survey_stack()
+            await self.publish_output(
+                source="tool",
+                channel="text",
+                text=f"literature survey started: {topic}",
+                plan=SURVEY_PLAN_LABEL,
+                tool="paper_survey",
+            )
+            report = await run_survey(
+                stack,
+                SurveyRequest(query=topic, max_papers=self._survey_max_papers),
+                emit=self._project_survey_event,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self.publish_output(
+                source="tool",
+                channel="error",
+                text=f"literature survey failed: {exc}",
+                plan=SURVEY_PLAN_LABEL,
+                tool="paper_survey",
+            )
+            return
+        if report.corpus_ref is None:
+            await self.publish_output(
+                source="tool",
+                channel="error",
+                text=(
+                    f"literature survey built no corpus (status={report.status}); "
+                    "ideation continues on the dataset alone"
+                ),
+                plan=SURVEY_PLAN_LABEL,
+                tool="paper_survey",
+            )
+            return
+        self.state.corpus_ref = report.corpus_ref
+        self.state.save(self._state_path)
+        await self.publish_output(
+            source="tool",
+            channel="text",
+            text=(
+                f"literature corpus ready: {report.converted()} papers "
+                f"({report.timings.total_seconds:.0f}s)"
+            ),
+            plan=SURVEY_PLAN_LABEL,
+            tool="paper_survey",
+        )
+
+    def _ensure_survey_stack(self) -> SurveyStack:
+        """装配（并缓存）文献链路依赖，复用本项目的 artifact 存储。
+
+        共用一份 store 是硬要求：``corpus_ref`` 要和 ``state.json`` 里其他引用
+        一起被本项目解析，落在两个 store 里就会出现"状态里记着、宿主取不到"。
+        """
+        if self._survey_stack is None:
+            self._survey_stack = build_survey_stack(
+                artifacts=self._store, client=self._client
+            )
+        return self._survey_stack
+
+    async def _project_survey_event(
+        self, kind: str, _ref: str, data: dict[str, Any] | None = None
+    ) -> None:
+        """把调研进度投影成一条可读输出。
+
+        全链路十几分钟起步，其中七成花在检索上。不报进度的话，它在界面上与卡死
+        没有区别——而它跑在后台，用户连"哪一步慢"都无从判断。
+        """
+        payload = data or {}
+        if kind == "paper_scout/step":
+            text = (
+                f"scout step {payload.get('step', '?')}: "
+                f"pool {payload.get('pool', 0)}"
+            )
+        elif kind == "survey/scouted":
+            text = f"retrieved {payload.get('retained', 0)} of {payload.get('pool', 0)}"
+        elif kind == "survey/fetched":
+            text = (
+                f"fetched {payload.get('fetched', 0)} of "
+                f"{payload.get('attempted', 0)} attempted"
+            )
+        elif kind == "survey/converted":
+            text = f"converted {payload.get('converted', 0)} papers"
+        elif kind == "survey/indexed":
+            text = f"indexed {payload.get('indexed', 0)} papers"
+        else:
+            return
+        await self.publish_output(
+            source="tool",
+            channel="text",
+            text=text,
+            plan=SURVEY_PLAN_LABEL,
+            tool="paper_survey",
+        )
 
     async def start_task(self, task: str) -> str:
         """Seed the research task and start PREPARE -> SEARCH -> VALIDATE.
@@ -661,6 +833,7 @@ class ResearchRuntime:
                 artifacts=self._store,
                 workspace=Path(eda_dir),
                 runtime=self._execution,
+                extra_tools=self._attach_corpus_tools,
             )
         allocations = self._ideator_allocations(count)
         self._ideator_lanes = len(allocations)
@@ -691,6 +864,22 @@ class ResearchRuntime:
         # 返回空列表让调度器优雅收尾（搜索自然结束，用户可见错误后干预）。
         return hypotheses[:count]
 
+    def _attach_corpus_tools(self, tools: ToolRegistry) -> None:
+        """语料已就绪时，给这条 Ideator lane 追加只读检索算子。
+
+        只加纯读的那几个：``paper_survey`` / ``paper_fetch`` / ``paper_markdown``
+        都会下载并调用模型，摆在只读语料的 Agent 面前迟早会被按下去，而语料本来
+        就是外面一次性建好的。
+        """
+        if self.state.corpus_ref is None or self._survey_stack is None:
+            return
+        build_survey_tools(
+            self._survey_stack,
+            include_survey=False,
+            include_producers=False,
+            into=tools,
+        )
+
     @staticmethod
     def _ideator_allocations(count: int) -> tuple[int, ...]:
         """Distribute one requested batch across at most three actual lanes."""
@@ -704,15 +893,21 @@ class ResearchRuntime:
         self, label: str, target: int, eda_dir: Path
     ) -> list[Hypothesis]:
         """Run one independent Ideator and return its structured batch."""
-        request = {
-            "content": (
-                f"Inspect the EDA workspace at {eda_dir} without modifying any "
-                "files, then propose up to "
-                f"{target} falsifiable hypotheses that could improve the primary "
-                "metric. Return the hypotheses as structured output."
-            ),
-            "context_refs": [],
-        }
+        content = (
+            f"Inspect the EDA workspace at {eda_dir} without modifying any "
+            "files, then propose up to "
+            f"{target} falsifiable hypotheses that could improve the primary "
+            "metric. Return the hypotheses as structured output."
+        )
+        corpus_ref = self.survey_corpus_ref()
+        if corpus_ref is not None:
+            content = (
+                f"{content}\n\nA literature corpus is available for this task. "
+                f"Pass corpus_ref={corpus_ref!r} to the paper_* tools to search and "
+                "read it, and record the paper keys you actually used in each "
+                "hypothesis's sources field."
+            )
+        request = {"content": content, "context_refs": []}
         _agent_id, run_id = await self._agents.create_root(
             "ideator", request, name=label
         )
@@ -905,6 +1100,11 @@ class ResearchRuntime:
                 ready.cancel()
         self._subscriber_ready.clear()
         self._subscribers.clear()
+        # 后台调研不属于任何 Plan，Supervisor.stop 管不到它；不在这里取消就会在
+        # runtime 关掉之后继续下载、继续调模型，还会往已清空的订阅者发布。
+        if self._survey_task is not None and not self._survey_task.done():
+            self._survey_task.cancel()
+            await asyncio.gather(self._survey_task, return_exceptions=True)
         await self._supervisor.stop()
         if self._task is not None and not self._task.done():
             self._task.cancel()

@@ -286,7 +286,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             await embedder.embed(["probe"])
         return "sha256:" + "9" * 64
 
-    async def run_pipeline(self, **overrides):
+    async def run_pipeline(self, *, emit=None, **overrides):
         request = SurveyRequest(query="tabular auc", **overrides)
         with mock.patch.multiple(
             pipeline_module,
@@ -296,7 +296,36 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             GradedRelevanceScorer=mock.MagicMock(),
             build_corpus_index=self.fake_index,
         ):
-            return await SurveyPipeline(self.stack, request).run()
+            return await SurveyPipeline(self.stack, request, emit=emit).run()
+
+    async def test_each_stage_reports_progress_to_a_subscribed_emit(self) -> None:
+        events: list[tuple[str, dict]] = []
+
+        async def record(kind: str, _ref: str, data: dict | None = None) -> None:
+            events.append((kind, data or {}))
+
+        report = await self.run_pipeline(emit=record)
+
+        kinds = [kind for kind, _ in events]
+        self.assertEqual(
+            kinds,
+            [
+                "survey/scouted",
+                "survey/fetched",
+                "survey/converted",
+                "survey/indexed",
+            ],
+        )
+        payloads = dict(events)
+        self.assertEqual(payloads["survey/scouted"]["retained"], len(PAPERS))
+        self.assertEqual(payloads["survey/fetched"]["fetched"], len(PAPERS))
+        self.assertEqual(payloads["survey/converted"]["converted"], report.converted())
+        self.assertEqual(payloads["survey/indexed"]["indexed"], len(PAPERS))
+
+    async def test_progress_is_optional_and_absent_by_default(self) -> None:
+        report = await self.run_pipeline()
+
+        self.assertEqual(report.status, "complete")
 
     async def test_happy_path_carries_every_paper_to_the_index(self) -> None:
         report = await self.run_pipeline()

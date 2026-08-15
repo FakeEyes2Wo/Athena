@@ -24,6 +24,7 @@ from athena.core.agent.models import AgentContext
 from athena.core.contracts import ArtifactRef
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
+from athena.core.tool_types import EmitEvent
 from athena.research.paper_markdown.processor import (
     PaperProcessor,
     VisualInterpretationRequiredError,
@@ -340,10 +341,17 @@ class SurveyPipeline:
     ``SurveyReport``，而不是在半路抛异常丢掉已经付出的成本。
     """
 
-    def __init__(self, stack: "SurveyStack", request: SurveyRequest) -> None:
+    def __init__(
+        self,
+        stack: "SurveyStack",
+        request: SurveyRequest,
+        *,
+        emit: EmitEvent | None = None,
+    ) -> None:
         self.stack = stack
         self.request = request
         self.report = SurveyReport(query=request.query, status="empty")
+        self._emit = emit or _silent_emit
         self._outcomes: dict[str, PaperOutcome] = {}
         self._by_identifier: dict[str, str] = {}
         self._conversion_keys: dict[str, str] = {}
@@ -354,10 +362,35 @@ class SurveyPipeline:
         """执行全链路，返回逐篇结果与成本账。"""
         started = time.monotonic()
         source_request_ref = await self._scout()
+        await self._emit(
+            "survey/scouted",
+            self.report.scout_result_ref or "",
+            {"pool": self.report.scout_pool, "retained": self.report.scout_retained},
+        )
         if source_request_ref is not None:
             source_result = await self._fetch(source_request_ref)
+            await self._emit(
+                "survey/fetched",
+                self.report.source_result_ref or "",
+                {
+                    "fetched": self.report.fetched,
+                    "attempted": self.report.fetch_attempted,
+                },
+            )
             papers = await self._convert(source_result)
+            # 逐篇计数只能从登记项来：``report.papers`` 要到 ``run`` 收尾时才成型，
+            # 在这里读 ``report.converted()`` 恒为 0
+            await self._emit(
+                "survey/converted",
+                "",
+                {"converted": self._count("conversion_status"), "papers": len(papers)},
+            )
             await self._index(papers)
+            await self._emit(
+                "survey/indexed",
+                self.report.corpus_ref or "",
+                {"indexed": self._count("indexed")},
+            )
         self.report.timings.total_seconds = round(time.monotonic() - started, 3)
         self.report.http_requests = self.stack.http.request_count
         self._collect_model_costs()
@@ -369,6 +402,16 @@ class SurveyPipeline:
         )
         self.report.status = self.final_status()
         return self.report
+
+    def _count(self, field: str) -> int:
+        """统计登记项里某个进度字段成立的篇数，供中途的进度事件使用。
+
+        ``conversion_status`` 比对 ``"converted"``，其余字段按真值判断。
+        """
+        values = [getattr(item, field) for item in self._outcomes.values()]
+        if field == "conversion_status":
+            return sum(1 for value in values if value == "converted")
+        return sum(1 for value in values if value)
 
     def final_status(self) -> str:
         """本次运行的结论，只看它自己产出了什么。
@@ -768,16 +811,25 @@ class SurveyPipeline:
         return AgentContext(
             thread=thread,
             turn=turn,
-            emit=_silent_emit,
+            emit=self._emit,
             tools=ToolRegistry(),
             cancel=asyncio.Event(),
         )
 
 
 async def _silent_emit(_kind: str, _ref: str, _data: dict | None = None) -> None:
-    """默认事件汇：全链路驱动不订阅事件流，事实全部落在 SurveyReport 里。"""
+    """默认事件汇：不订阅时事实全部落在 SurveyReport 里。"""
 
 
-async def run_survey(stack: "SurveyStack", request: SurveyRequest) -> SurveyReport:
-    """跑一次完整的 Academic Survey，返回逐篇结果与成本账。"""
-    return await SurveyPipeline(stack, request).run()
+async def run_survey(
+    stack: "SurveyStack",
+    request: SurveyRequest,
+    *,
+    emit: EmitEvent | None = None,
+) -> SurveyReport:
+    """跑一次完整的 Academic Survey，返回逐篇结果与成本账。
+
+    ``emit`` 订阅四段的进度事件（``paper_scout/*`` 与 ``survey/*``）。全链路十几分钟
+    起步，放进长时运行的宿主里而不报进度，看上去与卡死没有区别；不订阅时行为不变。
+    """
+    return await SurveyPipeline(stack, request, emit=emit).run()

@@ -25,6 +25,9 @@ class ResearchState(BaseModel):
     validation: dict[str, object] | None = None
     # PREPARE 产出的 EDA 工作区目录（Ideator 自行探索）；仅路径元数据，非 EDA 结果。
     eda_dir: str | None = None
+    # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用检索算子。
+    # 与其他引用一样落在本项目的 artifact store 里，换机器取不到时重跑即可。
+    corpus_ref: str | None = None
 
     @model_validator(mode="after")
     def _validate_plan_keys(self) -> "ResearchState":
