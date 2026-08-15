@@ -8,7 +8,6 @@ const DiffViewer = lazy(() => import("../DiffViewer"));
 const FileTree = lazy(() => import("../FileTree"));
 const HypothesisGraphViz = lazy(() => import("../HypothesisGraphViz"));
 const AlgorithmsPanel = lazy(() => import("../AlgorithmsPanel"));
-const SettingsPanel = lazy(() => import("../SettingsPanel"));
 const LLMIOPanel = lazy(() => import("../LLMIOPanel"));
 const ExperimentManager = lazy(() => import("../ExperimentManager"));
 const ExperimentLog = lazy(() => import("../ExperimentLog"));
@@ -25,7 +24,6 @@ export const PANELS: Record<string, ComponentType> = {
   report: ReportPanel,
   "hypothesis-graph": HypothesisGraphViz,
   algorithms: AlgorithmsPanel,
-  settings: SettingsPanel,
   "llm-io": LLMIOPanel,
   experiments: ExperimentManager,
 };
@@ -40,7 +38,6 @@ export const PANEL_TITLES: Record<string, string> = {
   report: "报告",
   "hypothesis-graph": "假设图",
   algorithms: "图算法",
-  settings: "设置",
   "llm-io": "LLM 轨迹",
   experiments: "实验管理",
 };

@@ -12,6 +12,7 @@ import { ThemeToggle } from "./ThemeToggle";
 import { AthenaWordmark } from "./AthenaWordmark";
 import { HumanRequestDialog } from "./HumanRequestDialog";
 import { PANELS } from "../context/panels";
+import { SettingsPanel } from "../SettingsPanel";
 import { MODULE_BY_KEY } from "./navigation";
 import styles from "./AppShell.module.css";
 
@@ -77,6 +78,8 @@ export function AppShell({ currentRoot, onSwitchWorkspace, pipeline }: AppShellP
         <main className={styles.main}>
           {module === "session" ? (
             <ConversationPane pipeline={pipeline} />
+          ) : module === "settings" ? (
+            <SettingsPanel onClose={() => setModule("session")} />
           ) : (
             <div className={styles["main-panel"]}>
               <PanelView panel={def.panel} />
