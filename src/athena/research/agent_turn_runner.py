@@ -15,11 +15,38 @@ from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.research.contracts import DataScriptBundle
+from athena.research.idea_generation.gate import run_light_pipeline
+from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.plans import wait_run_events
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+
+MAX_GATE_RETRIES = 2
+"""门禁全拒后最多重新提案几次。
+
+上限是硬的：门禁若持续拒绝，无限重生成就是死循环。取 2 是保守起点——一次让生成侧
+按理由修正，一次留给它换个方向；没有经验依据，跑过几轮真实搜索后再校准。
+"""
+
+
+def _regenerate_prompt(rejections: list[str], target: int) -> str:
+    """把逐条拒绝理由拼成给同一个 Ideator 的重新提案请求。
+
+    走 followup 而不是新建 agent：同一个 thread 保留了它原本的探索上下文，知道自己
+    提过什么、为什么被拒，否则等于让一个全新的 agent 从零重猜。
+    """
+    reasons = "\n".join(f"- {reason}" for reason in rejections)
+    return (
+        "Every hypothesis you proposed was rejected by the quality gate:\n\n"
+        f"{reasons}\n\n"
+        f"Propose up to {target} different falsifiable hypotheses that address these "
+        "specific objections. Do not restate a rejected hypothesis with reworded "
+        "prose - change the substance, or explore a different mechanism entirely. "
+        "Return the hypotheses as structured output."
+    )
 
 
 async def _read_eval_handoff(
@@ -104,6 +131,7 @@ class AgentTurnRunner:
                 artifacts=rt._store,
                 workspace=Path(eda_dir),
                 runtime=rt._execution,
+                gated=getattr(rt, "_ideation", "gated") == "gated",
             )
         allocations = self._ideator_allocations(count)
         events = getattr(rt, "_events_bus", None)
@@ -169,18 +197,75 @@ class AgentTurnRunner:
                 "proposing hypotheses."
             )
         request = {"content": content, "context_refs": context_refs}
-        _agent_id, run_id = await rt._agents.create_root("ideator", request, name=label)
-        summary = await wait_run_events(
-            rt._agents,
-            run_id,
-            lambda kind, ref, data: rt._events_bus.project_agent_event(
-                label, kind, ref, data
-            ),
+        agent_id, run_id = await rt._agents.create_root("ideator", request, name=label)
+        gated = getattr(rt, "_ideation", "gated") == "gated"
+        schema = IdeatorHypothesisBatch if gated else HypothesisBatch
+
+        # 门禁全拒时带理由重新提案：拒绝本身就是给生成侧的有效信号。上限是硬的——
+        # 门禁若持续拒绝，无限重生成会变成死循环（真实跑测里 SEARCH 已因全拒而静默
+        # 死过一次：返回空列表 -> generated=False -> run_search 直接 return -> 状态停在
+        # RUNNING 既不推进也不终止）。
+        for attempt in range(MAX_GATE_RETRIES + 1):
+            summary = await wait_run_events(
+                rt._agents,
+                run_id,
+                lambda kind, ref, data: rt._events_bus.project_agent_event(
+                    label, kind, ref, data
+                ),
+            )
+            batch = await load_agent_result(summary, rt._store, schema)
+            if batch is None:
+                raise RuntimeError(summary.error or "Ideator turn failed")
+
+            rejections: list[str] = []
+            kept = await self._finish_ideator_batch(batch, rejections=rejections)
+            if kept or not rejections or attempt == MAX_GATE_RETRIES:
+                if not kept and rejections:
+                    await rt.publish_output(
+                        source="agent", channel="error", plan=label,
+                        text=(
+                            f"gate rejected every candidate after "
+                            f"{attempt + 1} attempt(s); this lane yields nothing"
+                        ),
+                    )
+                return kept
+
+            run_id = await rt._agents.followup(
+                agent_id,
+                {"content": _regenerate_prompt(rejections, target), "context_refs": []},
+            )
+        return []
+
+    async def _finish_ideator_batch(
+        self,
+        batch: IdeatorHypothesisBatch | HypothesisBatch,
+        *,
+        rejections: list[str] | None = None,
+    ) -> list[Hypothesis]:
+        """按消融模式决定 Ideator 产出如何进入 ResearchTree。
+
+        ``gated``：跑 Idea Generation 门禁（pre_gate + 视角审阅 + hard_gate + pairwise
+        排序），不合格的候选直接丢弃，不静默放行。
+        ``baseline``：main 原有行为，产出即入库，作为消融对照组。
+        """
+        rt = self._runtime
+        if getattr(rt, "_ideation", "gated") != "gated":
+            return list(batch.hypotheses)
+
+        async def progress(message: str) -> None:  # noqa: D401
+            """把门禁进度投影成普通输出事件。
+
+            门禁全程只有 LLM 往返、没有本地计算，不报进度的话外部无法区分"正在跑十几个
+            调用"和"卡死了"。
+            """
+            publish = getattr(rt, "publish_output", None)
+            if publish is not None:
+                await publish(source="agent", channel="text", text=f"gate> {message}")
+
+        return await run_light_pipeline(
+            batch.hypotheses, model=rt._model, artifacts=rt._store, progress=progress,
+            rejections=rejections,
         )
-        batch = await load_agent_result(summary, rt._store, HypothesisBatch)
-        if batch is None:
-            raise RuntimeError(summary.error or "Ideator turn failed")
-        return batch.hypotheses
 
     async def run_general_turn(self, task: str) -> dict[str, object]:
         """Dispatch one General Agent rooted at the project and return its result."""

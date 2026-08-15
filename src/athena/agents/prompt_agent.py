@@ -84,12 +84,17 @@ def register_prompt_agent(
     provider: object,
     artifacts: ArtifactStore,
     name: str | None = None,
+    prompt_agent_type: str | None = None,
 ) -> None:
     """注册 prompt-driven ReAct Agent 工厂（各 ``register_*_agent`` 的共性）。
 
     ``workspace`` 可为固定 ``Path`` 或 ``Callable[[agent_id], Path]``（plan 按
     每个 hypothesis 动态解析工作区）；``name`` 支持 ``{agent_id}`` 占位符，缺省
     为 ``f"{agent_type}-agent"``。max_turns 统一用 ``AgentConfig`` 默认 200。
+
+    ``prompt_agent_type`` 让 prompt 文件名与注册名解耦，缺省二者相同。ideator 的
+    消融开关要在同一个注册名下切换两份不同契约的 prompt（``ideator_agent.md`` 与
+    ``ideator_gated_agent.md``），是目前唯一的用例。
     """
 
     def factory(agent_id: str, _config: str | None = None) -> AgentSpec:
@@ -98,7 +103,7 @@ def register_prompt_agent(
         agent = Agent(
             provider,
             tools,
-            load_prompt(agent_type),
+            load_prompt(prompt_agent_type or agent_type),
             AgentConfig(name=(name or f"{agent_type}-agent").format(agent_id=agent_id)),
             output_type=output_type,
             artifacts=artifacts,
