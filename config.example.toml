@@ -1,0 +1,93 @@
+# Athena 运行配置模板
+#
+# 使用方式
+#   1. 复制本文件为 config.toml（与仓库根目录同级，已被 .gitignore 忽略）
+#   2. 按需修改下列各节
+#   3. 密钥类配置继续放在 .env（参考 .env.example），不要写进 config.toml
+#
+# 配置优先级（由高到低）
+#   系统环境变量  >  .env  >  config.toml  >  内置默认值
+#
+# 当前已接入 config.toml 的只有 [llm] 与 [llm.retry]（settings.py 读取）；
+# [kaggle] 与 [survey] 两节用于集中说明，暂仍由各自模块直接读环境变量，
+# 后续逐步迁入。
+
+# ──────────────────────────────────────────────────────────────────────────
+# LLM 基础配置
+# ──────────────────────────────────────────────────────────────────────────
+[llm]
+# 后端类型：deepseek | openai | anthropic（默认 deepseek）
+provider = "deepseek"
+
+# OpenAI 兼容 API 端点（默认 DeepSeek 官方端点）
+base_url = "https://api.deepseek.com"
+
+# 快/省档模型：搜索、审阅、门禁等日常调用默认走它
+model_name = "deepseek-v4-flash"
+
+# 强/贵档模型：需要更强推理时手动切换
+model_pro = "deepseek-v4-pro"
+
+# API Key 不写在这里。
+# settings.api_key() 依次读取环境变量 DEEPSEEK_API_KEY、OPENAI_API_KEY。
+# 请把真实 key 放在 .env 中，不要提交进仓库。
+
+# ──────────────────────────────────────────────────────────────────────────
+# LLM 网络与重试
+# ──────────────────────────────────────────────────────────────────────────
+[llm.retry]
+# 流式响应断线最多重连次数（指数退避 + jitter，交给 openai SDK 处理）
+max_retries = 5
+
+# 单次流式请求总超时（秒）：DeepSeek 思考可能较久，给足等待时间
+timeout_s = 300.0
+
+# ──────────────────────────────────────────────────────────────────────────
+# Kaggle（Athena-cli kaggle / kaggle_* 工具）
+# 本节暂由 kaggle/auth.py 直接读环境变量，config 化逐步迁移。
+# ──────────────────────────────────────────────────────────────────────────
+[kaggle]
+# API token 所在环境变量名；真实 token 放 .env：KAGGLE_API_TOKEN=KGAT_...
+token_env = "KAGGLE_API_TOKEN"
+
+# 数据下载根目录；不设时默认 cwd/kaggle-data
+download_root = "kaggle-data"
+
+# ──────────────────────────────────────────────────────────────────────────
+# Academic Survey（Athena-cli survey / paper_survey 工具）
+# 全部可选：缺哪个就关掉哪个能力，链路在降级形态下仍然完整可跑。
+# 用 `Athena-cli survey --check` 查看当前装配结果。
+# 本节暂由 survey/wiring.py 直接读环境变量，config 化逐步迁移。
+# ──────────────────────────────────────────────────────────────────────────
+[survey]
+# 检索策略模型；不设沿用 [llm].model_name（环境变量 ATHENA_SURVEY_MODEL）
+model = ""
+
+# 相关性打分模型；不设沿用策略模型（环境变量 ATHENA_SCORER_MODEL）
+# 打分是调用次数最多的一环，换轻量模型是压缩总时长性价比最高的一处。
+# 注意：换模型后门槛口径会变，>0.45（三分档）跨模型稳定。
+scorer_model = ""
+
+# 句向量模型；不设则语义检索关闭，关键词检索与整篇读取照常（ATHENA_EMBEDDING_MODEL）
+embedding_model = ""
+
+# 图表解读多模态模型；不设则图表退回仅证据文本（ATHENA_VISION_MODEL）
+vision_model = ""
+
+# artifact 根目录；默认 ~/.athena/artifacts（刻意放仓库外：取源会下载 TeX 包与 PDF）
+# （环境变量 ATHENA_ARTIFACT_ROOT）
+artifact_root = ""
+
+# arXiv / OpenAlex 礼貌池联系邮箱；随每次请求发给第三方站点（ATHENA_CONTACT_EMAIL）
+contact_email = ""
+
+# Semantic Scholar key 所在环境变量名（SEMANTIC_SCHOLAR_API_KEY）
+# 影响比看上去大：实测无 key 时 19 次 search 有 15 次 429；配 key 后 28 次仅 4 次失败。
+semantic_scholar_key_env = "SEMANTIC_SCHOLAR_API_KEY"
+
+# OpenAlex key 所在环境变量名（OPENALEX_API_KEY）；不设走匿名额度
+openalex_key_env = "OPENALEX_API_KEY"
+
+# Ghostscript 可执行文件，用于光栅化 EPS/PS 插图（ATHENA_GHOSTSCRIPT）
+# 2015 年前的 arXiv 论文几乎全用 EPS；不设按 PATH 自动发现 gs / gswin64c / mgs 等。
+ghostscript = ""

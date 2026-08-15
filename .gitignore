@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Local config (copy config.example.toml -> config.toml)
+config.toml
+
 # Python bytecode, caches, and virtualenvs
 __pycache__/
 *.py[cod]
