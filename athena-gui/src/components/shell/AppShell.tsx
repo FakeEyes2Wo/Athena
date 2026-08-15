@@ -1,4 +1,4 @@
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import type { ContextPanelKey, ModuleKey } from "../../types/ui";
 import { usePipeline } from "../../hooks/usePipeline";
 import { ConversationPane } from "../conversation/ConversationPane";
@@ -32,6 +32,21 @@ export function AppShell({ currentRoot, onSwitchWorkspace, pipeline }: AppShellP
 
   const def = MODULE_BY_KEY[module];
   const { viewModel } = pipeline;
+
+  // 切回「会话」模块时，重新拉取当前会话的 transcript，让右侧工作区恢复历史对话；
+  // 运行中跳过（此时消息由实时事件驱动，避免重放打断进行中的执行）。
+  const previousModule = useRef(module);
+  useEffect(() => {
+    const wasAway = previousModule.current !== "session";
+    previousModule.current = module;
+    if (
+      module === "session" &&
+      wasAway &&
+      pipeline.viewModel.status !== "running"
+    ) {
+      void pipeline.switchSession(pipeline.currentSessionId);
+    }
+  }, [module, pipeline]);
 
   return (
     <div className={styles.shell}>
