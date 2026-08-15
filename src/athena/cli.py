@@ -349,13 +349,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--ideation",
-        choices=["gated", "baseline"],
-        default="gated",
+        choices=["ideageneration", "baseline", "debate"],
+        default="ideageneration",
         help=(
-            "hypothesis intake: 'gated' runs the Idea Generation quality gate "
-            "(structural + falsifiability checks, review perspectives, ranking) "
+            "hypothesis intake: 'ideageneration' (default) runs the Idea Generation "
+            "quality gate (structural + falsifiability checks, review perspectives) "
             "before hypotheses enter the tree; 'baseline' is the ablation control "
-            "that registers Ideator output as-is"
+            "that registers Ideator output as-is; 'debate' uses the debate-based "
+            "Ideator (proposal -> review -> revision -> judge)"
         ),
     )
     _add_survey_parser(subparsers)

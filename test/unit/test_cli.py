@@ -100,8 +100,8 @@ def test_run_options_configure_runtime_constructor() -> None:
         "search_limit": 3,
         "auto_validate": True,
         "direction": "minimize",
-        # 消融开关默认走门禁；--ideation baseline 是对照组。
-        "ideation": "gated",
+        # 消融开关默认走 idea generation 门禁；--ideation baseline 是对照组。
+        "ideation": "ideageneration",
     }
 
 
@@ -148,6 +148,14 @@ def test_ideation_ablation_flag_reaches_the_runtime_constructor() -> None:
         ["run", "--project", "p", "--data", "d.csv", "--ideation", "baseline"]
     )
     assert cli._runtime_options(args)["ideation"] == "baseline"
+
+
+def test_ideation_debate_flag_reaches_the_runtime_constructor() -> None:
+    """--ideation debate 必须真的传到 runtime，否则辩论式 Ideator 无法被选择。"""
+    args = cli._build_parser().parse_args(
+        ["run", "--project", "p", "--data", "d.csv", "--ideation", "debate"]
+    )
+    assert cli._runtime_options(args)["ideation"] == "debate"
 
 
 @pytest.mark.asyncio

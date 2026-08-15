@@ -1,11 +1,11 @@
-"""Idea Generation pipeline: hypothesis generation, structural/falsifiability gating,
-novelty audit, multi-perspective review, and the REVISE debate loop.
+"""Idea Generation light pipeline: pre_gate (structural + falsifiability) ->
+methodology/statistics review -> light_hard_gate, then survivors are returned in
+submission order to the shared ResearchTree/Supervisor hypothesis pool (no local ranking).
 
 Ported from feature/idea-generation-pre-gate onto this branch's Supervisor/ResearchRuntime
-architecture.
+architecture. Orchestration is plain asyncio (gather/semaphores); no langgraph dependency.
 
-Orchestration note: the old branch's langgraph StateGraph orchestration is NOT ported —
-this branch has no langgraph dependency and adding one is out of scope under time pressure.
-``workflow.run_full_pipeline`` uses plain asyncio (gather/semaphores), matching the old
-branch's own pre-langgraph implementation.
+The production entry point is ``gate.run_light_pipeline``, called by
+``research/agent_turn_runner._finish_ideator_batch`` when ``--ideation ideageneration``
+(the default). ``--ideation debate`` routes to the debate-based Ideator instead.
 """

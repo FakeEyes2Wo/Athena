@@ -13,7 +13,6 @@ from athena.research.idea_generation.idea_schemas import (
     ClaimRole,
     FalsifiabilityJudgment,
     IdeatorHypothesisDraft,
-    PairwiseJudgment,
     SkepticJudgment,
 )
 
@@ -37,10 +36,9 @@ def _patch(monkeypatch, *, falsifiable: bool = True):
             )
         if schema is SkepticJudgment:
             return SkepticJudgment(critique="c", unaddressed_risks=[], fatal_flaw_found=False)
-        return PairwiseJudgment(winner="candidate_a", rationale="r")
+        raise AssertionError(f"unexpected schema: {schema}")
 
     for path in (
-        "athena.research.idea_generation.gate",
         "athena.research.idea_generation.pre_gate_checks",
         "athena.research.idea_generation.review_board",
     ):
