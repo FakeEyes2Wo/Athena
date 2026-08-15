@@ -8,7 +8,7 @@
   gap: var(--space-md);
   padding: var(--space-md);
   border-right: 1px solid var(--border);
-  background: var(--surface);
+  background: var(--surface-elevated);
   overflow-y: auto;
 }
 

@@ -15,16 +15,19 @@
   border: 1px solid var(--border);
   background: var(--surface-muted);
   color: var(--text-primary);
+  box-shadow: var(--shadow-xs);
   resize: none;
   font-size: 14px;
   line-height: 1.5;
   font-family: var(--font-sans);
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
 }
 .composer__input:focus {
   outline: none;
   border-color: var(--border-focus);
   background: var(--surface);
+  box-shadow: var(--shadow-sm);
 }
 .composer__send {
   align-self: flex-end;
@@ -37,10 +40,11 @@
   border: none;
   background: var(--accent);
   color: #fff;
+  box-shadow: var(--shadow-xs);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: background var(--dur) var(--ease);
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .composer__send:hover:not(:disabled) {
   background: var(--accent-hover);

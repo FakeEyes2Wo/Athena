@@ -889,7 +889,7 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--radius-bubble);
   padding: 8px 12px;
-  background: var(--surface-muted);
+  background: var(--surface);
 }
 .tool-output summary {
   cursor: pointer;
