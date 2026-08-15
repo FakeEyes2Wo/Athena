@@ -26,7 +26,31 @@ def test_settings_reads_env(monkeypatch):
     assert settings.pro_model_name() == "deepseek-reasoner"
 
 
+def test_openai_key_alone_is_enough(monkeypatch):
+    """只配 OPENAI_API_KEY 是最常见的一种配置，此前它永远解析不出密钥。
+
+    ``_resolve`` 的第二个位置参数是 config.toml 的路径元组；回退值放进那个位置会被
+    当成路径逐字符展开，于是整条回退链在这一种配置下静默返回 None。
+    """
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+
+    assert settings.api_key() == "sk-openai"
+
+
+def test_the_key_fallback_prefers_the_more_specific_variable(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    assert settings.api_key() == "sk-deepseek"
+
+    monkeypatch.setenv("LLM_API_KEY", "sk-explicit")
+    assert settings.api_key() == "sk-explicit"
+
+
 def test_get_client_raises_without_key(monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="API key"):
