@@ -53,6 +53,14 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     setForm((prev) => ({ ...prev, [field]: value }));
   }
 
+  function patchApiKey(field: keyof GuiSettings["api_keys"], value: string) {
+    setSaved(false);
+    setForm((prev) => ({
+      ...prev,
+      api_keys: { ...prev.api_keys, [field]: value },
+    }));
+  }
+
   async function save() {
     setSaving(true);
     setError(null);
@@ -64,6 +72,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       tolerance: form.tolerance,
       auto_validate: form.auto_validate,
       manual_mode: form.manual_mode,
+      api_keys: form.api_keys,
     };
     try {
       const next = await settingsSet(patch);
@@ -138,6 +147,34 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 {switching ? "切换中…" : "切换"}
               </button>
             </div>
+          </section>
+
+          <section className={styles.section}>
+            <h3 className={styles.sectionTitle}>API Keys</h3>
+            <div className={styles.grid}>
+              <ApiKeyField
+                label="DeepSeek"
+                field="DEEPSEEK_API_KEY"
+                masked={settings.api_keys.DEEPSEEK_API_KEY}
+                value={form.api_keys.DEEPSEEK_API_KEY}
+                onChange={patchApiKey}
+              />
+              <ApiKeyField
+                label="OpenAI"
+                field="OPENAI_API_KEY"
+                masked={settings.api_keys.OPENAI_API_KEY}
+                value={form.api_keys.OPENAI_API_KEY}
+                onChange={patchApiKey}
+              />
+              <ApiKeyField
+                label="Kaggle Token"
+                field="KAGGLE_API_TOKEN"
+                masked={settings.api_keys.KAGGLE_API_TOKEN}
+                value={form.api_keys.KAGGLE_API_TOKEN}
+                onChange={patchApiKey}
+              />
+            </div>
+            <p className={styles.hint}>密钥只写回 .env，界面不回显明文；留空表示不修改。</p>
           </section>
 
           <section className={styles.section}>
@@ -239,6 +276,34 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </footer>
       </section>
     </div>
+  );
+}
+
+function ApiKeyField({
+  label,
+  field,
+  masked,
+  value,
+  onChange,
+}: {
+  label: string;
+  field: keyof GuiSettings["api_keys"];
+  masked: string;
+  value: string;
+  onChange(field: keyof GuiSettings["api_keys"], value: string): void;
+}) {
+  return (
+    <label className="field">
+      <span className="field__label">{label}</span>
+      <input
+        className="input"
+        type="password"
+        autoComplete="off"
+        placeholder={masked ? `已设置 · ${masked}` : "未设置"}
+        value={value}
+        onChange={(e) => onChange(field, e.target.value)}
+      />
+    </label>
   );
 }
 

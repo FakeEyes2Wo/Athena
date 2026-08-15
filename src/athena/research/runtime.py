@@ -1,8 +1,8 @@
-﻿"""Composition root for Athena's autonomous research Supervisor."""
+"""Composition root for Athena's autonomous research Supervisor."""
 
 import asyncio
-import json
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -13,7 +13,7 @@ from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import ResponsesProvider
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
-from athena.core.contracts import ArtifactRef, ArtifactStore
+from athena.core.contracts import ArtifactRef
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_tree import ResearchTree
 from athena.core.tool import ToolRegistry
@@ -44,6 +44,42 @@ logger = logging.getLogger(__name__)
 # GUI settings_set 白名单字段；与 ``athena/gui/settings.py`` 的 ``WRITABLE_FIELDS``
 # 一致（契约测试 tests/test_gui_protocol_contract.py 断言二者相等）。
 # direction / tolerance / auto_validate 为构造期参数，改动后仅影响后续 plan。
+API_KEY_ENV_VARS: tuple[str, ...] = (
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+    "KAGGLE_API_TOKEN",
+)
+
+
+def _mask_secret(value: str | None) -> str:
+    """把密钥匿名化成 ``sk-********f8e3`` 形态，绝不回传明文。"""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:3]}{'*' * 8}{value[-4:]}"
+
+
+def _upsert_dotenv(path: Path, updates: dict[str, str]) -> None:
+    """把 ``KEY=value`` 写入 ``.env``，保留注释与既有行；重复键覆盖。"""
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    updated: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                out.append(f"{key}={updates[key]}")
+                updated.add(key)
+                continue
+        out.append(line)
+    for key, value in updates.items():
+        if key not in updated:
+            out.append(f"{key}={value}")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
 SETTINGS_WHITELIST: frozenset[str] = frozenset(
     {
         "concurrency",
@@ -54,6 +90,7 @@ SETTINGS_WHITELIST: frozenset[str] = frozenset(
         "manual_mode",
         "ideator_count",
         "hypotheses_per_ideator",
+        "api_keys",
     }
 )
 
@@ -82,15 +119,15 @@ class ResearchRuntime:
         auto_validate: bool = False,
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
-        ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration",
+        ideation: Literal["gated", "baseline"] = "gated",
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
         ask_user: AskUser | None = None,
     ) -> None:
-        # 消融开关：``ideageneration`` 走 Idea Generation 门禁，``baseline`` 走 main
-        # 原有的"产出即入库"，``debate`` 走辩论式 Ideator。输出契约与 prompt 在 agent
-        # 注册时绑定，故一路传到 register_ideator_agent，不只是出口处分支。
+        # 消融开关：``gated`` 走 Idea Generation 门禁，``baseline`` 走 main 原有的
+        # "产出即入库"。输出契约与 prompt 在 agent 注册时绑定，故一路传到
+        # register_ideator_agent，不只是出口处分支。
         self._ideation = ideation
         self._root = Path(project_root or ".").resolve()
         self._athena = (
@@ -324,6 +361,9 @@ class ResearchRuntime:
             "manual_mode": self.state.manual_mode,
             "phase": self.state.phase,
             "status": self.state.status,
+            "api_keys": {
+                key: _mask_secret(os.environ.get(key)) for key in API_KEY_ENV_VARS
+            },
         }
 
     async def apply_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
@@ -377,6 +417,23 @@ class ResearchRuntime:
             if not isinstance(auto_validate, bool):
                 raise ValueError("auto_validate must be a bool")
             self._auto_validate = auto_validate
+        if "api_keys" in patch:
+            raw = patch["api_keys"]
+            if not isinstance(raw, dict):
+                raise ValueError("api_keys must be an object")
+            updates: dict[str, str] = {}
+            for key in API_KEY_ENV_VARS:
+                value = raw.get(key)
+                if value is None:
+                    continue
+                if not isinstance(value, str):
+                    raise ValueError(f"{key} must be a string")
+                value = value.strip()
+                if value:
+                    updates[key] = value
+            if updates:
+                _upsert_dotenv(Path(".env"), updates)
+                os.environ.update(updates)
         if any(
             field in patch
             for field in (

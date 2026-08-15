@@ -18,7 +18,7 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  background: #FAF7F0;
+  background: #FFFFFF;
   border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 20px;
   box-shadow: var(--shadow-lg);

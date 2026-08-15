@@ -275,6 +275,12 @@ export interface GraphAlgorithmInfo {
 
 /* ── Settings ─────────────────────────────────────────────────────── */
 
+export interface ApiKeyFields {
+  DEEPSEEK_API_KEY: string;
+  OPENAI_API_KEY: string;
+  KAGGLE_API_TOKEN: string;
+}
+
 export interface GuiSettings {
   project_root: string;
   model: string | null;
@@ -286,6 +292,7 @@ export interface GuiSettings {
   manual_mode: boolean;
   phase: string;
   status: string;
+  api_keys: ApiKeyFields;
 }
 
 export const DEFAULT_GUI_SETTINGS: GuiSettings = {
@@ -299,6 +306,11 @@ export const DEFAULT_GUI_SETTINGS: GuiSettings = {
   manual_mode: false,
   phase: "idle",
   status: "idle",
+  api_keys: {
+    DEEPSEEK_API_KEY: "",
+    OPENAI_API_KEY: "",
+    KAGGLE_API_TOKEN: "",
+  },
 };
 
 /* ── LLM I/O traces ───────────────────────────────────────────────── */

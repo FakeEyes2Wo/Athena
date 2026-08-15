@@ -47,6 +47,7 @@ SETTINGS_FIELDS: list[dict[str, object]] = [
     {"name": "tolerance", "label": "容忍度", "type": "float", "writable": True, "min": 0},
     {"name": "auto_validate", "label": "自动验证", "type": "bool", "writable": True},
     {"name": "manual_mode", "label": "手动选假设", "type": "bool", "writable": True},
+    {"name": "api_keys", "label": "API Keys", "type": "secrets", "writable": True},
     {"name": "phase", "label": "阶段", "type": "string", "writable": False},
     {"name": "status", "label": "状态", "type": "string", "writable": False},
 ]
