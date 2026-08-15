@@ -275,10 +275,11 @@ export interface GraphAlgorithmInfo {
 
 /* ── Settings ─────────────────────────────────────────────────────── */
 
-export interface ApiKeyFields {
-  DEEPSEEK_API_KEY: string;
-  OPENAI_API_KEY: string;
-  KAGGLE_API_TOKEN: string;
+export interface ModelConnection {
+  provider: string;
+  base_url: string;
+  model_name: string;
+  llm_api_key: string;
 }
 
 export interface GuiSettings {
@@ -292,7 +293,7 @@ export interface GuiSettings {
   manual_mode: boolean;
   phase: string;
   status: string;
-  api_keys: ApiKeyFields;
+  model_connection: ModelConnection;
 }
 
 export const DEFAULT_GUI_SETTINGS: GuiSettings = {
@@ -306,10 +307,11 @@ export const DEFAULT_GUI_SETTINGS: GuiSettings = {
   manual_mode: false,
   phase: "idle",
   status: "idle",
-  api_keys: {
-    DEEPSEEK_API_KEY: "",
-    OPENAI_API_KEY: "",
-    KAGGLE_API_TOKEN: "",
+  model_connection: {
+    provider: "deepseek",
+    base_url: "",
+    model_name: "",
+    llm_api_key: "",
   },
 };
 

@@ -44,11 +44,15 @@ logger = logging.getLogger(__name__)
 # GUI settings_set 白名单字段；与 ``athena/gui/settings.py`` 的 ``WRITABLE_FIELDS``
 # 一致（契约测试 tests/test_gui_protocol_contract.py 断言二者相等）。
 # direction / tolerance / auto_validate 为构造期参数，改动后仅影响后续 plan。
-API_KEY_ENV_VARS: tuple[str, ...] = (
-    "DEEPSEEK_API_KEY",
-    "OPENAI_API_KEY",
-    "KAGGLE_API_TOKEN",
-)
+MODEL_CONNECTION_ENV_VARS: dict[str, str] = {
+    "provider": "LLM_PROVIDER",
+    "base_url": "BASE_URL",
+    "model_name": "MODEL_NAME",
+    "llm_api_key": "LLM_API_KEY",
+}
+"""模型连接字段 → 环境变量名；provider 只允许 deepseek/openai/qwen。"""
+
+ALLOWED_MODEL_PROVIDERS = ("deepseek", "openai", "qwen")
 
 
 def _mask_secret(value: str | None) -> str:
@@ -90,7 +94,7 @@ SETTINGS_WHITELIST: frozenset[str] = frozenset(
         "manual_mode",
         "ideator_count",
         "hypotheses_per_ideator",
-        "api_keys",
+        "model_connection",
     }
 )
 
@@ -361,8 +365,15 @@ class ResearchRuntime:
             "manual_mode": self.state.manual_mode,
             "phase": self.state.phase,
             "status": self.state.status,
-            "api_keys": {
-                key: _mask_secret(os.environ.get(key)) for key in API_KEY_ENV_VARS
+            "model_connection": {
+                "provider": os.environ.get("LLM_PROVIDER") or "deepseek",
+                "base_url": os.environ.get("BASE_URL") or "",
+                "model_name": os.environ.get("MODEL_NAME") or "",
+                "llm_api_key": _mask_secret(
+                    os.environ.get("LLM_API_KEY")
+                    or os.environ.get("DEEPSEEK_API_KEY")
+                    or os.environ.get("OPENAI_API_KEY")
+                ),
             },
         }
 
@@ -417,20 +428,25 @@ class ResearchRuntime:
             if not isinstance(auto_validate, bool):
                 raise ValueError("auto_validate must be a bool")
             self._auto_validate = auto_validate
-        if "api_keys" in patch:
-            raw = patch["api_keys"]
+        if "model_connection" in patch:
+            raw = patch["model_connection"]
             if not isinstance(raw, dict):
-                raise ValueError("api_keys must be an object")
+                raise ValueError("model_connection must be an object")
             updates: dict[str, str] = {}
-            for key in API_KEY_ENV_VARS:
-                value = raw.get(key)
+            for field, env_key in MODEL_CONNECTION_ENV_VARS.items():
+                value = raw.get(field)
                 if value is None:
                     continue
                 if not isinstance(value, str):
-                    raise ValueError(f"{key} must be a string")
+                    raise ValueError(f"{field} must be a string")
                 value = value.strip()
+                if field == "provider":
+                    if value and value not in ALLOWED_MODEL_PROVIDERS:
+                        raise ValueError(
+                            f"provider must be one of {', '.join(ALLOWED_MODEL_PROVIDERS)}"
+                        )
                 if value:
-                    updates[key] = value
+                    updates[env_key] = value
             if updates:
                 _upsert_dotenv(Path(".env"), updates)
                 os.environ.update(updates)

@@ -22,7 +22,7 @@ interface SettingsPanelProps {
   onClose(): void;
 }
 
-/** 运行设置：圆角米白小窗，覆盖在主工作区之上。 */
+/** 运行设置：圆角纯白小窗，覆盖在主工作区之上。 */
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [settings, setSettings] = useState<GuiSettings>(DEFAULT_GUI_SETTINGS);
   const [form, setForm] = useState<GuiSettings>(DEFAULT_GUI_SETTINGS);
@@ -53,11 +53,14 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     setForm((prev) => ({ ...prev, [field]: value }));
   }
 
-  function patchApiKey(field: keyof GuiSettings["api_keys"], value: string) {
+  function patchModelConnection(
+    field: keyof GuiSettings["model_connection"],
+    value: string,
+  ) {
     setSaved(false);
     setForm((prev) => ({
       ...prev,
-      api_keys: { ...prev.api_keys, [field]: value },
+      model_connection: { ...prev.model_connection, [field]: value },
     }));
   }
 
@@ -72,7 +75,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       tolerance: form.tolerance,
       auto_validate: form.auto_validate,
       manual_mode: form.manual_mode,
-      api_keys: form.api_keys,
+      model_connection: form.model_connection,
     };
     try {
       const next = await settingsSet(patch);
@@ -150,29 +153,64 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </section>
 
           <section className={styles.section}>
-            <h3 className={styles.sectionTitle}>API Keys</h3>
+            <h3 className={styles.sectionTitle}>模型连接</h3>
             <div className={styles.grid}>
-              <ApiKeyField
-                label="DeepSeek"
-                field="DEEPSEEK_API_KEY"
-                masked={settings.api_keys.DEEPSEEK_API_KEY}
-                value={form.api_keys.DEEPSEEK_API_KEY}
-                onChange={patchApiKey}
-              />
-              <ApiKeyField
-                label="OpenAI"
-                field="OPENAI_API_KEY"
-                masked={settings.api_keys.OPENAI_API_KEY}
-                value={form.api_keys.OPENAI_API_KEY}
-                onChange={patchApiKey}
-              />
-              <ApiKeyField
-                label="Kaggle Token"
-                field="KAGGLE_API_TOKEN"
-                masked={settings.api_keys.KAGGLE_API_TOKEN}
-                value={form.api_keys.KAGGLE_API_TOKEN}
-                onChange={patchApiKey}
-              />
+              <label className="field">
+                <span className="field__label">PROVIDER</span>
+                <select
+                  className="select"
+                  value={form.model_connection.provider}
+                  onChange={(e) => patchModelConnection("provider", e.target.value)}
+                >
+                  <option value="deepseek">deepseek</option>
+                  <option value="openai">openai</option>
+                  <option value="qwen">qwen</option>
+                </select>
+              </label>
+
+              <label className="field">
+                <span className="field__label">MODEL_NAME</span>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="deepseek-v4-flash"
+                  value={form.model_connection.model_name}
+                  onChange={(e) => patchModelConnection("model_name", e.target.value)}
+                />
+              </label>
+
+              <label className="field" style={{ gridColumn: "1 / -1" }}>
+                <span className="field__label">BASE_URL</span>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder={
+                    form.model_connection.provider === "deepseek"
+                      ? "https://api.deepseek.com"
+                      : form.model_connection.provider === "openai"
+                        ? "https://api.openai.com/v1"
+                        : "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                  }
+                  value={form.model_connection.base_url}
+                  onChange={(e) => patchModelConnection("base_url", e.target.value)}
+                />
+              </label>
+
+              <label className="field" style={{ gridColumn: "1 / -1" }}>
+                <span className="field__label">LLM_API_KEY</span>
+                <input
+                  className="input"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={
+                    settings.model_connection.llm_api_key
+                      ? `已设置 · ${settings.model_connection.llm_api_key}`
+                      : "未设置"
+                  }
+                  value={form.model_connection.llm_api_key}
+                  onChange={(e) => patchModelConnection("llm_api_key", e.target.value)}
+                />
+              </label>
             </div>
             <p className={styles.hint}>密钥只写回 .env，界面不回显明文；留空表示不修改。</p>
           </section>
@@ -264,10 +302,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </div>
 
         <footer className={styles.footer}>
-          <p className={styles.hint}>
-            提示：direction / tolerance / auto_validate 为构造期参数，保存后对后续 plan 生效。
-          </p>
-          <div className={styles.actions}>
+          <div className={styles.actions} style={{ marginLeft: "auto" }}>
             <button className="btn btn--ghost btn--sm" onClick={() => void refresh()}>刷新</button>
             <button className="btn btn--primary btn--sm" onClick={() => void save()} disabled={saving}>
               {saving ? "保存中…" : "保存"}
@@ -276,34 +311,6 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </footer>
       </section>
     </div>
-  );
-}
-
-function ApiKeyField({
-  label,
-  field,
-  masked,
-  value,
-  onChange,
-}: {
-  label: string;
-  field: keyof GuiSettings["api_keys"];
-  masked: string;
-  value: string;
-  onChange(field: keyof GuiSettings["api_keys"], value: string): void;
-}) {
-  return (
-    <label className="field">
-      <span className="field__label">{label}</span>
-      <input
-        className="input"
-        type="password"
-        autoComplete="off"
-        placeholder={masked ? `已设置 · ${masked}` : "未设置"}
-        value={value}
-        onChange={(e) => onChange(field, e.target.value)}
-      />
-    </label>
   );
 }
 

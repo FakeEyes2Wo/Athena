@@ -20,7 +20,13 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PRO_MODEL = "deepseek-v4-pro"
 DEFAULT_PROVIDER = "deepseek"
 
-ALLOWED_PROVIDERS = ("deepseek", "openai", "anthropic")
+ALLOWED_PROVIDERS = ("deepseek", "openai", "qwen")
+
+DEFAULT_BASE_URLS = {
+    "deepseek": "https://api.deepseek.com",
+    "openai": "https://api.openai.com/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+}
 
 _CONFIG_PATH = Path("config.toml")
 
@@ -65,13 +71,16 @@ def _resolve(key: str, config_path: tuple[str, ...] = (), default: str | None = 
 
 
 def api_key() -> str | None:
-    """读取 DEEPSEEK_API_KEY，回退 OPENAI_API_KEY（只从环境变量读取）。"""
-    return _resolve("DEEPSEEK_API_KEY", default=_resolve("OPENAI_API_KEY"))
+    """读取 LLM_API_KEY，回退 DEEPSEEK_API_KEY / OPENAI_API_KEY（只从环境变量读取）。"""
+    return _resolve("LLM_API_KEY", default=_resolve("DEEPSEEK_API_KEY", _resolve("OPENAI_API_KEY")))
 
 
 def base_url() -> str:
-    """OpenAI 兼容端点：BASE_URL > config.toml ``[llm].base_url`` > DeepSeek 默认。"""
-    return _resolve("BASE_URL", ("llm", "base_url"), DEFAULT_BASE_URL) or DEFAULT_BASE_URL
+    """OpenAI 兼容端点：BASE_URL > config.toml ``[llm].base_url`` > provider 默认端点。"""
+    configured = _resolve("BASE_URL", ("llm", "base_url"))
+    if configured:
+        return configured
+    return DEFAULT_BASE_URLS.get(provider_kind(), DEFAULT_BASE_URL)
 
 
 def model_name() -> str:
