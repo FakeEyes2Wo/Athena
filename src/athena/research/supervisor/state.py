@@ -27,6 +27,11 @@ class ResearchState(BaseModel):
     manual_mode: bool = False
     plans: dict[str, PlanState] = Field(default_factory=dict)
     validation: dict[str, object] | None = None
+    # PREPARE 的续跑断点：已冻结的 evaluator_ref 与两个步骤各自用掉的轮次。
+    # 与 ``validation`` 同形（都是单写者写入的阶段进度），刻意不放进 ``plans``：
+    # ``Recovery.reconcile`` 会遍历每个 plan，``Supervisor.recover`` 还会把它们按
+    # ``agent_type="plan"`` 恢复，PREPARE 混进去只会污染 SEARCH 的恢复路径。
+    prepare: dict[str, object] | None = None
     # PREPARE 产出的 EDA 工作区目录（Ideator 自行探索）；仅路径元数据，非 EDA 结果。
     eda_dir: str | None = None
     # Supervisor 在首个 task-understanding turn 产出的结构化任务理解（供 GUI 意图预览）。

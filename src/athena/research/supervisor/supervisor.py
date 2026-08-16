@@ -513,6 +513,16 @@ class Supervisor(SupervisorActions):
         self.state.validation = {"result_ref": result_ref}
         await self._persist_state()
 
+    async def checkpoint_prepare(self, **fields: object) -> None:
+        """Merge PREPARE progress into durable state through the single writer.
+
+        例：``await checkpoint_prepare(evaluator_ref="sha256:e")`` 之后再
+        ``await checkpoint_prepare(prepare_turns=2)``，两个字段都保留。合并而非
+        覆盖：两个步骤各自记各自的进度，后写的不该抹掉先写的。
+        """
+        self.state.prepare = {**(self.state.prepare or {}), **fields}
+        await self._persist_state()
+
     def _search_limit_reached(self) -> bool:
         attempts = count_search_attempts(self.state, self.tree)
         return attempts >= self.state.search_limit and not self._running

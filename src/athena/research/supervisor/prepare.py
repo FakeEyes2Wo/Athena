@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,6 +31,23 @@ PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
 EVALUATOR_AGENT_ID = "evaluator"
 EVALUATOR_PLAN_ID = "evaluator"
+
+# 每轮结束把累计轮次交回单写者持久化；``None`` 表示调用方不关心断点。
+TurnCheckpoint = Callable[[int], Awaitable[None]]
+
+# 续跑时的接续语。记忆已由 rollout 恢复（见 RuntimeThreadManager._make_runtime），
+# 所以这里只说"接着上一轮"，不重复原始任务——重发任务会让 agent 重做它在自己
+# transcript 里看得见已经做完的事。
+RESUME_EVALUATOR_PROMPT = (
+    "The previous session was interrupted. Review your own transcript above, then "
+    "continue from where you stopped and finish freezing the evaluator. Do not "
+    "restart work you have already completed."
+)
+RESUME_PREPARE_PROMPT = (
+    "The previous session was interrupted. Review your own transcript above, then "
+    "continue from where you stopped and finish the trusted baseline. Do not "
+    "restart work you have already completed."
+)
 
 
 class PrepareResult(BaseModel):
@@ -119,8 +137,14 @@ async def run_evaluator_plan(
     task: str,
     max_turns: int,
     publish: EmitEvent | None = None,
+    turns_used: int = 0,
+    checkpoint: TurnCheckpoint | None = None,
 ) -> ArtifactRef:
-    """Run and repair one evaluator Agent until a frozen evaluator bundle exists."""
+    """Run and repair one evaluator Agent until a frozen evaluator bundle exists.
+
+    ``turns_used`` 是断点处已经花掉的轮次：续跑从那里接着数，而不是把预算重置成 0
+    （否则每崩一次就白送一整轮预算，崩溃循环可以无限烧 token）。
+    """
 
     if max_turns < 1:
         raise ValueError("max_turns must be at least 1")
@@ -139,23 +163,35 @@ async def run_evaluator_plan(
             ensure_ascii=False,
         )
     )
-    agent_id, run_id = await agents.create_root(
-        "evaluator",
-        {"content": task, "context_refs": [context_ref]},
-        agent_id=EVALUATOR_AGENT_ID,
-        name=EVALUATOR_PLAN_ID,
-    )
-    if agent_id != EVALUATOR_AGENT_ID:
-        raise RuntimeError(f"evaluator Agent id must be {EVALUATOR_AGENT_ID}")
+    run_id: str | None = None
+    if turns_used:
+        # 续跑：恢复会话（rollout 里的对话原样回来）后用一条 followup 接续，
+        # 不再 create_root 把原始任务重发一遍。
+        await agents.resume_agent(
+            EVALUATOR_AGENT_ID, agent_type="evaluator", name=EVALUATOR_PLAN_ID
+        )
+    else:
+        agent_id, run_id = await agents.create_root(
+            "evaluator",
+            {"content": task, "context_refs": [context_ref]},
+            agent_id=EVALUATOR_AGENT_ID,
+            name=EVALUATOR_PLAN_ID,
+        )
+        if agent_id != EVALUATOR_AGENT_ID:
+            raise RuntimeError(f"evaluator Agent id must be {EVALUATOR_AGENT_ID}")
 
     feedback: str | None = None
-    for turn in range(max_turns):
-        if turn:
+    for turn in range(turns_used, max_turns):
+        if run_id is None:
             run_id = await agents.followup(
                 EVALUATOR_AGENT_ID,
-                {"content": feedback, "context_refs": []},
+                {"content": feedback or RESUME_EVALUATOR_PROMPT, "context_refs": []},
             )
         summary = await wait_run_events(agents, run_id, publish)
+        # 消费掉本轮的 run_id：下一轮必须重新发起，才不会重复等同一个 run。
+        run_id = None
+        if checkpoint is not None:
+            await checkpoint(turn + 1)
         try:
             decision = await _decision_from_summary(summary, store)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -198,11 +234,14 @@ async def run_prepare_plan(
     task: str,
     max_turns: int,
     publish: EmitEvent | None = None,
+    turns_used: int = 0,
+    checkpoint: TurnCheckpoint | None = None,
 ) -> PrepareResult:
     """Run and repair one stable PREPARE Agent until a trusted baseline exists.
 
     ``evaluator_ref`` 是步骤 1 冻结的评估器 bundle；本步骤只产出 experiment 侧
     产物（experiment.json/solution/predictions/report/handoff）并用它可信打分。
+    ``turns_used`` 与 evaluator 步骤同义：断点处已花掉的轮次，续跑接着数。
     """
 
     if max_turns < 1:
@@ -224,23 +263,32 @@ async def run_prepare_plan(
             ensure_ascii=False,
         )
     )
-    agent_id, run_id = await agents.create_root(
-        "prepare",
-        {"content": task, "context_refs": [context_ref]},
-        agent_id=PREPARE_AGENT_ID,
-        name=PREPARE_PLAN_ID,
-    )
-    if agent_id != PREPARE_AGENT_ID:
-        raise RuntimeError(f"prepare Agent id must be {PREPARE_AGENT_ID}")
+    run_id: str | None = None
+    if turns_used:
+        await agents.resume_agent(
+            PREPARE_AGENT_ID, agent_type="prepare", name=PREPARE_PLAN_ID
+        )
+    else:
+        agent_id, run_id = await agents.create_root(
+            "prepare",
+            {"content": task, "context_refs": [context_ref]},
+            agent_id=PREPARE_AGENT_ID,
+            name=PREPARE_PLAN_ID,
+        )
+        if agent_id != PREPARE_AGENT_ID:
+            raise RuntimeError(f"prepare Agent id must be {PREPARE_AGENT_ID}")
 
     feedback: str | None = None
-    for turn in range(max_turns):
-        if turn:
+    for turn in range(turns_used, max_turns):
+        if run_id is None:
             run_id = await agents.followup(
                 PREPARE_AGENT_ID,
-                {"content": feedback, "context_refs": []},
+                {"content": feedback or RESUME_PREPARE_PROMPT, "context_refs": []},
             )
         summary = await wait_run_events(agents, run_id, publish)
+        run_id = None
+        if checkpoint is not None:
+            await checkpoint(turn + 1)
         try:
             decision = await _decision_from_summary(summary, store)
         except (OSError, RuntimeError, ValueError) as exc:
