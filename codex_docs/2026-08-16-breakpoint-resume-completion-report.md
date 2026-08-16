@@ -6,6 +6,7 @@ Implemented on `main`, commits:
 
 - `281bca7` — WIP baseline (user's websearch work committed first, as requested).
 - `3c0e052` — `feat(research): resume checkpoints for task understanding, general research, and PREPARE`.
+- `a8df535` — `fix(research): persist general agent id before waiting for its turn`.
 
 ## Changes
 
@@ -21,7 +22,9 @@ Implemented on `main`, commits:
   exists; `dispatch_general` caches the first research result and reuses the
   persisted worker id.
 - `src/athena/research/agent_turn_runner.py`: `run_general_turn` returns the
-  outcome and can resume the prior general worker from its rollout.
+  outcome, persists the stable worker id **before** waiting for the turn (so a
+  timed-out/crashed worker can be resumed from its rollout on restart), and can
+  continue the prior general worker via its persisted id.
 - `src/athena/research/runtime.py`: `start()` skips the task-understanding turn
   when `state.task_understanding` is persisted (emits
   `断点续传：复用已持久化的任务理解…`); `start_task()` persists and reuses the
@@ -34,7 +37,7 @@ Implemented on `main`, commits:
 ## Verification evidence
 
 - Hermetic unit batch (state / thread_runtime / supervisor / runtime_settings /
-  breakpoint_resume): **55 passed**.
+  breakpoint_resume): **56 passed**.
 - `python -m compileall` on all changed production modules: exit 0.
 - `scripts/check_code_style.py` on all changed production modules: exit 0
   (32 pre-existing R3 docstring advisories, non-blocking by design).
@@ -57,5 +60,6 @@ verifies hermetically.
 
 ## Rollback
 
-Revert `3c0e052`; delete `.athena/state.json` in projects that were opened with
-the new schema if running older code (`ResearchState` is `extra="forbid"`).
+Revert `3c0e052` and `a8df535`; delete `.athena/state.json` in projects that
+were opened with the new schema if running older code (`ResearchState` is
+`extra="forbid"`).
