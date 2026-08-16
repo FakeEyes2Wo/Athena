@@ -73,7 +73,8 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
         await runner._run_ideator_lane("ideator-1", 1, Path(tmp_path))
 
     request = captured["request"]
-    assert request["context_refs"], "eval_handoff context ref should be attached"
+    # content 是唯一到得了 model 的信道；ref 仍然留着，供事后审计与重放。
+    assert _HANDOFF.strip() in request["content"]
     payload = json.loads(await store.get_text(request["context_refs"][0]))
     assert payload == {"eval_handoff": _HANDOFF}
 
@@ -112,11 +113,10 @@ async def test_the_prepare_baseline_is_handed_the_eval_contract(tmp_path) -> Non
             max_turns=1,
         )
 
-    payloads = [
-        json.loads(await store.get_text(ref)) for ref in seen["request"]["context_refs"]
-    ]
-    handoffs = [p["eval_handoff"] for p in payloads if "eval_handoff" in p]
-    assert handoffs == [_HANDOFF]
+    # 必须在 content 里。base_runner 只把 trigger 的 content 当作 model 的 user
+    # prompt（input_text = trigger.content），context_refs 从来没有被解析回正文——
+    # 断言它出现在 refs 里等于什么都没验证。
+    assert _HANDOFF.strip() in seen["request"]["content"]
 
 
 @pytest.mark.asyncio
@@ -141,3 +141,11 @@ async def test_a_search_candidate_carries_the_eval_contract_in_its_plan_input(
         ).eval_handoff
         == ""
     )
+
+
+def test_handoff_block_is_empty_when_there_is_no_contract() -> None:
+    from athena.research.supervisor.experiment import handoff_block
+
+    assert handoff_block("") == ""
+    assert handoff_block("   \n ") == ""
+    assert "row_id" in handoff_block("id column: row_id")

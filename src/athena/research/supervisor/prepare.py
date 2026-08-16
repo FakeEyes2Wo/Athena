@@ -21,6 +21,7 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
 from athena.research.supervisor.experiment import (
     PlanRunner,
+    handoff_block,
     load_agent_result,
     read_eval_handoff,
 )
@@ -262,17 +263,11 @@ async def run_prepare_plan(
     # 基线也在写 predictions/，所以它必须先知道评估器要什么格式。不给的话它只能瞎猜
     # 列名和行集合——真机上就交出了 ``sample_id,probability,label_true`` 覆盖全部 6000
     # 行，而评估器要 ``__athena_row_id`` 与 1200 行留出集，直接判 0.0。
-    context_refs = [context_ref]
-    handoff = await read_eval_handoff(store, evaluator_ref)
-    if handoff:
-        context_refs.append(
-            await store.put_text(
-                json.dumps({"eval_handoff": handoff}, ensure_ascii=False)
-            )
-        )
+    # 契约拼进 content：context_refs 到不了 model（见 ``handoff_block``）。
+    content = task + handoff_block(await read_eval_handoff(store, evaluator_ref))
     agent_id, run_id = await agents.create_root(
         "prepare",
-        {"content": task, "context_refs": context_refs},
+        {"content": content, "context_refs": [context_ref]},
         agent_id=PREPARE_AGENT_ID,
         name=PREPARE_PLAN_ID,
     )

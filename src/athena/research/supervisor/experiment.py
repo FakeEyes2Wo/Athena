@@ -44,6 +44,26 @@ _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
 _MAX_FIELD_NAME_CHARS = 40
 
 
+def handoff_block(handoff: str) -> str:
+    """把评估契约拼成一段可直接接在 prompt 后面的正文。
+
+    **必须走 content，不能走 context_refs。** ``base_runner`` 只把 trigger 的
+    ``content`` 当作 model 的 user prompt（``input_text = trigger.content``），
+    ``context_refs`` 里的 artifact 引用从来没有被解析回正文——它是一条死信道。
+    真机（2026-08-16 第 11 次）证据：ideator 的 prompt 里写着"The evaluator contract
+    is attached as context"，而同一次 turn 的完整 user prompt 只有 374 字符，契约一个
+    字都不在里面；PREPARE 那边同样，基线因此只能猜列名，交出 join 不上的预测判 0.0。
+    """
+    if not handoff.strip():
+        return ""
+    return (
+        "\n\n--- Evaluator contract (authoritative; your predictions must match it "
+        "exactly) ---\n"
+        f"{handoff.strip()}\n"
+        "--- end of evaluator contract ---"
+    )
+
+
 async def read_eval_handoff(
     store: ArtifactStore, evaluator_ref: ArtifactRef | None
 ) -> str:

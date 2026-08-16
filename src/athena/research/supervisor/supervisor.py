@@ -19,6 +19,7 @@ from athena.research.supervisor.experiment import (
     PlanTurnResult,
     decide_settlement,
     load_agent_result,
+    handoff_block,
     load_best,
     read_eval_handoff,
 )
@@ -637,6 +638,13 @@ class Supervisor(SupervisorActions):
         await self._wake.wait()
         return not self._stopped
 
+    async def _plan_handoff(self, plan_id: str) -> str:
+        """取该 Plan 冻结时记下的评估契约；取不到就返回空串，不影响这一轮。"""
+        try:
+            return (await self.plan_input(plan_id)).eval_handoff
+        except (KeyError, OSError, ValueError):
+            return ""
+
     async def _corpus_ideation(self) -> bool:
         """语料落地后补一轮 ideation，让调研的产出真的被读到。
 
@@ -731,6 +739,8 @@ class Supervisor(SupervisorActions):
                         f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
                         f"turn limit: {state.turn_limit}; patience: {state.patience}; "
                         f"stale rounds: {state.stale_rounds}."
+                        # 候选要按契约写 predictions/，而 context_refs 到不了 model。
+                        + handoff_block(await self._plan_handoff(plan_id))
                     ),
                     "context_refs": [state.context_ref],
                 },

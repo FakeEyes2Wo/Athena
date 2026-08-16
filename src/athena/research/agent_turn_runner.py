@@ -19,7 +19,11 @@ from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
-from athena.research.supervisor.experiment import load_agent_result, read_eval_handoff
+from athena.research.supervisor.experiment import (
+    handoff_block,
+    load_agent_result,
+    read_eval_handoff,
+)
 from athena.research.supervisor.plans import wait_run_events
 from athena.retrieval.web_search import WebSearchTool
 
@@ -300,16 +304,14 @@ class AgentTurnRunner:
         context_refs: list[ArtifactRef] = []
         handoff = await read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
         if handoff:
+            # 契约拼进 content。此前它只被塞进 context_refs 并在正文里声称"attached as
+            # context"——而 context_refs 到不了 model，那句话一直是空头支票。
             context_refs.append(
                 await rt._store.put_text(
                     json.dumps({"eval_handoff": handoff}, ensure_ascii=False)
                 )
             )
-            content += (
-                "\n\nThe evaluator contract (predictions directory layout and "
-                "scoring criteria) is attached as context; read it before "
-                "proposing hypotheses."
-            )
+            content += handoff_block(handoff)
         corpus_ref = rt.survey_corpus_ref()
         if corpus_ref is not None:
             content += (
