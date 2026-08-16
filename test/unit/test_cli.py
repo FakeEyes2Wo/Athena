@@ -104,7 +104,9 @@ def test_run_options_configure_runtime_constructor() -> None:
         "ideation": "ideageneration",
         "survey": False,
         "survey_query": "",
-        "survey_max_papers": 10,
+        "survey_max_papers": 20,
+        "survey_search_top_k": 0,
+        "survey_max_seconds": 0.0,
     }
 
 

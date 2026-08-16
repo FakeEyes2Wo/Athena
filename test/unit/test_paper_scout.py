@@ -3,7 +3,9 @@
 import asyncio
 import json
 import tempfile
+import math
 import unittest
+from types import SimpleNamespace
 import zlib
 
 from pydantic import ValidationError
@@ -42,6 +44,8 @@ from athena.research.paper_scout.schemas import (
     ScoutStats,
 )
 from athena.research.paper_scout.scorer import (
+    decision_position,
+    true_probability,
     DEFAULT_BATCH_SIZE,
     GradedRelevanceScorer,
     parse_grades,
@@ -1245,3 +1249,74 @@ class OpenAccessFieldTest(unittest.TestCase):
         """字段与标题摘要同批返回，漏掉它就等于把这条信号丢在上游。"""
         self.assertIn("openAccessPdf", SEMANTIC_SCHOLAR_FIELDS)
         self.assertIn("isOpenAccess", SEMANTIC_SCHOLAR_FIELDS)
+
+
+class DecisionTokenTest(unittest.TestCase):
+    """判决 token 不在序列开头——旧实现假定它在，于是每篇都得 0 分。"""
+
+    @staticmethod
+    def _logprobs(tokens: list[tuple[str, list[tuple[str, float]]]]):
+        """按 OpenAI 的 logprobs 形状造一个替身。"""
+        return SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    token=token,
+                    top_logprobs=[
+                        SimpleNamespace(token=name, logprob=math.log(max(prob, 1e-12)))
+                        for name, prob in alternatives
+                    ],
+                )
+                for token, alternatives in tokens
+            ]
+        )
+
+    def test_the_verdict_is_found_behind_the_decision_prefix(self) -> None:
+        """真机形态：token[0]='Decision'、token[1]=':'、token[2]=' True'。"""
+        logprobs = self._logprobs(
+            [
+                ("Decision", [("Decision", 1.0), ("Dec", 0.0), ("Reason", 0.0)]),
+                (":", [(":", 1.0)]),
+                (" True", [(" True", 0.72), (" False", 0.28)]),
+            ]
+        )
+
+        self.assertEqual(2, decision_position(logprobs.content))
+        self.assertAlmostEqual(0.72, true_probability(logprobs), places=6)
+
+    def test_a_false_verdict_reports_the_true_probability_not_zero(self) -> None:
+        logprobs = self._logprobs(
+            [
+                ("Decision", [("Decision", 1.0)]),
+                (":", [(":", 1.0)]),
+                (" False", [(" False", 0.9), (" True", 0.1)]),
+            ]
+        )
+
+        self.assertAlmostEqual(0.1, true_probability(logprobs), places=6)
+
+    def test_a_verdict_in_first_position_still_works(self) -> None:
+        """换个提示词前缀就没了；定位必须按 token 内容，不能按固定下标。"""
+        logprobs = self._logprobs([("True", [("True", 0.8), ("False", 0.2)])])
+
+        self.assertEqual(0, decision_position(logprobs.content))
+        self.assertAlmostEqual(0.8, true_probability(logprobs), places=6)
+
+    def test_no_verdict_anywhere_degrades_rather_than_scoring_zero(self) -> None:
+        """返回 None 让调用方走文本回退；返回 0.0 会把"读不出来"伪装成"不相关"。"""
+        logprobs = self._logprobs([("I", [("I", 1.0)]), (" think", [(" think", 1.0)])])
+
+        self.assertIsNone(decision_position(logprobs.content))
+        self.assertIsNone(true_probability(logprobs))
+
+    def test_an_endpoint_without_logprobs_still_returns_none(self) -> None:
+        self.assertIsNone(true_probability(None))
+        self.assertIsNone(true_probability(SimpleNamespace(content=[])))
+
+    def test_a_verdict_whose_alternatives_omit_true_scores_zero(self) -> None:
+        """True 掉出 top_k 截断 = 概率极低，判 0 是对的。"""
+        logprobs = self._logprobs(
+            [("Decision", [("Decision", 1.0)]), (":", [(":", 1.0)]),
+             (" False", [(" False", 1.0), (" false", 0.0)])]
+        )
+
+        self.assertEqual(0.0, true_probability(logprobs))

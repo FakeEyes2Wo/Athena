@@ -1,13 +1,14 @@
 """相关性打分：决定论文能否进池、如何排序、以及是否进入最终交付集合。
 
-论文用 pasa-7b-selector 输出 "True" token 的概率作为 ρ(p) ∈ [0,1]。这需要推理端点返回
-logprobs，本仓库默认的 OpenAI 兼容端点不返回（实测 ``logprobs`` 字段缺失），因此提供两个
-实现：
+论文用 pasa-7b-selector 输出 "True" token 的概率作为 ρ(p) ∈ [0,1]，是个连续分数。本仓库
+拿不到那个分数，但**原因不是端点不支持 logprobs**——那句话曾经写在这里，2026-08-17 实测
+证明它是错的，见下。
 
-- ``TokenProbabilityScorer`` 复现论文口径，端点支持 logprobs 时使用；
-- ``GradedRelevanceScorer`` 用论文 LLM-score 一节的 0–3 分级评分归一到 [0,1]，是没有
-  logprobs 时的默认选择。二值 True/False 会让 ρ 只剩两个取值，Recall@k 排序和 0.5
-  阈值都会退化，分级评分保留了排序所需的区分度。
+- ``GradedRelevanceScorer`` —— **默认实现**。用论文 LLM-score 一节的 0–3 分级评分归一到
+  [0,1]。四个取值不够细（交付名额几乎总在某一档内部被截断，见 ``pool.tie_break``），但
+  它是目前手上最细的那个。
+- ``TokenProbabilityScorer`` —— 复现论文口径。**代码已修好，但不要启用**，理由见该类的
+  文档字符串：它会让 ρ 退化成两个取值，比四档更粗。
 
 两者都不读环境变量，客户端由调用方注入。
 """
@@ -46,6 +47,7 @@ DEFAULT_BATCH_SIZE = 24
 SCORING_ABSTRACT_CHARS = 1200
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 TRUE_TOKEN = re.compile(r"^\s*true", re.IGNORECASE)
+FALSE_TOKEN = re.compile(r"^\s*false", re.IGNORECASE)
 
 
 class RelevanceScorer(Protocol):
@@ -150,8 +152,26 @@ class GradedRelevanceScorer:
 class TokenProbabilityScorer:
     """复现论文口径：ρ(p) 为 selector 输出 "True" token 的概率。
 
-    只有当推理端点在响应里返回 ``logprobs`` 时才可用；拿不到 logprobs 时退回按判定
-    文本取 1.0/0.0，并在 ``degraded`` 上标记，让调用方知道排序信号已经退化成二值。
+    ⚠️ **不要把它设成默认打分器。** 代码是好的（2026-08-17 修掉了读错 token 的 bug，见
+    ``decision_position``），但在通用 instruct 模型上它产出的 ρ 比四档**更粗**。
+
+    2026-08-17 在阿里云百炼 compatible-mode 上逐条实测：
+
+    1. **端点支持 logprobs。** 此前模块头写着"端点不返回（实测字段缺失）"，是错的。
+       条件是必须与 ``top_logprobs`` 一起发——只发 ``logprobs=True`` 时 qwen3.6-flash
+       字段缺失、qwen3.7-plus 返回 0 个候选；加上 ``top_logprobs=5`` 两个模型都给满 5 个。
+       本类发的正是这个组合，所以端点从来不是障碍。
+    2. **旧实现读错了 token**，于是每篇都得 0.0。已修。
+    3. **修好之后 ρ 仍然只有两个取值。** 判决 token 的概率是 ``' False':1.000``，
+       其余候选 ``0.000``——温度 0 下模型完全饱和。取到的 ρ 因此非 1 即 0。
+
+    第 3 条才是它不可用的真正原因，而且换端点解决不了：论文的 ρ 来自
+    ``pasa-7b-selector``，一个**为这件事微调、输出分布经过校准**的判别器；通用 instruct
+    模型在二选一判断上给的就是饱和概率。要拿回连续 ρ 得换判别模型，那是训练问题不是
+    接口问题。
+
+    留着它有两个用处：换到校准过的 selector 时直接可用；以及作为"端点能力"与"模型标定"
+    是两件事的记录。
     """
 
     def __init__(
@@ -204,13 +224,48 @@ class TokenProbabilityScorer:
         return 1.0 if TRUE_TOKEN.match(choice.message.content or "") else 0.0
 
 
+def decision_position(content: list) -> int | None:
+    """找出判决 token 在序列里的位置；找不到时返回 ``None``。
+
+    不能假定判决在 ``content[0]``。``SELECT_PROMPT`` 要求的输出格式是
+    ``Decision: True/False``，于是首 token 是 ``'Decision'``——实测
+    （qwen3.6-flash，2026-08-17）：
+
+    ======  ==============  ====================================================
+    位置    token           top_logprobs
+    ======  ==============  ====================================================
+    0       ``'Decision'``  ``'Decision':1.000, 'Dec':0.000, 'Reason':0.000 …``
+    1       ``':'``         ``':':1.000 …``
+    2       ``' False'``    ``' False':1.000, ' false':0.000, ' True':0.000 …``
+    ======  ==============  ====================================================
+
+    判决在位置 2。旧实现只看位置 0，在那里找不到 ``True``，于是**每一篇都返回 0.0**——
+    分数看上去正常（是个合法的 [0,1] 浮点），实际毫无信息。这是"安静地成功"的又一例。
+
+    按 token 内容定位而不是按固定下标：换个提示词或换个模型，前缀长度就会变。
+    """
+    for position, item in enumerate(content):
+        token = getattr(item, "token", "")
+        if TRUE_TOKEN.match(token) or FALSE_TOKEN.match(token):
+            return position
+    return None
+
+
 def true_probability(logprobs: object) -> float | None:
-    """从 logprobs 里取首 token 为 "True" 的概率；端点未返回时为 ``None``。"""
+    """从 logprobs 里取判决 token 为 "True" 的概率；端点未返回时为 ``None``。
+
+    ⚠️ **本函数已修好，但 ``TokenProbabilityScorer`` 仍然不该启用。** 原因不在这里，
+    在模型：见该类的文档字符串。
+    """
     content = getattr(logprobs, "content", None)
     if not content:
         return None
-    alternatives = getattr(content[0], "top_logprobs", None) or []
+    position = decision_position(content)
+    if position is None:
+        return None
+    alternatives = getattr(content[position], "top_logprobs", None) or []
     for item in alternatives:
         if TRUE_TOKEN.match(getattr(item, "token", "")):
             return math.exp(getattr(item, "logprob", 0.0))
+    # 判决 token 找到了，但候选里没有 True——说明模型给 True 的概率低于 top_k 截断
     return 0.0

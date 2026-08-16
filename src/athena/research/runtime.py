@@ -68,7 +68,7 @@ MODEL_CONNECTION_ENV_VARS: dict[str, str] = {
 
 ALLOWED_MODEL_PROVIDERS = ("deepseek", "openai", "qwen")
 
-DEFAULT_SURVEY_PAPERS = 10
+DEFAULT_SURVEY_PAPERS = 20
 SURVEY_PLAN_LABEL = "survey"
 # 由研究任务提炼文献检索式的提示。任务原文不能直接当检索式：它带着数据集路径、
 # 目标列名这些只对本机有意义的行，而 PaperScout 会把整段原样交给相关性打分模型。
@@ -172,6 +172,8 @@ class ResearchRuntime:
         survey: bool = False,
         survey_query: str = "",
         survey_max_papers: int = DEFAULT_SURVEY_PAPERS,
+        survey_search_top_k: int = 0,
+        survey_max_seconds: float = 0.0,
     ) -> None:
         # 消融开关：``gated`` 走 Idea Generation 门禁，``baseline`` 走 main 原有的
         # "产出即入库"。输出契约与 prompt 在 agent 注册时绑定，故一路传到
@@ -182,6 +184,10 @@ class ResearchRuntime:
         self._survey_enabled = survey
         self._survey_query = survey_query
         self._survey_max_papers = survey_max_papers
+        # 0 表示"用 SurveyRequest 的默认值"。这两个必须一起调：深度决定每步的打分量，
+        # 墙钟决定跑得完几步，只动一个换来的是拿广度换深度。
+        self._survey_search_top_k = survey_search_top_k
+        self._survey_max_seconds = survey_max_seconds
         self._survey_stack: SurveyStack | None = None
         # 本轮 ideation 各 Ideator 的检索会话；引用核验按它们的已读集合判定。
         self._corpus_sessions: list[RetrievalSession] = []

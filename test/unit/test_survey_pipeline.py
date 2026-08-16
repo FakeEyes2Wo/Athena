@@ -558,14 +558,20 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("index_failed: RateLimitError", report.warnings)
         self.assertTrue(all(item.paper_content_ref for item in report.papers))
 
-    async def test_the_delivery_budget_defaults_to_ten(self) -> None:
-        """默认交付量按交互延迟定：10 篇约 15 分钟，50 篇约 40 分钟。
+    async def test_the_delivery_budget_and_search_depth_have_deliberate_defaults(
+        self,
+    ) -> None:
+        """三个默认值互相牵制，改任何一个都要连着看另外两个。
 
-        ``paper_scout`` 用它做交付截断而不是限制打分范围，所以它省的是下游三段，
-        不是检索——检索成本由 ``max_steps`` 决定。
+        ``search_top_k`` 决定池子里有什么（实测深度 10 只浮现 1/10 篇 gold、50 浮现
+        6/10）；``max_seconds`` 决定跑得完几步——它一直是真正绑定的那条约束，只提深度
+        不放宽墙钟就是拿广度换深度；``max_papers`` 只决定截断留几篇，对检索没有影响。
         """
-        self.assertEqual(10, SurveyRequest(query="q").max_papers)
-        self.assertEqual(4, SurveyRequest(query="q").conversion_concurrency)
+        request = SurveyRequest(query="q")
+
+        self.assertEqual(50, request.search_top_k)
+        self.assertEqual(1800.0, request.max_seconds)
+        self.assertEqual(20, request.max_papers)
 
     async def test_the_scorer_uses_its_own_model_when_one_is_configured(self) -> None:
         """打分是调用最多的一环，必须能独立换成轻量模型。"""

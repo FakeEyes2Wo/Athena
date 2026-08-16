@@ -67,6 +67,30 @@ SEARCH_COST = 0.1
 EXPAND_COST = 0.05
 
 
+SEARCH_TOP_K_NOTE = """检索深度为什么从 10 提到 50。
+
+论文的 ``top_k = 10`` 是针对全 arXiv 的稠密语义索引设的；本实现走 arXiv 的词法排序与
+Semantic Scholar / OpenAlex，同一个常数不成立——gold 会散落在 10–50 名之间，在进入打分
+之前就被丢掉。
+
+实测（``sparbench_000``，拿 Agent **自己发出的那 4 条查询**换深度重跑，查询本身不变）：
+
+======  ==============
+深度    该题 gold 浮现
+======  ==============
+10      1 / 10
+50      6 / 10
+100     6 / 10
+======  ==============
+
+50 处已经饱和，取 50 而不是 100——多出来的深度只多付打分的钱，不多找到论文。
+
+**这个参数不能单独调。** 每步的打分量随它线性增长，而 ``max_seconds`` 一直是真正绑定的
+那条约束：三轮真机里两轮 ``stop_reason: max_seconds``、停在第 4 步，``max_steps`` 从未生
+效。只提深度不放宽墙钟，换来的是步数变少——用探索广度换掉探索深度，净效果可能为负。
+两者必须一起动。
+"""
+
 class ScoutPaper(BaseModel):
     """池中的一篇论文，带有它是怎样被发现的以及它的相关性分数。"""
 
@@ -199,12 +223,26 @@ class ScoutRequest(BaseModel):
     max_parallel_calls: int = Field(
         default=5, ge=1, description="Tool calls honoured per step."
     )
-    search_top_k: int = Field(default=10, ge=1, description="Results per search call.")
+    search_top_k: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Results per search call. The paper's 10 does not carry over to a "
+            "lexical backend; see SEARCH_TOP_K_NOTE."
+        ),
+    )
     expand_top_k: int = Field(
         default=20, ge=1, description="References followed per expand call."
     )
     max_papers: int = Field(default=0, ge=0, description="0 means no handoff cap.")
-    max_seconds: float = Field(default=600.0, gt=0, description="Wall-clock budget.")
+    max_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        description=(
+            "Wall-clock budget, raised together with search_top_k: at 600s it was "
+            "the clock and not max_steps that stopped the run."
+        ),
+    )
     retain_threshold: float = Field(
         default=RETAIN_THRESHOLD,
         ge=0.0,

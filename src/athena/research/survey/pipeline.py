@@ -149,11 +149,24 @@ class SurveyRequest(BaseModel):
             "downstream stages without paying for or being gated by PaperScout."
         ),
     )
-    max_papers: int = Field(default=10, ge=1, description="Papers carried downstream.")
+    max_papers: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Papers carried downstream. Does NOT affect retrieval — the whole pool "
+            "is scored either way; this only decides how many survive truncation. "
+            "Raised from 10 because the cut lands inside a score tier (dozens tie "
+            "at one value) and because PaperLibrary makes each paper a one-time cost."
+        ),
+    )
     max_steps: int = Field(default=6, ge=1, description="PaperScout step budget.")
-    search_top_k: int = Field(default=10, ge=1, description="Results per search call.")
+    search_top_k: int = Field(
+        default=50, ge=1, description="Results per search call; see SEARCH_TOP_K_NOTE."
+    )
     expand_top_k: int = Field(default=20, ge=1, description="References per expand.")
-    max_seconds: float = Field(default=600.0, gt=0, description="Scout wall budget.")
+    max_seconds: float = Field(
+        default=1800.0, gt=0, description="Scout wall budget; raised with search_top_k."
+    )
     retain_threshold: float = Field(
         default=RETAIN_THRESHOLD,
         ge=0.0,

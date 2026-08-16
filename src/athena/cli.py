@@ -76,6 +76,8 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "survey": args.survey,
         "survey_query": args.survey_query or "",
         "survey_max_papers": args.survey_papers,
+        "survey_search_top_k": args.survey_search_top_k,
+        "survey_max_seconds": args.survey_max_seconds,
     }
 
 
@@ -262,6 +264,8 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
             max_papers=args.max_papers,
             max_steps=args.max_steps,
             max_seconds=args.max_seconds,
+            search_top_k=args.search_top_k,
+            expand_top_k=args.expand_top_k,
             retain_threshold=args.retain_threshold,
             require_retrievable_source=not args.allow_unfetchable,
             published_to=args.published_to,
@@ -436,6 +440,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="进入语料的论文篇数；成本大致随它线性增长",
     )
     run.add_argument(
+        "--survey-search-top-k",
+        type=_non_negative_int,
+        default=0,
+        help="loop 内调研的检索深度；0 表示用 SurveyRequest 的默认值",
+    )
+    run.add_argument(
+        "--survey-max-seconds",
+        type=float,
+        default=0.0,
+        help="loop 内调研的检索墙钟预算；0 表示用默认值。与 --survey-search-top-k 一起调",
+    )
+    run.add_argument(
         "--fork-from",
         default="",
         help=(
@@ -478,7 +494,28 @@ def _add_survey_parser(subparsers) -> None:
         "--max-steps", type=int, default=defaults.max_steps, help="PaperScout 步数上限"
     )
     survey.add_argument(
-        "--max-seconds", type=float, default=defaults.max_seconds, help="检索墙钟预算"
+        "--max-seconds",
+        type=float,
+        default=defaults.max_seconds,
+        help=(
+            "检索墙钟预算。它一直是真正绑定的那条约束（真机多轮 stop_reason 都是 "
+            "max_seconds、停在第 4 步），所以调 --search-top-k 时必须一起放宽"
+        ),
+    )
+    survey.add_argument(
+        "--search-top-k",
+        type=int,
+        default=defaults.search_top_k,
+        help=(
+            "每次 search 取回几条。论文的 10 是给稠密语义索引设的，换成词法排序后不成立"
+            "——实测同一批查询在深度 10 只浮现 1/10 篇 gold，深度 50 浮现 6/10，100 无增益"
+        ),
+    )
+    survey.add_argument(
+        "--expand-top-k",
+        type=int,
+        default=defaults.expand_top_k,
+        help="每次 expand 沿参考文献取回几条",
     )
     survey.add_argument(
         "--retain-threshold",
