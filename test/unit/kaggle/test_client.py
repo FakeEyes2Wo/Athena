@@ -66,6 +66,30 @@ async def test_get_notebook_returns_source_from_json() -> None:
     assert "kernel=owner%2Fslug" in http.url
 
 
+async def test_get_notebook_reads_blob_source_from_pull_response() -> None:
+    """Kaggle v1 pull 响应把 notebook 源码放在 ``blob.source``。"""
+    http = FakeHttp(
+        json.dumps({"metadata": {"ref": "owner/slug"}, "blob": {"source": '{"cells": []}'}}).encode()
+    )
+    client = _client(http)
+
+    source = await client.get_notebook("owner/slug")
+
+    assert source == '{"cells": []}'
+
+
+async def test_get_notebook_tolerates_utf8_bom() -> None:
+    body = "\ufeff" + json.dumps(
+        {"metadata": {"ref": "owner/slug"}, "blob": {"source": '{"cells": []}'}}
+    )
+    http = FakeHttp(body.encode("utf-8"))
+    client = _client(http)
+
+    source = await client.get_notebook("owner/slug")
+
+    assert source == '{"cells": []}'
+
+
 def _zip_notebook_source() -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:

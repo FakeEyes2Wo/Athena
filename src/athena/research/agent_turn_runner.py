@@ -22,7 +22,7 @@ from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.plans import wait_run_events
-from athena.retrieval.web_search import WebSearchTool
+from athena.retrieval.web_search import WebFetchTool, WebSearchTool
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -271,6 +271,7 @@ class AgentTurnRunner:
             for spec in kaggle.specs:
                 registry.register(kaggle.resolve(spec.name))
         registry.register(WebSearchTool())
+        registry.register(WebFetchTool())
         return registry
 
     @staticmethod

@@ -290,11 +290,19 @@ def _multipart_file(file_name: str, content: bytes, boundary: str) -> bytes:
 
 
 def _notebook_source_from_body(body: bytes) -> str:
-    """Extract notebook source from a JSON ``source`` field, a zip archive, or raw text."""
+    """Extract notebook source from Kaggle's pull JSON, a zip archive, or raw text.
+
+    The Kaggle v1 API nests the source as ``{"blob": {"source": "<notebook json>"}}``
+    (see ``extract_agent.py`` for the concrete shape); a few older clients return a
+    top-level ``source`` field. Both are accepted.
+    """
     try:
-        payload = json.loads(body.decode("utf-8"))
+        payload = json.loads(body.decode("utf-8-sig"))
         if isinstance(payload, dict):
+            blob = payload.get("blob")
             source = payload.get("source")
+            if isinstance(blob, dict):
+                source = blob.get("source", source)
             if isinstance(source, str) and source.strip():
                 return source
     except (json.JSONDecodeError, UnicodeDecodeError):
