@@ -192,8 +192,29 @@ REFUTED：又一次"实验从没发生却给出自信判决"，只是这回坏�
 第 9 次跑测首次走到 `COMPLETED`：PREPARE → SEARCH → VALIDATE → COMPLETED，基线
 ROC-AUC **0.8823**（此前恒定 0.502），调研在同一进程内建好语料。
 
-仍未验证的是本轮新加的两条（`no_change` 判据、语料就绪补一轮 ideation）在真机上的效果
-——它们有单元回归，但还没有一次完整跑测复核过。
+第 12 次是第一次 SEARCH 真的在做实验：
+
+```
+hypothesis        commit   primary    cited  status
+baseline          -        0.879049   -      SUCCEEDED
+0373fd55be93      YES      0.880641   False  SUCCEEDED   <- SOTA
+1cbe2524cae1      YES      -          True   FAILED
+377c8699e96f      YES      -          True   FAILED
+ce8bb6989abd      YES      0.871740   True   SUCCEEDED
+afd5f68a98f0      YES      0.700031   True   SUCCEEDED
+abfef4a2930c      YES      -          True   FAILED
+
+distinct scores: 4 / 4      sota: exp_hyp_0373fd55be93
+```
+
+- **每个候选都产生了新 commit**，分数四个各不相同（0.879049 / 0.880641 / 0.871740 /
+  0.700031）。SOTA 从基线推进到 0.880641——这是所有跑测里第一次出现真实的搜索进展。
+- **`no_change` 一次都没触发**。这不是它失效，是它没机会：候选真的在改文件了。所以这条
+  判据目前只有单元回归背书，真机上尚未被触发过一次。
+- 三条带引用的假设 FAILED（`settled without a trusted result`），另两条跑出了分数但都低
+  于基线。见 [文献语料接入 loop](corpus_ideation_ch.md) 第五节。
+
+VALIDATE 仍以第三节末尾那个同族问题告终（`validation diff is binary`），未处理。
 
 ## 相关文档
 
