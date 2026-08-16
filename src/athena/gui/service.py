@@ -18,6 +18,7 @@ from athena.core.agent import settings
 from athena.gui import experiments, graph, traces
 from athena.research.report import build_final_report
 from athena.research.runtime import ResearchRuntime
+from athena.research.runtime_events import recent_user_texts
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +55,7 @@ class GuiService:
         return {"status": await self._runtime.message("/stop")}
 
     def _recent_user_texts(self, limit: int = 6) -> list[str]:
-        """Return recent Human messages from the persisted session transcript.
-
-        断点续传后，当前消息往往只是“继续/重试”之类的短句；只用它做任务理解会
-        退化成一堆 Unknown。把之前的人类消息一起给模型，任务理解才能沿用上下文。
-        """
+        """Return recent Human messages from the persisted session transcript."""
         replay = getattr(self._runtime, "replay_output_events", None)
         if replay is None:
             return []
@@ -67,15 +64,7 @@ class GuiService:
         except Exception:
             logger.warning("failed to replay session transcript", exc_info=True)
             return []
-        texts = [
-            record.get("text")
-            for record in records
-            if isinstance(record, dict)
-            and record.get("type") == "user"
-            and isinstance(record.get("text"), str)
-            and record.get("text", "").strip()
-        ]
-        return texts[-limit:]
+        return recent_user_texts(records, limit)
 
     async def parse_intent(self, message: str) -> dict[str, Any]:
         """Produce a supervisor-style task understanding from a research task.

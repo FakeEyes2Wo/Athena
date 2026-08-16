@@ -29,7 +29,7 @@ from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.phase_runner import PhaseRunner
-from athena.research.runtime_events import RuntimeEvents
+from athena.research.runtime_events import RuntimeEvents, recent_user_texts
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.events import EventProjector
 from athena.research.supervisor.experiment import PlanTurnResult
@@ -530,25 +530,25 @@ class ResearchRuntime:
         return self.settings()
 
     def _recent_user_texts(self, limit: int = 6) -> list[str]:
-        """Return recent Human messages from the persisted session transcript.
-
-        断点续传后 ``_task_text`` 可能只是“继续/重试”这类短句；任务理解需要
-        把之前的人类消息一并交给 Supervisor，否则会退化成一片 Unknown。
-        """
+        """Return recent Human messages from the persisted session transcript."""
         try:
             records = self.replay_output_events()
         except Exception:
             logger.warning("failed to replay session transcript", exc_info=True)
             return []
-        texts = [
-            record.get("text")
-            for record in records
-            if isinstance(record, dict)
-            and record.get("type") == "user"
-            and isinstance(record.get("text"), str)
-            and record.get("text", "").strip()
-        ]
-        return texts[-limit:]
+        return recent_user_texts(records, limit)
+
+    @staticmethod
+    def _task_context_text(task_text: str, prior: list[str]) -> str:
+        """Build the supervisor task-understanding prompt from task + history."""
+        if not prior:
+            return task_text
+        return (
+            "Previous conversation:\n"
+            + "\n".join(f"- {text}" for text in prior)
+            + "\n\nCurrent task text:\n"
+            + task_text
+        )
 
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.
@@ -568,15 +568,9 @@ class ResearchRuntime:
             and self.state.phase == "PREPARE"
             and self._task_text.strip()
         ):
-            context = self._task_text
-            prior = self._recent_user_texts()
-            if prior:
-                context = (
-                    "Previous conversation:\n"
-                    + "\n".join(f"- {text}" for text in prior)
-                    + "\n\nCurrent task text:\n"
-                    + self._task_text
-                )
+            context = self._task_context_text(
+                self._task_text, self._recent_user_texts()
+            )
             try:
                 await self._agent_turns.run_supervisor_turn(context)
             except Exception:
@@ -733,22 +727,22 @@ class ResearchRuntime:
             tool="paper_survey",
         )
 
+    def _rearm_if_terminal(self) -> None:
+        """Clear the done supervisor task so a terminal run can be restarted."""
+        if self._started and self._task is not None and self._task.done():
+            if self.state.status in {"FAILED", "STOPPED", "COMPLETED"}:
+                self._task = None
+
     async def start_task(self, task: str) -> str:
         """Seed the research task and start PREPARE -> SEARCH -> VALIDATE.
 
         Fresh runs begin at PREPARE so a trusted baseline/SOTA is established
         before any SEARCH hypothesis can be proposed. Existing ``state.json``
-        (resume) keeps its phase and starts via ``recover()``.
-
-        A terminal run (FAILED/STOPPED/COMPLETED) can be restarted from the
-        same runtime: the old supervisor task is done, so re-arm it and start
-        again. ``eda_dir`` and workspaces are intentionally left untouched —
-        retrying PREPARE reuses whatever already exists.
+        (resume) keeps its phase and starts via ``recover()``. A terminal run
+        is re-armed in place; ``eda_dir`` and workspaces are left untouched.
         """
         self._task_text = task
-        if self._started and self._task is not None and self._task.done():
-            if self.state.status in {"FAILED", "STOPPED", "COMPLETED"}:
-                self._task = None
+        self._rearm_if_terminal()
         if not self._started or self._task is None:
             if (
                 self.tree.best_experiment_id() is None

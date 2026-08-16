@@ -33,6 +33,21 @@ _MAX_COMMAND_CHARS = 400
 EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
 
 
+def recent_user_texts(
+    records: list[dict[str, object]], limit: int = 6
+) -> list[str]:
+    """Return the last ``limit`` non-empty Human message texts from a transcript."""
+    texts = [
+        record.get("text")
+        for record in records
+        if isinstance(record, dict)
+        and record.get("type") == "user"
+        and isinstance(record.get("text"), str)
+        and record.get("text", "").strip()
+    ]
+    return texts[-limit:]
+
+
 class RuntimeEvents:
     """Project, publish, and persist the runtime's output/state stream."""
 
