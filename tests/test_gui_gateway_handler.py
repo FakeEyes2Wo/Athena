@@ -105,7 +105,31 @@ async def test_handler_session_switch_default_has_no_state_root(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_handler_session_switch_resumes_running_search(tmp_path) -> None:
-    """SEARCH/RUNNING 会话在切换时自动续跑（断点续传）。"""
+    """SEARCH/RUNNING 且已持久化的会话在切换时自动续跑（断点续传）。"""
+    from types import SimpleNamespace
+
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        state_path = tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text("{}", encoding="utf-8")
+        runtime._state_path = state_path
+        runtime.state = SimpleNamespace(phase="SEARCH", status="RUNNING")
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert created[0].started is True
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_does_not_resume_fresh_session(tmp_path) -> None:
+    """全新会话的内存默认状态（SEARCH/RUNNING）不能被误判成需要续跑。"""
     from types import SimpleNamespace
 
     created: list[RecordingRuntime] = []
@@ -120,7 +144,7 @@ async def test_handler_session_switch_resumes_running_search(tmp_path) -> None:
 
     await handler.dispatch("session_switch", {"session_id": "s-1"})
 
-    assert created[0].started is True
+    assert created[0].started is False
 
 
 @pytest.mark.asyncio

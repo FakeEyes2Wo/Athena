@@ -67,6 +67,11 @@ export class WsBackend {
           settled = true;
           reject(new Error(`无法连接后端 ${url}，请先启动后端`));
         }
+        // 连接断开时，所有在途 RPC 必须失败，否则删除/切换等按钮会永远挂起。
+        for (const pending of this.pending.values()) {
+          pending.reject(new Error("后端连接已断开"));
+        }
+        this.pending.clear();
         this.scheduleReconnect(url);
       };
       this.ws = ws;

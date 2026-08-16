@@ -480,15 +480,31 @@ export function usePipeline(workspaceRoot?: string | null) {
   const deleteSession = useCallback(async (id: string) => {
     // default 是主项目会话，不可删除；命名会话删除后返回更新列表。
     if (id === "default") return;
-    const { sessions: list } = await sessionDelete(id);
-    const titles = loadTitles(titlesKey);
-    delete titles[id];
-    localStorage.setItem(titlesKey, JSON.stringify(titles));
-    setSessions(list.map((sid) => ({ id: sid, title: titles[sid] ?? "新会话" })));
-    if (id === currentSessionId) {
-      await switchSession("default");
+    try {
+      const { sessions: list } = await sessionDelete(id);
+      const titles = loadTitles(titlesKey);
+      delete titles[id];
+      localStorage.setItem(titlesKey, JSON.stringify(titles));
+      setSessions(list.map((sid) => ({ id: sid, title: titles[sid] ?? "新会话" })));
+      if (id === currentSessionId) {
+        await switchSession("default");
+      }
+    } catch (err) {
+      setViewModel((prev) => ({
+        ...prev,
+        status: "error",
+        messages: [
+          ...prev.messages,
+          {
+            id: nextId("error"),
+            role: "athena",
+            kind: "error",
+            content: `删除会话失败：${errorMessage(err)}`,
+          },
+        ],
+      }));
     }
-  }, [currentSessionId, switchSession, titlesKey]);
+  }, [currentSessionId, nextId, switchSession, titlesKey]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);

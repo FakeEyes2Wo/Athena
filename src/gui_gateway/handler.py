@@ -118,6 +118,9 @@ class GuiRequestHandler:
         self, project_root: str, state_root: Path | None
     ) -> None:
         """Close the current runtime and rebuild a fresh one (project/session swap)."""
+        if state_root is not None:
+            # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
+            state_root.mkdir(parents=True, exist_ok=True)
         await self._runtime.aclose()
         self._runtime = self._make_runtime(project_root, state_root)
         self._service = GuiService(self._runtime)
@@ -132,8 +135,13 @@ class GuiRequestHandler:
         """
         try:
             state = getattr(self._runtime, "state", None)
+            state_path = getattr(self._runtime, "_state_path", None)
+            # 只有从磁盘恢复出的状态才可能是“进行中”；全新会话的内存默认状态
+            # （phase=SEARCH/status=RUNNING）不能被误判成需要续跑。
+            persisted = state_path is not None and Path(state_path).is_file()
             mid_run = (
-                state is not None
+                persisted
+                and state is not None
                 and state.phase in {"SEARCH", "VALIDATE"}
                 and state.status == "RUNNING"
             )
