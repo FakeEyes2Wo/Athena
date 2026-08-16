@@ -10,6 +10,15 @@ from typing import Any
 from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
+from athena.research.bench import (
+    DEFAULT_QUERY_SET,
+    corpus_health,
+    dump_report,
+    load_query_set,
+    run_known_item,
+)
+from athena.research.bench import available as bench_available
+from athena.research.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.runtime import DEFAULT_SURVEY_PAPERS
 from athena.research.survey import (
@@ -323,6 +332,8 @@ async def _dispatch_command(args: argparse.Namespace) -> int:
         return await _cmd_run(args)
     if args.command == "survey":
         return await _cmd_survey(args)
+    if args.command == "bench":
+        return await _cmd_bench(args)
     if args.command == "kaggle":
         return await _cmd_kaggle(args)
     if args.command == "status":
@@ -394,6 +405,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="进入语料的论文篇数；成本大致随它线性增长",
     )
     _add_survey_parser(subparsers)
+    _add_bench_parser(subparsers)
     _add_kaggle_parser(subparsers)
     for name in ("status", "pause", "resume", "stop"):
         subparsers.add_parser(name).add_argument(
@@ -489,6 +501,143 @@ def _add_survey_parser(subparsers) -> None:
     )
     survey.add_argument("--out", default="", help="把 SurveyReport JSON 写到该路径")
     survey.add_argument("--check", action="store_true", help="只做装配自检")
+
+
+def _add_bench_parser(subparsers) -> None:
+    """挂上 ``bench`` 子命令：把此前一次性脚本做的测量变成能重跑、能 diff 的东西。
+
+    两个子模式对应两类问题：``retrieval`` 问"改写过的提问能不能找回那篇论文"，
+    ``health`` 问"这份语料的结构够不够用"。后者不需要任何模型，因此在没有编码器的
+    环境里也能跑。
+    """
+    bench = subparsers.add_parser(
+        "bench", help="measure retrieval quality and corpus health on a built corpus"
+    )
+    modes = bench.add_subparsers(dest="bench_command", required=True)
+
+    retrieval = modes.add_parser("retrieval", help="known-item hit@k and MRR per channel")
+    retrieval.add_argument("--corpus", required=True, help="corpus_ref to benchmark")
+    retrieval.add_argument(
+        "--queries",
+        default=DEFAULT_QUERY_SET,
+        help=(
+            f"packaged query set name ({', '.join(bench_available())}) or a path to a "
+            "QuerySet JSON file"
+        ),
+    )
+    retrieval.add_argument("--top-k", type=int, default=BENCH_TOP_K, help="返回条数")
+    retrieval.add_argument(
+        "--no-semantic",
+        action="store_true",
+        help="只跑词面通道，不调编码 API（离线核对关键词检索的回归时用）",
+    )
+
+    health = modes.add_parser("health", help="structural invariants of a corpus")
+    health.add_argument("--corpus", required=True, help="corpus_ref to inspect")
+    health.add_argument(
+        "--detail", action="store_true", help="逐篇列出，而不是只给汇总"
+    )
+
+    for parser in (retrieval, health):
+        parser.add_argument(
+            "--artifact-root", default="", help="artifact 根目录；默认 ~/.athena/artifacts"
+        )
+        parser.add_argument("--out", default="", help="把报告写成 JSON，供两次运行 diff")
+
+
+def _print_retrieval_report(report) -> None:
+    """打印逐通道成绩；未命中的查询单独列出来，因为它们才是要改的东西。"""
+    print(f"\nknown-item 基准：{report.query_set}")
+    print(f"  语料: {report.corpus_papers} 篇 / {report.corpus_chunks} chunk")
+    print(f"  编码器: {report.embedding_model or '（无）'}  k={report.top_k}")
+    if report.unusable_queries:
+        print(
+            f"  金标不在本语料、已排除: {', '.join(report.unusable_queries)}"
+            "  （这不是检索失败）"
+        )
+    header = f"  {'通道':<26}{'hit@1':>7}{'hit@3':>7}{'hit@5':>7}{'未命中':>8}{'MRR':>8}"
+    print(header)
+    for channel in report.channels:
+        print(
+            f"  {channel.channel:<26}"
+            f"{channel.hit_at_1:>4}/{channel.scored:<2}"
+            f"{channel.hit_at_3:>4}/{channel.scored:<2}"
+            f"{channel.hit_at_5:>4}/{channel.scored:<2}"
+            f"{channel.missed:>8}{channel.mrr:>8.3f}"
+        )
+    for channel in report.channels:
+        missed = [item.query_id for item in channel.outcomes if item.rank is None]
+        if missed:
+            print(f"  {channel.channel} 未命中: {', '.join(missed)}")
+
+
+def _print_health_report(report, detail: bool) -> None:
+    """打印结构体检；每一行都对应一条"够不够用"的判据。"""
+    print(f"\n语料体检：{report.corpus_ref}")
+    print(f"  规模: {report.papers} 篇 / {report.chunks} chunk / {report.sentences} 句")
+    print(
+        f"  语义检索: {'可用' if report.semantic_search else '不可用'}"
+        f"  编码器: {report.embedding_model or '（无）'}"
+    )
+    print(
+        f"  摘要覆盖: {report.abstract_coverage:.0%}"
+        f"  门面几乎无正文的篇数: {report.thin_anchor_papers}"
+    )
+    print(
+        f"  语料内引用边: {report.citation_edges}"
+        f"（每篇 {report.citation_density:.2f}）  图文互链: {report.visual_links}"
+    )
+    print("  章节覆盖（篇数）:")
+    for name, count in report.section_coverage.items():
+        print(f"    {name:<14}{count:>4} / {report.papers}")
+    if not detail:
+        return
+    print("  逐篇:")
+    for item in report.papers_detail:
+        flags = []
+        if not item.has_abstract_chunk:
+            flags.append(f"无摘要chunk(锚点={item.anchor_kind})")
+        if item.anchor_prose_chars < 40:
+            flags.append(f"门面正文{item.anchor_prose_chars}字")
+        print(
+            f"    {item.paper_id:<38}{item.chunks:>5} chunk"
+            f"{item.outbound_citations:>4} 引用  {'; '.join(flags)}"
+        )
+
+
+async def _cmd_bench(args: argparse.Namespace) -> int:
+    """跑一次基准并打印报告；``--out`` 时同时落一份可 diff 的 JSON。
+
+    语义通道需要与建索引时**同一个**编码器，因此这里复用 ``build_survey_stack`` 而不是
+    另建一个：换了模型的向量与索引里的向量不在同一个空间，得到的分数看上去正常、实际
+    毫无意义——正是这条链路反复吃过的那种亏。
+    """
+    stack = build_survey_stack(
+        artifact_root=args.artifact_root, enable_vision=False
+    )
+    corpus = await stack.corpus_cache.load(
+        stack.artifacts, args.corpus, vectors=args.bench_command == "retrieval"
+    )
+    if args.bench_command == "health":
+        report = corpus_health(corpus, args.corpus)
+        _print_health_report(report, args.detail)
+    else:
+        embedder = None if args.no_semantic else stack.embedder
+        if embedder is None and not args.no_semantic:
+            print(
+                "未配置 ATHENA_EMBEDDING_MODEL，只跑词面通道。", file=sys.stderr
+            )
+        report = await run_known_item(
+            corpus,
+            load_query_set(args.queries),
+            corpus_ref=args.corpus,
+            embedder=embedder,
+            top_k=args.top_k,
+        )
+        _print_retrieval_report(report)
+    if args.out:
+        print(f"\n报告已写入 {dump_report(report, args.out)}")
+    return 0
 
 
 def _add_kaggle_parser(subparsers) -> None:
