@@ -1,10 +1,8 @@
 # Current Athena Work
 
-Active implementation plan:
-- `codex_docs/2026-08-16-breakpoint-resume-fix-plan.md`
+No active implementation plan.
 
-Execution notes:
-- Implement in the shared `main` checkout, after WIP baseline commit `281bca7`.
-- Preserve unrelated worktree changes; stage only files owned by this plan.
-- Every acceptance criterion needs fresh verification evidence before the plan is
-  completed; then write the completion report, delete the plan, and update this file.
+Most recent completed work:
+- `codex_docs/2026-08-16-breakpoint-resume-completion-report.md`
+  (breakpoint resume for task understanding / general research / PREPARE,
+  commits `281bca7` and `3c0e052`).
