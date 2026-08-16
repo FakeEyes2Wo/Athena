@@ -560,6 +560,61 @@ async def test_stream_omits_response_format_without_output_type() -> None:
     assert any(e.kind == "response_completed" for e in events)
 
 
+def _registry_with_one_tool() -> ToolRegistry:
+    tools = ToolRegistry()
+    tools.register(_EchoTool())
+    return tools
+
+
+@pytest.mark.asyncio
+async def test_an_agent_with_tools_keeps_them_instead_of_the_strict_schema() -> None:
+    """有工具时不能再发 response_format，否则模型一个 tool call 也发不出来。
+
+    实测：qwen 兼容端点在 ``tools + response_format`` 下 3/3 直接返回终态 JSON，去掉
+    ``response_format`` 后 3/3 正常调工具。Athena 每个 Agent 都带 ``output_type``，
+    这条一旦回归，整个 loop 会退化成"只写 JSON 不干活"。
+    """
+    client = _CaptureClient()
+    provider = OpenAIProvider("model", client=client)
+
+    events = [
+        e
+        async for e in provider.stream(
+            AgentConfig(),
+            _registry_with_one_tool(),
+            [],
+            asyncio.Event(),
+            output_type=_Out,
+        )
+    ]
+
+    assert "response_format" not in client.kwargs
+    assert [t["function"]["name"] for t in client.kwargs["tools"]] == ["echo"]
+    schema_message = client.kwargs["messages"][-1]
+    assert schema_message["role"] == "system"
+    assert json.dumps(_Out.model_json_schema()) in schema_message["content"]
+    assert any(e.kind == "response_completed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_with_tools_also_drops_the_json_object_constraint() -> None:
+    client = _CaptureClient()
+    provider = DeepSeekProvider("model", client=client)
+
+    await anext(
+        provider.stream(
+            AgentConfig(),
+            _registry_with_one_tool(),
+            [],
+            asyncio.Event(),
+            output_type=_Out,
+        )
+    )
+
+    assert "response_format" not in client.kwargs
+    assert client.kwargs["messages"][-1]["role"] == "system"
+
+
 class _ResponseFormatFallbackClient:
     def __init__(self, message: str) -> None:
         self.calls: list[dict] = []
@@ -808,6 +863,69 @@ class _ValidStructuredProvider:
             {"delta": '{"answer":"hi"}', "accumulated": '{"answer":"hi"}'},
         )
         yield StreamEvent("response_completed")
+
+
+class _FencedStructuredProvider:
+    """模型把终态 JSON 包进 markdown 围栏——真机上 Ideator 就是这么打死 SEARCH 的。"""
+
+    def __init__(self, body: str) -> None:
+        self.calls = 0
+        self.body = body
+
+    async def stream(self, *_args, **_kwargs):
+        self.calls += 1
+        yield StreamEvent("text_delta", {"delta": self.body, "accumulated": self.body})
+        yield StreamEvent("response_completed")
+
+
+def _structured_context(tools: ToolRegistry) -> AgentContext:
+    return AgentContext(
+        AthenaThread(
+            thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+        ),
+        AthenaTurn(
+            turn_id="t1.1", thread_id="t1", request_ref="request", status="running"
+        ),
+        lambda *_a: asyncio.sleep(0),
+        tools,
+        asyncio.Event(),
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '```json\n{"answer":"hi"}\n```',
+        '```\n{"answer":"hi"}\n```',
+        '```json\r\n{"answer":"hi"}\r\n```',
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_fenced_json_answer_is_accepted_on_the_first_try(body: str) -> None:
+    """围栏是格式噪声，不该烧掉重试预算——一次采样就要通过。"""
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider(body)
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert outcome.result_ref
+    assert agent.model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_prose_around_the_fence_still_counts_as_invalid() -> None:
+    """只剥围栏，不去猜正文里哪一段是 JSON；真的乱答仍要走重试并最终报错。"""
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider('here you go: {"answer": ')
+
+    with pytest.raises(RuntimeError, match="structured output invalid"):
+        await agent.run(_structured_context(tools))
 
 
 @pytest.mark.asyncio

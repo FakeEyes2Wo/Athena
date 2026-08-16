@@ -20,7 +20,7 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from openai import AsyncOpenAI, RateLimitError
@@ -33,9 +33,11 @@ from athena.research.paper_markdown.interfaces import (
     VisualInterpretationRequest,
 )
 from athena.research.paper_markdown.tool import PaperMarkdownTool
+from athena.research.paper_rag.search import CorpusCache, RetrievalSession
 from athena.research.paper_rag.tool import (
     PaperChunkReadTool,
     PaperCitesTool,
+    PaperCorpusOverviewTool,
     PaperKeywordSearchTool,
     PaperSectionSearchTool,
     PaperSemanticSearchTool,
@@ -319,6 +321,10 @@ class SurveyStack:
     因此不在装配期强制要求。
 
     ``scorer_model`` 为空串表示打分沿用 ``model``，用 ``effective_scorer_model()`` 取值。
+
+    ``corpus_cache`` 挂在 stack 上而不是每套工具各建一个：一次运行里可能有多个 Agent
+    读同一份语料（三条 Ideator lane 各拿一套工具），解码后的语料是只读的，共享一份
+    才不会把内存乘以并发度。
     """
 
     artifacts: LocalArtifactStore
@@ -332,6 +338,7 @@ class SurveyStack:
     semantic_scholar_api_key: str = ""
     openalex_api_key: str = ""
     ghostscript: str = ""
+    corpus_cache: CorpusCache = field(default_factory=CorpusCache)
 
     def effective_scorer_model(self) -> str:
         """实际用于打分的模型名；未单独配置时就是策略模型。"""
@@ -404,22 +411,26 @@ def build_survey_tools(
     *,
     include_survey: bool = True,
     include_producers: bool = True,
-    into: ToolRegistry | None = None,
+    session: RetrievalSession | None = None,
 ) -> ToolRegistry:
-    """注册全链路、取源、转换与六个检索算子，返回可直接交给 Agent 的工具表。
+    """注册全链路、取源、转换与七个检索算子，返回可直接交给 Agent 的工具表。
+
+    七个检索算子共用**一个** ``RetrievalSession``：会话既是语料缓存的入口，也是"本
+    会话已读过哪些 chunk"的账本。每个工具各建一个会话时，两件事都会坏——同一份语料
+    被解码七次，而 ``paper_chunk_read`` 的去重也只对它自己成立。
 
     ``paper_semantic_search`` 只在装配了编码器时注册：没有编码器时它会在每次调用
     时抛错，注册一个必然失败的工具只会诱导模型反复重试。
 
-    ``include_survey=False`` 去掉 ``paper_survey``，留给已经拿到 ``corpus_ref``、
-    只需要读语料的 Agent——把一个几分钟起步的工具摆在那里，模型迟早会去按它。
-    ``include_producers=False`` 连 ``paper_fetch`` / ``paper_markdown`` 一起去掉，
-    只留纯读算子：这两个也会下载和调模型，同样不该出现在只读语料的 Agent 面前。
+    ``include_survey=False`` 去掉 ``paper_survey``，``include_producers=False`` 再去掉
+    取源与转换，留给已经拿到 ``corpus_ref``、只需要读语料的 Agent——把一个几分钟起步
+    的工具摆在那里，模型迟早会去按它。
 
-    ``into`` 把工具并进调用方已有的注册表（重名由 ``ToolRegistry.register`` 报错），
-    用于给已经持有工作区工具的 Agent 追加检索能力。
+    ``session`` 可由调用方注入：会话记着"这个 Agent 真正打开过哪些论文"，而引用核验
+    需要那份账本（见 ``RetrievalSession.read_papers``）。不注入时自建一个，行为不变。
     """
-    tools = into if into is not None else ToolRegistry()
+    tools = ToolRegistry()
+    session = session if session is not None else RetrievalSession(stack.corpus_cache)
     if include_survey:
         tools.register(PaperSurveyTool(stack))
     if include_producers:
@@ -438,11 +449,14 @@ def build_survey_tools(
                 ghostscript=stack.ghostscript or None,
             )
         )
-    tools.register(PaperKeywordSearchTool(stack.artifacts))
-    tools.register(PaperChunkReadTool(stack.artifacts))
-    tools.register(PaperVisualOfTool(stack.artifacts))
-    tools.register(PaperCitesTool(stack.artifacts))
-    tools.register(PaperSectionSearchTool(stack.artifacts))
+    tools.register(PaperCorpusOverviewTool(stack.artifacts, session))
+    tools.register(PaperKeywordSearchTool(stack.artifacts, session))
+    tools.register(PaperChunkReadTool(stack.artifacts, session))
+    tools.register(PaperVisualOfTool(stack.artifacts, session))
+    tools.register(PaperCitesTool(stack.artifacts, session))
+    tools.register(PaperSectionSearchTool(stack.artifacts, session))
     if stack.embedder is not None:
-        tools.register(PaperSemanticSearchTool(stack.artifacts, stack.embedder))
+        tools.register(
+            PaperSemanticSearchTool(stack.artifacts, stack.embedder, session)
+        )
     return tools

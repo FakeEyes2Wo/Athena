@@ -29,6 +29,13 @@ class ResearchState(BaseModel):
     validation: dict[str, object] | None = None
     # PREPARE 产出的 EDA 工作区目录（Ideator 自行探索）；仅路径元数据，非 EDA 结果。
     eda_dir: str | None = None
+    # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用 paper_* 检索算子。
+    # 与其他引用一样落在本项目的 artifact store 里，换机器取不到时重跑即可。
+    corpus_ref: str | None = None
+    # 语料就绪之后是否已经补跑过一轮 ideation。调研要十几分钟，第一轮 ideation 几乎
+    # 必然早于它完成；而调度器只在"无假设可排"时才 GENERATE，短跑测里第一轮就把队列
+    # 填满，于是语料一次都读不到。这个标记让语料落地后补一轮，且只补一轮。
+    corpus_ideation_done: bool = False
     # Supervisor 在首个 task-understanding turn 产出的结构化任务理解（供 GUI 意图预览）。
     task_understanding: dict[str, object] | None = None
     # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用检索算子。

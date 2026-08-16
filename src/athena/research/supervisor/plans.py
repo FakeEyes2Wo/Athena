@@ -123,6 +123,9 @@ class PlanInput(BaseModel):
     tolerance: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     evaluator_ref: ArtifactRef
     tree_ref: ArtifactRef
+    # 冻结评估器的自述契约（HANDOFF.md 原文）。候选要写 predictions/，不给它这份东西
+    # 就只能猜列名和行集合——真机上基线因此交出了完全 join 不上的预测，判 0.0。
+    eval_handoff: str = ""
     human_context: str = ""
     initial_turn_limit: int | None = Field(default=None, ge=0)
     initial_patience: int | None = Field(default=None, ge=0)

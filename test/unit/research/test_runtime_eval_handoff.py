@@ -8,7 +8,8 @@ import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.research.runtime import ResearchRuntime
-from athena.research.agent_turn_runner import AgentTurnRunner, _read_eval_handoff
+from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.supervisor.experiment import read_eval_handoff
 
 _HANDOFF = "# Eval contract\n\npredictions/predictions.csv: header,id,target\n"
 
@@ -32,20 +33,20 @@ async def _freeze_bundle(store, *, include_handoff: bool) -> str:
 async def test_read_eval_handoff_returns_markdown(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     evaluator_ref = await _freeze_bundle(store, include_handoff=True)
-    assert await _read_eval_handoff(store, evaluator_ref) == _HANDOFF
+    assert await read_eval_handoff(store, evaluator_ref) == _HANDOFF
 
 
 @pytest.mark.asyncio
 async def test_read_eval_handoff_empty_when_absent(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     evaluator_ref = await _freeze_bundle(store, include_handoff=False)
-    assert await _read_eval_handoff(store, evaluator_ref) == ""
+    assert await read_eval_handoff(store, evaluator_ref) == ""
 
 
 @pytest.mark.asyncio
 async def test_read_eval_handoff_empty_when_no_ref(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
-    assert await _read_eval_handoff(store, None) == ""
+    assert await read_eval_handoff(store, None) == ""
 
 
 @pytest.mark.asyncio
@@ -55,7 +56,9 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
 
     runtime = ResearchRuntime.__new__(ResearchRuntime)
     runtime._store = store
-    runtime._supervisor = SimpleNamespace(evaluator_ref=evaluator_ref)
+    runtime._supervisor = SimpleNamespace(
+        evaluator_ref=evaluator_ref, state=SimpleNamespace(corpus_ref=None)
+    )
     runner = AgentTurnRunner(runtime)
 
     captured: dict[str, object] = {}
@@ -70,6 +73,79 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
         await runner._run_ideator_lane("ideator-1", 1, Path(tmp_path))
 
     request = captured["request"]
-    assert request["context_refs"], "eval_handoff context ref should be attached"
+    # content 是唯一到得了 model 的信道；ref 仍然留着，供事后审计与重放。
+    assert _HANDOFF.strip() in request["content"]
     payload = json.loads(await store.get_text(request["context_refs"][0]))
     assert payload == {"eval_handoff": _HANDOFF}
+
+
+@pytest.mark.asyncio
+async def test_the_prepare_baseline_is_handed_the_eval_contract(tmp_path) -> None:
+    """真机（2026-08-16 第 10 次）：基线交出的预测评估器根本 join 不上，判 0.0。
+
+    评估器写的 HANDOFF.md 已经把 ``__athena_row_id`` 与那 1200 行留出集讲得很清楚，
+    prepare 的提示词也写着"契约已作为 context 附上"——但代码从来没附。基线因此只能猜，
+    交出了 ``sample_id,probability,label_true`` 覆盖全部 6000 行。写 predictions 的
+    Agent 必须拿到契约。
+    """
+    from athena.research.supervisor import prepare as prepare_module
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    evaluator_ref = await _freeze_bundle(store, include_handoff=True)
+    seen: dict[str, object] = {}
+
+    class _Agents:
+        async def create_root(self, agent_type, request, *, agent_id=None, name=None):
+            seen["request"] = request
+            raise RuntimeError("stop after the first dispatch")
+
+    with pytest.raises(RuntimeError, match="stop after the first dispatch"):
+        await prepare_module.run_prepare_plan(
+            agents=_Agents(),
+            evaluator=SimpleNamespace(),
+            git=SimpleNamespace(),
+            workspace=SimpleNamespace(path=str(tmp_path / "ws")),
+            execution=SimpleNamespace(ensure_environment=lambda: None),
+            store=store,
+            evaluator_ref=evaluator_ref,
+            tree_ref=await store.put_text("{}"),
+            task="build a baseline",
+            max_turns=1,
+        )
+
+    # 必须在 content 里。base_runner 只把 trigger 的 content 当作 model 的 user
+    # prompt（input_text = trigger.content），context_refs 从来没有被解析回正文——
+    # 断言它出现在 refs 里等于什么都没验证。
+    assert _HANDOFF.strip() in seen["request"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_search_candidate_carries_the_eval_contract_in_its_plan_input(
+    tmp_path,
+) -> None:
+    """候选同样在写 predictions/，契约随 PlanInput 一起冻结给它。"""
+    from athena.research.supervisor.plans import PlanInput
+
+    plan_input = PlanInput(
+        evaluator_ref="sha256:" + "a" * 64,
+        tree_ref="sha256:" + "b" * 64,
+        eval_handoff=_HANDOFF,
+    )
+
+    restored = PlanInput.model_validate_json(plan_input.model_dump_json())
+
+    assert restored.eval_handoff == _HANDOFF
+    assert (
+        PlanInput(
+            evaluator_ref="sha256:" + "a" * 64, tree_ref="sha256:" + "b" * 64
+        ).eval_handoff
+        == ""
+    )
+
+
+def test_handoff_block_is_empty_when_there_is_no_contract() -> None:
+    from athena.research.supervisor.experiment import handoff_block
+
+    assert handoff_block("") == ""
+    assert handoff_block("   \n ") == ""
+    assert "row_id" in handoff_block("id column: row_id")

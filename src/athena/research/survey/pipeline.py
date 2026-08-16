@@ -357,6 +357,9 @@ class SurveyPipeline:
         self._conversion_keys: dict[str, str] = {}
         # 取源可以多要几篇垫底，转换不能——转换才是花钱的那一段
         self._convert_cap = request.max_papers
+        # 独立跑时事实全部落在 SurveyReport 里；接进 loop 后它是个十几分钟的后台任务，
+        # 没有逐段回报的话，外部无法区分"正在取第 7 篇"与"卡死了"。
+        self._emit = emit or _silent_emit
 
     async def run(self) -> SurveyReport:
         """执行全链路，返回逐篇结果与成本账。"""
@@ -811,6 +814,8 @@ class SurveyPipeline:
         return AgentContext(
             thread=thread,
             turn=turn,
+            # 检索是全链路里最慢的一段（实测约占墙钟 70%），PaperScout 自己的
+            # started/step/completed 事件是这段唯一的进度来源，必须往外传
             emit=self._emit,
             tools=ToolRegistry(),
             cancel=asyncio.Event(),

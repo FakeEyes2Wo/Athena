@@ -6,7 +6,9 @@
 
 import asyncio
 import json
+import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,15 +19,20 @@ from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
-from athena.research.contracts import DataScriptBundle
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
-from athena.research.supervisor.experiment import load_agent_result
+from athena.research.supervisor.experiment import (
+    handoff_block,
+    load_agent_result,
+    read_eval_handoff,
+)
 from athena.research.supervisor.plans import wait_run_events
 from athena.retrieval.web_search import WebFetchTool, WebSearchTool
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+logger = logging.getLogger(__name__)
 
 
 MAX_GATE_RETRIES = 2
@@ -60,31 +67,17 @@ def _regenerate_prompt(rejections: list[str], target: int) -> str:
     )
 
 
-async def _read_eval_handoff(
-    store: ArtifactStore, evaluator_ref: ArtifactRef | None
-) -> str:
-    """Read the evaluator ``HANDOFF.md`` from a frozen bundle (empty when absent)."""
-    if evaluator_ref is None:
-        return ""
-    try:
-        bundle = DataScriptBundle.model_validate_json(
-            await store.get_text(evaluator_ref)
-        )
-    except (ValueError, OSError):
-        return ""
-    if bundle.tree_ref is None:
-        return ""
-    try:
-        tree = json.loads(await store.get_text(bundle.tree_ref))
-    except (ValueError, OSError):
-        return ""
-    handoff_ref = tree.get("HANDOFF.md")
-    if not isinstance(handoff_ref, str):
-        return ""
-    try:
-        return await store.get_text(handoff_ref)
-    except (ValueError, OSError):
-        return ""
+@dataclass(frozen=True, slots=True)
+class IdeatorLaneResult:
+    """一条 Ideator lane 的产出：入图的假设 + 它请求的补充 EDA。
+
+    门禁会丢弃候选，所以"留下的假设"不再是 Agent 原始 batch 的子集对象，而
+    ``eda_request`` 又只存在于原始 batch 上——两者必须一起带出来，否则调用方要么
+    拿不到假设、要么拿不到 EDA 请求。
+    """
+
+    hypotheses: list[Hypothesis]
+    eda_request: str = ""
 
 
 class AgentTurnRunner:
@@ -174,6 +167,9 @@ class AgentTurnRunner:
                 artifacts=rt._store,
                 workspace=Path(eda_dir),
                 runtime=rt._execution,
+                # 惰性求值：ideator 只注册一次，而工具的可用性是随时间变的——语料要
+                # 十几分钟才建好，Kaggle 是否接入也取决于 Supervisor 后来的决定。传
+                # 一个已经求好值的 registry，等于把第一轮的可用性冻结到运行结束。
                 extra_tools=rt.ideator_tools(),
                 gated=getattr(rt, "_ideation", "ideageneration") == "ideageneration",
             )
@@ -185,6 +181,8 @@ class AgentTurnRunner:
         # 追加到上一轮同 lane 的开放消息上。
         self._ideator_round += 1
         round_label = self._ideator_round
+        # 引用核验按"本轮谁打开过哪几篇"判定，因此每轮先把上一轮的会话账本丢掉。
+        rt.start_corpus_round()
         events = getattr(rt, "_events_bus", None)
         if events is not None:
             events.set_ideator_lanes(len(allocations))
@@ -212,9 +210,8 @@ class AgentTurnRunner:
                 )
             else:
                 hypotheses.extend(result.hypotheses)
-                request = (result.eda_request or "").strip()
-                if request:
-                    eda_requests.append(request)
+                if result.eda_request:
+                    eda_requests.append(result.eda_request)
         # 动态 EDA：任一 lane 请求补充信息时，派发 Data Agent 在 EDA 目录上做
         # 增量分析并写回 report/figures。合并多 lane 请求为一次分析任务。
         if eda_requests:
@@ -299,8 +296,8 @@ class AgentTurnRunner:
 
     async def _run_ideator_lane(
         self, label: str, target: int, eda_dir: Path
-    ) -> HypothesisBatch:
-        """Run one independent Ideator and return its structured batch."""
+    ) -> IdeatorLaneResult:
+        """Run one independent Ideator and return what survived its quality gate."""
         rt = self._runtime
         content = (
             f"Inspect the EDA workspace at {eda_dir} without modifying any "
@@ -317,18 +314,19 @@ class AgentTurnRunner:
                 "hypothesis's sources field."
             )
         context_refs: list[ArtifactRef] = []
-        handoff = await _read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
+        handoff = await read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
         if handoff:
+            # 契约拼进 content。此前它只被塞进 context_refs 并在正文里声称"attached as
+            # context"——而 context_refs 到不了 model，那句话一直是空头支票。
             context_refs.append(
                 await rt._store.put_text(
                     json.dumps({"eval_handoff": handoff}, ensure_ascii=False)
                 )
             )
-            content += (
-                "\n\nThe evaluator contract (predictions directory layout and "
-                "scoring criteria) is attached as context; read it before "
-                "proposing hypotheses."
-            )
+            content += handoff_block(handoff)
+        corpus_ref = rt.survey_corpus_ref()
+        if corpus_ref is not None:
+            content += await self._corpus_block(corpus_ref)
         request = {"content": content, "context_refs": context_refs}
         agent_id, run_id = await rt._agents.create_root("ideator", request, name=label)
         gated = getattr(rt, "_ideation", "ideageneration") == "ideageneration"
@@ -361,13 +359,16 @@ class AgentTurnRunner:
                             f"{attempt + 1} attempt(s); this lane yields nothing"
                         ),
                     )
-                return kept
+                # 只有 baseline 契约 ``HypothesisBatch`` 带 ``eda_request``；
+                # ``IdeatorHypothesisBatch`` 没有这个字段，门禁模式因此不请求补充 EDA。
+                request = getattr(batch, "eda_request", None) or ""
+                return IdeatorLaneResult(kept, request.strip())
 
             run_id = await rt._agents.followup(
                 agent_id,
                 {"content": _regenerate_prompt(rejections, target), "context_refs": []},
             )
-        return []
+        return IdeatorLaneResult([])
 
     async def _finish_ideator_batch(
         self,
@@ -383,7 +384,7 @@ class AgentTurnRunner:
         """
         rt = self._runtime
         if getattr(rt, "_ideation", "ideageneration") != "ideageneration":
-            return list(batch.hypotheses)
+            return await self._verify_sources(list(batch.hypotheses))
 
         async def progress(message: str) -> None:  # noqa: D401
             """把门禁进度投影成普通输出事件。
@@ -395,10 +396,79 @@ class AgentTurnRunner:
             if publish is not None:
                 await publish(source="agent", channel="text", text=f"gate> {message}")
 
-        return await run_light_pipeline(
+        kept = await run_light_pipeline(
             batch.hypotheses, model=rt._model, artifacts=rt._store, progress=progress,
             rejections=rejections,
         )
+        return await self._verify_sources(kept)
+
+    async def _corpus_block(self, corpus_ref: str) -> str:
+        """把语料目录直接摆进 prompt，而不是指望 Agent 自己去调 overview。
+
+        真机三次跑测里 Ideator **一次都没调过** ``paper_corpus_overview``，直接用泛词做
+        语义检索；第 12 次因此从没碰过语料里那三篇真正讲 AUC 的论文——而任务主指标就是
+        ROC-AUC。目录是纯索引读取（8 篇约 26 毫秒、1500 token），自己调一次比赌它会调
+        便宜得多，也让"语料里有什么"成为确定的输入而不是运气。
+        """
+        papers = ""
+        try:
+            summaries = await self._runtime.corpus_summaries()
+            papers = "\n".join(
+                f"- {item.paper_id} — {item.title.strip() or '(untitled)'}"
+                for item in summaries
+            )
+        except Exception:  # noqa: BLE001 - 目录读不出来不该拖垮 ideation
+            logger.warning("corpus overview unavailable for the lane", exc_info=True)
+        listing = f"\n\nIt holds these papers:\n{papers}" if papers else ""
+        return (
+            f"\n\nA literature corpus is available for this task "
+            f"(corpus_ref={corpus_ref!r}).{listing}\n\n"
+            "Use paper_semantic_search / paper_keyword_search to locate passages, then "
+            "**paper_chunk_read to actually read them** — pick the papers whose "
+            "subject matches this task's metric and data, not merely the topic. "
+            "A hypothesis's "
+            "`sources` must list only papers you opened with paper_chunk_read; "
+            "citations to papers you never read are dropped and earn nothing."
+        )
+
+    async def _verify_sources(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+        """只保留本轮**真正打开过正文**的论文，其余引用一律丢弃。
+
+        ``ranker.rubric_prior`` 给"有引用"加 0.3（在总分里占 0.12），也就是说凭空写一个
+        paper id 就能让候选往前排。这条奖励只有在引用可核验时才成立，否则它奖励的是幻觉。
+        校验必须在入图之前做——进了图就是排序的输入了。
+
+        **判据是"读过"，不是"在语料里"。** 第一版只查 id 是否存在于语料，真机（2026-08-16
+        第 12 次）证明那太松：Ideator 拿《数据增强综述》支持"两两交互特征"、拿《信用卡欺诈
+        检测综述》同时支持 target encoding 与 SMOTE，而语料里三篇真正讲 AUC 的论文一次都
+        没被引用。带引用和不带引用的假设提的是同一批干预——引用是事后贴的标签，不是想法的
+        来源。这些论文都在检索结果里出现过，只是从没被 ``paper_chunk_read`` 打开，所以
+        "读过"能拦住而"存在"拦不住。
+
+        没有语料时整段跳过：此时 ``sources`` 按 schema 本就该为空，不该顺手清掉别的来源
+        写进去的内容。
+        """
+        rt = self._runtime
+        if not await rt.corpus_paper_ids():
+            return hypotheses
+        opened = rt.corpus_papers_read()
+        verified: list[Hypothesis] = []
+        dropped = 0
+        for hypothesis in hypotheses:
+            kept = [source for source in hypothesis.sources if source in opened]
+            dropped += len(hypothesis.sources) - len(kept)
+            verified.append(hypothesis.model_copy(update={"sources": kept}))
+        if dropped:
+            await rt.publish_output(
+                source="agent",
+                channel="error",
+                text=(
+                    f"dropped {dropped} citation(s) to papers this round never opened; "
+                    "cite only what you read with paper_chunk_read — a paper that "
+                    "merely appeared in search results is not evidence"
+                ),
+            )
+        return verified
 
     async def _run_debate_ideator_turn(self, count: int) -> list[Hypothesis]:
         """Run the debate-based Ideator (proposal -> review -> revision -> judge).

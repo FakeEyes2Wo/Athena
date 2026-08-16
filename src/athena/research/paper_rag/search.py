@@ -1,16 +1,33 @@
 """A-RAG 检索与遍历算子的实现，与工具边界分离以便直接单测。
 
 两类算子：**检索**（关键词、语义）按内容找入口，**遍历**（图文互链、引用、章节）沿已
-有的类型化边走一步。全部算子共享一个 ``RetrievalSession``：它缓存已解码的语料，避
-免每次工具调用重复解析大 artifact，同时记录本会话已整篇读过的 chunk。
+有的类型化边走一步。
+
+装载状态分两层，因为它们的共享范围本来就不同：``CorpusCache`` 持有解码后的只读语料，
+按 ``corpus_ref`` 在进程内共享；``RetrievalSession`` 持有"本会话已整篇读过哪些 chunk"，
+按 Agent 各自独立。合成一个对象时，几条并行的 Ideator lane 要么各解一份 1 GB 级的
+语料，要么互相吃掉对方的正文。
 """
 
-import json
+import asyncio
 from dataclasses import dataclass
 
+import numpy
+
 from athena.core.contracts import ArtifactRef
-from athena.research.paper_rag.index import LETTER_RUN, normalize
-from athena.research.paper_rag.schemas import ChunkRead, PaperCorpusIndex, SearchHit
+from athena.research.paper_rag.index import (
+    LETTER_RUN,
+    decode_json_vectors,
+    normalize,
+    unpack_vectors,
+)
+from athena.research.paper_rag.schemas import (
+    ChunkRead,
+    CorpusOverview,
+    PaperCorpusIndex,
+    PaperSummary,
+    SearchHit,
+)
 from athena.core.contracts import ArtifactStore
 
 MAX_SNIPPET_CHARS = 600
@@ -18,21 +35,72 @@ SENTENCE_POOL_FACTOR = 8
 SELF_CONTAINED_TOKENS = 5
 TRAVERSAL_SNIPPET_SENTENCES = 3
 ALREADY_READ_NOTICE = "This chunk has been read before."
+ABSTRACT_KIND = "abstract"
+# 一次总览要同时装下几十篇论文，预算按"够判断值不值得读"给，不是按"读懂"给：44 篇真实
+# 语料下整份结果约 25 KB，摘要放到 400 字符则要 37 KB，多出来的部分不改变任何取舍。
+OVERVIEW_ABSTRACT_CHARS = 280
+OVERVIEW_SECTIONS = 10
+
+# 章节别名：论文之间对"同一个部分"的叫法不统一，而按字面子串匹配会让跨论文对比这个
+# 算子存在的理由落空。实测 44 篇真实语料里 ``Limitations`` 只命中 3 篇、``Ablation``
+# 7 篇——不是这些论文不讨论局限与消融，是它们把内容放在别的标题下面。
+SECTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "limitation": ("limitation", "threats to validity", "shortcoming", "failure case"),
+    "ablation": (
+        "ablation",
+        "component analysis",
+        "sensitivity analysis",
+        "factor analysis",
+    ),
+    "related work": ("related work", "background", "prior work", "literature"),
+    "experiment": ("experiment", "empirical", "evaluation", "results"),
+    "conclusion": ("conclusion", "concluding", "summary and outlook"),
+    "discussion": ("discussion", "analysis and discussion"),
+    "method": ("method", "methodology", "approach", "our model", "proposed"),
+    "dataset": ("dataset", "data set", "data collection", "corpus", "benchmark"),
+}
+
+
+def heading_variants(heading: str) -> tuple[str, ...]:
+    """把一个章节名展开成实际去匹配的若干写法。
+
+    按"组内任一写法出现在查询里"来选组，而不是要求查询与某个写法字面相等：``Limitations``
+    要能选中以 ``limitation`` 为词根的那一组，``Ablation Studies`` 同理。查询本身始终留
+    在返回值里，因此未登记的章节名原样匹配——这层别名只放宽命中范围，从不改变语义。
+
+    一个查询命中多组时取先声明的那组（如 ``dataset limitations``）；这种混合标题本来
+    就没有唯一正确答案，取第一组至少是确定的。
+    """
+    wanted = heading.lower().strip()
+    for aliases in SECTION_ALIASES.values():
+        if any(alias in wanted for alias in aliases):
+            return (wanted, *aliases)
+    return (wanted,)
 
 
 @dataclass(slots=True)
 class LoadedCorpus:
-    """解码后的语料：索引本体、句向量、自足度权重、以及 chunk_id 到位置的映射。
+    """解码后的语料：索引本体、chunk_id 映射、反向引用索引、以及按需装载的句向量。
 
     ``cited_by`` 是引用边的反向索引，装载时构建一次：正向"这个 chunk 引了谁"直接读
     ``entry.cited_ids`` 即可，反向"谁引了这篇"要遍历全部条目，每次查询重算不合算。
+    ``lowered`` 是正文的小写副本，关键词检索每次查询都要用；不预算的话每次查询都要
+    重新小写一遍全语料（实测 4.5 MB 正文 25 ms/次）。
+
+    ``vectors``/``weights`` 只有语义检索需要，因此默认为空——关键词检索、整篇读取与
+    三个遍历算子都不该为一份用不到的向量矩阵付装载代价。
     """
 
     index: PaperCorpusIndex
-    vectors: list[list[float]]
-    weights: list[float]
     positions: dict[str, int]
     cited_by: dict[str, list[str]]
+    lowered: list[str]
+    vectors: numpy.ndarray | None = None
+    weights: numpy.ndarray | None = None
+
+    def has_vectors(self) -> bool:
+        """本语料是否已装载句向量。"""
+        return self.vectors is not None
 
 
 def self_contained_weight(text: str) -> float:
@@ -49,46 +117,91 @@ def self_contained_weight(text: str) -> float:
     return min(1.0, len(LETTER_RUN.findall(text)) / SELF_CONTAINED_TOKENS)
 
 
-class RetrievalSession:
-    """三个检索工具共享的会话状态。
+class CorpusCache:
+    """进程级语料缓存：同一 ``corpus_ref`` 只解码一次，多个 Agent 会话共用一份。
 
-    语料索引按 ``corpus_ref`` 缓存，同一引用只解析一次；已读集合让重复
-    ``paper_chunk_read`` 退化为零成本回执，既省上下文也促使 Agent 去探索新的 chunk。
+    解码结果是纯只读数据，因此可以共享；共享是必需的而不是优化——一份 44 篇论文的
+    语料，句向量解码后常驻百 MB 级，三条并行的 Ideator lane 各解一份没有余量。
+
+    每个 ``corpus_ref`` 一把锁：两条 lane 同时首次访问同一语料时，第二条等第一条解
+    完直接命中缓存，而不是各解一遍。
     """
 
     def __init__(self) -> None:
         self._corpora: dict[str, LoadedCorpus] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def load(
+        self, store: ArtifactStore, corpus_ref: ArtifactRef, *, vectors: bool = False
+    ) -> LoadedCorpus:
+        """载入并缓存语料；``vectors=True`` 时额外装载句向量与自足度权重。"""
+        lock = self._locks.setdefault(corpus_ref, asyncio.Lock())
+        async with lock:
+            corpus = self._corpora.get(corpus_ref)
+            if corpus is None:
+                corpus = await _decode_corpus(store, corpus_ref)
+                self._corpora[corpus_ref] = corpus
+            if vectors and not corpus.has_vectors():
+                await _attach_vectors(store, corpus)
+            return corpus
+
+
+async def _decode_corpus(store: ArtifactStore, corpus_ref: ArtifactRef) -> LoadedCorpus:
+    """解析索引本体并预算好每次查询都要用的派生结构（不含句向量）。"""
+    index = PaperCorpusIndex.model_validate_json(await store.get_text(corpus_ref))
+    cited_by: dict[str, list[str]] = {}
+    for entry in index.entries:
+        for target in entry.cited_ids:
+            cited_by.setdefault(target, []).append(entry.chunk_id)
+    return LoadedCorpus(
+        index=index,
+        positions={
+            entry.chunk_id: position for position, entry in enumerate(index.entries)
+        },
+        cited_by=cited_by,
+        lowered=[entry.text.lower() for entry in index.entries],
+    )
+
+
+async def _attach_vectors(store: ArtifactStore, corpus: LoadedCorpus) -> None:
+    """装载句向量与自足度权重；未建向量的语料留空，由语义检索明确报错。"""
+    index = corpus.index
+    if index.embedding_ref is None:
+        return
+    if index.embedding_format == "float32":
+        corpus.vectors = unpack_vectors(await store.get_bytes(index.embedding_ref))
+    else:
+        # 1.0 语料：磁盘上仍是 JSON 文本，解析一次后与新格式共用同一种内存表示
+        corpus.vectors = await asyncio.to_thread(
+            decode_json_vectors, await store.get_text(index.embedding_ref)
+        )
+    corpus.weights = numpy.fromiter(
+        (
+            self_contained_weight(index.sentence_text(position))
+            for position in range(len(index.sentences))
+        ),
+        dtype=numpy.float32,
+        count=len(index.sentences),
+    )
+
+
+class RetrievalSession:
+    """一个 Agent 的检索会话：共享的语料缓存 + 自己的已读集合。
+
+    已读集合让重复 ``paper_chunk_read`` 退化为零成本回执，既省上下文也促使 Agent 去
+    探索新的 chunk。它必须按 Agent 独立：共享会让第二条 lane 因为第一条读过而拿不到
+    正文。缺省自带一个私有 ``CorpusCache``，供单测与单 Agent 场景直接使用。
+    """
+
+    def __init__(self, cache: CorpusCache | None = None) -> None:
+        self._cache = cache or CorpusCache()
         self._read: set[str] = set()
 
-    async def load(self, store: ArtifactStore, corpus_ref: ArtifactRef) -> LoadedCorpus:
-        """载入并缓存语料；未建向量的语料不会去读句向量，也不会算自足度权重。"""
-        cached = self._corpora.get(corpus_ref)
-        if cached is not None:
-            return cached
-        index = PaperCorpusIndex.model_validate_json(await store.get_text(corpus_ref))
-        vectors: list[list[float]] = []
-        weights: list[float] = []
-        if index.embedding_ref is not None:
-            vectors = json.loads(await store.get_text(index.embedding_ref))
-            weights = [
-                self_contained_weight(index.sentence_text(position))
-                for position in range(len(index.sentences))
-            ]
-        cited_by: dict[str, list[str]] = {}
-        for entry in index.entries:
-            for target in entry.cited_ids:
-                cited_by.setdefault(target, []).append(entry.chunk_id)
-        loaded = LoadedCorpus(
-            index=index,
-            vectors=vectors,
-            weights=weights,
-            positions={
-                entry.chunk_id: position for position, entry in enumerate(index.entries)
-            },
-            cited_by=cited_by,
-        )
-        self._corpora[corpus_ref] = loaded
-        return loaded
+    async def load(
+        self, store: ArtifactStore, corpus_ref: ArtifactRef, *, vectors: bool = False
+    ) -> LoadedCorpus:
+        """经共享缓存载入语料；``vectors=True`` 只由语义检索传。"""
+        return await self._cache.load(store, corpus_ref, vectors=vectors)
 
     def was_read(self, chunk_id: str) -> bool:
         """本会话内是否已整篇读过该 chunk。"""
@@ -97,6 +210,80 @@ class RetrievalSession:
     def mark_read(self, chunk_id: str) -> None:
         """登记一次整篇读取。"""
         self._read.add(chunk_id)
+
+    def read_papers(self) -> set[str]:
+        """本会话真正打开过正文的论文集合，用于核验假设的 ``sources``。
+
+        判据刻意取"整篇读过"而不是"检索命中过"。真机（2026-08-16 第 12 次）里 Ideator
+        把一篇《数据增强综述》引来支持"两两交互特征"、把一篇《信用卡欺诈检测综述》同时
+        引来支持 target encoding 和 SMOTE——这些论文都在检索结果里出现过，只是从没被
+        打开。按命中算就拦不住这种贴标签式引用；按读过算才能。
+        """
+        return {paper_namespace(chunk_id) for chunk_id in self._read}
+
+
+def corpus_overview(
+    corpus: LoadedCorpus, paper_ids: list[str], limit: int
+) -> CorpusOverview:
+    """列出语料里有哪些论文，每篇给标题、摘要开头、可用章节名与 chunk 数。
+
+    这是 Agent 拿到 ``corpus_ref`` 之后唯一不需要先知道点什么的入口。其余七个算子都
+    要求先有关键词、查询、chunk id 或章节名——没有本算子，第一步只能瞎猜。它同时是
+    ``sources`` 的合法取值来源：这里列出的 ``paper_id`` 就是可以引用的键。
+
+    纯索引读取：不调模型、不访网络、不碰句向量。
+    """
+    index = corpus.index
+    allowed = {item for item in paper_ids if item}
+    grouped: dict[str, list[int]] = {}
+    for position, entry in enumerate(index.entries):
+        if allowed and entry.paper_id not in allowed:
+            continue
+        grouped.setdefault(entry.paper_id, []).append(position)
+    return CorpusOverview(
+        papers=len({entry.paper_id for entry in index.entries}),
+        chunks=len(index.entries),
+        semantic_search=index.embedding_ref is not None,
+        embedding_model=index.embedding_model,
+        summaries=[
+            _paper_summary(corpus, paper_id, positions)
+            for paper_id, positions in list(grouped.items())[:limit]
+        ],
+    )
+
+
+def corpus_paper_ids(corpus: LoadedCorpus) -> set[str]:
+    """语料里真实存在的 paper id；是"这条引用是不是编的"唯一的判据。"""
+    return {entry.paper_id for entry in corpus.index.entries if entry.paper_id}
+
+
+def _paper_summary(
+    corpus: LoadedCorpus, paper_id: str, positions: list[int]
+) -> PaperSummary:
+    """按一篇论文的 chunk 位置组装门面；锚点优先摘要，与索引里的引用落点同一规则。"""
+    entries = corpus.index.entries
+    anchor = next(
+        (position for position in positions if entries[position].kind == ABSTRACT_KIND),
+        positions[0],
+    )
+    sections: list[str] = []
+    for position in positions:
+        path = entries[position].heading_path
+        if path and path[0] not in sections:
+            sections.append(path[0])
+    text = entries[anchor].text.strip()
+    return PaperSummary(
+        paper_id=paper_id,
+        title=entries[anchor].title,
+        anchor_chunk_id=entries[anchor].chunk_id,
+        abstract=(
+            text
+            if len(text) <= OVERVIEW_ABSTRACT_CHARS
+            else text[:OVERVIEW_ABSTRACT_CHARS].rstrip() + " …"
+        ),
+        chunks=len(positions),
+        sections=sections[:OVERVIEW_SECTIONS],
+    )
 
 
 def join_snippet(sentences: list[str]) -> str:
@@ -128,24 +315,68 @@ def make_hit(
     )
 
 
+def score_by_keywords(
+    corpus: LoadedCorpus, terms: list[str]
+) -> list[tuple[float, int]]:
+    """按 ``Σ 词频 × 关键词长度`` 给每个命中 chunk 打分，得分降序、同分按 chunk 序。"""
+    scored = [
+        (float(sum(lowered.count(term) * len(term) for term in terms)), position)
+        for position, lowered in enumerate(corpus.lowered)
+    ]
+    hits = [item for item in scored if item[0] > 0.0]
+    hits.sort(key=lambda item: (-item[0], item[1]))
+    return hits
+
+
+def rotate_by_paper(
+    corpus: LoadedCorpus, scored: list[tuple[float, int]], limit: int
+) -> list[tuple[float, int]]:
+    """按论文轮转分配名额：每篇先出最高分的一条，再出第二条。
+
+    与 ``section_search`` 同一条纪律，理由也一样。实测（44 篇语料，query
+    "false positive rate range / specificity / restricted"）：67 个 chunk 命中、
+    来自 17 篇论文，而按全局得分直排时 **10 个名额有 9 个被同一篇吃掉**——一篇临床
+    论文反复把 specificity 当指标名用。真正该出的那篇，最高分 chunk 排在全局第 17
+    位，正好落在 k=10 之外；轮转后它排第 5。
+    """
+    by_paper: dict[str, list[tuple[float, int]]] = {}
+    for item in scored:
+        by_paper.setdefault(corpus.index.entries[item[1]].paper_id, []).append(item)
+    order = sorted(by_paper, key=lambda paper: (-by_paper[paper][0][0], paper))
+    rounds = max((len(group) for group in by_paper.values()), default=0)
+    return [
+        by_paper[paper][index]
+        for index in range(rounds)
+        for paper in order
+        if index < len(by_paper[paper])
+    ][:limit]
+
+
 def keyword_search(
     corpus: LoadedCorpus, keywords: list[str], limit: int
 ) -> list[SearchHit]:
     """按 ``Σ 词频 × 关键词长度`` 给 chunk 打分，长关键词更具体因而权重更高。
 
     匹配不区分大小写，以便实体名在正文与标题的不同写法下都能命中。
+
+    多词关键词按**字面子串**匹配，因此没有逐字出现过的短语一条都命中不了；实测 27 条
+    自然多词关键词里 7 条（26%）返回空，而这 7 条拆成单词后全部有结果。``Wasserstein
+    ball`` 命中 0、``wasserstein`` 命中 5，且全在那篇讲它的论文里。整组关键词颗粒无收
+    时因此退到词级重试一次——对 Agent 而言"语料里没有"与"你的措辞没逐字出现"是两回事，
+    而当前接口把后者伪装成前者。
+
+    名额按论文轮转，见 ``rotate_by_paper``。
     """
     terms = [keyword.lower() for keyword in keywords if keyword.strip()]
-    scored: list[tuple[float, int]] = []
-    for position, entry in enumerate(corpus.index.entries):
-        lowered = entry.text.lower()
-        score = float(sum(lowered.count(term) * len(term) for term in terms))
-        if score > 0.0:
-            scored.append((score, position))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    scored = score_by_keywords(corpus, terms)
+    if not scored:
+        tokens = [token for term in terms for token in term.split() if token]
+        if len(tokens) > len(terms):
+            terms = tokens
+            scored = score_by_keywords(corpus, terms)
 
     hits: list[SearchHit] = []
-    for score, position in scored[:limit]:
+    for score, position in rotate_by_paper(corpus, scored, limit):
         entry = corpus.index.entries[position]
         matched = [
             corpus.index.sentence_text(sentence)
@@ -168,21 +399,22 @@ def semantic_search(
 
     余弦相似度按 ``self_contained_weight`` 折算后再排序，实词寥寥的片段不会仅凭向量方向
     集中就压过真正回答查询的正文句。
+
+    打分走 numpy 矩阵乘：逐句纯 Python 点积在 36920 句 × 1024 维的真实语料上要 1.9 秒，
+    同一次计算 numpy 用 2.8 毫秒。排序仍按"得分降序、同分按句序"，与逐句实现一致。
     """
-    query = normalize(query_vector)
-    scores = [
-        corpus.weights[position]
-        * sum(left * right for left, right in zip(query, vector))
-        for position, vector in enumerate(corpus.vectors)
-    ]
-    pool = sorted(
-        (position for position, score in enumerate(scores) if score > 0.0),
-        key=lambda position: -scores[position],
-    )[: max(limit, 1) * SENTENCE_POOL_FACTOR]
+    if corpus.vectors is None or corpus.weights is None:
+        return []
+    query = numpy.asarray(normalize(query_vector), dtype=numpy.float32)
+    scores = corpus.weights * (corpus.vectors @ query)
+    positive = numpy.flatnonzero(scores > 0.0)
+    # positive 本身升序，稳定排序因此让同分句按句序在前，与逐句实现的结果一致
+    order = numpy.argsort(-scores[positive], kind="stable")
+    pool = positive[order][: max(limit, 1) * SENTENCE_POOL_FACTOR]
 
     # pool 已按得分降序，因此每个 chunk 的首个句子就是它的最高分句
     grouped: dict[int, list[int]] = {}
-    for sentence in pool:
+    for sentence in pool.tolist():
         grouped.setdefault(corpus.index.sentences[sentence].entry_index, []).append(
             sentence
         )
@@ -192,7 +424,7 @@ def semantic_search(
         make_hit(
             corpus,
             position,
-            scores[sentences[0]],
+            float(scores[sentences[0]]),
             join_snippet([corpus.index.sentence_text(s) for s in sorted(sentences)]),
         )
         for position, sentences in ranked
@@ -299,8 +531,11 @@ def section_search(
     **轮转是这个算子的要点，不是修饰。** 一篇论文的 Ablation 往往被切成十几个 chunk，
     按得分直排会让名额被一篇吃光——实测 `Ablation` 一度返回 10 条却只覆盖 1 篇论文，
     而该算子存在的理由正是跨论文对比。轮转后每篇先出一条，再出第二条。
+
+    章节名先经 ``heading_variants`` 展开成同义写法（见 ``SECTION_ALIASES``）：论文之间
+    对同一部分的叫法不统一，按字面子串匹配会让大多数论文因为标题措辞不同而落选。
     """
-    wanted = heading.lower().strip()
+    variants = heading_variants(heading)
     allowed = {item for item in paper_ids if item}
     by_paper: dict[str, list[tuple[float, int]]] = {}
     for position, entry in enumerate(corpus.index.entries):
@@ -310,7 +545,7 @@ def section_search(
             (
                 level
                 for level, name in enumerate(entry.heading_path)
-                if wanted in name.lower()
+                if any(variant in name.lower() for variant in variants)
             ),
             None,
         )

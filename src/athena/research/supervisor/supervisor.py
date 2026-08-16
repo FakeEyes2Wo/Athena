@@ -19,7 +19,9 @@ from athena.research.supervisor.experiment import (
     PlanTurnResult,
     decide_settlement,
     load_agent_result,
+    handoff_block,
     load_best,
+    read_eval_handoff,
 )
 from athena.research.supervisor.plans import (
     PlanDecision,
@@ -264,6 +266,7 @@ class Supervisor(SupervisorActions):
             tolerance=self._tolerance,
             evaluator_ref=self._evaluator_ref,
             tree_ref=tree_ref,
+            eval_handoff=await read_eval_handoff(self._store, self._evaluator_ref),
             human_context="\n".join(guidance),
             initial_turn_limit=hypothesis.turn_limit,
             initial_patience=hypothesis.patience,
@@ -644,11 +647,46 @@ class Supervisor(SupervisorActions):
         await self._wake.wait()
         return not self._stopped
 
+    async def _plan_handoff(self, plan_id: str) -> str:
+        """取该 Plan 冻结时记下的评估契约；取不到就返回空串，不影响这一轮。"""
+        try:
+            return (await self.plan_input(plan_id)).eval_handoff
+        except (KeyError, OSError, ValueError):
+            return ""
+
+    async def _corpus_ideation(self) -> bool:
+        """语料落地后补一轮 ideation，让调研的产出真的被读到。
+
+        非阻塞设计（SEARCH 绝不为调研停等）本身没问题，但它单独并不成立：调度器只在
+        "没有假设可排"时才 GENERATE，而第一轮 ideation 几乎必然早于调研完成——真机实测
+        语料就绪比第一轮 ideation 晚约两分钟，那一轮把队列填满之后调度器再没需要生成，
+        于是十几分钟的调研成果一次都没被读到，6 条假设 0 条引用语料。
+
+        补的这一轮不动实验预算：它只往队列里加候选，跑几个仍由 ``search_limit`` 决定。
+        只补一轮，``corpus_ideation_done`` 落在持久化状态里，续跑不会重复补。
+        """
+        if self.state.corpus_ref is None or self.state.corpus_ideation_done:
+            return False
+        if self._run_ideator_turn is None:
+            # 没有 Ideator 就没有"读语料的那一步"，标记掉避免每轮重试。
+            self.state.corpus_ideation_done = True
+            await self._persist_state()
+            return False
+        self.state.corpus_ideation_done = True
+        await self._persist_state()
+        hypotheses = await self._run_ideator_turn(self.state.hypotheses_per_ideator)
+        if self._stopped:
+            return False
+        registered = await self.register_hypotheses(hypotheses)
+        return len(registered["hypothesis_ids"]) > 0
+
     async def _fill_slots(self) -> bool:
         """Apply Scheduler actions until all available slots are accounted for."""
         if self._stopped:
             return False
-        generated = False
+        generated = await self._corpus_ideation()
+        if self._stopped:
+            return generated
         actions = self._scheduler.next_actions(
             self.state,
             self.tree,
@@ -710,6 +748,8 @@ class Supervisor(SupervisorActions):
                         f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
                         f"turn limit: {state.turn_limit}; patience: {state.patience}; "
                         f"stale rounds: {state.stale_rounds}."
+                        # 候选要按契约写 predictions/，而 context_refs 到不了 model。
+                        + handoff_block(await self._plan_handoff(plan_id))
                     ),
                     "context_refs": [state.context_ref],
                 },

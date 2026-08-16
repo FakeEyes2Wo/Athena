@@ -1,5 +1,6 @@
 """Narrow one-Agent PREPARE phase execution."""
 
+import csv
 import json
 import subprocess
 from pathlib import Path
@@ -18,7 +19,12 @@ from athena.core.workspace import (
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
-from athena.research.supervisor.experiment import PlanRunner, load_agent_result
+from athena.research.supervisor.experiment import (
+    PlanRunner,
+    handoff_block,
+    load_agent_result,
+    read_eval_handoff,
+)
 from athena.research.supervisor.plans import (
     PlanDecision,
     PlanInput,
@@ -45,11 +51,39 @@ class PrepareResult(BaseModel):
     report_ref: ArtifactRef
 
 
+ROW_ID_COLUMN = "__athena_row_id"
+
+
 def _workspace_output(root: Path, rel: str) -> Path:
     try:
         return resolve_workspace_path(root, rel)
     except ValueError as exc:
         raise ValueError(f"output path escapes workspace: {rel}") from exc
+
+
+def _require_joinable_labels(labels_file: Path) -> None:
+    """``labels.csv`` 必须带 id 列，否则预测与标签只能按位置对齐。
+
+    真实跑测（2026-08-16）：agent 交上来的 labels.csv 只有一列 ``label``（1200 行
+    留出集），候选交的是 6000 行 ``row_id,probability``，而 evaluate.py 把两边截到较
+    短长度后逐位比较。**每个候选都恒定得到 AUC≈0.502**——同一份预测按 row_id 正确
+    join 是 0.8668。SEARCH 于是跑完全程、给出自信而无意义的判决。
+
+    没有 id 列时 join 在结构上就不可能，因此这是能在冻结前静态判掉的必要条件。它不
+    充分：带了 id 列仍可以写成按位置对齐。那一层由 evaluator prompt 的 shuffle 自检
+    负责，运行期的判别性检查见 docs/evaluator_contract_ch.md。
+    """
+    with labels_file.open(encoding="utf-8-sig", newline="") as handle:
+        header = next(csv.reader(handle), [])
+    columns = [name.strip() for name in header if name.strip()]
+    if len(columns) < 2:
+        raise ValueError(
+            f"labels.csv must carry a row-id column named {ROW_ID_COLUMN!r} next to "
+            f"the target so predictions can be joined by id, but its header is "
+            f"{columns or ['<empty>']}. Rewrite it as "
+            f"'{ROW_ID_COLUMN},<target>' and make evaluate.py join on that column "
+            "instead of comparing the two files row by row."
+        )
 
 
 async def _freeze_evaluator(
@@ -98,6 +132,8 @@ async def _freeze_evaluator(
             "eval labels are missing: labels.csv or a non-empty labels/ dir must "
             f"sit next to the eval script (same directory as {evaluator_rel!r})"
         )
+    if labels_file.is_file() and labels_file.stat().st_size:
+        _require_joinable_labels(labels_file)
     bundle = await scripts.freeze(evaluator_root, BundleMetadata(entrypoint=entrypoint))
     return await store.put_text(bundle.model_dump_json())
 
@@ -224,9 +260,14 @@ async def run_prepare_plan(
             ensure_ascii=False,
         )
     )
+    # 基线也在写 predictions/，所以它必须先知道评估器要什么格式。不给的话它只能瞎猜
+    # 列名和行集合——真机上就交出了 ``sample_id,probability,label_true`` 覆盖全部 6000
+    # 行，而评估器要 ``__athena_row_id`` 与 1200 行留出集，直接判 0.0。
+    # 契约拼进 content：context_refs 到不了 model（见 ``handoff_block``）。
+    content = task + handoff_block(await read_eval_handoff(store, evaluator_ref))
     agent_id, run_id = await agents.create_root(
         "prepare",
-        {"content": task, "context_refs": [context_ref]},
+        {"content": content, "context_refs": [context_ref]},
         agent_id=PREPARE_AGENT_ID,
         name=PREPARE_PLAN_ID,
     )

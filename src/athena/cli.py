@@ -11,6 +11,7 @@ from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
+from athena.research.runtime import DEFAULT_SURVEY_PAPERS
 from athena.research.survey import (
     SurveyRequest,
     build_survey_stack,
@@ -61,7 +62,7 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "direction": args.direction or "maximize",
         "ideation": args.ideation,
         "survey": args.survey,
-        "survey_query": args.survey_query,
+        "survey_query": args.survey_query or "",
         "survey_max_papers": args.survey_papers,
     }
 
@@ -129,17 +130,27 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     renderer = _EventRenderer()
 
     def receive(kind: str, payload: dict[str, object]) -> None:
+        """先判终态再渲染：控制流不能挂在"打印成功"这个前提上。
+
+        真实跑测（2026-08-16）：Agent 输出里一个 ✅ 让 ``print`` 在 GBK 控制台上抛
+        ``UnicodeEncodeError``，异常在 ``terminal.set()`` 之前就把 ``receive`` 打断，
+        于是一次已经 FAILED 的运行继续挂到 ``--timeout`` 才退出（实测挂了 25 分钟仍
+        在跑）。渲染是尽力而为的旁支，失败只该少一行日志。
+        """
         nonlocal exit_code
-        renderer.render(kind, payload)
-        if kind != "state":
-            return
-        status = payload.get("status")
-        phase = payload.get("phase")
-        if status == "STOPPED" or phase == "COMPLETED":
-            terminal.set()
-        elif status == "FAILED":
-            exit_code = 1
-            terminal.set()
+        if kind == "state":
+            status = payload.get("status")
+            phase = payload.get("phase")
+            if status == "STOPPED" or phase == "COMPLETED":
+                terminal.set()
+            elif status == "FAILED":
+                exit_code = 1
+                terminal.set()
+        try:
+            renderer.render(kind, payload)
+        except (UnicodeEncodeError, ValueError):
+            # UnicodeEncodeError：终端编码装不下某个字符；ValueError：未知事件种类。
+            print(f"[unrenderable {kind} event]", file=sys.stderr, flush=True)
 
     subscription_id = runtime.subscribe(receive)
     try:
@@ -362,6 +373,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Ideator (proposal -> review -> revision -> judge)"
         ),
     )
+    # 默认关：一次调研是十几分钟的模型往返，不能由默认值替用户决定花这笔钱。
     run.add_argument(
         "--survey",
         action="store_true",
@@ -377,8 +389,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--survey-papers",
-        type=int,
-        default=10,
+        type=_non_negative_int,
+        default=DEFAULT_SURVEY_PAPERS,
         help="进入语料的论文篇数；成本大致随它线性增长",
     )
     _add_survey_parser(subparsers)
@@ -504,7 +516,20 @@ def _add_kaggle_parser(subparsers) -> None:
     kaggle.add_argument("--out", default="", help="把报告 JSON 写到该路径")
 
 
+def _make_output_encodable() -> None:
+    """把 stdout/stderr 切成 UTF-8，装不下的字符退化成替代符而不是抛异常。
+
+    Windows 上重定向后的 stdout 默认是 GBK，Agent 正文里的 ✅/中文标点会让 ``print``
+    直接抛 ``UnicodeEncodeError``。这里只影响本进程的输出编码，不改任何业务行为。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _make_output_encodable()
     parser = _build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     return asyncio.run(_dispatch_command(args))

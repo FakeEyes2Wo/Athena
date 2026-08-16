@@ -43,6 +43,7 @@ async def test_ideator_turn_runs_actual_lane_count_concurrently_and_merges_in_or
     tmp_path,
 ) -> None:
     runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._corpus_sessions = []
     runtime._provider = object()
     runtime._state = SimpleNamespace(
         eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
@@ -123,6 +124,7 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
     tmp_path,
 ) -> None:
     runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._corpus_sessions = []
     runtime._provider = object()
     runtime._state = SimpleNamespace(
         eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
@@ -158,6 +160,7 @@ async def test_ideator_turn_keeps_every_generated_hypothesis_without_truncation(
     tmp_path,
 ) -> None:
     runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._corpus_sessions = []
     runtime._provider = object()
     runtime._state = SimpleNamespace(
         eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
@@ -191,6 +194,7 @@ async def test_ideator_turn_resolves_relative_eda_dir_against_project_root(
     tmp_path,
 ) -> None:
     runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._corpus_sessions = []
     runtime._provider = object()
     runtime._root = tmp_path
     workspace = tmp_path / "workspaces" / "eda"
@@ -222,6 +226,7 @@ async def test_ideator_turn_resolves_relative_eda_dir_against_project_root(
 async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
     """任一 Ideator lane 请求补充 EDA 时，触发 Data Agent 写回 EDA 目录。"""
     runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._corpus_sessions = []
     runtime._provider = object()
     runtime._root = tmp_path
     runtime._state = SimpleNamespace(
