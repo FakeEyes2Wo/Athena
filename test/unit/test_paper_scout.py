@@ -16,6 +16,8 @@ from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext
 from athena.research.paper_scout.agent import PaperScoutAgent, dispatch_tool_calls
 from athena.research.paper_scout.backends import (
+    ARXIV_MAX_RESULTS,
+    SEMANTIC_SCHOLAR_MAX_RESULTS,
     SEMANTIC_SCHOLAR_FIELDS,
     ArxivSearchBackend,
     BackendError,
@@ -123,7 +125,7 @@ class StubTransport:
         self.routes = routes
         self.urls: list[str] = []
 
-    async def get(self, url: str, headers: dict) -> HttpResponse:
+    async def get(self, url: str, headers: dict | None = None) -> HttpResponse:
         self.urls.append(url)
         for marker, response in self.routes.items():
             if marker in url:
@@ -1320,3 +1322,40 @@ class DecisionTokenTest(unittest.TestCase):
         )
 
         self.assertEqual(0.0, true_probability(logprobs))
+
+
+class BackendLimitTest(unittest.IsolatedAsyncioTestCase):
+    """两个后端的返回上限必须夹紧，而不是把超限的值原样透传。"""
+
+    async def test_semantic_scholar_clamps_instead_of_failing_the_whole_channel(
+        self,
+    ) -> None:
+        """超限不是被截断而是整个请求失败。
+
+        实测 ``limit=150`` 时 ``/paper/search`` 返回非 2xx，本层抛 ``BackendError``、
+        该次动作返回 0 篇——于是一个配得过高的 ``search_top_k`` 会让整条 S2 通道静默
+        消失，只剩 arXiv，而失败长得像"这个查询没搜到东西"。
+        """
+        transport = StubTransport(
+            {"api.semanticscholar.org": HttpResponse(
+                status=200, url="s2", body=b'{"data": []}', headers={})}
+        )
+        backend = SemanticScholarBackend(transport, None)
+
+        await backend.search("q", 500, "")
+
+        self.assertIn(f"limit={SEMANTIC_SCHOLAR_MAX_RESULTS}", transport.urls[0])
+        self.assertNotIn("limit=500", transport.urls[0])
+
+    async def test_arxiv_clamps_too(self) -> None:
+        transport = StubTransport(
+            {"arxiv.org": HttpResponse(
+                status=200, url="arxiv",
+                body=b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>",
+                headers={})}
+        )
+        backend = ArxivSearchBackend(transport)
+
+        await backend.search("q", 500, "")
+
+        self.assertIn(f"max_results={ARXIV_MAX_RESULTS}", transport.urls[0])

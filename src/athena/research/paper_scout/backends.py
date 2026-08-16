@@ -30,7 +30,22 @@ SEMANTIC_SCHOLAR_FIELDS = (
     "isOpenAccess,openAccessPdf"
 )
 SEMANTIC_SCHOLAR_INTERVAL = 1.1
+
 ARXIV_MAX_RESULTS = 50
+"""arXiv 单次查询返回的上限。
+
+这是本仓库设的上限，也正好是 ``search_top_k`` 值得设成 50 的原因：实测把深度从 50 提到
+100，arXiv 返回的篇数一动不动（两条查询都是 50 篇），多出来的全部来自 Semantic Scholar。
+"""
+
+SEMANTIC_SCHOLAR_MAX_RESULTS = 100
+"""Semantic Scholar 单次检索的上限。
+
+**必须夹紧，因为超限不是被截断而是整个请求失败。** 实测 ``limit=150`` 时
+``/paper/search`` 返回非 2xx，本层抛 ``BackendError``、该次动作返回 0 篇——于是一个
+配得过高的 ``search_top_k`` 会让整条 S2 通道静默消失，只剩 arXiv，而失败长得像"这个
+查询没搜到东西"。
+"""
 
 
 class BackendError(RuntimeError):
@@ -172,7 +187,11 @@ class SemanticScholarBackend:
 
     async def search(self, query: str, limit: int, cutoff: str) -> list[ScoutPaper]:
         """执行一次 Semantic Scholar 相关性搜索。"""
-        params = {"query": query, "limit": limit, "fields": SEMANTIC_SCHOLAR_FIELDS}
+        params = {
+            "query": query,
+            "limit": min(limit, SEMANTIC_SCHOLAR_MAX_RESULTS),
+            "fields": SEMANTIC_SCHOLAR_FIELDS,
+        }
         response = await self.http.get(
             f"{SEMANTIC_SCHOLAR_SEARCH}?{urllib.parse.urlencode(params)}",
             self._headers(),
