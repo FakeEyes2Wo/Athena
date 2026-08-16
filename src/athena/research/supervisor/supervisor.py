@@ -377,6 +377,8 @@ class Supervisor(SupervisorActions):
         """
         if self.state.phase == "SEARCH":
             await self.run_search()
+            if self._stopped:
+                return
             if self._auto_validate:
                 await self._transition_phase("VALIDATE")
             elif self._search_limit_reached() and self.state.status == "RUNNING":
@@ -590,6 +592,13 @@ class Supervisor(SupervisorActions):
         """Run rolling SEARCH scheduling."""
         self._stopped = False
         while not self._stopped:
+            if self.state.status != "RUNNING":
+                # 暂停/等待人工决策：不再派发新 turn，直到 /resume 或选择操作唤醒。
+                self._wake.clear()
+                await self._wake.wait()
+                if self._stopped:
+                    return
+                continue
             generated = await self._fill_slots()
             if not self._running:
                 if generated:
@@ -865,6 +874,7 @@ class Supervisor(SupervisorActions):
         self._agents.resume()
         self.state.status = "RUNNING"
         await self._persist_state()
+        self._wake.set()
         self._spawn_search()
         return self.state.status
 
@@ -878,6 +888,7 @@ class Supervisor(SupervisorActions):
     async def stop(self) -> None:
         """Stop scheduling and interrupt every locally owned Plan turn."""
         self._stopped = True
+        self._wake.set()
         for plan_id in tuple(self._running):
             try:
                 await self._agents.interrupt(plan_id, "supervisor_stopped")
