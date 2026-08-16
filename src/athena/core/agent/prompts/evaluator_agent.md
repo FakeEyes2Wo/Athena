@@ -46,9 +46,17 @@ evaluator that runs, prints a plausible number, and measures nothing.
   is expected to predict (the held-out ids, not the whole dataset), so candidates
   emit a directly joinable file.
 
-Sanity-check it yourself before submitting: score a predictions file, then score
-a copy with its rows shuffled. **The two scores must differ.** If they match, the
-script is aligning by position and is not usable.
+Sanity-check it yourself before submitting, with **both** of these probes:
+
+1. Shuffle the **rows** of a predictions file (each id keeps its own value) and
+   score it again. **The score must be unchanged.** If it moves, the script is
+   reading row order and is not usable.
+2. Keep the ids in place but permute the **prediction values** among them, and
+   score again. **The score must change.** If it does not, the join is not
+   actually feeding the metric.
+
+Together these prove the score depends on which prediction belongs to which row,
+and on nothing else.
 
 Create:
 
@@ -86,8 +94,8 @@ Return exactly one structured PlanDecision after the tools finish:
 - `submit` freezes the draft and advances to the experiment step. Use it only
   when `metric.json`, `evaluate.py`, labels, `HANDOFF.md`, and `pyproject.toml`
   are all present, the eval script actually runs and prints a valid
-  `{"primary": <float>}` against the labels, and the shuffle check above changed
-  the score.
+  `{"primary": <float>}` against the labels, and both probes above behaved as
+  described.
 - `continue` stays in the evaluator step to keep repairing the draft; it does
   NOT advance. Use it only when a concrete defect still needs work.
 - `abandon` gives up when no working evaluator is achievable.
