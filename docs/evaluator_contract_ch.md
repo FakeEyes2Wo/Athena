@@ -113,14 +113,46 @@ Agent 自己写出来的 evaluator：
 | 行打乱（id 与值一起移动） | 0.882326 | 不变 → 确实按 id join |
 | 值在 id 之间打乱 | 0.474217 | 变化 → join 确实喂给了指标 |
 
-## 五、还没做：把判别性检查搬进平台
+## 五、契约必须走 content，`context_refs` 到不了 model
+
+严格化之后第一次复跑，基线直接判 0.0——不是评估器的错，是**候选侧根本没看到契约**。
+
+写 `predictions/` 的有三类 Agent：PREPARE 的基线、每个 SEARCH 候选、以及提假设时要参考
+格式的 Ideator。此前只有 Ideator 那条路"附了"契约，而且是附进 `context_refs`：
+
+```python
+input_text = trigger.content if trigger is not None else ""   # base_runner
+```
+
+`base_runner` 只把 trigger 的 **content** 当作 model 的 user prompt。`context_refs` 从
+来没有被解析回正文——它只在"未读 mailbox 消息"那条路径上被拼成信封，拼的还是 ref 字符
+串而不是内容。**这是一条死信道。**
+
+真机（2026-08-16 第 11 次）证据：
+
+- Ideator 的整条 user prompt 只有 374 字符，末尾写着 "The evaluator contract … is
+  attached as context; read it before proposing hypotheses"——契约一个字都不在里面。
+  这句空头支票在 main 上已经存在很久。
+- PREPARE 的日志前几轮里 `__athena_row_id` / `eval_handoff` 一次都没出现，基线因此交出
+  `id,probability` 覆盖全部 6000 行。
+
+反过来说，Ideator 之所以真能用上语料，恰恰因为 `corpus_ref` 那段是拼进 **content** 的。
+
+现在 `handoff_block()` 把契约拼成一段带边界标记的正文，三个入口都走 content。
+`context_refs` 仍然照留，供事后审计与重放，只是不再假装它能送达。
+
+> **对测试的教训**：旧用例断言的是"ref 出现在 `context_refs` 里"。它在真机全线失效的整
+> 段时间里一直是绿的——因为它验证的是数据被放进了一个没人读的字段。断言要落在**能改变
+> model 行为的那个字段**上。
+
+## 六、还没做：把判别性检查搬进平台
 
 上节两个探针目前写在 prompt 里，靠的是模型自觉。真正牢靠的做法是冻结后由平台自己跑一
 遍。没有立刻做，是因为它需要平台知道预测文件的列名与格式，而那恰恰是当前契约没有规定
 死的部分——先把契约收紧，再谈自动验证。做这一步时应当同时把预测格式固定成
 `__athena_row_id,prediction`，与 `init_agent.md` 的既有约定合并。
 
-## 六、为什么这条值得单独立一篇
+## 七、为什么这条值得单独立一篇
 
 其他缺陷的失败是响亮的：崩溃、卡死、预算耗尽。这一条**安静地成功**——SEARCH 跑完，
 research tree 里躺着状态齐全的实验记录，REFUTED/INCONCLUSIVE 一应俱全，而它们全部没有
