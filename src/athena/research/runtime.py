@@ -529,6 +529,27 @@ class ResearchRuntime:
             self.state.save(self._state_path)
         return self.settings()
 
+    def _recent_user_texts(self, limit: int = 6) -> list[str]:
+        """Return recent Human messages from the persisted session transcript.
+
+        断点续传后 ``_task_text`` 可能只是“继续/重试”这类短句；任务理解需要
+        把之前的人类消息一并交给 Supervisor，否则会退化成一片 Unknown。
+        """
+        try:
+            records = self.replay_output_events()
+        except Exception:
+            logger.warning("failed to replay session transcript", exc_info=True)
+            return []
+        texts = [
+            record.get("text")
+            for record in records
+            if isinstance(record, dict)
+            and record.get("type") == "user"
+            and isinstance(record.get("text"), str)
+            and record.get("text", "").strip()
+        ]
+        return texts[-limit:]
+
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.
 
@@ -541,13 +562,23 @@ class ResearchRuntime:
         self._agents.start()
         # 任务理解：让 SupervisorAgent 在 PREPARE 之前读一遍任务，自行决定是否
         # 经 ``configure_kaggle`` 接入 Kaggle 工具。失败只降级为默认关闭，不阻断。
+        # 断点续传时把最近的人类消息一起带上，短句 follow-up 也能沿用旧上下文。
         if (
             self._provider is not None
             and self.state.phase == "PREPARE"
             and self._task_text.strip()
         ):
+            context = self._task_text
+            prior = self._recent_user_texts()
+            if prior:
+                context = (
+                    "Previous conversation:\n"
+                    + "\n".join(f"- {text}" for text in prior)
+                    + "\n\nCurrent task text:\n"
+                    + self._task_text
+                )
             try:
-                await self._agent_turns.run_supervisor_turn(self._task_text)
+                await self._agent_turns.run_supervisor_turn(context)
             except Exception:
                 logger.warning(
                     "supervisor task-understanding turn failed; Kaggle tools stay off",

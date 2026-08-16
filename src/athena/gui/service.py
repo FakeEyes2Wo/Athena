@@ -53,6 +53,30 @@ class GuiService:
     async def stop(self) -> dict[str, Any]:
         return {"status": await self._runtime.message("/stop")}
 
+    def _recent_user_texts(self, limit: int = 6) -> list[str]:
+        """Return recent Human messages from the persisted session transcript.
+
+        断点续传后，当前消息往往只是“继续/重试”之类的短句；只用它做任务理解会
+        退化成一堆 Unknown。把之前的人类消息一起给模型，任务理解才能沿用上下文。
+        """
+        replay = getattr(self._runtime, "replay_output_events", None)
+        if replay is None:
+            return []
+        try:
+            records = replay()
+        except Exception:
+            logger.warning("failed to replay session transcript", exc_info=True)
+            return []
+        texts = [
+            record.get("text")
+            for record in records
+            if isinstance(record, dict)
+            and record.get("type") == "user"
+            and isinstance(record.get("text"), str)
+            and record.get("text", "").strip()
+        ]
+        return texts[-limit:]
+
     async def parse_intent(self, message: str) -> dict[str, Any]:
         """Produce a supervisor-style task understanding from a research task.
 
@@ -60,18 +84,21 @@ class GuiService:
         task type / primary metric / evaluation plan). Falls back to a keyword
         heuristic when no API key is configured or the LLM call fails, so the GUI
         keeps working in a degraded mode.
+
+        断点续传：当前消息会追加进会话日志，并把最近几条 Human 消息一并交给模型，
+        让“继续/重试”这类短消息也能沿用之前对话里的数据集/目标/指标。
         """
         # 断点续传：先把用户消息写入会话日志，重开目录后能还原完整对话。
         self._runtime.persist_user_message(message)
+        context = self._recent_user_texts()
         try:
             client = settings.get_client()
             model = settings.model_name()
+            chat_messages = [{"role": "system", "content": _TASK_UNDERSTANDING_SYSTEM}]
+            chat_messages.extend({"role": "user", "content": text} for text in context)
             response = await client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": _TASK_UNDERSTANDING_SYSTEM},
-                    {"role": "user", "content": message},
-                ],
+                messages=chat_messages,
                 response_format={"type": "json_object"},
                 extra_body={"thinking": {"type": "disabled"}},
             )
@@ -83,6 +110,10 @@ class GuiService:
             ).model_dump(mode="json")
         except Exception:
             logger.warning("LLM task understanding failed; falling back to heuristic", exc_info=True)
+            state = getattr(self._runtime, "state", None)
+            existing = getattr(state, "task_understanding", None)
+            if isinstance(existing, dict) and existing:
+                return existing
             return _heuristic_understanding(message)
 
     async def start_search(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -299,7 +330,9 @@ class TaskUnderstanding(BaseModel):
 
 _TASK_UNDERSTANDING_SYSTEM = (
     "You are the research supervisor producing a task understanding for an ML research task. "
-    "Return a JSON object with exactly these keys:\n"
+    "The user messages below are a conversation; the last message may be a short follow-up "
+    "or retry instruction. Infer the task understanding from the earlier messages when the "
+    "last message is not self-contained. Return a JSON object with exactly these keys:\n"
     '- "title": a short conversational title (at most 12 words) naming the task;\n'
     '- "dataset": one line describing the dataset (path/name and expected shape);\n'
     '- "target": the target column and its type (e.g. "churned: binary label"), or "" if unknown;\n'
