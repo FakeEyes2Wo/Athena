@@ -47,8 +47,12 @@ Create all artifacts needed for a trusted baseline:
   — note the double brackets around each command), and workspace-relative
   `outputs` for `predictions` (a directory, pointed to by `outputs.predictions`
   via its relative path) and `report` (a Markdown report file);
-- a non-empty `predictions/` directory (any number of files, any format)
-  matching the frozen evaluator contract, and a Markdown report output.
+- a non-empty `predictions/` directory whose files match the frozen evaluator
+  contract **exactly** — the contract names the id column your rows must carry
+  and which rows must appear. Do not invent your own column names or predict a
+  different row set: predictions that cannot be joined to the labels score zero,
+  and the baseline is what every later candidate is compared against. Also write
+  a Markdown report output.
 
 Install every third-party dependency (numpy, pandas, scikit-learn, ...) into
 the shared environment root, not into a workspace-local venv. The deterministic

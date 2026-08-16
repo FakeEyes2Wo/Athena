@@ -20,6 +20,7 @@ from athena.research.supervisor.experiment import (
     decide_settlement,
     load_agent_result,
     load_best,
+    read_eval_handoff,
 )
 from athena.research.supervisor.plans import (
     PlanDecision,
@@ -264,6 +265,7 @@ class Supervisor(SupervisorActions):
             tolerance=self._tolerance,
             evaluator_ref=self._evaluator_ref,
             tree_ref=tree_ref,
+            eval_handoff=await read_eval_handoff(self._store, self._evaluator_ref),
             human_context="\n".join(guidance),
             initial_turn_limit=hypothesis.turn_limit,
             initial_patience=hypothesis.patience,

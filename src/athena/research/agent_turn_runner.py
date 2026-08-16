@@ -17,10 +17,9 @@ from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
-from athena.research.contracts import DataScriptBundle
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
-from athena.research.supervisor.experiment import load_agent_result
+from athena.research.supervisor.experiment import load_agent_result, read_eval_handoff
 from athena.research.supervisor.plans import wait_run_events
 from athena.retrieval.web_search import WebSearchTool
 
@@ -79,33 +78,6 @@ def _merged(*registries: ToolRegistry | None) -> ToolRegistry | None:
         for spec in registry.specs:
             merged.register(registry.resolve(spec.name))
     return merged
-
-
-async def _read_eval_handoff(
-    store: ArtifactStore, evaluator_ref: ArtifactRef | None
-) -> str:
-    """Read the evaluator ``HANDOFF.md`` from a frozen bundle (empty when absent)."""
-    if evaluator_ref is None:
-        return ""
-    try:
-        bundle = DataScriptBundle.model_validate_json(
-            await store.get_text(evaluator_ref)
-        )
-    except (ValueError, OSError):
-        return ""
-    if bundle.tree_ref is None:
-        return ""
-    try:
-        tree = json.loads(await store.get_text(bundle.tree_ref))
-    except (ValueError, OSError):
-        return ""
-    handoff_ref = tree.get("HANDOFF.md")
-    if not isinstance(handoff_ref, str):
-        return ""
-    try:
-        return await store.get_text(handoff_ref)
-    except (ValueError, OSError):
-        return ""
 
 
 class AgentTurnRunner:
@@ -326,7 +298,7 @@ class AgentTurnRunner:
             "metric. Return the hypotheses as structured output."
         )
         context_refs: list[ArtifactRef] = []
-        handoff = await _read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
+        handoff = await read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
         if handoff:
             context_refs.append(
                 await rt._store.put_text(

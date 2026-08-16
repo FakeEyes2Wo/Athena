@@ -44,6 +44,40 @@ _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
 _MAX_FIELD_NAME_CHARS = 40
 
 
+async def read_eval_handoff(
+    store: ArtifactStore, evaluator_ref: ArtifactRef | None
+) -> str:
+    """Read the evaluator ``HANDOFF.md`` from a frozen bundle (empty when absent).
+
+    冻结的评估器自带一份自述契约：预测该带哪个 id 列、该覆盖哪些行、怎么 join。
+    **写预测的那些 Agent 必须拿到它**——PREPARE 的基线与每个 SEARCH 候选都在写
+    ``predictions/``，而在 2026-08-16 第 10 次跑测之前只有 Ideator 收到过这份文件。
+    结果是基线交出 ``sample_id,probability,label_true`` 覆盖全部 6000 行，而评估器要
+    的是 ``__athena_row_id`` 与那 1200 行留出集，直接判 0.0。
+    """
+    if evaluator_ref is None:
+        return ""
+    try:
+        bundle = DataScriptBundle.model_validate_json(
+            await store.get_text(evaluator_ref)
+        )
+    except (ValueError, OSError):
+        return ""
+    if bundle.tree_ref is None:
+        return ""
+    try:
+        tree = json.loads(await store.get_text(bundle.tree_ref))
+    except (ValueError, OSError):
+        return ""
+    handoff_ref = tree.get("HANDOFF.md")
+    if not isinstance(handoff_ref, str):
+        return ""
+    try:
+        return await store.get_text(handoff_ref)
+    except (ValueError, OSError):
+        return ""
+
+
 def _validate_relative_path(path: str, label: str) -> None:
     """拒绝绝对路径、驱动器相对路径、空段与 ``..`` 逃逸的 workspace 相对路径。"""
     if os.path.isabs(path):
