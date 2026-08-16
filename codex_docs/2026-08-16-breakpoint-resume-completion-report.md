@@ -9,6 +9,7 @@ Implemented on `main`, commits:
 - `a8df535` — `fix(research): persist general agent id before waiting for its turn`.
 - `de9e3c0` — `refactor(research): flatten general worker resume branch`.
 - `358cb90` — `fix(research): backward-compatible resume state and logic review fixes`.
+- `20aaa44` — `fix(research): ten-pass logic review and simplification`.
 
 ## Changes
 
@@ -44,11 +45,12 @@ Implemented on `main`, commits:
 ## Verification evidence
 
 - Hermetic unit batch (state / thread_runtime / supervisor / runtime_settings /
-  breakpoint_resume): **60 passed**.
+  breakpoint_resume): **63 passed**.
 - Additional runtime batch (ideators / survey / eval-handoff / task-seeding):
   35 passed; the 2 remaining failures are pre-existing from the WIP baseline
   (`DataProfile` was removed from `athena.research.data_models` but the debate
-  ideator still lazily imports it), unrelated to these commits.
+  ideator still lazily imports it; the gated-batch test asserts the pre-WIP
+  `HypothesisBatch` shape), unrelated to these commits.
 - `python -m compileall` on all changed production modules: exit 0.
 - `scripts/check_code_style.py` on all changed production modules: exit 0
   (32 pre-existing R3 docstring advisories, non-blocking by design).
@@ -63,6 +65,27 @@ Implemented on `main`, commits:
   fail with the sandbox's documented named-pipe boundary
   (`_winapi.CreateNamedPipe` PermissionError) before reaching changed code; the
   new paths are covered by hermetic tests instead.
+
+## Ten-pass logic review and simplification (commit `20aaa44`)
+
+Pass 1 persistence layer: fixed inline+resume mixed-state migration gap and
+deleted the dead `resume_applied` flag.
+Pass 2 runtime task-text paths: no new defects; helper behavior verified.
+Pass 3 supervisor: normalize `task` before cache-key comparison; persist the
+cleared broken cache ref immediately so restarts don't re-hit it.
+Pass 4 agent turns: supervisor/data/general timeout now interrupt the still
+running worker (prevents permanent `AgentBusyError` wedge); data turn got the
+missing timeout; pre-wait checkpoint block simplified.
+Pass 5 phase/thread boundaries: evaluator reuse and rollback-only failure path
+re-verified, no change.
+Pass 6 single-writer consistency: remaining `_state` references only exist
+before `recover()` runs; authoritative `rt.state` used everywhere else.
+Pass 7 crash windows/compatibility: split-file, digest binding, inline
+migration covered by tests.
+Pass 8 test gaps: added broken-cache healing and timeout-interrupt tests.
+Pass 9 simplification: extracted `_interrupt_agent` (removes 12 duplicated
+lines), extracted `_merge_resume`, flattened `start()` understanding branch.
+Pass 10 end-to-end re-read and final verification (63 passed).
 
 ## Real-project replay
 
