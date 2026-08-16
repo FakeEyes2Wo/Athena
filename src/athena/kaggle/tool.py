@@ -38,24 +38,15 @@ def _schema(props: dict[str, str], *required: str) -> dict:
 
 def _notebook_ref(input: dict) -> str:
     """Accept either a notebook URL or an ``owner/slug`` ref."""
-    raw = (
-        input.get("notebook")
-        or input.get("ref")
-        or input.get("url")
-        or ""
-    )
-    value = str(raw).strip()
+    value = str(input.get("notebook") or input.get("ref") or input.get("url") or "").strip()
     if not value:
         raise ValueError("notebook must be a non-empty string")
-    if "kaggle.com/code/" in value:
-        parts = urllib.parse.urlsplit(value).path.strip("/").split("/")
-        if parts and parts[0] == "code":
-            parts = parts[1:]
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
-        if parts:
-            return parts[0]
-    return value
+    if "kaggle.com/code/" not in value:
+        return value
+    parts = urllib.parse.urlsplit(value).path.strip("/").split("/")
+    if "code" in parts:
+        parts = parts[parts.index("code") + 1:]
+    return "/".join(parts[:2]) or value
 
 
 class KaggleListCompetitionsTool(BaseTool):

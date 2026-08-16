@@ -197,40 +197,14 @@ class KaggleApiClient:
         return result if isinstance(result, list) else []
 
     async def get_notebook(self, ref: str) -> str:
-        """Pull a public notebook's source text by ``owner/slug`` ref.
-
-        The Kaggle API may answer with a JSON document whose ``source`` field
-        contains the notebook, or with a zip archive of notebook files. Both
-        shapes are unwrapped here into the first readable notebook source.
-        """
+        """Pull a public notebook's source text by ``owner/slug`` ref."""
         url = BASE_URL + "/kernels/pull?" + urllib.parse.urlencode({"kernel": ref})
         response = await self._http.get(url, self._auth_headers())
         if not response.ok:
             raise KaggleApiError(
                 response.status, _error_message(response), response.url
             )
-
-        try:
-            payload = json.loads(response.body.decode("utf-8"))
-            if isinstance(payload, dict):
-                source = payload.get("source")
-                if isinstance(source, str) and source.strip():
-                    return source
-                files = payload.get("files")
-                if isinstance(files, list) and files:
-                    first = files[0]
-                    if isinstance(first, dict) and first.get("url"):
-                        file_response = await self._http.get(
-                            str(first["url"]), self._auth_headers()
-                        )
-                        if file_response.ok:
-                            return file_response.body.decode(
-                                "utf-8", errors="replace"
-                            )
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-        return await asyncio.to_thread(_notebook_source_from_archive, response.body)
+        return await asyncio.to_thread(_notebook_source_from_body, response.body)
 
     async def _post(
         self, url: str, headers: dict[str, str], data: bytes
@@ -315,8 +289,16 @@ def _multipart_file(file_name: str, content: bytes, boundary: str) -> bytes:
     )
 
 
-def _notebook_source_from_archive(body: bytes) -> str:
-    """Unwrap the first notebook source from a zip archive, or decode as text."""
+def _notebook_source_from_body(body: bytes) -> str:
+    """Extract notebook source from a JSON ``source`` field, a zip archive, or raw text."""
+    try:
+        payload = json.loads(body.decode("utf-8"))
+        if isinstance(payload, dict):
+            source = payload.get("source")
+            if isinstance(source, str) and source.strip():
+                return source
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             names = archive.namelist()
@@ -324,8 +306,6 @@ def _notebook_source_from_archive(body: bytes) -> str:
                 for name in names:
                     if name.endswith(suffix):
                         return archive.read(name).decode("utf-8", errors="replace")
-            for name in names[:1]:
-                return archive.read(name).decode("utf-8", errors="replace")
     except (zipfile.BadZipFile, OSError):
         pass
     return body.decode("utf-8", errors="replace")
