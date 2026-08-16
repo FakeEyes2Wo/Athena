@@ -8,7 +8,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from athena.agents.data_agent import DATA_AGENT_ID, register_data_agent
 from athena.agents.general_agent import GeneralResult, register_general_agent
@@ -22,7 +22,7 @@ from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.plans import wait_run_events
-from athena.retrieval.web_search import WebFetchTool, WebSearchTool
+from athena.retrieval.web_search import WebFetchTool, WebSearchTool, WebSession
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -284,8 +284,11 @@ class AgentTurnRunner:
         if kaggle is not None:
             for spec in kaggle.specs:
                 registry.register(kaggle.resolve(spec.name))
-        registry.register(WebSearchTool())
-        registry.register(WebFetchTool())
+        # web_search 与 web_fetch 共享同一会话，使搜索结果 ref_id 可被
+        # web_fetch 直接打开/查找（对齐 Codex web.run 的 open/find）。
+        web_session = WebSession()
+        registry.register(WebSearchTool(session=web_session))
+        registry.register(WebFetchTool(session=web_session))
         return registry
 
     @staticmethod
