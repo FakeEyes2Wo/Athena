@@ -30,6 +30,9 @@ class ResearchState(BaseModel):
     eda_dir: str | None = None
     # Supervisor 在首个 task-understanding turn 产出的结构化任务理解（供 GUI 意图预览）。
     task_understanding: dict[str, object] | None = None
+    # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用检索算子。
+    # 与其他引用一样落在本项目的 artifact store 里，换机器取不到时重跑即可。
+    corpus_ref: str | None = None
 
     @model_validator(mode="after")
     def _validate_plan_keys(self) -> "ResearchState":

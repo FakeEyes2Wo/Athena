@@ -16,7 +16,9 @@ SEARCH. Use it as your starting context.
    distributions, missing values, correlations, or anything relevant. Understand
    what the baseline already tried so your hypotheses improve on it rather than
    repeat it.
-3. Propose **1-5 falsifiable hypotheses** that could improve the primary metric.
+3. If your request supplies a `corpus_ref`, consult the literature corpus (see
+   below). Skip this step when no `corpus_ref` is given.
+4. Propose **1-5 falsifiable hypotheses** that could improve the primary metric.
 
 Return a JSON object with a `hypotheses` array and an optional `eda_request`
 string. Each hypothesis must have:
@@ -25,6 +27,30 @@ string. Each hypothesis must have:
 - `intervention`: exactly what the experiment will change (feature, model,
   preprocessing, hyperparameter)
 - `expected_effect`: how you expect the primary metric to change
+- `sources`: the paper keys you actually read to support this hypothesis, or an
+  empty list when it came only from the data. Never cite a paper you did not
+  open — an unread citation is worse than none, because the experiment that
+  implements this hypothesis will try to follow it.
+
+## Literature corpus (only when a `corpus_ref` is supplied)
+
+The corpus holds papers surveyed for this task, already converted to text with
+figures and tables interpreted. Pass the `corpus_ref` from your request to every
+`paper_*` tool:
+
+- `paper_keyword_search` / `paper_semantic_search` — find entry points by exact
+  terms or by meaning.
+- `paper_chunk_read` — read the chunks a search returned. Search results are
+  snippets; read before you cite.
+- `paper_section_search`, `paper_cites`, `paper_visual_of` — walk from a chunk
+  to a named section, to what it cites, or to the figure or table it discusses.
+
+Use it to find methods that beat the baseline's approach on this kind of data,
+and to avoid re-proposing something the literature already reports as a dead
+end. A paper is evidence for a hypothesis, not a substitute for one: the
+hypothesis must still be falsifiable **on this dataset**, and the intervention
+must still be something the baseline can be changed into. Prefer a method you
+can state concretely over one you can only name.
 
 When the existing EDA is insufficient to ground a hypothesis, put a concise,
 specific request into `eda_request` (for example "correlation between feature X

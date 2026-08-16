@@ -60,6 +60,9 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
         "ideation": args.ideation,
+        "survey": args.survey,
+        "survey_query": args.survey_query,
+        "survey_max_papers": args.survey_papers,
     }
 
 
@@ -358,6 +361,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "that registers Ideator output as-is; 'debate' uses the debate-based "
             "Ideator (proposal -> review -> revision -> judge)"
         ),
+    )
+    run.add_argument(
+        "--survey",
+        action="store_true",
+        help=(
+            "跑一次文献调研，让 Ideator 除数据集外还能读论文。与 PREPARE 并行，"
+            "不占关键路径，但要花十几分钟的模型调用；默认关闭"
+        ),
+    )
+    run.add_argument(
+        "--survey-query",
+        default="",
+        help="文献检索式；留空则由研究任务提炼一句主题",
+    )
+    run.add_argument(
+        "--survey-papers",
+        type=int,
+        default=10,
+        help="进入语料的论文篇数；成本大致随它线性增长",
     )
     _add_survey_parser(subparsers)
     _add_kaggle_parser(subparsers)

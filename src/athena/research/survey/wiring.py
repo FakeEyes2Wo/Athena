@@ -352,6 +352,7 @@ def build_survey_stack(
     model: str = "",
     scorer_model: str = "",
     client: AsyncOpenAI | None = None,
+    artifacts: LocalArtifactStore | None = None,
     enable_embedder: bool = True,
     enable_vision: bool = True,
 ) -> SurveyStack:
@@ -360,10 +361,15 @@ def build_survey_stack(
     编码器与视觉模型各自需要一个模型名；对应环境变量缺失时该能力保持关闭而不是
     报错——链路在降级形态下仍然完整可跑，把它做成硬错误只会让首次接入寸步难行。
 
+    ``artifacts`` 给了就用调用方那份存储，``artifact_root`` 随之失效。宿主（例如
+    ``ResearchRuntime``）已经有自己的内容寻址存储时必须走这条路：``corpus_ref`` 要
+    和宿主记在同一份状态里的其他引用一起被解析，落在两个 store 里就会出现"状态里
+    记着、宿主取不到"。
+
     缺 LLM 凭据时由 ``settings.get_client()`` 抛错，不在这里重复判断。
     """
     resolved_client = build_client(client)
-    artifacts = build_artifact_store(artifact_root)
+    store = artifacts if artifacts is not None else build_artifact_store(artifact_root)
     contact = os.environ.get(CONTACT_EMAIL_ENV, "")
     http = HostRateLimiter(
         transport=UrllibTransport(),
@@ -377,9 +383,9 @@ def build_survey_stack(
         embedder = OpenAIEmbedder(resolved_client, embedding_model)
     interpreter = None
     if enable_vision and vision_model:
-        interpreter = VisionInterpreter(resolved_client, vision_model, artifacts)
+        interpreter = VisionInterpreter(resolved_client, vision_model, store)
     return SurveyStack(
-        artifacts=artifacts,
+        artifacts=store,
         client=resolved_client,
         model=resolve_model(model),
         http=http,
@@ -394,7 +400,11 @@ def build_survey_stack(
 
 
 def build_survey_tools(
-    stack: SurveyStack, *, include_survey: bool = True
+    stack: SurveyStack,
+    *,
+    include_survey: bool = True,
+    include_producers: bool = True,
+    into: ToolRegistry | None = None,
 ) -> ToolRegistry:
     """注册全链路、取源、转换与六个检索算子，返回可直接交给 Agent 的工具表。
 
@@ -403,25 +413,31 @@ def build_survey_tools(
 
     ``include_survey=False`` 去掉 ``paper_survey``，留给已经拿到 ``corpus_ref``、
     只需要读语料的 Agent——把一个几分钟起步的工具摆在那里，模型迟早会去按它。
+    ``include_producers=False`` 连 ``paper_fetch`` / ``paper_markdown`` 一起去掉，
+    只留纯读算子：这两个也会下载和调模型，同样不该出现在只读语料的 Agent 面前。
+
+    ``into`` 把工具并进调用方已有的注册表（重名由 ``ToolRegistry.register`` 报错），
+    用于给已经持有工作区工具的 Agent 追加检索能力。
     """
-    tools = ToolRegistry()
+    tools = into if into is not None else ToolRegistry()
     if include_survey:
         tools.register(PaperSurveyTool(stack))
-    tools.register(
-        PaperFetchTool(
-            stack.artifacts,
-            http=stack.http,
-            contact_email=stack.contact_email or None,
-            openalex_api_key=stack.openalex_api_key or None,
+    if include_producers:
+        tools.register(
+            PaperFetchTool(
+                stack.artifacts,
+                http=stack.http,
+                contact_email=stack.contact_email or None,
+                openalex_api_key=stack.openalex_api_key or None,
+            )
         )
-    )
-    tools.register(
-        PaperMarkdownTool(
-            stack.artifacts,
-            stack.visual_interpreter,
-            ghostscript=stack.ghostscript or None,
+        tools.register(
+            PaperMarkdownTool(
+                stack.artifacts,
+                stack.visual_interpreter,
+                ghostscript=stack.ghostscript or None,
+            )
         )
-    )
     tools.register(PaperKeywordSearchTool(stack.artifacts))
     tools.register(PaperChunkReadTool(stack.artifacts))
     tools.register(PaperVisualOfTool(stack.artifacts))

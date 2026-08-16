@@ -1,4 +1,4 @@
-﻿"""Agent turn execution for the research runtime (Supervisor / Ideator / General).
+"""Agent turn execution for the research runtime (Supervisor / Ideator / General).
 
 拆自 ``ResearchRuntime``：把"运行一个 Agent turn 并解包结构化结果"的逻辑
 集中到 ``AgentTurnRunner``。持有 ``runtime`` 引用访问组合根的共享基础设施。
@@ -151,7 +151,7 @@ class AgentTurnRunner:
                 artifacts=rt._store,
                 workspace=Path(eda_dir),
                 runtime=rt._execution,
-                extra_tools=rt.kaggle_tools("ideator"),
+                extra_tools=rt.ideator_tools(),
                 gated=getattr(rt, "_ideation", "ideageneration") == "ideageneration",
             )
         ideator_count = rt._state.ideator_count
@@ -284,6 +284,14 @@ class AgentTurnRunner:
             f"{target} falsifiable hypotheses that could improve the primary "
             "metric. Return the hypotheses as structured output."
         )
+        corpus_ref = rt.survey_corpus_ref()
+        if corpus_ref is not None:
+            content += (
+                f"\n\nA literature corpus is available for this task. "
+                f"Pass corpus_ref={corpus_ref!r} to the paper_* tools to search and "
+                "read it, and record the paper keys you actually used in each "
+                "hypothesis's sources field."
+            )
         context_refs: list[ArtifactRef] = []
         handoff = await _read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
         if handoff:

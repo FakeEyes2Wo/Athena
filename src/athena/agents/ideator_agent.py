@@ -8,6 +8,7 @@ premises/predictions/disconfirmers 的富结构）结构化输出一组假设。
 light_hard_gate，再由 ``Supervisor.register_hypotheses`` 写入图。
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 from athena.agents.prompt_agent import register_prompt_agent
@@ -29,7 +30,7 @@ def register_ideator_agent(
     artifacts: ArtifactStore,
     workspace: Path,
     runtime: ExecutionRuntime,
-    extra_tools: ToolRegistry | None = None,
+    extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
     gated: bool = True,
 ) -> None:
     """Register a fresh Ideator Agent factory bound to the EDA workspace.
