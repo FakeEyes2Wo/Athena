@@ -4,6 +4,7 @@
 分析由 prepare/ideator 等 agent 用自己的 workspace + shell 代码生成流程完成。
 """
 
+import urllib.parse
 from typing import TYPE_CHECKING
 
 from athena.core.tool import BaseTool
@@ -18,9 +19,12 @@ if TYPE_CHECKING:
 KAGGLE_LIST_COMPETITIONS = "kaggle_list_competitions"
 KAGGLE_GET_COMPETITION = "kaggle_get_competition"
 KAGGLE_LIST_NOTEBOOKS = "kaggle_list_notebooks"
+KAGGLE_GET_NOTEBOOK = "kaggle_get_notebook"
 KAGGLE_DOWNLOAD_DATA = "kaggle_download_data"
 KAGGLE_RUN = "kaggle_run"
 KAGGLE_SUBMIT = "kaggle_submit"
+
+MAX_NOTEBOOK_SOURCE_CHARS = 120_000
 
 
 def _schema(props: dict[str, str], *required: str) -> dict:
@@ -30,6 +34,28 @@ def _schema(props: dict[str, str], *required: str) -> dict:
         "properties": {name: {"type": typ} for name, typ in props.items()},
         "required": list(required),
     }
+
+
+def _notebook_ref(input: dict) -> str:
+    """Accept either a notebook URL or an ``owner/slug`` ref."""
+    raw = (
+        input.get("notebook")
+        or input.get("ref")
+        or input.get("url")
+        or ""
+    )
+    value = str(raw).strip()
+    if not value:
+        raise ValueError("notebook must be a non-empty string")
+    if "kaggle.com/code/" in value:
+        parts = urllib.parse.urlsplit(value).path.strip("/").split("/")
+        if parts and parts[0] == "code":
+            parts = parts[1:]
+        if len(parts) >= 2:
+            return f"{parts[0]}/{parts[1]}"
+        if parts:
+            return parts[0]
+    return value
 
 
 class KaggleListCompetitionsTool(BaseTool):
@@ -137,6 +163,7 @@ class KaggleListNotebooksTool(BaseTool):
         limit = max(1, min(_as_int(input.get("max_results"), 10), 50))
         items = [
             {
+                "ref": i.get("ref", ""),
                 "title": i.get("title", ""),
                 "author": author_name(i.get("author", "")),
                 "votes": pick_first(i, "totalVotes", "total_votes", default=0),
@@ -150,6 +177,35 @@ class KaggleListNotebooksTool(BaseTool):
             for i in raw[:limit]
         ]
         return ToolResult(data={"notebooks": items, "count": len(items)})
+
+
+class KaggleGetNotebookTool(BaseTool):
+    spec = ToolSpec(
+        name=KAGGLE_GET_NOTEBOOK,
+        description=(
+            "Read a public Kaggle notebook's full source (code + markdown). Pass the "
+            "notebook ref or url returned by kaggle_list_notebooks. Returns the source "
+            "text; it is truncated to the first "
+            f"{MAX_NOTEBOOK_SOURCE_CHARS} characters."
+        ),
+        input_schema=_schema({"notebook": "string"}, "notebook"),
+    )
+
+    def __init__(self, stack: "KaggleStack") -> None:
+        self.stack = stack
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        ref = _notebook_ref(input)
+        source = await self.stack.client.get_notebook(ref)
+        truncated = len(source) > MAX_NOTEBOOK_SOURCE_CHARS
+        return ToolResult(
+            data={
+                "notebook": ref,
+                "source": source[:MAX_NOTEBOOK_SOURCE_CHARS],
+                "truncated": truncated,
+                "length": len(source),
+            }
+        )
 
 
 class KaggleDownloadDataTool(BaseTool):

@@ -1,6 +1,8 @@
 """KaggleApiClient 的单元测试，用假传输避免触网。"""
 
+import io
 import json
+import zipfile
 from unittest import mock
 
 from athena.kaggle.auth import KaggleCredentials
@@ -52,6 +54,32 @@ async def test_download_competition_returns_paths(tmp_path) -> None:
     with mock.patch("kagglehub.competition_download", return_value=str(dest)):
         paths = await client.download_competition("x", dest)
     assert [p.name for p in paths] == ["train.csv"]
+
+
+async def test_get_notebook_returns_source_from_json() -> None:
+    http = FakeHttp(json.dumps({"source": "print('hello')"}).encode())
+    client = _client(http)
+
+    source = await client.get_notebook("owner/slug")
+
+    assert source == "print('hello')"
+    assert "kernel=owner%2Fslug" in http.url
+
+
+def _zip_notebook_source() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("notebook.ipynb", '{"cells": []}')
+    return buffer.getvalue()
+
+
+async def test_get_notebook_unwraps_zip_archive() -> None:
+    http = FakeHttp(_zip_notebook_source())
+    client = _client(http)
+
+    source = await client.get_notebook("owner/slug")
+
+    assert source == '{"cells": []}'
 
 
 async def test_non_2xx_raises_kaggle_api_error() -> None:

@@ -12,12 +12,14 @@ from athena.kaggle.client import KaggleApiClient
 from athena.kaggle.tool import (
     KAGGLE_DOWNLOAD_DATA,
     KAGGLE_GET_COMPETITION,
+    KAGGLE_GET_NOTEBOOK,
     KAGGLE_LIST_COMPETITIONS,
     KAGGLE_LIST_NOTEBOOKS,
     KAGGLE_RUN,
     KAGGLE_SUBMIT,
     KaggleDownloadDataTool,
     KaggleGetCompetitionTool,
+    KaggleGetNotebookTool,
     KaggleListCompetitionsTool,
     KaggleListNotebooksTool,
     KaggleRunTool,
@@ -75,6 +77,7 @@ _TOOL_FACTORIES = {
     KAGGLE_LIST_COMPETITIONS: KaggleListCompetitionsTool,
     KAGGLE_GET_COMPETITION: KaggleGetCompetitionTool,
     KAGGLE_LIST_NOTEBOOKS: KaggleListNotebooksTool,
+    KAGGLE_GET_NOTEBOOK: KaggleGetNotebookTool,
     KAGGLE_DOWNLOAD_DATA: KaggleDownloadDataTool,
     KAGGLE_RUN: KaggleRunTool,
     KAGGLE_SUBMIT: KaggleSubmitTool,
@@ -84,8 +87,8 @@ _TOOL_FACTORIES = {
 AGENT_KAGGLE_TOOLS: dict[str, tuple[str, ...]] = {
     "evaluator": (KAGGLE_GET_COMPETITION, KAGGLE_DOWNLOAD_DATA),
     "prepare": (KAGGLE_RUN,),
-    "ideator": (KAGGLE_LIST_NOTEBOOKS,),
-    "plan": (KAGGLE_LIST_NOTEBOOKS,),
+    "ideator": (KAGGLE_LIST_NOTEBOOKS, KAGGLE_GET_NOTEBOOK),
+    "plan": (KAGGLE_LIST_NOTEBOOKS, KAGGLE_GET_NOTEBOOK),
     "general": tuple(_TOOL_FACTORIES),
 }
 

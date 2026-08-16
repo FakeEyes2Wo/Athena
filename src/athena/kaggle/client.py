@@ -1,10 +1,12 @@
 """Kaggle API v1 客户端：元数据走 urllib GET，数据下载经 kagglehub，提交走两步 POST。"""
 
 import asyncio
+import io
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -194,6 +196,42 @@ class KaggleApiClient:
         result = await self.get_json("/kernels/list", params)
         return result if isinstance(result, list) else []
 
+    async def get_notebook(self, ref: str) -> str:
+        """Pull a public notebook's source text by ``owner/slug`` ref.
+
+        The Kaggle API may answer with a JSON document whose ``source`` field
+        contains the notebook, or with a zip archive of notebook files. Both
+        shapes are unwrapped here into the first readable notebook source.
+        """
+        url = BASE_URL + "/kernels/pull?" + urllib.parse.urlencode({"kernel": ref})
+        response = await self._http.get(url, self._auth_headers())
+        if not response.ok:
+            raise KaggleApiError(
+                response.status, _error_message(response), response.url
+            )
+
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+            if isinstance(payload, dict):
+                source = payload.get("source")
+                if isinstance(source, str) and source.strip():
+                    return source
+                files = payload.get("files")
+                if isinstance(files, list) and files:
+                    first = files[0]
+                    if isinstance(first, dict) and first.get("url"):
+                        file_response = await self._http.get(
+                            str(first["url"]), self._auth_headers()
+                        )
+                        if file_response.ok:
+                            return file_response.body.decode(
+                                "utf-8", errors="replace"
+                            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+        return await asyncio.to_thread(_notebook_source_from_archive, response.body)
+
     async def _post(
         self, url: str, headers: dict[str, str], data: bytes
     ) -> HttpResponse:
@@ -275,3 +313,19 @@ def _multipart_file(file_name: str, content: bytes, boundary: str) -> bytes:
         + content
         + f"\r\n--{boundary}--\r\n".encode()
     )
+
+
+def _notebook_source_from_archive(body: bytes) -> str:
+    """Unwrap the first notebook source from a zip archive, or decode as text."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            names = archive.namelist()
+            for suffix in (".ipynb", ".py"):
+                for name in names:
+                    if name.endswith(suffix):
+                        return archive.read(name).decode("utf-8", errors="replace")
+            for name in names[:1]:
+                return archive.read(name).decode("utf-8", errors="replace")
+    except (zipfile.BadZipFile, OSError):
+        pass
+    return body.decode("utf-8", errors="replace")
