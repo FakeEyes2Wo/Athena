@@ -304,6 +304,52 @@ async def test_prepare_scoring_failure_retries_without_agent_repair(
     assert agents.feedback == ["row ids do not align"]
 
 
+def _evaluator_draft(root: Path, labels_csv: str) -> None:
+    """最小可冻结 evaluator 草稿，labels.csv 内容由用例给定。"""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "labels.csv").write_text(labels_csv, encoding="utf-8")
+    (root / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (root / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_labels_without_a_row_id_column_never_freeze(tmp_path: Path) -> None:
+    """真实跑测（2026-08-16）：单列 labels.csv 让每个候选都恒定得 AUC≈0.502。
+
+    agent 交的 labels.csv 只有一列 ``label``（1200 行留出集），候选交的是 6000 行
+    ``row_id,probability``，evaluate.py 把两边截到较短长度后逐位比较——比的是毫不相干
+    的行。同一份预测按 row_id 正确 join 出来是 0.8668。没有 id 列时 join 在结构上就不
+    可能，所以这一条必须在冻结前拦下，而不是让 SEARCH 跑完全程给出无意义的判决。
+    """
+    evaluator_dir = tmp_path / "evaluator"
+    _evaluator_draft(evaluator_dir, "label\n0\n1\n")
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(ValueError, match="__athena_row_id"):
+        await _freeze_evaluator(
+            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        )
+
+
+@pytest.mark.asyncio
+async def test_labels_carrying_a_row_id_column_freeze_normally(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    evaluator_ref = await _freeze_evaluator(
+        root=evaluator_dir, scripts=_TreeScripts(store), store=store
+    )
+
+    bundle = DataScriptBundle.model_validate_json(await store.get_text(evaluator_ref))
+    assert "labels.csv" in json.loads(await store.get_text(bundle.tree_ref))
+
+
 @pytest.mark.asyncio
 async def test_freeze_evaluator_accepts_labels_directory_and_handoff(
     tmp_path: Path,

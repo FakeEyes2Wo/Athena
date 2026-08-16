@@ -26,6 +26,30 @@ from the real competition:
 
 Otherwise, when the task gives a local dataset path, proceed without Kaggle.
 
+## Every row must be joined by an explicit id — never by position
+
+This is the single most important rule here, because getting it wrong produces an
+evaluator that runs, prints a plausible number, and measures nothing.
+
+- `labels.csv` MUST carry a row-id column named `__athena_row_id` alongside the
+  target, i.e. `__athena_row_id,label`. The id is the row's position in the
+  original dataset file, so a candidate can reproduce it without guessing.
+- `evaluate.py` MUST join predictions to labels **on that id**. Never rely on row
+  order, and never truncate to the shorter of the two — `y_true[:n]` against
+  `y_pred[:n]` compares unrelated rows and yields a near-random score for every
+  candidate alike.
+- If a label id has no matching prediction, or a prediction names an id that is
+  not in the labels, that is an **error**: print `{"primary": 0.0}` and a short
+  diagnostic to stderr. Silently scoring the intersection hides a broken
+  candidate.
+- `HANDOFF.md` MUST state the id column name and exactly which rows a candidate
+  is expected to predict (the held-out ids, not the whole dataset), so candidates
+  emit a directly joinable file.
+
+Sanity-check it yourself before submitting: score a predictions file, then score
+a copy with its rows shuffled. **The two scores must differ.** If they match, the
+script is aligning by position and is not usable.
+
 Create:
 
 - a `metric.json` at the workspace root declaring the entrypoint, e.g.
@@ -38,11 +62,13 @@ Create:
   line `{"primary": <float>}` to stdout (nothing else). Read `labels` with a
   `__file__`-relative path and `predictions/` with a `predictions` relative
   path so the script stays correct inside the frozen bundle;
-- the ground-truth `labels.csv` (or a non-empty `labels/` directory);
+- the ground-truth `labels.csv` with its `__athena_row_id` column (or a non-empty
+  `labels/` directory);
 - a `HANDOFF.md` describing the eval contract: (a) the layout of the
-  `predictions/` directory and the format of each file in it (the setup
-  format), and (b) how the primary metric is computed and what counts as
-  correct vs. incorrect (the judgment criteria);
+  `predictions/` directory and the format of each file in it — including the
+  `__athena_row_id` column and which ids must appear (the setup format), and
+  (b) how the primary metric is computed and what counts as correct vs.
+  incorrect (the judgment criteria);
 - a `pyproject.toml` so the draft is a valid uv project (the freezer runs
   `uv lock`).
 
@@ -59,8 +85,9 @@ Return exactly one structured PlanDecision after the tools finish:
 
 - `submit` freezes the draft and advances to the experiment step. Use it only
   when `metric.json`, `evaluate.py`, labels, `HANDOFF.md`, and `pyproject.toml`
-  are all present and the eval script actually runs and prints a valid
-  `{"primary": <float>}` against the labels.
+  are all present, the eval script actually runs and prints a valid
+  `{"primary": <float>}` against the labels, and the shuffle check above changed
+  the score.
 - `continue` stays in the evaluator step to keep repairing the draft; it does
   NOT advance. Use it only when a concrete defect still needs work.
 - `abandon` gives up when no working evaluator is achievable.

@@ -14,6 +14,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [代码规范](代码规范.md) | current | 导入/注释/异常/格式/测试约定 |
 | [结构化输出与工具调用](agent_structured_output_ch.md) | current | `response_format` 与工具互斥、schema 注入、围栏剥离 |
 | [真机跑测暴露的 loop 失效模式](loop_failure_modes_ch.md) | current | lane 契约、CLI 终态、修复反馈可执行性、环境自检 |
+| [Evaluator 契约](evaluator_contract_ch.md) | current | 预测与标签必须按 id 对齐；一个"安静地成功"的失效 |
 | [可运行研究工作流](../README.md#run-the-complete-agent-workflow) | current | `src/main.py` 安装、认证、CLI 参数、产物和失败语义 |
 | [测试指南](operations/testing.md) | current | 本地测试层次与验收命令 |
 | [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
