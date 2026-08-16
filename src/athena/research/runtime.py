@@ -365,8 +365,21 @@ class ResearchRuntime:
             workspace_for=self._supervisor.workspace_path,
             execution=self._execution,
             # plan agent 在构造期即注册，早于 Supervisor 任务理解，故惰性求值。
-            extra_tools=lambda: self.kaggle_tools("plan"),
+            extra_tools=self.plan_tools,
         )
+
+    def plan_tools(self) -> ToolRegistry | None:
+        """写代码那一步的额外工具：Kaggle（若接入）+ 文献语料的只读检索算子。
+
+        此前只有 Ideator 能查语料，于是文献只能影响"试什么"，永远影响不了"怎么实现"
+        ——而后者才是论文真正给得出细节的地方：损失函数的写法、超参区间、预处理口径。
+        一条假设写着"用 focal loss"，实现时该取什么 gamma、要不要配合重采样，答案就在
+        那几篇论文里，而 PlanAgent 够不着。
+
+        与 Ideator 用各自独立的会话：已读账本按 Agent 独立，而引用核验只看 ideation
+        那一轮的账本，PlanAgent 读了什么不该算进去。
+        """
+        return _merged(self.kaggle_tools("plan"), self.corpus_tools())
 
     def kaggle_stack(self) -> KaggleStack:
         """Lazily build the shared Kaggle stack rooted at the project root.
@@ -403,29 +416,38 @@ class ResearchRuntime:
         """
 
         def build() -> ToolRegistry | None:
-            return _merged(self.kaggle_tools("ideator"), self.corpus_tools())
+            return _merged(
+                self.kaggle_tools("ideator"),
+                self.corpus_tools(for_ideation=True),
+            )
 
         return build
 
     # ── 文献语料：一次性构建，Ideator 只读 ──────────────────────────────
 
-    def corpus_tools(self) -> ToolRegistry | None:
+    def corpus_tools(self, *, for_ideation: bool = False) -> ToolRegistry | None:
         """语料的只读检索算子；没有语料时返回 ``None``。
 
         只给读的那一组：``paper_survey``/``paper_fetch``/``paper_markdown`` 会写出
-        新语料，摆在 Ideator 面前迟早会被按下去，而一次全链路是十几分钟起步。
+        新语料，摆在 Agent 面前迟早会被按下去，而一次全链路是十几分钟起步。
 
         判据只有 ``corpus_ref``，不看本进程是否跑过调研。语料是内容寻址的、``corpus_ref``
         是持久化状态，因此续跑（或本轮命中缓存语料）时 ``_survey_stack`` 必然是 None，
         而那恰恰是最该拿到算子的场合——真实跑测里正是这条路径让 Ideator 收到"去调
         paper_corpus_overview"的提示却一个算子都没有，0 次检索、0 条 sources。
+
+        ``for_ideation`` 决定这个会话的已读账本算不算进引用核验。**默认不算**：核验要
+        回答的是"提这条假设时读过什么"，而 PlanAgent 在实现阶段读的论文与那个问题无关。
+        默认设成不追踪，是为了让以后新增的消费方不会无声地放宽核验——放宽的后果是奖励
+        贴标签，而那正是这条链路已经付过一次学费的地方。
         """
         if self.survey_corpus_ref() is None:
             return None
         session = RetrievalSession(self._ensure_survey_stack().corpus_cache)
-        # 每个 Ideator 实例一个会话（已读集合必须按 Agent 独立），但会话要留在运行时
-        # 手里：引用核验需要"这一轮谁真的打开过哪几篇"的账本。
-        self._corpus_sessions.append(session)
+        if for_ideation:
+            # 每个 Ideator 实例一个会话（已读集合必须按 Agent 独立），但会话要留在运行时
+            # 手里：引用核验需要"这一轮谁真的打开过哪几篇"的账本。
+            self._corpus_sessions.append(session)
         return build_survey_tools(
             self._ensure_survey_stack(),
             include_survey=False,
@@ -446,6 +468,31 @@ class ResearchRuntime:
         for session in self._corpus_sessions:
             opened |= session.read_papers()
         return opened
+
+    async def corpus_passages_read(self) -> dict[str, list[str]]:
+        """本轮 ideation 逐篇读过的正文，按 ``paper_id`` 归组。
+
+        支持性判定要看的是**读过的那几段**，而不是整篇论文：拿整篇去问"支不支持"，问的
+        就变成了"这篇论文大体上相关吗"——而那正是贴标签式引用能通过的那个问题。
+        """
+        corpus_ref = self.survey_corpus_ref()
+        if corpus_ref is None:
+            return {}
+        chunk_ids: set[str] = set()
+        for session in self._corpus_sessions:
+            chunk_ids |= session.read_chunk_ids()
+        if not chunk_ids:
+            return {}
+        stack = self._ensure_survey_stack()
+        corpus = await stack.corpus_cache.load(self._store, corpus_ref)
+        passages: dict[str, list[str]] = {}
+        for chunk_id in sorted(chunk_ids):
+            position = corpus.positions.get(chunk_id)
+            if position is None:
+                continue
+            entry = corpus.index.entries[position]
+            passages.setdefault(entry.paper_id, []).append(entry.text)
+        return passages
 
     async def corpus_summaries(self) -> list[PaperSummary]:
         """语料的逐篇门面，用于把"里面有什么"直接写进 Ideator 的 prompt。

@@ -215,12 +215,14 @@ async def test_a_ready_corpus_triggers_one_extra_ideation_round(tmp_path: Path) 
         if hypothesis.sources
     ]
     assert len(grounded) == 1
-    assert supervisor.state.corpus_ideation_done is True
+    assert supervisor.state.corpus_ideated_ref == "sha256:corpus"
 
 
 @pytest.mark.asyncio
-async def test_the_extra_ideation_round_happens_only_once(tmp_path: Path) -> None:
-    """补一轮是为了让语料被读到，不是每轮都补——那会把预算烧在生成上。"""
+async def test_the_extra_ideation_round_happens_once_per_corpus_version(
+    tmp_path: Path,
+) -> None:
+    """同一份语料只补一轮——每轮都补会把预算烧在生成上。"""
     calls: list[int] = []
 
     async def fake_ideator(count: int) -> list[Hypothesis]:
@@ -245,4 +247,26 @@ async def test_no_corpus_means_no_extra_round(tmp_path: Path) -> None:
     supervisor = await _make_supervisor(tmp_path, run_ideator_turn=fake_ideator)
 
     assert await supervisor._corpus_ideation() is False
-    assert supervisor.state.corpus_ideation_done is False
+    assert supervisor.state.corpus_ideated_ref is None
+
+
+@pytest.mark.asyncio
+async def test_an_extended_corpus_earns_another_round(tmp_path: Path) -> None:
+    """语料可以增量扩充；用布尔标记的话，扩充进来的论文永远读不到。"""
+    calls: list[str | None] = []
+
+    async def fake_ideator(count: int) -> list[Hypothesis]:
+        calls.append(supervisor.state.corpus_ref)
+        return []
+
+    supervisor = await _make_supervisor(tmp_path, run_ideator_turn=fake_ideator)
+    supervisor.state.corpus_ref = "sha256:first"
+    await supervisor._corpus_ideation()
+    await supervisor._corpus_ideation()
+
+    supervisor.state.corpus_ref = "sha256:extended"
+    await supervisor._corpus_ideation()
+    await supervisor._corpus_ideation()
+
+    assert calls == ["sha256:first", "sha256:extended"]
+    assert supervisor.state.corpus_ideated_ref == "sha256:extended"

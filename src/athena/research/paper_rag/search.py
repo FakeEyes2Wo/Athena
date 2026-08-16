@@ -265,6 +265,10 @@ class RetrievalSession:
         """登记一次整篇读取。"""
         self._read.add(chunk_id)
 
+    def read_chunk_ids(self) -> set[str]:
+        """本会话整篇读过的 chunk id；引用支持性判定要拿它们取正文。"""
+        return set(self._read)
+
     def read_papers(self) -> set[str]:
         """本会话真正打开过正文的论文集合，用于核验假设的 ``sources``。
 

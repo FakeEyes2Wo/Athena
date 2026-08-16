@@ -19,6 +19,12 @@ from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
+from athena.research.idea_generation.citation_support import (
+    SUPPORT_PROMPT,
+    SupportVerdict,
+    format_evidence,
+    parse_verdict,
+)
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
 from athena.research.supervisor.experiment import (
@@ -28,6 +34,7 @@ from athena.research.supervisor.experiment import (
 )
 from athena.research.supervisor.plans import wait_run_events
 from athena.retrieval.web_search import WebFetchTool, WebSearchTool
+from athena.utils.single_turn_chat import single_turn_chat
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -468,7 +475,76 @@ class AgentTurnRunner:
                     "merely appeared in search results is not evidence"
                 ),
             )
-        return verified
+        return await self._verify_support(verified)
+
+    async def _verify_support(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+        """再问一层：被引的那几段正文，到底支不支持这条主张。
+
+        ``_verify_sources`` 查的是**行为**（读没读过），这一层查的是**内容**。两者都需要：
+        一个读过《数据增强综述》再拿它去支持"两两交互特征工程"的 Ideator，行为那一关是
+        过得去的，而那正是真机上实际发生的事。
+
+        判据保守——模棱两可算不支持。误删一条真引用只少了一份可追溯性；放行一条假引用会
+        让下游把没有根据的干预当成有据可依，而这条链路已经为后者付过一次学费。
+
+        判定失败（模型不可用、解析不出来）时**保留原引用**：这一层是增益，不该因为一次
+        端点抖动就把整轮的引用清空。丢弃与保留的方向在这里是相反的——解析不出来判"不支持"
+        是单条判定内部的保守，整层不可用则不该改变已经通过前一关的结论。
+        """
+        rt = self._runtime
+        if rt._model is None or not any(item.sources for item in hypotheses):
+            return hypotheses
+        passages = await rt.corpus_passages_read()
+        checked: list[Hypothesis] = []
+        rejected: list[str] = []
+        for hypothesis in hypotheses:
+            if not hypothesis.sources:
+                checked.append(hypothesis)
+                continue
+            verdicts = await asyncio.gather(
+                *(
+                    self._support_verdict(hypothesis, source, passages.get(source, []))
+                    for source in hypothesis.sources
+                ),
+                return_exceptions=True,
+            )
+            kept: list[str] = []
+            for source, verdict in zip(hypothesis.sources, verdicts):
+                if isinstance(verdict, BaseException):
+                    # 整层不可用 → 保留，别让端点抖动清空引用
+                    kept.append(source)
+                    continue
+                if verdict.supports:
+                    kept.append(source)
+                else:
+                    rejected.append(f"{source} ({verdict.why or 'no support'})")
+            checked.append(hypothesis.model_copy(update={"sources": kept}))
+        if rejected:
+            await rt.publish_output(
+                source="agent",
+                channel="error",
+                text=(
+                    f"dropped {len(rejected)} citation(s) whose passages do not "
+                    f"support the claim: {'; '.join(rejected[:5])}"
+                ),
+            )
+        return checked
+
+    async def _support_verdict(
+        self, hypothesis: Hypothesis, paper_id: str, passages: list[str]
+    ) -> SupportVerdict:
+        """问一次"这段话支持这条主张吗"，返回结构化判定。"""
+        rt = self._runtime
+        prompt = SUPPORT_PROMPT.format(
+            claim=hypothesis.statement,
+            intervention=hypothesis.intervention,
+            paper_id=paper_id,
+            evidence=format_evidence(passages),
+        )
+        content = await single_turn_chat(
+            prompt, model=rt._model, client=rt._client, max_tokens=200
+        )
+        return parse_verdict(paper_id, content)
 
     async def _run_debate_ideator_turn(self, count: int) -> list[Hypothesis]:
         """Run the debate-based Ideator (proposal -> review -> revision -> judge).

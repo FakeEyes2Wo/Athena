@@ -647,6 +647,36 @@ class Supervisor(SupervisorActions):
         await self._wake.wait()
         return not self._stopped
 
+    def _corpus_block(self, plan_id: str) -> str:
+        """告诉这个候选：它的假设引了哪几篇论文，以及怎么去读。
+
+        引用一直只停在假设的 ``sources`` 字段里，而真正要用到细节的是**实现**那一步：
+        损失函数怎么写、gamma 取多少、要不要配合重采样。一条写着"用 focal loss"的假设，
+        答案就在被引的那几篇里，而 PlanAgent 此前既拿不到检索算子，也不知道自己该读谁。
+
+        点名 ``paper_id`` 而不是把正文整段拼进来：正文在 chunk 里可能有几千字，而
+        ``paper_chunk_read`` 本来就是渐进披露的接口——候选自己决定读多少。
+        """
+        corpus_ref = self.state.corpus_ref
+        if corpus_ref is None:
+            return ""
+        try:
+            hypothesis = self.tree.get_hypothesis(plan_id)
+        except KeyError:
+            # PREPARE / VALIDATE 的 plan_id 不是假设 id——它们本来就没有引用
+            return ""
+        sources = list(hypothesis.sources or [])
+        if not sources:
+            return ""
+        return (
+            f"\n\nThe literature corpus for this task is available "
+            f"(corpus_ref={corpus_ref!r}). This hypothesis was formed from: "
+            f"{', '.join(sources)}. Use paper_search and paper_chunk_read on those "
+            "papers for the implementation details the hypothesis leaves open — "
+            "exact loss formulation, hyper-parameter ranges, preprocessing. Follow "
+            "what they report; do not invent numbers they do not give."
+        )
+
     async def _plan_handoff(self, plan_id: str) -> str:
         """取该 Plan 冻结时记下的评估契约；取不到就返回空串，不影响这一轮。"""
         try:
@@ -655,24 +685,28 @@ class Supervisor(SupervisorActions):
             return ""
 
     async def _corpus_ideation(self) -> bool:
-        """语料落地后补一轮 ideation，让调研的产出真的被读到。
+        """语料落地（或扩充）之后补一轮 ideation，让调研的产出真的被读到。
 
         非阻塞设计（SEARCH 绝不为调研停等）本身没问题，但它单独并不成立：调度器只在
         "没有假设可排"时才 GENERATE，而第一轮 ideation 几乎必然早于调研完成——真机实测
         语料就绪比第一轮 ideation 晚约两分钟，那一轮把队列填满之后调度器再没需要生成，
         于是十几分钟的调研成果一次都没被读到，6 条假设 0 条引用语料。
 
+        触发条件是**语料版本变了**，不是"补过没有"。语料现在可以增量扩充，用布尔标记
+        会让扩充进来的新论文永远读不到——第一轮补过就再也不补了。
+
         补的这一轮不动实验预算：它只往队列里加候选，跑几个仍由 ``search_limit`` 决定。
-        只补一轮，``corpus_ideation_done`` 落在持久化状态里，续跑不会重复补。
         """
-        if self.state.corpus_ref is None or self.state.corpus_ideation_done:
+        corpus_ref = self.state.corpus_ref
+        if corpus_ref is None or corpus_ref == self.state.corpus_ideated_ref:
             return False
         if self._run_ideator_turn is None:
-            # 没有 Ideator 就没有"读语料的那一步"，标记掉避免每轮重试。
-            self.state.corpus_ideation_done = True
+            # 没有 Ideator 就没有"读语料的那一步"，记下版本避免每轮重试。
+            self.state.corpus_ideated_ref = corpus_ref
             await self._persist_state()
             return False
-        self.state.corpus_ideation_done = True
+        # 先落状态再跑：重入时不会为同一份语料补第二轮。
+        self.state.corpus_ideated_ref = corpus_ref
         await self._persist_state()
         hypotheses = await self._run_ideator_turn(self.state.hypotheses_per_ideator)
         if self._stopped:
@@ -750,6 +784,7 @@ class Supervisor(SupervisorActions):
                         f"stale rounds: {state.stale_rounds}."
                         # 候选要按契约写 predictions/，而 context_refs 到不了 model。
                         + handoff_block(await self._plan_handoff(plan_id))
+                        + self._corpus_block(plan_id)
                     ),
                     "context_refs": [state.context_ref],
                 },
