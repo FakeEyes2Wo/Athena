@@ -287,6 +287,7 @@ export interface GuiSettings {
   model: string | null;
   concurrency: number;
   search_limit: number;
+  ideation: "ideageneration" | "baseline" | "debate";
   direction: "maximize" | "minimize";
   tolerance: number;
   auto_validate: boolean;
@@ -301,6 +302,7 @@ export const DEFAULT_GUI_SETTINGS: GuiSettings = {
   model: null,
   concurrency: 1,
   search_limit: 0,
+  ideation: "ideageneration",
   direction: "maximize",
   tolerance: 0,
   auto_validate: false,

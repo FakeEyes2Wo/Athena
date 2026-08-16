@@ -33,6 +33,10 @@ class AgentTypeRegistry:
         """agent_type 是否已注册。"""
         return agent_type in self._factories
 
+    def unregister(self, agent_type: str) -> None:
+        """撤销一个 agent_type 的注册；未注册时为 no-op。"""
+        self._factories.pop(agent_type, None)
+
     def require_spec(self, agent_type: str, *, agent_id: AgentId) -> AgentSpec:
         """按 agent_type 创建该实例的全新 binding；未注册抛 NOT_FOUND。
 

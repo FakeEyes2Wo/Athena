@@ -13,6 +13,7 @@ import styles from "./SettingsPanel.module.css";
 type WritableField =
   | "concurrency"
   | "search_limit"
+  | "ideation"
   | "direction"
   | "tolerance"
   | "auto_validate"
@@ -71,6 +72,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     const patch: Partial<GuiSettings> = {
       concurrency: form.concurrency,
       search_limit: form.search_limit,
+      ideation: form.ideation,
       direction: form.direction,
       tolerance: form.tolerance,
       auto_validate: form.auto_validate,
@@ -238,6 +240,19 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                   value={form.search_limit}
                   onChange={(e) => patchField("search_limit", Number(e.target.value))}
                 />
+              </label>
+
+              <label className="field">
+                <span className="field__label">Ideator 机制</span>
+                <select
+                  className="select"
+                  value={form.ideation}
+                  onChange={(e) => patchField("ideation", e.target.value)}
+                >
+                  <option value="ideageneration">ideageneration · 门禁生成</option>
+                  <option value="baseline">baseline · 消融对照</option>
+                  <option value="debate">debate · 辩论式</option>
+                </select>
               </label>
 
               <label className="field">

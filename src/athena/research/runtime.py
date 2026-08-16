@@ -99,6 +99,7 @@ SETTINGS_WHITELIST: frozenset[str] = frozenset(
         "tolerance",
         "auto_validate",
         "manual_mode",
+        "ideation",
         "ideator_count",
         "hypotheses_per_ideator",
         "model_connection",
@@ -141,7 +142,7 @@ class ResearchRuntime:
         auto_validate: bool = False,
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
-        ideation: Literal["gated", "baseline"] = "gated",
+        ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration",
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
@@ -411,6 +412,7 @@ class ResearchRuntime:
             "model": self._model,
             "concurrency": self.state.concurrency,
             "search_limit": self.state.search_limit,
+            "ideation": self._ideation,
             "ideator_count": self.state.ideator_count,
             "hypotheses_per_ideator": self.state.hypotheses_per_ideator,
             "direction": self._direction,
@@ -451,6 +453,17 @@ class ResearchRuntime:
             if not isinstance(search_limit, int) or search_limit < 0:
                 raise ValueError("search_limit must be an integer >= 0")
             self.state.search_limit = search_limit
+        if "ideation" in patch:
+            ideation = patch["ideation"]
+            if ideation not in {"ideageneration", "baseline", "debate"}:
+                raise ValueError(
+                    "ideation must be 'ideageneration', 'baseline', or 'debate'"
+                )
+            if ideation != self._ideation:
+                self._ideation = ideation
+                # 输出契约/prompt 在 Ideator 注册时绑定；切换模式后撤销旧注册，
+                # 下一条 lane 会按新机制重新注册（debate 模式不走注册表）。
+                self._registry.unregister("ideator")
         if "ideator_count" in patch:
             value = patch["ideator_count"]
             if not isinstance(value, int) or value < 1 or value > 8:
