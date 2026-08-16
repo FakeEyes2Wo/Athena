@@ -45,6 +45,7 @@ from athena.research.paper_scout.schemas import (
     ScoutStats,
 )
 from athena.research.paper_scout.scorer import GradedRelevanceScorer
+from athena.research.paper_scout.selection import LlmBoundarySelector
 from athena.research.survey.library import (
     conversion_key,
     copy_refs,
@@ -292,6 +293,20 @@ class SurveyReport(BaseModel):
             "were never converted. Normally zero now that fetching stops on target."
         ),
     )
+    boundary_tier: int = Field(
+        default=0,
+        ge=0,
+        description="Papers tied at the delivery cut; see ScoutStats.boundary_tier.",
+    )
+    boundary_reranked: bool = Field(
+        default=False, description="The tie at the cut was resolved by rerank."
+    )
+    facets: list[str] = Field(
+        default_factory=list, description="Facets the topic was split into."
+    )
+    facet_coverage: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Fraction of facets delivered."
+    )
     scout_dropped_no_source: int = Field(
         default=0,
         ge=0,
@@ -489,6 +504,9 @@ class SurveyPipeline:
             ),
             model=self.stack.model,
             client=self.stack.client,
+            # 边界档重排用策略模型那一档：这一次调用决定将近一半的交付集合，是全链路
+            # 里单次影响最大的一次判断，不该省在这里。
+            selector=LlmBoundarySelector(self.stack.client, self.stack.model),
         )
         candidates = self.candidate_cap()
         scout_request = ScoutRequest(
@@ -615,6 +633,10 @@ class SurveyPipeline:
         self.report.scout_pool = len(corpus.pool)
         self.report.scout_retained = len(corpus.retained)
         self.report.scout_dropped_no_source = stats.dropped_no_source
+        self.report.boundary_tier = stats.boundary_tier
+        self.report.boundary_reranked = stats.boundary_reranked
+        self.report.facets = list(stats.facets)
+        self.report.facet_coverage = stats.facet_coverage
         self.report.retain_threshold = self.request.retain_threshold
         # 分数分布是决定门槛该放在哪的唯一依据：交付 2 篇既可能是"池里只有 2 篇好的"，
         # 也可能是"18 篇 2 分被门槛挡住了"，只看交付量分不出这两种情况

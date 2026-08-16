@@ -118,7 +118,9 @@ class FakeScoutAgent:
     status = "complete"
     warnings: list[str] = []
 
-    def __init__(self, artifacts, backends, references, scorer, *, model, client):
+    def __init__(
+        self, artifacts, backends, references, scorer, *, model, client, selector=None
+    ):
         self.artifacts = artifacts
 
     async def run(self, ctx) -> AgentOutcome:

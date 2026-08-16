@@ -143,6 +143,40 @@ class ScoutStats(BaseModel):
     policy_calls: int = Field(default=0, ge=0)
     scorer_calls: int = Field(default=0, ge=0)
     backend_requests: int = Field(default=0, ge=0)
+    boundary_tier: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Papers tied at the score where delivery was cut. Scoring has four levels, "
+            "so this is routinely dozens: it is the size of the choice that used to be "
+            "made by a hash."
+        ),
+    )
+    boundary_reranked: bool = Field(
+        default=False,
+        description="The boundary tier was resolved by rerank rather than by hash.",
+    )
+    selection_note: str = Field(
+        default="",
+        description=(
+            "Why selection took the path it did. Kept out of `errors` on purpose: "
+            "falling back to hash order is a degraded selection, not a failed run, "
+            "and marking the run partial for it would hide real backend failures."
+        ),
+    )
+    facets: list[str] = Field(
+        default_factory=list,
+        description="Facets the topic was split into for coverage-aware selection.",
+    )
+    facet_coverage: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of facets covered by the delivered set. Relevance ranking alone "
+            "cannot express 'ten good papers all about the same method'."
+        ),
+    )
     wall_seconds: float = Field(default=0.0, ge=0.0)
     stop_reason: str = Field(default="", description="Why the loop terminated.")
     errors: list[str] = Field(default_factory=list)

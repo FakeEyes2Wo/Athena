@@ -105,6 +105,21 @@ def print_report(report: SurveyReport) -> None:
             f"（门槛 {report.retain_threshold}）",
         )
     )
+    if report.boundary_tier:
+        print(
+            report_line(
+                "边界档",
+                f"{report.boundary_tier} 篇同分争最后几个名额，"
+                f"{'已重排' if report.boundary_reranked else '按散列取（重排未生效）'}",
+            )
+        )
+    if report.facets:
+        print(
+            report_line(
+                "课题分面",
+                f"{report.facet_coverage:.0%} 覆盖  ·  {' / '.join(report.facets)}",
+            )
+        )
     if report.scout_dropped_no_source:
         print(
             report_line(

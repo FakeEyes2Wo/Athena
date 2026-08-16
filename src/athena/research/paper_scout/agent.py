@@ -36,6 +36,7 @@ from athena.research.paper_scout.schemas import (
     ScoutStats,
 )
 from athena.research.paper_scout.scorer import RelevanceScorer
+from athena.research.paper_scout.selection import BoundarySelector, select_delivery
 from athena.research.paper_scout.session import ScoutSession
 from athena.research.paper_source.schemas import (
     PaperIdentity,
@@ -133,12 +134,15 @@ class PaperScoutAgent(BaseAgent):
         *,
         model: str,
         client: AsyncOpenAI | None = None,
+        selector: BoundarySelector | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.search_backends = search_backends
         self.reference_backend = reference_backend
         self.scorer = scorer
         self.model = model
+        # 边界档重排器；缺省时选片回退到散列次序，行为与此前一致。
+        self.selector = selector
         self._provider = ResponsesProvider(model, client=client)
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
@@ -232,11 +236,24 @@ class PaperScoutAgent(BaseAgent):
     ) -> AgentOutcome:
         """汇总统计、写入 artifact 并返回 Turn 结果。"""
         eligible = session.pool.retained(session.request.retain_threshold)
-        retained = session.pool.retained(
+        # 截断前的完整候选：交付名额几乎总是落在某一档内部，而"该选哪几篇"不能由
+        # tie_break 的散列决定（见 selection.select_delivery）。
+        contenders = session.pool.retained(
             session.request.retain_threshold,
-            session.request.max_papers,
             require_retrievable_source=session.request.require_retrievable_source,
         )
+        selection = await select_delivery(
+            session.request.query,
+            contenders,
+            session.request.max_papers,
+            self.selector,
+        )
+        retained = selection.delivered
+        stats.boundary_tier = selection.boundary_size
+        stats.boundary_reranked = selection.reranked
+        stats.facets = list(selection.facets)
+        stats.facet_coverage = round(selection.coverage(), 3)
+        stats.selection_note = selection.note
         if session.request.require_retrievable_source:
             stats.dropped_no_source = sum(
                 1 for paper in eligible if not has_retrievable_source(paper)
