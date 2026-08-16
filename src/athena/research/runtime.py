@@ -563,10 +563,13 @@ class ResearchRuntime:
         # 任务理解：让 SupervisorAgent 在 PREPARE 之前读一遍任务，自行决定是否
         # 经 ``configure_kaggle`` 接入 Kaggle 工具。失败只降级为默认关闭，不阻断。
         # 断点续传时把最近的人类消息一起带上，短句 follow-up 也能沿用旧上下文。
+        # ``task_understanding`` 非空即表示上一轮已经理解过任务（由
+        # ``record_task_understanding`` 落进 state），续跑时跳过，别把这一步重做一遍。
         if (
             self._provider is not None
             and self.state.phase == "PREPARE"
             and self._task_text.strip()
+            and not self.state.task_understanding
         ):
             context = self._task_context_text(
                 self._task_text, self._recent_user_texts()
@@ -826,13 +829,19 @@ class ResearchRuntime:
         return answer
 
     async def _ensure_started(self) -> None:
-        """Start (and recover) the Supervisor loop once a trusted baseline exists.
+        """Start (and recover) the Supervisor loop for a run that has progress.
 
-        No-op for a fresh project (no SOTA yet) so control commands never jump
-        straight into SEARCH without PREPARE.
+        两类可续的运行：有 baseline（SEARCH/VALIDATE 可直接恢复），或磁盘上已有
+        ``state.json``（此前启动过，多半在 PREPARE 中途断掉——那时还没有 baseline）。
+        只认 baseline 的话，PREPARE 期间的 ``/resume`` 只会改一个 status 标志，界面
+        显示"运行中"而实际什么都没跑。两者都没有才是全新项目，此时保持 no-op，
+        控制命令不得越过 PREPARE 直接进 SEARCH。
         """
-        if not self._started and self.tree.best_experiment_id() is not None:
-            await self.start()
+        if self._started:
+            return
+        if self.tree.best_experiment_id() is None and not self._state_path.is_file():
+            return
+        await self.start()
 
     # ── 事件/订阅/持久化（委托 RuntimeEvents）────────────────────────
 
