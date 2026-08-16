@@ -305,23 +305,68 @@ def make_hit(
     )
 
 
+def score_by_keywords(
+    corpus: LoadedCorpus, terms: list[str]
+) -> list[tuple[float, int]]:
+    """按 ``Σ 词频 × 关键词长度`` 给每个命中 chunk 打分，得分降序、同分按 chunk 序。"""
+    scored = [
+        (float(sum(lowered.count(term) * len(term) for term in terms)), position)
+        for position, lowered in enumerate(corpus.lowered)
+    ]
+    hits = [item for item in scored if item[0] > 0.0]
+    hits.sort(key=lambda item: (-item[0], item[1]))
+    return hits
+
+
+def rotate_by_paper(
+    corpus: LoadedCorpus, scored: list[tuple[float, int]], limit: int
+) -> list[tuple[float, int]]:
+    """按论文轮转分配名额：每篇先出最高分的一条，再出第二条。
+
+    与 ``section_search`` 同一条纪律，理由也一样。实测（44 篇语料，query
+    "false positive rate range / specificity / restricted"）：67 个 chunk 命中、
+    来自 17 篇论文，而按全局得分直排时 **10 个名额有 9 个被同一篇吃掉**——一篇临床
+    论文反复把 specificity 当指标名用。真正该出的那篇，最高分 chunk 排在全局第 17
+    位，正好落在 k=10 之外；轮转后它排第 5。
+    """
+    by_paper: dict[str, list[tuple[float, int]]] = {}
+    for item in scored:
+        by_paper.setdefault(corpus.index.entries[item[1]].paper_id, []).append(item)
+    order = sorted(by_paper, key=lambda paper: (-by_paper[paper][0][0], paper))
+    rounds = max((len(group) for group in by_paper.values()), default=0)
+    return [
+        by_paper[paper][index]
+        for index in range(rounds)
+        for paper in order
+        if index < len(by_paper[paper])
+    ][:limit]
+
+
 def keyword_search(
     corpus: LoadedCorpus, keywords: list[str], limit: int
 ) -> list[SearchHit]:
     """按 ``Σ 词频 × 关键词长度`` 给 chunk 打分，长关键词更具体因而权重更高。
 
     匹配不区分大小写，以便实体名在正文与标题的不同写法下都能命中。
+
+    多词关键词按**字面子串**匹配，因此没有逐字出现过的短语一条都命中不了；实测 27 条
+    自然多词关键词里 7 条（26%）返回空，而这 7 条拆成单词后全部有结果。``Wasserstein
+    ball`` 命中 0、``wasserstein`` 命中 5，且全在那篇讲它的论文里。整组关键词颗粒无收
+    时因此退到词级重试一次——对 Agent 而言"语料里没有"与"你的措辞没逐字出现"是两回事，
+    而当前接口把后者伪装成前者。
+
+    名额按论文轮转，见 ``rotate_by_paper``。
     """
     terms = [keyword.lower() for keyword in keywords if keyword.strip()]
-    scored: list[tuple[float, int]] = []
-    for position, lowered in enumerate(corpus.lowered):
-        score = float(sum(lowered.count(term) * len(term) for term in terms))
-        if score > 0.0:
-            scored.append((score, position))
-    scored.sort(key=lambda item: (-item[0], item[1]))
+    scored = score_by_keywords(corpus, terms)
+    if not scored:
+        tokens = [token for term in terms for token in term.split() if token]
+        if len(tokens) > len(terms):
+            terms = tokens
+            scored = score_by_keywords(corpus, terms)
 
     hits: list[SearchHit] = []
-    for score, position in scored[:limit]:
+    for score, position in rotate_by_paper(corpus, scored, limit):
         entry = corpus.index.entries[position]
         matched = [
             corpus.index.sentence_text(sentence)

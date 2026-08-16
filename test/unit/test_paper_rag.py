@@ -40,6 +40,7 @@ from athena.research.paper_rag.search import (
     keyword_search,
     read_chunks,
     paper_namespace,
+    score_by_keywords,
     section_search,
     self_contained_weight,
     semantic_search,
@@ -1310,3 +1311,107 @@ class SectionRoundRobinTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual({"heavy"}, {hit.paper_id for hit in hits})
         self.assertEqual(5, len(hits))
+
+
+class KeywordRoundRobinTest(unittest.IsolatedAsyncioTestCase):
+    """名额按论文轮转，否则一篇高频使用该词的论文会吃光结果。
+
+    真实跑测（44 篇语料，2026-08-16）：query "false positive rate range /
+    specificity / restricted" 命中 67 个 chunk、来自 17 篇论文，而按全局得分直排时
+    10 个名额有 9 个属于同一篇临床论文——它反复把 specificity 当指标名用。真正该出的
+    论文最高分 chunk 排在全局第 17 位，正好落在 k=10 之外。
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    async def corpus(self, heavy: int, light: int):
+        papers = [
+            await make_paper(
+                self.store,
+                "heavy",
+                "Heavy Paper",
+                [
+                    f"Specificity is reported again, run {index}."
+                    for index in range(heavy)
+                ],
+            )
+        ]
+        for index in range(light):
+            papers.append(
+                await make_paper(
+                    self.store,
+                    f"light{index}",
+                    f"Light Paper {index}",
+                    ["Specificity bounds the partial area under the curve."],
+                )
+            )
+        return await self.session.load(
+            self.store, await build_corpus_index(self.store, papers)
+        )
+
+    async def test_one_prolific_paper_does_not_fill_every_slot(self) -> None:
+        hits = keyword_search(await self.corpus(heavy=20, light=4), ["specificity"], 5)
+
+        self.assertEqual(5, len(hits))
+        self.assertEqual(5, len({hit.paper_id for hit in hits}))
+
+    async def test_surplus_slots_still_go_to_the_richest_paper(self) -> None:
+        hits = keyword_search(await self.corpus(heavy=20, light=2), ["specificity"], 6)
+
+        counts: dict[str, int] = {}
+        for hit in hits:
+            counts[hit.paper_id] = counts.get(hit.paper_id, 0) + 1
+
+        self.assertEqual({"heavy", "light0", "light1"}, set(counts))
+        self.assertEqual(4, counts["heavy"])
+        self.assertEqual({"heavy", "light0", "light1"}, {h.paper_id for h in hits[:3]})
+
+
+class KeywordTokenFallbackTest(unittest.IsolatedAsyncioTestCase):
+    """短语一条都不中时退到词级重试一次。
+
+    多词关键词按字面子串匹配，实测 27 条自然多词关键词里 7 条（26%）返回空，而这 7
+    条拆成单词后全部有结果。对 Agent 而言"语料里没有"与"你的措辞没逐字出现"是两回
+    事，当前接口把后者伪装成前者。
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
+        self.session = RetrievalSession()
+
+    async def load(self, texts: list[str]):
+        paper = await make_paper(self.store, "p1", "Paper One", texts)
+        return await self.session.load(
+            self.store, await build_corpus_index(self.store, [paper])
+        )
+
+    async def test_a_phrase_that_never_appears_verbatim_falls_back_to_tokens(
+        self,
+    ) -> None:
+        corpus = await self.load(["The Wasserstein metric bounds the ball radius."])
+
+        # 短语本身逐字不存在——正文里 Wasserstein 与 ball 相隔数词
+        self.assertEqual([], score_by_keywords(corpus, ["wasserstein ball"]))
+
+        hits = keyword_search(corpus, ["wasserstein ball"], 5)
+
+        self.assertEqual(1, len(hits))
+        self.assertIn("Wasserstein", hits[0].snippet)
+
+    async def test_an_exact_phrase_match_never_triggers_the_fallback(self) -> None:
+        """短语命中时不得退化成词级，否则精确检索会被拆散成一堆泛词命中。"""
+        corpus = await self.load(
+            ["Partial AUC is optimized here.", "The area under the curve is reported."]
+        )
+
+        hits = keyword_search(corpus, ["partial auc"], 5)
+
+        self.assertEqual(["p1:c0"], [hit.chunk_id for hit in hits])
+
+    async def test_a_single_word_query_with_no_match_stays_empty(self) -> None:
+        """单词查询拆不出更多词，没有可退的一步，空就是空。"""
+        corpus = await self.load(["Nothing relevant here."])
+
+        self.assertEqual([], keyword_search(corpus, ["wasserstein"], 5))
