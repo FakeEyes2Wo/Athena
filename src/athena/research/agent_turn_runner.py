@@ -17,7 +17,7 @@ from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
-from athena.research.contracts import DataScriptBundle
+from athena.research.contracts import DataScriptBundle, GeneralTurnOutcome
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
 from athena.research.supervisor.experiment import load_agent_result
@@ -95,6 +95,7 @@ class AgentTurnRunner:
         self._ideator_round = 0
 
     async def run_supervisor_turn(self, text: str) -> str:
+        """Run one serialized SupervisorAgent turn and return its human-facing answer."""
         rt = self._runtime
         if rt._provider is None:
             raise RuntimeError("SupervisorAgent provider is not registered")
@@ -133,9 +134,7 @@ class AgentTurnRunner:
             if default_eda is not None and os.path.exists(Path(default_eda) / "eda"):
                 eda_dir = str(Path(default_eda) / "eda")
             else:
-                raise RuntimeError(
-                    "EDA workspace not captured; PREPARE must run first"
-                )
+                raise RuntimeError("EDA workspace not captured; PREPARE must run first")
         eda_path = Path(eda_dir)
         # 相对项目根的路径（新契约）解析为绝对；旧 state 遗留的绝对路径原样保留。
         if not eda_path.is_absolute():
@@ -358,7 +357,9 @@ class AgentTurnRunner:
             if kept or not rejections or attempt == MAX_GATE_RETRIES:
                 if not kept and rejections:
                     await rt.publish_output(
-                        source="agent", channel="error", plan=label,
+                        source="agent",
+                        channel="error",
+                        plan=label,
                         text=(
                             f"gate rejected every candidate after "
                             f"{attempt + 1} attempt(s); this lane yields nothing"
@@ -399,7 +400,10 @@ class AgentTurnRunner:
                 await publish(source="agent", channel="text", text=f"gate> {message}")
 
         return await run_light_pipeline(
-            batch.hypotheses, model=rt._model, artifacts=rt._store, progress=progress,
+            batch.hypotheses,
+            model=rt._model,
+            artifacts=rt._store,
+            progress=progress,
             rejections=rejections,
         )
 
@@ -410,9 +414,9 @@ class AgentTurnRunner:
         consumes the shared ResearchTree directly and returns hypotheses in judge order;
         there is no pipeline-local ranking either.
         """
-        from athena.agents.ideator import Ideator
-        from athena.research.data_models import DataProfile
-        from athena.research.idea_generation.structured_chat import (
+        from athena.agents.ideator import Ideator  # 延迟导入避免循环依赖
+        from athena.research.data_models import DataProfile  # 延迟导入避免循环依赖
+        from athena.research.idea_generation.structured_chat import (  # 延迟导入避免循环依赖
             single_turn_structured_chat,
         )
 
@@ -421,11 +425,16 @@ class AgentTurnRunner:
         debate_tools = rt.ideator_tools()()
 
         class _StructuredResult:
+            """Structured single-turn result adapter for the debate Ideator."""
+
             def __init__(self, value: object) -> None:
                 self.output = value
 
         class _DebateAgentAdapter:
+            """Adapt one structured chat call into the debate Ideator interface."""
+
             async def run(self, prompt, output_type=None, message_history=None):
+                """Run one structured generation and return an Ideator-compatible result."""
                 effective_prompt = prompt
                 if corpus_ref is not None:
                     effective_prompt += (
@@ -444,6 +453,7 @@ class AgentTurnRunner:
                 return _StructuredResult(value)
 
         def agent_factory(_role: str, _agent_index: int):
+            """Return one debate agent adapter for a role lane."""
             return _DebateAgentAdapter()
 
         # 辩论 Ideator 的完整输入（DataProfile/papers/models）在 EDA-only 的 SEARCH
@@ -455,14 +465,22 @@ class AgentTurnRunner:
             result = await ideator.generate(profile, [], [], rt.tree)
         except Exception as error:  # noqa: BLE001 - debate 失败按 lane 失败上报
             await rt.publish_output(
-                source="agent", channel="error", plan="ideator-debate",
+                source="agent",
+                channel="error",
+                plan="ideator-debate",
                 text=f"Debate Ideator failed: {error}",
             )
             return []
         return result.hypotheses[:count]
 
-    async def run_general_turn(self, task: str) -> dict[str, object]:
-        """Dispatch one General Agent rooted at the project and return its result."""
+    async def run_general_turn(
+        self, task: str, prior_agent_id: str | None = None
+    ) -> GeneralTurnOutcome:
+        """Dispatch one General Agent rooted at the project and return its outcome.
+
+        ``prior_agent_id`` 续跑同一个 worker：进程重启后经其 rollout 恢复记忆，
+        避免断点续传时重复调研。
+        """
         rt = self._runtime
         if rt._provider is None:
             raise RuntimeError("General Agent requires a registered Agent provider")
@@ -476,9 +494,21 @@ class AgentTurnRunner:
                 extra_tools=self._general_tools(),
             )
         request = {"content": task, "context_refs": []}
-        _agent_id, run_id = await rt._agents.create_root(
-            "general", request, name="general"
-        )
+        if prior_agent_id is not None:
+            if rt._agents.has_agent(prior_agent_id):
+                run_id = await rt._agents.followup(prior_agent_id, request)
+                agent_id = prior_agent_id
+            else:
+                agent_id, run_id = await rt._agents.create_root(
+                    "general",
+                    request,
+                    agent_id=prior_agent_id,
+                    name="general",
+                )
+        else:
+            agent_id, run_id = await rt._agents.create_root(
+                "general", request, name="general"
+            )
         try:
             summary = await asyncio.wait_for(
                 wait_run_events(
@@ -497,4 +527,4 @@ class AgentTurnRunner:
         result = await load_agent_result(summary, rt._store, GeneralResult)
         if result is None:
             raise RuntimeError(summary.error or "General Agent turn failed")
-        return result.model_dump()
+        return GeneralTurnOutcome(agent_id=agent_id, result=result.model_dump())

@@ -12,6 +12,7 @@ from athena.research.runtime import ResearchRuntime
 def _runtime() -> ResearchRuntime:
     runtime = ResearchRuntime.__new__(ResearchRuntime)
     runtime._root = Path(".")
+    runtime._state_path = Path(".") / ".athena" / "state.json"
     runtime._model = None
     runtime._ideation = "ideageneration"
     runtime._direction = "maximize"
@@ -27,6 +28,8 @@ def _runtime() -> ResearchRuntime:
             manual_mode=False,
             phase="PREPARE",
             status="RUNNING",
+            task_text=None,
+            save=lambda path: None,
         )
     )
     runtime._state = runtime._supervisor.state

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from athena.core.contracts import ArtifactRef
 from athena.core.persistence import atomic_write_json
 from athena.research.supervisor.plans import PlanState
 
@@ -34,6 +35,15 @@ class ResearchState(BaseModel):
     # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用检索算子。
     # 与其他引用一样落在本项目的 artifact store 里，换机器取不到时重跑即可。
     corpus_ref: str | None = None
+    # 断点续传：首次完整任务文本（续跑时沿用，避免短消息污染 survey/PREPARE 提示词）。
+    task_text: str | None = None
+    # 断点续传：configure_kaggle 的持久化决定（None=未决定，False=已决定关闭）。
+    kaggle_download: bool | None = None
+    # 断点续传：任务理解阶段 general 调研的产物引用与 worker 稳定 id。
+    task_research_ref: ArtifactRef | None = None
+    task_research_agent_id: str | None = None
+    # 断点续传：已冻结评估器 bundle；PREPARE 重启时跳过 evaluator 重跑。
+    evaluator_ref: ArtifactRef | None = None
 
     @model_validator(mode="after")
     def _validate_plan_keys(self) -> "ResearchState":

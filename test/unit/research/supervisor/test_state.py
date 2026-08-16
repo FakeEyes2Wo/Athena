@@ -262,3 +262,53 @@ def test_load_rejects_non_object_json(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="must be an object"):
         ResearchState.load(path)
+
+
+def test_resume_checkpoint_fields_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    state = ResearchState(
+        status="RUNNING",
+        phase="PREPARE",
+        search_limit=10,
+        concurrency=1,
+        task_text="predict titanic survival",
+        kaggle_download=False,
+        task_research_ref=_CONTEXT_REF,
+        task_research_agent_id="general-worker",
+        evaluator_ref=_TRUSTED_REF,
+    )
+
+    state.save(path)
+    loaded = ResearchState.load(path)
+
+    assert loaded == state
+    assert loaded.task_text == "predict titanic survival"
+    assert loaded.kaggle_download is False
+    assert loaded.task_research_ref == _CONTEXT_REF
+    assert loaded.task_research_agent_id == "general-worker"
+    assert loaded.evaluator_ref == _TRUSTED_REF
+
+
+def test_legacy_state_without_resume_fields_defaults_to_none(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "RUNNING",
+                "phase": "PREPARE",
+                "search_limit": 10,
+                "concurrency": 1,
+                "plans": {},
+                "validation": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = ResearchState.load(path)
+
+    assert loaded.task_text is None
+    assert loaded.kaggle_download is None
+    assert loaded.task_research_ref is None
+    assert loaded.task_research_agent_id is None
+    assert loaded.evaluator_ref is None

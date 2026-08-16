@@ -161,6 +161,57 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
 
 
 @pytest.mark.asyncio
+async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    async def run_evaluator_plan(**kwargs):
+        del kwargs
+        raise AssertionError("evaluator must be skipped when a checkpoint exists")
+
+    async def run_prepare_plan(**kwargs):
+        return PrepareResult(
+            evaluator_ref=kwargs["evaluator_ref"],
+            metric=0.71,
+            commit=kwargs["workspace"].base_commit,
+            predictions_ref=await kwargs["store"].put_text("predictions"),
+            evidence_ref=await kwargs["store"].put_text("evidence"),
+            report_ref=await kwargs["store"].put_text("report"),
+        )
+
+    monkeypatch.setattr(
+        "athena.research.phase_runner.run_evaluator_plan",
+        run_evaluator_plan,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "athena.research.phase_runner.run_prepare_plan", run_prepare_plan, raising=False
+    )
+    runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
+    runtime.register_supervisor(provider=object())
+    await runtime._git.init()
+    runtime._agents.start()
+    frozen_ref = await runtime._store.put_text(
+        DataScriptBundle(
+            bundle_id="prepare-evaluator", entrypoint="evaluate.py"
+        ).model_dump_json()
+    )
+    runtime.state.evaluator_ref = frozen_ref
+    runtime.supervisor._evaluator_ref = frozen_ref
+    events: list[tuple[str, dict[str, object]]] = []
+    runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
+
+    result = await runtime._phase_runner.run_prepare_phase()
+
+    assert result.evaluator_ref == frozen_ref
+    assert any(
+        kind == "output" and "复用已冻结的评估器断点" in str(payload.get("text"))
+        for kind, payload in events
+    )
+    assert runtime.state.evaluator_ref == frozen_ref
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_default_validation_adapter_uses_frozen_inputs_and_supervisor_checkpoint(
     tmp_path: Path, monkeypatch
 ) -> None:

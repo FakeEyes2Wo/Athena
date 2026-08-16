@@ -15,6 +15,7 @@ from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch, GitWorkspace
+from athena.research.contracts import GeneralTurnOutcome
 from athena.research.supervisor.experiment import (
     PlanTurnResult,
     decide_settlement,
@@ -46,7 +47,7 @@ Publish = Callable[[Literal["output", "state"], dict[str, object]], Awaitable[No
 PreparePhase = Callable[[], Awaitable[PrepareResult]]
 ValidationPhase = Callable[[CommitHash, float], Awaitable[object]]
 IdeatorTurn = Callable[[int], Awaitable[list[Hypothesis]]]
-GeneralTurn = Callable[[str], Awaitable[dict[str, object]]]
+GeneralTurn = Callable[[str, str | None], Awaitable[GeneralTurnOutcome]]
 PublishAgentEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 
 
@@ -122,7 +123,9 @@ class Supervisor(SupervisorActions):
     ) -> None:
         self._project_root = Path(project_root)
         _athena = (
-            Path(state_root) if state_root is not None else self._project_root / ".athena"
+            Path(state_root)
+            if state_root is not None
+            else self._project_root / ".athena"
         )
         self._state_path = _athena / "state.json"
         self._tree_path = _athena / "research_tree.json"
@@ -133,7 +136,9 @@ class Supervisor(SupervisorActions):
         self._workspaces = workspaces
         self._scheduler = scheduler
         self._recovery = recovery
-        self._evaluator_ref = evaluator_ref
+        self._evaluator_ref = (
+            evaluator_ref if evaluator_ref is not None else state.evaluator_ref
+        )
         self._direction = direction
         self._tolerance = tolerance
         self._run_plan_turn = run_plan_turn
@@ -152,7 +157,7 @@ class Supervisor(SupervisorActions):
         self._next_hypothesis_id: str | None = None
         self._stopped = False
         # None=关闭, True=接入且下载, False=接入但不下载（任务理解阶段由 SupervisorAgent 决定）。
-        self._kaggle_download: bool | None = None
+        self._kaggle_download: bool | None = state.kaggle_download
         # 手动模式下等待人工选定假设时，唤醒 run_search 循环的信号。
         self._wake = asyncio.Event()
         # SEARCH 调度循环的后台任务（供 WAITING→RUNNING 重入）；首轮由 start() 直接 await。
@@ -185,6 +190,8 @@ class Supervisor(SupervisorActions):
         self, enabled: bool, download: bool = True
     ) -> dict[str, object]:
         self._kaggle_download = bool(download) if enabled else None
+        self.state.kaggle_download = self._kaggle_download
+        await self._persist_state()
         return {"kaggle_enabled": self.kaggle_enabled, "download": self.kaggle_download}
 
     async def record_task_understanding(self, **payload: object) -> dict[str, object]:
@@ -192,6 +199,13 @@ class Supervisor(SupervisorActions):
         self.state.task_understanding = dict(payload)
         await self._persist_state()
         return {"recorded": True, "task_understanding": self.state.task_understanding}
+
+    async def checkpoint_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
+        """Persist one frozen evaluator bundle so PREPARE resumes past evaluator."""
+        self._evaluator_ref = ref
+        self.state.evaluator_ref = ref
+        await self._persist_state()
+        return {"evaluator_ref": ref}
 
     async def read_hypotheses(self) -> dict[str, object]:
         """Read-only snapshot of pending hypotheses, SOTA and SEARCH attempts."""
@@ -408,6 +422,19 @@ class Supervisor(SupervisorActions):
     async def _run_prepare(self) -> None:
         if self._run_prepare_phase is None:
             raise RuntimeError("PREPARE phase adapter is not configured")
+        if self.tree.best_experiment_id() is not None:
+            # 断点续传：tree 已含可信 baseline（崩溃窗口为 tree 已写、phase 未转），
+            # 跳过重跑 PREPARE，直接进入 SEARCH。
+            await self._publish(
+                "output",
+                {
+                    "source": "supervisor",
+                    "channel": "text",
+                    "text": "PREPARE: 已有可信 baseline（断点续传），跳过 PREPARE。",
+                },
+            )
+            await self._transition_phase("SEARCH")
+            return
         result = await self._run_prepare_phase()
         hypothesis_id = "baseline"
         experiment_id = "exp_baseline"
@@ -1088,12 +1115,33 @@ class Supervisor(SupervisorActions):
         return {"plans": plans, "running": list(self._running)}
 
     async def dispatch_general(self, task: str) -> dict[str, object]:
-        """Dispatch one General Agent to do concrete work and return its result."""
+        """Dispatch one General Agent to do concrete work and return its result.
+
+        第一次成功的 general 调研作为断点写入 state；后续调用直接返回缓存，
+        避免续跑时重复派发同一个 worker。
+        """
         if self._run_general_turn is None:
             raise RuntimeError("General Agent dispatch is not configured")
         if not task.strip():
             raise ValueError("general task must be nonblank")
-        return await self._run_general_turn(task)
+        if self.state.task_research_ref is not None:
+            try:
+                cached = json.loads(
+                    await self._store.get_text(self.state.task_research_ref)
+                )
+            except (OSError, ValueError):
+                # artifact 缺失或内容损坏 → 当作无缓存重新派发
+                cached = None
+            if isinstance(cached, dict) and cached:
+                return {"cached": True, **cached}
+        outcome = await self._run_general_turn(task, self.state.task_research_agent_id)
+        if self.state.task_research_ref is None:
+            self.state.task_research_agent_id = outcome.agent_id
+            self.state.task_research_ref = await self._store.put_text(
+                json.dumps(outcome.result, ensure_ascii=False)
+            )
+            await self._persist_state()
+        return outcome.result
 
 
 __all__ = [

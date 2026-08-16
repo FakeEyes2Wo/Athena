@@ -82,35 +82,53 @@ class PhaseRunner:
             channel="text",
             text=f"PREPARE: EDA 工作区 {rt._state.eda_dir} 已就绪。",
         )
-        # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结。
-        await rt.publish_output(
-            source="supervisor", channel="text", text="PREPARE: 冻结评估器…"
-        )
-        evaluator_dir = rt._workspaces_root / "evaluator"
-        if not rt._registry.contains("evaluator"):
-            register_evaluator_agent(
-                rt._registry,
-                provider=rt._provider,
-                artifacts=rt._store,
-                workspace=evaluator_dir,
-                runtime=rt._execution,
-                extra_tools=rt.kaggle_tools("evaluator"),
+        # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结；
+        # 断点续传时若已有可解析的 frozen bundle，直接复用不重跑。
+        evaluator_ref = rt._supervisor.evaluator_ref
+        if evaluator_ref is not None:
+            try:
+                await rt._store.get_text(evaluator_ref)
+            except Exception:
+                # artifact 缺失或损坏 → 重新冻结评估器
+                evaluator_ref = None
+        if evaluator_ref is None:
+            await rt.publish_output(
+                source="supervisor", channel="text", text="PREPARE: 冻结评估器…"
             )
-        evaluator_ref = await run_evaluator_plan(
-            agents=rt._agents,
-            scripts=rt._scripts,
-            store=rt._store,
-            evaluator_dir=evaluator_dir,
-            execution=rt._execution,
-            task=rt._task_text,
-            max_turns=MAX_PLAN_TURNS,
-            publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
-                "evaluator", kind, ref, data
-            ),
-        )
+            evaluator_dir = rt._workspaces_root / "evaluator"
+            if not rt._registry.contains("evaluator"):
+                register_evaluator_agent(
+                    rt._registry,
+                    provider=rt._provider,
+                    artifacts=rt._store,
+                    workspace=evaluator_dir,
+                    runtime=rt._execution,
+                    extra_tools=rt.kaggle_tools("evaluator"),
+                )
+            evaluator_ref = await run_evaluator_plan(
+                agents=rt._agents,
+                scripts=rt._scripts,
+                store=rt._store,
+                evaluator_dir=evaluator_dir,
+                execution=rt._execution,
+                task=rt._task_text,
+                max_turns=MAX_PLAN_TURNS,
+                publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
+                    "evaluator", kind, ref, data
+                ),
+            )
+            await rt._supervisor.checkpoint_evaluator(evaluator_ref)
+        else:
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 复用已冻结的评估器断点，跳过 evaluator Agent。",
+            )
         # 步骤 2：prepare agent 在 EDA worktree 写 experiment 产物并可信打分。
         await rt.publish_output(
-            source="supervisor", channel="text", text="PREPARE: 运行 PREPARE Agent 并打分…"
+            source="supervisor",
+            channel="text",
+            text="PREPARE: 运行 PREPARE Agent 并打分…",
         )
         if not rt._registry.contains("prepare"):
             register_prepare_agent(

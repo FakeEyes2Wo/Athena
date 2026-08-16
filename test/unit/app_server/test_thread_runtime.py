@@ -201,6 +201,50 @@ class ThreadRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.force_close()
 
+    async def test_runner_failure_persists_partial_messages_to_rollout(self) -> None:
+        class FailingMemoryRunner:
+            async def run_with_context(self, thread, turn, emit, ctx, cancel):
+                del thread, turn, emit, cancel
+                ctx.append(
+                    ModelRequest(parts=[UserPromptPart(content="partial turn item")])
+                )
+                raise LookupError("failed")
+
+        class FakeRollout:
+            def __init__(self) -> None:
+                self.records = []
+
+            async def open(self, _thread_id):
+                return None
+
+            async def close(self):
+                return None
+
+            def record(self, message):
+                self.records.append(message)
+
+        ctx = ContextManager()
+        rollout = FakeRollout()
+        runtime = ThreadRuntime(
+            "thread:1",
+            "session:1",
+            "artifact:context",
+            FailingMemoryRunner(),
+            ctx=ctx,
+            rollout=rollout,
+        )
+        await runtime.start()
+        try:
+            await ThreadHandle(runtime).submit(StartTurn("turn:1", "artifact:request"))
+            await eventually(lambda: runtime.state == "idle")
+
+            self.assertEqual(runtime.last_terminal_kind, "turn_failed")
+            self.assertEqual(len(rollout.records), 1)
+            self.assertEqual(rollout.records[0].parts[0].content, "partial turn item")
+            self.assertEqual(ctx.snapshot()[0], 0)
+        finally:
+            await runtime.force_close()
+
     async def test_stalled_health_does_not_cancel_active_runner(self) -> None:
         runner = BlockingRunner()
         runtime = ThreadRuntime(

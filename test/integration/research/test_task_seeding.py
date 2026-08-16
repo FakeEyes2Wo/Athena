@@ -111,3 +111,39 @@ async def test_message_default_does_not_seed(tmp_path: Path) -> None:
         assert runtime._started is False
     finally:
         await _close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_start_task_reuses_persisted_task_understanding(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    try:
+        runtime.state.task_understanding = {"title": "titanic"}
+        runtime.state.task_text = "predict titanic survival"
+        runs: list[str] = []
+
+        async def fake_supervisor_turn(text: str) -> str:
+            runs.append(text)
+            return "should not run"
+
+        runtime._agent_turns.run_supervisor_turn = fake_supervisor_turn  # type: ignore[method-assign]
+        events: list[tuple[str, dict[str, object]]] = []
+        runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
+
+        status = await runtime.start_task("continue")
+
+        assert status == "RUNNING"
+        assert runtime._task_text == "predict titanic survival"
+        assert runs == []
+        assert any(
+            kind == "output"
+            and "断点续传：复用已持久化的任务理解" in str(payload.get("text"))
+            for kind, payload in events
+        )
+        assert not any(
+            kind == "output" and "任务理解中" in str(payload.get("text"))
+            for kind, payload in events
+        )
+    finally:
+        await _close(runtime)

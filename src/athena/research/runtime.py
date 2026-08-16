@@ -324,7 +324,9 @@ class ResearchRuntime:
             provider=provider,
             artifacts=self._store,
             actions=self._supervisor,
-            ask_user=(lambda _t, _u: self._ask_user) if self._ask_user is not None else None,
+            ask_user=(
+                (lambda _t, _u: self._ask_user) if self._ask_user is not None else None
+            ),
             kaggle_stack=supervisor_kaggle,
         )
         register_plan_agent(
@@ -472,7 +474,9 @@ class ResearchRuntime:
         if "hypotheses_per_ideator" in patch:
             value = patch["hypotheses_per_ideator"]
             if not isinstance(value, int) or value < 1 or value > 5:
-                raise ValueError("hypotheses_per_ideator must be an integer between 1 and 5")
+                raise ValueError(
+                    "hypotheses_per_ideator must be an integer between 1 and 5"
+                )
             self.state.hypotheses_per_ideator = value
         if "manual_mode" in patch:
             manual = patch["manual_mode"]
@@ -562,34 +566,38 @@ class ResearchRuntime:
         self._agents.start()
         # 任务理解：让 SupervisorAgent 在 PREPARE 之前读一遍任务，自行决定是否
         # 经 ``configure_kaggle`` 接入 Kaggle 工具。失败只降级为默认关闭，不阻断。
-        # 断点续传时把最近的人类消息一起带上，短句 follow-up 也能沿用旧上下文。
-        if (
-            self._provider is not None
-            and self.state.phase == "PREPARE"
-            and self._task_text.strip()
-        ):
-            context = self._task_context_text(
-                self._task_text, self._recent_user_texts()
-            )
-            await self.publish_output(
-                source="supervisor",
-                channel="text",
-                text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
-            )
-            try:
-                await self._agent_turns.run_supervisor_turn(context)
-                await self.publish_output(
-                    source="supervisor", channel="text", text="任务理解完成。"
-                )
-            except Exception as error:
-                logger.warning(
-                    "supervisor task-understanding turn failed; Kaggle tools stay off",
-                    exc_info=True,
+        # 断点续传时把最近的人类消息一起带上，短句 follow-up 也能沿用旧上下文；
+        # state 已持久化任务理解时直接复用，不重跑（否则 continue 会重复首轮理解）。
+        if self._provider is not None and self.state.phase == "PREPARE":
+            if self._task_text.strip() and self.state.task_understanding is None:
+                context = self._task_context_text(
+                    self._task_text, self._recent_user_texts()
                 )
                 await self.publish_output(
                     source="supervisor",
-                    channel="error",
-                    text=f"任务理解失败（已降级继续）：{error}",
+                    channel="text",
+                    text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
+                )
+                try:
+                    await self._agent_turns.run_supervisor_turn(context)
+                    await self.publish_output(
+                        source="supervisor", channel="text", text="任务理解完成。"
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "supervisor task-understanding turn failed; Kaggle tools stay off",
+                        exc_info=True,
+                    )
+                    await self.publish_output(
+                        source="supervisor",
+                        channel="error",
+                        text=f"任务理解失败（已降级继续）：{error}",
+                    )
+            elif self.state.task_understanding is not None:
+                await self.publish_output(
+                    source="supervisor",
+                    channel="text",
+                    text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
                 )
         self._start_survey()
         self._task = asyncio.create_task(self._supervisor.start())
@@ -753,8 +761,13 @@ class ResearchRuntime:
         before any SEARCH hypothesis can be proposed. Existing ``state.json``
         (resume) keeps its phase and starts via ``recover()``. A terminal run
         is re-armed in place; ``eda_dir`` and workspaces are left untouched.
+        断点续传时沿用首次持久化的完整任务文本，短消息（continue/retry）不会
+        污染 survey 选题与 PREPARE 提示词。
         """
-        self._task_text = task
+        self._task_text = self.state.task_text or task
+        if self.state.task_text is None:
+            self.state.task_text = task
+            self.state.save(self._state_path)
         self._rearm_if_terminal()
         if not self._started or self._task is None:
             if (

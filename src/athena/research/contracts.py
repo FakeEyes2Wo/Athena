@@ -7,11 +7,20 @@
 首版只冻结合同的形状与硬约束（enum/范围/非空），业务语义由 LLM 生成的脚本承担。
 """
 
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel
 
 from athena.core.contracts import ArtifactRef, NonBlankText
+
+
+@dataclass(frozen=True)
+class GeneralTurnOutcome:
+    """One completed General Agent turn: stable agent id plus its structured result."""
+
+    agent_id: str
+    result: dict[str, object]
 
 
 class DataScriptBundle(BaseModel):

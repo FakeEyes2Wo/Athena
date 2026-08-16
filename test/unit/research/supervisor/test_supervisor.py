@@ -3,6 +3,7 @@
 import json
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,10 +17,11 @@ from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import ExecutionRuntime
+from athena.research.contracts import GeneralTurnOutcome
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
-from athena.research.supervisor.supervisor import _final_report_text
+from athena.research.supervisor.supervisor import Supervisor, _final_report_text
 
 
 class _SubmitProvider:
@@ -190,3 +192,127 @@ def test_final_report_text_surfaces_validation_metrics() -> None:
 
 def test_final_report_text_is_minimal_without_metrics() -> None:
     assert _final_report_text({}) == "VALIDATE completed"
+
+
+def _checkpoint_supervisor(tmp_path: Path, run_general_turn=None) -> Supervisor:
+    """Build a lightweight Supervisor for checkpoint-related unit tests."""
+    state_path = tmp_path / ".athena" / "state.json"
+    state = (
+        ResearchState.load(state_path)
+        if state_path.is_file()
+        else ResearchState(
+            status="RUNNING", phase="PREPARE", search_limit=10, concurrency=1
+        )
+    )
+
+    async def no_plan_turn(_plan_id, _state):
+        raise AssertionError("plan turn must not run")
+
+    async def no_supervisor_turn(_text):
+        raise AssertionError("supervisor turn must not run")
+
+    async def publish(_kind, _payload):
+        return None
+
+    return Supervisor(
+        project_root=tmp_path,
+        state=state,
+        tree=ResearchTree(),
+        store=LocalArtifactStore(tmp_path / "artifacts"),
+        agents=SimpleNamespace(),
+        workspaces=SimpleNamespace(),
+        scheduler=Scheduler(),
+        recovery=Recovery(),
+        evaluator_ref=None,
+        run_plan_turn=no_plan_turn,
+        run_supervisor_turn=no_supervisor_turn,
+        publish=publish,
+        run_general_turn=run_general_turn,
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_general_caches_first_result(tmp_path: Path) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_general(task: str, prior_agent_id: str | None):
+        calls.append((task, prior_agent_id))
+        return GeneralTurnOutcome(
+            agent_id="general-worker",
+            result={"result": "done", "files": ["summary.md"]},
+        )
+
+    supervisor = _checkpoint_supervisor(tmp_path, fake_general)
+
+    first = await supervisor.dispatch_general("inspect competition")
+    second = await supervisor.dispatch_general("inspect competition")
+
+    assert first == {"result": "done", "files": ["summary.md"]}
+    assert second == {"cached": True, "result": "done", "files": ["summary.md"]}
+    assert calls == [("inspect competition", None)]
+    assert supervisor.state.task_research_ref is not None
+    assert supervisor.state.task_research_agent_id == "general-worker"
+    persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
+    assert persisted.task_research_ref == supervisor.state.task_research_ref
+
+
+@pytest.mark.asyncio
+async def test_set_kaggle_enabled_persists_and_restores_decision(
+    tmp_path: Path,
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+
+    result = await supervisor.set_kaggle_enabled(True, download=False)
+
+    assert result == {"kaggle_enabled": True, "download": False}
+    persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
+    assert persisted.kaggle_download is False
+    restored = _checkpoint_supervisor(tmp_path)
+    assert restored.kaggle_enabled is True
+    assert restored.kaggle_download is False
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_evaluator_persists_frozen_bundle(tmp_path: Path) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    ref = await supervisor._store.put_text('{"frozen": true}')
+
+    result = await supervisor.checkpoint_evaluator(ref)
+
+    assert result == {"evaluator_ref": ref}
+    assert supervisor.evaluator_ref == ref
+    restored = _checkpoint_supervisor(tmp_path)
+    assert restored.evaluator_ref == ref
+
+
+@pytest.mark.asyncio
+async def test_run_prepare_skips_when_trusted_baseline_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    monkeypatch.setattr(supervisor.tree, "best_experiment_id", lambda: "exp_baseline")
+    calls: list[str] = []
+
+    async def raise_prepare():
+        calls.append("prepare")
+        raise AssertionError("PREPARE must be skipped")
+
+    supervisor._run_prepare_phase = raise_prepare  # type: ignore[method-assign]
+    captured: list[tuple[str, dict[str, object]]] = []
+    original_publish = supervisor._publish
+
+    async def publish(kind, payload):
+        captured.append((kind, payload))
+        return await original_publish(kind, payload)
+
+    supervisor._publish = publish  # type: ignore[method-assign]
+
+    await supervisor._run_prepare()
+
+    assert calls == []
+    assert supervisor.state.phase == "SEARCH"
+    assert supervisor.state.status == "RUNNING"
+    assert any(
+        kind == "output" and "跳过 PREPARE" in str(payload.get("text"))
+        for kind, payload in captured
+    )
