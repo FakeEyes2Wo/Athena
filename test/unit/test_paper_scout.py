@@ -5,6 +5,10 @@ import json
 import tempfile
 import math
 import unittest
+from unittest import mock
+import athena.research.paper_scout.agent as agent_module
+from athena.research.paper_scout.selection import DeliverySelection
+from athena.research.paper_source.schemas import PaperSourcePolicy
 from types import SimpleNamespace
 import zlib
 
@@ -1359,3 +1363,67 @@ class BackendLimitTest(unittest.IsolatedAsyncioTestCase):
         await backend.search("q", 500, "")
 
         self.assertIn(f"max_results={ARXIV_MAX_RESULTS}", transport.urls[0])
+
+
+class DeliveryTargetTest(unittest.TestCase):
+    """重排要对准真正的交付量，不是候选上限。
+
+    取源按 3 倍超额下单、够数即停：``max_papers`` 是候选上限（真机 60），实际进语料的是
+    ``stop_after_fetched``（真机 20）。按候选上限切档，截断线落在第 60 位——真机实测那里
+    是 197 篇同为 0.20 的尾部，而取源试到第 36 篇就够数，那一档一篇都没被碰过，于是重排
+    精心排了一批永远不会被下载的论文。
+    """
+
+    def _run(self, *, stop_after_fetched: int, max_papers: int, papers: int):
+        """跑一次单步 scout，返回 (选片收到的 limit, 交付篇数)。"""
+        seen: list[int] = []
+
+        async def spy(query, contenders, limit, selector):
+            seen.append(limit)
+            return DeliverySelection(delivered=list(contenders[:limit]))
+
+        backend = StubBackend(
+            "stub", [paper(str(i), f"Paper {i}", 0.0) for i in range(papers)]
+        )
+        scores = {f"Paper {i}": 0.9 for i in range(papers)}
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = LocalArtifactStore(directory)
+            request = ScoutRequest(
+                query="anomaly detection",
+                max_steps=1,
+                max_papers=max_papers,
+                paper_source_policy=PaperSourcePolicy(
+                    stop_after_fetched=stop_after_fetched
+                ),
+            )
+            ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
+            agent = PaperScoutAgent(
+                artifacts, [backend], None, StubScorer(scores), model="stub-model"
+            )
+            agent._provider = ScriptedProvider(
+                [[("paper_scout_search", {"query": "graph anomaly"})]]
+            )
+            with mock.patch.object(agent_module, "select_delivery", spy):
+                outcome = asyncio.run(agent.run(agent_context(ref)))
+            result = PaperScoutResult.model_validate_json(
+                asyncio.run(artifacts.get_text(outcome.result_ref))
+            )
+        return seen, result.paper_count
+
+    def test_the_cut_follows_the_delivery_target_not_the_candidate_cap(self) -> None:
+        seen, _ = self._run(stop_after_fetched=5, max_papers=30, papers=40)
+
+        self.assertEqual([5], seen)
+
+    def test_unselected_candidates_stay_on_as_fetch_backups(self) -> None:
+        """垫底的存在意义就是接住取源失败，不该因为没被选中而消失。"""
+        _seen, delivered = self._run(
+            stop_after_fetched=5, max_papers=30, papers=40
+        )
+
+        self.assertEqual(30, delivered)
+
+    def test_no_stop_target_falls_back_to_the_candidate_cap(self) -> None:
+        seen, _ = self._run(stop_after_fetched=0, max_papers=7, papers=20)
+
+        self.assertEqual([7], seen)

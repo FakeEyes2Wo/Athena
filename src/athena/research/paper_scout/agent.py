@@ -242,13 +242,23 @@ class PaperScoutAgent(BaseAgent):
             session.request.retain_threshold,
             require_retrievable_source=session.request.require_retrievable_source,
         )
+        # 重排要对准**真正的交付量**，不是候选上限。取源按 3 倍超额下单、够数即停，所以
+        # ``max_papers`` 是候选上限（真机 60），而实际进语料的是 ``stop_after_fetched``
+        # （真机 20）。按候选上限切档，截断线落在第 60 位——真机实测那里是 197 篇同为
+        # 0.20 的尾部，而取源试到第 36 篇就够数了，那一档一篇都没被碰过。也就是说重排
+        # 精心排了一批永远不会被下载的论文。按交付量切档，截断线才落在真正有人争的地方。
+        target = session.request.paper_source_policy.stop_after_fetched
         selection = await select_delivery(
             session.request.query,
             contenders,
-            session.request.max_papers,
+            target or session.request.max_papers,
             self.selector,
         )
-        retained = selection.delivered
+        # 选出的交付集合在前，其余候选按原次序垫在后面：取源逐个尝试、失败就往后走，
+        # 垫底的存在意义就是接住取源失败，不该因为没被选中而消失。
+        chosen = {item.paper_key for item in selection.delivered}
+        backups = [item for item in contenders if item.paper_key not in chosen]
+        retained = (selection.delivered + backups)[: session.request.max_papers or None]
         stats.boundary_tier = selection.boundary_size
         stats.boundary_reranked = selection.reranked
         stats.facets = list(selection.facets)
