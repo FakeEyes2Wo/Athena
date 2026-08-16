@@ -11,6 +11,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
+from athena.core.research_models import HypothesisBatch
 from athena.research import agent_turn_runner as atr_module
 from athena.research import runtime as runtime_module
 from athena.research.agent_turn_runner import AgentTurnRunner
@@ -187,7 +188,7 @@ async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
         return SimpleNamespace(hypotheses=[])
 
     async def finish(_batch, *, rejections=None):
-        return []
+        return HypothesisBatch()
 
     monkeypatch.setattr(atr_module, "wait_run_events", wait)
     monkeypatch.setattr(atr_module, "load_agent_result", load)
@@ -215,7 +216,7 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
         return SimpleNamespace(hypotheses=[])
 
     async def finish(_batch, *, rejections=None):
-        return []
+        return HypothesisBatch()
 
     monkeypatch.setattr(atr_module, "wait_run_events", wait)
     monkeypatch.setattr(atr_module, "load_agent_result", load)
@@ -280,7 +281,9 @@ async def test_debate_ideation_receives_corpus_instruction_and_read_only_tools(
     captured_prompts: list[str] = []
     captured_tools: list[object | None] = []
 
-    async def fake_single_turn(prompt, schema, *, model, artifacts, client=None, tools=None):
+    async def fake_single_turn(
+        prompt, schema, *, model, artifacts, client=None, tools=None
+    ):
         captured_prompts.append(prompt)
         captured_tools.append(tools)
         return SimpleNamespace()

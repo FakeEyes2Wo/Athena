@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -19,7 +20,6 @@ from athena.core.agent import AgentOutcome
 from athena.core.contracts import ArtifactRef, ArtifactStore, new_id
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
-from athena.research.data_models import DataProfile
 from athena.agents.ideator.types import (
     DebateResult,
     _JudgeOutput,
@@ -28,7 +28,6 @@ from athena.agents.ideator.types import (
     _RevisionBatch,
     _TurnRequest,
 )
-from athena.retrieval.types import HFModelRef, PaperRef
 
 _OUTPUT_TYPES = {
     "proposal": _ProposalBatch,
@@ -36,6 +35,15 @@ _OUTPUT_TYPES = {
     "revision": _RevisionBatch,
     "judge": _JudgeOutput,
 }
+
+
+def _context_value(item: object) -> object:
+    """Dump one context item to a JSON-friendly value (pydantic / dataclass / passthrough)."""
+    if isinstance(item, BaseModel):
+        return item.model_dump(mode="json")
+    if dataclasses.is_dataclass(item):
+        return asdict(item)
+    return item
 
 
 class _DebateRunner:
@@ -243,16 +251,16 @@ class Ideator:
 
     async def generate(
         self,
-        profile: DataProfile,
-        papers: list[PaperRef],
-        models: list[HFModelRef],
+        profile: BaseModel,
+        papers: Sequence[object],
+        models: Sequence[object],
         tree: ResearchTree,
     ) -> DebateResult:
         """基于数据画像/论文/模型产出经辩论裁决的假设批次。"""
         context_payload = {
-            "profile": profile.model_dump(mode="json"),
-            "papers": [asdict(paper) for paper in papers],
-            "models": [asdict(model) for model in models],
+            "profile": _context_value(profile),
+            "papers": [_context_value(paper) for paper in papers],
+            "models": [_context_value(model) for model in models],
             "tree": tree.to_dict(),
         }
         parent_id = tree.best_experiment_id()

@@ -263,7 +263,7 @@ async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
 async def test_gated_batch_preserves_eda_request(monkeypatch) -> None:
     """gated 模式的 IdeatorHypothesisBatch 也把 eda_request 传给动态 EDA。"""
     runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._ideation = "gated"
+    runtime._ideation = "ideageneration"
     runtime._model = "m"
     runtime._store = object()
 

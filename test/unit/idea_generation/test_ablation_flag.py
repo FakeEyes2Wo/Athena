@@ -57,8 +57,12 @@ def _register(gated: bool | None, tmp_path: Path):
     registry = _Registry()
     kwargs = {} if gated is None else {"gated": gated}
     register_ideator_agent(
-        registry, provider=object(), artifacts=SimpleNamespace(),
-        workspace=tmp_path, runtime=_execution_runtime(), **kwargs,
+        registry,
+        provider=object(),
+        artifacts=SimpleNamespace(),
+        workspace=tmp_path,
+        runtime=_execution_runtime(),
+        **kwargs,
     )
     return registry.factories["ideator"]("agent-1")
 
@@ -69,6 +73,7 @@ def _output_type_of(gated: bool, tmp_path: Path):
 
 
 # ====== 输出契约随开关切换 ======
+
 
 def test_gated_mode_binds_the_rich_output_contract(tmp_path):
     assert _output_type_of(True, tmp_path) is IdeatorHypothesisBatch
@@ -81,10 +86,13 @@ def test_baseline_mode_binds_mains_original_output_contract(tmp_path):
 
 def test_gated_is_the_default(tmp_path):
     """本次交付的能力默认开启；消融时显式关掉。"""
-    assert _register(None, tmp_path).runner._agent._output_type is IdeatorHypothesisBatch
+    assert (
+        _register(None, tmp_path).runner._agent._output_type is IdeatorHypothesisBatch
+    )
 
 
 # ====== 两份 prompt 各自存在且要求不同 ======
+
 
 def test_baseline_prompt_does_not_demand_the_rich_fields():
     """baseline prompt 不能要求 premises/disconfirmers——那是 gated 侧的契约。
@@ -104,10 +112,13 @@ def test_gated_prompt_demands_the_rich_fields():
 
 # ====== 出口分支：门禁只在 gated 侧跑 ======
 
+
 def _runner(ideation: str) -> AgentTurnRunner:
     """AgentTurnRunner 只需要 runtime 上的三个字段就能做出口分支。"""
     return AgentTurnRunner(
-        SimpleNamespace(_model="fake-model", _store=SimpleNamespace(), _ideation=ideation)
+        SimpleNamespace(
+            _model="fake-model", _store=SimpleNamespace(), _ideation=ideation
+        )
     )
 
 
@@ -120,7 +131,9 @@ async def test_baseline_mode_registers_ideator_output_untouched(monkeypatch):
         called["gate"] += 1
         return []
 
-    monkeypatch.setattr("athena.research.agent_turn_runner.run_light_pipeline", _tripwire)
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner.run_light_pipeline", _tripwire
+    )
     produced = [Hypothesis(statement="s", intervention="i", expected_effect="e")]
 
     result = await _runner("baseline")._finish_ideator_batch(
@@ -128,7 +141,7 @@ async def test_baseline_mode_registers_ideator_output_untouched(monkeypatch):
     )
 
     assert called["gate"] == 0
-    assert result == produced
+    assert result.hypotheses == produced
 
 
 @pytest.mark.asyncio
@@ -140,10 +153,15 @@ async def test_ideageneration_mode_sends_drafts_through_the_gate(monkeypatch):
         called["gate"] += 1
         return kept
 
-    monkeypatch.setattr("athena.research.agent_turn_runner.run_light_pipeline", _fake_gate)
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner.run_light_pipeline", _fake_gate
+    )
     draft = IdeatorHypothesisDraft(
-        statement="s", intervention="i", expected_effect="e",
-        supported_premises=[], predicted_observations=["p"],
+        statement="s",
+        intervention="i",
+        expected_effect="e",
+        supported_premises=[],
+        predicted_observations=["p"],
         disconfirming_observations=["d"],
     )
 
@@ -152,4 +170,4 @@ async def test_ideageneration_mode_sends_drafts_through_the_gate(monkeypatch):
     )
 
     assert called["gate"] == 1
-    assert result == kept
+    assert result.hypotheses == kept

@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
+
 from athena.agents.data_agent import DATA_AGENT_ID, register_data_agent
 from athena.agents.general_agent import GeneralResult, register_general_agent
 from athena.agents.ideator_agent import register_ideator_agent
@@ -49,6 +51,14 @@ async def _interrupt_agent(agents, agent_id: str, reason: str) -> None:
         await agents.interrupt(agent_id, reason)
     except Exception:
         pass
+
+
+class _DebateProfile(BaseModel):
+    """辩论 Ideator 的最小数据画像（EDA-only SEARCH 没有完整 DataProfile 来源）。"""
+
+    row_count: int = 0
+    col_count: int = 0
+    task_type_hint: str = "eda_workspace"
 
 
 def _regenerate_prompt(rejections: list[str], target: int) -> str:
@@ -374,8 +384,8 @@ class AgentTurnRunner:
 
             rejections: list[str] = []
             kept = await self._finish_ideator_batch(batch, rejections=rejections)
-            if kept or not rejections or attempt == MAX_GATE_RETRIES:
-                if not kept and rejections:
+            if kept.hypotheses or not rejections or attempt == MAX_GATE_RETRIES:
+                if not kept.hypotheses and rejections:
                     await rt.publish_output(
                         source="agent",
                         channel="error",
@@ -391,23 +401,33 @@ class AgentTurnRunner:
                 agent_id,
                 {"content": _regenerate_prompt(rejections, target), "context_refs": []},
             )
-        return []
+        return HypothesisBatch()
 
     async def _finish_ideator_batch(
         self,
         batch: IdeatorHypothesisBatch | HypothesisBatch,
         *,
         rejections: list[str] | None = None,
-    ) -> list[Hypothesis]:
+    ) -> HypothesisBatch:
         """按消融模式决定 Ideator 产出如何进入 ResearchTree。
 
         ``ideageneration``：跑 Idea Generation 门禁（pre_gate + 视角审阅 +
         light_hard_gate），不合格的候选直接丢弃，不静默放行。
         ``baseline``：main 原有行为，产出即入库，作为消融对照组。
+        两个模式统一返回 ``HypothesisBatch``，保留原批次的 ``eda_request``。
         """
         rt = self._runtime
+        eda_request = getattr(batch, "eda_request", None)
         if getattr(rt, "_ideation", "ideageneration") != "ideageneration":
-            return list(batch.hypotheses)
+            hypotheses = [
+                (
+                    item
+                    if isinstance(item, Hypothesis)
+                    else Hypothesis.model_validate(item)
+                )
+                for item in batch.hypotheses
+            ]
+            return HypothesisBatch(hypotheses=hypotheses, eda_request=eda_request)
 
         async def progress(message: str) -> None:  # noqa: D401
             """把门禁进度投影成普通输出事件。
@@ -419,13 +439,14 @@ class AgentTurnRunner:
             if publish is not None:
                 await publish(source="agent", channel="text", text=f"gate> {message}")
 
-        return await run_light_pipeline(
+        kept = await run_light_pipeline(
             batch.hypotheses,
             model=rt._model,
             artifacts=rt._store,
             progress=progress,
             rejections=rejections,
         )
+        return HypothesisBatch(hypotheses=kept, eda_request=eda_request)
 
     async def _run_debate_ideator_turn(self, count: int) -> list[Hypothesis]:
         """Run the debate-based Ideator (proposal -> review -> revision -> judge).
@@ -435,7 +456,6 @@ class AgentTurnRunner:
         there is no pipeline-local ranking either.
         """
         from athena.agents.ideator import Ideator  # 延迟导入避免循环依赖
-        from athena.research.data_models import DataProfile  # 延迟导入避免循环依赖
         from athena.research.idea_generation.structured_chat import (  # 延迟导入避免循环依赖
             single_turn_structured_chat,
         )
@@ -477,9 +497,8 @@ class AgentTurnRunner:
             return _DebateAgentAdapter()
 
         # 辩论 Ideator 的完整输入（DataProfile/papers/models）在 EDA-only 的 SEARCH
-        # 组合根里没有现成来源；这里给最小画像 + 空文献/模型列表，保证模式可运行，
-        # 后续接入 PREPARE 的 DataProfile 构建器后可替换为真实输入。
-        profile = DataProfile(row_count=0, col_count=0, task_type_hint="eda_workspace")
+        # 组合根里没有现成来源；这里给最小画像 + 空文献/模型列表，保证模式可运行。
+        profile = _DebateProfile()
         ideator = Ideator(agent_factory=agent_factory, artifacts=rt._store)
         try:
             result = await ideator.generate(profile, [], [], rt.tree)

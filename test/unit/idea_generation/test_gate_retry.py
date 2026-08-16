@@ -35,10 +35,14 @@ class _Agents:
 
 def _runner(agents: _Agents, tmp_path) -> AgentTurnRunner:
     runtime = SimpleNamespace(
-        _agents=agents, _model="m", _store=SimpleNamespace(), _ideation="ideageneration",
+        _agents=agents,
+        _model="m",
+        _store=SimpleNamespace(),
+        _ideation="ideageneration",
         _supervisor=SimpleNamespace(evaluator_ref=None),
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         publish_output=_noop_publish,
+        survey_corpus_ref=lambda: None,
     )
     return AgentTurnRunner(runtime)
 
@@ -85,7 +89,7 @@ async def test_all_rejected_triggers_a_followup_with_the_blocking_reasons(
 
     kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1", 1, tmp_path)
 
-    assert len(kept) == 1
+    assert len(kept.hypotheses) == 1
     assert len(agents.followups) == 1
     assert "risk_ok_methodology" in agents.followups[0]
 
@@ -98,7 +102,7 @@ async def test_retries_are_capped(tmp_path, monkeypatch):
 
     kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1", 1, tmp_path)
 
-    assert kept == []
+    assert kept.hypotheses == []
     assert len(agents.followups) == MAX_GATE_RETRIES
     assert calls["n"] == MAX_GATE_RETRIES + 1
 
@@ -110,7 +114,7 @@ async def test_first_round_success_does_not_retry(tmp_path, monkeypatch):
 
     kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1", 1, tmp_path)
 
-    assert len(kept) == 1
+    assert len(kept.hypotheses) == 1
     assert agents.followups == []
 
 
@@ -124,5 +128,5 @@ async def test_baseline_mode_never_retries(tmp_path, monkeypatch):
 
     kept = await runner._run_ideator_lane("ideator-1", 1, tmp_path)
 
-    assert kept == []
+    assert kept.hypotheses == []
     assert agents.followups == []
