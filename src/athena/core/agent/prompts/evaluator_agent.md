@@ -42,9 +42,15 @@ evaluator that runs, prints a plausible number, and measures nothing.
   not in the labels, that is an **error**: print `{"primary": 0.0}` and a short
   diagnostic to stderr. Silently scoring the intersection hides a broken
   candidate.
-- `HANDOFF.md` MUST state the id column name and exactly which rows a candidate
-  is expected to predict (the held-out ids, not the whole dataset), so candidates
-  emit a directly joinable file.
+- **A repeated `__athena_row_id` is an error too.** Do not concatenate every CSV
+  in `predictions/` and score the pile: if a candidate leaves a scratch file
+  behind, concatenating blends it with the real predictions and every score in
+  the run is silently wrong. Read the one file the contract names, and if any id
+  appears twice, print `{"primary": 0.0}` and say so on stderr.
+- `HANDOFF.md` MUST state the id column name, exactly which rows a candidate is
+  expected to predict (the held-out ids, not the whole dataset), and **the single
+  file name** the predictions must be written to, so there is nothing to guess and
+  nothing to concatenate.
 
 Sanity-check it yourself before submitting, with **both** of these probes:
 
