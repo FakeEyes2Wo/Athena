@@ -14,6 +14,7 @@ from athena.research.bench.reproducibility import delivery_overlap
 from athena.research.paper_scout.pool import tie_break
 from athena.research.paper_scout.schemas import ScoutPaper
 from athena.research.paper_scout.selection import (
+    MAX_RANKED,
     DeliverySelection,
     fill_by_coverage,
     format_papers,
@@ -326,3 +327,36 @@ class DeliverySelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BoundaryCapTest(unittest.IsolatedAsyncioTestCase):
+    """边界档可以很大——真机实测 48 篇同分。全塞给模型会超时，而超时是安静的。"""
+
+    async def test_only_the_capped_head_is_sent_to_the_model(self) -> None:
+        papers = _ranked({f"t{i:02d}": 0.45 for i in range(60)})
+        selector = FakeSelector([], [], {})
+
+        await select_delivery("q", papers, 5, selector)
+
+        self.assertEqual(MAX_RANKED, len(selector.seen[1]))
+
+    async def test_papers_beyond_the_cap_keep_hash_order_at_the_back(self) -> None:
+        """没被排到不该让它出局，但也不该插到已经被排过的那些前面。"""
+        papers = _ranked({f"t{i:02d}": 0.45 for i in range(60)})
+        head = [item.paper_key for item in hash_order(papers)[:MAX_RANKED]]
+        # 模型只回了 head 的最后一篇，其余都得靠补位
+        selector = FakeSelector([head[-1]], [], {})
+
+        selection = await select_delivery("q", papers, 3, selector)
+
+        self.assertEqual(head[-1], selection.delivered[0].paper_key)
+        self.assertTrue(selection.reranked)
+        self.assertEqual(60, selection.boundary_size)
+
+    async def test_the_reported_boundary_size_is_the_real_tier_not_the_cap(self) -> None:
+        """报告要说清"有多少篇在争"，而不是"我们看了多少篇"。"""
+        papers = _ranked({f"t{i:02d}": 0.45 for i in range(60)})
+
+        selection = await select_delivery("q", papers, 5, FakeSelector([], [], {}))
+
+        self.assertEqual(60, selection.boundary_size)

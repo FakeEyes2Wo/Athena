@@ -35,9 +35,30 @@ from athena.research.paper_scout.pool import tie_break
 from athena.research.paper_scout.schemas import ScoutPaper
 
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
-SELECTION_ABSTRACT_CHARS = 700
 MAX_FACETS = 5
-DEFAULT_TIMEOUT = 120.0
+
+SELECTION_ABSTRACT_CHARS = 320
+"""交给重排的摘要长度。
+
+从 700 降到 320 是被真机逼的：一次 48 篇的边界档按 700 字符渲染约 34 000 字符输入，加上
+逐篇的排序输出，整次调用在 120 秒里跑不完（实测两臂都是 ``APITimeoutError``）。判"这篇
+比那篇更贴题"用不到整段摘要——前 320 字符已经覆盖问题设定与方法名。
+"""
+
+MAX_RANKED = 40
+"""一次最多交给模型重排几篇。
+
+边界档可以很大——真机实测浅检索那轮是 **48 篇同为 0.20**。全部塞进去既撑大输入，又要求
+模型输出 48 行排序，而延迟由输出 token 决定。超出的部分保持散列次序排在后面：它们本来
+就在候选的尾部，重排与否几乎不改变交付集合。
+"""
+
+DEFAULT_TIMEOUT = 300.0
+"""单次重排的超时。
+
+120 秒是拍出来的，真机上两臂都超时，整个重排从未生效过——回退逻辑是对的，所以它安静地
+退化成了散列次序，没有任何报错。300 秒配合上面两条裁剪，留出足够余量。
+"""
 
 SELECTION_PROMPT = """You are assembling the reading list for a research task. \
 A relevance scorer has already run; papers above the cut are settled. Your job is the \
@@ -63,14 +84,15 @@ Already selected (for facet coverage only — do not rank these):
 Tied papers to rank:
 {tied}
 
-Return one JSON object and nothing else:
+Return one JSON object and nothing else, with no prose around it:
 {{"facets": ["facet name", ...],
   "settled_facets": {{"<id>": ["facet name", ...]}},
-  "ranking": [{{"id": "<id>", "facets": ["facet name", ...], "why": "one clause"}}]}}
+  "ranking": [{{"id": "<id>", "facets": ["facet name", ...]}}]}}
 
 `ranking` must list every tied paper exactly once, best first. Use only facet names \
-you declared in `facets`. Judge relevance to the topic, not writing quality, venue or \
-citation count."""
+you declared in `facets`. **Write no explanations** — the ordering itself is the \
+answer, and latency here is driven by output length. Judge relevance to the topic, \
+not writing quality, venue or citation count."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,8 +226,12 @@ async def select_delivery(
             boundary_size=len(tied),
             note="no selector configured; fell back to hash order",
         )
+    # 只把前 MAX_RANKED 篇交给模型；其余保持散列次序排在后面。边界档在真机上可以到 48
+    # 篇，全塞进去会让这次调用超时——而超时的表现是安静地退回散列，整个重排等于没做。
+    ranked_order = hash_order(tied)
+    head, tail = ranked_order[:MAX_RANKED], ranked_order[MAX_RANKED:]
     try:
-        facets, facets_by_paper, order = await selector.rank(query, certain, tied)
+        facets, facets_by_paper, order = await selector.rank(query, certain, head)
     except Exception as error:  # noqa: BLE001 - 选片必须永远给得出结果
         return DeliverySelection(
             delivered=certain + hash_order(tied)[:slots],
@@ -220,8 +246,11 @@ async def select_delivery(
         )
     by_key = {item.paper_key: item for item in tied}
     ordered = [by_key[key] for key in order if key in by_key]
-    # 模型漏掉的候选按散列次序补在末尾：漏掉一篇不该让它彻底出局，但也不该插到前面
-    ordered.extend(hash_order([item for item in tied if item.paper_key not in set(order)]))
+    # 模型漏掉的、以及超出 MAX_RANKED 没送进去的，都按散列次序补在末尾：没被排到不该让
+    # 它彻底出局，但也不该插到已经被排过的那些前面
+    seen = set(order)
+    ordered.extend(item for item in head if item.paper_key not in seen)
+    ordered.extend(tail)
     covered: dict[str, str] = {}
     for paper in certain:
         for facet in facets_by_paper.get(paper.paper_key, []):
