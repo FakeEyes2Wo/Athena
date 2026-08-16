@@ -509,6 +509,13 @@ class AgentTurnRunner:
             agent_id, run_id = await rt._agents.create_root(
                 "general", request, name="general"
             )
+        if (
+            rt._state.task_research_ref is None
+            and rt._state.task_research_agent_id != agent_id
+        ):
+            # 断点续传：等待前先留下稳定 id，worker 超时/进程崩溃后仍能续跑同一线程。
+            rt._state.task_research_agent_id = agent_id
+            rt._state.save(rt._state_path)
         try:
             summary = await asyncio.wait_for(
                 wait_run_events(

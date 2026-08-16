@@ -218,3 +218,56 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         "复用已冻结的评估器断点" in str(output.get("text")) for output in outputs
     )
     assert rt._supervisor.checked_refs == []
+
+
+@pytest.mark.asyncio
+async def test_run_general_turn_persists_agent_id_before_wait(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from athena.agents.general_agent import GeneralResult
+    from athena.research import agent_turn_runner as atr
+
+    saves: list[str] = []
+    state = SimpleNamespace(
+        phase="PREPARE",
+        status="RUNNING",
+        task_research_ref=None,
+        task_research_agent_id=None,
+        save=lambda path: saves.append(str(path)),
+    )
+
+    class FakeAgents:
+        async def create_root(self, agent_type, request, *, name, agent_id=None):
+            del name, agent_id
+            return "general-worker", "run-1"
+
+    rt = SimpleNamespace(
+        _root=tmp_path,
+        _state_path=tmp_path / ".athena" / "state.json",
+        _state=state,
+        _provider=object(),
+        _registry=SimpleNamespace(contains=lambda name: True),
+        _store=object(),
+        _execution=object(),
+        _agents=FakeAgents(),
+        _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
+    )
+
+    async def wait_run_events(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace()
+
+    monkeypatch.setattr(atr, "wait_run_events", wait_run_events, raising=False)
+
+    async def load_agent_result(summary, store, schema):
+        del summary, store, schema
+        return GeneralResult(result="done", files=["summary.md"])
+
+    monkeypatch.setattr(atr, "load_agent_result", load_agent_result, raising=False)
+
+    outcome = await atr.AgentTurnRunner(rt).run_general_turn("inspect competition")
+
+    assert outcome.agent_id == "general-worker"
+    assert outcome.result == {"result": "done", "files": ["summary.md"]}
+    assert state.task_research_agent_id == "general-worker"
+    assert saves == [str(rt._state_path)]
