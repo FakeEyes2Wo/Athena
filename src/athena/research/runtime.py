@@ -588,7 +588,13 @@ class ResearchRuntime:
         # 断点续传时把最近的人类消息一起带上，短句 follow-up 也能沿用旧上下文；
         # state 已持久化任务理解时直接复用，不重跑（否则 continue 会重复首轮理解）。
         if self._provider is not None and self.state.phase == "PREPARE":
-            if self._task_text.strip() and self.state.task_understanding is None:
+            if self.state.task_understanding is not None:
+                await self.publish_output(
+                    source="supervisor",
+                    channel="text",
+                    text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
+                )
+            elif self._task_text.strip():
                 context = self._task_context_text(
                     self._task_text, self._recent_user_texts()
                 )
@@ -612,12 +618,6 @@ class ResearchRuntime:
                         channel="error",
                         text=f"任务理解失败（已降级继续）：{error}",
                     )
-            elif self.state.task_understanding is not None:
-                await self.publish_output(
-                    source="supervisor",
-                    channel="text",
-                    text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
-                )
         self._start_survey()
         self._task = asyncio.create_task(self._supervisor.start())
         self._started = True

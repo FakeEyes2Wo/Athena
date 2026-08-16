@@ -44,6 +44,27 @@ def _core_digest(payload: Mapping) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _merge_resume(candidate: dict, payload: Mapping, resume_path: Path) -> None:
+    """Overlay a digest-matching resume file onto the core candidate."""
+    if not resume_path.is_file():
+        return
+    try:
+        resume = json.loads(resume_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # resume 文件损坏/截断 → 按无断点继续，核心状态仍可用
+        return
+    if not isinstance(resume, dict) or resume.get("state_digest") != _core_digest(
+        payload
+    ):
+        logger.warning(
+            "ignoring stale resume file %s (core state changed)", resume_path
+        )
+        return
+    for key in RESUME_FIELDS:
+        if key in resume:
+            candidate[key] = resume[key]
+
+
 class ResearchState(BaseModel):
     """Small durable checkpoint for unfinished autonomous research."""
 
@@ -130,25 +151,7 @@ class ResearchState(BaseModel):
             raise ValueError("research state payload must be an object")
         candidate = dict(payload)
         inline_resume = any(key in candidate for key in RESUME_FIELDS)
-        resume_applied = False
-        resume_path = _resume_path(target)
-        if resume_path.is_file():
-            try:
-                resume = json.loads(resume_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                # resume 文件损坏/截断 → 按无断点继续，核心状态仍可用
-                resume = None
-            if isinstance(resume, dict) and resume.get("state_digest") == _core_digest(
-                payload
-            ):
-                for key in RESUME_FIELDS:
-                    if key in resume:
-                        candidate[key] = resume[key]
-                resume_applied = True
-            else:
-                logger.warning(
-                    "ignoring stale resume file %s (core state changed)", resume_path
-                )
+        _merge_resume(candidate, payload, _resume_path(target))
         if candidate.get("task_research_ref") is not None and not candidate.get(
             "task_research_task"
         ):
@@ -157,7 +160,7 @@ class ResearchState(BaseModel):
             candidate["task_research_agent_id"] = None
             inline_resume = True
         state = cls.model_validate(candidate)
-        if inline_resume and not resume_applied:
+        if inline_resume:
             # 迁移中间版本的内联布局：旧二进制只能读不含 resume 字段的核心文件。
             state.save(target)
         return state

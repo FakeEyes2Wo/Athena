@@ -269,6 +269,31 @@ async def test_dispatch_general_caches_first_result(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_general_heals_broken_cached_artifact(tmp_path: Path) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    broken_ref = "sha256:" + "e" * 64
+    supervisor.state.task_research_task = "inspect competition"
+    supervisor.state.task_research_ref = broken_ref
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_general(task: str, prior_agent_id: str | None):
+        calls.append((task, prior_agent_id))
+        return GeneralTurnOutcome(
+            agent_id="general-fresh", result={"result": "fresh", "files": []}
+        )
+
+    supervisor._run_general_turn = fake_general  # type: ignore[method-assign]
+
+    result = await supervisor.dispatch_general("inspect competition")
+
+    assert result == {"result": "fresh", "files": []}
+    assert calls == [("inspect competition", None)]
+    assert supervisor.state.task_research_ref != broken_ref
+    persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
+    assert persisted.task_research_ref == supervisor.state.task_research_ref
+
+
+@pytest.mark.asyncio
 async def test_set_kaggle_enabled_persists_and_restores_decision(
     tmp_path: Path,
 ) -> None:

@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from athena.research.supervisor.plans import PlanState
-from athena.research.supervisor.state import ResearchState
+from athena.research.supervisor.state import ResearchState, _core_digest
 
 _TRUSTED_REF = "sha256:" + "b" * 64
 _CONTEXT_REF = "sha256:" + "d" * 64
@@ -393,3 +393,31 @@ def test_load_migrates_intermediate_inline_resume_state(tmp_path: Path) -> None:
     assert "task_research_ref" not in core
     resume = json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))
     assert resume["task_text"] == "predict titanic survival"
+
+
+def test_load_rewrites_inline_core_even_when_resume_file_matches(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.json"
+    payload = {
+        "status": "RUNNING",
+        "phase": "PREPARE",
+        "search_limit": 10,
+        "concurrency": 1,
+        "plans": {},
+        "validation": None,
+        "task_text": "inline task",
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "resume.json").write_text(
+        json.dumps({"state_digest": _core_digest(payload), "task_text": "resume task"}),
+        encoding="utf-8",
+    )
+
+    loaded = ResearchState.load(path)
+
+    assert loaded.task_text == "resume task"
+    core = json.loads(path.read_text(encoding="utf-8"))
+    assert "task_text" not in core
+    resume = json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))
+    assert resume["task_text"] == "resume task"

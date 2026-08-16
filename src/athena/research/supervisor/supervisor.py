@@ -1123,7 +1123,8 @@ class Supervisor(SupervisorActions):
         """
         if self._run_general_turn is None:
             raise RuntimeError("General Agent dispatch is not configured")
-        if not task.strip():
+        task = task.strip()
+        if not task:
             raise ValueError("general task must be nonblank")
         cached_task = self.state.task_research_task
         if self.state.task_research_ref is not None and cached_task == task:
@@ -1132,8 +1133,9 @@ class Supervisor(SupervisorActions):
                     await self._store.get_text(self.state.task_research_ref)
                 )
             except (OSError, ValueError):
-                # artifact 缺失或内容损坏 → 清掉引用，当作无缓存重新派发
+                # artifact 缺失或内容损坏 → 清掉引用并落盘，避免重启后反复撞坏缓存
                 self.state.task_research_ref = None
+                await self._persist_state()
                 cached = None
             if isinstance(cached, dict) and cached:
                 return {"cached": True, **cached}

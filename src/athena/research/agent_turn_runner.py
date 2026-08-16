@@ -43,6 +43,14 @@ LLM/工具调用可能因上游无响应而永久挂起（无异常、无事件�
 """
 
 
+async def _interrupt_agent(agents, agent_id: str, reason: str) -> None:
+    """Best-effort 打断 worker；worker 已结束或不存在时忽略。"""
+    try:
+        await agents.interrupt(agent_id, reason)
+    except Exception:
+        pass
+
+
 def _regenerate_prompt(rejections: list[str], target: int) -> str:
     """把逐条拒绝理由拼成给同一个 Ideator 的重新提案请求。
 
@@ -114,6 +122,9 @@ class AgentTurnRunner:
                 rt._agents.wait_run(run_id), timeout=AGENT_TURN_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError as error:
+            await _interrupt_agent(
+                rt._agents, SUPERVISOR_AGENT_ID, "supervisor_turn_timeout"
+            )
             raise RuntimeError(
                 f"SupervisorAgent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
             ) from error
@@ -255,13 +266,22 @@ class AgentTurnRunner:
                 agent_id=DATA_AGENT_ID,
                 name=DATA_AGENT_ID,
             )
-        summary = await wait_run_events(
-            rt._agents,
-            run_id,
-            lambda kind, ref, data: rt._events_bus.project_agent_event(
-                DATA_AGENT_ID, kind, ref, data
-            ),
-        )
+        try:
+            summary = await asyncio.wait_for(
+                wait_run_events(
+                    rt._agents,
+                    run_id,
+                    lambda kind, ref, data: rt._events_bus.project_agent_event(
+                        DATA_AGENT_ID, kind, ref, data
+                    ),
+                ),
+                timeout=AGENT_TURN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as error:
+            await _interrupt_agent(rt._agents, DATA_AGENT_ID, "data_turn_timeout")
+            raise RuntimeError(
+                f"Data Agent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
+            ) from error
         result = await load_agent_result(summary, rt._store, EdaResult)
         if result is None:
             raise RuntimeError(summary.error or "Data Agent turn failed")
@@ -503,16 +523,17 @@ class AgentTurnRunner:
                 "general", request, agent_id=prior_agent_id, name="general"
             )
         state = rt.state
-        if state.task_research_ref is None and state.task_research_task == task:
+        if state.task_research_ref is None and state.task_research_task in (None, task):
+            changed = state.task_research_task is None
+            if changed:
+                # 断点续传：等待前先留下任务原文与稳定 id，worker 超时/进程崩溃后
+                # 能按任务归属续跑同一线程；已有其他任务归属时绝不覆盖。
+                state.task_research_task = task
             if state.task_research_agent_id != agent_id:
                 state.task_research_agent_id = agent_id
+                changed = True
+            if changed:
                 state.save(rt._state_path)
-        elif state.task_research_ref is None and state.task_research_task is None:
-            # 断点续传：等待前先留下任务原文与稳定 id，worker 超时/进程崩溃后
-            # 能按任务归属续跑同一线程；已有其他任务归属时绝不覆盖。
-            state.task_research_task = task
-            state.task_research_agent_id = agent_id
-            state.save(rt._state_path)
         try:
             summary = await asyncio.wait_for(
                 wait_run_events(
@@ -525,11 +546,7 @@ class AgentTurnRunner:
                 timeout=AGENT_TURN_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as error:
-            try:
-                await rt._agents.interrupt(agent_id, "general_turn_timeout")
-            except Exception:
-                # worker 已结束或不存在 → 无需打断
-                pass
+            await _interrupt_agent(rt._agents, agent_id, "general_turn_timeout")
             raise RuntimeError(
                 f"General Agent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
             ) from error

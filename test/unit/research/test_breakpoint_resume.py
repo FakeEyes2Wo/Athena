@@ -304,6 +304,56 @@ async def test_run_general_turn_persists_agent_id_before_wait(
 
 
 @pytest.mark.asyncio
+async def test_run_general_turn_interrupts_worker_on_timeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from athena.research import agent_turn_runner as atr
+
+    state = SimpleNamespace(
+        phase="PREPARE",
+        status="RUNNING",
+        task_research_task=None,
+        task_research_ref=None,
+        task_research_agent_id=None,
+        save=lambda path: None,
+    )
+    interrupted: list[tuple[str, str]] = []
+
+    class FakeAgents:
+        async def create_root(self, agent_type, request, *, name, agent_id=None):
+            del name, agent_id
+            return "general-worker", "run-1"
+
+        async def interrupt(self, agent_id, reason):
+            interrupted.append((agent_id, reason))
+
+    rt = SimpleNamespace(
+        _root=tmp_path,
+        _state_path=tmp_path / ".athena" / "state.json",
+        _state=state,
+        state=state,
+        _provider=object(),
+        _registry=SimpleNamespace(contains=lambda name: True),
+        _store=object(),
+        _execution=object(),
+        _agents=FakeAgents(),
+        _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
+    )
+    monkeypatch.setattr(atr, "AGENT_TURN_TIMEOUT_SECONDS", 0)
+
+    async def never_finishes(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(atr, "wait_run_events", never_finishes, raising=False)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        await atr.AgentTurnRunner(rt).run_general_turn("inspect competition")
+
+    assert interrupted == [("general-worker", "general_turn_timeout")]
+
+
+@pytest.mark.asyncio
 async def test_start_task_reconstructs_task_text_from_legacy_understanding(
     tmp_path: Path,
 ) -> None:
