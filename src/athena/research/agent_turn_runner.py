@@ -35,6 +35,13 @@ MAX_GATE_RETRIES = 2
 按理由修正，一次留给它换个方向；没有经验依据，跑过几轮真实搜索后再校准。
 """
 
+AGENT_TURN_TIMEOUT_SECONDS = 900
+"""单个 Agent turn 的硬超时。
+
+LLM/工具调用可能因上游无响应而永久挂起（无异常、无事件），前端看起来就是卡住。
+给 wait 加超时，至少能把“挂起”变成可读的错误，而不是让 PREPARE 永远停在原地。
+"""
+
 
 def _regenerate_prompt(rejections: list[str], target: int) -> str:
     """把逐条拒绝理由拼成给同一个 Ideator 的重新提案请求。
@@ -101,7 +108,14 @@ class AgentTurnRunner:
                 agent_id=SUPERVISOR_AGENT_ID,
                 name=SUPERVISOR_AGENT_ID,
             )
-        summary = await rt._agents.wait_run(run_id)
+        try:
+            summary = await asyncio.wait_for(
+                rt._agents.wait_run(run_id), timeout=AGENT_TURN_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as error:
+            raise RuntimeError(
+                f"SupervisorAgent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
+            ) from error
         result = await load_agent_result(summary, rt._store, SupervisorAnswer)
         if result is None:
             raise RuntimeError(summary.error or "SupervisorAgent turn failed")
@@ -462,13 +476,21 @@ class AgentTurnRunner:
         _agent_id, run_id = await rt._agents.create_root(
             "general", request, name="general"
         )
-        summary = await wait_run_events(
-            rt._agents,
-            run_id,
-            lambda kind, ref, data: rt._events_bus.project_agent_event(
-                "general", kind, ref, data
-            ),
-        )
+        try:
+            summary = await asyncio.wait_for(
+                wait_run_events(
+                    rt._agents,
+                    run_id,
+                    lambda kind, ref, data: rt._events_bus.project_agent_event(
+                        "general", kind, ref, data
+                    ),
+                ),
+                timeout=AGENT_TURN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as error:
+            raise RuntimeError(
+                f"General Agent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
+            ) from error
         result = await load_agent_result(summary, rt._store, GeneralResult)
         if result is None:
             raise RuntimeError(summary.error or "General Agent turn failed")

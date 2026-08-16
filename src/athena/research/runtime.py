@@ -571,12 +571,25 @@ class ResearchRuntime:
             context = self._task_context_text(
                 self._task_text, self._recent_user_texts()
             )
+            await self.publish_output(
+                source="supervisor",
+                channel="text",
+                text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
+            )
             try:
                 await self._agent_turns.run_supervisor_turn(context)
-            except Exception:
+                await self.publish_output(
+                    source="supervisor", channel="text", text="任务理解完成。"
+                )
+            except Exception as error:
                 logger.warning(
                     "supervisor task-understanding turn failed; Kaggle tools stay off",
                     exc_info=True,
+                )
+                await self.publish_output(
+                    source="supervisor",
+                    channel="error",
+                    text=f"任务理解失败（已降级继续）：{error}",
                 )
         self._start_survey()
         self._task = asyncio.create_task(self._supervisor.start())

@@ -66,6 +66,9 @@ class PhaseRunner:
             return await rt._prepare_phase()
         if rt._provider is None:
             raise RuntimeError("PREPARE requires a registered Agent provider")
+        await rt.publish_output(
+            source="supervisor", channel="text", text="PREPARE: 初始化项目仓库…"
+        )
         base_commit = await rt._git.init()
         workspace = await rt._git.create(base_commit, "athena/prepare", name="eda")
         # 只把 EDA 目录路径交给 supervisor 持有的持久化 state；EDA 结果不进 SEARCH。
@@ -74,7 +77,15 @@ class PhaseRunner:
             Path(workspace.path).resolve().relative_to(rt._root.resolve())
         )
         rt._state.save(rt._state_path)
+        await rt.publish_output(
+            source="supervisor",
+            channel="text",
+            text=f"PREPARE: EDA 工作区 {rt._state.eda_dir} 已就绪。",
+        )
         # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结。
+        await rt.publish_output(
+            source="supervisor", channel="text", text="PREPARE: 冻结评估器…"
+        )
         evaluator_dir = rt._workspaces_root / "evaluator"
         if not rt._registry.contains("evaluator"):
             register_evaluator_agent(
@@ -98,6 +109,9 @@ class PhaseRunner:
             ),
         )
         # 步骤 2：prepare agent 在 EDA worktree 写 experiment 产物并可信打分。
+        await rt.publish_output(
+            source="supervisor", channel="text", text="PREPARE: 运行 PREPARE Agent 并打分…"
+        )
         if not rt._registry.contains("prepare"):
             register_prepare_agent(
                 rt._registry,
