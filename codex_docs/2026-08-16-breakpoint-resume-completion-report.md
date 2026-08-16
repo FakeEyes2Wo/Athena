@@ -7,6 +7,7 @@ Implemented on `main`, commits:
 - `281bca7` — WIP baseline (user's websearch work committed first, as requested).
 - `3c0e052` — `feat(research): resume checkpoints for task understanding, general research, and PREPARE`.
 - `a8df535` — `fix(research): persist general agent id before waiting for its turn`.
+- `de9e3c0` — `refactor(research): flatten general worker resume branch`.
 
 ## Changes
 
@@ -60,6 +61,6 @@ verifies hermetically.
 
 ## Rollback
 
-Revert `3c0e052` and `a8df535`; delete `.athena/state.json` in projects that
-were opened with the new schema if running older code (`ResearchState` is
+Revert `3c0e052`, `a8df535`, and `de9e3c0`; delete `.athena/state.json` in projects
+that were opened with the new schema if running older code (`ResearchState` is
 `extra="forbid"`).
