@@ -390,6 +390,8 @@ class AgentTurnRunner:
         )
 
         rt = self._runtime
+        corpus_ref = rt.survey_corpus_ref()
+        debate_tools = rt.ideator_tools()()
 
         class _StructuredResult:
             def __init__(self, value: object) -> None:
@@ -397,8 +399,20 @@ class AgentTurnRunner:
 
         class _DebateAgentAdapter:
             async def run(self, prompt, output_type=None, message_history=None):
+                effective_prompt = prompt
+                if corpus_ref is not None:
+                    effective_prompt += (
+                        f"\n\nA literature corpus is available for this task. "
+                        f"Pass corpus_ref={corpus_ref!r} to the paper_* tools to search and "
+                        "read it, and record the paper keys you actually used in each "
+                        "hypothesis's sources field."
+                    )
                 value = await single_turn_structured_chat(
-                    prompt, output_type, model=rt._model, artifacts=rt._store,
+                    effective_prompt,
+                    output_type,
+                    model=rt._model,
+                    artifacts=rt._store,
+                    tools=debate_tools,
                 )
                 return _StructuredResult(value)
 

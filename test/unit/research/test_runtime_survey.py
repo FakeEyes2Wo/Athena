@@ -265,6 +265,52 @@ def test_survey_tools_merge_into_an_existing_registry() -> None:
     assert READ_ONLY_TOOLS <= names
 
 
+@pytest.mark.asyncio
+async def test_debate_ideation_receives_corpus_instruction_and_read_only_tools(
+    monkeypatch,
+) -> None:
+    """--ideation debate 同样接入 survey：提示带 corpus_ref，agent 拿只读论文工具。"""
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"), _survey_stack=_stack())
+    runtime._model = "m"
+    runtime._supervisor.tree = SimpleNamespace(
+        best_experiment_id=lambda: None, to_dict=lambda: {}
+    )
+    runtime.publish_output = _recorder([])
+    runner = AgentTurnRunner(runtime)
+    captured_prompts: list[str] = []
+    captured_tools: list[object | None] = []
+
+    async def fake_single_turn(prompt, schema, *, model, artifacts, client=None, tools=None):
+        captured_prompts.append(prompt)
+        captured_tools.append(tools)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        "athena.research.idea_generation.structured_chat.single_turn_structured_chat",
+        fake_single_turn,
+    )
+
+    class FakeIdeator:
+        def __init__(self, agent_factory, artifacts) -> None:
+            self._agent_factory = agent_factory
+
+        async def generate(self, profile, papers, models, tree):
+            adapter = self._agent_factory("debater", 0)
+            await adapter.run("base prompt", output_type=object)
+            return SimpleNamespace(hypotheses=[])
+
+    monkeypatch.setattr("athena.agents.ideator.Ideator", FakeIdeator)
+
+    await runner._run_debate_ideator_turn(2)
+
+    assert "sha256:corpus" in captured_prompts[0]
+    assert "sources" in captured_prompts[0]
+    assert captured_tools[0] is not None
+    names = {spec.name for spec in captured_tools[0].specs}
+    assert READ_ONLY_TOOLS <= names
+    assert not (PRODUCER_TOOLS & names)
+
+
 def _eda_dir():
     """Throwaway EDA directory path for lane request construction."""
     from pathlib import Path
