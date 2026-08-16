@@ -159,7 +159,22 @@ class KaggleApiClient:
         def _download() -> list[Path]:
             import kagglehub
 
-            downloaded = kagglehub.competition_download(ref, output_dir=str(target))
+            try:
+                downloaded = kagglehub.competition_download(ref, output_dir=str(target))
+            except Exception as exc:  # noqa: BLE001 - kagglehub 异常类型不稳定，按状态码识别
+                text = str(exc)
+                if "403" in text:
+                    raise KaggleApiError(
+                        403,
+                        (
+                            f"{text}. Kaggle API credentials may be valid, but the "
+                            f"competition rules were not accepted for '{ref}'. "
+                            f"Accept them at https://www.kaggle.com/competitions/{ref}/rules "
+                            "and retry."
+                        ),
+                        f"https://www.kaggle.com/competitions/{ref}",
+                    ) from exc
+                raise
             root = Path(downloaded)
             return [p for p in root.rglob("*") if p.is_file()]
 

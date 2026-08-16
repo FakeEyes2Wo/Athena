@@ -708,9 +708,17 @@ class ResearchRuntime:
         Fresh runs begin at PREPARE so a trusted baseline/SOTA is established
         before any SEARCH hypothesis can be proposed. Existing ``state.json``
         (resume) keeps its phase and starts via ``recover()``.
+
+        A terminal run (FAILED/STOPPED/COMPLETED) can be restarted from the
+        same runtime: the old supervisor task is done, so re-arm it and start
+        again. ``eda_dir`` and workspaces are intentionally left untouched —
+        retrying PREPARE reuses whatever already exists.
         """
         self._task_text = task
-        if not self._started:
+        if self._started and self._task is not None and self._task.done():
+            if self.state.status in {"FAILED", "STOPPED", "COMPLETED"}:
+                self._task = None
+        if not self._started or self._task is None:
             if (
                 self.tree.best_experiment_id() is None
                 and self._state.phase != "PREPARE"

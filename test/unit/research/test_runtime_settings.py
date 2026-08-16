@@ -29,6 +29,7 @@ def _runtime() -> ResearchRuntime:
             status="RUNNING",
         )
     )
+    runtime._state = runtime._supervisor.state
     return runtime
 
 
@@ -66,3 +67,26 @@ async def test_switching_ideation_unregisters_the_bound_ideator_contract() -> No
     await runtime.apply_settings({"ideation": "baseline"})
 
     assert not runtime._registry.contains("ideator")
+
+
+@pytest.mark.asyncio
+async def test_start_task_rearms_after_a_terminal_failure() -> None:
+    """web 端 FAILED 后再次 start 应重新武装 runtime，而不是直接返回 FAILED。"""
+    runtime = _runtime()
+    runtime._started = True
+    runtime._task = SimpleNamespace(done=lambda: True)
+    runtime._supervisor.tree = SimpleNamespace(best_experiment_id=lambda: None)
+    runtime.state.status = "FAILED"
+    calls: list[str] = []
+
+    async def fake_start() -> None:
+        calls.append("start")
+        runtime.state.status = "RUNNING"
+
+    runtime.start = fake_start  # type: ignore[method-assign]
+
+    result = await runtime.start_task("retry after rules accepted")
+
+    assert calls == ["start"]
+    assert result == "RUNNING"
+    assert runtime._task_text == "retry after rules accepted"

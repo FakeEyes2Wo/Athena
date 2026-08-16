@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -112,7 +113,15 @@ class AgentTurnRunner:
         """把 ``state.eda_dir`` 解析为本项目内的绝对 EDA 目录并做存在性校验。"""
         eda_dir = rt._state.eda_dir
         if not eda_dir:
-            raise RuntimeError("EDA workspace not captured; PREPARE must run first")
+            # PREPARE 失败后 state.eda_dir 可能为空，但默认 EDA 目录已建好；
+            # 只要目录存在就继续，不因为状态字段缺失而误报“未捕获”。
+            default_eda = getattr(rt, "_workspaces_root", None)
+            if default_eda is not None and os.path.exists(Path(default_eda) / "eda"):
+                eda_dir = str(Path(default_eda) / "eda")
+            else:
+                raise RuntimeError(
+                    "EDA workspace not captured; PREPARE must run first"
+                )
         eda_path = Path(eda_dir)
         # 相对项目根的路径（新契约）解析为绝对；旧 state 遗留的绝对路径原样保留。
         if not eda_path.is_absolute():
