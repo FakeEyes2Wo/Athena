@@ -919,3 +919,71 @@ async def test_prepare_requires_report_before_scoring(tmp_path) -> None:
     assert result.evidence_ref is not None
     assert "report" in json.loads(await store.get_text(result.evidence_ref))["error"]
     assert workspace.messages == []
+
+
+class _UnchangedWorkspace(_FakeWorkspace):
+    """候选一个文件都没改：diff 为空，因此不会产生新 commit。"""
+
+    async def diff(self, workspace: GitWorkBranch) -> GitDiff:
+        diff = GitDiff(ref=_OTHER_REF, paths=())
+        self.diffs.append(diff)
+        return diff
+
+
+@pytest.mark.asyncio
+async def test_a_search_candidate_that_changed_nothing_is_not_an_experiment(
+    tmp_path,
+) -> None:
+    """真机（2026-08-16）：4 个候选的 commit 全等于 baseline，分数一模一样。
+
+    Agent 读了继承来的基线脚本、原样重跑、看见 0.8823 就提交，说 "The hypothesis has
+    produced a working solution"，其中 3 条随后被判 REFUTED——实验从没发生却给出了自信
+    的判决。评估修好之前这一切都被恒定的 0.502 盖住了。空 diff 是可以直接判掉的信号。
+    """
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
+    )
+    runner._workspace = _UnchangedWorkspace(["c1"])
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "-c", "print('train')"]],
+        predictions="__athena_row_id,prediction\nrow_1,1\nrow_2,0\n",
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "no_change"
+    assert result.commit is None
+    assert "changed no file" in (result.error or "")
+    assert runner._workspace.messages == []  # 没有提交任何东西
+
+
+@pytest.mark.asyncio
+async def test_prepare_baseline_may_legitimately_produce_an_empty_diff(
+    tmp_path,
+) -> None:
+    """只有 SEARCH 候选受这条约束：PREPARE 基线本来就没有"相对谁的改动"。"""
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, store = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.88)
+    )
+    runner._workspace = _UnchangedWorkspace(["c1"])
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "-c", "print('train')"]],
+        predictions="__athena_row_id,prediction\nrow_1,1\nrow_2,0\n",
+    )
+    state = PlanState(kind="PREPARE", context_ref=_REF, turns_used=1, turn_limit=12)
+
+    result = await runner.run_turn("prepare", state, plan_input)
+
+    assert result.kind == "scored"
+    assert result.metric == 0.88
