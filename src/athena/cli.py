@@ -10,6 +10,7 @@ from typing import Any
 from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
+from athena.research.fork import ForkError, fork_project
 from athena.research.bench import (
     DEFAULT_QUERY_SET,
     corpus_health,
@@ -18,6 +19,8 @@ from athena.research.bench import (
     run_known_item,
 )
 from athena.research.bench import available as bench_available
+from athena.research.bench import delivery_overlap
+from athena.research.paper_rag.search import corpus_paper_ids
 from athena.research.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.runtime import DEFAULT_SURVEY_PAPERS
@@ -128,11 +131,36 @@ class _EventRenderer:
         raise ValueError(f"unsupported runtime event kind: {kind}")
 
 
+def _apply_fork(args: argparse.Namespace) -> int:
+    """按 ``--fork-from`` 把源项目的 PREPARE 产物复制到本次运行的目录。
+
+    分叉失败直接返回非零退出码：让运行"降级成自己重跑一遍 PREPARE"会静默毁掉 A/B 的
+    前提，而那种毁法在分数出来之前看不出来。
+    """
+    if not args.fork_from:
+        return 0
+    try:
+        result = fork_project(args.fork_from, args.project)
+    except ForkError as error:
+        print(f"分叉失败：{error}", file=sys.stderr)
+        return 2
+    print(f"已从 {result.source} 分叉到 {result.target}")
+    print(f"  共用 evaluator: {result.evaluator_ref}")
+    print(f"  共用基线实验: {result.baseline_experiment_id}")
+    print(f"  复制目录: {', '.join(result.copied) or '（无）'}")
+    print("  语料已清空，本臂将自行决定是否调研")
+    return 0
+
+
 async def _cmd_run(args: argparse.Namespace) -> int:
     # 数据路径预检：拼错/缺失的 --data 应在跑 LLM 之前立刻失败，而非白烧一轮。
     if not Path(args.data).exists():
         print(f"error: data path does not exist: {args.data}", file=sys.stderr)
         return 2
+    # 分叉必须在构造 runtime 之前：runtime 会读 .athena 里的 state 与 tree 决定起始阶段。
+    forked = _apply_fork(args)
+    if forked:
+        return forked
     runtime = _runtime(args.project, **_runtime_options(args))
     terminal = asyncio.Event()
     exit_code = 0
@@ -407,6 +435,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SURVEY_PAPERS,
         help="进入语料的论文篇数；成本大致随它线性增长",
     )
+    run.add_argument(
+        "--fork-from",
+        default="",
+        help=(
+            "从一个已 PREPARE 完的项目分叉：共用它冻结的 evaluator 与基线 commit，"
+            "直接从 SEARCH 起步。做 A/B 时两臂都从同一个源分叉，才只剩 ideation 一个"
+            "变量——两臂各跑各的 PREPARE 时，基线方差与待测效应同量级"
+        ),
+    )
     _add_survey_parser(subparsers)
     _add_bench_parser(subparsers)
     _add_kaggle_parser(subparsers)
@@ -539,6 +576,22 @@ def _add_bench_parser(subparsers) -> None:
     )
     modes = bench.add_subparsers(dest="bench_command", required=True)
 
+    overlap = modes.add_parser(
+        "overlap", help="how reproducible two surveys' delivered paper sets are"
+    )
+    overlap.add_argument(
+        "--corpus",
+        action="append",
+        required=True,
+        metavar="REF",
+        help=(
+            "corpus_ref of one run; pass twice or more. Below ~0.3 mean Jaccard the "
+            "corpus is effectively a fresh random draw each run and no A/B over it "
+            "can mean much"
+        ),
+    )
+    overlap.add_argument("--query", default="", help="调研主题，仅写进报告")
+
     retrieval = modes.add_parser("retrieval", help="known-item hit@k and MRR per channel")
     retrieval.add_argument("--corpus", required=True, help="corpus_ref to benchmark")
     retrieval.add_argument(
@@ -562,7 +615,7 @@ def _add_bench_parser(subparsers) -> None:
         "--detail", action="store_true", help="逐篇列出，而不是只给汇总"
     )
 
-    for parser in (retrieval, health):
+    for parser in (retrieval, health, overlap):
         parser.add_argument(
             "--artifact-root", default="", help="artifact 根目录；默认 ~/.athena/artifacts"
         )
@@ -629,6 +682,25 @@ def _print_health_report(report, detail: bool) -> None:
         )
 
 
+def _print_overlap_report(report) -> None:
+    """打印交付重合度；这是选片改动唯一的验收指标。"""
+    subject = f"：{report.query}" if report.query else ""
+    print(f"\n交付可复现性{subject}")
+    print(f"  比较了 {report.runs} 次运行，各交付 {report.delivered} 篇")
+    print(
+        f"  平均两两 Jaccard: {report.mean_jaccard:.3f}"
+        f"  最低: {report.min_jaccard:.3f}"
+    )
+    print(f"  稳定核心: {len(report.stable_core)} 篇  并集: {report.union_size} 篇")
+    if report.mean_jaccard < 0.3:
+        print(
+            "  低于 0.3：每次跑出来的基本是一次新的随机抽样，"
+            "在它之上做的任何 A/B 都说明不了问题"
+        )
+    for paper_id in report.stable_core:
+        print(f"    {paper_id}")
+
+
 async def _cmd_bench(args: argparse.Namespace) -> int:
     """跑一次基准并打印报告；``--out`` 时同时落一份可 diff 的 JSON。
 
@@ -637,8 +709,22 @@ async def _cmd_bench(args: argparse.Namespace) -> int:
     毫无意义——正是这条链路反复吃过的那种亏。
     """
     stack = build_survey_stack(
-        artifact_root=args.artifact_root, enable_vision=False
+        artifact_root=args.artifact_root, enable_vision=False, enable_library=False
     )
+    if args.bench_command == "overlap":
+        runs = [
+            sorted(
+                corpus_paper_ids(
+                    await stack.corpus_cache.load(stack.artifacts, ref)
+                )
+            )
+            for ref in args.corpus
+        ]
+        report = delivery_overlap(runs, query=args.query, label="corpus delivery")
+        _print_overlap_report(report)
+        if args.out:
+            print(f"\n报告已写入 {dump_report(report, args.out)}")
+        return 0
     corpus = await stack.corpus_cache.load(
         stack.artifacts, args.corpus, vectors=args.bench_command == "retrieval"
     )
