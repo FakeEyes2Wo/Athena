@@ -94,6 +94,11 @@ ABBREVIATIONS = frozenset(
     }
 )
 MIN_SENTENCE_CHARS = 2
+OVERVIEW_ANCHOR_CHARS = 280
+"""判断门面是否有实质正文时看的窗口，与 ``search.OVERVIEW_ABSTRACT_CHARS`` 同宽。
+
+同宽是硬要求：这个判断要回答的正是"读者实际看到的那段字里有多少是正文"。
+"""
 EMBED_BATCH = 128
 SENTENCE_TERMINATORS = (".", "!", "?")
 DISPLAY_MATH_CLOSERS = ("$$", "\\]")
@@ -371,14 +376,70 @@ async def require_semantic_embedder(embedder: TextEmbedder) -> float:
     return margin
 
 
+NON_ANCHOR_KINDS = frozenset({"table", "figure", "equation", "bibliography", "code"})
+MIN_ANCHOR_PROSE_CHARS = 40
+FRONT_MATTER_SCAN = 6
+LATEX_COMMAND = re.compile(r"\\[a-zA-Z@]+\*?")
+
+
+def novel_prose_chars(text: str, title: str) -> int:
+    """一段文本里**新增信息**的字符数：扣掉标题与 LaTeX 命令之后还剩多少实词。
+
+    直接数字母不够。作者列表与论文题目都由字母组成，数出来是满的，而读者从这段文字里
+    一个字的新信息都得不到——标题已经在 ``title`` 字段里另给了一份。真机上有一篇的首个
+    chunk 整段是 ``\\definecolor…pdftitle=`` 的 LaTeX 导言区。
+    """
+    window = text.strip()
+    if window.startswith(HEADING_PATH_PREFIX):
+        window = window.split("\n", 1)[-1].strip()
+    window = LATEX_COMMAND.sub(" ", window[:OVERVIEW_ANCHOR_CHARS])
+    title_words = {word.lower() for word in LETTER_RUN.findall(title) if len(word) > 2}
+    return sum(
+        len(word)
+        for word in LETTER_RUN.findall(window)
+        if word.lower() not in title_words
+    )
+
+
+def anchor_index(kinds: list[str], texts: list[str], titles: list[str]) -> int:
+    """选出一篇论文的门面单元下标：优先摘要，否则前几个里第一段像正文的。
+
+    这个落点有三个消费者——``paper_corpus_overview`` 的摘要、引用边的指向、以及写进
+    Ideator 提示词的语料目录——所以它必须只有一处定义。
+
+    退化规则从"取第一个单元"改成"取前几个里第一段有实质正文的"。真机（语料 A，44 篇）
+    实测：**20 篇没有 abstract kind 的 chunk**，退化之后 3 篇的门面落在表格上、1 篇落在
+    插图上，还有几篇落在只有标题和作者名的首段。语料的前门因此有一半是坏的，而它同时是
+    引用边的落点——``paper_cites`` 指过去就是一张表。
+
+    只扫前 ``FRONT_MATTER_SCAN`` 个：前置区块就那么长，再往后就成了"随便找一段正文"，
+    那不是门面。都不合格时仍退回第一个，选片必须永远给得出结果。
+    """
+    for position, kind in enumerate(kinds):
+        if kind == ABSTRACT_KIND:
+            return position
+    for position in range(min(FRONT_MATTER_SCAN, len(kinds))):
+        if kinds[position] in NON_ANCHOR_KINDS:
+            continue
+        if novel_prose_chars(texts[position], titles[position]) >= MIN_ANCHOR_PROSE_CHARS:
+            return position
+    return 0
+
+
 def paper_anchors(units_by_paper: list[list[RetrievalUnit]]) -> dict[str, str]:
-    """给每篇论文选一个可被引用指向的落点：优先摘要，否则第一个单元。"""
+    """给每篇论文选一个可被引用指向的落点；规则见 ``anchor_index``。"""
     anchors: dict[str, str] = {}
     for units in units_by_paper:
         if not units:
             continue
         namespace = units[0].metadata.get("retrieval_namespace", "")
-        chosen = next((item for item in units if item.kind == ABSTRACT_KIND), units[0])
+        chosen = units[
+            anchor_index(
+                [item.kind for item in units],
+                [item.text for item in units],
+                [item.metadata.get("title", "") for item in units],
+            )
+        ]
         anchors[namespace] = chosen.unit_id
     return anchors
 

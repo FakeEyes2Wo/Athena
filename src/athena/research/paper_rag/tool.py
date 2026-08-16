@@ -19,6 +19,7 @@ from athena.research.paper_rag.search import (
     RetrievalSession,
     citation_links,
     corpus_overview,
+    hybrid_search,
     keyword_search,
     read_chunks,
     section_search,
@@ -280,8 +281,102 @@ class PaperSemanticSearchTool(BaseTool):
                 ),
             )
 
-        vectors = await self.embedder.embed([query])
-        hits = semantic_search(corpus, vectors[0], resolve_top_k(input))
+        vector = await self.session.embed_query(self.embedder, query)
+        hits = semantic_search(corpus, vector, resolve_top_k(input))
+        return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
+
+
+class PaperSearchTool(BaseTool):
+    """默认入口：词面与语义两个通道各取一批，再按 RRF 融合。
+
+    存在的理由是实测的互补性，不是设计上的对称。同一份 44 篇语料、12 条改写查询（金标
+    是论文）上：
+
+    ===================  ======  ======  ======  ======
+    通道                 hit@1   hit@5   未命中  MRR
+    ===================  ======  ======  ======  ======
+    keyword              5/12    11/12   0       0.601
+    semantic             9/12    11/12   1       0.833
+    **hybrid (RRF)**     7/12    12/12   **0**   0.778
+    ===================  ======  ======  ======  ======
+
+    融合的 MRR 低于纯语义，**但它是唯一一条没有未命中的通道**，而且 hit@5 满分。这个
+    取舍对本场景是对的：Ideator 的失败从来不是"该读的论文排在第 2 而不是第 1"，而是
+    "它根本没进视野"。只看 MRR 会把这次交换读成退步。
+    """
+
+    spec = ToolSpec(
+        name="paper_search",
+        description=(
+            "Search the corpus by meaning and by exact terms at once, fusing both "
+            "rankings. This is the entry point to use first: it recovers papers that "
+            "either channel alone misses. Returns chunk ids with matched snippets, "
+            "not full chunks — read what looks promising with paper_chunk_read. "
+            "Reach for paper_semantic_search or paper_keyword_search instead only "
+            "when you deliberately want one channel: pure meaning, or a term that "
+            "must appear verbatim."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "corpus_ref": CORPUS_REF_SCHEMA,
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Natural language description of what is sought.",
+                },
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Exact terms worth matching literally. Omit to derive them "
+                        "from the query."
+                    ),
+                },
+                "k": TOP_K_SCHEMA,
+            },
+            "required": ["corpus_ref", "query"],
+            "additionalProperties": False,
+        },
+    )
+
+    def __init__(
+        self,
+        artifacts: ArtifactStore,
+        embedder: TextEmbedder,
+        session: RetrievalSession | None = None,
+    ) -> None:
+        self.artifacts = artifacts
+        self.embedder = embedder
+        self.session = session or RetrievalSession()
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        """执行一次融合检索；没有向量时自动退化成纯词面而不是报错。
+
+        退化而不报错是有理由的：融合的词面那一半在无向量语料上照常可用，把整个入口变成
+        硬错误只会逼 Agent 去猜该换哪个工具。
+        """
+        corpus_ref = require_corpus_ref(input)
+        query = input.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string.")
+        raw = input.get("keywords")
+        keywords = [
+            item.strip()
+            for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, str) and item.strip()
+        ] or query.split()
+        if ctx.cancel.is_set():
+            raise asyncio.CancelledError
+
+        corpus = await self.session.load(self.artifacts, corpus_ref, vectors=True)
+        vector: list[float] = []
+        if (
+            corpus.index.embedding_ref is not None
+            and corpus.index.embedding_model == self.embedder.model
+        ):
+            vector = await self.session.embed_query(self.embedder, query)
+        hits = hybrid_search(corpus, vector, keywords, resolve_top_k(input))
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
 

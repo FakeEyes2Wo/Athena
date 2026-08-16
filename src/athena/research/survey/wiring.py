@@ -39,6 +39,7 @@ from athena.research.paper_rag.tool import (
     PaperCitesTool,
     PaperCorpusOverviewTool,
     PaperKeywordSearchTool,
+    PaperSearchTool,
     PaperSectionSearchTool,
     PaperSemanticSearchTool,
     PaperVisualOfTool,
@@ -485,4 +486,7 @@ def build_survey_tools(
         tools.register(
             PaperSemanticSearchTool(stack.artifacts, stack.embedder, session)
         )
+        # 融合入口只在有编码器时注册：没有向量它会退化成纯词面，与
+        # paper_keyword_search 完全重复，多摆一个只会让选择变难。
+        tools.register(PaperSearchTool(stack.artifacts, stack.embedder, session))
     return tools

@@ -357,7 +357,7 @@ class ToolRegistrationTest(unittest.TestCase):
             embedder=embedder,
         )
 
-    def test_all_ten_tools_register_when_the_embedder_exists(self) -> None:
+    def test_every_tool_registers_when_the_embedder_exists(self) -> None:
         names = [
             item.name
             for item in build_survey_tools(
@@ -373,6 +373,7 @@ class ToolRegistrationTest(unittest.TestCase):
                 "paper_fetch",
                 "paper_keyword_search",
                 "paper_markdown",
+                "paper_search",
                 "paper_section_search",
                 "paper_semantic_search",
                 "paper_survey",
@@ -381,10 +382,12 @@ class ToolRegistrationTest(unittest.TestCase):
             names,
         )
 
-    def test_semantic_search_is_omitted_without_an_embedder(self) -> None:
+    def test_the_embedding_channels_are_omitted_without_an_embedder(self) -> None:
+        """没有向量时 paper_search 会退化成纯词面，与 paper_keyword_search 完全重复。"""
         names = [item.name for item in build_survey_tools(self.stack(None)).specs]
 
         self.assertNotIn("paper_semantic_search", names)
+        self.assertNotIn("paper_search", names)
         self.assertIn("paper_keyword_search", names)
 
     def test_the_survey_tool_can_be_left_out_for_corpus_only_agents(self) -> None:

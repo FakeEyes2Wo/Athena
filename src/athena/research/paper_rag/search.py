@@ -17,6 +17,7 @@ import numpy
 from athena.core.contracts import ArtifactRef
 from athena.research.paper_rag.index import (
     LETTER_RUN,
+    anchor_index,
     decode_json_vectors,
     normalize,
     unpack_vectors,
@@ -125,11 +126,32 @@ class CorpusCache:
 
     每个 ``corpus_ref`` 一把锁：两条 lane 同时首次访问同一语料时，第二条等第一条解
     完直接命中缓存，而不是各解一遍。
+
+    ``query_vectors`` 是查询向量缓存，也挂在这一层。语义检索 96% 的时间是一次编码 API
+    往返（实测 p50 136.8 ms，本地打分只要 6.66 ms），而同一句查询会被跨 lane、跨轮次
+    反复问到——三条 Ideator lane 拿到的是同一个任务、同一份语料，问出来的话高度重合。
+    缓存按编码器分桶：不同模型的向量不在同一个空间里。
     """
 
     def __init__(self) -> None:
         self._corpora: dict[str, LoadedCorpus] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._query_vectors: dict[tuple[str, str], list[float]] = {}
+
+    async def embed_query(self, embedder, query: str) -> list[float]:
+        """编码一句查询，同一 ``(模型, 查询)`` 只付一次 API 往返。
+
+        缓存归一化后的向量：``semantic_search`` 本来就要归一化，存归一化后的省一次计算，
+        也让缓存值可以直接喂给矩阵乘。
+        """
+        key = (getattr(embedder, "model", ""), query)
+        found = self._query_vectors.get(key)
+        if found is not None:
+            return found
+        vectors = await embedder.embed([query])
+        vector = normalize(vectors[0]) if vectors else []
+        self._query_vectors[key] = vector
+        return vector
 
     async def load(
         self, store: ArtifactStore, corpus_ref: ArtifactRef, *, vectors: bool = False
@@ -163,13 +185,41 @@ async def _decode_corpus(store: ArtifactStore, corpus_ref: ArtifactRef) -> Loade
     )
 
 
+def _mapped_vectors(store: ArtifactStore, ref: ArtifactRef) -> numpy.ndarray | None:
+    """尽量以 mmap 打开句向量文件；做不到时返回 ``None`` 让调用方走读字节的路径。
+
+    读字节再解码要同时持有两份：151 MB 的字节缓冲加 151 MB 的数组，工作集 333 MB。
+    ``mmap_mode="r"`` 实测 0.8 ms 打开、常驻 29.8 MB，首次查询触页后稳定在 186 MB——
+    每个语料省约 147 MB，而且在内存压力下这部分可以被换出去。
+
+    只有本地内容寻址存储能给出路径，因此按能力探测而不是按类型判断：``ArtifactStore``
+    协议里没有 ``path_for``，将来换成远端实现时这里自动退回读字节。
+    """
+    path_for = getattr(store, "path_for", None)
+    if path_for is None:
+        return None
+    try:
+        path = path_for(ref)
+        if not path.is_file():
+            return None
+        return numpy.load(path, mmap_mode="r", allow_pickle=False)
+    except (OSError, ValueError):
+        # 路径拿不到、文件被清理、或不是 npy 格式 → 退回读字节，不让检索因此失败
+        return None
+
+
 async def _attach_vectors(store: ArtifactStore, corpus: LoadedCorpus) -> None:
     """装载句向量与自足度权重；未建向量的语料留空，由语义检索明确报错。"""
     index = corpus.index
     if index.embedding_ref is None:
         return
     if index.embedding_format == "float32":
-        corpus.vectors = unpack_vectors(await store.get_bytes(index.embedding_ref))
+        mapped = await asyncio.to_thread(_mapped_vectors, store, index.embedding_ref)
+        corpus.vectors = (
+            mapped
+            if mapped is not None
+            else unpack_vectors(await store.get_bytes(index.embedding_ref))
+        )
     else:
         # 1.0 语料：磁盘上仍是 JSON 文本，解析一次后与新格式共用同一种内存表示
         corpus.vectors = await asyncio.to_thread(
@@ -202,6 +252,10 @@ class RetrievalSession:
     ) -> LoadedCorpus:
         """经共享缓存载入语料；``vectors=True`` 只由语义检索传。"""
         return await self._cache.load(store, corpus_ref, vectors=vectors)
+
+    async def embed_query(self, embedder, query: str) -> list[float]:
+        """经共享缓存编码一句查询；见 ``CorpusCache.embed_query``。"""
+        return await self._cache.embed_query(embedder, query)
 
     def was_read(self, chunk_id: str) -> bool:
         """本会话内是否已整篇读过该 chunk。"""
@@ -262,10 +316,15 @@ def _paper_summary(
 ) -> PaperSummary:
     """按一篇论文的 chunk 位置组装门面；锚点优先摘要，与索引里的引用落点同一规则。"""
     entries = corpus.index.entries
-    anchor = next(
-        (position for position in positions if entries[position].kind == ABSTRACT_KIND),
-        positions[0],
-    )
+    # 与建索引时的引用落点同一条规则（``index.anchor_index``）：总览摘要与引用边指向
+    # 的必须是同一个 chunk，否则"去读引用指向的那篇"读到的和目录里写的不是一段。
+    anchor = positions[
+        anchor_index(
+            [entries[position].kind for position in positions],
+            [entries[position].text for position in positions],
+            [entries[position].title for position in positions],
+        )
+    ]
     sections: list[str] = []
     for position in positions:
         path = entries[position].heading_path
@@ -429,6 +488,64 @@ def semantic_search(
         )
         for position, sentences in ranked
     ]
+
+
+RRF_K = 60
+"""RRF 的平滑常数，取自 Cormack 等人的原始设定。
+
+它决定"排在第 1 相对排在第 5 值多少"。60 是个刻意保守的取值：名次靠前的优势被压得比较
+平，因此单个通道的一次误判不会主导融合结果——而这正是融合存在的理由。
+"""
+
+
+def reciprocal_rank_fusion(
+    channels: list[list[SearchHit]], limit: int
+) -> list[SearchHit]:
+    """按 ``Σ 1/(k + 名次)`` 融合多个通道的结果。
+
+    用名次而不是分数：两个通道的分数根本不可比——词面分是 ``Σ 词频 × 关键词长度``（无
+    上界），语义分是加权余弦（0..1）。任何把它们线性相加的做法都要先猜一个归一化，而那
+    个猜测会随语料大小漂移。名次不需要归一化。
+
+    同一个 chunk 在多个通道里都出现时得分累加，这正是融合想要的：两条独立证据都指向它。
+    命中体本身取首次出现的那个，因为不同通道给的 snippet 不同，而先出现的那个来自排名
+    更靠前的通道。
+    """
+    scores: dict[str, float] = {}
+    first: dict[str, SearchHit] = {}
+    for hits in channels:
+        for rank, hit in enumerate(hits, start=1):
+            scores[hit.chunk_id] = scores.get(hit.chunk_id, 0.0) + 1.0 / (RRF_K + rank)
+            first.setdefault(hit.chunk_id, hit)
+    order = sorted(scores, key=lambda chunk_id: (-scores[chunk_id], chunk_id))
+    return [
+        first[chunk_id].model_copy(update={"score": scores[chunk_id]})
+        for chunk_id in order[:limit]
+    ]
+
+
+def hybrid_search(
+    corpus: LoadedCorpus,
+    query_vector: list[float],
+    keywords: list[str],
+    limit: int,
+) -> list[SearchHit]:
+    """词面与语义两个通道各取一批，再按 RRF 融合。
+
+    两个通道的失效模式不同，而且不相关：词面检索跨不过措辞差异（"用一个从 Beta 分布抽
+    出的系数混合两个训练样本"连不到 mixup 那篇论文上，因为论文根本不用这些词），语义
+    检索则会在查询里出现精确术语或数字时被泛化的近义句挤掉。融合的价值全在这个互补性
+    上——两个通道同时错的情况远少于任一通道单独错。
+
+    各通道取 ``limit`` 的两倍再融合：只取 ``limit`` 会让"在 A 里排第 12、在 B 里排第 3"
+    的 chunk 拿不到 A 的那一票，而那正是融合该救回来的那种命中。
+    """
+    pool = max(limit, 1) * 2
+    channels = [
+        keyword_search(corpus, keywords, pool) if keywords else [],
+        semantic_search(corpus, query_vector, pool) if query_vector else [],
+    ]
+    return reciprocal_rank_fusion([item for item in channels if item], limit)
 
 
 def head_snippet(corpus: LoadedCorpus, position: int) -> str:

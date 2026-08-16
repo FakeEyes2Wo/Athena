@@ -8,9 +8,11 @@
 本模块只读索引：不调模型、不访网络、不碰句向量。
 """
 
-import re
-
-from athena.research.paper_rag.index import HEADING_PATH_PREFIX, LETTER_RUN
+from athena.research.paper_rag.index import (
+    MIN_ANCHOR_PROSE_CHARS,
+    anchor_index,
+    novel_prose_chars,
+)
 from athena.research.paper_rag.search import (
     LoadedCorpus,
     heading_variants,
@@ -19,23 +21,6 @@ from athena.research.paper_rag.search import (
 from athena.research.bench.schemas import CorpusHealthReport, PaperHealth
 
 ABSTRACT_KIND = "abstract"
-HEADING_PREFIX = HEADING_PATH_PREFIX
-LATEX_COMMAND = re.compile(r"\\[a-zA-Z@]+\*?")
-
-OVERVIEW_WINDOW_CHARS = 280
-"""``PaperSummary.abstract`` 的额度，与 ``search.OVERVIEW_ABSTRACT_CHARS`` 一致。
-
-体检要量的是"Ideator 实际看到的那 280 个字符里有多少是正文"，所以窗口必须与生产
-路径同宽；宽一点窄一点都会把这个数字变成另一件事的度量。
-"""
-
-MIN_ANCHOR_PROSE_CHARS = 40
-"""低于这个字数就认为门面几乎没有正文散文。
-
-真机（语料 A，44 篇）实测：22 篇的 280 字额度里正文不足 40 字，额度花在标题（``title``
-字段本来就有）与作者列表上，有一篇整段是 ``\\definecolor...pdftitle=`` 的导言区。
-阈值取得很松，只用来识别"几乎什么都没有"。
-"""
 
 PROBED_SECTIONS = (
     "abstract",
@@ -57,42 +42,20 @@ PROBED_SECTIONS = (
 
 
 def anchor_position(corpus: LoadedCorpus, positions: list[int]) -> int:
-    """一篇论文被引用与被总览时的落点；优先摘要，否则首个 chunk。
+    """一篇论文被引用与被总览时的落点。
 
-    规则必须与 ``search._paper_summary`` 和 ``index.paper_anchors`` 一致——体检要量的是
-    生产路径实际选中的那个 chunk，另立一套规则就量成了别的东西。
+    直接走 ``index.anchor_index``，不另写一套——体检要量的是**生产路径实际选中的那个
+    chunk**。规则在两处各写一遍，体检就会在规则改动后继续报旧行为，而那种"尺子和被测
+    对象各说各话"是最难察觉的一类错误。
     """
     entries = corpus.index.entries
-    return next(
-        (item for item in positions if entries[item].kind == ABSTRACT_KIND),
-        positions[0],
-    )
-
-
-def novel_prose_chars(text: str, title: str) -> int:
-    """总览窗口里**新增信息**的字符数：扣掉标题与 LaTeX 命令之后还剩多少实词。
-
-    直接数实词是不够的。作者列表与论文标题都由字母组成，数出来是满的，而 Ideator 从
-    这段文字里一个字的新信息都得不到——标题已经在 ``PaperSummary.title`` 字段里另给了
-    一份。所以先扣掉三样东西再数：
-
-    - ``> Section: …`` 前缀（``chunking`` 给无标题 chunk 加的结构行）；
-    - 标题本身，逐词扣（论文常在正文首行重复一遍自己的题目，大小写与断行都可能不同）；
-    - ``\\command`` 形态的 LaTeX 命令（有一篇的锚点整段是 ``\\definecolor…pdftitle=``）。
-
-    剩下的字母串长度就是这 280 字额度真正买到的东西。
-    """
-    window = text.strip()
-    if window.startswith(HEADING_PREFIX):
-        window = window.split("\n", 1)[-1].strip()
-    window = window[:OVERVIEW_WINDOW_CHARS]
-    window = LATEX_COMMAND.sub(" ", window)
-    title_words = {word.lower() for word in LETTER_RUN.findall(title) if len(word) > 2}
-    return sum(
-        len(word)
-        for word in LETTER_RUN.findall(window)
-        if word.lower() not in title_words
-    )
+    return positions[
+        anchor_index(
+            [entries[position].kind for position in positions],
+            [entries[position].text for position in positions],
+            [entries[position].title for position in positions],
+        )
+    ]
 
 
 def paper_sections(corpus: LoadedCorpus, positions: list[int]) -> list[str]:

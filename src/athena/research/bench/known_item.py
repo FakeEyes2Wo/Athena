@@ -23,6 +23,7 @@ from athena.research.paper_rag.schemas import SearchHit
 from athena.research.paper_rag.search import (
     LoadedCorpus,
     corpus_paper_ids,
+    hybrid_search,
     keyword_search,
     semantic_search,
 )
@@ -32,6 +33,7 @@ HIT_CUTOFFS = (1, 3, 5, 10)
 
 KEYWORD_CHANNEL = "paper_keyword_search"
 SEMANTIC_CHANNEL = "paper_semantic_search"
+HYBRID_CHANNEL = "hybrid_rrf"
 
 ChannelRunner = Callable[[str, list[str], int], Awaitable[list[SearchHit]]]
 
@@ -144,6 +146,21 @@ def semantic_runner(corpus: LoadedCorpus, embedder: TextEmbedder) -> ChannelRunn
     return run
 
 
+def hybrid_runner(corpus: LoadedCorpus, embedder: TextEmbedder) -> ChannelRunner:
+    """两个通道各取一批后按 RRF 融合；用于回答"融合到底值不值得上"。
+
+    这条通道先作为**基准里的一个候选**存在，而不是直接接进工具表。两个通道的互补性是
+    个经验问题，不是设计问题——先量，赢了再上。
+    """
+
+    async def run(question: str, keywords: list[str], top_k: int) -> list[SearchHit]:
+        vectors = await embedder.embed([question])
+        query = normalize(vectors[0]) if vectors else []
+        return hybrid_search(corpus, query, keywords or question.split(), top_k)
+
+    return run
+
+
 def usable_queries(query_set: QuerySet, corpus: LoadedCorpus) -> tuple[list[str], list[str]]:
     """把查询分成"金标在语料里"与"无从回答"两组。
 
@@ -187,6 +204,15 @@ async def run_known_item(
                 usable,
                 SEMANTIC_CHANNEL,
                 semantic_runner(corpus, embedder),
+                top_k,
+            )
+        )
+        channels.append(
+            await run_channel(
+                query_set,
+                usable,
+                HYBRID_CHANNEL,
+                hybrid_runner(corpus, embedder),
                 top_k,
             )
         )
@@ -234,6 +260,7 @@ def compare(before: RetrievalBenchReport, after: RetrievalBenchReport) -> list[s
 
 __all__ = [
     "DEFAULT_TOP_K",
+    "HYBRID_CHANNEL",
     "KEYWORD_CHANNEL",
     "SEMANTIC_CHANNEL",
     "compare",
