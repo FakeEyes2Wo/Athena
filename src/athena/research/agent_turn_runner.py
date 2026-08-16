@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,19 @@ def _regenerate_prompt(rejections: list[str], target: int) -> str:
         "prose - change the substance, or explore a different mechanism entirely. "
         "Return the hypotheses as structured output."
     )
+
+
+@dataclass(frozen=True, slots=True)
+class IdeatorLaneResult:
+    """一条 Ideator lane 的产出：入图的假设 + 它请求的补充 EDA。
+
+    门禁会丢弃候选，所以"留下的假设"不再是 Agent 原始 batch 的子集对象，而
+    ``eda_request`` 又只存在于原始 batch 上——两者必须一起带出来，否则调用方要么
+    拿不到假设、要么拿不到 EDA 请求。
+    """
+
+    hypotheses: list[Hypothesis]
+    eda_request: str = ""
 
 
 def _merged(*registries: ToolRegistry | None) -> ToolRegistry | None:
@@ -207,9 +221,8 @@ class AgentTurnRunner:
                 )
             else:
                 hypotheses.extend(result.hypotheses)
-                request = (result.eda_request or "").strip()
-                if request:
-                    eda_requests.append(request)
+                if result.eda_request:
+                    eda_requests.append(result.eda_request)
         # 动态 EDA：任一 lane 请求补充信息时，派发 Data Agent 在 EDA 目录上做
         # 增量分析并写回 report/figures。合并多 lane 请求为一次分析任务。
         if eda_requests:
@@ -303,8 +316,8 @@ class AgentTurnRunner:
 
     async def _run_ideator_lane(
         self, label: str, target: int, eda_dir: Path
-    ) -> HypothesisBatch:
-        """Run one independent Ideator and return its structured batch."""
+    ) -> IdeatorLaneResult:
+        """Run one independent Ideator and return what survived its quality gate."""
         rt = self._runtime
         content = (
             f"Inspect the EDA workspace at {eda_dir} without modifying any "
@@ -366,13 +379,16 @@ class AgentTurnRunner:
                             f"{attempt + 1} attempt(s); this lane yields nothing"
                         ),
                     )
-                return kept
+                # 只有 baseline 契约 ``HypothesisBatch`` 带 ``eda_request``；
+                # ``IdeatorHypothesisBatch`` 没有这个字段，门禁模式因此不请求补充 EDA。
+                request = getattr(batch, "eda_request", None) or ""
+                return IdeatorLaneResult(kept, request.strip())
 
             run_id = await rt._agents.followup(
                 agent_id,
                 {"content": _regenerate_prompt(rejections, target), "context_refs": []},
             )
-        return []
+        return IdeatorLaneResult([])
 
     async def _finish_ideator_batch(
         self,
