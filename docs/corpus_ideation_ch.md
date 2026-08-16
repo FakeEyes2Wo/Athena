@@ -79,9 +79,10 @@ def survey_corpus_ref(self) -> str | None:
 `Supervisor._corpus_ideation()` 在 `_fill_slots` 的最前面跑：
 
 ```python
-if self.state.corpus_ref is None or self.state.corpus_ideation_done:
+corpus_ref = self.state.corpus_ref
+if corpus_ref is None or corpus_ref == self.state.corpus_ideated_ref:
     return False
-self.state.corpus_ideation_done = True     # 先落状态再跑，避免重入补第二轮
+self.state.corpus_ideated_ref = corpus_ref   # 先落状态再跑，避免重入补第二轮
 await self._persist_state()
 hypotheses = await self._run_ideator_turn(self.state.hypotheses_per_ideator)
 return len(await self.register_hypotheses(hypotheses)) > 0
@@ -89,7 +90,9 @@ return len(await self.register_hypotheses(hypotheses)) > 0
 
 三条约束成立：
 
-- **只补一轮。** `corpus_ideation_done` 落在持久化状态里，续跑不重复补。
+- **每个语料版本补一轮。** 记的是**语料引用**而不是布尔标记：语料现在可以增量扩充
+  （见 `PaperLibrary`），布尔标记会让扩充进来的新论文永远读不到——第一轮补过就再也不补
+  了。旧 `state.json` 里的 `corpus_ideation_done` 由 before-validator 迁移，续跑不会崩。
 - **不动实验预算。** 它只往队列里加候选，跑几个仍由 `search_limit` 决定；新候选按
   `ranker` 的优先级与既有候选竞争，不插队。
 - **没有 Ideator 时直接标记完成**，避免每轮重试一个不存在的能力。
@@ -156,7 +159,14 @@ build_survey_stack(artifacts=self._store, client=self._client)
 （含 `built[0]["artifacts"] is runtime._store`）与
 `test_citations_are_verifiable_against_a_corpus_restored_from_state`。
 
-## 四、引用必须是"读过的"，且不换算成优先级
+## 四、引用要经三层核验，且不换算成优先级
+
+> **第三层是整改时补的。** 前两层查的都是**行为**（id 在不在语料里、本轮打开过没有），
+> 而一个读过《数据增强综述》再拿它去支持"两两交互特征工程"的 Ideator，两层都过得去——
+> 那正是下面第五节记录的真机现象。第三层查**内容**：把被引论文里真读过的那几段交给模型，
+> 问"这段话支持这条主张吗"，不支持就丢掉。实现见
+> `research/idea_generation/citation_support.py`，整改说明见
+> [文献链路整改](survey_overhaul_ch.md) 第五节。
 
 `_verify_sources` 在假设入图前，把 `sources` 与**本轮真正打开过正文的论文**求交：
 
@@ -313,3 +323,19 @@ encoding、多项式与交互项），开调研那臂被语料带向了 SMOTE �
 - [paper_rag 工具](paper_rag_tool_ch.md) — 七个算子的接口语义
 - [paper_rag 真机基准](paper_rag_benchmarks_ch.md) — 检索质量与性能实测
 - [真机跑测暴露的 loop 失效模式](loop_failure_modes_ch.md) — 同一轮跑测的其余缺陷
+
+
+## 八、整改之后（2026-08-16）
+
+本文记录的三次真机跑测都发生在整改之前。整改改动了本文涉及的四处，逐条对照见
+[文献链路整改](survey_overhaul_ch.md)：
+
+| 本文哪一节 | 整改后 |
+|---|---|
+| 约束四"只补一轮" | 改成"每个语料版本补一轮"，语料扩充会触发下一轮 |
+| 第四节"引用必须是读过的" | 加了第三层：被引段落必须真的支持这条主张 |
+| 第六节"这个 A/B 答不了原问题" | `--fork-from` 让两臂共用 evaluator 与基线，只剩 ideation 一个变量 |
+| 全文"只有 Ideator 能查语料" | PlanAgent 也拿到只读算子，且它的会话不进引用核验的账本 |
+
+第六节那句方法论教训仍然成立，而且现在有工具支撑：**凡是要拿来下结论的分数，都该独立
+重算一遍再信。**

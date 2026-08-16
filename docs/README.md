@@ -50,6 +50,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [paper_rag 工具](paper_rag_tool_ch.md) | current | 两个检索算子 + 三个遍历算子 + 整篇读取 |
 | [paper_rag 真机基准](paper_rag_benchmarks_ch.md) | current | 装载/时延实测、known-item 检索质量、优化清单 |
 | [文献语料接入 loop](corpus_ideation_ch.md) | current | 调研产物如何交给 Ideator，引用如何核验 |
+| [文献链路整改](survey_overhaul_ch.md) | current | 六段整改：可重跑基准、论文库、选片、门面与融合、消费端、A/B 分叉 |
 
 ## Kaggle 与 Supervisor 人类门
 
