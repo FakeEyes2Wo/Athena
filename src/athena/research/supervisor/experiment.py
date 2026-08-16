@@ -40,6 +40,8 @@ Direction = Literal["maximize", "minimize"]
 # manifest 禁止声明的可执行文件（平台自有，agent 不得直接调用）。
 _FORBIDDEN_EXECUTABLES = frozenset({"git", "git.exe"})
 _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
+# 回给 agent 的多余键名上限，避免超长键把反馈挤爆。
+_MAX_FIELD_NAME_CHARS = 40
 
 
 def _validate_relative_path(path: str, label: str) -> None:
@@ -54,19 +56,41 @@ def _validate_relative_path(path: str, label: str) -> None:
         raise ValueError(f"{label} path escapes the workspace")
 
 
+def _safe_field_name(part: object) -> str:
+    """多余字段的键名，去掉不可打印字符并截断后才放进反馈。
+
+    只用于 ``extra_forbidden``：该错误的键名按定义就不在 ``_MANIFEST_FIELDS`` 里，
+    一律遮成 ``<field>`` 等于让 agent 永远不知道该删哪个键。键名是它自己写的、
+    长度有界，回给它不构成信息泄露；manifest 的**取值**仍由 ``include_input=False``
+    挡在外面。
+    """
+    printable = "".join(char for char in str(part) if char.isprintable())
+    return printable[:_MAX_FIELD_NAME_CHARS] or "<field>"
+
+
 def _manifest_validation_summary(error: ValidationError) -> str:
-    """Return actionable validation details without manifest input values."""
+    """Return actionable validation details without manifest input values.
+
+    真实跑测（2026-08-16）：agent 在 manifest 里多写了一个 ``metrics`` 块，收到的反馈是
+    ``<field>: Extra inputs are not permitted``——它连删哪个键都不知道，于是原样重交三
+    次直到 PREPARE 轮次预算耗尽。多余键的键名因此必须报出来。
+    """
     summaries: list[str] = []
     for detail in error.errors(
         include_url=False,
         include_context=False,
         include_input=False,
     ):
+        extra_key = detail["type"] == "extra_forbidden"
         location = ".".join(
             (
                 str(part)
                 if isinstance(part, int)
-                else part if part in _MANIFEST_FIELDS else "<field>"
+                else (
+                    part
+                    if part in _MANIFEST_FIELDS
+                    else _safe_field_name(part) if extra_key else "<field>"
+                )
             )
             for part in detail["loc"]
         )
