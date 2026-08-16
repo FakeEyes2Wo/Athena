@@ -73,14 +73,14 @@ class PhaseRunner:
         workspace = await rt._git.create(base_commit, "athena/prepare", name="eda")
         # 只把 EDA 目录路径交给 supervisor 持有的持久化 state；EDA 结果不进 SEARCH。
         # 存相对项目根的路径而非绝对路径：state 才项目自包含。
-        rt._state.eda_dir = str(
+        rt.state.eda_dir = str(
             Path(workspace.path).resolve().relative_to(rt._root.resolve())
         )
-        rt._state.save(rt._state_path)
+        rt.state.save(rt._state_path)
         await rt.publish_output(
             source="supervisor",
             channel="text",
-            text=f"PREPARE: EDA 工作区 {rt._state.eda_dir} 已就绪。",
+            text=f"PREPARE: EDA 工作区 {rt.state.eda_dir} 已就绪。",
         )
         # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结；
         # 断点续传时若已有可解析的 frozen bundle，直接复用不重跑。

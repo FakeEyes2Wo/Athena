@@ -79,6 +79,32 @@ async def test_start_task_persists_first_task_text_and_reuses_it(
 
 
 @pytest.mark.asyncio
+async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path)
+    saves: list[str] = []
+
+    def save(path) -> None:
+        saves.append(str(path))
+
+    runtime._state.save = save
+    runtime._state.task_text = "https://www.kaggle.com/competitions/kaggriculture"
+    runtime._state.task_understanding = None
+    runtime._started = True
+    runtime._task = SimpleNamespace(done=lambda: False)
+
+    status = await runtime.start_task("continue")
+
+    assert status == "RUNNING"
+    assert runtime._task_text == "https://www.kaggle.com/competitions/kaggriculture"
+    assert (
+        runtime._state.task_text == "https://www.kaggle.com/competitions/kaggriculture"
+    )
+    assert saves == []
+
+
+@pytest.mark.asyncio
 async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> None:
     runtime = _stub_runtime(
         tmp_path, task_understanding={"title": "titanic", "target": "survival"}
@@ -178,8 +204,9 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         _agents=object(),
         _evaluator=object(),
         _execution=object(),
-        _supervisor=FakeSupervisor(frozen_ref),
         _state=state,
+        state=state,
+        _supervisor=FakeSupervisor(frozen_ref),
         _store=FakeStore(),
         _git=FakeGit(),
         _registry=SimpleNamespace(contains=lambda name: True),
@@ -231,6 +258,7 @@ async def test_run_general_turn_persists_agent_id_before_wait(
     state = SimpleNamespace(
         phase="PREPARE",
         status="RUNNING",
+        task_research_task=None,
         task_research_ref=None,
         task_research_agent_id=None,
         save=lambda path: saves.append(str(path)),
@@ -245,6 +273,7 @@ async def test_run_general_turn_persists_agent_id_before_wait(
         _root=tmp_path,
         _state_path=tmp_path / ".athena" / "state.json",
         _state=state,
+        state=state,
         _provider=object(),
         _registry=SimpleNamespace(contains=lambda name: True),
         _store=object(),
@@ -269,5 +298,29 @@ async def test_run_general_turn_persists_agent_id_before_wait(
 
     assert outcome.agent_id == "general-worker"
     assert outcome.result == {"result": "done", "files": ["summary.md"]}
+    assert state.task_research_task == "inspect competition"
     assert state.task_research_agent_id == "general-worker"
     assert saves == [str(rt._state_path)]
+
+
+@pytest.mark.asyncio
+async def test_start_task_reconstructs_task_text_from_legacy_understanding(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path)
+    runtime._state.task_text = None
+    runtime._state.task_understanding = {
+        "title": "Kaggriculture farming simulation",
+        "dataset": "kaggriculture environment",
+        "target": "maximize income",
+    }
+    runtime._started = True
+    runtime._task = SimpleNamespace(done=lambda: False)
+
+    status = await runtime.start_task("continue")
+
+    assert status == "RUNNING"
+    assert runtime._task_text == (
+        "Kaggriculture farming simulation kaggriculture environment maximize income"
+    )
+    assert runtime._state.task_text is None

@@ -126,7 +126,7 @@ class AgentTurnRunner:
     @staticmethod
     def _resolve_eda_dir(rt: "ResearchRuntime") -> str:
         """把 ``state.eda_dir`` 解析为本项目内的绝对 EDA 目录并做存在性校验。"""
-        eda_dir = rt._state.eda_dir
+        eda_dir = rt.state.eda_dir
         if not eda_dir:
             # PREPARE 失败后 state.eda_dir 可能为空，但默认 EDA 目录已建好；
             # 只要目录存在就继续，不因为状态字段缺失而误报“未捕获”。
@@ -176,8 +176,8 @@ class AgentTurnRunner:
                 extra_tools=rt.ideator_tools(),
                 gated=getattr(rt, "_ideation", "ideageneration") == "ideageneration",
             )
-        ideator_count = rt._state.ideator_count
-        hypotheses_per_ideator = rt._state.hypotheses_per_ideator
+        ideator_count = rt.state.ideator_count
+        hypotheses_per_ideator = rt.state.hypotheses_per_ideator
         batch = max(count, ideator_count * hypotheses_per_ideator)
         allocations = self._ideator_allocations(batch, ideator_count)
         # 每轮用唯一前缀，避免跨轮复用 ``ideator-N`` 导致前端/ TUI 把新一轮
@@ -502,13 +502,17 @@ class AgentTurnRunner:
             agent_id, run_id = await rt._agents.create_root(
                 "general", request, agent_id=prior_agent_id, name="general"
             )
-        if (
-            rt._state.task_research_ref is None
-            and rt._state.task_research_agent_id != agent_id
-        ):
-            # 断点续传：等待前先留下稳定 id，worker 超时/进程崩溃后仍能续跑同一线程。
-            rt._state.task_research_agent_id = agent_id
-            rt._state.save(rt._state_path)
+        state = rt.state
+        if state.task_research_ref is None and state.task_research_task == task:
+            if state.task_research_agent_id != agent_id:
+                state.task_research_agent_id = agent_id
+                state.save(rt._state_path)
+        elif state.task_research_ref is None and state.task_research_task is None:
+            # 断点续传：等待前先留下任务原文与稳定 id，worker 超时/进程崩溃后
+            # 能按任务归属续跑同一线程；已有其他任务归属时绝不覆盖。
+            state.task_research_task = task
+            state.task_research_agent_id = agent_id
+            state.save(rt._state_path)
         try:
             summary = await asyncio.wait_for(
                 wait_run_events(
@@ -521,6 +525,11 @@ class AgentTurnRunner:
                 timeout=AGENT_TURN_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as error:
+            try:
+                await rt._agents.interrupt(agent_id, "general_turn_timeout")
+            except Exception:
+                # worker 已结束或不存在 → 无需打断
+                pass
             raise RuntimeError(
                 f"General Agent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
             ) from error

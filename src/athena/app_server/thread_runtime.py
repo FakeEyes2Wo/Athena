@@ -619,12 +619,10 @@ async def _run_turn(runtime: ThreadRuntime, turn: AthenaTurn) -> None:
         await runtime.control_queue.put(RunnerCancelled(turn_id=turn.turn_id))
         raise
     except Exception as exc:
-        # 4. 失败：先留痕再回滚半成品消息。断点续传需要失败/中断回合的可见进展
-        # （例如 supervisor 回合里已完成的 general 调研工具结果），内存上下文仍
-        # 回滚，保证本次调用方拿到失败语义。
+        # 4. 失败：回滚半成品消息。磁盘 rollout 必须与内存上下文保持一致，
+        # 否则重启恢复会拼接出从未存在过的对话组合；关键的中间产物
+        # （任务理解、general 调研结果）由 state 级断点单独持久化。
         if runtime._ctx is not None and before_index is not None:
-            new_items = runtime._ctx.items_since(before_index)
-            runtime.record_items(new_items)
             runtime._ctx.rollback(before_index)
         await runtime.control_queue.put(
             RunnerFailed(

@@ -273,6 +273,7 @@ def test_resume_checkpoint_fields_round_trip(tmp_path: Path) -> None:
         concurrency=1,
         task_text="predict titanic survival",
         kaggle_download=False,
+        task_research_task="inspect competition",
         task_research_ref=_CONTEXT_REF,
         task_research_agent_id="general-worker",
         evaluator_ref=_TRUSTED_REF,
@@ -284,9 +285,25 @@ def test_resume_checkpoint_fields_round_trip(tmp_path: Path) -> None:
     assert loaded == state
     assert loaded.task_text == "predict titanic survival"
     assert loaded.kaggle_download is False
+    assert loaded.task_research_task == "inspect competition"
     assert loaded.task_research_ref == _CONTEXT_REF
     assert loaded.task_research_agent_id == "general-worker"
     assert loaded.evaluator_ref == _TRUSTED_REF
+    # 旧 schema 兼容：resume 字段不写进 state.json，而是落在 resume.json。
+    core = json.loads(path.read_text(encoding="utf-8"))
+    assert not set(core).intersection(
+        {
+            "task_text",
+            "kaggle_download",
+            "task_research_task",
+            "task_research_ref",
+            "task_research_agent_id",
+            "evaluator_ref",
+        }
+    )
+    resume = json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))
+    assert resume["task_text"] == "predict titanic survival"
+    assert resume["state_digest"]
 
 
 def test_legacy_state_without_resume_fields_defaults_to_none(tmp_path: Path) -> None:
@@ -309,6 +326,70 @@ def test_legacy_state_without_resume_fields_defaults_to_none(tmp_path: Path) -> 
 
     assert loaded.task_text is None
     assert loaded.kaggle_download is None
+    assert loaded.task_research_task is None
     assert loaded.task_research_ref is None
     assert loaded.task_research_agent_id is None
     assert loaded.evaluator_ref is None
+
+
+def test_stale_resume_file_is_ignored_when_core_state_changed(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    state = ResearchState(
+        status="RUNNING",
+        phase="PREPARE",
+        search_limit=10,
+        concurrency=1,
+        task_text="predict titanic survival",
+    )
+    state.save(path)
+    # 模拟旧代码重写核心 state（不写 resume.json）后新代码重新读取。
+    path.write_text(
+        json.dumps(
+            {
+                "status": "RUNNING",
+                "phase": "PREPARE",
+                "search_limit": 5,
+                "concurrency": 1,
+                "plans": {},
+                "validation": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = ResearchState.load(path)
+
+    assert loaded.search_limit == 5
+    assert loaded.task_text is None
+
+
+def test_load_migrates_intermediate_inline_resume_state(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "RUNNING",
+                "phase": "PREPARE",
+                "search_limit": 10,
+                "concurrency": 1,
+                "plans": {},
+                "validation": None,
+                "task_text": "predict titanic survival",
+                "task_research_ref": _CONTEXT_REF,
+                "task_research_agent_id": "general-worker",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = ResearchState.load(path)
+
+    assert loaded.task_text == "predict titanic survival"
+    # 没有任务原文的调研引用无法判断归属，加载时按无缓存归一化。
+    assert loaded.task_research_ref is None
+    assert loaded.task_research_agent_id is None
+    core = json.loads(path.read_text(encoding="utf-8"))
+    assert "task_text" not in core
+    assert "task_research_ref" not in core
+    resume = json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))
+    assert resume["task_text"] == "predict titanic survival"

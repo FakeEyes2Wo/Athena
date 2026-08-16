@@ -47,6 +47,7 @@ async def test_ideator_turn_runs_actual_lane_count_concurrently_and_merges_in_or
     runtime._state = SimpleNamespace(
         eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
     )
+    runtime._supervisor = SimpleNamespace(state=runtime._state)
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     started: list[tuple[str, int]] = []
     all_started = asyncio.Event()
@@ -127,6 +128,7 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
     runtime._state = SimpleNamespace(
         eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
     )
+    runtime._supervisor = SimpleNamespace(state=runtime._state)
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     errors: list[tuple[str, str]] = []
 
@@ -162,6 +164,7 @@ async def test_ideator_turn_keeps_every_generated_hypothesis_without_truncation(
     runtime._state = SimpleNamespace(
         eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
     )
+    runtime._supervisor = SimpleNamespace(state=runtime._state)
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
 
     async def run_lane(self, label: str, _target: int, _eda_dir):
@@ -198,6 +201,7 @@ async def test_ideator_turn_resolves_relative_eda_dir_against_project_root(
     runtime._state = SimpleNamespace(
         eda_dir="workspaces/eda", ideator_count=3, hypotheses_per_ideator=2
     )
+    runtime._supervisor = SimpleNamespace(state=runtime._state)
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     resolved: list[str] = []
 
@@ -227,6 +231,7 @@ async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
     runtime._state = SimpleNamespace(
         eda_dir=str(tmp_path), ideator_count=2, hypotheses_per_ideator=1
     )
+    runtime._supervisor = SimpleNamespace(state=runtime._state)
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     requests: list[str] = []
 

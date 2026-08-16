@@ -554,6 +554,23 @@ class ResearchRuntime:
             + task_text
         )
 
+    def _resume_task_text(self, fallback: str) -> str:
+        """Reconstruct the effective task text from persisted resume state.
+
+        优先用首次持久化的完整任务文本；旧项目没有该字段时，用结构化任务
+        理解（title/dataset/target）拼出描述，避免把 "continue" 喂给
+        survey/PREPARE 提示词。
+        """
+        if self.state.task_text:
+            return self.state.task_text
+        understanding = self.state.task_understanding or {}
+        parts = [
+            str(understanding[key])
+            for key in ("title", "dataset", "target")
+            if understanding.get(key)
+        ]
+        return " ".join(parts) if parts else fallback
+
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.
 
@@ -564,6 +581,8 @@ class ResearchRuntime:
             return self._task
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
+        # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。
+        self._task_text = self._resume_task_text(self._task_text)
         # 任务理解：让 SupervisorAgent 在 PREPARE 之前读一遍任务，自行决定是否
         # 经 ``configure_kaggle`` 接入 Kaggle 工具。失败只降级为默认关闭，不阻断。
         # 断点续传时把最近的人类消息一起带上，短句 follow-up 也能沿用旧上下文；
@@ -762,19 +781,16 @@ class ResearchRuntime:
         (resume) keeps its phase and starts via ``recover()``. A terminal run
         is re-armed in place; ``eda_dir`` and workspaces are left untouched.
         断点续传时沿用首次持久化的完整任务文本，短消息（continue/retry）不会
-        污染 survey 选题与 PREPARE 提示词。
+        污染 survey 选题与 PREPARE 提示词；任务理解崩溃重试时也不覆盖已存任务。
         """
-        self._task_text = self.state.task_text or task
-        if self.state.task_text is None:
+        if self.state.task_text is None and self.state.task_understanding is None:
             self.state.task_text = task
             self.state.save(self._state_path)
+        self._task_text = self._resume_task_text(task)
         self._rearm_if_terminal()
         if not self._started or self._task is None:
-            if (
-                self.tree.best_experiment_id() is None
-                and self._state.phase != "PREPARE"
-            ):
-                self._state.phase = "PREPARE"
+            if self.tree.best_experiment_id() is None and self.state.phase != "PREPARE":
+                self.state.phase = "PREPARE"
             await self.start()
         return self.state.status
 

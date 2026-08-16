@@ -201,7 +201,7 @@ class ThreadRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await runtime.force_close()
 
-    async def test_runner_failure_persists_partial_messages_to_rollout(self) -> None:
+    async def test_runner_failure_keeps_rollout_in_sync_with_context(self) -> None:
         class FailingMemoryRunner:
             async def run_with_context(self, thread, turn, emit, ctx, cancel):
                 del thread, turn, emit, cancel
@@ -239,8 +239,7 @@ class ThreadRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await eventually(lambda: runtime.state == "idle")
 
             self.assertEqual(runtime.last_terminal_kind, "turn_failed")
-            self.assertEqual(len(rollout.records), 1)
-            self.assertEqual(rollout.records[0].parts[0].content, "partial turn item")
+            self.assertEqual(rollout.records, [])
             self.assertEqual(ctx.snapshot()[0], 0)
         finally:
             await runtime.force_close()

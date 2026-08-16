@@ -28,6 +28,7 @@ def _runtime() -> ResearchRuntime:
             manual_mode=False,
             phase="PREPARE",
             status="RUNNING",
+            task_understanding=None,
             task_text=None,
             save=lambda path: None,
         )

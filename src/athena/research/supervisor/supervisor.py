@@ -423,7 +423,7 @@ class Supervisor(SupervisorActions):
         if self._run_prepare_phase is None:
             raise RuntimeError("PREPARE phase adapter is not configured")
         if self.tree.best_experiment_id() is not None:
-            # 断点续传：tree 已含可信 baseline（崩溃窗口为 tree 已写、phase 未转），
+            # 断点续传：tree 已含可信 SOTA baseline（崩溃窗口为 tree 已写、phase 未转），
             # 跳过重跑 PREPARE，直接进入 SEARCH。
             await self._publish(
                 "output",
@@ -1117,25 +1117,39 @@ class Supervisor(SupervisorActions):
     async def dispatch_general(self, task: str) -> dict[str, object]:
         """Dispatch one General Agent to do concrete work and return its result.
 
-        第一次成功的 general 调研作为断点写入 state；后续调用直接返回缓存，
-        避免续跑时重复派发同一个 worker。
+        第一次成功的 general 调研作为断点写入 state；同一任务后续调用直接返回
+        缓存，避免续跑时重复派发 worker。不同任务不命中缓存，照常派发且不覆盖
+        已保存的调研断点。
         """
         if self._run_general_turn is None:
             raise RuntimeError("General Agent dispatch is not configured")
         if not task.strip():
             raise ValueError("general task must be nonblank")
-        if self.state.task_research_ref is not None:
+        cached_task = self.state.task_research_task
+        if self.state.task_research_ref is not None and cached_task == task:
             try:
                 cached = json.loads(
                     await self._store.get_text(self.state.task_research_ref)
                 )
             except (OSError, ValueError):
-                # artifact 缺失或内容损坏 → 当作无缓存重新派发
+                # artifact 缺失或内容损坏 → 清掉引用，当作无缓存重新派发
+                self.state.task_research_ref = None
                 cached = None
             if isinstance(cached, dict) and cached:
                 return {"cached": True, **cached}
-        outcome = await self._run_general_turn(task, self.state.task_research_agent_id)
-        if self.state.task_research_ref is None:
+        # 仅在"同一任务且尚无缓存"时复用旧 worker id；不同任务必须开新线程，
+        # 否则新任务会混进调研线程记忆并劫持调研断点。
+        prior_agent_id = (
+            self.state.task_research_agent_id
+            if self.state.task_research_ref is None and cached_task == task
+            else None
+        )
+        outcome = await self._run_general_turn(task, prior_agent_id)
+        if self.state.task_research_ref is None and self.state.task_research_task in (
+            None,
+            task,
+        ):
+            self.state.task_research_task = task
             self.state.task_research_agent_id = outcome.agent_id
             self.state.task_research_ref = await self._store.put_text(
                 json.dumps(outcome.result, ensure_ascii=False)

@@ -237,6 +237,11 @@ async def test_dispatch_general_caches_first_result(tmp_path: Path) -> None:
 
     async def fake_general(task: str, prior_agent_id: str | None):
         calls.append((task, prior_agent_id))
+        if task == "submit final predictions":
+            return GeneralTurnOutcome(
+                agent_id="general-submit",
+                result={"result": "submitted", "files": []},
+            )
         return GeneralTurnOutcome(
             agent_id="general-worker",
             result={"result": "done", "files": ["summary.md"]},
@@ -246,14 +251,21 @@ async def test_dispatch_general_caches_first_result(tmp_path: Path) -> None:
 
     first = await supervisor.dispatch_general("inspect competition")
     second = await supervisor.dispatch_general("inspect competition")
+    different = await supervisor.dispatch_general("submit final predictions")
 
     assert first == {"result": "done", "files": ["summary.md"]}
     assert second == {"cached": True, "result": "done", "files": ["summary.md"]}
-    assert calls == [("inspect competition", None)]
+    assert different == {"result": "submitted", "files": []}
+    assert calls == [
+        ("inspect competition", None),
+        ("submit final predictions", None),
+    ]
+    assert supervisor.state.task_research_task == "inspect competition"
     assert supervisor.state.task_research_ref is not None
     assert supervisor.state.task_research_agent_id == "general-worker"
     persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
     assert persisted.task_research_ref == supervisor.state.task_research_ref
+    assert persisted.task_research_task == "inspect competition"
 
 
 @pytest.mark.asyncio

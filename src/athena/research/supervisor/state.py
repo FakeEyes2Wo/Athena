@@ -1,15 +1,47 @@
-"""Atomic persistence for the autonomous Supervisor's ``state.json``."""
+"""Atomic persistence for the autonomous Supervisor's ``state.json``.
 
+断点续传字段与旧 schema 不兼容（``extra="forbid"``），因此分开持久化：
+``state.json`` 只写旧版核心字段，新增的 resume 字段落到同目录 ``resume.json``，
+并绑定核心 payload 的摘要——旧代码重写 ``state.json`` 后摘要失配，新代码会
+自动忽略过期的 resume 数据。
+"""
+
+import hashlib
 import json
+import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
-from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.contracts import ArtifactRef
 from athena.core.persistence import atomic_write_json
 from athena.research.supervisor.plans import PlanState
+
+logger = logging.getLogger(__name__)
+
+RESUME_FIELDS = (
+    "task_text",
+    "kaggle_download",
+    "task_research_task",
+    "task_research_ref",
+    "task_research_agent_id",
+    "evaluator_ref",
+)
+
+
+def _resume_path(path: Path) -> Path:
+    """Return the sibling resume file for one state path."""
+    return path.with_name("resume.json")
+
+
+def _core_digest(payload: Mapping) -> str:
+    """Digest core payload so stale resume files can be detected after downgrade."""
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class ResearchState(BaseModel):
@@ -39,7 +71,9 @@ class ResearchState(BaseModel):
     task_text: str | None = None
     # 断点续传：configure_kaggle 的持久化决定（None=未决定，False=已决定关闭）。
     kaggle_download: bool | None = None
-    # 断点续传：任务理解阶段 general 调研的产物引用与 worker 稳定 id。
+    # 断点续传：任务理解阶段 general 调研的产物引用、worker 稳定 id 与任务原文；
+    # 缓存按任务原文匹配，避免把调研结果错当成后续任意 general 任务的结果。
+    task_research_task: str | None = None
     task_research_ref: ArtifactRef | None = None
     task_research_agent_id: str | None = None
     # 断点续传：已冻结评估器 bundle；PREPARE 重启时跳过 evaluator 重跑。
@@ -59,13 +93,71 @@ class ResearchState(BaseModel):
         return self
 
     def save(self, path: str | Path) -> Path:
-        """Atomically replace ``path`` with this validated state."""
-        return atomic_write_json(path, self.model_dump(mode="json"))
+        """Atomically replace ``path`` with the core state and persist resume fields.
+
+        Core state keeps the legacy schema so older binaries can still read
+        ``state.json``; resume fields live in a sibling ``resume.json``.
+        """
+        target = Path(path)
+        core = self.model_dump(mode="json", exclude=RESUME_FIELDS)
+        atomic_write_json(target, core)
+        resume_payload = {
+            key: getattr(self, key)
+            for key in RESUME_FIELDS
+            if getattr(self, key) is not None
+        }
+        resume_path = _resume_path(target)
+        if resume_payload:
+            atomic_write_json(
+                resume_path,
+                {"state_digest": _core_digest(core), **resume_payload},
+            )
+        else:
+            resume_path.unlink(missing_ok=True)
+        return target
 
     @classmethod
     def load(cls, path: str | Path) -> "ResearchState":
-        """Load and validate a state object from JSON."""
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        """Load and validate a state object from JSON plus its resume file.
+
+        兼容三种磁盘形态：旧版核心 schema、中间版本把 resume 字段内联进
+        ``state.json``、当前版的核心 + ``resume.json`` 拆分布局。读取中间版本
+        时会立即重写为拆分布局，让旧二进制重新可读核心文件。
+        """
+        target = Path(path)
+        payload = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("research state payload must be an object")
-        return cls.model_validate(payload)
+        candidate = dict(payload)
+        inline_resume = any(key in candidate for key in RESUME_FIELDS)
+        resume_applied = False
+        resume_path = _resume_path(target)
+        if resume_path.is_file():
+            try:
+                resume = json.loads(resume_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                # resume 文件损坏/截断 → 按无断点继续，核心状态仍可用
+                resume = None
+            if isinstance(resume, dict) and resume.get("state_digest") == _core_digest(
+                payload
+            ):
+                for key in RESUME_FIELDS:
+                    if key in resume:
+                        candidate[key] = resume[key]
+                resume_applied = True
+            else:
+                logger.warning(
+                    "ignoring stale resume file %s (core state changed)", resume_path
+                )
+        if candidate.get("task_research_ref") is not None and not candidate.get(
+            "task_research_task"
+        ):
+            # 中间版本存过没有任务原文的调研引用：无法判断缓存归属，按无缓存处理。
+            candidate["task_research_ref"] = None
+            candidate["task_research_agent_id"] = None
+            inline_resume = True
+        state = cls.model_validate(candidate)
+        if inline_resume and not resume_applied:
+            # 迁移中间版本的内联布局：旧二进制只能读不含 resume 字段的核心文件。
+            state.save(target)
+        return state
