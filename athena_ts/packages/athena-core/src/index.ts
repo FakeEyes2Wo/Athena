@@ -6,6 +6,12 @@ export * from "./models/research-models.js"
 export * from "./models/research-data-models.js"
 export { ExperimentStatus, ExperimentSchema, ResearchTree, SAVE_VERSION } from "./models/research-tree.js"
 export type { Experiment } from "./models/research-tree.js"
+export { buildHypothesisGraph } from "./models/hypothesis-graph.js"
+export type {
+  HypothesisGraph,
+  HypothesisGraphEdge,
+  HypothesisGraphNode,
+} from "./models/hypothesis-graph.js"
 export * from "./services/workspace.js"
 export { atomicWriteJson } from "./services/persistence.js"
 export { isTransientError, retryAsync } from "./services/retry.js"

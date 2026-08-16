@@ -1,0 +1,24 @@
+{
+  "name": "@athena/autoresearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "run:autoresearch": "node scripts/run-autoresearch.mjs",
+    "ui": "node scripts/dsh-ui-server.mjs"
+  },
+  "dependencies": {
+    "@athena/core": "0.1.0",
+    "@athena/research": "0.1.0",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}

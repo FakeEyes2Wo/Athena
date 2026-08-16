@@ -209,9 +209,8 @@ class AthenaApp:
             self._history_scroll += max(0, after - before)
             self._clamp_history_scroll()
 
-        if self._app is not None:
-            if self._history_selection_lines is None:
-                self._app.invalidate()
+        if self._app is not None and self._history_selection_lines is None:
+            self._app.invalidate()
 
     async def handle_key(self, token: str) -> None:
         """Handle normalized keys; tests use the same path as prompt-toolkit."""

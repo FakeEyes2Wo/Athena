@@ -11,11 +11,24 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 |---|---|---|
 | [Supervisor 设计基线](supervisor_design.md) | current | 目标架构：研究流程、控制面、数据隔离与验收门（最终产品合同） |
 | [Supervisor 实现计划](supervisor_imp_docs.md) | current | 实现状态、任务拆分、全局约束与冻结验证命令 |
+| [研究核心机制整理](research_core_mechanisms_ch.md) | current | ResearchTree / SEARCH 搜索 / IdeaGenerator / Hypothesis 排序 / 动态 EDA |
 | [代码规范](代码规范.md) | current | 导入/注释/异常/格式/测试约定 |
-| [可运行研究工作流](../README.md#run-the-complete-agent-workflow) | current | `src/main.py` 安装、认证、CLI 参数、产物和失败语义 |
+| [可运行研究工作流](../README.md#运行) | current | `Athena-cli` 安装、认证、CLI 参数、产物和失败语义 |
 | [测试指南](operations/testing.md) | current | 本地测试层次与验收命令 |
 | [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
 | [Prompt 驱动 Agents 设计](architecture/2026-08-09-prompt-driven-agents-design.md) | current | Prompt 驱动 Agents 改造设计（历史） |
+
+## AutoResearch 设计（2026-08-15）
+
+| 文档 | 状态 | 用途 |
+|---|---|---|
+| [AutoResearch 设计目录](autoresearch/README.md) | design | AutoResearch 设计文档入口与已确认决策 |
+| [AutoResearch 框架与 TS 插件设计](autoresearch/2026-08-15-autoresearch-ts-plugin-design.md) | design | 端到端 idea→experiment→paper 全流程、独立 @athena/autoresearch 包、阶段状态机、论文生成三路径、预算与质量闸 |
+| [AutoResearch 泛化与极简架构](autoresearch/2026-08-15-autoresearch-generalization-and-minimalism.md) | design | RunSpec + PipelineRunner + StageContext + Provider 可插拔；SVG skill 不绑定、默认 native-svg 兜底 |
+| [AutoResearch 详细设计](autoresearch/2026-08-15-autoresearch-detailed-design.md) | design | 实现级设计：包结构、zod 契约、服务 API、阶段伪代码、插件注册、事件、恢复、测试与验收 |
+| [AutoResearch 阶段协议与 Paper Engine](autoresearch/2026-08-15-autoresearch-protocols-and-paper-engine.md) | design | Athena 适配接口、入池协议、TemplateKit/Overleaf/LatexBuilder/Composer/Reviewer/Packaging 契约、事件 payload、错误码、BDD 场景 |
+| [AutoResearch 论文图与可信实验/消融设计](autoresearch/2026-08-15-autoresearch-figures-and-experiment-design.md) | design | LLM 生成 SVG 架构图、SVG 渲染管线、EDA 图不进入论文、多数据集可信实验、消融矩阵、BDD 增量 |
+| [Hypothesis 本地池设计](autoresearch/2026-08-15-hypothesis-local-pool-design.md) | design | 独立 HypothesisPool 服务、池状态机、与 ResearchTree 对账、论文回写 |
 
 ## Academic Survey
 

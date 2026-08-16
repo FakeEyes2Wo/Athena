@@ -5,7 +5,6 @@
 
 import { z } from "zod"
 import { CommitHash, FiniteFloat, HypothesisSchema, LooseFloat, digestFromRef } from "@athena/core"
-import type { Hypothesis } from "@athena/core"
 
 /** 校验为 ``sha256:<64 hex>`` 的受信任内容引用。 */
 const TrustedRef = z.string().refine(

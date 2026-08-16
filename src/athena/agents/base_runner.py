@@ -8,6 +8,7 @@ turn 构造最小 :class:`AgentContext`（thread/turn 为派生展示值，memor
 
 import asyncio
 import json
+from collections.abc import Callable
 
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 

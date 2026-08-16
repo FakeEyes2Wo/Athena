@@ -2,3 +2,7 @@ node_modules/
 dist/
 dist-node/
 src-tauri/target/
+
+# PyInstaller 打包的 Python 后端二进制（构建产物，不入库）
+src-tauri/resources/gui_gateway.exe
+src-tauri/resources/gui_gateway

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Athena for DSH · AutoResearch</title>
+  <style>
+    /* Design tokens mirror athena-gui/src/styles.css (light mode). */
+    :root {
+      color-scheme: light;
+      --bg: #F6F7F9;
+      --surface: #FFFFFF;
+      --surface-elevated: #F1F3F6;
+      --surface-muted: #F0F2F5;
+      --border: rgba(15, 23, 42, 0.08);
+      --border-strong: rgba(15, 23, 42, 0.14);
+      --border-focus: rgba(37, 99, 235, 0.4);
+      --accent: #2563EB;
+      --accent-hover: #1D4ED8;
+      --accent-subtle: rgba(37, 99, 235, 0.07);
+      --accent-soft: rgba(37, 99, 235, 0.14);
+      --text-primary: #0F172A;
+      --text-secondary: #5B6472;
+      --text-tertiary: #9AA3B2;
+      --success: #059669;
+      --success-subtle: rgba(5, 150, 105, 0.1);
+      --warning: #D97706;
+      --warning-subtle: rgba(217, 119, 6, 0.12);
+      --danger: #DC2626;
+      --danger-subtle: rgba(220, 38, 38, 0.09);
+      --info: #0891B2;
+      --info-subtle: rgba(8, 145, 178, 0.1);
+      --shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+      --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.04);
+      --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.06), 0 2px 4px rgba(15, 23, 42, 0.04);
+      --font-sans: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      --font-mono: "Geist Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+      --radius-xs: 6px;
+      --radius-sm: 8px;
+      --radius-md: 10px;
+      --radius-card: 12px;
+      --radius-panel: 14px;
+      --radius-btn: 9px;
+      --space-xs: 4px;
+      --space-sm: 8px;
+      --space-md: 12px;
+      --space-lg: 16px;
+      --space-xl: 20px;
+      --space-2xl: 28px;
+      --ease: cubic-bezier(0.4, 0, 0.2, 1);
+      --dur: 160ms;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text-primary);
+    }
+    button { font-family: inherit; }
+
+    /* ===== App shell: 52px topbar + rail + 232px sidebar + main ===== */
+    .shell {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 52px 1fr;
+      overflow: hidden;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: var(--space-md);
+      padding: 0 var(--space-lg);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .topbar__mark {
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      background: linear-gradient(135deg, var(--accent), #7C3AED);
+      box-shadow: var(--shadow-xs);
+    }
+    .topbar__brand { font-size: 14px; font-weight: 700; letter-spacing: -0.01em; }
+    .topbar__brand span { color: var(--accent); }
+    .topbar__status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: var(--space-sm);
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); }
+    .status-dot[data-status="running"] { background: var(--success); }
+    .status-dot[data-status="paused"] { background: var(--warning); }
+    .status-dot[data-status="completed"] { background: var(--info); }
+    .status-dot[data-status="error"] { background: var(--danger); }
+
+    .body { min-height: 0; display: flex; position: relative; }
+
+    /* ===== Function rail (Athena FunctionRail) ===== */
+    .rail {
+      width: 52px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: var(--space-sm) 0;
+      border-right: 1px solid var(--border);
+      background: var(--surface-elevated);
+    }
+    .rail ul { list-style: none; margin: 0; padding: 0 7px; display: flex; flex-direction: column; gap: 6px; }
+    .rail button {
+      width: 100%;
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      border: none;
+      border-radius: 12px;
+      background: transparent;
+      color: var(--text-tertiary);
+      cursor: pointer;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+        box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+    }
+    .rail button:hover { background: var(--surface-muted); color: var(--text-primary); transform: translateY(-1px); }
+    .rail button.active {
+      background: var(--accent-subtle);
+      color: var(--accent);
+      box-shadow: inset 0 0 0 1px var(--accent-soft), var(--shadow-xs);
+    }
+    .rail button.active:hover { transform: none; }
+    .rail svg { width: 19px; height: 19px; }
+
+    /* ===== Context sidebar ===== */
+    .sidebar {
+      width: 232px;
+      flex-shrink: 0;
+      padding: var(--space-xl) var(--space-md);
+      border-right: 1px solid var(--border);
+      background: var(--surface-elevated);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-xl);
+    }
+    .sidebar-title { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: var(--text-tertiary); text-transform: uppercase; }
+    .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+    .field label { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
+    .input {
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-size: 13px;
+      color: var(--text-primary);
+      outline: none;
+      transition: border-color var(--dur) var(--ease);
+    }
+    .input:focus { border-color: var(--border-focus); }
+    .actions { display: flex; flex-direction: column; gap: var(--space-sm); }
+    .hint {
+      margin-top: auto;
+      padding: var(--space-md);
+      border-radius: var(--radius-card);
+      background: var(--accent-subtle);
+      border: 1px solid var(--accent-soft);
+      color: var(--accent-hover);
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    /* ===== Main workspace ===== */
+    .main {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      overflow-y: auto;
+      background: var(--surface);
+      padding: var(--space-xl) var(--space-2xl);
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-xl);
+    }
+
+    .panel-toolbar { display: flex; justify-content: space-between; align-items: center; gap: var(--space-md); }
+    .panel-toolbar h3 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+    .panel-toolbar .muted { color: var(--text-secondary); font-size: 12px; }
+
+    /* ===== Buttons (Athena btn tokens) ===== */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px 16px;
+      border-radius: var(--radius-btn);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        color var(--dur) var(--ease), transform var(--dur) var(--ease);
+      white-space: nowrap;
+    }
+    .btn:hover:not(:disabled) { background: var(--surface-elevated); border-color: var(--border-strong); }
+    .btn:disabled { opacity: 0.45; cursor: default; }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn--primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+    .btn--ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
+    .btn--ghost:hover:not(:disabled) { background: var(--surface-elevated); color: var(--text-primary); }
+
+    /* ===== Cards ===== */
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(172px, 1fr)); gap: var(--space-md); }
+    .card {
+      padding: var(--space-lg);
+      border-radius: var(--radius-card);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      box-shadow: var(--shadow-xs);
+    }
+    .card__title {
+      margin: 0 0 var(--space-sm);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      letter-spacing: 0.04em;
+    }
+    .card .value { font-size: 21px; font-weight: 750; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card .value.mono { font-family: var(--font-mono); font-size: 14px; color: var(--text-secondary); }
+    .card .sub { margin-top: 6px; color: var(--text-tertiary); font-size: 12px; }
+
+    /* ===== Badges (Athena badge variants) ===== */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.6;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+    .badge--success { background: var(--success-subtle); color: var(--success); border-color: var(--success); }
+    .badge--warning { background: var(--warning-subtle); color: var(--warning); border-color: var(--warning); }
+    .badge--danger  { background: var(--danger-subtle);  color: var(--danger);  border-color: var(--danger); }
+    .badge--neutral { background: var(--surface-muted); color: var(--text-secondary); border-color: var(--border-strong); }
+    .badge--info    { background: var(--info-subtle);    color: var(--info);    border-color: var(--info); }
+
+    /* ===== Graph panel ===== */
+    .graph-panel { position: relative; }
+    .graph-container {
+      background: linear-gradient(180deg, #FDFEFF, #F8FAFC);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      min-height: 420px;
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+    }
+    .graph-container:active { cursor: grabbing; }
+    .legend {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 5;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      box-shadow: var(--shadow-md);
+    }
+    .legend__title { font-weight: 600; color: var(--text-primary); }
+    .legend__row { display: flex; align-items: center; gap: 6px; }
+    .legend__line { display: inline-block; width: 20px; height: 0; border-top: 2px solid var(--text-tertiary); }
+    .legend__line--dashed { border-top: 2px dashed var(--danger); }
+    .legend__swatches { display: flex; flex-wrap: wrap; gap: 4px; }
+
+    /* ===== Console ===== */
+    .console {
+      background: #FBFCFE;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-card);
+      padding: var(--space-md) var(--space-lg);
+      min-height: 200px;
+      max-height: 320px;
+      overflow: auto;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      color: #334155;
+    }
+
+    @media (max-width: 860px) {
+      .shell { grid-template-rows: 52px auto; height: auto; overflow: visible; }
+      .body { flex-direction: column; }
+      .rail { width: 100%; flex-direction: row; padding: 0; border-right: 0; border-bottom: 1px solid var(--border); }
+      .rail ul { flex-direction: row; padding: 6px 8px; }
+      .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); }
+      .main { padding: var(--space-lg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <span class="topbar__mark" aria-hidden>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.8 2.8M16.2 16.2L19 19M19 5l-2.8 2.8M7.8 16.2L5 19"/></svg>
+      </span>
+      <div class="topbar__brand">Athena <span>for DSH</span></div>
+      <div class="topbar__status">
+        <span class="status-dot" id="status-dot" data-status="idle"></span>
+        <span id="status-text">idle · 未连接</span>
+      </div>
+    </header>
+
+    <div class="body">
+      <nav class="rail" aria-label="主导航">
+        <ul>
+          <li><button data-target="overview" class="active" title="概览" aria-label="概览">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+          </button></li>
+          <li><button data-target="graph" title="假设图" aria-label="假设图">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2.4"/><circle cx="19" cy="5" r="2.4"/><circle cx="12" cy="19" r="2.4"/><path d="M7.2 7.2l9.4-1M7.4 8.2l3.6 8.6M16.6 7.2l-3.6 8.6"/></svg>
+          </button></li>
+          <li><button data-target="console" title="控制台" aria-label="控制台">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          </button></li>
+        </ul>
+      </nav>
+
+      <aside class="sidebar">
+        <div>
+          <div class="sidebar-title">AutoResearch</div>
+        </div>
+        <div class="field">
+          <label for="dir">数据目录</label>
+          <input id="dir" class="input" value="examples/titanic" />
+        </div>
+        <div class="actions">
+          <button id="run" class="btn btn--primary">运行 AutoResearch</button>
+          <button id="refresh" class="btn btn--ghost">刷新状态</button>
+        </div>
+        <div class="hint">
+          只读数据目录；探索方向与论文内容由流程和 LLM Provider 决定，不做任务特异性假设。
+        </div>
+      </aside>
+
+      <main class="main">
+        <section id="overview" class="cards">
+          <div class="card"><div class="card__title">Run ID</div><div class="value mono" id="run_id">—</div><div class="sub">本次运行标识</div></div>
+          <div class="card"><div class="card__title">Phase</div><div class="value" id="phase">—</div><div class="sub">当前阶段</div></div>
+          <div class="card"><div class="card__title">Status</div><div class="value"><span id="status" class="badge badge--neutral">—</span></div><div class="sub">运行状态</div></div>
+          <div class="card"><div class="card__title">SOTA</div><div class="value mono" id="sota">—</div><div class="sub">最佳实验</div></div>
+          <div class="card"><div class="card__title">Queued</div><div class="value" id="queued">—</div><div class="sub">排队假设</div></div>
+        </section>
+
+        <section id="graph" class="card graph-panel" style="padding:0; overflow:visible;">
+          <div class="panel-toolbar" style="padding: var(--space-lg) var(--space-lg) 0;">
+            <h3>假设图</h3>
+            <span class="muted" id="graph-summary">加载中…</span>
+          </div>
+          <div style="padding: var(--space-md) var(--space-lg) var(--space-lg);">
+            <div class="graph-container" id="graph" aria-label="假设图可视化">
+              <div class="legend">
+                <div class="legend__title">图例</div>
+                <div class="legend__row"><span class="legend__line"></span>谱系 (lineage)</div>
+                <div class="legend__row"><span class="legend__line legend__line--dashed"></span>取代 (supersedes)</div>
+                <div class="legend__row"><span class="badge badge--success">SUPPORTED</span>★ SOTA</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="console" class="card" style="padding:0;">
+          <div class="panel-toolbar" style="padding: var(--space-lg) var(--space-lg) 0;">
+            <h3>控制台输出</h3>
+            <span class="muted" id="console-note">自动刷新</span>
+          </div>
+          <div style="padding: var(--space-md) var(--space-lg) var(--space-lg);">
+            <div class="console" id="console-pane">等待运行…</div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <script src="hypothesis-graph.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

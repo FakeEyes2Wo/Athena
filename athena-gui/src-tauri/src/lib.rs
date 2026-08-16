@@ -49,6 +49,7 @@ pub fn run() {
             commands::experiments::experiment_set_sota,
             commands::state::state_get,
             commands::state::sessions_list,
+            commands::state::sessions_list_for,
             commands::state::session_switch,
             commands::state::session_delete,
             commands::state::human_pending,

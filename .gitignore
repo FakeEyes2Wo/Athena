@@ -53,6 +53,7 @@ Thumbs.db
 uv.lock
 XH-202619.pdf
 /docs/open-design/*
+/docs/autoresearch/
 /data_analyze/*
 !/data_analyze/.gitkeep
 !/data_analyze/EDA.md/

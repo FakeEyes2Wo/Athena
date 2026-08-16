@@ -27,32 +27,45 @@
   color: var(--text-tertiary);
 }
 
-/* 会话上下文 */
-.workspace {
+/* 会话上下文：按工作区分组 */
+.workspaceGroup {
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-sm);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--surface-elevated);
+  gap: 2px;
 }
 
-.workspaceName {
+.workspaceHeader {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--text-primary);
-  overflow: hidden;
-  white-space: nowrap;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 
-.workspaceName span {
+.workspaceHeader span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workspaceHeader:disabled {
+  color: var(--accent);
+  cursor: default;
+}
+
+.workspaceHeader:not(:disabled):hover {
+  background: var(--surface-muted);
+  color: var(--text-primary);
 }
 
 .newSession {
@@ -118,6 +131,11 @@
   white-space: nowrap;
 }
 
+/* 会话条目：单行标题。 */
+.sessionTitle {
+  font-size: 13px;
+}
+
 .item:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;
@@ -147,16 +165,29 @@
   background: transparent;
   color: var(--text-tertiary);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-
-.sessionRow:hover .delete,
-.delete:focus-visible {
   opacity: 1;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 
 .delete:hover {
   color: var(--danger, #e5484d);
   background: var(--surface-muted);
+}
+
+.switchWorkspace {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.switchWorkspace:hover {
+  background: var(--surface-muted);
+  color: var(--text-primary);
 }

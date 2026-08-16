@@ -8,6 +8,10 @@ import pytest
 
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.idea_generation.idea_schemas import (
+    IdeatorHypothesisBatch,
+    IdeatorHypothesisDraft,
+)
 from athena.research.runtime import ResearchRuntime
 
 
@@ -248,3 +252,35 @@ async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
         "change ideator-1-2",
     ]
     assert requests == ["- correlation between age and target"]
+
+
+@pytest.mark.asyncio
+async def test_gated_batch_preserves_eda_request(monkeypatch) -> None:
+    """gated 模式的 IdeatorHypothesisBatch 也把 eda_request 传给动态 EDA。"""
+    runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._ideation = "gated"
+    runtime._model = "m"
+    runtime._store = object()
+
+    async def fake_pipeline(drafts, **kwargs):
+        return [_hypothesis("kept")]
+
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner.run_light_pipeline", fake_pipeline
+    )
+    runner = AgentTurnRunner(runtime)
+    draft = IdeatorHypothesisDraft(
+        statement="s",
+        intervention="i",
+        expected_effect="e",
+        supported_premises=[],
+        predicted_observations=["p"],
+        disconfirming_observations=["d"],
+    )
+    batch = IdeatorHypothesisBatch(hypotheses=[draft], eda_request="mine X")
+
+    out = await runner._finish_ideator_batch(batch)
+
+    assert isinstance(out, HypothesisBatch)
+    assert out.eda_request == "mine X"
+    assert [item.intervention for item in out.hypotheses] == ["change kept"]

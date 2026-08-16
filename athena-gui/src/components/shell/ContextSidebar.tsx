@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react";
 import type { ContextPanelKey, ModuleKey } from "../../types/ui";
 import { Icon } from "../common/Icon";
 import { RELATED_PANELS } from "./navigation";
 import { basename } from "../../lib/path";
+import { sessionsListFor } from "../../lib/tauri-bridge";
+import { loadSessionTitles } from "../../hooks/usePipeline";
 import styles from "./ContextSidebar.module.css";
 
 export interface SessionItem {
@@ -9,25 +12,36 @@ export interface SessionItem {
   title: string;
 }
 
+interface WorkspaceGroup {
+  root: string;
+  name: string;
+  isCurrent: boolean;
+  sessions: SessionItem[];
+}
+
 interface ContextSidebarProps {
   module: ModuleKey;
   currentRoot: string | null;
+  recentRoots: string[];
   sessions: SessionItem[];
   currentSessionId: string;
   onSwitchWorkspace(): void;
+  onSelectWorkspace(path: string): void;
   onSelectSession(id: string): void;
   onNewSession(): void;
   onDeleteSession(id: string): void;
   onOpenDrawer(panel: ContextPanelKey): void;
 }
 
-/** 上下文侧栏：会话模块显示工作区/新会话/会话列表，其余模块显示详情视图。 */
+/** 上下文侧栏：会话模块显示按工作区分组的会话列表，其余模块显示详情视图。 */
 export function ContextSidebar({
   module,
   currentRoot,
+  recentRoots,
   sessions,
   currentSessionId,
   onSwitchWorkspace,
+  onSelectWorkspace,
   onSelectSession,
   onNewSession,
   onDeleteSession,
@@ -40,9 +54,11 @@ export function ContextSidebar({
       {module === "session" ? (
         <SessionContext
           currentRoot={currentRoot}
+          recentRoots={recentRoots}
           sessions={sessions}
           currentSessionId={currentSessionId}
           onSwitchWorkspace={onSwitchWorkspace}
+          onSelectWorkspace={onSelectWorkspace}
           onSelectSession={onSelectSession}
           onNewSession={onNewSession}
           onDeleteSession={onDeleteSession}
@@ -74,54 +90,101 @@ export function ContextSidebar({
 
 function SessionContext({
   currentRoot,
+  recentRoots,
   sessions,
   currentSessionId,
   onSwitchWorkspace,
+  onSelectWorkspace,
   onSelectSession,
   onNewSession,
   onDeleteSession,
 }: {
   currentRoot: string | null;
+  recentRoots: string[];
   sessions: SessionItem[];
   currentSessionId: string;
   onSwitchWorkspace(): void;
+  onSelectWorkspace(path: string): void;
   onSelectSession(id: string): void;
   onNewSession(): void;
   onDeleteSession(id: string): void;
 }) {
+  const [otherGroups, setOtherGroups] = useState<WorkspaceGroup[]>([]);
+
+  // 拉取其它工作区的会话（当前工作区的会话由 usePipeline 提供），按工作区分组展示。
+  useEffect(() => {
+    let cancelled = false;
+    const others = recentRoots.filter((root) => root !== currentRoot);
+    if (others.length === 0) {
+      setOtherGroups([]);
+      return;
+    }
+    Promise.all(
+      others.map(async (root) => {
+        try {
+          const { sessions: ids } = await sessionsListFor(root);
+          const titles = loadSessionTitles(root);
+          return {
+            root,
+            name: basename(root),
+            isCurrent: false,
+            sessions: ids.map((id) => ({ id, title: titles[id] ?? "新会话" })),
+          };
+        } catch {
+          return { root, name: basename(root), isCurrent: false, sessions: [] };
+        }
+      }),
+    ).then((groups) => {
+      if (!cancelled) setOtherGroups(groups);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [recentRoots, currentRoot]);
+
+  const currentGroup: WorkspaceGroup = {
+    root: currentRoot ?? "",
+    name: basename(currentRoot),
+    isCurrent: true,
+    sessions,
+  };
+  const groups = [currentGroup, ...otherGroups];
+
   return (
     <>
-      <div className={styles.workspace}>
-        <div className={styles.sectionLabel}>工作区</div>
-        <div className={styles.workspaceName} title={currentRoot ?? ""}>
-          <Icon name="folder" size={14} />
-          <span>{basename(currentRoot)}</span>
-        </div>
-        <button className="btn btn--ghost btn--sm" onClick={onSwitchWorkspace}>
-          切换工作区
-        </button>
-      </div>
       <button className={styles.newSession} onClick={onNewSession}>
         <Icon name="sparkles" size={14} />
         新会话
       </button>
-      {sessions.length > 0 && (
-        <nav aria-label="会话列表">
-          <div className={styles.sectionLabel}>会话</div>
+      {groups.map((group) => (
+        <nav key={group.root || "current"} aria-label={`${group.name} 会话`} className={styles.workspaceGroup}>
+          <button
+            type="button"
+            className={styles.workspaceHeader}
+            onClick={() => {
+              if (!group.isCurrent) onSelectWorkspace(group.root);
+            }}
+            disabled={group.isCurrent}
+            title={group.isCurrent ? "当前工作区" : `切换到 ${group.root}`}
+          >
+            <Icon name="folder" size={14} />
+            <span>{group.name}</span>
+          </button>
           <ul className={styles.list}>
-            {sessions.map((session) => (
+            {group.sessions.map((session) => (
               <li key={session.id} className={styles.sessionRow}>
                 <button
                   type="button"
-                  className={`${styles.item}${session.id === currentSessionId ? ` ${styles["item--active"]}` : ""}`}
-                  onClick={() => onSelectSession(session.id)}
-                  aria-current={session.id === currentSessionId ? "page" : undefined}
-                  title={session.title}
+                  className={`${styles.item}${group.isCurrent && session.id === currentSessionId ? ` ${styles["item--active"]}` : ""}`}
+                  onClick={() =>
+                    group.isCurrent ? onSelectSession(session.id) : onSelectWorkspace(group.root)
+                  }
+                  aria-current={group.isCurrent && session.id === currentSessionId ? "page" : undefined}
+                  title={`${group.name} · ${session.title}`}
                 >
-                  <Icon name="chat" size={15} />
-                  <span>{session.title}</span>
+                  <span className={styles.sessionTitle}>{session.title}</span>
                 </button>
-                {session.id !== "default" && (
+                {group.isCurrent && session.id !== "default" && (
                   <button
                     type="button"
                     className={styles.delete}
@@ -136,7 +199,10 @@ function SessionContext({
             ))}
           </ul>
         </nav>
-      )}
+      ))}
+      <button className={styles.switchWorkspace} onClick={onSwitchWorkspace}>
+        切换工作区
+      </button>
     </>
   );
 }

@@ -5,7 +5,7 @@ runtime binding（AgentSpec），保证同类型多个实例拥有独立状态�
 配置，不写入 GraphStore；首版只注册静态类型，动态创建新类型不在首版合同内。
 """
 
-from typing import Callable
+from collections.abc import Callable
 
 from athena.core.agent.types import (
     AgentCommandError,

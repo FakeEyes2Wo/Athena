@@ -2,7 +2,8 @@
 
 import json
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Literal
+from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 

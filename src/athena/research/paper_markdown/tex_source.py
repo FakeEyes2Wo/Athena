@@ -366,23 +366,22 @@ def expand_file(
                 )
                 output.append(match.group(0))
                 line_map.append(SourceLine(file=path, line=line_number))
+            elif included not in decoded:
+                diagnostics.append(
+                    ProcessingDiagnostic(
+                        level="warning",
+                        code="tex_include_non_text",
+                        message=f"Include '{target}' resolved to unsupported text type {included}.",
+                    )
+                )
+                output.append(match.group(0))
+                line_map.append(SourceLine(file=path, line=line_number))
             else:
-                if included not in decoded:
-                    diagnostics.append(
-                        ProcessingDiagnostic(
-                            level="warning",
-                            code="tex_include_non_text",
-                            message=f"Include '{target}' resolved to unsupported text type {included}.",
-                        )
-                    )
-                    output.append(match.group(0))
-                    line_map.append(SourceLine(file=path, line=line_number))
-                else:
-                    child_lines, child_map = expand_file(
-                        included, files, decoded, diagnostics, (*stack, path)
-                    )
-                    output.extend(child_lines)
-                    line_map.extend(child_map)
+                child_lines, child_map = expand_file(
+                    included, files, decoded, diagnostics, (*stack, path)
+                )
+                output.extend(child_lines)
+                line_map.extend(child_map)
             cursor = match.end()
         suffix = line[cursor:]
         if suffix.strip():

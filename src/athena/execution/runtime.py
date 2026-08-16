@@ -684,13 +684,7 @@ class ExecutionRuntime:
             shell, shell_args = None, None
         else:
             shell, shell_args = self._env.shell_parts()
-        persist = None
-        if self._store is not None:
-
-            async def persist(full_text: str) -> str:
-                """把完整命令输出写为证据 artifact，返回其 ref。"""
-                return await self._store.put_text(full_text)
-
+        persist = self._store.put_text if self._store is not None else None
         executor = CommandExecutor(
             env=self._env.build_env(context.workspace_root), persist=persist
         )

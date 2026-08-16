@@ -84,12 +84,9 @@ interface TextStore {
 
 /** 创建安全的运行时记录，完整工具输出仍作为 artifact 保留。 */
 export class EventProjector {
-  private store: TextStore
   private sequence = 0
 
-  constructor(store: TextStore) {
-    this.store = store
-  }
+  constructor(_store: TextStore) {}
 
   private nextSequence(): number {
     this.sequence += 1

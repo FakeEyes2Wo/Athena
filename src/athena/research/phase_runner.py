@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from athena.agents.plan_agent import register_plan_agent
 from athena.agents.prepare_agent import register_evaluator_agent, register_prepare_agent
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.agents.validate_agent import register_validate_agent

@@ -20,12 +20,14 @@ type Pipeline = ReturnType<typeof usePipeline>;
 
 interface AppShellProps {
   currentRoot: string | null;
+  recentRoots: string[];
   onSwitchWorkspace(): void;
+  onSelectWorkspace(path: string): void;
   pipeline: Pipeline;
 }
 
 /** 统一研究工作区：顶栏 + 功能轨 + 上下文侧栏 + 主工作区 + 详情抽屉。 */
-export function AppShell({ currentRoot, onSwitchWorkspace, pipeline }: AppShellProps) {
+export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelectWorkspace, pipeline }: AppShellProps) {
   const [module, setModule] = useState<ModuleKey>("session");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [drawerPanel, setDrawerPanel] = useState<ContextPanelKey | null>(null);
@@ -81,9 +83,11 @@ export function AppShell({ currentRoot, onSwitchWorkspace, pipeline }: AppShellP
           <ContextSidebar
             module={module}
             currentRoot={currentRoot}
+            recentRoots={recentRoots}
             sessions={pipeline.sessions}
             currentSessionId={pipeline.currentSessionId}
             onSwitchWorkspace={onSwitchWorkspace}
+            onSelectWorkspace={onSelectWorkspace}
             onSelectSession={pipeline.switchSession}
             onNewSession={pipeline.newSession}
             onDeleteSession={pipeline.deleteSession}

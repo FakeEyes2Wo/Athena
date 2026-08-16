@@ -40,4 +40,20 @@ describe("researchPlugin", () => {
     )
     expect(ctx.researchTree.pendingHypotheses().length).toBe(1)
   })
+
+  it("registers research_status/research_tree/research_run when the DSH tool service exists", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "athena-dsh-tools-"))
+    const registered: string[] = []
+    const ctx = new Context()
+    ctx.provide("tools", {
+      register(def: { name: string }) {
+        registered.push(def.name)
+        return () => {}
+      },
+    })
+    await ctx.plugin(researchPlugin({ projectRoot: tmp }))
+
+    expect(registered).toEqual(["research_status", "research_tree", "research_run"])
+    expect(researchStatus(ctx).phase).toBe("PREPARE")
+  })
 })

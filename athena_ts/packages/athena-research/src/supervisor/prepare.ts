@@ -15,17 +15,14 @@ import {
   type GitWorkspace,
 } from "@athena/core"
 
-import { DataScriptBundleSchema, type DataScriptBundle } from "../contracts.js"
+import { DataScriptBundleSchema } from "../contracts.js"
 import { BundleMetadata, type DataScriptRunner } from "../script_runner.js"
 import type { Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
 import { PlanRunner, type PlanTurnResult } from "./experiment.js"
 import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } from "./plans.js"
 
-export const PREPARE_AGENT_ID = "prepare"
 export const PREPARE_PLAN_ID = "prepare"
-export const EVALUATOR_AGENT_ID = "evaluator"
-export const EVALUATOR_PLAN_ID = "evaluator"
 
 /** Trusted baseline data returned to the single-writer Supervisor。 */
 export const PrepareResultSchema = z.strictObject({

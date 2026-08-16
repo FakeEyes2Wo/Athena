@@ -5,6 +5,10 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "build": "tsc -p packages/athena-core && tsc -p packages/athena-agent && tsc -p packages/athena-research",
+    "build:dsh": "tsc -p packages/athena-dsh",
+    "build:autoresearch": "tsc -p packages/athena-autoresearch",
+    "run:autoresearch": "node packages/athena-autoresearch/scripts/run-autoresearch.mjs",
+    "ui:autoresearch": "node packages/athena-autoresearch/scripts/dsh-ui-server.mjs",
     "test": "vitest run"
   },
   "devDependencies": {

@@ -130,7 +130,7 @@ def draft_chunk(
         retrieval_text = section + (f"\n\n{retrieval_body}" if retrieval_body else "")
     start = min(spans[element.element_id][0] for element in elements)
     end = max(spans[element.element_id][1] for element in elements)
-    identity = f"{start}:{end}:{content_text}".encode("utf-8")
+    identity = f"{start}:{end}:{content_text}".encode()
     return DraftChunk(
         chunk_id="chunk-" + hashlib.sha256(identity).hexdigest()[:16],
         kind=dominant_kind(elements),

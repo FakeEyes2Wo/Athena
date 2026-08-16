@@ -3,7 +3,7 @@
  */
 
 import { CandidateEvaluationSchema, type CandidateEvaluation, type DataScriptBundle } from "./contracts.js"
-import type { DataScriptRunner, ScriptRunResult } from "./script_runner.js"
+import type { ScriptRunResult } from "./script_runner.js"
 
 /** 候选输出导致的评分失败（等价 Python ValueError → scoring_failed）。 */
 export class ScoringError extends Error {

@@ -242,7 +242,7 @@ class MessageProcessor:
             raise RuntimeError("already initialized")
         params = msg.params or {}
         if params.get("protocol_version", 1) != 1:
-            raise ValueError(f"unsupported protocol version")
+            raise ValueError("unsupported protocol version")
         return {"protocol_version": 1, "server_name": "athena", "status": "ok"}
 
     async def _handle_shutdown_request(self, msg: RequestEnvelope) -> dict:

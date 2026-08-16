@@ -213,6 +213,11 @@ export function sessionsList(): Promise<{ sessions: string[] }> {
   return rpc<{ sessions: string[] }>("sessions_list");
 }
 
+/** List session ids in an arbitrary workspace directory (without switching runtime). */
+export function sessionsListFor(path: string): Promise<{ sessions: string[] }> {
+  return rpc<{ sessions: string[] }>("sessions_list_for", { path });
+}
+
 /** Switch the active session and return its transcript. */
 export function sessionSwitch(sessionId: string): Promise<{ records: SessionRecord[] }> {
   if (hasTauri) return invoke("session_switch", { sessionId });

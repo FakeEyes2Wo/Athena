@@ -93,7 +93,7 @@ def within_cutoff(arxiv_id: str, published_date: str, cutoff: str) -> bool:
     """
     if not cutoff:
         return True
-    prefix = arxiv_id.split(".")[0]
+    prefix = arxiv_id.split(".", maxsplit=1)[0]
     if len(prefix) == 4 and prefix.isdigit():
         return prefix <= cutoff[2:4] + cutoff[5:7]
     if published_date:

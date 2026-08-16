@@ -4,8 +4,6 @@
 折入本模块。``MetricSpec``/``TaskMetaData`` 原在 ``research/models.py``，现与
 其余研究域数据模型合并于此：
 
-- ``DataProfile``/``ColumnSummary``：真实 Ideator 的输入类型
-  （``agents/ideator/ideator.py``），描述数据集画像；
 - ``DataCard``：数据集卡片，被 ``scripts/export_rust_contract_fixtures.py``
   用作跨语言契约固件；
 - ``MetricSpec``/``TaskMetaData``：任务元数据与评估指标规格，同样被 Rust
@@ -29,29 +27,6 @@ class DataCard(BaseModel):
     fingerprint: str
     schema_ref: ArtifactRef
     split_manifest_ref: ArtifactRef | None = None
-
-
-class ColumnSummary(BaseModel):
-    """Statistical summary of a single column in a dataset."""
-
-    name: str
-    dtype: str
-    missing_rate: float = 0.0
-    n_unique: int | None = None
-    sample_values: list[str] = Field(default_factory=list)
-    processing: str = ""
-
-
-class DataProfile(BaseModel):
-    """Profile of a dataset: row/column counts, column summaries, task hints."""
-
-    row_count: int
-    col_count: int
-    columns: list[ColumnSummary] = Field(default_factory=list)
-    missing_rate: float = 0.0
-    task_type_hint: str = ""
-    target_col: str | None = None
-    issue_summary: str = ""
 
 
 class MetricSpec(BaseModel):

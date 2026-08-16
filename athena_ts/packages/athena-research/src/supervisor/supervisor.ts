@@ -19,7 +19,7 @@ import { ValidationResultSchema, type ValidationResult } from "../contracts.js"
 import { loadBest, type PlanTurnResult } from "./experiment.js"
 import { Outcome, type Outcome as OutcomeType } from "./policy.js"
 import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } from "./plans.js"
-import { PrepareResultSchema, type PrepareResult } from "./prepare.js"
+import type { PrepareResult } from "./prepare.js"
 import { Recovery } from "./recovery.js"
 import { ScheduleKind, Scheduler, countSearchAttempts } from "./scheduler.js"
 import { ResearchState } from "./state.js"
@@ -64,7 +64,6 @@ export class FixedFlowSupervisor {
   private store: ArtifactStore
   private git: GitWorkspace
   private scheduler: Scheduler
-  private recovery: Recovery
   private evaluatorRef: ArtifactRef | null
   private direction: "maximize" | "minimize"
   private tolerance: number
@@ -82,7 +81,6 @@ export class FixedFlowSupervisor {
     store: ArtifactStore
     git: GitWorkspace
     scheduler?: Scheduler | null
-    recovery?: Recovery | null
     evaluatorRef?: ArtifactRef | null
     direction?: "maximize" | "minimize"
     tolerance?: number
@@ -93,7 +91,6 @@ export class FixedFlowSupervisor {
     this.store = opts.store
     this.git = opts.git
     this.scheduler = opts.scheduler ?? new Scheduler()
-    this.recovery = opts.recovery ?? new Recovery()
     this.evaluatorRef = opts.evaluatorRef ?? null
     this.direction = opts.direction ?? "maximize"
     this.tolerance = opts.tolerance ?? 0.0
@@ -104,6 +101,11 @@ export class FixedFlowSupervisor {
 
   get runningPlanIds(): string[] {
     return [...this.running.keys()]
+  }
+
+  /** 替换 worker 接线（例如 research_run 工具在拿到 DSH ``exec.agent`` 后注入）。 */
+  setWorkers(workers: SupervisorWorkers): void {
+    this.workers = workers
   }
 
   private saveState(): void {
@@ -313,26 +315,25 @@ export class FixedFlowSupervisor {
       return
     }
     if (completed.decision.decision === "abandon" && (state.best_ref ?? null) === null) {
-      await this.settlePlan(planId, null, completed.result)
+      await this.settlePlan(planId, null)
       await this.publishState()
       return
     }
-    const settlement = this.decideSettlement(state, completed.decision, completed.result?.report_ref ?? null)
+    const settlement = this.decideSettlement(state, completed.decision)
     if (settlement.action === "continue") {
       this.saveState()
     } else if (settlement.action === "wait") {
       this.state.status = "WAITING"
       this.saveState()
     } else {
-      await this.settlePlan(planId, settlement.best_ref, completed.result)
+      await this.settlePlan(planId, settlement.best_ref)
     }
     await this.publishState()
   }
 
   private decideSettlement(
     state: PlanState,
-    decision: PlanDecision,
-    reportRef: ArtifactRef | null
+    decision: PlanDecision
   ): { action: "settle" | "wait" | "continue"; best_ref: ArtifactRef | null } {
     const hasBest = state.best_ref !== undefined && state.best_ref !== null
     const patienceExhausted =
@@ -352,8 +353,7 @@ export class FixedFlowSupervisor {
 
   private async settlePlan(
     planId: string,
-    bestRef: ArtifactRef | null,
-    result: PlanTurnResult | null
+    bestRef: ArtifactRef | null
   ): Promise<void> {
     const planInput = PlanInputSchema.parse(JSON.parse(await this.store.getText(this.state.plans[planId]!.context_ref)))
     const hypothesis = this.tree.getHypothesis(planId)

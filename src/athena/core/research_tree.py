@@ -5,7 +5,8 @@ import math
 from collections import deque
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from pydantic import BaseModel, Field, model_validator
 

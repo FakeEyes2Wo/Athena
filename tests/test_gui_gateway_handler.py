@@ -104,6 +104,46 @@ async def test_handler_session_switch_default_has_no_state_root(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_handler_session_switch_resumes_running_search(tmp_path) -> None:
+    """SEARCH/RUNNING 会话在切换时自动续跑（断点续传）。"""
+    from types import SimpleNamespace
+
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.state = SimpleNamespace(phase="SEARCH", status="RUNNING")
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert created[0].started is True
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_does_not_resume_completed(tmp_path) -> None:
+    """COMPLETED/WAITING 会话在切换时不自动续跑。"""
+    from types import SimpleNamespace
+
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.state = SimpleNamespace(phase="SEARCH", status="COMPLETED")
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert created[0].started is False
+
+
+@pytest.mark.asyncio
 async def test_handler_sessions_list_lists_namespaces(tmp_path) -> None:
     handler = _handler_at(tmp_path)
     for sid in ("s-1", "s-2"):

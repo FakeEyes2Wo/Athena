@@ -418,9 +418,8 @@ def _progress_line(state: TuiState, width: int) -> StyleAndTextTuples:
         optional.append(("class:status.secondary", f"{attempts}/{limit} attempts"))
     if successes is not None:
         optional.append(("class:status.secondary", f"{successes} successful"))
-    if width >= 72:
-        if workers is not None:
-            optional.append(("class:status.secondary", f"{workers} workers"))
+    if width >= 72 and workers is not None:
+        optional.append(("class:status.secondary", f"{workers} workers"))
     if metric is not None:
         optional.append(("class:status.secondary", f"SOTA {metric}"))
 

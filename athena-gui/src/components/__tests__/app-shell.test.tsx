@@ -25,7 +25,7 @@ function makePipeline(overrides: Record<string, unknown> = {}) {
 describe("AppShell", () => {
   it("renders brand, workspace, and the function-rail modules", () => {
     renderUi(
-      <AppShell currentRoot="C:/projects/titanic" onSwitchWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
+      <AppShell currentRoot="C:/projects/titanic" recentRoots={[]} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
     );
 
     expect(screen.getAllByText("Athena").length).toBeGreaterThan(0);
@@ -37,7 +37,7 @@ describe("AppShell", () => {
 
   it("toggles the context sidebar via the top-bar control", () => {
     renderUi(
-      <AppShell currentRoot={null} onSwitchWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
+      <AppShell currentRoot={null} recentRoots={[]} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
     );
 
     expect(screen.getByText("新会话")).toBeInTheDocument();
@@ -55,7 +55,9 @@ describe("AppShell", () => {
     renderUi(
       <AppShell
         currentRoot="C:/projects/titanic"
+        recentRoots={[]}
         onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
         pipeline={makePipeline({
           sessions: [
             { id: "default", title: "新会话" },

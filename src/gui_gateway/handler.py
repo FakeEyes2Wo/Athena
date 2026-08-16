@@ -5,13 +5,17 @@ Routes canonical GUI methods (see ``docs/athena-gui-design.md`` §3) to
 transport, which subscribes to runtime ``state``/``output`` events directly.
 """
 
+import logging
 import shutil
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from athena.gui.service import GuiService
 from athena.research import ResearchRuntime
 from gui_gateway.human import HumanRequestBroker
+
+logger = logging.getLogger(__name__)
 
 RuntimeFactory = Callable[[str | None, Path | None], ResearchRuntime]
 
@@ -38,6 +42,7 @@ SUPPORTED_METHODS: frozenset[str] = frozenset(
         "tree_save",
         "tree_load",
         "sessions_list",
+        "sessions_list_for",
         "session_switch",
         "session_delete",
         "eda_report",
@@ -116,6 +121,29 @@ class GuiRequestHandler:
         await self._runtime.aclose()
         self._runtime = self._make_runtime(project_root, state_root)
         self._service = GuiService(self._runtime)
+        await self._resume_running_session()
+
+    async def _resume_running_session(self) -> None:
+        """重建 runtime 后自动续跑「进行中」的会话，实现断点续传。
+
+        只续跑 SEARCH/VALIDATE 且状态为 RUNNING 的会话；COMPLETED/FAILED/STOPPED
+        保持静止，WAITING（等待人工决策）也不自动续跑，避免跳过人工决策或重跑
+        已完成阶段。续跑失败降级为静默空闲，不阻断会话切换本身。
+        """
+        try:
+            state = getattr(self._runtime, "state", None)
+            mid_run = (
+                state is not None
+                and state.phase in {"SEARCH", "VALIDATE"}
+                and state.status == "RUNNING"
+            )
+        except Exception:
+            return
+        if mid_run:
+            try:
+                await self._runtime.start()
+            except Exception:
+                logger.exception("auto-resume failed; leaving the session idle")
 
     async def set_project_root(self, path: str) -> dict[str, object]:
         """切换到新项目目录：目录不存在时自动创建，再用工厂重建 runtime。"""
@@ -138,10 +166,10 @@ class GuiRequestHandler:
         await self._swap_runtime(str(self._project_root), state_root)
         return {"session_id": session_id, "records": self._runtime.replay_output_events()}
 
-    def _session_ids(self) -> list[str]:
+    def _session_ids(self, project_root: Path | None = None) -> list[str]:
         """返回会话 id（``default`` + 命名空间子目录），最近修改在前。"""
+        root = (project_root or self._project_root) / ".athena" / "conversations"
         ids = ["default"]
-        root = self._project_root / ".athena" / "conversations"
         if root.is_dir():
             ids.extend(
                 p.name
@@ -153,8 +181,12 @@ class GuiRequestHandler:
         return ids
 
     def sessions_list(self) -> dict[str, object]:
-        """返回会话 id（``default`` + 命名空间子目录），最近修改在前。"""
+        """返回当前工作区的会话 id，最近修改在前。"""
         return {"sessions": self._session_ids()}
+
+    def sessions_list_for(self, path: str) -> dict[str, object]:
+        """列出任意工作区目录的会话 id（不切换 runtime），供前端按工作区分组。"""
+        return {"sessions": self._session_ids(Path(path))}
 
     def session_delete(self, session_id: str) -> dict[str, object]:
         """删除一个会话：命名会话删整个 conversation 目录；``default`` 只清 transcript。"""
@@ -204,6 +236,8 @@ class GuiRequestHandler:
             return service.tree_load()
         if method == "sessions_list":
             return self.sessions_list()
+        if method == "sessions_list_for":
+            return self.sessions_list_for(_require_str(params, "path", "path"))
         if method == "session_switch":
             return await self.session_switch(
                 _require_str(params, "session_id", "session_id")

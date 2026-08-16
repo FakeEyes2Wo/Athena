@@ -129,8 +129,7 @@ class EventProjector:
         projected events continue from ``sequence + 1`` instead of colliding
         with (and being deduplicated against) the restored TUI history.
         """
-        if sequence > self._sequence:
-            self._sequence = sequence
+        self._sequence = max(self._sequence, sequence)
 
     def output(
         self,

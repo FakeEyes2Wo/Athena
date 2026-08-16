@@ -1,6 +1,6 @@
-# Athena research preset（DSH agent 组合片段，供 base/web 组合 include）
+# Athena + AutoResearch preset（DSH agent 组合片段，供 base/web 组合 include）
 
-# 挂载方式：把本文件的 Athena 行并入 DSH 的 agent preset（或作为独立 preset）。
+# 挂载方式：把本文件的 Athena/AutoResearch 行并入 DSH 的 agent preset（或作为独立 preset）。
 # 研究域 Service 全部按 entry-local realm 隔离，避免跨 session 共享可变实例。
 
 - id: athena-research
@@ -15,6 +15,13 @@
     researchScriptRunner: true
     researchGit: true
     researchSupervisor: true
+    autoResearchSpec: true
+    autoResearchStateStore: true
+    hypothesisPool: true
+    autoResearchGateRunner: true
+    autoResearchProviders: true
+    autoResearchStages: true
+    autoResearchRuntime: true
   config:
     - id: research-services
       name: '@athena/dsh'
@@ -24,3 +31,15 @@
         concurrency: 4
         direction: maximize
         tolerance: 0.0
+    - id: autoresearch-services
+      name: '@athena/autoresearch'
+      config:
+        projectRoot: '{{cwd}}'
+        runSpec:
+          run_id: ar_dsh
+          budgets:
+            max_ideas: 20
+            max_experiments: 10
+            max_paper_rounds: 5
+            max_tokens: 0
+            project_time_limit: PT12H

@@ -5,7 +5,8 @@ import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 import fitz
 
@@ -653,7 +654,7 @@ class PdfPaperParser:
 
     def make_id(self, prefix: str, page: int, value: str) -> str:
         """由页码和内容生成稳定标识。"""
-        digest = hashlib.sha256(f"{page}:{value}".encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha256(f"{page}:{value}".encode()).hexdigest()[:12]
         return f"{prefix}-{digest}"
 
     def locator(self, block: PdfBlock) -> SourceLocator:

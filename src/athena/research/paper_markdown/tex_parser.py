@@ -4,7 +4,7 @@ import bisect
 import hashlib
 import re
 from pathlib import PurePosixPath
-from typing import Iterable
+from collections.abc import Iterable
 
 import pylatexenc
 from pylatexenc.latex2text import LatexNodes2Text
@@ -859,7 +859,7 @@ class TexPaperParser:
 
     def make_id(self, prefix: str, raw: str, position: int) -> str:
         """由源码内容和位置生成稳定短标识。"""
-        digest = hashlib.sha256(f"{position}:{raw}".encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha256(f"{position}:{raw}".encode()).hexdigest()[:12]
         return f"{prefix}-{digest}"
 
     def add_element(

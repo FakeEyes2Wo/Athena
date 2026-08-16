@@ -13,7 +13,7 @@ from athena.core.agent.runtime import Agent
 from athena.core.agent.tools.user_input import RequestUserInputTool
 from athena.core.agent.types import AgentSpec, JsonCodec
 from athena.core.tool import BaseTool, ToolRegistry
-from athena.core.tool_types import AskUser, ToolContext, ToolSpec
+from athena.core.tool_types import ToolContext, ToolSpec
 from athena.kaggle.tool import KaggleGetCompetitionTool
 
 SUPERVISOR_AGENT_ID = "supervisor"

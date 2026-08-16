@@ -17,10 +17,13 @@ const ResearchStateSchema = z
     phase: z.enum(["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]),
     search_limit: z.number().int().min(0),
     concurrency: z.number().int().min(1),
+    ideator_count: z.number().int().min(1).max(8).default(3),
+    hypotheses_per_ideator: z.number().int().min(1).max(5).default(2),
     manual_mode: z.boolean().default(false),
     plans: z.record(z.string(), PlanStateSchema).default({}),
     validation: z.record(z.string(), z.unknown()).nullable().default(null),
     eda_dir: z.string().nullable().default(null),
+    task_understanding: z.record(z.string(), z.unknown()).nullable().default(null),
   })
   .superRefine((state, ctx) => {
     for (const [planId, plan] of Object.entries(state.plans)) {
@@ -47,10 +50,13 @@ export class ResearchState {
   phase: ResearchPhase
   search_limit: number
   concurrency: number
+  ideator_count: number
+  hypotheses_per_ideator: number
   manual_mode: boolean
   plans: Record<string, PlanState>
   validation: Record<string, unknown> | null
   eda_dir: string | null
+  task_understanding: Record<string, unknown> | null
 
   constructor(input: ResearchStateInput) {
     const parsed = parseOrThrow(ResearchStateSchema, input)
@@ -58,10 +64,13 @@ export class ResearchState {
     this.phase = parsed.phase
     this.search_limit = parsed.search_limit
     this.concurrency = parsed.concurrency
+    this.ideator_count = parsed.ideator_count
+    this.hypotheses_per_ideator = parsed.hypotheses_per_ideator
     this.manual_mode = parsed.manual_mode
     this.plans = parsed.plans
     this.validation = parsed.validation
     this.eda_dir = parsed.eda_dir
+    this.task_understanding = parsed.task_understanding
   }
 
   static parse(data: unknown): ResearchState {
@@ -74,12 +83,15 @@ export class ResearchState {
       phase: this.phase,
       search_limit: this.search_limit,
       concurrency: this.concurrency,
+      ideator_count: this.ideator_count,
+      hypotheses_per_ideator: this.hypotheses_per_ideator,
       manual_mode: this.manual_mode,
       plans: Object.fromEntries(
         Object.entries(this.plans).map(([id, plan]) => [id, planStateToJSON(plan)])
       ),
       validation: this.validation,
       eda_dir: this.eda_dir,
+      task_understanding: this.task_understanding,
     }
   }
 

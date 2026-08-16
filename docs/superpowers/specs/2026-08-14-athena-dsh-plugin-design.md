@@ -67,3 +67,19 @@ DSH 插件是 `{ apply(ctx) { ... } }` cordis 插件，Service 经 `ctx.provide(
 
 - `supervisor` 的 LLM worker（ideator/plan/validate/prepare/evaluator）具体走 DSH 的 `subagent spawn` 还是 `goal` 域，需先 `cordis_inspect_list` 确认当前 DSH 版本的 subagent/goal Service 签名后再定。
 - Athena preset 是独立 agent.cordis.yml 还是并入 `standard` preset，待定。
+
+## 7. AutoResearch 上层框架（2026-08-15 增补）
+
+在“Athena 作为 DSH 插件”之上新增 **AutoResearch**：端到端
+`Idea Generation → Experiment（Athena 子集）→ Paper Writing → Paper Refinement → Artifact Packaging`。
+
+- 概念设计：`../../autoresearch/2026-08-15-autoresearch-ts-plugin-design.md`
+- Hypothesis 本地池：`../../autoresearch/2026-08-15-hypothesis-local-pool-design.md`
+
+对本设计的增量影响（概念层）：
+
+1. **新增独立包 `@athena/autoresearch`**：`autoresearchPlugin(ctx)` 通过 `ctx.get` 复用本插件注册的研究服务；Athena 子集契约不变。
+2. **新增 HypothesisPool**：`researchTree` 继续作为实验图事实源；池作为生命周期/论文元数据索引，独立 `hypothesis_pool.json`。
+3. **新增 AutoResearchState**：顶层阶段独立 state 文件；`EXPERIMENT` 阶段内部委托现有 `ResearchState`（PREPARE→SEARCH→VALIDATE）。
+4. **新增 Paper 引擎**：模板化 LaTeX 论文（ICLR/ICML 等）为交付物；LLM 直接编辑 LaTeX；Overleaf 走官方 API / 本机 TeX 编译器 / 无 LaTeX 的 Markdown draft 三条路径。
+5. **门禁与预算**：全自动但有阶段预算与质量闸；首版只做 token 预算；阴性结果写入 limitations；LaTeX 编译自修复不做轮次限制，只受项目总时间限制，并返回控制台/编译输出。

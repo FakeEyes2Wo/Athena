@@ -43,24 +43,32 @@ function confirmStop(): boolean {
   }
 }
 
-const SESSION_TITLES_KEY = "athena-session-titles";
-
-function loadTitles(): Record<string, string> {
+function loadTitles(key: string): Record<string, string> {
   try {
-    return JSON.parse(localStorage.getItem(SESSION_TITLES_KEY) ?? "{}");
+    return JSON.parse(localStorage.getItem(key) ?? "{}");
   } catch {
     return {};
   }
 }
 
-function saveTitle(id: string, title: string): void {
+function saveTitle(key: string, id: string, title: string): void {
   try {
-    const titles = loadTitles();
+    const titles = loadTitles(key);
     titles[id] = title;
-    localStorage.setItem(SESSION_TITLES_KEY, JSON.stringify(titles));
+    localStorage.setItem(key, JSON.stringify(titles));
   } catch {
     // 非致命：标题仅用于展示。
   }
+}
+
+/** 会话标题按工作区隔离的 localStorage 键（与 usePipeline 内一致）。 */
+export function sessionTitlesKey(workspaceRoot?: string | null): string {
+  return `athena-session-titles:${workspaceRoot ?? "default"}`;
+}
+
+/** 读取某个工作区的会话标题（供跨工作区分组展示复用）。 */
+export function loadSessionTitles(workspaceRoot?: string | null): Record<string, string> {
+  return loadTitles(sessionTitlesKey(workspaceRoot));
 }
 
 /** 从 task understanding（TaskUnderstanding）推导会话标题。 */
@@ -197,12 +205,14 @@ function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): P
  * Manages the view model, subscribes to backend events, and exposes all user actions
  * (send prompt, start/stop/pause/resume search, open/close panels).
  */
-export function usePipeline() {
+export function usePipeline(workspaceRoot?: string | null) {
   const [viewModel, setViewModel] = useState<PipelineViewModel>(createEmptyPipelineViewModel);
   const [sessions, setSessions] = useState<Array<{ id: string; title: string }>>([]);
   const [currentSessionId, setCurrentSessionId] = useState("default");
   const [humanRequests, setHumanRequests] = useState<HumanRequest[]>([]);
   const counter = useRef(0);
+  // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
+  const titlesKey = sessionTitlesKey(workspaceRoot);
 
   const nextId = useCallback((prefix: string) => {
     counter.current += 1;
@@ -225,8 +235,8 @@ export function usePipeline() {
   // 更新会话标题（state + localStorage）。
   const renameSession = useCallback((id: string, title: string) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
-    saveTitle(id, title);
-  }, []);
+    saveTitle(titlesKey, id, title);
+  }, [titlesKey]);
 
   // Subscribe to backend pipeline events on mount.
   useEffect(() => {
@@ -261,7 +271,7 @@ export function usePipeline() {
       })
       .then(({ active, list, records }) => {
         if (!mounted) return;
-        const titles = loadTitles();
+        const titles = loadTitles(titlesKey);
         setSessions(
           (list.length ? list : [active]).map((id) => ({ id, title: titles[id] ?? "新会话" })),
         );
@@ -273,7 +283,7 @@ export function usePipeline() {
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, []);
+  }, [titlesKey]);
 
   // Poll for outstanding supervisor human questions while a run is active.
   useEffect(() => {
@@ -440,28 +450,45 @@ export function usePipeline() {
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
-    saveTitle(id, "新会话");
-  }, []);
+    saveTitle(titlesKey, id, "新会话");
+  }, [titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
-    const { records } = await sessionSwitch(id);
-    setCurrentSessionId(id);
-    restoreRecords(records, true);
-  }, [restoreRecords]);
+    try {
+      const { records } = await sessionSwitch(id);
+      setCurrentSessionId(id);
+      restoreRecords(records, true);
+    } catch (err) {
+      // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
+      setViewModel((prev) => ({
+        ...prev,
+        status: "error",
+        messages: [
+          ...prev.messages,
+          {
+            id: nextId("error"),
+            role: "athena",
+            kind: "error",
+            content: `切换会话失败：${errorMessage(err)}`,
+          },
+        ],
+      }));
+    }
+  }, [restoreRecords, nextId]);
 
   const deleteSession = useCallback(async (id: string) => {
     // default 是主项目会话，不可删除；命名会话删除后返回更新列表。
     if (id === "default") return;
     const { sessions: list } = await sessionDelete(id);
-    const titles = loadTitles();
+    const titles = loadTitles(titlesKey);
     delete titles[id];
-    localStorage.setItem(SESSION_TITLES_KEY, JSON.stringify(titles));
+    localStorage.setItem(titlesKey, JSON.stringify(titles));
     setSessions(list.map((sid) => ({ id: sid, title: titles[sid] ?? "新会话" })));
     if (id === currentSessionId) {
       await switchSession("default");
     }
-  }, [currentSessionId, switchSession]);
+  }, [currentSessionId, switchSession, titlesKey]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);
