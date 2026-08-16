@@ -494,20 +494,13 @@ class AgentTurnRunner:
                 extra_tools=self._general_tools(),
             )
         request = {"content": task, "context_refs": []}
-        if prior_agent_id is not None:
-            if rt._agents.has_agent(prior_agent_id):
-                run_id = await rt._agents.followup(prior_agent_id, request)
-                agent_id = prior_agent_id
-            else:
-                agent_id, run_id = await rt._agents.create_root(
-                    "general",
-                    request,
-                    agent_id=prior_agent_id,
-                    name="general",
-                )
+        if prior_agent_id is not None and rt._agents.has_agent(prior_agent_id):
+            agent_id = prior_agent_id
+            run_id = await rt._agents.followup(agent_id, request)
         else:
+            # ``agent_id=None`` 时新开随机 worker；给定 prior id 则经 rollout 恢复记忆。
             agent_id, run_id = await rt._agents.create_root(
-                "general", request, name="general"
+                "general", request, agent_id=prior_agent_id, name="general"
             )
         if (
             rt._state.task_research_ref is None
