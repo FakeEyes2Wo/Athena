@@ -383,19 +383,29 @@ class ResearchRuntime:
 
         只给读的那一组：``paper_survey``/``paper_fetch``/``paper_markdown`` 会写出
         新语料，摆在 Ideator 面前迟早会被按下去，而一次全链路是十几分钟起步。
+
+        判据只有 ``corpus_ref``，不看本进程是否跑过调研。语料是内容寻址的、``corpus_ref``
+        是持久化状态，因此续跑（或本轮命中缓存语料）时 ``_survey_stack`` 必然是 None，
+        而那恰恰是最该拿到算子的场合——真实跑测里正是这条路径让 Ideator 收到"去调
+        paper_corpus_overview"的提示却一个算子都没有，0 次检索、0 条 sources。
         """
-        if self.survey_corpus_ref() is None or self._survey_stack is None:
+        if self.survey_corpus_ref() is None:
             return None
         return build_survey_tools(
-            self._survey_stack, include_survey=False, include_producers=False
+            self._ensure_survey_stack(), include_survey=False, include_producers=False
         )
 
     async def corpus_paper_ids(self) -> set[str]:
-        """语料里真实存在的 paper id；假设引用的合法取值就是这一组。"""
+        """语料里真实存在的 paper id；假设引用的合法取值就是这一组。
+
+        与 ``corpus_tools`` 同一条惰性装配规则：只要有 ``corpus_ref`` 就能核验引用，
+        否则续跑时校验会拿到空集合而静默放行任何编造的 paper id。
+        """
         corpus_ref = self.survey_corpus_ref()
-        if corpus_ref is None or self._survey_stack is None:
+        if corpus_ref is None:
             return set()
-        corpus = await self._survey_stack.corpus_cache.load(self._store, corpus_ref)
+        stack = self._ensure_survey_stack()
+        corpus = await stack.corpus_cache.load(self._store, corpus_ref)
         return corpus_paper_ids(corpus)
 
     def _ensure_survey_stack(self) -> SurveyStack:

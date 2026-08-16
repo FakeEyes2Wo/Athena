@@ -44,6 +44,11 @@ def _state(**overrides) -> ResearchState:
     return ResearchState(**payload)
 
 
+async def _no_corpus() -> set[str]:
+    """引用核验的空基准：用在只关心提示词、不关心核验结果的用例里。"""
+    return set()
+
+
 def _stack() -> SurveyStack:
     return SurveyStack(
         artifacts=LocalArtifactStore(tempfile.mkdtemp(prefix="survey_tools_")),
@@ -279,6 +284,8 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
     requests = _lane_harness(monkeypatch)
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
     runtime._agents = _AgentSpy(requests)
+    # 有 corpus_ref 就会真去装载语料做引用核验；这里只关心提示词，给个空的已知集合。
+    runtime.corpus_paper_ids = _no_corpus
 
     await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1", 2, _eda_dir())
 
@@ -392,3 +399,51 @@ class _AgentSpy:
         assert agent_type == "ideator"
         self._sink.append(request)
         return name, f"run-{name}"
+
+
+def test_a_corpus_restored_from_state_still_hands_the_ideator_its_operators(
+    monkeypatch,
+) -> None:
+    """真实跑测（2026-08-16）：续跑时 Ideator 收到提示却一个检索算子都没有。
+
+    ``corpus_ref`` 是持久化状态，``_survey_stack`` 只在 ``_run_survey`` 里建。于是
+    "本轮命中缓存语料"这条路径——``_start_survey`` 明确早退不再调研的那一条——保证
+    了 stack 为 None，判据里带上 ``_survey_stack`` 就等于把语料对 Ideator 永久藏起来。
+    实测：0 次 paper_* 调用、0 条 sources，而提示词还在让它去调 paper_corpus_overview。
+    """
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"))
+    assert runtime._survey_stack is None
+    built: list[object] = []
+    monkeypatch.setattr(
+        runtime_module,
+        "build_survey_stack",
+        lambda **kwargs: built.append(kwargs) or _stack(),
+    )
+
+    names = {spec.name for spec in runtime.corpus_tools().specs}
+
+    assert READ_ONLY_TOOLS <= names
+    assert not (PRODUCER_TOOLS & names)
+    # artifact store 必须是本项目那一份，否则算子会去另一个库里找语料
+    assert built and built[0]["artifacts"] is runtime._store
+
+
+@pytest.mark.asyncio
+async def test_citations_are_verifiable_against_a_corpus_restored_from_state(
+    monkeypatch,
+) -> None:
+    """校验侧同一条惰性装配：否则续跑时已知集合为空，任何编造的 id 都会被放行。"""
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"))
+    stack = _stack()
+    monkeypatch.setattr(runtime_module, "build_survey_stack", lambda **_kwargs: stack)
+
+    async def _load(_store, _corpus_ref, **_kwargs):
+        return SimpleNamespace(
+            index=SimpleNamespace(
+                entries=[SimpleNamespace(paper_id="arxiv:1710.09412")]
+            )
+        )
+
+    stack.corpus_cache.load = _load
+
+    assert await runtime.corpus_paper_ids() == {"arxiv:1710.09412"}
