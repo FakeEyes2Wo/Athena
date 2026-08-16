@@ -410,6 +410,7 @@ def build_survey_tools(
     *,
     include_survey: bool = True,
     include_producers: bool = True,
+    session: RetrievalSession | None = None,
 ) -> ToolRegistry:
     """注册全链路、取源、转换与七个检索算子，返回可直接交给 Agent 的工具表。
 
@@ -423,9 +424,12 @@ def build_survey_tools(
     ``include_survey=False`` 去掉 ``paper_survey``，``include_producers=False`` 再去掉
     取源与转换，留给已经拿到 ``corpus_ref``、只需要读语料的 Agent——把一个几分钟起步
     的工具摆在那里，模型迟早会去按它。
+
+    ``session`` 可由调用方注入：会话记着"这个 Agent 真正打开过哪些论文"，而引用核验
+    需要那份账本（见 ``RetrievalSession.read_papers``）。不注入时自建一个，行为不变。
     """
     tools = ToolRegistry()
-    session = RetrievalSession(stack.corpus_cache)
+    session = session if session is not None else RetrievalSession(stack.corpus_cache)
     if include_survey:
         tools.register(PaperSurveyTool(stack))
     if include_producers:

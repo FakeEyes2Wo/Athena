@@ -6,6 +6,7 @@
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,8 @@ from athena.retrieval.web_search import WebSearchTool
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+logger = logging.getLogger(__name__)
 
 
 MAX_GATE_RETRIES = 2
@@ -170,6 +173,8 @@ class AgentTurnRunner:
         # 追加到上一轮同 lane 的开放消息上。
         self._ideator_round += 1
         round_label = self._ideator_round
+        # 引用核验按"本轮谁打开过哪几篇"判定，因此每轮先把上一轮的会话账本丢掉。
+        rt.start_corpus_round()
         events = getattr(rt, "_events_bus", None)
         if events is not None:
             events.set_ideator_lanes(len(allocations))
@@ -314,13 +319,7 @@ class AgentTurnRunner:
             content += handoff_block(handoff)
         corpus_ref = rt.survey_corpus_ref()
         if corpus_ref is not None:
-            content += (
-                f"\n\nA literature corpus is available for this task. Call "
-                f"paper_corpus_overview with corpus_ref={corpus_ref!r} first to see "
-                "which papers it holds, then use the other paper_* tools with the "
-                "same corpus_ref to search and read them. Record the paper ids you "
-                "actually read in each hypothesis's sources field."
-            )
+            content += await self._corpus_block(corpus_ref)
         request = {"content": content, "context_refs": context_refs}
         agent_id, run_id = await rt._agents.create_root("ideator", request, name=label)
         gated = getattr(rt, "_ideation", "ideageneration") == "ideageneration"
@@ -396,24 +395,60 @@ class AgentTurnRunner:
         )
         return await self._verify_sources(kept)
 
+    async def _corpus_block(self, corpus_ref: str) -> str:
+        """把语料目录直接摆进 prompt，而不是指望 Agent 自己去调 overview。
+
+        真机三次跑测里 Ideator **一次都没调过** ``paper_corpus_overview``，直接用泛词做
+        语义检索；第 12 次因此从没碰过语料里那三篇真正讲 AUC 的论文——而任务主指标就是
+        ROC-AUC。目录是纯索引读取（8 篇约 26 毫秒、1500 token），自己调一次比赌它会调
+        便宜得多，也让"语料里有什么"成为确定的输入而不是运气。
+        """
+        papers = ""
+        try:
+            summaries = await self._runtime.corpus_summaries()
+            papers = "\n".join(
+                f"- {item.paper_id} — {item.title.strip() or '(untitled)'}"
+                for item in summaries
+            )
+        except Exception:  # noqa: BLE001 - 目录读不出来不该拖垮 ideation
+            logger.warning("corpus overview unavailable for the lane", exc_info=True)
+        listing = f"\n\nIt holds these papers:\n{papers}" if papers else ""
+        return (
+            f"\n\nA literature corpus is available for this task "
+            f"(corpus_ref={corpus_ref!r}).{listing}\n\n"
+            "Use paper_semantic_search / paper_keyword_search to locate passages, then "
+            "**paper_chunk_read to actually read them** — pick the papers whose "
+            "subject matches this task's metric and data, not merely the topic. "
+            "A hypothesis's "
+            "`sources` must list only papers you opened with paper_chunk_read; "
+            "citations to papers you never read are dropped and earn nothing."
+        )
+
     async def _verify_sources(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
-        """去掉引不到语料的 paper id，只保留真实读过的那些。
+        """只保留本轮**真正打开过正文**的论文，其余引用一律丢弃。
 
         ``ranker.rubric_prior`` 给"有引用"加 0.3（在总分里占 0.12），也就是说凭空写一个
         paper id 就能让候选往前排。这条奖励只有在引用可核验时才成立，否则它奖励的是幻觉。
         校验必须在入图之前做——进了图就是排序的输入了。
 
+        **判据是"读过"，不是"在语料里"。** 第一版只查 id 是否存在于语料，真机（2026-08-16
+        第 12 次）证明那太松：Ideator 拿《数据增强综述》支持"两两交互特征"、拿《信用卡欺诈
+        检测综述》同时支持 target encoding 与 SMOTE，而语料里三篇真正讲 AUC 的论文一次都
+        没被引用。带引用和不带引用的假设提的是同一批干预——引用是事后贴的标签，不是想法的
+        来源。这些论文都在检索结果里出现过，只是从没被 ``paper_chunk_read`` 打开，所以
+        "读过"能拦住而"存在"拦不住。
+
         没有语料时整段跳过：此时 ``sources`` 按 schema 本就该为空，不该顺手清掉别的来源
         写进去的内容。
         """
         rt = self._runtime
-        known = await rt.corpus_paper_ids()
-        if not known:
+        if not await rt.corpus_paper_ids():
             return hypotheses
+        opened = rt.corpus_papers_read()
         verified: list[Hypothesis] = []
         dropped = 0
         for hypothesis in hypotheses:
-            kept = [source for source in hypothesis.sources if source in known]
+            kept = [source for source in hypothesis.sources if source in opened]
             dropped += len(hypothesis.sources) - len(kept)
             verified.append(hypothesis.model_copy(update={"sources": kept}))
         if dropped:
@@ -421,8 +456,9 @@ class AgentTurnRunner:
                 source="agent",
                 channel="error",
                 text=(
-                    f"dropped {dropped} citation(s) that name no paper in the corpus; "
-                    "only verifiable sources count towards a hypothesis's priority"
+                    f"dropped {dropped} citation(s) to papers this round never opened; "
+                    "cite only what you read with paper_chunk_read — a paper that "
+                    "merely appeared in search results is not evidence"
                 ),
             )
         return verified

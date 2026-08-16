@@ -40,6 +40,8 @@ def _runner(agents: _Agents, tmp_path) -> AgentTurnRunner:
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         publish_output=_noop_publish,
         survey_corpus_ref=lambda: None,
+        start_corpus_round=lambda: None,
+        corpus_papers_read=set,
         corpus_paper_ids=_no_corpus,
     )
     return AgentTurnRunner(runtime)

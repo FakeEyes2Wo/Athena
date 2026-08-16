@@ -28,7 +28,13 @@ from athena.kaggle import (
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.agent_turn_runner import AgentTurnRunner
-from athena.research.paper_rag.search import corpus_paper_ids
+from athena.research.paper_rag.schemas import PaperSummary
+from athena.research.paper_rag.search import (
+    RetrievalSession,
+    corpus_overview,
+    corpus_paper_ids,
+)
+from athena.research.paper_rag.tool import MAX_OVERVIEW_PAPERS
 from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime_events import RuntimeEvents
 from athena.research.script_runner import DataScriptRunner
@@ -161,6 +167,8 @@ class ResearchRuntime:
         self._survey_query = survey_query
         self._survey_max_papers = survey_max_papers
         self._survey_stack: SurveyStack | None = None
+        # 本轮 ideation 各 Ideator 的检索会话；引用核验按它们的已读集合判定。
+        self._corpus_sessions: list[RetrievalSession] = []
         self._survey_task: asyncio.Task[None] | None = None
         self._root = Path(project_root or ".").resolve()
         self._athena = (
@@ -391,9 +399,42 @@ class ResearchRuntime:
         """
         if self.survey_corpus_ref() is None:
             return None
+        session = RetrievalSession(self._ensure_survey_stack().corpus_cache)
+        # 每个 Ideator 实例一个会话（已读集合必须按 Agent 独立），但会话要留在运行时
+        # 手里：引用核验需要"这一轮谁真的打开过哪几篇"的账本。
+        self._corpus_sessions.append(session)
         return build_survey_tools(
-            self._ensure_survey_stack(), include_survey=False, include_producers=False
+            self._ensure_survey_stack(),
+            include_survey=False,
+            include_producers=False,
+            session=session,
         )
+
+    def start_corpus_round(self) -> None:
+        """开始新一轮 ideation：丢掉上一轮的会话账本。
+
+        不清的话，上一轮读过的论文会一直算作"本轮读过"，引用核验会越来越松。
+        """
+        self._corpus_sessions.clear()
+
+    def corpus_papers_read(self) -> set[str]:
+        """本轮 ideation 里被真正打开过正文的论文。"""
+        opened: set[str] = set()
+        for session in self._corpus_sessions:
+            opened |= session.read_papers()
+        return opened
+
+    async def corpus_summaries(self) -> list[PaperSummary]:
+        """语料的逐篇门面，用于把"里面有什么"直接写进 Ideator 的 prompt。
+
+        纯索引读取：不调模型、不访网络、不碰句向量，8 篇实测约 26 毫秒。
+        """
+        corpus_ref = self.survey_corpus_ref()
+        if corpus_ref is None:
+            return []
+        stack = self._ensure_survey_stack()
+        corpus = await stack.corpus_cache.load(self._store, corpus_ref)
+        return corpus_overview(corpus, [], MAX_OVERVIEW_PAPERS).summaries
 
     async def corpus_paper_ids(self) -> set[str]:
         """语料里真实存在的 paper id；假设引用的合法取值就是这一组。

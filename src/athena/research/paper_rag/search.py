@@ -211,6 +211,16 @@ class RetrievalSession:
         """登记一次整篇读取。"""
         self._read.add(chunk_id)
 
+    def read_papers(self) -> set[str]:
+        """本会话真正打开过正文的论文集合，用于核验假设的 ``sources``。
+
+        判据刻意取"整篇读过"而不是"检索命中过"。真机（2026-08-16 第 12 次）里 Ideator
+        把一篇《数据增强综述》引来支持"两两交互特征"、把一篇《信用卡欺诈检测综述》同时
+        引来支持 target encoding 和 SMOTE——这些论文都在检索结果里出现过，只是从没被
+        打开。按命中算就拦不住这种贴标签式引用；按读过算才能。
+        """
+        return {paper_namespace(chunk_id) for chunk_id in self._read}
+
 
 def corpus_overview(
     corpus: LoadedCorpus, paper_ids: list[str], limit: int

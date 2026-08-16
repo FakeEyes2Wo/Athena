@@ -38,16 +38,23 @@ def _text_similarity(left: Hypothesis, right: Hypothesis) -> float:
 
 
 def rubric_prior(hypothesis: Hypothesis, tree: ResearchTree) -> float:
-    """Cold-start prior in [0.4, 1.0] from evidence and specificity.
+    """Cold-start prior in [0.4, 1.0] from specificity alone.
 
     A pending hypothesis has no experiment data yet, so this rubric is the only
     reliable signal. It is deliberately small and transparent; a future
     ReflectionAgent rubric can replace it with richer scores.
+
+    **有引用不再加分。** 早先这里给非空 ``sources`` 加 0.3（占总分 0.12），意图是让有据
+    可依的假设先跑。真机（2026-08-16 第 12 次）表明它买到的是装饰而不是依据：带引用与
+    不带引用的假设提的是同一批干预，引用是事后贴上去的，且经常张冠李戴——一篇《数据增强
+    综述》被用来支持"两两交互特征"。奖励"有没有引用"就是在为贴标签付钱。
+
+    引用本身仍然有价值（可追溯、可复核），只是不该换算成优先级。真要让文献影响排序，得
+    先有"这条引用确实支持这个主张"的判据，而那还不存在。
     """
     del tree
-    evidence = 1.0 if hypothesis.sources else 0.0
     specific = 1.0 if len(tokenize(hypothesis.intervention)) >= 3 else 0.0
-    return 0.4 + 0.3 * evidence + 0.3 * specific
+    return 0.4 + 0.6 * specific
 
 
 def _settled_hypotheses(tree: ResearchTree) -> list[Hypothesis]:

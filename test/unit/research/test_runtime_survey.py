@@ -17,6 +17,7 @@ from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry, tool
 from athena.research import runtime as runtime_module
 from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.paper_rag.schemas import PaperSummary
 from athena.research.paper_source.http import HostRateLimiter
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.state import ResearchState
@@ -67,6 +68,7 @@ def _runtime(state: ResearchState, **attributes) -> ResearchRuntime:
     runtime._survey_query = ""
     runtime._survey_max_papers = 10
     runtime._survey_stack = None
+    runtime._corpus_sessions = []
     runtime._survey_task = None
     runtime._model = "m"
     runtime._client = None
@@ -287,40 +289,119 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
     # 有 corpus_ref 就会真去装载语料做引用核验；这里只关心提示词，给个空的已知集合。
     runtime.corpus_paper_ids = _no_corpus
 
+    async def summaries():
+        return [
+            PaperSummary(
+                paper_id="arxiv:1710.09412",
+                title="mixup",
+                anchor_chunk_id="a",
+                chunks=3,
+            ),
+            PaperSummary(
+                paper_id="doi:10.1145/3554729",
+                title="AUC Maximization: A Survey",
+                anchor_chunk_id="b",
+                chunks=5,
+            ),
+        ]
+
+    runtime.corpus_summaries = summaries
+
     await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1", 2, _eda_dir())
 
     content = requests[0]["content"]
     assert "sha256:corpus" in content
-    assert "paper_corpus_overview" in content
+    # 目录直接摆进 prompt，而不是指望 Agent 自己去调 paper_corpus_overview——真机三次
+    # 跑测它一次都没调过，因此从没看见语料里那几篇真正对得上任务指标的论文。
+    assert "arxiv:1710.09412" in content
+    assert "AUC Maximization: A Survey" in content
+    assert "paper_chunk_read" in content
     assert "sources" in content
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_corpus_listing_does_not_break_ideation(
+    monkeypatch,
+) -> None:
+    """目录读不出来只该少一段提示，不该让这一轮 ideation 挂掉。"""
+    requests = _lane_harness(monkeypatch)
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"))
+    runtime._agents = _AgentSpy(requests)
+    runtime.corpus_paper_ids = _no_corpus
+
+    async def broken():
+        raise OSError("artifact store is unavailable")
+
+    runtime.corpus_summaries = broken
+
+    await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1", 2, _eda_dir())
+
+    content = requests[0]["content"]
+    assert "sha256:corpus" in content
+    assert "paper_chunk_read" in content
 
 
 # ── 引用可核验 ──────────────────────────────────────────────────────────
 
 
+def _opened(runtime, papers: set[str]) -> None:
+    """让 runtime 报告"本轮打开过这些论文"，模拟 paper_chunk_read 的已读账本。"""
+    runtime.corpus_papers_read = lambda: set(papers)
+
+
 @pytest.mark.asyncio
-async def test_a_citation_naming_no_corpus_paper_is_dropped_before_ranking() -> None:
-    """ranker 给"有引用"加分；不校验的话编一个 id 就能让候选往前排。"""
+async def test_only_papers_the_lane_actually_opened_survive_verification() -> None:
+    """判据是"读过"，不是"在语料里"。
+
+    真机（2026-08-16 第 12 次）：Ideator 拿《数据增强综述》支持"两两交互特征"、拿《信用卡
+    欺诈检测综述》同时支持 target encoding 与 SMOTE——这些论文都在检索结果里出现过，只是
+    从没被打开。按"存在于语料"校验放行了全部；按"读过"才拦得住。
+    """
     published: list[dict] = []
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
     runtime.publish_output = _recorder(published)
 
     async def known() -> set[str]:
-        return {"arxiv:1706.03762"}
+        return {"arxiv:1706.03762", "arxiv:2010.06479"}
 
     runtime.corpus_paper_ids = known
+    _opened(runtime, {"arxiv:1706.03762"})
     proposed = Hypothesis(
         statement="s",
         intervention="i",
         expected_effect="e",
-        sources=["arxiv:1706.03762", "arxiv:9999.99999"],
+        # 第一条读过；第二条只在语料里、从没打开；第三条根本不存在。
+        sources=["arxiv:1706.03762", "arxiv:2010.06479", "arxiv:9999.99999"],
     )
 
     kept = await AgentTurnRunner(runtime)._verify_sources([proposed])
 
     assert kept[0].sources == ["arxiv:1706.03762"]
     assert published[-1]["channel"] == "error"
-    assert "1 citation" in published[-1]["text"]
+    assert "2 citation" in published[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_reading_nothing_means_citing_nothing() -> None:
+    """一篇都没打开就交引用，是纯粹的贴标签，全部清掉。"""
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"))
+    runtime.publish_output = _recorder([])
+
+    async def known() -> set[str]:
+        return {"arxiv:1706.03762"}
+
+    runtime.corpus_paper_ids = known
+    _opened(runtime, set())
+    proposed = Hypothesis(
+        statement="s",
+        intervention="i",
+        expected_effect="e",
+        sources=["arxiv:1706.03762"],
+    )
+
+    kept = await AgentTurnRunner(runtime)._verify_sources([proposed])
+
+    assert kept[0].sources == []
 
 
 @pytest.mark.asyncio
