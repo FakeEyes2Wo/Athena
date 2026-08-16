@@ -21,6 +21,19 @@ import {
 } from "../lib/tauri-bridge";
 import { createEmptyPipelineViewModel, type PipelineViewModel } from "../types/ui";
 
+export interface LogEntry {
+  id: string;
+  at: number;
+  kind: string;
+  source?: string;
+  channel?: string;
+  plan?: string;
+  tool?: string;
+  text: string;
+}
+
+const MAX_LOG_ENTRIES = 500;
+
 /** Maps the backend runtime status to the frontend pipeline status. */
 const RUNTIME_STATUS_MAP: Record<string, PipelineViewModel["status"]> = {
   RUNNING: "running",
@@ -210,7 +223,9 @@ export function usePipeline(workspaceRoot?: string | null) {
   const [sessions, setSessions] = useState<Array<{ id: string; title: string }>>([]);
   const [currentSessionId, setCurrentSessionId] = useState("default");
   const [humanRequests, setHumanRequests] = useState<HumanRequest[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
+  const logCounter = useRef(0);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
 
@@ -218,6 +233,24 @@ export function usePipeline(workspaceRoot?: string | null) {
     counter.current += 1;
     return `${prefix}-${counter.current}`;
   }, []);
+
+  const appendLog = useCallback((event: PipelineEvent) => {
+    const data = event.data as Record<string, unknown> | undefined;
+    logCounter.current += 1;
+    const entry: LogEntry = {
+      id: `log-${logCounter.current}`,
+      at: Date.now(),
+      kind: event.kind,
+      source: typeof data?.source === "string" ? data.source : undefined,
+      channel: typeof data?.channel === "string" ? data.channel : undefined,
+      plan: typeof data?.plan === "string" ? data.plan : undefined,
+      tool: typeof data?.tool === "string" ? data.tool : undefined,
+      text: typeof data?.text === "string" ? data.text : "",
+    };
+    setLogs((prev) => [...prev.slice(-(MAX_LOG_ENTRIES - 1)), entry]);
+  }, []);
+
+  const clearLogs = useCallback(() => setLogs([]), []);
 
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
   const restoreRecords = useCallback(
@@ -246,6 +279,7 @@ export function usePipeline(workspaceRoot?: string | null) {
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
       setViewModel((prev) => applyPipelineEvent(prev, event));
+      appendLog(event);
     }).then((fns) => {
       if (!mounted) { fns.forEach((fn) => fn()); return; }
       unlisteners = fns;
@@ -283,7 +317,7 @@ export function usePipeline(workspaceRoot?: string | null) {
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [titlesKey]);
+  }, [appendLog, titlesKey]);
 
   // Poll for outstanding supervisor human questions while a run is active.
   useEffect(() => {
@@ -522,6 +556,8 @@ export function usePipeline(workspaceRoot?: string | null) {
     sessions,
     currentSessionId,
     humanRequests,
+    logs,
+    clearLogs,
     sendPrompt,
     startRun,
     pauseRun,
@@ -533,5 +569,5 @@ export function usePipeline(workspaceRoot?: string | null) {
     deleteSession,
     selectHypothesis,
     answerHuman,
-  }), [answerHuman, currentSessionId, deleteSession, humanRequests, pauseRun, resumeRun, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
+  }), [answerHuman, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
 }

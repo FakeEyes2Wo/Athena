@@ -8,6 +8,7 @@ import { ErrorBoundary } from "../common/ErrorBoundary";
 import { FunctionRail } from "./FunctionRail";
 import { ContextSidebar } from "./ContextSidebar";
 import { ContextDrawer } from "./ContextDrawer";
+import { LogDrawer } from "./LogDrawer";
 import { ThemeToggle } from "./ThemeToggle";
 import { AthenaWordmark } from "./AthenaWordmark";
 import { HumanRequestDialog } from "./HumanRequestDialog";
@@ -31,6 +32,7 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
   const [module, setModule] = useState<ModuleKey>("session");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [drawerPanel, setDrawerPanel] = useState<ContextPanelKey | null>(null);
+  const [logOpen, setLogOpen] = useState(false);
 
   const def = MODULE_BY_KEY[module];
   const { viewModel } = pipeline;
@@ -74,6 +76,15 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
             {viewModel.phase || "idle"} · {viewModel.status}
           </span>
         </div>
+        <button
+          type="button"
+          className={styles["topbar__collapse"]}
+          onClick={() => setLogOpen((v) => !v)}
+          aria-label={logOpen ? "关闭日志" : "打开日志"}
+          title="运行日志"
+        >
+          <Icon name="log" size={17} />
+        </button>
         <ThemeToggle />
       </header>
 
@@ -107,6 +118,13 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
         </main>
         {drawerPanel && (
           <ContextDrawer panel={drawerPanel} onClose={() => setDrawerPanel(null)} />
+        )}
+        {logOpen && (
+          <LogDrawer
+            entries={pipeline.logs}
+            onClose={() => setLogOpen(false)}
+            onClear={pipeline.clearLogs}
+          />
         )}
       </div>
 
