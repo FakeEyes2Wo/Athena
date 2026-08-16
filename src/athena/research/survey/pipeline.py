@@ -45,6 +45,11 @@ from athena.research.paper_scout.schemas import (
     ScoutStats,
 )
 from athena.research.paper_scout.scorer import GradedRelevanceScorer
+from athena.research.survey.library import (
+    conversion_key,
+    copy_refs,
+    scout_key,
+)
 from athena.research.paper_source.fetcher import PaperSourceFetcher
 from athena.research.paper_source.schemas import (
     PaperIdentity,
@@ -183,6 +188,14 @@ class SurveyRequest(BaseModel):
     build_index: bool = Field(
         default=True, description="Build the RAG corpus index after conversion."
     )
+    fresh_scout: bool = Field(
+        default=False,
+        description=(
+            "Re-run PaperScout even when this exact request is already in the paper "
+            "library. Off by default: the same ScoutRequest is a deterministic input, "
+            "so re-running it only re-pays 71% of the wall clock for the same answer."
+        ),
+    )
 
 
 class PaperOutcome(BaseModel):
@@ -216,6 +229,10 @@ class PaperOutcome(BaseModel):
     visuals_interpreted: int = Field(default=0, ge=0)
     vision_calls: int = Field(default=0, ge=0, description="Model calls for visuals.")
     conversion_seconds: float = Field(default=0.0, ge=0.0)
+    conversion_cached: bool = Field(
+        default=False,
+        description="Conversion was replayed from the paper library, paying no model calls.",
+    )
     error: str = Field(default="", description="Failure reason, empty when fine.")
     paper_content_ref: ArtifactRef | None = Field(default=None)
 
@@ -304,6 +321,16 @@ class SurveyReport(BaseModel):
     vision_failures: int = Field(default=0, ge=0)
     embed_calls: int = Field(default=0, ge=0)
     embedded_texts: int = Field(default=0, ge=0)
+    scout_cached: bool = Field(
+        default=False, description="PaperScout was replayed from the paper library."
+    )
+    library: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Paper library hit/miss counters for this run. A second run of the same "
+            "query should show near-zero model and http cost; see `timings`."
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
 
     def converted(self) -> int:
@@ -397,6 +424,8 @@ class SurveyPipeline:
         self.report.timings.total_seconds = round(time.monotonic() - started, 3)
         self.report.http_requests = self.stack.http.request_count
         self._collect_model_costs()
+        if self.stack.library is not None:
+            self.report.library = self.stack.library.stats()
         # 报告的论文列表在此统一构建：登记项在各段被就地改写，最后一次成型才能
         # 保证顺序稳定，也避免用 pydantic 的值相等去判断"这一项是否已加入"
         self.report.papers = sorted(
@@ -479,12 +508,66 @@ class SurveyPipeline:
                 visual_policy=self.request.visual_policy,
             ),
         )
-        request_ref = await self.stack.artifacts.put_text(
-            scout_request.model_dump_json()
-        )
+        request_json = scout_request.model_dump_json()
+        cached = await self._cached_scout(request_json)
+        if cached is not None:
+            self.report.timings.scout_seconds = round(time.monotonic() - started, 3)
+            self.report.scout_cached = True
+            return await self._read_scout_result(cached)
+        request_ref = await self.stack.artifacts.put_text(request_json)
         outcome = await agent.run(self._agent_context(request_ref))
         self.report.timings.scout_seconds = round(time.monotonic() - started, 3)
+        await self._cache_scout(request_json, outcome.result_ref)
         return await self._read_scout_result(outcome.result_ref)
+
+    def _scout_cache_key(self, request_json: str) -> str:
+        """本次检索在库里的键；整份请求进键，见 ``library.scout_key``。"""
+        return scout_key(request_json)
+
+    async def _cached_scout(self, request_json: str) -> ArtifactRef | None:
+        """取回同一份请求上次跑出的检索结果，并把它引用的 blob 复制回本地存储。
+
+        检索占 10 篇尺寸下 71% 的墙钟（实测 581/820 秒），而它是**确定性输入的函数**：
+        同一份 ``ScoutRequest`` 再跑一遍不会得到新东西，只会重付 4 次策略调用与几十次
+        打分。想要新的一批论文时应当改请求（或走 ``fresh_scout``），而不是靠"每次都
+        重跑"来碰运气——那正是 tie_break 散列造成的不可复现，不是特性。
+
+        任何一环缺失都当作未命中：缓存是纯加速，宁可重跑也不能交出半份结果。
+        """
+        library = self.stack.library
+        if library is None or self.request.fresh_scout:
+            return None
+        payload = await library.load_text(self._scout_cache_key(request_json))
+        if payload is None:
+            return None
+        try:
+            result = PaperScoutResult.model_validate_json(payload)
+        except ValueError:
+            # 库里的结果与当前 schema 不兼容 → 重新检索
+            return None
+        refs = [result.corpus_ref, result.stats_ref, result.paper_source_request_ref]
+        wanted = [ref for ref in refs if ref]
+        if await copy_refs(library.store, self.stack.artifacts, wanted) != len(wanted):
+            return None
+        self.report.warnings.append("scout_cache_hit")
+        return await self.stack.artifacts.put_text(payload)
+
+    async def _cache_scout(self, request_json: str, result_ref: ArtifactRef) -> None:
+        """把这次检索的结果连同它引用的 blob 一起存进库。"""
+        library = self.stack.library
+        if library is None:
+            return
+        payload = await self.stack.artifacts.get_text(result_ref)
+        try:
+            result = PaperScoutResult.model_validate_json(payload)
+        except ValueError:
+            # 结果读不出来就不缓存；这一轮照常继续
+            return
+        refs = [result.corpus_ref, result.stats_ref, result.paper_source_request_ref]
+        await copy_refs(
+            self.stack.artifacts, library.store, [ref for ref in refs if ref]
+        )
+        await library.save_text(self._scout_cache_key(request_json), payload)
 
     async def _direct_source_request(self) -> ArtifactRef | None:
         """把显式给出的 arXiv id 直接做成取源请求，并登记为待处理论文。
@@ -596,6 +679,9 @@ class SurveyPipeline:
             http=self.stack.http,
             contact_email=self.stack.contact_email or None,
             openalex_api_key=self.stack.openalex_api_key or None,
+            # 落盘的定位符缓存。内容寻址存储能去重字节，去重不了 HTTP 请求，而 arXiv
+            # 每 3 秒只允许一次——不给路径的话缓存只活在进程内，重跑必然重新下载一遍。
+            cache=self.stack.locator_cache(),
         )
         result = await fetcher.fetch(request)
         self.report.timings.source_seconds = round(time.monotonic() - started, 3)
@@ -667,12 +753,19 @@ class SurveyPipeline:
         outcome = self._outcome_for(paper_key)
         interpreter = self.stack.visual_interpreter
         calls_before = interpreter.calls if interpreter is not None else 0
-        # 计时必须在拿到信号量之后开始：并发受限时排队等待会被算进单篇成本，
-        # 让每篇的耗时都趋同于批次总耗时，成本数字就失去意义
-        async with limit:
-            started = time.monotonic()
-            content = await self._process(processor, outcome, request_ref)
-            outcome.conversion_seconds = round(time.monotonic() - started, 3)
+        cached = await self._cached_conversion(request_ref)
+        if cached is not None:
+            outcome.conversion_cached = True
+            content = cached
+        else:
+            # 计时必须在拿到信号量之后开始：并发受限时排队等待会被算进单篇成本，
+            # 让每篇的耗时都趋同于批次总耗时，成本数字就失去意义
+            async with limit:
+                started = time.monotonic()
+                content = await self._process(processor, outcome, request_ref)
+                outcome.conversion_seconds = round(time.monotonic() - started, 3)
+            if content is not None:
+                await self._cache_conversion(request_ref, content)
         if interpreter is not None:
             outcome.vision_calls = interpreter.calls - calls_before
         if content is None:
@@ -689,6 +782,53 @@ class SurveyPipeline:
             1 for item in content.visuals if item.interpretation_status == "interpreted"
         )
         return content
+
+    async def _conversion_cache_key(self, request_ref: ArtifactRef) -> str | None:
+        """本篇转换在库里的键；请求读不出来时返回 ``None``（走正常转换路径）。
+
+        键取自 ``PaperConversionRequest`` 里的源引用，而那些引用本身就是内容散列——
+        "同一篇论文的同一份源码"因此天然是同一个键，不必另外指纹。
+        """
+        try:
+            request = PaperConversionRequest.model_validate_json(
+                await self.stack.artifacts.get_text(request_ref)
+            )
+        except (ValueError, OSError):
+            # 请求本身有问题 → 交给 _process 去报这条失败，不在缓存层吞掉
+            return None
+        return conversion_key(
+            request.paper_id or "",
+            request.tex_source_ref,
+            request.pdf_ref,
+            self.request.visual_policy,
+        )
+
+    async def _cached_conversion(self, request_ref: ArtifactRef) -> PaperContent | None:
+        """取回这篇论文上次转换出来的结果。
+
+        转换是整条链路里唯一按篇调用多模态模型的一段（44 篇实测 1347 次视觉调用），
+        而它的输入完全由源字节决定。缓存键里带转换器版本与视觉策略，改了解析器或换了
+        策略会自动失效——需要人记得手动清的缓存迟早会喂回过期结果，而那种错误只会表现为
+        "这次改动没效果"。
+        """
+        library = self.stack.library
+        if library is None:
+            return None
+        key = await self._conversion_cache_key(request_ref)
+        if key is None:
+            return None
+        return await library.load_paper(key, self.stack.artifacts)
+
+    async def _cache_conversion(
+        self, request_ref: ArtifactRef, content: PaperContent
+    ) -> None:
+        """把这篇论文的转换产物存进库。"""
+        library = self.stack.library
+        if library is None:
+            return
+        key = await self._conversion_cache_key(request_ref)
+        if key is not None:
+            await library.save_paper(key, content, self.stack.artifacts)
 
     async def _process(
         self,
@@ -731,7 +871,10 @@ class SurveyPipeline:
         started = time.monotonic()
         try:
             self.report.corpus_ref = await build_corpus_index(
-                self.stack.artifacts, selected, self.stack.embedder
+                self.stack.artifacts,
+                selected,
+                self.stack.embedder,
+                vectors=self.stack.vector_cache(),
             )
         except OpenAIError as error:
             # 建索引是最后一段，也是唯一会一次性打光编码配额的一段。异常逃出去会连同

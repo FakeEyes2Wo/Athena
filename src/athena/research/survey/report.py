@@ -64,6 +64,15 @@ def print_check(stack: SurveyStack) -> int:
             stack.ghostscript or f"未找到（EPS/PS 插图读不了，可设 {GHOSTSCRIPT_ENV}）",
         )
     )
+    library = stack.library
+    print(
+        report_line(
+            "论文库",
+            f"{library.root}（{library.stats()['entries']} 条）"
+            if library is not None
+            else "关闭（每次调研都会重新下载、重新转换、重新编码）",
+        )
+    )
     print(report_line("联系邮箱", stack.contact_email or "（未设置，礼貌池不生效）"))
     print(
         report_line(
@@ -150,6 +159,17 @@ def print_report(report: SurveyReport) -> None:
             f"/{report.embedded_texts} 条",
         )
     )
+    if report.library:
+        cached = sum(1 for item in report.papers if item.conversion_cached)
+        print(
+            report_line(
+                "论文库",
+                f"命中 {report.library.get('hits', 0)} / 未命中 "
+                f"{report.library.get('misses', 0)}"
+                f"  转换复用 {cached} 篇"
+                f"  检索{'复用' if report.scout_cached else '重跑'}",
+            )
+        )
     # 未尝试的候选不逐条列出：够数即停之后可能有二十来篇，它们既没失败也没花成本，
     # 混在里面只会把真正失败的那几篇淹掉
     untouched = sum(1 for item in report.papers if item.fetch_status == NOT_ATTEMPTED)

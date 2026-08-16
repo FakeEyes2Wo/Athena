@@ -217,6 +217,8 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
         artifact_root=args.artifact_root,
         model=args.model,
         scorer_model=args.scorer_model,
+        enable_library=not args.no_library,
+        library_root_path=args.library_root,
     )
     if args.check:
         return print_check(stack)
@@ -241,6 +243,7 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
             source_candidate_multiple=args.source_candidates,
             strict_quality=args.strict_quality,
             build_index=not args.no_index,
+            fresh_scout=args.fresh_scout,
         ),
     )
     print_report(report)
@@ -457,6 +460,27 @@ def _add_survey_parser(subparsers) -> None:
             "让取不到源的论文也参与交付（默认剔除：既无 arXiv id、上游也没给开放获取"
             "链接的论文下载不到，却会占掉一个交付名额）"
         ),
+    )
+    survey.add_argument(
+        "--fresh-scout",
+        action="store_true",
+        help=(
+            "即使论文库里已有同一份检索请求，也重新跑一遍 PaperScout。默认复用："
+            "同一份 ScoutRequest 是确定性输入，重跑只是把 71% 的墙钟再付一遍"
+        ),
+    )
+    survey.add_argument(
+        "--no-library",
+        action="store_true",
+        help=(
+            "关掉论文库，每篇都重新下载、重新转换、重新编码。只在核对"
+            "缓存是否掩盖了问题时才需要"
+        ),
+    )
+    survey.add_argument(
+        "--library-root",
+        default="",
+        help="论文库根目录；默认 ATHENA_LIBRARY_ROOT 或 ~/.athena/library",
     )
     survey.add_argument("--published-to", default="", help="发布日期上限 ISO")
     survey.add_argument(

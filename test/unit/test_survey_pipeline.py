@@ -35,6 +35,7 @@ from athena.research.paper_source.schemas import (
     PaperSourceResult,
     PaperSourceStats,
 )
+from athena.research.survey.library import PaperLibrary
 from athena.research.survey.pipeline import SurveyPipeline, SurveyRequest
 from athena.research.survey.wiring import SurveyStack
 from athena.core.artifact_store import LocalArtifactStore
@@ -686,3 +687,146 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         report = await self.run_pipeline()
 
         self.assertEqual(7, report.scout_dropped_no_source)
+
+
+class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
+    """第二次调研只该为新论文付钱。
+
+    此前每一次调研都从零开始：同一篇论文重新下载、重新转换（含视觉调用）、重新编码。
+    这些用例把"重跑不再付钱"钉住，因为省下来的正是链路里最贵的两段。
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="reuse_store_"))
+        self.library = PaperLibrary(tempfile.mkdtemp(prefix="reuse_lib_"))
+        self.interpreter = FakeInterpreter()
+        self.embedder = FakeEmbedder()
+        self.stack = SurveyStack(
+            artifacts=self.store,
+            client=object(),
+            model="m",
+            http=HostRateLimiter(),
+            embedder=self.embedder,
+            visual_interpreter=self.interpreter,
+            library=self.library,
+        )
+        FakeScoutAgent.papers = PAPERS
+        FakeScoutAgent.dropped_no_source = 0
+        FakeScoutAgent.seen_request = None
+        FakeScoutAgent.status = "complete"
+        FakeScoutAgent.warnings = []
+        FakeScoutAgent.runs = 0
+        FakeFetcher.statuses = ["fetched", "fetched"]
+        FakeFetcher.enriched = {}
+        FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
+        FakeProcessor.empty = set()
+        FakeProcessor.delay = 0.0
+        FakeProcessor.runs = 0
+        FakeScoutAgent.source_request = PaperSourceRequest(
+            papers=[
+                {"identity": {"arxiv_id": key.split(":")[1]}} for key, _t, _s in PAPERS
+            ]
+        )
+        FakeFetcher.conversion_refs = [
+            await self._conversion_ref(key) for key, _t, _s in PAPERS
+        ]
+
+    async def _conversion_ref(self, paper_id: str) -> str:
+        return await self.store.put_text(
+            pipeline_module.PaperConversionRequest(
+                pdf_ref="sha256:" + "2" * 64,
+                paper_id=paper_id,
+                visual_policy="best_effort",
+            ).model_dump_json()
+        )
+
+    async def run_pipeline(self, **overrides):
+        request = SurveyRequest(query="tabular auc", **overrides)
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=CountingScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=CountingProcessor,
+            GradedRelevanceScorer=mock.MagicMock(),
+        ):
+            return await SurveyPipeline(self.stack, request).run()
+
+    async def test_a_second_identical_run_pays_no_conversion_and_no_scout(self) -> None:
+        """转换是唯一按篇调多模态模型的一段；检索占 71% 的墙钟。两者都不该重付。"""
+        first = await self.run_pipeline()
+
+        self.assertEqual(2, first.converted())
+        self.assertFalse(first.scout_cached)
+        conversions_after_first = CountingProcessor.runs
+        scouts_after_first = CountingScoutAgent.runs
+
+        second = await self.run_pipeline()
+
+        self.assertEqual(2, second.converted())
+        self.assertTrue(second.scout_cached)
+        self.assertEqual(conversions_after_first, CountingProcessor.runs)
+        self.assertEqual(scouts_after_first, CountingScoutAgent.runs)
+        self.assertTrue(all(item.conversion_cached for item in second.papers))
+
+    async def test_the_second_run_still_produces_the_same_corpus(self) -> None:
+        """省钱不能以产物退化为代价：缓存命中的语料必须和现算的一样。"""
+        first = await self.run_pipeline()
+        second = await self.run_pipeline()
+
+        self.assertEqual(first.corpus_ref, second.corpus_ref)
+        self.assertEqual(
+            [item.paper_key for item in first.papers],
+            [item.paper_key for item in second.papers],
+        )
+
+    async def test_fresh_scout_forces_the_search_to_run_again(self) -> None:
+        """想要新的一批论文时有明确的开关，而不是靠"每次都重跑"碰运气。"""
+        await self.run_pipeline()
+        before = CountingScoutAgent.runs
+
+        report = await self.run_pipeline(fresh_scout=True)
+
+        self.assertFalse(report.scout_cached)
+        self.assertEqual(before + 1, CountingScoutAgent.runs)
+
+    async def test_changing_the_visual_policy_invalidates_the_conversion_cache(
+        self,
+    ) -> None:
+        """``required`` 与 ``best_effort`` 产出不同的 PaperContent；共用缓存会让开关失灵。"""
+        await self.run_pipeline()
+        before = CountingProcessor.runs
+
+        await self.run_pipeline(visual_policy="required")
+
+        self.assertEqual(before + len(PAPERS), CountingProcessor.runs)
+
+    async def test_without_a_library_nothing_is_cached(self) -> None:
+        """没有库时行为与此前完全一致——缓存是可选增益，不是新的必需依赖。"""
+        self.stack.library = None
+        await self.run_pipeline()
+        before = CountingProcessor.runs
+
+        report = await self.run_pipeline()
+
+        self.assertFalse(report.scout_cached)
+        self.assertEqual(before + len(PAPERS), CountingProcessor.runs)
+
+
+class CountingScoutAgent(FakeScoutAgent):
+    """记下真正跑过几次检索的 FakeScoutAgent。"""
+
+    runs = 0
+
+    async def run(self, ctx):
+        CountingScoutAgent.runs += 1
+        return await super().run(ctx)
+
+
+class CountingProcessor(FakeProcessor):
+    """记下真正转换过几篇的 FakeProcessor。"""
+
+    runs = 0
+
+    async def process(self, request):
+        CountingProcessor.runs += 1
+        return await super().process(request)

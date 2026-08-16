@@ -17,7 +17,7 @@ import numpy
 
 from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import PaperContent, RetrievalUnit
-from athena.research.paper_rag.interfaces import TextEmbedder
+from athena.research.paper_rag.interfaces import TextEmbedder, VectorCache
 from athena.research.paper_rag.schemas import (
     CorpusEntry,
     CorpusSentence,
@@ -266,7 +266,7 @@ def visual_link_ids(unit: RetrievalUnit) -> list[str]:
     return [f"{namespace}:{item}" for item in linked.split(",") if item]
 
 
-def pack_vectors(vectors: list[list[float]]) -> bytes:
+def pack_vectors(vectors: "list[list[float]] | numpy.ndarray") -> bytes:
     """把归一化后的向量打包成 float32 numpy 缓冲。
 
     1.0 的 JSON 文本编码在真实语料上不可用：44 篇论文的 36920 条句向量落盘 800 MB，
@@ -312,6 +312,24 @@ async def embed_sentences(
         [index.sentence_text(position) for position in range(len(index.sentences))],
         embedder,
     )
+
+
+async def embed_paper_sentences(
+    index: PaperCorpusIndex, start: int, end: int, embedder: TextEmbedder
+) -> numpy.ndarray:
+    """编码一篇论文名下的句子区间，返回归一化后的 float32 矩阵。
+
+    按篇编码而不是整份语料一次编码，是为了让**每篇的向量可以单独缓存**：句子是从
+    ``PaperContent`` 确定性切出来的，同一篇论文在两份语料里切出的句子序列必然相同，
+    因此向量整篇复用是安全的。一次 44 篇的语料要编码 36920 条句子（2308 批请求），
+    而两次调研之间往往有大半论文是重合的。
+    """
+    texts = [index.sentence_text(position) for position in range(start, end)]
+    vectors: list[list[float]] = []
+    for offset in range(0, len(texts), EMBED_BATCH):
+        batch = await embedder.embed(texts[offset : offset + EMBED_BATCH])
+        vectors.extend(normalize(vector) for vector in batch)
+    return numpy.asarray(vectors, dtype=numpy.float32).reshape(len(texts), -1)
 
 
 class NonSemanticEmbedderError(RuntimeError):
@@ -449,6 +467,7 @@ async def build_corpus_index(
     embedder: TextEmbedder | None = None,
     *,
     index_bibliography: bool = False,
+    vectors: VectorCache | None = None,
 ) -> ArtifactRef:
     """把若干篇论文构建成可检索语料，返回三个检索工具接受的 ``corpus_ref``。
 
@@ -467,7 +486,11 @@ async def build_corpus_index(
 
     entries: list[CorpusEntry] = []
     sentences: list[CorpusSentence] = []
+    # 逐篇记下句子区间，让向量能按篇缓存：句子是从 PaperContent 确定性切出来的，
+    # 同一篇论文在两份语料里的句子序列必然相同。
+    spans_by_paper: list[tuple[int, int]] = []
     for units in units_by_paper:
+        paper_start = len(sentences)
         for unit in units:
             if unit.kind == BIBLIOGRAPHY_KIND and not index_bibliography:
                 continue
@@ -492,6 +515,7 @@ async def build_corpus_index(
                 )
                 for start, end in spans
             )
+        spans_by_paper.append((paper_start, len(sentences)))
 
     # 未被解释的视觉单元与未索引的参考文献都不在语料里，指向它们的链接必须剔除，
     # 否则 Agent 会读到 not_found
@@ -502,7 +526,38 @@ async def build_corpus_index(
 
     index = PaperCorpusIndex(entries=entries, sentences=sentences)
     if embedder is not None:
-        index.embedding_ref = await embed_sentences(store, index, embedder)
+        index.embedding_ref = await build_embeddings(
+            store, index, papers, spans_by_paper, embedder, vectors
+        )
         index.embedding_format = "float32"
         index.embedding_model = embedder.model
     return await store.put_text(index.model_dump_json())
+
+
+async def build_embeddings(
+    store: ArtifactStore,
+    index: PaperCorpusIndex,
+    papers: list[PaperContent],
+    spans_by_paper: list[tuple[int, int]],
+    embedder: TextEmbedder,
+    vectors: VectorCache | None,
+) -> ArtifactRef:
+    """按篇编码（或按篇取缓存）后拼成整份语料的向量矩阵。
+
+    没有缓存时行为与整份一次编码完全一致——拼接顺序就是 ``index.sentences`` 的顺序，
+    而那个一一对应关系是语义检索唯一的正确性前提：错位不会报错，只会让之后每一次检索
+    都返回错的句子。
+    """
+    blocks: list[numpy.ndarray] = []
+    for paper, (start, end) in zip(papers, spans_by_paper):
+        cached = await vectors.load(paper, start, end) if vectors is not None else None
+        if cached is not None:
+            blocks.append(cached)
+            continue
+        block = await embed_paper_sentences(index, start, end, embedder)
+        if vectors is not None:
+            await vectors.save(paper, block)
+        blocks.append(block)
+    if not blocks:
+        return await store.put_bytes(pack_vectors([]))
+    return await store.put_bytes(pack_vectors(numpy.concatenate(blocks, axis=0)))

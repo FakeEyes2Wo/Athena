@@ -47,8 +47,10 @@ from athena.research.paper_scout.backends import (
     SEMANTIC_SCHOLAR_INTERVAL,
     build_default_backends,
 )
+from athena.research.paper_source.fetcher import LocatorCache
 from athena.research.paper_source.http import HostRateLimiter, UrllibTransport
 from athena.research.paper_source.tool import PaperFetchTool
+from athena.research.survey.library import LibraryVectorCache, PaperLibrary
 from athena.research.survey.tool import PaperSurveyTool
 
 ARTIFACT_ROOT_ENV = "ATHENA_ARTIFACT_ROOT"
@@ -339,6 +341,27 @@ class SurveyStack:
     openalex_api_key: str = ""
     ghostscript: str = ""
     corpus_cache: CorpusCache = field(default_factory=CorpusCache)
+    library: PaperLibrary | None = None
+
+    def locator_cache(self) -> LocatorCache:
+        """落盘的取源定位符缓存，放在论文库根下。
+
+        没有库时退回进程内缓存（行为与此前一致）。缓存的价值全在跨进程：arXiv 每 3 秒
+        只允许一次请求，而一次 10 篇的调研要发几十次。
+        """
+        if self.library is None:
+            return LocatorCache()
+        return LocatorCache(self.library.root / "locators.json")
+
+    def vector_cache(self) -> LibraryVectorCache | None:
+        """按篇复用句向量的缓存；没有库或没有编码器时为 ``None``。
+
+        编码器标识进键：不同模型的向量不在同一个空间里，混用会让检索给出看上去正常、
+        实际毫无意义的分数。
+        """
+        if self.library is None or self.embedder is None:
+            return None
+        return LibraryVectorCache(self.library, self.artifacts, self.embedder.model)
 
     def effective_scorer_model(self) -> str:
         """实际用于打分的模型名；未单独配置时就是策略模型。"""
@@ -362,6 +385,8 @@ def build_survey_stack(
     artifacts: LocalArtifactStore | None = None,
     enable_embedder: bool = True,
     enable_vision: bool = True,
+    enable_library: bool = True,
+    library_root_path: str | Path = "",
 ) -> SurveyStack:
     """按环境变量装配整条 Academic Survey 链路的依赖。
 
@@ -403,6 +428,7 @@ def build_survey_stack(
         semantic_scholar_api_key=os.environ.get(SEMANTIC_SCHOLAR_KEY_ENV, ""),
         openalex_api_key=os.environ.get(OPENALEX_KEY_ENV, ""),
         ghostscript=find_ghostscript(),
+        library=PaperLibrary(library_root_path) if enable_library else None,
     )
 
 
