@@ -43,11 +43,19 @@ def survey_corpus_ref(self) -> str | None:
 ```
 
 语料建好要十几分钟，而 ideation 每一轮都要取一次。在这里等一下，就等于把语料从"可选
-增益"变成关键路径。语料没建好时 Ideator 照常只凭 EDA 提假设；建好之后的那一轮自动拿到
-算子。
+增益"变成关键路径。语料没建好时 Ideator 照常只凭 EDA 提假设。
 
-真机上这条被验证过一次：第 3 次跑测里语料 ready 的事件与 SEARCH 失败几乎同刻发生，那
-一轮的 Ideator 一条都没用上语料，loop 本身没有因此多等一秒。
+真机上"不停等"这一半被验证过：第 3 次跑测里语料 ready 的事件与 SEARCH 失败几乎同刻发
+生，那一轮的 Ideator 一条都没用上语料，loop 本身没有因此多等一秒。
+
+> **另一半曾经写错。** 本文早先的版本在这里写"建好之后的那一轮自动拿到算子"，而这句话
+> 从未被验证过——当时的证据只是"SEARCH 没有变慢"，那验证的是**不阻塞**，不是**会生效**。
+>
+> 第 9 次跑测把它证伪了：语料在 seq 908 就绪，唯一一轮 ideation 在 seq 785 就启动了，
+> 早约两分钟；全程 0 次 `paper_*` 调用，6 条假设 0 条引用语料。原因是调度器只在"没有
+> 假设可排"时才 `GENERATE`（`scheduler.next_actions`），而第一轮生成的 6 条假设已经
+> 填满了 4 个实验额度，此后再没需要生成过。**非阻塞本身没错，错的是它单独并不成立
+> ——缺一个"语料就绪 → 补一轮"的触发器。** 见约束四。
 
 ### 约束二：只给读的那一组
 
@@ -64,6 +72,27 @@ def survey_corpus_ref(self) -> str | None:
 
 `_run_survey` 把除 `CancelledError` 外的异常转成一条 error 输出，loop 继续。
 `aclose()` 里先取消调研任务再停 Supervisor，避免后台任务把进程吊住。
+
+### 约束四：语料就绪必须补一轮 ideation
+
+不阻塞是对的，但它需要一个配套件才成立：**语料落地时得有人再问一次假设。**
+`Supervisor._corpus_ideation()` 在 `_fill_slots` 的最前面跑：
+
+```python
+if self.state.corpus_ref is None or self.state.corpus_ideation_done:
+    return False
+self.state.corpus_ideation_done = True     # 先落状态再跑，避免重入补第二轮
+await self._persist_state()
+hypotheses = await self._run_ideator_turn(self.state.hypotheses_per_ideator)
+return len(await self.register_hypotheses(hypotheses)) > 0
+```
+
+三条约束成立：
+
+- **只补一轮。** `corpus_ideation_done` 落在持久化状态里，续跑不重复补。
+- **不动实验预算。** 它只往队列里加候选，跑几个仍由 `search_limit` 决定；新候选按
+  `ranker` 的优先级与既有候选竞争，不插队。
+- **没有 Ideator 时直接标记完成**，避免每轮重试一个不存在的能力。
 
 ## 二、工具必须惰性求值
 
@@ -147,16 +176,24 @@ kept = [s for s in hypothesis.sources if s in known]
 
 ## 五、真机结果
 
-第 8 次完整跑测（`--survey-papers 8`，语料预置以免重跑 13 分钟的调研）：
+三次跑测各自证明了不同的一段，合起来才是完整链路。
+
+**第 8 次**（语料预置，跳过 13 分钟调研）—— 证明"语料 → Ideator"这一段：
 
 ```
 hypotheses=5  experiments=3  sota=exp_baseline
-statuses: PROPOSED 3 · INCONCLUSIVE 1 · REFUTED 1
 cited papers: arxiv:2304.02858, doi:10.69987/aimlr.2026.70205
 ```
 
-4 条 Ideator 假设里 3 条带可核验引用，其中"把 `cat_a` 的 LabelEncoder 换成 target
-encoding"被实验证伪。
+4 条 Ideator 假设里 3 条带可核验引用。当时的实验判决（REFUTED/INCONCLUSIVE）后来查明
+全部无效——那一轮的 evaluator 按位置对齐，每个候选恒定 0.502，见
+[Evaluator 契约](evaluator_contract_ch.md)。**引用是真的，判决不是。**
+
+**第 9 次**（`--survey --survey-papers 8`，不预置语料）—— 证明"调研 → 语料"能在同一
+进程内跑完：调研 seq 1 起、seq 908 就绪，PREPARE → SEARCH → VALIDATE → COMPLETED 全程
+走通，基线 0.8823（evaluator 已修好）。但**语料一次都没被读到**：唯一一轮 ideation 在
+seq 785 就启动了，0 次 `paper_*` 调用、6 条假设 0 条引用。约束四正是为此加的，加完之后
+这条路径尚未复跑验证。
 
 单独跑一次 Ideator turn 观察算子使用（真实模型、真实语料，161.7 秒）：
 

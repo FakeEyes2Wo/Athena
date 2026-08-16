@@ -161,20 +161,43 @@ ModuleNotFoundError: No module named
 建议在 `run` 启动时就检查：`shutil.which("uv")` 非空；`len(project_root) <= 127`
 或 `LongPathsEnabled = 1`。两项都是毫秒级，而失败的代价是几十分钟的模型时间。
 
-## 五、修完之后的完整跑测
+## 五、一个字都没改的候选也算实验
 
-第 8 次跑测走完 PREPARE → SEARCH → VALIDATE：
+评估修好之后（见 [Evaluator 契约](evaluator_contract_ch.md)），第 9 次跑测立刻照出一条
+此前被恒定 0.502 盖住的问题：
 
 ```
-hypotheses=5  experiments=3  sota=exp_baseline
-statuses: PROPOSED 3 · INCONCLUSIVE 1 · REFUTED 1
+baseline commit f2cc5597fbea  primary=0.882326
+80bf18bfa3c2    f2cc5597fbea   no   0.882326   REFUTED
+3342c5a12da2    f2cc5597fbea   no   0.882326   REFUTED
+0a86e624f87f    f2cc5597fbea   no   0.882326   REFUTED
+aa77d5008be3    f2cc5597fbea   no        -     FAILED
 ```
 
-4 条 Ideator 假设里 3 条带可核验的语料引用，其中一条（把 `cat_a` 的 LabelEncoder 换成
-target encoding）被实验证伪。VALIDATE 随后以第三节末尾那个同族问题告终。
+4 个候选的 commit **全部等于 baseline**，predictions artifact 逐字节相同，分数一模一样。
+看 Agent 日志就清楚了：它读了继承来的 `solution/train_model.py`、读了
+`predictions/metrics.json`、**原样重跑了一遍基线脚本**，然后提交——
+
+> "The hypothesis has produced a working solution with ensemble AUC of 0.8823"
+
+它压根没实现自己那条 one-hot encoding 改动，只是看见数字不错就交了。三条因此被判
+REFUTED：又一次"实验从没发生却给出自信判决"，只是这回坏的不是评估，是候选。
+
+`PlanRunner` 现在在打分之后、提交之前判这一刀：SEARCH 计划拿到空 diff 就返回
+`kind="no_change"`，错误文本直接说"你没有改动任何文件，因此重跑的是父实验"，走既有的
+同 Plan 反馈重试链。只约束 SEARCH——PREPARE 基线本来就没有"相对谁的改动"。
+
+## 六、修完之后的完整跑测
+
+第 9 次跑测首次走到 `COMPLETED`：PREPARE → SEARCH → VALIDATE → COMPLETED，基线
+ROC-AUC **0.8823**（此前恒定 0.502），调研在同一进程内建好语料。
+
+仍未验证的是本轮新加的两条（`no_change` 判据、语料就绪补一轮 ideation）在真机上的效果
+——它们有单元回归，但还没有一次完整跑测复核过。
 
 ## 相关文档
 
 - [结构化输出与工具调用](agent_structured_output_ch.md) — 同一轮跑测里的另外两个缺陷
-- [文献语料接入 loop](corpus_ideation_ch.md) — 第 8 次跑测里带引用的假设从哪来
+- [Evaluator 契约](evaluator_contract_ch.md) — 那个"安静地成功"的失效
+- [文献语料接入 loop](corpus_ideation_ch.md) — 带引用的假设从哪来
 - [Supervisor 设计基线](supervisor_design.md) — 三阶段与门禁的目标契约
