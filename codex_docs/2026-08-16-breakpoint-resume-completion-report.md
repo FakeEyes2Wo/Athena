@@ -10,6 +10,7 @@ Implemented on `main`, commits:
 - `de9e3c0` — `refactor(research): flatten general worker resume branch`.
 - `358cb90` — `fix(research): backward-compatible resume state and logic review fixes`.
 - `20aaa44` — `fix(research): ten-pass logic review and simplification`.
+- `ee5ded2` — `fix(research): restore debate/gated ideator paths and their tests`.
 
 ## Changes
 
@@ -46,14 +47,14 @@ Implemented on `main`, commits:
 
 - Hermetic unit batch (state / thread_runtime / supervisor / runtime_settings /
   breakpoint_resume): **63 passed**.
-- Additional runtime batch (ideators / survey / eval-handoff / task-seeding):
-  35 passed; the 2 remaining failures are pre-existing from the WIP baseline
-  (`DataProfile` was removed from `athena.research.data_models` but the debate
-  ideator still lazily imports it; the gated-batch test asserts the pre-WIP
-  `HypothesisBatch` shape), unrelated to these commits.
+- Runtime batch (ideators / survey / eval-handoff / task-seeding): **37 passed**
+  (the two pre-existing ideator failures were fixed in `ee5ded2`).
+- Idea-generation suite: **32 passed** (six pre-existing failures fixed).
+- Full `test/unit/research`: **319 passed**.
 - `python -m compileall` on all changed production modules: exit 0.
 - `scripts/check_code_style.py` on all changed production modules: exit 0
-  (32 pre-existing R3 docstring advisories, non-blocking by design).
+  (R3 docstring advisories remain non-blocking by design; R4 separator lines in
+  `idea_schemas.py` were removed).
 - All changed Python files formatted with in-process Black 26.5.1 using the
   repo's `[tool.black]` config (the venv's CLI Black hangs in this sandbox, so
   formatting was applied via `black.format_str`; output identical semantics).
@@ -65,6 +66,23 @@ Implemented on `main`, commits:
   fail with the sandbox's documented named-pipe boundary
   (`_winapi.CreateNamedPipe` PermissionError) before reaching changed code; the
   new paths are covered by hermetic tests instead.
+
+## Extra repair rounds 11–12 (commit `ee5ded2`)
+
+Round 11 — legacy bugs:
+- `agents/ideator/ideator.py` no longer imports deleted `DataProfile` /
+  `retrieval.types`; context items are dumped duck-typed (pydantic / dataclass).
+- `_run_debate_ideator_turn` uses a local `_DebateProfile`; debate mode runs again.
+- `IdeatorHypothesisBatch` regained the optional `eda_request` field; gated output
+  is normalized to `HypothesisBatch` so `run_ideator_turn` and dynamic EDA work.
+- Updated stale tests (`_ideation="gated"`, list-return fakes) to the real
+  contracts.
+
+Round 12 — expanded regression and cleanup:
+- Removed R4 ASCII separator lines from `idea_schemas.py`.
+- Fixed six pre-existing idea-generation test failures (missing
+  `survey_corpus_ref` in fakes + old list-return assertions).
+- Full `test/unit/research` green (319 passed).
 
 ## Ten-pass logic review and simplification (commit `20aaa44`)
 
