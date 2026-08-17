@@ -12,6 +12,7 @@ Implemented on `main`, commits:
 - `20aaa44` — `fix(research): ten-pass logic review and simplification`.
 - `ee5ded2` — `fix(research): restore debate/gated ideator paths and their tests`.
 - `41d4166` — `fix(research): protect .athena state from agent writes and tolerate unknown keys`.
+- `4e4a7ca` — `fix(gui): route prose to running supervisor instead of task understanding`.
 
 ## Changes
 
@@ -105,6 +106,17 @@ loading (`extra="forbid"`).
   `test/unit/research` + `test/unit/agent` + `test/unit/execution`: **498 passed**.
 - The corrupted `new_kaggle_test/.athena/state.json` itself was intentionally
   **not modified** (user requested protections only).
+
+## Running-session prose routing (commit `4e4a7ca`)
+
+While a run is active, typing ordinary text in the GUI went through
+`parse_intent` (task-understanding preview) instead of the supervisor. Fixed in
+`usePipeline.sendPrompt`: when `viewModel.status` is `running`/`paused`,
+non-slash prose is sent via `sendControl` (backend `message` → supervisor) and
+the supervisor reply is appended; idle/completed still uses the intent-preview
+flow for starting a new task. Also added the missing `viewModel.status`
+dependency to the `sendPrompt` callback (it was stale). Frontend tests:
+`usePipeline.test.tsx` 7 passed; `tsc --noEmit` clean.
 
 ## Ten-pass logic review and simplification (commit `20aaa44`)
 
