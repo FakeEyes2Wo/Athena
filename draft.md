@@ -219,3 +219,57 @@
     要求 medium/long。
   - 测试从 10 个扩到 11 个，覆盖该规则与 total/capped 语义。
 - 验证：`compileall` = 0，`pyflakes` = 0，`test_web_search.py` 11 passed。
+
+## 追加：DSH GUI 回到底部按钮
+- `dsh-ui/index.html`：新增 `.fab` 悬浮胶囊按钮（右下角、浅色 token、箭头图标 + “回到底部”），
+  位于 shell 内、固定在视口右下，`[hidden]` 时隐藏。
+- `dsh-ui/app.js`：监听 `.main` 滚动，距底部 < 48px 时自动隐藏按钮；点击平滑
+  `scrollTo({ top: scrollHeight })`；`refresh()` 后同步按钮显隐，避免内容变化后状态过期。
+- 验证：`node --check app.js` 通过；重启常驻服务（新 PID 167500），
+  `http://127.0.0.1:8787/` 返回页面包含 `to-bottom` 按钮。
+
+## 追加：修复 “unknown experiment id” 错误
+- 现象：SEARCH Plan 提交后报 `research failed: 'unknown experiment id: exp_hyp_...'`。
+- 根因：`startPlan()` 只保存 `state.json`，没有保存 `research_tree.json`；进程重启/状态恢复后
+  `state.plans` 存在但 `research_tree.json` 缺少对应的 `exp_${hypothesisId}`。
+  `Recovery.reconcile()` 又把“无 experiment 的 Plan”当作未终结 Plan 保留，最终
+  `settlePlan()` 调用 `completeExperiment` 时找不到实验记录而崩溃。
+- 修改：
+  - `supervisor.ts` `startPlan()`：新增 experiment 后立即 `tree.save(treePath)`；
+    并在“已有 Plan 但缺 experiment”时抛出明确错误，不再拖到 settle 才报未知 ID。
+  - `recovery.ts`：SEARCH Plan 如果没有对应 experiment 记录，视为孤儿 Plan 直接丢弃，
+    避免恢复后继续运行到崩溃。
+  - 更新 `recovery.test.ts` 对应两条用例。
+- 现场修复：
+  - `C:\Users\80163\Desktop\挑战杯_2026\new_kaggle_test\.athena` 中
+    `state.json` 有 `hyp_088d74e0c1e4` Plan，`research_tree.json` 无对应 experiment。
+  - 用一次性脚本从 `context_ref` + `best_ref` 重建 `exp_hyp_088d74e0c1e4`：
+    metric 7800.4667 > baseline 7784.6667 → WIN，标记 SUPPORTED 并设为新 SOTA；
+    删除孤儿 Plan，state 恢复 RUNNING。
+  - 验证：`ResearchTree.load` / `ResearchState.load` 均通过；当前 `new_kaggle_test`
+    可继续运行。
+- 验证：`tsc -p packages/athena-research` 通过；Recovery 行为用 Node 冒烟验证
+  （缺 experiment 丢弃、有 RUNNING experiment 保留）。
+
+## 追加：Prompt 鼓励对长输出做 grep 式定向搜索
+- 背景：Agent 跑 `shell_command` 遇到 OpenSpiel 等超长错误/可用列表时，不应整段阅读。
+- 修改：
+  - `src/athena/execution/runtime.py`：`shell_command` 工具 description 增加
+    “长输出先管道搜索”的指引，示例 `grep` / `findstr` / `Select-String`。
+  - `athena_ts/packages/athena-research/src/shell.ts`：TS 版 `shell_command`
+    工具 description 同步增加同一指引。
+  - 多个 agent prompt 同步补充同一规则：
+    `general_agent.md`、`plan_agent.md`、`prepare_agent.md`、`evaluator_agent.md`、
+    `code_agent.md`、`data_agent.md`。
+- 验证：`python -m py_compile src/athena/execution/runtime.py` 通过，
+  `python -m pyflakes src/athena/execution/runtime.py` 通过；
+  `tsc -p packages/athena-research` 通过。
+
+## 追加：清理仓库临时文件
+- 删除根目录临时脚本 `.inspect_loop.py`。
+- 递归清理 `__pycache__`、`.pytest_cache`、`.mypy_cache`、`.ruff_cache`、
+  `.hypothesis`、`.tox` 等缓存目录（共 4940 个）。
+- 清理 `*.tmp` / `*.bak` / `*.orig` / `*.rej` / `*.pyc` / `*.pyo` / `~` 结尾等
+  临时文件（5 个）。
+- 剩余 1 个无法删除：`.worktrees/supervisor-streaming-output/.pytest_cache`
+  （OS 拒绝访问，可能由外部权限/占用导致），不影响主仓库。

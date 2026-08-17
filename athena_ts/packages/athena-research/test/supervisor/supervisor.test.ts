@@ -154,3 +154,107 @@ describe("FixedFlowSupervisor", () => {
     expect(Object.keys(state.plans)).toEqual([])
   })
 })
+
+function coreSupervisor(
+  dir: string,
+  opts: { autoValidate?: boolean; workers?: Partial<SupervisorWorkers> } = {}
+) {
+  const store = new LocalArtifactStore(join(dir, "artifacts"))
+  const tree = baselineTree(dir)
+  const state = new ResearchState({
+    status: "RUNNING",
+    phase: "SEARCH",
+    search_limit: 10,
+    concurrency: 2,
+  })
+  const workers: SupervisorWorkers = {
+    publish: async () => {},
+    runPreparePhase: async () => {
+      throw new Error("not used")
+    },
+    runValidationPhase: async (_commit, metric) =>
+      ValidationResultSchema.parse({
+        result_id: "vr_1",
+        status: "COMPLETED",
+        test_score: metric,
+        final_test_score: metric,
+      }),
+    runIdeatorTurn: async () => [],
+    runPlanAgentTurn: async () => PlanDecisionSchema.parse({ decision: "continue", reason: "keep going" }),
+    runPlanTurn: async () => {
+      throw new Error("not used")
+    },
+    ...opts.workers,
+  }
+  const supervisor = new FixedFlowSupervisor({
+    projectRoot: dir,
+    state,
+    tree,
+    store,
+    git: fakeGit(join(dir, "worktrees")),
+    evaluatorRef: REF,
+    workers,
+    autoValidate: opts.autoValidate ?? false,
+  })
+  return { supervisor, store, state, tree }
+}
+
+describe("FixedFlowSupervisor core actions", () => {
+  it("persists structured task understanding through the single writer", async () => {
+    const dir = tmpDir()
+    const { supervisor, state } = coreSupervisor(dir)
+    const understanding = { title: "titanic", task_type: "classification", primary_metric: "accuracy" }
+
+    const result = await supervisor.recordTaskUnderstanding(understanding)
+
+    expect(result).toEqual({ recorded: true, task_understanding: understanding })
+    expect(state.task_understanding).toEqual(understanding)
+    const persisted = ResearchState.load(join(dir, ".athena", "state.json"))
+    expect(persisted.task_understanding).toEqual(understanding)
+  })
+
+  it("freezes guidance into later Plan inputs", async () => {
+    const dir = tmpDir()
+    const { supervisor } = coreSupervisor(dir)
+    const hypothesisId = supervisor.tree.addHypothesis(
+      HypothesisSchema.parse({
+        statement: "improve feature",
+        intervention: "add feature",
+        expected_effect: "raise metric",
+        parent_id: "exp_baseline",
+      })
+    )
+
+    await supervisor.recordGuidance("next hint", "next")
+    await supervisor.recordGuidance("always apply this", "persistent")
+    await supervisor.startPlan(hypothesisId)
+
+    const planInput = await supervisor.planInput(hypothesisId)
+    expect(planInput.human_context).toBe("always apply this\nnext hint")
+  })
+
+  it("configures search budget and snapshots hypotheses", async () => {
+    const dir = tmpDir()
+    const { supervisor, state } = coreSupervisor(dir)
+
+    const result = await supervisor.configureSearch({ search_limit: 7, concurrency: 3 })
+    expect(result).toEqual({ search_limit: 7, concurrency: 3 })
+    expect(state.search_limit).toBe(7)
+    expect(state.concurrency).toBe(3)
+
+    const snapshot = await supervisor.readHypotheses()
+    expect(snapshot).toMatchObject({ sota: "exp_baseline", attempts: 0, search_limit: 7 })
+  })
+
+  it("runs VALIDATE interactively and persists the final report ref", async () => {
+    const dir = tmpDir()
+    const { supervisor, state } = coreSupervisor(dir)
+
+    await supervisor.setPhaseDecision("VALIDATE")
+
+    expect(state.phase).toBe("COMPLETED")
+    expect(state.status).toBe("COMPLETED")
+    expect(state.validation).not.toBeNull()
+    expect(typeof state.validation?.["report_ref"]).toBe("string")
+  })
+})

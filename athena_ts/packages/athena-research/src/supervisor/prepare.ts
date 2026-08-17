@@ -4,7 +4,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname, join, relative } from "node:path"
 import { z } from "zod"
 import {
   ArtifactRef,
@@ -21,6 +21,7 @@ import type { Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
 import { PlanRunner, type PlanTurnResult } from "./experiment.js"
 import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } from "./plans.js"
+import type { ResearchState } from "./state.js"
 
 export const PREPARE_PLAN_ID = "prepare"
 
@@ -34,6 +35,23 @@ export const PrepareResultSchema = z.strictObject({
   report_ref: ArtifactRef,
 })
 export type PrepareResult = z.infer<typeof PrepareResultSchema>
+
+/**
+ * 建立 PREPARE 的稳定实验目录（对齐 Python PhaseRunner）：
+ * 初始化 `.athena/repo` → 创建固定 `workspaces/eda` worktree → 立即持久化 eda_dir。
+ */
+export async function createPrepareWorkspace(opts: {
+  git: GitWorkspace
+  projectRoot: string
+  state: ResearchState
+  statePath: string
+}): Promise<GitWorkBranch> {
+  const baseCommit = await opts.git.init(undefined, ".gitignore", ".venv/\n")
+  const workspace = await opts.git.create(baseCommit, "athena/prepare", { name: "eda" })
+  opts.state.eda_dir = relative(opts.projectRoot, workspace.path) || "."
+  opts.state.save(opts.statePath)
+  return workspace
+}
 
 /** 冻结 evaluator 目录（metric.json 的 eval_script）为 bundle，返回 bundle JSON ref。 */
 export async function freezeEvaluator(opts: {

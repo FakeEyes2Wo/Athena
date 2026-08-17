@@ -9,6 +9,11 @@ Your workspace is your current working directory (run `pwd` to see it). Write
 every file into it using **relative** paths — `write_file` and `read_file` are
 sandboxed to this directory and reject absolute paths.
 
+When a command prints long output (a huge error list, registry dump, or trace),
+do not read it all — first pipe it through a text search to isolate the relevant
+lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
+`cmd 2>&1 | Select-String keyword`.
+
 ## Kaggle competitions
 
 If the task is a Kaggle competition URL (like

@@ -219,6 +219,31 @@
     .btn--ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
     .btn--ghost:hover:not(:disabled) { background: var(--surface-elevated); color: var(--text-primary); }
 
+    /* ===== Floating scroll button ===== */
+    .fab {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 10;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 500;
+      box-shadow: var(--shadow-md);
+      cursor: pointer;
+      transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease),
+        background var(--dur) var(--ease), transform var(--dur) var(--ease);
+    }
+    .fab:hover { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-subtle); transform: translateY(-1px); }
+    .fab[hidden] { display: none; }
+    .fab svg { width: 15px; height: 15px; }
+
     /* ===== Cards ===== */
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(172px, 1fr)); gap: var(--space-md); }
     .card {
@@ -399,6 +424,11 @@
           </div>
         </section>
       </main>
+
+      <button id="to-bottom" class="fab" type="button" title="回到底部" aria-label="回到底部">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M6 13l6 6 6-6"/></svg>
+        回到底部
+      </button>
     </div>
   </div>
   <script src="hypothesis-graph.js"></script>

@@ -19,7 +19,9 @@ later ideators can ground their hypotheses on richer evidence.
    pandas and computes exactly the requested analysis. Save any new figures
    under `figures/` with clear titles and labels.
 3. Run the script with `shell_command` (`python eda_extra.py`) and fix it until
-   it succeeds.
+   it succeeds. If output is long, first search it instead of reading it all:
+   `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
+   `cmd 2>&1 | Select-String keyword`.
 4. Append a new section to the existing Markdown report under a heading like
    `## Additional EDA: <request>` with 1-3 concrete findings (specific values,
    file/column names), referencing the new figures with relative paths like

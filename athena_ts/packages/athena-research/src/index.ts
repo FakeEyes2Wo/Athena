@@ -2,6 +2,7 @@
 
 export * from "./contracts.js"
 export * from "./supervisor/policy.js"
+export * from "./supervisor/ranker.js"
 export * from "./supervisor/plans.js"
 export { ResearchState } from "./supervisor/state.js"
 export { ScheduleKind, ScheduleAction, Scheduler, countSearchAttempts } from "./supervisor/scheduler.js"
@@ -31,8 +32,9 @@ export {
 } from "./supervisor/events.js"
 export type { OutputEvent, StateEvent } from "./supervisor/events.js"
 export { ValidationService, generalizationGap, generalizationWarning } from "./validation.js"
+export { buildFinalReport } from "./report.js"
 export { runValidationPlan } from "./supervisor/validation.js"
-export { PrepareResultSchema, freezeEvaluator, runEvaluatorPlan, runPreparePlan } from "./supervisor/prepare.js"
+export { PrepareResultSchema, createPrepareWorkspace, freezeEvaluator, runEvaluatorPlan, runPreparePlan } from "./supervisor/prepare.js"
 export type { PrepareResult, AgentTurn } from "./supervisor/prepare.js"
 export { FixedFlowSupervisor } from "./supervisor/supervisor.js"
 export type { CompletedTurn, SupervisorWorkers, PlanTurn, PlanAgentTurn, IdeatorTurn, PreparePhase, ValidationPhase } from "./supervisor/supervisor.js"

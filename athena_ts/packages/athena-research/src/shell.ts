@@ -33,7 +33,11 @@ export function makeShellTool(runtime: ExecutionRuntime, context: ExecutionConte
     },
     {
       name: "shell_command",
-      description: "Run a shell command (argv-style, split on whitespace) in the project workspace.",
+      description:
+        "Run a shell command (argv-style, split on whitespace) in the project workspace. " +
+        "When output is long, pipe it through a text search first, e.g. " +
+        "`cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or " +
+        "`cmd 2>&1 | Select-String keyword`.",
       inputSchema: {
         type: "object",
         properties: { command: { type: "string", description: "The command to run." } },

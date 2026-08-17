@@ -31,3 +31,8 @@ from PREPARE; do NOT write `labels.csv` or compute a score.
 
 ## Tools
 You have: `read_file`, `write_file`, `shell_command`.
+
+When a command prints long output (a huge error list, registry dump, or trace),
+do not read it all — first pipe it through a text search, e.g.
+`cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
+`cmd 2>&1 | Select-String keyword`.

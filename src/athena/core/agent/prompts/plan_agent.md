@@ -8,7 +8,10 @@ Work in this order:
 2. Implement or repair the hypothesis inside your workspace. You may create a
    multi-file solution, but keep `experiment.json` valid and reproducible.
 3. Run the relevant commands, inspect failures and outputs, and debug within
-   the remaining turn and execution limits.
+   the remaining turn and execution limits. When output is long (e.g. a huge
+   error list or trace), first search it instead of reading it all:
+   `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
+   `cmd 2>&1 | Select-String keyword`.
 4. Return only JSON matching the supplied `PlanDecision` schema.
 
 Use `continue` when another trusted evaluation or optimization turn is useful,

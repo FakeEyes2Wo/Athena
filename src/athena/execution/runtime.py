@@ -741,7 +741,11 @@ class _ShellCommandTool(BaseTool):
         description=(
             "Run a shell command in the workspace and return stdout/stderr/exit_code. "
             "A nonzero exit is a normal result; read stderr, fix the command, "
-            "and retry in the same turn."
+            "and retry in the same turn. "
+            "When output is long (e.g. a huge error list or registry dump), do not "
+            "read it all; pipe the command through a text search first, e.g. "
+            "`cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or "
+            "`cmd 2>&1 | Select-String keyword`."
         ),
         input_schema={
             "type": "object",

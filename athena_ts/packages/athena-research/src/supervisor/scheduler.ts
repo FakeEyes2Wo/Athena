@@ -4,7 +4,8 @@
 
 import type { Hypothesis, ResearchTree } from "@athena/core"
 
-import { EloPolicy, queueOrder, type HypothesisPolicy, type Outcome } from "./policy.js"
+import { EloPolicy, type HypothesisPolicy, type Outcome } from "./policy.js"
+import { Selector } from "./ranker.js"
 import type { ResearchState } from "./state.js"
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])
@@ -63,9 +64,11 @@ export interface NextActionsOptions {
 /** 按固定确定性顺序填充 SEARCH 并发槽位。 */
 export class Scheduler {
   private policy: HypothesisPolicy
+  private selector: Selector
 
-  constructor(policy: HypothesisPolicy | null = null) {
+  constructor(policy: HypothesisPolicy | null = null, selector: Selector | null = null) {
     this.policy = policy ?? new EloPolicy()
+    this.selector = selector ?? new Selector(this.policy)
   }
 
   seed(parent: Hypothesis | null): number {
@@ -148,11 +151,9 @@ export class Scheduler {
         hypothesis.id !== humanNext &&
         tree.experimentForHypothesis(hypothesis.id) === null
     )
-    return candidates.sort((a, b) => {
-      const [pa, oa] = queueOrder(this.policy.priority(a, tree), a.order)
-      const [pb, ob] = queueOrder(this.policy.priority(b, tree), b.order)
-      if (pa !== pb) return pa - pb
-      return oa - ob
-    })
+    // 去重只作用于本轮选择：同一轮不并行启动近似重复的新假设，但所有假设
+    // 仍保留在 graph（PROPOSED）中，后续轮次仍可重新排名并选中。
+    const distinct = this.selector.deduplicate(candidates, [])
+    return this.selector.rank(tree, distinct)
   }
 }

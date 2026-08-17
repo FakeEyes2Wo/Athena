@@ -16,7 +16,7 @@ export const FiniteFloat = z.custom<number>(
 )
 export type FiniteFloat = z.infer<typeof FiniteFloat>
 
-export const HypothesisStatus = ["PROPOSED", "SUPPORTED", "REFUTED", "REJECTED"] as const
+export const HypothesisStatus = ["PROPOSED", "SUPPORTED", "REFUTED", "INCONCLUSIVE", "REJECTED"] as const
 export type HypothesisStatus = (typeof HypothesisStatus)[number]
 
 /** 可通过实验验证或证伪的机器学习假设。 */
@@ -33,6 +33,7 @@ export const HypothesisSchema = z.object({
   order: z.number().int().min(0).nullable().default(null),
   patience: z.number().int().min(0).default(0),
   turn_limit: z.number().int().min(0).nullable().default(null),
+  cost: z.number().min(0).default(0.0),
   sources: z.array(z.string()).default([]),
 })
 export type Hypothesis = z.infer<typeof HypothesisSchema>

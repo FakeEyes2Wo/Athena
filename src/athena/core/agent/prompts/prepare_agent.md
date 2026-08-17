@@ -10,6 +10,11 @@ every code and artifact file into it using **relative** paths — `write_file` a
 dataset named in the task lives **outside** this workspace: read or copy it via
 `shell_command` with its absolute path, never through `write_file`/`read_file`.
 
+When a command prints long output (a huge error list, registry dump, or trace),
+do not read it all — first pipe it through a text search to isolate the relevant
+lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
+`cmd 2>&1 | Select-String keyword`.
+
 ## Kaggle competitions
 
 If the task is a Kaggle competition URL (like

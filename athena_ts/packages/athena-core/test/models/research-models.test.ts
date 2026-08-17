@@ -23,9 +23,22 @@ describe("domain models retain validation and serialization", () => {
     })
     const verdict = ComparisonVerdictSchema.parse({ winner: "candidate", p_value: 0.01 })
     expect(hypothesis.status).toBe("PROPOSED")
+    expect(hypothesis.cost).toBe(0)
     expect(plan.kind).toBe("search")
     expect(evaluation.primary).toBe(0.8)
     expect(verdict.winner).toBe("candidate")
+  })
+
+  it("hypothesis status matches the Python contract including INCONCLUSIVE", () => {
+    const hypothesis = HypothesisSchema.parse({
+      statement: "claim",
+      intervention: "change",
+      expected_effect: "improve",
+      status: "INCONCLUSIVE",
+      cost: 0.25,
+    })
+    expect(hypothesis.status).toBe("INCONCLUSIVE")
+    expect(hypothesis.cost).toBe(0.25)
   })
 
   it("evaluation protocol models live in research-data-models", () => {

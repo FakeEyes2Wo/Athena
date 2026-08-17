@@ -77,12 +77,13 @@ describe("Recovery", () => {
     expect(reconciled.status).toBe("RUNNING")
   })
 
-  it("active plan without final experiment is kept for resume", () => {
+  it("active plan without an experiment record is dropped as an orphan", () => {
     const reconciled = Recovery.reconcile(state(), tree(), {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
-    expect(reconciled).toEqual(state())
+    expect("h1" in reconciled.plans).toBe(false)
+    expect(reconciled.status).toBe("RUNNING")
   })
 
   it("missing context keeps plan and marks research waiting", () => {
@@ -103,7 +104,7 @@ describe("Recovery", () => {
     expect(reconciled.status).toBe("WAITING")
   })
 
-  it("proposed hypothesis without plan stays queued", () => {
+  it("proposed hypothesis without plan stays queued; orphan plan is dropped", () => {
     const t = new ResearchTree()
     t.addHypothesis(
       HypothesisSchema.parse({
@@ -117,7 +118,7 @@ describe("Recovery", () => {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
-    expect(reconciled.plans).toEqual(state().plans)
+    expect("h1" in reconciled.plans).toBe(false)
     expect(t.pendingHypotheses().length).toBeGreaterThan(0)
   })
 

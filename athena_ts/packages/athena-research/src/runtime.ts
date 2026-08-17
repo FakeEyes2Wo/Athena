@@ -20,7 +20,7 @@ import { PlanRunner } from "./supervisor/experiment.js"
 import { Scheduler } from "./supervisor/scheduler.js"
 import { ResearchState } from "./supervisor/state.js"
 import { FixedFlowSupervisor, type SupervisorWorkers } from "./supervisor/supervisor.js"
-import { runEvaluatorPlan, runPreparePlan, type AgentTurn } from "./supervisor/prepare.js"
+import { createPrepareWorkspace, runEvaluatorPlan, runPreparePlan, type AgentTurn } from "./supervisor/prepare.js"
 import { runValidationPlan } from "./supervisor/validation.js"
 import { WorkerRunner, HypothesisBatchOutputType, PlanDecisionOutputType } from "./worker.js"
 import { makeShellTool } from "./shell.js"
@@ -193,6 +193,13 @@ export class ResearchRuntime {
       runPreparePhase: async () => {
         if (!rt.worker) throw new Error("PREPARE requires a registered Agent provider")
         const agent = rt.makeAgentTurn()
+        const workspace = await createPrepareWorkspace({
+          git: rt.git,
+          projectRoot: rt.root,
+          state: rt.state,
+          statePath: rt.statePath,
+        })
+
         const evaluatorDir = join(rt.workspacesRoot, "evaluator")
         mkdirSync(evaluatorDir, { recursive: true })
         const evaluatorRef = await runEvaluatorPlan({
@@ -203,8 +210,6 @@ export class ResearchRuntime {
           task: rt.taskText,
           maxTurns: 20,
         })
-        const baseCommit = await rt.git.init(undefined, ".gitignore", ".venv/\n")
-        const workspace = await rt.git.create(baseCommit, "athena/prepare")
         const treeRef = await rt.store.putText(JSON.stringify(rt.tree.toDict()))
         return runPreparePlan({
           agent,

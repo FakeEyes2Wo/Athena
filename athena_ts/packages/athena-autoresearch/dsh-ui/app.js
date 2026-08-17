@@ -49,6 +49,7 @@ async function refresh() {
     $("console-pane").textContent = (data.console_lines ?? []).join("\n") || "（暂无输出）"
     $("console-note").textContent = `自动刷新 · ${new Date().toLocaleTimeString()}`
     setTopbarStatus(true, data.status)
+    syncToBottom()
   } catch {
     setTopbarStatus(false)
   }
@@ -65,6 +66,21 @@ for (const button of document.querySelectorAll(".rail button[data-target]")) {
     }
   })
 }
+
+// Floating "回到底部" button for the main scroll container.
+const mainPane = document.querySelector(".main")
+const toBottom = $("to-bottom")
+const nearBottom = () => mainPane.scrollHeight - mainPane.scrollTop - mainPane.clientHeight < 48
+
+function syncToBottom() {
+  toBottom.hidden = nearBottom()
+}
+
+mainPane.addEventListener("scroll", syncToBottom, { passive: true })
+toBottom.addEventListener("click", () => {
+  mainPane.scrollTo({ top: mainPane.scrollHeight, behavior: "smooth" })
+})
+syncToBottom()
 
 $("run").addEventListener("click", async () => {
   $("run").disabled = true

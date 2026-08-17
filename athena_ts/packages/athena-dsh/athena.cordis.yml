@@ -29,6 +29,10 @@
         projectRoot: '{{cwd}}'
         searchLimit: 10
         concurrency: 4
+        ideatorCount: 3
+        hypothesesPerIdeator: 2
+        manualMode: false
+        autoValidate: false
         direction: maximize
         tolerance: 0.0
     - id: autoresearch-services

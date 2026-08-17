@@ -22,7 +22,7 @@ function isSettled(
 ): boolean {
   if (plan.kind === "SEARCH") {
     const experimentId = tree.experimentForHypothesis(planId)
-    if (experimentId === null) return false
+    if (experimentId === null) return true
     return TERMINAL.has(tree.getExperiment(experimentId).status)
   }
   if (plan.kind === "PREPARE") return hasFinalBaselineValue
