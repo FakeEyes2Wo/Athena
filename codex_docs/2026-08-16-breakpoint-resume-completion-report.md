@@ -11,6 +11,7 @@ Implemented on `main`, commits:
 - `358cb90` — `fix(research): backward-compatible resume state and logic review fixes`.
 - `20aaa44` — `fix(research): ten-pass logic review and simplification`.
 - `ee5ded2` — `fix(research): restore debate/gated ideator paths and their tests`.
+- `41d4166` — `fix(research): protect .athena state from agent writes and tolerate unknown keys`.
 
 ## Changes
 
@@ -83,6 +84,27 @@ Round 12 — expanded regression and cleanup:
 - Fixed six pre-existing idea-generation test failures (missing
   `survey_corpus_ref` in fakes + old list-return assertions).
 - Full `test/unit/research` green (319 passed).
+
+## Framework-owned state protections A/B/C (commit `41d4166`)
+
+Cause found in `new_kaggle_test`: a General Agent wrote a self-invented `sota`
+key into the default project's `.athena/state.json`, breaking `ResearchState`
+loading (`extra="forbid"`).
+
+- **A — write guard**: `write_file` rejects any path under `.athena/**`;
+  `shell_command` rejects `.athena` write-style commands and workdirs inside
+  `.athena`, while read-only access stays allowed.
+- **B — tolerant load**: `ResearchState.load()` logs a warning, backs the
+  original up to `state.json.corrupt`, strips unknown top-level keys, and
+  continues; invalid known fields still raise ValidationError.
+- **C — prompt constraint**: `supervisor/general/prepare/evaluator` prompts now
+  state that `.athena/` is framework-owned, SOTA/state are recorded by the
+  runtime, and workers must never write framework state.
+- Tests: added for write denial, shell denial/read allowance, unknown-key
+  stripping/backup, invalid-field still failing, and prompt ownership text.
+  `test/unit/research` + `test/unit/agent` + `test/unit/execution`: **498 passed**.
+- The corrupted `new_kaggle_test/.athena/state.json` itself was intentionally
+  **not modified** (user requested protections only).
 
 ## Ten-pass logic review and simplification (commit `20aaa44`)
 
