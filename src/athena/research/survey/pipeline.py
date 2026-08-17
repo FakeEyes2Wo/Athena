@@ -35,7 +35,11 @@ from athena.research.paper_markdown.schemas import (
     QualityStatus,
     VisualPolicy,
 )
-from athena.research.paper_rag.index import build_corpus_index
+from athena.research.paper_rag.index import (
+    BIBLIOGRAPHY_KIND,
+    build_corpus_index,
+    split_sentences,
+)
 from athena.research.paper_scout.agent import PaperScoutAgent
 from athena.research.paper_scout.schemas import (
     RETAIN_THRESHOLD,
@@ -66,6 +70,22 @@ if TYPE_CHECKING:
     from athena.research.survey.wiring import SurveyStack
 
 INDEXABLE_QUALITY: tuple[QualityStatus, ...] = ("pass", "pass_with_notes")
+
+SHRED_MIN_SENTENCE_CHARS = 40
+"""平均句长低于这个值就判为提取碎片而非正文，理由与取值依据见 ``_shredded``。
+
+三轮真机 44 篇回放：合法论文的最低平均句长 69 字符，唯一的坏例子 30 字符，40 落在两者
+之间。
+"""
+
+SHRED_MIN_SENTENCES = 200
+"""少于这么多句就不做碎片判定。
+
+短论文的平均句长本来就不稳（一篇只有几十句的会议短文，一个公式密集的段落就能把均值
+拉下来），而它们再碎也贵不到哪里去——这道闸门是为代价加的，不该去动那些根本不贵的。
+回放里有两篇分别只有 136 和 141 句，正是被这条线放过去的；坏例子有 35151 句，离它两个
+数量级。
+"""
 
 DEFAULT_CONVERSION_CONCURRENCY = 4
 """并发转换的篇数。
@@ -238,6 +258,13 @@ class PaperOutcome(BaseModel):
         default=False,
         description="Conversion succeeded but produced implausibly little text.",
     )
+    shredded: bool = Field(
+        default=False,
+        description=(
+            "Conversion produced fragments rather than sentences, so the paper was "
+            "kept out of the corpus. The mirror image of suspect_empty."
+        ),
+    )
     chunks: int = Field(default=0, ge=0)
     visuals: int = Field(default=0, ge=0)
     visuals_interpreted: int = Field(default=0, ge=0)
@@ -338,6 +365,14 @@ class SurveyReport(BaseModel):
     )
     facet_coverage: float = Field(
         default=0.0, ge=0.0, le=1.0, description="Fraction of facets delivered."
+    )
+    shredded_papers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Papers refused by the shred gate, one line each with the numbers behind "
+            "the refusal. A list rather than a count: this gate discards a paper the "
+            "grader wanted, so every refusal has to be reviewable."
+        ),
     )
     scout_dropped_no_source: int = Field(
         default=0,
@@ -958,7 +993,7 @@ class SurveyPipeline:
         """按质量门禁筛选后建语料索引。"""
         if not self.request.build_index:
             return
-        selected = [item for item in papers if self._indexable(item)]
+        selected = [item for item in papers if await self._indexable(item)]
         chosen = {item.paper_id or "" for item in selected}
         for content in papers:
             raw = content.paper_id or ""
@@ -1012,26 +1047,84 @@ class SurveyPipeline:
         self.report.reference_edges = sum(len(v) for v in translated.values())
         return translated
 
-    def _indexable(self, content: PaperContent) -> bool:
-        """语料门禁：只有 ``suspect_empty`` 一票否决，``degraded`` 默认放行。
+    async def _indexable(self, content: PaperContent) -> bool:
+        """语料门禁：两条存在性判定一票否决，``degraded`` 默认放行。
 
         ``degraded`` 是存在性判定——出现**一条**内容缺失诊断就否决整篇，与论文规模
         无关。实测一批真实论文里，85 个 chunk 的论文因 1 条诊断出局，5 篇被挡的论文
         逐条核对后 4 篇是误判、1 篇只是参考文献未解析而正文完整。而 ``paper_rag`` 本
         身是 chunk 级检索：坏掉的公式或表格 chunk 不会被捞出来，局部缺陷不该否决整篇。
 
-        ``suspect_empty`` 仍然一票否决，因为它表达的是另一件事——正文根本没提取出来。
-        空壳既提供不了证据，又会让语料看起来已经覆盖这篇论文。
+        一票否决的两条都不是"内容好不好"，而是"提取到底成没成功"：
+
+        - ``suspect_empty`` —— 正文根本没提取出来。空壳既提供不了证据，又会让语料
+          看起来已经覆盖这篇论文。
+        - ``shredded``（见 ``_shredded``）—— 提取出来的不是正文而是碎片。
 
         ``strict_quality`` 保留严格口径，供需要"只要干净语料"的评测使用。
         """
         raw = content.paper_id or ""
         key = self._conversion_keys.get(raw, raw)
-        if self._outcome_for(key).suspect_empty:
+        outcome = self._outcome_for(key)
+        if outcome.suspect_empty:
+            return False
+        if await self._shredded(content, outcome):
             return False
         if not self.request.strict_quality:
             return True
         return content.quality_status in INDEXABLE_QUALITY
+
+    async def _shredded(self, content: PaperContent, outcome: PaperOutcome) -> bool:
+        """正文是否被切成了碎片而不是句子；是则拒绝入语料并登记原因。
+
+        **这道闸门是按代价加的，判据却只能是内容。** 2026-08-17 真机一轮里
+        ``arxiv:1106.1813``（SMOTE）的 TeX 包缺 ``\\begin{document}``，入口推断失败，
+        转换器把整包连成 774904 字符、140 chunk、**35151 句**——一篇占掉整个语料的
+        66%、整次调研墙钟的 47%（2147 秒）。此前的门禁放行了它：``rag_chunk_oversized``
+        属于"记录但不拦"，而那套判据问的是内容对不对，**不问代价**。
+
+        但"太贵所以不要"不是个能写死的判据——长综述本来就该贵。真正的判据是那 35151
+        条根本不是句子。把三轮真机的 44 篇 ``PaperContent`` 逐篇回放本闸门：
+
+        ==========================  ========  ==========  ==========
+        论文                        句数      平均句长    判定
+        ==========================  ========  ==========  ==========
+        ``arxiv:1106.1813``         35151     **30**      拦下
+        ``arxiv:2512.05469``        957       69          放行（最接近门限）
+        ``arxiv:2506.16791``        3039      92          放行
+        ``doi:10.1038/s41598-...``  1077      99          放行
+        ==========================  ========  ==========  ==========
+
+        平均句长比"每 chunk 句数"更可靠：密度随体裁变化（综述天然长），而 30 个字符的
+        "句子"在任何体裁里都不是句子，是 2002 年双栏排版被拆出来的断行。
+
+        阈值取 40，落在 30 与 69 之间：比坏样本高 33%，比最接近的合法样本低 42%。
+        **样本很薄**——44 篇、同一条 query、只有一个坏例子——所以宁可放过也不误杀，
+        并且把每一次拒绝都记进 ``shredded_papers`` 让它可被复核。
+
+        走 ``load_retrieval_units`` + ``split_sentences``、并同样跳过参考文献单元，
+        与 ``build_corpus_index`` 逐字一致：闸门量的必须是建索引时**真会产生**的那些
+        句子，两处定义一旦漂移，闸门就在量别的东西。代价是 chunk 正文被多读一遍，
+        那是本地磁盘读，相对它要挡下的编码开销可以忽略。
+        """
+        units = await content.load_retrieval_units(self.stack.artifacts)
+        lengths = [
+            end - start
+            for unit in units
+            if unit.kind != BIBLIOGRAPHY_KIND
+            for start, end in split_sentences(unit.text)
+        ]
+        if len(lengths) < SHRED_MIN_SENTENCES:
+            return False
+        mean_length = sum(lengths) / len(lengths)
+        if mean_length >= SHRED_MIN_SENTENCE_CHARS:
+            return False
+        outcome.shredded = True
+        self.report.shredded_papers.append(
+            f"{outcome.paper_key}: {len(lengths)} 句，平均 {mean_length:.0f} 字符"
+            f"（低于 {SHRED_MIN_SENTENCE_CHARS}），判为提取碎片，未入语料"
+        )
+        return True
 
     def _outcome_for(self, paper_key: str) -> PaperOutcome:
         """取出或新建一篇论文的登记项。

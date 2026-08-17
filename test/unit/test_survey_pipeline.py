@@ -36,7 +36,13 @@ from athena.research.paper_source.schemas import (
     PaperSourceStats,
 )
 from athena.research.survey.library import PaperLibrary
-from athena.research.survey.pipeline import SurveyPipeline, SurveyRequest
+from athena.research.paper_rag.index import split_sentences
+from athena.research.survey.pipeline import (
+    SHRED_MIN_SENTENCES,
+    PaperOutcome,
+    SurveyPipeline,
+    SurveyRequest,
+)
 from athena.research.survey.wiring import SurveyStack
 from athena.core.artifact_store import LocalArtifactStore
 
@@ -72,10 +78,14 @@ async def make_content(
     quality: str = "pass",
     chunks: int = 2,
     empty: bool = False,
+    shredded: bool = False,
+    shred_repeat: int = 40,
 ) -> PaperContent:
     """构造一篇最小但字段合法的 PaperContent。
 
     ``empty`` 复现 PDF-wrapper 投稿：markdown 只有一行，其余字段一切正常。
+    ``shredded`` 复现另一头——``arxiv:1106.1813`` 那种入口推断失败的 TeX 包：句子数量
+    极多而每句只是断行碎片。两者都是"转换报成功但提取没成功"。
     """
     body = f"# {paper_id}" if empty else f"# {paper_id}\n\n" + "body text. " * 400
     blank = await store.put_text(body)
@@ -83,7 +93,11 @@ async def make_content(
         PaperChunk(
             chunk_id=f"c{position}",
             kind="paragraph",
-            content_ref=await store.put_text(f"body {position} of {paper_id}"),
+            content_ref=await store.put_text(
+                "Chawla. Bowyer. Hall. JAIR. 2002. pp 321. " * shred_repeat
+                if shredded
+                else f"body {position} of {paper_id}"
+            ),
             heading_path=["Method"],
             char_start=0,
             char_end=10,
@@ -239,6 +253,7 @@ class FakeProcessor:
 
     outcomes: dict[str, object] = {}
     empty: set = set()
+    shredded: set = set()
     delay: float = 0.0
 
     def __init__(self, artifacts, interpreter, refiner, **kwargs) -> None:
@@ -254,7 +269,9 @@ class FakeProcessor:
             self.artifacts,
             request.paper_id,
             quality=outcome,
+            chunks=40 if request.paper_id in type(self).shredded else 2,
             empty=request.paper_id in type(self).empty,
+            shredded=request.paper_id in type(self).shredded,
         )
 
 
@@ -280,6 +297,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         FakeFetcher.enriched = {}
         FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
         FakeProcessor.empty = set()
+        FakeProcessor.shredded = set()
         FakeProcessor.delay = 0.0
         FakeScoutAgent.source_request = PaperSourceRequest(
             papers=[
@@ -485,6 +503,69 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, merged.relevance)
         self.assertTrue(merged.indexed)
         self.assertNotIn(enriched, [item.paper_key for item in report.papers])
+
+    async def test_shredded_extraction_is_refused_and_reported(self) -> None:
+        """转换报成功但产出的是碎片而不是句子 → 挡在语料外，并留下可复核的理由。
+
+        真机命中：``arxiv:1106.1813``（SMOTE）的 TeX 包缺 ``\begin{document}``，入口
+        推断失败，转换器把整包连成 774904 字符、35151 句、平均每句 30 字符。它一篇占
+        掉整个语料 66%、整次调研墙钟的 47%（2147 秒），而当时的门禁放行了它——
+        ``rag_chunk_oversized`` 属于"记录但不拦"，那套判据问内容对不对，不问代价。
+        """
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.shredded = {PAPERS[1][0]}
+
+        report = await self.run_pipeline()
+
+        shredded = next(i for i in report.papers if i.paper_key == PAPERS[1][0])
+        healthy = next(i for i in report.papers if i.paper_key == PAPERS[0][0])
+        self.assertTrue(shredded.shredded)
+        self.assertEqual("converted", shredded.conversion_status)
+        self.assertFalse(shredded.indexed)
+        self.assertFalse(healthy.shredded)
+        self.assertTrue(healthy.indexed)
+        self.assertEqual([1], [len(batch) for batch in self.indexed])
+
+    async def test_a_refusal_carries_the_numbers_behind_it(self) -> None:
+        """这道闸门会丢掉打分器要的论文，所以每次拒绝都必须能被复核，不能只是个计数。"""
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.shredded = {PAPERS[1][0]}
+
+        report = await self.run_pipeline()
+
+        self.assertEqual(1, len(report.shredded_papers))
+        line = report.shredded_papers[0]
+        self.assertIn(PAPERS[1][0], line)
+        self.assertIn("句", line)
+        self.assertIn("字符", line)
+
+    async def test_normal_papers_are_never_touched_by_the_shred_gate(self) -> None:
+        """正常论文一篇都不能被误伤——真机 44 篇回放里只有 1 篇触发。"""
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "degraded"}
+
+        report = await self.run_pipeline()
+
+        self.assertEqual([], report.shredded_papers)
+        self.assertTrue(all(not item.shredded for item in report.papers))
+
+    async def test_short_papers_are_exempt_from_the_shred_judgement(self) -> None:
+        """句数太少时均值不稳，而它们再碎也贵不到哪里去；闸门是为代价加的。"""
+        content = await make_content(
+            self.store, "arxiv:0001.0001", chunks=1, shredded=True, shred_repeat=10
+        )
+        outcome = PaperOutcome(
+            paper_key="arxiv:0001.0001",
+            fetch_status="fetched",
+            conversion_status="converted",
+        )
+        pipeline = SurveyPipeline(self.stack, SurveyRequest(query="q"))
+
+        units = await content.load_retrieval_units(self.store)
+        total = sum(len(split_sentences(unit.text)) for unit in units)
+        self.assertLess(total, SHRED_MIN_SENTENCES)
+        self.assertFalse(await pipeline._shredded(content, outcome))
+        self.assertEqual([], pipeline.report.shredded_papers)
+        self.assertFalse(outcome.shredded)
 
     async def test_silent_content_loss_is_flagged_and_never_indexed(self) -> None:
         """转换报成功但正文近乎为空 → 必须被识别出来并挡在语料外。
@@ -824,6 +905,7 @@ class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
         FakeFetcher.enriched = {}
         FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
         FakeProcessor.empty = set()
+        FakeProcessor.shredded = set()
         FakeProcessor.delay = 0.0
         FakeProcessor.runs = 0
         FakeScoutAgent.source_request = PaperSourceRequest(

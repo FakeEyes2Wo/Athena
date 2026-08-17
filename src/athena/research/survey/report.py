@@ -68,9 +68,11 @@ def print_check(stack: SurveyStack) -> int:
     print(
         report_line(
             "论文库",
-            f"{library.root}（{library.stats()['entries']} 条）"
-            if library is not None
-            else "关闭（每次调研都会重新下载、重新转换、重新编码）",
+            (
+                f"{library.root}（{library.stats()['entries']} 条）"
+                if library is not None
+                else "关闭（每次调研都会重新下载、重新转换、重新编码）"
+            ),
         )
     )
     print(report_line("联系邮箱", stack.contact_email or "（未设置，礼貌池不生效）"))
@@ -127,6 +129,8 @@ def print_report(report: SurveyReport) -> None:
                 f"{report.scout_dropped_no_source} 篇过线但取不到源，未占交付名额",
             )
         )
+    for line in report.shredded_papers:
+        print(report_line("碎片剔除", line))
     print(
         report_line(
             "取源成功",
