@@ -170,6 +170,16 @@ def print_report(report: SurveyReport) -> None:
             f"total={timings.total_seconds}",
         )
     )
+    if report.scout_busy:
+        busy = sum(report.scout_busy.values())
+        detail = "  ".join(f"{k}={v:.1f}" for k, v in report.scout_busy.items())
+        print(
+            report_line(
+                "scout 忙时",
+                f"{detail}  合计 {busy:.1f}s / 墙钟 "
+                f"{report.timings.scout_seconds:.1f}s（并发，故合计可超墙钟）",
+            )
+        )
     print(
         report_line(
             "调用数",

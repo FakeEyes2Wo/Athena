@@ -9,6 +9,7 @@ paper pool。把它单独放一层是因为两个动作共享同一段"打分 �
 """
 
 import asyncio
+import time
 
 from athena.research.paper_scout.backends import ReferenceBackend, SearchBackend
 from athena.research.paper_scout.schemas import (
@@ -63,6 +64,7 @@ class ScoutSession:
         self.actions: list[ScoutAction] = []
         self.errors: list[str] = []
         self.step = 0
+        self.backend_seconds = 0.0
         self._lock = asyncio.Lock()
 
     async def search(self, query: str) -> ScoutAction:
@@ -78,15 +80,18 @@ class ScoutSession:
         found: list[ScoutPaper] = []
         seen: set[str] = set()
         for backend in self.search_backends:
+            started = time.monotonic()
             try:
                 results = await backend.search(
                     cleaned, self.request.search_top_k, self.request.published_to
                 )
             except Exception as error:
+                self.backend_seconds += time.monotonic() - started
                 # 单个后端失败（限流、解析失败、网络）→ 记录并继续用其他后端
                 self.errors.append(f"{backend.name}: {type(error).__name__}: {error}")
                 action.error = f"{backend.name}: {type(error).__name__}"
                 continue
+            self.backend_seconds += time.monotonic() - started
             for paper in results:
                 # 同一篇论文常同时来自 arXiv 与 S2，标题键让跨后端的重复也能并掉
                 keys = {paper.paper_key, title_key(paper.title)}
@@ -136,11 +141,13 @@ class ScoutSession:
             self._record(action, ("expand", action.argument))
             return action
 
+        started = time.monotonic()
         try:
             found = await self.reference_backend.references(
                 target, self.request.expand_top_k
             )
         except Exception as error:
+            self.backend_seconds += time.monotonic() - started
             # 引用后端失败 → 该动作零收益，但论文仍保持已扩展，避免立刻重复请求
             self.errors.append(
                 f"{self.reference_backend.name}: {type(error).__name__}: {error}"
@@ -149,6 +156,7 @@ class ScoutSession:
             self._record(action, ("expand", action.argument))
             return action
 
+        self.backend_seconds += time.monotonic() - started
         action.returned = len(found)
         await self._absorb(found, action, EXPAND_COST)
         self._record(action, ("expand", action.argument))

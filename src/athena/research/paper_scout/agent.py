@@ -213,9 +213,11 @@ class PaperScoutAgent(BaseAgent):
                 paper_list=session.pool.observation(),
             )
             stats.policy_calls += 1
+            policy_started = time.monotonic()
             calls, analysis = await collect_tool_calls(
                 self._provider, config, tools, prompt, ctx.cancel
             )
+            stats.policy_seconds += time.monotonic() - policy_started
             if not calls:
                 return "policy_returned_no_action"
 
@@ -296,6 +298,10 @@ class PaperScoutAgent(BaseAgent):
         stats.scorer_calls = getattr(session.scorer, "calls", 0)
         stats.rerank_calls = getattr(session.reranker, "calls", 0)
         stats.rerank_failures = getattr(session.reranker, "failures", 0)
+        stats.scorer_seconds = round(getattr(session.scorer, "seconds", 0.0), 3)
+        stats.rerank_seconds = round(getattr(session.reranker, "seconds", 0.0), 3)
+        stats.backend_seconds = round(session.backend_seconds, 3)
+        stats.policy_seconds = round(stats.policy_seconds, 3)
         stats.backend_requests = self._backend_requests()
         stats.errors = session.errors[:50]
 

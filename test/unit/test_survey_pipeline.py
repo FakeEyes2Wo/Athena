@@ -57,6 +57,12 @@ class FakeInterpreter:
         self.calls = 0
         self.failures = 0
 
+    async def interpret(self, request):
+        """记一次调用并让出事件循环，好让并发转换真的交错起来。"""
+        self.calls += 1
+        await asyncio.sleep(0)
+        return request
+
 
 class FakeEmbedder:
     model = "fake-embedder"
@@ -255,9 +261,11 @@ class FakeProcessor:
     empty: set = set()
     shredded: set = set()
     delay: float = 0.0
+    visuals_per_paper: dict[str, int] = {}
 
     def __init__(self, artifacts, interpreter, refiner, **kwargs) -> None:
         self.artifacts = artifacts
+        self.interpreter = interpreter
 
     async def process(self, request) -> PaperContent:
         outcome = type(self).outcomes[request.paper_id]
@@ -265,6 +273,8 @@ class FakeProcessor:
             raise outcome
         if type(self).delay:
             await asyncio.sleep(type(self).delay)
+        for _ in range(type(self).visuals_per_paper.get(request.paper_id, 0)):
+            await self.interpreter.interpret(request)
         return await make_content(
             self.artifacts,
             request.paper_id,
@@ -298,6 +308,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
         FakeProcessor.empty = set()
         FakeProcessor.shredded = set()
+        FakeProcessor.visuals_per_paper = {}
         FakeProcessor.delay = 0.0
         FakeScoutAgent.source_request = PaperSourceRequest(
             papers=[
@@ -503,6 +514,40 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1.0, merged.relevance)
         self.assertTrue(merged.indexed)
         self.assertNotIn(enriched, [item.paper_key for item in report.papers])
+
+    async def test_vision_calls_are_counted_per_paper_not_off_a_shared_dial(
+        self,
+    ) -> None:
+        """并发转换下，每篇的视觉调用数必须是它自己的，不能是共享计数器的增量。
+
+        原实现记的是 ``interpreter.calls - calls_before``，而转换默认 4 篇并发，
+        增量里混着同时在跑的其他论文。真机三轮：逐篇求和 3996 / 3513 / 1244，报告
+        总数 340 / 361 / 135——**大了 9–12 倍**。
+
+        这个用例特意让两篇论文交错执行（``FakeInterpreter.interpret`` 每次 ``sleep(0)``
+        让出事件循环），旧实现在这种情况下必然多记。
+        """
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.visuals_per_paper = {PAPERS[0][0]: 3, PAPERS[1][0]: 7}
+
+        report = await self.run_pipeline()
+
+        by_key = {item.paper_key: item for item in report.papers}
+        self.assertEqual(3, by_key[PAPERS[0][0]].vision_calls)
+        self.assertEqual(7, by_key[PAPERS[1][0]].vision_calls)
+        self.assertEqual(
+            report.vision_calls, sum(item.vision_calls for item in report.papers)
+        )
+
+    async def test_a_paper_without_visuals_is_charged_nothing(self) -> None:
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.visuals_per_paper = {PAPERS[1][0]: 5}
+
+        report = await self.run_pipeline()
+
+        by_key = {item.paper_key: item for item in report.papers}
+        self.assertEqual(0, by_key[PAPERS[0][0]].vision_calls)
+        self.assertEqual(5, by_key[PAPERS[1][0]].vision_calls)
 
     async def test_shredded_extraction_is_refused_and_reported(self) -> None:
         """转换报成功但产出的是碎片而不是句子 → 挡在语料外，并留下可复核的理由。
@@ -906,6 +951,7 @@ class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
         FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
         FakeProcessor.empty = set()
         FakeProcessor.shredded = set()
+        FakeProcessor.visuals_per_paper = {}
         FakeProcessor.delay = 0.0
         FakeProcessor.runs = 0
         FakeScoutAgent.source_request = PaperSourceRequest(

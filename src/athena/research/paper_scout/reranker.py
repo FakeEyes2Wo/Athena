@@ -53,6 +53,7 @@ rerank 打完同一个 352 篇池子只要 **0.4 秒**。churn 的大头从来�
 
 import asyncio
 import json
+import time
 import urllib.error
 import urllib.request
 from typing import Protocol
@@ -147,6 +148,7 @@ class DashScopeReranker:
         self.timeout = timeout
         self.calls = 0
         self.failures = 0
+        self.seconds = 0.0
         self._limit = asyncio.Semaphore(concurrency)
 
     async def affinity(self, query: str, papers: list[ScoutPaper]) -> list[float]:
@@ -172,14 +174,17 @@ class DashScopeReranker:
         async with self._limit:
             for attempt in range(RERANK_ATTEMPTS):
                 self.calls += 1
+                started = time.monotonic()
                 try:
                     payload = await asyncio.to_thread(self._post, query, documents)
                 except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                    self.seconds += time.monotonic() - started
                     # 网络故障、超时或响应不是 JSON → 再试一次，仍失败才按 0 分降级
                     if attempt == RERANK_ATTEMPTS - 1:
                         self.failures += 1
                         return [0.0] * len(papers)
                     continue
+                self.seconds += time.monotonic() - started
                 return parse_scores(payload, len(papers))
         raise RuntimeError("unreachable: the retry loop either returns or degrades")
 

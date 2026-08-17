@@ -18,6 +18,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from typing import Protocol
 
 from openai import AsyncOpenAI
@@ -154,6 +155,7 @@ class GradedRelevanceScorer:
         self.timeout = timeout
         self.passes = max(1, passes)
         self.calls = 0
+        self.seconds = 0.0
 
     async def score(self, query: str, papers: list[ScoutPaper]) -> list[float]:
         """对整批论文打分；打 ``passes`` 遍取均值，内部按 ``batch_size`` 拆成并发请求。"""
@@ -185,6 +187,7 @@ class GradedRelevanceScorer:
             ),
         )
         self.calls += 1
+        started = time.monotonic()
         try:
             reply = await self.client.chat.completions.create(
                 model=self.model,
@@ -195,6 +198,9 @@ class GradedRelevanceScorer:
         except Exception:
             # 打分失败不能把论文误判为高相关 → 整批按 0 分，让它们留在池外
             return [0.0] * len(papers)
+        finally:
+            # 失败的调用同样花了墙钟，超时那种尤其贵，不计入会低估成本
+            self.seconds += time.monotonic() - started
         return parse_grades(reply.choices[0].message.content or "", len(papers))
 
 

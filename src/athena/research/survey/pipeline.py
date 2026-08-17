@@ -352,6 +352,15 @@ class SurveyReport(BaseModel):
         ge=0,
         description="Cross-encoder requests that ordered papers tied on relevance.",
     )
+    scout_busy: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Serial busy seconds inside scout, per category. NOT wall-clock shares: "
+            "scoring runs concurrently with reranking and backends run concurrently "
+            "with each other, so these sum to more than scout_seconds. Read them for "
+            "'what is expensive', never for 'what fraction of the run'."
+        ),
+    )
     affinity_failures: int = Field(
         default=0,
         ge=0,
@@ -453,6 +462,38 @@ class SurveyReport(BaseModel):
             return 0.0
         failed = sum(1 for item in attempted if item.conversion_status == "failed")
         return failed / len(attempted)
+
+
+class _PerPaperVision:
+    """把共享的视觉解读器包一层，按篇统计调用与失败。
+
+    此前 ``PaperOutcome.vision_calls`` 记的是 ``interpreter.calls - calls_before``——
+    一个**共享**计数器在这篇论文转换期间的增量。转换是并发的（默认 4 篇），所以这个
+    增量里混着同时在跑的其他论文的调用。真机三轮验证：逐篇求和 3996 / 3513 / 1244，
+    而报告总数是 340 / 361 / 135，**大了 9–12 倍**。
+
+    这条 bug 尤其值得记一笔，因为它旁边就写着正确做法：``conversion_seconds`` 特意在
+    信号量**之内**开始计时，注释解释的正是"排队等待会被算进单篇成本，让每篇耗时都趋同
+    于批次总耗时，成本数字就失去意义"。同一个函数里，时间做对了，调用数做错了。
+
+    ``inner`` 为 ``None`` 时（没配视觉模型）本代理不该被交给 ``PaperProcessor``——
+    它必须收到真正的 ``None`` 才会走"退回仅证据文本"那条路。
+    """
+
+    def __init__(self, inner: object | None) -> None:
+        self.inner = inner
+        self.calls = 0
+        self.failures = 0
+
+    async def interpret(self, request):
+        """转发一次解读，并把这一次记在**本篇**账上。"""
+        self.calls += 1
+        try:
+            return await self.inner.interpret(request)
+        except Exception:
+            # 计数后原样上抛：由 visual_policy 决定整篇失败还是退回证据文本
+            self.failures += 1
+            raise
 
 
 class SurveyPipeline:
@@ -737,6 +778,12 @@ class SurveyPipeline:
         self.report.boundary_reranked = stats.boundary_reranked
         self.report.affinity_calls = stats.rerank_calls
         self.report.affinity_failures = stats.rerank_failures
+        self.report.scout_busy = {
+            "policy": stats.policy_seconds,
+            "scorer": stats.scorer_seconds,
+            "rerank": stats.rerank_seconds,
+            "backend": stats.backend_seconds,
+        }
         self.report.facets = list(stats.facets)
         self.report.facet_coverage = stats.facet_coverage
         self.report.retain_threshold = self.request.retain_threshold
@@ -862,30 +909,31 @@ class SurveyPipeline:
         if not jobs:
             self.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
             return []
-        processor = PaperProcessor(
-            self.stack.artifacts,
-            self.stack.visual_interpreter,
-            None,
-            ghostscript=self.stack.ghostscript or None,
-        )
         limit = asyncio.Semaphore(self.request.conversion_concurrency)
         results = await asyncio.gather(
-            *(self._convert_one(processor, limit, key, ref) for key, ref in jobs)
+            *(self._convert_one(limit, key, ref) for key, ref in jobs)
         )
         self.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
         return [item for item in results if item is not None]
 
     async def _convert_one(
         self,
-        processor: PaperProcessor,
         limit: asyncio.Semaphore,
         paper_key: str,
         request_ref: ArtifactRef,
     ) -> PaperContent | None:
-        """转换一篇论文；失败只记进报告，不影响同批其他论文。"""
+        """转换一篇论文；失败只记进报告，不影响同批其他论文。
+
+        视觉解读器按篇套一层计数代理，而不是共用 stack 上那个：见 ``_PerPaperVision``。
+        """
         outcome = self._outcome_for(paper_key)
-        interpreter = self.stack.visual_interpreter
-        calls_before = interpreter.calls if interpreter is not None else 0
+        counter = _PerPaperVision(self.stack.visual_interpreter)
+        processor = PaperProcessor(
+            self.stack.artifacts,
+            counter if counter.inner is not None else None,
+            None,
+            ghostscript=self.stack.ghostscript or None,
+        )
         cached = await self._cached_conversion(request_ref)
         if cached is not None:
             outcome.conversion_cached = True
@@ -899,8 +947,7 @@ class SurveyPipeline:
                 outcome.conversion_seconds = round(time.monotonic() - started, 3)
             if content is not None:
                 await self._cache_conversion(request_ref, content)
-        if interpreter is not None:
-            outcome.vision_calls = interpreter.calls - calls_before
+        outcome.vision_calls = counter.calls
         if content is None:
             return None
         outcome.conversion_status = "converted"

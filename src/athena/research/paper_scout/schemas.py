@@ -187,6 +187,22 @@ class ScoutStats(BaseModel):
         ),
     )
     backend_requests: int = Field(default=0, ge=0)
+    policy_seconds: float = Field(default=0.0, ge=0.0)
+    scorer_seconds: float = Field(default=0.0, ge=0.0)
+    rerank_seconds: float = Field(default=0.0, ge=0.0)
+    backend_seconds: float = Field(default=0.0, ge=0.0)
+    """四项**串行累计**耗时，不是墙钟占比。
+
+    加这四个字段的直接起因：一次真机调研 scout 段 936.8 秒，而当时能报出来的只有调用
+    次数——策略 6 次、打分 14 次、同分排序 12 次、后端 31 次——**那 936.8 秒归不到其中
+    任何一项**。同一条 query 三轮跑出 631 / 881 / 937 秒，动作最少的那轮反而最慢，
+    没有分段计时就永远只能猜。
+
+    ``_absorb`` 里打分与 rerank 是并发的，多个后端也是并发的，所以四项之和会**大于**
+    scout 墙钟。这正是 ``PaperOutcome.vision_calls`` 踩过的坑：它拿共享计数器的差值当
+    单篇成本，并发下逐篇求和比总数大 9–12 倍。这里从一开始就说清楚——要读"谁最贵"看
+    这四个数，要读"占了多少墙钟"只能看 ``scout_seconds``，两者不可混用。
+    """
     boundary_tier: int = Field(
         default=0,
         ge=0,

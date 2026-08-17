@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import math
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -173,6 +174,7 @@ class StubReranker:
         self.default = default
         self.calls = 0
         self.failures = 0
+        self.seconds = 0.0
 
     async def affinity(self, query: str, papers: list[ScoutPaper]) -> list[float]:
         self.calls += 1
@@ -1795,3 +1797,93 @@ class SessionRerankTest(unittest.IsolatedAsyncioTestCase):
             [entry for entry in order if entry.endswith(":start")],
         )
         self.assertLess(order.index("rerank:start"), order.index("score:end"))
+
+
+class ScoutBusyTimeTest(unittest.IsolatedAsyncioTestCase):
+    """scout 内部的分段计时：一次真机 936.8 秒曾经归不到任何一项。"""
+
+    async def test_scorer_records_time_even_when_the_call_fails(self) -> None:
+        """失败的调用同样花了墙钟，超时那种尤其贵——不计入就会低估成本。"""
+
+        class Failing:
+            class Completions:
+                async def create(self, **_kwargs):
+                    await asyncio.sleep(0.02)
+                    raise RuntimeError("endpoint down")
+
+            chat = SimpleNamespace(completions=Completions())
+
+        scorer = GradedRelevanceScorer(Failing(), "m")
+
+        scores = await scorer.score("q", [paper("1", "P", 0.0)])
+
+        self.assertEqual([0.0], scores)
+        self.assertGreater(scorer.seconds, 0.0)
+
+    async def test_reranker_records_time_across_retries(self) -> None:
+        reranker = DashScopeReranker("k", "m")
+
+        def always_fails(query: str, documents: list[str]) -> dict:
+            raise urllib.error.URLError("down")
+
+        with mock.patch.object(reranker, "_post", always_fails):
+            await reranker.affinity("q", [paper("1", "P", 0.0)])
+
+        self.assertEqual(1, reranker.failures)
+        self.assertGreaterEqual(reranker.seconds, 0.0)
+        self.assertEqual(RERANK_ATTEMPTS, reranker.calls)
+
+    async def test_backend_time_counts_failures_too(self) -> None:
+        """后端失败往往是超时，那正是最贵的一种，漏计会让 backend 看起来很便宜。"""
+
+        class SlowFailing:
+            name = "stub"
+
+            async def search(self, *_args):
+                await asyncio.sleep(0.02)
+                raise RuntimeError("timeout")
+
+        session = ScoutSession(
+            ScoutRequest(query="q"), [SlowFailing()], None, StubScorer({})
+        )
+
+        await session.search("q")
+
+        self.assertGreater(session.backend_seconds, 0.0)
+
+    async def test_busy_time_is_not_presented_as_a_wall_clock_share(self) -> None:
+        """并发下四项之和会超过墙钟；这个测试锁住"可以超过"，防止有人加个错误的断言。
+
+        ``PaperOutcome.vision_calls`` 正是栽在这里：拿共享计数器的差值当单篇成本，
+        并发下逐篇求和比总数大 9–12 倍。
+        """
+        order: list[str] = []
+
+        class Slow(StubScorer):
+            async def score(self, query, papers):
+                order.append("score")
+                await asyncio.sleep(0.05)
+                return await super().score(query, papers)
+
+        class SlowRerank(StubReranker):
+            async def affinity(self, query, papers):
+                order.append("rerank")
+                await asyncio.sleep(0.05)
+                self.seconds += 0.05
+                return await super().affinity(query, papers)
+
+        scorer = Slow({"A": 0.45})
+        scorer.seconds = 0.05
+        reranker = SlowRerank({"A": 0.3})
+        session = ScoutSession(ScoutRequest(query="q"), [], None, scorer, reranker)
+
+        started = time.monotonic()
+        await session._absorb(
+            [paper("a", "A", 0.0)],
+            ScoutAction(step=1, kind="search", argument="q"),
+            0.1,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(["score", "rerank"], order)
+        self.assertGreater(scorer.seconds + reranker.seconds, elapsed)
