@@ -171,7 +171,9 @@ def print_report(report: SurveyReport) -> None:
             "调用数",
             f"http={report.http_requests} vision={report.vision_calls}"
             f"(失败 {report.vision_failures}) embed={report.embed_calls}"
-            f"/{report.embedded_texts} 条",
+            f"/{report.embedded_texts} 条"
+            f" 同分排序={report.affinity_calls}"
+            f"{f'(失败 {report.affinity_failures})' if report.affinity_failures else ''}",
         )
     )
     if report.library:

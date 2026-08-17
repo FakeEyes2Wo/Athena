@@ -313,7 +313,25 @@ class SurveyReport(BaseModel):
         description="Papers tied at the delivery cut; see ScoutStats.boundary_tier.",
     )
     boundary_reranked: bool = Field(
-        default=False, description="The tie at the cut was resolved by rerank."
+        default=False,
+        description=(
+            "The tie at the cut was resolved by the LLM boundary selector. Distinct "
+            "from affinity_calls below: that is the cross-encoder ordering every tie "
+            "in the pool, this is one LLM call on the tier at the cut."
+        ),
+    )
+    affinity_calls: int = Field(
+        default=0,
+        ge=0,
+        description="Cross-encoder requests that ordered papers tied on relevance.",
+    )
+    affinity_failures: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Cross-encoder batches that failed after retry. Those papers sort last "
+            "within their grade, so this is a bias indicator, not just a cost one."
+        ),
     )
     facets: list[str] = Field(
         default_factory=list, description="Facets the topic was split into."
@@ -682,6 +700,8 @@ class SurveyPipeline:
         self.report.scout_dropped_no_source = stats.dropped_no_source
         self.report.boundary_tier = stats.boundary_tier
         self.report.boundary_reranked = stats.boundary_reranked
+        self.report.affinity_calls = stats.rerank_calls
+        self.report.affinity_failures = stats.rerank_failures
         self.report.facets = list(stats.facets)
         self.report.facet_coverage = stats.facet_coverage
         self.report.retain_threshold = self.request.retain_threshold

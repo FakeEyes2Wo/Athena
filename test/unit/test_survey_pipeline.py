@@ -114,6 +114,8 @@ class FakeScoutAgent:
     source_request: PaperSourceRequest | None = None
     papers = PAPERS
     dropped_no_source = 0
+    rerank_calls = 0
+    rerank_failures = 0
     seen_request: ScoutRequest | None = None
     seen_reranker: object = None
     status = "complete"
@@ -149,7 +151,11 @@ class FakeScoutAgent:
             for key, title, score in type(self).papers
         ]
         stats_ref = await self.artifacts.put_text(
-            ScoutStats(dropped_no_source=type(self).dropped_no_source).model_dump_json()
+            ScoutStats(
+                dropped_no_source=type(self).dropped_no_source,
+                rerank_calls=type(self).rerank_calls,
+                rerank_failures=type(self).rerank_failures,
+            ).model_dump_json()
         )
         corpus = ScoutCorpus(
             query="q", retained=retained, pool=retained, actions=[], stats_ref=stats_ref
@@ -638,6 +644,30 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(FakeScoutAgent.seen_reranker)
         self.assertEqual("complete", report.status)
+
+    async def test_affinity_cost_reaches_the_report(self) -> None:
+        """报告上看不见的东西等于没跑过。
+
+        六点十那次核对之所以能下结论，全靠分数分布这个间接证据。同分排序不改变分数
+        分布，所以它必须自己在报告上留下计数——否则下一次"它到底跑没跑"又只能靠猜。
+        """
+        FakeScoutAgent.rerank_calls = 12
+        FakeScoutAgent.rerank_failures = 1
+        self.addCleanup(setattr, FakeScoutAgent, "rerank_calls", 0)
+        self.addCleanup(setattr, FakeScoutAgent, "rerank_failures", 0)
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            build_corpus_index=self.fake_index,
+        ):
+            report = await SurveyPipeline(
+                self.stack, SurveyRequest(query="tabular auc")
+            ).run()
+
+        self.assertEqual(12, report.affinity_calls)
+        self.assertEqual(1, report.affinity_failures)
 
     def test_the_rerank_model_is_part_of_the_scout_cache_key(self) -> None:
         """换掉拆平局的信号，将近一半的交付集合会变——缓存必须跟着失效。
