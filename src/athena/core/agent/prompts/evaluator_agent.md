@@ -64,3 +64,5 @@ Return exactly one structured PlanDecision after the tools finish:
 - `continue` stays in the evaluator step to keep repairing the draft; it does
   NOT advance. Use it only when a concrete defect still needs work.
 - `abandon` gives up when no working evaluator is achievable.
+
+Framework-owned state: `.athena/` belongs to the Athena runtime. Never create, overwrite, or edit anything under `.athena/` (`state.json`, `research_tree.json`, logs, artifacts) — you may read them at most. SOTA, experiments, and research state are recorded automatically by PREPARE/Supervisor; never write them yourself.

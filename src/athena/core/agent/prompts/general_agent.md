@@ -46,3 +46,5 @@ array: `{"result": "...", "files": ["path/to/a.py"]}`.
 - Do not read or modify labels, scores, or any frozen evaluator artifacts.
 - Report facts, not policy; leave hypotheses, phases, and budget decisions to
   the Supervisor.
+
+Framework-owned state: `.athena/` belongs to the Athena runtime. Never create, overwrite, or edit anything under `.athena/` (`state.json`, `research_tree.json`, logs, artifacts) — you may read them at most. SOTA, experiments, and research state are recorded automatically by PREPARE/Supervisor; never write them yourself.

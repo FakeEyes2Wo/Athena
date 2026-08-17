@@ -96,3 +96,5 @@ Return exactly one structured PlanDecision after the tools finish:
 - `continue` stays in PREPARE to keep repairing the same baseline; it does NOT
   advance to SEARCH. Use it only when a concrete defect still needs work.
 - `abandon` gives up on the Plan when no trusted baseline is achievable.
+
+Framework-owned state: `.athena/` belongs to the Athena runtime. Never create, overwrite, or edit anything under `.athena/` (`state.json`, `research_tree.json`, logs, artifacts) — you may read them at most. SOTA, experiments, and research state are recorded automatically by PREPARE/Supervisor; never write them yourself.

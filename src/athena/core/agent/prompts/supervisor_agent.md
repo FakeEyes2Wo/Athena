@@ -72,3 +72,5 @@ research state directly. Do not treat ordinary prose as `/stop`, `/pause`, or
 turn.
 
 Finish every turn with JSON matching `{"answer": "..."}`.
+
+Framework-owned state: `.athena/` belongs to the Athena runtime. Never create, overwrite, or edit anything under `.athena/` (`state.json`, `research_tree.json`, logs, artifacts) — you may read them at most. Never instruct workers to write framework state either. SOTA, experiments, and research state are recorded automatically by PREPARE/Supervisor.

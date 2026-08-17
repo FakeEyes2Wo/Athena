@@ -149,6 +149,21 @@ class ResearchState(BaseModel):
         payload = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("research state payload must be an object")
+        unknown = [key for key in payload if key not in cls.model_fields]
+        if unknown:
+            # agent/旧版本可能写入未知键（例如误写的 ``sota``）：告警、备份原文、
+            # 剥离后继续加载，避免一个外来键让整个项目无法打开。
+            logger.warning(
+                "stripping unknown state.json keys %s from %s", unknown, target
+            )
+            try:
+                backup = target.with_name("state.json.corrupt")
+                backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+            except OSError:
+                logger.warning("failed to back up corrupted state file", exc_info=True)
+            payload = {
+                key: value for key, value in payload.items() if key in cls.model_fields
+            }
         candidate = dict(payload)
         inline_resume = any(key in candidate for key in RESUME_FIELDS)
         _merge_resume(candidate, payload, _resume_path(target))

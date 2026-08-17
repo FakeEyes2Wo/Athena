@@ -35,6 +35,15 @@ async def test_path_escape_is_rejected(tmp_path: Path) -> None:
     assert not (tmp_path.parent / "evil.txt").exists()
 
 
+async def test_write_file_rejects_framework_owned_athena(tmp_path: Path) -> None:
+    """agent 的 write_file 不得写框架私有目录 .athena/**。"""
+    tool = generic_tool_registry(tmp_path).resolve("write_file")
+    result = await tool.ainvoke(_ctx(), path=".athena/state.json", content="{}")
+    assert not result.success
+    assert ".athena" in result.error
+    assert not (tmp_path / ".athena" / "state.json").exists()
+
+
 async def test_read_file_missing_raises(tmp_path: Path) -> None:
     """缺失文件 → 抛 FileNotFoundError → ToolResult(success=False)。"""
     tool = generic_tool_registry(tmp_path).resolve("read_file")

@@ -245,6 +245,33 @@ async def test_shell_command_tool_contract(tmp_path: Path) -> None:
     assert "tool-ok" in data["stdout"]
 
 
+@pytest.mark.asyncio
+async def test_shell_tool_rejects_framework_owned_athena_writes(tmp_path: Path) -> None:
+    """agent 的 shell_command 不得写框架私有目录 .athena/**。"""
+    (tmp_path / ".athena").mkdir()
+    tool = _runtime(tmp_path).shell_command_tool(tmp_path)
+    ctx = ToolContext(
+        "shell_command", "c1", lambda *a: asyncio.sleep(0), asyncio.Event()
+    )
+    result = await tool.ainvoke(ctx, command="Set-Content .athena/state.json '{}'")
+    assert not result.success
+    assert ".athena" in result.error
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_allows_framework_owned_athena_reads(tmp_path: Path) -> None:
+    """只读访问 .athena/** 仍然允许，方便 agent 检查状态。"""
+    (tmp_path / ".athena").mkdir()
+    (tmp_path / ".athena" / "state.json").write_text("{}", encoding="utf-8")
+    tool = _runtime(tmp_path).shell_command_tool(tmp_path)
+    ctx = ToolContext(
+        "shell_command", "c1", lambda *a: asyncio.sleep(0), asyncio.Event()
+    )
+    result = await tool.ainvoke(ctx, command="Get-Content .athena/state.json")
+    assert result.success
+    assert "{}" in result.data["stdout"]
+
+
 def test_environment_hash_changes_with_declaration(tmp_path: Path) -> None:
     """环境哈希随 pyproject.toml 内容变化；缺声明文件也可计算。"""
     env = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path)

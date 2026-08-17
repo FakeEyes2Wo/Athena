@@ -15,6 +15,8 @@ from athena.core.workspace import resolve_workspace_path
 if TYPE_CHECKING:
     from athena.execution.runtime import ExecutionRuntime
 
+_FRAMEWORK_OWNED_DIR = ".athena"
+
 
 def _workspace_path(root: Path, path: str) -> Path:
     try:
@@ -24,6 +26,15 @@ def _workspace_path(root: Path, path: str) -> Path:
             f"{exc} Use a relative path inside your workspace ({root}); "
             "reach external files via shell_command instead."
         ) from None
+
+
+def _reject_framework_write(path_obj: Path) -> None:
+    """框架私有目录只读：agent 不得写 ``.athena/**``（state/tree/logs/artifacts）。"""
+    if _FRAMEWORK_OWNED_DIR in path_obj.parts:
+        raise ValueError(
+            f".athena/ is owned by the Athena runtime and is read-only for agents; "
+            f"refusing to write {path_obj}"
+        )
 
 
 def generic_tool_registry(
@@ -53,8 +64,9 @@ def generic_tool_registry(
 
     @tool
     async def write_file(path: str, content: str) -> dict:
-        """Create or overwrite a file in the workspace."""
+        """Create or overwrite a file in the workspace (never under .athena/)."""
         path_obj = _workspace_path(root, path)
+        _reject_framework_write(path_obj)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         path_obj.write_text(content, encoding="utf-8")
         return {"path": str(path_obj)}

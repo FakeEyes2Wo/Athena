@@ -12,6 +12,7 @@ import codecs
 import hashlib
 import locale
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -133,6 +134,39 @@ def _validate_command_input(command: str | None, argv: list[str] | None) -> None
         not argv or any(not isinstance(part, str) or not part for part in argv)
     ):
         raise ValueError("argv must be a non-empty list of non-empty strings")
+
+
+_ATHENA_WRITE_MARKERS = re.compile(
+    r"(set-content|add-content|out-file|new-item|remove-item|move-item|"
+    r"copy-item|rename-item|mkdir|rmdir|\bdel\b|\brm\b|\berase\b|"
+    r"writealltext|writeallbytes|\.write_text\s*\(|"
+    r"open\s*\([^)]*['\"][wa]['\"]|\|\s*out-file)",
+    re.IGNORECASE,
+)
+
+
+def _reject_athena_shell_write(
+    command: str, workdir: str | None, workspace_root: Path
+) -> None:
+    """框架私有目录只读：shell 不得在 ``.athena/`` 内工作或对其执行写操作。
+
+    命令字符串只能做启发式识别（LLM 可换写法绕过），真正的强约束由
+    ``write_file`` 工具与 prompt 约束共同承担。
+    """
+    if workdir:
+        workdir_path = Path(workdir)
+        if not workdir_path.is_absolute():
+            workdir_path = workspace_root / workdir_path
+        if ".athena" in workdir_path.resolve().parts:
+            raise ValueError(
+                ".athena/ is owned by the Athena runtime and is read-only for "
+                "agents; run shell commands from your workspace instead."
+            )
+    if ".athena" in command and _ATHENA_WRITE_MARKERS.search(command):
+        raise ValueError(
+            ".athena/ is owned by the Athena runtime and is read-only for agents; "
+            "inspect it with read_file/Get-Content, never write it."
+        )
 
 
 class EnvironmentManager:
@@ -726,6 +760,9 @@ class _ShellCommandTool(BaseTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """执行命令：委托 ``ExecutionRuntime.run`` 并返回契约 JSON。"""
+        command = str(input["command"])
+        workdir = input.get("workdir")
+        _reject_athena_shell_write(command, workdir, self._workspace_root)
         context = ExecutionContext(
             project_root=self._runtime.project_root,
             workspace_root=self._workspace_root,
@@ -733,9 +770,9 @@ class _ShellCommandTool(BaseTool):
         )
         result = await self._runtime.run(
             context,
-            str(input["command"]),
+            command,
             timeout_s=int(input.get("timeout_s", 120)),
-            workdir=input.get("workdir"),
+            workdir=workdir,
             emit=ctx.emit,
         )
         return result.to_dict()

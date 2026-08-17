@@ -421,3 +421,57 @@ def test_load_rewrites_inline_core_even_when_resume_file_matches(
     assert "task_text" not in core
     resume = json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))
     assert resume["task_text"] == "resume task"
+
+
+def test_load_strips_unknown_top_level_keys_and_backs_up(
+    tmp_path: Path, caplog
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "RUNNING",
+                "phase": "PREPARE",
+                "search_limit": 10,
+                "concurrency": 1,
+                "plans": {},
+                "validation": None,
+                "sota": {"baseline": "Wheat Loop", "value": 3352.5},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING"):
+        loaded = ResearchState.load(path)
+
+    assert loaded.status == "RUNNING"
+    assert "sota" not in loaded.model_dump()
+    assert any("sota" in message for message in caplog.messages)
+    backup = (tmp_path / "state.json.corrupt").read_text(encoding="utf-8")
+    assert "Wheat Loop" in backup
+
+
+def test_load_unknown_key_does_not_mask_invalid_known_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "BROKEN",
+                "phase": "PREPARE",
+                "search_limit": 10,
+                "concurrency": 1,
+                "plans": {},
+                "validation": None,
+                "sota": {"value": 3352.5},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError):
+        ResearchState.load(path)
+
+    assert (tmp_path / "state.json.corrupt").is_file()
