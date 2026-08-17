@@ -105,13 +105,17 @@ def vectors_key(paper_content_ref: ArtifactRef, embedding_model: str) -> str:
     return cache_key("vectors", INDEX_VERSION, paper_content_ref, embedding_model)
 
 
-def scout_key(request_json: str) -> str:
-    """一次检索的内容键，取整份 ``ScoutRequest`` 的规范 JSON。
+def scout_key(request_json: str, scorer: str = "") -> str:
+    """一次检索的内容键：整份 ``ScoutRequest`` 的规范 JSON **加上打分器指纹**。
 
-    整份进键而不是只取 query：步数、门槛、打分模型都会改变交付集合，漏掉任何一个都会
-    让缓存把 A 的结果当成 B 的。
+    整份请求进键而不是只取 query——步数、深度、门槛都会改变交付集合。
+
+    但请求本身**不含打分器配置**：模型名与打分遍数都由组合根决定，不在 ``ScoutRequest``
+    里。所以它们必须单独进键，否则换了打分器之后同一个查询会被原样重放，改动静默不生效。
+    这一条是踩出来的：把打分默认改成两遍取均值之后，库里已有的单遍结果仍然命中，而"没生
+    效"和"生效了但没用"在报告上长得一模一样。
     """
-    return cache_key("scout", request_json)
+    return cache_key("scout", request_json, scorer)
 
 
 def retrieval_refs(content: PaperContent) -> list[ArtifactRef]:

@@ -44,7 +44,7 @@ from athena.research.paper_scout.schemas import (
     ScoutRequest,
     ScoutStats,
 )
-from athena.research.paper_scout.scorer import GradedRelevanceScorer
+from athena.research.paper_scout.scorer import DEFAULT_PASSES, GradedRelevanceScorer
 from athena.research.paper_scout.selection import LlmBoundarySelector
 from athena.research.survey.library import (
     conversion_key,
@@ -568,8 +568,17 @@ class SurveyPipeline:
         return await self._read_scout_result(outcome.result_ref)
 
     def _scout_cache_key(self, request_json: str) -> str:
-        """本次检索在库里的键；整份请求进键，见 ``library.scout_key``。"""
-        return scout_key(request_json)
+        """本次检索在库里的键；请求 + 打分器指纹，见 ``library.scout_key``。"""
+        return scout_key(request_json, self._scorer_fingerprint())
+
+    def _scorer_fingerprint(self) -> str:
+        """打分器的身份：模型名 + 打分遍数。
+
+        这两样都不在 ``ScoutRequest`` 里（由组合根决定），却都会改变交付集合，所以必须
+        显式进缓存键。``DEFAULT_PASSES`` 从 1 改成 2 的那次，正是因为它不在键里而让库里
+        的旧结果继续命中。
+        """
+        return f"{self.stack.effective_scorer_model()}/{DEFAULT_PASSES}"
 
     async def _cached_scout(self, request_json: str) -> ArtifactRef | None:
         """取回同一份请求上次跑出的检索结果，并把它引用的 blob 复制回本地存储。

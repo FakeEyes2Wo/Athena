@@ -267,3 +267,31 @@ class LibraryRootTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScoutKeyTest(unittest.TestCase):
+    """打分器配置不在 ScoutRequest 里，却会改变交付集合——必须单独进键。"""
+
+    def test_changing_the_pass_count_invalidates_the_cached_search(self) -> None:
+        """把打分从 1 遍改成 2 遍之后，库里的旧结果不能再命中。
+
+        这一条是踩出来的：改完默认值之后同一个查询仍然命中缓存，多遍打分静默不发生，
+        而"没生效"和"生效了但没用"在报告上长得一模一样。
+        """
+        request = '{"query":"x","max_steps":6}'
+
+        self.assertNotEqual(
+            scout_key(request, "flash/1"), scout_key(request, "flash/2")
+        )
+
+    def test_changing_the_scorer_model_invalidates_it_too(self) -> None:
+        request = '{"query":"x","max_steps":6}'
+
+        self.assertNotEqual(
+            scout_key(request, "flash/2"), scout_key(request, "plus/2")
+        )
+
+    def test_the_same_request_and_scorer_still_hit(self) -> None:
+        request = '{"query":"x","max_steps":6}'
+
+        self.assertEqual(scout_key(request, "flash/2"), scout_key(request, "flash/2"))
