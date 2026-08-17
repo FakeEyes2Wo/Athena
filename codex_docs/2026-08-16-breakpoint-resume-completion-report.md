@@ -13,6 +13,7 @@ Implemented on `main`, commits:
 - `ee5ded2` — `fix(research): restore debate/gated ideator paths and their tests`.
 - `41d4166` — `fix(research): protect .athena state from agent writes and tolerate unknown keys`.
 - `4e4a7ca` — `fix(gui): route prose to running supervisor instead of task understanding`.
+- `3072c86` — `refactor(research): simplify resume and protection code`.
 
 ## Changes
 
@@ -117,6 +118,19 @@ the supervisor reply is appended; idle/completed still uses the intent-preview
 flow for starting a new task. Also added the missing `viewModel.status`
 dependency to the `sendPrompt` callback (it was stale). Frontend tests:
 `usePipeline.test.tsx` 7 passed; `tsc --noEmit` clean.
+
+## Simplification pass (commit `3072c86`)
+
+- `agent_turn_runner._finish_ideator_batch`: non-gated conversion now always
+  `Hypothesis.model_validate(item)`; removed the redundant isinstance branch and
+  the unreachable trailing return (replaced with an explicit invariant assert).
+- `supervisor.dispatch_general`: introduced local `owned`/`ref` so the same
+  “same task + no cache” predicate is computed once instead of three times.
+- `runtime.start()`: extracted `_maybe_run_task_understanding()`; `start()` is now
+  a straight 12-line orchestration, and the understanding branch has a flat
+  guard-return shape.
+- Behavior preserved; regression `test/unit/research` + `test/unit/agent` +
+  `test/unit/execution`: **498 passed**; `compileall` and `check_code_style` clean.
 
 ## Ten-pass logic review and simplification (commit `20aaa44`)
 
