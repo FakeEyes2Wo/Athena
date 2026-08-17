@@ -1126,15 +1126,15 @@ class Supervisor(SupervisorActions):
         task = task.strip()
         if not task:
             raise ValueError("general task must be nonblank")
-        cached_task = self.state.task_research_task
-        if self.state.task_research_ref is not None and cached_task == task:
+        owned = self.state.task_research_task == task
+        ref = self.state.task_research_ref
+        if ref is not None and owned:
             try:
-                cached = json.loads(
-                    await self._store.get_text(self.state.task_research_ref)
-                )
+                cached = json.loads(await self._store.get_text(ref))
             except (OSError, ValueError):
                 # artifact 缺失或内容损坏 → 清掉引用并落盘，避免重启后反复撞坏缓存
                 self.state.task_research_ref = None
+                ref = None
                 await self._persist_state()
                 cached = None
             if isinstance(cached, dict) and cached:
@@ -1142,15 +1142,10 @@ class Supervisor(SupervisorActions):
         # 仅在"同一任务且尚无缓存"时复用旧 worker id；不同任务必须开新线程，
         # 否则新任务会混进调研线程记忆并劫持调研断点。
         prior_agent_id = (
-            self.state.task_research_agent_id
-            if self.state.task_research_ref is None and cached_task == task
-            else None
+            self.state.task_research_agent_id if ref is None and owned else None
         )
         outcome = await self._run_general_turn(task, prior_agent_id)
-        if self.state.task_research_ref is None and self.state.task_research_task in (
-            None,
-            task,
-        ):
+        if ref is None and self.state.task_research_task in (None, task):
             self.state.task_research_task = task
             self.state.task_research_agent_id = outcome.agent_id
             self.state.task_research_ref = await self._store.put_text(

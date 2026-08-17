@@ -401,7 +401,7 @@ class AgentTurnRunner:
                 agent_id,
                 {"content": _regenerate_prompt(rejections, target), "context_refs": []},
             )
-        return HypothesisBatch()
+        raise AssertionError("unreachable: retry loop always returns")
 
     async def _finish_ideator_batch(
         self,
@@ -419,15 +419,12 @@ class AgentTurnRunner:
         rt = self._runtime
         eda_request = getattr(batch, "eda_request", None)
         if getattr(rt, "_ideation", "ideageneration") != "ideageneration":
-            hypotheses = [
-                (
-                    item
-                    if isinstance(item, Hypothesis)
-                    else Hypothesis.model_validate(item)
-                )
-                for item in batch.hypotheses
-            ]
-            return HypothesisBatch(hypotheses=hypotheses, eda_request=eda_request)
+            return HypothesisBatch(
+                hypotheses=[
+                    Hypothesis.model_validate(item) for item in batch.hypotheses
+                ],
+                eda_request=eda_request,
+            )
 
         async def progress(message: str) -> None:  # noqa: D401
             """把门禁进度投影成普通输出事件。

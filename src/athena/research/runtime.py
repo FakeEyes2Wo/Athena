@@ -571,6 +571,44 @@ class ResearchRuntime:
         ]
         return " ".join(parts) if parts else fallback
 
+    async def _maybe_run_task_understanding(self) -> None:
+        """PREPARE 阶段运行任务理解；已有断点则直接跳过。
+
+        失败只降级为默认关闭 Kaggle 工具，不阻断启动。
+        """
+        if self._provider is None or self.state.phase != "PREPARE":
+            return
+        if self.state.task_understanding is not None:
+            await self.publish_output(
+                source="supervisor",
+                channel="text",
+                text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
+            )
+            return
+        if not self._task_text.strip():
+            return
+        context = self._task_context_text(self._task_text, self._recent_user_texts())
+        await self.publish_output(
+            source="supervisor",
+            channel="text",
+            text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
+        )
+        try:
+            await self._agent_turns.run_supervisor_turn(context)
+            await self.publish_output(
+                source="supervisor", channel="text", text="任务理解完成。"
+            )
+        except Exception as error:
+            logger.warning(
+                "supervisor task-understanding turn failed; Kaggle tools stay off",
+                exc_info=True,
+            )
+            await self.publish_output(
+                source="supervisor",
+                channel="error",
+                text=f"任务理解失败（已降级继续）：{error}",
+            )
+
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.
 
@@ -583,41 +621,7 @@ class ResearchRuntime:
         self._agents.start()
         # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。
         self._task_text = self._resume_task_text(self._task_text)
-        # 任务理解：让 SupervisorAgent 在 PREPARE 之前读一遍任务，自行决定是否
-        # 经 ``configure_kaggle`` 接入 Kaggle 工具。失败只降级为默认关闭，不阻断。
-        # 断点续传时把最近的人类消息一起带上，短句 follow-up 也能沿用旧上下文；
-        # state 已持久化任务理解时直接复用，不重跑（否则 continue 会重复首轮理解）。
-        if self._provider is not None and self.state.phase == "PREPARE":
-            if self.state.task_understanding is not None:
-                await self.publish_output(
-                    source="supervisor",
-                    channel="text",
-                    text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
-                )
-            elif self._task_text.strip():
-                context = self._task_context_text(
-                    self._task_text, self._recent_user_texts()
-                )
-                await self.publish_output(
-                    source="supervisor",
-                    channel="text",
-                    text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
-                )
-                try:
-                    await self._agent_turns.run_supervisor_turn(context)
-                    await self.publish_output(
-                        source="supervisor", channel="text", text="任务理解完成。"
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "supervisor task-understanding turn failed; Kaggle tools stay off",
-                        exc_info=True,
-                    )
-                    await self.publish_output(
-                        source="supervisor",
-                        channel="error",
-                        text=f"任务理解失败（已降级继续）：{error}",
-                    )
+        await self._maybe_run_task_understanding()
         self._start_survey()
         self._task = asyncio.create_task(self._supervisor.start())
         self._started = True
