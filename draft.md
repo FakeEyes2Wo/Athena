@@ -273,3 +273,15 @@
   临时文件（5 个）。
 - 剩余 1 个无法删除：`.worktrees/supervisor-streaming-output/.pytest_cache`
   （OS 拒绝访问，可能由外部权限/占用导致），不影响主仓库。
+
+## 追加：Release 构建
+- 执行 `node scripts/release.cjs --backend python`：
+  - Python 后端 PyInstaller 打包 `gui_gateway.exe`
+  - 前端 `tsc && vite build`
+  - Tauri release + MSI/NSIS 安装器
+- 产物：
+  - `athena-gui/src-tauri/resources/gui_gateway.exe`（131,457,521 B）
+  - `athena-gui/src-tauri/target/release/athena-gui.exe`（15,522,816 B）
+  - `athena-gui/src-tauri/target/release/bundle/msi/Athena_0.1.0_x64_en-US.msi`（138,711,040 B）
+  - `athena-gui/src-tauri/target/release/bundle/nsis/Athena_0.1.0_x64-setup.exe`（136,219,704 B）
+- 构建退出码 0，全部完成。
