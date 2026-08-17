@@ -44,3 +44,20 @@ def dump_report(report, path: str | Path) -> Path:
         encoding="utf-8",
     )
     return target
+
+
+def load_recall_set(name_or_path: str) -> "RecallQuerySet":
+    """按名字取随包召回金标，或按路径读一份自定义的；规则与 ``load_query_set`` 相同。"""
+    from athena.research.bench.recall import RecallQuerySet
+
+    candidate = Path(name_or_path)
+    if candidate.suffix == ".json" or candidate.exists():
+        return RecallQuerySet.model_validate_json(
+            candidate.read_text(encoding="utf-8")
+        )
+    packaged = DATASETS_DIR / f"{name_or_path}.json"
+    if not packaged.is_file():
+        raise FileNotFoundError(
+            f"unknown recall set {name_or_path!r}; packaged sets: {', '.join(available())}"
+        )
+    return RecallQuerySet.model_validate_json(packaged.read_text(encoding="utf-8"))

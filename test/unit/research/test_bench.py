@@ -7,6 +7,8 @@
 
 import unittest
 
+from pydantic import ValidationError
+
 from athena.research.bench.health import (
     MIN_ANCHOR_PROSE_CHARS,
     all_headings,
@@ -24,7 +26,12 @@ from athena.research.bench.known_item import (
     score_channel,
     usable_queries,
 )
-from athena.research.bench.query_sets import available, load_query_set
+from athena.research.bench.query_sets import (
+    available,
+    load_query_set,
+    load_recall_set,
+)
+from athena.research.bench.recall import RecallQuerySet, evaluate_recall
 from athena.research.bench.reproducibility import delivery_overlap, jaccard
 from athena.research.bench.schemas import KnownItemQuery, QueryOutcome, QuerySet
 from athena.research.paper_rag.schemas import (
@@ -432,3 +439,76 @@ class PackagedQuerySetTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecallTest(unittest.TestCase):
+    """三段损失必须分开报——它们该动的地方完全不同。"""
+
+    @staticmethod
+    def _set(gold: list[str]) -> RecallQuerySet:
+        return RecallQuerySet(
+            name="t", topic="a topic", gold=gold, gold_source="a stronger run"
+        )
+
+    def test_a_gold_never_retrieved_is_charged_to_retrieval(self) -> None:
+        report = evaluate_recall(self._set(["a", "b"]), {"a": 1.0}, ["a"])
+
+        stages = {item.stage: item for item in report.stages}
+        self.assertEqual(1, stages["in_pool"].lost_here)
+        self.assertEqual(["b"], report.missing_from_pool)
+
+    def test_a_gold_found_but_scored_low_is_charged_to_scoring(self) -> None:
+        """找到了却没判够分——该动的是打分提示或打分模型，不是检索。"""
+        report = evaluate_recall(self._set(["a", "b"]), {"a": 1.0, "b": 0.2}, ["a"])
+
+        stages = {item.stage: item for item in report.stages}
+        self.assertEqual(0, stages["in_pool"].lost_here)
+        self.assertEqual(1, stages["judged_relevant"].lost_here)
+        self.assertEqual(["b"], report.scored_below_threshold)
+
+    def test_a_gold_judged_relevant_but_cut_is_charged_to_delivery(self) -> None:
+        report = evaluate_recall(self._set(["a", "b"]), {"a": 1.0, "b": 1.0}, ["a"])
+
+        stages = {item.stage: item for item in report.stages}
+        self.assertEqual(1, stages["delivered"].lost_here)
+        self.assertEqual(["b"], report.dropped_at_delivery)
+
+    def test_every_stage_is_scored_against_the_gold_total(self) -> None:
+        """分母都是金标总数：读数的人问的是"最终拿到多少"，各段自己丢多少由 lost_here 答。"""
+        report = evaluate_recall(
+            self._set(["a", "b", "c", "d"]), {"a": 1.0, "b": 1.0, "c": 0.2}, ["a"]
+        )
+
+        stages = {item.stage: item for item in report.stages}
+        self.assertAlmostEqual(0.75, stages["in_pool"].recall)
+        self.assertAlmostEqual(0.5, stages["judged_relevant"].recall)
+        self.assertAlmostEqual(0.25, stages["delivered"].recall)
+
+    def test_the_threshold_is_inclusive_at_the_mid_tier(self) -> None:
+        """0.45 是 2 分档的取值——"切题但不满足全部条件"应当算认。"""
+        report = evaluate_recall(self._set(["a"]), {"a": 0.45}, ["a"])
+
+        self.assertEqual([], report.scored_below_threshold)
+
+    def test_a_duplicated_gold_is_counted_once(self) -> None:
+        report = evaluate_recall(self._set(["a", "a"]), {"a": 1.0}, ["a"])
+
+        self.assertEqual(1, report.gold_total)
+
+    def test_the_gold_source_is_carried_into_the_report(self) -> None:
+        """代理金标被当成 ground truth 读，比没有金标更糟。"""
+        report = evaluate_recall(self._set(["a"]), {"a": 1.0}, ["a"])
+
+        self.assertEqual("a stronger run", report.gold_source)
+
+    def test_a_gold_source_cannot_be_left_empty(self) -> None:
+        with self.assertRaises(ValidationError):
+            RecallQuerySet(name="t", topic="x", gold=["a"], gold_source="")
+
+
+class PackagedRecallSetTest(unittest.TestCase):
+    def test_the_packaged_recall_gold_loads_and_declares_its_source(self) -> None:
+        recall_set = load_recall_set("imbalance_auc_recall")
+
+        self.assertTrue(recall_set.gold)
+        self.assertIn("PROXY", recall_set.gold_source)

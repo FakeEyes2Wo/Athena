@@ -19,7 +19,9 @@ from athena.research.bench import (
     run_known_item,
 )
 from athena.research.bench import available as bench_available
-from athena.research.bench import delivery_overlap
+from athena.research.bench import RELEVANT_THRESHOLD, delivery_overlap, evaluate_recall
+from athena.research.bench.query_sets import load_recall_set
+from athena.research.paper_scout.schemas import ScoutCorpus
 from athena.research.paper_rag.search import corpus_paper_ids
 from athena.research.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
@@ -629,6 +631,26 @@ def _add_bench_parser(subparsers) -> None:
     )
     overlap.add_argument("--query", default="", help="调研主题，仅写进报告")
 
+    recall = modes.add_parser(
+        "recall", help="split the loss into not-found / not-judged / not-delivered"
+    )
+    recall.add_argument(
+        "--pool",
+        required=True,
+        help="ScoutCorpus 的 artifact 引用（一次检索跑出来的池子与交付集合）",
+    )
+    recall.add_argument(
+        "--gold",
+        default="imbalance_auc_recall",
+        help="随包召回金标的名字，或一份 RecallQuerySet JSON 的路径",
+    )
+    recall.add_argument(
+        "--threshold",
+        type=float,
+        default=RELEVANT_THRESHOLD,
+        help=f"判为相关的分数线，默认 {RELEVANT_THRESHOLD}（2 分档）",
+    )
+
     retrieval = modes.add_parser("retrieval", help="known-item hit@k and MRR per channel")
     retrieval.add_argument("--corpus", required=True, help="corpus_ref to benchmark")
     retrieval.add_argument(
@@ -652,7 +674,7 @@ def _add_bench_parser(subparsers) -> None:
         "--detail", action="store_true", help="逐篇列出，而不是只给汇总"
     )
 
-    for parser in (retrieval, health, overlap):
+    for parser in (retrieval, health, overlap, recall):
         parser.add_argument(
             "--artifact-root", default="", help="artifact 根目录；默认 ~/.athena/artifacts"
         )
@@ -719,6 +741,25 @@ def _print_health_report(report, detail: bool) -> None:
         )
 
 
+def _print_recall_report(report) -> None:
+    """打印三段召回；每一段丢的东西该动的地方不同，所以分开报。"""
+    print(f"\n召回评测：{report.query_set}")
+    print(f"  课题: {report.topic}")
+    print(f"  金标 {report.gold_total} 篇 · 池子 {report.pool_size} 篇 · "
+          f"交付 {report.delivered_size} 篇 · 相关线 {report.threshold}")
+    labels = {
+        "in_pool": "进池（检索找到）",
+        "judged_relevant": "判为相关（打分给够）",
+        "delivered": "进交付（名额与取源）",
+    }
+    for stage in report.stages:
+        print(
+            f"  {labels[stage.stage]:<24}{stage.found:>4}/{report.gold_total}"
+            f"  召回 {stage.recall:.3f}   本段丢 {stage.lost_here}"
+        )
+    print(f"\n  金标来源: {report.gold_source}")
+
+
 def _print_overlap_report(report) -> None:
     """打印交付重合度；这是选片改动唯一的验收指标。"""
     subject = f"：{report.query}" if report.query else ""
@@ -748,6 +789,20 @@ async def _cmd_bench(args: argparse.Namespace) -> int:
     stack = build_survey_stack(
         artifact_root=args.artifact_root, enable_vision=False, enable_library=False
     )
+    if args.bench_command == "recall":
+        corpus = ScoutCorpus.model_validate_json(
+            await stack.artifacts.get_text(args.pool)
+        )
+        report = evaluate_recall(
+            load_recall_set(args.gold),
+            {item.paper_key: item.relevance for item in corpus.pool},
+            [item.paper_key for item in corpus.retained],
+            threshold=args.threshold,
+        )
+        _print_recall_report(report)
+        if args.out:
+            print(f"\n报告已写入 {dump_report(report, args.out)}")
+        return 0
     if args.bench_command == "overlap":
         runs = [
             sorted(
