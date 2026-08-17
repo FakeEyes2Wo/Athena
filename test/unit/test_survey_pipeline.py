@@ -115,13 +115,24 @@ class FakeScoutAgent:
     papers = PAPERS
     dropped_no_source = 0
     seen_request: ScoutRequest | None = None
+    seen_reranker: object = None
     status = "complete"
     warnings: list[str] = []
 
     def __init__(
-        self, artifacts, backends, references, scorer, *, model, client, selector=None
+        self,
+        artifacts,
+        backends,
+        references,
+        scorer,
+        *,
+        model,
+        client,
+        selector=None,
+        reranker=None,
     ):
         self.artifacts = artifacts
+        type(self).seen_reranker = reranker
 
     async def run(self, ctx) -> AgentOutcome:
         type(self).seen_request = ScoutRequest.model_validate_json(
@@ -589,6 +600,61 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             await SurveyPipeline(self.stack, request).run()
 
         self.assertEqual("flash", scorer.call_args.args[1])
+
+    async def test_the_reranker_actually_reaches_the_scout_agent(self) -> None:
+        """装配上有、真正跑的时候没有——这条链路上已经栽过三次的那种失败。
+
+        边界重排器超时、重排目标取错、打分器配置没进缓存键，三次都是"看上去做完了、
+        实际什么也没做"。同分次序信号同样只在 ``PaperScoutAgent`` 里生效，装在 stack 上
+        不等于传了下去。
+        """
+        self.stack.reranker = mock.MagicMock(model="gte-rerank-v2")
+        FakeScoutAgent.seen_reranker = None
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            build_corpus_index=self.fake_index,
+        ):
+            await SurveyPipeline(self.stack, SurveyRequest(query="tabular auc")).run()
+
+        self.assertIs(self.stack.reranker, FakeScoutAgent.seen_reranker)
+
+    async def test_no_reranker_passes_none_rather_than_failing(self) -> None:
+        """没配 ATHENA_RERANK_MODEL 时链路照常跑完，排序退回散列。"""
+        self.stack.reranker = None
+        FakeScoutAgent.seen_reranker = mock.MagicMock()
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            build_corpus_index=self.fake_index,
+        ):
+            report = await SurveyPipeline(
+                self.stack, SurveyRequest(query="tabular auc")
+            ).run()
+
+        self.assertIsNone(FakeScoutAgent.seen_reranker)
+        self.assertEqual("complete", report.status)
+
+    def test_the_rerank_model_is_part_of_the_scout_cache_key(self) -> None:
+        """换掉拆平局的信号，将近一半的交付集合会变——缓存必须跟着失效。
+
+        真机一轮 352 篇里 197 篇同分。``DEFAULT_PASSES`` 那次正是漏了这一步：改了配置，
+        库里的旧结果继续命中，报告上看不出任何异常。
+        """
+        request = SurveyRequest(query="tabular auc")
+        self.stack.reranker = None
+        without = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+        self.stack.reranker = mock.MagicMock(model="gte-rerank-v2")
+        with_rerank = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+        self.stack.reranker = mock.MagicMock(model="some-other-reranker")
+        other = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+
+        self.assertNotEqual(without, with_rerank)
+        self.assertNotEqual(with_rerank, other)
 
     async def test_the_scorer_falls_back_to_the_policy_model(self) -> None:
         """不配打分模型时行为与分开之前完全一致。"""

@@ -48,6 +48,7 @@ from athena.research.paper_scout.backends import (
     SEMANTIC_SCHOLAR_INTERVAL,
     build_default_backends,
 )
+from athena.research.paper_scout.reranker import DashScopeReranker
 from athena.research.paper_source.fetcher import LocatorCache
 from athena.research.paper_source.http import HostRateLimiter, UrllibTransport
 from athena.research.paper_source.tool import PaperFetchTool
@@ -57,6 +58,7 @@ from athena.research.survey.tool import PaperSurveyTool
 ARTIFACT_ROOT_ENV = "ATHENA_ARTIFACT_ROOT"
 SURVEY_MODEL_ENV = "ATHENA_SURVEY_MODEL"
 SCORER_MODEL_ENV = "ATHENA_SCORER_MODEL"
+RERANK_MODEL_ENV = "ATHENA_RERANK_MODEL"
 EMBEDDING_MODEL_ENV = "ATHENA_EMBEDDING_MODEL"
 VISION_MODEL_ENV = "ATHENA_VISION_MODEL"
 CONTACT_EMAIL_ENV = "ATHENA_CONTACT_EMAIL"
@@ -115,6 +117,28 @@ def resolve_scorer_model(explicit: str = "") -> str:
     回落而不是报错：不设这个变量时行为与此前完全一致。
     """
     return explicit or os.environ.get(SCORER_MODEL_ENV, "")
+
+
+def build_reranker(model: str = "") -> DashScopeReranker | None:
+    """按 ``ATHENA_RERANK_MODEL`` 建同分次序的交叉编码器；未配置时返回 ``None``。
+
+    与编码器、视觉模型同样是可降级的能力：没有它排序退回 ``pool.tie_break`` 的散列，
+    行为与接入之前完全一致，因此不在装配期强制要求。
+
+    凭据复用 ``settings`` 那份 —— rerank 与打分、编码走同一个百炼账号，只是端点不同
+    （它不是 OpenAI 兼容接口，见 ``DashScopeReranker``）。多解析一份 key 就多一处能
+    不一致的地方。
+
+    拿不到 key 时返回 ``None`` 而不是抛错：``.env`` 只配了 ``ATHENA_RERANK_MODEL``
+    却没有凭据的情况下，让整条链路跑不起来比降级更糟。
+    """
+    resolved = model or os.environ.get(RERANK_MODEL_ENV, "")
+    if not resolved:
+        return None
+    api_key = getattr(settings.get_client(), "api_key", "") or ""
+    if not api_key:
+        return None
+    return DashScopeReranker(api_key, resolved)
 
 
 def build_artifact_store(root: str | Path = "") -> LocalArtifactStore:
@@ -343,6 +367,7 @@ class SurveyStack:
     ghostscript: str = ""
     corpus_cache: CorpusCache = field(default_factory=CorpusCache)
     library: PaperLibrary | None = None
+    reranker: DashScopeReranker | None = None
 
     def locator_cache(self) -> LocatorCache:
         """落盘的取源定位符缓存，放在论文库根下。
@@ -367,6 +392,13 @@ class SurveyStack:
     def effective_scorer_model(self) -> str:
         """实际用于打分的模型名；未单独配置时就是策略模型。"""
         return self.scorer_model or self.model
+
+    def rerank_model(self) -> str:
+        """同分次序用的交叉编码器名；没配时为空串。
+
+        进检索缓存键（见 ``pipeline._scorer_fingerprint``）：换了它，同分论文的次序就变了，
+        缓存里那份结果不再代表当前配置。"""
+        return self.reranker.model if self.reranker is not None else ""
 
     def build_backends(self) -> tuple[list, object]:
         """构造共享限流器的检索后端与引用后端。"""
@@ -430,6 +462,7 @@ def build_survey_stack(
         openalex_api_key=os.environ.get(OPENALEX_KEY_ENV, ""),
         ghostscript=find_ghostscript(),
         library=PaperLibrary(library_root_path) if enable_library else None,
+        reranker=build_reranker(),
     )
 
 

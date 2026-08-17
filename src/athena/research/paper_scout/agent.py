@@ -35,6 +35,7 @@ from athena.research.paper_scout.schemas import (
     ScoutRequest,
     ScoutStats,
 )
+from athena.research.paper_scout.reranker import RelevanceReranker
 from athena.research.paper_scout.scorer import RelevanceScorer
 from athena.research.paper_scout.selection import BoundarySelector, select_delivery
 from athena.research.paper_scout.session import ScoutSession
@@ -125,8 +126,8 @@ async def dispatch_tool_calls(
 class PaperScoutAgent(BaseAgent):
     """按 PaperScout 的 search/expand 决策过程收集论文的 Athena Agent。
 
-    依赖全部由组合根注入：检索后端、引用后端、相关性 scorer 和模型客户端。模块不在导入
-    时创建客户端，也不读环境变量。
+    依赖全部由组合根注入：检索后端、引用后端、相关性 scorer、同分次序 reranker 和模型
+    客户端。模块不在导入时创建客户端，也不读环境变量。
     """
 
     name = "paper_scout"
@@ -142,11 +143,14 @@ class PaperScoutAgent(BaseAgent):
         model: str,
         client: AsyncOpenAI | None = None,
         selector: BoundarySelector | None = None,
+        reranker: RelevanceReranker | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.search_backends = search_backends
         self.reference_backend = reference_backend
         self.scorer = scorer
+        # 同分论文的次序信号；缺省时排序回退到散列，行为与此前一致。
+        self.reranker = reranker
         self.model = model
         # 边界档重排器；缺省时选片回退到散列次序，行为与此前一致。
         self.selector = selector
@@ -158,7 +162,11 @@ class PaperScoutAgent(BaseAgent):
             await self.artifacts.get_text(ctx.turn.request_ref)
         )
         session = ScoutSession(
-            request, self.search_backends, self.reference_backend, self.scorer
+            request,
+            self.search_backends,
+            self.reference_backend,
+            self.scorer,
+            self.reranker,
         )
         tools = ToolRegistry()
         tools.register(PaperScoutSearchTool(session))
@@ -286,6 +294,8 @@ class PaperScoutAgent(BaseAgent):
         stats.scored_papers = len(session.pool)
         stats.retained_papers = len(retained)
         stats.scorer_calls = getattr(session.scorer, "calls", 0)
+        stats.rerank_calls = getattr(session.reranker, "calls", 0)
+        stats.rerank_failures = getattr(session.reranker, "failures", 0)
         stats.backend_requests = self._backend_requests()
         stats.errors = session.errors[:50]
 

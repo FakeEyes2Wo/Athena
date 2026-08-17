@@ -5,6 +5,7 @@ import json
 import tempfile
 import math
 import unittest
+import urllib.error
 from unittest import mock
 import athena.research.paper_scout.agent as agent_module
 from athena.research.paper_scout.selection import DeliverySelection
@@ -35,8 +36,15 @@ from athena.research.paper_scout.pool import (
     PaperPool,
     has_retrievable_source,
     locator_for,
+    rank_key,
     tie_break,
     truncate_abstract,
+)
+from athena.research.paper_scout.reranker import (
+    RERANK_ATTEMPTS,
+    DashScopeReranker,
+    document_for,
+    parse_scores,
 )
 from athena.research.paper_scout.prompts import format_history
 from athena.research.paper_scout.schemas import (
@@ -44,6 +52,7 @@ from athena.research.paper_scout.schemas import (
     PASA_RETAIN_THRESHOLD,
     RETAIN_THRESHOLD,
     PaperScoutResult,
+    ScoutAction,
     ScoutCorpus,
     ScoutPaper,
     ScoutRequest,
@@ -151,6 +160,22 @@ class StubScorer:
     async def score(self, query: str, papers: list[ScoutPaper]) -> list[float]:
         self.calls += 1
         self.seen.extend(paper.title for paper in papers)
+        return [self.scores.get(paper.title, self.default) for paper in papers]
+
+
+class StubReranker:
+    """Returns a fixed affinity per title, counting calls and failures."""
+
+    model = "stub-rerank"
+
+    def __init__(self, scores: dict[str, float], default: float = 0.0) -> None:
+        self.scores = scores
+        self.default = default
+        self.calls = 0
+        self.failures = 0
+
+    async def affinity(self, query: str, papers: list[ScoutPaper]) -> list[float]:
+        self.calls += 1
         return [self.scores.get(paper.title, self.default) for paper in papers]
 
 
@@ -313,6 +338,74 @@ class PoolTest(unittest.TestCase):
         self.assertEqual("ArXiv high", pool.ranked()[0].title)
         self.assertNotEqual(tie_break("arxiv:1"), tie_break("arxiv:2"))
 
+    def test_affinity_orders_within_a_grade_but_never_across_grades(self):
+        """affinity 只在同分时起作用；它绝不能把低分论文顶到高分之上。
+
+        这是整个设计的前提：打分器决定档位，affinity 只填补档位内部的空白。真机上
+        affinity 的取值区间是 [0.006, 0.364]，而档位之间的落差是 0.2 起步——如果两者
+        进了同一个加权和，affinity 就会开始改写打分器的判断。
+        """
+        pool = PaperPool()
+        low = paper("low", "Low grade high affinity", 0.20)
+        low.affinity = 0.364
+        high = paper("high", "High grade low affinity", 0.45)
+        high.affinity = 0.006
+        pool.add(low)
+        pool.add(high)
+
+        self.assertEqual(
+            ["High grade low affinity", "Low grade high affinity"],
+            [item.title for item in pool.ranked()],
+        )
+
+    def test_affinity_breaks_ties_the_hash_would_have_decided(self):
+        """同分时按 affinity 降序，而且要与散列给出的次序不同才算真的起了作用。"""
+        pool = PaperPool()
+        for index in range(6):
+            item = paper(f"t{index}", f"Tied {index}", 0.45)
+            item.affinity = index / 10.0
+            pool.add(item)
+
+        by_affinity = [item.title for item in pool.ranked()]
+        by_hash = [
+            item.title
+            for item in sorted(pool.ranked(), key=lambda x: tie_break(x.paper_key))
+        ]
+
+        self.assertEqual([f"Tied {i}" for i in range(5, -1, -1)], by_affinity)
+        self.assertNotEqual(by_hash, by_affinity)
+
+    def test_missing_affinity_falls_back_to_the_hash_order(self):
+        """没配 rerank（affinity 全为 0）时，次序与接入之前完全一致。"""
+        pool = PaperPool()
+        for index in range(5):
+            pool.add(paper(f"n{index}", f"Untouched {index}", 0.45))
+
+        expected = sorted(pool.ranked(), key=lambda item: tie_break(item.paper_key))
+
+        self.assertEqual(
+            [item.paper_key for item in expected],
+            [item.paper_key for item in pool.ranked()],
+        )
+
+    def test_failed_rerank_sorts_last_within_its_grade(self):
+        """rerank 失败的论文 affinity 为 0，在本档垫底——这条偏置是有意接受的，须锁住。"""
+        pool = PaperPool()
+        scored = paper("ok", "Got a score", 0.45)
+        scored.affinity = 0.006
+        failed = paper("bad", "Rerank failed", 0.45)
+        pool.add(scored)
+        pool.add(failed)
+
+        self.assertEqual("Got a score", pool.ranked()[0].title)
+
+    def test_rank_key_is_the_single_ordering_definition(self):
+        """``ranked`` 与 ``observation`` 必须共用同一个键，否则观测会推销排不上号的论文。"""
+        item = paper("k", "Keyed", 0.45)
+        item.affinity = 0.25
+
+        self.assertEqual((-0.45, -0.25, tie_break(item.paper_key)), rank_key(item))
+
     def test_mark_expanded_only_succeeds_once(self):
         pool = PaperPool()
         pool.add(paper("1", "First", 0.9))
@@ -446,7 +539,7 @@ class ScorerBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(24, DEFAULT_BATCH_SIZE)
 
     async def test_papers_are_split_into_batches_of_the_configured_size(self):
-        """批次数按单遍算；总请求数是它乘以 passes（默认 2，见 DEFAULT_PASSES）。"""
+        """批次数按单遍算；总请求数是它乘以 passes（默认 1，见 DEFAULT_PASSES）。"""
         client = StubScoringClient('{"1": 3, "2": 3, "3": 3}')
         scorer = GradedRelevanceScorer(client, "m", batch_size=3, passes=1)
 
@@ -1332,8 +1425,11 @@ class DecisionTokenTest(unittest.TestCase):
     def test_a_verdict_whose_alternatives_omit_true_scores_zero(self) -> None:
         """True 掉出 top_k 截断 = 概率极低，判 0 是对的。"""
         logprobs = self._logprobs(
-            [("Decision", [("Decision", 1.0)]), (":", [(":", 1.0)]),
-             (" False", [(" False", 1.0), (" false", 0.0)])]
+            [
+                ("Decision", [("Decision", 1.0)]),
+                (":", [(":", 1.0)]),
+                (" False", [(" False", 1.0), (" false", 0.0)]),
+            ]
         )
 
         self.assertEqual(0.0, true_probability(logprobs))
@@ -1352,8 +1448,11 @@ class BackendLimitTest(unittest.IsolatedAsyncioTestCase):
         消失，只剩 arXiv，而失败长得像"这个查询没搜到东西"。
         """
         transport = StubTransport(
-            {"api.semanticscholar.org": HttpResponse(
-                status=200, url="s2", body=b'{"data": []}', headers={})}
+            {
+                "api.semanticscholar.org": HttpResponse(
+                    status=200, url="s2", body=b'{"data": []}', headers={}
+                )
+            }
         )
         backend = SemanticScholarBackend(transport, None)
 
@@ -1364,10 +1463,14 @@ class BackendLimitTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_arxiv_clamps_too(self) -> None:
         transport = StubTransport(
-            {"arxiv.org": HttpResponse(
-                status=200, url="arxiv",
-                body=b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>",
-                headers={})}
+            {
+                "arxiv.org": HttpResponse(
+                    status=200,
+                    url="arxiv",
+                    body=b"<feed xmlns='http://www.w3.org/2005/Atom'></feed>",
+                    headers={},
+                )
+            }
         )
         backend = ArxivSearchBackend(transport)
 
@@ -1428,9 +1531,7 @@ class DeliveryTargetTest(unittest.TestCase):
 
     def test_unselected_candidates_stay_on_as_fetch_backups(self) -> None:
         """垫底的存在意义就是接住取源失败，不该因为没被选中而消失。"""
-        _seen, delivered = self._run(
-            stop_after_fetched=5, max_papers=30, papers=40
-        )
+        _seen, delivered = self._run(stop_after_fetched=5, max_papers=30, papers=40)
 
         self.assertEqual(30, delivered)
 
@@ -1457,7 +1558,9 @@ class ScorerPassesTest(unittest.IsolatedAsyncioTestCase):
                     reply = outer.replies[min(outer.seen, len(outer.replies) - 1)]
                     outer.seen += 1
                     return SimpleNamespace(
-                        choices=[SimpleNamespace(message=SimpleNamespace(content=reply))]
+                        choices=[
+                            SimpleNamespace(message=SimpleNamespace(content=reply))
+                        ]
                     )
 
             self.chat = SimpleNamespace(completions=Completions())
@@ -1503,3 +1606,192 @@ class ScorerPassesTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], await scorer.score("q", []))
         self.assertEqual(0, scorer.calls)
+
+
+class RerankerTest(unittest.IsolatedAsyncioTestCase):
+    """同分次序的交叉编码器：回填、批次、降级与重试。"""
+
+    def _papers(self, count: int) -> list:
+        return [
+            paper(str(index), f"Paper {index}", 0.0) for index in range(1, count + 1)
+        ]
+
+    def test_scores_are_restored_by_index_not_by_response_order(self) -> None:
+        """响应按分数降序返回，必须按 ``index`` 回填。
+
+        照响应顺序 ``zip`` 不会报错，只会让每一篇拿到别人的分数——而结果看上去完全正常。
+        """
+        payload = {
+            "output": {
+                "results": [
+                    {"index": 2, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.3},
+                    {"index": 1, "relevance_score": 0.1},
+                ]
+            }
+        }
+
+        self.assertEqual([0.3, 0.1, 0.9], parse_scores(payload, 3))
+
+    def test_papers_absent_from_the_response_score_zero(self) -> None:
+        """``top_n`` 截断或服务端漏掉某篇时不能错位，缺的那篇按无信号处理。"""
+        payload = {"output": {"results": [{"index": 1, "relevance_score": 0.5}]}}
+
+        self.assertEqual([0.0, 0.5, 0.0], parse_scores(payload, 3))
+
+    def test_out_of_range_indexes_are_ignored_rather_than_raising(self) -> None:
+        payload = {
+            "output": {
+                "results": [
+                    {"index": 7, "relevance_score": 0.9},
+                    {"index": -1, "relevance_score": 0.8},
+                    {"index": 0, "relevance_score": 0.2},
+                ]
+            }
+        }
+
+        self.assertEqual([0.2, 0.0], parse_scores(payload, 2))
+
+    def test_document_shows_the_grader_the_same_text(self) -> None:
+        """affinity 与 relevance 必须读同一段文本，否则排的不是同一个问题。"""
+        item = paper("d", "Title", 0.0)
+        item.abstract = "x" * 2000
+
+        document = document_for(item)
+
+        self.assertTrue(document.startswith("Title\n"))
+        self.assertEqual(len("Title\n") + 1200, len(document))
+
+    async def test_batches_are_split_and_concatenated_in_order(self) -> None:
+        reranker = DashScopeReranker("k", "m", batch_size=2)
+        seen: list[list[str]] = []
+
+        def fake_post(query: str, documents: list[str]) -> dict:
+            seen.append(documents)
+            return {
+                "output": {
+                    "results": [
+                        {"index": position, "relevance_score": 0.1 * (position + 1)}
+                        for position in range(len(documents))
+                    ]
+                }
+            }
+
+        with mock.patch.object(reranker, "_post", fake_post):
+            scores = await reranker.affinity("q", self._papers(5))
+
+        self.assertEqual([2, 2, 1], [len(batch) for batch in seen])
+        self.assertEqual(5, len(scores))
+        self.assertEqual(3, reranker.calls)
+
+    async def test_no_papers_costs_no_requests(self) -> None:
+        reranker = DashScopeReranker("k", "m")
+
+        self.assertEqual([], await reranker.affinity("q", []))
+        self.assertEqual(0, reranker.calls)
+
+    async def test_a_transient_failure_is_retried_before_degrading(self) -> None:
+        reranker = DashScopeReranker("k", "m")
+        attempts = {"count": 0}
+
+        def flaky(query: str, documents: list[str]) -> dict:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise TimeoutError("first attempt times out")
+            return {"output": {"results": [{"index": 0, "relevance_score": 0.42}]}}
+
+        with mock.patch.object(reranker, "_post", flaky):
+            scores = await reranker.affinity("q", self._papers(1))
+
+        self.assertEqual([0.42], scores)
+        self.assertEqual(0, reranker.failures)
+
+    async def test_persistent_failure_degrades_to_zero_and_is_counted(self) -> None:
+        """拿不到 affinity 只该丢掉次序信号，不该让整轮调研失败——但必须留下痕迹。"""
+        reranker = DashScopeReranker("k", "m")
+
+        def always_fails(query: str, documents: list[str]) -> dict:
+            raise urllib.error.URLError("endpoint down")
+
+        with mock.patch.object(reranker, "_post", always_fails):
+            scores = await reranker.affinity("q", self._papers(3))
+
+        self.assertEqual([0.0, 0.0, 0.0], scores)
+        self.assertEqual(1, reranker.failures)
+        self.assertEqual(RERANK_ATTEMPTS, reranker.calls)
+
+
+class SessionRerankTest(unittest.IsolatedAsyncioTestCase):
+    """打分与 rerank 在 ``_absorb`` 里的协作。"""
+
+    def _session(self, reranker) -> ScoutSession:
+        return ScoutSession(
+            ScoutRequest(query="q"),
+            [],
+            None,
+            StubScorer({"A": 0.45, "B": 0.45}),
+            reranker,
+        )
+
+    async def test_affinity_lands_on_the_papers_that_enter_the_pool(self) -> None:
+        reranker = StubReranker({"A": 0.30, "B": 0.10})
+        session = self._session(reranker)
+
+        await session._absorb(
+            [paper("a", "A", 0.0), paper("b", "B", 0.0)],
+            ScoutAction(step=1, kind="search", argument="q"),
+            0.1,
+        )
+
+        self.assertEqual(["A", "B"], [item.title for item in session.pool.ranked()])
+        self.assertEqual(1, reranker.calls)
+
+    async def test_no_reranker_leaves_affinity_at_zero(self) -> None:
+        """没配 rerank 时不该有任何行为变化。"""
+        session = self._session(None)
+
+        await session._absorb(
+            [paper("a", "A", 0.0)],
+            ScoutAction(step=1, kind="search", argument="q"),
+            0.1,
+        )
+
+        self.assertEqual(0.0, session.pool.ranked()[0].affinity)
+
+    async def test_scoring_and_reranking_run_concurrently(self) -> None:
+        """两者互不依赖，串行发出等于白等 rerank 的那一整段延迟。"""
+        order: list[str] = []
+
+        class SlowScorer(StubScorer):
+            async def score(self, query, papers):
+                order.append("score:start")
+                await asyncio.sleep(0.02)
+                order.append("score:end")
+                return await super().score(query, papers)
+
+        class SlowReranker(StubReranker):
+            async def affinity(self, query, papers):
+                order.append("rerank:start")
+                await asyncio.sleep(0.02)
+                order.append("rerank:end")
+                return await super().affinity(query, papers)
+
+        session = ScoutSession(
+            ScoutRequest(query="q"),
+            [],
+            None,
+            SlowScorer({"A": 0.45}),
+            SlowReranker({"A": 0.3}),
+        )
+
+        await session._absorb(
+            [paper("a", "A", 0.0)],
+            ScoutAction(step=1, kind="search", argument="q"),
+            0.1,
+        )
+
+        self.assertEqual(
+            ["score:start", "rerank:start"],
+            [entry for entry in order if entry.endswith(":start")],
+        )
+        self.assertLess(order.index("rerank:start"), order.index("score:end"))

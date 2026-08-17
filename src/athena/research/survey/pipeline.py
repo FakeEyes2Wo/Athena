@@ -536,6 +536,8 @@ class SurveyPipeline:
             # 边界档重排用策略模型那一档：这一次调用决定将近一半的交付集合，是全链路
             # 里单次影响最大的一次判断，不该省在这里。
             selector=LlmBoundarySelector(self.stack.client, self.stack.model),
+            # 同分论文的次序信号。没配 ATHENA_RERANK_MODEL 时为 None，排序退回散列。
+            reranker=self.stack.reranker,
         )
         candidates = self.candidate_cap()
         scout_request = ScoutRequest(
@@ -572,13 +574,20 @@ class SurveyPipeline:
         return scout_key(request_json, self._scorer_fingerprint())
 
     def _scorer_fingerprint(self) -> str:
-        """打分器的身份：模型名 + 打分遍数。
+        """打分器的身份：模型名 + 打分遍数 + 同分次序用的交叉编码器。
 
-        这两样都不在 ``ScoutRequest`` 里（由组合根决定），却都会改变交付集合，所以必须
+        三样都不在 ``ScoutRequest`` 里（由组合根决定），却都会改变交付集合，所以必须
         显式进缓存键。``DEFAULT_PASSES`` 从 1 改成 2 的那次，正是因为它不在键里而让库里
-        的旧结果继续命中。
+        的旧结果继续命中——改了等于没改，而报告上看不出任何异常。
+
+        rerank 模型同样要进：真机一轮 352 篇里 197 篇同分，换掉拆平局的那个信号，交付
+        集合里将近一半会变。
         """
-        return f"{self.stack.effective_scorer_model()}/{DEFAULT_PASSES}"
+        return (
+            f"{self.stack.effective_scorer_model()}"
+            f"/{DEFAULT_PASSES}"
+            f"/{self.stack.rerank_model()}"
+        )
 
     async def _cached_scout(self, request_json: str) -> ArtifactRef | None:
         """取回同一份请求上次跑出的检索结果，并把它引用的 blob 复制回本地存储。

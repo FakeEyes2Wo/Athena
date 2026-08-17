@@ -91,6 +91,7 @@ Semantic Scholar / OpenAlex，同一个常数不成立——gold 会散落在 10
 两者必须一起动。
 """
 
+
 class ScoutPaper(BaseModel):
     """池中的一篇论文，带有它是怎样被发现的以及它的相关性分数。"""
 
@@ -122,6 +123,15 @@ class ScoutPaper(BaseModel):
         default=None, description="Upstream open-access claim; None when unknown."
     )
     relevance: float = Field(default=0.0, ge=0.0, le=1.0, description="Score in [0,1].")
+    affinity: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Cross-encoder affinity, used only to order papers the grader scored "
+            "identically. Not comparable to relevance: a different scale entirely, "
+            "measured in [0.006, 0.364] on a real pool. 0.0 means no signal."
+        ),
+    )
     expanded: bool = Field(
         default=False, description="Whether its references were already followed."
     )
@@ -166,6 +176,16 @@ class ScoutStats(BaseModel):
     )
     policy_calls: int = Field(default=0, ge=0)
     scorer_calls: int = Field(default=0, ge=0)
+    rerank_calls: int = Field(default=0, ge=0)
+    rerank_failures: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Rerank batches that failed after retry. Those papers carry affinity "
+            "0.0 and sort last within their grade, so a non-zero count means the "
+            "tie ordering was partly biased, not merely degraded."
+        ),
+    )
     backend_requests: int = Field(default=0, ge=0)
     boundary_tier: int = Field(
         default=0,

@@ -53,8 +53,24 @@ def tie_break(paper_key: str) -> str:
     因此这里只做一件事：把字典序换成 ``paper_key`` 的稳定散列。次序仍然完全可复现，但不再
     与通道、年代或编号相关，同分的论文按各自的机会入选。要真正区分同档论文，得让打分器给出
     更细的分数，而不是在这里发明信号。
+
+    **这已经不再是同档论文的第一顺位。** ``ScoutPaper.affinity``（交叉编码器给的连续分数，
+    见 ``paper_scout.reranker``）排在本函数之前，把"发明信号"换成了"引入一个独立的信号"。
+    散列仍然是最后的兜底：没配 rerank、或者 rerank 请求失败时，次序回到这里。
     """
     return hashlib.sha256(paper_key.encode("utf-8")).hexdigest()
+
+
+def rank_key(paper: ScoutPaper) -> tuple[float, float, str]:
+    """池排序的三级键：相关性档位 → 交叉编码器 affinity → 稳定散列。
+
+    三级各司其职，顺序不能换：``relevance`` 是打分器的判断，affinity **只在打分器给出
+    相同分数时才起作用**——它不覆盖判断，只填补判断留下的空白。真机一轮 352 篇里有
+    197 篇同分，此前这 197 篇之间完全由散列决定次序。
+
+    affinity 缺省为 0.0，因此没配 rerank 时这个键退化成原来的两级，行为与此前一致。
+    """
+    return (-paper.relevance, -paper.affinity, tie_break(paper.paper_key))
 
 
 def locator_for(paper: ScoutPaper) -> str:
@@ -161,11 +177,8 @@ class PaperPool:
         return True
 
     def ranked(self) -> list[ScoutPaper]:
-        """按相关性降序返回全部论文；同分次序见 ``tie_break``。"""
-        return sorted(
-            self._papers.values(),
-            key=lambda item: (-item.relevance, tie_break(item.paper_key)),
-        )
+        """按相关性降序返回全部论文；同分次序见 ``rank_key``。"""
+        return sorted(self._papers.values(), key=rank_key)
 
     def retained(
         self,
@@ -197,10 +210,7 @@ class PaperPool:
         ranked = self.ranked()
         expanded = [item for item in ranked if item.expanded][:OBSERVATION_EXPANDED]
         fresh = [item for item in ranked if not item.expanded][:OBSERVATION_UNEXPANDED]
-        shown = sorted(
-            expanded + fresh,
-            key=lambda item: (-item.relevance, tie_break(item.paper_key)),
-        )
+        shown = sorted(expanded + fresh, key=rank_key)
         lines = [POOL_HEADER]
         for paper in shown:
             status = "[EXP]" if paper.expanded else "[NEW]"
