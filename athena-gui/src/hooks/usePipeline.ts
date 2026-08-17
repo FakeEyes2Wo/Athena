@@ -394,6 +394,35 @@ export function usePipeline(workspaceRoot?: string | null) {
       messages: [...prev.messages, { id: nextId("user"), role: "user", kind: "text", content }],
     }));
 
+    // 运行中/暂停中：普通文本是给 Supervisor 的指导/计划调整，不应再次走任务理解预览。
+    if (viewModel.status === "running" || viewModel.status === "paused") {
+      try {
+        const response = (await sendControl(content)) as { response?: unknown };
+        const reply = typeof response?.response === "string" ? response.response : "";
+        if (reply) {
+          setViewModel((prev) => ({
+            ...prev,
+            messages: [
+              ...prev.messages,
+              { id: nextId("athena"), role: "athena", kind: "text", content: reply },
+            ],
+          }));
+        }
+      } catch (err) {
+        const text = errorMessage(err);
+        setViewModel((prev) => ({
+          ...prev,
+          status: "error",
+          messages: [
+            ...prev.messages,
+            { id: nextId("error"), role: "athena", kind: "error", content: text },
+          ],
+        }));
+        throw err;
+      }
+      return;
+    }
+
     try {
       const preview = await sendMessage(content);
       // 根据 task understanding 结果给当前会话一个标题（类似 Claude Code）。
@@ -424,7 +453,7 @@ export function usePipeline(workspaceRoot?: string | null) {
       }));
       throw err;
     }
-  }, [currentSessionId, nextId, renameSession]);
+  }, [currentSessionId, nextId, renameSession, viewModel.status]);
 
   const startRun = useCallback(async (task?: string, messageId?: string) => {
     setViewModel((prev) => ({

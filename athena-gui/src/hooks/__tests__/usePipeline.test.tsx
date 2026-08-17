@@ -139,6 +139,25 @@ describe("usePipeline", () => {
     expect(bridgeMocks.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("routes prose to the supervisor while a run is active instead of parse_intent", async () => {
+    bridgeMocks.startSearch.mockResolvedValue({ ok: true });
+    bridgeMocks.sendControl.mockResolvedValue({ response: "收到，已调整计划。" });
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.startRun("analyze this CSV");
+    });
+    await act(async () => {
+      await result.current.sendPrompt("请优先做草莓");
+    });
+
+    expect(bridgeMocks.sendMessage).not.toHaveBeenCalled();
+    expect(bridgeMocks.sendControl).toHaveBeenCalledWith("请优先做草莓");
+    expect(result.current.viewModel.messages.some(
+      (message) => message.role === "athena" && message.content === "收到，已调整计划。",
+    )).toBe(true);
+  });
+
   it("toggles manual/auto mode through the exposed action", async () => {
     const { result } = renderHook(() => usePipeline());
 
