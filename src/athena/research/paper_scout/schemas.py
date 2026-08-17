@@ -180,6 +180,11 @@ class ScoutStats(BaseModel):
         default=False,
         description="The boundary tier was resolved by rerank rather than by hash.",
     )
+    reference_edges: int = Field(
+        default=0,
+        ge=0,
+        description="In-corpus citation edges resolved from the upstream reference API.",
+    )
     selection_note: str = Field(
         default="",
         description=(
@@ -279,6 +284,14 @@ class ScoutCorpus(BaseModel):
     )
     pool: list[ScoutPaper] = Field(description="Every paper accepted into the pool.")
     actions: list[ScoutAction] = Field(description="Ordered action trace.")
+    reference_edges: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Delivered paper -> the delivered papers it cites, from the upstream "
+            "reference API. Parsing bibliographies alone yielded 1 edge across 20 "
+            "papers, which leaves paper_cites and cited_by inert at production size."
+        ),
+    )
     stats_ref: ArtifactRef = Field(description="Reference to the run statistics.")
 
 

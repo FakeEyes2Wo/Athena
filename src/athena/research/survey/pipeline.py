@@ -257,6 +257,7 @@ class StageTimings(BaseModel):
     scout_seconds: float = Field(default=0.0, ge=0.0)
     source_seconds: float = Field(default=0.0, ge=0.0)
     markdown_seconds: float = Field(default=0.0, ge=0.0)
+    references_seconds: float = Field(default=0.0, ge=0.0)
     index_seconds: float = Field(default=0.0, ge=0.0)
     total_seconds: float = Field(default=0.0, ge=0.0)
 
@@ -349,6 +350,19 @@ class SurveyReport(BaseModel):
     vision_failures: int = Field(default=0, ge=0)
     embed_calls: int = Field(default=0, ge=0)
     embedded_texts: int = Field(default=0, ge=0)
+    reference_lookups: int = Field(
+        default=0,
+        ge=0,
+        description="Delivered papers whose reference list was resolved upstream.",
+    )
+    reference_edges: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "In-corpus paper-to-paper citation edges. Parsing bibliographies alone "
+            "yielded 1 edge across 20 papers, which makes paper_cites inert."
+        ),
+    )
     scout_cached: bool = Field(
         default=False, description="PaperScout was replayed from the paper library."
     )
@@ -410,6 +424,8 @@ class SurveyPipeline:
         self._outcomes: dict[str, PaperOutcome] = {}
         self._by_identifier: dict[str, str] = {}
         self._conversion_keys: dict[str, str] = {}
+        self._retained: list = []
+        self._paper_edges: dict[str, list[str]] = {}
         # 取源可以多要几篇垫底，转换不能——转换才是花钱的那一段
         self._convert_cap = request.max_papers
         # 独立跑时事实全部落在 SurveyReport 里；接进 loop 后它是个十几分钟的后台任务，
@@ -660,6 +676,15 @@ class SurveyPipeline:
         self.report.score_histogram = dict(sorted(histogram.items(), reverse=True))
         self.report.warnings.extend(result.warnings)
         self.report.scout_status = result.status
+        # 留着交付的 ScoutPaper 本体：取 references 需要它们的标识符，而 PaperOutcome
+        # 只存了 paper_key
+        self._retained = list(corpus.retained)
+        # 引用图由 scout 建好带过来：那一层本来就持有 reference backend，在这里另建一份
+        # 会让管线的单测打到真实网络上。
+        self._paper_edges = {
+            source: list(targets) for source, targets in corpus.reference_edges.items()
+        }
+        self.report.reference_lookups = len(self._paper_edges)
         for paper in corpus.retained:
             self._outcomes[paper.paper_key] = PaperOutcome(
                 paper_key=paper.paper_key,
@@ -910,6 +935,7 @@ class SurveyPipeline:
                 selected,
                 self.stack.embedder,
                 vectors=self.stack.vector_cache(),
+                paper_edges=self._index_edges(selected),
             )
         except OpenAIError as error:
             # 建索引是最后一段，也是唯一会一次性打光编码配额的一段。异常逃出去会连同
@@ -922,6 +948,31 @@ class SurveyPipeline:
                 raw = content.paper_id or ""
                 self._outcome_for(self._conversion_keys.get(raw, raw)).indexed = False
         self.report.timings.index_seconds = round(time.monotonic() - started, 3)
+
+    def _index_edges(self, selected: list[PaperContent]) -> dict[str, list[str]]:
+        """把引用图从 scout 的 ``paper_key`` 翻成语料里的 ``paper_id``。
+
+        两套 id 不同是既有事实（``_register_identifiers`` 的注释说明了为什么），所以这一步
+        必须走同一套并表逻辑，否则边会连到不存在的落点上、在建索引时被整批丢掉。
+        """
+        canonical_to_raw: dict[str, str] = {}
+        for content in selected:
+            raw = content.paper_id or ""
+            canonical_to_raw.setdefault(self._conversion_keys.get(raw, raw), raw)
+        translated: dict[str, list[str]] = {}
+        for source, targets in self._paper_edges.items():
+            source_raw = canonical_to_raw.get(source)
+            if source_raw is None:
+                continue
+            linked = [
+                canonical_to_raw[target]
+                for target in targets
+                if target in canonical_to_raw and canonical_to_raw[target] != source_raw
+            ]
+            if linked:
+                translated[source_raw] = list(dict.fromkeys(linked))
+        self.report.reference_edges = sum(len(v) for v in translated.values())
+        return translated
 
     def _indexable(self, content: PaperContent) -> bool:
         """语料门禁：只有 ``suspect_empty`` 一票否决，``degraded`` 默认放行。

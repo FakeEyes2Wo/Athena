@@ -51,6 +51,13 @@ from athena.research.paper_scout.tool import (
     PaperScoutSearchTool,
 )
 
+REFERENCE_LIMIT = 200
+"""给一篇论文取参考文献时的上限。
+
+只用来连交付集合内部的边，够覆盖"这篇引了这批里的哪几篇"即可。取 200 而不是全部：
+一篇综述能有几百条参考文献，而落在 20 篇交付集合里的至多 19 条。
+"""
+
 POLICY_MAX_TOKENS = 2048
 POLICY_TEMPERATURE = 0.3
 ACTION_TOOLS = (SEARCH_TOOL_NAME, EXPAND_TOOL_NAME)
@@ -282,6 +289,8 @@ class PaperScoutAgent(BaseAgent):
         stats.backend_requests = self._backend_requests()
         stats.errors = session.errors[:50]
 
+        edges = await self._reference_edges(retained)
+        stats.reference_edges = sum(len(item) for item in edges.values())
         stats_ref = await self.artifacts.put_text(stats.model_dump_json())
         corpus = ScoutCorpus(
             query=session.request.query,
@@ -289,6 +298,7 @@ class PaperScoutAgent(BaseAgent):
             pool=session.pool.ranked(),
             actions=session.actions,
             stats_ref=stats_ref,
+            reference_edges=edges,
         )
         corpus_ref = await self.artifacts.put_text(corpus.model_dump_json())
         source_ref = await self._paper_source_request(
@@ -313,6 +323,38 @@ class PaperScoutAgent(BaseAgent):
             result_ref=result_ref,
             next_context_ref=f"context://{ctx.turn.turn_id}/next",
         )
+
+    async def _reference_edges(self, retained: list) -> dict[str, list[str]]:
+        """给交付集合建"论文 → 论文"的引用图，只保留两端都在交付集合里的边。
+
+        为什么不能靠下游解析参考文献来连：那条路要求被引论文的**标题**在引用方的参考文献
+        文本里匹配得上，而真机实测 20 篇语料只连出 **1 条边**、44 篇 16 条——在生产尺寸上
+        等于没有，``paper_cites`` 与 ``cited_by`` 两个算子因此形同虚设。而引用后端在检索
+        阶段本来就返回这层关系，只是一直没人存下来。
+
+        只给交付集合取，不给整个池子（真机 352 篇）：边只有两端都落在语料里才有落点，
+        为池子里其余几百篇各发一次请求，连出来的边一条都用不上。
+
+        逐篇失败只跳过那一篇：引用图是增益，缺几条边不该让一次已经付过检索成本的运行失败。
+        """
+        backend = self.reference_backend
+        if backend is None or not retained:
+            return {}
+        known = {paper.paper_key for paper in retained}
+        edges: dict[str, list[str]] = {}
+        for paper in retained:
+            try:
+                cited = await backend.references(paper, REFERENCE_LIMIT)
+            except Exception:  # noqa: BLE001 - 少几条边不该中断整轮
+                continue
+            targets = [
+                item.paper_key
+                for item in cited
+                if item.paper_key in known and item.paper_key != paper.paper_key
+            ]
+            if targets:
+                edges[paper.paper_key] = list(dict.fromkeys(targets))
+        return edges
 
     async def _paper_source_request(
         self, retained: list, corpus_ref: str, request: ScoutRequest

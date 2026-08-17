@@ -509,6 +509,44 @@ def citation_edges(
     return edges
 
 
+def reference_edges(
+    units_by_paper: list[list[RetrievalUnit]],
+    anchors: dict[str, str],
+    paper_edges: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """把上游给的"论文 → 论文"引用关系折成"锚点 → 锚点"的边。
+
+    这条边与 ``citation_edges`` 解析参考文献得到的那条是**互补**的，不是替代：
+
+    - 参考文献解析是 **chunk 级**的——"这一段引了 [@smith2020]"——精确到出处，但只能连上
+      标题恰好能匹配上的那几条。真机实测 20 篇语料只连出 **1 条边**，44 篇连出 16 条：
+      在生产尺寸上等于没有。
+    - 上游 references 是**论文级**的：知道 X 引了 Y，但不知道 X 的哪一段引的。它挂在
+      论文的锚点上——``citing_anchors`` 本来就把任意 chunk 归约到锚点做反向查询，正向
+      也用同一个落点，两个方向才对称。
+
+    只保留两端都在语料里的边：跨出语料的引用没有落点，留着只会让 Agent 读到 ``not_found``。
+    """
+    edges: dict[str, list[str]] = {}
+    present = {
+        units[0].metadata.get("retrieval_namespace", "")
+        for units in units_by_paper
+        if units
+    }
+    for source, targets in paper_edges.items():
+        anchor = anchors.get(source)
+        if anchor is None:
+            continue
+        linked = [
+            anchors[target]
+            for target in targets
+            if target != source and target in present and target in anchors
+        ]
+        if linked:
+            edges[anchor] = list(dict.fromkeys(linked))
+    return edges
+
+
 def cited_paper_ids(
     unit: RetrievalUnit, edges: dict[tuple[str, str], str]
 ) -> list[str]:
@@ -529,6 +567,7 @@ async def build_corpus_index(
     *,
     index_bibliography: bool = False,
     vectors: VectorCache | None = None,
+    paper_edges: dict[str, list[str]] | None = None,
 ) -> ArtifactRef:
     """把若干篇论文构建成可检索语料，返回三个检索工具接受的 ``corpus_ref``。
 
@@ -544,6 +583,8 @@ async def build_corpus_index(
     units_by_paper = [await paper.load_retrieval_units(store) for paper in papers]
     anchors = paper_anchors(units_by_paper)
     edges = citation_edges(units_by_paper, anchors)
+    # 论文级引用挂在锚点上，与参考文献解析出的 chunk 级引用并存，见 reference_edges
+    anchor_edges = reference_edges(units_by_paper, anchors, paper_edges or {})
 
     entries: list[CorpusEntry] = []
     sentences: list[CorpusSentence] = []
@@ -565,7 +606,12 @@ async def build_corpus_index(
                     heading_path=unit.heading_path,
                     text=unit.text,
                     visual_ids=visual_link_ids(unit),
-                    cited_ids=cited_paper_ids(unit, edges),
+                    cited_ids=list(
+                        dict.fromkeys(
+                            cited_paper_ids(unit, edges)
+                            + anchor_edges.get(unit.unit_id, [])
+                        )
+                    ),
                     sentence_start=len(sentences),
                     sentence_end=len(sentences) + len(spans),
                 )

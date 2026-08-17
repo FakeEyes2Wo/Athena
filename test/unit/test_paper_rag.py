@@ -19,6 +19,8 @@ from athena.research.paper_rag.index import (
     SEMANTIC_PROBES,
     NonSemanticEmbedderError,
     build_corpus_index,
+    paper_anchors,
+    reference_edges,
     require_semantic_embedder,
     semantic_margin,
     display_math_close,
@@ -1406,3 +1408,65 @@ class KeywordTokenFallbackTest(unittest.IsolatedAsyncioTestCase):
         corpus = await self.load(["Nothing relevant here."])
 
         self.assertEqual([], keyword_search(corpus, ["wasserstein"], 5))
+
+
+class ReferenceEdgeTest(unittest.TestCase):
+    """论文级引用边：靠解析参考文献连不出来的那些，由上游 references 补。
+
+    真机实测解析参考文献在 20 篇语料上只连出 1 条边、44 篇 16 条——在生产尺寸上
+    ``paper_cites`` 与 ``cited_by`` 等于是死的。
+    """
+
+    @staticmethod
+    def _units(namespace: str, count: int = 2) -> list:
+        from athena.research.paper_markdown.schemas import RetrievalUnit
+
+        return [
+            RetrievalUnit(
+                unit_id=f"{namespace}:chunk-{index}",
+                kind="abstract" if index == 0 else "paragraph",
+                text=f"Body {index} of {namespace} with enough prose to be an anchor.",
+                heading_path=[],
+                locators=[],
+                metadata={"retrieval_namespace": namespace, "paper_id": namespace},
+            )
+            for index in range(count)
+        ]
+
+    def test_edges_land_on_the_anchor_of_each_paper(self) -> None:
+        """反向查询本来就把任意 chunk 归约到锚点；正向用同一个落点，两个方向才对称。"""
+        units = [self._units("p1"), self._units("p2")]
+        anchors = paper_anchors(units)
+
+        edges = reference_edges(units, anchors, {"p1": ["p2"]})
+
+        self.assertEqual({anchors["p1"]: [anchors["p2"]]}, edges)
+
+    def test_targets_outside_the_corpus_are_dropped(self) -> None:
+        """跨出语料的引用没有落点，留着只会让 Agent 读到 not_found。"""
+        units = [self._units("p1")]
+        anchors = paper_anchors(units)
+
+        edges = reference_edges(units, anchors, {"p1": ["p2", "p3"]})
+
+        self.assertEqual({}, edges)
+
+    def test_a_paper_never_cites_itself(self) -> None:
+        units = [self._units("p1")]
+        anchors = paper_anchors(units)
+
+        self.assertEqual({}, reference_edges(units, anchors, {"p1": ["p1"]}))
+
+    def test_duplicate_targets_are_collapsed(self) -> None:
+        units = [self._units("p1"), self._units("p2")]
+        anchors = paper_anchors(units)
+
+        edges = reference_edges(units, anchors, {"p1": ["p2", "p2"]})
+
+        self.assertEqual([anchors["p2"]], edges[anchors["p1"]])
+
+    def test_an_unknown_source_is_skipped_rather_than_raising(self) -> None:
+        units = [self._units("p1")]
+        anchors = paper_anchors(units)
+
+        self.assertEqual({}, reference_edges(units, anchors, {"ghost": ["p1"]}))
