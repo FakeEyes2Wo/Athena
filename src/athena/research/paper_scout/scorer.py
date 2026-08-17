@@ -94,11 +94,43 @@ def parse_grades(content: str, count: int) -> list[float]:
     return scores
 
 
+DEFAULT_PASSES = 2
+"""同一批论文打几遍取均值。
+
+**打分在温度 0 下并不确定。** 同一批 60 篇论文连打 8 遍，两遍之间的逐篇档位一致率均值
+只有 0.779（区间 0.617–0.867）。这不是模型有偏——8 遍之间没有系统性漂移，109 篇跨运行
+对照的均分变化是 +0.004——纯粹是抖动。
+
+抖动会直接变成交付集合的 churn，而且**截断越紧越严重**（60 篇里取前 N，全部不相交组合
+的两两 Jaccard，样本数 28–280）：
+
+======  ==================  ==================  ==================
+遍数    前 10 篇            前 20 篇            前 30 篇
+======  ==================  ==================  ==================
+1       0.594 ± 0.239       0.640 ± 0.138       0.741 ± 0.077
+**2**   **0.809 ± 0.109**   **0.746 ± 0.099**   **0.802 ± 0.064**
+3       0.871 ± 0.086       0.767 ± 0.066       0.815 ± 0.046
+4       0.922 ± 0.090       0.727 ± 0.027       0.792 ± 0.027
+======  ==================  ==================  ==================
+
+取 2 是因为 1→2 那一跳最大（前 10 篇 +0.215），再往上收益递减而成本线性增长。打分用的是
+轻量模型且整批并发，实测 60 篇一遍 37.8 秒。
+
+> 这与"更细的分档反而更不稳"（见 ``docs/survey_overhaul_ch.md`` 六点六）不矛盾：那里加的
+> 是**分辨率**——把同一份抖动表达得更充分；这里做的是**降方差**——同一把尺子量几遍取平均。
+> 前者放大噪声，后者压缩噪声。
+
+均值会产生非档位的取值（0.325 之类），这正是想要的：同分堆本身就是要消除的东西。
+"""
+
+
 class GradedRelevanceScorer:
-    """按 0–3 分级批量打分的 LLM scorer。
+    """按 0–3 分级批量打分的 LLM scorer，默认打两遍取均值。
 
     批量而不是逐篇请求：一次 search 会带回 10 篇以上候选，逐篇调用会让打分的调用数
     压过策略本身的调用数，而分级评分对同批次比较反而更稳定。
+
+    多遍取均值的依据见 ``DEFAULT_PASSES``。
     """
 
     def __init__(
@@ -108,17 +140,28 @@ class GradedRelevanceScorer:
         *,
         batch_size: int = DEFAULT_BATCH_SIZE,
         timeout: float = 120.0,
+        passes: int = DEFAULT_PASSES,
     ) -> None:
         self.client = client
         self.model = model
         self.batch_size = batch_size
         self.timeout = timeout
+        self.passes = max(1, passes)
         self.calls = 0
 
     async def score(self, query: str, papers: list[ScoutPaper]) -> list[float]:
-        """对整批论文打分，内部按 ``batch_size`` 拆成并发请求。"""
+        """对整批论文打分；打 ``passes`` 遍取均值，内部按 ``batch_size`` 拆成并发请求。"""
         if not papers:
             return []
+        rounds = await asyncio.gather(
+            *(self._one_pass(query, papers) for _ in range(self.passes))
+        )
+        if len(rounds) == 1:
+            return rounds[0]
+        return [sum(values) / len(values) for values in zip(*rounds)]
+
+    async def _one_pass(self, query: str, papers: list[ScoutPaper]) -> list[float]:
+        """跑一遍完整打分。"""
         batches = [
             papers[start : start + self.batch_size]
             for start in range(0, len(papers), self.batch_size)

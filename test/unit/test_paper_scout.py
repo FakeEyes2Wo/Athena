@@ -50,10 +50,10 @@ from athena.research.paper_scout.schemas import (
     ScoutStats,
 )
 from athena.research.paper_scout.scorer import (
-    decision_position,
-    true_probability,
     DEFAULT_BATCH_SIZE,
+    DEFAULT_PASSES,
     GradedRelevanceScorer,
+    decision_position,
     parse_grades,
     true_probability,
 )
@@ -446,8 +446,9 @@ class ScorerBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(24, DEFAULT_BATCH_SIZE)
 
     async def test_papers_are_split_into_batches_of_the_configured_size(self):
+        """批次数按单遍算；总请求数是它乘以 passes（默认 2，见 DEFAULT_PASSES）。"""
         client = StubScoringClient('{"1": 3, "2": 3, "3": 3}')
-        scorer = GradedRelevanceScorer(client, "m", batch_size=3)
+        scorer = GradedRelevanceScorer(client, "m", batch_size=3, passes=1)
 
         scores = await scorer.score(
             "q", [paper(f"arxiv:{i}", f"T{i}", 0.0) for i in range(7)]
@@ -456,6 +457,16 @@ class ScorerBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(7, len(scores))
         self.assertEqual(3, scorer.calls)
         self.assertEqual(3, len(client.prompts))
+
+    async def test_the_default_pass_count_doubles_the_requests(self):
+        """多打一遍是为了压抖动：单遍两次之间的逐篇一致率只有 0.779。"""
+        client = StubScoringClient('{"1": 3, "2": 3, "3": 3}')
+        scorer = GradedRelevanceScorer(client, "m", batch_size=3)
+
+        await scorer.score("q", [paper(f"arxiv:{i}", f"T{i}", 0.0) for i in range(7)])
+
+        self.assertEqual(DEFAULT_PASSES, scorer.passes)
+        self.assertEqual(3 * DEFAULT_PASSES, scorer.calls)
 
     async def test_a_failed_batch_scores_zero_without_taking_down_the_rest(self):
         """整批按 0 分处理——打分失败绝不能把论文误判成高相关。
@@ -1427,3 +1438,68 @@ class DeliveryTargetTest(unittest.TestCase):
         seen, _ = self._run(stop_after_fetched=0, max_papers=7, papers=20)
 
         self.assertEqual([7], seen)
+
+
+class ScorerPassesTest(unittest.IsolatedAsyncioTestCase):
+    """打分在温度 0 下并不确定；多遍取均值是压缩抖动，不是提高分辨率。"""
+
+    class _Sequenced:
+        """按预设序列逐遍返回不同分数的假客户端。"""
+
+        def __init__(self, replies: list[str]) -> None:
+            self.replies = list(replies)
+            self.seen = 0
+
+            outer = self
+
+            class Completions:
+                async def create(self, **_kwargs):
+                    reply = outer.replies[min(outer.seen, len(outer.replies) - 1)]
+                    outer.seen += 1
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content=reply))]
+                    )
+
+            self.chat = SimpleNamespace(completions=Completions())
+
+    def _papers(self, count: int) -> list:
+        return [
+            paper(str(index), f"Paper {index}", 0.0) for index in range(1, count + 1)
+        ]
+
+    async def test_two_passes_average_the_two_readings(self) -> None:
+        """3 分与 1 分平均成 0.6：(1.0 + 0.2) / 2。"""
+        client = self._Sequenced(['{"1": 3}', '{"1": 1}'])
+        scorer = GradedRelevanceScorer(client, "m", passes=2)
+
+        scores = await scorer.score("q", self._papers(1))
+
+        self.assertAlmostEqual(0.6, scores[0])
+        self.assertEqual(2, scorer.calls)
+
+    async def test_one_pass_keeps_the_exact_tier_value(self) -> None:
+        """单遍时不该引入任何平均，取值必须仍落在 GRADE_SCORES 上。"""
+        client = self._Sequenced(['{"1": 2}'])
+        scorer = GradedRelevanceScorer(client, "m", passes=1)
+
+        self.assertEqual([0.45], await scorer.score("q", self._papers(1)))
+
+    async def test_agreement_between_passes_leaves_the_score_untouched(self) -> None:
+        client = self._Sequenced(['{"1": 3}', '{"1": 3}'])
+        scorer = GradedRelevanceScorer(client, "m", passes=2)
+
+        self.assertEqual([1.0], await scorer.score("q", self._papers(1)))
+
+    async def test_passes_below_one_are_clamped_rather_than_dividing_by_zero(
+        self,
+    ) -> None:
+        scorer = GradedRelevanceScorer(self._Sequenced(['{"1": 3}']), "m", passes=0)
+
+        self.assertEqual(1, scorer.passes)
+        self.assertEqual([1.0], await scorer.score("q", self._papers(1)))
+
+    async def test_no_papers_costs_no_calls_whatever_the_pass_count(self) -> None:
+        scorer = GradedRelevanceScorer(self._Sequenced([]), "m", passes=3)
+
+        self.assertEqual([], await scorer.score("q", []))
+        self.assertEqual(0, scorer.calls)
