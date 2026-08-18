@@ -20,6 +20,7 @@ from athena.research.supervisor.experiment import (
     decide_settlement,
     load_agent_result,
     handoff_block,
+    hypothesis_block,
     load_best,
     read_eval_handoff,
 )
@@ -768,6 +769,20 @@ class Supervisor(SupervisorActions):
         if plan_id not in self._running:
             self._running[plan_id] = asyncio.create_task(self._run_one_turn(plan_id))
 
+    def _hypothesis_block(self, plan_id: str) -> str:
+        """本 Plan 要检验的那条假设，拼进 prompt 正文。
+
+        ``plan_id`` 就是 ``hypothesis_id``（见 ``start_plan``）。树里取不到时返回空串
+        而不是抛异常：少一段上下文该降级，不该让整条 Plan 挂掉。
+        """
+        try:
+            hypothesis = self.tree.get_hypothesis(plan_id)
+        except KeyError:
+            return ""
+        return hypothesis_block(
+            hypothesis.statement, hypothesis.intervention, hypothesis.expected_effect
+        )
+
     async def _run_one_turn(self, plan_id: str) -> _CompletedTurn:
         """Spend one turn durably, run the Agent, then execute trusted scoring."""
         state = self.state.plans[plan_id]
@@ -782,7 +797,9 @@ class Supervisor(SupervisorActions):
                         f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
                         f"turn limit: {state.turn_limit}; patience: {state.patience}; "
                         f"stale rounds: {state.stale_rounds}."
-                        # 候选要按契约写 predictions/，而 context_refs 到不了 model。
+                        # 假设与契约都必须走 content：context_refs 到不了 model
+                        # （见 experiment.hypothesis_block / handoff_block）。
+                        + self._hypothesis_block(plan_id)
                         + handoff_block(await self._plan_handoff(plan_id))
                         + self._corpus_block(plan_id)
                     ),

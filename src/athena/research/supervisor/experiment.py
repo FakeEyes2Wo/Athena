@@ -64,6 +64,46 @@ def handoff_block(handoff: str) -> str:
     )
 
 
+def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
+    """把这条 Plan 要检验的假设拼进 prompt 正文。
+
+    与 ``handoff_block`` 是同一条教训的第二处落点：假设此前只经 ``PlanInput`` 走
+    ``context_refs``，而那是一条**死信道**——``base_runner`` 只把 trigger 的 ``content``
+    当作 model 的 user prompt，``context_refs`` 仅以 sha256 引用的形式出现在信封里，
+    通用工具集（``read_file``/``write_file``/``shell_command``）里也没有任何按 ref 取
+    正文的算子。于是 PlanAgent 从来没见过它要实现的那条假设。
+
+    真机（2026-08-18，为文献 A/B 跑的对照臂）证据，6 次实验无一实现分配给它的假设：
+
+    - 3 次直接 ``abandon``，理由逐字是 "The user message does not contain explicit
+      hypothesis text"；
+    - 另 3 次自行编了一个干预。假设写着"加交互特征"的那次，提交的代码实现的是"删掉
+      噪声列"，还自带一行 ``Hypothesis: Removing noise columns ...`` 的注释；写着
+      "用 IterativeImputer 替代中位数填充"的那次，代码里根本没有 IterativeImputer。
+    - 两条不同的假设因此产出**逐字节相同的预测**（AP 都是 0.304924）——它们都退化成了
+      同一个默认动作。
+
+    后果比"少一段上下文"严重得多：整条 SEARCH 检验的不是 Ideator 提的假设，而是
+    PlanAgent 临时想出来的东西。凡是想测"假设质量影响下游分数"的实验，在这条信道修好
+    之前都测不到自己以为在测的东西。
+    """
+    parts = [
+        ("Claim", statement),
+        ("Intervention to implement", intervention),
+        ("Expected effect", expected),
+    ]
+    body = "\n".join(
+        f"{label}: {value.strip()}" for label, value in parts if value and value.strip()
+    )
+    if not body:
+        return ""
+    return (
+        "\n\n--- Hypothesis under test (implement exactly this, nothing else) ---\n"
+        f"{body}\n"
+        "--- end of hypothesis ---"
+    )
+
+
 async def read_eval_handoff(
     store: ArtifactStore, evaluator_ref: ArtifactRef | None
 ) -> str:
