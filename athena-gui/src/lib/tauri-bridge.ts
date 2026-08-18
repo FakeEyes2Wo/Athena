@@ -513,10 +513,19 @@ export function experimentSetSota(experimentId: string): Promise<{ sota_id: stri
 
 /* ── Human requests ───────────────────────────────────────────────── */
 
+/** One optional answer for a clarification question. */
+export interface ClarificationChoice {
+  label: string;
+  value: string;
+}
+
 /** One outstanding supervisor question awaiting a human reply. */
 export interface HumanRequest {
   request_id: string;
   prompt: string;
+  choices?: ClarificationChoice[] | null;
+  allow_custom: boolean;
+  allow_skip: boolean;
 }
 
 /** List the supervisor's outstanding human questions. */
@@ -524,7 +533,7 @@ export function humanPending(): Promise<{ requests: HumanRequest[] }> {
   return rpc<{ requests: HumanRequest[] }>("human_pending");
 }
 
-/** Answer one outstanding human question by request id. */
+/** Answer one outstanding human question with free text. */
 export function humanReply(
   requestId: string,
   answer: string,
@@ -533,6 +542,27 @@ export function humanReply(
   return wsBackend.call("human_reply", {
     request_id: requestId,
     answer,
+  }) as Promise<{ replied: boolean }>;
+}
+
+/** Answer one outstanding multiple-choice question. */
+export function humanChoice(
+  requestId: string,
+  value: string,
+): Promise<{ replied: boolean }> {
+  if (hasTauri) return invoke("human_reply", { requestId, choice: value });
+  return wsBackend.call("human_reply", {
+    request_id: requestId,
+    choice: value,
+  }) as Promise<{ replied: boolean }>;
+}
+
+/** Skip one outstanding human question. */
+export function humanSkip(requestId: string): Promise<{ replied: boolean }> {
+  if (hasTauri) return invoke("human_reply", { requestId, skip: true });
+  return wsBackend.call("human_reply", {
+    request_id: requestId,
+    skip: true,
   }) as Promise<{ replied: boolean }>;
 }
 

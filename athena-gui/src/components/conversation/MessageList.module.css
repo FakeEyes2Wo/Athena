@@ -6,6 +6,34 @@
   scroll-behavior: smooth;
 }
 
+.jump-to-bottom {
+  position: sticky;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 0 auto;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  transition:
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.jump-to-bottom:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-soft);
+  transform: translateY(-1px);
+}
+
 .message-bubble {
   padding: var(--space-md) var(--space-lg);
   margin-bottom: var(--space-md);

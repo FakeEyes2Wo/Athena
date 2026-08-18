@@ -29,6 +29,17 @@
   white-space: pre-wrap;
 }
 
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.choices .button {
+  text-align: left;
+}
+
 .actions {
   display: flex;
   gap: 8px;

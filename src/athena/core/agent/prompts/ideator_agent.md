@@ -18,7 +18,12 @@ SEARCH. Use it as your starting context.
    repeat it.
 3. If your request supplies a `corpus_ref`, consult the literature corpus (see
    below). Skip this step when no `corpus_ref` is given.
-4. Propose **1-5 falsifiable hypotheses** that could improve the primary metric.
+4. Read any research handoff you were given: `KAGGLE_HANDOFF.md` in the
+   workspace or handoff text delivered to your mailbox. It contains evidence
+   collected for this task (e.g. Kaggle discussions and top notebooks). Use it
+   as supporting evidence; cite `discussion:<ref>` / `notebook:<ref>` in
+   `sources` only when you actually used that evidence.
+5. Propose **1-5 falsifiable hypotheses** that could improve the primary metric.
 
 Return a JSON object with a `hypotheses` array and an optional `eda_request`
 string. Each hypothesis must have:

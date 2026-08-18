@@ -5,8 +5,10 @@
 """
 
 import asyncio
+import itertools
 import json
 import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,11 +16,23 @@ from pydantic import BaseModel
 
 from athena.agents.data_agent import DATA_AGENT_ID, register_data_agent
 from athena.agents.general_agent import GeneralResult, register_general_agent
-from athena.agents.ideator_agent import register_ideator_agent
+from athena.agents.ideator_agent import (
+    SEARCH_IDEATOR_PROFILES,
+    IdeatorProfile,
+    register_ideator_agent,
+)
+from athena.agents.kaggle_handoff_agent import (
+    KAGGLE_HANDOFF_AGENT_ID,
+    KAGGLE_HANDOFF_AGENT_TYPE,
+    KAGGLE_HANDOFF_FILENAME,
+    KaggleHandoffResult,
+    register_kaggle_handoff_agent,
+)
 from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
+from athena.kaggle.wiring import kaggle_slug_from_task
 from athena.research.contracts import DataScriptBundle, GeneralTurnOutcome
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
@@ -43,6 +57,57 @@ AGENT_TURN_TIMEOUT_SECONDS = 900
 LLM/工具调用可能因上游无响应而永久挂起（无异常、无事件），前端看起来就是卡住。
 给 wait 加超时，至少能把“挂起”变成可读的错误，而不是让 PREPARE 永远停在原地。
 """
+
+TURN_HEARTBEAT_SECONDS = 300
+"""等待 Agent turn 期间向 UI 报告“仍在运行”的间隔。"""
+
+
+async def _wait_run_with_heartbeat(
+    rt,
+    agents,
+    run_id,
+    *,
+    agent_id: str,
+    label: str,
+    plan: str | None = None,
+    project: bool = True,
+):
+    """等待 Agent run：每 5 分钟发布心跳，15 分钟硬超时并 interrupt。"""
+    deadline = time.monotonic() + AGENT_TURN_TIMEOUT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            await _interrupt_agent(agents, agent_id, f"{agent_id}_turn_timeout")
+            raise RuntimeError(
+                f"{label} timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
+            )
+        if project:
+            events_bus = getattr(rt, "_events_bus", None)
+            if events_bus is not None:
+                publish = lambda kind, ref, data: events_bus.project_agent_event(  # noqa: E731
+                    plan or agent_id, kind, ref, data
+                )
+            else:
+                publish = None
+            waiter = wait_run_events(agents, run_id, publish)
+        else:
+            waiter = agents.wait_run(run_id)
+        try:
+            return await asyncio.wait_for(
+                waiter, timeout=min(TURN_HEARTBEAT_SECONDS, remaining)
+            )
+        except asyncio.TimeoutError:
+            publish_output = getattr(rt, "publish_output", None)
+            if publish_output is not None:
+                await publish_output(
+                    source="agent",
+                    channel="text",
+                    text=f"{label} still working (heartbeat)…",
+                    plan=plan or agent_id,
+                )
+
+MAX_KAGGLE_HANDOFF_CHARS = 12_000
+"""注入 Ideator 的 Kaggle handoff 文本上限，防止把超大内容塞进每轮 prompt。"""
 
 
 async def _interrupt_agent(agents, agent_id: str, reason: str) -> None:
@@ -127,17 +192,15 @@ class AgentTurnRunner:
                 agent_id=SUPERVISOR_AGENT_ID,
                 name=SUPERVISOR_AGENT_ID,
             )
-        try:
-            summary = await asyncio.wait_for(
-                rt._agents.wait_run(run_id), timeout=AGENT_TURN_TIMEOUT_SECONDS
-            )
-        except asyncio.TimeoutError as error:
-            await _interrupt_agent(
-                rt._agents, SUPERVISOR_AGENT_ID, "supervisor_turn_timeout"
-            )
-            raise RuntimeError(
-                f"SupervisorAgent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
-            ) from error
+        summary = await _wait_run_with_heartbeat(
+            rt,
+            rt._agents,
+            run_id,
+            agent_id=SUPERVISOR_AGENT_ID,
+            label="SupervisorAgent turn",
+            plan=SUPERVISOR_AGENT_ID,
+            project=False,
+        )
         result = await load_agent_result(summary, rt._store, SupervisorAnswer)
         if result is None:
             raise RuntimeError(summary.error or "SupervisorAgent turn failed")
@@ -184,19 +247,39 @@ class AgentTurnRunner:
         rt = self._runtime
         if rt._provider is None:
             raise RuntimeError("Ideator requires a registered Agent provider")
+        # 按 state.handoff_sources 收集启用的 handoff；失败来源只返回空文本，
+        # 不影响本地 EDA-only 的 idea generation。
+        handoff_texts = await self._collect_handoff_texts()
         if getattr(rt, "_ideation", "ideageneration") == "debate":
-            return await self._run_debate_ideator_turn(count)
+            return await self._run_debate_ideator_turn(count, handoff_texts)
         eda_dir = self._resolve_eda_dir(rt)
-        if not rt._registry.contains("ideator"):
-            register_ideator_agent(
-                rt._registry,
-                provider=rt._provider,
-                artifacts=rt._store,
-                workspace=Path(eda_dir),
-                runtime=rt._execution,
-                extra_tools=rt.ideator_tools(),
-                gated=getattr(rt, "_ideation", "ideageneration") == "ideageneration",
-            )
+        ideation = getattr(rt, "_ideation", "ideageneration")
+        if ideation == "ideageneration":
+            for profile in SEARCH_IDEATOR_PROFILES:
+                if not rt._registry.contains(profile.agent_type):
+                    register_ideator_agent(
+                        rt._registry,
+                        provider=rt._provider,
+                        artifacts=rt._store,
+                        workspace=Path(eda_dir),
+                        runtime=rt._execution,
+                        extra_tools=rt.ideator_tools(),
+                        gated=True,
+                        profile=profile,
+                    )
+            lane_profiles = itertools.cycle(SEARCH_IDEATOR_PROFILES)
+        else:
+            if not rt._registry.contains("ideator"):
+                register_ideator_agent(
+                    rt._registry,
+                    provider=rt._provider,
+                    artifacts=rt._store,
+                    workspace=Path(eda_dir),
+                    runtime=rt._execution,
+                    extra_tools=rt.ideator_tools(),
+                    gated=False,
+                )
+            lane_profiles = itertools.repeat(None)
         ideator_count = rt.state.ideator_count
         hypotheses_per_ideator = rt.state.hypotheses_per_ideator
         batch = max(count, ideator_count * hypotheses_per_ideator)
@@ -212,7 +295,10 @@ class AgentTurnRunner:
         lane_results = await asyncio.gather(
             *(
                 self._run_ideator_lane(
-                    f"ideator-{round_label}-{index}", target, Path(eda_dir)
+                    f"ideator-{round_label}-{index}",
+                    target,
+                    Path(eda_dir),
+                    **self._lane_kwargs(handoff_texts, next(lane_profiles)),
                 )
                 for index, target in enumerate(allocations, start=1)
             ),
@@ -276,22 +362,14 @@ class AgentTurnRunner:
                 agent_id=DATA_AGENT_ID,
                 name=DATA_AGENT_ID,
             )
-        try:
-            summary = await asyncio.wait_for(
-                wait_run_events(
-                    rt._agents,
-                    run_id,
-                    lambda kind, ref, data: rt._events_bus.project_agent_event(
-                        DATA_AGENT_ID, kind, ref, data
-                    ),
-                ),
-                timeout=AGENT_TURN_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError as error:
-            await _interrupt_agent(rt._agents, DATA_AGENT_ID, "data_turn_timeout")
-            raise RuntimeError(
-                f"Data Agent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
-            ) from error
+        summary = await _wait_run_with_heartbeat(
+            rt,
+            rt._agents,
+            run_id,
+            agent_id=DATA_AGENT_ID,
+            label="Data Agent turn",
+            plan=DATA_AGENT_ID,
+        )
         result = await load_agent_result(summary, rt._store, EdaResult)
         if result is None:
             raise RuntimeError(summary.error or "Data Agent turn failed")
@@ -320,6 +398,138 @@ class AgentTurnRunner:
         registry.register(WebFetchTool(session=web_session))
         return registry
 
+    def _kaggle_handoff_tools(self) -> ToolRegistry:
+        """Kaggle Handoff Agent 的工具：Kaggle notebook/discussion + 网页回退。"""
+        registry = ToolRegistry()
+        kaggle = self._runtime.kaggle_tools("kaggle_handoff")
+        if kaggle is not None:
+            for spec in kaggle.specs:
+                registry.register(kaggle.resolve(spec.name))
+        # web_fetch 作为 discussion 抓取的回退通道；与 web_search 共享会话。
+        web_session = WebSession()
+        registry.register(WebSearchTool(session=web_session))
+        registry.register(WebFetchTool(session=web_session))
+        return registry
+
+    async def _ensure_kaggle_handoff(self) -> str:
+        """Run the Kaggle Handoff Agent once and return its markdown text.
+
+        Returns an empty string when Kaggle is disabled, the task is not a Kaggle
+        competition, or the handoff could not be produced. Idea Generation must
+        never block on this optional evidence channel.
+        """
+        rt = self._runtime
+        if not getattr(rt._supervisor, "kaggle_enabled", False):
+            return ""
+        eda_dir = Path(self._resolve_eda_dir(rt))
+        handoff_path = eda_dir / KAGGLE_HANDOFF_FILENAME
+        if handoff_path.is_file():
+            text = handoff_path.read_text(encoding="utf-8")[:MAX_KAGGLE_HANDOFF_CHARS]
+            self._remember_handoff_ref("kaggle", await rt._store.put_text(text))
+            return text
+        task_text = (
+            getattr(rt, "_task_text", "")
+            or getattr(rt.state, "task_text", "")
+            or ""
+        )
+        slug = kaggle_slug_from_task(task_text)
+        if not slug:
+            # Supervisor 对裸 slug（如 ``titanic``）也会开启 Kaggle；URL 解析
+            # 拿不到时，从结构化任务理解的 dataset 字段取裸 slug 作为回退。
+            understanding = getattr(rt.state, "task_understanding", None) or {}
+            candidate = str(understanding.get("dataset") or "").strip()
+            if candidate and "/" not in candidate and not any(
+                ch.isspace() for ch in candidate
+            ):
+                slug = candidate
+        if not slug or rt._provider is None:
+            return ""
+        try:
+            if not rt._registry.contains(KAGGLE_HANDOFF_AGENT_TYPE):
+                register_kaggle_handoff_agent(
+                    rt._registry,
+                    provider=rt._provider,
+                    artifacts=rt._store,
+                    workspace=eda_dir,
+                    runtime=rt._execution,
+                    extra_tools=self._kaggle_handoff_tools(),
+                )
+            content = (
+                f"Competition slug: {slug}\n\n"
+                f"Research task: {task_text}\n\n"
+                "Read the EDA workspace's RESEARCH_HANDOFF.md, pull relevant Kaggle "
+                "discussions and top notebooks, and write KAGGLE_HANDOFF.md."
+            )
+            if rt._agents.has_agent(KAGGLE_HANDOFF_AGENT_ID):
+                run_id = await rt._agents.followup(
+                    KAGGLE_HANDOFF_AGENT_ID, {"content": content, "context_refs": []}
+                )
+            else:
+                _agent_id, run_id = await rt._agents.create_root(
+                    KAGGLE_HANDOFF_AGENT_TYPE,
+                    {"content": content, "context_refs": []},
+                    agent_id=KAGGLE_HANDOFF_AGENT_ID,
+                    name=KAGGLE_HANDOFF_AGENT_ID,
+                )
+            summary = await _wait_run_with_heartbeat(
+                rt,
+                rt._agents,
+                run_id,
+                agent_id=KAGGLE_HANDOFF_AGENT_ID,
+                label="Kaggle handoff",
+                plan=KAGGLE_HANDOFF_AGENT_ID,
+            )
+            result = await load_agent_result(summary, rt._store, KaggleHandoffResult)
+            if handoff_path.is_file():
+                if result is not None:
+                    await rt.publish_output(
+                        source="agent",
+                        channel="text",
+                        text=f"Kaggle handoff ready: {result.summary}",
+                        plan=KAGGLE_HANDOFF_AGENT_ID,
+                    )
+                text = handoff_path.read_text(
+                    encoding="utf-8"
+                )[:MAX_KAGGLE_HANDOFF_CHARS]
+                self._remember_handoff_ref("kaggle", await rt._store.put_text(text))
+                return text
+            message = (
+                "Kaggle handoff agent finished without KAGGLE_HANDOFF.md"
+                if result is not None
+                else "Kaggle handoff agent failed"
+            )
+            await rt.publish_output(
+                source="agent",
+                channel="error",
+                text=f"{message}; idea generation continues without Kaggle evidence.",
+                plan=KAGGLE_HANDOFF_AGENT_ID,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - handoff 是可选证据通道
+            await rt.publish_output(
+                source="agent",
+                channel="error",
+                text=(
+                    f"Kaggle handoff failed ({type(exc).__name__}: {exc}); "
+                    "idea generation continues without Kaggle evidence."
+                ),
+                plan=KAGGLE_HANDOFF_AGENT_ID,
+            )
+        return ""
+
+    @staticmethod
+    def _lane_kwargs(
+        handoff_texts: list[str], profile: IdeatorProfile | None
+    ) -> dict:
+        """构造 _run_ideator_lane 的可选 kwargs，避免调用点出现 None 参数堆。"""
+        kwargs: dict = {}
+        if handoff_texts:
+            kwargs["handoff_texts"] = handoff_texts
+        if profile is not None:
+            kwargs["profile"] = profile
+        return kwargs
+
     @staticmethod
     def _ideator_allocations(count: int, lanes: int) -> tuple[int, ...]:
         """Distribute one requested batch across at most ``lanes`` ideator lanes."""
@@ -329,8 +539,67 @@ class AgentTurnRunner:
         base, remainder = divmod(count, worker_count)
         return tuple(base + (index < remainder) for index in range(worker_count))
 
+    def _remember_handoff_ref(self, source: str, ref: str) -> None:
+        """把 source -> artifact ref 记进 state，供断点续传复用。"""
+        rt = self._runtime
+        state = getattr(rt, "state", None)
+        handoff_refs = getattr(state, "handoff_refs", None)
+        if not isinstance(handoff_refs, dict):
+            return
+        if handoff_refs.get(source) == ref:
+            return
+        handoff_refs[source] = ref
+        save = getattr(state, "save", None)
+        state_path = getattr(rt, "_state_path", None)
+        if save is not None and state_path:
+            save(state_path)
+
+    def _literature_handoff_text(self) -> str:
+        """复用现有 corpus_ref，把文献调研包装成一段 handoff 文本。"""
+        rt = self._runtime
+        ref = rt.survey_corpus_ref()
+        if not ref:
+            return ""
+        self._remember_handoff_ref("literature", ref)
+        return (
+            "A literature corpus is available for this task. "
+            f"Pass corpus_ref={ref!r} to the paper_* tools to search and read it, "
+            "and record the paper keys you actually used in each hypothesis's "
+            "sources field."
+        )
+
+    async def _collect_handoff_texts(self) -> list[str]:
+        """按 state.handoff_sources 收集已启用的 handoff 文本。"""
+        rt = self._runtime
+        sources = getattr(rt.state, "handoff_sources", None) or []
+        texts: list[str] = []
+        clarification_ref = getattr(rt.state, "handoff_refs", {}).get(
+            "task_clarification"
+        )
+        if clarification_ref:
+            try:
+                texts.append(await rt._store.get_text(clarification_ref))
+            except Exception:  # noqa: BLE001 - 澄清记录是增益而非前提
+                pass
+        for source in sources:
+            if source == "kaggle":
+                text = await self._ensure_kaggle_handoff()
+            elif source == "literature":
+                text = self._literature_handoff_text()
+            else:
+                text = ""
+            if text:
+                texts.append(text)
+        return texts
+
     async def _run_ideator_lane(
-        self, label: str, target: int, eda_dir: Path
+        self,
+        label: str,
+        target: int,
+        eda_dir: Path,
+        *,
+        handoff_texts: list[str] | None = None,
+        profile: IdeatorProfile | None = None,
     ) -> HypothesisBatch:
         """Run one independent Ideator and return its structured batch."""
         rt = self._runtime
@@ -340,13 +609,12 @@ class AgentTurnRunner:
             f"{target} falsifiable hypotheses that could improve the primary "
             "metric. Return the hypotheses as structured output."
         )
-        corpus_ref = rt.survey_corpus_ref()
-        if corpus_ref is not None:
+        if profile is not None:
+            content += f"\n\n{profile.task_hint}"
+        if handoff_texts:
             content += (
-                f"\n\nA literature corpus is available for this task. "
-                f"Pass corpus_ref={corpus_ref!r} to the paper_* tools to search and "
-                "read it, and record the paper keys you actually used in each "
-                "hypothesis's sources field."
+                "\n\nResearch handoff documents have been delivered to your "
+                "mailbox; use them as supporting evidence."
             )
         context_refs: list[ArtifactRef] = []
         handoff = await _read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
@@ -362,7 +630,22 @@ class AgentTurnRunner:
                 "proposing hypotheses."
             )
         request = {"content": content, "context_refs": context_refs}
-        agent_id, run_id = await rt._agents.create_root("ideator", request, name=label)
+        agent_type = profile.agent_type if profile is not None else "ideator"
+        if handoff_texts:
+            # 先注册 ideator 线程（不触发 turn），把 handoff 完成信息投进 mailbox，
+            # 再启动首个 turn；BaseAgentRunner 会把未读 mailbox 消息追加进模型上下文。
+            await rt._agents.resume_agent(
+                label, agent_type=agent_type, name=label
+            )
+            mailbox_content = "\n\n".join(handoff_texts)
+            await rt._agents.send_message(label, mailbox_content, [])
+            agent_id, run_id = await rt._agents.create_root(
+                agent_type, request, agent_id=label, name=label
+            )
+        else:
+            agent_id, run_id = await rt._agents.create_root(
+                agent_type, request, name=label
+            )
         gated = getattr(rt, "_ideation", "ideageneration") == "ideageneration"
         schema = IdeatorHypothesisBatch if gated else HypothesisBatch
 
@@ -371,12 +654,13 @@ class AgentTurnRunner:
         # 死过一次：返回空列表 -> generated=False -> run_search 直接 return -> 状态停在
         # RUNNING 既不推进也不终止）。
         for attempt in range(MAX_GATE_RETRIES + 1):
-            summary = await wait_run_events(
+            summary = await _wait_run_with_heartbeat(
+                rt,
                 rt._agents,
                 run_id,
-                lambda kind, ref, data: rt._events_bus.project_agent_event(
-                    label, kind, ref, data
-                ),
+                agent_id=agent_id,
+                label=label,
+                plan=label,
             )
             batch = await load_agent_result(summary, rt._store, schema)
             if batch is None:
@@ -397,9 +681,12 @@ class AgentTurnRunner:
                     )
                 return kept
 
+            regenerate = _regenerate_prompt(rejections, target)
+            if profile is not None:
+                regenerate += f"\n\n{profile.task_hint}"
             run_id = await rt._agents.followup(
                 agent_id,
-                {"content": _regenerate_prompt(rejections, target), "context_refs": []},
+                {"content": regenerate, "context_refs": []},
             )
         raise AssertionError("unreachable: retry loop always returns")
 
@@ -445,7 +732,9 @@ class AgentTurnRunner:
         )
         return HypothesisBatch(hypotheses=kept, eda_request=eda_request)
 
-    async def _run_debate_ideator_turn(self, count: int) -> list[Hypothesis]:
+    async def _run_debate_ideator_turn(
+        self, count: int, handoff_texts: list[str] | None = None
+    ) -> list[Hypothesis]:
         """Run the debate-based Ideator (proposal -> review -> revision -> judge).
 
         This is the pre-migration ideator preserved behind ``--ideation debate``. It
@@ -458,7 +747,6 @@ class AgentTurnRunner:
         )
 
         rt = self._runtime
-        corpus_ref = rt.survey_corpus_ref()
         debate_tools = rt.ideator_tools()()
 
         class _StructuredResult:
@@ -473,13 +761,8 @@ class AgentTurnRunner:
             async def run(self, prompt, output_type=None, message_history=None):
                 """Run one structured generation and return an Ideator-compatible result."""
                 effective_prompt = prompt
-                if corpus_ref is not None:
-                    effective_prompt += (
-                        f"\n\nA literature corpus is available for this task. "
-                        f"Pass corpus_ref={corpus_ref!r} to the paper_* tools to search and "
-                        "read it, and record the paper keys you actually used in each "
-                        "hypothesis's sources field."
-                    )
+                if handoff_texts:
+                    effective_prompt += "\n\n" + "\n\n".join(handoff_texts)
                 value = await single_turn_structured_chat(
                     effective_prompt,
                     output_type,
@@ -550,22 +833,14 @@ class AgentTurnRunner:
                 changed = True
             if changed:
                 state.save(rt._state_path)
-        try:
-            summary = await asyncio.wait_for(
-                wait_run_events(
-                    rt._agents,
-                    run_id,
-                    lambda kind, ref, data: rt._events_bus.project_agent_event(
-                        "general", kind, ref, data
-                    ),
-                ),
-                timeout=AGENT_TURN_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError as error:
-            await _interrupt_agent(rt._agents, agent_id, "general_turn_timeout")
-            raise RuntimeError(
-                f"General Agent turn timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
-            ) from error
+        summary = await _wait_run_with_heartbeat(
+            rt,
+            rt._agents,
+            run_id,
+            agent_id=agent_id,
+            label="General Agent turn",
+            plan="general",
+        )
         result = await load_agent_result(summary, rt._store, GeneralResult)
         if result is None:
             raise RuntimeError(summary.error or "General Agent turn failed")

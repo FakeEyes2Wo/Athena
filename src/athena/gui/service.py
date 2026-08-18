@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 class GuiService:
     """Expose the full research runtime over JSON-friendly methods."""
 
-    def __init__(self, runtime: ResearchRuntime) -> None:
+    def __init__(self, runtime: ResearchRuntime, broker: Any = None) -> None:
         self._runtime = runtime
+        self._broker = broker
         self._rollout_dir: Path = runtime.tree_path.parent / "logs" / "agents"
 
     # ── 控制 ──────────────────────────────────────────────────────────────
@@ -69,41 +70,99 @@ class GuiService:
     async def parse_intent(self, message: str) -> dict[str, Any]:
         """Produce a supervisor-style task understanding from a research task.
 
-        Mirrors the ``task_understanding.md`` sections (title / dataset / target /
-        task type / primary metric / evaluation plan). Falls back to a keyword
-        heuristic when no API key is configured or the LLM call fails, so the GUI
-        keeps working in a degraded mode.
-
-        断点续传：当前消息会追加进会话日志，并把最近几条 Human 消息一并交给模型，
-        让“继续/重试”这类短消息也能沿用之前对话里的数据集/目标/指标。
+        在缺少关键信息时，通过 broker 向用户提出选择题澄清（1/2/3），直到 LLM
+        给出 final understanding 或达到最大问题数。LLM 失败时回退 keyword
+        heuristic，GUI 保持可用。澄清问答写入 TASK_CLARIFICATION.md 并注册到
+        runtime.state.handoff_refs["task_clarification"]。
         """
         # 断点续传：先把用户消息写入会话日志，重开目录后能还原完整对话。
         self._runtime.persist_user_message(message)
         context = self._recent_user_texts()
+        chat_messages = [
+            {"role": "system", "content": _CLARIFYING_UNDERSTANDING_SYSTEM}
+        ]
+        chat_messages.extend({"role": "user", "content": text} for text in context)
+
+        qa_pairs: list[tuple[str, str]] = []
+        understanding: dict[str, Any] = {}
         try:
-            client = settings.get_client()
-            model = settings.model_name()
-            chat_messages = [{"role": "system", "content": _TASK_UNDERSTANDING_SYSTEM}]
-            chat_messages.extend({"role": "user", "content": text} for text in context)
-            response = await client.chat.completions.create(
-                model=model,
-                messages=chat_messages,
-                response_format={"type": "json_object"},
-                extra_body={"thinking": {"type": "disabled"}},
-            )
-            content = response.choices[0].message.content
-            if not content:
-                return _heuristic_understanding(message)
-            return TaskUnderstanding.model_validate(
-                json.loads(content)
-            ).model_dump(mode="json")
+            for _ in range(CLARIFY_MAX_QUESTIONS):
+                payload = await self._clarify_once(chat_messages)
+                if isinstance(payload, dict) and payload.get("done"):
+                    candidate = payload.get("understanding")
+                    if isinstance(candidate, dict):
+                        understanding = candidate
+                    break
+                question = payload.get("question") if isinstance(payload, dict) else ""
+                choices = payload.get("choices") if isinstance(payload, dict) else None
+                if not isinstance(question, str) or not question.strip():
+                    break
+                if self._broker is None:
+                    answer = "skip"
+                else:
+                    answer = await self._broker.ask(
+                        question,
+                        choices=choices,
+                        allow_custom=bool(payload.get("allow_custom", True)),
+                        allow_skip=bool(payload.get("allow_skip", True)),
+                    )
+                answer = answer or "skip"
+                qa_pairs.append((question, answer))
+                chat_messages.append(
+                    {"role": "user", "content": f"Q: {question}\nA: {answer}"}
+                )
         except Exception:
-            logger.warning("LLM task understanding failed; falling back to heuristic", exc_info=True)
+            logger.warning(
+                "LLM task understanding failed; falling back to heuristic",
+                exc_info=True,
+            )
             state = getattr(self._runtime, "state", None)
             existing = getattr(state, "task_understanding", None)
             if isinstance(existing, dict) and existing:
                 return existing
             return _heuristic_understanding(message)
+
+        if not understanding:
+            understanding = _heuristic_understanding(message)
+        result = TaskUnderstanding.model_validate(understanding).model_dump(mode="json")
+        await self._persist_clarification(message, qa_pairs, result)
+        return result
+
+    async def _clarify_once(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        """One LLM call returning either a clarification question or the final understanding."""
+        client = settings.get_client()
+        model = settings.model_name()
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        content = response.choices[0].message.content
+        if not content:
+            return {}
+        payload = json.loads(content)
+        return payload if isinstance(payload, dict) else {}
+
+    async def _persist_clarification(
+        self,
+        task: str,
+        qa_pairs: list[tuple[str, str]],
+        understanding: dict[str, Any],
+    ) -> None:
+        """Write the clarification transcript into handoff_refs (best-effort)."""
+        store = getattr(self._runtime, "_store", None)
+        state = getattr(self._runtime, "state", None)
+        refs = getattr(state, "handoff_refs", None)
+        if store is None or state is None or not isinstance(refs, dict):
+            return
+        markdown = _render_clarification(task, qa_pairs, understanding)
+        ref = await store.put_text(markdown)
+        refs["task_clarification"] = ref
+        save = getattr(state, "save", None)
+        state_path = getattr(self._runtime, "_state_path", None)
+        if save is not None and state_path:
+            save(state_path)
 
     async def start_search(self, config: dict[str, Any]) -> dict[str, Any]:
         task = config.get("task") or config.get("message") or config.get("task_type") or ""
@@ -317,21 +376,54 @@ class TaskUnderstanding(BaseModel):
     needs_configuration: bool = True
 
 
-_TASK_UNDERSTANDING_SYSTEM = (
+CLARIFY_MAX_QUESTIONS = 8
+
+_CLARIFYING_UNDERSTANDING_SYSTEM = (
     "You are the research supervisor producing a task understanding for an ML research task. "
-    "The user messages below are a conversation; the last message may be a short follow-up "
-    "or retry instruction. Infer the task understanding from the earlier messages when the "
-    "last message is not self-contained. Return a JSON object with exactly these keys:\n"
-    '- "title": a short conversational title (at most 12 words) naming the task;\n'
-    '- "dataset": one line describing the dataset (path/name and expected shape);\n'
-    '- "target": the target column and its type (e.g. "churned: binary label"), or "" if unknown;\n'
-    '- "task_type": one of classification, regression, vision, generation, other;\n'
-    '- "primary_metric": a lowercased metric name (accuracy, f1, mse, mae, auc, rmse, ...);\n'
-    '- "direction": "maximize" or "minimize";\n'
-    '- "evaluation_plan": one sentence on how the primary metric is computed;\n'
-    '- "needs_configuration": true if any field is uncertain.\n'
+    "The user messages are a conversation; earlier messages provide context for short follow-ups.\n"
+    "Return exactly one JSON object in one of two shapes:\n"
+    "1. When you still need essential information (dataset path/name, target column, task type, "
+    "primary metric, direction, evaluation split, constraints, compute budget):\n"
+    '{"done": false, "question": "...", "choices": [{"label": "...", "value": "..."}], '
+    '"allow_custom": true, "allow_skip": true}\n'
+    "Give 2-3 choices whenever possible. Ask one question at a time and stop when the answer "
+    "no longer affects the understanding.\n"
+    "2. When you have enough information:\n"
+    '{"done": true, "understanding": {"title": "...", "dataset": "...", "target": "...", '
+    '"task_type": "classification|regression|vision|generation|other", "primary_metric": "...", '
+    '"direction": "maximize|minimize", "evaluation_plan": "...", "needs_configuration": true|false}}\n'
     "Respond with only the JSON object."
 )
+
+
+def _render_clarification(
+    task: str,
+    qa_pairs: list[tuple[str, str]],
+    understanding: dict[str, Any],
+) -> str:
+    """Render the task clarification transcript as markdown handoff."""
+    lines = [
+        "# TASK_CLARIFICATION",
+        "",
+        "## Original task",
+        task,
+        "",
+        "## Clarification Q&A",
+    ]
+    if qa_pairs:
+        for index, (question, answer) in enumerate(qa_pairs, start=1):
+            lines.append(f"{index}. Q: {question}")
+            lines.append(f"   A: {answer}")
+    else:
+        lines.append("(no clarification questions were needed)")
+    lines.extend(
+        [
+            "",
+            "## Final understanding",
+            json.dumps(understanding, ensure_ascii=False, indent=2),
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _heuristic_understanding(message: str) -> dict[str, Any]:

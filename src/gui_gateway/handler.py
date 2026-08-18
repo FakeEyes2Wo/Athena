@@ -106,7 +106,7 @@ class GuiRequestHandler:
         self._runtime = runtime
         self._make_runtime = make_runtime
         self._broker = broker or HumanRequestBroker()
-        self._service = GuiService(runtime)
+        self._service = GuiService(runtime, broker=self._broker)
         self._project_root = Path(runtime.settings().get("project_root") or ".")
 
     @property
@@ -123,7 +123,7 @@ class GuiRequestHandler:
             state_root.mkdir(parents=True, exist_ok=True)
         await self._runtime.aclose()
         self._runtime = self._make_runtime(project_root, state_root)
-        self._service = GuiService(self._runtime)
+        self._service = GuiService(self._runtime, broker=self._broker)
         await self._resume_running_session()
 
     async def _resume_running_session(self) -> None:
@@ -294,10 +294,20 @@ class GuiRequestHandler:
         if method == "human_pending":
             return {"requests": self._broker.pending()}
         if method == "human_reply":
+            request_id = _require_str(params, "request_id", "request_id")
+            answer = params.get("answer")
+            if answer is not None and not isinstance(answer, str):
+                raise ValueError("answer must be a string")
+            choice = params.get("choice")
+            if choice is not None and not isinstance(choice, str):
+                raise ValueError("choice must be a string")
+            skip = bool(params.get("skip", False))
             return {
                 "replied": self._broker.reply(
-                    _require_str(params, "request_id", "request_id"),
-                    _require_str(params, "answer", "answer"),
+                    request_id,
+                    answer,
+                    choice=choice,
+                    skip=skip,
                 )
             }
 

@@ -2,7 +2,7 @@
 
 EDA 与 SOTA 分析不在这里做——它们由 prepare/ideator 等 agent 用自己的
 workspace + shell 代码生成流程完成（与本地数据集的流程一致）。Kaggle 模块
-只负责「取数」：竞赛元数据、下载、notebook 证据、提交。
+只负责「取数」：竞赛元数据、下载、notebook/discussion 证据、提交。
 """
 
 from typing import Literal
@@ -28,6 +28,18 @@ class NotebookSummary(BaseModel):
     author: str = ""
     total_votes: int = 0
     language: str = ""
+    version: str = ""
+    url: str = ""
+
+
+class DiscussionThreadSummary(BaseModel):
+    """One Kaggle competition discussion thread summary."""
+
+    ref: str
+    title: str = ""
+    author: str = ""
+    total_votes: int = 0
+    comment_count: int = 0
     url: str = ""
 
 

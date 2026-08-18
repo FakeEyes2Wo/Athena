@@ -244,6 +244,11 @@ class Supervisor(SupervisorActions):
                 raise RuntimeError("SEARCH Plan requires a frozen evaluator")
             self._evaluator_ref = baselines[0].plan.run_config_ref
         if hypothesis_id in self.state.plans:
+            if self.tree.experiment_for_hypothesis(hypothesis_id) is None:
+                raise RuntimeError(
+                    f"active plan {hypothesis_id} is missing experiment "
+                    f"exp_{hypothesis_id}; remove the plan or repair the tree"
+                )
             return hypothesis_id
         hypothesis = self.tree.get_hypothesis(hypothesis_id)
         existing = self.tree.experiment_for_hypothesis(hypothesis_id)
@@ -311,6 +316,12 @@ class Supervisor(SupervisorActions):
             patience=hypothesis.patience,
         )
         self._save_state()
+        # start_plan 与 settle_plan 之间可能隔很多个 turn/很久；若这里只保存
+        # state.json 而不保存 research_tree.json，进程一旦在这段窗口内崩溃，
+        # 恢复时 state.plans 仍在但 tree 缺少 exp_{hypothesis_id}，最终在
+        # settle_plan 中抛 unknown experiment id。先落 state、再落 tree，并让
+        # recover() 具备“state 有 Plan、tree 缺实验”时的重建能力。
+        self.tree.save(self._tree_path)
         await self._agents.resume_agent(
             hypothesis_id, agent_type="plan", name=hypothesis_id
         )
@@ -544,6 +555,55 @@ class Supervisor(SupervisorActions):
         attempts = count_search_attempts(self.state, self.tree)
         return attempts >= self.state.search_limit and not self._running
 
+    def _repair_missing_experiment(
+        self,
+        plan_id: str,
+        context_ref: str,
+        plan_input: PlanInput,
+        branch: GitWorkBranch,
+    ) -> bool:
+        """Recreate a RUNNING search experiment lost in the state-saved/tree-not-saved window.
+
+        Returns True when the experiment was added to the in-memory tree and should be
+        persisted by the caller. If the hypothesis/reference cannot be found the orphan
+        Plan is left for ``Recovery.reconcile`` to drop.
+        """
+        if self.tree.experiment_for_hypothesis(plan_id) is not None:
+            return False
+        try:
+            hypothesis = self.tree.get_hypothesis(plan_id)
+            reference = self.tree.get_experiment(plan_input.reference_experiment_id)
+        except KeyError as exc:
+            logger.warning(
+                "cannot repair missing experiment exp_%s: %s", plan_id, exc
+            )
+            return False
+        experiment_id = f"exp_{plan_id}"
+        try:
+            self.tree.add_experiment(
+                experiment_id,
+                Experiment(
+                    parent_id=hypothesis.parent_id,
+                    hypothesis_id=plan_id,
+                    commit=reference.commit,
+                    plan=ExperimentPlan(
+                        kind="search",
+                        change=hypothesis.intervention,
+                        run_config_ref=context_ref,
+                        budget={},
+                        acceptance_rule="trusted score",
+                    ),
+                    gitwork=branch,
+                    status=ExperimentStatus.RUNNING,
+                ),
+            )
+        except (KeyError, ValueError) as exc:
+            logger.warning(
+                "cannot repair missing experiment exp_%s: %s", plan_id, exc
+            )
+            return False
+        return True
+
     async def recover(self, state: ResearchState | None = None) -> ResearchState:
         """Reconcile persisted Plans without inventing missing frozen resources."""
         if self._tree_path.is_file():
@@ -558,6 +618,7 @@ class Supervisor(SupervisorActions):
             else:
                 artifact_presence[plan.context_ref] = True
         workspace_presence: dict[str, bool] = {}
+        repaired_experiments = False
         for plan_id, plan in candidate.plans.items():
             if not artifact_presence[plan.context_ref]:
                 workspace_presence[plan_id] = False
@@ -575,6 +636,16 @@ class Supervisor(SupervisorActions):
             else:
                 self._branches[plan_id] = branch
                 workspace_presence[plan_id] = Path(branch.path).is_dir()
+                if (
+                    plan.kind == "SEARCH"
+                    and workspace_presence[plan_id]
+                    and self._repair_missing_experiment(
+                        plan_id, plan.context_ref, plan_input, branch
+                    )
+                ):
+                    repaired_experiments = True
+        if repaired_experiments:
+            self.tree.save(self._tree_path)
         self.state = self._recovery.reconcile(
             candidate,
             self.tree,

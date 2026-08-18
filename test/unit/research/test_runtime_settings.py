@@ -26,6 +26,8 @@ def _runtime() -> ResearchRuntime:
             ideator_count=3,
             hypotheses_per_ideator=2,
             manual_mode=False,
+            handoff_sources=["kaggle", "literature"],
+            handoff_refs={},
             phase="PREPARE",
             status="RUNNING",
             task_understanding=None,
@@ -61,6 +63,26 @@ async def test_apply_settings_rejects_unknown_ideation_values() -> None:
 
     with pytest.raises(ValueError):
         await runtime.apply_settings({"ideation": "gated"})
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_handoff_sources_persists() -> None:
+    runtime = _runtime()
+
+    result = await runtime.apply_settings(
+        {"handoff_sources": ["kaggle", "literature"]}
+    )
+
+    assert runtime.state.handoff_sources == ["kaggle", "literature"]
+    assert result["handoff_sources"] == ["kaggle", "literature"]
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_rejects_invalid_handoff_sources() -> None:
+    runtime = _runtime()
+
+    with pytest.raises(ValueError):
+        await runtime.apply_settings({"handoff_sources": ["kaggle", "web"]})
 
 
 @pytest.mark.asyncio

@@ -106,6 +106,58 @@ async def test_get_notebook_unwraps_zip_archive() -> None:
     assert source == '{"cells": []}'
 
 
+async def test_list_discussions_uses_internal_endpoint_and_parses_threads() -> None:
+    http = FakeHttp(
+        json.dumps(
+            [
+                {
+                    "ref": "123",
+                    "title": "trick",
+                    "author": {"name": "u"},
+                    "totalVotes": 4,
+                    "totalComments": 9,
+                }
+            ]
+        ).encode()
+    )
+    client = _client(http)
+
+    result = await client.list_discussions("titanic")
+
+    assert result == [
+        {
+            "ref": "123",
+            "title": "trick",
+            "author": {"name": "u"},
+            "totalVotes": 4,
+            "totalComments": 9,
+        }
+    ]
+    assert "api/i/competitions/titanic/discussions" in http.url
+    assert "sortBy=hotness" in http.url
+
+
+async def test_get_discussion_returns_joined_thread_text() -> None:
+    http = FakeHttp(
+        json.dumps(
+            {
+                "title": "How I improved",
+                "body": "Feature engineering helped.",
+                "comments": [{"author": "u2", "body": "Try log transform."}],
+            }
+        ).encode()
+    )
+    client = _client(http)
+
+    source = await client.get_discussion("123")
+
+    assert "# How I improved" in source
+    assert "Feature engineering helped." in source
+    assert "u2:" in source
+    assert "Try log transform." in source
+    assert "api/i/discussions/123" in http.url
+
+
 async def test_non_2xx_raises_kaggle_api_error() -> None:
     http = FakeHttp(json.dumps({"message": "forbidden"}).encode(), status=403)
     client = _client(http)

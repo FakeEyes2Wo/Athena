@@ -70,7 +70,7 @@ def test_tree_settled_but_state_active_is_reconciled_once() -> None:
     assert reconciled.status == "RUNNING"
 
 
-def test_active_plan_without_final_experiment_is_kept_for_resume() -> None:
+def test_active_plan_without_experiment_is_dropped() -> None:
     reconciled = Recovery().reconcile(
         _state(),
         _tree(),
@@ -78,10 +78,11 @@ def test_active_plan_without_final_experiment_is_kept_for_resume() -> None:
         artifact_exists=lambda _ref: True,
     )
 
-    assert reconciled == _state()
+    assert "h1" not in reconciled.plans
+    assert reconciled.status == "RUNNING"
 
 
-def test_missing_context_keeps_plan_and_marks_research_waiting() -> None:
+def test_missing_context_drops_orphan_plan() -> None:
     reconciled = Recovery().reconcile(
         _state(),
         _tree(),
@@ -89,11 +90,11 @@ def test_missing_context_keeps_plan_and_marks_research_waiting() -> None:
         artifact_exists=lambda _ref: False,
     )
 
-    assert "h1" in reconciled.plans
-    assert reconciled.status == "WAITING"
+    assert "h1" not in reconciled.plans
+    assert reconciled.status == "RUNNING"
 
 
-def test_missing_workspace_keeps_frozen_plan_and_marks_waiting() -> None:
+def test_missing_workspace_drops_orphan_plan() -> None:
     reconciled = Recovery().reconcile(
         _state(),
         _tree(),
@@ -101,8 +102,8 @@ def test_missing_workspace_keeps_frozen_plan_and_marks_waiting() -> None:
         artifact_exists=lambda _ref: True,
     )
 
-    assert reconciled.plans["h1"].context_ref == _REF
-    assert reconciled.status == "WAITING"
+    assert "h1" not in reconciled.plans
+    assert reconciled.status == "RUNNING"
 
 
 def test_proposed_hypothesis_without_plan_stays_queued() -> None:
@@ -123,7 +124,7 @@ def test_proposed_hypothesis_without_plan_stays_queued() -> None:
         artifact_exists=lambda _ref: True,
     )
 
-    assert reconciled.plans == _state().plans
+    assert reconciled.plans == {}
     assert tree.pending_hypotheses()
 
 

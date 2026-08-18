@@ -5,7 +5,11 @@ from pathlib import Path
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool_types import ToolContext
-from athena.kaggle.tool import KaggleRunTool
+from athena.kaggle.tool import (
+    KaggleGetDiscussionTool,
+    KaggleListDiscussionsTool,
+    KaggleRunTool,
+)
 from athena.kaggle.wiring import KaggleStack
 
 
@@ -72,3 +76,53 @@ async def test_kaggle_run_skips_download_when_disabled(tmp_path) -> None:
     assert result.data["downloaded_files"] == []
     assert result.data["data_manifest_ref"] == ""
     assert result.data["notebooks"]  # 不下载仍检索 notebook 证据
+
+
+class _DiscussionClient:
+    async def list_discussions(
+        self, competition: str, *, page: int = 1, sort_by: str = "hotness"
+    ) -> list[dict]:
+        return [
+            {
+                "ref": "12345",
+                "title": "trick that helped",
+                "author": {"name": "kaggler"},
+                "totalVotes": 7,
+                "totalComments": 12,
+                "url": "https://www.kaggle.com/competitions/x/discussion/12345",
+            }
+        ]
+
+    async def get_discussion(self, ref: str) -> str:
+        return f"# Discussion {ref}\n\nSome community trick."
+
+
+async def test_kaggle_list_discussions_returns_threads() -> None:
+    stack = KaggleStack(
+        client=_DiscussionClient(),
+        artifacts=LocalArtifactStore("."),
+        download_root=Path("."),
+    )
+    tool = KaggleListDiscussionsTool(stack)
+    ctx = ToolContext("kaggle_list_discussions", "d1", _noop_emit, asyncio.Event())
+    result = await tool.execute({"competition": "x"}, ctx)
+    assert result.success
+    assert result.data["count"] == 1
+    assert result.data["discussions"][0]["ref"] == "12345"
+    assert result.data["discussions"][0]["comment_count"] == 12
+
+
+async def test_kaggle_get_discussion_returns_source() -> None:
+    stack = KaggleStack(
+        client=_DiscussionClient(),
+        artifacts=LocalArtifactStore("."),
+        download_root=Path("."),
+    )
+    tool = KaggleGetDiscussionTool(stack)
+    ctx = ToolContext("kaggle_get_discussion", "d2", _noop_emit, asyncio.Event())
+    result = await tool.execute(
+        {"discussion": "https://www.kaggle.com/competitions/x/discussion/12345"}, ctx
+    )
+    assert result.success
+    assert result.data["discussion"] == "12345"
+    assert "community trick" in result.data["source"]

@@ -1,7 +1,7 @@
-"""Kaggle 工具边界：五个算子 + 一个聚合算子 ``kaggle_run``。
+"""Kaggle 工具边界：notebook/discussion 证据算子 + 一个聚合算子 ``kaggle_run``。
 
-这些工具只负责「取数」（元数据、下载、notebook 证据、提交）；EDA 与 SOTA
-分析由 prepare/ideator 等 agent 用自己的 workspace + shell 代码生成流程完成。
+这些工具只负责「取数」（元数据、下载、notebook/discussion 证据、提交）；EDA
+与 SOTA 分析由 prepare/ideator 等 agent 用自己的 workspace + shell 代码生成流程完成。
 """
 
 import urllib.parse
@@ -20,11 +20,14 @@ KAGGLE_LIST_COMPETITIONS = "kaggle_list_competitions"
 KAGGLE_GET_COMPETITION = "kaggle_get_competition"
 KAGGLE_LIST_NOTEBOOKS = "kaggle_list_notebooks"
 KAGGLE_GET_NOTEBOOK = "kaggle_get_notebook"
+KAGGLE_LIST_DISCUSSIONS = "kaggle_list_discussions"
+KAGGLE_GET_DISCUSSION = "kaggle_get_discussion"
 KAGGLE_DOWNLOAD_DATA = "kaggle_download_data"
 KAGGLE_RUN = "kaggle_run"
 KAGGLE_SUBMIT = "kaggle_submit"
 
 MAX_NOTEBOOK_SOURCE_CHARS = 120_000
+MAX_DISCUSSION_CHARS = 120_000
 
 
 def _schema(props: dict[str, str], *required: str) -> dict:
@@ -47,6 +50,21 @@ def _notebook_ref(input: dict) -> str:
     if "code" in parts:
         parts = parts[parts.index("code") + 1:]
     return "/".join(parts[:2]) or value
+
+
+def _discussion_ref(input: dict) -> str:
+    """Accept either a discussion URL or its id/ref."""
+    value = str(input.get("discussion") or input.get("ref") or input.get("url") or "").strip()
+    if not value:
+        raise ValueError("discussion must be a non-empty string")
+    if "kaggle.com" not in value:
+        return value
+    parts = urllib.parse.urlsplit(value).path.strip("/").split("/")
+    if "discussion" in parts:
+        after = parts[parts.index("discussion") + 1:]
+        if after:
+            return "/".join(after)
+    return parts[-1] if parts else value
 
 
 class KaggleListCompetitionsTool(BaseTool):
@@ -158,6 +176,16 @@ class KaggleListNotebooksTool(BaseTool):
                 "title": i.get("title", ""),
                 "author": author_name(i.get("author", "")),
                 "votes": pick_first(i, "totalVotes", "total_votes", default=0),
+                "version": str(
+                    pick_first(
+                        i,
+                        "currentVersion",
+                        "current_version",
+                        "version",
+                        "versionNumber",
+                        default="",
+                    )
+                ),
                 "url": i.get("url", "")
                 or (
                     f"https://www.kaggle.com/code/{i.get('ref')}"
@@ -193,6 +221,82 @@ class KaggleGetNotebookTool(BaseTool):
             data={
                 "notebook": ref,
                 "source": source[:MAX_NOTEBOOK_SOURCE_CHARS],
+                "truncated": truncated,
+                "length": len(source),
+            }
+        )
+
+
+class KaggleListDiscussionsTool(BaseTool):
+    spec = ToolSpec(
+        name=KAGGLE_LIST_DISCUSSIONS,
+        description=(
+            "List public Kaggle competition discussion threads, sorted by hotness, "
+            "to find community pitfalls, failed attempts and known tricks. Returns "
+            "each thread's ref, title, author, votes, comment count and url. Use "
+            "this to gather qualitative evidence before forming hypotheses."
+        ),
+        input_schema=_schema(
+            {"competition": "string", "max_results": "integer"}, "competition"
+        ),
+    )
+
+    def __init__(self, stack: "KaggleStack") -> None:
+        self.stack = stack
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        ref = _competition_ref(input)
+        raw = await self.stack.client.list_discussions(ref, sort_by="hotness")
+        limit = max(1, min(_as_int(input.get("max_results"), 10), 50))
+        items = [
+            {
+                "ref": i.get("ref", "")
+                or str(i.get("id", ""))
+                or str(i.get("threadId", ""))
+                or "",
+                "title": i.get("title", ""),
+                "author": author_name(i.get("author", "")),
+                "votes": pick_first(
+                    i, "totalVotes", "total_votes", "voteCount", "vote_count", default=0
+                ),
+                "comment_count": pick_first(
+                    i,
+                    "totalComments",
+                    "total_comments",
+                    "commentCount",
+                    "comment_count",
+                    default=0,
+                ),
+                "url": i.get("url", ""),
+            }
+            for i in raw[:limit]
+        ]
+        return ToolResult(data={"discussions": items, "count": len(items)})
+
+
+class KaggleGetDiscussionTool(BaseTool):
+    spec = ToolSpec(
+        name=KAGGLE_GET_DISCUSSION,
+        description=(
+            "Read a public Kaggle discussion thread's title, body and comments. "
+            "Pass the discussion ref or url returned by kaggle_list_discussions. "
+            "Returns the text; it is truncated to the first "
+            f"{MAX_DISCUSSION_CHARS} characters."
+        ),
+        input_schema=_schema({"discussion": "string"}, "discussion"),
+    )
+
+    def __init__(self, stack: "KaggleStack") -> None:
+        self.stack = stack
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        ref = _discussion_ref(input)
+        source = await self.stack.client.get_discussion(ref)
+        truncated = len(source) > MAX_DISCUSSION_CHARS
+        return ToolResult(
+            data={
+                "discussion": ref,
+                "source": source[:MAX_DISCUSSION_CHARS],
                 "truncated": truncated,
                 "length": len(source),
             }

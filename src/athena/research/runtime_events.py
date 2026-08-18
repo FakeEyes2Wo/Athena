@@ -132,13 +132,22 @@ class RuntimeEvents:
                 await asyncio.to_thread(
                     self._store.path_for(unsafe_ref).unlink, missing_ok=True
                 )
-        event = await self._events.tool_output(
-            stdout=result.stdout,
-            stderr=result.stderr,
-            plan=plan,
-            tool=tool,
-            artifact_ref=artifact_ref,
-        )
+        if not result.stdout and not result.stderr:
+            event = self._events.output(
+                source="tool",
+                channel="stdout",
+                text=f"{tool} completed (exit {result.exit_code}, no output)",
+                plan=plan,
+                tool=tool,
+            )
+        else:
+            event = await self._events.tool_output(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                plan=plan,
+                tool=tool,
+                artifact_ref=artifact_ref,
+            )
         await self._publish("output", event.model_dump(mode="json"))
 
     @staticmethod

@@ -44,6 +44,10 @@ before `record_task_understanding`, read its `evaluation_metric`, and record tha
 exact metric name (lowercased, e.g. `panoptic_quality`) as `primary_metric` —
 never guess `accuracy` for a competition you have not queried.
 
+When a critical fact is unknown, call `request_user_input` with `choices` (2-3
+candidate answers) whenever possible. Ask one question at a time and stop asking
+once the answer no longer affects the decision.
+
 Reflect before finalizing: re-read the task, confirm whether a competition slug
 is present and correctly parsed from any URL, and double-check that
 `enabled`/`download` match the task's real needs. If your first judgment was

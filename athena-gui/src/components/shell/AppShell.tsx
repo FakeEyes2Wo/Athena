@@ -131,6 +131,8 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
       <HumanRequestDialog
         requests={pipeline.humanRequests}
         onAnswer={pipeline.answerHuman}
+        onChoice={pipeline.chooseHumanAnswer}
+        onSkip={pipeline.skipHumanAnswer}
       />
     </div>
   );

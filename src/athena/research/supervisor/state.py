@@ -88,6 +88,13 @@ class ResearchState(BaseModel):
     # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用检索算子。
     # 与其他引用一样落在本项目的 artifact store 里，换机器取不到时重跑即可。
     corpus_ref: str | None = None
+    # Idea Generation 可用的 handoff 来源（前端 settings_set 可控制），
+    # 取值示例：["kaggle"]、["kaggle", "literature"]、[]。
+    handoff_sources: list[str] = Field(
+        default_factory=lambda: ["kaggle", "literature"]
+    )
+    # source -> artifact ref，记录已生成的 handoff，供断点续传复用。
+    handoff_refs: dict[str, ArtifactRef] = Field(default_factory=dict)
     # 断点续传：首次完整任务文本（续跑时沿用，避免短消息污染 survey/PREPARE 提示词）。
     task_text: str | None = None
     # 断点续传：configure_kaggle 的持久化决定（None=未决定，False=已决定关闭）。

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorMessage } from "../lib/errors";
 import {
+  humanChoice,
   humanPending,
   humanReply,
+  humanSkip,
   pauseSearch,
   resumeSearch,
   sendControl,
@@ -223,6 +225,7 @@ export function usePipeline(workspaceRoot?: string | null) {
   const [sessions, setSessions] = useState<Array<{ id: string; title: string }>>([]);
   const [currentSessionId, setCurrentSessionId] = useState("default");
   const [humanRequests, setHumanRequests] = useState<HumanRequest[]>([]);
+  const [awaitingIntent, setAwaitingIntent] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
   const logCounter = useRef(0);
@@ -319,9 +322,10 @@ export function usePipeline(workspaceRoot?: string | null) {
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
   }, [appendLog, titlesKey]);
 
-  // Poll for outstanding supervisor human questions while a run is active.
+  // Poll for outstanding supervisor human questions while a run is active or
+  // while the initial intent clarification is pending.
   useEffect(() => {
-    if (viewModel.status !== "running") {
+    if (viewModel.status !== "running" && !awaitingIntent) {
       setHumanRequests([]);
       return;
     }
@@ -337,7 +341,7 @@ export function usePipeline(workspaceRoot?: string | null) {
     void poll();
     const timer = setInterval(poll, 1500);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [viewModel.status]);
+  }, [viewModel.status, awaitingIntent]);
 
   // User actions.
 
@@ -423,6 +427,7 @@ export function usePipeline(workspaceRoot?: string | null) {
       return;
     }
 
+    setAwaitingIntent(true);
     try {
       const preview = await sendMessage(content);
       // 根据 task understanding 结果给当前会话一个标题（类似 Claude Code）。
@@ -452,6 +457,8 @@ export function usePipeline(workspaceRoot?: string | null) {
         ],
       }));
       throw err;
+    } finally {
+      setAwaitingIntent(false);
     }
   }, [currentSessionId, nextId, renameSession, viewModel.status]);
 
@@ -580,6 +587,16 @@ export function usePipeline(workspaceRoot?: string | null) {
     setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
   }, []);
 
+  const chooseHumanAnswer = useCallback(async (requestId: string, value: string) => {
+    await humanChoice(requestId, value);
+    setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
+  }, []);
+
+  const skipHumanAnswer = useCallback(async (requestId: string) => {
+    await humanSkip(requestId);
+    setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
+  }, []);
+
   return useMemo(() => ({
     viewModel,
     sessions,
@@ -598,5 +615,7 @@ export function usePipeline(workspaceRoot?: string | null) {
     deleteSession,
     selectHypothesis,
     answerHuman,
-  }), [answerHuman, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
+    chooseHumanAnswer,
+    skipHumanAnswer,
+  }), [answerHuman, chooseHumanAnswer, skipHumanAnswer, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
 }

@@ -10,12 +10,27 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from athena.agents.ideator_agent import (
+    BASELINE_IDEATOR_PROFILE,
+    HandoffResult,
+    register_ideator_agent,
+)
 from athena.agents.prepare_agent import register_evaluator_agent, register_prepare_agent
+from athena.agents.prepare_eda_agent import (
+    PREPARE_EDA_AGENT_ID,
+    PREPARE_EDA_AGENT_TYPE,
+    register_prepare_eda_agent,
+)
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.agents.validate_agent import register_validate_agent
 from athena.execution.runtime import ExecutionContext
 from athena.research.contracts import ValidationResult
-from athena.research.supervisor.experiment import PlanRunner, PlanTurnResult
+from athena.research.supervisor.experiment import (
+    PlanRunner,
+    PlanTurnResult,
+    load_agent_result,
+)
+from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.prepare import (
     PrepareResult,
     run_evaluator_plan,
@@ -59,6 +74,39 @@ class PhaseRunner:
             direction=plan_input.direction,
         )
         return await runner.run_turn(plan_id, state, plan_input)
+
+    async def _run_handoff_agent(
+        self,
+        *,
+        agent_id: str,
+        agent_type: str,
+        workspace: str,
+        output_file: str,
+        content: str,
+    ) -> str:
+        """Run one handoff-producing agent and return the output file text."""
+        rt = self._runtime
+        request = {"content": content, "context_refs": []}
+        if rt._agents.has_agent(agent_id):
+            run_id = await rt._agents.followup(agent_id, request)
+        else:
+            _id, run_id = await rt._agents.create_root(
+                agent_type, request, agent_id=agent_id, name=agent_id
+            )
+
+        def publish(kind: str, ref: str, data: dict | None = None) -> None:
+            events_bus = getattr(rt, "_events_bus", None)
+            if events_bus is not None:
+                events_bus.project_agent_event(agent_id, kind, ref, data)
+
+        summary = await wait_run_events(rt._agents, run_id, publish)
+        result = await load_agent_result(summary, rt._store, HandoffResult)
+        if result is None:
+            raise RuntimeError(summary.error or f"{agent_type} handoff agent failed")
+        path = Path(workspace) / output_file
+        if not path.is_file():
+            raise RuntimeError(f"{agent_type} did not write {output_file}")
+        return path.read_text(encoding="utf-8")
 
     async def run_prepare_phase(self) -> PrepareResult:
         rt = self._runtime
@@ -124,7 +172,70 @@ class PhaseRunner:
                 channel="text",
                 text="PREPARE: 复用已冻结的评估器断点，跳过 evaluator Agent。",
             )
-        # 步骤 2：prepare agent 在 EDA worktree 写 experiment 产物并可信打分。
+        # 步骤 2a：EDA handoff。
+        try:
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 生成 EDA_HANDOFF.md…",
+            )
+            if not rt._registry.contains(PREPARE_EDA_AGENT_TYPE):
+                register_prepare_eda_agent(
+                    rt._registry,
+                    provider=rt._provider,
+                    artifacts=rt._store,
+                    workspace=Path(workspace.path),
+                    runtime=rt._execution,
+                    extra_tools=rt.kaggle_tools("prepare"),
+                )
+            await self._run_handoff_agent(
+                agent_id=PREPARE_EDA_AGENT_ID,
+                agent_type=PREPARE_EDA_AGENT_TYPE,
+                workspace=str(workspace.path),
+                output_file="EDA_HANDOFF.md",
+                content=rt._task_text,
+            )
+        except Exception as error:
+            await rt.publish_output(
+                source="supervisor",
+                channel="error",
+                text=f"EDA handoff failed ({error}); baseline ideator continues.",
+            )
+        # 步骤 2b：baseline_ideator 读 EDA handoff，写 BASELINE_DESIGN.md。
+        try:
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 生成 BASELINE_DESIGN.md…",
+            )
+            if not rt._registry.contains(BASELINE_IDEATOR_PROFILE.agent_type):
+                register_ideator_agent(
+                    rt._registry,
+                    provider=rt._provider,
+                    artifacts=rt._store,
+                    workspace=Path(workspace.path),
+                    runtime=rt._execution,
+                    extra_tools=rt.ideator_tools(),
+                    gated=True,
+                    profile=BASELINE_IDEATOR_PROFILE,
+                )
+            await self._run_handoff_agent(
+                agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
+                agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
+                workspace=str(workspace.path),
+                output_file="BASELINE_DESIGN.md",
+                content=(
+                    f"{rt._task_text}\n\nRead EDA_HANDOFF.md and write "
+                    "BASELINE_DESIGN.md."
+                ),
+            )
+        except Exception as error:
+            await rt.publish_output(
+                source="supervisor",
+                channel="error",
+                text=f"Baseline design failed ({error}); prepare falls back to task-only.",
+            )
+        # 步骤 3：prepare agent 按 BASELINE_DESIGN.md 实现并可信打分。
         await rt.publish_output(
             source="supervisor",
             channel="text",

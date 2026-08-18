@@ -939,6 +939,41 @@ async def test_ask_user_tool_round_trips_answer_into_memory() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_user_input_passes_choices_to_ask_user() -> None:
+    """有 choices 时工具把 choices / allow_custom / allow_skip 透传给 ask_user。"""
+    seen: dict = {}
+
+    async def ask_user(prompt, *, choices=None, allow_custom=True, allow_skip=True):
+        seen.update(
+            {
+                "prompt": prompt,
+                "choices": choices,
+                "allow_custom": allow_custom,
+                "allow_skip": allow_skip,
+            }
+        )
+        return "choice:f1"
+
+    tool = RequestUserInputTool()
+    ctx = ToolContext("request_user_input", "c1", lambda *_a: asyncio.sleep(0), asyncio.Event(), ask_user=ask_user)
+    result = await tool.execute(
+        {
+            "prompt": "choose metric",
+            "choices": [{"label": "f1", "value": "f1"}],
+            "allow_custom": False,
+            "allow_skip": False,
+        },
+        ctx,
+    )
+
+    assert result == "choice:f1"
+    assert seen["prompt"] == "choose metric"
+    assert seen["choices"] == [{"label": "f1", "value": "f1"}]
+    assert seen["allow_custom"] is False
+    assert seen["allow_skip"] is False
+
+
+@pytest.mark.asyncio
 async def test_ask_user_tool_without_injection_reports_error() -> None:
     """未注入 ask_user 时工具返回错误文本，循环不崩溃、照常结束。"""
     tools = ToolRegistry()

@@ -745,7 +745,10 @@ class _ShellCommandTool(BaseTool):
             "When output is long (e.g. a huge error list or registry dump), do not "
             "read it all; pipe the command through a text search first, e.g. "
             "`cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or "
-            "`cmd 2>&1 | Select-String keyword`."
+            "`cmd 2>&1 | Select-String keyword`. "
+            "If stdout and stderr are both empty, the command produced no matching "
+            "output; do not repeat the exact same command - change the pattern or "
+            "inspect why the expected output is missing."
         ),
         input_schema={
             "type": "object",

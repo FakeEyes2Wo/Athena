@@ -98,10 +98,9 @@ class KaggleApiClient:
             raise KaggleAuthError(0, "no Kaggle credentials configured", BASE_URL)
         return {"Authorization": header}
 
-    async def _get(
-        self, path: str, params: dict[str, Any] | None = None
+    async def _get_url(
+        self, url: str, params: dict[str, Any] | None = None
     ) -> HttpResponse:
-        url = BASE_URL + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         response = await self._http.get(url, self._auth_headers())
@@ -110,6 +109,11 @@ class KaggleApiClient:
                 response.status, _error_message(response), response.url
             )
         return response
+
+    async def _get(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> HttpResponse:
+        return await self._get_url(BASE_URL + path, params)
 
     async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         response = await self._get(path, params)
@@ -206,6 +210,49 @@ class KaggleApiClient:
             )
         return await asyncio.to_thread(_notebook_source_from_body, response.body)
 
+    async def list_discussions(
+        self,
+        competition: str,
+        *,
+        page: int = 1,
+        sort_by: str = "hotness",
+    ) -> list[dict]:
+        """List public Kaggle competition discussion threads (best-effort endpoint).
+
+        Kaggle v1 does not expose a stable public discussions endpoint; this uses
+        Kaggle's internal ``/api/i/...`` JSON endpoint. If that endpoint changes,
+        callers degrade the same way as a failed notebook search.
+        """
+        params = {"page": max(page, 1), "sortBy": sort_by}
+        url = (
+            "https://www.kaggle.com/api/i/competitions/"
+            f"{urllib.parse.quote(competition)}/discussions"
+        )
+        response = await self._get_url(url, params)
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise KaggleApiError(
+                response.status, "discussions response is not JSON", response.url
+            ) from error
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("discussions", "threads", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    async def get_discussion(self, ref: str) -> str:
+        """Read one Kaggle discussion thread and its comments as text."""
+        url = (
+            "https://www.kaggle.com/api/i/discussions/"
+            f"{urllib.parse.quote(ref, safe='/')}"
+        )
+        response = await self._get_url(url)
+        return await asyncio.to_thread(_discussion_source_from_body, response.body)
+
     async def _post(
         self, url: str, headers: dict[str, str], data: bytes
     ) -> HttpResponse:
@@ -287,6 +334,56 @@ def _multipart_file(file_name: str, content: bytes, boundary: str) -> bytes:
         + content
         + f"\r\n--{boundary}--\r\n".encode()
     )
+
+
+def _discussion_source_from_body(body: bytes) -> str:
+    """Extract discussion text from Kaggle's internal JSON response.
+
+    Accepted shapes:
+    - ``{"title": ..., "body"|"content"|"text": ...}``
+    - ``{"title": ..., "comments": [{"author": ..., "body"|"content"|"text": ...}]}``
+    - ``{"result": {...}}`` or ``{"thread": {...}}`` wrappers.
+    Falls back to raw UTF-8 text for non-JSON responses.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return body.decode("utf-8", errors="replace")
+    if isinstance(payload, dict):
+        for key in ("thread", "discussion", "result"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                payload = nested
+                break
+    if not isinstance(payload, dict):
+        return json.dumps(payload, ensure_ascii=False)
+    parts: list[str] = []
+    title = payload.get("title")
+    if isinstance(title, str) and title.strip():
+        parts.append(f"# {title.strip()}")
+    for key in ("body", "content", "text", "description"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+            break
+    comments = payload.get("comments") or payload.get("replies")
+    if isinstance(comments, list):
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            author = comment.get("author")
+            if isinstance(author, dict):
+                author = author.get("name", "")
+            text = ""
+            for key in ("body", "content", "text", "commentText"):
+                value = comment.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+            prefix = f"**{author}:**" if author else "**comment:**"
+            if text:
+                parts.append(f"{prefix} {text}")
+    return "\n\n".join(parts) if parts else body.decode("utf-8", errors="replace")
 
 
 def _notebook_source_from_body(body: bytes) -> str:

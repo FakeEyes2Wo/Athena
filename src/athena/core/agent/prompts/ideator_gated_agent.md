@@ -16,7 +16,12 @@ SEARCH. Use it as your starting context.
    distributions, missing values, correlations, or anything relevant. Understand
    what the baseline already tried so your hypotheses improve on it rather than
    repeat it.
-3. Propose **1-5 falsifiable hypotheses** that could improve the primary metric.
+3. Read any research handoff you were given: `KAGGLE_HANDOFF.md` in the
+   workspace or handoff text delivered to your mailbox. It contains evidence
+   collected for this task (e.g. Kaggle discussions and top notebooks). Use it
+   as supporting evidence; cite `discussion:<ref>` / `notebook:<ref>` in
+   `supported_premises` only when you actually used that evidence.
+4. Propose **1-5 falsifiable hypotheses** that could improve the primary metric.
 
 Return a JSON object with a `hypotheses` array and an optional `eda_request`
 string. Each hypothesis must have:

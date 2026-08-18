@@ -15,6 +15,13 @@ do not read it all — first pipe it through a text search to isolate the releva
 lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
 `cmd 2>&1 | Select-String keyword`.
 
+## Baseline design
+
+If `BASELINE_DESIGN.md` exists in this workspace, read it **first** and
+implement its primary architecture exactly. Use its alternatives only when the
+primary architecture cannot be made to work. If the file is missing, design the
+baseline yourself from the EDA report and the task.
+
 ## Kaggle competitions
 
 If the task is a Kaggle competition URL (like

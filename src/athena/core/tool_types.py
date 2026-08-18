@@ -11,8 +11,9 @@ from typing import Any
 EmitEvent = Callable[[str, str, dict[str, Any] | None], Awaitable[None]]
 """事件发射器: ``(kind: str, artifact_ref: str, data: dict | None) -> None``。"""
 
-AskUser = Callable[[str], Awaitable[str | None]]
-"""用户输入请求回调: ``(prompt) -> 回答文本``；``None`` 表示取消/超时。"""
+AskUser = Callable[..., Awaitable[str | None]]
+"""用户输入请求回调；兼容旧 ``(prompt) -> 回答文本`` 和新扩展参数。
+``None`` 表示取消/超时。"""
 
 TOOL_BEGIN = "tool/begin"
 TOOL_END = "tool/end"

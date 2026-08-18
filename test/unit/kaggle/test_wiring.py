@@ -12,6 +12,8 @@ EXPECTED_TOOLS = {
     "kaggle_get_competition",
     "kaggle_list_notebooks",
     "kaggle_get_notebook",
+    "kaggle_list_discussions",
+    "kaggle_get_discussion",
     "kaggle_download_data",
     "kaggle_run",
     "kaggle_submit",
@@ -23,10 +25,20 @@ def test_agent_kaggle_tool_mapping_is_minimal() -> None:
     assert AGENT_KAGGLE_TOOLS["ideator"] == (
         "kaggle_list_notebooks",
         "kaggle_get_notebook",
+        "kaggle_list_discussions",
+        "kaggle_get_discussion",
     )
     assert AGENT_KAGGLE_TOOLS["plan"] == (
         "kaggle_list_notebooks",
         "kaggle_get_notebook",
+        "kaggle_list_discussions",
+        "kaggle_get_discussion",
+    )
+    assert AGENT_KAGGLE_TOOLS["kaggle_handoff"] == (
+        "kaggle_list_notebooks",
+        "kaggle_get_notebook",
+        "kaggle_list_discussions",
+        "kaggle_get_discussion",
     )
     assert set(AGENT_KAGGLE_TOOLS["evaluator"]) == {
         "kaggle_get_competition",

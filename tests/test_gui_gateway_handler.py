@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from gui_gateway.handler import GuiRequestHandler, _session_state_root
+from gui_gateway.human import HumanRequestBroker
 
 
 class RecordingRuntime:
@@ -238,6 +239,44 @@ async def test_handler_human_pending_and_reply() -> None:
     assert result == {"replied": True}
     assert await task == "done"
     assert (await handler.dispatch("human_pending", {}))["requests"] == []
+
+
+@pytest.mark.asyncio
+async def test_human_broker_choice_and_skip_replies() -> None:
+    broker = HumanRequestBroker()
+    handler = GuiRequestHandler(RecordingRuntime(), broker=broker)
+
+    async def ask() -> str | None:
+        return await broker.ask(
+            "choose metric",
+            choices=[
+                {"label": "accuracy", "value": "accuracy"},
+                {"label": "f1", "value": "f1"},
+            ],
+        )
+
+    task = asyncio.create_task(ask())
+    await asyncio.sleep(0)
+    request_id = (await handler.dispatch("human_pending", {}))["requests"][0][
+        "request_id"
+    ]
+    assert await handler.dispatch(
+        "human_reply", {"request_id": request_id, "choice": "f1"}
+    ) == {"replied": True}
+    assert await task == "choice:f1"
+
+    async def skip_ask() -> str | None:
+        return await broker.ask("skip me")
+
+    task = asyncio.create_task(skip_ask())
+    await asyncio.sleep(0)
+    request_id = (await handler.dispatch("human_pending", {}))["requests"][0][
+        "request_id"
+    ]
+    assert await handler.dispatch(
+        "human_reply", {"request_id": request_id, "skip": True}
+    ) == {"replied": True}
+    assert await task == "skip"
 
 
 @pytest.mark.asyncio

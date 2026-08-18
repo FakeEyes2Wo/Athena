@@ -102,6 +102,7 @@ SETTINGS_WHITELIST: frozenset[str] = frozenset(
         "ideation",
         "ideator_count",
         "hypotheses_per_ideator",
+        "handoff_sources",
         "model_connection",
     }
 )
@@ -417,6 +418,7 @@ class ResearchRuntime:
             "ideation": self._ideation,
             "ideator_count": self.state.ideator_count,
             "hypotheses_per_ideator": self.state.hypotheses_per_ideator,
+            "handoff_sources": self.state.handoff_sources,
             "direction": self._direction,
             "tolerance": self._tolerance,
             "auto_validate": self._auto_validate,
@@ -478,6 +480,16 @@ class ResearchRuntime:
                     "hypotheses_per_ideator must be an integer between 1 and 5"
                 )
             self.state.hypotheses_per_ideator = value
+        if "handoff_sources" in patch:
+            value = patch["handoff_sources"]
+            if not isinstance(value, list) or any(
+                source not in {"kaggle", "literature"} for source in value
+            ):
+                raise ValueError(
+                    "handoff_sources must be a list containing only "
+                    "'kaggle' and 'literature'"
+                )
+            self.state.handoff_sources = value
         if "manual_mode" in patch:
             manual = patch["manual_mode"]
             if not isinstance(manual, bool):
@@ -528,6 +540,7 @@ class ResearchRuntime:
                 "search_limit",
                 "ideator_count",
                 "hypotheses_per_ideator",
+                "handoff_sources",
             )
         ):
             self.state.save(self._state_path)

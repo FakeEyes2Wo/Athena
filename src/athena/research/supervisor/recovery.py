@@ -28,7 +28,10 @@ def _is_settled(
     if plan.kind == "SEARCH":
         experiment_id = tree.experiment_for_hypothesis(plan_id)
         if experiment_id is None:
-            return False
+            # 崩溃窗口为 state 已写、tree 未写：该 Plan 是孤儿，没有可结算的
+            # 实验记录。继续保留会拖到 settle 时用 exp_{plan_id} 查询而崩溃，
+            # 因此视为已了结并丢弃；Supervisor.recover 会在丢弃前尝试重建。
+            return True
         return tree.get_experiment(experiment_id).status in _TERMINAL
     if plan.kind == "PREPARE":
         return has_final_baseline

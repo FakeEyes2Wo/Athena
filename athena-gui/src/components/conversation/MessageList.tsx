@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { UIMessage } from "../../types/ui";
 import { IntentPreviewCard } from "../cards/IntentPreviewCard";
 import { ErrorCard } from "../cards/ErrorCard";
@@ -91,10 +92,35 @@ function TrajectoryItem({ msg, onStartRun }: { msg: UIMessage; onStartRun: Messa
 
 /** Renders chat messages, intent preview cards, and the trajectory (agent/tool/supervisor/ideator). */
 export function MessageList({ messages, onStartRun }: MessageListProps) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const segments = segmentMessages(messages);
 
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+
+    const update = () => {
+      setShowJumpToBottom(el.scrollHeight - el.scrollTop - el.clientHeight > 120);
+    };
+
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, [messages.length]);
+
+  const scrollToBottom = () => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  };
+
   return (
-    <div className={styles["message-list"]} role="log" aria-live="polite">
+    <div className={styles["message-list"]} role="log" aria-live="polite" ref={listRef}>
       {segments.map((segment, index) => {
         if (segment.lane === null) {
           return segment.items.map((msg) => (
@@ -110,6 +136,18 @@ export function MessageList({ messages, onStartRun }: MessageListProps) {
           </section>
         );
       })}
+      {showJumpToBottom && (
+        <button
+          type="button"
+          className={styles["jump-to-bottom"]}
+          onClick={scrollToBottom}
+          aria-label="返回底部"
+          title="返回底部"
+        >
+          <Icon name="chevronDown" size={16} />
+          <span>返回底部</span>
+        </button>
+      )}
     </div>
   );
 }

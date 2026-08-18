@@ -40,10 +40,31 @@ Source of truth: `src/athena/kaggle/`, `src/athena/research/supervisor/superviso
 |---|---|---|
 | evaluator | PREPARE | `kaggle_get_competition`, `kaggle_download_data` |
 | prepare | PREPARE | `kaggle_run` |
-| ideator | SEARCH | `kaggle_list_notebooks` |
-| plan | SEARCH | `kaggle_list_notebooks` |
-| general | SEARCH | 全部 5 个 |
+| ideator | SEARCH | `kaggle_list_notebooks`, `kaggle_get_notebook`, `kaggle_list_discussions`, `kaggle_get_discussion` |
+| plan | SEARCH | `kaggle_list_notebooks`, `kaggle_get_notebook`, `kaggle_list_discussions`, `kaggle_get_discussion` |
+| kaggle_handoff | SEARCH | notebook + discussion 四个算子，外加 web_search/web_fetch 回退 |
+| general | SEARCH | 全部算子 |
 | data / validate | SEARCH / VALIDATE | 无 |
+
+`kaggle_handoff` Agent 在 SEARCH 首个 ideation 轮前运行一次，把 discussion 与
+notebook 证据写成 EDA 工作区的 `KAGGLE_HANDOFF.md` 和机器可读的
+`KAGGLE_EVIDENCE.json`（含 notebook ref/version 与 discussion ref 溯源），并
+通过 Agent mailbox 把完成信息投递给每个 Ideator，供所有 Ideator Agent 使用。
+
+## Handoff 来源开关
+
+`state.handoff_sources` 控制 Ideation 使用哪些 handoff 来源，前端可经
+`settings_set` 配置：
+
+```json
+{"patch": {"handoff_sources": ["kaggle", "literature"]}}
+```
+
+- `"kaggle"`：启用 Kaggle Handoff Agent；
+- `"literature"`：复用现有 `corpus_ref`，向 Ideator 投递文献语料信息；
+- `[]`：关闭所有 handoff，Ideator 仅使用本地 EDA / baseline。
+- 已生成的 handoff ref 记录在 `state.handoff_refs`（source -> artifact ref），
+  断点续传时复用。
 
 工具集经 `runtime.kaggle_tools(agent_type)` 按需解析；plan agent 因注册早于任务理解，
 用 callable 惰性求值。

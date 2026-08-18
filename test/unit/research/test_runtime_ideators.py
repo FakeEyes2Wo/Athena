@@ -52,7 +52,7 @@ async def test_ideator_turn_runs_actual_lane_count_concurrently_and_merges_in_or
     started: list[tuple[str, int]] = []
     all_started = asyncio.Event()
 
-    async def run_lane(self, label: str, target: int, _eda_dir):
+    async def run_lane(self, label: str, target: int, _eda_dir, profile=None):
         started.append((label, target))
         if len(started) == 3:
             all_started.set()
@@ -132,7 +132,7 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     errors: list[tuple[str, str]] = []
 
-    async def run_lane(self, label: str, _target: int, _eda_dir):
+    async def run_lane(self, label: str, _target: int, _eda_dir, profile=None):
         if label == "ideator-1-2":
             raise RuntimeError("offline")
         return HypothesisBatch(hypotheses=[_hypothesis(label)])
@@ -167,7 +167,7 @@ async def test_ideator_turn_keeps_every_generated_hypothesis_without_truncation(
     runtime._supervisor = SimpleNamespace(state=runtime._state)
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
 
-    async def run_lane(self, label: str, _target: int, _eda_dir):
+    async def run_lane(self, label: str, _target: int, _eda_dir, profile=None):
         return HypothesisBatch(
             hypotheses=[_hypothesis(f"{label}-a"), _hypothesis(f"{label}-b")]
         )
@@ -205,7 +205,7 @@ async def test_ideator_turn_resolves_relative_eda_dir_against_project_root(
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     resolved: list[str] = []
 
-    async def run_lane(self, label: str, _target: int, eda_dir):
+    async def run_lane(self, label: str, _target: int, eda_dir, profile=None):
         resolved.append(str(eda_dir))
         return HypothesisBatch(hypotheses=[_hypothesis(label)])
 
@@ -235,7 +235,7 @@ async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
     runtime._registry = SimpleNamespace(contains=lambda _name: True)
     requests: list[str] = []
 
-    async def run_lane(self, label: str, _target: int, _eda_dir):
+    async def run_lane(self, label: str, _target: int, _eda_dir, profile=None):
         if label == "ideator-1-1":
             return HypothesisBatch(
                 hypotheses=[_hypothesis(label)],

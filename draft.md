@@ -285,3 +285,23 @@
   - `athena-gui/src-tauri/target/release/bundle/msi/Athena_0.1.0_x64_en-US.msi`（138,711,040 B）
   - `athena-gui/src-tauri/target/release/bundle/nsis/Athena_0.1.0_x64-setup.exe`（136,219,704 B）
 - 构建退出码 0，全部完成。
+
+## 追加：Python 版 “unknown experiment id” 修复（与 TS 版对齐并增强恢复）
+- 现象：Python 后端 SEARCH Plan 恢复后报
+  `research failed: 'unknown experiment id: exp_hyp_...'`。
+- 根因：`Supervisor.start_plan` 只写 `state.json`，不写 `research_tree.json`；
+  崩溃/重启后 `state.plans` 仍在，但 tree 缺 `exp_{hypothesis_id}`。
+  `Recovery.reconcile` 又把无 experiment 的 SEARCH Plan 当未终结保留，最终
+  `settle_plan` 查不到实验记录。
+- 修改：
+  - `supervisor.py` `start_plan()`：新增 experiment 后先落 `state.json`、
+    再立即落 `research_tree.json`；已有 Plan 但缺 experiment 时抛明确错误。
+  - `supervisor.py` `recover()`：对“state 有 Plan、tree 缺 experiment”的
+    崩溃窗口做重建——从 `context_ref`/`plan_input` 和幂等 worktree 重建
+    RUNNING 实验记录并写回 tree，避免丢失已投入的 Plan。
+  - `recovery.py`：SEARCH Plan 若仍无对应 experiment，视为孤儿 Plan 丢弃，
+    不再保留到 settle 崩溃（与 TS `recovery.ts` 对齐）。
+- 验证：
+  - `test_recovery.py` 更新并通过（7 passed）；
+  - 手工异步脚本验证 `start_plan` 落 tree、删除 experiment 后 `recover()`
+    可重建 RUNNING 实验并写回、纯 `Recovery.reconcile` 丢弃孤儿 Plan。

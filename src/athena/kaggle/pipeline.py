@@ -130,6 +130,16 @@ def _notebooks_from_raw(raw: list[dict]) -> list[NotebookSummary]:
                     pick_first(item, "totalVotes", "total_votes", default=0)
                 ),
                 language=item.get("language", ""),
+                version=str(
+                    pick_first(
+                        item,
+                        "currentVersion",
+                        "current_version",
+                        "version",
+                        "versionNumber",
+                        default="",
+                    )
+                ),
                 url=item.get("url", "")
                 or (f"https://www.kaggle.com/code/{ref}" if ref else ""),
             )

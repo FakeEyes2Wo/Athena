@@ -1,6 +1,7 @@
 """SEARCH settlement and crash-recovery integration contracts."""
 
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
@@ -242,6 +243,27 @@ async def test_restart_resumes_stable_agent_context_and_workspace(harness: _Harn
             asyncio.gather(restart_task, return_exceptions=True), timeout=2
         )
         await asyncio.wait_for(agents.aclose(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_recover_rebuilds_experiment_lost_before_tree_save(harness: _Harness):
+    await harness.supervisor.start_plan("h1")
+    tree_path = harness.root / ".athena" / "research_tree.json"
+    payload = json.loads(tree_path.read_text(encoding="utf-8"))
+    del payload["experiments"]["exp_h1"]
+    tree_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    recovered = await harness.supervisor.recover(
+        ResearchState.load(harness.root / ".athena" / "state.json")
+    )
+
+    assert "h1" in recovered.plans
+    assert harness.supervisor.tree.experiment_for_hypothesis("h1") == "exp_h1"
+    assert (
+        harness.supervisor.tree.get_experiment("exp_h1").status.value == "RUNNING"
+    )
+    persisted = json.loads(tree_path.read_text(encoding="utf-8"))
+    assert "exp_h1" in persisted["experiments"]
 
 
 @pytest.mark.asyncio

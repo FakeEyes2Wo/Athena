@@ -171,6 +171,12 @@ async def test_new_plan_freezes_evaluator_tree_and_human_context(
     persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
     assert persisted.plans["hyp_vit"].context_ref == state.plans["hyp_vit"].context_ref
     assert persisted.plans["hyp_vit"].turns_used == 0
+    persisted_tree = ResearchTree.load(tmp_path / ".athena" / "research_tree.json")
+    assert persisted_tree.experiment_for_hypothesis("hyp_vit") == "exp_hyp_vit"
+    assert (
+        persisted_tree.get_experiment("exp_hyp_vit").status
+        is ExperimentStatus.RUNNING
+    )
     await supervisor.stop()
     await agents.aclose()
 
