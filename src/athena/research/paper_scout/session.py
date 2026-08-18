@@ -79,19 +79,17 @@ class ScoutSession:
 
         found: list[ScoutPaper] = []
         seen: set[str] = set()
-        for backend in self.search_backends:
-            started = time.monotonic()
-            try:
-                results = await backend.search(
-                    cleaned, self.request.search_top_k, self.request.published_to
-                )
-            except Exception as error:
-                self.backend_seconds += time.monotonic() - started
+        outcomes = await asyncio.gather(
+            *(self._ask_backend(backend, cleaned) for backend in self.search_backends)
+        )
+        for backend, (results, error) in zip(
+            self.search_backends, outcomes, strict=True
+        ):
+            if error is not None:
                 # 单个后端失败（限流、解析失败、网络）→ 记录并继续用其他后端
                 self.errors.append(f"{backend.name}: {type(error).__name__}: {error}")
                 action.error = f"{backend.name}: {type(error).__name__}"
                 continue
-            self.backend_seconds += time.monotonic() - started
             for paper in results:
                 # 同一篇论文常同时来自 arXiv 与 S2，标题键让跨后端的重复也能并掉
                 keys = {paper.paper_key, title_key(paper.title)}
@@ -161,6 +159,35 @@ class ScoutSession:
         await self._absorb(found, action, EXPAND_COST)
         self._record(action, ("expand", action.argument))
         return action
+
+    async def _ask_backend(
+        self, backend: SearchBackend, query: str
+    ) -> tuple[list[ScoutPaper], Exception | None]:
+        """问一个检索后端，把异常当返回值交回去而不是抛出。
+
+        并发发出而不是挨个等：两个后端是两个不同的服务，``HostRateLimiter`` 按服务分桶、
+        每桶一把锁，因此它们之间本来就没有节流上的相互作用——串行等待纯属白等。
+
+        **结果与串行版逐字相同。** ``asyncio.gather`` 保序，调用方按同样的后端顺序做同样
+        的去重，于是 ``found`` 的内容和次序都不变；异常也仍然按顺序记进 ``errors``，
+        ``action.error`` 同样停在最后一个失败的后端上。异常必须当返回值传回，否则一个后端
+        失败会让 ``gather`` 取消其余的——那才是真正的行为改变。
+
+        计时仍是按后端各自累加（串行累计，见 ``ScoutStats`` 的说明）：并发之后这几项之和
+        会超过 scout 墙钟，那是预期的，不是记账错误。
+        """
+        started = time.monotonic()
+        try:
+            return (
+                await backend.search(
+                    query, self.request.search_top_k, self.request.published_to
+                ),
+                None,
+            )
+        except Exception as error:
+            return [], error
+        finally:
+            self.backend_seconds += time.monotonic() - started
 
     async def _absorb(
         self, found: list[ScoutPaper], action: ScoutAction, cost: float
