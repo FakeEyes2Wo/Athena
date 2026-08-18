@@ -82,13 +82,30 @@ class ForkResult:
     copied: tuple[str, ...]
 
 
-def _baseline(tree: dict) -> dict:
-    """取出基线实验；没有它就没有可共享的评估与起点。"""
+def _baseline(tree: dict) -> tuple[str, dict]:
+    """取出基线实验及其 id；没有它就没有可共享的评估与起点。
+
+    ``kind`` 在 ``plan`` 里，不在实验顶层——``Experiment`` 模型没有这个字段（见
+    ``core.research_tree.Experiment``，它只有 ``parent_id``/``hypothesis_id``/``commit``/
+    ``plan``/``gitwork``/``status``/``eval``/``verdict``/``artifacts``/``error``）。
+    实验 id 同理：它是映射的键，不是记录里的字段。
+
+    此前这里读的是顶层 ``kind`` 与顶层 ``id``，而单元测试的 fixture 恰好按那个形状造数据，
+    于是 ``fork_project`` **在真项目上从未成功过一次**：它对着一个刚跑完 PREPARE 的项目
+    抛 "source project has no baseline experiment"。2026-08-18 真机撞到。
+
+    顶层 ``kind`` 仍然接受，只为兼容手写的旧树；判据以 ``plan.kind`` 为准。
+    """
     experiments = tree.get("experiments")
-    items = experiments.values() if isinstance(experiments, dict) else experiments or []
-    for experiment in items:
-        if isinstance(experiment, dict) and experiment.get("kind") == "baseline":
-            return experiment
+    if not isinstance(experiments, dict):
+        experiments = {}
+    for experiment_id, experiment in experiments.items():
+        if not isinstance(experiment, dict):
+            continue
+        plan = experiment.get("plan")
+        kind = plan.get("kind") if isinstance(plan, dict) else None
+        if kind == "baseline" or experiment.get("kind") == "baseline":
+            return str(experiment_id), experiment
     raise ForkError(
         "source project has no baseline experiment; run PREPARE there first — "
         "forking exists precisely to avoid re-running it per arm"
@@ -164,7 +181,7 @@ def fork_project(source: str | Path, target: str | Path) -> ForkResult:
             raise ForkError(f"{required} is missing; the source project is incomplete")
 
     tree = json.loads(tree_path.read_text(encoding="utf-8"))
-    baseline = _baseline(tree)
+    baseline_id, baseline = _baseline(tree)
     evaluator_ref = _evaluator_ref(baseline)
 
     target_athena.mkdir(parents=True)
@@ -192,6 +209,6 @@ def fork_project(source: str | Path, target: str | Path) -> ForkResult:
         source=source_root,
         target=target_root,
         evaluator_ref=evaluator_ref,
-        baseline_experiment_id=str(baseline.get("id", "")),
+        baseline_experiment_id=baseline_id,
         copied=tuple(copied),
     )

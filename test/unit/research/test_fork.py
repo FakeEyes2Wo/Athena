@@ -17,18 +17,24 @@ from athena.research.supervisor.state import ResearchState
 
 
 def _tree(*, with_baseline: bool = True, evaluator: str = "sha256:eval") -> dict:
+    """按 ``ResearchTree.to_dict`` 真正写出来的形状造树。
+
+    此前这个 fixture 把 ``kind`` 与 ``id`` 放在实验的**顶层**，而 ``Experiment`` 模型
+    两个字段都没有：``kind`` 在 ``plan`` 里，``id`` 是映射的键。于是 ``fork_project``
+    按顶层字段找基线，在单元测试里一路绿灯，**在真项目上从未成功过一次**——它抛
+    "source project has no baseline experiment"，而那条消息指向的正是刚跑完 PREPARE
+    的项目。2026-08-18 在真机上撞到。
+    """
     experiments: dict[str, dict] = {
         "exp_search": {
-            "id": "exp_search",
-            "kind": "search",
-            "plan": {"run_config_ref": "sha256:other"},
+            "hypothesis_id": "hyp_search",
+            "plan": {"kind": "search", "run_config_ref": "sha256:other"},
         }
     }
     if with_baseline:
         experiments["exp_baseline"] = {
-            "id": "exp_baseline",
-            "kind": "baseline",
-            "plan": {"run_config_ref": evaluator},
+            "hypothesis_id": "hyp_baseline",
+            "plan": {"kind": "baseline", "run_config_ref": evaluator},
         }
     return {"version": 2, "sota_id": "exp_baseline", "hypotheses": {}, "experiments": experiments}
 
