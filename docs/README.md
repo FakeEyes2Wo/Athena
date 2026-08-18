@@ -51,6 +51,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [paper_rag 真机基准](paper_rag_benchmarks_ch.md) | current | 装载/时延实测、known-item 检索质量、优化清单 |
 | [文献语料接入 loop](corpus_ideation_ch.md) | current | 调研产物如何交给 Ideator，引用如何核验 |
 | [文献链路整改](survey_overhaul_ch.md) | current | 六段整改：可重跑基准、论文库、选片、门面与融合、消费端、A/B 分叉 |
+| [调研的交付与边界](survey_limits_ch.md) | current | 代价分解、A/B 结论（开调研没让假设变好）与全部已知限制 |
 
 ## Kaggle 与 Supervisor 人类门
 
