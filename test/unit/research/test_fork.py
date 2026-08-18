@@ -7,6 +7,7 @@
 """
 
 import json
+import shutil
 import unittest
 from pathlib import Path
 from tempfile import mkdtemp
@@ -42,6 +43,14 @@ def _prepared(**tree_kwargs) -> Path:
     (athena / "repo" / "solution.py").write_text("print(1)\n", encoding="utf-8")
     (athena / "workspaces").mkdir(parents=True)
     (athena / "workspaces" / "leftover.txt").write_text("stale", encoding="utf-8")
+    # EDA 工作区在**项目根**下的 workspaces/，不在 .athena/ 里；它是 PREPARE 用
+    # ``git worktree`` 建的，因此带一个指回源仓库的 .git 链接文件。
+    eda = root / "workspaces" / "eda"
+    eda.mkdir(parents=True)
+    (eda / "REPORT.md").write_text("# EDA\n", encoding="utf-8")
+    (eda / ".git").write_text(
+        f"gitdir: {athena / 'repo' / '.git' / 'worktrees' / 'eda'}\n", encoding="utf-8"
+    )
     (athena / "research_tree.json").write_text(
         json.dumps(_tree(**tree_kwargs)), encoding="utf-8"
     )
@@ -81,7 +90,7 @@ class ForkTest(unittest.TestCase):
 
         result = fork_project(source, target)
 
-        self.assertEqual(("artifacts", "repo"), result.copied)
+        self.assertEqual(("artifacts", "repo", "workspaces/eda"), result.copied)
         self.assertEqual(
             "blob",
             (target / ".athena" / "artifacts" / "ab" / "cdef").read_text("utf-8"),
@@ -117,6 +126,54 @@ class ForkTest(unittest.TestCase):
         state = ResearchState.load(target / ".athena" / "state.json")
         self.assertEqual(6, state.search_limit)
         self.assertEqual("workspaces/eda", state.eda_dir)
+
+    def test_the_eda_workspace_comes_along_with_its_path(self) -> None:
+        """只带字段不带目录，等于让每个 Ideator lane 各抛一次异常。
+
+        真机复现（2026-08-18）：分叉出的臂 ``workspaces/`` 整个不存在，而 ``eda_dir``
+        仍写着 ``workspaces/eda``；``AgentTurnRunner._resolve_eda_dir`` 因此抛
+        "EDA workspace is stale"，而 ``run_ideator_turn`` 把 lane 异常吞成一条 error
+        输出——**这一臂一条假设都产不出来，且不报错**。分叉存在的唯一目的就是跑 A/B。
+        """
+        source, target = _prepared(), _target()
+
+        fork_project(source, target)
+
+        carried = target / "workspaces" / "eda"
+        self.assertTrue(carried.is_dir())
+        self.assertEqual(
+            "# EDA\n", (carried / "REPORT.md").read_text(encoding="utf-8")
+        )
+
+    def test_the_carried_eda_no_longer_points_at_the_source_repository(self) -> None:
+        """worktree 链接文件必须删掉，否则两臂在同一份 git 历史上互相写。
+
+        它是一个指回**源项目** ``.athena/repo`` 的纯文本指针。原样复制的话，新臂在 EDA
+        目录里跑的任何 git 命令都作用在源项目上，而症状不是报错，是分数莫名互相影响。
+        """
+        source, target = _prepared(), _target()
+
+        fork_project(source, target)
+
+        carried = target / "workspaces" / "eda"
+        # 先断言目录真的带过来了：否则"链接文件不存在"会因为整个目录都不存在而
+        # 空洞地通过——这条用例在修复前必须是红的。
+        self.assertTrue(carried.is_dir())
+        self.assertFalse((carried / ".git").exists())
+
+    def test_an_eda_path_that_does_not_exist_is_cleared_rather_than_kept(self) -> None:
+        """带不过来就把字段清掉，让 runtime 走"未捕获"那条明确的路。
+
+        留着一个指向不存在目录的路径，错误会在十几分钟后以"没有假设"的形态出现；
+        清空则让它在第一时间以一条明确的 RuntimeError 出现。
+        """
+        source, target = _prepared(), _target()
+        shutil.rmtree(source / "workspaces" / "eda")
+
+        fork_project(source, target)
+
+        state = ResearchState.load(target / ".athena" / "state.json")
+        self.assertIsNone(state.eda_dir)
 
     def test_stale_working_directories_are_left_behind(self) -> None:
         """上一次运行的临时产物复制过来，只会让新臂从一个半旧的工作区起步。"""
