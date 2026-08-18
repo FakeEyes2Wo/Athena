@@ -6,6 +6,17 @@
 
 复用现有 `HumanRequestBroker` / `request_user_input` / `human_pending` / `human_reply` / `HumanRequestDialog`，把任务理解升级为前端 1/2/3 选择题多轮澄清；澄清结果写 `TASK_CLARIFICATION.md` 并进入现有 `handoff_refs`。
 
+## Status
+
+- [x] broker choices / custom / skip
+- [x] request_user_input choices 透传
+- [x] human_reply choice / skip
+- [x] parse_intent 多轮澄清 + handoff
+- [x] supervisor prompt 选择题追问
+- [x] ideator 注入 task_clarification
+- [x] 前端弹窗与轮询
+- [x] 测试与验证
+
 ## 实施步骤
 
 ### 1. `src/gui_gateway/human.py`
