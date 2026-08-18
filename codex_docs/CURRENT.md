@@ -1,6 +1,10 @@
 # Current Athena Work
 
-No active implementation plan.
+Active implementation plan:
+- `codex_docs/2026-08-18-task-understanding-clarification-plan.md`
+
+Design spec:
+- `docs/superpowers/specs/2026-08-18-task-understanding-clarification-design.md`
 
 Most recent completed work:
 - `codex_docs/2026-08-16-breakpoint-resume-completion-report.md`
