@@ -217,11 +217,19 @@ class ResponsesProvider(BaseProvider):
         *,
         output_type: type | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """流式调用 Chat Completions，产出文本增量 / 工具调用 / 完成事件。"""
+        """流式调用 Chat Completions，产出文本增量 / 工具调用 / 完成事件。
+
+        ``response_format`` 与工具互斥，二者只能取一。它把整条回复约束成 schema，
+        模型于是一个 tool call 也发不出来；而 Athena 每个 Agent 都带 ``output_type``，
+        真跑起来就是 evaluator 连着十几轮回 ``{"decision":"continue","reason":"Let me
+        read the training CSV"}``、一次工具都不调，PREPARE 因此永远冻结不出 evaluator。
+        有工具时改把 schema 注入 prompt（``_schema_instruction``，原本只有 DeepSeek 走
+        这条），让 ReAct 先照常用工具、末轮再回 JSON；无工具时才用严格 schema。
+        """
         api_msgs = _to_api(messages)
-        if self.provider_kind == "deepseek" and output_type is not None:
-            api_msgs = [*api_msgs, _schema_instruction(output_type)]
         tool_defs = [spec.to_openai_tool() for spec in tools.specs]
+        if output_type is not None and (tool_defs or self.provider_kind == "deepseek"):
+            api_msgs = [*api_msgs, _schema_instruction(output_type)]
 
         kw: dict = dict(
             model=self.model_name,
@@ -231,7 +239,7 @@ class ResponsesProvider(BaseProvider):
             stream=True,
             extra_body={"thinking": {"type": "disabled"}},
         )
-        if output_type is not None:
+        if output_type is not None and not tool_defs:
             response_format = self._response_format(output_type)
             if response_format is not None:
                 kw["response_format"] = response_format

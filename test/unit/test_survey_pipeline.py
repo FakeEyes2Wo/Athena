@@ -35,7 +35,14 @@ from athena.research.paper_source.schemas import (
     PaperSourceResult,
     PaperSourceStats,
 )
-from athena.research.survey.pipeline import SurveyPipeline, SurveyRequest
+from athena.research.survey.library import PaperLibrary
+from athena.research.paper_rag.index import split_sentences
+from athena.research.survey.pipeline import (
+    SHRED_MIN_SENTENCES,
+    PaperOutcome,
+    SurveyPipeline,
+    SurveyRequest,
+)
 from athena.research.survey.wiring import SurveyStack
 from athena.core.artifact_store import LocalArtifactStore
 
@@ -49,6 +56,12 @@ class FakeInterpreter:
     def __init__(self) -> None:
         self.calls = 0
         self.failures = 0
+
+    async def interpret(self, request):
+        """记一次调用并让出事件循环，好让并发转换真的交错起来。"""
+        self.calls += 1
+        await asyncio.sleep(0)
+        return request
 
 
 class FakeEmbedder:
@@ -71,10 +84,14 @@ async def make_content(
     quality: str = "pass",
     chunks: int = 2,
     empty: bool = False,
+    shredded: bool = False,
+    shred_repeat: int = 40,
 ) -> PaperContent:
     """构造一篇最小但字段合法的 PaperContent。
 
     ``empty`` 复现 PDF-wrapper 投稿：markdown 只有一行，其余字段一切正常。
+    ``shredded`` 复现另一头——``arxiv:1106.1813`` 那种入口推断失败的 TeX 包：句子数量
+    极多而每句只是断行碎片。两者都是"转换报成功但提取没成功"。
     """
     body = f"# {paper_id}" if empty else f"# {paper_id}\n\n" + "body text. " * 400
     blank = await store.put_text(body)
@@ -82,7 +99,11 @@ async def make_content(
         PaperChunk(
             chunk_id=f"c{position}",
             kind="paragraph",
-            content_ref=await store.put_text(f"body {position} of {paper_id}"),
+            content_ref=await store.put_text(
+                "Chawla. Bowyer. Hall. JAIR. 2002. pp 321. " * shred_repeat
+                if shredded
+                else f"body {position} of {paper_id}"
+            ),
             heading_path=["Method"],
             char_start=0,
             char_end=10,
@@ -113,12 +134,27 @@ class FakeScoutAgent:
     source_request: PaperSourceRequest | None = None
     papers = PAPERS
     dropped_no_source = 0
+    rerank_calls = 0
+    rerank_failures = 0
     seen_request: ScoutRequest | None = None
+    seen_reranker: object = None
     status = "complete"
     warnings: list[str] = []
 
-    def __init__(self, artifacts, backends, references, scorer, *, model, client):
+    def __init__(
+        self,
+        artifacts,
+        backends,
+        references,
+        scorer,
+        *,
+        model,
+        client,
+        selector=None,
+        reranker=None,
+    ):
         self.artifacts = artifacts
+        type(self).seen_reranker = reranker
 
     async def run(self, ctx) -> AgentOutcome:
         type(self).seen_request = ScoutRequest.model_validate_json(
@@ -135,7 +171,11 @@ class FakeScoutAgent:
             for key, title, score in type(self).papers
         ]
         stats_ref = await self.artifacts.put_text(
-            ScoutStats(dropped_no_source=type(self).dropped_no_source).model_dump_json()
+            ScoutStats(
+                dropped_no_source=type(self).dropped_no_source,
+                rerank_calls=type(self).rerank_calls,
+                rerank_failures=type(self).rerank_failures,
+            ).model_dump_json()
         )
         corpus = ScoutCorpus(
             query="q", retained=retained, pool=retained, actions=[], stats_ref=stats_ref
@@ -219,10 +259,13 @@ class FakeProcessor:
 
     outcomes: dict[str, object] = {}
     empty: set = set()
+    shredded: set = set()
     delay: float = 0.0
+    visuals_per_paper: dict[str, int] = {}
 
     def __init__(self, artifacts, interpreter, refiner, **kwargs) -> None:
         self.artifacts = artifacts
+        self.interpreter = interpreter
 
     async def process(self, request) -> PaperContent:
         outcome = type(self).outcomes[request.paper_id]
@@ -230,11 +273,15 @@ class FakeProcessor:
             raise outcome
         if type(self).delay:
             await asyncio.sleep(type(self).delay)
+        for _ in range(type(self).visuals_per_paper.get(request.paper_id, 0)):
+            await self.interpreter.interpret(request)
         return await make_content(
             self.artifacts,
             request.paper_id,
             quality=outcome,
+            chunks=40 if request.paper_id in type(self).shredded else 2,
             empty=request.paper_id in type(self).empty,
+            shredded=request.paper_id in type(self).shredded,
         )
 
 
@@ -260,6 +307,8 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         FakeFetcher.enriched = {}
         FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
         FakeProcessor.empty = set()
+        FakeProcessor.shredded = set()
+        FakeProcessor.visuals_per_paper = {}
         FakeProcessor.delay = 0.0
         FakeScoutAgent.source_request = PaperSourceRequest(
             papers=[
@@ -466,6 +515,103 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(merged.indexed)
         self.assertNotIn(enriched, [item.paper_key for item in report.papers])
 
+    async def test_vision_calls_are_counted_per_paper_not_off_a_shared_dial(
+        self,
+    ) -> None:
+        """并发转换下，每篇的视觉调用数必须是它自己的，不能是共享计数器的增量。
+
+        原实现记的是 ``interpreter.calls - calls_before``，而转换默认 4 篇并发，
+        增量里混着同时在跑的其他论文。真机三轮：逐篇求和 3996 / 3513 / 1244，报告
+        总数 340 / 361 / 135——**大了 9–12 倍**。
+
+        这个用例特意让两篇论文交错执行（``FakeInterpreter.interpret`` 每次 ``sleep(0)``
+        让出事件循环），旧实现在这种情况下必然多记。
+        """
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.visuals_per_paper = {PAPERS[0][0]: 3, PAPERS[1][0]: 7}
+
+        report = await self.run_pipeline()
+
+        by_key = {item.paper_key: item for item in report.papers}
+        self.assertEqual(3, by_key[PAPERS[0][0]].vision_calls)
+        self.assertEqual(7, by_key[PAPERS[1][0]].vision_calls)
+        self.assertEqual(
+            report.vision_calls, sum(item.vision_calls for item in report.papers)
+        )
+
+    async def test_a_paper_without_visuals_is_charged_nothing(self) -> None:
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.visuals_per_paper = {PAPERS[1][0]: 5}
+
+        report = await self.run_pipeline()
+
+        by_key = {item.paper_key: item for item in report.papers}
+        self.assertEqual(0, by_key[PAPERS[0][0]].vision_calls)
+        self.assertEqual(5, by_key[PAPERS[1][0]].vision_calls)
+
+    async def test_shredded_extraction_is_refused_and_reported(self) -> None:
+        """转换报成功但产出的是碎片而不是句子 → 挡在语料外，并留下可复核的理由。
+
+        真机命中：``arxiv:1106.1813``（SMOTE）的 TeX 包缺 ``\begin{document}``，入口
+        推断失败，转换器把整包连成 774904 字符、35151 句、平均每句 30 字符。它一篇占
+        掉整个语料 66%、整次调研墙钟的 47%（2147 秒），而当时的门禁放行了它——
+        ``rag_chunk_oversized`` 属于"记录但不拦"，那套判据问内容对不对，不问代价。
+        """
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.shredded = {PAPERS[1][0]}
+
+        report = await self.run_pipeline()
+
+        shredded = next(i for i in report.papers if i.paper_key == PAPERS[1][0])
+        healthy = next(i for i in report.papers if i.paper_key == PAPERS[0][0])
+        self.assertTrue(shredded.shredded)
+        self.assertEqual("converted", shredded.conversion_status)
+        self.assertFalse(shredded.indexed)
+        self.assertFalse(healthy.shredded)
+        self.assertTrue(healthy.indexed)
+        self.assertEqual([1], [len(batch) for batch in self.indexed])
+
+    async def test_a_refusal_carries_the_numbers_behind_it(self) -> None:
+        """这道闸门会丢掉打分器要的论文，所以每次拒绝都必须能被复核，不能只是个计数。"""
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "pass"}
+        FakeProcessor.shredded = {PAPERS[1][0]}
+
+        report = await self.run_pipeline()
+
+        self.assertEqual(1, len(report.shredded_papers))
+        line = report.shredded_papers[0]
+        self.assertIn(PAPERS[1][0], line)
+        self.assertIn("句", line)
+        self.assertIn("字符", line)
+
+    async def test_normal_papers_are_never_touched_by_the_shred_gate(self) -> None:
+        """正常论文一篇都不能被误伤——真机 44 篇回放里只有 1 篇触发。"""
+        FakeProcessor.outcomes = {PAPERS[0][0]: "pass", PAPERS[1][0]: "degraded"}
+
+        report = await self.run_pipeline()
+
+        self.assertEqual([], report.shredded_papers)
+        self.assertTrue(all(not item.shredded for item in report.papers))
+
+    async def test_short_papers_are_exempt_from_the_shred_judgement(self) -> None:
+        """句数太少时均值不稳，而它们再碎也贵不到哪里去；闸门是为代价加的。"""
+        content = await make_content(
+            self.store, "arxiv:0001.0001", chunks=1, shredded=True, shred_repeat=10
+        )
+        outcome = PaperOutcome(
+            paper_key="arxiv:0001.0001",
+            fetch_status="fetched",
+            conversion_status="converted",
+        )
+        pipeline = SurveyPipeline(self.stack, SurveyRequest(query="q"))
+
+        units = await content.load_retrieval_units(self.store)
+        total = sum(len(split_sentences(unit.text)) for unit in units)
+        self.assertLess(total, SHRED_MIN_SENTENCES)
+        self.assertFalse(await pipeline._shredded(content, outcome))
+        self.assertEqual([], pipeline.report.shredded_papers)
+        self.assertFalse(outcome.shredded)
+
     async def test_silent_content_loss_is_flagged_and_never_indexed(self) -> None:
         """转换报成功但正文近乎为空 → 必须被识别出来并挡在语料外。
 
@@ -555,14 +701,20 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("index_failed: RateLimitError", report.warnings)
         self.assertTrue(all(item.paper_content_ref for item in report.papers))
 
-    async def test_the_delivery_budget_defaults_to_ten(self) -> None:
-        """默认交付量按交互延迟定：10 篇约 15 分钟，50 篇约 40 分钟。
+    async def test_the_delivery_budget_and_search_depth_have_deliberate_defaults(
+        self,
+    ) -> None:
+        """三个默认值互相牵制，改任何一个都要连着看另外两个。
 
-        ``paper_scout`` 用它做交付截断而不是限制打分范围，所以它省的是下游三段，
-        不是检索——检索成本由 ``max_steps`` 决定。
+        ``search_top_k`` 决定池子里有什么（实测深度 10 只浮现 1/10 篇 gold、50 浮现
+        6/10）；``max_seconds`` 决定跑得完几步——它一直是真正绑定的那条约束，只提深度
+        不放宽墙钟就是拿广度换深度；``max_papers`` 只决定截断留几篇，对检索没有影响。
         """
-        self.assertEqual(10, SurveyRequest(query="q").max_papers)
-        self.assertEqual(4, SurveyRequest(query="q").conversion_concurrency)
+        request = SurveyRequest(query="q")
+
+        self.assertEqual(50, request.search_top_k)
+        self.assertEqual(1800.0, request.max_seconds)
+        self.assertEqual(20, request.max_papers)
 
     async def test_the_scorer_uses_its_own_model_when_one_is_configured(self) -> None:
         """打分是调用最多的一环，必须能独立换成轻量模型。"""
@@ -580,6 +732,85 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             await SurveyPipeline(self.stack, request).run()
 
         self.assertEqual("flash", scorer.call_args.args[1])
+
+    async def test_the_reranker_actually_reaches_the_scout_agent(self) -> None:
+        """装配上有、真正跑的时候没有——这条链路上已经栽过三次的那种失败。
+
+        边界重排器超时、重排目标取错、打分器配置没进缓存键，三次都是"看上去做完了、
+        实际什么也没做"。同分次序信号同样只在 ``PaperScoutAgent`` 里生效，装在 stack 上
+        不等于传了下去。
+        """
+        self.stack.reranker = mock.MagicMock(model="gte-rerank-v2")
+        FakeScoutAgent.seen_reranker = None
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            build_corpus_index=self.fake_index,
+        ):
+            await SurveyPipeline(self.stack, SurveyRequest(query="tabular auc")).run()
+
+        self.assertIs(self.stack.reranker, FakeScoutAgent.seen_reranker)
+
+    async def test_no_reranker_passes_none_rather_than_failing(self) -> None:
+        """没配 ATHENA_RERANK_MODEL 时链路照常跑完，排序退回散列。"""
+        self.stack.reranker = None
+        FakeScoutAgent.seen_reranker = mock.MagicMock()
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            build_corpus_index=self.fake_index,
+        ):
+            report = await SurveyPipeline(
+                self.stack, SurveyRequest(query="tabular auc")
+            ).run()
+
+        self.assertIsNone(FakeScoutAgent.seen_reranker)
+        self.assertEqual("complete", report.status)
+
+    async def test_affinity_cost_reaches_the_report(self) -> None:
+        """报告上看不见的东西等于没跑过。
+
+        六点十那次核对之所以能下结论，全靠分数分布这个间接证据。同分排序不改变分数
+        分布，所以它必须自己在报告上留下计数——否则下一次"它到底跑没跑"又只能靠猜。
+        """
+        FakeScoutAgent.rerank_calls = 12
+        FakeScoutAgent.rerank_failures = 1
+        self.addCleanup(setattr, FakeScoutAgent, "rerank_calls", 0)
+        self.addCleanup(setattr, FakeScoutAgent, "rerank_failures", 0)
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=FakeScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=FakeProcessor,
+            build_corpus_index=self.fake_index,
+        ):
+            report = await SurveyPipeline(
+                self.stack, SurveyRequest(query="tabular auc")
+            ).run()
+
+        self.assertEqual(12, report.affinity_calls)
+        self.assertEqual(1, report.affinity_failures)
+
+    def test_the_rerank_model_is_part_of_the_scout_cache_key(self) -> None:
+        """换掉拆平局的信号，将近一半的交付集合会变——缓存必须跟着失效。
+
+        真机一轮 352 篇里 197 篇同分。``DEFAULT_PASSES`` 那次正是漏了这一步：改了配置，
+        库里的旧结果继续命中，报告上看不出任何异常。
+        """
+        request = SurveyRequest(query="tabular auc")
+        self.stack.reranker = None
+        without = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+        self.stack.reranker = mock.MagicMock(model="gte-rerank-v2")
+        with_rerank = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+        self.stack.reranker = mock.MagicMock(model="some-other-reranker")
+        other = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+
+        self.assertNotEqual(without, with_rerank)
+        self.assertNotEqual(with_rerank, other)
 
     async def test_the_scorer_falls_back_to_the_policy_model(self) -> None:
         """不配打分模型时行为与分开之前完全一致。"""
@@ -686,3 +917,148 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         report = await self.run_pipeline()
 
         self.assertEqual(7, report.scout_dropped_no_source)
+
+
+class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
+    """第二次调研只该为新论文付钱。
+
+    此前每一次调研都从零开始：同一篇论文重新下载、重新转换（含视觉调用）、重新编码。
+    这些用例把"重跑不再付钱"钉住，因为省下来的正是链路里最贵的两段。
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="reuse_store_"))
+        self.library = PaperLibrary(tempfile.mkdtemp(prefix="reuse_lib_"))
+        self.interpreter = FakeInterpreter()
+        self.embedder = FakeEmbedder()
+        self.stack = SurveyStack(
+            artifacts=self.store,
+            client=object(),
+            model="m",
+            http=HostRateLimiter(),
+            embedder=self.embedder,
+            visual_interpreter=self.interpreter,
+            library=self.library,
+        )
+        FakeScoutAgent.papers = PAPERS
+        FakeScoutAgent.dropped_no_source = 0
+        FakeScoutAgent.seen_request = None
+        FakeScoutAgent.status = "complete"
+        FakeScoutAgent.warnings = []
+        FakeScoutAgent.runs = 0
+        FakeFetcher.statuses = ["fetched", "fetched"]
+        FakeFetcher.enriched = {}
+        FakeProcessor.outcomes = {key: "pass" for key, _t, _s in PAPERS}
+        FakeProcessor.empty = set()
+        FakeProcessor.shredded = set()
+        FakeProcessor.visuals_per_paper = {}
+        FakeProcessor.delay = 0.0
+        FakeProcessor.runs = 0
+        FakeScoutAgent.source_request = PaperSourceRequest(
+            papers=[
+                {"identity": {"arxiv_id": key.split(":")[1]}} for key, _t, _s in PAPERS
+            ]
+        )
+        FakeFetcher.conversion_refs = [
+            await self._conversion_ref(key) for key, _t, _s in PAPERS
+        ]
+
+    async def _conversion_ref(self, paper_id: str) -> str:
+        return await self.store.put_text(
+            pipeline_module.PaperConversionRequest(
+                pdf_ref="sha256:" + "2" * 64,
+                paper_id=paper_id,
+                visual_policy="best_effort",
+            ).model_dump_json()
+        )
+
+    async def run_pipeline(self, **overrides):
+        request = SurveyRequest(query="tabular auc", **overrides)
+        with mock.patch.multiple(
+            pipeline_module,
+            PaperScoutAgent=CountingScoutAgent,
+            PaperSourceFetcher=FakeFetcher,
+            PaperProcessor=CountingProcessor,
+            GradedRelevanceScorer=mock.MagicMock(),
+        ):
+            return await SurveyPipeline(self.stack, request).run()
+
+    async def test_a_second_identical_run_pays_no_conversion_and_no_scout(self) -> None:
+        """转换是唯一按篇调多模态模型的一段；检索占 71% 的墙钟。两者都不该重付。"""
+        first = await self.run_pipeline()
+
+        self.assertEqual(2, first.converted())
+        self.assertFalse(first.scout_cached)
+        conversions_after_first = CountingProcessor.runs
+        scouts_after_first = CountingScoutAgent.runs
+
+        second = await self.run_pipeline()
+
+        self.assertEqual(2, second.converted())
+        self.assertTrue(second.scout_cached)
+        self.assertEqual(conversions_after_first, CountingProcessor.runs)
+        self.assertEqual(scouts_after_first, CountingScoutAgent.runs)
+        self.assertTrue(all(item.conversion_cached for item in second.papers))
+
+    async def test_the_second_run_still_produces_the_same_corpus(self) -> None:
+        """省钱不能以产物退化为代价：缓存命中的语料必须和现算的一样。"""
+        first = await self.run_pipeline()
+        second = await self.run_pipeline()
+
+        self.assertEqual(first.corpus_ref, second.corpus_ref)
+        self.assertEqual(
+            [item.paper_key for item in first.papers],
+            [item.paper_key for item in second.papers],
+        )
+
+    async def test_fresh_scout_forces_the_search_to_run_again(self) -> None:
+        """想要新的一批论文时有明确的开关，而不是靠"每次都重跑"碰运气。"""
+        await self.run_pipeline()
+        before = CountingScoutAgent.runs
+
+        report = await self.run_pipeline(fresh_scout=True)
+
+        self.assertFalse(report.scout_cached)
+        self.assertEqual(before + 1, CountingScoutAgent.runs)
+
+    async def test_changing_the_visual_policy_invalidates_the_conversion_cache(
+        self,
+    ) -> None:
+        """``required`` 与 ``best_effort`` 产出不同的 PaperContent；共用缓存会让开关失灵。"""
+        await self.run_pipeline()
+        before = CountingProcessor.runs
+
+        await self.run_pipeline(visual_policy="required")
+
+        self.assertEqual(before + len(PAPERS), CountingProcessor.runs)
+
+    async def test_without_a_library_nothing_is_cached(self) -> None:
+        """没有库时行为与此前完全一致——缓存是可选增益，不是新的必需依赖。"""
+        self.stack.library = None
+        await self.run_pipeline()
+        before = CountingProcessor.runs
+
+        report = await self.run_pipeline()
+
+        self.assertFalse(report.scout_cached)
+        self.assertEqual(before + len(PAPERS), CountingProcessor.runs)
+
+
+class CountingScoutAgent(FakeScoutAgent):
+    """记下真正跑过几次检索的 FakeScoutAgent。"""
+
+    runs = 0
+
+    async def run(self, ctx):
+        CountingScoutAgent.runs += 1
+        return await super().run(ctx)
+
+
+class CountingProcessor(FakeProcessor):
+    """记下真正转换过几篇的 FakeProcessor。"""
+
+    runs = 0
+
+    async def process(self, request):
+        CountingProcessor.runs += 1
+        return await super().process(request)

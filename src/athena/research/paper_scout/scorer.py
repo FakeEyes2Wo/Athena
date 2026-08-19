@@ -1,13 +1,15 @@
 """相关性打分：决定论文能否进池、如何排序、以及是否进入最终交付集合。
 
-论文用 pasa-7b-selector 输出 "True" token 的概率作为 ρ(p) ∈ [0,1]。这需要推理端点返回
-logprobs，本仓库默认的 OpenAI 兼容端点不返回（实测 ``logprobs`` 字段缺失），因此提供两个
-实现：
+论文用 pasa-7b-selector 输出 "True" token 的概率作为 ρ(p) ∈ [0,1]，是个连续分数。本仓库
+拿不到那个分数，但**原因不是端点不支持 logprobs**——那句话曾经写在这里，2026-08-17 实测
+证明它是错的，见下。
 
-- ``TokenProbabilityScorer`` 复现论文口径，端点支持 logprobs 时使用；
-- ``GradedRelevanceScorer`` 用论文 LLM-score 一节的 0–3 分级评分归一到 [0,1]，是没有
-  logprobs 时的默认选择。二值 True/False 会让 ρ 只剩两个取值，Recall@k 排序和 0.5
-  阈值都会退化，分级评分保留了排序所需的区分度。
+- ``GradedRelevanceScorer`` —— **默认实现**。用论文 LLM-score 一节的 0–3 分级评分归一到
+  [0,1]。四个取值不够细，交付名额几乎总在某一档内部被截断——真机一轮 352 篇里 197 篇
+  同分。这一层不再试图自己解决它：同分论文的次序交给 ``paper_scout.reranker`` 的交叉
+  编码器，本模块只负责"这篇够不够格进池、过不过交付门槛"。
+- ``TokenProbabilityScorer`` —— 复现论文口径。**代码已修好，但不要启用**，理由见该类的
+  文档字符串：它会让 ρ 退化成两个取值，比四档更粗。
 
 两者都不读环境变量，客户端由调用方注入。
 """
@@ -16,6 +18,7 @@ import asyncio
 import json
 import math
 import re
+import time
 from typing import Protocol
 
 from openai import AsyncOpenAI
@@ -46,6 +49,7 @@ DEFAULT_BATCH_SIZE = 24
 SCORING_ABSTRACT_CHARS = 1200
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 TRUE_TOKEN = re.compile(r"^\s*true", re.IGNORECASE)
+FALSE_TOKEN = re.compile(r"^\s*false", re.IGNORECASE)
 
 
 class RelevanceScorer(Protocol):
@@ -92,11 +96,48 @@ def parse_grades(content: str, count: int) -> list[float]:
     return scores
 
 
+DEFAULT_PASSES = 1
+"""同一批论文打几遍取均值。
+
+**打分在温度 0 下并不确定。** 同一批 60 篇论文连打 8 遍，两遍之间的逐篇档位一致率均值
+只有 0.779（区间 0.617–0.867）。这不是模型有偏——8 遍之间没有系统性漂移，109 篇跨运行
+对照的均分变化是 +0.004——纯粹是抖动。端点也救不了：``seed`` 参数收下了但不兑现，同一
+seed 连发三次给出三个不同答案，``system_fingerprint`` 为 ``None``（2026-08-17 实测）。
+
+抖动会变成交付集合的 churn，取均值确实能压住它。**但它压的不是主要那一份。** 真机一轮
+352 篇里 197 篇同分，截断线正好落在那一档——churn 的大头是平局内部的任意排序，不是档位
+翻转。把平局交给交叉编码器之后，第二遍打分就不值那个钱了（60 篇真实池子、8 遍独立打分、
+不同遍之间的 top-N Jaccard）：
+
+============================  =================  =================  =================
+配置                          前 10 篇           前 20 篇           前 30 篇
+============================  =================  =================  =================
+1 遍 + sha256 拆平局          0.599 ± 0.202      0.690 ± 0.161      0.777 ± 0.073
+**1 遍 + rerank 拆平局**      **0.692 ± 0.183**  **0.791 ± 0.090**  **0.896 ± 0.053**
+2 遍取均值 + sha256           0.742 ± 0.076      0.730 ± 0.078      0.784 ± 0.059
+2 遍取均值 + rerank           0.823 ± 0.096      0.753 ± 0.052      0.915 ± 0.029
+============================  =================  =================  =================
+
+在生产实际截断的位置（交付目标 20 篇、``max_papers`` 60）一遍加 rerank 就赢过两遍取均值，
+而两遍在真机上实测要多花 40% 的 scout 墙钟（631 秒 → 881 秒），rerank 打完同一个 352 篇
+池子只要 0.4 秒。因此默认回到 1。
+
+保留这个参数而不是删掉：换到没有 rerank 的部署时，调到 2 仍是当时能拿到的最好选择——
+上表第三行确实优于第一行。前 10 篇那一格两遍取均值至今仍略优（0.742 vs 0.692，两者标准差
+0.076/0.183 重叠），只是生产不在那个位置截断。
+
+``passes > 1`` 时均值会产生非档位的取值（0.325 之类），那是它压平同分堆的方式；默认的
+一遍不产生这些取值，同分堆改由 ``pool.rank_key`` 的 affinity 一级拆开。
+"""
+
+
 class GradedRelevanceScorer:
     """按 0–3 分级批量打分的 LLM scorer。
 
     批量而不是逐篇请求：一次 search 会带回 10 篇以上候选，逐篇调用会让打分的调用数
     压过策略本身的调用数，而分级评分对同批次比较反而更稳定。
+
+    默认只打一遍；``passes`` 的取舍与它为什么不再需要大于 1，见 ``DEFAULT_PASSES``。
     """
 
     def __init__(
@@ -106,17 +147,29 @@ class GradedRelevanceScorer:
         *,
         batch_size: int = DEFAULT_BATCH_SIZE,
         timeout: float = 120.0,
+        passes: int = DEFAULT_PASSES,
     ) -> None:
         self.client = client
         self.model = model
         self.batch_size = batch_size
         self.timeout = timeout
+        self.passes = max(1, passes)
         self.calls = 0
+        self.seconds = 0.0
 
     async def score(self, query: str, papers: list[ScoutPaper]) -> list[float]:
-        """对整批论文打分，内部按 ``batch_size`` 拆成并发请求。"""
+        """对整批论文打分；打 ``passes`` 遍取均值，内部按 ``batch_size`` 拆成并发请求。"""
         if not papers:
             return []
+        rounds = await asyncio.gather(
+            *(self._one_pass(query, papers) for _ in range(self.passes))
+        )
+        if len(rounds) == 1:
+            return rounds[0]
+        return [sum(values) / len(values) for values in zip(*rounds)]
+
+    async def _one_pass(self, query: str, papers: list[ScoutPaper]) -> list[float]:
+        """跑一遍完整打分。"""
         batches = [
             papers[start : start + self.batch_size]
             for start in range(0, len(papers), self.batch_size)
@@ -134,6 +187,7 @@ class GradedRelevanceScorer:
             ),
         )
         self.calls += 1
+        started = time.monotonic()
         try:
             reply = await self.client.chat.completions.create(
                 model=self.model,
@@ -144,14 +198,35 @@ class GradedRelevanceScorer:
         except Exception:
             # 打分失败不能把论文误判为高相关 → 整批按 0 分，让它们留在池外
             return [0.0] * len(papers)
+        finally:
+            # 失败的调用同样花了墙钟，超时那种尤其贵，不计入会低估成本
+            self.seconds += time.monotonic() - started
         return parse_grades(reply.choices[0].message.content or "", len(papers))
 
 
 class TokenProbabilityScorer:
     """复现论文口径：ρ(p) 为 selector 输出 "True" token 的概率。
 
-    只有当推理端点在响应里返回 ``logprobs`` 时才可用；拿不到 logprobs 时退回按判定
-    文本取 1.0/0.0，并在 ``degraded`` 上标记，让调用方知道排序信号已经退化成二值。
+    ⚠️ **不要把它设成默认打分器。** 代码是好的（2026-08-17 修掉了读错 token 的 bug，见
+    ``decision_position``），但在通用 instruct 模型上它产出的 ρ 比四档**更粗**。
+
+    2026-08-17 在阿里云百炼 compatible-mode 上逐条实测：
+
+    1. **端点支持 logprobs。** 此前模块头写着"端点不返回（实测字段缺失）"，是错的。
+       条件是必须与 ``top_logprobs`` 一起发——只发 ``logprobs=True`` 时 qwen3.6-flash
+       字段缺失、qwen3.7-plus 返回 0 个候选；加上 ``top_logprobs=5`` 两个模型都给满 5 个。
+       本类发的正是这个组合，所以端点从来不是障碍。
+    2. **旧实现读错了 token**，于是每篇都得 0.0。已修。
+    3. **修好之后 ρ 仍然只有两个取值。** 判决 token 的概率是 ``' False':1.000``，
+       其余候选 ``0.000``——温度 0 下模型完全饱和。取到的 ρ 因此非 1 即 0。
+
+    第 3 条才是它不可用的真正原因，而且换端点解决不了：论文的 ρ 来自
+    ``pasa-7b-selector``，一个**为这件事微调、输出分布经过校准**的判别器；通用 instruct
+    模型在二选一判断上给的就是饱和概率。要拿回连续 ρ 得换判别模型，那是训练问题不是
+    接口问题。
+
+    留着它有两个用处：换到校准过的 selector 时直接可用；以及作为"端点能力"与"模型标定"
+    是两件事的记录。
     """
 
     def __init__(
@@ -204,13 +279,48 @@ class TokenProbabilityScorer:
         return 1.0 if TRUE_TOKEN.match(choice.message.content or "") else 0.0
 
 
+def decision_position(content: list) -> int | None:
+    """找出判决 token 在序列里的位置；找不到时返回 ``None``。
+
+    不能假定判决在 ``content[0]``。``SELECT_PROMPT`` 要求的输出格式是
+    ``Decision: True/False``，于是首 token 是 ``'Decision'``——实测
+    （qwen3.6-flash，2026-08-17）：
+
+    ======  ==============  ====================================================
+    位置    token           top_logprobs
+    ======  ==============  ====================================================
+    0       ``'Decision'``  ``'Decision':1.000, 'Dec':0.000, 'Reason':0.000 …``
+    1       ``':'``         ``':':1.000 …``
+    2       ``' False'``    ``' False':1.000, ' false':0.000, ' True':0.000 …``
+    ======  ==============  ====================================================
+
+    判决在位置 2。旧实现只看位置 0，在那里找不到 ``True``，于是**每一篇都返回 0.0**——
+    分数看上去正常（是个合法的 [0,1] 浮点），实际毫无信息。这是"安静地成功"的又一例。
+
+    按 token 内容定位而不是按固定下标：换个提示词或换个模型，前缀长度就会变。
+    """
+    for position, item in enumerate(content):
+        token = getattr(item, "token", "")
+        if TRUE_TOKEN.match(token) or FALSE_TOKEN.match(token):
+            return position
+    return None
+
+
 def true_probability(logprobs: object) -> float | None:
-    """从 logprobs 里取首 token 为 "True" 的概率；端点未返回时为 ``None``。"""
+    """从 logprobs 里取判决 token 为 "True" 的概率；端点未返回时为 ``None``。
+
+    ⚠️ **本函数已修好，但 ``TokenProbabilityScorer`` 仍然不该启用。** 原因不在这里，
+    在模型：见该类的文档字符串。
+    """
     content = getattr(logprobs, "content", None)
     if not content:
         return None
-    alternatives = getattr(content[0], "top_logprobs", None) or []
+    position = decision_position(content)
+    if position is None:
+        return None
+    alternatives = getattr(content[position], "top_logprobs", None) or []
     for item in alternatives:
         if TRUE_TOKEN.match(getattr(item, "token", "")):
             return math.exp(getattr(item, "logprob", 0.0))
+    # 判决 token 找到了，但候选里没有 True——说明模型给 True 的概率低于 top_k 截断
     return 0.0

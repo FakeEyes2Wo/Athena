@@ -9,6 +9,7 @@ import itertools
 import json
 import os
 import time
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,15 +34,28 @@ from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
 from athena.kaggle.wiring import kaggle_slug_from_task
-from athena.research.contracts import DataScriptBundle, GeneralTurnOutcome
+from athena.research.contracts import GeneralTurnOutcome
+from athena.research.idea_generation.citation_support import (
+    SUPPORT_PROMPT,
+    SupportVerdict,
+    format_evidence,
+    parse_verdict,
+)
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
-from athena.research.supervisor.experiment import load_agent_result
+from athena.research.supervisor.experiment import (
+    handoff_block,
+    load_agent_result,
+    read_eval_handoff,
+)
 from athena.research.supervisor.plans import wait_run_events
 from athena.retrieval.web_search import WebFetchTool, WebSearchTool, WebSession
+from athena.utils.single_turn_chat import single_turn_chat
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+logger = logging.getLogger(__name__)
 
 
 MAX_GATE_RETRIES = 2
@@ -77,10 +91,8 @@ async def _wait_run_with_heartbeat(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            await _interrupt_agent(agents, agent_id, f"{agent_id}_turn_timeout")
-            raise RuntimeError(
-                f"{label} timed out after {AGENT_TURN_TIMEOUT_SECONDS}s"
-            )
+            await _interrupt_agent(agents, agent_id, f"{plan or agent_id}_turn_timeout")
+            raise RuntimeError(f"{label} timed out after {AGENT_TURN_TIMEOUT_SECONDS}s")
         if project:
             events_bus = getattr(rt, "_events_bus", None)
             if events_bus is not None:
@@ -105,6 +117,7 @@ async def _wait_run_with_heartbeat(
                     text=f"{label} still working (heartbeat)…",
                     plan=plan or agent_id,
                 )
+
 
 MAX_KAGGLE_HANDOFF_CHARS = 12_000
 """注入 Ideator 的 Kaggle handoff 文本上限，防止把超大内容塞进每轮 prompt。"""
@@ -141,33 +154,6 @@ def _regenerate_prompt(rejections: list[str], target: int) -> str:
         "prose - change the substance, or explore a different mechanism entirely. "
         "Return the hypotheses as structured output."
     )
-
-
-async def _read_eval_handoff(
-    store: ArtifactStore, evaluator_ref: ArtifactRef | None
-) -> str:
-    """Read the evaluator ``HANDOFF.md`` from a frozen bundle (empty when absent)."""
-    if evaluator_ref is None:
-        return ""
-    try:
-        bundle = DataScriptBundle.model_validate_json(
-            await store.get_text(evaluator_ref)
-        )
-    except (ValueError, OSError):
-        return ""
-    if bundle.tree_ref is None:
-        return ""
-    try:
-        tree = json.loads(await store.get_text(bundle.tree_ref))
-    except (ValueError, OSError):
-        return ""
-    handoff_ref = tree.get("HANDOFF.md")
-    if not isinstance(handoff_ref, str):
-        return ""
-    try:
-        return await store.get_text(handoff_ref)
-    except (ValueError, OSError):
-        return ""
 
 
 class AgentTurnRunner:
@@ -288,6 +274,8 @@ class AgentTurnRunner:
         # 追加到上一轮同 lane 的开放消息上。
         self._ideator_round += 1
         round_label = self._ideator_round
+        # 引用核验按"本轮谁打开过哪几篇"判定，因此每轮先把上一轮的会话账本丢掉。
+        rt.start_corpus_round()
         events = getattr(rt, "_events_bus", None)
         if events is not None:
             events.set_ideator_lanes(len(allocations))
@@ -428,9 +416,7 @@ class AgentTurnRunner:
             self._remember_handoff_ref("kaggle", await rt._store.put_text(text))
             return text
         task_text = (
-            getattr(rt, "_task_text", "")
-            or getattr(rt.state, "task_text", "")
-            or ""
+            getattr(rt, "_task_text", "") or getattr(rt.state, "task_text", "") or ""
         )
         slug = kaggle_slug_from_task(task_text)
         if not slug:
@@ -438,8 +424,10 @@ class AgentTurnRunner:
             # 拿不到时，从结构化任务理解的 dataset 字段取裸 slug 作为回退。
             understanding = getattr(rt.state, "task_understanding", None) or {}
             candidate = str(understanding.get("dataset") or "").strip()
-            if candidate and "/" not in candidate and not any(
-                ch.isspace() for ch in candidate
+            if (
+                candidate
+                and "/" not in candidate
+                and not any(ch.isspace() for ch in candidate)
             ):
                 slug = candidate
         if not slug or rt._provider is None:
@@ -488,9 +476,9 @@ class AgentTurnRunner:
                         text=f"Kaggle handoff ready: {result.summary}",
                         plan=KAGGLE_HANDOFF_AGENT_ID,
                     )
-                text = handoff_path.read_text(
-                    encoding="utf-8"
-                )[:MAX_KAGGLE_HANDOFF_CHARS]
+                text = handoff_path.read_text(encoding="utf-8")[
+                    :MAX_KAGGLE_HANDOFF_CHARS
+                ]
                 self._remember_handoff_ref("kaggle", await rt._store.put_text(text))
                 return text
             message = (
@@ -519,9 +507,7 @@ class AgentTurnRunner:
         return ""
 
     @staticmethod
-    def _lane_kwargs(
-        handoff_texts: list[str], profile: IdeatorProfile | None
-    ) -> dict:
+    def _lane_kwargs(handoff_texts: list[str], profile: IdeatorProfile | None) -> dict:
         """构造 _run_ideator_lane 的可选 kwargs，避免调用点出现 None 参数堆。"""
         kwargs: dict = {}
         if handoff_texts:
@@ -617,26 +603,25 @@ class AgentTurnRunner:
                 "mailbox; use them as supporting evidence."
             )
         context_refs: list[ArtifactRef] = []
-        handoff = await _read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
+        handoff = await read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
         if handoff:
+            # 契约拼进 content。此前它只被塞进 context_refs 并在正文里声称"attached as
+            # context"——而 context_refs 到不了 model，那句话一直是空头支票。
             context_refs.append(
                 await rt._store.put_text(
                     json.dumps({"eval_handoff": handoff}, ensure_ascii=False)
                 )
             )
-            content += (
-                "\n\nThe evaluator contract (predictions directory layout and "
-                "scoring criteria) is attached as context; read it before "
-                "proposing hypotheses."
-            )
+            content += handoff_block(handoff)
+        corpus_ref = rt.survey_corpus_ref()
+        if corpus_ref is not None:
+            content += await self._corpus_block(corpus_ref)
         request = {"content": content, "context_refs": context_refs}
         agent_type = profile.agent_type if profile is not None else "ideator"
         if handoff_texts:
             # 先注册 ideator 线程（不触发 turn），把 handoff 完成信息投进 mailbox，
             # 再启动首个 turn；BaseAgentRunner 会把未读 mailbox 消息追加进模型上下文。
-            await rt._agents.resume_agent(
-                label, agent_type=agent_type, name=label
-            )
+            await rt._agents.resume_agent(label, agent_type=agent_type, name=label)
             mailbox_content = "\n\n".join(handoff_texts)
             await rt._agents.send_message(label, mailbox_content, [])
             agent_id, run_id = await rt._agents.create_root(
@@ -707,9 +692,7 @@ class AgentTurnRunner:
         eda_request = getattr(batch, "eda_request", None)
         if getattr(rt, "_ideation", "ideageneration") != "ideageneration":
             return HypothesisBatch(
-                hypotheses=[
-                    Hypothesis.model_validate(item) for item in batch.hypotheses
-                ],
+                hypotheses=await self._verify_sources(list(batch.hypotheses)),
                 eda_request=eda_request,
             )
 
@@ -730,7 +713,147 @@ class AgentTurnRunner:
             progress=progress,
             rejections=rejections,
         )
-        return HypothesisBatch(hypotheses=kept, eda_request=eda_request)
+        return HypothesisBatch(
+            hypotheses=await self._verify_sources(kept),
+            eda_request=eda_request,
+        )
+
+    async def _corpus_block(self, corpus_ref: str) -> str:
+        """把语料目录直接摆进 prompt，而不是指望 Agent 自己去调 overview。
+
+        真机三次跑测里 Ideator **一次都没调过** ``paper_corpus_overview``，直接用泛词做
+        语义检索；第 12 次因此从没碰过语料里那三篇真正讲 AUC 的论文——而任务主指标就是
+        ROC-AUC。目录是纯索引读取（8 篇约 26 毫秒、1500 token），自己调一次比赌它会调
+        便宜得多，也让"语料里有什么"成为确定的输入而不是运气。
+        """
+        papers = ""
+        try:
+            summaries = await self._runtime.corpus_summaries()
+            papers = "\n".join(
+                f"- {item.paper_id} — {item.title.strip() or '(untitled)'}"
+                for item in summaries
+            )
+        except Exception:  # noqa: BLE001 - 目录读不出来不该拖垮 ideation
+            logger.warning("corpus overview unavailable for the lane", exc_info=True)
+        listing = f"\n\nIt holds these papers:\n{papers}" if papers else ""
+        return (
+            f"\n\nA literature corpus is available for this task "
+            f"(corpus_ref={corpus_ref!r}).{listing}\n\n"
+            "Use paper_semantic_search / paper_keyword_search to locate passages, then "
+            "**paper_chunk_read to actually read them** — pick the papers whose "
+            "subject matches this task's metric and data, not merely the topic. "
+            "A hypothesis's "
+            "`sources` must list only papers you opened with paper_chunk_read; "
+            "citations to papers you never read are dropped and earn nothing."
+        )
+
+    async def _verify_sources(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+        """只保留本轮**真正打开过正文**的论文，其余引用一律丢弃。
+
+        ``ranker.rubric_prior`` 给"有引用"加 0.3（在总分里占 0.12），也就是说凭空写一个
+        paper id 就能让候选往前排。这条奖励只有在引用可核验时才成立，否则它奖励的是幻觉。
+        校验必须在入图之前做——进了图就是排序的输入了。
+
+        **判据是"读过"，不是"在语料里"。** 第一版只查 id 是否存在于语料，真机（2026-08-16
+        第 12 次）证明那太松：Ideator 拿《数据增强综述》支持"两两交互特征"、拿《信用卡欺诈
+        检测综述》同时支持 target encoding 与 SMOTE，而语料里三篇真正讲 AUC 的论文一次都
+        没被引用。带引用和不带引用的假设提的是同一批干预——引用是事后贴的标签，不是想法的
+        来源。这些论文都在检索结果里出现过，只是从没被 ``paper_chunk_read`` 打开，所以
+        "读过"能拦住而"存在"拦不住。
+
+        没有语料时整段跳过：此时 ``sources`` 按 schema 本就该为空，不该顺手清掉别的来源
+        写进去的内容。
+        """
+        rt = self._runtime
+        if not await rt.corpus_paper_ids():
+            return hypotheses
+        opened = rt.corpus_papers_read()
+        verified: list[Hypothesis] = []
+        dropped = 0
+        for hypothesis in hypotheses:
+            kept = [source for source in hypothesis.sources if source in opened]
+            dropped += len(hypothesis.sources) - len(kept)
+            verified.append(hypothesis.model_copy(update={"sources": kept}))
+        if dropped:
+            await rt.publish_output(
+                source="agent",
+                channel="error",
+                text=(
+                    f"dropped {dropped} citation(s) to papers this round never opened; "
+                    "cite only what you read with paper_chunk_read — a paper that "
+                    "merely appeared in search results is not evidence"
+                ),
+            )
+        return await self._verify_support(verified)
+
+    async def _verify_support(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
+        """再问一层：被引的那几段正文，到底支不支持这条主张。
+
+        ``_verify_sources`` 查的是**行为**（读没读过），这一层查的是**内容**。两者都需要：
+        一个读过《数据增强综述》再拿它去支持"两两交互特征工程"的 Ideator，行为那一关是
+        过得去的，而那正是真机上实际发生的事。
+
+        判据保守——模棱两可算不支持。误删一条真引用只少了一份可追溯性；放行一条假引用会
+        让下游把没有根据的干预当成有据可依，而这条链路已经为后者付过一次学费。
+
+        判定失败（模型不可用、解析不出来）时**保留原引用**：这一层是增益，不该因为一次
+        端点抖动就把整轮的引用清空。丢弃与保留的方向在这里是相反的——解析不出来判"不支持"
+        是单条判定内部的保守，整层不可用则不该改变已经通过前一关的结论。
+        """
+        rt = self._runtime
+        if rt._model is None or not any(item.sources for item in hypotheses):
+            return hypotheses
+        passages = await rt.corpus_passages_read()
+        checked: list[Hypothesis] = []
+        rejected: list[str] = []
+        for hypothesis in hypotheses:
+            if not hypothesis.sources:
+                checked.append(hypothesis)
+                continue
+            verdicts = await asyncio.gather(
+                *(
+                    self._support_verdict(hypothesis, source, passages.get(source, []))
+                    for source in hypothesis.sources
+                ),
+                return_exceptions=True,
+            )
+            kept: list[str] = []
+            for source, verdict in zip(hypothesis.sources, verdicts):
+                if isinstance(verdict, BaseException):
+                    # 整层不可用 → 保留，别让端点抖动清空引用
+                    kept.append(source)
+                    continue
+                if verdict.supports:
+                    kept.append(source)
+                else:
+                    rejected.append(f"{source} ({verdict.why or 'no support'})")
+            checked.append(hypothesis.model_copy(update={"sources": kept}))
+        if rejected:
+            await rt.publish_output(
+                source="agent",
+                channel="error",
+                text=(
+                    f"dropped {len(rejected)} citation(s) whose passages do not "
+                    f"support the claim: {'; '.join(rejected[:5])}"
+                ),
+            )
+        return checked
+
+    async def _support_verdict(
+        self, hypothesis: Hypothesis, paper_id: str, passages: list[str]
+    ) -> SupportVerdict:
+        """问一次"这段话支持这条主张吗"，返回结构化判定。"""
+        rt = self._runtime
+        prompt = SUPPORT_PROMPT.format(
+            claim=hypothesis.statement,
+            intervention=hypothesis.intervention,
+            paper_id=paper_id,
+            evidence=format_evidence(passages),
+        )
+        content = await single_turn_chat(
+            prompt, model=rt._model, client=rt._client, max_tokens=200
+        )
+        return parse_verdict(paper_id, content)
 
     async def _run_debate_ideator_turn(
         self, count: int, handoff_texts: list[str] | None = None
@@ -747,6 +870,7 @@ class AgentTurnRunner:
         )
 
         rt = self._runtime
+        corpus_ref = rt.survey_corpus_ref()
         debate_tools = rt.ideator_tools()()
 
         class _StructuredResult:
@@ -763,6 +887,13 @@ class AgentTurnRunner:
                 effective_prompt = prompt
                 if handoff_texts:
                     effective_prompt += "\n\n" + "\n\n".join(handoff_texts)
+                if corpus_ref is not None:
+                    effective_prompt += (
+                        f"\n\nA literature corpus is available for this task. "
+                        f"Pass corpus_ref={corpus_ref!r} to the paper_* tools to search and "
+                        "read it, and record the paper keys you actually used in each "
+                        "hypothesis's sources field."
+                    )
                 value = await single_turn_structured_chat(
                     effective_prompt,
                     output_type,

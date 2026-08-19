@@ -13,6 +13,9 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [Supervisor 实现计划](supervisor_imp_docs.md) | current | 实现状态、任务拆分、全局约束与冻结验证命令 |
 | [研究核心机制整理](research_core_mechanisms_ch.md) | current | ResearchTree / SEARCH 搜索 / IdeaGenerator / Hypothesis 排序 / 动态 EDA |
 | [代码规范](代码规范.md) | current | 导入/注释/异常/格式/测试约定 |
+| [结构化输出与工具调用](agent_structured_output_ch.md) | current | `response_format` 与工具互斥、schema 注入、围栏剥离 |
+| [真机跑测暴露的 loop 失效模式](loop_failure_modes_ch.md) | current | lane 契约、CLI 终态、修复反馈可执行性、环境自检 |
+| [Evaluator 契约](evaluator_contract_ch.md) | current | 预测与标签必须按 id 对齐；一个"安静地成功"的失效 |
 | [可运行研究工作流](../README.md#运行) | current | `Athena-cli` 安装、认证、CLI 参数、产物和失败语义 |
 | [测试指南](operations/testing.md) | current | 本地测试层次与验收命令 |
 | [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
@@ -45,6 +48,10 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [paper_markdown 输出](paper_markdown_rag_output_ch.md) | current | chunk 与视觉单元的落盘形态 |
 | [paper_markdown 质量](paper_markdown_rag_quality_ch.md) | current | 质量门禁判定与诊断码 |
 | [paper_rag 工具](paper_rag_tool_ch.md) | current | 两个检索算子 + 三个遍历算子 + 整篇读取 |
+| [paper_rag 真机基准](paper_rag_benchmarks_ch.md) | current | 装载/时延实测、known-item 检索质量、优化清单 |
+| [文献语料接入 loop](corpus_ideation_ch.md) | current | 调研产物如何交给 Ideator，引用如何核验 |
+| [文献链路整改](survey_overhaul_ch.md) | current | 六段整改：可重跑基准、论文库、选片、门面与融合、消费端、A/B 分叉 |
+| [调研的交付与边界](survey_limits_ch.md) | current | 代价分解、A/B 结论（开调研没让假设变好）与全部已知限制 |
 
 ## Kaggle 与 Supervisor 人类门
 

@@ -28,6 +28,13 @@ from athena.kaggle import (
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.paper_rag.schemas import PaperSummary
+from athena.research.paper_rag.search import (
+    RetrievalSession,
+    corpus_overview,
+    corpus_paper_ids,
+)
+from athena.research.paper_rag.tool import MAX_OVERVIEW_PAPERS
 from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime_events import RuntimeEvents, recent_user_texts
 from athena.research.script_runner import DataScriptRunner
@@ -60,6 +67,18 @@ MODEL_CONNECTION_ENV_VARS: dict[str, str] = {
 """模型连接字段 → 环境变量名；provider 只允许 deepseek/openai/qwen。"""
 
 ALLOWED_MODEL_PROVIDERS = ("deepseek", "openai", "qwen")
+
+DEFAULT_SURVEY_PAPERS = 20
+SURVEY_PLAN_LABEL = "survey"
+# 由研究任务提炼文献检索式的提示。任务原文不能直接当检索式：它带着数据集路径、
+# 目标列名这些只对本机有意义的行，而 PaperScout 会把整段原样交给相关性打分模型。
+SURVEY_QUERY_PROMPT = (
+    "Turn the following machine-learning research task into one English literature "
+    "search topic for an academic paper search engine. Name the problem type, data "
+    "modality and the methods worth surveying. Drop dataset paths, column names, "
+    "file names and metric values. Answer with the topic sentence only, no preamble "
+    "and no quotes."
+)
 
 
 def _mask_secret(value: str | None) -> str:
@@ -112,16 +131,20 @@ PreparePhase = Callable[[], Awaitable[PrepareResult]]
 ValidationPhase = Callable[[str, float], Awaitable[ValidationResult]]
 PlanTurn = Callable[[str, ResearchState], Awaitable[PlanTurnResult]]
 
-SURVEY_PLAN_LABEL = "survey"
-# 由研究任务提炼文献检索式的提示。任务原文不能直接当检索式：它带着数据集路径、
-# 目标列名这些只对本机有意义的行，而 PaperScout 会把整段原样交给相关性打分模型。
-SURVEY_QUERY_PROMPT = (
-    "Turn the following machine-learning research task into one English literature "
-    "search topic for an academic paper search engine. Name the problem type, data "
-    "modality and the methods worth surveying. Drop dataset paths, column names, "
-    "file names and metric values. Answer with the topic sentence only, no "
-    "preamble and no quotes."
-)
+
+def _merged(*registries: ToolRegistry | None) -> ToolRegistry | None:
+    """合并若干可选工具表；全为空时返回 ``None``。
+
+    ``ToolRegistry`` 不支持批量 merge，只能逐个 resolve/register。
+    """
+    present = [registry for registry in registries if registry is not None]
+    if not present:
+        return None
+    merged = ToolRegistry()
+    for registry in present:
+        for spec in registry.specs:
+            merged.register(registry.resolve(spec.name))
+    return merged
 
 
 class ResearchRuntime:
@@ -150,12 +173,27 @@ class ResearchRuntime:
         ask_user: AskUser | None = None,
         survey: bool = False,
         survey_query: str = "",
-        survey_max_papers: int = 10,
+        survey_max_papers: int = DEFAULT_SURVEY_PAPERS,
+        survey_search_top_k: int = 0,
+        survey_max_seconds: float = 0.0,
     ) -> None:
         # 消融开关：``gated`` 走 Idea Generation 门禁，``baseline`` 走 main 原有的
         # "产出即入库"。输出契约与 prompt 在 agent 注册时绑定，故一路传到
         # register_ideator_agent，不只是出口处分支。
         self._ideation = ideation
+        # 文献调研默认关闭：一次调研是十几分钟的模型往返，不能由默认值替用户决定
+        # 花这笔钱。开启后它作为后台任务与 PREPARE 并行，SEARCH 绝不为它停等。
+        self._survey_enabled = survey
+        self._survey_query = survey_query
+        self._survey_max_papers = survey_max_papers
+        # 0 表示"用 SurveyRequest 的默认值"。这两个必须一起调：深度决定每步的打分量，
+        # 墙钟决定跑得完几步，只动一个换来的是拿广度换深度。
+        self._survey_search_top_k = survey_search_top_k
+        self._survey_max_seconds = survey_max_seconds
+        self._survey_stack: SurveyStack | None = None
+        # 本轮 ideation 各 Ideator 的检索会话；引用核验按它们的已读集合判定。
+        self._corpus_sessions: list[RetrievalSession] = []
+        self._survey_task: asyncio.Task[None] | None = None
         self._root = Path(project_root or ".").resolve()
         self._athena = (
             Path(state_root).resolve()
@@ -337,8 +375,21 @@ class ResearchRuntime:
             workspace_for=self._supervisor.workspace_path,
             execution=self._execution,
             # plan agent 在构造期即注册，早于 Supervisor 任务理解，故惰性求值。
-            extra_tools=lambda: self.kaggle_tools("plan"),
+            extra_tools=self.plan_tools,
         )
+
+    def plan_tools(self) -> ToolRegistry | None:
+        """写代码那一步的额外工具：Kaggle（若接入）+ 文献语料的只读检索算子。
+
+        此前只有 Ideator 能查语料，于是文献只能影响"试什么"，永远影响不了"怎么实现"
+        ——而后者才是论文真正给得出细节的地方：损失函数的写法、超参区间、预处理口径。
+        一条假设写着"用 focal loss"，实现时该取什么 gamma、要不要配合重采样，答案就在
+        那几篇论文里，而 PlanAgent 够不着。
+
+        与 Ideator 用各自独立的会话：已读账本按 Agent 独立，而引用核验只看 ideation
+        那一轮的账本，PlanAgent 读了什么不该算进去。
+        """
+        return _merged(self.kaggle_tools("plan"), self.corpus_tools())
 
     def kaggle_stack(self) -> KaggleStack:
         """Lazily build the shared Kaggle stack rooted at the project root.
@@ -368,30 +419,115 @@ class ResearchRuntime:
     def ideator_tools(self) -> Callable[[], ToolRegistry | None]:
         """Return a lazy provider for Ideator lane extra tools.
 
-        Kaggle tools come from the shared stack when enabled; corpus tools are
+        Kaggle tools come from the shared stack when enabled; corpus operators are
         appended once the literature survey has built a corpus. The provider shape
         keeps registration time and per-lane tool assembly separate, so a corpus
         that finishes after PREPARE is picked up by the next Ideator lane.
         """
 
         def build() -> ToolRegistry | None:
-            tools = self.kaggle_tools("ideator")
-            if self.state.corpus_ref is None or self._survey_stack is None:
-                return tools
-            corpus = ToolRegistry()
-            build_survey_tools(
-                self._survey_stack,
-                include_survey=False,
-                include_producers=False,
-                into=corpus,
+            return _merged(
+                self.kaggle_tools("ideator"),
+                self.corpus_tools(for_ideation=True),
             )
-            if tools is None:
-                return corpus
-            for spec in corpus.specs:
-                tools.register(corpus.resolve(spec.name))
-            return tools
 
         return build
+
+    # ── 文献语料：一次性构建，Ideator 只读 ──────────────────────────────
+
+    def corpus_tools(self, *, for_ideation: bool = False) -> ToolRegistry | None:
+        """语料的只读检索算子；没有语料时返回 ``None``。
+
+        只给读的那一组：``paper_survey``/``paper_fetch``/``paper_markdown`` 会写出
+        新语料，摆在 Agent 面前迟早会被按下去，而一次全链路是十几分钟起步。
+
+        判据只有 ``corpus_ref``，不看本进程是否跑过调研。语料是内容寻址的、``corpus_ref``
+        是持久化状态，因此续跑（或本轮命中缓存语料）时 ``_survey_stack`` 必然是 None，
+        而那恰恰是最该拿到算子的场合——真实跑测里正是这条路径让 Ideator 收到"去调
+        paper_corpus_overview"的提示却一个算子都没有，0 次检索、0 条 sources。
+
+        ``for_ideation`` 决定这个会话的已读账本算不算进引用核验。**默认不算**：核验要
+        回答的是"提这条假设时读过什么"，而 PlanAgent 在实现阶段读的论文与那个问题无关。
+        默认设成不追踪，是为了让以后新增的消费方不会无声地放宽核验——放宽的后果是奖励
+        贴标签，而那正是这条链路已经付过一次学费的地方。
+        """
+        if self.survey_corpus_ref() is None:
+            return None
+        session = RetrievalSession(self._ensure_survey_stack().corpus_cache)
+        if for_ideation:
+            # 每个 Ideator 实例一个会话（已读集合必须按 Agent 独立），但会话要留在运行时
+            # 手里：引用核验需要"这一轮谁真的打开过哪几篇"的账本。
+            self._corpus_sessions.append(session)
+        return build_survey_tools(
+            self._ensure_survey_stack(),
+            include_survey=False,
+            include_producers=False,
+            session=session,
+        )
+
+    def start_corpus_round(self) -> None:
+        """开始新一轮 ideation：丢掉上一轮的会话账本。
+
+        不清的话，上一轮读过的论文会一直算作"本轮读过"，引用核验会越来越松。
+        """
+        self._corpus_sessions.clear()
+
+    def corpus_papers_read(self) -> set[str]:
+        """本轮 ideation 里被真正打开过正文的论文。"""
+        opened: set[str] = set()
+        for session in self._corpus_sessions:
+            opened |= session.read_papers()
+        return opened
+
+    async def corpus_passages_read(self) -> dict[str, list[str]]:
+        """本轮 ideation 逐篇读过的正文，按 ``paper_id`` 归组。
+
+        支持性判定要看的是**读过的那几段**，而不是整篇论文：拿整篇去问"支不支持"，问的
+        就变成了"这篇论文大体上相关吗"——而那正是贴标签式引用能通过的那个问题。
+        """
+        corpus_ref = self.survey_corpus_ref()
+        if corpus_ref is None:
+            return {}
+        chunk_ids: set[str] = set()
+        for session in self._corpus_sessions:
+            chunk_ids |= session.read_chunk_ids()
+        if not chunk_ids:
+            return {}
+        stack = self._ensure_survey_stack()
+        corpus = await stack.corpus_cache.load(self._store, corpus_ref)
+        passages: dict[str, list[str]] = {}
+        for chunk_id in sorted(chunk_ids):
+            position = corpus.positions.get(chunk_id)
+            if position is None:
+                continue
+            entry = corpus.index.entries[position]
+            passages.setdefault(entry.paper_id, []).append(entry.text)
+        return passages
+
+    async def corpus_summaries(self) -> list[PaperSummary]:
+        """语料的逐篇门面，用于把"里面有什么"直接写进 Ideator 的 prompt。
+
+        纯索引读取：不调模型、不访网络、不碰句向量，8 篇实测约 26 毫秒。
+        """
+        corpus_ref = self.survey_corpus_ref()
+        if corpus_ref is None:
+            return []
+        stack = self._ensure_survey_stack()
+        corpus = await stack.corpus_cache.load(self._store, corpus_ref)
+        return corpus_overview(corpus, [], MAX_OVERVIEW_PAPERS).summaries
+
+    async def corpus_paper_ids(self) -> set[str]:
+        """语料里真实存在的 paper id；假设引用的合法取值就是这一组。
+
+        与 ``corpus_tools`` 同一条惰性装配规则：只要有 ``corpus_ref`` 就能核验引用，
+        否则续跑时校验会拿到空集合而静默放行任何编造的 paper id。
+        """
+        corpus_ref = self.survey_corpus_ref()
+        if corpus_ref is None:
+            return set()
+        stack = self._ensure_survey_stack()
+        corpus = await stack.corpus_cache.load(self._store, corpus_ref)
+        return corpus_paper_ids(corpus)
 
     # ── GUI 门面扩展：树持久化与运行设置（供 gui_gateway 只读/控制）────────
 
@@ -632,6 +768,8 @@ class ResearchRuntime:
             return self._task
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
+        # 与 PREPARE 并行起跑：调研要十几分钟，而 PREPARE 也不快，串起来等于白等一遍。
+        self._start_survey()
         # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。
         self._task_text = self._resume_task_text(self._task_text)
         await self._maybe_run_task_understanding()
@@ -665,20 +803,30 @@ class ResearchRuntime:
         return self.state.corpus_ref
 
     async def _survey_topic(self) -> str:
-        """本次调研的检索式：显式参数优先，否则由研究任务提炼一句主题。"""
+        """本次调研的检索式：显式参数优先，否则由研究任务提炼一句主题。
+
+        提炼失败时退回任务原文而不是抛错：任务原文带着数据集路径与列名，是个糟糕的
+        检索式，但降级检索仍然好过没有检索——而抛错会让整段调研在还没发出一次请求
+        之前就结束。
+        """
         if self._survey_query.strip():
             return self._survey_query.strip()
-        if self._model is None:
-            raise RuntimeError(
-                "literature survey requires a model or an explicit query"
+        task = self._task_text.strip()
+        if not task or self._model is None:
+            return task
+        try:
+            topic = await single_turn_chat(
+                task,
+                model=self._model,
+                client=self._client,
+                system_prompt=SURVEY_QUERY_PROMPT,
             )
-        topic = await single_turn_chat(
-            self._task_text,
-            model=self._model,
-            client=self._client,
-            system_prompt=SURVEY_QUERY_PROMPT,
-        )
-        return topic.strip()
+        except Exception:  # noqa: BLE001 - 改写失败退回原文，不阻断调研
+            logger.warning(
+                "survey topic rewrite failed; using the raw task", exc_info=True
+            )
+            return task
+        return topic.strip() or task
 
     async def _run_survey(self) -> None:
         """跑一次全链路调研并把语料引用写进持久状态。

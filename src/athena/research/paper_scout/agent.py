@@ -35,7 +35,9 @@ from athena.research.paper_scout.schemas import (
     ScoutRequest,
     ScoutStats,
 )
+from athena.research.paper_scout.reranker import RelevanceReranker
 from athena.research.paper_scout.scorer import RelevanceScorer
+from athena.research.paper_scout.selection import BoundarySelector, select_delivery
 from athena.research.paper_scout.session import ScoutSession
 from athena.research.paper_source.schemas import (
     PaperIdentity,
@@ -49,6 +51,13 @@ from athena.research.paper_scout.tool import (
     PaperScoutExpandTool,
     PaperScoutSearchTool,
 )
+
+REFERENCE_LIMIT = 200
+"""给一篇论文取参考文献时的上限。
+
+只用来连交付集合内部的边，够覆盖"这篇引了这批里的哪几篇"即可。取 200 而不是全部：
+一篇综述能有几百条参考文献，而落在 20 篇交付集合里的至多 19 条。
+"""
 
 POLICY_MAX_TOKENS = 2048
 POLICY_TEMPERATURE = 0.3
@@ -117,8 +126,8 @@ async def dispatch_tool_calls(
 class PaperScoutAgent(BaseAgent):
     """按 PaperScout 的 search/expand 决策过程收集论文的 Athena Agent。
 
-    依赖全部由组合根注入：检索后端、引用后端、相关性 scorer 和模型客户端。模块不在导入
-    时创建客户端，也不读环境变量。
+    依赖全部由组合根注入：检索后端、引用后端、相关性 scorer、同分次序 reranker 和模型
+    客户端。模块不在导入时创建客户端，也不读环境变量。
     """
 
     name = "paper_scout"
@@ -133,12 +142,18 @@ class PaperScoutAgent(BaseAgent):
         *,
         model: str,
         client: AsyncOpenAI | None = None,
+        selector: BoundarySelector | None = None,
+        reranker: RelevanceReranker | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.search_backends = search_backends
         self.reference_backend = reference_backend
         self.scorer = scorer
+        # 同分论文的次序信号；缺省时排序回退到散列，行为与此前一致。
+        self.reranker = reranker
         self.model = model
+        # 边界档重排器；缺省时选片回退到散列次序，行为与此前一致。
+        self.selector = selector
         self._provider = ResponsesProvider(model, client=client)
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
@@ -147,7 +162,11 @@ class PaperScoutAgent(BaseAgent):
             await self.artifacts.get_text(ctx.turn.request_ref)
         )
         session = ScoutSession(
-            request, self.search_backends, self.reference_backend, self.scorer
+            request,
+            self.search_backends,
+            self.reference_backend,
+            self.scorer,
+            self.reranker,
         )
         tools = ToolRegistry()
         tools.register(PaperScoutSearchTool(session))
@@ -194,9 +213,11 @@ class PaperScoutAgent(BaseAgent):
                 paper_list=session.pool.observation(),
             )
             stats.policy_calls += 1
+            policy_started = time.monotonic()
             calls, analysis = await collect_tool_calls(
                 self._provider, config, tools, prompt, ctx.cancel
             )
+            stats.policy_seconds += time.monotonic() - policy_started
             if not calls:
                 return "policy_returned_no_action"
 
@@ -232,11 +253,34 @@ class PaperScoutAgent(BaseAgent):
     ) -> AgentOutcome:
         """汇总统计、写入 artifact 并返回 Turn 结果。"""
         eligible = session.pool.retained(session.request.retain_threshold)
-        retained = session.pool.retained(
+        # 截断前的完整候选：交付名额几乎总是落在某一档内部，而"该选哪几篇"不能由
+        # tie_break 的散列决定（见 selection.select_delivery）。
+        contenders = session.pool.retained(
             session.request.retain_threshold,
-            session.request.max_papers,
             require_retrievable_source=session.request.require_retrievable_source,
         )
+        # 重排要对准**真正的交付量**，不是候选上限。取源按 3 倍超额下单、够数即停，所以
+        # ``max_papers`` 是候选上限（真机 60），而实际进语料的是 ``stop_after_fetched``
+        # （真机 20）。按候选上限切档，截断线落在第 60 位——真机实测那里是 197 篇同为
+        # 0.20 的尾部，而取源试到第 36 篇就够数了，那一档一篇都没被碰过。也就是说重排
+        # 精心排了一批永远不会被下载的论文。按交付量切档，截断线才落在真正有人争的地方。
+        target = session.request.paper_source_policy.stop_after_fetched
+        selection = await select_delivery(
+            session.request.query,
+            contenders,
+            target or session.request.max_papers,
+            self.selector,
+        )
+        # 选出的交付集合在前，其余候选按原次序垫在后面：取源逐个尝试、失败就往后走，
+        # 垫底的存在意义就是接住取源失败，不该因为没被选中而消失。
+        chosen = {item.paper_key for item in selection.delivered}
+        backups = [item for item in contenders if item.paper_key not in chosen]
+        retained = (selection.delivered + backups)[: session.request.max_papers or None]
+        stats.boundary_tier = selection.boundary_size
+        stats.boundary_reranked = selection.reranked
+        stats.facets = list(selection.facets)
+        stats.facet_coverage = round(selection.coverage(), 3)
+        stats.selection_note = selection.note
         if session.request.require_retrievable_source:
             stats.dropped_no_source = sum(
                 1 for paper in eligible if not has_retrievable_source(paper)
@@ -252,9 +296,17 @@ class PaperScoutAgent(BaseAgent):
         stats.scored_papers = len(session.pool)
         stats.retained_papers = len(retained)
         stats.scorer_calls = getattr(session.scorer, "calls", 0)
+        stats.rerank_calls = getattr(session.reranker, "calls", 0)
+        stats.rerank_failures = getattr(session.reranker, "failures", 0)
+        stats.scorer_seconds = round(getattr(session.scorer, "seconds", 0.0), 3)
+        stats.rerank_seconds = round(getattr(session.reranker, "seconds", 0.0), 3)
+        stats.backend_seconds = round(session.backend_seconds, 3)
+        stats.policy_seconds = round(stats.policy_seconds, 3)
         stats.backend_requests = self._backend_requests()
         stats.errors = session.errors[:50]
 
+        edges = await self._reference_edges(retained)
+        stats.reference_edges = sum(len(item) for item in edges.values())
         stats_ref = await self.artifacts.put_text(stats.model_dump_json())
         corpus = ScoutCorpus(
             query=session.request.query,
@@ -262,6 +314,7 @@ class PaperScoutAgent(BaseAgent):
             pool=session.pool.ranked(),
             actions=session.actions,
             stats_ref=stats_ref,
+            reference_edges=edges,
         )
         corpus_ref = await self.artifacts.put_text(corpus.model_dump_json())
         source_ref = await self._paper_source_request(
@@ -286,6 +339,38 @@ class PaperScoutAgent(BaseAgent):
             result_ref=result_ref,
             next_context_ref=f"context://{ctx.turn.turn_id}/next",
         )
+
+    async def _reference_edges(self, retained: list) -> dict[str, list[str]]:
+        """给交付集合建"论文 → 论文"的引用图，只保留两端都在交付集合里的边。
+
+        为什么不能靠下游解析参考文献来连：那条路要求被引论文的**标题**在引用方的参考文献
+        文本里匹配得上，而真机实测 20 篇语料只连出 **1 条边**、44 篇 16 条——在生产尺寸上
+        等于没有，``paper_cites`` 与 ``cited_by`` 两个算子因此形同虚设。而引用后端在检索
+        阶段本来就返回这层关系，只是一直没人存下来。
+
+        只给交付集合取，不给整个池子（真机 352 篇）：边只有两端都落在语料里才有落点，
+        为池子里其余几百篇各发一次请求，连出来的边一条都用不上。
+
+        逐篇失败只跳过那一篇：引用图是增益，缺几条边不该让一次已经付过检索成本的运行失败。
+        """
+        backend = self.reference_backend
+        if backend is None or not retained:
+            return {}
+        known = {paper.paper_key for paper in retained}
+        edges: dict[str, list[str]] = {}
+        for paper in retained:
+            try:
+                cited = await backend.references(paper, REFERENCE_LIMIT)
+            except Exception:  # noqa: BLE001 - 少几条边不该中断整轮
+                continue
+            targets = [
+                item.paper_key
+                for item in cited
+                if item.paper_key in known and item.paper_key != paper.paper_key
+            ]
+            if targets:
+                edges[paper.paper_key] = list(dict.fromkeys(targets))
+        return edges
 
     async def _paper_source_request(
         self, retained: list, corpus_ref: str, request: ScoutRequest

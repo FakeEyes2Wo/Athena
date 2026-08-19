@@ -10,7 +10,22 @@ from typing import Any
 from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
+from athena.research.fork import ForkError, fork_project
+from athena.research.bench import (
+    DEFAULT_QUERY_SET,
+    corpus_health,
+    dump_report,
+    load_query_set,
+    run_known_item,
+)
+from athena.research.bench import available as bench_available
+from athena.research.bench import RELEVANT_THRESHOLD, delivery_overlap, evaluate_recall
+from athena.research.bench.query_sets import load_recall_set
+from athena.research.paper_scout.schemas import ScoutCorpus
+from athena.research.paper_rag.search import corpus_paper_ids
+from athena.research.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
+from athena.research.runtime import DEFAULT_SURVEY_PAPERS
 from athena.research.survey import (
     SurveyRequest,
     build_survey_stack,
@@ -61,8 +76,10 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "direction": args.direction or "maximize",
         "ideation": args.ideation,
         "survey": args.survey,
-        "survey_query": args.survey_query,
+        "survey_query": args.survey_query or "",
         "survey_max_papers": args.survey_papers,
+        "survey_search_top_k": args.survey_search_top_k,
+        "survey_max_seconds": args.survey_max_seconds,
     }
 
 
@@ -118,28 +135,63 @@ class _EventRenderer:
         raise ValueError(f"unsupported runtime event kind: {kind}")
 
 
+def _apply_fork(args: argparse.Namespace) -> int:
+    """按 ``--fork-from`` 把源项目的 PREPARE 产物复制到本次运行的目录。
+
+    分叉失败直接返回非零退出码：让运行"降级成自己重跑一遍 PREPARE"会静默毁掉 A/B 的
+    前提，而那种毁法在分数出来之前看不出来。
+    """
+    if not args.fork_from:
+        return 0
+    try:
+        result = fork_project(args.fork_from, args.project)
+    except ForkError as error:
+        print(f"分叉失败：{error}", file=sys.stderr)
+        return 2
+    print(f"已从 {result.source} 分叉到 {result.target}")
+    print(f"  共用 evaluator: {result.evaluator_ref}")
+    print(f"  共用基线实验: {result.baseline_experiment_id}")
+    print(f"  复制目录: {', '.join(result.copied) or '（无）'}")
+    print("  语料已清空，本臂将自行决定是否调研")
+    return 0
+
+
 async def _cmd_run(args: argparse.Namespace) -> int:
     # 数据路径预检：拼错/缺失的 --data 应在跑 LLM 之前立刻失败，而非白烧一轮。
     if not Path(args.data).exists():
         print(f"error: data path does not exist: {args.data}", file=sys.stderr)
         return 2
+    # 分叉必须在构造 runtime 之前：runtime 会读 .athena 里的 state 与 tree 决定起始阶段。
+    forked = _apply_fork(args)
+    if forked:
+        return forked
     runtime = _runtime(args.project, **_runtime_options(args))
     terminal = asyncio.Event()
     exit_code = 0
     renderer = _EventRenderer()
 
     def receive(kind: str, payload: dict[str, object]) -> None:
+        """先判终态再渲染：控制流不能挂在"打印成功"这个前提上。
+
+        真实跑测（2026-08-16）：Agent 输出里一个 ✅ 让 ``print`` 在 GBK 控制台上抛
+        ``UnicodeEncodeError``，异常在 ``terminal.set()`` 之前就把 ``receive`` 打断，
+        于是一次已经 FAILED 的运行继续挂到 ``--timeout`` 才退出（实测挂了 25 分钟仍
+        在跑）。渲染是尽力而为的旁支，失败只该少一行日志。
+        """
         nonlocal exit_code
-        renderer.render(kind, payload)
-        if kind != "state":
-            return
-        status = payload.get("status")
-        phase = payload.get("phase")
-        if status == "STOPPED" or phase == "COMPLETED":
-            terminal.set()
-        elif status == "FAILED":
-            exit_code = 1
-            terminal.set()
+        if kind == "state":
+            status = payload.get("status")
+            phase = payload.get("phase")
+            if status == "STOPPED" or phase == "COMPLETED":
+                terminal.set()
+            elif status == "FAILED":
+                exit_code = 1
+                terminal.set()
+        try:
+            renderer.render(kind, payload)
+        except (UnicodeEncodeError, ValueError):
+            # UnicodeEncodeError：终端编码装不下某个字符；ValueError：未知事件种类。
+            print(f"[unrenderable {kind} event]", file=sys.stderr, flush=True)
 
     subscription_id = runtime.subscribe(receive)
     try:
@@ -197,6 +249,8 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
         artifact_root=args.artifact_root,
         model=args.model,
         scorer_model=args.scorer_model,
+        enable_library=not args.no_library,
+        library_root_path=args.library_root,
     )
     if args.check:
         return print_check(stack)
@@ -212,6 +266,8 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
             max_papers=args.max_papers,
             max_steps=args.max_steps,
             max_seconds=args.max_seconds,
+            search_top_k=args.search_top_k,
+            expand_top_k=args.expand_top_k,
             retain_threshold=args.retain_threshold,
             require_retrievable_source=not args.allow_unfetchable,
             published_to=args.published_to,
@@ -221,6 +277,7 @@ async def _cmd_survey(args: argparse.Namespace) -> int:
             source_candidate_multiple=args.source_candidates,
             strict_quality=args.strict_quality,
             build_index=not args.no_index,
+            fresh_scout=args.fresh_scout,
         ),
     )
     print_report(report)
@@ -312,6 +369,8 @@ async def _dispatch_command(args: argparse.Namespace) -> int:
         return await _cmd_run(args)
     if args.command == "survey":
         return await _cmd_survey(args)
+    if args.command == "bench":
+        return await _cmd_bench(args)
     if args.command == "kaggle":
         return await _cmd_kaggle(args)
     if args.command == "status":
@@ -362,6 +421,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Ideator (proposal -> review -> revision -> judge)"
         ),
     )
+    # 默认关：一次调研是十几分钟的模型往返，不能由默认值替用户决定花这笔钱。
     run.add_argument(
         "--survey",
         action="store_true",
@@ -377,11 +437,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--survey-papers",
-        type=int,
-        default=10,
+        type=_non_negative_int,
+        default=DEFAULT_SURVEY_PAPERS,
         help="进入语料的论文篇数；成本大致随它线性增长",
     )
+    run.add_argument(
+        "--survey-search-top-k",
+        type=_non_negative_int,
+        default=0,
+        help="loop 内调研的检索深度；0 表示用 SurveyRequest 的默认值",
+    )
+    run.add_argument(
+        "--survey-max-seconds",
+        type=float,
+        default=0.0,
+        help="loop 内调研的检索墙钟预算；0 表示用默认值。与 --survey-search-top-k 一起调",
+    )
+    run.add_argument(
+        "--fork-from",
+        default="",
+        help=(
+            "从一个已 PREPARE 完的项目分叉：共用它冻结的 evaluator 与基线 commit，"
+            "直接从 SEARCH 起步。做 A/B 时两臂都从同一个源分叉，才只剩 ideation 一个"
+            "变量——两臂各跑各的 PREPARE 时，基线方差与待测效应同量级"
+        ),
+    )
     _add_survey_parser(subparsers)
+    _add_bench_parser(subparsers)
     _add_kaggle_parser(subparsers)
     for name in ("status", "pause", "resume", "stop"):
         subparsers.add_parser(name).add_argument(
@@ -414,7 +496,28 @@ def _add_survey_parser(subparsers) -> None:
         "--max-steps", type=int, default=defaults.max_steps, help="PaperScout 步数上限"
     )
     survey.add_argument(
-        "--max-seconds", type=float, default=defaults.max_seconds, help="检索墙钟预算"
+        "--max-seconds",
+        type=float,
+        default=defaults.max_seconds,
+        help=(
+            "检索墙钟预算。它一直是真正绑定的那条约束（真机多轮 stop_reason 都是 "
+            "max_seconds、停在第 4 步），所以调 --search-top-k 时必须一起放宽"
+        ),
+    )
+    survey.add_argument(
+        "--search-top-k",
+        type=int,
+        default=defaults.search_top_k,
+        help=(
+            "每次 search 取回几条。论文的 10 是给稠密语义索引设的，换成词法排序后不成立"
+            "——实测同一批查询在深度 10 只浮现 1/10 篇 gold，深度 50 浮现 6/10，100 无增益"
+        ),
+    )
+    survey.add_argument(
+        "--expand-top-k",
+        type=int,
+        default=defaults.expand_top_k,
+        help="每次 expand 沿参考文献取回几条",
     )
     survey.add_argument(
         "--retain-threshold",
@@ -433,6 +536,27 @@ def _add_survey_parser(subparsers) -> None:
             "让取不到源的论文也参与交付（默认剔除：既无 arXiv id、上游也没给开放获取"
             "链接的论文下载不到，却会占掉一个交付名额）"
         ),
+    )
+    survey.add_argument(
+        "--fresh-scout",
+        action="store_true",
+        help=(
+            "即使论文库里已有同一份检索请求，也重新跑一遍 PaperScout。默认复用："
+            "同一份 ScoutRequest 是确定性输入，重跑只是把 71% 的墙钟再付一遍"
+        ),
+    )
+    survey.add_argument(
+        "--no-library",
+        action="store_true",
+        help=(
+            "关掉论文库，每篇都重新下载、重新转换、重新编码。只在核对"
+            "缓存是否掩盖了问题时才需要"
+        ),
+    )
+    survey.add_argument(
+        "--library-root",
+        default="",
+        help="论文库根目录；默认 ATHENA_LIBRARY_ROOT 或 ~/.athena/library",
     )
     survey.add_argument("--published-to", default="", help="发布日期上限 ISO")
     survey.add_argument(
@@ -479,6 +603,245 @@ def _add_survey_parser(subparsers) -> None:
     survey.add_argument("--check", action="store_true", help="只做装配自检")
 
 
+def _add_bench_parser(subparsers) -> None:
+    """挂上 ``bench`` 子命令：把此前一次性脚本做的测量变成能重跑、能 diff 的东西。
+
+    两个子模式对应两类问题：``retrieval`` 问"改写过的提问能不能找回那篇论文"，
+    ``health`` 问"这份语料的结构够不够用"。后者不需要任何模型，因此在没有编码器的
+    环境里也能跑。
+    """
+    bench = subparsers.add_parser(
+        "bench", help="measure retrieval quality and corpus health on a built corpus"
+    )
+    modes = bench.add_subparsers(dest="bench_command", required=True)
+
+    overlap = modes.add_parser(
+        "overlap", help="how reproducible two surveys' delivered paper sets are"
+    )
+    overlap.add_argument(
+        "--corpus",
+        action="append",
+        required=True,
+        metavar="REF",
+        help=(
+            "corpus_ref of one run; pass twice or more. Below ~0.3 mean Jaccard the "
+            "corpus is effectively a fresh random draw each run and no A/B over it "
+            "can mean much"
+        ),
+    )
+    overlap.add_argument("--query", default="", help="调研主题，仅写进报告")
+
+    recall = modes.add_parser(
+        "recall", help="split the loss into not-found / not-judged / not-delivered"
+    )
+    recall.add_argument(
+        "--pool",
+        required=True,
+        help="ScoutCorpus 的 artifact 引用（一次检索跑出来的池子与交付集合）",
+    )
+    recall.add_argument(
+        "--gold",
+        default="imbalance_auc_recall",
+        help="随包召回金标的名字，或一份 RecallQuerySet JSON 的路径",
+    )
+    recall.add_argument(
+        "--threshold",
+        type=float,
+        default=RELEVANT_THRESHOLD,
+        help=f"判为相关的分数线，默认 {RELEVANT_THRESHOLD}（2 分档）",
+    )
+
+    retrieval = modes.add_parser("retrieval", help="known-item hit@k and MRR per channel")
+    retrieval.add_argument("--corpus", required=True, help="corpus_ref to benchmark")
+    retrieval.add_argument(
+        "--queries",
+        default=DEFAULT_QUERY_SET,
+        help=(
+            f"packaged query set name ({', '.join(bench_available())}) or a path to a "
+            "QuerySet JSON file"
+        ),
+    )
+    retrieval.add_argument("--top-k", type=int, default=BENCH_TOP_K, help="返回条数")
+    retrieval.add_argument(
+        "--no-semantic",
+        action="store_true",
+        help="只跑词面通道，不调编码 API（离线核对关键词检索的回归时用）",
+    )
+
+    health = modes.add_parser("health", help="structural invariants of a corpus")
+    health.add_argument("--corpus", required=True, help="corpus_ref to inspect")
+    health.add_argument(
+        "--detail", action="store_true", help="逐篇列出，而不是只给汇总"
+    )
+
+    for parser in (retrieval, health, overlap, recall):
+        parser.add_argument(
+            "--artifact-root", default="", help="artifact 根目录；默认 ~/.athena/artifacts"
+        )
+        parser.add_argument("--out", default="", help="把报告写成 JSON，供两次运行 diff")
+
+
+def _print_retrieval_report(report) -> None:
+    """打印逐通道成绩；未命中的查询单独列出来，因为它们才是要改的东西。"""
+    print(f"\nknown-item 基准：{report.query_set}")
+    print(f"  语料: {report.corpus_papers} 篇 / {report.corpus_chunks} chunk")
+    print(f"  编码器: {report.embedding_model or '（无）'}  k={report.top_k}")
+    if report.unusable_queries:
+        print(
+            f"  金标不在本语料、已排除: {', '.join(report.unusable_queries)}"
+            "  （这不是检索失败）"
+        )
+    header = f"  {'通道':<26}{'hit@1':>7}{'hit@3':>7}{'hit@5':>7}{'未命中':>8}{'MRR':>8}"
+    print(header)
+    for channel in report.channels:
+        print(
+            f"  {channel.channel:<26}"
+            f"{channel.hit_at_1:>4}/{channel.scored:<2}"
+            f"{channel.hit_at_3:>4}/{channel.scored:<2}"
+            f"{channel.hit_at_5:>4}/{channel.scored:<2}"
+            f"{channel.missed:>8}{channel.mrr:>8.3f}"
+        )
+    for channel in report.channels:
+        missed = [item.query_id for item in channel.outcomes if item.rank is None]
+        if missed:
+            print(f"  {channel.channel} 未命中: {', '.join(missed)}")
+
+
+def _print_health_report(report, detail: bool) -> None:
+    """打印结构体检；每一行都对应一条"够不够用"的判据。"""
+    print(f"\n语料体检：{report.corpus_ref}")
+    print(f"  规模: {report.papers} 篇 / {report.chunks} chunk / {report.sentences} 句")
+    print(
+        f"  语义检索: {'可用' if report.semantic_search else '不可用'}"
+        f"  编码器: {report.embedding_model or '（无）'}"
+    )
+    print(
+        f"  摘要覆盖: {report.abstract_coverage:.0%}"
+        f"  门面几乎无正文的篇数: {report.thin_anchor_papers}"
+    )
+    print(
+        f"  语料内引用边: {report.citation_edges}"
+        f"（每篇 {report.citation_density:.2f}）  图文互链: {report.visual_links}"
+    )
+    print("  章节覆盖（篇数）:")
+    for name, count in report.section_coverage.items():
+        print(f"    {name:<14}{count:>4} / {report.papers}")
+    if not detail:
+        return
+    print("  逐篇:")
+    for item in report.papers_detail:
+        flags = []
+        if not item.has_abstract_chunk:
+            flags.append(f"无摘要chunk(锚点={item.anchor_kind})")
+        if item.anchor_prose_chars < 40:
+            flags.append(f"门面正文{item.anchor_prose_chars}字")
+        print(
+            f"    {item.paper_id:<38}{item.chunks:>5} chunk"
+            f"{item.outbound_citations:>4} 引用  {'; '.join(flags)}"
+        )
+
+
+def _print_recall_report(report) -> None:
+    """打印三段召回；每一段丢的东西该动的地方不同，所以分开报。"""
+    print(f"\n召回评测：{report.query_set}")
+    print(f"  课题: {report.topic}")
+    print(f"  金标 {report.gold_total} 篇 · 池子 {report.pool_size} 篇 · "
+          f"交付 {report.delivered_size} 篇 · 相关线 {report.threshold}")
+    labels = {
+        "in_pool": "进池（检索找到）",
+        "judged_relevant": "判为相关（打分给够）",
+        "delivered": "进交付（名额与取源）",
+    }
+    for stage in report.stages:
+        print(
+            f"  {labels[stage.stage]:<24}{stage.found:>4}/{report.gold_total}"
+            f"  召回 {stage.recall:.3f}   本段丢 {stage.lost_here}"
+        )
+    print(f"\n  金标来源: {report.gold_source}")
+
+
+def _print_overlap_report(report) -> None:
+    """打印交付重合度；这是选片改动唯一的验收指标。"""
+    subject = f"：{report.query}" if report.query else ""
+    print(f"\n交付可复现性{subject}")
+    print(f"  比较了 {report.runs} 次运行，各交付 {report.delivered} 篇")
+    print(
+        f"  平均两两 Jaccard: {report.mean_jaccard:.3f}"
+        f"  最低: {report.min_jaccard:.3f}"
+    )
+    print(f"  稳定核心: {len(report.stable_core)} 篇  并集: {report.union_size} 篇")
+    if report.mean_jaccard < 0.3:
+        print(
+            "  低于 0.3：每次跑出来的基本是一次新的随机抽样，"
+            "在它之上做的任何 A/B 都说明不了问题"
+        )
+    for paper_id in report.stable_core:
+        print(f"    {paper_id}")
+
+
+async def _cmd_bench(args: argparse.Namespace) -> int:
+    """跑一次基准并打印报告；``--out`` 时同时落一份可 diff 的 JSON。
+
+    语义通道需要与建索引时**同一个**编码器，因此这里复用 ``build_survey_stack`` 而不是
+    另建一个：换了模型的向量与索引里的向量不在同一个空间，得到的分数看上去正常、实际
+    毫无意义——正是这条链路反复吃过的那种亏。
+    """
+    stack = build_survey_stack(
+        artifact_root=args.artifact_root, enable_vision=False, enable_library=False
+    )
+    if args.bench_command == "recall":
+        corpus = ScoutCorpus.model_validate_json(
+            await stack.artifacts.get_text(args.pool)
+        )
+        report = evaluate_recall(
+            load_recall_set(args.gold),
+            {item.paper_key: item.relevance for item in corpus.pool},
+            [item.paper_key for item in corpus.retained],
+            threshold=args.threshold,
+        )
+        _print_recall_report(report)
+        if args.out:
+            print(f"\n报告已写入 {dump_report(report, args.out)}")
+        return 0
+    if args.bench_command == "overlap":
+        runs = [
+            sorted(
+                corpus_paper_ids(
+                    await stack.corpus_cache.load(stack.artifacts, ref)
+                )
+            )
+            for ref in args.corpus
+        ]
+        report = delivery_overlap(runs, query=args.query, label="corpus delivery")
+        _print_overlap_report(report)
+        if args.out:
+            print(f"\n报告已写入 {dump_report(report, args.out)}")
+        return 0
+    corpus = await stack.corpus_cache.load(
+        stack.artifacts, args.corpus, vectors=args.bench_command == "retrieval"
+    )
+    if args.bench_command == "health":
+        report = corpus_health(corpus, args.corpus)
+        _print_health_report(report, args.detail)
+    else:
+        embedder = None if args.no_semantic else stack.embedder
+        if embedder is None and not args.no_semantic:
+            print(
+                "未配置 ATHENA_EMBEDDING_MODEL，只跑词面通道。", file=sys.stderr
+            )
+        report = await run_known_item(
+            corpus,
+            load_query_set(args.queries),
+            corpus_ref=args.corpus,
+            embedder=embedder,
+            top_k=args.top_k,
+        )
+        _print_retrieval_report(report)
+    if args.out:
+        print(f"\n报告已写入 {dump_report(report, args.out)}")
+    return 0
+
+
 def _add_kaggle_parser(subparsers) -> None:
     """挂上 ``kaggle`` 子命令：连接竞赛 → 下载 → 检索 notebook，或列出竞赛 / 自检。"""
     kaggle = subparsers.add_parser("kaggle", help="fetch a Kaggle competition's data")
@@ -504,7 +867,20 @@ def _add_kaggle_parser(subparsers) -> None:
     kaggle.add_argument("--out", default="", help="把报告 JSON 写到该路径")
 
 
+def _make_output_encodable() -> None:
+    """把 stdout/stderr 切成 UTF-8，装不下的字符退化成替代符而不是抛异常。
+
+    Windows 上重定向后的 stdout 默认是 GBK，Agent 正文里的 ✅/中文标点会让 ``print``
+    直接抛 ``UnicodeEncodeError``。这里只影响本进程的输出编码，不改任何业务行为。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _make_output_encodable()
     parser = _build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     return asyncio.run(_dispatch_command(args))

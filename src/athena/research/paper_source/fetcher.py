@@ -65,6 +65,18 @@ MAX_PDF_CANDIDATES = 3
 CACHE_VERSION = 1
 NON_ALNUM = re.compile(r"[^0-9a-z]+")
 
+DEFAULT_FETCH_CONCURRENCY = 4
+"""同时尝试取源的篇数。
+
+不是靠它压 arXiv：那一路由 ``HostRateLimiter`` 按 3 秒一个排队，并发多少都一样。真正
+并行起来的是出版商那一路——一轮实测 32 次尝试里 DOI 占 17 次，而 **12 次失败全在 DOI
+通道**（MDPI/IEEE/Wiley 反爬），超时比成功还贵，正是最该并行的一类。
+
+取 4 而不是更大，是因为 ``stop_after_fetched`` 的代价随它线性增长：每一波最多有
+``concurrency - 1`` 次下载在够数之后才回来，那几篇会被丢掉。4 与
+``DEFAULT_CONVERSION_CONCURRENCY`` 对齐，两段的并发形状保持一致。
+"""
+
 
 def diagnostic(level: str, code: str, message: str) -> ProcessingDiagnostic:
     """构造取源阶段的诊断项；code 必须稳定可机读，供质量门禁筛选。"""
@@ -239,10 +251,12 @@ class PaperSourceFetcher:
         cache: LocatorCache | None = None,
         contact_email: str | None = None,
         openalex_api_key: str | None = None,
+        concurrency: int = DEFAULT_FETCH_CONCURRENCY,
     ) -> None:
         self.artifacts = artifacts
         self.http = http or HostRateLimiter(contact_email=contact_email)
         self.cache = cache or LocatorCache()
+        self.concurrency = max(1, concurrency)
         self.arxiv = ArxivClient(self.http)
         self.openalex = OpenAlexClient(self.http, contact_email, openalex_api_key)
 
@@ -268,24 +282,44 @@ class PaperSourceFetcher:
         # 阶段 2：批量解析 arXiv 最新版本与元数据（每 60 篇 1 次请求）
         resolution = await self._resolve_versions(accepted, diagnostics)
 
-        # 阶段 3：逐篇取源并生成转换请求（唯一按篇计费的阶段）
+        # 阶段 3：取源并生成转换请求（唯一按篇计费的阶段）
         #
         # ``stop_after_fetched`` 让调用方按"要几篇成功的"下单，而不是按"试几篇"。取源
         # 成功率按通道差一倍——实测六轮 arXiv 81/89 = 91%，期刊 17/36 = 47%（出版商反爬：
         # IEEE 返回 0 字节，MDPI 与 ACM 403）——而交付集合的通道构成每轮都不同，任何固定
-        # 的超额系数都会在构成变化时失准。这里顺序尝试、够数即停，多余的候选一次都不下载。
+        # 的超额系数都会在构成变化时失准。所以按名次收结果、够数即停。
+        #
+        # 按 ``concurrency`` 分波并发，而不是挨个等：一轮实测 32 次尝试花掉 387.8 秒
+        # （平均 12.1 秒），而 12 次失败全部来自 DOI 通道的出版商反爬——超时比成功还贵。
+        # 尝试的构成是 arXiv 15 / DOI 17，两类落在 ``HostRateLimiter`` 的不同桶里：
+        # arXiv 那些照旧 3 秒一个排队，DOI 那些可以完全并行。
+        #
+        # **records 与串行版逐字相同**：``gather`` 保序，收的时候仍按名次、够数即停，
+        # 超出停止点的那几条直接丢掉。代价是每波最多有 ``concurrency - 1`` 次多余下载
+        # ——用有限的额外带宽换墙钟，不是零成本。
         records: list[PaperSourceRecord] = []
         target = request.policy.stop_after_fetched
         fetched_so_far = 0
-        for index, paper in enumerate(accepted):
+        window = max(1, self.concurrency)
+        for start in range(0, len(accepted), window):
             if cancel is not None and cancel.is_set():
                 raise asyncio.CancelledError
             if target and fetched_so_far >= target:
                 break
-            record = await self._fetch_one(index, paper, request.policy, resolution)
-            records.append(record)
-            if record.status == "fetched":
-                fetched_so_far += 1
+            batch = list(enumerate(accepted))[start : start + window]
+            attempted = await asyncio.gather(
+                *(
+                    self._fetch_one(index, paper, request.policy, resolution)
+                    for index, paper in batch
+                )
+            )
+            # 按名次收，够数即停：丢掉本波超出停止点的那几条，让 records 与串行版逐字相同
+            for record in attempted:
+                if target and fetched_so_far >= target:
+                    break
+                records.append(record)
+                if record.status == "fetched":
+                    fetched_so_far += 1
         if target and len(records) < len(accepted):
             diagnostics.append(
                 diagnostic(

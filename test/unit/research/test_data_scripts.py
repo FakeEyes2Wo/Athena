@@ -196,3 +196,39 @@ def test_run_cmd_timeout_raises_clear_error(tmp_path, monkeypatch) -> None:
         _run_cmd(["uv", "lock"], cwd=tmp_path)
     with pytest.raises(subprocess.TimeoutExpired, match="timed out"):
         _run_cmd_capture(["uv", "run", "python", "--version"], cwd=tmp_path)
+
+
+def test_a_failed_command_carries_its_stderr_into_the_message() -> None:
+    """退出码说不出该改什么；变成 Agent 反馈的那条消息必须带上 stderr。
+
+    真机（2026-08-16 A/B 的 survey-on 臂）：评估器在 stderr 写了
+    ``4800 prediction ids not in labels``，传到 PREPARE 的却只有 "returned non-zero
+    exit status 1"，于是它重试 11 次、每次交出同样的 6000 行预测，直到轮次预算耗尽。
+    """
+    import pathlib
+    import subprocess
+    import sys
+
+    from athena.research.script_runner import ScriptCommandError, _run
+
+    script = (
+        "import sys; sys.stderr.write('4800 prediction ids not in labels'); sys.exit(1)"
+    )
+    with pytest.raises(ScriptCommandError) as caught:
+        _run([sys.executable, "-c", script], cwd=pathlib.Path.cwd())
+
+    assert "4800 prediction ids not in labels" in str(caught.value)
+    # 类型不变，既有的 SubprocessError 捕获点照常生效
+    assert isinstance(caught.value, subprocess.CalledProcessError)
+
+
+def test_a_successful_command_still_returns_its_output() -> None:
+    import pathlib
+    import sys
+
+    from athena.research.script_runner import _run
+
+    completed = _run([sys.executable, "-c", "print('ok')"], cwd=pathlib.Path.cwd())
+
+    assert completed.stdout.strip() == "ok"
+    assert completed.returncode == 0

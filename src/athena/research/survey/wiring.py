@@ -20,7 +20,7 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from openai import AsyncOpenAI, RateLimitError
@@ -33,10 +33,13 @@ from athena.research.paper_markdown.interfaces import (
     VisualInterpretationRequest,
 )
 from athena.research.paper_markdown.tool import PaperMarkdownTool
+from athena.research.paper_rag.search import CorpusCache, RetrievalSession
 from athena.research.paper_rag.tool import (
     PaperChunkReadTool,
     PaperCitesTool,
+    PaperCorpusOverviewTool,
     PaperKeywordSearchTool,
+    PaperSearchTool,
     PaperSectionSearchTool,
     PaperSemanticSearchTool,
     PaperVisualOfTool,
@@ -45,13 +48,17 @@ from athena.research.paper_scout.backends import (
     SEMANTIC_SCHOLAR_INTERVAL,
     build_default_backends,
 )
+from athena.research.paper_scout.reranker import DashScopeReranker
+from athena.research.paper_source.fetcher import LocatorCache
 from athena.research.paper_source.http import HostRateLimiter, UrllibTransport
 from athena.research.paper_source.tool import PaperFetchTool
+from athena.research.survey.library import LibraryVectorCache, PaperLibrary
 from athena.research.survey.tool import PaperSurveyTool
 
 ARTIFACT_ROOT_ENV = "ATHENA_ARTIFACT_ROOT"
 SURVEY_MODEL_ENV = "ATHENA_SURVEY_MODEL"
 SCORER_MODEL_ENV = "ATHENA_SCORER_MODEL"
+RERANK_MODEL_ENV = "ATHENA_RERANK_MODEL"
 EMBEDDING_MODEL_ENV = "ATHENA_EMBEDDING_MODEL"
 VISION_MODEL_ENV = "ATHENA_VISION_MODEL"
 CONTACT_EMAIL_ENV = "ATHENA_CONTACT_EMAIL"
@@ -110,6 +117,28 @@ def resolve_scorer_model(explicit: str = "") -> str:
     回落而不是报错：不设这个变量时行为与此前完全一致。
     """
     return explicit or os.environ.get(SCORER_MODEL_ENV, "")
+
+
+def build_reranker(model: str = "") -> DashScopeReranker | None:
+    """按 ``ATHENA_RERANK_MODEL`` 建同分次序的交叉编码器；未配置时返回 ``None``。
+
+    与编码器、视觉模型同样是可降级的能力：没有它排序退回 ``pool.tie_break`` 的散列，
+    行为与接入之前完全一致，因此不在装配期强制要求。
+
+    凭据复用 ``settings`` 那份 —— rerank 与打分、编码走同一个百炼账号，只是端点不同
+    （它不是 OpenAI 兼容接口，见 ``DashScopeReranker``）。多解析一份 key 就多一处能
+    不一致的地方。
+
+    拿不到 key 时返回 ``None`` 而不是抛错：``.env`` 只配了 ``ATHENA_RERANK_MODEL``
+    却没有凭据的情况下，让整条链路跑不起来比降级更糟。
+    """
+    resolved = model or os.environ.get(RERANK_MODEL_ENV, "")
+    if not resolved:
+        return None
+    api_key = getattr(settings.get_client(), "api_key", "") or ""
+    if not api_key:
+        return None
+    return DashScopeReranker(api_key, resolved)
 
 
 def build_artifact_store(root: str | Path = "") -> LocalArtifactStore:
@@ -319,6 +348,10 @@ class SurveyStack:
     因此不在装配期强制要求。
 
     ``scorer_model`` 为空串表示打分沿用 ``model``，用 ``effective_scorer_model()`` 取值。
+
+    ``corpus_cache`` 挂在 stack 上而不是每套工具各建一个：一次运行里可能有多个 Agent
+    读同一份语料（三条 Ideator lane 各拿一套工具），解码后的语料是只读的，共享一份
+    才不会把内存乘以并发度。
     """
 
     artifacts: LocalArtifactStore
@@ -332,10 +365,40 @@ class SurveyStack:
     semantic_scholar_api_key: str = ""
     openalex_api_key: str = ""
     ghostscript: str = ""
+    corpus_cache: CorpusCache = field(default_factory=CorpusCache)
+    library: PaperLibrary | None = None
+    reranker: DashScopeReranker | None = None
+
+    def locator_cache(self) -> LocatorCache:
+        """落盘的取源定位符缓存，放在论文库根下。
+
+        没有库时退回进程内缓存（行为与此前一致）。缓存的价值全在跨进程：arXiv 每 3 秒
+        只允许一次请求，而一次 10 篇的调研要发几十次。
+        """
+        if self.library is None:
+            return LocatorCache()
+        return LocatorCache(self.library.root / "locators.json")
+
+    def vector_cache(self) -> LibraryVectorCache | None:
+        """按篇复用句向量的缓存；没有库或没有编码器时为 ``None``。
+
+        编码器标识进键：不同模型的向量不在同一个空间里，混用会让检索给出看上去正常、
+        实际毫无意义的分数。
+        """
+        if self.library is None or self.embedder is None:
+            return None
+        return LibraryVectorCache(self.library, self.artifacts, self.embedder.model)
 
     def effective_scorer_model(self) -> str:
         """实际用于打分的模型名；未单独配置时就是策略模型。"""
         return self.scorer_model or self.model
+
+    def rerank_model(self) -> str:
+        """同分次序用的交叉编码器名；没配时为空串。
+
+        进检索缓存键（见 ``pipeline._scorer_fingerprint``）：换了它，同分论文的次序就变了，
+        缓存里那份结果不再代表当前配置。"""
+        return self.reranker.model if self.reranker is not None else ""
 
     def build_backends(self) -> tuple[list, object]:
         """构造共享限流器的检索后端与引用后端。"""
@@ -355,6 +418,8 @@ def build_survey_stack(
     artifacts: LocalArtifactStore | None = None,
     enable_embedder: bool = True,
     enable_vision: bool = True,
+    enable_library: bool = True,
+    library_root_path: str | Path = "",
 ) -> SurveyStack:
     """按环境变量装配整条 Academic Survey 链路的依赖。
 
@@ -396,6 +461,8 @@ def build_survey_stack(
         semantic_scholar_api_key=os.environ.get(SEMANTIC_SCHOLAR_KEY_ENV, ""),
         openalex_api_key=os.environ.get(OPENALEX_KEY_ENV, ""),
         ghostscript=find_ghostscript(),
+        library=PaperLibrary(library_root_path) if enable_library else None,
+        reranker=build_reranker(),
     )
 
 
@@ -404,22 +471,26 @@ def build_survey_tools(
     *,
     include_survey: bool = True,
     include_producers: bool = True,
-    into: ToolRegistry | None = None,
+    session: RetrievalSession | None = None,
 ) -> ToolRegistry:
-    """注册全链路、取源、转换与六个检索算子，返回可直接交给 Agent 的工具表。
+    """注册全链路、取源、转换与七个检索算子，返回可直接交给 Agent 的工具表。
+
+    七个检索算子共用**一个** ``RetrievalSession``：会话既是语料缓存的入口，也是"本
+    会话已读过哪些 chunk"的账本。每个工具各建一个会话时，两件事都会坏——同一份语料
+    被解码七次，而 ``paper_chunk_read`` 的去重也只对它自己成立。
 
     ``paper_semantic_search`` 只在装配了编码器时注册：没有编码器时它会在每次调用
     时抛错，注册一个必然失败的工具只会诱导模型反复重试。
 
-    ``include_survey=False`` 去掉 ``paper_survey``，留给已经拿到 ``corpus_ref``、
-    只需要读语料的 Agent——把一个几分钟起步的工具摆在那里，模型迟早会去按它。
-    ``include_producers=False`` 连 ``paper_fetch`` / ``paper_markdown`` 一起去掉，
-    只留纯读算子：这两个也会下载和调模型，同样不该出现在只读语料的 Agent 面前。
+    ``include_survey=False`` 去掉 ``paper_survey``，``include_producers=False`` 再去掉
+    取源与转换，留给已经拿到 ``corpus_ref``、只需要读语料的 Agent——把一个几分钟起步
+    的工具摆在那里，模型迟早会去按它。
 
-    ``into`` 把工具并进调用方已有的注册表（重名由 ``ToolRegistry.register`` 报错），
-    用于给已经持有工作区工具的 Agent 追加检索能力。
+    ``session`` 可由调用方注入：会话记着"这个 Agent 真正打开过哪些论文"，而引用核验
+    需要那份账本（见 ``RetrievalSession.read_papers``）。不注入时自建一个，行为不变。
     """
-    tools = into if into is not None else ToolRegistry()
+    tools = ToolRegistry()
+    session = session if session is not None else RetrievalSession(stack.corpus_cache)
     if include_survey:
         tools.register(PaperSurveyTool(stack))
     if include_producers:
@@ -438,11 +509,17 @@ def build_survey_tools(
                 ghostscript=stack.ghostscript or None,
             )
         )
-    tools.register(PaperKeywordSearchTool(stack.artifacts))
-    tools.register(PaperChunkReadTool(stack.artifacts))
-    tools.register(PaperVisualOfTool(stack.artifacts))
-    tools.register(PaperCitesTool(stack.artifacts))
-    tools.register(PaperSectionSearchTool(stack.artifacts))
+    tools.register(PaperCorpusOverviewTool(stack.artifacts, session))
+    tools.register(PaperKeywordSearchTool(stack.artifacts, session))
+    tools.register(PaperChunkReadTool(stack.artifacts, session))
+    tools.register(PaperVisualOfTool(stack.artifacts, session))
+    tools.register(PaperCitesTool(stack.artifacts, session))
+    tools.register(PaperSectionSearchTool(stack.artifacts, session))
     if stack.embedder is not None:
-        tools.register(PaperSemanticSearchTool(stack.artifacts, stack.embedder))
+        tools.register(
+            PaperSemanticSearchTool(stack.artifacts, stack.embedder, session)
+        )
+        # 融合入口只在有编码器时注册：没有向量它会退化成纯词面，与
+        # paper_keyword_search 完全重复，多摆一个只会让选择变难。
+        tools.register(PaperSearchTool(stack.artifacts, stack.embedder, session))
     return tools

@@ -122,6 +122,12 @@ Recall 0.100 对 R@all 0.111，转化率 90%——瓶颈同样在"找不到"，�
 
 ### 主要原因是检索深度，不是查询质量
 
+> **2026-08-17：这条已经落地。** `search_top_k` 默认从 10 提到 50、`max_seconds` 从 600
+> 提到 1800，两者必须一起动——墙钟一直是真正绑定的那条约束（本文多轮 `stop_reason` 都是
+> `max_seconds`、停在第 4 步，`max_steps` 从未生效），只提深度会让步数变少，等于拿广度换
+> 深度。两个参数此前 CLI 都够不着，现在 `survey --search-top-k / --max-seconds` 与
+> `run --survey-search-top-k / --survey-max-seconds` 都能调。
+
 把 `sparbench_000` 里 Agent 自己发出的 4 条查询按不同深度重新执行：
 
 | 检索深度 | 该题 gold 浮现数 |
@@ -154,5 +160,19 @@ Agent 精确检索 domain generalization 并且正确地没有返回 Swin Transf
 - 检索后端与论文不同（arXiv + Semantic Scholar vs 本地 Milvus 快照 / serper.dev 网页搜索），
   数值不是同语料复现。
 - 相关性打分模型与论文不同（`gpt-5.6-terra` vs `pasa-7b-selector`），且打分档位更粗。
+  **2026-08-17 查清了这一条的真正原因**，此前归因是错的：
+
+  1. 端点**支持** logprobs。`scorer.py` 曾写着"实测字段缺失"，不成立——阿里云百炼
+     compatible-mode 上，只要 `logprobs=True` 与 `top_logprobs=5` 一起发，qwen3.6-flash
+     与 qwen3.7-plus 都返回满 5 个候选。`TokenProbabilityScorer` 发的正是这个组合。
+  2. `true_probability()` 读错了 token。`SELECT_PROMPT` 的输出是 `Decision: True/False`，
+     首 token 是 `'Decision'`，判决在第 3 个 token 上。旧实现只看第一个，于是**每篇都返回
+     0.0**——一个合法的 [0,1] 浮点，毫无信息。已修。
+  3. **修好之后 ρ 仍然只有两个取值。** 判决 token 的概率是 `' False':1.000`、其余候选
+     `0.000`，温度 0 下模型完全饱和。所以 `TokenProbabilityScorer` **仍然不启用**——启用
+     会让打分从四档退到两档。
+
+  换端点解决不了第 3 条：论文的 ρ 来自 `pasa-7b-selector`，一个为这件事微调、输出分布经过
+  校准的判别器。要拿回连续 ρ 得换判别模型，那是训练问题不是接口问题。
 - 交付门槛在评测数据上复算选定，见上。
 - 未实现 PSPO，因此不含论文中 RL 微调带来的增益。

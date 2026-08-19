@@ -357,7 +357,7 @@ class ToolRegistrationTest(unittest.TestCase):
             embedder=embedder,
         )
 
-    def test_all_nine_tools_register_when_the_embedder_exists(self) -> None:
+    def test_every_tool_registers_when_the_embedder_exists(self) -> None:
         names = [
             item.name
             for item in build_survey_tools(
@@ -369,9 +369,11 @@ class ToolRegistrationTest(unittest.TestCase):
             [
                 "paper_chunk_read",
                 "paper_cites",
+                "paper_corpus_overview",
                 "paper_fetch",
                 "paper_keyword_search",
                 "paper_markdown",
+                "paper_search",
                 "paper_section_search",
                 "paper_semantic_search",
                 "paper_survey",
@@ -380,10 +382,12 @@ class ToolRegistrationTest(unittest.TestCase):
             names,
         )
 
-    def test_semantic_search_is_omitted_without_an_embedder(self) -> None:
+    def test_the_embedding_channels_are_omitted_without_an_embedder(self) -> None:
+        """没有向量时 paper_search 会退化成纯词面，与 paper_keyword_search 完全重复。"""
         names = [item.name for item in build_survey_tools(self.stack(None)).specs]
 
         self.assertNotIn("paper_semantic_search", names)
+        self.assertNotIn("paper_search", names)
         self.assertIn("paper_keyword_search", names)
 
     def test_the_survey_tool_can_be_left_out_for_corpus_only_agents(self) -> None:
@@ -395,3 +399,45 @@ class ToolRegistrationTest(unittest.TestCase):
 
         self.assertNotIn("paper_survey", names)
         self.assertIn("paper_chunk_read", names)
+
+    def test_a_read_only_agent_gets_neither_the_survey_nor_the_producers(self) -> None:
+        """Ideator 只读语料：取源与转换会写出新语料，不该出现在它的工具表里。"""
+        names = {
+            item.name
+            for item in build_survey_tools(
+                self.stack(None), include_survey=False, include_producers=False
+            ).specs
+        }
+
+        self.assertEqual(
+            set(), names & {"paper_survey", "paper_fetch", "paper_markdown"}
+        )
+        self.assertIn("paper_corpus_overview", names)
+        self.assertIn("paper_chunk_read", names)
+
+    def test_every_retrieval_tool_shares_one_session(self) -> None:
+        """七个算子各建一个会话时，同一份语料会被解码七次，已读账本也只对自己成立。"""
+        tools = build_survey_tools(self.stack(OpenAIEmbedder(FakeClient(), "e")))
+        sessions = {
+            id(tools.resolve(name).session)
+            for name in (
+                "paper_corpus_overview",
+                "paper_keyword_search",
+                "paper_chunk_read",
+                "paper_visual_of",
+                "paper_cites",
+                "paper_section_search",
+                "paper_semantic_search",
+            )
+        }
+
+        self.assertEqual(1, len(sessions))
+
+    def test_separate_tool_sets_share_the_stack_corpus_cache(self) -> None:
+        """三条 Ideator lane 各拿一套工具，但语料只该解码一份。"""
+        stack = self.stack(None)
+        first = build_survey_tools(stack).resolve("paper_keyword_search")
+        second = build_survey_tools(stack).resolve("paper_keyword_search")
+
+        self.assertIsNot(first.session, second.session)
+        self.assertIs(first.session._cache, second.session._cache)

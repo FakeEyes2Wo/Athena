@@ -12,6 +12,7 @@ from athena.core.tool_types import TOOL_BEGIN, TOOL_END, ToolContext
 from athena.research.paper_markdown.schemas import PaperConversionRequest
 from athena.research.paper_source.arxiv import parse_atom_feed, parse_raw_record
 from athena.research.paper_source.fetcher import (
+    DEFAULT_FETCH_CONCURRENCY,
     LocatorCache,
     PaperSourceFetcher,
     sniff_payload,
@@ -382,12 +383,15 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def build(
-        self, routes: dict[str, object]
+        self, routes: dict[str, object], concurrency: int = DEFAULT_FETCH_CONCURRENCY
     ) -> tuple[PaperSourceFetcher, FakeTransport]:
         """Build a fetcher wired to a fake transport and an in-memory cache."""
         transport = FakeTransport(routes)
         fetcher = PaperSourceFetcher(
-            self.artifacts, http=limiter(transport, []), cache=LocatorCache()
+            self.artifacts,
+            http=limiter(transport, []),
+            cache=LocatorCache(),
+            concurrency=concurrency,
         )
         return fetcher, transport
 
@@ -753,6 +757,95 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await fetcher.fetch(self.pasa_request(), cancel)
+
+
+class FetchConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    """并发取源必须与串行版给出**逐字相同**的 records，只是更快。
+
+    这是接受这次改动的全部前提：``stop_after_fetched`` 决定交付集合，而它原本依赖
+    "挨个试、够数即停"。分波并发之后仍要按名次收、够数即停，超出停止点的那几条丢掉。
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.artifacts = LocalArtifactStore(tempfile.mkdtemp(prefix="fetch_conc_"))
+
+    def _fetcher(self, routes, concurrency):
+        return PaperSourceFetcher(
+            self.artifacts,
+            http=limiter(FakeTransport(routes), []),
+            cache=LocatorCache(),
+            concurrency=concurrency,
+        )
+
+    def _request(self, ids: list[str], target: int) -> PaperSourceRequest:
+        return PaperSourceRequest(
+            papers=[PaperRef(identity=PaperIdentity(arxiv_id=item)) for item in ids],
+            policy=PaperSourcePolicy(
+                max_papers=len(ids),
+                stop_after_fetched=target,
+                allow_unpinned_version=True,
+            ),
+        )
+
+    def _routes(self, source: bytes, failing: set[str]) -> dict:
+        routes = {QUERY_URL: ok(ATOM_FEED), "https://arxiv.org/src/": ok(source)}
+        for item in failing:
+            routes[f"https://arxiv.org/src/{item}"] = HttpResponse(
+                status=404, url="", body=b""
+            )
+        return routes
+
+    async def _records(self, ids, failing, target, concurrency):
+        source = tar_gz_bytes(
+            {
+                "main.tex": rb"\documentclass{article}"
+                rb"\begin{document}PaSa\end{document}"
+            }
+        )
+        fetcher = self._fetcher(self._routes(source, failing), concurrency)
+        result = await fetcher.fetch(self._request(ids, target))
+        return [(item.paper_key, item.status) for item in result.records]
+
+    async def test_waves_match_the_serial_order_exactly(self) -> None:
+        """交错的成功与失败是最容易出错的形态：够数的那一刻正落在某一波中间。"""
+        ids = ["2501.10120", "1706.03762", "1512.03385", "2009.02040", "1412.6980"]
+        failing = {"1706.03762", "2009.02040"}
+
+        serial = await self._records(ids, failing, 2, 1)
+        parallel = await self._records(ids, failing, 2, 4)
+
+        self.assertEqual(serial, parallel)
+
+    async def test_a_target_reached_mid_wave_discards_the_rest_of_it(self) -> None:
+        """目标在一波中间达成时，本波剩下的结果必须丢掉，否则 records 会比串行版长。"""
+        ids = ["2501.10120", "1706.03762", "1512.03385", "2009.02040"]
+
+        serial = await self._records(ids, set(), 1, 1)
+        parallel = await self._records(ids, set(), 1, 4)
+
+        self.assertEqual(1, len(serial))
+        self.assertEqual(serial, parallel)
+
+    async def test_no_target_attempts_every_candidate_either_way(self) -> None:
+        """没有停止目标时两者都要把候选试完，一篇不少。"""
+        ids = ["2501.10120", "1706.03762", "1512.03385"]
+
+        serial = await self._records(ids, {"1706.03762"}, 0, 1)
+        parallel = await self._records(ids, {"1706.03762"}, 0, 4)
+
+        self.assertEqual(3, len(serial))
+        self.assertEqual(serial, parallel)
+
+    async def test_all_failing_candidates_are_all_attempted(self) -> None:
+        """全失败时不能提前收手——够数即停不是"试够几次即停"。"""
+        ids = ["2501.10120", "1706.03762", "1512.03385"]
+        failing = set(ids)
+
+        serial = await self._records(ids, failing, 2, 1)
+        parallel = await self._records(ids, failing, 2, 4)
+
+        self.assertEqual(3, len(serial))
+        self.assertEqual(serial, parallel)
 
 
 class PaperFetchToolTest(unittest.IsolatedAsyncioTestCase):

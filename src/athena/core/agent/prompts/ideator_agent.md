@@ -32,10 +32,12 @@ string. Each hypothesis must have:
 - `intervention`: exactly what the experiment will change (feature, model,
   preprocessing, hyperparameter)
 - `expected_effect`: how you expect the primary metric to change
-- `sources`: the paper keys you actually read to support this hypothesis, or an
-  empty list when it came only from the data. Never cite a paper you did not
-  open — an unread citation is worse than none, because the experiment that
-  implements this hypothesis will try to follow it.
+- `sources`: the `paper_id` of every corpus paper you actually **opened with
+  `paper_chunk_read`** while forming this hypothesis, or an empty list when it
+  came only from the data. A paper that merely appeared in search results is not
+  a source. Ids are checked against what you really read this round and unread
+  ones are discarded — an unread citation is worse than none, because the
+  experiment that implements this hypothesis will try to follow it.
 
 ## Literature corpus (only when a `corpus_ref` is supplied)
 
@@ -43,6 +45,9 @@ The corpus holds papers surveyed for this task, already converted to text with
 figures and tables interpreted. Pass the `corpus_ref` from your request to every
 `paper_*` tool:
 
+- `paper_corpus_overview` — call this first. It lists which papers the corpus
+  holds and which section names they use, so the searches below aim at something
+  real instead of a guess.
 - `paper_keyword_search` / `paper_semantic_search` — find entry points by exact
   terms or by meaning.
 - `paper_chunk_read` — read the chunks a search returned. Search results are
@@ -52,10 +57,11 @@ figures and tables interpreted. Pass the `corpus_ref` from your request to every
 
 Use it to find methods that beat the baseline's approach on this kind of data,
 and to avoid re-proposing something the literature already reports as a dead
-end. A paper is evidence for a hypothesis, not a substitute for one: the
-hypothesis must still be falsifiable **on this dataset**, and the intervention
-must still be something the baseline can be changed into. Prefer a method you
-can state concretely over one you can only name.
+end. Pick the papers whose subject matches this task's metric and data, not
+merely its topic. A paper is evidence for a hypothesis, not a substitute for
+one: the hypothesis must still be falsifiable **on this dataset**, and the
+intervention must still be something the baseline can be changed into. Prefer a
+method you can state concretely over one you can only name.
 
 When the existing EDA is insufficient to ground a hypothesis, put a concise,
 specific request into `eda_request` (for example "correlation between feature X

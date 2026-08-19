@@ -85,14 +85,12 @@ class ResearchState(BaseModel):
     eda_dir: str | None = None
     # Supervisor 在首个 task-understanding turn 产出的结构化任务理解（供 GUI 意图预览）。
     task_understanding: dict[str, object] | None = None
-    # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用检索算子。
+    # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用 paper_* 检索算子。
     # 与其他引用一样落在本项目的 artifact store 里，换机器取不到时重跑即可。
     corpus_ref: str | None = None
     # Idea Generation 可用的 handoff 来源（前端 settings_set 可控制），
     # 取值示例：["kaggle"]、["kaggle", "literature"]、[]。
-    handoff_sources: list[str] = Field(
-        default_factory=lambda: ["kaggle", "literature"]
-    )
+    handoff_sources: list[str] = Field(default_factory=lambda: ["kaggle", "literature"])
     # source -> artifact ref，记录已生成的 handoff，供断点续传复用。
     handoff_refs: dict[str, ArtifactRef] = Field(default_factory=dict)
     # 断点续传：首次完整任务文本（续跑时沿用，避免短消息污染 survey/PREPARE 提示词）。
@@ -106,6 +104,31 @@ class ResearchState(BaseModel):
     task_research_agent_id: str | None = None
     # 断点续传：已冻结评估器 bundle；PREPARE 重启时跳过 evaluator 重跑。
     evaluator_ref: ArtifactRef | None = None
+    # 已经为哪一份语料补跑过 ideation。调研要十几分钟，第一轮 ideation 几乎必然早于它
+    # 完成；而调度器只在"无假设可排"时才 GENERATE，短跑测里第一轮就把队列填满，于是
+    # 语料一次都读不到。
+    #
+    # 记的是**语料引用**而不是一个布尔标记：语料现在可以增量扩充（见 PaperLibrary），
+    # 布尔标记会让扩充之后的新论文永远读不到——第一轮补过就再也不补了。存引用之后，
+    # 判据变成"这一份语料补过没有"，扩充自然触发下一轮。
+    corpus_ideated_ref: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_corpus_ideation_flag(cls, payload: object) -> object:
+        """把旧状态里的 ``corpus_ideation_done`` 翻译成 ``corpus_ideated_ref``。
+
+        ``extra="forbid"`` 下，旧字段留在 ``state.json`` 里会让续跑直接校验失败——那是
+        最糟的一种不兼容：用户看到的是崩溃，而不是降级。翻译而不是丢弃，是为了保住原
+        行为：已经补过那一轮的运行不该因为升级而再补一轮。
+        """
+        if not isinstance(payload, Mapping) or "corpus_ideation_done" not in payload:
+            return payload
+        migrated = dict(payload)
+        done = migrated.pop("corpus_ideation_done", False)
+        if done and not migrated.get("corpus_ideated_ref"):
+            migrated["corpus_ideated_ref"] = migrated.get("corpus_ref")
+        return migrated
 
     @model_validator(mode="after")
     def _validate_plan_keys(self) -> "ResearchState":
@@ -156,6 +179,8 @@ class ResearchState(BaseModel):
         payload = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("research state payload must be an object")
+        if "corpus_ideation_done" in payload:
+            payload = cls._migrate_corpus_ideation_flag(payload)
         unknown = [key for key in payload if key not in cls.model_fields]
         if unknown:
             # agent/旧版本可能写入未知键（例如误写的 ``sota``）：告警、备份原文、

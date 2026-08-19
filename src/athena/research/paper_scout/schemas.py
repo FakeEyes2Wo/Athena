@@ -67,6 +67,31 @@ SEARCH_COST = 0.1
 EXPAND_COST = 0.05
 
 
+SEARCH_TOP_K_NOTE = """检索深度为什么从 10 提到 50。
+
+论文的 ``top_k = 10`` 是针对全 arXiv 的稠密语义索引设的；本实现走 arXiv 的词法排序与
+Semantic Scholar / OpenAlex，同一个常数不成立——gold 会散落在 10–50 名之间，在进入打分
+之前就被丢掉。
+
+实测（``sparbench_000``，拿 Agent **自己发出的那 4 条查询**换深度重跑，查询本身不变）：
+
+======  ==============
+深度    该题 gold 浮现
+======  ==============
+10      1 / 10
+50      6 / 10
+100     6 / 10
+======  ==============
+
+50 处已经饱和，取 50 而不是 100——多出来的深度只多付打分的钱，不多找到论文。
+
+**这个参数不能单独调。** 每步的打分量随它线性增长，而 ``max_seconds`` 一直是真正绑定的
+那条约束：三轮真机里两轮 ``stop_reason: max_seconds``、停在第 4 步，``max_steps`` 从未生
+效。只提深度不放宽墙钟，换来的是步数变少——用探索广度换掉探索深度，净效果可能为负。
+两者必须一起动。
+"""
+
+
 class ScoutPaper(BaseModel):
     """池中的一篇论文，带有它是怎样被发现的以及它的相关性分数。"""
 
@@ -98,6 +123,15 @@ class ScoutPaper(BaseModel):
         default=None, description="Upstream open-access claim; None when unknown."
     )
     relevance: float = Field(default=0.0, ge=0.0, le=1.0, description="Score in [0,1].")
+    affinity: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Cross-encoder affinity, used only to order papers the grader scored "
+            "identically. Not comparable to relevance: a different scale entirely, "
+            "measured in [0.006, 0.364] on a real pool. 0.0 means no signal."
+        ),
+    )
     expanded: bool = Field(
         default=False, description="Whether its references were already followed."
     )
@@ -142,7 +176,72 @@ class ScoutStats(BaseModel):
     )
     policy_calls: int = Field(default=0, ge=0)
     scorer_calls: int = Field(default=0, ge=0)
+    rerank_calls: int = Field(default=0, ge=0)
+    rerank_failures: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Rerank batches that failed after retry. Those papers carry affinity "
+            "0.0 and sort last within their grade, so a non-zero count means the "
+            "tie ordering was partly biased, not merely degraded."
+        ),
+    )
     backend_requests: int = Field(default=0, ge=0)
+    policy_seconds: float = Field(default=0.0, ge=0.0)
+    scorer_seconds: float = Field(default=0.0, ge=0.0)
+    rerank_seconds: float = Field(default=0.0, ge=0.0)
+    backend_seconds: float = Field(default=0.0, ge=0.0)
+    """四项**串行累计**耗时，不是墙钟占比。
+
+    加这四个字段的直接起因：一次真机调研 scout 段 936.8 秒，而当时能报出来的只有调用
+    次数——策略 6 次、打分 14 次、同分排序 12 次、后端 31 次——**那 936.8 秒归不到其中
+    任何一项**。同一条 query 三轮跑出 631 / 881 / 937 秒，动作最少的那轮反而最慢，
+    没有分段计时就永远只能猜。
+
+    ``_absorb`` 里打分与 rerank 是并发的，多个后端也是并发的，所以四项之和会**大于**
+    scout 墙钟。这正是 ``PaperOutcome.vision_calls`` 踩过的坑：它拿共享计数器的差值当
+    单篇成本，并发下逐篇求和比总数大 9–12 倍。这里从一开始就说清楚——要读"谁最贵"看
+    这四个数，要读"占了多少墙钟"只能看 ``scout_seconds``，两者不可混用。
+    """
+    boundary_tier: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Papers tied at the score where delivery was cut. Scoring has four levels, "
+            "so this is routinely dozens: it is the size of the choice that used to be "
+            "made by a hash."
+        ),
+    )
+    boundary_reranked: bool = Field(
+        default=False,
+        description="The boundary tier was resolved by rerank rather than by hash.",
+    )
+    reference_edges: int = Field(
+        default=0,
+        ge=0,
+        description="In-corpus citation edges resolved from the upstream reference API.",
+    )
+    selection_note: str = Field(
+        default="",
+        description=(
+            "Why selection took the path it did. Kept out of `errors` on purpose: "
+            "falling back to hash order is a degraded selection, not a failed run, "
+            "and marking the run partial for it would hide real backend failures."
+        ),
+    )
+    facets: list[str] = Field(
+        default_factory=list,
+        description="Facets the topic was split into for coverage-aware selection.",
+    )
+    facet_coverage: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of facets covered by the delivered set. Relevance ranking alone "
+            "cannot express 'ten good papers all about the same method'."
+        ),
+    )
     wall_seconds: float = Field(default=0.0, ge=0.0)
     stop_reason: str = Field(default="", description="Why the loop terminated.")
     errors: list[str] = Field(default_factory=list)
@@ -165,12 +264,26 @@ class ScoutRequest(BaseModel):
     max_parallel_calls: int = Field(
         default=5, ge=1, description="Tool calls honoured per step."
     )
-    search_top_k: int = Field(default=10, ge=1, description="Results per search call.")
+    search_top_k: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Results per search call. The paper's 10 does not carry over to a "
+            "lexical backend; see SEARCH_TOP_K_NOTE."
+        ),
+    )
     expand_top_k: int = Field(
         default=20, ge=1, description="References followed per expand call."
     )
     max_papers: int = Field(default=0, ge=0, description="0 means no handoff cap.")
-    max_seconds: float = Field(default=600.0, gt=0, description="Wall-clock budget.")
+    max_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        description=(
+            "Wall-clock budget, raised together with search_top_k: at 600s it was "
+            "the clock and not max_steps that stopped the run."
+        ),
+    )
     retain_threshold: float = Field(
         default=RETAIN_THRESHOLD,
         ge=0.0,
@@ -207,6 +320,14 @@ class ScoutCorpus(BaseModel):
     )
     pool: list[ScoutPaper] = Field(description="Every paper accepted into the pool.")
     actions: list[ScoutAction] = Field(description="Ordered action trace.")
+    reference_edges: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Delivered paper -> the delivered papers it cites, from the upstream "
+            "reference API. Parsing bibliographies alone yielded 1 edge across 20 "
+            "papers, which leaves paper_cites and cited_by inert at production size."
+        ),
+    )
     stats_ref: ArtifactRef = Field(description="Reference to the run statistics.")
 
 

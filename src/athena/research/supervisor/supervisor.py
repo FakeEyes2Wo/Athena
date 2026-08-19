@@ -20,7 +20,10 @@ from athena.research.supervisor.experiment import (
     PlanTurnResult,
     decide_settlement,
     load_agent_result,
+    handoff_block,
+    hypothesis_block,
     load_best,
+    read_eval_handoff,
 )
 from athena.research.supervisor.plans import (
     PlanDecision,
@@ -283,6 +286,7 @@ class Supervisor(SupervisorActions):
             tolerance=self._tolerance,
             evaluator_ref=self._evaluator_ref,
             tree_ref=tree_ref,
+            eval_handoff=await read_eval_handoff(self._store, self._evaluator_ref),
             human_context="\n".join(guidance),
             initial_turn_limit=hypothesis.turn_limit,
             initial_patience=hypothesis.patience,
@@ -574,9 +578,7 @@ class Supervisor(SupervisorActions):
             hypothesis = self.tree.get_hypothesis(plan_id)
             reference = self.tree.get_experiment(plan_input.reference_experiment_id)
         except KeyError as exc:
-            logger.warning(
-                "cannot repair missing experiment exp_%s: %s", plan_id, exc
-            )
+            logger.warning("cannot repair missing experiment exp_%s: %s", plan_id, exc)
             return False
         experiment_id = f"exp_{plan_id}"
         try:
@@ -598,9 +600,7 @@ class Supervisor(SupervisorActions):
                 ),
             )
         except (KeyError, ValueError) as exc:
-            logger.warning(
-                "cannot repair missing experiment exp_%s: %s", plan_id, exc
-            )
+            logger.warning("cannot repair missing experiment exp_%s: %s", plan_id, exc)
             return False
         return True
 
@@ -742,11 +742,80 @@ class Supervisor(SupervisorActions):
         await self._wake.wait()
         return not self._stopped
 
+    def _corpus_block(self, plan_id: str) -> str:
+        """告诉这个候选：它的假设引了哪几篇论文，以及怎么去读。
+
+        引用一直只停在假设的 ``sources`` 字段里，而真正要用到细节的是**实现**那一步：
+        损失函数怎么写、gamma 取多少、要不要配合重采样。一条写着"用 focal loss"的假设，
+        答案就在被引的那几篇里，而 PlanAgent 此前既拿不到检索算子，也不知道自己该读谁。
+
+        点名 ``paper_id`` 而不是把正文整段拼进来：正文在 chunk 里可能有几千字，而
+        ``paper_chunk_read`` 本来就是渐进披露的接口——候选自己决定读多少。
+        """
+        corpus_ref = self.state.corpus_ref
+        if corpus_ref is None:
+            return ""
+        try:
+            hypothesis = self.tree.get_hypothesis(plan_id)
+        except KeyError:
+            # PREPARE / VALIDATE 的 plan_id 不是假设 id——它们本来就没有引用
+            return ""
+        sources = list(hypothesis.sources or [])
+        if not sources:
+            return ""
+        return (
+            f"\n\nThe literature corpus for this task is available "
+            f"(corpus_ref={corpus_ref!r}). This hypothesis was formed from: "
+            f"{', '.join(sources)}. Use paper_search and paper_chunk_read on those "
+            "papers for the implementation details the hypothesis leaves open — "
+            "exact loss formulation, hyper-parameter ranges, preprocessing. Follow "
+            "what they report; do not invent numbers they do not give."
+        )
+
+    async def _plan_handoff(self, plan_id: str) -> str:
+        """取该 Plan 冻结时记下的评估契约；取不到就返回空串，不影响这一轮。"""
+        try:
+            return (await self.plan_input(plan_id)).eval_handoff
+        except (KeyError, OSError, ValueError):
+            return ""
+
+    async def _corpus_ideation(self) -> bool:
+        """语料落地（或扩充）之后补一轮 ideation，让调研的产出真的被读到。
+
+        非阻塞设计（SEARCH 绝不为调研停等）本身没问题，但它单独并不成立：调度器只在
+        "没有假设可排"时才 GENERATE，而第一轮 ideation 几乎必然早于调研完成——真机实测
+        语料就绪比第一轮 ideation 晚约两分钟，那一轮把队列填满之后调度器再没需要生成，
+        于是十几分钟的调研成果一次都没被读到，6 条假设 0 条引用语料。
+
+        触发条件是**语料版本变了**，不是"补过没有"。语料现在可以增量扩充，用布尔标记
+        会让扩充进来的新论文永远读不到——第一轮补过就再也不补了。
+
+        补的这一轮不动实验预算：它只往队列里加候选，跑几个仍由 ``search_limit`` 决定。
+        """
+        corpus_ref = self.state.corpus_ref
+        if corpus_ref is None or corpus_ref == self.state.corpus_ideated_ref:
+            return False
+        if self._run_ideator_turn is None:
+            # 没有 Ideator 就没有"读语料的那一步"，记下版本避免每轮重试。
+            self.state.corpus_ideated_ref = corpus_ref
+            await self._persist_state()
+            return False
+        # 先落状态再跑：重入时不会为同一份语料补第二轮。
+        self.state.corpus_ideated_ref = corpus_ref
+        await self._persist_state()
+        hypotheses = await self._run_ideator_turn(self.state.hypotheses_per_ideator)
+        if self._stopped:
+            return False
+        registered = await self.register_hypotheses(hypotheses)
+        return len(registered["hypothesis_ids"]) > 0
+
     async def _fill_slots(self) -> bool:
         """Apply Scheduler actions until all available slots are accounted for."""
         if self._stopped:
             return False
-        generated = False
+        generated = await self._corpus_ideation()
+        if self._stopped:
+            return generated
         actions = self._scheduler.next_actions(
             self.state,
             self.tree,
@@ -794,6 +863,20 @@ class Supervisor(SupervisorActions):
         if plan_id not in self._running:
             self._running[plan_id] = asyncio.create_task(self._run_one_turn(plan_id))
 
+    def _hypothesis_block(self, plan_id: str) -> str:
+        """本 Plan 要检验的那条假设，拼进 prompt 正文。
+
+        ``plan_id`` 就是 ``hypothesis_id``（见 ``start_plan``）。树里取不到时返回空串
+        而不是抛异常：少一段上下文该降级，不该让整条 Plan 挂掉。
+        """
+        try:
+            hypothesis = self.tree.get_hypothesis(plan_id)
+        except KeyError:
+            return ""
+        return hypothesis_block(
+            hypothesis.statement, hypothesis.intervention, hypothesis.expected_effect
+        )
+
     async def _run_one_turn(self, plan_id: str) -> _CompletedTurn:
         """Spend one turn durably, run the Agent, then execute trusted scoring."""
         state = self.state.plans[plan_id]
@@ -808,6 +891,11 @@ class Supervisor(SupervisorActions):
                         f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
                         f"turn limit: {state.turn_limit}; patience: {state.patience}; "
                         f"stale rounds: {state.stale_rounds}."
+                        # 假设与契约都必须走 content：context_refs 到不了 model
+                        # （见 experiment.hypothesis_block / handoff_block）。
+                        + self._hypothesis_block(plan_id)
+                        + handoff_block(await self._plan_handoff(plan_id))
+                        + self._corpus_block(plan_id)
                     ),
                     "context_refs": [state.context_ref],
                 },

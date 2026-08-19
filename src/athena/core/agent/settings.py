@@ -71,8 +71,18 @@ def _resolve(key: str, config_path: tuple[str, ...] = (), default: str | None = 
 
 
 def api_key() -> str | None:
-    """读取 LLM_API_KEY，回退 DEEPSEEK_API_KEY / OPENAI_API_KEY（只从环境变量读取）。"""
-    return _resolve("LLM_API_KEY", default=_resolve("DEEPSEEK_API_KEY", _resolve("OPENAI_API_KEY")))
+    """读取 LLM_API_KEY，回退 DEEPSEEK_API_KEY / OPENAI_API_KEY（只从环境变量读取）。
+
+    三层回退都必须走 ``default=`` 关键字：``_resolve`` 的第二个位置参数是 config.toml
+    的路径元组，把回退值放进去会让它被当成路径逐字符展开，于是"只配了
+    ``OPENAI_API_KEY``"这一种（也是最常见的一种）配置永远解析不出密钥。
+    """
+    return _resolve(
+        "LLM_API_KEY",
+        default=_resolve(
+            "DEEPSEEK_API_KEY", default=_resolve("OPENAI_API_KEY")
+        ),
+    )
 
 
 def base_url() -> str:

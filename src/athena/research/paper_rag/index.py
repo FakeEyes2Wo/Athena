@@ -8,13 +8,16 @@
 落，Markdown 结构行占了相当比例，放任它们与正文句平权参与检索会系统性地劣化排序。
 """
 
+import io
 import json
 import math
 import re
 
+import numpy
+
 from athena.core.contracts import ArtifactRef
 from athena.research.paper_markdown.schemas import PaperContent, RetrievalUnit
-from athena.research.paper_rag.interfaces import TextEmbedder
+from athena.research.paper_rag.interfaces import TextEmbedder, VectorCache
 from athena.research.paper_rag.schemas import (
     CorpusEntry,
     CorpusSentence,
@@ -49,6 +52,7 @@ BIBLIOGRAPHY_KIND = "bibliography"
 ABSTRACT_KIND = "abstract"
 CITATION_KEY = re.compile(r"\[@([^\]\s]+)\]")
 MIN_TITLE_MATCH_CHARS = 20
+MIN_TITLE_RUN_CHARS = 40
 HEADING_PATH_PREFIX = "> Section:"
 TABLE_DELIMITER = re.compile(r"^\|[\s\-:|]+\|?$")
 DISPLAY_MATH_FENCES = {"$$": "$$", "\\[": "\\]"}
@@ -90,6 +94,11 @@ ABBREVIATIONS = frozenset(
     }
 )
 MIN_SENTENCE_CHARS = 2
+OVERVIEW_ANCHOR_CHARS = 280
+"""判断门面是否有实质正文时看的窗口，与 ``search.OVERVIEW_ABSTRACT_CHARS`` 同宽。
+
+同宽是硬要求：这个判断要回答的正是"读者实际看到的那段字里有多少是正文"。
+"""
 EMBED_BATCH = 128
 SENTENCE_TERMINATORS = (".", "!", "?")
 DISPLAY_MATH_CLOSERS = ("$$", "\\]")
@@ -262,6 +271,32 @@ def visual_link_ids(unit: RetrievalUnit) -> list[str]:
     return [f"{namespace}:{item}" for item in linked.split(",") if item]
 
 
+def pack_vectors(vectors: "list[list[float]] | numpy.ndarray") -> bytes:
+    """把归一化后的向量打包成 float32 numpy 缓冲。
+
+    1.0 的 JSON 文本编码在真实语料上不可用：44 篇论文的 36920 条句向量落盘 800 MB，
+    ``json.loads`` 要 10 秒，解码成 ``list[list[float]]`` 常驻 1.15 GB（每个 Python
+    float 24 字节）。同一批向量按 float32 打包是 144 MB、装载 0.02 秒、常驻 144 MB，
+    而 float32 与 float64 的差异在 1e-7 量级，对 top-k 排序没有影响。
+    """
+    buffer = io.BytesIO()
+    numpy.save(buffer, numpy.asarray(vectors, dtype=numpy.float32), allow_pickle=False)
+    return buffer.getvalue()
+
+
+def unpack_vectors(data: bytes) -> numpy.ndarray:
+    """读回 ``pack_vectors`` 写下的缓冲，得到 ``(句数, 维度)`` 的 float32 矩阵。"""
+    return numpy.load(io.BytesIO(data), allow_pickle=False)
+
+
+def decode_json_vectors(text: str) -> numpy.ndarray:
+    """读回 1.0 语料的 JSON 向量，仍归一成同一种内存表示。
+
+    磁盘格式有两种，内存表示只有一种：旧语料只是多付一次解析，检索路径无需分支。
+    """
+    return numpy.asarray(json.loads(text), dtype=numpy.float32)
+
+
 async def embed_texts(
     store: ArtifactStore, texts: list[str], embedder: TextEmbedder
 ) -> ArtifactRef:
@@ -270,7 +305,7 @@ async def embed_texts(
     for start in range(0, len(texts), EMBED_BATCH):
         batch = await embedder.embed(texts[start : start + EMBED_BATCH])
         vectors.extend(normalize(vector) for vector in batch)
-    return await store.put_text(json.dumps(vectors))
+    return await store.put_bytes(pack_vectors(vectors))
 
 
 async def embed_sentences(
@@ -282,6 +317,24 @@ async def embed_sentences(
         [index.sentence_text(position) for position in range(len(index.sentences))],
         embedder,
     )
+
+
+async def embed_paper_sentences(
+    index: PaperCorpusIndex, start: int, end: int, embedder: TextEmbedder
+) -> numpy.ndarray:
+    """编码一篇论文名下的句子区间，返回归一化后的 float32 矩阵。
+
+    按篇编码而不是整份语料一次编码，是为了让**每篇的向量可以单独缓存**：句子是从
+    ``PaperContent`` 确定性切出来的，同一篇论文在两份语料里切出的句子序列必然相同，
+    因此向量整篇复用是安全的。一次 44 篇的语料要编码 36920 条句子（2308 批请求），
+    而两次调研之间往往有大半论文是重合的。
+    """
+    texts = [index.sentence_text(position) for position in range(start, end)]
+    vectors: list[list[float]] = []
+    for offset in range(0, len(texts), EMBED_BATCH):
+        batch = await embedder.embed(texts[offset : offset + EMBED_BATCH])
+        vectors.extend(normalize(vector) for vector in batch)
+    return numpy.asarray(vectors, dtype=numpy.float32).reshape(len(texts), -1)
 
 
 class NonSemanticEmbedderError(RuntimeError):
@@ -323,16 +376,96 @@ async def require_semantic_embedder(embedder: TextEmbedder) -> float:
     return margin
 
 
+NON_ANCHOR_KINDS = frozenset({"table", "figure", "equation", "bibliography", "code"})
+MIN_ANCHOR_PROSE_CHARS = 40
+FRONT_MATTER_SCAN = 6
+LATEX_COMMAND = re.compile(r"\\[a-zA-Z@]+\*?")
+
+
+def novel_prose_chars(text: str, title: str) -> int:
+    """一段文本里**新增信息**的字符数：扣掉标题与 LaTeX 命令之后还剩多少实词。
+
+    直接数字母不够。作者列表与论文题目都由字母组成，数出来是满的，而读者从这段文字里
+    一个字的新信息都得不到——标题已经在 ``title`` 字段里另给了一份。真机上有一篇的首个
+    chunk 整段是 ``\\definecolor…pdftitle=`` 的 LaTeX 导言区。
+    """
+    window = text.strip()
+    if window.startswith(HEADING_PATH_PREFIX):
+        window = window.split("\n", 1)[-1].strip()
+    window = LATEX_COMMAND.sub(" ", window[:OVERVIEW_ANCHOR_CHARS])
+    title_words = {word.lower() for word in LETTER_RUN.findall(title) if len(word) > 2}
+    return sum(
+        len(word)
+        for word in LETTER_RUN.findall(window)
+        if word.lower() not in title_words
+    )
+
+
+def anchor_index(kinds: list[str], texts: list[str], titles: list[str]) -> int:
+    """选出一篇论文的门面单元下标：优先摘要，否则前几个里第一段像正文的。
+
+    这个落点有三个消费者——``paper_corpus_overview`` 的摘要、引用边的指向、以及写进
+    Ideator 提示词的语料目录——所以它必须只有一处定义。
+
+    退化规则从"取第一个单元"改成"取前几个里第一段有实质正文的"。真机（语料 A，44 篇）
+    实测：**20 篇没有 abstract kind 的 chunk**，退化之后 3 篇的门面落在表格上、1 篇落在
+    插图上，还有几篇落在只有标题和作者名的首段。语料的前门因此有一半是坏的，而它同时是
+    引用边的落点——``paper_cites`` 指过去就是一张表。
+
+    只扫前 ``FRONT_MATTER_SCAN`` 个：前置区块就那么长，再往后就成了"随便找一段正文"，
+    那不是门面。都不合格时仍退回第一个，选片必须永远给得出结果。
+    """
+    for position, kind in enumerate(kinds):
+        if kind == ABSTRACT_KIND:
+            return position
+    for position in range(min(FRONT_MATTER_SCAN, len(kinds))):
+        if kinds[position] in NON_ANCHOR_KINDS:
+            continue
+        if novel_prose_chars(texts[position], titles[position]) >= MIN_ANCHOR_PROSE_CHARS:
+            return position
+    return 0
+
+
 def paper_anchors(units_by_paper: list[list[RetrievalUnit]]) -> dict[str, str]:
-    """给每篇论文选一个可被引用指向的落点：优先摘要，否则第一个单元。"""
+    """给每篇论文选一个可被引用指向的落点；规则见 ``anchor_index``。"""
     anchors: dict[str, str] = {}
     for units in units_by_paper:
         if not units:
             continue
         namespace = units[0].metadata.get("retrieval_namespace", "")
-        chosen = next((item for item in units if item.kind == ABSTRACT_KIND), units[0])
+        chosen = units[
+            anchor_index(
+                [item.kind for item in units],
+                [item.text for item in units],
+                [item.metadata.get("title", "") for item in units],
+            )
+        ]
         anchors[namespace] = chosen.unit_id
     return anchors
+
+
+def title_matches(key: str, normalized: str) -> bool:
+    """一条参考文献的规范化文本是否指向标题规范化为 ``key`` 的论文。
+
+    先试整题包含，这是干净的情形。真实语料里大量引用过不了这一关，原因不是引错了论文
+    而是标题本身有出入：作者拼错自己的题目（``hetergeneous`` vs ``heterogeneous``）、
+    引用的是 arXiv 版而语料收的是会议版（多出一个 ``representation``）。整题包含对这
+    一个字符的差别是全或无的。
+
+    因此再试一条：标题里存在一段 ``MIN_TITLE_RUN_CHARS`` 长的连续规范化字符出现在参考
+    文献里，就算命中。阈值取 40 是有依据的——44 篇真实语料上它恰好补回三条人工核对为
+    真的引用（10→11 篇引用方、8→10 篇被引方），且不引入任何误连；同时它天然排除短标题
+    （"Enhanced Cost-sensitive Ensemble" 规范化后只有 29 字符，永远够不到 40），而短标题
+    正是宽松匹配下误连的唯一来源。
+    """
+    if len(key) >= MIN_TITLE_MATCH_CHARS and key in normalized:
+        return True
+    if len(key) < MIN_TITLE_RUN_CHARS:
+        return False
+    return any(
+        key[start : start + MIN_TITLE_RUN_CHARS] in normalized
+        for start in range(len(key) - MIN_TITLE_RUN_CHARS + 1)
+    )
 
 
 def citation_edges(
@@ -340,9 +473,10 @@ def citation_edges(
 ) -> dict[tuple[str, str], str]:
     """把参考文献条目解析成 ``(命名空间, 引用键) → 被引论文落点`` 的边。
 
-    只认语料内部的引用：一条参考文献的文本里若包含语料中某篇论文的规范化标题，就把该
-    条目的引用键连到那篇论文。跨出语料的引用没有落点，留着只会变成 ``not_found``。
-    标题短于 ``MIN_TITLE_MATCH_CHARS`` 时不参与匹配，避免"RAG"这类短名误连。
+    只认语料内部的引用：一条参考文献的文本若被 ``title_matches`` 判定指向语料中某篇论
+    文，就把该条目的引用键连到那篇论文。跨出语料的引用没有落点，留着只会变成
+    ``not_found``。标题短于 ``MIN_TITLE_MATCH_CHARS`` 时不参与匹配，避免"RAG"这类短名
+    误连。
     """
     catalogue = [
         (title_key(units[0].metadata.get("title", "")), namespace)
@@ -364,7 +498,7 @@ def citation_edges(
                 (
                     anchors[cited]
                     for key, cited in catalogue
-                    if cited != namespace and key in normalized
+                    if cited != namespace and title_matches(key, normalized)
                 ),
                 None,
             )
@@ -372,6 +506,44 @@ def citation_edges(
                 continue
             for citation_key in CITATION_KEY.findall(unit.text):
                 edges[(namespace, citation_key)] = target
+    return edges
+
+
+def reference_edges(
+    units_by_paper: list[list[RetrievalUnit]],
+    anchors: dict[str, str],
+    paper_edges: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """把上游给的"论文 → 论文"引用关系折成"锚点 → 锚点"的边。
+
+    这条边与 ``citation_edges`` 解析参考文献得到的那条是**互补**的，不是替代：
+
+    - 参考文献解析是 **chunk 级**的——"这一段引了 [@smith2020]"——精确到出处，但只能连上
+      标题恰好能匹配上的那几条。真机实测 20 篇语料只连出 **1 条边**，44 篇连出 16 条：
+      在生产尺寸上等于没有。
+    - 上游 references 是**论文级**的：知道 X 引了 Y，但不知道 X 的哪一段引的。它挂在
+      论文的锚点上——``citing_anchors`` 本来就把任意 chunk 归约到锚点做反向查询，正向
+      也用同一个落点，两个方向才对称。
+
+    只保留两端都在语料里的边：跨出语料的引用没有落点，留着只会让 Agent 读到 ``not_found``。
+    """
+    edges: dict[str, list[str]] = {}
+    present = {
+        units[0].metadata.get("retrieval_namespace", "")
+        for units in units_by_paper
+        if units
+    }
+    for source, targets in paper_edges.items():
+        anchor = anchors.get(source)
+        if anchor is None:
+            continue
+        linked = [
+            anchors[target]
+            for target in targets
+            if target != source and target in present and target in anchors
+        ]
+        if linked:
+            edges[anchor] = list(dict.fromkeys(linked))
     return edges
 
 
@@ -394,6 +566,8 @@ async def build_corpus_index(
     embedder: TextEmbedder | None = None,
     *,
     index_bibliography: bool = False,
+    vectors: VectorCache | None = None,
+    paper_edges: dict[str, list[str]] | None = None,
 ) -> ArtifactRef:
     """把若干篇论文构建成可检索语料，返回三个检索工具接受的 ``corpus_ref``。
 
@@ -409,10 +583,16 @@ async def build_corpus_index(
     units_by_paper = [await paper.load_retrieval_units(store) for paper in papers]
     anchors = paper_anchors(units_by_paper)
     edges = citation_edges(units_by_paper, anchors)
+    # 论文级引用挂在锚点上，与参考文献解析出的 chunk 级引用并存，见 reference_edges
+    anchor_edges = reference_edges(units_by_paper, anchors, paper_edges or {})
 
     entries: list[CorpusEntry] = []
     sentences: list[CorpusSentence] = []
+    # 逐篇记下句子区间，让向量能按篇缓存：句子是从 PaperContent 确定性切出来的，
+    # 同一篇论文在两份语料里的句子序列必然相同。
+    spans_by_paper: list[tuple[int, int]] = []
     for units in units_by_paper:
+        paper_start = len(sentences)
         for unit in units:
             if unit.kind == BIBLIOGRAPHY_KIND and not index_bibliography:
                 continue
@@ -426,7 +606,12 @@ async def build_corpus_index(
                     heading_path=unit.heading_path,
                     text=unit.text,
                     visual_ids=visual_link_ids(unit),
-                    cited_ids=cited_paper_ids(unit, edges),
+                    cited_ids=list(
+                        dict.fromkeys(
+                            cited_paper_ids(unit, edges)
+                            + anchor_edges.get(unit.unit_id, [])
+                        )
+                    ),
                     sentence_start=len(sentences),
                     sentence_end=len(sentences) + len(spans),
                 )
@@ -437,6 +622,7 @@ async def build_corpus_index(
                 )
                 for start, end in spans
             )
+        spans_by_paper.append((paper_start, len(sentences)))
 
     # 未被解释的视觉单元与未索引的参考文献都不在语料里，指向它们的链接必须剔除，
     # 否则 Agent 会读到 not_found
@@ -447,6 +633,38 @@ async def build_corpus_index(
 
     index = PaperCorpusIndex(entries=entries, sentences=sentences)
     if embedder is not None:
-        index.embedding_ref = await embed_sentences(store, index, embedder)
+        index.embedding_ref = await build_embeddings(
+            store, index, papers, spans_by_paper, embedder, vectors
+        )
+        index.embedding_format = "float32"
         index.embedding_model = embedder.model
     return await store.put_text(index.model_dump_json())
+
+
+async def build_embeddings(
+    store: ArtifactStore,
+    index: PaperCorpusIndex,
+    papers: list[PaperContent],
+    spans_by_paper: list[tuple[int, int]],
+    embedder: TextEmbedder,
+    vectors: VectorCache | None,
+) -> ArtifactRef:
+    """按篇编码（或按篇取缓存）后拼成整份语料的向量矩阵。
+
+    没有缓存时行为与整份一次编码完全一致——拼接顺序就是 ``index.sentences`` 的顺序，
+    而那个一一对应关系是语义检索唯一的正确性前提：错位不会报错，只会让之后每一次检索
+    都返回错的句子。
+    """
+    blocks: list[numpy.ndarray] = []
+    for paper, (start, end) in zip(papers, spans_by_paper):
+        cached = await vectors.load(paper, start, end) if vectors is not None else None
+        if cached is not None:
+            blocks.append(cached)
+            continue
+        block = await embed_paper_sentences(index, start, end, embedder)
+        if vectors is not None:
+            await vectors.save(paper, block)
+        blocks.append(block)
+    if not blocks:
+        return await store.put_bytes(pack_vectors([]))
+    return await store.put_bytes(pack_vectors(numpy.concatenate(blocks, axis=0)))

@@ -113,6 +113,11 @@ def register_ideator_agent(
 
     ``profile`` 提供时，agent_type / prompt / 输出契约全部来自 profile；
     ``extra_tools`` 对每个 profile 都一样（Kaggle + literature corpus）。
+
+    输出契约与 prompt 都在注册时绑定，所以开关必须在这一层，不能只在出口处分支。
+
+    ``extra_tools`` 传零参 callable 时按 Agent 实例惰性求值：ideator 只注册一次，而
+    文献语料要十几分钟才建好，冻结注册时刻的工具表等于让语料永远接不进来。
     """
     agent_type = profile.agent_type if profile is not None else IDEATOR_AGENT_TYPE
     prompt_agent_type = (

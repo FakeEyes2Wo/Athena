@@ -40,6 +40,102 @@ Direction = Literal["maximize", "minimize"]
 # manifest 禁止声明的可执行文件（平台自有，agent 不得直接调用）。
 _FORBIDDEN_EXECUTABLES = frozenset({"git", "git.exe"})
 _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
+# 回给 agent 的多余键名上限，避免超长键把反馈挤爆。
+_MAX_FIELD_NAME_CHARS = 40
+
+
+def handoff_block(handoff: str) -> str:
+    """把评估契约拼成一段可直接接在 prompt 后面的正文。
+
+    **必须走 content，不能走 context_refs。** ``base_runner`` 只把 trigger 的
+    ``content`` 当作 model 的 user prompt（``input_text = trigger.content``），
+    ``context_refs`` 里的 artifact 引用从来没有被解析回正文——它是一条死信道。
+    真机（2026-08-16 第 11 次）证据：ideator 的 prompt 里写着"The evaluator contract
+    is attached as context"，而同一次 turn 的完整 user prompt 只有 374 字符，契约一个
+    字都不在里面；PREPARE 那边同样，基线因此只能猜列名，交出 join 不上的预测判 0.0。
+    """
+    if not handoff.strip():
+        return ""
+    return (
+        "\n\n--- Evaluator contract (authoritative; your predictions must match it "
+        "exactly) ---\n"
+        f"{handoff.strip()}\n"
+        "--- end of evaluator contract ---"
+    )
+
+
+def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
+    """把这条 Plan 要检验的假设拼进 prompt 正文。
+
+    与 ``handoff_block`` 是同一条教训的第二处落点：假设此前只经 ``PlanInput`` 走
+    ``context_refs``，而那是一条**死信道**——``base_runner`` 只把 trigger 的 ``content``
+    当作 model 的 user prompt，``context_refs`` 仅以 sha256 引用的形式出现在信封里，
+    通用工具集（``read_file``/``write_file``/``shell_command``）里也没有任何按 ref 取
+    正文的算子。于是 PlanAgent 从来没见过它要实现的那条假设。
+
+    真机（2026-08-18，为文献 A/B 跑的对照臂）证据，6 次实验无一实现分配给它的假设：
+
+    - 3 次直接 ``abandon``，理由逐字是 "The user message does not contain explicit
+      hypothesis text"；
+    - 另 3 次自行编了一个干预。假设写着"加交互特征"的那次，提交的代码实现的是"删掉
+      噪声列"，还自带一行 ``Hypothesis: Removing noise columns ...`` 的注释；写着
+      "用 IterativeImputer 替代中位数填充"的那次，代码里根本没有 IterativeImputer。
+    - 两条不同的假设因此产出**逐字节相同的预测**（AP 都是 0.304924）——它们都退化成了
+      同一个默认动作。
+
+    后果比"少一段上下文"严重得多：整条 SEARCH 检验的不是 Ideator 提的假设，而是
+    PlanAgent 临时想出来的东西。凡是想测"假设质量影响下游分数"的实验，在这条信道修好
+    之前都测不到自己以为在测的东西。
+    """
+    parts = [
+        ("Claim", statement),
+        ("Intervention to implement", intervention),
+        ("Expected effect", expected),
+    ]
+    body = "\n".join(
+        f"{label}: {value.strip()}" for label, value in parts if value and value.strip()
+    )
+    if not body:
+        return ""
+    return (
+        "\n\n--- Hypothesis under test (implement exactly this, nothing else) ---\n"
+        f"{body}\n"
+        "--- end of hypothesis ---"
+    )
+
+
+async def read_eval_handoff(
+    store: ArtifactStore, evaluator_ref: ArtifactRef | None
+) -> str:
+    """Read the evaluator ``HANDOFF.md`` from a frozen bundle (empty when absent).
+
+    冻结的评估器自带一份自述契约：预测该带哪个 id 列、该覆盖哪些行、怎么 join。
+    **写预测的那些 Agent 必须拿到它**——PREPARE 的基线与每个 SEARCH 候选都在写
+    ``predictions/``，而在 2026-08-16 第 10 次跑测之前只有 Ideator 收到过这份文件。
+    结果是基线交出 ``sample_id,probability,label_true`` 覆盖全部 6000 行，而评估器要
+    的是 ``__athena_row_id`` 与那 1200 行留出集，直接判 0.0。
+    """
+    if evaluator_ref is None:
+        return ""
+    try:
+        bundle = DataScriptBundle.model_validate_json(
+            await store.get_text(evaluator_ref)
+        )
+    except (ValueError, OSError):
+        return ""
+    if bundle.tree_ref is None:
+        return ""
+    try:
+        tree = json.loads(await store.get_text(bundle.tree_ref))
+    except (ValueError, OSError):
+        return ""
+    handoff_ref = tree.get("HANDOFF.md")
+    if not isinstance(handoff_ref, str):
+        return ""
+    try:
+        return await store.get_text(handoff_ref)
+    except (ValueError, OSError):
+        return ""
 
 
 def _validate_relative_path(path: str, label: str) -> None:
@@ -54,19 +150,41 @@ def _validate_relative_path(path: str, label: str) -> None:
         raise ValueError(f"{label} path escapes the workspace")
 
 
+def _safe_field_name(part: object) -> str:
+    """多余字段的键名，去掉不可打印字符并截断后才放进反馈。
+
+    只用于 ``extra_forbidden``：该错误的键名按定义就不在 ``_MANIFEST_FIELDS`` 里，
+    一律遮成 ``<field>`` 等于让 agent 永远不知道该删哪个键。键名是它自己写的、
+    长度有界，回给它不构成信息泄露；manifest 的**取值**仍由 ``include_input=False``
+    挡在外面。
+    """
+    printable = "".join(char for char in str(part) if char.isprintable())
+    return printable[:_MAX_FIELD_NAME_CHARS] or "<field>"
+
+
 def _manifest_validation_summary(error: ValidationError) -> str:
-    """Return actionable validation details without manifest input values."""
+    """Return actionable validation details without manifest input values.
+
+    真实跑测（2026-08-16）：agent 在 manifest 里多写了一个 ``metrics`` 块，收到的反馈是
+    ``<field>: Extra inputs are not permitted``——它连删哪个键都不知道，于是原样重交三
+    次直到 PREPARE 轮次预算耗尽。多余键的键名因此必须报出来。
+    """
     summaries: list[str] = []
     for detail in error.errors(
         include_url=False,
         include_context=False,
         include_input=False,
     ):
+        extra_key = detail["type"] == "extra_forbidden"
         location = ".".join(
             (
                 str(part)
                 if isinstance(part, int)
-                else part if part in _MANIFEST_FIELDS else "<field>"
+                else (
+                    part
+                    if part in _MANIFEST_FIELDS
+                    else _safe_field_name(part) if extra_key else "<field>"
+                )
             )
             for part in detail["loc"]
         )
@@ -182,6 +300,8 @@ class PlanTurnResult(BaseModel):
         "output_failed",
         "execution_failed",
         "manifest_invalid",
+        # SEARCH 候选一个文件都没改：它重跑的是父实验，测不了任何东西。
+        "no_change",
     ]
     metric: float | None = None
     commit: CommitHash | None = None
@@ -406,6 +526,20 @@ class PlanRunner:
         metric = evaluation.test_score
 
         diff = await self._workspace.diff(self._branch)
+        # 一个字都没改的 SEARCH 候选不是实验。真机（2026-08-16）：4 个候选的 commit
+        # 全等于 baseline，predictions artifact 逐字节相同，分数一模一样，却有 3 条被
+        # 判 REFUTED——Agent 读了继承来的基线脚本、原样重跑、看见 0.8823 就提交，说
+        # "The hypothesis has produced a working solution"。评估修好之前这一切都被
+        # 恒定的 0.502 盖住了。空 diff 是可以直接判掉的信号。
+        if state.kind == "SEARCH" and not diff.paths:
+            return await self._failure(
+                plan_id,
+                "no_change",
+                "this candidate changed no file, so it re-ran the parent unchanged and "
+                "cannot test anything. Implement the intervention described in the "
+                "hypothesis — edit the solution sources, then rerun and submit.",
+                predictions_ref=predictions_ref,
+            )
         commit = await self._workspace.commit(
             self._branch, diff, f"plan {plan_id} trusted score {metric:.4f}"
         )
@@ -451,6 +585,7 @@ class PlanRunner:
             "output_failed",
             "execution_failed",
             "manifest_invalid",
+            "no_change",
         ],
         error: str,
         *,

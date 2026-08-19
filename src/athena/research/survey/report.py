@@ -64,6 +64,17 @@ def print_check(stack: SurveyStack) -> int:
             stack.ghostscript or f"未找到（EPS/PS 插图读不了，可设 {GHOSTSCRIPT_ENV}）",
         )
     )
+    library = stack.library
+    print(
+        report_line(
+            "论文库",
+            (
+                f"{library.root}（{library.stats()['entries']} 条）"
+                if library is not None
+                else "关闭（每次调研都会重新下载、重新转换、重新编码）"
+            ),
+        )
+    )
     print(report_line("联系邮箱", stack.contact_email or "（未设置，礼貌池不生效）"))
     print(
         report_line(
@@ -96,6 +107,21 @@ def print_report(report: SurveyReport) -> None:
             f"（门槛 {report.retain_threshold}）",
         )
     )
+    if report.boundary_tier:
+        print(
+            report_line(
+                "边界档",
+                f"{report.boundary_tier} 篇同分争最后几个名额，"
+                f"{'已重排' if report.boundary_reranked else '按散列取（重排未生效）'}",
+            )
+        )
+    if report.facets:
+        print(
+            report_line(
+                "课题分面",
+                f"{report.facet_coverage:.0%} 覆盖  ·  {' / '.join(report.facets)}",
+            )
+        )
     if report.scout_dropped_no_source:
         print(
             report_line(
@@ -103,6 +129,8 @@ def print_report(report: SurveyReport) -> None:
                 f"{report.scout_dropped_no_source} 篇过线但取不到源，未占交付名额",
             )
         )
+    for line in report.shredded_papers:
+        print(report_line("碎片剔除", line))
     print(
         report_line(
             "取源成功",
@@ -142,14 +170,37 @@ def print_report(report: SurveyReport) -> None:
             f"total={timings.total_seconds}",
         )
     )
+    if report.scout_busy:
+        busy = sum(report.scout_busy.values())
+        detail = "  ".join(f"{k}={v:.1f}" for k, v in report.scout_busy.items())
+        print(
+            report_line(
+                "scout 忙时",
+                f"{detail}  合计 {busy:.1f}s / 墙钟 "
+                f"{report.timings.scout_seconds:.1f}s（并发，故合计可超墙钟）",
+            )
+        )
     print(
         report_line(
             "调用数",
             f"http={report.http_requests} vision={report.vision_calls}"
             f"(失败 {report.vision_failures}) embed={report.embed_calls}"
-            f"/{report.embedded_texts} 条",
+            f"/{report.embedded_texts} 条"
+            f" 同分排序={report.affinity_calls}"
+            f"{f'(失败 {report.affinity_failures})' if report.affinity_failures else ''}",
         )
     )
+    if report.library:
+        cached = sum(1 for item in report.papers if item.conversion_cached)
+        print(
+            report_line(
+                "论文库",
+                f"命中 {report.library.get('hits', 0)} / 未命中 "
+                f"{report.library.get('misses', 0)}"
+                f"  转换复用 {cached} 篇"
+                f"  检索{'复用' if report.scout_cached else '重跑'}",
+            )
+        )
     # 未尝试的候选不逐条列出：够数即停之后可能有二十来篇，它们既没失败也没花成本，
     # 混在里面只会把真正失败的那几篇淹掉
     untouched = sum(1 for item in report.papers if item.fetch_status == NOT_ATTEMPTED)

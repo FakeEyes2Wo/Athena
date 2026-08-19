@@ -1,0 +1,91 @@
+{
+  "name": "imbalance_auc",
+  "description": "Known-item retrieval over a corpus on imbalanced tabular classification and AUC optimisation. Every question is deliberately paraphrased away from its gold paper's title wording, so a lexical channel cannot win by copying the title back. Read `rationale` before changing any gold: a gold that is merely on-topic is not a gold.",
+  "corpus_papers": 44,
+  "queries": [
+    {
+      "query_id": "k01",
+      "question": "Train on convex combinations of two examples, mixing both the inputs and their labels with a coefficient drawn from a Beta distribution.",
+      "keywords": ["convex combination", "beta distribution", "interpolate training examples"],
+      "gold": ["arxiv:1710.09412"],
+      "rationale": "mixup. The paper's own title says nothing about beta distributions or interpolation, so a title-copying channel gets no help here."
+    },
+    {
+      "query_id": "k02",
+      "question": "Define the uncertainty set as a transport-distance ball centred on the empirical distribution and optimise against the worst case inside it.",
+      "keywords": ["ambiguity set", "worst case distribution", "transport distance"],
+      "gold": ["arxiv:1712.06050"],
+      "rationale": "Wasserstein DRO. Explicitly NOT `arxiv:2203.00176` (When AUC meets DRO): that one uses KL divergence and CVaR and never mentions Wasserstein — an early version of this set had it as gold, which is exactly the mislabel the usability check exists to catch."
+    },
+    {
+      "query_id": "k03",
+      "question": "Ask whether the two standard capacity-control tricks are still needed once batch normalisation is in the network.",
+      "keywords": ["batch normalization", "capacity control", "still necessary"],
+      "gold": ["arxiv:1802.07042"],
+      "rationale": "Do deep nets really need weight decay and dropout. The question names neither of the two tricks, so the channel has to bridge 'capacity control' to them."
+    },
+    {
+      "query_id": "k04",
+      "question": "Optimise only the area under a restricted stretch of the ROC curve, bounded to a false-positive-rate interval, instead of the whole curve.",
+      "keywords": ["false positive rate range", "specificity", "restricted"],
+      "gold": ["doi:10.1177/0962280217718866", "doi:10.1162/neco_a_00972"],
+      "rationale": "Two-Way Partial AUC and the partial-AUC SVM paper. This is the query where lexical ranking collapses: 67 chunks match across 17 papers and a clinical paper that uses 'specificity' as a metric name floods the top of the list."
+    },
+    {
+      "query_id": "k05",
+      "question": "A broad review of how deep models behave when one class vastly outnumbers the other, and what has been tried about it.",
+      "keywords": ["majority", "minority", "survey"],
+      "gold": ["doi:10.1186/s40537-019-0192-5"],
+      "rationale": "Survey on deep learning with class imbalance. Kept deliberately: `majority`/`minority` are the topic words here, so any IDF scheme that down-weights common terms must not break this one."
+    },
+    {
+      "query_id": "k06",
+      "question": "Optimise a ranking objective in a single sweep over the data without keeping earlier examples around.",
+      "keywords": ["one pass", "streaming", "no storage of previous examples"],
+      "gold": ["doi:10.1016/j.artint.2016.03.003"],
+      "rationale": "One-Pass AUC Optimization. 'Ranking objective' rather than AUC, so the channel must bridge the synonym."
+    },
+    {
+      "query_id": "k07",
+      "question": "Optimise a ranking objective when only positive examples are labelled and everything else is unlabelled.",
+      "keywords": ["positive unlabeled", "semi supervised", "ranking objective"],
+      "gold": ["doi:10.1007/s10994-017-5678-9"],
+      "rationale": "Semi-Supervised AUC Optimization based on Positive-Unlabeled Learning."
+    },
+    {
+      "query_id": "k08",
+      "question": "Swap the objective of a gradient-boosted tree ensemble for one that up-weights hard examples, to cope with skewed labels.",
+      "keywords": ["focal loss", "weighted loss", "boosted trees"],
+      "gold": ["arxiv:1908.01672", "arxiv:2310.05067"],
+      "rationale": "Imbalance-XGBoost and Robust-GBDT. Two papers are genuinely correct here; the rank of whichever comes first is what counts."
+    },
+    {
+      "query_id": "k09",
+      "question": "Use a generative model to turn examples of the abundant class into examples of the rare class for tabular data.",
+      "keywords": ["translation", "generative", "tabular"],
+      "gold": ["arxiv:2204.08683"],
+      "rationale": "Imbalanced Classification via a Tabular Translation GAN."
+    },
+    {
+      "query_id": "k10",
+      "question": "Generate new rare-class rows by sampling inside the convex hull spanned by the rare-class neighbourhood.",
+      "keywords": ["convex space", "oversampling", "neighbourhood"],
+      "gold": ["arxiv:2206.09812"],
+      "rationale": "ConvGeN. 'Convex hull' is the paraphrase of the paper's 'convex space'."
+    },
+    {
+      "query_id": "k11",
+      "question": "Several parties hold their own data and optimise a ranking objective jointly without the number of communication rounds growing with the iterations.",
+      "keywords": ["communication complexity", "distributed parties", "ranking objective"],
+      "gold": ["arxiv:2102.04635", "arxiv:2304.10101"],
+      "rationale": "The two federated AUC maximisation papers."
+    },
+    {
+      "query_id": "k12",
+      "question": "Systematically compare the available remedies for skewed class frequencies on convolutional architectures.",
+      "keywords": ["systematic study", "convolutional", "skewed class frequencies"],
+      "gold": ["doi:10.1016/j.neunet.2018.07.011"],
+      "rationale": "A systematic study of the class imbalance problem in convolutional neural networks."
+    }
+  ]
+}

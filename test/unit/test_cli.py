@@ -104,8 +104,25 @@ def test_run_options_configure_runtime_constructor() -> None:
         "ideation": "ideageneration",
         "survey": False,
         "survey_query": "",
-        "survey_max_papers": 10,
+        "survey_max_papers": 20,
+        "survey_search_top_k": 0,
+        "survey_max_seconds": 0.0,
     }
+
+
+def test_the_literature_survey_stays_off_unless_it_is_asked_for() -> None:
+    """默认不跑：一次调研是十几分钟的模型往返，不能由默认值替用户决定花这笔钱。"""
+    base = ["run", "--project", "p", "--data", "d.csv"]
+    parser = cli._build_parser()
+
+    default = cli._runtime_options(parser.parse_args(base))
+    enabled = cli._runtime_options(
+        parser.parse_args([*base, "--survey", "--survey-papers", "4"])
+    )
+
+    assert default["survey"] is False
+    assert enabled["survey"] is True
+    assert enabled["survey_max_papers"] == 4
 
 
 def test_run_defaults_to_auto_validate_for_headless_cli() -> None:
@@ -257,3 +274,76 @@ def test_main_accepts_explicit_argv(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "_dispatch_command", fake_dispatch)
     assert cli.main(["status", "--project", "p"]) == 17
+
+
+class _UnprintableRuntime(FakeRuntime):
+    """Agent 输出里带一个终端编码装不下的字符，随后立刻报 FAILED。
+
+    ``_emit`` 复刻 ``runtime_events.invoke``：订阅者抛异常时只记一笔日志、不往上抛。
+    这正是真实运行里"进程既没崩也没退出"的机制——没有这层吞异常，测试里异常会直接
+    冒泡成另一条退出路径，反而测不到卡死。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.subscriber_errors = 0
+
+    def _emit(self, kind: str, payload: dict) -> None:
+        try:
+            self.callback(kind, payload)
+        except Exception:  # noqa: BLE001 - 与事件总线一致：订阅者故障不影响运行时
+            self.subscriber_errors += 1
+
+    async def start(self) -> None:
+        self.calls.append("start")
+        self._emit(
+            "output",
+            {
+                "type": "output",
+                "seq": 1,
+                "source": "agent",
+                "channel": "text",
+                "text": "done ✅",
+                "plan": None,
+                "tool": None,
+                "artifact_ref": None,
+                "truncated": False,
+            },
+        )
+        self._emit("state", _state(status="FAILED", phase="SEARCH"))
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_fails_still_exits_when_its_output_cannot_be_printed(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    """真实跑测（2026-08-16）：一个 ✅ 让 FAILED 的运行挂到 --timeout 才退出。
+
+    ``print`` 在 GBK 控制台上抛 ``UnicodeEncodeError``，异常打断了 ``receive``，
+    ``terminal.set()`` 因此从没执行。渲染失败只能少一行日志，不能改变退出行为。
+    """
+    runtime = _UnprintableRuntime()
+    monkeypatch.setattr(cli, "_runtime", lambda project, **options: runtime)
+
+    class _Gbk:
+        encoding = "gbk"
+
+        def write(self, text: str) -> int:
+            text.encode("gbk")  # 复现真实终端：装不下就抛
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli.sys, "stdout", _Gbk())
+    data = tmp_path / "train.csv"
+    data.write_text("x,y\n1,0\n", encoding="utf-8")
+    args = cli._build_parser().parse_args(
+        ["run", "--project", "p", "--data", str(data), "--timeout", "5"]
+    )
+
+    assert await cli._cmd_run(args) == 1
+    assert runtime.closed is True
+    # 关键断言：退出码 1 必须来自 FAILED 状态，而不是 --timeout 兜底——两条路都返回
+    # 1，只断言退出码的话这个用例在修复前也会"通过"。
+    assert "timed out" not in capsys.readouterr().err
