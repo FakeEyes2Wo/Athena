@@ -197,6 +197,10 @@ class _ManifestExecution:
             await emit("command/completed", "exec:prepare", result.to_dict())
         return result
 
+    async def collect_outputs(self, subdirs) -> None:
+        """本地替身：产出本来就在工作区里。"""
+        return None
+
 
 class _Harness:
     def __init__(

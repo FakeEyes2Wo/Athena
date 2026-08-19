@@ -84,6 +84,10 @@ class _FakeExecution:
             self.emit_seen.append(emit)
         return self._results.pop(0)
 
+    async def collect_outputs(self, subdirs) -> None:
+        """本地替身：产出本来就在工作区里。"""
+        self.collected = tuple(subdirs)
+
 
 class _FakeWorkspace:
     """Minimal GitWorkspace double committing a fixed sequence of hashes."""

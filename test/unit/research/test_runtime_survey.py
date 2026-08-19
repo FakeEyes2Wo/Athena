@@ -54,6 +54,9 @@ def _stack() -> SurveyStack:
 def _runtime(state: ResearchState, **attributes) -> ResearchRuntime:
     """Build a runtime shell carrying only what the survey paths touch."""
     runtime = ResearchRuntime.__new__(ResearchRuntime)
+    # __new__ 绕过 __init__：算力池的字段要自己补，否则 aclose 归还租约时炸。
+    runtime._pool = None
+    runtime._leases = {}
     runtime._state = state
     runtime._supervisor = SimpleNamespace(
         state=state, kaggle_enabled=False, evaluator_ref=None

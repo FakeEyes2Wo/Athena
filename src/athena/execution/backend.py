@@ -67,6 +67,13 @@ class ExecutionBackend(Protocol):
     ) -> CommandResult:
         """执行一条命令并流式推送事件。"""
 
+    async def collect_outputs(self, subdirs: tuple[str, ...]) -> None:
+        """把 manifest 声明的产出目录取到本地，供**本地**的可信评估器打分。
+
+        本地后端无事可做（文件本来就在那儿）。远程后端必须真的拉回来——
+        评估器与测试标签永远留在控制节点，远端只产出 ``predictions/``。
+        """
+
     async def aclose(self) -> None:
         """释放后端持有的资源（本地无事可做；远程要关掉常驻通道）。"""
 
@@ -144,6 +151,10 @@ class LocalBackend:
             timeout_s=timeout_s,
             emit=emit,
         )
+
+    async def collect_outputs(self, subdirs: tuple[str, ...]) -> None:
+        """本地执行，产出本来就在工作区里。"""
+        del subdirs
 
     async def aclose(self) -> None:
         """本地后端没有需要释放的东西。"""

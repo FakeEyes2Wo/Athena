@@ -124,6 +124,19 @@ class WorkspaceMirror:
         """远端工作区根（posix 路径）。"""
         return str(self._remote)
 
+    @property
+    def local_root(self) -> Path:
+        """本地工作区根。"""
+        return self._local
+
+    def local_manifest(self) -> dict[str, FileEntry]:
+        """本地工作区当前的清单。"""
+        return local_manifest(self._local, excludes=self._excludes)
+
+    async def fetch(self, relative: str) -> bytes:
+        """取回工作区里某个相对路径的字节。"""
+        return await self._channel.read_file(self.remote_path(relative))
+
     def remote_path(self, relative: str) -> str:
         """把工作区相对路径映射成远端绝对路径。"""
         return str(self._remote / PurePosixPath(relative))

@@ -9,6 +9,7 @@
 import json
 import os
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Literal, TypeVar
 
 from pydantic import (
@@ -298,6 +299,7 @@ class PlanRunner:
         context: ExecutionContext,
         direction: Direction = "maximize",
         timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
+        placement: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self._execution = execution
         self._store = store
@@ -307,6 +309,16 @@ class PlanRunner:
         self._context = context
         self._direction = direction
         self._timeout_s = timeout_s
+        # 这次实验跑在哪台机器、哪几张卡上。异构算力下，A 臂拿 A100、B 臂拿 3090
+        # 在墙钟受限的实验里分数不可比——不记进证据就无从发现。
+        #
+        # 是回调而不是快照：远端「哪些大文件没拉回来」要跑完才知道，构造期取值
+        # 会永远得到一份空清单。
+        self._placement = placement
+
+    def _placement_block(self) -> dict[str, Any] | None:
+        """取当前的 placement 记录（本地算力时为 None）。"""
+        return None if self._placement is None else self._placement()
 
     @property
     def workdir(self) -> Path:
@@ -351,6 +363,10 @@ class PlanRunner:
                         "declared dependencies into the environment venv, then retry."
                     )
                 return await self._failure(plan_id, "execution_failed", error)
+
+        # 产出必须先回到控制节点：可信评估器与测试标签永远不出门，远端只产出
+        # predictions/。本地后端这一步是空操作。
+        await self._execution.collect_outputs(tuple(manifest.outputs.values()))
 
         predictions_root = manifest.outputs["predictions"]
         predictions_dir = self.workdir / predictions_root
@@ -410,18 +426,19 @@ class PlanRunner:
         commit = await self._workspace.commit(
             self._branch, diff, f"plan {plan_id} trusted score {metric:.4f}"
         )
+        evidence: dict[str, Any] = {
+            "plan": plan_id,
+            "metric": metric,
+            "commit": commit,
+            "predictions_ref": predictions_ref,
+            "report_ref": report_ref,
+            "outputs": manifest.outputs,
+        }
+        placement = self._placement_block()
+        if placement is not None:
+            evidence["placement"] = placement
         evidence_ref = await self._store.put_text(
-            json.dumps(
-                {
-                    "plan": plan_id,
-                    "metric": metric,
-                    "commit": commit,
-                    "predictions_ref": predictions_ref,
-                    "report_ref": report_ref,
-                    "outputs": manifest.outputs,
-                },
-                ensure_ascii=False,
-            )
+            json.dumps(evidence, ensure_ascii=False)
         )
         updated = state
         if state.kind == "SEARCH":
@@ -458,16 +475,18 @@ class PlanRunner:
         predictions_ref: ArtifactRef | None = None,
     ) -> PlanTurnResult:
         cleaned = redact(" ".join(error.split()))[:1000]
+        evidence: dict[str, Any] = {
+            "plan": plan_id,
+            "kind": kind,
+            "error": cleaned,
+            "predictions_ref": predictions_ref,
+        }
+        placement = self._placement_block()
+        if placement is not None:
+            # 失败也可能是"这台机器/这张卡"的问题，同样要能追溯到硬件。
+            evidence["placement"] = placement
         evidence_ref = await self._store.put_text(
-            json.dumps(
-                {
-                    "plan": plan_id,
-                    "kind": kind,
-                    "error": cleaned,
-                    "predictions_ref": predictions_ref,
-                },
-                ensure_ascii=False,
-            )
+            json.dumps(evidence, ensure_ascii=False)
         )
         return PlanTurnResult(
             kind=kind,

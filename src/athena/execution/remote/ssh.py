@@ -122,11 +122,15 @@ _FORWARDED_HOST_VARS: frozenset[str] = frozenset({"LANG", "LC_ALL", "LC_CTYPE"})
 
 
 class SshBackend:
-    """在一台远程 GPU 机上执行；实现 ``ExecutionBackend``。
+    """在一台远程 GPU 机上执行命令。
+
+    它**不是**完整的 ``ExecutionBackend``：少一个 ``collect_outputs``。这是有意的。
+    远程执行绕不开「文件怎么在两台机器之间搬」，而搬法有策略、有代价，必须由
+    ``MirroredBackend`` 显式包一层才算完整。留一个空的 ``collect_outputs`` 在这里
+    会让「产出没拉回来」变成一次静默的空目录，而不是一个类型错误。
 
     一个 Plan 拿到租约后，它的**全部**命令——``shell_command`` 与 manifest——都落在
-    这台机器的同一个目录。工作区镜像与数据分发由上层负责（``mirror.py`` / P3），
-    后端只管「把命令送过去并流式回来」。
+    这台机器的同一个目录。
     """
 
     def __init__(

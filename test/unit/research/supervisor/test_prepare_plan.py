@@ -118,6 +118,10 @@ class _Execution:
         del context, command, argv, kwargs
         return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
 
+    async def collect_outputs(self, subdirs) -> None:
+        """本地替身：产出本来就在工作区里。"""
+        return None
+
 
 class _Evaluator:
     async def score(self, **kwargs):

@@ -790,6 +790,10 @@ class ExecutionRuntime:
             emit=emit,
         )
 
+    async def collect_outputs(self, subdirs: tuple[str, ...]) -> None:
+        """把 manifest 声明的产出取到本地，供本地评估器打分。"""
+        await self._backend.collect_outputs(tuple(subdirs))
+
     async def aclose(self) -> None:
         """释放后端资源（本地无事可做；远程要关掉常驻通道）。"""
         await self._backend.aclose()

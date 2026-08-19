@@ -15,7 +15,13 @@ from pathlib import Path
 import pytest
 
 from athena.execution import ExecutionBackend
-from athena.execution.remote import RemoteChannel, SshBackend, SshHost
+from athena.execution.remote import (
+    RemoteChannel,
+    SshBackend,
+    SshHost,
+    WorkspaceMirror,
+)
+from athena.execution.remote.mirrored import MirroredBackend
 from athena.execution.remote.channel import SubprocessTransport
 
 
@@ -85,9 +91,21 @@ def test_the_agent_source_travels_in_the_command_not_on_stdin() -> None:
 # ------------------------------------------------------------------ 后端行为
 
 
-def test_the_backend_satisfies_the_protocol(backend) -> None:
-    assert isinstance(backend, ExecutionBackend)
+def test_the_executor_alone_is_not_a_complete_backend(backend) -> None:
+    """少一个 collect_outputs，而且这是有意的。
+
+    远程执行绕不开「文件怎么在两台机器之间搬」。给 SshBackend 补一个空实现，
+    会让「产出没拉回来」变成一次静默的空目录；缺着，它就只能是一个类型错误。
+    """
+    assert not isinstance(backend, ExecutionBackend)
     assert backend.name == "gpu-01"
+
+    mirror = WorkspaceMirror(
+        backend._channel,
+        local_root=Path(backend.remote_workspace),
+        remote_root=backend.remote_workspace,
+    )
+    assert isinstance(MirroredBackend(backend, mirror), ExecutionBackend)
 
 
 def test_the_runtime_block_describes_the_remote_host(backend) -> None:

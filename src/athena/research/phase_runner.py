@@ -44,20 +44,26 @@ class PhaseRunner:
         if rt._plan_turn.__name__ != "unavailable_plan_turn":
             return await rt._plan_turn(plan_id, state)
         plan_input = await rt._supervisor.plan_input(plan_id)
+        workspace_path = rt._supervisor.workspace_path(plan_id)
+        # 算力绑定的粒度是 Plan：这个 Plan 的每一条命令——agent 的 shell_command
+        # 与 manifest——都落在同一台机器、同一个目录。拿不到算力是错误，不是
+        # 一次退回本地 CPU 的降级。
+        execution = await rt.execution_for(plan_id, workspace_path)
         runner = PlanRunner(
-            execution=rt._execution,
+            execution=execution,
             store=rt._store,
             evaluator=rt._evaluator,
             workspace=rt._git,
             branch=rt._supervisor.workspace(plan_id),
             context=ExecutionContext(
                 project_root=rt._root,
-                workspace_root=rt._supervisor.workspace_path(plan_id),
+                workspace_root=workspace_path,
                 environment_root=rt._root,
                 experiment_id=plan_id,
             ),
             direction=plan_input.direction,
             timeout_s=rt.state.experiment_timeout_s,
+            placement=lambda: rt.placement_for(plan_id),
         )
         return await runner.run_turn(plan_id, state, plan_input)
 

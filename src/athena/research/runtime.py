@@ -18,6 +18,8 @@ from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_tree import ResearchTree
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser
+from athena.execution.compute_config import ComputeConfig, load_compute_config
+from athena.execution.pool import GpuPool, Lease
 from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.kaggle import (
     AGENT_KAGGLE_TOOLS,
@@ -141,6 +143,7 @@ class ResearchRuntime:
         search_limit: int = 10,
         concurrency: int = 1,
         experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
+        compute: ComputeConfig | None = None,
         ideator_count: int = 3,
         hypotheses_per_ideator: int = 2,
         auto_validate: bool = False,
@@ -245,6 +248,17 @@ class ResearchRuntime:
             data_root=self._data_root,
             store=self._store,
         )
+        # 算力：本地跑还是派到 GPU 机上。配置解析失败**不吞**——写错主机名要在
+        # 开跑前就红，而不是跑完一整轮才发现根本没走远程。
+        self._compute = compute if compute is not None else load_compute_config()
+        self._pool: GpuPool | None = None
+        self._leases: dict[str, Lease] = {}
+        if self._compute.remote:
+            self._pool = GpuPool(
+                list(self._compute.hosts),
+                placement=self._compute.placement,
+                store=self._store,
+            )
         # 断点续传保护：跨目录拷贝来的 state 会携带旧项目的 eda_dir，使 PREPARE
         # 工作区/EDA 目录落到别的项目。强制校验其属于当前 project_root，否则置空
         # 让 PREPARE 按本项目重建——本项目只保留自身信息，唯一允许跨目录的是数据集源。
@@ -943,7 +957,58 @@ class ResearchRuntime:
         baselines = self._tree.experiments(kind="baseline")
         return baselines[0].plan.run_config_ref if baselines else None
 
+    async def execution_for(self, plan_id: str, workspace: Path) -> ExecutionRuntime:
+        """给一个 Plan 拿到它该用的执行运行时。
+
+        本地算力直接复用共享的那一个。远程算力**每个 Plan 一份租约**：拿不到就
+        排队，排不到就抛 ``NoComputeAvailable``——绝不静默退回本地 CPU 跑完再
+        报一个分数。那种结果不是你要的实验，而且全链路会是绿的。
+        """
+        if self._pool is None:
+            return self._execution
+        lease = self._leases.get(plan_id)
+        if lease is None:
+            if not self._pool.cards():
+                await self._pool.preflight()
+            lease = await self._pool.acquire(
+                plan_id,
+                local_workspace=Path(workspace),
+                gpus=self._compute.gpus_per_experiment,
+                timeout_s=self._compute.queue_timeout_s,
+            )
+            self._leases[plan_id] = lease
+            logger.info(
+                "plan %s leased %s gpu %s",
+                plan_id,
+                lease.host.name,
+                list(lease.gpu_ids),
+            )
+        return ExecutionRuntime(
+            project_root=self._root,
+            environment_root=self._root,
+            data_root=self._data_root,
+            store=self._store,
+            backend=lease.backend,
+        )
+
+    def placement_for(self, plan_id: str) -> dict[str, Any] | None:
+        """这个 Plan 跑在哪台机器、哪几张卡上；本地算力时为 None。"""
+        lease = self._leases.get(plan_id)
+        return None if lease is None else lease.placement()
+
+    async def release_lease(self, plan_id: str) -> None:
+        """归还一个 Plan 的租约（关通道 → 远端清场 → 卡回池子）。"""
+        if self._pool is None or plan_id not in self._leases:
+            return
+        self._leases.pop(plan_id, None)
+        await self._pool.release(plan_id)
+
     async def aclose(self) -> None:
+        # 租约先还：通道一关，远端 stdin 就 EOF，它会杀掉自己起过的所有进程组。
+        # 漏掉这一步 = 显存被一个没人要的训练进程一直占着。
+        if self._pool is not None:
+            await self._pool.aclose()
+            self._leases.clear()
         for ready in self._events_bus._subscriber_ready.values():
             if not ready.done():
                 ready.cancel()

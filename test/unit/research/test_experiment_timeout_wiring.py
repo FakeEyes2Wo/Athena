@@ -31,10 +31,17 @@ def _fake_runtime(tmp_path: Path, *, timeout_s: int) -> SimpleNamespace:
     async def plan_input(plan_id: str) -> PlanInput:
         return PlanInput(evaluator_ref=_REF, tree_ref=_REF)
 
+    execution = object()
+
+    async def execution_for(plan_id: str, workspace):
+        return execution
+
     return SimpleNamespace(
         _plan_turn=unavailable_plan_turn,
         _root=tmp_path,
-        _execution=object(),
+        _execution=execution,
+        execution_for=execution_for,
+        placement_for=lambda plan_id: None,
         _store=object(),
         _evaluator=object(),
         _git=object(),
