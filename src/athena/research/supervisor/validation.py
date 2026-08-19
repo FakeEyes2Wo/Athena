@@ -26,6 +26,7 @@ from athena.research.supervisor.experiment import (
     load_agent_result,
     read_experiment_manifest,
 )
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.validation import ValidationService
 
 CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
@@ -272,6 +273,7 @@ async def _execute_predictions(
     git: GitWorkspace,
     workspace: GitWorkBranch,
     store: ArtifactStore,
+    timeout_s: int,
     publish: EmitEvent | None,
 ) -> tuple[ArtifactRef, str]:
     workdir = Path(workspace.path)
@@ -286,6 +288,7 @@ async def _execute_predictions(
             result = await execution.run(
                 context,
                 argv=argv,
+                timeout_s=timeout_s,
                 workdir=workdir,
                 emit=publish,
             )
@@ -387,6 +390,7 @@ async def run_validation_plan(
     independent_review: Callable[[str], Awaitable[ValidationDiffReview]],
     result_ref: ArtifactRef | None,
     checkpoint: CheckpointValidation,
+    timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     publish: EmitEvent | None = None,
 ) -> ValidationResult:
     """Run or recover one independent validation attempt under its stable key."""
@@ -449,6 +453,7 @@ async def run_validation_plan(
                 git=git,
                 workspace=workspace,
                 store=store,
+                timeout_s=timeout_s,
                 publish=publish,
             )
             if await git.diff(workspace) != reviewed_diff:

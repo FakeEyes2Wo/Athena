@@ -22,6 +22,7 @@ from athena.research.supervisor.experiment import (
     load_best,
 )
 from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
     PlanBest,
     PlanDecision,
     PlanInput,
@@ -62,6 +63,8 @@ class _FakeExecution:
         self.calls: list[list[str]] = []
         self.workdirs: list[str | None] = []
         self.emit_seen: list[object] = []
+        # 每条 manifest 命令实际拿到的超时；实验能不能跑完全看它。
+        self.timeouts: list[int] = []
 
     async def run(
         self,
@@ -75,6 +78,7 @@ class _FakeExecution:
     ) -> CommandResult:
         self.calls.append(list(argv) if argv is not None else [])
         self.workdirs.append(workdir)
+        self.timeouts.append(timeout_s)
         if emit is not None:
             emit("command/started", "exec:run", {"command": argv})
             self.emit_seen.append(emit)
@@ -144,7 +148,11 @@ async def _scored_plan(
 
 
 async def _runner_setup(
-    tmp_path: Path, *, execution: _FakeExecution, evaluator: _FakeEvaluator
+    tmp_path: Path,
+    *,
+    execution: _FakeExecution,
+    evaluator: _FakeEvaluator,
+    timeout_s: int | None = None,
 ):
     store = LocalArtifactStore(tmp_path / "artifacts")
     bundle = DataScriptBundle(bundle_id="b1", entrypoint="eval.py")
@@ -166,6 +174,7 @@ async def _runner_setup(
             workspace_root=Path(branch.path),
             environment_root=tmp_path,
         ),
+        **({} if timeout_s is None else {"timeout_s": timeout_s}),
     )
     return runner, plan_input, workspace, branch, store
 
@@ -861,3 +870,77 @@ async def test_prepare_requires_report_before_scoring(tmp_path) -> None:
     assert result.evidence_ref is not None
     assert "report" in json.loads(await store.get_text(result.evidence_ref))["error"]
     assert workspace.messages == []
+
+
+# ---------------------------------------------------------------------------
+# manifest 超时：这是那次实验本身的执行时间，agent 改不了
+# ---------------------------------------------------------------------------
+
+
+def test_the_manifest_timeout_default_is_not_the_interactive_shell_default() -> None:
+    """默认值必须远大于 120 秒，并且 ``PlanRunner`` 用的就是这个默认值。
+
+    原实现把 ``timeout_s: int = 120`` 直接写死在 ``PlanRunner.__init__``，而两处
+    构造（``phase_runner``/``prepare``）都不覆盖它。120 与 ``shell_command`` 的交互
+    默认值是同一个字面量，但语义完全不同：agent 可以给 ``shell_command`` 传更大的
+    ``timeout_s``，而 manifest schema 里根本没有超时字段——于是「训练超过两分钟」
+    被伪装成 ``error="timeout"`` 的执行失败，agent 只会去改代码，永远改不对。
+    """
+    import inspect
+
+    default = inspect.signature(PlanRunner.__init__).parameters["timeout_s"].default
+    assert default == DEFAULT_EXPERIMENT_TIMEOUT_S
+    assert DEFAULT_EXPERIMENT_TIMEOUT_S >= 3600
+
+
+@pytest.mark.asyncio
+async def test_manifest_commands_run_under_the_configured_timeout(tmp_path) -> None:
+    """配置的超时必须真的落到每一条 manifest 命令上。
+
+    只断言默认值会漏掉「常量对了但没接上」这种改法，所以这里断言的是
+    ``ExecutionRuntime.run`` 实际收到的值。
+    """
+    execution = _FakeExecution(
+        [
+            CommandResult(ok=True, stdout="", stderr="", exit_code=0),
+            CommandResult(ok=True, stdout="", stderr="", exit_code=0),
+        ]
+    )
+    runner, plan_input, _workspace, branch, _store = await _runner_setup(
+        tmp_path,
+        execution=execution,
+        evaluator=_FakeEvaluator(metric=0.9),
+        timeout_s=7200,
+    )
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "prep.py"], [sys.executable, "train.py"]],
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    await runner.run_turn("h1", state, plan_input)
+
+    assert execution.timeouts == [7200, 7200]
+
+
+@pytest.mark.asyncio
+async def test_manifest_commands_default_to_the_long_timeout(tmp_path) -> None:
+    """不传超时时，走的也必须是长超时，而不是 120 秒。"""
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="", stderr="", exit_code=0)]
+    )
+    runner, plan_input, _workspace, branch, _store = await _runner_setup(
+        tmp_path,
+        execution=execution,
+        evaluator=_FakeEvaluator(metric=0.9),
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    await runner.run_turn("h1", state, plan_input)
+
+    assert execution.timeouts == [DEFAULT_EXPERIMENT_TIMEOUT_S]

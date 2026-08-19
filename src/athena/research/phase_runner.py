@@ -57,6 +57,7 @@ class PhaseRunner:
                 experiment_id=plan_id,
             ),
             direction=plan_input.direction,
+            timeout_s=rt.state.experiment_timeout_s,
         )
         return await runner.run_turn(plan_id, state, plan_input)
 
@@ -153,6 +154,7 @@ class PhaseRunner:
             tree_ref=tree_ref,
             task=rt._task_text,
             max_turns=MAX_PLAN_TURNS,
+            timeout_s=rt.state.experiment_timeout_s,
             publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
                 "prepare", kind, ref, data
             ),
@@ -217,6 +219,7 @@ class PhaseRunner:
             independent_review=self.review_validation_diff,
             result_ref=result_ref,
             checkpoint=rt._supervisor.checkpoint_validation,
+            timeout_s=rt.state.experiment_timeout_s,
             publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
                 "validate", kind, ref, data
             ),

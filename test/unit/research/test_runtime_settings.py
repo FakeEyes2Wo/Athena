@@ -23,6 +23,7 @@ def _runtime() -> ResearchRuntime:
         state=SimpleNamespace(
             concurrency=1,
             search_limit=10,
+            experiment_timeout_s=3600,
             ideator_count=3,
             hypotheses_per_ideator=2,
             manual_mode=False,

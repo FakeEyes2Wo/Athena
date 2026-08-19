@@ -449,6 +449,7 @@ async def test_execute_predictions_packs_predictions_directory(tmp_path) -> None
         git=git,
         workspace=workspace,
         store=store,
+        timeout_s=60,
         publish=None,
     )
 
@@ -486,6 +487,7 @@ async def test_execute_predictions_rejects_missing_directory(tmp_path) -> None:
             git=git,
             workspace=workspace,
             store=store,
+            timeout_s=60,
             publish=None,
         )
     assert git.restored == [("predictions",)]

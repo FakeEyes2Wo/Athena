@@ -177,13 +177,33 @@ class EnvironmentManager:
         *,
         project_root: str | Path,
         environment_root: str | Path,
+        data_root: str | Path | None = None,
         host: dict[str, str] | None = None,
     ) -> None:
         self._project_root = Path(project_root)
         self._environment_root = Path(environment_root)
+        self._data_root = Path(data_root) if data_root is not None else None
         self._host = host if host is not None else os.environ
         self._versions: dict[str, str] = {}
         self._needs_repair: str | None = None
+
+    def env_ref(self, name: str) -> str:
+        """按当前 shell 的语法引用一个环境变量。
+
+        实测过的坑：注入子进程的是**环境**变量，而 PowerShell 里 ``$FOO`` 取的是
+        PowerShell 变量，未定义就静默展开成空串——``uv add --project "$ATHENA_ENV_ROOT"``
+        在 Windows 上等价于 ``--project ""``。必须写 ``$env:FOO``。cmd 用 ``%FOO%``。
+        探测不到 shell 时退回 POSIX 写法（与 runtime_summary 的错误分支一致）。
+        """
+        try:
+            shell = Path(self.shell_parts()[0]).name.lower()
+        except RuntimeError:
+            return f"${name}"
+        if "powershell" in shell or "pwsh" in shell:
+            return f"$env:{name}"
+        if shell == "cmd.exe":
+            return f"%{name}%"
+        return f"${name}"
 
     @property
     def os_name(self) -> str:
@@ -232,6 +252,10 @@ class EnvironmentManager:
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["ATHENA_ENV_ROOT"] = str(self._environment_root)
+        # 数据集根目录。agent 生成的脚本必须靠它定位数据，而不是把绝对路径写死：
+        # 写死的路径换台机器（尤其换到 Linux GPU 机）第一行 read_csv 就炸。
+        if self._data_root is not None:
+            env["ATHENA_DATA_ROOT"] = str(self._data_root)
         return env
 
     def tool_versions(self) -> dict[str, str]:
@@ -335,14 +359,25 @@ class EnvironmentManager:
         shell_line = f"- Shell: {shell_name}"
         if shell_name == "powershell.exe":
             shell_line += ' (chain with ";" not "&&")'
-        return (
-            "Runtime:\n"
-            f"- OS: {self.os_name}\n"
-            f"{shell_line}\n"
-            f"- Workspace: {workspace_root}\n"
-            f"- Python: {python}, {state}\n"
-            f'- Add dependencies with: uv add --project "$ATHENA_ENV_ROOT" <package>'
+        env_root = self.env_ref("ATHENA_ENV_ROOT")
+        lines = [
+            "Runtime:",
+            f"- OS: {self.os_name}",
+            shell_line,
+            f"- Workspace: {workspace_root}",
+            f"- Python: {python}, {state}",
+        ]
+        if self._data_root is not None:
+            data_ref = self.env_ref("ATHENA_DATA_ROOT")
+            lines.append(
+                f'- Dataset directory: "{data_ref}" in the shell, '
+                'os.environ["ATHENA_DATA_ROOT"] in Python. '
+                "Never hardcode an absolute dataset path: it differs per machine."
+            )
+        lines.append(
+            f'- Add dependencies with: uv add --project "{env_root}" <package>'
         )
+        return "\n".join(lines)
 
     def _probe(self, name: str) -> str:
         found = shutil.which(name)
@@ -660,6 +695,7 @@ class ExecutionRuntime:
         *,
         project_root: str | Path,
         environment_root: str | Path | None = None,
+        data_root: str | Path | None = None,
         store: ArtifactStore | None = None,
     ) -> None:
         self._project_root = Path(project_root)
@@ -668,9 +704,12 @@ class ExecutionRuntime:
             if environment_root is not None
             else self._project_root
         )
+        self._data_root = Path(data_root) if data_root is not None else None
         self._store = store
         self._env = EnvironmentManager(
-            project_root=self._project_root, environment_root=self._environment_root
+            project_root=self._project_root,
+            environment_root=self._environment_root,
+            data_root=self._data_root,
         )
 
     @property
@@ -682,6 +721,11 @@ class ExecutionRuntime:
     def environment_root(self) -> Path:
         """环境根（含 pyproject.toml / uv.lock / .venv）。"""
         return self._environment_root
+
+    @property
+    def data_root(self) -> Path | None:
+        """数据集根目录；未配置时为 None（此时不注入 ATHENA_DATA_ROOT）。"""
+        return self._data_root
 
     def shell_command_tool(self, workspace_root: str | Path) -> BaseTool:
         """构造模型可见的 shell_command 工具（cwd 默认 workspace）。"""

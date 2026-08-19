@@ -10,6 +10,7 @@ from typing import Any
 from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.survey import (
     SurveyRequest,
@@ -39,9 +40,33 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _dataset_context(data: str) -> tuple[Path, str]:
+    """把 ``--data`` 拆成（数据根目录, 给 agent 的一句说明）。
+
+    绝对路径不进 prompt。原实现把 ``Dataset path: C:/.../train.csv`` 原样喂给
+    agent，于是它生成的脚本里全是宿主机绝对路径——换个盘符、换台机器（尤其换到
+    Linux GPU 机）第一行 ``read_csv`` 就炸。改为只告诉它环境变量名，路径由
+    ``ExecutionRuntime`` 经 ``ATHENA_DATA_ROOT`` 注入。
+
+    ``--data`` 指向文件时取其所在目录为根，并把文件名告诉 agent（否则它得先
+    ``ls`` 一次才知道读哪个）。
+    """
+    path = Path(data).resolve()
+    root = path.parent if path.is_file() else path
+    note = (
+        "Dataset: the directory is in the ATHENA_DATA_ROOT environment variable "
+        '(in Python: os.environ["ATHENA_DATA_ROOT"]). Never hardcode an absolute '
+        "dataset path: it differs per machine."
+    )
+    if path.is_file():
+        note += f" Primary file: {path.name}."
+    return root, note
+
+
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
-    task_lines = [args.task or "", f"Dataset path: {args.data}"]
+    data_root, dataset_note = _dataset_context(args.data)
+    task_lines = [args.task or "", dataset_note]
     optional_context = (
         ("Target", args.target),
         ("Task type", args.task_type),
@@ -57,6 +82,8 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
             if args.max_search_experiments is not None
             else 10
         ),
+        "experiment_timeout_s": args.experiment_timeout,
+        "data_root": data_root,
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
         "ideation": args.ideation,
@@ -349,6 +376,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_non_negative_int,
         default=None,
         help="abort the run after N seconds (unbounded by default)",
+    )
+    run.add_argument(
+        "--experiment-timeout",
+        type=int,
+        default=DEFAULT_EXPERIMENT_TIMEOUT_S,
+        help=(
+            "单条 experiment.json 命令的超时上限（秒，默认 "
+            f"{DEFAULT_EXPERIMENT_TIMEOUT_S}）。这是那次实验本身的执行时间——"
+            "agent 无法自行放宽它，训练比它久就会被判成执行失败"
+        ),
     )
     run.add_argument(
         "--ideation",

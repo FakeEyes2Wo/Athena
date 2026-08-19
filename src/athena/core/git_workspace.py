@@ -76,6 +76,13 @@ class LocalGitWorkspace(GitWorkspace):
         # reference already exists）。必须确认本目录自己就是 git 仓库。
         if not (path / ".git").exists():
             await self._git("init", "-b", "main", cwd=path)
+            # 行尾归一化必须关掉。本仓库靠 .gitattributes 挡住全局
+            # core.autocrlf=true，但这个仓库是新 init 的、没有 .gitattributes，
+            # 于是完整继承用户的全局设置：在 Windows 上签出的脚本带 CRLF。
+            # 同机跑无害，一旦把工作区送到 Linux 执行，shebang 行末尾多出的 CR
+            # 直接变成 bad interpreter，而且报错完全指不到真正的原因。
+            await self._git("config", "core.autocrlf", "false", cwd=path)
+            await self._git("config", "core.eol", "lf", cwd=path)
 
             init_file = path / initial_file
             init_file.write_text(initial_content)

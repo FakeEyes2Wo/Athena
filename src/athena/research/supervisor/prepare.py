@@ -20,6 +20,7 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
 from athena.research.supervisor.experiment import PlanRunner, load_agent_result
 from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
     PlanDecision,
     PlanInput,
     PlanState,
@@ -197,6 +198,7 @@ async def run_prepare_plan(
     tree_ref: ArtifactRef,
     task: str,
     max_turns: int,
+    timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     publish: EmitEvent | None = None,
 ) -> PrepareResult:
     """Run and repair one stable PREPARE Agent until a trusted baseline exists.
@@ -266,6 +268,7 @@ async def run_prepare_plan(
                     environment_root=execution.environment_root,
                     experiment_id=PREPARE_PLAN_ID,
                 ),
+                timeout_s=timeout_s,
             )
             outcome = await runner.run_turn(
                 PREPARE_PLAN_ID,

@@ -34,6 +34,7 @@ from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.events import EventProjector
 from athena.research.supervisor.experiment import PlanTurnResult
 from athena.research.supervisor.prepare import PrepareResult
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
@@ -95,6 +96,7 @@ SETTINGS_WHITELIST: frozenset[str] = frozenset(
     {
         "concurrency",
         "search_limit",
+        "experiment_timeout_s",
         "direction",
         "tolerance",
         "auto_validate",
@@ -131,12 +133,14 @@ class ResearchRuntime:
         *,
         project_root: str | Path | None = None,
         state_root: str | Path | None = None,
+        data_root: str | Path | None = None,
         model: str | None = None,
         client: Any = None,
         task: str = "",
         auto_seed_task: bool = False,
         search_limit: int = 10,
         concurrency: int = 1,
+        experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
         ideator_count: int = 3,
         hypotheses_per_ideator: int = 2,
         auto_validate: bool = False,
@@ -186,11 +190,6 @@ class ResearchRuntime:
             project_root=self._root,
             rollout_dir=self._athena / "logs" / "agents",
         )
-        self._execution = ExecutionRuntime(
-            project_root=self._root,
-            environment_root=self._root,
-            store=self._store,
-        )
         self._scripts = DataScriptRunner(
             store=self._store,
             workdir=self._athena / "runs",
@@ -219,9 +218,32 @@ class ResearchRuntime:
                 phase=initial_phase,
                 search_limit=search_limit,
                 concurrency=concurrency,
+                experiment_timeout_s=experiment_timeout_s,
                 ideator_count=ideator_count,
                 hypotheses_per_ideator=hypotheses_per_ideator,
             )
+        )
+        # 数据集根：本次构造参数优先，其次续跑时状态里存的那个。必须排在 state
+        # 载入之后——ExecutionRuntime 要用最终值建，agent 才拿得到 ATHENA_DATA_ROOT。
+        # 不存在的路径直接丢弃并告警：宁可 agent 看不到这一行，也不能给它一个
+        # 指向空气的变量，然后在第一条 read_csv 上炸。
+        if data_root is not None:
+            self._data_root: Path | None = Path(data_root).resolve()
+        elif self._state.data_root is not None:
+            self._data_root = Path(self._state.data_root)
+        else:
+            self._data_root = None
+        if self._data_root is not None and not self._data_root.is_dir():
+            logger.warning("dataset root does not exist, ignoring: %s", self._data_root)
+            self._data_root = None
+        self._state.data_root = (
+            str(self._data_root) if self._data_root is not None else None
+        )
+        self._execution = ExecutionRuntime(
+            project_root=self._root,
+            environment_root=self._root,
+            data_root=self._data_root,
+            store=self._store,
         )
         # 断点续传保护：跨目录拷贝来的 state 会携带旧项目的 eda_dir，使 PREPARE
         # 工作区/EDA 目录落到别的项目。强制校验其属于当前 project_root，否则置空
@@ -414,6 +436,7 @@ class ResearchRuntime:
             "model": self._model,
             "concurrency": self.state.concurrency,
             "search_limit": self.state.search_limit,
+            "experiment_timeout_s": self.state.experiment_timeout_s,
             "ideation": self._ideation,
             "ideator_count": self.state.ideator_count,
             "hypotheses_per_ideator": self.state.hypotheses_per_ideator,
@@ -455,6 +478,11 @@ class ResearchRuntime:
             if not isinstance(search_limit, int) or search_limit < 0:
                 raise ValueError("search_limit must be an integer >= 0")
             self.state.search_limit = search_limit
+        if "experiment_timeout_s" in patch:
+            timeout = patch["experiment_timeout_s"]
+            if not isinstance(timeout, int) or timeout < 1:
+                raise ValueError("experiment_timeout_s must be an integer >= 1")
+            self.state.experiment_timeout_s = timeout
         if "ideation" in patch:
             ideation = patch["ideation"]
             if ideation not in {"ideageneration", "baseline", "debate"}:
@@ -526,6 +554,7 @@ class ResearchRuntime:
             for field in (
                 "concurrency",
                 "search_limit",
+                "experiment_timeout_s",
                 "ideator_count",
                 "hypotheses_per_ideator",
             )

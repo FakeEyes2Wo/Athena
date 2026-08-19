@@ -29,6 +29,7 @@ def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime
     runtime._state = SimpleNamespace(
         phase="PREPARE",
         status="RUNNING",
+        experiment_timeout_s=3600,
         task_understanding=task_understanding,
         task_text="predict titanic survival" if task_understanding else None,
         save=lambda path: None,
@@ -192,7 +193,11 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
 
     frozen_ref = "sha256:" + "f" * 64
     state = SimpleNamespace(
-        phase="PREPARE", status="RUNNING", eda_dir=None, save=lambda path: None
+        phase="PREPARE",
+        status="RUNNING",
+        eda_dir=None,
+        experiment_timeout_s=3600,
+        save=lambda path: None,
     )
     rt = SimpleNamespace(
         _root=tmp_path,

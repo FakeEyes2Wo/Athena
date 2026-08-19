@@ -17,7 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.contracts import ArtifactRef
 from athena.core.persistence import atomic_write_json
-from athena.research.supervisor.plans import PlanState
+from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
+    PlanState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,10 @@ class ResearchState(BaseModel):
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
+    # manifest 命令的超时上限（秒）——与 concurrency 同类的运行期旋钮：可持久化、
+    # 可经 settings_set 改。放在核心 schema 而非 resume.json，因为它是配置不是断点；
+    # 旧二进制读到这个未知键只会告警并剥离（见 load），不会打不开项目。
+    experiment_timeout_s: int = Field(default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1)
     # 每轮 ideation 的并行 lane 数与每 lane 假设数（与 SEARCH 并发度解耦）。
     ideator_count: int = Field(default=3, ge=1, le=8)
     hypotheses_per_ideator: int = Field(default=2, ge=1, le=5)
@@ -83,6 +90,9 @@ class ResearchState(BaseModel):
     validation: dict[str, object] | None = None
     # PREPARE 产出的 EDA 工作区目录（Ideator 自行探索）；仅路径元数据，非 EDA 结果。
     eda_dir: str | None = None
+    # 数据集根目录的绝对路径。持久化是为了续跑不必重传 --data；它**不进 prompt**，
+    # 只经 ATHENA_DATA_ROOT 注入子进程，agent 生成的脚本因此不会写死绝对路径。
+    data_root: str | None = None
     # Supervisor 在首个 task-understanding turn 产出的结构化任务理解（供 GUI 意图预览）。
     task_understanding: dict[str, object] | None = None
     # Academic Survey 建好的论文语料索引；Ideator 只读，凭它调用检索算子。

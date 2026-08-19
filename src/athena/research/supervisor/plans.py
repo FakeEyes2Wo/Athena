@@ -21,6 +21,18 @@ from athena.core.research_models import Hypothesis
 
 _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
+# manifest 命令的默认超时（秒）。
+#
+# 原值 120 与 ``shell_command`` 的交互默认值是同一个字面量，但两者语义完全不同：
+# ``shell_command`` 是 agent 的探索命令，agent 想跑久可以自己传更大的 ``timeout_s``；
+# manifest 命令**就是那次实验本身**，而 manifest schema 里没有超时字段，agent
+# 没有任何途径改它。于是「实验跑久了」被伪装成 ``error="timeout"`` 的执行失败，
+# agent 只会去改代码，永远改不对。
+#
+# 一小时是「够长到不误伤，短到不会永远挂着」的折中；真正的上限交给
+# ``ResearchState.experiment_timeout_s`` 按项目配置。
+DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
+
 PublishEvent = Callable[[str, str, dict | None], Awaitable[None] | None]
 
 

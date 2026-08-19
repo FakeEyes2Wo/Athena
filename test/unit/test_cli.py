@@ -1,6 +1,7 @@
 """Tests for the output/state-only Athena CLI."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -96,8 +97,18 @@ def test_run_options_configure_runtime_constructor() -> None:
     )
 
     assert cli._runtime_options(args) == {
-        "task": "predict churn\nDataset path: dataset/train.csv\nTarget: churned",
+        # 数据集绝对路径不再进 prompt：agent 只拿到环境变量名，真实路径由
+        # ExecutionRuntime 经 ATHENA_DATA_ROOT 注入子进程。
+        "task": (
+            "predict churn"
+            + chr(10)
+            + cli._dataset_context("dataset/train.csv")[1]
+            + chr(10)
+            + "Target: churned"
+        ),
+        "data_root": cli._dataset_context("dataset/train.csv")[0],
         "search_limit": 3,
+        "experiment_timeout_s": 3600,
         "auto_validate": True,
         "direction": "minimize",
         # 消融开关默认走 idea generation 门禁；--ideation baseline 是对照组。
@@ -197,7 +208,11 @@ async def test_run_subscribes_before_start_and_waits_for_terminal_state(
     assert await cli._cmd_run(args) == 0
     assert runtime.calls[:2] == ["subscribe", "start"]
     assert runtime.closed is True
-    assert captured["task"] == f"task\nDataset path: {data}"
+    assert "Dataset path:" not in captured["task"]
+    assert str(data) not in captured["task"], "数据集绝对路径不得进 prompt"
+    assert "ATHENA_DATA_ROOT" in captured["task"]
+    assert "Primary file: train.csv." in captured["task"]
+    assert captured["data_root"] == Path(data).resolve().parent
     output = capsys.readouterr().out
     assert "agent> working" in output
     assert "phase=COMPLETED status=COMPLETED" in output

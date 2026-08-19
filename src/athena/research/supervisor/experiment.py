@@ -29,6 +29,7 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
     PlanBest,
     PlanDecision,
     PlanInput,
@@ -296,7 +297,7 @@ class PlanRunner:
         branch: GitWorkBranch,
         context: ExecutionContext,
         direction: Direction = "maximize",
-        timeout_s: int = 120,
+        timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     ) -> None:
         self._execution = execution
         self._store = store
