@@ -167,6 +167,19 @@ class SshBackend:
         """远端工作区根。"""
         return str(self._workspace)
 
+    @property
+    def channel(self):
+        """底层常驻通道（数据分发等旁路操作要用）。"""
+        return self._channel
+
+    def set_data_root(self, remote_data_root: str) -> None:
+        """把数据集根指到分发完成的那个内容寻址目录。
+
+        必须在起任何命令之前调用：``build_env`` 会把它写进 ``ATHENA_DATA_ROOT``，
+        而 agent 生成的脚本只认这个变量。
+        """
+        self._data_root = remote_data_root
+
     def env_ref(self, name: str) -> str:
         """远端是 POSIX，环境变量就是 ``$NAME``。"""
         return f"${name}"

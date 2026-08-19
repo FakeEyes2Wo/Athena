@@ -24,6 +24,12 @@ from typing import Any, Literal
 
 from athena.core.contracts import ArtifactStore
 from athena.execution.remote.channel import RemoteChannel
+from athena.execution.remote.dataset import (
+    DatasetSpec,
+    DatasetStager,
+    StageReport,
+    describe_dataset,
+)
 from athena.execution.remote.mirror import WorkspaceMirror
 from athena.execution.remote.mirrored import MirroredBackend
 from athena.execution.remote.ssh import SshBackend, SshHost, SshTransport
@@ -85,6 +91,7 @@ class Lease:
     backend: MirroredBackend
     remote_workspace: str
     queued_seconds: float = 0.0
+    dataset: StageReport | None = None
 
     def placement(self) -> dict[str, Any]:
         """写进实验证据的 ``placement`` 块。
@@ -92,7 +99,7 @@ class Lease:
         没有这一段，异构池里的比较就是不可比而又无从发现的。
         """
         names = {gpu.index: gpu.name for gpu in self.card.gpus}
-        return {
+        block: dict[str, Any] = {
             "host": self.host.name,
             "hostname": self.card.hostname,
             "os": self.card.os,
@@ -105,6 +112,14 @@ class Lease:
             "queued_seconds": round(self.queued_seconds, 3),
             "remote_only_paths": list(self.backend.remote_only),
         }
+        if self.dataset is not None:
+            block["dataset"] = {
+                "id": self.dataset.dataset_id,
+                "root": self.dataset.remote_root,
+                "reused": self.dataset.reused,
+                "bytes_sent": self.dataset.bytes_sent,
+            }
+        return block
 
 
 @dataclass(slots=True)
@@ -115,6 +130,9 @@ class _HostState:
     card: HostCard | None = None
     busy_gpus: set[int] = field(default_factory=set)
     leases: int = 0
+    # 本机已完整分发过的数据集 id。放置策略靠它做数据亲和：落到没有数据的机器上
+    # 要先付一次完整分发，大数据集下这一笔以小时计。
+    datasets: set[str] = field(default_factory=set)
 
     def free_gpus(self) -> list[int]:
         if self.card is None:
@@ -138,12 +156,15 @@ class GpuPool:
         *,
         placement: Placement = "pack",
         store: ArtifactStore | None = None,
+        dataset_root: Path | None = None,
         transport_factory=None,
     ) -> None:
         if not hosts:
             raise ValueError("compute pool needs at least one host")
         self._states = {host.name: _HostState(host) for host in hosts}
         self._placement = placement
+        self._dataset_root = Path(dataset_root) if dataset_root is not None else None
+        self._dataset: DatasetSpec | None = None
         self._store = store
         self._transport_factory = transport_factory or SshTransport
         self._leases: dict[str, Lease] = {}
@@ -250,6 +271,7 @@ class GpuPool:
             lease = await self._open_lease(
                 plan_id, state, tuple(gpu_ids), local_workspace
             )
+            lease.dataset = await self._stage_dataset(state, lease)
         except Exception:
             async with self._lock:
                 state.busy_gpus.difference_update(gpu_ids)
@@ -274,11 +296,20 @@ class GpuPool:
         ]
         if not candidates:
             return None
+        # 数据亲和优先于放置策略：落到没有数据的机器上要先付一次完整分发，大数据集
+        # 下这一笔以小时计，而 pack/spread 的差别只是几个百分点的利用率。
+        # 与 homogeneous 不冲突——同型号的过滤已经在上面的候选筛选里做完了，这里只在
+        # 同型号的机器之间按「有没有数据」排序（分发只是慢，异构是结果不可比）。
+        cold = (
+            (lambda state: self._dataset.dataset_id not in state.datasets)
+            if self._dataset is not None
+            else (lambda state: False)
+        )
         if self._placement == "spread":
-            candidates.sort(key=lambda state: (state.leases, state.host.name))
+            candidates.sort(key=lambda s: (cold(s), s.leases, s.host.name))
         else:
             # pack / homogeneous：先把一台机器用满，留出整台空机给需要多卡的实验。
-            candidates.sort(key=lambda state: (-state.leases, state.host.name))
+            candidates.sort(key=lambda s: (cold(s), -s.leases, s.host.name))
         chosen = candidates[0]
         return chosen, chosen.free_gpus()[:gpus]
 
@@ -321,6 +352,28 @@ class GpuPool:
             backend=MirroredBackend(inner, mirror),
             remote_workspace=remote_workspace,
         )
+
+    async def _stage_dataset(
+        self, state: _HostState, lease: Lease
+    ) -> StageReport | None:
+        """把数据集送到这台机器（已有就复用），并把 ATHENA_DATA_ROOT 指过去。
+
+        一台机器一份，不是一个 Plan 一份：数据是不可变共享物，租约只 pin 它。
+        """
+        if self._dataset_root is None:
+            return None
+        if self._dataset is None:
+            self._dataset = describe_dataset(self._dataset_root)
+        stager = DatasetStager(
+            lease.backend.inner.channel,
+            data_root=str(PurePosixPath(state.host.scratch) / "data"),
+        )
+        report = await stager.stage(self._dataset_root, self._dataset)
+        state.datasets.add(report.dataset_id)
+        # 分发到的是内容寻址目录，agent 只能靠 ATHENA_DATA_ROOT 找到它——
+        # 它既猜不到这个路径，也不该知道。
+        lease.backend.inner.set_data_root(report.remote_root)
+        return report
 
     async def release(self, plan_id: str) -> None:
         """归还租约：关通道（远端因此清场）并把卡放回池子。"""

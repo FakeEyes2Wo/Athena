@@ -258,3 +258,97 @@ async def test_a_lease_can_actually_run_a_command_in_its_workspace(
         assert "from the lease" in result.stdout
     finally:
         await pool.release("h1")
+
+
+# ---------------------------------------------------------------------------
+# 数据分发：一台机器一份，且租约拿到的是分发完成的那个目录
+# ---------------------------------------------------------------------------
+
+
+def _dataset(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "train.csv").write_bytes(b"id,y" + chr(10).encode() + b"1,0")
+    return root
+
+
+@pytest.mark.asyncio
+async def test_a_lease_points_ATHENA_DATA_ROOT_at_the_staged_copy(
+    tmp_path, patched_probe
+):
+    """agent 猜不到内容寻址目录，也不该知道——它只认 ATHENA_DATA_ROOT。"""
+    patched_probe["gpu-01"] = [_gpu(0)]
+    data = _dataset(tmp_path / "dataset")
+    pool = _make_pool([_host("gpu-01", tmp_path)], dataset_root=data)
+    await pool.preflight()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    lease = await pool.acquire("h1", local_workspace=workspace)
+    try:
+        assert lease.dataset is not None
+        assert not lease.dataset.reused
+        staged = lease.backend.inner.build_env()["ATHENA_DATA_ROOT"]
+        assert staged == lease.dataset.remote_root
+        assert (Path(staged) / "train.csv").is_file()
+        assert lease.placement()["dataset"]["id"] == lease.dataset.dataset_id
+    finally:
+        await pool.release("h1")
+
+
+@pytest.mark.asyncio
+async def test_the_second_lease_on_a_host_reuses_the_staged_dataset(
+    tmp_path, patched_probe
+):
+    """分发是按机器摊销的，不是按 Plan 重复付的。"""
+    patched_probe["gpu-01"] = [_gpu(0), _gpu(1)]
+    data = _dataset(tmp_path / "dataset")
+    pool = _make_pool([_host("gpu-01", tmp_path, max_leases=2)], dataset_root=data)
+    await pool.preflight()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    first = await pool.acquire("h1", local_workspace=workspace)
+    second = await pool.acquire("h2", local_workspace=workspace)
+    try:
+        assert first.dataset is not None and not first.dataset.reused
+        assert second.dataset is not None and second.dataset.reused
+        assert second.dataset.bytes_sent == 0
+    finally:
+        await pool.release("h1")
+        await pool.release("h2")
+
+
+@pytest.mark.asyncio
+async def test_placement_prefers_a_host_that_already_has_the_data(
+    tmp_path, patched_probe
+):
+    """数据亲和：落到冷机上要先付一次完整分发，大数据集下这一笔以小时计。
+
+    这里用 spread（本会挑负载更低的那台）验证亲和确实压过了放置策略本身。
+    """
+    patched_probe["gpu-01"] = [_gpu(0), _gpu(1)]
+    patched_probe["gpu-02"] = [_gpu(0), _gpu(1)]
+    data = _dataset(tmp_path / "dataset")
+    pool = _make_pool(
+        [
+            _host("gpu-01", tmp_path, max_leases=2),
+            _host("gpu-02", tmp_path, max_leases=2),
+        ],
+        placement="spread",
+        dataset_root=data,
+    )
+    await pool.preflight()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    # 先让 gpu-01 上有数据，并且**占着一份租约**——这样 spread 会明确倾向 gpu-02
+    # （负载 0 < 1）。亲和压不住策略的话，第二份租约就会落到 gpu-02 上。
+    first = await pool.acquire("h1", local_workspace=workspace)
+    assert first.host.name == "gpu-01"
+    second = await pool.acquire("h2", local_workspace=workspace)
+    try:
+        assert second.host.name == "gpu-01", "数据亲和必须压过 spread 的负载均衡"
+        assert second.dataset is not None and second.dataset.reused
+    finally:
+        await pool.release("h1")
+        await pool.release("h2")

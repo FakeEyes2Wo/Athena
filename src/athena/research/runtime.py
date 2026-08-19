@@ -258,6 +258,7 @@ class ResearchRuntime:
                 list(self._compute.hosts),
                 placement=self._compute.placement,
                 store=self._store,
+                dataset_root=self._data_root,
             )
         # 断点续传保护：跨目录拷贝来的 state 会携带旧项目的 eda_dir，使 PREPARE
         # 工作区/EDA 目录落到别的项目。强制校验其属于当前 project_root，否则置空
