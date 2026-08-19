@@ -44,11 +44,7 @@ def distinct_papers(hits: list[SearchHit]) -> list[str]:
     名次按论文算而不是按 chunk 算：同一篇论文连出三个 chunk 不该让它的名次变成 1、2、3，
     否则"名额被一篇吃光"这种失败反而会让分数变好看。
     """
-    seen: list[str] = []
-    for hit in hits:
-        if hit.paper_id and hit.paper_id not in seen:
-            seen.append(hit.paper_id)
-    return seen
+    return list(dict.fromkeys(hit.paper_id for hit in hits if hit.paper_id))
 
 
 def first_gold_rank(returned: list[str], gold: list[str]) -> int | None:
@@ -161,7 +157,9 @@ def hybrid_runner(corpus: LoadedCorpus, embedder: TextEmbedder) -> ChannelRunner
     return run
 
 
-def usable_queries(query_set: QuerySet, corpus: LoadedCorpus) -> tuple[list[str], list[str]]:
+def usable_queries(
+    query_set: QuerySet, corpus: LoadedCorpus
+) -> tuple[list[str], list[str]]:
     """把查询分成"金标在语料里"与"无从回答"两组。
 
     这一步在真机上当场抓出过一个错标——《When AUC meets DRO》通篇用 KL 散度与 CVaR，

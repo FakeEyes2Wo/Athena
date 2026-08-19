@@ -143,11 +143,9 @@ def pdf_hint_urls(paper: PaperRef) -> list[str]:
     不在这里过滤协议：非 http(s) 链接留给 ``_fetch_url`` 拒绝并记录诊断，静默丢弃会让上游
     永远看不到自己给错了链接。
     """
-    urls: list[str] = []
-    for hint in paper.hints:
-        if hint.kind in PDF_HINT_KINDS and hint.url not in urls:
-            urls.append(hint.url)
-    return urls
+    return list(
+        dict.fromkeys(hint.url for hint in paper.hints if hint.kind in PDF_HINT_KINDS)
+    )
 
 
 def fetch_status(outcome: "ChannelOutcome") -> str:

@@ -361,3 +361,10 @@
   - 抽出 `_MESSAGE_INPUT_SCHEMA`，send/followup 共用同一输入 schema。
 - `kaggle/tool.py`：抽出 `_COMPETITION_LIST_SCHEMA`，list_notebooks / list_discussions 共用。
 - 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。
+
+## 追加：源码文件逐项简化（batch）
+- `bench/known_item.py`：`distinct_papers` 改为 `dict.fromkeys` 保序去重。
+- `paper_scout/backends.py`：Semantic Scholar 的 search/references 共用 `_get_json`，去掉重复的 HTTP 错误检查与 JSON 解析。
+- `paper_source/fetcher.py`：`pdf_hint_urls` 改为 `dict.fromkeys` 保序去重。
+- `paper_rag/interfaces.py` + `__init__.py`：删除无实现、无调用点的 `ChunkContextualizer` 契约。
+- 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。

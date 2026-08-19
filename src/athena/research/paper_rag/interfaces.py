@@ -40,16 +40,3 @@ class VectorCache(Protocol):
 
     async def save(self, paper: "PaperContent", vectors: numpy.ndarray) -> None:
         """存下该论文的句向量矩阵。"""
-
-
-class ChunkContextualizer(Protocol):
-    """给 chunk 生成上下文前缀的接口，供 Contextual Retrieval 备选方案使用。
-
-    当前没有任何实现，索引链路也不调用它；保留契约是为了让备选方案落地时不必再改
-    ``build_corpus_index`` 的签名。设计背景见 ``docs/paper_rag_tool_ch.md``。
-    """
-
-    model: str
-
-    async def contextualize(self, document: str, chunks: list[str]) -> list[str]:
-        """为每个 chunk 生成一段定位它在全文中位置的前缀，顺序与输入一致。"""

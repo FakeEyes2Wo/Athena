@@ -13,7 +13,7 @@ from athena.research.paper_rag.index import (
     is_indexable,
     split_sentences,
 )
-from athena.research.paper_rag.interfaces import ChunkContextualizer, TextEmbedder
+from athena.research.paper_rag.interfaces import TextEmbedder
 from athena.research.paper_rag.schemas import (
     ChunkRead,
     CorpusEntry,
@@ -54,7 +54,6 @@ __all__ = [
     "SearchHit",
     "ChunkRead",
     "TextEmbedder",
-    "ChunkContextualizer",
     "CorpusCache",
     "RetrievalSession",
     "NonSemanticEmbedderError",

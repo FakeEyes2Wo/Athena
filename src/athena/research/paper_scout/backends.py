@@ -185,20 +185,25 @@ class SemanticScholarBackend:
     def _headers(self) -> dict[str, str]:
         return {"x-api-key": self.api_key} if self.api_key else {}
 
-    async def search(self, query: str, limit: int, cutoff: str) -> list[ScoutPaper]:
-        """执行一次 Semantic Scholar 相关性搜索。"""
-        params = {
-            "query": query,
-            "limit": min(limit, SEMANTIC_SCHOLAR_MAX_RESULTS),
-            "fields": SEMANTIC_SCHOLAR_FIELDS,
-        }
+    async def _get_json(self, url: str, params: dict) -> object:
+        """发一次带 key 的 GET；非 2xx 或非 JSON 都抛 ``BackendError``。"""
         response = await self.http.get(
-            f"{SEMANTIC_SCHOLAR_SEARCH}?{urllib.parse.urlencode(params)}",
-            self._headers(),
+            f"{url}?{urllib.parse.urlencode(params)}", self._headers()
         )
         if not response.ok:
-            raise BackendError(f"semantic_scholar returned HTTP {response.status}")
-        payload = parse_json(response.body)
+            raise BackendError(f"{self.name} returned HTTP {response.status}")
+        return parse_json(response.body)
+
+    async def search(self, query: str, limit: int, cutoff: str) -> list[ScoutPaper]:
+        """执行一次 Semantic Scholar 相关性搜索。"""
+        payload = await self._get_json(
+            SEMANTIC_SCHOLAR_SEARCH,
+            {
+                "query": query,
+                "limit": min(limit, SEMANTIC_SCHOLAR_MAX_RESULTS),
+                "fields": SEMANTIC_SCHOLAR_FIELDS,
+            },
+        )
         records = payload.get("data") if isinstance(payload, dict) else None
         return self._papers(records, "search", query, cutoff, limit)
 
@@ -207,16 +212,12 @@ class SemanticScholarBackend:
         locator = self._locator(paper)
         if not locator:
             return []
-        params = {"limit": limit, "fields": SEMANTIC_SCHOLAR_FIELDS}
         url = SEMANTIC_SCHOLAR_REFERENCES.format(
             locator=urllib.parse.quote(locator, safe=":")
         )
-        response = await self.http.get(
-            f"{url}?{urllib.parse.urlencode(params)}", self._headers()
+        payload = await self._get_json(
+            url, {"limit": limit, "fields": SEMANTIC_SCHOLAR_FIELDS}
         )
-        if not response.ok:
-            raise BackendError(f"semantic_scholar returned HTTP {response.status}")
-        payload = parse_json(response.body)
         rows = payload.get("data") if isinstance(payload, dict) else None
         cited = [
             row.get("citedPaper")
