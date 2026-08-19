@@ -354,3 +354,10 @@
 - `kaggle/tool.py`：9 个 Kaggle 工具类不再各自定义 `__init__`，统一继承 `StackTool`；删除 `KaggleTool` 中间层与重复的 `stack` 存储。
 - `research/survey/tool.py`：`PaperSurveyTool` 改为继承 `StackTool`，删除自己的 `__init__` 与 `TYPE_CHECKING` 依赖。
 - 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。
+
+## 追加：继续合并相似类与重复 schema
+- `agents/orchestration.py`：
+  - `_FollowupTool` 并入 `_RuntimeTool` 基座（`agent_id` 置空），删除独立 `__init__`。
+  - 抽出 `_MESSAGE_INPUT_SCHEMA`，send/followup 共用同一输入 schema。
+- `kaggle/tool.py`：抽出 `_COMPETITION_LIST_SCHEMA`，list_notebooks / list_discussions 共用。
+- 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。

@@ -28,6 +28,18 @@ def _task_payload(input: dict) -> dict:
     }
 
 
+_MESSAGE_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "agent_id": {"type": "string"},
+        "content": {"type": "string", "default": ""},
+        "context_refs": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["agent_id"],
+}
+"""send / followup 共用的输入 schema。"""
+
+
 # 静态权限矩阵（设计 registered-agent-catalog §5）：agent_type -> 允许 spawn 的类型
 DEFAULT_PERMISSIONS: dict[str, set[str]] = {
     "data": {"plot"},
@@ -97,15 +109,7 @@ class _SendTool(_RuntimeTool):
     spec = ToolSpec(
         name="send",
         description="向目标 Agent 投递消息，不唤醒目标",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string"},
-                "content": {"type": "string", "default": ""},
-                "context_refs": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["agent_id"],
-        },
+        input_schema=_MESSAGE_INPUT_SCHEMA,
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
@@ -119,25 +123,17 @@ class _SendTool(_RuntimeTool):
         return {"sent": True}
 
 
-class _FollowupTool(BaseTool):
-    """follow-up 原实例并创建新 turn。"""
+class _FollowupTool(_RuntimeTool):
+    """follow-up 原实例并创建新 turn；目标 agent 由输入指定，故基座 ``agent_id`` 为空。"""
 
     spec = ToolSpec(
         name="followup",
         description="向原 Agent 实例投递后续任务并创建新 turn",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string"},
-                "content": {"type": "string", "default": ""},
-                "context_refs": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["agent_id"],
-        },
+        input_schema=_MESSAGE_INPUT_SCHEMA,
     )
 
     def __init__(self, runtime: AgentRuntime) -> None:
-        self._runtime = runtime
+        super().__init__(runtime, agent_id="")
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """follow-up 原实例并创建新 turn，返回新 Run id。"""

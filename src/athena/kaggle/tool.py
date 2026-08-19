@@ -35,6 +35,12 @@ def _schema(props: dict[str, str], *required: str) -> dict:
     }
 
 
+_COMPETITION_LIST_SCHEMA = _schema(
+    {"competition": "string", "max_results": "integer"}, "competition"
+)
+"""list_notebooks / list_discussions 共用的输入 schema。"""
+
+
 def _notebook_ref(input: dict) -> str:
     """Accept either a notebook URL or an ``owner/slug`` ref."""
     value = str(
@@ -152,9 +158,7 @@ class KaggleListNotebooksTool(StackTool):
             "current SOTA approaches. Returns each notebook's title, author, votes and "
             "url. Use this to gather evidence before implementing a solution."
         ),
-        input_schema=_schema(
-            {"competition": "string", "max_results": "integer"}, "competition"
-        ),
+        input_schema=_COMPETITION_LIST_SCHEMA,
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
@@ -224,9 +228,7 @@ class KaggleListDiscussionsTool(StackTool):
             "each thread's ref, title, author, votes, comment count and url. Use "
             "this to gather qualitative evidence before forming hypotheses."
         ),
-        input_schema=_schema(
-            {"competition": "string", "max_results": "integer"}, "competition"
-        ),
+        input_schema=_COMPETITION_LIST_SCHEMA,
     )
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
