@@ -172,6 +172,8 @@ class FakeScoutAgent:
         ]
         stats_ref = await self.artifacts.put_text(
             ScoutStats(
+                pool_size=len(retained),
+                retained_papers=len(retained),
                 dropped_no_source=type(self).dropped_no_source,
                 rerank_calls=type(self).rerank_calls,
                 rerank_failures=type(self).rerank_failures,
@@ -367,6 +369,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         )
         payloads = dict(events)
         self.assertEqual(payloads["survey/scouted"]["retained"], len(PAPERS))
+        self.assertEqual(payloads["survey/scouted"]["pool"], len(PAPERS))
         self.assertEqual(payloads["survey/fetched"]["fetched"], len(PAPERS))
         self.assertEqual(payloads["survey/converted"]["converted"], report.converted())
         self.assertEqual(payloads["survey/indexed"]["indexed"], len(PAPERS))
@@ -792,8 +795,8 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
                 self.stack, SurveyRequest(query="tabular auc")
             ).run()
 
-        self.assertEqual(12, report.affinity_calls)
-        self.assertEqual(1, report.affinity_failures)
+        self.assertEqual(12, report.scout.rerank_calls)
+        self.assertEqual(1, report.scout.rerank_failures)
 
     def test_the_rerank_model_is_part_of_the_scout_cache_key(self) -> None:
         """换掉拆平局的信号，将近一半的交付集合会变——缓存必须跟着失效。
@@ -840,7 +843,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(30, FakeScoutAgent.seen_request.max_papers)
         self.assertEqual(30, policy.max_papers)
         self.assertEqual(10, policy.stop_after_fetched)
-        self.assertEqual(report.scout_retained, len(FakeScoutAgent.papers))
+        self.assertEqual(report.scout.retained_papers, len(FakeScoutAgent.papers))
 
     async def test_the_candidate_multiple_is_configurable(self) -> None:
         await self.run_pipeline(max_papers=10, source_candidate_multiple=5)
@@ -916,7 +919,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
 
         report = await self.run_pipeline()
 
-        self.assertEqual(7, report.scout_dropped_no_source)
+        self.assertEqual(7, report.scout.dropped_no_source)
 
 
 class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):

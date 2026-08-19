@@ -149,7 +149,7 @@ class SurveyRequest(BaseModel):
 
     ``max_papers`` 默认 10。在默认的 ``retain_threshold=0`` 下它是交付量的唯一控制，
     但它**只影响下游三段**：``paper_scout`` 会把整个候选池都打一遍分（实测池 240 篇、
-    ``scored_papers`` 也是 240），``max_papers`` 只在 ``_finish`` 里做最后一次截断。
+    ``pool_size`` 也是 240），``max_papers`` 只在 ``_finish`` 里做最后一次截断。
     所以调小它省的是取源、转换和索引，省不到检索——要压检索成本得调 ``max_steps``。
 
     真机换算（50 篇跑出来的数据按前 10 篇重算）：scout 640s 不变，取源 68s，转换 167s
@@ -312,12 +312,6 @@ class SurveyReport(BaseModel):
     )
     scout_result_ref: ArtifactRef | None = Field(default=None)
     source_result_ref: ArtifactRef | None = Field(default=None)
-    scout_pool: int = Field(default=0, ge=0, description="Papers accepted into pool.")
-    scout_retained: int = Field(
-        default=0,
-        ge=0,
-        description="Papers PaperScout delivered as fetch candidates.",
-    )
     fetch_attempted: int = Field(
         default=0,
         ge=0,
@@ -334,46 +328,13 @@ class SurveyReport(BaseModel):
             "were never converted. Normally zero now that fetching stops on target."
         ),
     )
-    boundary_tier: int = Field(
-        default=0,
-        ge=0,
-        description="Papers tied at the delivery cut; see ScoutStats.boundary_tier.",
-    )
-    boundary_reranked: bool = Field(
-        default=False,
+    scout: ScoutStats = Field(
+        default_factory=ScoutStats,
         description=(
-            "The tie at the cut was resolved by the LLM boundary selector. Distinct "
-            "from affinity_calls below: that is the cross-encoder ordering every tie "
-            "in the pool, this is one LLM call on the tier at the cut."
+            "PaperScout's own run statistics. Boundary tier, facets, busy-seconds and "
+            "rerank call/failure counts all live here instead of being mirrored as "
+            "SurveyReport fields."
         ),
-    )
-    affinity_calls: int = Field(
-        default=0,
-        ge=0,
-        description="Cross-encoder requests that ordered papers tied on relevance.",
-    )
-    scout_busy: dict[str, float] = Field(
-        default_factory=dict,
-        description=(
-            "Serial busy seconds inside scout, per category. NOT wall-clock shares: "
-            "scoring runs concurrently with reranking and backends run concurrently "
-            "with each other, so these sum to more than scout_seconds. Read them for "
-            "'what is expensive', never for 'what fraction of the run'."
-        ),
-    )
-    affinity_failures: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "Cross-encoder batches that failed after retry. Those papers sort last "
-            "within their grade, so this is a bias indicator, not just a cost one."
-        ),
-    )
-    facets: list[str] = Field(
-        default_factory=list, description="Facets the topic was split into."
-    )
-    facet_coverage: float = Field(
-        default=0.0, ge=0.0, le=1.0, description="Fraction of facets delivered."
     )
     shredded_papers: list[str] = Field(
         default_factory=list,
@@ -381,14 +342,6 @@ class SurveyReport(BaseModel):
             "Papers refused by the shred gate, one line each with the numbers behind "
             "the refusal. A list rather than a count: this gate discards a paper the "
             "grader wanted, so every refusal has to be reviewable."
-        ),
-    )
-    scout_dropped_no_source: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "Papers above the threshold that were dropped for having no fetchable "
-            "source, and so never competed for a delivery slot."
         ),
     )
     retain_threshold: float = Field(
@@ -524,7 +477,6 @@ class SurveyPipeline:
         self._convert_cap = request.max_papers
         # 独立跑时事实全部落在 SurveyReport 里；接进 loop 后它是个十几分钟的后台任务，
         # 没有逐段回报的话，外部无法区分"正在取第 7 篇"与"卡死了"。
-        self._emit = emit or _silent_emit
 
     async def run(self) -> SurveyReport:
         """执行全链路，返回逐篇结果与成本账。"""
@@ -533,7 +485,10 @@ class SurveyPipeline:
         await self._emit(
             "survey/scouted",
             self.report.scout_result_ref or "",
-            {"pool": self.report.scout_pool, "retained": self.report.scout_retained},
+            {
+                "pool": self.report.scout.pool_size,
+                "retained": self.report.scout.retained_papers,
+            },
         )
         if source_request_ref is not None:
             source_result = await self._fetch(source_request_ref)
@@ -747,7 +702,7 @@ class SurveyPipeline:
                 conversion_status="no_source",
             )
             self._register_identifiers(key, identity)
-        self.report.scout_retained = len(papers)
+        self.report.scout.retained_papers = len(papers)
         self._convert_cap = max(self.request.max_papers, len(papers))
         request = PaperSourceRequest(
             papers=papers,
@@ -771,21 +726,7 @@ class SurveyPipeline:
             await self.stack.artifacts.get_text(result.stats_ref)
         )
         self.report.scout_result_ref = result_ref
-        self.report.scout_pool = len(corpus.pool)
-        self.report.scout_retained = len(corpus.retained)
-        self.report.scout_dropped_no_source = stats.dropped_no_source
-        self.report.boundary_tier = stats.boundary_tier
-        self.report.boundary_reranked = stats.boundary_reranked
-        self.report.affinity_calls = stats.rerank_calls
-        self.report.affinity_failures = stats.rerank_failures
-        self.report.scout_busy = {
-            "policy": stats.policy_seconds,
-            "scorer": stats.scorer_seconds,
-            "rerank": stats.rerank_seconds,
-            "backend": stats.backend_seconds,
-        }
-        self.report.facets = list(stats.facets)
-        self.report.facet_coverage = stats.facet_coverage
+        self.report.scout = stats
         self.report.retain_threshold = self.request.retain_threshold
         # 分数分布是决定门槛该放在哪的唯一依据：交付 2 篇既可能是"池里只有 2 篇好的"，
         # 也可能是"18 篇 2 分被门槛挡住了"，只看交付量分不出这两种情况

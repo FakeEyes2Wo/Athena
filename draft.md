@@ -338,3 +338,13 @@
 - `supervisor/recovery.py`：内联 `_has_final_baseline`。
 - 测试同步：`test_runtime_ideators.py` 的 lane 桩接受新增的 `handoff_texts` 关键字。
 - 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。
+
+## 追加：合并代码整理——SurveyReport/ScoutStats 去冗余
+- `SurveyReport` 删除与 `ScoutStats` 重复的 9 个字段：`scout_pool`、`scout_retained`、`scout_dropped_no_source`、`boundary_tier`、`boundary_reranked`、`affinity_calls`、`affinity_failures`、`scout_busy`、`facets`、`facet_coverage`，改为持有 `scout: ScoutStats` 一个字段（实际删 10 个）。
+- `SurveyPipeline._read_scout_result` 不再逐字段复制 scout 统计；`report.py` / `survey/tool.py` 改从 `report.scout` 读取。
+- `ScoutStats` 删除与 `pool_size` 恒等的 `scored_papers`。
+- `PaperScoutAgent._finish`：
+  - `dropped_no_source` 改为 `len(eligible) - len(contenders)`，删掉对 `has_retrievable_source` 的逐篇调用与 import。
+  - action 计数三遍推导合并为一趟循环。
+- 测试同步：`FakeScoutAgent` 填充 `pool_size` / `retained_papers`，断言改用 `report.scout.*`。
+- 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。

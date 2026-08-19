@@ -95,7 +95,7 @@ class PaperSurveyTool(BaseTool):
             "papers_indexed": sum(1 for item in report.papers if item.indexed),
             "papers_converted": report.converted(),
             "papers_fetched": report.fetched,
-            "pool_size": report.scout_pool,
+            "pool_size": report.scout.pool_size,
             "warnings": report.warnings,
         }
         if report.corpus_ref is None:

@@ -103,30 +103,31 @@ def print_report(report: SurveyReport) -> None:
     print(
         report_line(
             "候选池 / 取源候选",
-            f"{report.scout_pool} / {report.scout_retained}"
+            f"{report.scout.pool_size} / {report.scout.retained_papers}"
             f"（门槛 {report.retain_threshold}）",
         )
     )
-    if report.boundary_tier:
+    if report.scout.boundary_tier:
         print(
             report_line(
                 "边界档",
-                f"{report.boundary_tier} 篇同分争最后几个名额，"
-                f"{'已重排' if report.boundary_reranked else '按散列取（重排未生效）'}",
+                f"{report.scout.boundary_tier} 篇同分争最后几个名额，"
+                f"{'已重排' if report.scout.boundary_reranked else '按散列取（重排未生效）'}",
             )
         )
-    if report.facets:
+    if report.scout.facets:
         print(
             report_line(
                 "课题分面",
-                f"{report.facet_coverage:.0%} 覆盖  ·  {' / '.join(report.facets)}",
+                f"{report.scout.facet_coverage:.0%} 覆盖  ·  "
+                f"{' / '.join(report.scout.facets)}",
             )
         )
-    if report.scout_dropped_no_source:
+    if report.scout.dropped_no_source:
         print(
             report_line(
                 "无源剔除",
-                f"{report.scout_dropped_no_source} 篇过线但取不到源，未占交付名额",
+                f"{report.scout.dropped_no_source} 篇过线但取不到源，未占交付名额",
             )
         )
     for line in report.shredded_papers:
@@ -135,7 +136,7 @@ def print_report(report: SurveyReport) -> None:
         report_line(
             "取源成功",
             f"{report.fetched} / {report.fetch_attempted} 次尝试"
-            f"（候选 {report.scout_retained}，够数即停）",
+            f"（候选 {report.scout.retained_papers}，够数即停）",
         )
     )
     if report.surplus_dropped:
@@ -170,24 +171,30 @@ def print_report(report: SurveyReport) -> None:
             f"total={timings.total_seconds}",
         )
     )
-    if report.scout_busy:
-        busy = sum(report.scout_busy.values())
-        detail = "  ".join(f"{k}={v:.1f}" for k, v in report.scout_busy.items())
-        print(
-            report_line(
-                "scout 忙时",
-                f"{detail}  合计 {busy:.1f}s / 墙钟 "
-                f"{report.timings.scout_seconds:.1f}s（并发，故合计可超墙钟）",
+    if report.scout:
+        busy = {
+            "policy": report.scout.policy_seconds,
+            "scorer": report.scout.scorer_seconds,
+            "rerank": report.scout.rerank_seconds,
+            "backend": report.scout.backend_seconds,
+        }
+        if any(busy.values()):
+            detail = "  ".join(f"{k}={v:.1f}" for k, v in busy.items())
+            print(
+                report_line(
+                    "scout 忙时",
+                    f"{detail}  合计 {sum(busy.values()):.1f}s / 墙钟 "
+                    f"{report.timings.scout_seconds:.1f}s（并发，故合计可超墙钟）",
+                )
             )
-        )
     print(
         report_line(
             "调用数",
             f"http={report.http_requests} vision={report.vision_calls}"
             f"(失败 {report.vision_failures}) embed={report.embed_calls}"
             f"/{report.embedded_texts} 条"
-            f" 同分排序={report.affinity_calls}"
-            f"{f'(失败 {report.affinity_failures})' if report.affinity_failures else ''}",
+            f" 同分排序={report.scout.rerank_calls}"
+            f"{f'(失败 {report.scout.rerank_failures})' if report.scout.rerank_failures else ''}",
         )
     )
     if report.library:

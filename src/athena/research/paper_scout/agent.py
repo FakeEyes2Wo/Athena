@@ -22,7 +22,6 @@ from athena.core.contracts import ArtifactStore
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext, ToolResult
 from athena.research.paper_scout.backends import ReferenceBackend, SearchBackend
-from athena.research.paper_scout.pool import has_retrievable_source
 from athena.research.paper_scout.prompts import (
     PAPERSCOUT_SYSTEM_PROMPT,
     PAPERSCOUT_USER_PROMPT,
@@ -282,18 +281,19 @@ class PaperScoutAgent(BaseAgent):
         stats.facet_coverage = round(selection.coverage(), 3)
         stats.selection_note = selection.note
         if session.request.require_retrievable_source:
-            stats.dropped_no_source = sum(
-                1 for paper in eligible if not has_retrievable_source(paper)
-            )
-        stats.search_actions = sum(
-            1 for action in session.actions if action.kind == "search"
-        )
-        stats.expand_actions = sum(
-            1 for action in session.actions if action.kind == "expand"
-        )
-        stats.repeated_actions = sum(1 for action in session.actions if action.repeated)
+            stats.dropped_no_source = len(eligible) - len(contenders)
+        search_actions = expand_actions = repeated_actions = 0
+        for action in session.actions:
+            if action.kind == "search":
+                search_actions += 1
+            else:
+                expand_actions += 1
+            if action.repeated:
+                repeated_actions += 1
+        stats.search_actions = search_actions
+        stats.expand_actions = expand_actions
+        stats.repeated_actions = repeated_actions
         stats.pool_size = len(session.pool)
-        stats.scored_papers = len(session.pool)
         stats.retained_papers = len(retained)
         stats.scorer_calls = getattr(session.scorer, "calls", 0)
         stats.rerank_calls = getattr(session.reranker, "calls", 0)

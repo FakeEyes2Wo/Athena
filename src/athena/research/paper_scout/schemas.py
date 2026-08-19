@@ -164,7 +164,6 @@ class ScoutStats(BaseModel):
     expand_actions: int = Field(default=0, ge=0)
     repeated_actions: int = Field(default=0, ge=0)
     pool_size: int = Field(default=0, ge=0)
-    scored_papers: int = Field(default=0, ge=0)
     retained_papers: int = Field(default=0, ge=0)
     dropped_no_source: int = Field(
         default=0,
