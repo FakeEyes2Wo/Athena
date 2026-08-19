@@ -348,3 +348,9 @@
   - action 计数三遍推导合并为一趟循环。
 - 测试同步：`FakeScoutAgent` 填充 `pool_size` / `retained_papers`，断言改用 `report.scout.*`。
 - 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。
+
+## 追加：合并相似工具类
+- `core/tool.py`：新增 `StackTool(BaseTool)`，统一"只注入一个 stack"的工具底座。
+- `kaggle/tool.py`：9 个 Kaggle 工具类不再各自定义 `__init__`，统一继承 `StackTool`；删除 `KaggleTool` 中间层与重复的 `stack` 存储。
+- `research/survey/tool.py`：`PaperSurveyTool` 改为继承 `StackTool`，删除自己的 `__init__` 与 `TYPE_CHECKING` 依赖。
+- 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。

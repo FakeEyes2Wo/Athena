@@ -10,19 +10,14 @@
 配额。
 """
 
-from typing import TYPE_CHECKING
-
-from athena.core.tool import BaseTool
+from athena.core.tool import StackTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.research.survey.pipeline import SurveyRequest, run_survey
-
-if TYPE_CHECKING:
-    from athena.research.survey.wiring import SurveyStack
 
 SURVEY_TOOL_NAME = "paper_survey"
 
 
-class PaperSurveyTool(BaseTool):
+class PaperSurveyTool(StackTool):
     """按主题跑完整条文献链路，返回语料引用与这次运行的成本账。
 
     依赖由组合根注入（``SurveyStack``），工具本身不读环境变量、不建客户端。
@@ -70,9 +65,6 @@ class PaperSurveyTool(BaseTool):
         },
         concurrency_safe=False,
     )
-
-    def __init__(self, stack: "SurveyStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """跑一次全链路；一篇都没转换成功时把报告当作失败返回。"""

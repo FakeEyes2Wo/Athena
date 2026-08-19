@@ -78,6 +78,13 @@ class BaseTool(ABC):
         return result
 
 
+class StackTool(BaseTool):
+    """只有一个注入依赖的工具底座：把 ``stack`` 存在 ``self.stack`` 上。"""
+
+    def __init__(self, stack: Any) -> None:
+        self.stack = stack
+
+
 def _type_to_schema(annotation: Any) -> dict:
     """Python 类型注解 → JSON Schema 片段（str/int/float/bool/list/dict/Optional）。
 

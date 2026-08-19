@@ -5,16 +5,12 @@
 """
 
 import urllib.parse
-from typing import TYPE_CHECKING
 
-from athena.core.tool import BaseTool
+from athena.core.tool import StackTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.kaggle.client import author_name, pick_first
 from athena.kaggle.pipeline import run_kaggle
 from athena.kaggle.schemas import KaggleRunRequest
-
-if TYPE_CHECKING:
-    from athena.kaggle.wiring import KaggleStack
 
 KAGGLE_LIST_COMPETITIONS = "kaggle_list_competitions"
 KAGGLE_GET_COMPETITION = "kaggle_get_competition"
@@ -41,33 +37,37 @@ def _schema(props: dict[str, str], *required: str) -> dict:
 
 def _notebook_ref(input: dict) -> str:
     """Accept either a notebook URL or an ``owner/slug`` ref."""
-    value = str(input.get("notebook") or input.get("ref") or input.get("url") or "").strip()
+    value = str(
+        input.get("notebook") or input.get("ref") or input.get("url") or ""
+    ).strip()
     if not value:
         raise ValueError("notebook must be a non-empty string")
     if "kaggle.com/code/" not in value:
         return value
     parts = urllib.parse.urlsplit(value).path.strip("/").split("/")
     if "code" in parts:
-        parts = parts[parts.index("code") + 1:]
+        parts = parts[parts.index("code") + 1 :]
     return "/".join(parts[:2]) or value
 
 
 def _discussion_ref(input: dict) -> str:
     """Accept either a discussion URL or its id/ref."""
-    value = str(input.get("discussion") or input.get("ref") or input.get("url") or "").strip()
+    value = str(
+        input.get("discussion") or input.get("ref") or input.get("url") or ""
+    ).strip()
     if not value:
         raise ValueError("discussion must be a non-empty string")
     if "kaggle.com" not in value:
         return value
     parts = urllib.parse.urlsplit(value).path.strip("/").split("/")
     if "discussion" in parts:
-        after = parts[parts.index("discussion") + 1:]
+        after = parts[parts.index("discussion") + 1 :]
         if after:
             return "/".join(after)
     return parts[-1] if parts else value
 
 
-class KaggleListCompetitionsTool(BaseTool):
+class KaggleListCompetitionsTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_LIST_COMPETITIONS,
         description=(
@@ -79,9 +79,6 @@ class KaggleListCompetitionsTool(BaseTool):
             {"search": "string", "page": "integer", "sort_by": "string"}
         ),
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         raw = await self.stack.client.list_competitions(
@@ -102,7 +99,7 @@ class KaggleListCompetitionsTool(BaseTool):
         return ToolResult(data={"competitions": summaries, "count": len(summaries)})
 
 
-class KaggleGetCompetitionTool(BaseTool):
+class KaggleGetCompetitionTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_GET_COMPETITION,
         description=(
@@ -113,9 +110,6 @@ class KaggleGetCompetitionTool(BaseTool):
         ),
         input_schema=_schema({"competition": "string"}, "competition"),
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _competition_ref(input)
@@ -150,7 +144,7 @@ class KaggleGetCompetitionTool(BaseTool):
         )
 
 
-class KaggleListNotebooksTool(BaseTool):
+class KaggleListNotebooksTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_LIST_NOTEBOOKS,
         description=(
@@ -162,9 +156,6 @@ class KaggleListNotebooksTool(BaseTool):
             {"competition": "string", "max_results": "integer"}, "competition"
         ),
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _competition_ref(input)
@@ -198,7 +189,7 @@ class KaggleListNotebooksTool(BaseTool):
         return ToolResult(data={"notebooks": items, "count": len(items)})
 
 
-class KaggleGetNotebookTool(BaseTool):
+class KaggleGetNotebookTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_GET_NOTEBOOK,
         description=(
@@ -209,9 +200,6 @@ class KaggleGetNotebookTool(BaseTool):
         ),
         input_schema=_schema({"notebook": "string"}, "notebook"),
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _notebook_ref(input)
@@ -227,7 +215,7 @@ class KaggleGetNotebookTool(BaseTool):
         )
 
 
-class KaggleListDiscussionsTool(BaseTool):
+class KaggleListDiscussionsTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_LIST_DISCUSSIONS,
         description=(
@@ -240,9 +228,6 @@ class KaggleListDiscussionsTool(BaseTool):
             {"competition": "string", "max_results": "integer"}, "competition"
         ),
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _competition_ref(input)
@@ -274,7 +259,7 @@ class KaggleListDiscussionsTool(BaseTool):
         return ToolResult(data={"discussions": items, "count": len(items)})
 
 
-class KaggleGetDiscussionTool(BaseTool):
+class KaggleGetDiscussionTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_GET_DISCUSSION,
         description=(
@@ -285,9 +270,6 @@ class KaggleGetDiscussionTool(BaseTool):
         ),
         input_schema=_schema({"discussion": "string"}, "discussion"),
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _discussion_ref(input)
@@ -303,7 +285,7 @@ class KaggleGetDiscussionTool(BaseTool):
         )
 
 
-class KaggleDownloadDataTool(BaseTool):
+class KaggleDownloadDataTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_DOWNLOAD_DATA,
         description=(
@@ -316,9 +298,6 @@ class KaggleDownloadDataTool(BaseTool):
         ),
         concurrency_safe=False,
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _competition_ref(input)
@@ -355,7 +334,7 @@ class KaggleDownloadDataTool(BaseTool):
         )
 
 
-class KaggleRunTool(BaseTool):
+class KaggleRunTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_RUN,
         description=(
@@ -375,9 +354,6 @@ class KaggleRunTool(BaseTool):
         ),
         concurrency_safe=False,
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _competition_ref(input)
@@ -412,7 +388,7 @@ class KaggleRunTool(BaseTool):
         return ToolResult(data=data, artifacts=refs)
 
 
-class KaggleSubmitTool(BaseTool):
+class KaggleSubmitTool(StackTool):
     spec = ToolSpec(
         name=KAGGLE_SUBMIT,
         description=(
@@ -425,9 +401,6 @@ class KaggleSubmitTool(BaseTool):
         ),
         concurrency_safe=False,
     )
-
-    def __init__(self, stack: "KaggleStack") -> None:
-        self.stack = stack
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         ref = _competition_ref(input)
