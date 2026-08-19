@@ -773,7 +773,6 @@ class ResearchRuntime:
         # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。
         self._task_text = self._resume_task_text(self._task_text)
         await self._maybe_run_task_understanding()
-        self._start_survey()
         self._task = asyncio.create_task(self._supervisor.start())
         self._started = True
         return self._task

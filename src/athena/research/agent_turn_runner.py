@@ -540,20 +540,6 @@ class AgentTurnRunner:
         if save is not None and state_path:
             save(state_path)
 
-    def _literature_handoff_text(self) -> str:
-        """复用现有 corpus_ref，把文献调研包装成一段 handoff 文本。"""
-        rt = self._runtime
-        ref = rt.survey_corpus_ref()
-        if not ref:
-            return ""
-        self._remember_handoff_ref("literature", ref)
-        return (
-            "A literature corpus is available for this task. "
-            f"Pass corpus_ref={ref!r} to the paper_* tools to search and read it, "
-            "and record the paper keys you actually used in each hypothesis's "
-            "sources field."
-        )
-
     async def _collect_handoff_texts(self) -> list[str]:
         """按 state.handoff_sources 收集已启用的 handoff 文本。"""
         rt = self._runtime
@@ -570,8 +556,6 @@ class AgentTurnRunner:
         for source in sources:
             if source == "kaggle":
                 text = await self._ensure_kaggle_handoff()
-            elif source == "literature":
-                text = self._literature_handoff_text()
             else:
                 text = ""
             if text:

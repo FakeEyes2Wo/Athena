@@ -305,3 +305,13 @@
   - `test_recovery.py` 更新并通过（7 passed）；
   - 手工异步脚本验证 `start_plan` 落 tree、删除 experiment 后 `recover()`
     可重建 RUNNING 实验并写回、纯 `Recovery.reconcile` 丢弃孤儿 Plan。
+
+## 追加：合并 feature/survey-overhaul + 简化
+- 分析 `feature/survey-overhaul`（54 commits，84 files，+12.7k 行）：核心是论文语料/引用核验、survey bench 与文档、plan/fork 修复。
+- 合并到 main：解决 8 个冲突文件，保留 main 的断点续传/heartbeat/Kaggle handoff/任务理解，同时接入 feature 的 corpus_tools、citation verification、plan_tools。
+- 简化：
+  - `agent_turn_runner.py`：去掉重复的本地 `_read_eval_handoff`（改用 `supervisor.experiment.read_eval_handoff`），去掉冗余 `_literature_handoff_text`（语料提示已由 `_corpus_block` 提供）。
+  - `runtime.py`：去掉 `start()` 中重复的 `_start_survey()` 调用。
+  - `state.py`：`load()` 先迁移 `corpus_ideation_done` 再剥离未知键，保证旧状态迁移不丢。
+  - 测试同步：`test_agent.py` 的 anthropic 断言改为 ValueError（当前不支持 anthropic）。
+- 验证：`python -m pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺 `kagglehub` 可选依赖，与本次改动无关）；`test/unit/research + idea_generation + test_agent` = 492 passed。
