@@ -111,7 +111,7 @@ async def _wait_run_with_heartbeat(
             return await asyncio.wait_for(
                 waiter, timeout=min(TURN_HEARTBEAT_SECONDS, remaining)
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             publish_output = getattr(rt, "publish_output", None)
             if publish_output is not None:
                 await publish_output(

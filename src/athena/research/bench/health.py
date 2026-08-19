@@ -97,9 +97,7 @@ def matches_section(headings: list[str], probe: str) -> bool:
     会把"这些论文不讨论局限"和"它们把局限写在别的标题下"混成同一个数字。
     """
     variants = heading_variants(probe)
-    return any(
-        variant in name.lower() for name in headings for variant in variants
-    )
+    return any(variant in name.lower() for name in headings for variant in variants)
 
 
 def corpus_health(corpus: LoadedCorpus, corpus_ref: str = "") -> CorpusHealthReport:
@@ -116,7 +114,7 @@ def corpus_health(corpus: LoadedCorpus, corpus_ref: str = "") -> CorpusHealthRep
     details: list[PaperHealth] = []
     paper_edges: set[tuple[str, str]] = set()
     visual_links = 0
-    section_coverage = {probe: 0 for probe in PROBED_SECTIONS}
+    section_coverage = dict.fromkeys(PROBED_SECTIONS, 0)
 
     for paper_id, positions in grouped.items():
         entries = [index.entries[position] for position in positions]

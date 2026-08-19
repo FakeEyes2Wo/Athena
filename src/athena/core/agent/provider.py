@@ -231,14 +231,14 @@ class ResponsesProvider(BaseProvider):
         if output_type is not None and (tool_defs or self.provider_kind == "deepseek"):
             api_msgs = [*api_msgs, _schema_instruction(output_type)]
 
-        kw: dict = dict(
-            model=self.model_name,
-            messages=api_msgs,
-            max_tokens=config.max_tokens,
-            temperature=config.temperature,
-            stream=True,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
+        kw: dict = {
+            "model": self.model_name,
+            "messages": api_msgs,
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+            "stream": True,
+            "extra_body": {"thinking": {"type": "disabled"}},
+        }
         if output_type is not None and not tool_defs:
             response_format = self._response_format(output_type)
             if response_format is not None:

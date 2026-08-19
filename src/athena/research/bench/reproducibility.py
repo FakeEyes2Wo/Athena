@@ -33,7 +33,7 @@ def delivery_overlap(
     不同，全体交集会把前两次的一致性也一并抹掉，而均值能把它保留下来。同时报交集与并集
     的大小——"稳定核心有多大"和"候选面有多宽"是两个不同的问题。
     """
-    sets = [set(item for item in run if item) for run in runs]
+    sets = [{item for item in run if item} for run in runs]
     if len(sets) < 2:
         raise ValueError("delivery_overlap needs at least two runs to compare")
     pairs = [

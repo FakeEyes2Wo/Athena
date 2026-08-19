@@ -368,3 +368,9 @@
 - `paper_source/fetcher.py`：`pdf_hint_urls` 改为 `dict.fromkeys` 保序去重。
 - `paper_rag/interfaces.py` + `__init__.py`：删除无实现、无调用点的 `ChunkContextualizer` 契约。
 - 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。
+
+## 追加：逐文件简化（自动 + 手动）
+- ruff 自动修复：`asyncio.TimeoutError` -> `TimeoutError`；`dict.fromkeys` 替代两处 0 值字典推导（health / ranker）。
+- 手动修复：`reproducibility.py` 集合推导；`provider.py` `dict(...)` 改为字典字面量。
+- 前面 batch 的源码简化也包含在本轮（backends / fetcher / known_item / paper_rag interfaces）。
+- 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。

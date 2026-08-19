@@ -147,7 +147,7 @@ class Selector:
         high = max(values) if values else 0.0
         span = high - low
         if span <= 0:
-            return {key: 0.5 for key in priorities}
+            return dict.fromkeys(priorities, 0.5)
         return {key: (value - low) / span for key, value in priorities.items()}
 
     def _score(
