@@ -327,3 +327,14 @@
   - `_collect_handoff_texts` 去掉只剩一个来源的循环；
   - 移除未使用的 `ArtifactStore` import。
 - 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`，与本次改动无关）。
+
+## 追加：删除更多 _ 辅助函数（内联单次调用的薄封装）
+- `agent_turn_runner.py`：内联 `_interrupt_agent`、删除 `_lane_kwargs`（直接传 `handoff_texts` / `profile` 参数）。
+- `supervisor/prepare.py`：内联 `_workspace_output` 的异常改写。
+- `supervisor/scheduler.py`：内联 `_is_ready` 一行判据。
+- `supervisor/ranker.py`：内联 `_settled_hypotheses` 列表推导。
+- `supervisor/experiment.py`：内联 `_better` 方向比较。
+- `supervisor/events.py`：内联 `_utf8_prefix`，并复用 `encoded` 避免重复编码。
+- `supervisor/recovery.py`：内联 `_has_final_baseline`。
+- 测试同步：`test_runtime_ideators.py` 的 lane 桩接受新增的 `handoff_texts` 关键字。
+- 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`）。

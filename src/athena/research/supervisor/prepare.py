@@ -54,13 +54,6 @@ class PrepareResult(BaseModel):
 ROW_ID_COLUMN = "__athena_row_id"
 
 
-def _workspace_output(root: Path, rel: str) -> Path:
-    try:
-        return resolve_workspace_path(root, rel)
-    except ValueError as exc:
-        raise ValueError(f"output path escapes workspace: {rel}") from exc
-
-
 def _require_joinable_labels(labels_file: Path) -> None:
     """``labels.csv`` 必须带 id 列，否则预测与标签只能按位置对齐。
 
@@ -107,7 +100,10 @@ async def _freeze_evaluator(
         evaluator_rel = spec["eval_script"]
     except (OSError, ValueError, KeyError):
         raise ValueError("metric.json must declare eval_script")
-    evaluator_path = _workspace_output(root, evaluator_rel)
+    try:
+        evaluator_path = resolve_workspace_path(root, evaluator_rel)
+    except ValueError as exc:
+        raise ValueError(f"output path escapes workspace: {evaluator_rel}") from exc
     if evaluator_path.is_dir():
         # eval_script 声明的是目录；入口文件约定为 evaluate.py。
         evaluator_root = evaluator_path

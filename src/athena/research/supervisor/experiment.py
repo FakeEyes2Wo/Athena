@@ -320,11 +320,6 @@ class PlanTurnResult(BaseModel):
         return self
 
 
-def _better(candidate: float, reference: float, direction: Direction) -> bool:
-    """判断 ``candidate`` 是否在指标方向上优于 ``reference``。"""
-    return candidate > reference if direction == "maximize" else candidate < reference
-
-
 async def load_best(best_ref: ArtifactRef, store: ArtifactStore) -> PlanBest:
     """从 artifact 引用加载不可变 PlanBest 记录。"""
     return PlanBest.model_validate_json(await store.get_text(best_ref))
@@ -345,7 +340,9 @@ async def apply_trusted_score(
     未显著改进 → stale_rounds 加一且保留历史 best。返回 ``state`` 的副本。
     """
     current = await load_best(state.best_ref, store) if state.best_ref else None
-    improved = current is None or _better(metric, current.metric, direction)
+    improved = current is None or (
+        metric > current.metric if direction == "maximize" else metric < current.metric
+    )
     if improved:
         best = PlanBest(metric=metric, commit=commit, evidence_ref=evidence_ref)
         best_ref = await store.put_text(best.model_dump_json())

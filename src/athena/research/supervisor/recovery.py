@@ -9,14 +9,6 @@ from athena.research.supervisor.state import ResearchState
 _TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
 
 
-def _has_final_baseline(tree: ResearchTree) -> bool:
-    """True when the tree holds a terminal PREPARE baseline experiment."""
-    return any(
-        experiment.status in _TERMINAL
-        for experiment in tree.experiments(kind="baseline")
-    )
-
-
 def _is_settled(
     plan_id: str,
     plan: PlanState,
@@ -51,7 +43,10 @@ class Recovery:
         artifact_exists: Callable[[str], bool],
     ) -> ResearchState:
         """Remove settled Plans and expose missing recovery prerequisites as waiting."""
-        has_final_baseline = _has_final_baseline(tree)
+        has_final_baseline = any(
+            experiment.status in _TERMINAL
+            for experiment in tree.experiments(kind="baseline")
+        )
         plans: dict[str, PlanState] = {}
         waiting = False
         for plan_id, plan in state.plans.items():

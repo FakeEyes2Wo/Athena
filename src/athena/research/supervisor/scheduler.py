@@ -78,11 +78,6 @@ def count_search_attempts(state: ResearchState, tree: ResearchTree) -> int:
     return settled + active
 
 
-def _is_ready(turns_used: int, turn_limit: int | None) -> bool:
-    """True when a Plan still has remaining turns or is unlimited."""
-    return turn_limit is None or turns_used < turn_limit
-
-
 class Scheduler:
     """Fill SEARCH concurrency slots in a fixed deterministic order."""
 
@@ -136,7 +131,7 @@ class Scheduler:
             if (
                 plan.kind == "SEARCH"
                 and plan_id not in running
-                and _is_ready(plan.turns_used, plan.turn_limit)
+                and (plan.turn_limit is None or plan.turns_used < plan.turn_limit)
             ):
                 actions.append(ScheduleAction.Resume(plan_id))
                 free_slots -= 1

@@ -57,22 +57,13 @@ def rubric_prior(hypothesis: Hypothesis, tree: ResearchTree) -> float:
     return 0.4 + 0.6 * specific
 
 
-def _settled_hypotheses(tree: ResearchTree) -> list[Hypothesis]:
-    """Hypotheses whose experiment already produced a terminal verdict."""
-    return [
-        hypothesis
-        for hypothesis in tree.hypotheses()
-        if hypothesis.status != "PROPOSED"
-    ]
-
-
 def novelty(hypothesis: Hypothesis, tree: ResearchTree) -> float:
     """1 - max similarity to settled hypotheses (1.0 when nothing is settled).
 
     This is the UCB exploration term: it rewards directions unlike anything
     already tested, instead of repeating near-duplicate interventions.
     """
-    settled = _settled_hypotheses(tree)
+    settled = [item for item in tree.hypotheses() if item.status != "PROPOSED"]
     if not settled:
         return 1.0
     return 1.0 - max(_text_similarity(hypothesis, other) for other in settled)
@@ -91,9 +82,7 @@ def deduplicate(
     kept: list[Hypothesis] = []
     seen: list[Hypothesis] = list(existing)
     for candidate in candidates:
-        if any(
-            _text_similarity(candidate, other) >= threshold for other in seen
-        ):
+        if any(_text_similarity(candidate, other) >= threshold for other in seen):
             continue
         kept.append(candidate)
         seen.append(candidate)

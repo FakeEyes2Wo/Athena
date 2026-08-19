@@ -87,13 +87,6 @@ def sanitize_terminal_text(text: str) -> str:
     return _UNPRINTABLE.sub("", normalized)
 
 
-def _utf8_prefix(text: str, byte_limit: int) -> str:
-    encoded = text.encode("utf-8")
-    if len(encoded) <= byte_limit:
-        return text
-    return encoded[:byte_limit].decode("utf-8", errors="ignore")
-
-
 def truncate_middle(text: str, max_chars: int) -> str:
     """Middle-truncate ``text`` to roughly ``max_chars`` while preserving both ends.
 
@@ -177,8 +170,13 @@ class EventProjector:
         safe_stderr = redact(sanitize_terminal_text(stderr))
         safe_stdout = redact(sanitize_terminal_text(stdout))
         full = "\n".join(part for part in (safe_stderr, safe_stdout) if part)
-        preview = _utf8_prefix(full, _PREVIEW_BYTES)
-        truncated = len(full.encode("utf-8")) > _PREVIEW_BYTES
+        encoded = full.encode("utf-8")
+        truncated = len(encoded) > _PREVIEW_BYTES
+        preview = (
+            encoded[:_PREVIEW_BYTES].decode("utf-8", errors="ignore")
+            if truncated
+            else full
+        )
         if truncated and artifact_ref is None:
             artifact_ref = await self._store.put_text(full)
         channel: Literal["stdout", "stderr"] = "stderr" if safe_stderr else "stdout"

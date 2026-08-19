@@ -91,7 +91,10 @@ async def _wait_run_with_heartbeat(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            await _interrupt_agent(agents, agent_id, f"{plan or agent_id}_turn_timeout")
+            try:
+                await agents.interrupt(agent_id, f"{plan or agent_id}_turn_timeout")
+            except Exception:
+                pass
             raise RuntimeError(f"{label} timed out after {AGENT_TURN_TIMEOUT_SECONDS}s")
         if project:
             events_bus = getattr(rt, "_events_bus", None)
@@ -121,14 +124,6 @@ async def _wait_run_with_heartbeat(
 
 MAX_KAGGLE_HANDOFF_CHARS = 12_000
 """注入 Ideator 的 Kaggle handoff 文本上限，防止把超大内容塞进每轮 prompt。"""
-
-
-async def _interrupt_agent(agents, agent_id: str, reason: str) -> None:
-    """Best-effort 打断 worker；worker 已结束或不存在时忽略。"""
-    try:
-        await agents.interrupt(agent_id, reason)
-    except Exception:
-        pass
 
 
 class _DebateProfile(BaseModel):
@@ -286,7 +281,8 @@ class AgentTurnRunner:
                     f"ideator-{round_label}-{index}",
                     target,
                     Path(eda_dir),
-                    **self._lane_kwargs(handoff_texts, next(lane_profiles)),
+                    handoff_texts=handoff_texts,
+                    profile=next(lane_profiles),
                 )
                 for index, target in enumerate(allocations, start=1)
             ),
@@ -496,16 +492,6 @@ class AgentTurnRunner:
                 plan=KAGGLE_HANDOFF_AGENT_ID,
             )
         return ""
-
-    @staticmethod
-    def _lane_kwargs(handoff_texts: list[str], profile: IdeatorProfile | None) -> dict:
-        """构造 _run_ideator_lane 的可选 kwargs，避免调用点出现 None 参数堆。"""
-        kwargs: dict = {}
-        if handoff_texts:
-            kwargs["handoff_texts"] = handoff_texts
-        if profile is not None:
-            kwargs["profile"] = profile
-        return kwargs
 
     @staticmethod
     def _ideator_allocations(count: int, lanes: int) -> tuple[int, ...]:
