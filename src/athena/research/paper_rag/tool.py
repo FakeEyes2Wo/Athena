@@ -54,14 +54,34 @@ TOP_K_SCHEMA = {
 }
 
 
+def _clamp_positive(input: dict, key: str, default: int, maximum: int) -> int:
+    """取出并夹紧一个正整数；``BaseTool`` 不校验 schema，边界必须在代码里兜底。"""
+    value = input.get(key, default)
+    if not isinstance(value, int) or value < 1:
+        return default
+    return min(value, maximum)
+
+
+def _nonempty_str_list(value: object, label: str) -> list[str]:
+    """校验至少一个非空字符串，并返回清洗后的列表。"""
+    if not isinstance(value, list) or not any(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise ValueError(f"{label} must contain at least one non-empty string.")
+    return [item for item in value if isinstance(item, str) and item.strip()]
+
+
+def _optional_str_list(value: object, label: str) -> list[str]:
+    """校验可选字符串数组（缺省按空处理），并返回清洗后的列表。"""
+    value = value or []
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array of paper identifiers.")
+    return [item for item in value if isinstance(item, str)]
+
+
 def require_chunk_ids(input: dict) -> list[str]:
     """校验并取出 ``chunk_ids``；``BaseTool`` 不校验 input schema，边界必须兜底。"""
-    chunk_ids = input.get("chunk_ids")
-    if not isinstance(chunk_ids, list) or not any(
-        isinstance(item, str) and item.strip() for item in chunk_ids
-    ):
-        raise ValueError("chunk_ids must contain at least one non-empty string.")
-    return [item for item in chunk_ids if isinstance(item, str) and item.strip()]
+    return _nonempty_str_list(input.get("chunk_ids"), "chunk_ids")
 
 
 def require_corpus_ref(input: dict) -> str:
@@ -72,23 +92,30 @@ def require_corpus_ref(input: dict) -> str:
     return corpus_ref
 
 
-def resolve_top_k(input: dict) -> int:
-    """取出并夹紧 ``k``；``BaseTool`` 不校验 input schema，边界必须在代码里兜底。"""
-    value = input.get("k", DEFAULT_TOP_K)
-    if not isinstance(value, int) or value < 1:
-        return DEFAULT_TOP_K
-    return min(value, MAX_TOP_K)
+class PaperRagTool(BaseTool):
+    """论文语料只读算子的公共底座：持有 artifact store 与检索会话。"""
+
+    def __init__(
+        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
+    ) -> None:
+        self.artifacts = artifacts
+        self.session = session or RetrievalSession()
 
 
-def resolve_max_papers(input: dict) -> int:
-    """取出并夹紧 ``max_papers``，与 ``resolve_top_k`` 同一条边界兜底约定。"""
-    value = input.get("max_papers", DEFAULT_OVERVIEW_PAPERS)
-    if not isinstance(value, int) or value < 1:
-        return DEFAULT_OVERVIEW_PAPERS
-    return min(value, MAX_OVERVIEW_PAPERS)
+class PaperEmbeddingTool(PaperRagTool):
+    """需要句向量编码器的检索算子底座。"""
+
+    def __init__(
+        self,
+        artifacts: ArtifactStore,
+        embedder: TextEmbedder,
+        session: RetrievalSession | None = None,
+    ) -> None:
+        super().__init__(artifacts, session)
+        self.embedder = embedder
 
 
-class PaperCorpusOverviewTool(BaseTool):
+class PaperCorpusOverviewTool(PaperRagTool):
     """列出语料里有哪些论文，是拿到 ``corpus_ref`` 之后的第一步。
 
     其余算子都要求先知道点什么（关键词、查询、chunk id、章节名）；没有一个不需要前提
@@ -127,31 +154,25 @@ class PaperCorpusOverviewTool(BaseTool):
         },
     )
 
-    def __init__(
-        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
-    ) -> None:
-        self.artifacts = artifacts
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """列出语料内容。"""
         corpus_ref = require_corpus_ref(input)
-        paper_ids = input.get("paper_ids") or []
-        if not isinstance(paper_ids, list):
-            raise ValueError("paper_ids must be an array of paper identifiers.")
+        paper_ids = _optional_str_list(input.get("paper_ids"), "paper_ids")
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
         corpus = await self.session.load(self.artifacts, corpus_ref)
         overview = corpus_overview(
             corpus,
-            [item for item in paper_ids if isinstance(item, str)],
-            resolve_max_papers(input),
+            paper_ids,
+            _clamp_positive(
+                input, "max_papers", DEFAULT_OVERVIEW_PAPERS, MAX_OVERVIEW_PAPERS
+            ),
         )
         return ToolResult(data=overview.model_dump())
 
 
-class PaperKeywordSearchTool(BaseTool):
+class PaperKeywordSearchTool(PaperRagTool):
     """按精确关键词定位 chunk，返回 chunk id 与命中句片段。
 
     适合实体名、方法名、数据集名这类字面信号；不做同义扩展，因此没有语义漂移。
@@ -184,33 +205,23 @@ class PaperKeywordSearchTool(BaseTool):
         },
     )
 
-    def __init__(
-        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
-    ) -> None:
-        self.artifacts = artifacts
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """执行一次关键词检索。"""
         corpus_ref = require_corpus_ref(input)
-        keywords = input.get("keywords")
-        if not isinstance(keywords, list) or not any(
-            isinstance(item, str) and item.strip() for item in keywords
-        ):
-            raise ValueError("keywords must contain at least one non-empty string.")
+        keywords = _nonempty_str_list(input.get("keywords"), "keywords")
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
         corpus = await self.session.load(self.artifacts, corpus_ref)
         hits = keyword_search(
             corpus,
-            [item for item in keywords if isinstance(item, str)],
-            resolve_top_k(input),
+            keywords,
+            _clamp_positive(input, "k", DEFAULT_TOP_K, MAX_TOP_K),
         )
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
 
-class PaperSemanticSearchTool(BaseTool):
+class PaperSemanticSearchTool(PaperEmbeddingTool):
     """按语义相似度定位 chunk，返回 chunk id 与命中句片段。
 
     句级编码后按父 chunk 聚合，取最高句得分，因此长 chunk 不会因为平均稀释而被埋没。
@@ -243,16 +254,6 @@ class PaperSemanticSearchTool(BaseTool):
         },
     )
 
-    def __init__(
-        self,
-        artifacts: ArtifactStore,
-        embedder: TextEmbedder,
-        session: RetrievalSession | None = None,
-    ) -> None:
-        self.artifacts = artifacts
-        self.embedder = embedder
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """执行一次语义检索；语料未建向量或模型不一致时明确报错。"""
         corpus_ref = require_corpus_ref(input)
@@ -282,11 +283,13 @@ class PaperSemanticSearchTool(BaseTool):
             )
 
         vector = await self.session.embed_query(self.embedder, query)
-        hits = semantic_search(corpus, vector, resolve_top_k(input))
+        hits = semantic_search(
+            corpus, vector, _clamp_positive(input, "k", DEFAULT_TOP_K, MAX_TOP_K)
+        )
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
 
-class PaperSearchTool(BaseTool):
+class PaperSearchTool(PaperEmbeddingTool):
     """默认入口：词面与语义两个通道各取一批，再按 RRF 融合。
 
     存在的理由是实测的互补性，不是设计上的对称。同一份 44 篇语料、12 条改写查询（金标
@@ -340,16 +343,6 @@ class PaperSearchTool(BaseTool):
         },
     )
 
-    def __init__(
-        self,
-        artifacts: ArtifactStore,
-        embedder: TextEmbedder,
-        session: RetrievalSession | None = None,
-    ) -> None:
-        self.artifacts = artifacts
-        self.embedder = embedder
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """执行一次融合检索；没有向量时自动退化成纯词面而不是报错。
 
@@ -376,11 +369,16 @@ class PaperSearchTool(BaseTool):
             and corpus.index.embedding_model == self.embedder.model
         ):
             vector = await self.session.embed_query(self.embedder, query)
-        hits = hybrid_search(corpus, vector, keywords, resolve_top_k(input))
+        hits = hybrid_search(
+            corpus,
+            vector,
+            keywords,
+            _clamp_positive(input, "k", DEFAULT_TOP_K, MAX_TOP_K),
+        )
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
 
-class PaperChunkReadTool(BaseTool):
+class PaperChunkReadTool(PaperRagTool):
     """整篇读取指定 chunk，本会话内重复读取只返回提示。
 
     检索工具只给片段，全文必须显式读取——这条渐进披露让上下文只装 Agent 判断过值得
@@ -417,20 +415,10 @@ class PaperChunkReadTool(BaseTool):
         concurrency_safe=False,
     )
 
-    def __init__(
-        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
-    ) -> None:
-        self.artifacts = artifacts
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """读取请求的 chunk 全文。"""
         corpus_ref = require_corpus_ref(input)
-        chunk_ids = input.get("chunk_ids")
-        if not isinstance(chunk_ids, list) or not any(
-            isinstance(item, str) and item.strip() for item in chunk_ids
-        ):
-            raise ValueError("chunk_ids must contain at least one non-empty string.")
+        chunk_ids = require_chunk_ids(input)
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
@@ -438,13 +426,13 @@ class PaperChunkReadTool(BaseTool):
         chunks = read_chunks(
             corpus,
             self.session,
-            [item for item in chunk_ids if isinstance(item, str)],
+            chunk_ids,
             bool(input.get("include_adjacent", False)),
         )
         return ToolResult(data={"chunks": [chunk.model_dump() for chunk in chunks]})
 
 
-class PaperVisualOfTool(BaseTool):
+class PaperVisualOfTool(PaperRagTool):
     """沿图文互链走一步，双向通用。
 
     图表与讨论它的正文互为对方的证据：正文给出"我们观察到 X"，图给出 X 的量级。两边
@@ -472,12 +460,6 @@ class PaperVisualOfTool(BaseTool):
         },
     )
 
-    def __init__(
-        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
-    ) -> None:
-        self.artifacts = artifacts
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """走一步图文互链。"""
         corpus_ref = require_corpus_ref(input)
@@ -490,7 +472,7 @@ class PaperVisualOfTool(BaseTool):
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
 
-class PaperCitesTool(BaseTool):
+class PaperCitesTool(PaperRagTool):
     """沿引用边走一步，正向或反向。
 
     反向边（谁引用了这篇）能直接给出"后续工作如何评价它"，语义检索按定义会优先返回
@@ -530,12 +512,6 @@ class PaperCitesTool(BaseTool):
         },
     )
 
-    def __init__(
-        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
-    ) -> None:
-        self.artifacts = artifacts
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """走一步引用边。"""
         corpus_ref = require_corpus_ref(input)
@@ -553,7 +529,7 @@ class PaperCitesTool(BaseTool):
         )
 
 
-class PaperSectionSearchTool(BaseTool):
+class PaperSectionSearchTool(PaperRagTool):
     """按章节名跨论文取 chunk，自顶向下的结构入口。"""
 
     spec = ToolSpec(
@@ -588,21 +564,13 @@ class PaperSectionSearchTool(BaseTool):
         },
     )
 
-    def __init__(
-        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
-    ) -> None:
-        self.artifacts = artifacts
-        self.session = session or RetrievalSession()
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """按章节名取 chunk。"""
         corpus_ref = require_corpus_ref(input)
         heading = input.get("heading")
         if not isinstance(heading, str) or not heading.strip():
             raise ValueError("heading must be a non-empty string.")
-        paper_ids = input.get("paper_ids") or []
-        if not isinstance(paper_ids, list):
-            raise ValueError("paper_ids must be an array of paper identifiers.")
+        paper_ids = _optional_str_list(input.get("paper_ids"), "paper_ids")
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
@@ -610,7 +578,7 @@ class PaperSectionSearchTool(BaseTool):
         hits = section_search(
             corpus,
             heading,
-            [item for item in paper_ids if isinstance(item, str)],
-            resolve_top_k(input),
+            paper_ids,
+            _clamp_positive(input, "k", DEFAULT_TOP_K, MAX_TOP_K),
         )
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})

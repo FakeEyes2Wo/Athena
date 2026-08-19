@@ -315,3 +315,15 @@
   - `state.py`：`load()` 先迁移 `corpus_ideation_done` 再剥离未知键，保证旧状态迁移不丢。
   - 测试同步：`test_agent.py` 的 anthropic 断言改为 ValueError（当前不支持 anthropic）。
 - 验证：`python -m pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺 `kagglehub` 可选依赖，与本次改动无关）；`test/unit/research + idea_generation + test_agent` = 492 passed。
+
+## 追加：merge 后第二轮简化（能泛化就泛化）
+- `paper_rag/tool.py`：
+  - 抽出 `PaperRagTool`（artifact store + retrieval session）与 `PaperEmbeddingTool`（再加 embedder），7 个工具类去掉重复 `__init__`。
+  - `_clamp_positive` 统一 `resolve_top_k` / `resolve_max_papers`；`_nonempty_str_list` / `_optional_str_list` 统一 chunk_ids/keywords/paper_ids 校验。
+- `paper_scout/tool.py`：抽出 `PaperScoutTool` 基类，两个工具去掉重复 `__init__`。
+- `bench/query_sets.py`：`_load_packaged` 统一 `load_query_set` / `load_recall_set` 的重复读取逻辑。
+- `agent_turn_runner.py`：
+  - `_tools_with_kaggle` 统一 General / Kaggle-handoff 的工具表构造；
+  - `_collect_handoff_texts` 去掉只剩一个来源的循环；
+  - 移除未使用的 `ArtifactStore` import。
+- 验证：`pyflakes src/athena` = 0；`compileall` = 0；`pytest test/unit -q` = 1581 passed, 2 skipped, 1 failed（仅缺可选依赖 `kagglehub`，与本次改动无关）。

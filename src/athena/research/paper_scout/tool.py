@@ -24,7 +24,14 @@ SEARCH_TOOL_NAME = "paper_scout_search"
 EXPAND_TOOL_NAME = "paper_scout_expand"
 
 
-class PaperScoutSearchTool(BaseTool):
+class PaperScoutTool(BaseTool):
+    """PaperScout 动作工具的公共底座：持有本次运行的会话。"""
+
+    def __init__(self, session: ScoutSession) -> None:
+        self.session = session
+
+
+class PaperScoutSearchTool(PaperScoutTool):
     """按查询检索新论文并并入 paper pool。"""
 
     spec = ToolSpec(
@@ -44,9 +51,6 @@ class PaperScoutSearchTool(BaseTool):
         },
     )
 
-    def __init__(self, session: ScoutSession) -> None:
-        self.session = session
-
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """执行一次搜索动作。"""
         query = input.get("query")
@@ -58,7 +62,7 @@ class PaperScoutSearchTool(BaseTool):
         return ToolResult(data=action.model_dump(mode="json"))
 
 
-class PaperScoutExpandTool(BaseTool):
+class PaperScoutExpandTool(PaperScoutTool):
     """沿池中某篇论文的参考文献扩展一跳。"""
 
     spec = ToolSpec(
@@ -77,9 +81,6 @@ class PaperScoutExpandTool(BaseTool):
             "additionalProperties": False,
         },
     )
-
-    def __init__(self, session: ScoutSession) -> None:
-        self.session = session
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """执行一次扩展动作。

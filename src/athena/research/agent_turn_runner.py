@@ -30,7 +30,7 @@ from athena.agents.kaggle_handoff_agent import (
     register_kaggle_handoff_agent,
 )
 from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
-from athena.core.contracts import ArtifactRef, ArtifactStore
+from athena.core.contracts import ArtifactRef
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry
 from athena.kaggle.wiring import kaggle_slug_from_task
@@ -368,14 +368,10 @@ class AgentTurnRunner:
             plan=DATA_AGENT_ID,
         )
 
-    def _kaggle_tools(self) -> ToolRegistry | None:
-        """General Agent 需要全量 Kaggle 工具。"""
-        return self._runtime.kaggle_tools("general")
-
-    def _general_tools(self) -> ToolRegistry:
-        """General Agent 的工具：Kaggle（若接入）+ 网页搜索。"""
+    def _tools_with_kaggle(self, kind: str) -> ToolRegistry:
+        """Kaggle（若接入）+ 共享会话的网页搜索/抓取。"""
         registry = ToolRegistry()
-        kaggle = self._kaggle_tools()
+        kaggle = self._runtime.kaggle_tools(kind)
         if kaggle is not None:
             for spec in kaggle.specs:
                 registry.register(kaggle.resolve(spec.name))
@@ -386,18 +382,13 @@ class AgentTurnRunner:
         registry.register(WebFetchTool(session=web_session))
         return registry
 
+    def _general_tools(self) -> ToolRegistry:
+        """General Agent 的工具。"""
+        return self._tools_with_kaggle("general")
+
     def _kaggle_handoff_tools(self) -> ToolRegistry:
-        """Kaggle Handoff Agent 的工具：Kaggle notebook/discussion + 网页回退。"""
-        registry = ToolRegistry()
-        kaggle = self._runtime.kaggle_tools("kaggle_handoff")
-        if kaggle is not None:
-            for spec in kaggle.specs:
-                registry.register(kaggle.resolve(spec.name))
-        # web_fetch 作为 discussion 抓取的回退通道；与 web_search 共享会话。
-        web_session = WebSession()
-        registry.register(WebSearchTool(session=web_session))
-        registry.register(WebFetchTool(session=web_session))
-        return registry
+        """Kaggle Handoff Agent 的工具。"""
+        return self._tools_with_kaggle("kaggle_handoff")
 
     async def _ensure_kaggle_handoff(self) -> str:
         """Run the Kaggle Handoff Agent once and return its markdown text.
@@ -543,21 +534,17 @@ class AgentTurnRunner:
     async def _collect_handoff_texts(self) -> list[str]:
         """按 state.handoff_sources 收集已启用的 handoff 文本。"""
         rt = self._runtime
-        sources = getattr(rt.state, "handoff_sources", None) or []
+        state = rt.state
+        sources = getattr(state, "handoff_sources", None) or []
         texts: list[str] = []
-        clarification_ref = getattr(rt.state, "handoff_refs", {}).get(
-            "task_clarification"
-        )
+        clarification_ref = getattr(state, "handoff_refs", {}).get("task_clarification")
         if clarification_ref:
             try:
                 texts.append(await rt._store.get_text(clarification_ref))
             except Exception:  # noqa: BLE001 - 澄清记录是增益而非前提
                 pass
-        for source in sources:
-            if source == "kaggle":
-                text = await self._ensure_kaggle_handoff()
-            else:
-                text = ""
+        if "kaggle" in sources:
+            text = await self._ensure_kaggle_handoff()
             if text:
                 texts.append(text)
         return texts

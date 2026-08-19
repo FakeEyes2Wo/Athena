@@ -7,6 +7,7 @@
 import json
 from pathlib import Path
 
+from athena.research.bench.recall import RecallQuerySet
 from athena.research.bench.schemas import QuerySet
 
 DATASETS_DIR = Path(__file__).parent / "datasets"
@@ -18,21 +19,29 @@ def available() -> list[str]:
     return sorted(path.stem for path in DATASETS_DIR.glob("*.json"))
 
 
-def load_query_set(name_or_path: str = DEFAULT_QUERY_SET) -> QuerySet:
-    """按名字取随包查询集，或按路径读一份自定义的。
+def _load_packaged(model_cls: type, name_or_path: str, *, kind: str):
+    """按名字取随包 JSON，或按路径读一份自定义的。
 
     先试路径再试名字：名字是短标识（``imbalance_auc``），路径必然带分隔符或后缀，
     两者不会误判。找不到时把可用名字一并写进异常——这类错误几乎总是拼错名字。
     """
     candidate = Path(name_or_path)
     if candidate.suffix == ".json" or candidate.exists():
-        return QuerySet.model_validate_json(candidate.read_text(encoding="utf-8"))
-    packaged = DATASETS_DIR / f"{name_or_path}.json"
-    if not packaged.is_file():
-        raise FileNotFoundError(
-            f"unknown query set {name_or_path!r}; packaged sets: {', '.join(available())}"
-        )
-    return QuerySet.model_validate_json(packaged.read_text(encoding="utf-8"))
+        path = candidate
+    else:
+        packaged = DATASETS_DIR / f"{name_or_path}.json"
+        if not packaged.is_file():
+            raise FileNotFoundError(
+                f"unknown {kind} {name_or_path!r}; packaged sets: "
+                f"{', '.join(available())}"
+            )
+        path = packaged
+    return model_cls.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def load_query_set(name_or_path: str = DEFAULT_QUERY_SET) -> QuerySet:
+    """读随包或自定义的 known-item 查询集。"""
+    return _load_packaged(QuerySet, name_or_path, kind="query set")
 
 
 def dump_report(report, path: str | Path) -> Path:
@@ -46,18 +55,6 @@ def dump_report(report, path: str | Path) -> Path:
     return target
 
 
-def load_recall_set(name_or_path: str) -> "RecallQuerySet":
-    """按名字取随包召回金标，或按路径读一份自定义的；规则与 ``load_query_set`` 相同。"""
-    from athena.research.bench.recall import RecallQuerySet
-
-    candidate = Path(name_or_path)
-    if candidate.suffix == ".json" or candidate.exists():
-        return RecallQuerySet.model_validate_json(
-            candidate.read_text(encoding="utf-8")
-        )
-    packaged = DATASETS_DIR / f"{name_or_path}.json"
-    if not packaged.is_file():
-        raise FileNotFoundError(
-            f"unknown recall set {name_or_path!r}; packaged sets: {', '.join(available())}"
-        )
-    return RecallQuerySet.model_validate_json(packaged.read_text(encoding="utf-8"))
+def load_recall_set(name_or_path: str) -> RecallQuerySet:
+    """读随包或自定义的召回金标；规则与 ``load_query_set`` 相同。"""
+    return _load_packaged(RecallQuerySet, name_or_path, kind="recall set")
