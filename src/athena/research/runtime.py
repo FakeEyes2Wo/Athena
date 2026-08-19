@@ -318,6 +318,7 @@ class ResearchRuntime:
             run_prepare_phase=self._phase_runner.run_prepare_phase,
             run_validation_phase=self._phase_runner.run_validation_phase,
             publish_agent_event=self._events_bus.project_agent_event,
+            on_plan_settled=self.release_lease,
         )
         self._events_bus.attach_supervisor(self._supervisor)
         if model is not None:

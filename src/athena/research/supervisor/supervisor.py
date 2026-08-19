@@ -120,7 +120,11 @@ class Supervisor(SupervisorActions):
         run_prepare_phase: PreparePhase | None = None,
         run_validation_phase: ValidationPhase | None = None,
         publish_agent_event: PublishAgentEvent | None = None,
+        on_plan_settled: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
+        # Plan 结算回调。租约必须在这时归还——等到 runtime 关闭才还，等于每个跑完的
+        # Plan 都继续占着一张卡，池子会在第 N 个实验上无谓地耗尽。
+        self._on_plan_settled = on_plan_settled
         self._project_root = Path(project_root)
         _athena = (
             Path(state_root)
@@ -884,6 +888,16 @@ class Supervisor(SupervisorActions):
         self.tree.save(self._tree_path)
         self.state.plans.pop(plan_id)
         self._save_state()
+        if self._on_plan_settled is not None:
+            # 归还算力。失败不该把已经结算好的实验拖下水，所以只记日志。
+            try:
+                await self._on_plan_settled(plan_id)
+            except Exception:
+                logger.warning(
+                    "releasing compute for settled plan %s failed",
+                    plan_id,
+                    exc_info=True,
+                )
 
     async def message(self, text: str) -> str:
         """Delegate ordinary Human text to the long-lived SupervisorAgent."""

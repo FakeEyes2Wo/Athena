@@ -1,6 +1,6 @@
 # 远程 GPU 执行：需求分析与架构设计
 
-Status: draft
+Status: P0–P4 已实现（见第十一节）；P5 未做
 Date: 2026-08-19
 Base: main @ c31c8a7
 Source of truth: `src/athena/execution/runtime.py`、`src/athena/research/supervisor/experiment.py`、
@@ -163,7 +163,7 @@ ExecutionRuntime             门面不变；按租约选后端
 
 | Launcher | 包装 | 取消 | 适用 |
 |---|---|---|---|
-| `BareLauncher` | `CUDA_VISIBLE_DEVICES=<ids>` + `setsid` 起 argv | kill 进程组 | 裸 SSH 机器，Athena 自己当调度器 |
+| `BareLauncher` | `CUDA_VISIBLE_DEVICES=<ids>` + 新进程组起 argv | kill 进程组 | 裸 SSH 机器，Athena 自己当调度器 |
 | `SlurmLauncher` | `srun --gres=gpu:1 --time=...` 包住 argv | `scancel <jobid>` | 已有调度器的集群；Athena **不得**自己分配卡 |
 | `DockerLauncher` | `docker run --gpus device=<ids>` | `docker kill` | 需要隔离时；顺带关掉 `TODO(container-executor)` |
 
@@ -456,3 +456,75 @@ STALLED/TIMEOUT 推导，但目前只接在 `app_server/observability.py`，研�
 
 第 4、5 条是其中最重要的两条：它们测的不是功能，是第五节的**不静默降级**，
 以及 §4.8 里那个「半个数据集」的坑。
+
+---
+
+## 十一、实现记录（2026-08-19）
+
+P0–P4 已实现并提交在 `compute-resources` 分支。P5（Slurm / Docker）按第十节的
+计划**未做**，接口留着。
+
+| 期 | 提交 | 落点 |
+|---|---|---|
+| P0 | `b750452` | manifest 超时可配、`ATHENA_DATA_ROOT`、项目仓 `autocrlf=false` |
+| P1 | `b6dc75c` | `execution/backend.py`：`ExecutionBackend` + `LocalBackend` |
+| P2 上 | `34144eb` | `execution/remote/`：agent、channel、ssh、mirror |
+| P2 下 + P4 | `d9e18cc` | `execution/pool.py`、`compute_config.py`、租约接进研究循环、证据里的 placement |
+| P3 | `982e9b2` | `execution/remote/dataset.py`：内容寻址分发与数据亲和 |
+
+### 11.1 设计里被实现推翻的三处
+
+**（一）"Windows 上没有 setsid 的等价物，所以远端只能是 POSIX"——过强。**
+`CREATE_NEW_PROCESS_GROUP` + `taskkill /T` 就是等价物，本地执行器一直这么用。
+两边都支持之后，整条协议才能在开发机上跑**真验证**：真起进程、真杀进程组、
+真读回字节，只剩 ssh 那一跳没被覆盖。这个改动的收益远大于"少写一个分支"。
+
+**（二）`ssh host python3 -` 把源码从 stdin 喂进去——不成立。**
+解释器会把整个 stdin 当程序读完，stdin 也就没了；而 stdin 正是协议通道本身，
+更是"断线即 EOF、远端自己清场"这条机制的全部依据。改成 `-c` 加 base64 源码，
+顺带穿过 ssh 那层 shell 不需要任何转义技巧。
+
+**（三）`SshBackend` 不实现 `ExecutionBackend`，少一个 `collect_outputs`。**
+这是有意留的类型缺口。远程执行绕不开"文件怎么在两台机器之间搬"，给它补一个
+空实现会让"产物没拉回来"变成一次静默的空目录；缺着，它就只能是一个类型错误。
+完整后端是 `MirroredBackend(SshBackend, mirror)`。
+
+### 11.2 实现过程中查出的、原本不在清单上的缺陷
+
+**`runtime_summary` 教给 agent 的环境变量写法在 Windows 上是错的。**
+注入子进程的是环境变量，而 PowerShell 里 `$FOO` 取的是 PowerShell 变量，未定义
+就静默展开成空串。实测 `echo "[$ATHENA_ENV_ROOT]"` 得到 `[]`，`$env:` 写法才拿
+到真路径——也就是说这台机器上每一句 `uv add --project "$ATHENA_ENV_ROOT"` 实际
+都是 `--project ""`。这是第二节阻塞 #3 的一个具体实例，已随 P0 修掉。
+
+**流式根本没在流。** 远端 agent 原本用 `BufferedReader.read(n)`，它会一直等到凑
+满 n 字节或 EOF——一条几十字节的训练日志要等进程结束才出现。改 `read1` 之后，
+同一组用例从 64 秒降到 6.6 秒。
+
+**asyncio 的 `StreamReader` 默认只给 64 KiB 一行**，而一块 64 KiB 输出经 base64
+是约 88 KiB，正好越界，表现成通道"莫名其妙断开"——排查方向会完全跑偏。
+
+**租约原本只在 runtime 关闭时归还。** 每个跑完的 Plan 都还占着一张卡，池子会在
+第 N 个实验上无谓地耗尽，而表现是"排队排不到"。已改为结算即归还。
+
+### 11.3 自己写的两个用例是空的
+
+抽查"回退修复看它红不红"时发现：
+
+- "不校验就盖完成章"——照样全绿。顺利路径上校验本来就是空操作。
+- "去掉数据亲和"——照样全绿。两台机器负载相同时排序退化到按名字，本来就会选中
+  同一台。
+
+两条都补强之后才真的变红。这与六点九那次是同一个教训：**为"这类失败很安静"而
+写的测试，本身可以同样安静地失效。**
+
+### 11.4 还没做的
+
+- **P5**：`SlurmLauncher` / `DockerLauncher`。后者是第八节"这不是沙箱"的唯一真解。
+- **远端直取**（`fetch_command`）：§4.8 第 1 条说数据应当优先让 GPU 机自己去拉。
+  现在只实现了本地推送。没有上游 URL 的任务用不上，有的话这是最大的一笔节省。
+- **租约跨进程互斥**（§九·6）：现在限定单控制节点，但没有强制。
+- **GPU 利用率采样**（§七）：`nvidia-smi` 的事实只在注册时取了一次，没有常设采样。
+- **真机验收**：所有远程路径都在"本地子进程扮演远端"下验证过，**没有在真 GPU 机
+  上跑过**。第十节末尾那四条反向断言里，第 3 条（切断通道后远端进程消失）在本地
+  验过等价形式，第 1、2、4 条需要真机才算数。

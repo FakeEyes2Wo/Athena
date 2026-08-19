@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from athena.execution.compute_config import ComputeConfig, ComputeConfigError
 import athena.cli as cli
 
 
@@ -109,6 +110,7 @@ def test_run_options_configure_runtime_constructor() -> None:
         "data_root": cli._dataset_context("dataset/train.csv")[0],
         "search_limit": 3,
         "experiment_timeout_s": 3600,
+        "compute": ComputeConfig(),
         "auto_validate": True,
         "direction": "minimize",
         # 消融开关默认走 idea generation 门禁；--ideation baseline 是对照组。
@@ -272,3 +274,45 @@ def test_main_accepts_explicit_argv(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "_dispatch_command", fake_dispatch)
     assert cli.main(["status", "--project", "p"]) == 17
+
+
+def test_compute_defaults_to_the_config_file(monkeypatch) -> None:
+    """不给 --compute 就按 config.toml；没有配置文件就是本地。"""
+    monkeypatch.chdir(Path(__file__).parent)
+    args = cli._build_parser().parse_args(["run", "--project", "p", "--data", "d"])
+    assert cli._compute_config(args).mode == "local"
+
+
+def test_asking_for_ssh_without_hosts_fails_before_the_run(monkeypatch, tmp_path):
+    """配错了要在开跑前红，而不是跑完一整轮才发现根本没走远程。"""
+    monkeypatch.chdir(tmp_path)
+    args = cli._build_parser().parse_args(
+        ["run", "--project", "p", "--data", "d", "--compute", "ssh"]
+    )
+    with pytest.raises(ComputeConfigError, match="compute.hosts"):
+        cli._compute_config(args)
+
+
+def test_the_compute_flag_overrides_the_config_file(monkeypatch, tmp_path) -> None:
+    """--compute local 是「同一个 manifest 本地再跑一次」那条验收判据的入口。"""
+    (tmp_path / "config.toml").write_text(
+        "\n".join(
+            [
+                "[compute]",
+                'mode = "ssh"',
+                "",
+                "[[compute.hosts]]",
+                'name = "gpu-01"',
+                'ssh = "gpu01.lab"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    parser = cli._build_parser()
+    base = ["run", "--project", "p", "--data", "d"]
+
+    assert cli._compute_config(parser.parse_args(base)).mode == "ssh"
+    forced = cli._compute_config(parser.parse_args([*base, "--compute", "local"]))
+    assert forced.mode == "local"
+    assert forced.hosts, "覆盖只改 mode，主机配置要留着"

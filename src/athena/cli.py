@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from dataclasses import replace
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,11 @@ from typing import Any
 from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
+from athena.execution.compute_config import (
+    ComputeConfig,
+    ComputeConfigError,
+    load_compute_config,
+)
 from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.survey import (
@@ -63,6 +69,20 @@ def _dataset_context(data: str) -> tuple[Path, str]:
     return root, note
 
 
+def _compute_config(args: argparse.Namespace) -> ComputeConfig:
+    """把 ``--compute`` 覆盖叠到 ``config.toml`` 的 ``[compute]`` 上。
+
+    ``--compute ssh`` 但没有配主机时直接报错：宁可开跑前红，也不要跑完一整轮才
+    发现根本没走远程——那正是这套东西最该防住的失败模式。
+    """
+    config = load_compute_config()
+    if args.compute is None or args.compute == config.mode:
+        return config
+    if args.compute == "ssh" and not config.hosts:
+        raise ComputeConfigError("--compute ssh needs [[compute.hosts]] in config.toml")
+    return replace(config, mode=args.compute)
+
+
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
     data_root, dataset_note = _dataset_context(args.data)
@@ -84,6 +104,7 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         ),
         "experiment_timeout_s": args.experiment_timeout,
         "data_root": data_root,
+        "compute": _compute_config(args),
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
         "ideation": args.ideation,
@@ -378,6 +399,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="abort the run after N seconds (unbounded by default)",
     )
     run.add_argument(
+        "--compute",
+        choices=["local", "ssh"],
+        default=None,
+        help=(
+            "算力：local 在本机跑，ssh 派到 config.toml 的 [[compute.hosts]] 上。"
+            "不给则按 config.toml 里的 [compute].mode。绝不静默降级——配了 ssh 却"
+            "连不上会直接失败，不会偷偷退回本地 CPU 给你一个分数"
+        ),
+    )
+    run.add_argument(
         "--experiment-timeout",
         type=int,
         default=DEFAULT_EXPERIMENT_TIMEOUT_S,
@@ -534,9 +565,7 @@ def _add_kaggle_parser(subparsers) -> None:
     )
     kaggle.add_argument("--list", action="store_true", help="列出竞赛而不是跑流水线")
     kaggle.add_argument("--search", default="", help="--list 时的标题过滤词")
-    kaggle.add_argument(
-        "--sort-by", default="latestDeadline", help="--list 排序字段"
-    )
+    kaggle.add_argument("--sort-by", default="latestDeadline", help="--list 排序字段")
     kaggle.add_argument("--check", action="store_true", help="只做装配自检")
     kaggle.add_argument("--out", default="", help="把报告 JSON 写到该路径")
 

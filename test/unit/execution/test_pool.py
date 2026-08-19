@@ -352,3 +352,22 @@ async def test_placement_prefers_a_host_that_already_has_the_data(
     finally:
         await pool.release("h1")
         await pool.release("h2")
+
+
+@pytest.mark.asyncio
+async def test_a_released_lease_frees_the_card_for_the_next_plan(
+    tmp_path, patched_probe
+):
+    """结算即归还。等到 runtime 关闭才还的话，每个跑完的 Plan 都还占着一张卡，
+    池子会在第 N 个实验上无谓地耗尽——而表现是"排队排不到"，指不到真正的原因。
+    """
+    patched_probe["gpu-01"] = [_gpu(0)]
+    pool = _make_pool([_host("gpu-01", tmp_path, max_leases=1)])
+    await pool.preflight()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    for plan_id in ("h1", "h2", "h3"):
+        lease = await pool.acquire(plan_id, local_workspace=workspace, timeout_s=5)
+        assert lease.gpu_ids == (0,)
+        await pool.release(plan_id)
