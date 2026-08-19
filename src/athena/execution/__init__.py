@@ -1,5 +1,6 @@
 """Source-independent execution observability and shared execution runtime."""
 
+from athena.execution.backend import ExecutionBackend, LocalBackend
 from athena.execution.events import (
     ExecutionEvent,
     ExecutionEventKind,
@@ -23,6 +24,7 @@ __all__ = [
     "CommandExecutor",
     "CommandResult",
     "EnvironmentManager",
+    "ExecutionBackend",
     "ExecutionContext",
     "ExecutionEvent",
     "ExecutionEventKind",
@@ -33,5 +35,6 @@ __all__ = [
     "HealthEventSink",
     "HealthStateEvent",
     "JsonValue",
+    "LocalBackend",
     "MonitorLimits",
 ]

@@ -19,10 +19,14 @@ import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from athena.core.contracts import ArtifactStore
 from athena.core.tool import BaseTool
 from athena.core.tool_types import EmitEvent, ToolContext, ToolSpec
+
+if TYPE_CHECKING:
+    from athena.execution.backend import ExecutionBackend
 
 # 有界输出上限（字符）：超出后截断并记录完整输出 hash，避免无限累积。
 MAX_OUTPUT_CHARS = 60_000
@@ -681,12 +685,15 @@ class CommandExecutor:
 
 
 class ExecutionRuntime:
-    """共享执行运行时门面：选择环境 → 执行命令 → 流式事件 → 紧凑结果。
+    """共享执行运行时门面：选择后端 → 执行命令 → 流式事件 → 紧凑结果。
 
-    扩展点（design §Deferred Work，均不静默部分实现）：
+    命令跑在哪台机器上由 ``backend`` 决定，门面本身不知道——``backend.py`` 的
+    ``ExecutionBackend`` 就是那道界线。缺省是 ``LocalBackend``（控制节点自己），
+    行为与引入这条缝之前逐字相同。
+
+    扩展点（均不静默部分实现）：
     - TODO(execution-security): 强制文件系统/进程/网络/命令策略。
-    - TODO(container-executor): 在强隔离容器中执行命令。
-    - TODO(remote-executor): 移到 daemon / 远程 worker 协议后。
+    - TODO(container-executor): 在强隔离容器中执行命令（DockerLauncher）。
     - TODO(environment-lock): PREPARE 并发时序列化依赖变更。
     """
 
@@ -697,6 +704,7 @@ class ExecutionRuntime:
         environment_root: str | Path | None = None,
         data_root: str | Path | None = None,
         store: ArtifactStore | None = None,
+        backend: "ExecutionBackend | None" = None,
     ) -> None:
         self._project_root = Path(project_root)
         self._environment_root = (
@@ -706,11 +714,17 @@ class ExecutionRuntime:
         )
         self._data_root = Path(data_root) if data_root is not None else None
         self._store = store
-        self._env = EnvironmentManager(
-            project_root=self._project_root,
-            environment_root=self._environment_root,
-            data_root=self._data_root,
-        )
+        if backend is None:
+            # 延迟导入避免循环依赖：backend 需要本模块的 EnvironmentManager/CommandExecutor
+            from athena.execution.backend import LocalBackend
+
+            backend = LocalBackend(
+                project_root=self._project_root,
+                environment_root=self._environment_root,
+                data_root=self._data_root,
+                store=store,
+            )
+        self._backend = backend
 
     @property
     def project_root(self) -> Path:
@@ -731,13 +745,22 @@ class ExecutionRuntime:
         """构造模型可见的 shell_command 工具（cwd 默认 workspace）。"""
         return _ShellCommandTool(self, Path(workspace_root))
 
+    @property
+    def backend(self) -> "ExecutionBackend":
+        """当前执行后端（命令真正落在哪台机器上）。"""
+        return self._backend
+
     def runtime_summary(self, workspace_root: str | Path) -> str:
-        """注入 system prompt 的简洁运行时块。"""
-        return self._env.runtime_summary(Path(workspace_root))
+        """注入 system prompt 的简洁运行时块——来自真正执行命令的那台机器。"""
+        return self._backend.describe(Path(workspace_root))
+
+    def env_ref(self, name: str) -> str:
+        """按执行机器的 shell 语法引用一个环境变量。"""
+        return self._backend.env_ref(name)
 
     def ensure_environment(self) -> None:
         """确保共享环境根已初始化（含可被 uv 使用的 pyproject.toml）。"""
-        self._env.ensure_project()
+        self._backend.ensure_environment()
 
     async def run(
         self,
@@ -758,23 +781,18 @@ class ExecutionRuntime:
         """
         _validate_command_input(command, argv)
         cwd = Path(workdir) if workdir is not None else context.workspace_root
-        if argv is not None:
-            shell, shell_args = None, None
-        else:
-            shell, shell_args = self._env.shell_parts()
-        persist = self._store.put_text if self._store is not None else None
-        executor = CommandExecutor(
-            env=self._env.build_env(context.workspace_root), persist=persist
-        )
-        return await executor.run(
+        return await self._backend.run(
             command=command,
             argv=argv,
+            workspace_root=context.workspace_root,
             workdir=cwd,
-            shell=shell,
-            shell_args=shell_args,
             timeout_s=timeout_s,
             emit=emit,
         )
+
+    async def aclose(self) -> None:
+        """释放后端资源（本地无事可做；远程要关掉常驻通道）。"""
+        await self._backend.aclose()
 
 
 class _ShellCommandTool(BaseTool):

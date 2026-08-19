@@ -77,7 +77,7 @@ async def test_the_shell_form_in_the_summary_actually_resolves(tmp_path) -> None
     runtime = ExecutionRuntime(
         project_root=tmp_path, environment_root=tmp_path, data_root=data
     )
-    ref = runtime._env.env_ref("ATHENA_DATA_ROOT")
+    ref = runtime.env_ref("ATHENA_DATA_ROOT")
     context = ExecutionContext(
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )
