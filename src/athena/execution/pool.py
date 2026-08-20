@@ -63,15 +63,19 @@ class GpuCard:
 class HostCard:
     """注册期预检的结果——一台机器"能不能用、能用来干什么"的全部依据。
 
-    这类系统最典型的浪费是：跑了两小时的 PREPARE，在第一个实验才发现远端没装 uv。
+    这类系统最典型的浪费是：跑了两小时的 PREPARE，在第一个实验才发现远端跑不了。
     所以预检在注册时做，一次问清，不过就当场红。
+
+    ``packages`` 记的是这台机器上现成有什么。它不是锦上添花：远端的解释器是现成
+    的、Athena 不在那边装东西（见 ``SshBackend._environment_lines``），所以"有什么"
+    就直接决定了"能跑什么"。
     """
 
     name: str
     os: str
     hostname: str
     python: str
-    uv: str | None
+    packages: dict[str, str]
     gpus: tuple[GpuCard, ...]
 
     @property
@@ -226,7 +230,7 @@ class GpuPool:
             os=str(facts.get("os", "")),
             hostname=str(facts.get("hostname", "")),
             python=str(facts["python"]),
-            uv=facts.get("uv"),
+            packages=dict(facts.get("packages") or {}),
             gpus=gpus,
         )
 

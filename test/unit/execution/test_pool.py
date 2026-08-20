@@ -86,6 +86,9 @@ async def test_preflight_records_the_facts_a_lease_needs(tmp_path, patched_probe
     assert card.python.startswith("3.")
     assert card.gpu_model == "NVIDIA A100"
     assert [gpu.index for gpu in card.gpus] == [0, 1]
+    # "机器上现成有什么"决定了"能跑什么"——远端装不了东西，所以这一项属于预检
+    # 的结论，不是附加信息。
+    assert isinstance(card.packages, dict)
 
 
 @pytest.mark.asyncio

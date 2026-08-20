@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from athena.core.artifact_store import LocalArtifactStore
 from athena.execution import ExecutionBackend
 from athena.execution.remote import (
     RemoteChannel,
@@ -295,3 +296,52 @@ async def test_output_is_emitted_as_events_while_the_command_runs(backend) -> No
         data.get("delta", "") for kind, data in events if kind == "command/stdout"
     )
     assert "progress 1" in streamed and "progress 2" in streamed
+
+
+@pytest.mark.asyncio
+async def test_a_long_remote_log_keeps_its_tail_and_its_full_copy(
+    tmp_path, monkeypatch
+) -> None:
+    """远端长日志：模型看到头尾，证据 artifact 里是**完整**的那份。
+
+    这条是本地模拟里长期没被看住的一处：远程后端原本只累积头部，
+    ``output_ref`` 于是存了一份被砍过的文本——却仍然对外声称是完整输出。
+    结果是 agent 拿着 ref 去查 traceback，查到的还是没有 traceback 的那份，
+    而训练日志的 traceback 恰恰只在尾巴上。
+    """
+    monkeypatch.setattr("athena.execution.runtime.MAX_OUTPUT_CHARS", 300)
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    channel = RemoteChannel(SubprocessTransport(sys.executable))
+    await channel.open()
+    workspace = tmp_path / "remote-ws"
+    workspace.mkdir()
+    backend = SshBackend(
+        SshHost(name="gpu-01", alias="gpu01.lab"),
+        channel=channel,
+        remote_workspace=workspace.as_posix(),
+        store=store,
+    )
+    backend.bind_local_root(workspace)
+
+    try:
+        result = await backend.run(
+            argv=[
+                sys.executable,
+                "-c",
+                "print('HEAD-MARK'); print('n' * 5000); print('TAIL-MARK')",
+            ],
+            workspace_root=workspace,
+            workdir=workspace,
+            timeout_s=60,
+        )
+    finally:
+        await backend.aclose()
+
+    assert result.truncated and result.output_ref is not None
+    assert "HEAD-MARK" in result.stdout, "头部要留：它说明跑的是什么"
+    assert "TAIL-MARK" in result.stdout, "尾部要留：失败现场在最后"
+    assert "chars elided" in result.stdout, "省略必须写在正文里"
+
+    full = await store.get_text(result.output_ref)
+    assert "HEAD-MARK" in full and "TAIL-MARK" in full
+    assert full.count("n") >= 5000, "artifact 必须是完整输出，不是被砍过的那份"

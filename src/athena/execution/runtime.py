@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,103 @@ if TYPE_CHECKING:
 
 # 有界输出上限（字符）：超出后截断并记录完整输出 hash，避免无限累积。
 MAX_OUTPUT_CHARS = 60_000
+
+# 模型可见输出里头部占的比例。留头是为了知道"跑的是什么"（命令回显、配置、前几个
+# epoch）；留尾是因为**失败现场在最后**——traceback、最终指标、OOM 全在尾巴上。
+# 尾部拿大头。
+OUTPUT_HEAD_SHARE = 1 / 3
+
+
+class BoundedOutput:
+    """流式累积一条输出流，只保留头尾两段，中间省略。
+
+    为什么不是"保头砍尾"（本类出现之前的做法）：一次训练打几千行日志，前面是配置
+    回显，最后才是 traceback / 最终指标 / OOM。砍尾恰好把唯一有用的那一段删掉，
+    而且流读过就没了——不像文件还能再读一次。
+
+    对话历史那一层（``tool_types.truncate_text``）本来就是留头尾的，但它拿到的
+    已经是这里砍完的结果，所以那一层的头尾保留在这里被架空了。两层现在同口径。
+
+    ``keep_full`` 时另留一份完整文本落成证据 artifact。这是 ``truncated: true``
+    加 ``output_ref`` 这个契约的兑现方式：那个 ref 承诺"完整输出在这里"，
+    就必须真的完整——否则 agent 拿着 ref 去查，查到的还是被砍过的那份。
+    """
+
+    __slots__ = (
+        "_limit",
+        "_head_budget",
+        "_tail_budget",
+        "_head",
+        "_head_len",
+        "_tail",
+        "_tail_len",
+        "_total",
+        "_full",
+    )
+
+    def __init__(self, limit: int | None = None, *, keep_full: bool = False) -> None:
+        # 有意在这里读模块全局而不是写进默认参数：默认参数在 def 时求值，
+        # 测试里 monkeypatch MAX_OUTPUT_CHARS 就不会生效。
+        self._limit = MAX_OUTPUT_CHARS if limit is None else limit
+        self._head_budget = max(1, int(self._limit * OUTPUT_HEAD_SHARE))
+        self._tail_budget = max(1, self._limit - self._head_budget)
+        self._head: list[str] = []
+        self._head_len = 0
+        self._tail: deque[str] = deque()
+        self._tail_len = 0
+        self._total = 0
+        self._full: list[str] | None = [] if keep_full else None
+
+    def append(self, text: str) -> None:
+        """收下一块已解码的文本。"""
+        if not text:
+            return
+        self._total += len(text)
+        if self._full is not None:
+            self._full.append(text)
+        if self._head_len < self._head_budget:
+            room = self._head_budget - self._head_len
+            self._head.append(text[:room])
+            self._head_len += min(room, len(text))
+            text = text[room:]
+            if not text:
+                return
+        self._tail.append(text)
+        self._tail_len += len(text)
+        # 只丢"丢掉也还够尾部预算"的那些块；内存上界是预算加一块。
+        while self._tail and self._tail_len - len(self._tail[0]) >= self._tail_budget:
+            self._tail_len -= len(self._tail.popleft())
+
+    @property
+    def total(self) -> int:
+        """这条流一共产生了多少字符（不受上限影响）。"""
+        return self._total
+
+    @property
+    def truncated(self) -> bool:
+        """是否真的省略了内容。"""
+        return self._total > self._head_budget + self._tail_budget
+
+    def full_text(self) -> str:
+        """完整文本；``keep_full=False`` 时退化为可见部分。"""
+        if self._full is not None:
+            return "".join(self._full)
+        return self.text()
+
+    def text(self, output_ref: str | None = None) -> str:
+        """模型可见的文本：头 + 省略标记 + 尾。
+
+        标记必须留在正文里，而不是只在 ``truncated`` 字段上：agent 读到的是这段
+        文字，它得当场知道中间断了、断了多少、去哪儿取全的。
+        """
+        if not self.truncated:
+            return "".join(self._head) + "".join(self._tail)
+        elided = self._total - self._head_budget - self._tail_budget
+        where = f"; full output at {output_ref}" if output_ref else ""
+        mark = f"\n...[{elided} chars elided{where}]...\n"
+        tail = "".join(self._tail)[-self._tail_budget :]
+        return "".join(self._head) + mark + tail
+
 
 # 子进程保留的宿主环境变量白名单（过滤凭据类，避免脚本读取宿主机密）。
 # PATHEXT/COMSPEC 缺失时 PowerShell 无法按扩展名解析 python.exe（"未识别为 cmdlet"）。
@@ -582,53 +680,36 @@ class CommandExecutor:
                 ok=False, stdout="", stderr="", exit_code=127, error=error
             )
 
-        out_head: list[str] = []
-        err_head: list[str] = []
-        # persist 启用时累积完整输出（否则只保留有界头部，内存有界）。
-        out_full: list[str] = [] if self._persist is not None else None
-        err_full: list[str] = [] if self._persist is not None else None
+        keep_full = self._persist is not None
+        out = BoundedOutput(keep_full=keep_full)
+        err = BoundedOutput(keep_full=keep_full)
         digest = hashlib.sha256()
 
         async def pump(
-            stream: asyncio.StreamReader,
-            kind: str,
-            head: list[str],
-            full: list[str] | None,
-        ) -> int:
-            """读取流式输出：边 hash 完整输出边累积有界头部，返回本流字符数。
+            stream: asyncio.StreamReader, kind: str, sink: BoundedOutput
+        ) -> None:
+            """读取流式输出：边 hash 完整输出边累积有界头尾。
 
             用 ``_StreamDecoder`` 跨 chunk 解码：优先 UTF-8，遇到 GBK 等系统
             代码页字节时回退解码，既避免多字节字符在 chunk 边界被撕裂成 U+FFFD，
             也修正中文 Windows 上 PowerShell/原生命令输出的 mojibake。
             """
-            length = 0
             decoder = _StreamDecoder(self._fallback_encoding)
 
             async def emit_decoded(text: str) -> None:
-                nonlocal length
                 if not text:
                     return
                 await _dispatch(emit, kind, "exec:out", {"delta": text})
-                if length < MAX_OUTPUT_CHARS:
-                    room = MAX_OUTPUT_CHARS - length
-                    head.append(text[:room])
-                    length = min(MAX_OUTPUT_CHARS, length + len(text))
-                if full is not None:
-                    full.append(text)
+                sink.append(text)
 
             async for raw in stream:
                 digest.update(raw)
                 await emit_decoded(decoder.decode(raw))
             await emit_decoded(decoder.decode(b"", final=True))
-            return length
 
         readers = [
-            asyncio.create_task(
-                pump(proc.stdout, "command/stdout", out_head, out_full)
-            ),
-            asyncio.create_task(
-                pump(proc.stderr, "command/stderr", err_head, err_full)
-            ),
+            asyncio.create_task(pump(proc.stdout, "command/stdout", out)),
+            asyncio.create_task(pump(proc.stderr, "command/stderr", err)),
         ]
         try:
             returncode = await asyncio.wait_for(proc.wait(), timeout=timeout_s)
@@ -643,8 +724,8 @@ class CommandExecutor:
                 pass
             return CommandResult(
                 ok=False,
-                stdout="".join(out_head),
-                stderr="".join(err_head),
+                stdout=out.text(),
+                stderr=err.text(),
                 exit_code=-1,
                 error="timeout",
             )
@@ -652,20 +733,13 @@ class CommandExecutor:
             self._terminate(proc)  # 取消 turn → 终止整个进程树后传播
             await asyncio.gather(*readers, return_exceptions=True)
             raise
-        out_len, err_len = await asyncio.gather(*readers)
+        await asyncio.gather(*readers)
 
-        stdout = "".join(out_head)
-        stderr = "".join(err_head)
-        truncated = out_len >= MAX_OUTPUT_CHARS or err_len >= MAX_OUTPUT_CHARS
+        truncated = out.truncated or err.truncated
         if self._persist is not None and (returncode != 0 or truncated):
             # 持久化失败/截断命令的完整日志为证据 artifact（design §Persistence Policy）
             full_text = "\n".join(
-                part
-                for part in (
-                    "".join(out_full or []),
-                    "".join(err_full or []),
-                )
-                if part
+                part for part in (out.full_text(), err.full_text()) if part
             )
             output_ref = await self._persist(full_text)
         elif truncated:
@@ -674,8 +748,9 @@ class CommandExecutor:
             output_ref = None
         result = CommandResult(
             ok=returncode == 0,
-            stdout=stdout,
-            stderr=stderr,
+            # ref 先算再渲染：省略标记要把"去哪儿取全的"写进正文。
+            stdout=out.text(output_ref),
+            stderr=err.text(output_ref),
             exit_code=returncode or 0,
             truncated=truncated,
             output_ref=output_ref,

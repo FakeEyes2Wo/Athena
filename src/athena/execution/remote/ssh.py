@@ -13,6 +13,7 @@
 行为一致。
 """
 
+import hashlib
 import os
 import shlex
 from dataclasses import dataclass, field
@@ -28,7 +29,7 @@ from athena.execution.remote.channel import (
     StderrTail,
     bootstrap_code,
 )
-from athena.execution.runtime import CommandResult, MAX_OUTPUT_CHARS, _dispatch
+from athena.execution.runtime import BoundedOutput, CommandResult, _dispatch
 
 # 远端命令的长度上限。**这是量出来的，不是估的**：Win32-OpenSSH 9.5 把远端命令
 # 静默截断在 8189 字节——退出码仍是 0，远端 bash 只抱怨引号没配对，看起来像
@@ -341,18 +342,22 @@ class SshBackend:
         display = " ".join(argv) if argv is not None else (command or "")
         await _dispatch(emit, "command/started", "exec:run", {"command": display})
 
-        heads: dict[int, list[str]] = {1: [], 2: []}
-        lengths: dict[int, int] = {1: 0, 2: 0}
+        # keep_full 与本地执行器同一条规则：有地方存全文才留全文。留了才敢在
+        # 结果里给 output_ref——那个 ref 承诺"完整输出在这里"。
+        keep_full = self._store is not None
+        sinks = {
+            1: BoundedOutput(keep_full=keep_full),
+            2: BoundedOutput(keep_full=keep_full),
+        }
+        digest = hashlib.sha256()
         pending: list[asyncio.Task] = []
 
         def on_output(fd: int, block: bytes) -> None:
             # 远端固定 UTF-8：不套用本地代码页回退，那是控制节点的事。
+            digest.update(block)
             text = block.decode("utf-8", "replace")
             kind = "command/stdout" if fd == 1 else "command/stderr"
-            if lengths[fd] < MAX_OUTPUT_CHARS:
-                room = MAX_OUTPUT_CHARS - lengths[fd]
-                heads[fd].append(text[:room])
-                lengths[fd] = min(MAX_OUTPUT_CHARS, lengths[fd] + len(text))
+            sinks[fd].append(text)
             if emit is not None:
                 pending.append(
                     asyncio.ensure_future(
@@ -387,17 +392,22 @@ class SshBackend:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-        stdout, stderr = "".join(heads[1]), "".join(heads[2])
-        truncated = lengths[1] >= MAX_OUTPUT_CHARS or lengths[2] >= MAX_OUTPUT_CHARS
+        out, err = sinks[1], sinks[2]
+        truncated = out.truncated or err.truncated
         output_ref = None
         if self._store is not None and (code != 0 or truncated):
+            # 存的必须是**完整**输出。存被砍过的那份等于给了一个骗人的 ref：
+            # agent 拿着它去查 traceback，查到的还是被砍掉 traceback 的那份。
             output_ref = await self._store.put_text(
-                "\n".join(part for part in (stdout, stderr) if part)
+                "\n".join(part for part in (out.full_text(), err.full_text()) if part)
             )
+        elif truncated:
+            output_ref = "sha256:" + digest.hexdigest()
         result = CommandResult(
             ok=code == 0 and error is None,
-            stdout=stdout,
-            stderr=stderr,
+            # ref 先算再渲染：省略标记要把"去哪儿取全的"写进正文。
+            stdout=out.text(output_ref),
+            stderr=err.text(output_ref),
             exit_code=code,
             error=error,
             truncated=truncated,
