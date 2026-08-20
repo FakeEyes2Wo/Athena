@@ -410,3 +410,14 @@ ML v1 的完成定义是 M1–M3 全部通过；M4 不阻塞首个可用版本�
 
 后续修改应同时维护本文件、受影响的领域文档和对应 RUNBOOK，避免再次形成互相
 冲突的平行设计。
+
+## 17. 不依赖 Athena 的最小泛化闭环
+
+M4 的第一步已收敛为
+[`2026-08-20-minimal-generalized-research-loop-design.md`](2026-08-20-minimal-generalized-research-loop-design.md)：
+一个由 DSH 原生 Worker、最小 ResearchTree、五个 research tools 和
+`plan → work → evidence → decide` 构成的闭环。
+
+该闭环首个 benchmark 使用 `docs/examples_articles/reliable_conflictive_multi_view_learning`
+的 `candidate.md`，目标论文严格隐藏；闭环不调用 Athena。现有 Athena 路径继续作为
+可选 ML 路径，不是泛化闭环的运行依赖。
