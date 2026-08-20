@@ -25,9 +25,16 @@ from athena.execution.remote.channel import (
     LINE_LIMIT_BYTES,
     RemoteChannel,
     RemoteError,
+    StderrTail,
     bootstrap_code,
 )
 from athena.execution.runtime import CommandResult, MAX_OUTPUT_CHARS, _dispatch
+
+# 远端命令的长度上限。**这是量出来的，不是估的**：Win32-OpenSSH 9.5 把远端命令
+# 静默截断在 8189 字节——退出码仍是 0，远端 bash 只抱怨引号没配对，看起来像
+# 转义写错了，而不是"太长了"。控制节点是 Windows 是本设计锁定的前提，所以宁可
+# 在本地当场红。留一半余量给 shell 自己那点开销。
+REMOTE_COMMAND_LIMIT_BYTES = 4096
 
 # ssh 的固定选项。逐条都有理由，别当样板删：
 # - BatchMode：绝不弹交互式口令提示。通道跑在后台，提示只会变成一次静默挂死。
@@ -66,13 +73,27 @@ class SshHost:
     options: tuple[str, ...] = field(default_factory=tuple)
 
     def ssh_argv(self) -> list[str]:
-        """完整的 ssh 命令行：连上去并把远端 agent 拉起来。"""
+        """完整的 ssh 命令行：连上去并把远端 agent 拉起来。
+
+        命令必须短。agent 源码走 stdin 的头一段而不是命令行，正是因为
+        ``REMOTE_COMMAND_LIMIT_BYTES`` 那条真机限制。这里再守一道，是因为它的
+        违反方式是**静默截断**：越界不会报错，只会让远端执行半条命令。
+        """
+        remote_command = (
+            f"{shlex.quote(self.python)} -u -c {shlex.quote(bootstrap_code())}"
+        )
+        size = len(remote_command.encode("utf-8"))
+        if size > REMOTE_COMMAND_LIMIT_BYTES:
+            raise ValueError(
+                f"remote command for {self.name} is {size} bytes, over the "
+                f"{REMOTE_COMMAND_LIMIT_BYTES} limit; ssh truncates it silently"
+            )
         return [
             "ssh",
             *SSH_OPTIONS,
             *self.options,
             self.alias,
-            f"{shlex.quote(self.python)} -u -c {shlex.quote(bootstrap_code())}",
+            remote_command,
         ]
 
 
@@ -82,10 +103,15 @@ class SshTransport:
     def __init__(self, host: SshHost) -> None:
         self._host = host
         self._proc: Any = None
+        self._stderr = StderrTail()
 
     @property
     def description(self) -> str:
         return f"ssh:{self._host.alias}"
+
+    def diagnostics(self) -> str:
+        """ssh 自己的 stderr——认证失败、连不上、远端 shell 报错都只在这里。"""
+        return self._stderr.text()
 
     async def start(self):
         import asyncio
@@ -99,6 +125,8 @@ class SshTransport:
             limit=LINE_LIMIT_BYTES,
         )
         assert self._proc.stdin is not None and self._proc.stdout is not None
+        # 必须后台抽干：管道写满之后 ssh 会阻塞在写 stderr 上，表现成"连上了没反应"。
+        self._stderr.attach(self._proc.stderr)
         return self._proc.stdin, self._proc.stdout
 
     async def stop(self) -> None:
@@ -106,6 +134,7 @@ class SshTransport:
         if proc is None:
             return
         self._proc = None
+        self._stderr.stop()
         if proc.returncode is None:
             try:
                 proc.kill()
@@ -139,7 +168,6 @@ class SshBackend:
         *,
         channel: RemoteChannel,
         remote_workspace: str,
-        remote_env_root: str,
         remote_data_root: str | None = None,
         gpu_ids: tuple[int, ...] = (),
         store: ArtifactStore | None = None,
@@ -147,7 +175,6 @@ class SshBackend:
         self._host = host
         self._channel = channel
         self._workspace = PurePosixPath(remote_workspace)
-        self._env_root = remote_env_root
         self._data_root = remote_data_root
         self._gpu_ids = gpu_ids
         self._store = store
@@ -192,14 +219,14 @@ class SshBackend:
         """
         facts = self._channel.ready
         python = facts.get("python") or "missing"
-        state = "environment ready" if facts.get("uv") else "uv not found on the host"
         lines = [
             "Runtime:",
             f"- OS: {facts.get('os', 'Linux')} (remote host {self._host.name})",
             f"- Shell: {Path(facts.get('shell') or '/bin/bash').name}",
             f"- Workspace: {self._workspace}",
-            f"- Python: {python}, {state}",
+            f"- Python: {python} (this host's interpreter, used as-is)",
         ]
+        lines.extend(self._environment_lines())
         if self._gpu_ids:
             names = {
                 gpu.get("index"): gpu.get("name") for gpu in facts.get("gpus") or []
@@ -217,34 +244,79 @@ class SshBackend:
                 'os.environ["ATHENA_DATA_ROOT"] in Python. '
                 "Never hardcode an absolute dataset path: it differs per machine."
             )
-        lines.append(
-            '- Add dependencies with: uv add --project "$ATHENA_ENV_ROOT" <package>'
-        )
         return "\n".join(lines)
 
+    def _environment_lines(self) -> list[str]:
+        """把"这台机器上有什么、不能装什么"说死。
+
+        **远端只用现成的解释器，Athena 不在那边管环境。** 这是一个明确的取舍，
+        不是没做完：
+
+        - 装依赖要写盘、要联网、可能要 sudo，还会在一台可能被别人共用的机器上改
+          全局状态。这几样在租来的 GPU 机上都不该由 agent 顺手做。
+        - 真机上第一台机器就没有 uv，而原本那条无条件的
+          ``uv add --project "$ATHENA_ENV_ROOT"`` 指向的还是一个空目录——
+          教了一条必然失败的命令。
+        - 装包的失败模式很脏：半装上的依赖会让下一个租到这台机器的实验跑在一份
+          谁也说不清的环境里，而证据里不会留下任何痕迹。
+
+        代价是 agent 只能用现成的包，所以**必须告诉它现成的是哪些**——否则它会
+        拿一轮去试 import、再拿一轮去试装、最后拿一轮猜为什么装不上。
+        """
+        packages = self._channel.ready.get("packages") or {}
+        installed = ", ".join(f"{name} {version}" for name, version in packages.items())
+        return [
+            (
+                f"- Installed: {installed}"
+                if installed
+                else "- Installed: (none detected)"
+            ),
+            "- You cannot install packages on this host, and Athena will not do it "
+            "for you. If an import is missing, change the approach instead.",
+        ]
+
     def ensure_environment(self) -> None:
-        """远端环境根的准备由租约建立时完成（见 ``prepare_remote``）。"""
+        """远端没有 Athena 管的环境——解释器是现成的（见 ``_environment_lines``）。"""
         return None
 
     async def prepare_remote(self) -> None:
-        """在远端建好工作区与环境根目录。租约建立时调一次。"""
-        for path in (str(self._workspace), self._env_root):
-            await self._channel.request("mkdir", path=path)
+        """在远端建好工作区。租约建立时调一次。
+
+        只建工作区：远端**没有**环境根。本地那个 ``ATHENA_ENV_ROOT``（一个 uv
+        项目）在远端没有对应物，凭空建一个空目录只会让人以为那边也有一份受管环境。
+        """
+        await self._channel.request("mkdir", path=str(self._workspace))
+
+    def remote_path(self) -> str:
+        """远端子进程的 PATH——就是远端自己那一份。
+
+        **必须问远端要**，不能拿本地的 PATH 去改：非交互式 ssh 不读 ``~/.bashrc``，
+        容器里 conda 那一段 PATH 因此不在——真机上量到的表现是
+        ``ssh host python3 -V`` 直接 command not found，而交互登录一切正常。
+        远端 agent 在 ``probe`` 里把自己解释器的 bin 目录顶到最前再报上来。
+
+        这里**不**像本地执行器那样前置任何 ``.venv/bin``：远端没有 Athena 管的
+        环境（见 ``_environment_lines``），指向一个我们从不创建的目录只是装样子。
+        """
+        return str(self._channel.ready.get("path") or "")
 
     def build_env(self) -> dict[str, str]:
         """远端子进程的环境。
 
         刻意**不**转发本地的 PATH/HOME/TEMP/SSL_CERT_FILE 之类：那些值在远端全是
-        无效路径。只留语言环境，加上 Athena 自己的三个根与租到的卡。
+        无效路径。只留语言环境，加上远端自己的 PATH、数据集根，以及租到的卡。
+
+        **没有 ``ATHENA_ENV_ROOT``**：远端没有 Athena 管的环境。设一个指向空目录
+        的变量，只会让 agent 以为那边可以 ``uv add``。
         """
         env = {
             key: value
             for key, value in os.environ.items()
             if key in _FORWARDED_HOST_VARS
         }
+        env["PATH"] = self.remote_path()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        env["ATHENA_ENV_ROOT"] = self._env_root
         if self._data_root is not None:
             env["ATHENA_DATA_ROOT"] = self._data_root
         # 卡的分配是 Athena 自己做的（裸机没有调度器），靠它强制。

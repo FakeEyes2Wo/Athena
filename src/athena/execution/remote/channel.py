@@ -5,9 +5,11 @@
 全都可以——只要把同一份 ``agent.py`` 用本地子进程拉起来。于是有两个实现：
 
 - ``SubprocessTransport``：本地起同一份 agent，测试用，**协议全覆盖**。
-- ``SshTransport``（见 ``ssh.py``）：``ssh <host> python3 -c <base64 源码>``，只多了一跳。
+- ``SshTransport``（见 ``ssh.py``）：``ssh <host> python3 -c <加载器>``，只多了一跳。
 
-留在 ssh 那一跳之外未被覆盖的，只剩下 ssh 命令行本身——它短到可以一眼看完。
+两者拉起 agent 的方式**必须是同一套**（同一个加载器、同一段 stdin 前导），否则
+本地那几百条用例覆盖的就不是真机跑的那条路径。留在 ssh 那一跳之外未被覆盖的，
+只剩下 ssh 命令行本身——它短到可以一眼看完。
 """
 
 import asyncio
@@ -47,6 +49,60 @@ class RemoteTransport(Protocol):
     async def stop(self) -> None:
         """断开连接。**必须真的让远端的 stdin EOF**，否则孤儿进程收不掉。"""
 
+    def diagnostics(self) -> str:
+        """连接自己的错误输出（ssh 的 stderr 之类），用于解释一次掉线。
+
+        没有这一条，``Permission denied (publickey)``、``Connection refused``、
+        远端 shell 的语法报错会全部塌成同一句"channel closed unexpectedly"，
+        而它们的处置方式完全不同。
+        """
+        return ""
+
+
+# 保留多少 stderr 用于解释掉线。够放下 ssh 的几行报错和一个 Python traceback。
+DIAGNOSTIC_TAIL_BYTES = 4096
+
+
+class StderrTail:
+    """后台把一条 stderr 抽干，只留最后一段。
+
+    必须抽：管道写满之后远端会阻塞在写 stderr 上，表现成"连上了但没反应"。
+    只留最后一段：这是给人看的诊断，不是日志。
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._task: asyncio.Task[None] | None = None
+
+    def attach(self, reader: asyncio.StreamReader | None) -> None:
+        """挂上一条流，开始后台抽取。"""
+        if reader is None:
+            return
+        self._task = asyncio.create_task(self._drain(reader))
+
+    async def _drain(self, reader: asyncio.StreamReader) -> None:
+        try:
+            while True:
+                block = await reader.read(4096)
+                if not block:
+                    return
+                self._buffer.extend(block)
+                if len(self._buffer) > DIAGNOSTIC_TAIL_BYTES * 2:
+                    del self._buffer[:-DIAGNOSTIC_TAIL_BYTES]
+        except (asyncio.CancelledError, ConnectionError, OSError, ValueError):
+            return
+
+    def stop(self) -> None:
+        """停止抽取；已经收到的那一段留着。"""
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    def text(self) -> str:
+        """最后一段 stderr，已折成单行。"""
+        tail = bytes(self._buffer[-DIAGNOSTIC_TAIL_BYTES:])
+        return " ".join(tail.decode("utf-8", "replace").split())
+
 
 class SubprocessTransport:
     """本地子进程跑 agent；测试与「控制节点即计算节点」都用它。"""
@@ -54,10 +110,14 @@ class SubprocessTransport:
     def __init__(self, python: str) -> None:
         self._python = python
         self._proc: asyncio.subprocess.Process | None = None
+        self._stderr = StderrTail()
 
     @property
     def description(self) -> str:
         return f"subprocess:{self._python}"
+
+    def diagnostics(self) -> str:
+        return self._stderr.text()
 
     async def start(self) -> tuple[asyncio.StreamWriter, asyncio.StreamReader]:
         self._proc = await asyncio.create_subprocess_exec(
@@ -67,10 +127,11 @@ class SubprocessTransport:
             bootstrap_code(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             limit=LINE_LIMIT_BYTES,
         )
         assert self._proc.stdin is not None and self._proc.stdout is not None
+        self._stderr.attach(self._proc.stderr)
         return self._proc.stdin, self._proc.stdout
 
     async def stop(self) -> None:
@@ -78,6 +139,7 @@ class SubprocessTransport:
         if proc is None:
             return
         self._proc = None
+        self._stderr.stop()
         if proc.returncode is None:
             try:
                 proc.kill()
@@ -92,18 +154,35 @@ def agent_source() -> bytes:
 
 
 def bootstrap_code() -> str:
-    """把 agent 源码打包成一条可以直接交给 ``python3 -c`` 的字符串。
+    """交给 ``python3 -c`` 的**第零级**加载器：读一个长度，再读那么多字节并执行。
 
-    **不能用 ``python3 -`` 从 stdin 读源码**：解释器会把整个 stdin 当程序读完，
-    stdin 也就没了——而 stdin 正是协议通道本身，同时还是「连接一断即 EOF、
-    远端自己清场」这条机制的全部依据。
+    源码本身不走命令行，走 stdin 的头一段。这不是洁癖，是一条真机量出来的硬限制：
 
-    源码经 base64 之后只剩 ``A-Za-z0-9+/=``，穿过 ssh 那一层 shell 不需要任何
-    转义技巧；也因此不必在远端选一个可写位置落脚本、不会有版本漂移、
-    通道死掉也不留下一份没人管的文件。
+    > Win32-OpenSSH 9.5 把远端命令**静默截断在 8189 字节**——退出码仍是 0，
+    > 远端 bash 只会抱怨引号没配对。把 13 KiB 的 agent 源码 base64 塞进命令行
+    > （约 18 KiB）在 Linux 控制节点上能过，从 Windows 上必然断，而断法完全
+    > 不像"太长了"。控制节点是 Windows 是本设计锁定的前提，所以这条必须绕开。
+
+    绕法是把源码挪到 stdin，但**不能用 ``python3 -``**：那会让解释器把整个 stdin
+    当程序读到 EOF，stdin 也就没了——而 stdin 正是协议通道本身，同时还是
+    「连接一断即 EOF、远端自己清场」这条机制的全部依据。所以是长度前缀：
+    读满 N 字节就停手，剩下的原样留在同一个 ``BufferedReader`` 里给 agent 接着用。
+
+    副作用是好的：远端 ``ps`` 里现在是一行看得懂的加载器，而不是 18 KiB 的
+    base64 糊。
     """
-    payload = base64.b64encode(agent_source()).decode("ascii")
-    return f"import base64;exec(base64.b64decode('{payload}'))"
+    return (
+        "import sys;n=int(sys.stdin.buffer.readline());exec(sys.stdin.buffer.read(n))"
+    )
+
+
+def bootstrap_payload() -> bytes:
+    """紧跟在连接建立之后写进去的那一段：``长度\\n`` + agent 源码。
+
+    长度用十进制单独一行，因为加载器只有 ``readline`` 可用——此刻还没有任何协议。
+    """
+    source = agent_source()
+    return f"{len(source)}\n".encode("ascii") + source
 
 
 class RemoteChannel:
@@ -136,6 +215,9 @@ class RemoteChannel:
     async def open(self) -> dict[str, Any]:
         """连上、喂源码、等 ``ready``；握手不成立即失败。"""
         self._writer, self._reader = await self._transport.start()
+        # 源码是通道上的头一段字节，之后同一条流才变成协议（见 bootstrap_code）。
+        self._writer.write(bootstrap_payload())
+        await self._writer.drain()
         # ready 的 future 必须在读循环起来之前挂好，否则握手消息先到就被丢掉。
         ready = asyncio.get_running_loop().create_future()
         self._pending["@ready"] = ready
@@ -156,6 +238,15 @@ class RemoteChannel:
                 f"remote agent refused to start on {self.description}: "
                 f"{self.ready.get('error')}"
             )
+        # 握手本身只说得出 pid 和协议版本。事实（os/shell/python/PATH/uv/GPU）要问一次
+        # ——而且必须在这里问，不能指望每个调用方记得。
+        #
+        # 真机上量到的代价：不问的时候 ``ready`` 里没有 python，于是注入给 agent 的
+        # Runtime 块显示 "Python: missing"、OS 退回默认值 "Linux"、PATH 拼成空——
+        # 一份看起来完全正常、其实全是缺省值的运行时描述。那种错法不会报错，
+        # 只会让远端第一条命令 command not found，而信息指不到原因。
+        facts = await self.request("probe")
+        self.ready = {**self.ready, **facts, "op": "ready"}
         return self.ready
 
     async def close(self) -> None:
@@ -308,9 +399,22 @@ class RemoteChannel:
             pass
         finally:
             self._closed = True
-            self._fail_pending(
-                RemoteError(f"remote channel closed unexpectedly ({self.description})")
-            )
+            self._fail_pending(RemoteError(self._disconnect_reason()))
+
+    def _disconnect_reason(self) -> str:
+        """掉线的说法要带上原因。
+
+        ``Permission denied (publickey)``、``Connection refused``、远端 shell 的
+        语法报错，全都只会出现在传输自己的 stderr 上。丢掉它，这三种完全不同的
+        故障就塌成同一句话，排查只能靠猜。
+        """
+        reason = f"remote channel closed unexpectedly ({self.description})"
+        detail = ""
+        try:
+            detail = self._transport.diagnostics()
+        except Exception:  # 诊断本身不该再抛
+            detail = ""
+        return f"{reason}: {detail}" if detail else reason
 
     def _dispatch(self, message: dict) -> None:
         op = message.get("op")

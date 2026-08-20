@@ -235,6 +235,36 @@ async def test_releasing_a_lease_closes_its_channel(tmp_path, patched_probe):
 
 
 @pytest.mark.asyncio
+async def test_releasing_a_lease_takes_its_remote_workspace_with_it(
+    tmp_path, patched_probe
+):
+    """归还也要把远端工作区删掉，否则 scratch 是一条无界的磁盘泄漏。
+
+    每个跑完的 Plan 在远端留一份工作区副本，而同一块盘还得装数据集。真机上确认
+    过这个泄漏是真的。盘满的表现是"实验莫名其妙失败"，指不到原因。
+
+    删得起是因为该留的都已经在控制节点：源码经镜像回到本地 worktree，产出经
+    ``collect_outputs`` 回来了。
+    """
+    patched_probe["gpu-01"] = [_gpu(0)]
+    pool = _make_pool([_host("gpu-01", tmp_path)])
+    await pool.preflight()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "train.py").write_text("print(1)\n", encoding="utf-8")
+
+    lease = await pool.acquire("h1", local_workspace=workspace)
+    await lease.backend.mirror.push()
+    remote_workspace = Path(lease.remote_workspace)
+    assert (remote_workspace / "train.py").is_file(), "先确认真有东西可删"
+
+    await pool.release("h1")
+
+    assert not remote_workspace.exists()
+    assert not remote_workspace.parent.exists(), "整个租约目录都该走，不止 workspace"
+
+
+@pytest.mark.asyncio
 async def test_a_lease_can_actually_run_a_command_in_its_workspace(
     tmp_path, patched_probe
 ):
@@ -293,6 +323,10 @@ async def test_a_lease_points_ATHENA_DATA_ROOT_at_the_staged_copy(
         assert lease.placement()["dataset"]["id"] == lease.dataset.dataset_id
     finally:
         await pool.release("h1")
+
+    # 归还会删掉租约目录——但数据集是机器级共享物，只被 pin 住，绝不能跟着走。
+    # 跟着走的话，下一个 Plan 要重付一次完整分发，大数据集下这一笔以小时计。
+    assert (Path(lease.dataset.remote_root) / "train.csv").is_file()
 
 
 @pytest.mark.asyncio

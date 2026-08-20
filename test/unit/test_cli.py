@@ -1,5 +1,6 @@
 """Tests for the output/state-only Athena CLI."""
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -76,7 +77,24 @@ def test_parser_exposes_only_current_runtime_commands() -> None:
             parser.parse_args([removed, "--project", "p"])
 
 
-def test_run_options_configure_runtime_constructor() -> None:
+def test_compute_check_needs_no_project_and_refuses_to_guess(tmp_path, monkeypatch):
+    """算力自检不属于任何一个项目，也不该在没给动作时自作主张。
+
+    它的用处正是"还没开跑就先验机器"，所以要求 ``--project`` 会让它用不上。
+    """
+    monkeypatch.chdir(tmp_path)
+    args = cli._build_parser().parse_args(["compute", "--check"])
+    assert args.command == "compute" and args.check
+
+    idle = cli._build_parser().parse_args(["compute"])
+    assert asyncio.run(cli._cmd_compute(idle)) == 2
+
+
+def test_run_options_configure_runtime_constructor(tmp_path, monkeypatch) -> None:
+    # ``[compute]`` 从 cwd 的 config.toml 读。不隔离的话，这条用例断言的是**跑测试
+    # 那个人的本地配置**——而 config.toml 正是文档教大家去建的那个文件，于是"配了
+    # 远程算力"就会让一条与算力无关的用例莫名其妙地红。
+    monkeypatch.chdir(tmp_path)
     args = cli._build_parser().parse_args(
         [
             "run",

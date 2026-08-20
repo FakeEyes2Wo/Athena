@@ -10,6 +10,7 @@
 
 import asyncio
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from athena.execution.remote import (
 )
 from athena.execution.remote.mirrored import MirroredBackend
 from athena.execution.remote.channel import SubprocessTransport
+from athena.execution.remote.ssh import REMOTE_COMMAND_LIMIT_BYTES
 
 
 @pytest.fixture
@@ -37,7 +39,6 @@ async def backend(tmp_path):
         SshHost(name="gpu-01", alias="gpu01.lab"),
         channel=channel,
         remote_workspace=workspace.as_posix(),
-        remote_env_root=(tmp_path / "env").as_posix(),
         remote_data_root=data.as_posix(),
         gpu_ids=(2, 3),
     )
@@ -75,17 +76,31 @@ def test_the_ssh_command_line_disables_prompts_and_agent_forwarding() -> None:
     assert "ServerAliveInterval=60" in joined
 
 
-def test_the_agent_source_travels_in_the_command_not_on_stdin() -> None:
-    """stdin 是协议通道本身，不能被解释器当程序读掉。
+def test_the_remote_command_stays_under_the_silent_truncation_limit() -> None:
+    """远端命令必须短——超长不会报错，会被**静默截断**。
 
-    这条错了的表现是「连上去就没反应」，排查方向会完全跑偏。
+    真机量到：Win32-OpenSSH 9.5 在 8189 字节处砍断远端命令，退出码仍是 0，
+    远端 bash 只抱怨引号没配对，看起来像转义写错了而不是"太长了"。把 agent
+    源码 base64 进命令行（约 18 KiB）在 Linux 控制节点上能过，从 Windows 上必断。
     """
     argv = SshHost(name="gpu-01", alias="gpu01.lab", python="python3.11").ssh_argv()
     remote_command = argv[-1]
 
     assert remote_command.startswith("python3.11 -u -c ")
-    assert "base64.b64decode" in remote_command
-    assert " - " not in remote_command
+    assert len(remote_command.encode("utf-8")) <= REMOTE_COMMAND_LIMIT_BYTES
+    assert " - " not in remote_command, "绝不能是 python3 -：那会把协议通道读掉"
+
+
+def test_an_oversized_remote_command_fails_here_not_silently_over_there() -> None:
+    """越界要在本地当场红。
+
+    静默截断的排查成本极高：远端只会给一句风马牛不相及的语法错误。
+    """
+    host = SshHost(
+        name="gpu-01", alias="gpu01.lab", python="p" * REMOTE_COMMAND_LIMIT_BYTES
+    )
+    with pytest.raises(ValueError, match="truncates it silently"):
+        host.ssh_argv()
 
 
 # ------------------------------------------------------------------ 后端行为
@@ -119,28 +134,62 @@ def test_the_runtime_block_describes_the_remote_host(backend) -> None:
     assert "powershell" not in summary.lower()
     assert "remote host gpu-01" in summary
     assert "GPUs leased to this experiment" in summary
-    assert "ATHENA_DATA_ROOT" in summary
-    assert '"$ATHENA_ENV_ROOT"' in summary  # 远端是 POSIX，不是 $env:
-    assert backend.env_ref("ATHENA_ENV_ROOT") == "$ATHENA_ENV_ROOT"
+    assert '"$ATHENA_DATA_ROOT"' in summary  # 远端是 POSIX，不是 $env:
+    assert backend.env_ref("ATHENA_DATA_ROOT") == "$ATHENA_DATA_ROOT"
+    assert "- Python: missing" not in summary, "事实随握手一起到；不该退化成缺省值"
+
+
+def test_the_runtime_block_says_the_interpreter_is_fixed(backend) -> None:
+    """远端只用现成的解释器——这一条必须**说给 agent 听**，而不是让它撞。
+
+    原本无条件教的 ``uv add --project "$ATHENA_ENV_ROOT"`` 有两处错：真机上第一台
+    机器就没有 uv，而那个变量指向的还是一个我们凭空建的空目录。
+    """
+    backend._channel.ready = {
+        **backend.facts,
+        "packages": {"torch": "2.5.1+cu124", "numpy": "2.1.3"},
+    }
+    summary = backend.describe(Path("/ignored"))
+
+    assert "used as-is" in summary
+    assert "- Installed: torch 2.5.1+cu124, numpy 2.1.3" in summary
+    assert "cannot install packages" in summary
+    assert "uv add" not in summary and "pip install" not in summary
 
 
 def test_local_path_variables_are_not_forwarded(backend, monkeypatch) -> None:
-    """本地的 PATH/HOME/SSL_CERT_FILE 在远端全是无效路径，转发过去只会制造怪错。"""
+    """本地的 HOME/SSL_CERT_FILE 在远端全是无效路径，转发过去只会制造怪错。"""
     monkeypatch.setenv("SSL_CERT_FILE", r"C:\certs\ca.pem")
     monkeypatch.setenv("UV_CACHE_DIR", r"C:\uvcache")
     env = backend.build_env()
 
-    for leaked in (
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "TEMP",
-        "SSL_CERT_FILE",
-        "UV_CACHE_DIR",
-    ):
+    for leaked in ("HOME", "USERPROFILE", "TEMP", "SSL_CERT_FILE", "UV_CACHE_DIR"):
         assert leaked not in env, f"{leaked} 不该被转发到远端"
-    assert env["ATHENA_ENV_ROOT"].endswith("/env")
     assert env["ATHENA_DATA_ROOT"].endswith("/data")
+    # 远端没有 Athena 管的环境；给一个指向空目录的变量只会诱使 agent 去 uv add。
+    assert "ATHENA_ENV_ROOT" not in env
+
+
+def test_the_remote_path_comes_from_the_remote() -> None:
+    """PATH 必须问远端要，而且是远端自己的那一份。
+
+    真机上量到的：非交互式 ssh **不读** ``~/.bashrc``，容器里 conda 那一段 PATH
+    因此不在，``ssh host python3 -V`` 直接 command not found——同一台机器交互
+    登录却一切正常。远端 agent 在 probe 里把自己解释器的 bin 目录顶到最前报上来，
+    控制节点据此拼 PATH；少了这一步，agent 写的第一条 ``python train.py`` 就死。
+    """
+    # 钉一份真实的 Linux 事实：断言的是拼装规则，不是跑测试这台机器长什么样。
+    backend = SshBackend(
+        SshHost(name="gpu-01", alias="gpu01.lab"),
+        channel=SimpleNamespace(
+            ready={"path": "/root/miniconda3/bin:/usr/local/bin:/usr/bin:/bin"}
+        ),
+        remote_workspace="/scratch/athena/leases/h1/workspace",
+    )
+
+    assert backend.build_env()["PATH"] == (
+        "/root/miniconda3/bin:/usr/local/bin:/usr/bin:/bin"
+    ), "远端的 PATH 原样用；解释器所在目录由远端顶到最前"
 
 
 def test_the_lease_pins_the_gpus_it_was_given(backend) -> None:

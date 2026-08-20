@@ -20,6 +20,11 @@ from athena.execution.remote import (
     SubprocessTransport,
     WorkspaceMirror,
 )
+from athena.execution.remote.channel import (
+    agent_source,
+    bootstrap_code,
+    bootstrap_payload,
+)
 from athena.execution.remote.mirror import local_manifest
 
 
@@ -44,14 +49,22 @@ def _sink() -> tuple[dict[int, bytearray], object]:
 
 @pytest.mark.asyncio
 async def test_the_agent_reports_the_facts_needed_for_preflight(channel) -> None:
-    """握手就该带回注册期预检要的事实，不必再多问一轮。"""
+    """握手就该带回注册期预检要的事实，不必再多问一轮。
+
+    这条是真机上抓出来的：握手消息本身只有 pid 与协议版本，事实要另外问一次。
+    没有这一步时 ``ready`` 里没有 python，注入给 agent 的 Runtime 块就退化成一份
+    看起来完全正常、其实全是缺省值的描述——"Python: missing"、OS 猜成 Linux、
+    PATH 拼成空。它不报错，只让远端第一条命令 command not found。
+    """
     assert channel.ready["op"] == "ready"
     assert channel.ready["protocol"] == 1
 
-    probe = await channel.request("probe")
-    assert probe["python"].startswith("3.")
-    assert "gpus" in probe
-    assert "uv" in probe
+    assert channel.ready["python"].startswith("3.")
+    assert channel.ready["python_executable"]
+    assert channel.ready["path"], "远端 PATH 必须问远端要：非交互式 ssh 不读 .bashrc"
+    assert "gpus" in channel.ready
+    # 远端装不了东西，所以"手里有什么"必须在开工前就问清（见 ssh._environment_lines）。
+    assert isinstance(channel.ready["packages"], dict)
 
 
 @pytest.mark.asyncio
@@ -285,3 +298,64 @@ async def test_remote_and_local_manifests_agree(channel, tmp_path) -> None:
     for key, entry in local.items():
         assert remote[key].sha256 == entry.sha256
         assert remote[key].size == entry.size
+
+
+# ------------------------------------------------------ 引导：源码怎么过去的
+
+
+def test_the_loader_is_small_enough_to_survive_the_ssh_command_line() -> None:
+    """加载器必须短，因为超长的远端命令是**静默截断**的。
+
+    真机量到：Win32-OpenSSH 9.5 把远端命令砍在 8189 字节，退出码仍是 0，远端
+    bash 只会抱怨引号没配对——看起来像转义写错了。把 13 KiB 的 agent 源码
+    base64 进命令行必然踩中，而控制节点是 Windows 是本设计锁定的前提。
+    """
+    loader = bootstrap_code()
+
+    assert len(loader.encode("utf-8")) < 256, "加载器一旦长起来就该改用别的机制"
+    # 源码不在命令行里——它有 13 KiB，塞进去必然越过那条截断线。
+    assert "PROTOCOL_VERSION" not in loader
+    assert len(agent_source()) > 4096, "源码本来就超长；这正是不能走命令行的理由"
+
+
+def test_the_agent_source_travels_as_the_stdin_preamble() -> None:
+    """源码走 stdin 的头一段，而不是命令行，也不是 ``python3 -``。
+
+    ``python3 -`` 会让解释器把整个 stdin 当程序读到 EOF，stdin 也就没了——而
+    stdin 正是协议通道本身，也是「断线即 EOF、远端自己清场」的全部依据。
+    所以是长度前缀：读满 N 字节就停手。
+    """
+    payload = bootstrap_payload()
+    length, _, source = payload.partition(b"\n")
+
+    assert int(length) == len(source), "长度前缀必须正好是源码的字节数"
+    assert source == agent_source()
+    assert " - " not in bootstrap_code(), "绝不能是 python3 -"
+
+
+@pytest.mark.asyncio
+async def test_a_transport_that_dies_explains_itself(tmp_path) -> None:
+    """掉线要带上原因。
+
+    ``Permission denied (publickey)``、``Connection refused``、远端 shell 的语法
+    报错，只会出现在传输自己的 stderr 上。丢掉它，三种处置方式完全不同的故障
+    就塌成同一句 "channel closed unexpectedly"，排查只能靠猜。
+    """
+
+    class _DyingTransport(SubprocessTransport):
+        async def start(self):
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('Permission denied (publickey)')",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._proc = proc
+            self._stderr.attach(proc.stderr)
+            return proc.stdin, proc.stdout
+
+    channel = RemoteChannel(_DyingTransport(sys.executable))
+    with pytest.raises(RemoteError, match="Permission denied"):
+        await channel.open()

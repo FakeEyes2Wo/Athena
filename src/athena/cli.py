@@ -11,6 +11,7 @@ from typing import Any
 from athena.core.agent import settings
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
+from athena.execution.check import check_compute, print_compute_check
 from athena.execution.compute_config import (
     ComputeConfig,
     ComputeConfigError,
@@ -335,6 +336,27 @@ async def _cmd_kaggle(args: argparse.Namespace) -> int:
     return 0 if report.status != "empty" else 1
 
 
+async def _cmd_compute(args: argparse.Namespace) -> int:
+    """连上 ``[compute]`` 里的每一台机器，把它实际长什么样打出来。
+
+    存在的理由：验一台机器本来只能靠起一整轮研究，而这类系统最典型的浪费就是
+    「跑了两小时 PREPARE，在第一个实验才发现远端跑不了」。这条命令**不占卡、
+    不留下任何东西**，几秒钟给出答案。
+
+    ``--data`` 时顺带回答「这台机器的 scratch 装不装得下这份数据集」——没有共享
+    存储时这是最先撞上的墙。
+    """
+    if not args.check:
+        print("需要 --check。", file=sys.stderr)
+        return 2
+    config = _compute_config(args)
+    dataset_root = None
+    if args.data:
+        dataset_root, _ = _dataset_context(args.data)
+    check = await check_compute(config, dataset_root=dataset_root)
+    return print_compute_check(check)
+
+
 def _write_report(report, path: str) -> None:
     """把报告落到 ``--out``；写不进去只报错，不抹掉已经跑完的那一轮。
 
@@ -364,6 +386,8 @@ async def _dispatch_command(args: argparse.Namespace) -> int:
         return await _cmd_kaggle(args)
     if args.command == "status":
         return await _cmd_status(args)
+    if args.command == "compute":
+        return await _cmd_compute(args)
     return await _cmd_control(args)
 
 
@@ -451,6 +475,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_survey_parser(subparsers)
     _add_kaggle_parser(subparsers)
+    _add_compute_parser(subparsers)
     for name in ("status", "pause", "resume", "stop"):
         subparsers.add_parser(name).add_argument(
             "--project", required=True, help="project root"
@@ -545,6 +570,31 @@ def _add_survey_parser(subparsers) -> None:
     )
     survey.add_argument("--out", default="", help="把 SurveyReport JSON 写到该路径")
     survey.add_argument("--check", action="store_true", help="只做装配自检")
+
+
+def _add_compute_parser(subparsers) -> None:
+    """挂上 ``compute`` 子命令：算力自检。
+
+    ``--check`` 是它目前唯一做的事，仍然显式给出——留着以后加别的动作（清理遗留
+    租约、试跑一条命令）时命令行不必变形。
+    """
+    compute = subparsers.add_parser(
+        "compute", help="check the GPU hosts in [compute] before running anything"
+    )
+    compute.add_argument(
+        "--check", action="store_true", help="连上每台机器把它实际长什么样打出来"
+    )
+    compute.add_argument(
+        "--compute",
+        choices=["local", "ssh"],
+        default=None,
+        help="临时覆盖 config.toml 里的 [compute].mode",
+    )
+    compute.add_argument(
+        "--data",
+        default="",
+        help="数据集路径；给了就顺带检查每台机器的 scratch 装不装得下",
+    )
 
 
 def _add_kaggle_parser(subparsers) -> None:

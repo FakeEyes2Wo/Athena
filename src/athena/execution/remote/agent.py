@@ -1,8 +1,11 @@
 """远端 supervisor：在 GPU 机上跑的那一半，一份自包含的 stdlib 脚本。
 
-它由控制节点经 ``ssh <host> python3 -c <base64 源码>`` 拉起后常驻，之后双方在同一条
-SSH 通道上用「一行一条 JSON」对话。源码走 ``-c`` 而不是 stdin，是因为 stdin 就是通道
-本身（也是「断线即 EOF、自己清场」这条机制的全部依据），不能被解释器当程序读掉。**一份租约一条通道**，不是一条命令一个 ssh：
+它由控制节点经 ``ssh <host> python3 -c <加载器>`` 拉起后常驻，之后双方在同一条
+SSH 通道上用「一行一条 JSON」对话。本文件的源码作为 stdin 的**头一段**（长度前缀 +
+源码）送过来，而不是塞进命令行——Win32-OpenSSH 会把超过 8189 字节的远端命令静默
+截断（见 ``channel.bootstrap_code``）。也不能用 ``python3 -``：那会让解释器把整个
+stdin 当程序读到 EOF，而 stdin 就是通道本身（也是「断线即 EOF、自己清场」这条机制
+的全部依据）。**一份租约一条通道**，不是一条命令一个 ssh：
 
 - 握手只付一次，摊到一个 Plan 的几十上百条命令上；Win32-OpenSSH 不支持
   ControlMaster 连接复用，靠这条设计绕开，两端行为还一致。
@@ -287,14 +290,129 @@ def _mkdir(message):
     _send({"op": "ok", "id": message["id"]})
 
 
+def _search_path():
+    """本机真正该用的 PATH：解释器自己的 bin 目录排在最前。
+
+    真机上量到的：AutoDL 之类的容器把 python 装在 ``/root/miniconda3/bin``，
+    而那一段 PATH 是 ``~/.bashrc`` 加的——**非交互式 ssh 不读它**。于是
+    ``ssh host python3 -V`` 直接 command not found，同一台机器交互登录却一切正常。
+    这会让远端的第一条命令就失败，且失败信息完全指不到原因。
+
+    解释器是我们自己被 ``SshHost.python`` 指定拉起来的，它的 bin 目录必然存在。
+    以它为准，比让每个 agent 去猜靠谱。
+    """
+    own = os.path.dirname(os.path.abspath(sys.executable))
+    inherited = os.environ.get("PATH", "")
+    return own + os.pathsep + inherited if inherited else own
+
+
+# 决定"这个实验跑不跑得起来"的那些包。远端解释器是现成的、装不了东西，所以
+# agent 必须**开工前**就知道手里有什么——否则它会拿一轮去试 import、再拿一轮
+# 去试 pip install、最后拿一轮猜为什么装不上。
+_SURVEYED_PACKAGES = (
+    "torch",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+    "xgboost",
+    "lightgbm",
+    "transformers",
+    "matplotlib",
+    "jax",
+    "tensorflow",
+)
+
+
+def _packages():
+    """报出关键包的版本。
+
+    只读发行元数据，**不 import**：``import torch`` 要好几秒，还会初始化 CUDA
+    上下文、在一张我们还没租出去的卡上占住显存。
+    """
+    try:
+        import importlib.metadata as metadata
+    except ImportError:
+        return {}
+    found = {}
+    for name in _SURVEYED_PACKAGES:
+        try:
+            found[name] = metadata.version(name)
+        except Exception:
+            continue
+    return found
+
+
+def _tree_size(root):
+    """一棵子树的字节数与文件数。只 stat，不算哈希——这里问的是占了多少盘。"""
+    total = 0
+    files = 0
+    for base, _dirs, names in os.walk(root):
+        for name in names:
+            try:
+                total += os.lstat(os.path.join(base, name)).st_size
+                files += 1
+            except OSError:
+                continue
+    return total, files
+
+
+def _space(message):
+    """一个目录占了多少盘、还剩多少，以及它下面每个子目录各占多少。
+
+    ``compute --check`` 靠它回答两个问题：scratch 还剩不剩得下一份数据集，
+    以及有没有上一轮崩溃留下来、再没人会清的租约目录。
+    """
+    root = message["root"]
+    probe = root
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        usage = shutil.disk_usage(probe or os.getcwd())
+        total, free = usage.total, usage.free
+    except OSError:
+        total, free = 0, 0
+
+    entries = []
+    if os.path.isdir(root):
+        for name in sorted(os.listdir(root)):
+            path = os.path.join(root, name)
+            if not os.path.isdir(path):
+                continue
+            size, files = _tree_size(path)
+            try:
+                mtime = os.lstat(path).st_mtime
+            except OSError:
+                mtime = 0.0
+            entries.append(
+                {"name": name, "bytes": size, "files": files, "mtime": mtime}
+            )
+    _send(
+        {
+            "op": "space",
+            "id": message["id"],
+            "root": root,
+            "exists": os.path.isdir(root),
+            "total": total,
+            "free": free,
+            "entries": entries,
+        }
+    )
+
+
 def _probe(message):
     """注册期预检要的那些事实，一次问清。
 
-    这类系统最典型的浪费是：跑了两小时的 PREPARE，在第一个实验才发现远端没装 uv。
+    这类系统最典型的浪费是：跑了两小时的 PREPARE，在第一个实验才发现远端缺东西。
+    **不问 uv / pip**：远端的解释器是现成的，Athena 不在那边装任何东西
+    （见 ``ssh.SshBackend.describe``）。问了只会诱使 agent 去试一条不该走的路。
     """
 
     def _version(name, *args):
-        binary = shutil.which(name)
+        binary = shutil.which(name, path=_search_path())
         if not binary:
             return None
         try:
@@ -348,7 +466,11 @@ def _probe(message):
             "shell": shell,
             "python": sys.version.split()[0],
             "python_executable": sys.executable,
-            "uv": _version("uv", "--version"),
+            # 控制节点据此给远端子进程拼 PATH：没有这一条，agent 写的
+            # ``python train.py`` 在非交互式 ssh 下会 command not found。
+            "path": _search_path(),
+            "path_sep": os.pathsep,
+            "packages": _packages(),
             "git": _version("git", "--version"),
             "nvidia_smi": _version("nvidia-smi", "--version") is not None,
             "gpus": gpus,
@@ -366,6 +488,7 @@ _HANDLERS = {
     "remove": _remove,
     "mkdir": _mkdir,
     "probe": _probe,
+    "space": _space,
 }
 
 

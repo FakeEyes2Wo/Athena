@@ -204,8 +204,9 @@ class GpuPool:
     async def _probe(self, host: SshHost) -> HostCard:
         channel = RemoteChannel(self._transport_factory(host))
         try:
-            await channel.open()
-            facts = await channel.request("probe")
+            # 事实随握手一起拿到（见 RemoteChannel.open）：预检看到的和实验期
+            # 注入给 agent 的必须是同一份，否则预检就不是预检。
+            facts = await channel.open()
         finally:
             await channel.close()
         if not facts.get("python"):
@@ -323,7 +324,6 @@ class GpuPool:
         host = state.host
         scratch = PurePosixPath(host.scratch)
         remote_workspace = str(scratch / "leases" / plan_id / "workspace")
-        remote_env_root = str(scratch / "env")
         remote_data_root = str(scratch / "data")
 
         channel = RemoteChannel(self._transport_factory(host))
@@ -333,7 +333,6 @@ class GpuPool:
             host,
             channel=channel,
             remote_workspace=remote_workspace,
-            remote_env_root=remote_env_root,
             remote_data_root=remote_data_root,
             gpu_ids=gpu_ids,
             store=self._store,
@@ -376,12 +375,13 @@ class GpuPool:
         return report
 
     async def release(self, plan_id: str) -> None:
-        """归还租约：关通道（远端因此清场）并把卡放回池子。"""
+        """归还租约：删掉远端工作区、关通道（远端因此清场）、把卡放回池子。"""
         lease = self._leases.pop(plan_id, None)
         self._channels.pop(plan_id, None)
         if lease is None:
             return
         try:
+            await self._discard_workspace(lease)
             await lease.backend.aclose()
         finally:
             async with self._lock:
@@ -389,6 +389,42 @@ class GpuPool:
                 state.busy_gpus.difference_update(lease.gpu_ids)
                 state.leases = max(0, state.leases - 1)
                 self._freed.notify_all()
+
+    async def _discard_workspace(self, lease: Lease) -> None:
+        """删掉这份租约在远端的工作区目录。
+
+        不删就是一条无界的磁盘泄漏：每个跑完的 Plan 在 scratch 上留一份工作区
+        副本，而同一块盘还要装数据集。真机上确认过——``release`` 之后
+        ``<scratch>/leases/h1/`` 原封不动。盘满的表现是"实验莫名其妙失败"，
+        而且指不到原因。
+
+        删得起，是因为控制节点这边已经有全部该留的东西：源码经镜像回到了本地
+        worktree（可信修订据此提交），产出经 ``collect_outputs`` 回来了。**留在
+        远端的大文件**（checkpoint、特征缓存）会跟着一起没——所以这里把它们逐条
+        记进日志，而不是让它们悄悄消失。证据里的 ``remote_only_paths`` 说的是
+        "产出过但没取回"，不是"还能去拿"。
+
+        必须在关通道**之前**做：通道一关就没有人能执行这条删除了。
+        """
+        discarded = lease.backend.remote_only
+        if discarded:
+            logger.info(
+                "lease %s discards %d remote-only path(s) with its workspace: %s",
+                lease.plan_id,
+                len(discarded),
+                ", ".join(discarded[:10]),
+            )
+        lease_root = str(PurePosixPath(lease.remote_workspace).parent)
+        try:
+            await lease.backend.inner.channel.request("remove", paths=[lease_root])
+        except Exception as exc:
+            # 清不掉不该毁掉归还：卡必须回到池子里，否则一次网络抖动就少一张卡。
+            logger.warning(
+                "could not remove remote workspace %s on %s: %s",
+                lease_root,
+                lease.host.name,
+                exc,
+            )
 
     async def aclose(self) -> None:
         """归还所有租约。"""
