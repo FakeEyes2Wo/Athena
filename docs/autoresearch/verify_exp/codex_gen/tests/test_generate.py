@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
+from unittest.mock import AsyncMock
 
 CODEX_GEN = Path(__file__).resolve().parents[1]
 INPUTS = CODEX_GEN / "inputs"
+TEST_OUTPUTS = CODEX_GEN / "tests" / "_outputs"
 sys.path.insert(0, str(CODEX_GEN))
 
 import generate  # noqa: E402
@@ -96,6 +101,111 @@ class DrawioXmlTests(unittest.TestCase):
             laid_out = [label for row in layouts[path.stem] for label in row]
             self.assertCountEqual(laid_out, [node.label for node in spec.nodes])
             self.assertEqual(len(laid_out), len(set(laid_out)), path.name)
+
+
+class ExportValidationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        TEST_OUTPUTS.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(TEST_OUTPUTS, ignore_errors=True)
+
+    def test_validates_png_svg_and_pdf_signatures(self) -> None:
+        validator = getattr(generate, "validate_export_file", None)
+        self.assertIsNotNone(validator, "validate_export_file must be implemented")
+        png = TEST_OUTPUTS / "sample.png"
+        svg = TEST_OUTPUTS / "sample.svg"
+        pdf = TEST_OUTPUTS / "sample.pdf"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (640).to_bytes(4, "big")
+            + (360).to_bytes(4, "big")
+            + b"\x08\x06\x00\x00\x00"
+            + b"\x00\x00\x00\x00"
+        )
+        svg.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+        pdf.write_bytes(b"%PDF-1.7\n")
+        self.assertEqual(validator(png, "png")["dimensions"], [640, 360])
+        self.assertTrue(validator(svg, "svg")["ok"])
+        self.assertTrue(validator(pdf, "pdf")["ok"])
+
+
+class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        shutil.rmtree(TEST_OUTPUTS, ignore_errors=True)
+        TEST_OUTPUTS.mkdir(parents=True)
+
+    async def asyncTearDown(self) -> None:
+        shutil.rmtree(TEST_OUTPUTS, ignore_errors=True)
+
+    @staticmethod
+    def _fake_export(path: Path, drawio_cli: Path) -> dict[str, object]:
+        del drawio_cli
+        files: dict[str, str] = {}
+        for fmt in ("png", "svg", "pdf"):
+            target = path.with_suffix(f".{fmt}")
+            target.write_bytes(b"test-export")
+            files[fmt] = target.name
+        return {"ok": True, "files": files, "formats": {}}
+
+    async def test_pipeline_writes_required_evidence(self) -> None:
+        runner = getattr(generate, "run_pipeline", None)
+        self.assertIsNotNone(runner, "run_pipeline must be implemented")
+        with (
+            mock.patch.object(generate, "search_shapes", AsyncMock(return_value={})),
+            mock.patch.object(
+                generate,
+                "create_diagram",
+                AsyncMock(
+                    return_value={
+                        "ok": True,
+                        "xml": None,
+                        "build_id": "test-build",
+                        "error": None,
+                    }
+                ),
+            ),
+            mock.patch.object(generate, "export_drawio", side_effect=self._fake_export),
+        ):
+            report = await runner(INPUTS, TEST_OUTPUTS, Path("DrawIO.exe"))
+        self.assertEqual(report["total"], 10)
+        self.assertEqual(report["mcp_passed"], 10)
+        self.assertEqual(report["passed"], 10)
+        stem = "01-candidate-to-paper-pipeline"
+        self.assertTrue((TEST_OUTPUTS / f"{stem}.drawio").exists())
+        self.assertTrue((TEST_OUTPUTS / f"{stem}.mcp.json").exists())
+        self.assertTrue((TEST_OUTPUTS / f"{stem}.check.json").exists())
+        evidence = json.loads(
+            (TEST_OUTPUTS / f"{stem}.mcp.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(evidence["build_id"], "test-build")
+
+    async def test_pipeline_records_mcp_failure_without_stopping(self) -> None:
+        runner = getattr(generate, "run_pipeline", None)
+        self.assertIsNotNone(runner, "run_pipeline must be implemented")
+        with (
+            mock.patch.object(generate, "search_shapes", AsyncMock(return_value={})),
+            mock.patch.object(
+                generate,
+                "create_diagram",
+                AsyncMock(
+                    return_value={
+                        "ok": False,
+                        "xml": None,
+                        "build_id": None,
+                        "error": "offline",
+                    }
+                ),
+            ),
+            mock.patch.object(generate, "export_drawio", side_effect=self._fake_export),
+        ):
+            report = await runner(INPUTS, TEST_OUTPUTS, Path("DrawIO.exe"))
+        self.assertEqual(report["total"], 10)
+        self.assertEqual(report["failed"], 10)
+        self.assertTrue(
+            all(item["mcp"]["error"] == "offline" for item in report["files"])
+        )
 
 
 if __name__ == "__main__":

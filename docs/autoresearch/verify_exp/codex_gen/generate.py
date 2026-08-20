@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import html
+import json
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree as ET
+
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+BASE_DIR = Path(__file__).resolve().parent
+DRAWIO_MCP_URL = "https://mcp.draw.io/mcp"
+DEFAULT_DRAWIO_CLI = Path(
+    r"C:\Users\80163\AppData\Local\Microsoft\WinGet\Links\DrawIO.exe"
+)
 
 
 @dataclass(frozen=True)
@@ -627,3 +643,393 @@ def validate_drawio_xml(xml: str) -> dict[str, object]:
     if not valid:
         result["reason"] = "draw.io structural requirements failed"
     return result
+
+
+def _tool_result_text(result: Any) -> tuple[str, bool]:
+    dumped = result.model_dump() if hasattr(result, "model_dump") else result
+    if not isinstance(dumped, dict):
+        return "", True
+    text = ""
+    for block in dumped.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = str(block.get("text", ""))
+            break
+    return text, bool(dumped.get("isError", False))
+
+
+async def search_shapes(keywords: tuple[str, ...]) -> dict[str, object]:
+    """Search native draw.io shapes directly through hosted MCP."""
+    last_error: str | None = None
+    for attempt in range(3):
+        try:
+            found: dict[str, list[dict[str, str]]] = {}
+            async with streamablehttp_client(DRAWIO_MCP_URL) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    for keyword in keywords:
+                        result = await session.call_tool(
+                            "search_shapes", {"query": keyword, "limit": 4}
+                        )
+                        text, is_error = _tool_result_text(result)
+                        if is_error:
+                            raise RuntimeError(
+                                text or f"search_shapes failed for {keyword}"
+                            )
+                        payload = json.loads(text) if text else []
+                        found[keyword] = [
+                            {
+                                "title": str(item.get("title", "")),
+                                "style": str(item.get("style", "")),
+                            }
+                            for item in payload[:4]
+                            if isinstance(item, dict)
+                        ]
+            return {"ok": True, "shapes": found, "error": None}
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # MCP transports may raise ExceptionGroup.
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (2**attempt))
+    return {"ok": False, "shapes": {}, "error": last_error}
+
+
+async def create_diagram(xml: str) -> dict[str, object]:
+    """Validate and echo draw.io XML through hosted MCP create_diagram."""
+    last_error: str | None = None
+    for attempt in range(3):
+        try:
+            async with streamablehttp_client(DRAWIO_MCP_URL) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool("create_diagram", {"xml": xml})
+            text, is_error = _tool_result_text(result)
+            payload = json.loads(text) if text else {}
+            echoed = payload.get("xml") if isinstance(payload, dict) else None
+            build_id = payload.get("_buildId") if isinstance(payload, dict) else None
+            ok = not is_error and isinstance(echoed, str) and bool(echoed)
+            return {
+                "ok": ok,
+                "xml": echoed if isinstance(echoed, str) else None,
+                "build_id": build_id,
+                "error": None if ok else text or "create_diagram returned no XML",
+            }
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # MCP transports may raise ExceptionGroup.
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (2**attempt))
+    return {"ok": False, "xml": None, "build_id": None, "error": last_error}
+
+
+def validate_export_file(path: Path, fmt: str) -> dict[str, object]:
+    """Check an exported file's signature and parseable structure."""
+    result: dict[str, object] = {
+        "ok": False,
+        "file": path.name,
+        "bytes": path.stat().st_size if path.exists() else 0,
+        "dimensions": None,
+        "error": None,
+    }
+    if not path.exists() or path.stat().st_size == 0:
+        result["error"] = "missing or empty file"
+        return result
+    try:
+        if fmt == "png":
+            data = path.read_bytes()
+            if (
+                len(data) < 24
+                or data[:8] != b"\x89PNG\r\n\x1a\n"
+                or data[12:16] != b"IHDR"
+            ):
+                raise ValueError("invalid PNG signature or IHDR")
+            width = int.from_bytes(data[16:20], "big")
+            height = int.from_bytes(data[20:24], "big")
+            if width <= 0 or height <= 0:
+                raise ValueError("invalid PNG dimensions")
+            result["dimensions"] = [width, height]
+        elif fmt == "svg":
+            root = ET.parse(path).getroot()
+            if not root.tag.endswith("svg"):
+                raise ValueError("root is not svg")
+        elif fmt == "pdf":
+            if not path.read_bytes().startswith(b"%PDF-"):
+                raise ValueError("invalid PDF signature")
+        else:
+            raise ValueError(f"unsupported format: {fmt}")
+    except (OSError, ET.ParseError, ValueError) as exc:
+        result["error"] = str(exc)
+        return result
+    result["ok"] = True
+    return result
+
+
+def export_drawio(path: Path, drawio_cli: Path) -> dict[str, object]:
+    """Export one draw.io file to PNG, SVG, and PDF with local Draw.io."""
+    formats: dict[str, dict[str, object]] = {}
+    files: dict[str, str | None] = {}
+    if not drawio_cli.exists():
+        return {
+            "ok": False,
+            "files": {fmt: None for fmt in ("png", "svg", "pdf")},
+            "formats": {},
+            "error": f"Draw.io CLI missing: {drawio_cli}",
+        }
+    for fmt in ("png", "svg", "pdf"):
+        target = path.with_suffix(f".{fmt}")
+        try:
+            process = subprocess.run(
+                [
+                    str(drawio_cli),
+                    "--export",
+                    "--format",
+                    fmt,
+                    "--embed-diagram",
+                    "--output",
+                    str(target),
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            check = validate_export_file(target, fmt)
+            check.update(
+                {
+                    "returncode": process.returncode,
+                    "stdout": process.stdout[-1000:],
+                    "stderr": process.stderr[-1000:],
+                }
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            check = {
+                "ok": False,
+                "file": target.name,
+                "bytes": 0,
+                "dimensions": None,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        formats[fmt] = check
+        files[fmt] = target.name if check["ok"] else None
+    return {
+        "ok": all(bool(check["ok"]) for check in formats.values()),
+        "files": files,
+        "formats": formats,
+        "error": None,
+    }
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+async def run_pipeline(
+    inputs_dir: Path, outputs_dir: Path, drawio_cli: Path
+) -> dict[str, object]:
+    """Generate all diagrams independently and return a summary report."""
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, object]] = []
+    for prompt_path in sorted(inputs_dir.glob("*.md")):
+        stem = prompt_path.stem
+        record: dict[str, object] = {"stem": stem, "prompt": prompt_path.name}
+        try:
+            spec = parse_prompt(prompt_path.read_text(encoding="utf-8"), stem)
+            keywords = tuple(dict.fromkeys(node.icon for node in spec.nodes))
+            shape_search = await search_shapes(keywords)
+            shape_payload = shape_search.get("shapes", shape_search)
+            if not isinstance(shape_payload, dict):
+                shape_payload = {}
+            xml = build_drawio_xml(spec, shape_payload)
+            precheck = validate_drawio_xml(xml)
+            if not precheck["xml_ok"]:
+                raise ValueError(f"pre-MCP XML validation failed: {precheck}")
+
+            mcp = await create_diagram(xml)
+            echoed = mcp.get("xml")
+            final_xml = echoed if isinstance(echoed, str) and echoed else xml
+            final_check = validate_drawio_xml(final_xml)
+            drawio_path = outputs_dir / f"{stem}.drawio"
+            drawio_path.write_text(final_xml + "\n", encoding="utf-8")
+            export = export_drawio(drawio_path, drawio_cli)
+
+            mcp_evidence = {
+                "ok": bool(mcp.get("ok")),
+                "build_id": mcp.get("build_id"),
+                "error": mcp.get("error"),
+                "shape_search": shape_search,
+            }
+            check_evidence = {
+                "xml": final_check,
+                "export": export,
+            }
+            _write_json(outputs_dir / f"{stem}.mcp.json", mcp_evidence)
+            _write_json(outputs_dir / f"{stem}.check.json", check_evidence)
+            status = (
+                "PASS"
+                if final_check["xml_ok"] and mcp_evidence["ok"] and export["ok"]
+                else "FAIL"
+            )
+            record.update(
+                {
+                    "title": spec.title,
+                    "status": status,
+                    "drawio": drawio_path.name,
+                    "mcp": mcp_evidence,
+                    "check": final_check,
+                    "export": export,
+                }
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            record.update(
+                {
+                    "status": "FAIL",
+                    "mcp": {"ok": False, "build_id": None, "error": error},
+                    "check": {"xml_ok": False, "reason": error},
+                    "export": {"ok": False, "error": "not attempted"},
+                }
+            )
+            _write_json(outputs_dir / f"{stem}.mcp.json", record["mcp"])
+            _write_json(outputs_dir / f"{stem}.check.json", record["check"])
+        records.append(record)
+
+    passed = sum(record.get("status") == "PASS" for record in records)
+    mcp_passed = sum(bool(record.get("mcp", {}).get("ok")) for record in records)
+    return {
+        "total": len(records),
+        "passed": passed,
+        "failed": len(records) - passed,
+        "mcp_passed": mcp_passed,
+        "files": records,
+    }
+
+
+def verify_outputs(inputs_dir: Path, outputs_dir: Path) -> dict[str, object]:
+    """Verify all expected artifacts without calling MCP or Draw.io again."""
+    records: list[dict[str, object]] = []
+    required = ("drawio", "png", "svg", "pdf", "mcp.json", "check.json")
+    for prompt in sorted(inputs_dir.glob("*.md")):
+        stem = prompt.stem
+        missing = [
+            suffix
+            for suffix in required
+            if not (outputs_dir / f"{stem}.{suffix}").exists()
+        ]
+        xml_check = {"xml_ok": False, "reason": "missing drawio"}
+        if not missing and (outputs_dir / f"{stem}.drawio").exists():
+            xml_check = validate_drawio_xml(
+                (outputs_dir / f"{stem}.drawio").read_text(encoding="utf-8")
+            )
+        exports = {
+            fmt: validate_export_file(outputs_dir / f"{stem}.{fmt}", fmt)
+            for fmt in ("png", "svg", "pdf")
+        }
+        mcp_ok = False
+        mcp_path = outputs_dir / f"{stem}.mcp.json"
+        if mcp_path.exists():
+            try:
+                mcp_ok = bool(
+                    json.loads(mcp_path.read_text(encoding="utf-8")).get("ok")
+                )
+            except (OSError, json.JSONDecodeError):
+                mcp_ok = False
+        ok = (
+            not missing
+            and bool(xml_check["xml_ok"])
+            and mcp_ok
+            and all(item["ok"] for item in exports.values())
+        )
+        records.append(
+            {
+                "stem": stem,
+                "ok": ok,
+                "missing": missing,
+                "xml": xml_check,
+                "mcp_ok": mcp_ok,
+                "exports": exports,
+            }
+        )
+    passed = sum(record["ok"] for record in records)
+    return {
+        "total": len(records),
+        "passed": passed,
+        "failed": len(records) - passed,
+        "files": records,
+    }
+
+
+def _resolve_inside_base(value: str) -> Path:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = BASE_DIR / candidate
+    resolved = candidate.resolve()
+    if resolved != BASE_DIR and BASE_DIR not in resolved.parents:
+        raise ValueError(f"path must stay inside {BASE_DIR}: {value}")
+    return resolved
+
+
+def _write_failures(report: dict[str, object], failures_path: Path) -> None:
+    failed = [item for item in report.get("files", []) if item.get("status") != "PASS"]
+    if not failed:
+        failures_path.unlink(missing_ok=True)
+        return
+    lines = ["# Generation Failures", ""]
+    for item in failed:
+        lines.extend(
+            [
+                f"## {item.get('stem', 'unknown')}",
+                "",
+                f"- MCP: {item.get('mcp', {}).get('error')}",
+                f"- XML: {item.get('check', {}).get('reason')}",
+                f"- Export: {item.get('export', {}).get('error')}",
+                "",
+            ]
+        )
+    failures_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--inputs", default="inputs")
+    parser.add_argument("--outputs", default="outputs")
+    parser.add_argument("--report", default="report.json")
+    parser.add_argument("--drawio-cli", default=str(DEFAULT_DRAWIO_CLI))
+    parser.add_argument("--verify-only", action="store_true")
+    args = parser.parse_args()
+
+    try:
+        inputs_dir = _resolve_inside_base(args.inputs)
+        outputs_dir = _resolve_inside_base(args.outputs)
+        report_path = _resolve_inside_base(args.report)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    if args.verify_only:
+        report = verify_outputs(inputs_dir, outputs_dir)
+        print(
+            f"verify total={report['total']} passed={report['passed']} failed={report['failed']}"
+        )
+        return 0 if report["total"] == 10 and report["failed"] == 0 else 1
+
+    report = asyncio.run(run_pipeline(inputs_dir, outputs_dir, Path(args.drawio_cli)))
+    _write_json(report_path, report)
+    _write_failures(report, BASE_DIR / "FAILURES.md")
+    print(
+        f"total={report['total']} passed={report['passed']} failed={report['failed']} "
+        f"mcp_passed={report['mcp_passed']}"
+    )
+    return 0 if report["total"] == 10 and report["failed"] == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
