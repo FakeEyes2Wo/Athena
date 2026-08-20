@@ -282,7 +282,8 @@ research/
 ```
 
 最终 evidence 汇总所有轮次，包括失败和阴性结果，再交给现有
-records-to-paper handoff。
+records-to-paper handoff。汇总产物保存在 `research/final-evidence-chain.json`，并复制
+为 `records-paper/<run_id>/evidence_chain.json` 以保持现有下游契约不变。
 
 ## 10. HypothesisPool 的首版范围
 
@@ -396,3 +397,16 @@ ML v1 的完成定义是 M1–M3 全部通过；M4 不阻塞首个可用版本�
 - Provider 市场或 SDK；
 - 第二领域实现；
 - 为旧版 API 泛化设计中的每个概念预建类和 interface。
+
+## 16. 已嵌入的既有文档
+
+本设计的执行基线、动态 rubric、自主循环和代码精简边界已同步写入：
+
+- 总体与实现边界：TS 插件设计、泛化设计、详细设计、协议/Paper Engine、API
+  泛化设计和旧实现草稿；
+- 领域规则：HypothesisPool、idea generation、可信实验/消融/论文图设计；
+- 真实入口：candidate-to-paper、records-to-paper 设计及两个总控 RUNBOOK；
+- `README.md` 当前执行基线与关键决策索引。
+
+后续修改应同时维护本文件、受影响的领域文档和对应 RUNBOOK，避免再次形成互相
+冲突的平行设计。

@@ -6,17 +6,25 @@
 AutoResearch 是 Athena 之上的端到端研究自动化框架：
 `Idea Generation → Experiment（Athena 子集）→ Paper Writing → Paper Refinement/Quality Gate → Artifact Packaging`。
 
+## 当前执行基线（2026-08-20）
+
+当前实现应从
+[ML-first 精简控制平面设计](2026-08-20-autoresearch-ml-control-plane-design.md)
+出发：复用 DSH 和现有 handoff，以一个主要 `AutoResearchService` 跑通真实 ML
+纵切；旧版 RunSpec/PipelineRunner/ProviderRegistry 等通用框架延期到第二领域接入
+后的 M4。领域规则仍以本目录对应文档为准。
+
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [2026-08-15-autoresearch-ts-plugin-design.md](2026-08-15-autoresearch-ts-plugin-design.md) | AutoResearch 框架与 TS 插件设计：独立 `@athena/autoresearch` 包、阶段状态机、论文生成三路径、预算与质量闸 |
-| [2026-08-15-autoresearch-generalization-and-minimalism.md](2026-08-15-autoresearch-generalization-and-minimalism.md) | 泛化与极简架构：RunSpec + PipelineRunner + StageContext + Provider 可插拔；SVG skill 不绑定、默认 native-svg 兜底 |
-| [2026-08-15-autoresearch-detailed-design.md](2026-08-15-autoresearch-detailed-design.md) | 实现级详细设计：包结构、zod 契约、服务 API、阶段伪代码、插件注册、事件、恢复、测试与验收 |
+| [2026-08-15-autoresearch-generalization-and-minimalism.md](2026-08-15-autoresearch-generalization-and-minimalism.md) | M4 泛化参考：RunSpec + PipelineRunner + StageContext + Provider 可插拔；不作为 ML v1 实现基线 |
+| [2026-08-15-autoresearch-detailed-design.md](2026-08-15-autoresearch-detailed-design.md) | 历史实现级设计：阶段语义与验收保留，代码结构由 2026-08-20 精简设计覆盖 |
 | [2026-08-15-autoresearch-protocols-and-paper-engine.md](2026-08-15-autoresearch-protocols-and-paper-engine.md) | 阶段协议与 Paper Engine 详细设计：Athena 适配接口、入池协议、TemplateKit/Overleaf/LatexBuilder/Composer/Reviewer/Packaging 契约、事件 payload、错误码、BDD 场景 |
 | [2026-08-15-autoresearch-figures-and-experiment-design.md](2026-08-15-autoresearch-figures-and-experiment-design.md) | 论文图与可信实验/消融设计：LLM 生成 SVG 架构图、SVG 渲染管线、EDA 图不进入论文、多数据集可信实验、消融矩阵、BDD 增量 |
-| [2026-08-15-implementation-draft.md](2026-08-15-implementation-draft.md) | 实现草稿：包目录、RunSpec/PipelineRunner/Provider 核心代码草图、里程碑、测试草稿 |
-| [2026-08-15-api-generalization-design.md](2026-08-15-api-generalization-design.md) | API 泛化设计：RunSpec/Stage/Provider/Gate/EventBus/错误/工具层接口契约与验收清单 |
+| [2026-08-15-implementation-draft.md](2026-08-15-implementation-draft.md) | 已取代的实现草稿：只供查阅早期算法，不得直接作为 ML v1 实施计划 |
+| [2026-08-15-api-generalization-design.md](2026-08-15-api-generalization-design.md) | M4 API 参考：第二领域接入后再验证 RunSpec/Stage/Provider/Gate 等抽象 |
 | [2026-08-15-hypothesis-local-pool-design.md](2026-08-15-hypothesis-local-pool-design.md) | Hypothesis 本地池设计：`HypothesisPool` 服务、池状态机、与 `ResearchTree` 对账、论文回写 |
 | [2026-08-16-idea-generation-design.md](2026-08-16-idea-generation-design.md) | 独立 idea generation stage：双模 brainstorm、TS 门禁（照搬 Python light pipeline 阈值）、proposal+hypothesis 双产出 |
 | [2026-08-16-records-to-paper-design.md](2026-08-16-records-to-paper-design.md) | 已有实验记录→论文 全自动工作流设计（v3）：程序只做溯源，其余 Handoff 文档化；结合 Spark-to-Paper/ARIS 审计链 |
@@ -62,3 +70,9 @@ AutoResearch 是 Athena 之上的端到端研究自动化框架：
 5. **成本预算**：首版只做 token 预算（`max_tokens`），不接计费（不做 `max_cost`）。
 6. **LaTeX 编译失败自修复**：不做轮次限制，只受 `project_time_limit` 限制；每次尝试返回控制台/编译器输出。
 7. **阴性结果**：保留并写入 limitations / negative results。
+8. **运行基础设施**：复用 DSH，不实现第二套 Agent Runtime、EventBus、DAG 或任务队列。
+9. **控制平面**：ML v1 只注册一个主要 `AutoResearchService`，使用精简 state + events 记录。
+10. **质量闭环**：实验前动态生成、独立审查并冻结任务专用 rubric。
+11. **自主迭代**：evidence 后由 Supervisor 在预算内决定继续、转向、请求用户或结束；计划修订只影响未来。
+12. **实验引擎**：暂时使用 Python Athena，Core 不依赖其私有状态类型。
+13. **通用化时机**：ML v1 完成后，以第二个真实领域验证最小 Domain Profile，不预建空壳接口。
