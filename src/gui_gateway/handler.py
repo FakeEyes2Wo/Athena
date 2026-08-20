@@ -5,6 +5,7 @@ Routes canonical GUI methods (see ``docs/athena-gui-design.md`` §3) to
 transport, which subscribes to runtime ``state``/``output`` events directly.
 """
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -85,6 +86,24 @@ def _require_dict(params: dict[str, Any], key: str, label: str) -> dict[str, Any
     return value
 
 
+async def _rmtree_when_released(path: Path, attempts: int = 5) -> None:
+    """删除目录树；Windows 释放文件句柄有延迟，短暂重试后再放弃。
+
+    调用方已经把持有句柄的 runtime 关掉，但句柄落地不是同步的：关闭之后紧接着
+    rmtree 仍可能撞上 ``[WinError 32]``。
+
+    例：rmtree(dir) 抛 WinError 32 → 100ms 后重试 → 成功返回 None。
+    """
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(0.1)
+
+
 def _session_state_root(project_root: Path, session_id: str) -> Path | None:
     """Map a conversation id to its isolated state root (``None`` = default session)."""
     if session_id == "default":
@@ -108,6 +127,8 @@ class GuiRequestHandler:
         self._broker = broker or HumanRequestBroker()
         self._service = GuiService(runtime)
         self._project_root = Path(runtime.settings().get("project_root") or ".")
+        # 当前 runtime 属于哪个会话：删除会话时据此判断要不要先把 runtime 切走。
+        self._current_session_id = "default"
 
     @property
     def runtime(self) -> ResearchRuntime:
@@ -136,8 +157,8 @@ class GuiRequestHandler:
         try:
             state = getattr(self._runtime, "state", None)
             state_path = getattr(self._runtime, "_state_path", None)
-            # 只有从磁盘恢复出的状态才可能是“进行中”；全新会话的内存默认状态
-            # （phase=SEARCH/status=RUNNING）不能被误判成需要续跑。
+            # 只有从磁盘恢复出的状态才可能是“进行中”：全新会话的内存默认状态是
+            # PREPARE/IDLE，本就不满足下面的条件；这里再按有无 state.json 兜一层。
             persisted = state_path is not None and Path(state_path).is_file()
             mid_run = (
                 persisted
@@ -172,6 +193,7 @@ class GuiRequestHandler:
             raise ValueError("session switching is not configured")
         state_root = _session_state_root(self._project_root, session_id)
         await self._swap_runtime(str(self._project_root), state_root)
+        self._current_session_id = session_id
         return {"session_id": session_id, "records": self._runtime.replay_output_events()}
 
     def _session_ids(self, project_root: Path | None = None) -> list[str]:
@@ -196,8 +218,14 @@ class GuiRequestHandler:
         """列出任意工作区目录的会话 id（不切换 runtime），供前端按工作区分组。"""
         return {"sessions": self._session_ids(Path(path))}
 
-    def session_delete(self, session_id: str) -> dict[str, object]:
-        """删除一个会话：命名会话删整个 conversation 目录；``default`` 只清 transcript。"""
+    async def session_delete(self, session_id: str) -> dict[str, object]:
+        """删除一个会话：命名会话删整个 conversation 目录；``default`` 只清 transcript。
+
+        删的若是当前所在会话，必须先把 runtime 切回 ``default``——它的 agent
+        rollout writer 在 ``{state_root}/logs/agents/*.jsonl`` 上持着打开的句柄
+        （``ResearchRuntime`` 把 ``rollout_dir`` 指到会话状态根下），句柄不放手，
+        Windows 上 ``shutil.rmtree`` 会抛 ``PermissionError: [WinError 32]``。
+        """
         if session_id == "default":
             log = (
                 self._project_root
@@ -209,8 +237,11 @@ class GuiRequestHandler:
             log.unlink(missing_ok=True)
             return {"deleted": True, "sessions": self._session_ids()}
         state_root = _session_state_root(self._project_root, session_id)
+        if session_id == self._current_session_id and self._make_runtime is not None:
+            await self._swap_runtime(str(self._project_root), None)
+            self._current_session_id = "default"
         if state_root is not None and state_root.is_dir():
-            shutil.rmtree(state_root)
+            await _rmtree_when_released(state_root)
         return {"deleted": True, "sessions": self._session_ids()}
 
     async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, object]:
@@ -251,7 +282,9 @@ class GuiRequestHandler:
                 _require_str(params, "session_id", "session_id")
             )
         if method == "session_delete":
-            return self.session_delete(_require_str(params, "session_id", "session_id"))
+            return await self.session_delete(
+                _require_str(params, "session_id", "session_id")
+            )
         if method == "eda_report":
             return service.eda_report()
 

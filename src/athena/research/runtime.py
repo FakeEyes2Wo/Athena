@@ -206,17 +206,18 @@ class ResearchRuntime:
             if self._tree_path.is_file()
             else ResearchTree()
         )
-        initial_phase = (
-            "PREPARE"
-            if prepare_phase is not None or task or auto_seed_task
-            else "SEARCH"
-        )
+        # 全新 runtime 尚未启动任何阶段：状态是 IDLE 而不是 RUNNING，阶段落在
+        # PREPARE 而不是 SEARCH。GUI 网关一连上就把首帧 state 推给前端，首帧若
+        # 谎报 RUNNING/SEARCH，前端会以为已有运行在进行中，把首条任务路由到
+        # supervisor 对话而非 start_search，阶段机永远不启动。
+        # 真正的 RUNNING 由 ``start()`` 在进入阶段机时置上；已有
+        # ``state.json``（断点续传）沿用持久化的状态与阶段，不受此默认值影响。
         self._state = (
             ResearchState.load(self._state_path)
             if self._state_path.is_file()
             else ResearchState(
-                status="RUNNING",
-                phase=initial_phase,
+                status="IDLE",
+                phase="PREPARE",
                 search_limit=search_limit,
                 concurrency=concurrency,
                 ideator_count=ideator_count,
@@ -617,6 +618,13 @@ class ResearchRuntime:
         """
         if self._task is not None and not self._task.done():
             return self._task
+        # 阶段机从这里真正开跑：把「从未启动」的 IDLE 提升为 RUNNING。只提升
+        # IDLE——WAITING/COMPLETED/STOPPED 等由各自的控制路径（pause/stop/
+        # start_task 重新武装）决定，这里不覆盖。
+        # 只改内存不落盘：state.json 的唯一写者是 Supervisor，它随后的
+        # ``_persist_state`` 会把 RUNNING 持久化。
+        if self.state.status == "IDLE":
+            self.state.status = "RUNNING"
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
         # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。

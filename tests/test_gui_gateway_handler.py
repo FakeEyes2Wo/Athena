@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ from gui_gateway.handler import GuiRequestHandler, _session_state_root
 class RecordingRuntime:
     def __init__(self) -> None:
         self.started = False
+        # 模拟 agent rollout writer 持有的文件句柄；aclose() 负责关闭。
+        self.open_handle = None
         self.messages: list[str] = []
         self.tree_path = Path("/tmp/athena-runtime")
         self.project_root = "/tmp"
@@ -22,6 +25,9 @@ class RecordingRuntime:
 
     async def aclose(self) -> None:
         self.started = False
+        if self.open_handle is not None:
+            self.open_handle.close()
+            self.open_handle = None
 
     async def start_validation(self) -> str:
         return "COMPLETED"
@@ -269,3 +275,64 @@ async def test_set_project_root_auto_creates_directory(tmp_path) -> None:
     assert result["project_root"] == str(target)
     assert len(created) == 1
     assert created[0].tree_path.parent.parent == target
+
+
+@pytest.mark.asyncio
+async def test_handler_session_delete_releases_the_current_session_runtime(
+    tmp_path,
+) -> None:
+    """删除当前所在会话前必须先释放它的 runtime，否则 Windows 上删不掉。
+
+    生产里 agent 的 rollout writer 在 ``{state_root}/logs/agents/*.jsonl`` 上
+    持有打开的文件句柄（``runtime.py`` 把 ``rollout_dir`` 指到会话状态根下），
+    句柄不放手，``shutil.rmtree`` 会抛 ``PermissionError: [WinError 32]``。
+    """
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        if state_root is not None:
+            agents = Path(state_root) / "logs" / "agents"
+            agents.mkdir(parents=True, exist_ok=True)
+            # 模拟 agent 的 rollout writer：持久句柄，由 aclose() 负责关闭。
+            runtime.open_handle = (agents / "agent-0.jsonl").open(
+                "a", encoding="utf-8"
+            )
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    state_root = tmp_path / ".athena" / "conversations" / "s-1"
+    assert state_root.is_dir()
+
+    result = await handler.dispatch("session_delete", {"session_id": "s-1"})
+
+    assert result["deleted"] is True
+    assert not state_root.exists()
+    # 删完不能继续停在一个指向已删目录的 runtime 上。
+    assert handler.runtime.open_handle is None
+
+
+@pytest.mark.asyncio
+async def test_handler_session_delete_retries_while_windows_releases_handles(
+    tmp_path, monkeypatch
+) -> None:
+    """句柄释放有延迟：首次 rmtree 抛 PermissionError 时应重试而不是直接失败。"""
+    handler = _handler_at(tmp_path)
+    (tmp_path / ".athena" / "conversations" / "s-1").mkdir(parents=True)
+    calls = {"n": 0}
+    original = shutil.rmtree
+
+    def flaky_rmtree(path, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(32, "file in use")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", flaky_rmtree)
+
+    result = await handler.dispatch("session_delete", {"session_id": "s-1"})
+
+    assert calls["n"] == 2
+    assert result["deleted"] is True
+    assert not (tmp_path / ".athena" / "conversations" / "s-1").exists()

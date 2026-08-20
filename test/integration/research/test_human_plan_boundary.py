@@ -160,7 +160,10 @@ async def runtime(tmp_path: Path, monkeypatch):
     )
     instance.tree.update_hypothesis_status("baseline", "SUPPORTED")
     instance.tree.set_sota("exp_baseline")
+    # 模拟「已启动、正跑在 SEARCH」的会话：阶段与状态都显式设置，不依赖
+    # 构造默认值（全新 runtime 的默认是 PREPARE/IDLE，表示阶段机从未启动）。
     instance.state.phase = "SEARCH"
+    instance.state.status = "RUNNING"
     instance.supervisor._evaluator_ref = evaluator_ref
     for hypothesis_id in ("h_existing", "h_vit", "h_other"):
         instance.tree.add_hypothesis(

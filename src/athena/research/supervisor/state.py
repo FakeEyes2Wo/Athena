@@ -70,7 +70,9 @@ class ResearchState(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    status: Literal["RUNNING", "WAITING", "COMPLETED", "STOPPED", "FAILED"]
+    # IDLE = 阶段机从未启动（全新 runtime 的初始值）；``Supervisor.start()``
+    # 进入阶段机时置 RUNNING。区分二者，观察者才能分辨「没跑」与「在跑」。
+    status: Literal["IDLE", "RUNNING", "WAITING", "COMPLETED", "STOPPED", "FAILED"]
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)

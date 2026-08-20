@@ -79,6 +79,12 @@ export interface PipelineViewModel {
   pending: Array<{ id: string; statement: string }>;
   /** True when the runtime is in manual hypothesis-selection mode. */
   manual: boolean;
+  /**
+   * 后端 ``state.plans`` 里的计划（PREPARE / 每个 SEARCH 假设 / VALIDATE）。
+   * 非空说明阶段机确实跑过——``status`` 本身做不到这个判断，全新 runtime 也可能
+   * 上报 RUNNING。
+   */
+  plans: Array<{ id: string }>;
 }
 
 /** Returns a default PipelineViewModel with idle state and empty messages. */
@@ -98,5 +104,6 @@ export function createEmptyPipelineViewModel(): PipelineViewModel {
     },
     pending: [],
     manual: false,
+    plans: [],
   };
 }

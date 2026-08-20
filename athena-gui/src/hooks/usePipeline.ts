@@ -36,6 +36,7 @@ const MAX_LOG_ENTRIES = 500;
 
 /** Maps the backend runtime status to the frontend pipeline status. */
 const RUNTIME_STATUS_MAP: Record<string, PipelineViewModel["status"]> = {
+  IDLE: "idle",
   RUNNING: "running",
   WAITING: "paused",
   COMPLETED: "completed",
@@ -113,6 +114,24 @@ function applyHistoryRecords(current: PipelineViewModel, records: SessionRecord[
   return next;
 }
 
+/**
+ * 后端是否真的有运行在进行中。
+ *
+ * 不能只看 ``status``：网关构造的全新 runtime 首帧也可能报 RUNNING，而阶段机
+ * 尚未启动；那时首条任务必须走 ``parse_intent`` → ``start_search``。下面三个信号
+ * 只可能由阶段机真正跑过产生——已建计划、已有 SEARCH 尝试、已有 SOTA 基线。
+ *
+ * 例：{plans: [], searchAttempts: 0, latestExperimentId: null} → false
+ *     {plans: [{id: "prepare"}], …}                           → true
+ */
+function hasBackendActivity(model: PipelineViewModel): boolean {
+  return (
+    model.plans.length > 0 ||
+    model.rightRail.searchAttempts > 0 ||
+    model.rightRail.latestExperimentId !== null
+  );
+}
+
 /** Applies a single backend event (``state`` / ``output``) to the view model. */
 function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): PipelineViewModel {
   const next: PipelineViewModel = { ...current, rightRail: { ...current.rightRail } };
@@ -144,6 +163,9 @@ function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): P
     if (sota) {
       if (typeof sota.metric === "number") next.rightRail.bestPrimary = sota.metric;
       if (typeof sota.experiment === "string") next.rightRail.latestExperimentId = sota.experiment;
+    }
+    if (Array.isArray(data.plans)) {
+      next.plans = data.plans as Array<{ id: string }>;
     }
     if (Array.isArray(data.pending)) {
       next.pending = data.pending as Array<{ id: string; statement: string }>;
@@ -226,6 +248,9 @@ export function usePipeline(workspaceRoot?: string | null) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
   const logCounter = useRef(0);
+  // 本会话是否已经发出过 start_search：后端首帧回来之前也算「运行在进行中」，
+  // 否则这段窗口里的普通文本会被误当成新任务、再弹一张意图卡。
+  const runStarted = useRef(false);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
 
@@ -395,7 +420,12 @@ export function usePipeline(workspaceRoot?: string | null) {
     }));
 
     // 运行中/暂停中：普通文本是给 Supervisor 的指导/计划调整，不应再次走任务理解预览。
-    if (viewModel.status === "running" || viewModel.status === "paused") {
+    // 判定不能只看 status——全新 runtime 的首帧也可能报 RUNNING，那时阶段机还没
+    // 启动，首条任务必须走 parse_intent，否则 start_search 永远不会被调用。
+    const runInProgress =
+      (viewModel.status === "running" || viewModel.status === "paused") &&
+      (runStarted.current || hasBackendActivity(viewModel));
+    if (runInProgress) {
       try {
         const response = (await sendControl(content)) as { response?: unknown };
         const reply = typeof response?.response === "string" ? response.response : "";
@@ -453,9 +483,10 @@ export function usePipeline(workspaceRoot?: string | null) {
       }));
       throw err;
     }
-  }, [currentSessionId, nextId, renameSession, viewModel.status]);
+  }, [currentSessionId, nextId, renameSession, viewModel]);
 
   const startRun = useCallback(async (task?: string, messageId?: string) => {
+    runStarted.current = true;
     setViewModel((prev) => ({
       ...prev,
       phase: "PREPARE",
@@ -468,6 +499,8 @@ export function usePipeline(workspaceRoot?: string | null) {
       // 原始任务文本即后端 start_search 所需的 `task`；task understanding 只用于展示与标题。
       await startSearch({ task });
     } catch (err) {
+      // start_search 没成功 → 阶段机没起来，普通文本仍应重新走任务理解。
+      runStarted.current = false;
       setViewModel((prev) => ({
         ...prev,
         status: "error",
@@ -509,6 +542,7 @@ export function usePipeline(workspaceRoot?: string | null) {
   const newSession = useCallback(() => {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     const id = `s-${Date.now()}`;
+    runStarted.current = false;
     sessionSwitch(id).catch(() => {});
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
@@ -520,6 +554,9 @@ export function usePipeline(workspaceRoot?: string | null) {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
     try {
       const { records } = await sessionSwitch(id);
+      // 换会话即换 runtime：本会话「已发出 start_search」的记忆不能带过去，
+      // 否则新会话的首条任务会被误路由到 supervisor 对话。
+      runStarted.current = false;
       setCurrentSessionId(id);
       restoreRecords(records, true);
     } catch (err) {

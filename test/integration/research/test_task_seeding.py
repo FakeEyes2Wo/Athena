@@ -35,11 +35,33 @@ async def _close(runtime: ResearchRuntime) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fresh_runtime_starts_in_search_phase(tmp_path: Path) -> None:
+async def test_fresh_runtime_is_idle_at_prepare_until_seeded(tmp_path: Path) -> None:
+    """没有任务的全新 runtime 不得谎报运行中，也不得直接落在 SEARCH。
+
+    GUI 网关正是这样构造 runtime 的：一连上就把首帧 state 推给前端。首帧若说
+    ``RUNNING``/``SEARCH``，前端会以为已有运行在进行中，从而把首条任务路由到
+    supervisor 对话而不是 ``start_search``，阶段机永远不启动。
+    """
     runtime = _make_runtime(tmp_path)
     try:
-        assert runtime.state.phase == "SEARCH"
+        assert runtime.state.status == "IDLE"
+        assert runtime.state.phase == "PREPARE"
         assert runtime._started is False
+    finally:
+        await _close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_idle_runtime_reports_idle_in_its_first_state_event(tmp_path: Path) -> None:
+    """订阅即收到的首帧必须同样是 IDLE（GUI 首帧就取自这里）。"""
+    runtime = _make_runtime(tmp_path)
+    seen: list[tuple[str, dict[str, object]]] = []
+    try:
+        runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+        assert seen[0][0] == "state"
+        assert seen[0][1]["status"] == "IDLE"
+        assert seen[0][1]["phase"] == "PREPARE"
     finally:
         await _close(runtime)
 
