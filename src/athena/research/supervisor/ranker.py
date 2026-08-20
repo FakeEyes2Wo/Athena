@@ -38,11 +38,11 @@ def _text_similarity(left: Hypothesis, right: Hypothesis) -> float:
 
 
 def rubric_prior(hypothesis: Hypothesis, tree: ResearchTree) -> float:
-    """Cold-start prior in [0.4, 1.0] from evidence and specificity.
+    """Deterministic fallback prior in [0.4, 1.0].
 
-    A pending hypothesis has no experiment data yet, so this rubric is the only
-    reliable signal. It is deliberately small and transparent; a future
-    ReflectionAgent rubric can replace it with richer scores.
+    Rubric V2 normally stores an LLM review score before selection. This small,
+    transparent evidence/specificity heuristic remains the no-model/failure path;
+    it never pretends to be an AI review.
     """
     del tree
     evidence = 1.0 if hypothesis.sources else 0.0
@@ -84,9 +84,7 @@ def deduplicate(
     kept: list[Hypothesis] = []
     seen: list[Hypothesis] = list(existing)
     for candidate in candidates:
-        if any(
-            _text_similarity(candidate, other) >= threshold for other in seen
-        ):
+        if any(_text_similarity(candidate, other) >= threshold for other in seen):
             continue
         kept.append(candidate)
         seen.append(candidate)
@@ -161,7 +159,11 @@ class Selector:
         strengths: dict[str | None, float],
     ) -> float:
         config = self._config
-        prior = rubric_prior(hypothesis, tree)
+        prior = (
+            hypothesis.rubric_score
+            if hypothesis.rubric_score is not None
+            else rubric_prior(hypothesis, tree)
+        )
         strength = strengths.get(hypothesis.id, 0.5)
         explore = novelty(hypothesis, tree)
         cost = min(max(hypothesis.cost, 0.0), 1.0)

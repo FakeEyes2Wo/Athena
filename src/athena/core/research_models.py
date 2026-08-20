@@ -40,6 +40,17 @@ class Hypothesis(BaseModel):
     sources: list[str] = Field(
         default_factory=list, description="Paper URLs or model repos"
     )
+    rubric_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Deterministically aggregated LLM ranking rubric score",
+    )
+    rubric_ref: ArtifactRef | None = Field(
+        default=None,
+        description="Artifact containing the full hypothesis rubric explanation",
+    )
 
 
 class HypothesisBatch(BaseModel):

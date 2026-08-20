@@ -35,14 +35,24 @@ off. Make this decision once, before PREPARE builds its baseline.
 
 On that same first turn, also call `record_task_understanding` once with your
 best structured understanding of the task: a short `title`, the `dataset`
-(path/name), the `target` column, `task_type`, `primary_metric` + `direction`,
-and an `evaluation_plan`. Derive these from the task text and any dataset path it
-names; leave a field empty when unknown rather than guessing.
+(path/name), the `target` column, `task_type`, an `evaluation_plan`, and only a
+higher-priority primary metric that is explicitly supplied by the Human,
+official competition/benchmark, or protocol. Record every applicable source in
+the dedicated `human_*`, `official_*`, and `protocol_*` fields so deterministic
+code can enforce Human > Official > Protocol. Also set `primary_metric`,
+`direction`, and `metric_source` to the highest-priority one for compatibility.
+If none exists, set those metric/direction fields to null and `metric_source` to
+`unresolved`; a separate Research Evaluation Rubric Agent will make the
+context-aware scientific choice. Do not choose a metric from task type,
+imbalance, filenames, target names, or a default.
 
 If the task is a Kaggle competition, call `kaggle_get_competition` with the slug
 before `record_task_understanding`, read its `evaluation_metric`, and record that
 exact metric name (lowercased, e.g. `panoptic_quality`) as `primary_metric` —
-never guess `accuracy` for a competition you have not queried.
+record it in `official_primary_metric` (and direction when known). Use it as the
+compatibility `primary_metric` with `metric_source=official` only when no Human
+explicit primary exists. Never guess `accuracy` for a competition you have not
+queried.
 
 Reflect before finalizing: re-read the task, confirm whether a competition slug
 is present and correctly parsed from any URL, and double-check that

@@ -27,6 +27,7 @@ RESUME_FIELDS = (
     "task_research_task",
     "task_research_ref",
     "task_research_agent_id",
+    "evaluation_policy_ref",
     "evaluator_ref",
 )
 
@@ -97,6 +98,8 @@ class ResearchState(BaseModel):
     task_research_task: str | None = None
     task_research_ref: ArtifactRef | None = None
     task_research_agent_id: str | None = None
+    # Rubric V2：Task Understanding 后冻结的单主指标 Evaluation Policy。
+    evaluation_policy_ref: ArtifactRef | None = None
     # 断点续传：已冻结评估器 bundle；PREPARE 重启时跳过 evaluator 重跑。
     evaluator_ref: ArtifactRef | None = None
 
