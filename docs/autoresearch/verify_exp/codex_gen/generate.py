@@ -7,6 +7,7 @@ import asyncio
 import html
 import json
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -22,6 +23,21 @@ DRAWIO_MCP_URL = "https://mcp.draw.io/mcp"
 DEFAULT_DRAWIO_CLI = Path(
     r"C:\Users\80163\AppData\Local\Microsoft\WinGet\Links\DrawIO.exe"
 )
+DEFAULT_CHROME = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+SVG_NS = "http://www.w3.org/2000/svg"
+ET.register_namespace("", SVG_NS)
+CANVAS_SPECS: dict[str, tuple[int, int]] = {
+    "01-candidate-to-paper-pipeline": (1200, 800),
+    "02-rag-system": (1200, 800),
+    "03-rlhf-pipeline": (1200, 800),
+    "04-diffusion-llm-training": (1200, 800),
+    "05-multiturn-eval-harness": (1200, 800),
+    "06-model-editing-framework": (1200, 800),
+    "07-evidential-multiview-learning": (1200, 900),
+    "08-transformer-succinctness": (960, 1200),
+    "09-finetuning-influence-flow": (1200, 800),
+    "10-agent-reflection-loop": (1200, 800),
+}
 
 
 @dataclass(frozen=True)
@@ -123,8 +139,16 @@ LAYOUT_ROWS: dict[str, tuple[tuple[str, ...], ...]] = {
 
 POSITION_HINTS: dict[str, dict[str, tuple[float, float]]] = {
     "01-candidate-to-paper-pipeline": {
-        label: (float(index), 0.0)
-        for index, label in enumerate(LAYOUT_ROWS["01-candidate-to-paper-pipeline"][0])
+        "Candidate Intake": (0, 0),
+        "Brainstorm": (1, 0),
+        "Ideation": (2, 0),
+        "Experiment Plan": (3, 0),
+        "Experiment": (4, 0),
+        "Evidence": (0, 1.5),
+        "Claims & Outline": (1, 1.5),
+        "Writing": (2, 1.5),
+        "Review": (3, 1.5),
+        "Packaging": (4, 1.5),
     },
     "02-rag-system": {
         "Corpus": (0, 0),
@@ -144,8 +168,12 @@ POSITION_HINTS: dict[str, dict[str, tuple[float, float]]] = {
         "Preference Data": (1.5, 1.25),
     },
     "04-diffusion-llm-training": {
-        label: (float(index), 0.0)
-        for index, label in enumerate(LAYOUT_ROWS["04-diffusion-llm-training"][0])
+        "Text Tokens": (0, 0),
+        "Noising": (1, 0),
+        "Denoiser": (2, 0),
+        "Left-to-Right Decoder": (0, 1.5),
+        "Reasoning Trace": (1, 1.5),
+        "Answer": (2, 1.5),
     },
     "05-multiturn-eval-harness": {
         "Single-Turn Benchmarks": (0, 0),
@@ -457,6 +485,7 @@ def build_drawio_xml(
                     "rounded=1;whiteSpace=wrap;html=1;dashed=1;dashPattern=6 5;"
                     f"fillColor={color};fillOpacity=28;strokeColor={stroke};"
                     "strokeWidth=1.4;fontColor=#334155;fontSize=14;fontStyle=1;"
+                    "fontFamily=Helvetica;"
                     "verticalAlign=top;spacingTop=10;align=left;spacingLeft=12;"
                 ),
                 "vertex": "1",
@@ -475,6 +504,7 @@ def build_drawio_xml(
             "style": (
                 "text;html=1;strokeColor=none;fillColor=none;align=left;"
                 "verticalAlign=middle;fontColor=#0F172A;fontSize=20;fontStyle=1;"
+                "fontFamily=Helvetica;"
             ),
             "vertex": "1",
             "parent": "1",
@@ -531,7 +561,8 @@ def build_drawio_xml(
                 "style": (
                     "rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;"
                     f"strokeColor={color};strokeWidth=1.8;fontColor=#1E293B;"
-                    "fontSize=13;align=center;verticalAlign=middle;spacing=8;"
+                    "fontSize=13;fontFamily=Helvetica;align=center;"
+                    "verticalAlign=middle;spacing=8;"
                     "shadow=0;arcSize=14;"
                 ),
                 "vertex": "1",
@@ -557,6 +588,7 @@ def build_drawio_xml(
                 "style": (
                     "rounded=1;whiteSpace=wrap;html=1;fillColor=#F8FAFC;"
                     "strokeColor=#CBD5E1;dashed=1;fontColor=#475569;fontSize=10;"
+                    "fontFamily=Helvetica;"
                     "align=center;verticalAlign=middle;"
                 ),
                 "vertex": "1",
@@ -645,6 +677,436 @@ def validate_drawio_xml(xml: str) -> dict[str, object]:
     return result
 
 
+def _svg_tag(name: str) -> str:
+    return f"{{{SVG_NS}}}{name}"
+
+
+def _wrap_label(label: str, limit: int = 21) -> tuple[str, ...]:
+    words = label.split()
+    if len(label) <= limit or len(words) == 1:
+        return (label,)
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > limit:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) <= 2:
+        return tuple(lines)
+    return (" ".join(lines[:-1]), lines[-1])
+
+
+def _svg_text(
+    parent: ET.Element,
+    lines: tuple[str, ...],
+    *,
+    x: float,
+    y: float,
+    size: int,
+    weight: int = 400,
+    color: str = "#1E293B",
+    anchor: str = "middle",
+) -> ET.Element:
+    text = ET.SubElement(
+        parent,
+        _svg_tag("text"),
+        {
+            "x": f"{x:g}",
+            "y": f"{y:g}",
+            "font-family": "Helvetica, Arial, sans-serif",
+            "font-size": str(size),
+            "font-weight": str(weight),
+            "fill": color,
+            "text-anchor": anchor,
+        },
+    )
+    line_height = size * 1.18
+    start = -((len(lines) - 1) * line_height) / 2
+    for index, line in enumerate(lines):
+        tspan = ET.SubElement(
+            text,
+            _svg_tag("tspan"),
+            {
+                "x": f"{x:g}",
+                "dy": f"{start if index == 0 else line_height:g}",
+            },
+        )
+        tspan.text = line
+    return text
+
+
+def _edge_path(
+    source: tuple[float, float],
+    target: tuple[float, float],
+    *,
+    node_width: float,
+    node_height: float,
+    loop_y: float,
+    detour: float,
+) -> str:
+    sx, sy = source
+    tx, ty = target
+    source_mid_y = sy + node_height / 2
+    target_mid_y = ty + node_height / 2
+    if tx <= sx and ty > sy + node_height:
+        start_x = sx + node_width
+        start_y = source_mid_y
+        outer_x = start_x + 20
+        end_x = tx + node_width / 2
+        middle_y = (sy + node_height + ty) / 2
+        return (
+            f"M {start_x:g} {start_y:g} L {outer_x:g} {start_y:g} "
+            f"L {outer_x:g} {middle_y:g} L {end_x:g} {middle_y:g} "
+            f"L {end_x:g} {ty:g}"
+        )
+    if tx <= sx:
+        start_x = sx + node_width / 2
+        end_x = tx + node_width / 2
+        bottom = loop_y + detour
+        return (
+            f"M {start_x:g} {sy + node_height:g} L {start_x:g} {bottom:g} "
+            f"L {end_x:g} {bottom:g} L {end_x:g} {ty + node_height:g}"
+        )
+    start_x = sx + node_width
+    end_x = tx
+    if abs(target_mid_y - source_mid_y) < 1 and tx - sx > node_width * 2.2:
+        bottom = max(sy, ty) + node_height + 38 + detour
+        return (
+            f"M {start_x:g} {source_mid_y:g} L {start_x + 24:g} {source_mid_y:g} "
+            f"L {start_x + 24:g} {bottom:g} L {end_x - 24:g} {bottom:g} "
+            f"L {end_x - 24:g} {target_mid_y:g} L {end_x:g} {target_mid_y:g}"
+        )
+    middle = (start_x + end_x) / 2
+    return (
+        f"M {start_x:g} {source_mid_y:g} L {middle:g} {source_mid_y:g} "
+        f"L {middle:g} {target_mid_y:g} L {end_x:g} {target_mid_y:g}"
+    )
+
+
+def _native_node_colors(spec: DiagramSpec, label: str) -> tuple[str, str]:
+    if label in {
+        "Good Outputs",
+        "Answer",
+        "Decision + Reliability",
+        "Preservation Check",
+    }:
+        return "#F0FDF4", "#16A34A"
+    if label in {"Bad Outputs"}:
+        return "#FEF2F2", "#DC2626"
+    if label in {"Noising", "Reward Model", "Conflictive Aggregation"}:
+        return "#FFFBEB", "#D97706"
+    return "#FFFFFF", _node_color(spec, label)
+
+
+def _native_layout(
+    spec: DiagramSpec,
+) -> tuple[dict[str, tuple[float, float]], float, float]:
+    hints = POSITION_HINTS[spec.stem]
+    canvas_width, canvas_height = CANVAS_SPECS[spec.stem]
+    min_gx = min(x for x, _ in hints.values())
+    max_gx = max(x for x, _ in hints.values())
+    max_gy = max(y for _, y in hints.values())
+    left = max(52.0, canvas_width * 0.045)
+    right = canvas_width - left
+    usable_width = right - left
+    columns = max_gx - min_gx + 1
+    node_width = max(86.0, min(168.0, usable_width / columns * 0.86))
+    x_step = (
+        0.0 if max_gx == min_gx else (usable_width - node_width) / (max_gx - min_gx)
+    )
+
+    node_height = 64.0
+    area_top = 130.0
+    area_height = canvas_height - area_top - 64.0
+    if max_gy == 0:
+        y_step = 0.0
+        y_offset = area_top + (area_height - node_height) / 2
+    else:
+        max_y_step = 230.0 if canvas_height >= 1000 else 300.0
+        y_step = min(max_y_step, (area_height - node_height) / max_gy)
+        used_height = max_gy * y_step + node_height
+        y_offset = area_top + (area_height - used_height) / 2
+    positions = {
+        label: (
+            left + (gx - min_gx) * x_step,
+            y_offset + gy * y_step,
+        )
+        for label, (gx, gy) in hints.items()
+    }
+    return positions, node_width, node_height
+
+
+def _native_group_bounds(
+    members: tuple[str, ...],
+    positions: dict[str, tuple[float, float]],
+    node_width: float,
+    node_height: float,
+) -> tuple[float, float, float, float]:
+    xs = [positions[label][0] for label in members]
+    ys = [positions[label][1] for label in members]
+    left = min(xs) - 18
+    top = min(ys) - 38
+    right = max(xs) + node_width + 18
+    bottom = max(ys) + node_height + 22
+    return left, top, right - left, bottom - top
+
+
+def build_native_svg(spec: DiagramSpec) -> str:
+    """Render a publication-style SVG from the same spec and layout as draw.io."""
+    positions, node_width, node_height = _native_layout(spec)
+    backward_edges = [
+        edge
+        for edge in spec.edges
+        if positions[edge.target][0] <= positions[edge.source][0]
+    ]
+    node_bottom = max(y for _, y in positions.values()) + node_height
+    width, height = CANVAS_SPECS[spec.stem]
+    loop_base = min(height - 70, node_bottom + 80)
+
+    svg = ET.Element(
+        _svg_tag("svg"),
+        {
+            "width": str(width),
+            "height": str(height),
+            "viewBox": f"0 0 {width} {height}",
+            "role": "img",
+            "aria-label": spec.title,
+        },
+    )
+    defs = ET.SubElement(svg, _svg_tag("defs"))
+    marker = ET.SubElement(
+        defs,
+        _svg_tag("marker"),
+        {
+            "id": "arrow",
+            "viewBox": "0 0 10 10",
+            "refX": "9",
+            "refY": "5",
+            "markerWidth": "7",
+            "markerHeight": "7",
+            "orient": "auto-start-reverse",
+        },
+    )
+    ET.SubElement(
+        marker, _svg_tag("path"), {"d": "M 0 0 L 10 5 L 0 10 z", "fill": "#2563EB"}
+    )
+    filter_node = ET.SubElement(
+        defs,
+        _svg_tag("filter"),
+        {
+            "id": "soft-shadow",
+            "x": "-10%",
+            "y": "-10%",
+            "width": "120%",
+            "height": "130%",
+        },
+    )
+    ET.SubElement(
+        filter_node,
+        _svg_tag("feDropShadow"),
+        {
+            "dx": "0",
+            "dy": "1",
+            "stdDeviation": "1.2",
+            "flood-color": "#0F172A",
+            "flood-opacity": "0.09",
+        },
+    )
+    ET.SubElement(
+        svg, _svg_tag("rect"), {"width": "100%", "height": "100%", "fill": "#FFFFFF"}
+    )
+
+    annotation_targets = {
+        target.strip()
+        for annotation in spec.annotations
+        for target, separator, _ in [annotation.partition(":")]
+        if separator and target.strip() in positions
+    }
+
+    for index, group in enumerate(spec.groups):
+        x, y, group_width, group_height = _native_group_bounds(
+            group.members, positions, node_width, node_height
+        )
+        note_bottoms = [
+            positions[target][1] + node_height + 10 + 32 + 16
+            for target in group.members
+            if target in annotation_targets
+        ]
+        if note_bottoms:
+            group_height = max(group_height, max(note_bottoms) - y)
+        ET.SubElement(
+            svg,
+            _svg_tag("rect"),
+            {
+                "x": f"{x:g}",
+                "y": f"{y:g}",
+                "width": f"{group_width:g}",
+                "height": f"{group_height:g}",
+                "rx": "14",
+                "fill": GROUP_COLORS[index % len(GROUP_COLORS)],
+                "fill-opacity": "0.32",
+                "stroke": GROUP_STROKES[index % len(GROUP_STROKES)],
+                "stroke-width": "1.3",
+                "stroke-dasharray": "7 6",
+                "data-role": "group",
+                "data-label": group.label,
+            },
+        )
+        _svg_text(
+            svg,
+            (group.label,),
+            x=x + 14,
+            y=y + 22,
+            size=13,
+            weight=600,
+            color="#334155",
+            anchor="start",
+        )
+
+    _svg_text(
+        svg,
+        (spec.title,),
+        x=MARGIN_X - 24,
+        y=46,
+        size=20,
+        weight=700,
+        color="#0F172A",
+        anchor="start",
+    )
+    ET.SubElement(
+        svg,
+        _svg_tag("line"),
+        {
+            "x1": f"{MARGIN_X - 24:g}",
+            "y1": "66",
+            "x2": f"{min(width - 54, MARGIN_X + 116):g}",
+            "y2": "66",
+            "stroke": "#2563EB",
+            "stroke-width": "3",
+            "stroke-linecap": "round",
+        },
+    )
+
+    backward_index = 0
+    for index, edge in enumerate(spec.edges):
+        is_backward = positions[edge.target][0] <= positions[edge.source][0]
+        detour = backward_index * 18 if is_backward else index * 1.5
+        if is_backward:
+            backward_index += 1
+        ET.SubElement(
+            svg,
+            _svg_tag("path"),
+            {
+                "d": _edge_path(
+                    positions[edge.source],
+                    positions[edge.target],
+                    node_width=node_width,
+                    node_height=node_height,
+                    loop_y=loop_base,
+                    detour=detour,
+                ),
+                "fill": "none",
+                "stroke": "#2563EB",
+                "stroke-width": "2.1",
+                "stroke-linecap": "round",
+                "stroke-linejoin": "round",
+                "marker-end": "url(#arrow)",
+            },
+        )
+
+    for node in spec.nodes:
+        x, y = positions[node.label]
+        fill, stroke = _native_node_colors(spec, node.label)
+        ET.SubElement(
+            svg,
+            _svg_tag("rect"),
+            {
+                "x": f"{x:g}",
+                "y": f"{y:g}",
+                "width": f"{node_width:g}",
+                "height": f"{node_height:g}",
+                "rx": "11",
+                "fill": fill,
+                "stroke": stroke,
+                "stroke-width": "1.8",
+                "filter": "url(#soft-shadow)",
+            },
+        )
+        lines = _wrap_label(node.label, max(10, int(node_width / 7.2)))
+        label_y = y + (29 if len(lines) == 1 else 26)
+        _svg_text(
+            svg,
+            lines,
+            x=x + node_width / 2,
+            y=label_y,
+            size=11 if node_width < 105 else 12,
+            weight=600,
+        )
+        badge = ICON_BADGES.get(node.icon, node.icon.upper()[:8])
+        badge_width = min(node_width - 12, max(30, 6 * len(badge) + 12))
+        ET.SubElement(
+            svg,
+            _svg_tag("rect"),
+            {
+                "x": f"{x + (node_width - badge_width) / 2:g}",
+                "y": f"{y + node_height - 21:g}",
+                "width": f"{badge_width:g}",
+                "height": "15",
+                "rx": "7.5",
+                "fill": "#F1F5F9",
+            },
+        )
+        _svg_text(
+            svg,
+            (badge,),
+            x=x + node_width / 2,
+            y=y + node_height - 10,
+            size=7,
+            weight=600,
+            color="#64748B",
+        )
+
+    for annotation in spec.annotations:
+        target, separator, detail = annotation.partition(":")
+        if not separator or target.strip() not in positions:
+            continue
+        x, y = positions[target.strip()]
+        note_y = y + node_height + 10
+        ET.SubElement(
+            svg,
+            _svg_tag("rect"),
+            {
+                "x": f"{x:g}",
+                "y": f"{note_y:g}",
+                "width": f"{node_width:g}",
+                "height": "32",
+                "rx": "8",
+                "fill": "#F8FAFC",
+                "stroke": "#CBD5E1",
+                "stroke-width": "1",
+                "stroke-dasharray": "4 4",
+                "data-role": "annotation",
+                "data-target": target.strip(),
+            },
+        )
+        _svg_text(
+            svg,
+            _wrap_label(detail.strip(), max(12, int(node_width / 6.5))),
+            x=x + node_width / 2,
+            y=note_y + 19,
+            size=8,
+            color="#475569",
+        )
+
+    ET.indent(svg, space="  ")
+    return ET.tostring(svg, encoding="unicode", xml_declaration=False)
+
+
 def _tool_result_text(result: Any) -> tuple[str, bool]:
     dumped = result.model_dump() if hasattr(result, "model_dump") else result
     if not isinstance(dumped, dict):
@@ -690,7 +1152,7 @@ async def search_shapes(keywords: tuple[str, ...]) -> dict[str, object]:
         except BaseException as exc:  # MCP transports may raise ExceptionGroup.
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt < 2:
-                await asyncio.sleep(0.5 * (2**attempt))
+                await asyncio.sleep(2.0 * (attempt + 1))
     return {"ok": False, "shapes": {}, "error": last_error}
 
 
@@ -719,17 +1181,20 @@ async def create_diagram(xml: str) -> dict[str, object]:
         except BaseException as exc:  # MCP transports may raise ExceptionGroup.
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt < 2:
-                await asyncio.sleep(0.5 * (2**attempt))
+                await asyncio.sleep(2.0 * (attempt + 1))
     return {"ok": False, "xml": None, "build_id": None, "error": last_error}
 
 
-def validate_export_file(path: Path, fmt: str) -> dict[str, object]:
+def validate_export_file(
+    path: Path, fmt: str, *, expected_ratio: float | None = None
+) -> dict[str, object]:
     """Check an exported file's signature and parseable structure."""
     result: dict[str, object] = {
         "ok": False,
         "file": path.name,
         "bytes": path.stat().st_size if path.exists() else 0,
         "dimensions": None,
+        "page_points": None,
         "error": None,
     }
     if not path.exists() or path.stat().st_size == 0:
@@ -754,8 +1219,25 @@ def validate_export_file(path: Path, fmt: str) -> dict[str, object]:
             if not root.tag.endswith("svg"):
                 raise ValueError("root is not svg")
         elif fmt == "pdf":
-            if not path.read_bytes().startswith(b"%PDF-"):
+            data = path.read_bytes()
+            if not data.startswith(b"%PDF-"):
                 raise ValueError("invalid PDF signature")
+            media_box = re.search(
+                rb"/MediaBox\s*\[\s*0(?:\.0+)?\s+0(?:\.0+)?\s+"
+                rb"([0-9.]+)\s+([0-9.]+)\s*\]",
+                data,
+            )
+            if media_box is None:
+                raise ValueError("PDF MediaBox missing")
+            page_width = round(float(media_box.group(1)), 2)
+            page_height = round(float(media_box.group(2)), 2)
+            result["page_points"] = [page_width, page_height]
+            actual_ratio = page_width / page_height
+            if expected_ratio is not None and abs(actual_ratio - expected_ratio) > 0.02:
+                raise ValueError(
+                    "PDF aspect ratio does not match SVG: "
+                    f"{actual_ratio:.3f} != {expected_ratio:.3f}"
+                )
         else:
             raise ValueError(f"unsupported format: {fmt}")
     except (OSError, ET.ParseError, ValueError) as exc:
@@ -769,7 +1251,16 @@ def export_drawio(path: Path, drawio_cli: Path) -> dict[str, object]:
     """Export one draw.io file to PNG, SVG, and PDF with local Draw.io."""
     formats: dict[str, dict[str, object]] = {}
     files: dict[str, str | None] = {}
-    if not drawio_cli.exists():
+    try:
+        cli_exists = drawio_cli.exists()
+    except OSError as exc:
+        return {
+            "ok": False,
+            "files": {fmt: None for fmt in ("png", "svg", "pdf")},
+            "formats": {},
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if not cli_exists:
         return {
             "ok": False,
             "files": {fmt: None for fmt in ("png", "svg", "pdf")},
@@ -779,17 +1270,18 @@ def export_drawio(path: Path, drawio_cli: Path) -> dict[str, object]:
     for fmt in ("png", "svg", "pdf"):
         target = path.with_suffix(f".{fmt}")
         try:
+            command = [
+                str(drawio_cli),
+                "--export",
+                "--format",
+                fmt,
+                "--embed-diagram",
+            ]
+            if fmt == "png":
+                command.extend(["--scale", "2"])
+            command.extend(["--output", str(target), str(path)])
             process = subprocess.run(
-                [
-                    str(drawio_cli),
-                    "--export",
-                    "--format",
-                    fmt,
-                    "--embed-diagram",
-                    "--output",
-                    str(target),
-                    str(path),
-                ],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -818,9 +1310,132 @@ def export_drawio(path: Path, drawio_cli: Path) -> dict[str, object]:
         files[fmt] = target.name if check["ok"] else None
     return {
         "ok": all(bool(check["ok"]) for check in formats.values()),
+        "backend": "drawio-desktop",
         "files": files,
         "formats": formats,
         "error": None,
+    }
+
+
+def export_native(
+    spec: DiagramSpec, drawio_path: Path, chrome: Path = DEFAULT_CHROME
+) -> dict[str, object]:
+    """Export native SVG and convert it to 2x PNG and vector PDF with Chrome."""
+    drawio_path = drawio_path.resolve()
+    svg_path = drawio_path.with_suffix(".svg")
+    png_path = drawio_path.with_suffix(".png")
+    pdf_path = drawio_path.with_suffix(".pdf")
+    svg = build_native_svg(spec)
+    svg_path.write_text(svg + "\n", encoding="utf-8")
+    svg_root = ET.fromstring(svg)
+    width = int(float(svg_root.get("width", "1200")))
+    height = int(float(svg_root.get("height", "800")))
+    formats: dict[str, dict[str, object]] = {
+        "svg": validate_export_file(svg_path, "svg")
+    }
+    files: dict[str, str | None] = {"svg": svg_path.name, "png": None, "pdf": None}
+    try:
+        chrome_exists = chrome.exists()
+    except OSError as exc:
+        return {
+            "ok": False,
+            "backend": "native-svg-chrome",
+            "files": files,
+            "formats": formats,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if not chrome_exists:
+        return {
+            "ok": False,
+            "backend": "native-svg-chrome",
+            "files": files,
+            "formats": formats,
+            "error": f"Chrome missing: {chrome}",
+        }
+
+    profile_dir = drawio_path.parent / f".chrome-{spec.stem}"
+    html_path = drawio_path.parent / f".{spec.stem}.print.html"
+    html_path.write_text(
+        (
+            '<!doctype html><html><head><meta charset="utf-8"><style>'
+            f"@page{{size:{width}px {height}px;margin:0}}"
+            "html,body{margin:0;padding:0;background:#fff;width:100%;height:100%}"
+            "svg{display:block;width:100%;height:100%}"
+            f"</style></head><body>{svg}</body></html>"
+        ),
+        encoding="utf-8",
+    )
+    common = [
+        str(chrome),
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--hide-scrollbars",
+        "--allow-file-access-from-files",
+        f"--user-data-dir={profile_dir}",
+    ]
+    commands = {
+        "png": common
+        + [
+            "--force-device-scale-factor=2",
+            f"--window-size={width},{height}",
+            "--run-all-compositor-stages-before-draw",
+            f"--screenshot={png_path}",
+            svg_path.as_uri(),
+        ],
+        "pdf": common
+        + [
+            "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}",
+            html_path.as_uri(),
+        ],
+    }
+    try:
+        for fmt, command in commands.items():
+            target = png_path if fmt == "png" else pdf_path
+            try:
+                process = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                    check=False,
+                )
+                check = validate_export_file(
+                    target,
+                    fmt,
+                    expected_ratio=(width / height if fmt == "pdf" else None),
+                )
+                check.update(
+                    {
+                        "returncode": process.returncode,
+                        "stdout": process.stdout[-1000:],
+                        "stderr": process.stderr[-1000:],
+                    }
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                check = {
+                    "ok": False,
+                    "file": target.name,
+                    "bytes": 0,
+                    "dimensions": None,
+                    "returncode": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            formats[fmt] = check
+            files[fmt] = target.name if check["ok"] else None
+    finally:
+        html_path.unlink(missing_ok=True)
+        shutil.rmtree(profile_dir, ignore_errors=True)
+    ok = all(bool(formats[fmt]["ok"]) for fmt in ("png", "svg", "pdf"))
+    return {
+        "ok": ok,
+        "backend": "native-svg-chrome",
+        "files": files,
+        "formats": formats,
+        "error": None if ok else "native SVG conversion failed",
     }
 
 
@@ -831,18 +1446,27 @@ def _write_json(path: Path, payload: object) -> None:
 
 
 async def run_pipeline(
-    inputs_dir: Path, outputs_dir: Path, drawio_cli: Path
+    inputs_dir: Path,
+    outputs_dir: Path,
+    drawio_cli: Path,
+    export_backend: str = "auto",
+    only_stems: set[str] | None = None,
 ) -> dict[str, object]:
     """Generate all diagrams independently and return a summary report."""
     outputs_dir.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, object]] = []
-    for prompt_path in sorted(inputs_dir.glob("*.md")):
+    prompt_paths = sorted(inputs_dir.glob("*.md"))
+    if only_stems is not None:
+        prompt_paths = [path for path in prompt_paths if path.stem in only_stems]
+    for prompt_path in prompt_paths:
         stem = prompt_path.stem
         record: dict[str, object] = {"stem": stem, "prompt": prompt_path.name}
         try:
             spec = parse_prompt(prompt_path.read_text(encoding="utf-8"), stem)
             keywords = tuple(dict.fromkeys(node.icon for node in spec.nodes))
-            shape_search = await search_shapes(keywords)
+            shape_search = await search_shapes(keywords[:1])
+            if "ok" in shape_search:
+                await asyncio.sleep(1.5)
             shape_payload = shape_search.get("shapes", shape_search)
             if not isinstance(shape_payload, dict):
                 shape_payload = {}
@@ -857,14 +1481,30 @@ async def run_pipeline(
             final_check = validate_drawio_xml(final_xml)
             drawio_path = outputs_dir / f"{stem}.drawio"
             drawio_path.write_text(final_xml + "\n", encoding="utf-8")
-            export = export_drawio(drawio_path, drawio_cli)
-
             mcp_evidence = {
                 "ok": bool(mcp.get("ok")),
                 "build_id": mcp.get("build_id"),
                 "error": mcp.get("error"),
                 "shape_search": shape_search,
             }
+            if export_backend == "native":
+                export = export_native(spec, drawio_path)
+            else:
+                try:
+                    export = export_drawio(drawio_path, drawio_cli)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as exc:
+                    export = {
+                        "ok": False,
+                        "files": {fmt: None for fmt in ("png", "svg", "pdf")},
+                        "formats": {},
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+            if export_backend == "auto" and not export.get("ok"):
+                desktop_error = export.get("error")
+                export = export_native(spec, drawio_path)
+                export["fallback_from"] = desktop_error
             check_evidence = {
                 "xml": final_check,
                 "export": export,
@@ -913,6 +1553,35 @@ async def run_pipeline(
     }
 
 
+def merge_reports(
+    existing: dict[str, object], retried: dict[str, object]
+) -> dict[str, object]:
+    """Replace retried records while preserving the original report order."""
+    replacements = {
+        item["stem"]: item
+        for item in retried.get("files", [])
+        if isinstance(item, dict) and "stem" in item
+    }
+    files: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in existing.get("files", []):
+        if not isinstance(item, dict) or "stem" not in item:
+            continue
+        stem = str(item["stem"])
+        files.append(replacements.get(stem, item))
+        seen.add(stem)
+    files.extend(item for stem, item in replacements.items() if stem not in seen)
+    passed = sum(item.get("status") == "PASS" for item in files)
+    mcp_passed = sum(bool(item.get("mcp", {}).get("ok")) for item in files)
+    return {
+        "total": len(files),
+        "passed": passed,
+        "failed": len(files) - passed,
+        "mcp_passed": mcp_passed,
+        "files": files,
+    }
+
+
 def verify_outputs(inputs_dir: Path, outputs_dir: Path) -> dict[str, object]:
     """Verify all expected artifacts without calling MCP or Draw.io again."""
     records: list[dict[str, object]] = []
@@ -929,10 +1598,22 @@ def verify_outputs(inputs_dir: Path, outputs_dir: Path) -> dict[str, object]:
             xml_check = validate_drawio_xml(
                 (outputs_dir / f"{stem}.drawio").read_text(encoding="utf-8")
             )
+        canvas_width, canvas_height = CANVAS_SPECS[stem]
         exports = {
-            fmt: validate_export_file(outputs_dir / f"{stem}.{fmt}", fmt)
-            for fmt in ("png", "svg", "pdf")
+            "png": validate_export_file(outputs_dir / f"{stem}.png", "png"),
+            "svg": validate_export_file(outputs_dir / f"{stem}.svg", "svg"),
+            "pdf": validate_export_file(
+                outputs_dir / f"{stem}.pdf",
+                "pdf",
+                expected_ratio=canvas_width / canvas_height,
+            ),
         }
+        if exports["png"].get("dimensions") != [
+            canvas_width * 2,
+            canvas_height * 2,
+        ]:
+            exports["png"]["ok"] = False
+            exports["png"]["error"] = "PNG dimensions do not match 2x canvas"
         mcp_ok = False
         mcp_path = outputs_dir / f"{stem}.mcp.json"
         if mcp_path.exists():
@@ -1003,7 +1684,13 @@ def main() -> int:
     parser.add_argument("--outputs", default="outputs")
     parser.add_argument("--report", default="report.json")
     parser.add_argument("--drawio-cli", default=str(DEFAULT_DRAWIO_CLI))
+    parser.add_argument(
+        "--export-backend",
+        choices=("auto", "desktop", "native"),
+        default="native",
+    )
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--retry-failed", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -1021,7 +1708,45 @@ def main() -> int:
         )
         return 0 if report["total"] == 10 and report["failed"] == 0 else 1
 
-    report = asyncio.run(run_pipeline(inputs_dir, outputs_dir, Path(args.drawio_cli)))
+    if args.retry_failed:
+        if not report_path.exists():
+            print(
+                f"cannot retry without an existing report: {report_path}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            existing_report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"cannot read existing report: {exc}", file=sys.stderr)
+            return 2
+        failed_stems = {
+            str(item.get("stem"))
+            for item in existing_report.get("files", [])
+            if item.get("status") != "PASS" and item.get("stem")
+        }
+        if failed_stems:
+            retried = asyncio.run(
+                run_pipeline(
+                    inputs_dir,
+                    outputs_dir,
+                    Path(args.drawio_cli),
+                    export_backend=args.export_backend,
+                    only_stems=failed_stems,
+                )
+            )
+            report = merge_reports(existing_report, retried)
+        else:
+            report = existing_report
+    else:
+        report = asyncio.run(
+            run_pipeline(
+                inputs_dir,
+                outputs_dir,
+                Path(args.drawio_cli),
+                export_backend=args.export_backend,
+            )
+        )
     _write_json(report_path, report)
     _write_failures(report, BASE_DIR / "FAILURES.md")
     print(
