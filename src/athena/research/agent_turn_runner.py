@@ -15,6 +15,10 @@ from pydantic import BaseModel
 from athena.agents.data_agent import DATA_AGENT_ID, register_data_agent
 from athena.agents.general_agent import GeneralResult, register_general_agent
 from athena.agents.ideator_agent import register_ideator_agent
+from athena.agents.rubric_agent import (
+    EVALUATION_RUBRIC_AGENT_TYPE,
+    HYPOTHESIS_RUBRIC_AGENT_TYPE,
+)
 from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
 from athena.core.contracts import ArtifactRef, ArtifactStore
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
@@ -22,6 +26,23 @@ from athena.core.tool import ToolRegistry
 from athena.research.contracts import DataScriptBundle, GeneralTurnOutcome
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
+from athena.research.rubrics.evaluation import (
+    MetricCapabilityRegistry,
+    generate_evaluation_policy,
+)
+from athena.research.rubrics.models import (
+    EvaluationPolicy,
+    EvaluationRubricDraft,
+    HypothesisRankingBatch,
+    HypothesisRankingCandidate,
+    HypothesisRankingContext,
+    ResearchEvaluationContext,
+)
+from athena.research.rubrics.ranking import (
+    aggregate_hypothesis_rubric,
+    build_hypothesis_ranking_prompt,
+    validate_hypothesis_rubric_batch,
+)
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.plans import wait_run_events
 from athena.retrieval.web_search import WebFetchTool, WebSearchTool, WebSession
@@ -105,12 +126,38 @@ async def _read_eval_handoff(
         return ""
 
 
+def _collect_context_artifact_refs(value: object) -> set[ArtifactRef]:
+    """Collect only artifact-bearing fields from serialized ranking context."""
+    refs: set[ArtifactRef] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.endswith("_ref") and isinstance(item, str) and item.strip():
+                refs.add(item)
+            elif key in {"evidence_refs", "artifacts"}:
+                if isinstance(item, list):
+                    refs.update(
+                        ref for ref in item if isinstance(ref, str) and ref.strip()
+                    )
+                elif isinstance(item, dict):
+                    refs.update(
+                        ref
+                        for ref in item.values()
+                        if isinstance(ref, str) and ref.strip()
+                    )
+            refs.update(_collect_context_artifact_refs(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(_collect_context_artifact_refs(item))
+    return refs
+
+
 class AgentTurnRunner:
     """Run Supervisor / Ideator / General Agent turns via the runtime's infra."""
 
     def __init__(self, runtime: "ResearchRuntime") -> None:
         self._runtime = runtime
         self._ideator_round = 0
+        self._rubric_round = 0
 
     async def run_supervisor_turn(self, text: str) -> str:
         """Run one serialized SupervisorAgent turn and return its human-facing answer."""
@@ -143,6 +190,308 @@ class AgentTurnRunner:
             raise RuntimeError(summary.error or "SupervisorAgent turn failed")
         await rt.publish_output(source="supervisor", channel="text", text=result.answer)
         return result.answer
+
+    def _evaluation_context(self) -> ResearchEvaluationContext:
+        """Translate provenance captured by task understanding into policy context."""
+        rt = self._runtime
+        understanding = dict(rt.state.task_understanding or {})
+        source = understanding.get("metric_source", "unresolved")
+        metric = understanding.get("primary_metric")
+        direction = understanding.get("direction")
+        source_fields: dict[str, object] = {
+            key: understanding[key]
+            for key in (
+                "human_primary_metric",
+                "human_direction",
+                "official_primary_metric",
+                "official_direction",
+                "protocol_primary_metric",
+                "protocol_direction",
+            )
+            if understanding.get(key) is not None
+        }
+        # Backward compatibility for the earlier single-source payload. New
+        # payloads carry every source so deterministic code enforces precedence.
+        if source in {"human", "official", "protocol"} and isinstance(metric, str):
+            source_fields.setdefault(f"{source}_primary_metric", metric)
+            if direction in {"maximize", "minimize"}:
+                source_fields.setdefault(f"{source}_direction", direction)
+        dataset_context = {
+            key: understanding[key]
+            for key in ("dataset", "target", "task_type")
+            if understanding.get(key) not in (None, "")
+        }
+        evaluation_plan = understanding.get("evaluation_plan")
+        feasibility = (
+            [str(evaluation_plan)]
+            if isinstance(evaluation_plan, str) and evaluation_plan.strip()
+            else []
+        )
+        task = rt._task_text.strip()
+        if not task:
+            task = str(understanding.get("title") or "").strip()
+        return ResearchEvaluationContext(
+            research_task=task,
+            task_understanding=understanding,
+            dataset_context=dataset_context,
+            evaluation_feasibility=feasibility,
+            supported_metrics=MetricCapabilityRegistry().as_context(),
+            **source_fields,
+        )
+
+    async def run_evaluation_rubric(self) -> tuple[EvaluationPolicy, ArtifactRef]:
+        """Generate and freeze Layer 1 before PREPARE creates the evaluator."""
+        rt = self._runtime
+        context = self._evaluation_context()
+        context_json = json.dumps(
+            context.model_dump(mode="json"), ensure_ascii=False, indent=2
+        )
+
+        async def _provide(
+            _context: ResearchEvaluationContext, correction: str | None
+        ) -> EvaluationRubricDraft:
+            content = (
+                "Create the Research Evaluation Rubric from this pre-baseline "
+                f"context:\n{context_json}"
+            )
+            if correction is not None:
+                content += (
+                    "\n\nThe previous recommendation failed deterministic "
+                    f"validation: {correction}. Correct it without changing a "
+                    "locked Human/official/protocol primary metric."
+                )
+            request = {"content": content, "context_refs": []}
+            if rt._agents.has_agent(EVALUATION_RUBRIC_AGENT_TYPE):
+                run_id = await rt._agents.followup(
+                    EVALUATION_RUBRIC_AGENT_TYPE, request
+                )
+            else:
+                _agent_id, run_id = await rt._agents.create_root(
+                    EVALUATION_RUBRIC_AGENT_TYPE,
+                    request,
+                    agent_id=EVALUATION_RUBRIC_AGENT_TYPE,
+                    name=EVALUATION_RUBRIC_AGENT_TYPE,
+                )
+            summary = await asyncio.wait_for(
+                wait_run_events(
+                    rt._agents,
+                    run_id,
+                    lambda kind, ref, data: rt._events_bus.project_agent_event(
+                        EVALUATION_RUBRIC_AGENT_TYPE, kind, ref, data
+                    ),
+                ),
+                timeout=AGENT_TURN_TIMEOUT_SECONDS,
+            )
+            draft = await load_agent_result(summary, rt._store, EvaluationRubricDraft)
+            if draft is None:
+                raise RuntimeError(summary.error or "Evaluation Rubric Agent failed")
+            return draft
+
+        policy = await generate_evaluation_policy(context, _provide)
+        ref = await rt._store.put_text(policy.model_dump_json())
+        await rt.publish_output(
+            source="agent",
+            channel="text",
+            text=(
+                "Research Evaluation Rubric frozen: "
+                f"primary={policy.primary_metric}, direction={policy.direction}, "
+                f"source={policy.metric_source}."
+            ),
+            plan=EVALUATION_RUBRIC_AGENT_TYPE,
+            artifact_ref=ref,
+        )
+        return policy, ref
+
+    @staticmethod
+    def _read_eda_context(root: Path, limit: int = 12000) -> str:
+        """Read a small set of existing PREPARE handoffs without re-running EDA."""
+        chunks: list[str] = []
+        remaining = limit
+        for relative in (
+            "RESEARCH_HANDOFF.md",
+            "HANDOFF.md",
+            "EDA.md",
+            "REPORT.md",
+            "report.md",
+        ):
+            path = root / relative
+            if remaining <= 0 or not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")[:remaining]
+            except (OSError, UnicodeError):
+                continue
+            if text.strip():
+                chunks.append(f"## {relative}\n{text}")
+                remaining -= len(text)
+        return "\n\n".join(chunks)
+
+    async def _hypothesis_ranking_context(
+        self, hypotheses: list[Hypothesis]
+    ) -> HypothesisRankingContext | None:
+        """Assemble Layer 1, EDA, SOTA, history, and eligible candidates."""
+        rt = self._runtime
+        policy = getattr(rt._supervisor, "evaluation_policy", None)
+        if policy is None:
+            return None
+        eda_root = Path(self._resolve_eda_dir(rt))
+        handoff = await _read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
+        baseline_experiments = rt.tree.experiments(kind="baseline")
+        baseline = (
+            baseline_experiments[0].model_dump(mode="json")
+            if baseline_experiments
+            else {}
+        )
+        sota_id = rt.tree.best_experiment_id()
+        current_sota: dict[str, object] = {}
+        if sota_id is not None:
+            experiment = rt.tree.get_experiment(sota_id)
+            current_sota = {
+                "experiment": experiment.model_dump(mode="json"),
+                "hypothesis": rt.tree.get_hypothesis(
+                    experiment.hypothesis_id
+                ).model_dump(mode="json"),
+            }
+        history: list[dict[str, object]] = []
+        for hypothesis in rt.tree.hypotheses()[-20:]:
+            item: dict[str, object] = {"hypothesis": hypothesis.model_dump(mode="json")}
+            if hypothesis.id is not None:
+                experiment_id = rt.tree.experiment_for_hypothesis(hypothesis.id)
+                if experiment_id is not None:
+                    item["experiment"] = rt.tree.get_experiment(
+                        experiment_id
+                    ).model_dump(mode="json")
+            history.append(item)
+        candidates = [
+            HypothesisRankingCandidate(
+                hypothesis_id=hypothesis.id or "",
+                statement=hypothesis.statement,
+                intervention=hypothesis.intervention,
+                expected_effect=hypothesis.expected_effect,
+                cost=hypothesis.cost,
+                sources=hypothesis.sources,
+                evidence_refs=hypothesis.evidence_refs,
+            )
+            for hypothesis in hypotheses
+        ]
+        return HypothesisRankingContext(
+            research_task=rt._task_text,
+            evaluation_policy=policy,
+            hypotheses=candidates,
+            eda_context=self._read_eda_context(eda_root),
+            evaluator_handoff=handoff,
+            baseline=baseline,
+            current_sota=current_sota,
+            research_history=history,
+            environment_context={
+                "search_limit": rt.state.search_limit,
+                "concurrency": rt.state.concurrency,
+            },
+        )
+
+    async def run_hypothesis_rubric(
+        self, hypotheses: list[Hypothesis]
+    ) -> list[Hypothesis]:
+        """Run a post-Gate batch review; return unscored inputs on any failure."""
+        rt = self._runtime
+        context = await self._hypothesis_ranking_context(hypotheses)
+        if context is None:
+            await rt.publish_output(
+                source="supervisor",
+                channel="error",
+                text=(
+                    "Hypothesis Rubric skipped because no Evaluation Policy is "
+                    "loaded; Selector will use the deterministic fallback."
+                ),
+            )
+            return hypotheses
+        expected_ids = [candidate.hypothesis_id for candidate in context.hypotheses]
+        allowed_refs = _collect_context_artifact_refs(context.model_dump(mode="json"))
+        prompt = build_hypothesis_ranking_prompt(context)
+        self._rubric_round += 1
+        label = f"hypothesis-rubric-{self._rubric_round}"
+        agent_id, run_id = await rt._agents.create_root(
+            HYPOTHESIS_RUBRIC_AGENT_TYPE,
+            {"content": prompt, "context_refs": []},
+            name=label,
+        )
+        last_error: BaseException | None = None
+        for attempt in range(2):
+            try:
+                summary = await asyncio.wait_for(
+                    wait_run_events(
+                        rt._agents,
+                        run_id,
+                        lambda kind, ref, data: rt._events_bus.project_agent_event(
+                            label, kind, ref, data
+                        ),
+                    ),
+                    timeout=AGENT_TURN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as error:
+                await _interrupt_agent(rt._agents, agent_id, "rubric_turn_timeout")
+                last_error = error
+                break
+            try:
+                batch = await load_agent_result(
+                    summary, rt._store, HypothesisRankingBatch
+                )
+                if batch is None:
+                    raise RuntimeError(
+                        summary.error or "Hypothesis Rubric Agent failed"
+                    )
+                reviews = validate_hypothesis_rubric_batch(
+                    batch,
+                    expected_ids,
+                    allowed_evidence_refs=allowed_refs,
+                )
+                scored: list[Hypothesis] = []
+                for hypothesis in hypotheses:
+                    if hypothesis.id is None:
+                        raise ValueError("ranking candidate is missing hypothesis ID")
+                    review = reviews[hypothesis.id]
+                    ref = await rt._store.put_text(review.model_dump_json())
+                    scored.append(
+                        hypothesis.model_copy(
+                            update={
+                                "rubric_score": aggregate_hypothesis_rubric(review),
+                                "rubric_ref": ref,
+                            }
+                        )
+                    )
+                await rt.publish_output(
+                    source="agent",
+                    channel="text",
+                    text=f"AI Hypothesis Rubric scored {len(scored)} candidates.",
+                    plan=label,
+                )
+                return scored
+            except Exception as error:
+                last_error = error
+                if attempt == 0 and summary.error is None:
+                    run_id = await rt._agents.followup(
+                        agent_id,
+                        {
+                            "content": (
+                                "The previous batch failed deterministic ID/schema "
+                                f"validation: {error}. Return exactly one review for "
+                                f"each of these IDs and no others: {expected_ids}"
+                            ),
+                            "context_refs": [],
+                        },
+                    )
+                    continue
+                break
+        await rt.publish_output(
+            source="supervisor",
+            channel="error",
+            text=(
+                "Hypothesis Rubric unavailable; Selector will use its deterministic "
+                f"fallback: {last_error}"
+            ),
+            plan=label,
+        )
+        return hypotheses
 
     @staticmethod
     def _resolve_eda_dir(rt: "ResearchRuntime") -> str:
@@ -340,6 +689,12 @@ class AgentTurnRunner:
             f"{target} falsifiable hypotheses that could improve the primary "
             "metric. Return the hypotheses as structured output."
         )
+        policy = getattr(rt._supervisor, "evaluation_policy", None)
+        if policy is not None:
+            content += (
+                "\n\nThe frozen Research Evaluation Policy is authoritative:\n"
+                + json.dumps(policy.model_dump(mode="json"), ensure_ascii=False)
+            )
         corpus_ref = rt.survey_corpus_ref()
         if corpus_ref is not None:
             content += (

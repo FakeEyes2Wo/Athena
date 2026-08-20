@@ -14,7 +14,9 @@ from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 
 
-async def _make_supervisor(tmp_path: Path, *, run_ideator_turn=None) -> Supervisor:
+async def _make_supervisor(
+    tmp_path: Path, *, run_ideator_turn=None, run_hypothesis_rubric=None
+) -> Supervisor:
     """Build a SEARCH Supervisor with a baseline SOTA and no plans."""
     store = LocalArtifactStore(tmp_path / "artifacts")
     evaluator_ref = await store.put_text('{"frozen":true}')
@@ -76,6 +78,7 @@ async def _make_supervisor(tmp_path: Path, *, run_ideator_turn=None) -> Supervis
         run_supervisor_turn=unused_supervisor_turn,
         publish=publish,
         run_ideator_turn=run_ideator_turn,
+        run_hypothesis_rubric=run_hypothesis_rubric,
     )
 
 
@@ -107,6 +110,69 @@ async def test_register_hypotheses_batches_under_current_sota(tmp_path: Path) ->
         assert hypothesis.parent_id == "exp_baseline"
         assert hypothesis.status == "PROPOSED"
         assert hypothesis.priority == 42.0  # 经 scheduler 从父假设播种
+
+
+@pytest.mark.asyncio
+async def test_gate_eligible_batch_is_scored_before_graph_registration(
+    tmp_path: Path,
+) -> None:
+    seen_ids: list[str] = []
+
+    async def rank_after_gate(hypotheses):
+        assert all(hypothesis.id is not None for hypothesis in hypotheses)
+        seen_ids.extend(hypothesis.id for hypothesis in hypotheses)
+        return [
+            hypothesis.model_copy(
+                update={"rubric_score": 0.9 - index * 0.2, "rubric_ref": "rubric"}
+            )
+            for index, hypothesis in enumerate(hypotheses)
+        ]
+
+    supervisor = await _make_supervisor(tmp_path, run_hypothesis_rubric=rank_after_gate)
+    result = await supervisor.register_hypotheses(
+        [
+            Hypothesis(
+                statement="first eligible hypothesis",
+                intervention="measure and change one component",
+                expected_effect="improve the frozen primary metric",
+            ),
+            Hypothesis(
+                statement="second eligible hypothesis",
+                intervention="measure and change another component",
+                expected_effect="improve the frozen primary metric",
+            ),
+        ]
+    )
+
+    assert result["hypothesis_ids"] == seen_ids
+    registered = [supervisor.tree.get_hypothesis(item) for item in seen_ids]
+    assert [item.rubric_score for item in registered] == [0.9, 0.7]
+    assert all(item.rubric_ref == "rubric" for item in registered)
+    assert all(item.status == "PROPOSED" for item in registered)
+
+
+@pytest.mark.asyncio
+async def test_rubric_failure_registers_unscored_hypotheses_for_fallback(
+    tmp_path: Path,
+) -> None:
+    async def unavailable(_hypotheses):
+        raise RuntimeError("no API")
+
+    supervisor = await _make_supervisor(tmp_path, run_hypothesis_rubric=unavailable)
+    result = await supervisor.register_hypotheses(
+        [
+            Hypothesis(
+                statement="eligible hypothesis",
+                intervention="run a bounded deterministic experiment",
+                expected_effect="improve the frozen primary metric",
+            )
+        ]
+    )
+
+    hypothesis = supervisor.tree.get_hypothesis(result["hypothesis_ids"][0])
+    assert hypothesis.rubric_score is None
+    assert hypothesis.rubric_ref is None
+    assert hypothesis.status == "PROPOSED"
 
 
 @pytest.mark.asyncio

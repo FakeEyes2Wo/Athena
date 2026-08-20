@@ -17,6 +17,8 @@ from athena.core.workspace import (
 )
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.rubrics.evaluation import normalize_metric_name
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.script_runner import BundleMetadata, DataScriptRunner
 from athena.research.supervisor.experiment import PlanRunner, load_agent_result
 from athena.research.supervisor.plans import (
@@ -57,6 +59,7 @@ async def _freeze_evaluator(
     root: Path,
     scripts: DataScriptRunner,
     store: ArtifactStore,
+    evaluation_policy: EvaluationPolicy | None = None,
 ) -> ArtifactRef:
     """Freeze the evaluator directory (metric.json's eval_script) into a bundle.
 
@@ -73,6 +76,25 @@ async def _freeze_evaluator(
         evaluator_rel = spec["eval_script"]
     except (OSError, ValueError, KeyError):
         raise ValueError("metric.json must declare eval_script")
+    if evaluation_policy is not None:
+        try:
+            declared_metric = normalize_metric_name(spec["primary_metric"])
+            declared_direction = spec["direction"]
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(
+                "metric.json must declare primary_metric and direction from the "
+                "frozen Evaluation Policy"
+            ) from None
+        if declared_metric != evaluation_policy.primary_metric:
+            raise ValueError(
+                "evaluator primary_metric does not match frozen Evaluation Policy: "
+                f"{declared_metric!r} != {evaluation_policy.primary_metric!r}"
+            )
+        if declared_direction != evaluation_policy.direction:
+            raise ValueError(
+                "evaluator direction does not match frozen Evaluation Policy: "
+                f"{declared_direction!r} != {evaluation_policy.direction!r}"
+            )
     evaluator_path = _workspace_output(root, evaluator_rel)
     if evaluator_path.is_dir():
         # eval_script 声明的是目录；入口文件约定为 evaluate.py。
@@ -117,6 +139,7 @@ async def run_evaluator_plan(
     evaluator_dir: Path,
     execution: ExecutionRuntime,
     task: str,
+    evaluation_policy: EvaluationPolicy | None = None,
     max_turns: int,
     publish: EmitEvent | None = None,
 ) -> ArtifactRef:
@@ -130,18 +153,31 @@ async def run_evaluator_plan(
     # `uv add --project "$ATHENA_ENV_ROOT"` 因缺 pyproject 失败。
     execution.ensure_environment()
 
+    policy_payload = (
+        evaluation_policy.model_dump(mode="json")
+        if evaluation_policy is not None
+        else None
+    )
     context_ref = await store.put_text(
         json.dumps(
             {
                 "plan_id": EVALUATOR_PLAN_ID,
                 "task": task,
+                "evaluation_policy": policy_payload,
             },
             ensure_ascii=False,
         )
     )
+    content = task
+    if policy_payload is not None:
+        content += (
+            "\n\nFROZEN RESEARCH EVALUATION POLICY (authoritative; do not "
+            "reselect the primary metric):\n"
+            + json.dumps(policy_payload, ensure_ascii=False, indent=2)
+        )
     agent_id, run_id = await agents.create_root(
         "evaluator",
-        {"content": task, "context_refs": [context_ref]},
+        {"content": content, "context_refs": [context_ref]},
         agent_id=EVALUATOR_AGENT_ID,
         name=EVALUATOR_PLAN_ID,
     )
@@ -169,7 +205,10 @@ async def run_evaluator_plan(
             raise RuntimeError(f"evaluator Agent abandoned Plan: {decision.reason}")
         try:
             evaluator_ref = await _freeze_evaluator(
-                root=root, scripts=scripts, store=store
+                root=root,
+                scripts=scripts,
+                store=store,
+                evaluation_policy=evaluation_policy,
             )
             if decision.decision != "submit":
                 raise ValueError(

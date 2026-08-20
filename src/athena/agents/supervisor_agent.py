@@ -3,7 +3,7 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.agents.base_runner import BaseAgentRunner
 from athena.agents.orchestration import RunToolProjector
@@ -151,11 +151,36 @@ class _TaskUnderstanding(BaseModel):
     dataset: str = ""
     target: str = ""
     task_type: str = "other"
-    primary_metric: str = Field(
-        default="accuracy", pattern=r"^[a-z][a-z0-9_]*$"
+    primary_metric: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
+    direction: Literal["maximize", "minimize"] | None = None
+    metric_source: Literal["human", "official", "protocol", "unresolved"] = "unresolved"
+    human_primary_metric: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
+    human_direction: Literal["maximize", "minimize"] | None = None
+    official_primary_metric: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_]*$"
     )
-    direction: Literal["maximize", "minimize"] = "maximize"
+    official_direction: Literal["maximize", "minimize"] | None = None
+    protocol_primary_metric: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    protocol_direction: Literal["maximize", "minimize"] | None = None
     evaluation_plan: str = ""
+
+    @model_validator(mode="after")
+    def _validate_metric_provenance(self) -> "_TaskUnderstanding":
+        if self.metric_source == "unresolved":
+            if self.primary_metric is not None or self.direction is not None:
+                raise ValueError(
+                    "unresolved task understanding cannot guess metric or direction"
+                )
+        elif self.primary_metric is None:
+            raise ValueError("a resolved metric source requires primary_metric")
+        for source in ("human", "official", "protocol"):
+            metric = getattr(self, f"{source}_primary_metric")
+            source_direction = getattr(self, f"{source}_direction")
+            if metric is None and source_direction is not None:
+                raise ValueError(f"{source}_direction requires {source}_primary_metric")
+        return self
 
 
 class _Guidance(BaseModel):
@@ -340,8 +365,9 @@ def supervisor_tool_registry(
         (
             "record_task_understanding",
             "Record the structured task understanding (title, dataset, target, task type, "
-            "primary metric + direction, evaluation plan) for the GUI intent preview. "
-            "Call this on the first task-understanding turn.",
+            "explicit/official/protocol primary metric provenance when present, and "
+            "evaluation plan). Leave metric unresolved for the Rubric Agent when no "
+            "higher-priority source exists. Call this on the first task-understanding turn.",
             _TaskUnderstanding,
             record_understanding,
         ),

@@ -82,6 +82,9 @@ async def test_record_task_understanding_tool_forwards_structured_fields() -> No
             "task_type": "classification",
             "primary_metric": "accuracy",
             "direction": "maximize",
+            "metric_source": "human",
+            "human_primary_metric": "accuracy",
+            "human_direction": "maximize",
             "evaluation_plan": "holdout accuracy",
         },
         ctx,
@@ -89,3 +92,4 @@ async def test_record_task_understanding_tool_forwards_structured_fields() -> No
     assert result["recorded"] is True
     assert actions.understanding["task_type"] == "classification"
     assert actions.understanding["primary_metric"] == "accuracy"
+    assert actions.understanding["human_primary_metric"] == "accuracy"

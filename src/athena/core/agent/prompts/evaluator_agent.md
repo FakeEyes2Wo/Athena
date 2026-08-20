@@ -33,8 +33,12 @@ Otherwise, when the task gives a local dataset path, proceed without Kaggle.
 
 Create:
 
-- a `metric.json` at the workspace root declaring the entrypoint, e.g.
-  `{"eval_script": "evaluate.py"}`;
+- a `metric.json` at the workspace root declaring the entrypoint, primary metric,
+  and direction, e.g. `{"eval_script": "evaluate.py", "primary_metric":
+  "macro_f1", "direction": "maximize"}`. When the task message contains a
+  FROZEN RESEARCH EVALUATION POLICY, its `primary_metric` and `direction` are
+  authoritative: copy them exactly and do not independently choose another
+  primary metric;
 - `evaluate.py`, the entrypoint. It runs with the workspace as its working
   directory after the predictions directory is materialized next to it. It must
   read the ground-truth `labels` (either a `labels.csv` file or a non-empty

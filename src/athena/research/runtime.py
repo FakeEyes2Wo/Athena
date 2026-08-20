@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from athena.agents.plan_agent import register_plan_agent
+from athena.agents.rubric_agent import register_rubric_agents
 from athena.agents.supervisor_agent import register_supervisor_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import ResponsesProvider
@@ -27,6 +28,7 @@ from athena.kaggle import (
 )
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime_events import RuntimeEvents, recent_user_texts
@@ -273,6 +275,7 @@ class ResearchRuntime:
             run_plan_turn=self._phase_runner.run_plan_turn,
             run_supervisor_turn=self._agent_turns.run_supervisor_turn,
             run_ideator_turn=self._agent_turns.run_ideator_turn,
+            run_hypothesis_rubric=self._agent_turns.run_hypothesis_rubric,
             run_general_turn=self._agent_turns.run_general_turn,
             publish=self._events_bus.publish_from_supervisor,
             auto_validate=auto_validate,
@@ -329,6 +332,7 @@ class ResearchRuntime:
             ),
             kaggle_stack=supervisor_kaggle,
         )
+        register_rubric_agents(self._registry, provider=provider, artifacts=self._store)
         register_plan_agent(
             self._registry,
             provider=provider,
@@ -571,11 +575,46 @@ class ResearchRuntime:
         ]
         return " ".join(parts) if parts else fallback
 
-    async def _maybe_run_task_understanding(self) -> None:
-        """PREPARE 阶段运行任务理解；已有断点则直接跳过。
+    async def _ensure_evaluation_policy(self) -> None:
+        """Load or generate the policy before PREPARE freezes its evaluator."""
+        # Lightweight test/injection runners predating Rubric V2 can omit this
+        # optional method; the real AgentTurnRunner always provides it.
+        if not hasattr(self._agent_turns, "run_evaluation_rubric"):
+            return
+        ref = getattr(self.state, "evaluation_policy_ref", None)
+        if ref is not None:
+            try:
+                policy = EvaluationPolicy.model_validate_json(
+                    await self._store.get_text(ref)
+                )
+            except (OSError, ValueError):
+                logger.warning(
+                    "persisted Evaluation Policy is invalid; regenerating",
+                    exc_info=True,
+                )
+            else:
+                self._supervisor.apply_evaluation_policy(policy)
+                self._direction = policy.direction
+                await self.publish_output(
+                    source="supervisor",
+                    channel="text",
+                    text=(
+                        "断点续传：复用已冻结的 Research Evaluation Rubric "
+                        f"({policy.primary_metric}, {policy.direction})。"
+                    ),
+                    artifact_ref=ref,
+                )
+                return
+        if self.state.task_understanding is None:
+            raise RuntimeError(
+                "Research Evaluation Rubric requires a completed task understanding"
+            )
+        policy, ref = await self._agent_turns.run_evaluation_rubric()
+        self._direction = policy.direction
+        await self._supervisor.checkpoint_evaluation_policy(ref, policy)
 
-        失败只降级为默认关闭 Kaggle 工具，不阻断启动。
-        """
+    async def _maybe_run_task_understanding(self) -> None:
+        """Run task understanding and Rubric V2 before evaluator freeze."""
         if self._provider is None or self.state.phase != "PREPARE":
             return
         if self.state.task_understanding is not None:
@@ -584,30 +623,35 @@ class ResearchRuntime:
                 channel="text",
                 text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
             )
-            return
-        if not self._task_text.strip():
-            return
-        context = self._task_context_text(self._task_text, self._recent_user_texts())
-        await self.publish_output(
-            source="supervisor",
-            channel="text",
-            text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
-        )
-        try:
-            await self._agent_turns.run_supervisor_turn(context)
-            await self.publish_output(
-                source="supervisor", channel="text", text="任务理解完成。"
-            )
-        except Exception as error:
-            logger.warning(
-                "supervisor task-understanding turn failed; Kaggle tools stay off",
-                exc_info=True,
+        else:
+            if not self._task_text.strip():
+                return
+            context = self._task_context_text(
+                self._task_text, self._recent_user_texts()
             )
             await self.publish_output(
                 source="supervisor",
-                channel="error",
-                text=f"任务理解失败（已降级继续）：{error}",
+                channel="text",
+                text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
             )
+            try:
+                await self._agent_turns.run_supervisor_turn(context)
+                await self.publish_output(
+                    source="supervisor", channel="text", text="任务理解完成。"
+                )
+            except Exception as error:
+                logger.warning(
+                    "supervisor task-understanding turn failed", exc_info=True
+                )
+                await self.publish_output(
+                    source="supervisor",
+                    channel="error",
+                    text=f"任务理解失败：{error}",
+                )
+        # No metric fallback is allowed here. A missing/invalid policy stops before
+        # evaluator freeze; a locked explicit metric can still survive enrichment
+        # failure through generate_evaluation_policy's deterministic preservation.
+        await self._ensure_evaluation_policy()
 
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.

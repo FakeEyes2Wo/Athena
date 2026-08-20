@@ -9,20 +9,50 @@ from pathlib import Path
 import pytest
 
 from athena.research import ResearchRuntime
+from athena.research.rubrics.models import EvaluationPolicy
 
 
 def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRuntime:
     """默认 runtime 从 SEARCH 开始；TUI auto-seed runtime 等待 PREPARE 任务。
 
-    ``client=object()`` 让后台 supervisor 的 PREPARE 在首次 LLM 调用即失败，
-    保证测试 hermetic（不 hit 真实 API、不依赖 git 执行结果）。
+    Task Understanding 与 Rubric V2 用 fake 结果，随后 PREPARE 的真实 agent 才在
+    fake client 上失败；测试保持 hermetic，不 hit 真实 API。
     """
-    return ResearchRuntime(
+    runtime = ResearchRuntime(
         project_root=tmp_path,
         model="fake",
         client=object(),
         auto_seed_task=auto_seed_task,
     )
+
+    async def fake_task_understanding(_text: str) -> str:
+        runtime.state.task_understanding = {
+            "title": "test task",
+            "dataset": "",
+            "target": "",
+            "task_type": "other",
+            "primary_metric": None,
+            "direction": None,
+            "metric_source": "unresolved",
+            "evaluation_plan": "",
+        }
+        return "understood"
+
+    async def fake_evaluation_rubric():
+        policy = EvaluationPolicy(
+            primary_metric="accuracy",
+            direction="maximize",
+            metric_source="ai",
+            locked=False,
+            confidence=0.5,
+            explanation="Hermetic test policy.",
+        )
+        ref = await runtime._store.put_text(policy.model_dump_json())
+        return policy, ref
+
+    runtime._agent_turns.run_supervisor_turn = fake_task_understanding  # type: ignore[method-assign]
+    runtime._agent_turns.run_evaluation_rubric = fake_evaluation_rubric  # type: ignore[method-assign]
+    return runtime
 
 
 async def _close(runtime: ResearchRuntime) -> None:
