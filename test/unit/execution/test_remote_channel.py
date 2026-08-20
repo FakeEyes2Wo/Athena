@@ -359,3 +359,199 @@ async def test_a_transport_that_dies_explains_itself(tmp_path) -> None:
     channel = RemoteChannel(_DyingTransport(sys.executable))
     with pytest.raises(RemoteError, match="Permission denied"):
         await channel.open()
+
+
+# ------------------------------------------------------ 传输：并行在飞而不是一块一等
+
+
+class _HoldPuts:
+    """把 ``put`` 的确认掐掉，其余请求照常放行。
+
+    流水线的可观测特征是「不等确认能发出多少」。用它断言比计时可靠——计时在 CI
+    上会抖，而且本地子进程扮演的远端快到根本攒不出飞行队列。
+    """
+
+    def __init__(self, channel: RemoteChannel) -> None:
+        self.paths: list[str] = []
+        self._ids: set[str] = set()
+        self._channel = channel
+        self._send = channel._send
+        self._dispatch = channel._dispatch
+        channel._send = self._watch  # type: ignore[method-assign]
+        channel._dispatch = self._filter  # type: ignore[method-assign]
+
+    async def _watch(self, payload: dict) -> None:
+        if payload.get("op") == "put":
+            self._ids.add(payload["id"])
+            self.paths.append(payload["path"])
+        await self._send(payload)
+
+    def _filter(self, message: dict) -> None:
+        if message.get("id") in self._ids:
+            return
+        self._dispatch(message)
+
+
+@pytest.mark.asyncio
+async def test_a_big_write_keeps_a_full_window_in_flight(channel, tmp_path) -> None:
+    """分块上传必须并行在飞，否则吞吐 = 块大小 ÷ 往返时延，与带宽无关。
+
+    真机量到的：一块一等时 64 KiB / 31 ms ≈ 2 MiB/s，实测 1.9；改成窗口之后
+    8 MiB 从 4.3 秒降到 0.6 秒。
+
+    断言方式刻意不用计时（CI 上会抖），而是**把回复掐掉**：谁也不确认时，
+    "不等确认能发出多少"就是窗口本身。一块一等的话这个数是 1。
+    """
+    from athena.execution.remote import agent as agent_module
+    from athena.execution.remote.channel import TRANSFER_WINDOW
+
+    payload = b"x" * (agent_module.CHUNK_BYTES * (TRANSFER_WINDOW + 8))
+    held = _HoldPuts(channel)
+
+    task = asyncio.create_task(channel.write_file(str(tmp_path / "big.bin"), payload))
+    await asyncio.sleep(0.5)
+    try:
+        assert not task.done(), "窗口满了就该停下等确认，而不是无界地灌"
+        # 两条都要：">1" 抓"退回一块一等"，"== 窗口"抓"无界地灌"。
+        # 只写后者的话，把常量改成 1 也能过——断言会跟着常量一起动。
+        assert len(held.paths) > 1, "一块一等就是这条链路上唯一的瓶颈"
+        assert len(held.paths) == TRANSFER_WINDOW
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_blocks_arrive_in_order_even_though_they_fly_together(channel, tmp_path):
+    """并行在飞不能打乱顺序——``append`` 语义全靠块 0 先落地。
+
+    错了的表现不是报错，是文件内容被拼错，而哈希校验要到分发的最后一步才发现。
+    """
+    from athena.execution.remote import agent as agent_module
+    from athena.execution.remote.channel import TRANSFER_WINDOW
+
+    chunk = agent_module.CHUNK_BYTES
+    # 每一块都带自己的序号：错序会变成内容不等，而不是长度不等。
+    payload = b"".join(
+        bytes([index % 256]) * chunk for index in range(TRANSFER_WINDOW * 3)
+    )
+
+    await channel.write_file(str(tmp_path / "ordered.bin"), payload)
+
+    assert (tmp_path / "ordered.bin").read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_streaming_a_file_never_reads_it_whole(channel, tmp_path) -> None:
+    """数据集里单个文件几十 GB 是常态，整读进内存不可行。
+
+    断言方式是把 ``read_bytes`` 拆掉：真在流式，就不会碰它。
+    """
+    from athena.execution.remote import agent as agent_module
+
+    source = tmp_path / "dataset.bin"
+    payload = bytes(range(256)) * (agent_module.CHUNK_BYTES * 40 // 256)
+    source.write_bytes(payload)
+    original = Path.read_bytes
+
+    def refuse(self):  # noqa: ANN001
+        raise AssertionError(f"整读进内存了：{self}")
+
+    Path.read_bytes = refuse  # type: ignore[method-assign]
+    try:
+        sent = await channel.send_file(str(tmp_path / "copy.bin"), source)
+    finally:
+        Path.read_bytes = original  # type: ignore[method-assign]
+
+    assert sent == len(payload)
+    assert (tmp_path / "copy.bin").read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_an_empty_file_still_gets_created(channel, tmp_path) -> None:
+    """零字节也要在远端真的出现——否则"文件没了"和"文件是空的"会被混为一谈。"""
+    await channel.write_file(str(tmp_path / "empty.bin"), b"")
+    assert (tmp_path / "empty.bin").is_file()
+    assert (tmp_path / "empty.bin").read_bytes() == b""
+
+    (tmp_path / "src.bin").write_bytes(b"")
+    assert (
+        await channel.send_file(str(tmp_path / "empty2.bin"), tmp_path / "src.bin") == 0
+    )
+    assert (tmp_path / "empty2.bin").is_file()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_leaves_no_dangling_futures(channel, tmp_path) -> None:
+    """飞行中的请求出错时，剩下那些必须被收掉。
+
+    不收的话会刷出一片 "Future exception was never retrieved"，把真正的原因淹掉——
+    而这正是排查传输故障时唯一有用的那条信息。
+    """
+    from athena.execution.remote import agent as agent_module
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("我是文件，不是目录", encoding="utf-8")
+    payload = b"x" * (agent_module.CHUNK_BYTES * 40)
+
+    with pytest.raises(RemoteError):
+        await channel.write_file(str(blocked / "nested.bin"), payload)
+
+    assert not [f for f in channel._pending.values() if not f.done()]
+
+
+@pytest.mark.asyncio
+async def test_the_mirror_pushes_several_files_at_once(channel, tmp_path) -> None:
+    """一个文件一次往返，50 个小文件就是 50 次。真机上那是 1.69 秒。
+
+    同样把回复掐掉来断言：谁也不确认时，同时在飞的**不同路径**数就是文件并发度。
+    """
+    from athena.execution.remote.channel import TRANSFER_FILES
+
+    local = tmp_path / "ws"
+    local.mkdir()
+    for index in range(TRANSFER_FILES * 3):
+        (local / f"m{index}.py").write_text(f"x = {index}\n", encoding="utf-8")
+    mirror = WorkspaceMirror(
+        channel, local_root=local, remote_root=str(tmp_path / "remote")
+    )
+    held = _HoldPuts(channel)
+
+    task = asyncio.create_task(mirror.push())
+    await asyncio.sleep(0.5)
+    try:
+        assert len(set(held.paths)) > 1, "一个一个推就是每个文件一次往返"
+        assert len(set(held.paths)) == TRANSFER_FILES, "并发度既是下限也是上限"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_the_mirror_streams_instead_of_slurping(channel, tmp_path) -> None:
+    """镜像也必须走流式，而不是先整读进内存。
+
+    ``send_file`` 自己流式还不够——真正会伤人的是调用点。工作区里出现一个大文件
+    时，整读会把控制节点直接打爆，而这台控制节点是笔记本。
+    """
+    local = tmp_path / "ws"
+    local.mkdir()
+    (local / "big.bin").write_bytes(b"y" * (1024 * 1024))
+    mirror = WorkspaceMirror(
+        channel, local_root=local, remote_root=str(tmp_path / "remote")
+    )
+    original = Path.read_bytes
+
+    def refuse(self):  # noqa: ANN001
+        raise AssertionError(f"整读进内存了：{self}")
+
+    Path.read_bytes = refuse  # type: ignore[method-assign]
+    try:
+        report = await mirror.push()
+    finally:
+        Path.read_bytes = original  # type: ignore[method-assign]
+
+    assert report.uploaded == ("big.bin",)
+    assert (tmp_path / "remote" / "big.bin").stat().st_size == 1024 * 1024

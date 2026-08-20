@@ -13,11 +13,12 @@
 远端，那边的 git 会去解析一条不存在的宿主机路径。它在默认排除名单里。
 """
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from athena.execution.remote.channel import RemoteChannel
+from athena.execution.remote.channel import TRANSFER_FILES, RemoteChannel
 
 # 永不镜像的目录/文件名。``.git`` 见模块文档；其余是纯本地缓存与虚拟环境——
 # 传过去既慢又错（venv 里全是宿主机绝对路径）。
@@ -152,6 +153,23 @@ class WorkspaceMirror:
             for row in reply.get("entries", [])
         }
 
+    async def _upload(self, keys: list[str]) -> None:
+        """并发推若干个文件。
+
+        文件之间互不相干，所以并发是安全的；而串行推的代价是每个文件一次往返
+        ——真机上 50 个小文件 1.69 秒，正好 34 ms 一个，就是一个 RTT。
+
+        并发**有上界**：每个文件都在流式推（不整读进内存），但每份仍占一个
+        传输窗口，无界并发会把内存和管道缓冲一起吃掉。
+        """
+        semaphore = asyncio.Semaphore(TRANSFER_FILES)
+
+        async def one(key: str) -> None:
+            async with semaphore:
+                await self._channel.send_file(self.remote_path(key), self._local / key)
+
+        await asyncio.gather(*(one(key) for key in keys))
+
     async def push(self, *, prune: bool = True) -> PushReport:
         """把本地相对远端的增量推上去。"""
         await self._channel.request("mkdir", path=str(self._remote))
@@ -160,6 +178,7 @@ class WorkspaceMirror:
 
         uploaded: list[str] = []
         oversized: list[str] = []
+        pending: list[str] = []
         sent = 0
         for key, entry in sorted(local.items()):
             existing = remote.get(key)
@@ -168,10 +187,11 @@ class WorkspaceMirror:
             if entry.size > self._max_push_bytes:
                 oversized.append(key)
                 continue
-            data = (self._local / key).read_bytes()
-            await self._channel.write_file(self.remote_path(key), data)
-            uploaded.append(key)
-            sent += len(data)
+            pending.append(key)
+            sent += entry.size
+        if pending:
+            await self._upload(pending)
+            uploaded = pending
 
         deleted: list[str] = []
         if prune:

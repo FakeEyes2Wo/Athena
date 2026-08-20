@@ -200,3 +200,30 @@ async def test_eviction_never_touches_a_pinned_dataset(channel, tmp_path):
     assert removed == (stale.dataset_id,)
     assert await stager.staged_ids() == {kept.dataset_id}
     assert (remote_root / kept.dataset_id / "train.csv").is_file()
+
+
+@pytest.mark.asyncio
+async def test_staging_streams_files_instead_of_slurping(channel, tmp_path) -> None:
+    """分发必须流式。
+
+    这是三条路径里最要命的一条：数据集单个文件几十 GB 是常态，整读进内存等于
+    在控制节点上要一块同样大的内存——而控制节点是一台笔记本。
+    """
+    local = tmp_path / "data"
+    local.mkdir()
+    (local / "train.bin").write_bytes(b"z" * (1024 * 1024))
+    spec = describe_dataset(local)
+    stager = DatasetStager(channel, data_root=(tmp_path / "remote").as_posix())
+    original = Path.read_bytes
+
+    def refuse(self):  # noqa: ANN001
+        raise AssertionError(f"整读进内存了：{self}")
+
+    Path.read_bytes = refuse  # type: ignore[method-assign]
+    try:
+        report = await stager.stage(local, spec)
+    finally:
+        Path.read_bytes = original  # type: ignore[method-assign]
+
+    assert report.uploaded == ("train.bin",)
+    assert (Path(report.remote_root) / "train.bin").stat().st_size == 1024 * 1024

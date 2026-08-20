@@ -23,13 +23,14 @@
 本地推送。
 """
 
+import asyncio
 import hashlib
 import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from athena.execution.remote.channel import RemoteChannel
+from athena.execution.remote.channel import TRANSFER_FILES, RemoteChannel
 from athena.execution.remote.mirror import FileEntry, local_manifest
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,24 @@ class DatasetStager:
                 + "; ".join(problems)
             )
 
+    async def _upload(
+        self, local_root: Path, remote_root: str, entries: list[FileEntry]
+    ) -> None:
+        """把缺的那些文件推上去：单个文件流式、多个文件并发。
+
+        两处都不能省。数据集常见两种形态：**一个几十 GB 的大文件**（不流式就要
+        整读进内存），以及**几十万个小文件**（不并发就是每个文件一次往返）。
+        """
+        semaphore = asyncio.Semaphore(TRANSFER_FILES)
+
+        async def one(entry: FileEntry) -> None:
+            async with semaphore:
+                await self._channel.send_file(
+                    f"{remote_root}/{entry.path}", local_root / entry.path
+                )
+
+        await asyncio.gather(*(one(entry) for entry in entries))
+
     async def stage(
         self, local_root: Path, spec: DatasetSpec, *, verify_existing: bool = True
     ) -> StageReport:
@@ -174,16 +193,14 @@ class DatasetStager:
         await self._channel.request("mkdir", path=remote_root)
         # 已经传过的那部分不重传：中断之后重来是续传，不是从头再来。
         remote = await self._remote_entries(spec)
-        uploaded: list[str] = []
-        sent = 0
-        for entry in spec.entries:
-            existing = remote.get(entry.path)
-            if existing is not None and existing.sha256 == entry.sha256:
-                continue
-            data = (Path(local_root) / entry.path).read_bytes()
-            await self._channel.write_file(f"{remote_root}/{entry.path}", data)
-            uploaded.append(entry.path)
-            sent += len(data)
+        missing = [
+            entry
+            for entry in spec.entries
+            if (found := remote.get(entry.path)) is None or found.sha256 != entry.sha256
+        ]
+        uploaded = [entry.path for entry in missing]
+        sent = sum(entry.size for entry in missing)
+        await self._upload(Path(local_root), remote_root, missing)
 
         # 校验通过之后才写完成标记。顺序反过来就等于给"半份数据"发了通行证。
         await self.verify(spec)

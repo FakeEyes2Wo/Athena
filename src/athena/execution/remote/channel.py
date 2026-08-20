@@ -15,7 +15,8 @@
 import asyncio
 import base64
 import json
-from collections.abc import Callable
+from collections import deque
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -30,6 +31,21 @@ HANDSHAKE_TIMEOUT_S = 60
 # 断开"——排查方向会完全跑偏。清单消息（一棵树的全部条目）也可能很长。
 # 这里给足，并在读循环里把越界单独报出来，而不是让它伪装成掉线。
 LINE_LIMIT_BYTES = 16 * 1024 * 1024
+
+# 传输窗口：一次可以有多少块 / 多少个文件在飞而不等确认。
+#
+# **这是量出来的。** 分块上传原本一块一等，于是吞吐 = 块大小 ÷ 往返时延，与带宽
+# 无关：64 KiB ÷ 31 ms ≈ 2 MiB/s，实测 1.9 MiB/s；同一条链路裸 ``scp`` 是
+# 5.9 MiB/s。窗口把上限抬到 ``窗口 × 块 ÷ RTT``，16 × 64 KiB 在 31 ms 的链路上
+# 足够跑到 32 MiB/s，早已越过链路本身的上限。
+#
+# 上界也是有意的：飞行中的字节数 = 窗口 × 块（base64 后约 ×1.33）。无界地灌会把
+# 内存和管道缓冲一起吃掉，而且失去背压——``drain`` 正是靠管道满了才挡一下。
+TRANSFER_WINDOW = 16
+
+# 同时推几个文件。50 个小文件原本要 50 次往返（实测 1.69 s，34 ms 一个，正好一个
+# RTT）。文件之间互不相干，并发是安全的；这里给的是并发上限，不是并发度。
+TRANSFER_FILES = 4
 
 
 class RemoteError(RuntimeError):
@@ -276,11 +292,21 @@ class RemoteChannel:
 
     async def request(self, op: str, **fields: Any) -> dict:
         """发一条请求并等它的终结响应（``ok`` / 该 op 自己的结果 / ``error``）。"""
+        future = await self.send(op, **fields)
+        return await future
+
+    async def send(self, op: str, **fields: Any) -> asyncio.Future[dict]:
+        """发一条请求，**不等**响应，返回它的 future。
+
+        分块传输靠它把多块同时放在飞行中。顺序不会因此乱：``_send`` 串行写，
+        远端 agent 的读循环也是顺序派发的，所以同一个文件的块到达次序与发出
+        次序一致——``append`` 语义因此仍然成立。
+        """
         request_id = self._next_id()
         future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         await self._send({"op": op, "id": request_id, **fields})
-        return await future
+        return future
 
     async def spawn(
         self,
@@ -330,20 +356,98 @@ class RemoteChannel:
         await future
         return b"".join(self._collect.pop(request_id, []))
 
+    async def _write_blocks(
+        self,
+        path: str,
+        blocks: AsyncIterator[bytes],
+        *,
+        executable: bool = False,
+    ) -> int:
+        """把一串块按窗口推到远端一个路径，返回写入的字节数。
+
+        **一块一等曾是这条链路上唯一的瓶颈。** 真机量到：64 KiB 的块、31 ms 的
+        往返，实测 1.9 MiB/s，而 64 KiB ÷ 31 ms ≈ 2 MiB/s——时间几乎全花在等
+        确认上，跟带宽无关；同一条链路裸 ``scp`` 能到 5.9 MiB/s。窗口把上限提到
+        ``窗口 × 块 ÷ RTT``。
+
+        顺序仍然成立（见 ``send``），所以 ``append`` 语义不受影响：块 0 截断，
+        其余追加。
+        """
+        inflight: deque[asyncio.Future[dict]] = deque()
+        sent = 0
+        index = 0
+        try:
+            async for block in blocks:
+                inflight.append(
+                    await self.send(
+                        "put",
+                        path=path,
+                        b64=base64.b64encode(block).decode("ascii"),
+                        append=index > 0,
+                    )
+                )
+                sent += len(block)
+                index += 1
+                # 窗口满了才收一块：飞行中的字节数因此有上界。
+                if len(inflight) >= TRANSFER_WINDOW:
+                    await inflight.popleft()
+            if index == 0 or executable:
+                # 空文件也要有一次 put（否则远端根本不会出现这个文件）；
+                # executable 只能在最后一块之后落，此时才知道哪一块是最后一块。
+                inflight.append(
+                    await self.send(
+                        "put",
+                        path=path,
+                        b64="",
+                        append=index > 0,
+                        executable=executable,
+                    )
+                )
+            while inflight:
+                await inflight.popleft()
+        except BaseException:
+            # 剩下的 future 要收掉，但**不能等**：本次传输被取消时没人会再来回复
+            # 它们，等下去就是死等。取消既不会挂，也不会刷出一片
+            # "Future exception was never retrieved" 把真正的原因淹掉。
+            for future in inflight:
+                future.cancel()
+            raise
+        return sent
+
     async def write_file(
         self, path: str, data: bytes, *, executable: bool = False
     ) -> None:
-        """把字节写到远端一个路径；大文件自动分块，避免一条巨行卡住通道。"""
+        """把内存里的字节写到远端一个路径。"""
         limit = agent_module.CHUNK_BYTES
-        blocks = [data[i : i + limit] for i in range(0, len(data), limit)] or [b""]
-        for index, block in enumerate(blocks):
-            await self.request(
-                "put",
-                path=path,
-                b64=base64.b64encode(block).decode("ascii"),
-                append=index > 0,
-                executable=executable and index == len(blocks) - 1,
-            )
+
+        async def blocks() -> AsyncIterator[bytes]:
+            for start in range(0, len(data), limit):
+                yield data[start : start + limit]
+
+        await self._write_blocks(path, blocks(), executable=executable)
+
+    async def send_file(
+        self, path: str, source: Path, *, executable: bool = False
+    ) -> int:
+        """把本地一个文件**流式**写到远端，返回字节数。
+
+        不整读进内存：数据集里单个文件几十 GB 是常态，而 ``write_file`` 的
+        ``bytes`` 参数意味着它必须先完整装进内存。读盘放到线程里做，不挡事件循环。
+        """
+        limit = agent_module.CHUNK_BYTES
+
+        async def blocks() -> AsyncIterator[bytes]:
+            handle = await asyncio.to_thread(open, source, "rb")
+            try:
+                while True:
+                    block = await asyncio.to_thread(handle.read, limit)
+                    if not block:
+                        return
+                    yield block
+            finally:
+                await asyncio.to_thread(handle.close)
+
+        return await self._write_blocks(path, blocks(), executable=executable)
 
     # ---------------------------------------------------------------- 内部
 
