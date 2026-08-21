@@ -107,7 +107,7 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
         )}
         <main className={styles.main}>
           {module === "session" ? (
-            <ConversationPane pipeline={pipeline} />
+            <ConversationPane key={pipeline.currentSessionId} pipeline={pipeline} />
           ) : module === "settings" ? (
             <SettingsPanel onClose={() => setModule("session")} />
           ) : (

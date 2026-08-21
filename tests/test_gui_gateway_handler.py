@@ -194,6 +194,30 @@ async def test_handler_session_delete_removes_named_session(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_handler_session_delete_current_swaps_to_default_first(tmp_path) -> None:
+    """删除当前会话时先切回 default 释放 runtime 句柄，避免 Windows 删除失败。"""
+    created: list[tuple[str, Path | None]] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        created.append((root, state_root))
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+    state_root = tmp_path / ".athena" / "conversations" / "s-1"
+    state_root.mkdir(parents=True)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    result = await handler.dispatch("session_delete", {"session_id": "s-1"})
+
+    assert result["deleted"] is True
+    assert not state_root.exists()
+    assert len(created) == 2
+    assert created[1] == (str(tmp_path), None)
+
+
+@pytest.mark.asyncio
 async def test_handler_session_delete_default_clears_transcript(tmp_path) -> None:
     handler = _handler_at(tmp_path)
     log = tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl"
@@ -208,7 +232,10 @@ async def test_handler_session_delete_default_clears_transcript(tmp_path) -> Non
 
 def test_session_state_root_rejects_traversal(tmp_path) -> None:
     assert _session_state_root(tmp_path, "default") is None
-    assert _session_state_root(tmp_path, "s-1") == tmp_path / ".athena" / "conversations" / "s-1"
+    assert (
+        _session_state_root(tmp_path, "s-1")
+        == tmp_path / ".athena" / "conversations" / "s-1"
+    )
     for bad in ("../evil", "a/b", ".", "..", ""):
         with pytest.raises(ValueError, match="invalid session_id"):
             _session_state_root(tmp_path, bad)

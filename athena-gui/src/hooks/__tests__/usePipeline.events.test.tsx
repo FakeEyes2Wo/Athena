@@ -14,6 +14,7 @@ vi.mock("../../lib/tauri-bridge", () => ({
     evaluation_plan: "f1_macro over a held-out split",
     needs_configuration: true,
   }),
+  sendControl: vi.fn().mockResolvedValue({ ok: true }),
   startSearch: vi.fn().mockResolvedValue({ ok: true }),
   pauseSearch: vi.fn().mockResolvedValue({ ok: true }),
   resumeSearch: vi.fn().mockResolvedValue({ ok: true }),
@@ -30,11 +31,14 @@ vi.mock("../../lib/tauri-bridge", () => ({
   PIPELINE_EVENT_NAMES: ["state", "output"],
 }));
 
+import { sendControl, sendMessage } from "../../lib/tauri-bridge";
 import { usePipeline } from "../usePipeline";
 
 describe("usePipeline event mapping", () => {
   beforeEach(() => {
     eventHandlers.length = 0;
+    vi.mocked(sendControl).mockClear();
+    vi.mocked(sendMessage).mockClear();
   });
 
   it("maps a state event to phase, status, budget, and SOTA", async () => {
@@ -57,6 +61,25 @@ describe("usePipeline event mapping", () => {
     expect(result.current.viewModel.rightRail.budgetRemaining).toBe(7);
     expect(result.current.viewModel.rightRail.bestPrimary).toBe(0.83);
     expect(result.current.viewModel.rightRail.latestExperimentId).toBe("exp-1");
+  });
+
+  it("does not treat a stale RUNNING status as an active run", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "SEARCH", status: "RUNNING" },
+      });
+    });
+
+    await act(async () => {
+      await result.current.sendPrompt("kaggle URL");
+    });
+
+    expect(result.current.viewModel.status).toBe("running");
+    expect(sendMessage).toHaveBeenCalledWith("kaggle URL");
+    expect(sendControl).not.toHaveBeenCalled();
   });
 
   it("updates the intent preview card from the supervisor task understanding", async () => {

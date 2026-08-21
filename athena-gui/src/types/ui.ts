@@ -75,6 +75,8 @@ export interface PipelineViewModel {
   status: PipelineStatus;
   messages: UIMessage[];
   rightRail: RightRailSummary;
+  /** Current research plan ids emitted by the backend. */
+  plans: Array<{ id: string }>;
   /** PROPOSED hypotheses awaiting manual selection. */
   pending: Array<{ id: string; statement: string }>;
   /** True when the runtime is in manual hypothesis-selection mode. */
@@ -96,6 +98,7 @@ export function createEmptyPipelineViewModel(): PipelineViewModel {
       bestPrimary: null,
       latestExperimentId: null,
     },
+    plans: [],
     pending: [],
     manual: false,
   };
