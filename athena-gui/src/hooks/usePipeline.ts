@@ -474,28 +474,35 @@ export function usePipeline(workspaceRoot?: string | null) {
     }
 
     setAwaitingIntent(true);
+    // 任务理解放到后台：不阻塞启动，避免澄清问答让界面一直停在 PREPARE · 空闲。
+    void sendMessage(content)
+      .then((preview) => {
+        renameSession(currentSessionId, titleFromTask(preview));
+        setViewModel((prev) => ({
+          ...prev,
+          messages: [
+            ...prev.messages,
+            {
+              id: nextId("preview"),
+              role: "athena",
+              kind: "intent-preview",
+              content: preview.title || `任务类型: ${preview.task_type} · 主指标: ${preview.primary_metric}`,
+              preview,
+              task: content,
+              started: true,
+            },
+          ],
+        }));
+      })
+      .catch(() => {
+        // 非致命：任务已经启动，preview 拿不到不阻塞运行。
+      })
+      .finally(() => setAwaitingIntent(false));
     try {
-      const preview = await sendMessage(content);
-      // 根据 task understanding 结果给当前会话一个标题（类似 Claude Code）。
-      renameSession(currentSessionId, titleFromTask(preview));
-      const previewId = nextId("preview");
-      setViewModel((prev) => ({
-        ...prev,
-        messages: [
-          ...prev.messages,
-          {
-            id: previewId,
-            role: "athena",
-            kind: "intent-preview",
-            content: preview.title || `任务类型: ${preview.task_type} · 主指标: ${preview.primary_metric}`,
-            preview,
-            task: content,
-          },
-        ],
-      }));
-      // 发送即启动：拿到任务理解后直接进入 PREPARE，不再要求用户二次确认。
-      await startRun(content, previewId);
+      // 发送即启动：直接进入 PREPARE，不再等任务理解返回。
+      await startRun(content);
     } catch (err) {
+      setAwaitingIntent(false);
       const text = errorMessage(err);
       setViewModel((prev) => ({
         ...prev,
@@ -506,8 +513,6 @@ export function usePipeline(workspaceRoot?: string | null) {
         ],
       }));
       throw err;
-    } finally {
-      setAwaitingIntent(false);
     }
   }, [currentSessionId, nextId, renameSession, startRun, viewModel]);
 
@@ -546,15 +551,17 @@ export function usePipeline(workspaceRoot?: string | null) {
     const id = `s-${Date.now()}`;
     runStarted.current = false;
     void (async () => {
-      // 离开当前空白会话时自动删除，避免侧栏堆积从未使用的新会话。
-      if (currentSessionBlank) {
+      const previousId = currentSessionId;
+      const shouldDeleteBlank = currentSessionBlank;
+      await sessionSwitch(id);
+      // 新会话创建成功后再清理旧空白会话，避免删除失败阻塞切换/新建。
+      if (shouldDeleteBlank) {
         try {
-          await sessionDelete(currentSessionId);
+          await sessionDelete(previousId);
         } catch {
           // 非致命：删除失败不阻塞新建会话。
         }
       }
-      await sessionSwitch(id);
     })();
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
@@ -564,20 +571,18 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
-    // 离开空白新会话时自动删除，避免侧栏堆积从未使用的新会话。
-    if (currentSessionBlank && id !== currentSessionId) {
-      try {
-        await sessionDelete(currentSessionId);
-      } catch {
-        // 非致命：删除失败不阻塞切换。
-      }
-    }
+    const previousId = currentSessionId;
+    const shouldDeleteBlank = currentSessionBlank && id !== previousId;
     try {
       const { records } = await sessionSwitch(id);
       // 换会话即换 runtime，运行标记不能带过去。
       runStarted.current = false;
       setCurrentSessionId(id);
       restoreRecords(records, true);
+      // 切换成功后再清理旧空白会话，避免删除失败阻塞切换。
+      if (shouldDeleteBlank) {
+        void sessionDelete(previousId).catch(() => {});
+      }
     } catch (err) {
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       setViewModel((prev) => ({

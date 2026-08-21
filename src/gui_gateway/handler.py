@@ -111,8 +111,9 @@ def _rmtree_force(path: Path) -> None:
     shutil.rmtree(path)
 
 
-async def _rmtree_when_released(path: Path, attempts: int = 5) -> None:
-    """删除目录树；Windows 句柄释放有延迟，短暂重试后再放弃。"""
+async def _rmtree_when_released(path: Path, attempts: int = 10) -> None:
+    """删除目录树；Windows 句柄释放有延迟，按退避重试足够久后再放弃。"""
+    delay = 0.1
     for attempt in range(attempts):
         try:
             _rmtree_force(path)
@@ -120,7 +121,8 @@ async def _rmtree_when_released(path: Path, attempts: int = 5) -> None:
         except PermissionError:
             if attempt == attempts - 1:
                 raise
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 0.5)
 
 
 class GuiRequestHandler:
