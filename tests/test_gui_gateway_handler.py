@@ -1,4 +1,6 @@
 import asyncio
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -215,6 +217,25 @@ async def test_handler_session_delete_current_swaps_to_default_first(tmp_path) -
     assert not state_root.exists()
     assert len(created) == 2
     assert created[1] == (str(tmp_path), None)
+
+
+@pytest.mark.asyncio
+async def test_handler_session_delete_removes_readonly_git_objects(
+    tmp_path,
+) -> None:
+    """删除会话时能清掉 Git 对象文件的只读属性（Windows WinError 5）。"""
+    handler = _handler_at(tmp_path)
+    state_root = tmp_path / ".athena" / "conversations" / "s-1"
+    obj_dir = state_root / "repo" / ".git" / "objects" / "ab"
+    obj_dir.mkdir(parents=True)
+    obj = obj_dir / "cdef1234"
+    obj.write_text("git object", encoding="utf-8")
+    os.chmod(obj, stat.S_IREAD)
+
+    result = await handler.dispatch("session_delete", {"session_id": "s-1"})
+
+    assert result["deleted"] is True
+    assert not state_root.exists()
 
 
 @pytest.mark.asyncio

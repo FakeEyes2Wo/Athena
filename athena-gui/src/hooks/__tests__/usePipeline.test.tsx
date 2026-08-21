@@ -88,6 +88,9 @@ describe("usePipeline", () => {
       content: "analyze this CSV",
     });
     expect(result.current.viewModel.messages[1].preview?.primary_metric).toBe("f1_macro");
+    // 发送即启动：拿到任务理解后应自动调用 start_search。
+    expect(bridgeMocks.startSearch).toHaveBeenCalledWith({ task: "analyze this CSV" });
+    expect(result.current.viewModel.status).toBe("running");
   });
 
   it("updates run state and context surface controls through the exposed API", async () => {

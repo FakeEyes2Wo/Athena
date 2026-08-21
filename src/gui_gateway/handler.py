@@ -7,7 +7,9 @@ transport, which subscribes to runtime ``state``/``output`` events directly.
 
 import asyncio
 import logging
+import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Any
 from collections.abc import Callable
@@ -99,11 +101,21 @@ def _session_state_root(project_root: Path, session_id: str) -> Path | None:
     return project_root / ".athena" / "conversations" / session_id
 
 
+def _rmtree_force(path: Path) -> None:
+    """删除目录树；先清除只读属性（Windows Git 对象文件），再删除。"""
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            os.chmod(os.path.join(root, name), stat.S_IWRITE)
+        for name in dirs:
+            os.chmod(os.path.join(root, name), stat.S_IWRITE)
+    shutil.rmtree(path)
+
+
 async def _rmtree_when_released(path: Path, attempts: int = 5) -> None:
     """删除目录树；Windows 句柄释放有延迟，短暂重试后再放弃。"""
     for attempt in range(attempts):
         try:
-            shutil.rmtree(path)
+            _rmtree_force(path)
             return
         except PermissionError:
             if attempt == attempts - 1:

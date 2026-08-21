@@ -351,6 +351,30 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   // User actions.
 
+  const startRun = useCallback(async (task?: string, messageId?: string) => {
+    runStarted.current = true;
+    setViewModel((prev) => ({
+      ...prev,
+      phase: "PREPARE",
+      status: "running",
+      messages: prev.messages.map((m) =>
+        m.id === messageId ? { ...m, started: true } : m,
+      ),
+    }));
+    try {
+      // 原始任务文本即后端 start_search 所需的 `task`；task understanding 只用于展示与标题。
+      await startSearch({ task });
+    } catch (err) {
+      // start_search 失败 → 阶段机没起来，重置运行标记。
+      runStarted.current = false;
+      setViewModel((prev) => ({
+        ...prev,
+        status: "error",
+      }));
+      throw err;
+    }
+  }, []);
+
   const sendPrompt = useCallback(async (msg: string) => {
     const content = msg.trim();
     if (!content) return;
@@ -444,12 +468,13 @@ export function usePipeline(workspaceRoot?: string | null) {
       const preview = await sendMessage(content);
       // 根据 task understanding 结果给当前会话一个标题（类似 Claude Code）。
       renameSession(currentSessionId, titleFromTask(preview));
+      const previewId = nextId("preview");
       setViewModel((prev) => ({
         ...prev,
         messages: [
           ...prev.messages,
           {
-            id: nextId("preview"),
+            id: previewId,
             role: "athena",
             kind: "intent-preview",
             content: preview.title || `任务类型: ${preview.task_type} · 主指标: ${preview.primary_metric}`,
@@ -458,6 +483,8 @@ export function usePipeline(workspaceRoot?: string | null) {
           },
         ],
       }));
+      // 发送即启动：拿到任务理解后直接进入 PREPARE，不再要求用户二次确认。
+      await startRun(content, previewId);
     } catch (err) {
       const text = errorMessage(err);
       setViewModel((prev) => ({
@@ -472,31 +499,7 @@ export function usePipeline(workspaceRoot?: string | null) {
     } finally {
       setAwaitingIntent(false);
     }
-  }, [currentSessionId, nextId, renameSession, viewModel]);
-
-  const startRun = useCallback(async (task?: string, messageId?: string) => {
-    runStarted.current = true;
-    setViewModel((prev) => ({
-      ...prev,
-      phase: "PREPARE",
-      status: "running",
-      messages: prev.messages.map((m) =>
-        m.id === messageId ? { ...m, started: true } : m,
-      ),
-    }));
-    try {
-      // 原始任务文本即后端 start_search 所需的 `task`；task understanding 只用于展示与标题。
-      await startSearch({ task });
-    } catch (err) {
-      // start_search 失败 → 阶段机没起来，重置运行标记。
-      runStarted.current = false;
-      setViewModel((prev) => ({
-        ...prev,
-        status: "error",
-      }));
-      throw err;
-    }
-  }, []);
+  }, [currentSessionId, nextId, renameSession, startRun, viewModel]);
 
   const pauseRun = useCallback(async () => {
     await pauseSearch();
