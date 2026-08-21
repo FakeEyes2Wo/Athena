@@ -136,6 +136,13 @@ async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> 
 
     assert runtime._started is True
     assert runtime._task is not None
+    for _ in range(50):
+        if any(
+            "断点续传：复用已持久化的任务理解" in str(output.get("text"))
+            for output in outputs
+        ):
+            break
+        await asyncio.sleep(0.01)
     assert any(
         "断点续传：复用已持久化的任务理解" in str(output.get("text"))
         for output in outputs

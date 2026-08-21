@@ -770,9 +770,15 @@ class ResearchRuntime:
         if self.state.status == "IDLE":
             self.state.status = "RUNNING"
             self.state.save(self._state_path)
-        await self._maybe_run_task_understanding()
-        self._task = asyncio.create_task(self._supervisor.start())
         self._started = True
+
+        async def _run_lifecycle() -> None:
+            # 任务理解也放进可取消的后台任务：否则 start_search RPC 会一直占住
+            # 网关，pause/stop 根本进不来，且 self._task 还不存在、无法取消。
+            await self._maybe_run_task_understanding()
+            await self._supervisor.start()
+
+        self._task = asyncio.create_task(_run_lifecycle())
         return self._task
 
     def _start_survey(self) -> None:

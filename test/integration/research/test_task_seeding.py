@@ -137,6 +137,14 @@ async def test_start_task_reuses_persisted_task_understanding(
         assert status == "RUNNING"
         assert runtime._task_text == "predict titanic survival"
         assert runs == []
+        for _ in range(50):
+            if any(
+                kind == "output"
+                and "断点续传：复用已持久化的任务理解" in str(payload.get("text"))
+                for kind, payload in events
+            ):
+                break
+            await asyncio.sleep(0.01)
         assert any(
             kind == "output"
             and "断点续传：复用已持久化的任务理解" in str(payload.get("text"))
