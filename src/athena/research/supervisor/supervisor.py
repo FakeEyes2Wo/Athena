@@ -122,9 +122,6 @@ class Supervisor(SupervisorActions):
         publish_agent_event: PublishAgentEvent | None = None,
         on_plan_settled: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        # Plan 结算回调。租约必须在这时归还——等到 runtime 关闭才还，等于每个跑完的
-        # Plan 都继续占着一张卡，池子会在第 N 个实验上无谓地耗尽。
-        self._on_plan_settled = on_plan_settled
         self._project_root = Path(project_root)
         _athena = (
             Path(state_root)
@@ -154,6 +151,9 @@ class Supervisor(SupervisorActions):
         self._run_prepare_phase = run_prepare_phase
         self._run_validation_phase = run_validation_phase
         self._publish_agent_event = publish_agent_event
+        # Plan 结算回调。租约必须在这时归还——等到 runtime 关闭才还，等于每个跑完的
+        # Plan 都继续占着一张卡，池子会在第 N 个实验上无谓地耗尽。
+        self._on_plan_settled = on_plan_settled
         self._branches: dict[str, GitWorkBranch] = {}
         self._next_guidance: str | None = None
         self._persistent_guidance: list[str] = []

@@ -13,6 +13,7 @@
 行为一致。
 """
 
+import asyncio
 import hashlib
 import os
 import shlex
@@ -55,6 +56,12 @@ SSH_OPTIONS: tuple[str, ...] = (
     "-o",
     "ExitOnForwardFailure=yes",
 )
+
+# 转发到远端的宿主环境变量：几乎为空。
+#
+# 本地那份白名单（PATH/HOME/TEMP/UV_CACHE_DIR/SSL_CERT_FILE…）在远端全是无效路径，
+# SSL_CERT_FILE 还会让远端 TLS 直接失败。语言环境是唯一无害且有用的一类。
+_FORWARDED_HOST_VARS: frozenset[str] = frozenset({"LANG", "LC_ALL", "LC_CTYPE"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,15 +115,15 @@ class SshTransport:
 
     @property
     def description(self) -> str:
+        """连接描述：走的是哪个 ssh 别名。"""
         return f"ssh:{self._host.alias}"
 
     def diagnostics(self) -> str:
         """ssh 自己的 stderr——认证失败、连不上、远端 shell 报错都只在这里。"""
         return self._stderr.text()
 
-    async def start(self):
-        import asyncio
-
+    async def start(self) -> tuple[asyncio.StreamWriter, asyncio.StreamReader]:
+        """起 ssh 进程，返回它的 ``(stdin, stdout)``。"""
         argv = self._host.ssh_argv()
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -131,6 +138,7 @@ class SshTransport:
         return self._proc.stdin, self._proc.stdout
 
     async def stop(self) -> None:
+        """杀掉 ssh 进程。远端 stdin 因此 EOF，它会自己清场。"""
         proc = self._proc
         if proc is None:
             return
@@ -142,13 +150,6 @@ class SshTransport:
             except ProcessLookupError:
                 pass
         await proc.wait()
-
-
-# 转发到远端的宿主环境变量：几乎为空。
-#
-# 本地那份白名单（PATH/HOME/TEMP/UV_CACHE_DIR/SSL_CERT_FILE…）在远端全是无效路径，
-# SSL_CERT_FILE 还会让远端 TLS 直接失败。语言环境是唯一无害且有用的一类。
-_FORWARDED_HOST_VARS: frozenset[str] = frozenset({"LANG", "LC_ALL", "LC_CTYPE"})
 
 
 class SshBackend:
@@ -179,6 +180,8 @@ class SshBackend:
         self._data_root = remote_data_root
         self._gpu_ids = gpu_ids
         self._store = store
+        # 本地工作区根，由 bind_local_root 设定；用来把 workdir 折算成远端路径。
+        self._local_workspace = Path.cwd()
 
     @property
     def name(self) -> str:
@@ -187,7 +190,7 @@ class SshBackend:
 
     @property
     def facts(self) -> dict[str, Any]:
-        """远端握手时报上来的事实（os/python/uv/GPU 列表）。"""
+        """远端握手时报上来的事实（os/shell/python/PATH/现成包/GPU 列表）。"""
         return dict(self._channel.ready)
 
     @property
@@ -218,6 +221,7 @@ class SshBackend:
         这正是那条不变式的落点：本机是 Windows/PowerShell，这里必须说 Linux/bash，
         否则模型会给 bash 写 PowerShell，而报错只会显示成语法错误。
         """
+        del workspace_root  # 远端工作区由租约给定，本地根在这里没有意义
         facts = self._channel.ready
         python = facts.get("python") or "missing"
         lines = [
@@ -335,8 +339,6 @@ class SshBackend:
         emit: EmitEvent | None = None,
     ) -> CommandResult:
         """在远端执行一条命令，流式回传输出，超时/取消都杀整个进程组。"""
-        import asyncio
-
         del workspace_root  # 远端路径由镜像决定，本地根在这里没有意义
         cwd = self._remote_cwd(workdir)
         display = " ".join(argv) if argv is not None else (command or "")
@@ -353,6 +355,7 @@ class SshBackend:
         pending: list[asyncio.Task] = []
 
         def on_output(fd: int, block: bytes) -> None:
+            """收下远端的一块原始输出：进 hash、进有界缓冲、流给上层。"""
             # 远端固定 UTF-8：不套用本地代码页回退，那是控制节点的事。
             digest.update(block)
             text = block.decode("utf-8", "replace")
@@ -424,15 +427,12 @@ class SshBackend:
         """把本地 workdir 折算成远端路径（工作区之外的一律落回工作区根）。"""
         try:
             relative = (
-                Path(workdir).resolve().relative_to(Path(self._local_root()).resolve())
+                Path(workdir).resolve().relative_to(self._local_workspace.resolve())
             )
         except (ValueError, OSError):
+            # workdir 不在工作区里 / 路径解析不了 → 落回工作区根，不猜
             return str(self._workspace)
         return str(self._workspace / PurePosixPath(relative.as_posix()))
-
-    def _local_root(self) -> Path:
-        """本地工作区根；由 ``bind_local_root`` 设定。"""
-        return getattr(self, "_local_workspace", Path.cwd())
 
     def bind_local_root(self, local_root: Path) -> None:
         """记住本地工作区根，用于把 workdir 折算成远端路径。"""

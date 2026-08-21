@@ -139,6 +139,7 @@ class _HostState:
     datasets: set[str] = field(default_factory=set)
 
     def free_gpus(self) -> list[int]:
+        """本机当前空闲的卡号（配置声明过就以声明为准，否则用探测到的）。"""
         if self.card is None:
             return []
         declared = self.host.gpus
@@ -172,7 +173,6 @@ class GpuPool:
         self._store = store
         self._transport_factory = transport_factory or SshTransport
         self._leases: dict[str, Lease] = {}
-        self._channels: dict[str, RemoteChannel] = {}
         self._lock = asyncio.Lock()
         self._freed = asyncio.Condition(self._lock)
 
@@ -305,16 +305,17 @@ class GpuPool:
         # 下这一笔以小时计，而 pack/spread 的差别只是几个百分点的利用率。
         # 与 homogeneous 不冲突——同型号的过滤已经在上面的候选筛选里做完了，这里只在
         # 同型号的机器之间按「有没有数据」排序（分发只是慢，异构是结果不可比）。
-        cold = (
-            (lambda state: self._dataset.dataset_id not in state.datasets)
+        cold = {
+            state.host.name
+            for state in candidates
             if self._dataset is not None
-            else (lambda state: False)
-        )
+            and self._dataset.dataset_id not in state.datasets
+        }
         if self._placement == "spread":
-            candidates.sort(key=lambda s: (cold(s), s.leases, s.host.name))
+            candidates.sort(key=lambda s: (s.host.name in cold, s.leases, s.host.name))
         else:
             # pack / homogeneous：先把一台机器用满，留出整台空机给需要多卡的实验。
-            candidates.sort(key=lambda s: (cold(s), -s.leases, s.host.name))
+            candidates.sort(key=lambda s: (s.host.name in cold, -s.leases, s.host.name))
         chosen = candidates[0]
         return chosen, chosen.free_gpus()[:gpus]
 
@@ -332,7 +333,6 @@ class GpuPool:
 
         channel = RemoteChannel(self._transport_factory(host))
         await channel.open()
-        self._channels[plan_id] = channel
         inner = SshBackend(
             host,
             channel=channel,
@@ -381,7 +381,6 @@ class GpuPool:
     async def release(self, plan_id: str) -> None:
         """归还租约：删掉远端工作区、关通道（远端因此清场）、把卡放回池子。"""
         lease = self._leases.pop(plan_id, None)
-        self._channels.pop(plan_id, None)
         if lease is None:
             return
         try:

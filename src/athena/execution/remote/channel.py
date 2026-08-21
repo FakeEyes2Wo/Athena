@@ -16,7 +16,7 @@ import asyncio
 import base64
 import json
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -47,6 +47,9 @@ TRANSFER_WINDOW = 16
 # RTT）。文件之间互不相干，并发是安全的；这里给的是并发上限，不是并发度。
 TRANSFER_FILES = 4
 
+# 保留多少 stderr 用于解释掉线。够放下 ssh 的几行报错和一个 Python traceback。
+DIAGNOSTIC_TAIL_BYTES = 4096
+
 
 class RemoteError(RuntimeError):
     """远端把一个请求判成失败。"""
@@ -73,10 +76,6 @@ class RemoteTransport(Protocol):
         而它们的处置方式完全不同。
         """
         return ""
-
-
-# 保留多少 stderr 用于解释掉线。够放下 ssh 的几行报错和一个 Python traceback。
-DIAGNOSTIC_TAIL_BYTES = 4096
 
 
 class StderrTail:
@@ -130,12 +129,15 @@ class SubprocessTransport:
 
     @property
     def description(self) -> str:
+        """连接描述：本地跑的是哪个解释器。"""
         return f"subprocess:{self._python}"
 
     def diagnostics(self) -> str:
+        """子进程自己的 stderr——远端 agent 起不来时原因只在这里。"""
         return self._stderr.text()
 
     async def start(self) -> tuple[asyncio.StreamWriter, asyncio.StreamReader]:
+        """起本地子进程，返回它的 ``(stdin, stdout)``。"""
         self._proc = await asyncio.create_subprocess_exec(
             self._python,
             "-u",
@@ -151,6 +153,7 @@ class SubprocessTransport:
         return self._proc.stdin, self._proc.stdout
 
     async def stop(self) -> None:
+        """杀掉子进程并等它收尸。"""
         proc = self._proc
         if proc is None:
             return
@@ -288,8 +291,6 @@ class RemoteChannel:
                 pass
         self._fail_pending(RemoteError("remote channel closed"))
 
-    # ---------------------------------------------------------------- 请求
-
     async def request(self, op: str, **fields: Any) -> dict:
         """发一条请求并等它的终结响应（``ok`` / 该 op 自己的结果 / ``error``）。"""
         future = await self.send(op, **fields)
@@ -347,14 +348,13 @@ class RemoteChannel:
         await self.request("cancel", target=job_id)
 
     async def read_file(self, path: str) -> bytes:
-        """把远端的一个文件整读回来。"""
-        request_id = self._next_id()
-        future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
-        self._pending[request_id] = future
-        self._collect[request_id] = []
-        await self._send({"op": "get", "id": request_id, "path": path})
-        await future
-        return b"".join(self._collect.pop(request_id, []))
+        """把远端的一个文件整读回来。
+
+        分块经 ``chunk`` 消息先到、``ok`` 最后到，所以是"等终结响应，再把攒下的
+        块拼起来"。终结响应里带着自己的 ``id``，不必在这里另记一份。
+        """
+        reply = await self.request("get", path=path)
+        return b"".join(self._collect.pop(reply.get("id"), []))
 
     async def _write_blocks(
         self,
@@ -421,6 +421,7 @@ class RemoteChannel:
         limit = agent_module.CHUNK_BYTES
 
         async def blocks() -> AsyncIterator[bytes]:
+            """把内存里的字节切成远端一次收得下的块。"""
             for start in range(0, len(data), limit):
                 yield data[start : start + limit]
 
@@ -437,6 +438,7 @@ class RemoteChannel:
         limit = agent_module.CHUNK_BYTES
 
         async def blocks() -> AsyncIterator[bytes]:
+            """一块一块地读文件；读盘放线程里，不挡事件循环。"""
             handle = await asyncio.to_thread(open, source, "rb")
             try:
                 while True:
@@ -449,7 +451,23 @@ class RemoteChannel:
 
         return await self._write_blocks(path, blocks(), executable=executable)
 
-    # ---------------------------------------------------------------- 内部
+    async def send_files(self, pairs: Iterable[tuple[str, Path]]) -> None:
+        """并发把若干个本地文件推到各自的远端路径。
+
+        文件之间互不相干，并发是安全的；串行的代价是每个文件一次往返——真机上
+        50 个小文件 1.69 s，正好 34 ms 一个，就是一个 RTT。
+
+        并发**有上界**：每个文件都在流式推（不整读进内存），但每份各占一个传输
+        窗口，无界并发会把内存和管道缓冲一起吃掉。
+        """
+        semaphore = asyncio.Semaphore(TRANSFER_FILES)
+
+        async def one(remote: str, source: Path) -> None:
+            """推一个文件，但先排队拿到并发名额。"""
+            async with semaphore:
+                await self.send_file(remote, source)
+
+        await asyncio.gather(*(one(remote, source) for remote, source in pairs))
 
     def _next_id(self) -> str:
         self._counter += 1
@@ -462,11 +480,6 @@ class RemoteChannel:
         async with self._write_lock:
             self._writer.write(line)
             await self._writer.drain()
-
-    def _resolve(self, key: str, payload: dict) -> None:
-        future = self._pending.pop(key, None)
-        if future is not None and not future.done():
-            future.set_result(payload)
 
     def _fail_pending(self, error: Exception) -> None:
         for future in list(self._pending.values()):
@@ -526,27 +539,31 @@ class RemoteChannel:
         if op in ("ready", "fatal"):
             # fatal 也走 ready 的 future：握手要么成功要么带着原因立刻失败，
             # 不能让调用方在超时上等满一分钟才知道远端根本不是 POSIX。
-            self._resolve("@ready", message)
-            return
-        if op == "out":
+            message_id = "@ready"
+        elif op == "out":
             callback = self._streams.get(message_id)
             if callback is not None:
                 callback(int(message.get("fd", 1)), base64.b64decode(message["b64"]))
             return
-        if op == "chunk":
+        elif op == "chunk":
             self._collect.setdefault(message_id, []).append(
                 base64.b64decode(message["b64"])
             )
             return
-        if op == "exit":
+        elif op == "exit":
             self._streams.pop(message_id, None)
-            future = self._exits.pop(message_id, None)
-            if future is not None and not future.done():
-                future.set_result(int(message.get("code", -1)))
+            exited = self._exits.pop(message_id, None)
+            if exited is not None and not exited.done():
+                exited.set_result(int(message.get("code", -1)))
+            return
+        # 剩下的都是某条请求的终结响应：ok / 该 op 自己的结果 / error。
+        future = self._pending.pop(message_id, None)
+        if future is None or future.done():
             return
         if op == "error":
-            future = self._pending.pop(message_id, None)
-            if future is not None and not future.done():
-                future.set_exception(RemoteError(message.get("error", "remote error")))
-            return
-        self._resolve(message_id, message)
+            # 失败的 get 不会再有块到来；攒了一半的那些跟着走，否则常驻通道上
+            # 每失败一次就漏一份。
+            self._collect.pop(message_id, None)
+            future.set_exception(RemoteError(message.get("error", "remote error")))
+        else:
+            future.set_result(message)

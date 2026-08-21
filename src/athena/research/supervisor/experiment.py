@@ -8,8 +8,8 @@
 
 import json
 import os
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal, TypeVar
 
 from pydantic import (
@@ -316,10 +316,6 @@ class PlanRunner:
         # 会永远得到一份空清单。
         self._placement = placement
 
-    def _placement_block(self) -> dict[str, Any] | None:
-        """取当前的 placement 记录（本地算力时为 None）。"""
-        return None if self._placement is None else self._placement()
-
     @property
     def workdir(self) -> Path:
         """Plan workspace 根（manifest 所在目录）。"""
@@ -434,9 +430,8 @@ class PlanRunner:
             "report_ref": report_ref,
             "outputs": manifest.outputs,
         }
-        placement = self._placement_block()
-        if placement is not None:
-            evidence["placement"] = placement
+        if self._placement is not None:
+            evidence["placement"] = self._placement()
         evidence_ref = await self._store.put_text(
             json.dumps(evidence, ensure_ascii=False)
         )
@@ -481,10 +476,9 @@ class PlanRunner:
             "error": cleaned,
             "predictions_ref": predictions_ref,
         }
-        placement = self._placement_block()
-        if placement is not None:
+        if self._placement is not None:
             # 失败也可能是"这台机器/这张卡"的问题，同样要能追溯到硬件。
-            evidence["placement"] = placement
+            evidence["placement"] = self._placement()
         evidence_ref = await self._store.put_text(
             json.dumps(evidence, ensure_ascii=False)
         )

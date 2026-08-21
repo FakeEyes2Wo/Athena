@@ -52,6 +52,13 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 |---|---|---|
 | [Kaggle 接入与 Supervisor 人类门](kaggle_supervisor_gate_ch.md) | current | 下载/预算/VALIDATE 三个门、假设监控、每 Agent 最少 Kaggle 工具 |
 
+## Compute Resources（远程 GPU 执行）
+
+| 文档 | 状态 | 用途 |
+|---|---|---|
+| [Compute Resources 设计](compute-resources-design.md) | current | 当前设计：协议缝、租约、常驻通道、镜像、数据分发、限制、测试与后续需求 |
+| [远程 GPU 执行：需求分析与架构设计](architecture/2026-08-19-remote-gpu-execution-design.md) | current | 需求分析、备选方案、实现记录与真机验收（历史） |
+
 ## 维护规则
 
 Canonical model owners are `athena.core.contracts`,

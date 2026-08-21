@@ -34,6 +34,18 @@ def test_hosts_are_ssh_config_aliases_not_user_at_host() -> None:
         )
 
 
+def test_a_malformed_host_entry_says_which_one_and_what_is_wrong() -> None:
+    """报错要指名道姓到第几条主机，否则十来台机器的配置只能逐条试。"""
+    with pytest.raises(
+        ComputeConfigError, match=r"compute\.hosts\[1\] must be a table"
+    ):
+        parse_compute_config(
+            {"mode": "ssh", "hosts": [{"name": "a", "ssh": "a"}, "gpu-02"]}
+        )
+    with pytest.raises(ComputeConfigError, match=r"compute\.hosts\[0\].+'name'"):
+        parse_compute_config({"mode": "ssh", "hosts": [{"ssh": "gpu01.lab"}]})
+
+
 def test_silent_fallback_is_not_an_option() -> None:
     with pytest.raises(ComputeConfigError, match="silent local fallback"):
         parse_compute_config({"mode": "ssh", "fallback": "silent", "hosts": []})

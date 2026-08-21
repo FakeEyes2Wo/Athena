@@ -2,23 +2,23 @@
 
 import argparse
 import asyncio
-from dataclasses import replace
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from athena.core.agent import settings
-from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
-from athena.research import ResearchRuntime
 from athena.execution.check import check_compute, print_compute_check
 from athena.execution.compute_config import (
     ComputeConfig,
     ComputeConfigError,
     load_compute_config,
 )
-from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
+from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
+from athena.research import ResearchRuntime
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.survey import (
     SurveyRequest,
     build_survey_stack,
@@ -140,6 +140,7 @@ class _EventRenderer:
         self._agent_plan = None
 
     def render(self, kind: str, payload: dict[str, object]) -> None:
+        """把一条事件打到 stdout（agent 的文本分片先攒成整行再打）。"""
         if kind == "output":
             source = payload.get("source", "runtime")
             channel = payload.get("channel", "text")
@@ -178,6 +179,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     renderer = _EventRenderer()
 
     def receive(kind: str, payload: dict[str, object]) -> None:
+        """渲染事件，并在终态上唤醒等待。"""
         nonlocal exit_code
         renderer.render(kind, payload)
         if kind != "state":
@@ -214,6 +216,7 @@ async def _cmd_status(args: argparse.Namespace) -> int:
     snapshot: dict[str, object] = {}
 
     def receive(kind: str, payload: dict[str, object]) -> None:
+        """只留下状态快照，其余事件不打印。"""
         if kind == "state":
             snapshot.update(payload)
 
@@ -621,6 +624,7 @@ def _add_kaggle_parser(subparsers) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """命令行入口：解析参数、跑对应子命令，返回退出码。"""
     parser = _build_parser()
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     return asyncio.run(_dispatch_command(args))

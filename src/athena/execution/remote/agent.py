@@ -35,6 +35,12 @@ import subprocess
 import sys
 import threading
 
+try:
+    import importlib.metadata as metadata
+except ImportError:
+    # python3 < 3.8：报不出包版本，其余功能照常
+    metadata = None
+
 PROTOCOL_VERSION = 1
 
 # 一次回传的最大原始字节数。太小则消息数爆炸，太大则一条日志行卡住整条通道。
@@ -330,15 +336,13 @@ def _packages():
     只读发行元数据，**不 import**：``import torch`` 要好几秒，还会初始化 CUDA
     上下文、在一张我们还没租出去的卡上占住显存。
     """
-    try:
-        import importlib.metadata as metadata
-    except ImportError:
+    if metadata is None:
         return {}
     found = {}
     for name in _SURVEYED_PACKAGES:
         try:
             found[name] = metadata.version(name)
-        except Exception:
+        except Exception:  # 没装（PackageNotFoundError）或元数据坏了：当作没有
             continue
     return found
 
@@ -502,6 +506,7 @@ def _shutdown():
 
 
 def main():
+    """握手 → 一行一条 JSON 地处理请求，直到 stdin EOF。"""
     _send({"op": "ready", "protocol": PROTOCOL_VERSION, "pid": os.getpid()})
     try:
         for raw in sys.stdin.buffer:

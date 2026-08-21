@@ -52,6 +52,37 @@ def _require(section: dict, key: str, where: str) -> object:
     return section[key]
 
 
+def _parse_host(entry: object, where: str) -> SshHost:
+    """解析一条 ``[[compute.hosts]]``。"""
+    if not isinstance(entry, dict):
+        raise ComputeConfigError(f"{where} must be a table")
+    alias = str(_require(entry, "ssh", where))
+    if "@" in alias:
+        # 别名而不是 user@host：连接的复杂度归 ssh_config，配置里不出现凭据。
+        raise ComputeConfigError(
+            f"{where}.ssh must be a Host alias from ~/.ssh/config, not "
+            f"'user@host' ({alias!r}); connection details belong in ssh_config"
+        )
+    declared = entry.get("gpus", "auto")
+    if declared == "auto":
+        gpus: tuple[int, ...] | None = None
+    elif isinstance(declared, list) and all(isinstance(i, int) for i in declared):
+        gpus = tuple(declared)
+    else:
+        raise ComputeConfigError(
+            f'{where}.gpus must be "auto" or a list of GPU indices'
+        )
+    return SshHost(
+        name=str(_require(entry, "name", where)),
+        alias=alias,
+        scratch=str(entry.get("scratch", "/scratch/athena")),
+        python=str(entry.get("python", "python3")),
+        gpus=gpus,
+        max_leases=int(entry.get("max_leases", 1)),
+        options=tuple(str(item) for item in entry.get("ssh_options") or ()),
+    )
+
+
 def parse_compute_config(payload: dict | None) -> ComputeConfig:
     """把 ``config.toml`` 的 ``[compute]`` 节解析成配置对象。"""
     if not payload:
@@ -72,40 +103,10 @@ def parse_compute_config(payload: dict | None) -> ComputeConfig:
             "silent local fallback is not an option by design"
         )
 
-    hosts: list[SshHost] = []
-    for index, entry in enumerate(payload.get("hosts") or []):
-        where = f"compute.hosts[{index}]"
-        if not isinstance(entry, dict):
-            raise ComputeConfigError(f"{where} must be a table")
-        name = str(_require(entry, "name", where))
-        alias = str(_require(entry, "ssh", where))
-        if "@" in alias:
-            raise ComputeConfigError(
-                f"{where}.ssh must be a Host alias from ~/.ssh/config, not "
-                f"'user@host' ({alias!r}); connection details belong in ssh_config"
-            )
-        declared = entry.get("gpus", "auto")
-        if declared == "auto":
-            gpus: tuple[int, ...] | None = None
-        elif isinstance(declared, list) and all(
-            isinstance(item, int) for item in declared
-        ):
-            gpus = tuple(declared)
-        else:
-            raise ComputeConfigError(
-                f'{where}.gpus must be "auto" or a list of GPU indices'
-            )
-        hosts.append(
-            SshHost(
-                name=name,
-                alias=alias,
-                scratch=str(entry.get("scratch", "/scratch/athena")),
-                python=str(entry.get("python", "python3")),
-                gpus=gpus,
-                max_leases=int(entry.get("max_leases", 1)),
-                options=tuple(str(item) for item in entry.get("ssh_options") or ()),
-            )
-        )
+    hosts = [
+        _parse_host(entry, f"compute.hosts[{index}]")
+        for index, entry in enumerate(payload.get("hosts") or [])
+    ]
     if mode == "ssh" and not hosts:
         raise ComputeConfigError(
             "compute.mode is 'ssh' but no [[compute.hosts]] are configured"

@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import base64
 import sys
 from pathlib import Path
 
@@ -300,7 +301,7 @@ async def test_remote_and_local_manifests_agree(channel, tmp_path) -> None:
         assert remote[key].size == entry.size
 
 
-# ------------------------------------------------------ 引导：源码怎么过去的
+# 引导：源码怎么过去的
 
 
 def test_the_loader_is_small_enough_to_survive_the_ssh_command_line() -> None:
@@ -361,7 +362,7 @@ async def test_a_transport_that_dies_explains_itself(tmp_path) -> None:
         await channel.open()
 
 
-# ------------------------------------------------------ 传输：并行在飞而不是一块一等
+# 传输：并行在飞而不是一块一等
 
 
 class _HoldPuts:
@@ -555,3 +556,40 @@ async def test_the_mirror_streams_instead_of_slurping(channel, tmp_path) -> None
 
     assert report.uploaded == ("big.bin",)
     assert (tmp_path / "remote" / "big.bin").stat().st_size == 1024 * 1024
+
+
+async def test_a_read_that_dies_midway_does_not_leave_chunks_behind(channel) -> None:
+    """读到一半失败时，攒下的块必须跟着那次请求一起走。
+
+    ``get`` 的分块先到、终结响应后到，所以块要先攒在通道上。远端读到一半才出错
+    （磁盘错误、文件被换掉）时，前面那些块再也没人来取——而常驻通道一跑就是几十
+    上百条命令，漏的是文件内容本身，不是几个字节的记账。
+
+    这里直接喂派发器：让远端真的在读到一半时失败很难，但"块先到、error 后到"
+    正是要守住的那个次序。
+    """
+    pending = asyncio.get_running_loop().create_future()
+    channel._pending["r-dying"] = pending
+    channel._dispatch(
+        {"op": "chunk", "id": "r-dying", "b64": base64.b64encode(b"half").decode()}
+    )
+    assert channel._collect["r-dying"] == [b"half"]
+
+    channel._dispatch({"op": "error", "id": "r-dying", "error": "disk went away"})
+    with pytest.raises(RemoteError, match="disk went away"):
+        await pending
+    assert "r-dying" not in channel._collect
+
+
+async def test_a_read_that_never_starts_reports_the_remote_error(channel) -> None:
+    """远端打不开文件时要抛，而不是安静地返回空字节。"""
+    with pytest.raises(RemoteError):
+        await channel.read_file("/definitely/not/here.bin")
+
+
+async def test_reading_a_file_returns_exactly_what_was_written(channel, tmp_path):
+    """整读回来的字节必须一字不差——分块拼接是这条路径唯一容易出错的地方。"""
+    payload = bytes(range(256)) * 900  # 跨多个 CHUNK_BYTES 块
+    target = tmp_path / "blob.bin"
+    await channel.write_file(str(target), payload)
+    assert await channel.read_file(str(target)) == payload

@@ -534,6 +534,7 @@ class _StreamDecoder:
         self._decoder = None  # 编码判定后启用的增量解码器
 
     def decode(self, raw: bytes, final: bool = False) -> str:
+        """增量解码一块字节；编码尚未判定时先缓冲并返回空串。"""
         if self._decoder is not None:
             return self._decoder.decode(raw, final=final)
         self._buf.extend(raw)
@@ -697,6 +698,7 @@ class CommandExecutor:
             decoder = _StreamDecoder(self._fallback_encoding)
 
             async def emit_decoded(text: str) -> None:
+                """把解码好的一段推给上层，同时进有界缓冲。"""
                 if not text:
                     return
                 await _dispatch(emit, kind, "exec:out", {"delta": text})
@@ -788,10 +790,9 @@ class ExecutionRuntime:
             else self._project_root
         )
         self._data_root = Path(data_root) if data_root is not None else None
-        self._store = store
         if backend is None:
-            # 延迟导入避免循环依赖：backend 需要本模块的 EnvironmentManager/CommandExecutor
-            from athena.execution.backend import LocalBackend
+            # backend 需要本模块的 EnvironmentManager/CommandExecutor
+            from athena.execution.backend import LocalBackend  # 延迟导入避免循环依赖
 
             backend = LocalBackend(
                 project_root=self._project_root,

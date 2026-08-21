@@ -18,7 +18,7 @@ from typing import Any
 
 from athena.execution.compute_config import ComputeConfig
 from athena.execution.remote.channel import RemoteChannel
-from athena.execution.remote.dataset import DatasetSpec
+from athena.execution.remote.dataset import DatasetSpec, describe_dataset
 from athena.execution.remote.ssh import SshBackend, SshHost, SshTransport
 
 
@@ -109,11 +109,17 @@ async def _check_host(host: SshHost, transport_factory) -> HostCheck:
             remote_data_root=str(scratch / "data" / "<dataset>"),
             gpu_ids=gpu_ids,
         )
+        if not facts.get("python"):
+            shortfall = "no python on the host"
+        elif not facts.get("gpus"):
+            shortfall = "nvidia-smi reported no GPUs"
+        else:
+            shortfall = ""
         return HostCheck(
             name=host.name,
             alias=host.alias,
-            ok=bool(facts.get("python")) and bool(facts.get("gpus")),
-            error=_shortfall(facts),
+            ok=not shortfall,
+            error=shortfall,
             facts=dict(facts),
             runtime_block=backend.describe(host.scratch),
             leases=leases,
@@ -133,15 +139,6 @@ async def _check_host(host: SshHost, transport_factory) -> HostCheck:
         await channel.close()
 
 
-def _shortfall(facts: dict[str, Any]) -> str:
-    """机器连上了但用不了时，说清楚缺什么。"""
-    if not facts.get("python"):
-        return "no python on the host"
-    if not facts.get("gpus"):
-        return "nvidia-smi reported no GPUs"
-    return ""
-
-
 async def check_compute(
     config: ComputeConfig,
     *,
@@ -151,14 +148,9 @@ async def check_compute(
     """按配置逐台机器自检。**不占用任何卡，也不留下任何东西。**"""
     dataset = None
     if dataset_root is not None:
-        from athena.execution.remote.dataset import describe_dataset
-
         dataset = describe_dataset(dataset_root)
     hosts = [await _check_host(host, transport_factory) for host in config.hosts]
     return ComputeCheck(config=config, hosts=tuple(hosts), dataset=dataset)
-
-
-# ------------------------------------------------------------------ 打印
 
 
 def _human(size: float) -> str:

@@ -50,7 +50,7 @@ async def backend(tmp_path):
         await backend.aclose()
 
 
-# ------------------------------------------------------------------ ssh 命令行
+# ssh 命令行
 
 
 def test_the_ssh_command_line_never_carries_credentials() -> None:
@@ -104,7 +104,7 @@ def test_an_oversized_remote_command_fails_here_not_silently_over_there() -> Non
         host.ssh_argv()
 
 
-# ------------------------------------------------------------------ 后端行为
+# 后端行为
 
 
 def test_the_executor_alone_is_not_a_complete_backend(backend) -> None:
@@ -345,3 +345,32 @@ async def test_a_long_remote_log_keeps_its_tail_and_its_full_copy(
     full = await store.get_text(result.output_ref)
     assert "HEAD-MARK" in full and "TAIL-MARK" in full
     assert full.count("n") >= 5000, "artifact 必须是完整输出，不是被砍过的那份"
+
+
+async def test_a_backend_without_a_bound_local_root_still_runs(tmp_path) -> None:
+    """没调过 ``bind_local_root`` 也要能跑。
+
+    ``compute --check`` 就是这么用的：它建一个后端只为渲染 Runtime 块，从不绑本地
+    根。折算不出远端路径时落回工作区根，而不是在一个从未出现在 ``__init__`` 里的
+    属性上抛 AttributeError——那种错读代码时完全看不出来。
+    """
+    channel = RemoteChannel(SubprocessTransport(sys.executable))
+    await channel.open()
+    workspace = tmp_path / "remote-ws"
+    workspace.mkdir()
+    backend = SshBackend(
+        SshHost(name="gpu-01", alias="gpu01.lab"),
+        channel=channel,
+        remote_workspace=workspace.as_posix(),
+    )
+    try:
+        assert "Runtime:" in backend.describe(tmp_path)
+        result = await backend.run(
+            argv=[sys.executable, "-c", "print('ok')"],
+            workspace_root=tmp_path,
+            workdir=tmp_path / "somewhere-else",
+            timeout_s=30,
+        )
+        assert result.ok and result.stdout.strip() == "ok"
+    finally:
+        await backend.aclose()
