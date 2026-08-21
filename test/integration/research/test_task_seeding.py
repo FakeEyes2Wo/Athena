@@ -148,3 +148,59 @@ async def test_start_task_reuses_persisted_task_understanding(
         )
     finally:
         await _close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_pause_cancels_running_prepare_and_resume_restarts(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    calls = 0
+
+    async def prepare_phase():
+        nonlocal calls
+        calls += 1
+        started.set()
+        await asyncio.Event().wait()  # 一直等，直到被取消
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        prepare_phase=prepare_phase,
+    )
+    try:
+        await runtime.start_task("pause during prepare")
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert runtime._task is not None and not runtime._task.done()
+
+        assert await runtime.message("/pause") == "WAITING"
+        assert runtime._task.done()
+
+        started.clear()
+        assert await runtime.message("/resume") == "RUNNING"
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert calls == 2
+    finally:
+        await _close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_running_prepare(tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    async def prepare_phase():
+        started.set()
+        await asyncio.Event().wait()
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        prepare_phase=prepare_phase,
+    )
+    try:
+        await runtime.start_task("stop during prepare")
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert runtime._task is not None and not runtime._task.done()
+
+        assert await runtime.message("/stop") == "STOPPED"
+        assert runtime._task.done()
+    finally:
+        await _close(runtime)

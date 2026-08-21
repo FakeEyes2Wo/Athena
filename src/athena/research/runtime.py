@@ -985,12 +985,26 @@ class ResearchRuntime:
         """
         command = text.strip()
         if command == "/stop":
-            return await self._supervisor.request_stop()
+            status = await self._supervisor.request_stop()
+            await self._cancel_supervisor_task()
+            return status
         if command == "/pause":
-            return await self._supervisor.pause()
+            status = await self._supervisor.pause()
+            # PREPARE/VALIDATE 没有 SEARCH 那样的调度循环检查点，直接取消阶段任务，
+            # 由 /resume 重新进入阶段机。
+            if self.state.phase in {"PREPARE", "VALIDATE"}:
+                await self._cancel_supervisor_task()
+            return status
         if command == "/resume":
-            await self._ensure_started()
-            return await self._supervisor.resume()
+            if self._supervisor._stopped:
+                return self.state.status
+            if (self._task is None or self._task.done()) and self._started:
+                await self._supervisor.resume(restarting=True)
+                await self.start()
+            else:
+                await self._ensure_started()
+                await self._supervisor.resume()
+            return self.state.status
         if command == "/manual":
             await self._ensure_started()
             await self._supervisor.set_manual_mode(True)
@@ -1024,6 +1038,12 @@ class ResearchRuntime:
         """
         if not self._started and self.tree.best_experiment_id() is not None:
             await self.start()
+
+    async def _cancel_supervisor_task(self) -> None:
+        """Cancel the current Supervisor lifecycle task (pause/stop interrupt)."""
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
 
     # ── 事件/订阅/持久化（委托 RuntimeEvents）────────────────────────
 

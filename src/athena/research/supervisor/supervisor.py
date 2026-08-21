@@ -448,9 +448,13 @@ class Supervisor(SupervisorActions):
                     "text": "PREPARE: 已有可信 baseline（断点续传），跳过 PREPARE。",
                 },
             )
+            if self._stopped or self.state.status == "WAITING":
+                return
             await self._transition_phase("SEARCH")
             return
         result = await self._run_prepare_phase()
+        if self._stopped or self.state.status == "WAITING":
+            return
         hypothesis_id = "baseline"
         experiment_id = "exp_baseline"
         if self.tree.best_experiment_id() is None:
@@ -503,6 +507,8 @@ class Supervisor(SupervisorActions):
                 "text": f"PREPARE completed with trusted metric {result.metric}.",
             },
         )
+        if self._stopped or self.state.status == "WAITING":
+            return
         await self._transition_phase("SEARCH")
 
     async def _run_validation(self) -> None:
@@ -515,6 +521,8 @@ class Supervisor(SupervisorActions):
         if sota.eval is None:
             raise RuntimeError("VALIDATE requires a trusted SOTA metric")
         result = await self._run_validation_phase(sota.commit, sota.eval.primary)
+        if self._stopped or self.state.status == "WAITING":
+            return
         validation = result.model_dump(mode="json")
         # VALIDATE 完成后生成并持久化最终报告：内容寻址 Artifact 供 GUI/审计读取，
         # ``report_ref`` 写入 state.validation，最终文本也发布到会话流。
@@ -547,7 +555,10 @@ class Supervisor(SupervisorActions):
 
     async def _transition_phase(self, phase: Literal["SEARCH", "VALIDATE"]) -> None:
         self.state.phase = phase
-        self.state.status = "RUNNING"
+        if self._stopped:
+            self.state.status = "STOPPED"
+        elif self.state.status != "WAITING":
+            self.state.status = "RUNNING"
         await self._persist_state()
 
     async def checkpoint_validation(self, result_ref: ArtifactRef) -> None:
@@ -688,7 +699,6 @@ class Supervisor(SupervisorActions):
 
     async def run_search(self) -> None:
         """Run rolling SEARCH scheduling."""
-        self._stopped = False
         while not self._stopped:
             if self.state.status != "RUNNING":
                 # 暂停/等待人工决策：不再派发新 turn，直到 /resume 或选择操作唤醒。
@@ -1055,13 +1065,19 @@ class Supervisor(SupervisorActions):
         await self._persist_state()
         return self.state.status
 
-    async def resume(self) -> str:
-        """Resume Agent dispatch after an explicit Human command."""
+    async def resume(self, *, restarting: bool = False) -> str:
+        """Resume Agent dispatch after an explicit Human command.
+
+        ``restarting=True`` is used when the phase task was cancelled by pause
+        (PREPARE/VALIDATE) and is about to be re-created by ``ResearchRuntime``;
+        in that case avoid double-spawning the SEARCH scheduler here.
+        """
         self._agents.resume()
         self.state.status = "RUNNING"
         await self._persist_state()
-        self._wake.set()
-        self._spawn_search()
+        if not restarting:
+            self._wake.set()
+            self._spawn_search()
         return self.state.status
 
     async def request_stop(self) -> str:
