@@ -15,6 +15,7 @@ from athena.execution.runtime import ExecutionRuntime
 
 PREPARE_EDA_AGENT_ID = "prepare_eda"
 PREPARE_EDA_AGENT_TYPE = "prepare_eda"
+EDA_WORKER_AGENT_TYPE = "eda_worker"
 
 
 def register_prepare_eda_agent(
@@ -26,7 +27,7 @@ def register_prepare_eda_agent(
     runtime: ExecutionRuntime,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
 ) -> None:
-    """Register a fresh PREPARE EDA Agent bound to the PREPARE worktree."""
+    """Register the EDA orchestrator and its worker subagents."""
     register_prompt_agent(
         registry,
         agent_type=PREPARE_EDA_AGENT_TYPE,
@@ -36,6 +37,17 @@ def register_prepare_eda_agent(
         provider=provider,
         artifacts=artifacts,
         extra_tools=extra_tools,
+    )
+    register_prompt_agent(
+        registry,
+        agent_type=EDA_WORKER_AGENT_TYPE,
+        output_type=HandoffResult,
+        workspace=workspace,
+        runtime=runtime,
+        provider=provider,
+        artifacts=artifacts,
+        extra_tools=extra_tools,
+        name="eda-worker",
     )
 
 

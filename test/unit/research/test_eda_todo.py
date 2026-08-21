@@ -1,0 +1,115 @@
+"""Unit tests for the EDA_TODO.md scheduler."""
+
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from athena.agents.ideator_agent import HandoffResult
+from athena.research import eda_todo
+from athena.research.eda_todo import run_eda_todos
+
+
+class _FakeAgents:
+    def __init__(self) -> None:
+        self.spawned: list[dict] = []
+
+    async def spawn(self, parent_id, agent_type, task, *, name=None):
+        self.spawned.append(
+            {"parent": parent_id, "type": agent_type, "task": task, "name": name}
+        )
+        return f"agent-{len(self.spawned)}", f"run-{len(self.spawned)}"
+
+    async def wait_run(self, run_id):
+        return SimpleNamespace(run_id=run_id, status="COMPLETED", error=None)
+
+
+def _write_reports(workspace: Path, files: list[str]) -> None:
+    for name in files:
+        (workspace / name).write_text("# report\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path
+    todo_file = workspace / "EDA_TODO.md"
+    todo_file.write_text(
+        "# EDA Todo\n"
+        "\n"
+        "## Stage 1: Overview (parallel: false)\n"
+        "- [ ] 00 Overview -> EDA_REPORT_00_OVERVIEW.md\n"
+        "\n"
+        "## Stage 2: Profiles (parallel: true)\n"
+        "- [ ] 01 Quality -> EDA_REPORT_01_DATA_QUALITY.md\n"
+        "- [ ] 02 Columns -> EDA_REPORT_02_COLUMNS.md\n",
+        encoding="utf-8",
+    )
+    _write_reports(
+        workspace,
+        [
+            "EDA_REPORT_00_OVERVIEW.md",
+            "EDA_REPORT_01_DATA_QUALITY.md",
+            "EDA_REPORT_02_COLUMNS.md",
+        ],
+    )
+
+    agents = _FakeAgents()
+
+    async def fake_wait(agents, run_id, publish):
+        return SimpleNamespace(run_id=run_id, status="COMPLETED", error=None)
+
+    async def fake_load(summary, store, result_type):
+        return HandoffResult(summary="ok", handoff_file="EDA_REPORT.md")
+
+    monkeypatch.setattr(eda_todo, "wait_run_events", fake_wait)
+    monkeypatch.setattr(eda_todo, "load_agent_result", fake_load)
+
+    failed = await run_eda_todos(agents=agents, store=None, workspace=workspace)
+
+    assert failed == []
+    text = todo_file.read_text(encoding="utf-8")
+    assert "- [x] 00 Overview" in text
+    assert "- [x] 01 Quality" in text
+    assert "- [x] 02 Columns" in text
+    assert len(agents.spawned) == 3
+    assert agents.spawned[0]["type"] == "eda_worker"
+
+
+@pytest.mark.asyncio
+async def test_run_eda_todos_keeps_failed_todo_unchecked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path
+    todo_file = workspace / "EDA_TODO.md"
+    todo_file.write_text(
+        "# EDA Todo\n"
+        "\n"
+        "## Stage 1 (parallel: false)\n"
+        "- [ ] 00 Overview -> EDA_REPORT_00_OVERVIEW.md\n",
+        encoding="utf-8",
+    )
+    _write_reports(workspace, ["EDA_REPORT_00_OVERVIEW.md"])
+
+    agents = _FakeAgents()
+
+    async def fake_wait(agents, run_id, publish):
+        raise RuntimeError("worker failed")
+
+    monkeypatch.setattr(eda_todo, "wait_run_events", fake_wait)
+
+    # load_agent_result should not be reached on failure.
+    async def fake_load(summary, store, result_type):
+        raise AssertionError("should not load result after failure")
+
+    monkeypatch.setattr(eda_todo, "load_agent_result", fake_load)
+
+    failed = await run_eda_todos(
+        agents=agents, store=None, workspace=workspace, retries=1
+    )
+
+    assert failed == ["00 Overview"]
+    text = todo_file.read_text(encoding="utf-8")
+    assert "- [ ] 00 Overview" in text

@@ -25,6 +25,7 @@ from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.agents.validate_agent import register_validate_agent
 from athena.execution.runtime import ExecutionContext
 from athena.research.contracts import ValidationResult
+from athena.research.eda_todo import run_eda_todos
 from athena.research.supervisor.experiment import (
     PlanRunner,
     PlanTurnResult,
@@ -48,6 +49,20 @@ if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
 
 
+def _write_fallback_eda(workspace: Path) -> None:
+    """Write minimal EDA entry files when the EDA pipeline fails."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    if not (workspace / "EDA_INDEX.md").exists():
+        (workspace / "EDA_INDEX.md").write_text(
+            "# EDA Index\n\nEDA generation failed; see logs.\n", encoding="utf-8"
+        )
+    if not (workspace / "EDA_HANDOFF.md").exists():
+        (workspace / "EDA_HANDOFF.md").write_text(
+            "# EDA Handoff\n\nEDA generation failed; baseline should explore the raw data.\n",
+            encoding="utf-8",
+        )
+
+
 class PhaseRunner:
     """Run PREPARE / VALIDATE / plan phases via the runtime's shared infra."""
 
@@ -55,6 +70,7 @@ class PhaseRunner:
         self._runtime = runtime
 
     async def run_plan_turn(self, plan_id: str, state: Any) -> PlanTurnResult:
+        """Execute one Plan turn through the configured plan runner."""
         rt = self._runtime
         if rt._plan_turn.__name__ != "unavailable_plan_turn":
             return await rt._plan_turn(plan_id, state)
@@ -95,6 +111,7 @@ class PhaseRunner:
             )
 
         def publish(kind: str, ref: str, data: dict | None = None) -> None:
+            """Forward one agent journal event to the runtime event bus."""
             events_bus = getattr(rt, "_events_bus", None)
             if events_bus is not None:
                 events_bus.project_agent_event(agent_id, kind, ref, data)
@@ -109,6 +126,7 @@ class PhaseRunner:
         return path.read_text(encoding="utf-8")
 
     async def run_prepare_phase(self) -> PrepareResult:
+        """Run the PREPARE phase and return the trusted baseline result."""
         rt = self._runtime
         if rt._prepare_phase is not None:
             return await rt._prepare_phase()
@@ -172,12 +190,12 @@ class PhaseRunner:
                 channel="text",
                 text="PREPARE: 复用已冻结的评估器断点，跳过 evaluator Agent。",
             )
-        # 步骤 2a：EDA handoff。
+        # 步骤 2a：EDA orchestrator → todo workers → finalize。
         try:
             await rt.publish_output(
                 source="supervisor",
                 channel="text",
-                text="PREPARE: 生成 EDA_HANDOFF.md…",
+                text="PREPARE: 生成 EDA_TODO.md…",
             )
             if not rt._registry.contains(PREPARE_EDA_AGENT_TYPE):
                 register_prepare_eda_agent(
@@ -192,15 +210,45 @@ class PhaseRunner:
                 agent_id=PREPARE_EDA_AGENT_ID,
                 agent_type=PREPARE_EDA_AGENT_TYPE,
                 workspace=str(workspace.path),
-                output_file="EDA_HANDOFF.md",
+                output_file="EDA_TODO.md",
                 content=rt._task_text,
             )
+            await run_eda_todos(
+                agents=rt._agents,
+                store=rt._store,
+                workspace=Path(workspace.path),
+                project_event=lambda aid, kind, ref, data: rt._events_bus.project_agent_event(
+                    aid, kind, ref, data
+                ),
+            )
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 汇总 EDA 报告…",
+            )
+            await self._run_handoff_agent(
+                agent_id=PREPARE_EDA_AGENT_ID,
+                agent_type=PREPARE_EDA_AGENT_TYPE,
+                workspace=str(workspace.path),
+                output_file="EDA_INDEX.md",
+                content=(
+                    "Finalize EDA: read all EDA_REPORT_*.md and write "
+                    "EDA_INDEX.md and EDA_HANDOFF.md."
+                ),
+            )
+            eda_dir = Path(workspace.path)
+            if (
+                not (eda_dir / "EDA_INDEX.md").is_file()
+                or not (eda_dir / "EDA_HANDOFF.md").is_file()
+            ):
+                _write_fallback_eda(eda_dir)
         except Exception as error:
             await rt.publish_output(
                 source="supervisor",
                 channel="error",
-                text=f"EDA handoff failed ({error}); baseline ideator continues.",
+                text=f"EDA handoff failed ({error}); writing fallback EDA files.",
             )
+            _write_fallback_eda(Path(workspace.path))
         # 步骤 2b：baseline_ideator 读 EDA handoff，写 BASELINE_DESIGN.md。
         try:
             await rt.publish_output(
@@ -272,6 +320,7 @@ class PhaseRunner:
     async def run_validation_phase(
         self, sota_commit: str, metric: float
     ) -> ValidationResult:
+        """Run the VALIDATE phase and return the validation result."""
         rt = self._runtime
         if rt._validation_phase is not None:
             return await rt._validation_phase(sota_commit, metric)
@@ -334,6 +383,7 @@ class PhaseRunner:
         )
 
     async def review_validation_diff(self, prompt: str) -> ValidationDiffReview:
+        """Independently review and accept/reject a proposed validation diff."""
         rt = self._runtime
         if rt._model is None:
             raise RuntimeError("independent validation review requires a model")
