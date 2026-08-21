@@ -615,8 +615,15 @@ export function usePipeline(workspaceRoot?: string | null) {
     setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
   }, []);
 
+  const runActive =
+    runStarted.current ||
+    viewModel.plans.length > 0 ||
+    viewModel.rightRail.searchAttempts > 0 ||
+    viewModel.rightRail.latestExperimentId !== null;
+
   return useMemo(() => ({
     viewModel,
+    runActive,
     sessions,
     currentSessionId,
     humanRequests,
@@ -635,5 +642,5 @@ export function usePipeline(workspaceRoot?: string | null) {
     answerHuman,
     chooseHumanAnswer,
     skipHumanAnswer,
-  }), [answerHuman, chooseHumanAnswer, skipHumanAnswer, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
+  }), [answerHuman, chooseHumanAnswer, skipHumanAnswer, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, runActive, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
 }

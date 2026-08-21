@@ -70,7 +70,7 @@ class ResearchState(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    status: Literal["RUNNING", "WAITING", "COMPLETED", "STOPPED", "FAILED"]
+    status: Literal["IDLE", "RUNNING", "WAITING", "COMPLETED", "STOPPED", "FAILED"]
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)

@@ -4,6 +4,8 @@ import styles from "./RunControls.module.css";
 
 interface RunControlsProps {
   viewModel: PipelineViewModel;
+  /** True when a real run has started or produced plans/attempts/SOTA activity. */
+  active: boolean;
   onPause(): void;
   onResume(): void;
   onStop(): void;
@@ -19,11 +21,11 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 /** Phase/status + runtime controls bar (pause/resume/stop + auto/manual). */
-export function RunControls({ viewModel, onPause, onResume, onStop, onToggleMode }: RunControlsProps) {
+export function RunControls({ viewModel, active, onPause, onResume, onStop, onToggleMode }: RunControlsProps) {
   const { phase, status, manual, rightRail } = viewModel;
-  const running = status === "running";
-  const paused = status === "paused";
-  const terminal = status === "idle" || status === "completed" || status === "error";
+  const running = status === "running" && active;
+  const paused = status === "paused" && active;
+  const terminal = status === "idle" || status === "completed" || status === "error" || !active;
   const best = rightRail.bestPrimary != null ? rightRail.bestPrimary.toFixed(4) : "--";
 
   return (

@@ -85,6 +85,43 @@ describe("ConversationPane", () => {
     expect(startRun).toHaveBeenCalledTimes(1);
   });
 
+  it("disables pause/stop for a phantom RUNNING state with no real activity", () => {
+    const pipeline = {
+      viewModel: {
+        ...createEmptyPipelineViewModel(),
+        status: "running" as const,
+        phase: "SEARCH",
+      },
+      runActive: false,
+      sendPrompt: vi.fn(),
+      startRun: vi.fn(),
+    } as const;
+
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    expect(screen.getByRole("button", { name: "暂停" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+  });
+
+  it("enables pause/stop when a real run is active", () => {
+    const pipeline = {
+      viewModel: {
+        ...createEmptyPipelineViewModel(),
+        status: "running" as const,
+        phase: "SEARCH",
+        plans: [{ id: "hyp-1" }],
+      },
+      runActive: true,
+      sendPrompt: vi.fn(),
+      startRun: vi.fn(),
+    } as const;
+
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    expect(screen.getByRole("button", { name: "暂停" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  });
+
   it("shows a started state instead of the confirm button once confirmed", () => {
     const sendPrompt = vi.fn().mockResolvedValue(undefined);
     const startRun = vi.fn().mockResolvedValue(undefined);

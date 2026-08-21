@@ -20,6 +20,7 @@ export function ConversationPane({ pipeline }: ConversationPaneProps) {
     <section className={styles["conversation-pane"]}>
       <RunControls
         viewModel={viewModel}
+        active={pipeline.runActive}
         onPause={() => void pipeline.pauseRun()}
         onResume={() => void pipeline.resumeRun()}
         onStop={() => void pipeline.stopRun()}

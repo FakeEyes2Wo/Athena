@@ -12,7 +12,7 @@ from athena.research import ResearchRuntime
 
 
 def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRuntime:
-    """默认 runtime 从 SEARCH 开始；TUI auto-seed runtime 等待 PREPARE 任务。
+    """默认 runtime 以 IDLE/PREPARE 等待任务；TUI auto-seed runtime 也等待 PREPARE。
 
     ``client=object()`` 让后台 supervisor 的 PREPARE 在首次 LLM 调用即失败，
     保证测试 hermetic（不 hit 真实 API、不依赖 git 执行结果）。
@@ -35,10 +35,11 @@ async def _close(runtime: ResearchRuntime) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fresh_runtime_starts_in_search_phase(tmp_path: Path) -> None:
+async def test_fresh_runtime_starts_idle_in_prepare_phase(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
     try:
-        assert runtime.state.phase == "SEARCH"
+        assert runtime.state.phase == "PREPARE"
+        assert runtime.state.status == "IDLE"
         assert runtime._started is False
     finally:
         await _close(runtime)

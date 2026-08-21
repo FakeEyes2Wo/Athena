@@ -245,17 +245,12 @@ class ResearchRuntime:
             if self._tree_path.is_file()
             else ResearchTree()
         )
-        initial_phase = (
-            "PREPARE"
-            if prepare_phase is not None or task or auto_seed_task
-            else "SEARCH"
-        )
         self._state = (
             ResearchState.load(self._state_path)
             if self._state_path.is_file()
             else ResearchState(
-                status="RUNNING",
-                phase=initial_phase,
+                status="IDLE",
+                phase="PREPARE",
                 search_limit=search_limit,
                 concurrency=concurrency,
                 ideator_count=ideator_count,
@@ -772,6 +767,9 @@ class ResearchRuntime:
         self._start_survey()
         # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。
         self._task_text = self._resume_task_text(self._task_text)
+        if self.state.status == "IDLE":
+            self.state.status = "RUNNING"
+            self.state.save(self._state_path)
         await self._maybe_run_task_understanding()
         self._task = asyncio.create_task(self._supervisor.start())
         self._started = True
