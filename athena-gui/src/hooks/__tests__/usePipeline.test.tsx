@@ -13,6 +13,7 @@ const bridgeMocks = vi.hoisted(() => ({
   stateGet: vi.fn(),
   sessionsList: vi.fn(),
   sessionSwitch: vi.fn(),
+  sessionDelete: vi.fn(),
   subscribeToPipelineEvents: vi.fn(),
 }));
 
@@ -28,6 +29,7 @@ vi.mock("../../lib/tauri-bridge", () => ({
   stateGet: bridgeMocks.stateGet,
   sessionsList: bridgeMocks.sessionsList,
   sessionSwitch: bridgeMocks.sessionSwitch,
+  sessionDelete: bridgeMocks.sessionDelete,
   subscribeToPipelineEvents: bridgeMocks.subscribeToPipelineEvents,
   PIPELINE_EVENT_NAMES: ["state", "output"],
 }));
@@ -47,6 +49,7 @@ describe("usePipeline", () => {
     bridgeMocks.stateGet.mockReset();
     bridgeMocks.sessionsList.mockReset();
     bridgeMocks.sessionSwitch.mockReset();
+    bridgeMocks.sessionDelete.mockReset();
     bridgeMocks.subscribeToPipelineEvents.mockReset();
 
     bridgeMocks.sendMessage.mockResolvedValue({
@@ -69,6 +72,7 @@ describe("usePipeline", () => {
     bridgeMocks.stateGet.mockResolvedValue({});
     bridgeMocks.sessionsList.mockResolvedValue({ sessions: [] });
     bridgeMocks.sessionSwitch.mockResolvedValue({ records: [] });
+    bridgeMocks.sessionDelete.mockResolvedValue({ deleted: true, sessions: [] });
     bridgeMocks.subscribeToPipelineEvents.mockResolvedValue([]);
   });
 
@@ -226,5 +230,48 @@ describe("usePipeline", () => {
     });
 
     expect(result.current.viewModel.messages).toHaveLength(0);
+  });
+
+  it("auto-deletes a blank new session when switching away", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => {
+      expect(result.current.currentSessionId).toBe("default");
+    });
+    await act(async () => {
+      result.current.newSession();
+    });
+    const blankId = result.current.currentSessionId;
+    expect(blankId).not.toBe("default");
+
+    await act(async () => {
+      await result.current.switchSession("default");
+    });
+
+    expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith(blankId);
+  });
+
+  it("does not delete a non-blank session when creating a new one", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => {
+      expect(result.current.currentSessionId).toBe("default");
+    });
+    await act(async () => {
+      result.current.newSession();
+    });
+    const usedId = result.current.currentSessionId;
+
+    // 在这个命名会话里发送并自动启动，使其不再是空白会话。
+    await act(async () => {
+      await result.current.sendPrompt("analyze this CSV");
+    });
+    expect(result.current.viewModel.messages.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      result.current.newSession();
+    });
+
+    expect(bridgeMocks.sessionDelete).not.toHaveBeenCalledWith(usedId);
   });
 });

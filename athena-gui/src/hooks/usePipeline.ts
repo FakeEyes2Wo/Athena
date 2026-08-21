@@ -237,6 +237,16 @@ export function usePipeline(workspaceRoot?: string | null) {
   const runStarted = useRef(false);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
+  // 空白会话：命名会话、无消息、且没有真实运行活动。切换/新建时自动清理。
+  const currentSessionBlank =
+    currentSessionId !== "default" &&
+    viewModel.messages.length === 0 &&
+    !(
+      runStarted.current ||
+      viewModel.plans.length > 0 ||
+      viewModel.rightRail.searchAttempts > 0 ||
+      viewModel.rightRail.latestExperimentId !== null
+    );
 
   const nextId = useCallback((prefix: string) => {
     counter.current += 1;
@@ -535,15 +545,33 @@ export function usePipeline(workspaceRoot?: string | null) {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     const id = `s-${Date.now()}`;
     runStarted.current = false;
-    sessionSwitch(id).catch(() => {});
+    void (async () => {
+      // 离开当前空白会话时自动删除，避免侧栏堆积从未使用的新会话。
+      if (currentSessionBlank) {
+        try {
+          await sessionDelete(currentSessionId);
+        } catch {
+          // 非致命：删除失败不阻塞新建会话。
+        }
+      }
+      await sessionSwitch(id);
+    })();
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
     saveTitle(titlesKey, id, "新会话");
-  }, [titlesKey]);
+  }, [currentSessionBlank, currentSessionId, titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
+    // 离开空白新会话时自动删除，避免侧栏堆积从未使用的新会话。
+    if (currentSessionBlank && id !== currentSessionId) {
+      try {
+        await sessionDelete(currentSessionId);
+      } catch {
+        // 非致命：删除失败不阻塞切换。
+      }
+    }
     try {
       const { records } = await sessionSwitch(id);
       // 换会话即换 runtime，运行标记不能带过去。
@@ -566,7 +594,7 @@ export function usePipeline(workspaceRoot?: string | null) {
         ],
       }));
     }
-  }, [restoreRecords, nextId]);
+  }, [currentSessionBlank, currentSessionId, nextId, restoreRecords]);
 
   const deleteSession = useCallback(async (id: string) => {
     // default 是主项目会话，不可删除；命名会话删除后返回更新列表。
