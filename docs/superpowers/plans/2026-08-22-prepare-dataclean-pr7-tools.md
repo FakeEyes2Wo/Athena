@@ -1595,6 +1595,26 @@ async def test_full_prepare_phase_e2e(tmp_path: Path) -> None:
         await runtime.aclose()
 ```
 
+**实际落地差异（2026-08-22，对真实代码验证后）：** 上面的文件规格与最终
+`test/integration/research/test_prepare_phase_e2e.py` 一致，仅以下四点按真实
+行为修正，阅读计划时以真实文件为准：
+
+1. `_system_prompt` / `_user_content` 同时处理 dict 消息与 `ModelMessage`：
+   `ResponsesProvider.stream` 先经 `_to_api` 把 ModelMessage 转成 OpenAI dict
+   （`{"role": "system", "content": ...}`），假客户端 `create` 拿到的就是 dict；
+   代码用 `isinstance(m, dict)` 分支 + 防御性回退（见文件内 docstring）。
+2. `dispatch` 增加 `# EDA Worker` 分支：worker 的 prompt 首行是 `# EDA Worker`
+   （不是 `# PREPARE EDA Agent`），且与"同 EDA system 但无 user 内容"都路由到
+   `self._worker`。
+3. supervisor 剧本追加 2 个 turn（`read_hypotheses` + budget 回答）：PREPARE 完成
+   后 SEARCH 预算为 0 且 `auto_validate=False` → 状态 WAITING → `_budget_gate`
+   触发 supervisor 第 4 次调用，剧本必须覆盖。
+4. **发现并修复 2 个真实生产 bug**（`forward_run_events` 中 `await publish(...)`
+   要求 publish 可等待）：`phase_runner._run_handoff_agent` 与
+   `eda_todo._run_one_todo` 的 publish 闭包原先返回 None（异步事件转发未 await），
+   在真实 `_events_bus` 下抛 `TypeError: object NoneType can't be used in 'await'`。
+   已改为 `async def publish(...) -> None` 并 `await` 转发。
+
 - [ ] **Step 2: 运行测试确认失败**
 
 Run: `uv run pytest test/integration/research/test_prepare_phase_e2e.py -v -m slow`
@@ -1618,7 +1638,9 @@ Expected: PASS。
 - [ ] **Step 5: 提交**
 
 ```bash
-git add test/integration/research/test_prepare_phase_e2e.py
+# 含 E2E 暴露的 async publish 修复（phase_runner / eda_todo）
+git add test/integration/research/test_prepare_phase_e2e.py \
+    src/athena/research/phase_runner.py src/athena/research/eda_todo.py
 git commit -m "test(e2e): full PREPARE phase walkthrough with dataclean repair round"
 ```
 
