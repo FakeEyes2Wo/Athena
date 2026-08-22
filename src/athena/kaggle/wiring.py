@@ -92,6 +92,7 @@ _TOOL_FACTORIES = {
 # 每个 agent 按其职责注入的最少 Kaggle 工具；data 做补充 EDA 无需 Kaggle 工具。
 AGENT_KAGGLE_TOOLS: dict[str, tuple[str, ...]] = {
     "evaluator": (KAGGLE_GET_COMPETITION, KAGGLE_DOWNLOAD_DATA),
+    "dataclean": (KAGGLE_GET_COMPETITION, KAGGLE_DOWNLOAD_DATA),
     "prepare": (KAGGLE_RUN,),
     "ideator": (
         KAGGLE_LIST_NOTEBOOKS,

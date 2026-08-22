@@ -678,11 +678,10 @@ class _DataCleanProvider:
     async def stream(self, _config, _tools, _messages, _cancel, **_kwargs):
         self.calls += 1
         action = self._actions.pop(0)
-        if isinstance(action, str):
-            answer = _abandon() if action == "abandon" else _submit()
-            yield StreamEvent(
-                kind="text_delta", data={"delta": answer, "accumulated": answer}
-            )
+        if action is None:
+            answer = _submit()
+        elif action == "abandon":
+            answer = _abandon()
         else:
             path, content = action
             yield StreamEvent(
@@ -693,6 +692,11 @@ class _DataCleanProvider:
                     "arguments": {"path": path, "content": content},
                 },
             )
+            yield StreamEvent(kind="response_completed", data={"finish_reason": "stop"})
+            return
+        yield StreamEvent(
+            kind="text_delta", data={"delta": answer, "accumulated": answer}
+        )
         yield StreamEvent(kind="response_completed", data={"finish_reason": "stop"})
 
 
