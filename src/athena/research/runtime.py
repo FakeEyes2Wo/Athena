@@ -1002,7 +1002,7 @@ class ResearchRuntime:
                 await self._cancel_supervisor_task()
             return status
         if command == "/resume":
-            if self._supervisor._stopped:
+            if self._supervisor.is_stopped():
                 return self.state.status
             if (self._task is None or self._task.done()) and self._started:
                 await self._supervisor.resume(restarting=True)
