@@ -236,6 +236,9 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
             report_ref="report-ref",
         )
 
+    async def run_dataclean_plan(**kwargs):
+        return "cleaned handoff text"
+
     monkeypatch.setattr(
         "athena.research.phase_runner.run_evaluator_plan",
         run_evaluator_plan,
@@ -243,6 +246,11 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     )
     monkeypatch.setattr(
         "athena.research.phase_runner.run_prepare_plan", run_prepare_plan, raising=False
+    )
+    monkeypatch.setattr(
+        "athena.research.phase_runner.run_dataclean_plan",
+        run_dataclean_plan,
+        raising=False,
     )
 
     result = await PhaseRunner(rt).run_prepare_phase()

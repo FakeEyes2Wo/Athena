@@ -17,6 +17,10 @@ from athena.agents.ideator_agent import (
     register_ideator_agent,
 )
 from athena.agents.prepare_agent import register_evaluator_agent, register_prepare_agent
+from athena.agents.prepare_dataclean_agent import (
+    DATACLEAN_AGENT_TYPE,
+    register_dataclean_agent,
+)
 from athena.agents.prepare_eda_agent import (
     PREPARE_EDA_AGENT_ID,
     PREPARE_EDA_AGENT_TYPE,
@@ -35,6 +39,7 @@ from athena.research.supervisor.experiment import (
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.prepare import (
     PrepareResult,
+    run_dataclean_plan,
     run_evaluator_plan,
     run_prepare_plan,
 )
@@ -133,11 +138,11 @@ class PhaseRunner:
                 agent_type, request, agent_id=agent_id, name=agent_id
             )
 
-        def publish(kind: str, ref: str, data: dict | None = None) -> None:
+        async def publish(kind: str, ref: str, data: dict | None = None) -> None:
             """Forward one agent journal event to the runtime event bus."""
             events_bus = getattr(rt, "_events_bus", None)
             if events_bus is not None:
-                events_bus.project_agent_event(agent_id, kind, ref, data)
+                await events_bus.project_agent_event(agent_id, kind, ref, data)
 
         summary = await wait_run_events(rt._agents, run_id, publish)
         result = await load_agent_result(summary, rt._store, HandoffResult)
@@ -158,6 +163,10 @@ class PhaseRunner:
             return await rt._prepare_phase()
         if rt._provider is None:
             raise RuntimeError("PREPARE requires a registered Agent provider")
+        # MCP 工具装配：本期仓库根只有空配置，是幂等 no-op（见 spec B3）。
+        # 用 hasattr 兼容 fake runtime（test_breakpoint_resume 用 SimpleNamespace 构造）。
+        if hasattr(rt, "init_mcp_tools"):
+            await rt.init_mcp_tools()
         await rt.publish_output(
             source="supervisor", channel="text", text="PREPARE: 初始化项目仓库…"
         )
@@ -195,7 +204,7 @@ class PhaseRunner:
                     artifacts=rt._store,
                     workspace=evaluator_dir,
                     runtime=rt._execution,
-                    extra_tools=rt.kaggle_tools("evaluator"),
+                    extra_tools=rt.agent_tools("evaluator"),
                 )
             evaluator_ref = await run_evaluator_plan(
                 agents=rt._agents,
@@ -232,6 +241,46 @@ class PhaseRunner:
                 channel="text",
                 text="PREPARE: 复用已冻结的评估器断点，跳过 evaluator Agent。",
             )
+        # 步骤 1b：dataclean agent 在 workspaces/dataclean/ 分析并清洗数据；
+        # 以 DATACLEAN_HANDOFF.md 非空为断点，复用时不重跑。
+        dataclean_dir = rt._workspaces_root / "dataclean"
+        dataclean_handoff_path = dataclean_dir / "DATACLEAN_HANDOFF.md"
+        dataclean_handoff: str | None = None
+        if dataclean_handoff_path.is_file() and dataclean_handoff_path.read_text(
+            encoding="utf-8"
+        ).strip():
+            dataclean_handoff = dataclean_handoff_path.read_text(encoding="utf-8")
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 复用 dataclean 断点，跳过 DataClean Agent。",
+            )
+        else:
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 运行 DataClean Agent…",
+            )
+            if not rt._registry.contains(DATACLEAN_AGENT_TYPE):
+                register_dataclean_agent(
+                    rt._registry,
+                    provider=rt._provider,
+                    artifacts=rt._store,
+                    workspace=dataclean_dir,
+                    runtime=rt._execution,
+                    extra_tools=rt.agent_tools("dataclean"),
+                )
+            dataclean_handoff = await run_dataclean_plan(
+                agents=rt._agents,
+                store=rt._store,
+                dataclean_dir=dataclean_dir,
+                execution=rt._execution,
+                task=rt._task_text,
+                max_turns=MAX_PLAN_TURNS,
+                publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
+                    "dataclean", kind, ref, data
+                ),
+            )
         # 步骤 2a：EDA orchestrator → todo workers → finalize。
         eda_ok = True
         try:
@@ -254,7 +303,13 @@ class PhaseRunner:
                 agent_type=PREPARE_EDA_AGENT_TYPE,
                 workspace=str(workspace.path),
                 output_file="EDA_TODO.md",
-                content=rt._task_text,
+                content=rt._task_text
+                + (
+                    f"\n\nDataClean ran in {dataclean_dir}; read "
+                    "DATACLEAN_HANDOFF.md there to consume the cleaned data."
+                    if dataclean_handoff
+                    else ""
+                ),
             )
             failed = await run_eda_todos(
                 agents=rt._agents,
@@ -323,7 +378,7 @@ class PhaseRunner:
                         artifacts=rt._store,
                         workspace=Path(workspace.path),
                         runtime=rt._execution,
-                        extra_tools=rt.ideator_tools(),
+                        extra_tools=rt.baseline_ideator_tools(),
                         gated=True,
                         profile=BASELINE_IDEATOR_PROFILE,
                     )

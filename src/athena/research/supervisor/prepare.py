@@ -36,6 +36,8 @@ PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
 EVALUATOR_AGENT_ID = "evaluator"
 EVALUATOR_PLAN_ID = "evaluator"
+DATACLEAN_AGENT_ID = "dataclean"
+DATACLEAN_PLAN_ID = "dataclean"
 
 
 class PrepareResult(BaseModel):
@@ -217,6 +219,85 @@ async def run_evaluator_plan(
     raise RuntimeError("evaluator turn budget exhausted without a frozen evaluator")
 
 
+async def run_dataclean_plan(
+    *,
+    agents: AgentRuntime,
+    store: ArtifactStore,
+    dataclean_dir: Path,
+    execution: ExecutionRuntime,
+    task: str,
+    max_turns: int,
+    publish: EmitEvent | None = None,
+) -> str:
+    """Run and repair one DataClean Agent until a non-empty handoff exists."""
+
+    if max_turns < 1:
+        raise ValueError("max_turns must be at least 1")
+    root = Path(dataclean_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    execution.ensure_environment()
+
+    context_ref = await store.put_text(
+        json.dumps(
+            {"plan_id": DATACLEAN_PLAN_ID, "task": task},
+            ensure_ascii=False,
+        )
+    )
+    agent_id, run_id = await agents.create_root(
+        "dataclean",
+        {"content": task, "context_refs": [context_ref]},
+        agent_id=DATACLEAN_AGENT_ID,
+        name=DATACLEAN_PLAN_ID,
+    )
+    if agent_id != DATACLEAN_AGENT_ID:
+        raise RuntimeError(f"dataclean Agent id must be {DATACLEAN_AGENT_ID}")
+
+    handoff_path = root / "DATACLEAN_HANDOFF.md"
+    feedback: str | None = None
+    for turn in range(max_turns):
+        if turn:
+            run_id = await agents.followup(
+                DATACLEAN_AGENT_ID,
+                {"content": feedback, "context_refs": []},
+            )
+        summary = await wait_run_events(agents, run_id, publish)
+        try:
+            decision = await _decision_from_summary(summary, store)
+        except (OSError, RuntimeError, ValueError) as exc:
+            feedback = (
+                "previous dataclean turn did not produce a valid decision: "
+                f"{' '.join(str(exc).split())[:1000]}"
+            )
+            continue
+        if decision.decision == "abandon":
+            raise RuntimeError(
+                f"dataclean Agent abandoned the cleaning pass: {decision.reason}"
+            )
+        # 数据无关的完成 gate：只认“非空 handoff + submit”，不校验任何固定产物布局。
+        # 校验失败转 feedback 继续修复循环（镜像 run_evaluator_plan 的 try/except）。
+        try:
+            if not (
+                handoff_path.is_file()
+                and handoff_path.read_text(encoding="utf-8").strip()
+            ):
+                raise ValueError(
+                    "DATACLEAN_HANDOFF.md is missing or empty. Inspect the data, "
+                    "apply whatever cleaning you decide is needed (or none if it "
+                    "is already clean), write DATACLEAN_HANDOFF.md describing what "
+                    "you found and did, and return submit when done."
+                )
+            if decision.decision != "submit":
+                raise ValueError(
+                    "DATACLEAN_HANDOFF.md exists but the decision was "
+                    f"{decision.decision!r}. Return submit to advance to EDA."
+                )
+            return handoff_path.read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            feedback = " ".join(str(exc).split())[:1000]
+
+    raise RuntimeError("dataclean turn budget exhausted without a cleaning handoff")
+
+
 async def run_prepare_plan(
     *,
     agents: AgentRuntime,
@@ -369,7 +450,10 @@ __all__ = [
     "PREPARE_PLAN_ID",
     "EVALUATOR_AGENT_ID",
     "EVALUATOR_PLAN_ID",
+    "DATACLEAN_AGENT_ID",
+    "DATACLEAN_PLAN_ID",
     "PrepareResult",
     "run_evaluator_plan",
+    "run_dataclean_plan",
     "run_prepare_plan",
 ]
