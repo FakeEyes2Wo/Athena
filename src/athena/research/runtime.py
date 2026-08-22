@@ -5,7 +5,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from athena.agents.plan_agent import register_plan_agent
 from athena.agents.supervisor_agent import register_supervisor_agent
@@ -25,9 +25,15 @@ from athena.kaggle import (
     build_kaggle_stack,
     build_kaggle_tools,
 )
+from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.config import (
+    ResearchConfig,
+    ResearchPaths,
+    SearchLimits,
+    SurveyConfig,
+)
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
-from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.paper_rag.schemas import PaperSummary
 from athena.research.paper_rag.search import (
     RetrievalSession,
@@ -38,6 +44,7 @@ from athena.research.paper_rag.tool import MAX_OVERVIEW_PAPERS
 from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime_events import RuntimeEvents, recent_user_texts
 from athena.research.script_runner import DataScriptRunner
+from athena.research.services import ResearchServices, ResearchSession
 from athena.research.supervisor.events import EventProjector
 from athena.research.supervisor.experiment import PlanTurnResult
 from athena.research.supervisor.prepare import PrepareResult
@@ -177,77 +184,80 @@ class ResearchRuntime:
         survey_search_top_k: int = 0,
         survey_max_seconds: float = 0.0,
     ) -> None:
-        # 消融开关：``gated`` 走 Idea Generation 门禁，``baseline`` 走 main 原有的
-        # "产出即入库"。输出契约与 prompt 在 agent 注册时绑定，故一路传到
-        # register_ideator_agent，不只是出口处分支。
-        self._ideation = ideation
-        # 文献调研默认关闭：一次调研是十几分钟的模型往返，不能由默认值替用户决定
-        # 花这笔钱。开启后它作为后台任务与 PREPARE 并行，SEARCH 绝不为它停等。
-        self._survey_enabled = survey
-        self._survey_query = survey_query
-        self._survey_max_papers = survey_max_papers
-        # 0 表示"用 SurveyRequest 的默认值"。这两个必须一起调：深度决定每步的打分量，
-        # 墙钟决定跑得完几步，只动一个换来的是拿广度换深度。
-        self._survey_search_top_k = survey_search_top_k
-        self._survey_max_seconds = survey_max_seconds
-        self._survey_stack: SurveyStack | None = None
-        # 本轮 ideation 各 Ideator 的检索会话；引用核验按它们的已读集合判定。
-        self._corpus_sessions: list[RetrievalSession] = []
-        self._survey_task: asyncio.Task[None] | None = None
-        self._root = Path(project_root or ".").resolve()
-        self._athena = (
+        root = Path(project_root or ".").resolve()
+        athena = (
             Path(state_root).resolve()
             if state_root is not None
-            else self._root / ".athena"
+            else root / ".athena"
         )
-        self._workspaces_root = (
-            self._root / "workspaces"
-            if state_root is None
-            else self._athena / "workspaces"
+        workspaces = root / "workspaces" if state_root is None else athena / "workspaces"
+        paths = ResearchPaths(
+            root=root,
+            athena=athena,
+            workspaces=workspaces,
+            state=athena / "state.json",
+            tree=athena / "research_tree.json",
+            sessions=athena / "logs" / "sessions",
         )
-        self._state_path = self._athena / "state.json"
-        self._tree_path = self._athena / "research_tree.json"
-        self._sessions_dir = self._athena / "logs" / "sessions"
-        self._store = LocalArtifactStore(self._athena / "artifacts")
-        self._kaggle_stack: KaggleStack | None = None
-        self._events = EventProjector(self._store)
-        self._events_bus = RuntimeEvents(
-            events=self._events,
-            store=self._store,
-            sessions_dir=self._sessions_dir,
+        config = ResearchConfig(
+            paths=paths,
+            model=model,
+            client=client,
+            task=task,
+            auto_seed_task=auto_seed_task,
+            search=SearchLimits(
+                search_limit=search_limit,
+                concurrency=concurrency,
+                ideator_count=ideator_count,
+                hypotheses_per_ideator=hypotheses_per_ideator,
+            ),
+            survey=SurveyConfig(
+                enabled=survey,
+                query=survey_query,
+                max_papers=survey_max_papers,
+                search_top_k=survey_search_top_k,
+                max_seconds=survey_max_seconds,
+            ),
+            auto_validate=auto_validate,
+            direction=direction,
+            tolerance=tolerance,
+            ideation=ideation,
+            prepare_phase=prepare_phase,
+            validation_phase=validation_phase,
+            plan_turn=plan_turn,
+            ask_user=ask_user,
         )
-        # 断点续传：恢复历史输出序列号，避免重启后新事件与重放历史 seq 冲突
-        # 而被 TUI 去重丢弃。seq 全局单调，跨所有会话恢复到最大 seq。
-        self._events_bus.resume_sequence()
-        self._registry = AgentTypeRegistry()
-        self._agents = AgentRuntime(
-            type_registry=self._registry,
-            project_root=self._root,
-            rollout_dir=self._athena / "logs" / "agents",
+
+        store = LocalArtifactStore(paths.athena / "artifacts")
+        registry = AgentTypeRegistry()
+        agents = AgentRuntime(
+            type_registry=registry,
+            project_root=root,
+            rollout_dir=paths.athena / "logs" / "agents",
         )
-        self._execution = ExecutionRuntime(
-            project_root=self._root,
-            environment_root=self._root,
-            store=self._store,
+        execution = ExecutionRuntime(
+            project_root=root,
+            environment_root=root,
+            store=store,
         )
-        self._scripts = DataScriptRunner(
-            store=self._store,
-            workdir=self._athena / "runs",
+        scripts = DataScriptRunner(
+            store=store,
+            workdir=paths.athena / "runs",
         )
-        self._evaluator = TrustedEvaluator(self._scripts)
-        self._git = LocalGitWorkspace(
-            self._athena / "repo",
-            self._workspaces_root,
-            self._store.put_bytes,
+        evaluator = TrustedEvaluator(scripts)
+        git = LocalGitWorkspace(
+            paths.athena / "repo",
+            workspaces,
+            store.put_bytes,
         )
-        self._tree = (
-            ResearchTree.load(self._tree_path)
-            if self._tree_path.is_file()
+        tree = (
+            ResearchTree.load(paths.tree)
+            if paths.tree.is_file()
             else ResearchTree()
         )
-        self._state = (
-            ResearchState.load(self._state_path)
-            if self._state_path.is_file()
+        state = (
+            ResearchState.load(paths.state)
+            if paths.state.is_file()
             else ResearchState(
                 status="IDLE",
                 phase="PREPARE",
@@ -261,64 +271,161 @@ class ResearchRuntime:
         # 工作区/EDA 目录落到别的项目。强制校验其属于当前 project_root，否则置空
         # 让 PREPARE 按本项目重建——本项目只保留自身信息，唯一允许跨目录的是数据集源。
         # eda_dir 存的是相对项目根的路径（见 _run_prepare_phase），先解析成绝对再校验。
-        eda_dir = self._state.eda_dir
+        eda_dir = state.eda_dir
         if eda_dir is not None:
             eda_path = Path(eda_dir)
             if not eda_path.is_absolute():
-                eda_path = (self._root / eda_dir).resolve()
-            if not eda_path.is_relative_to(self._root):
-                self._state.eda_dir = None
-        self._task: asyncio.Task[None] | None = None
-        self._started = False
-        self._auto_seed_task = auto_seed_task
-        self._provider: object | None = None
-        self._task_text = task
-        self._model = model
-        self._client = client
-        self._direction = direction
-        self._tolerance = tolerance
-        self._auto_validate = auto_validate
-        self._prepare_phase = prepare_phase
-        self._validation_phase = validation_phase
-        self._ask_user = ask_user
-        self._survey_enabled = survey
-        self._survey_query = survey_query
-        self._survey_max_papers = survey_max_papers
-        self._survey_stack: SurveyStack | None = None
-        self._survey_task: asyncio.Task[None] | None = None
+                eda_path = (root / eda_dir).resolve()
+            if not eda_path.is_relative_to(root):
+                state.eda_dir = None
 
-        async def unavailable_plan_turn(_plan_id: str, _state: Any) -> PlanTurnResult:
-            raise RuntimeError("SEARCH Plan execution is not configured")
+        events_projector = EventProjector(store)
+        events_bus = RuntimeEvents(
+            events=events_projector,
+            store=store,
+            sessions_dir=paths.sessions,
+        )
+        # 断点续传：恢复历史输出序列号，避免重启后新事件与重放历史 seq 冲突
+        # 而被 TUI 去重丢弃。seq 全局单调，跨所有会话恢复到最大 seq。
+        events_bus.resume_sequence()
 
-        self._plan_turn = plan_turn or unavailable_plan_turn
-        self._agent_turns = AgentTurnRunner(self)
-        self._phase_runner = PhaseRunner(self)
-        self._supervisor = Supervisor(
-            project_root=self._root,
-            state_root=self._athena,
-            state=self._state,
-            tree=self._tree,
-            store=self._store,
-            agents=self._agents,
-            workspaces=self._git,
+        services = ResearchServices(
+            store=store,
+            registry=registry,
+            agents=agents,
+            execution=execution,
+            git=git,
+            events=events_bus,
+            scripts=scripts,
+            evaluator=evaluator,
+            tree=tree,
+            state=state,
+        )
+        session = ResearchSession(task_text=task)
+        self._config = config
+        self._services = services
+        self._session = session
+
+        agent_turns = AgentTurnRunner(self)
+        phase_runner = PhaseRunner(self)
+        supervisor = Supervisor(
+            project_root=root,
+            state_root=athena,
+            state=state,
+            tree=tree,
+            store=store,
+            agents=agents,
+            workspaces=git,
             scheduler=Scheduler(),
             recovery=Recovery(),
             evaluator_ref=self._baseline_evaluator_ref(),
-            run_plan_turn=self._phase_runner.run_plan_turn,
-            run_supervisor_turn=self._agent_turns.run_supervisor_turn,
-            run_ideator_turn=self._agent_turns.run_ideator_turn,
-            run_general_turn=self._agent_turns.run_general_turn,
-            publish=self._events_bus.publish_from_supervisor,
+            run_plan_turn=phase_runner.run_plan_turn,
+            run_supervisor_turn=agent_turns.run_supervisor_turn,
+            run_ideator_turn=agent_turns.run_ideator_turn,
+            run_general_turn=agent_turns.run_general_turn,
+            publish=events_bus.publish_from_supervisor,
             auto_validate=auto_validate,
             direction=direction,
             tolerance=tolerance,
-            run_prepare_phase=self._phase_runner.run_prepare_phase,
-            run_validation_phase=self._phase_runner.run_validation_phase,
-            publish_agent_event=self._events_bus.project_agent_event,
+            run_prepare_phase=phase_runner.run_prepare_phase,
+            run_validation_phase=phase_runner.run_validation_phase,
+            publish_agent_event=events_bus.project_agent_event,
         )
-        self._events_bus.attach_supervisor(self._supervisor)
+        services.supervisor = supervisor
+        services.agent_turns = agent_turns
+        services.phase_runner = phase_runner
+        events_bus.attach_supervisor(supervisor)
         if model is not None:
             self.register_supervisor(provider=ResponsesProvider(model, client=client))
+
+    # ── Compatibility accessors: keep existing method bodies small while the
+    # runtime now stores only _config/_services/_session. Tests that construct
+    # ResearchRuntime.__new__ may still assign private names directly; those
+    # assignments land in __dict__ and shadow the derived values below.
+
+    _SESSION_FIELDS: ClassVar[dict[str, str]] = {
+        "_provider": "provider",
+        "_task": "task",
+        "_started": "started",
+        "_task_text": "task_text",
+        "_survey_stack": "survey_stack",
+        "_survey_task": "survey_task",
+        "_corpus_sessions": "corpus_sessions",
+        "_kaggle_stack": "kaggle_stack",
+    }
+
+    _CONFIG_FIELDS: ClassVar[dict[str, str | tuple[str, str]]] = {
+        "_model": "model",
+        "_client": "client",
+        "_direction": "direction",
+        "_tolerance": "tolerance",
+        "_auto_validate": "auto_validate",
+        "_prepare_phase": "prepare_phase",
+        "_validation_phase": "validation_phase",
+        "_ask_user": "ask_user",
+        "_ideation": "ideation",
+        "_survey_enabled": ("survey", "enabled"),
+        "_survey_query": ("survey", "query"),
+        "_survey_max_papers": ("survey", "max_papers"),
+        "_survey_search_top_k": ("survey", "search_top_k"),
+        "_survey_max_seconds": ("survey", "max_seconds"),
+    }
+
+    _PATH_FIELDS: ClassVar[dict[str, str]] = {
+        "_root": "root",
+        "_athena": "athena",
+        "_workspaces_root": "workspaces",
+        "_state_path": "state",
+        "_tree_path": "tree",
+        "_sessions_dir": "sessions",
+    }
+
+    _SERVICE_FIELDS: ClassVar[dict[str, str]] = {
+        "_store": "store",
+        "_events_bus": "events",
+        "_registry": "registry",
+        "_agents": "agents",
+        "_execution": "execution",
+        "_scripts": "scripts",
+        "_evaluator": "evaluator",
+        "_git": "git",
+        "_tree": "tree",
+        "_state": "state",
+        "_supervisor": "supervisor",
+        "_agent_turns": "agent_turns",
+        "_phase_runner": "phase_runner",
+    }
+
+    def __getattr__(self, name: str):
+        if name in self._SESSION_FIELDS:
+            if "_session" in self.__dict__:
+                return getattr(self.__dict__["_session"], self._SESSION_FIELDS[name])
+            raise AttributeError(name)
+        if name in self._CONFIG_FIELDS:
+            if "_config" in self.__dict__:
+                field = self._CONFIG_FIELDS[name]
+                if isinstance(field, tuple):
+                    return getattr(getattr(self.__dict__["_config"], field[0]), field[1])
+                return getattr(self.__dict__["_config"], field)
+            raise AttributeError(name)
+        if name in self._PATH_FIELDS:
+            if "_config" in self.__dict__:
+                return getattr(self.__dict__["_config"].paths, self._PATH_FIELDS[name])
+            raise AttributeError(name)
+        if name in self._SERVICE_FIELDS:
+            if "_services" in self.__dict__:
+                value = getattr(self.__dict__["_services"], self._SERVICE_FIELDS[name])
+                if name == "_supervisor" and value is None:
+                    raise AttributeError(name)
+                return value
+            raise AttributeError(name)
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+    def __setattr__(self, name: str, value) -> None:
+        if name in self._SESSION_FIELDS and "_session" in self.__dict__:
+            setattr(self.__dict__["_session"], self._SESSION_FIELDS[name], value)
+            return
+        object.__setattr__(self, name, value)
 
     @property
     def state(self) -> ResearchState:
@@ -342,6 +449,86 @@ class ResearchRuntime:
     @property
     def supervisor_provider(self) -> object | None:
         return self._provider
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def workspaces_root(self) -> Path:
+        return self._workspaces_root
+
+    @property
+    def state_path(self) -> Path:
+        return self._state_path
+
+    @property
+    def store(self) -> LocalArtifactStore:
+        return self._store
+
+    @property
+    def events(self) -> RuntimeEvents:
+        return self._events_bus
+
+    @property
+    def registry(self) -> AgentTypeRegistry:
+        return self._registry
+
+    @property
+    def agents(self) -> AgentRuntime:
+        return self._agents
+
+    @property
+    def execution(self) -> ExecutionRuntime:
+        return self._execution
+
+    @property
+    def scripts(self) -> DataScriptRunner:
+        return self._scripts
+
+    @property
+    def evaluator(self) -> TrustedEvaluator:
+        return self._evaluator
+
+    @property
+    def git(self) -> LocalGitWorkspace:
+        return self._git
+
+    @property
+    def provider(self) -> object | None:
+        return self._provider
+
+    @property
+    def task_text(self) -> str:
+        return self._task_text
+
+    @property
+    def model(self) -> str | None:
+        return self._model
+
+    @property
+    def client(self) -> Any:
+        return self._client
+
+    @property
+    def direction(self) -> Literal["maximize", "minimize"]:
+        return self._direction
+
+    @property
+    def ideation(self):
+        return self._ideation
+
+    @property
+    def prepare_phase(self):
+        return self._prepare_phase
+
+    @property
+    def validation_phase(self):
+        return self._validation_phase
+
+    @property
+    def plan_turn(self):
+        return self._config.plan_turn
 
     def register_supervisor(self, *, provider: object) -> None:
         """Register the long-lived SupervisorAgent once."""
@@ -824,7 +1011,7 @@ class ResearchRuntime:
                 client=self._client,
                 system_prompt=SURVEY_QUERY_PROMPT,
             )
-        except Exception:  # noqa: BLE001 - 改写失败退回原文，不阻断调研
+        except Exception:
             logger.warning(
                 "survey topic rewrite failed; using the raw task", exc_info=True
             )
@@ -1002,7 +1189,7 @@ class ResearchRuntime:
                 await self._cancel_supervisor_task()
             return status
         if command == "/resume":
-            if self._supervisor._stopped:
+            if self._supervisor.is_stopped():
                 return self.state.status
             if (self._task is None or self._task.done()) and self._started:
                 await self._supervisor.resume(restarting=True)
@@ -1099,11 +1286,7 @@ class ResearchRuntime:
         return baselines[0].plan.run_config_ref if baselines else None
 
     async def aclose(self) -> None:
-        for ready in self._events_bus._subscriber_ready.values():
-            if not ready.done():
-                ready.cancel()
-        self._events_bus._subscriber_ready.clear()
-        self._events_bus._subscribers.clear()
+        await self._events_bus.aclose()
         # 后台调研不属于任何 Plan，Supervisor.stop 管不到它；不在这里取消就会在
         # runtime 关掉之后继续下载、继续调模型，还会往已清空的订阅者发布。
         if self._survey_task is not None and not self._survey_task.done():

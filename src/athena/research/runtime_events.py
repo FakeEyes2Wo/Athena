@@ -286,6 +286,14 @@ class RuntimeEvents:
             *(invoke(key, emit) for key, emit in list(self._subscribers.items()))
         )
 
+    async def aclose(self) -> None:
+        """Cancel pending subscriber handshakes and drop all subscribers."""
+        for ready in self._subscriber_ready.values():
+            if not ready.done():
+                ready.cancel()
+        self._subscriber_ready.clear()
+        self._subscribers.clear()
+
     def _append_log(self, record: dict[str, object]) -> None:
         """Append one session record to the active session's transcript (best-effort)."""
         try:

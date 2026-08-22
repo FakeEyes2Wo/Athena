@@ -171,6 +171,10 @@ class Supervisor(SupervisorActions):
         """Return currently dispatched Plan IDs."""
         return tuple(self._running)
 
+    def is_stopped(self) -> bool:
+        """Return whether this Supervisor has been told to stop."""
+        return self._stopped
+
     @property
     def next_hypothesis_id(self) -> str | None:
         """Return the pending one-shot Human selection, if any."""

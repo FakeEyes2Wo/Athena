@@ -1,0 +1,59 @@
+"""Immutable configuration and path layout for the research runtime."""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class ResearchPaths:
+    """Filesystem layout derived from project/state roots."""
+
+    root: Path
+    athena: Path
+    workspaces: Path
+    state: Path
+    tree: Path
+    sessions: Path
+
+
+@dataclass(frozen=True)
+class SearchLimits:
+    """Search budget knobs owned by the durable ResearchState."""
+
+    search_limit: int = 10
+    concurrency: int = 1
+    ideator_count: int = 3
+    hypotheses_per_ideator: int = 2
+
+
+@dataclass(frozen=True)
+class SurveyConfig:
+    """Optional background literature-survey knobs."""
+
+    enabled: bool = False
+    query: str = ""
+    max_papers: int = 20
+    search_top_k: int = 0
+    max_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class ResearchConfig:
+    """Everything ResearchRuntime needs to know that does not change per run."""
+
+    paths: ResearchPaths
+    model: str | None = None
+    client: Any = None
+    task: str = ""
+    auto_seed_task: bool = False
+    search: SearchLimits = field(default_factory=SearchLimits)
+    survey: SurveyConfig = field(default_factory=SurveyConfig)
+    auto_validate: bool = False
+    direction: Literal["maximize", "minimize"] = "maximize"
+    tolerance: float = 0.0
+    ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration"
+    prepare_phase: Any = None
+    validation_phase: Any = None
+    plan_turn: Any = None
+    ask_user: Any = None

@@ -95,19 +95,19 @@ class PhaseRunner:
     async def run_plan_turn(self, plan_id: str, state: Any) -> PlanTurnResult:
         """Execute one Plan turn through the configured plan runner."""
         rt = self._runtime
-        if rt._plan_turn.__name__ != "unavailable_plan_turn":
-            return await rt._plan_turn(plan_id, state)
-        plan_input = await rt._supervisor.plan_input(plan_id)
+        if rt.plan_turn is not None:
+            return await rt.plan_turn(plan_id, state)
+        plan_input = await rt.supervisor.plan_input(plan_id)
         runner = PlanRunner(
-            execution=rt._execution,
-            store=rt._store,
-            evaluator=rt._evaluator,
-            workspace=rt._git,
-            branch=rt._supervisor.workspace(plan_id),
+            execution=rt.execution,
+            store=rt.store,
+            evaluator=rt.evaluator,
+            workspace=rt.git,
+            branch=rt.supervisor.workspace(plan_id),
             context=ExecutionContext(
-                project_root=rt._root,
-                workspace_root=rt._supervisor.workspace_path(plan_id),
-                environment_root=rt._root,
+                project_root=rt.root,
+                workspace_root=rt.supervisor.workspace_path(plan_id),
+                environment_root=rt.root,
                 experiment_id=plan_id,
             ),
             direction=plan_input.direction,
@@ -132,21 +132,21 @@ class PhaseRunner:
         rt = self._runtime
         request = {"content": content, "context_refs": []}
         try:
-            if rt._agents.has_agent(agent_id):
-                run_id = await rt._agents.followup(agent_id, request)
+            if rt.agents.has_agent(agent_id):
+                run_id = await rt.agents.followup(agent_id, request)
             else:
-                _id, run_id = await rt._agents.create_root(
+                _id, run_id = await rt.agents.create_root(
                     agent_type, request, agent_id=agent_id, name=agent_id
                 )
 
             def publish(kind: str, ref: str, data: dict | None = None) -> None:
                 """Forward one agent journal event to the runtime event bus."""
-                events_bus = getattr(rt, "_events_bus", None)
+                events_bus = getattr(rt, "events", None)
                 if events_bus is not None:
                     events_bus.project_agent_event(agent_id, kind, ref, data)
 
-            summary = await wait_run_events(rt._agents, run_id, publish)
-            result = await load_agent_result(summary, rt._store, HandoffResult)
+            summary = await wait_run_events(rt.agents, run_id, publish)
+            result = await load_agent_result(summary, rt.store, HandoffResult)
             path = Path(workspace) / output_file
             # 文件已落盘但结果解析失败时，仍视为成功，避免“文件存在却标红”。
             if result is None:
@@ -159,28 +159,28 @@ class PhaseRunner:
         finally:
             if reap_after:
                 try:
-                    await rt._agents.reap(agent_id)
+                    await rt.agents.reap(agent_id)
                 except Exception:  # noqa: BLE001,S110 - GC must never mask handoff failure
                     pass
 
     async def run_prepare_phase(self) -> PrepareResult:
         """Run the PREPARE phase and return the trusted baseline result."""
         rt = self._runtime
-        if rt._prepare_phase is not None:
-            return await rt._prepare_phase()
-        if rt._provider is None:
+        if rt.prepare_phase is not None:
+            return await rt.prepare_phase()
+        if rt.provider is None:
             raise RuntimeError("PREPARE requires a registered Agent provider")
         await rt.publish_output(
             source="supervisor", channel="text", text="PREPARE: 初始化项目仓库…"
         )
-        base_commit = await rt._git.init()
-        workspace = await rt._git.create(base_commit, "athena/prepare", name="eda")
+        base_commit = await rt.git.init()
+        workspace = await rt.git.create(base_commit, "athena/prepare", name="eda")
         # 只把 EDA 目录路径交给 supervisor 持有的持久化 state；EDA 结果不进 SEARCH。
         # 存相对项目根的路径而非绝对路径：state 才项目自包含。
         rt.state.eda_dir = str(
-            Path(workspace.path).resolve().relative_to(rt._root.resolve())
+            Path(workspace.path).resolve().relative_to(rt.root.resolve())
         )
-        rt.state.save(rt._state_path)
+        rt.state.save(rt.state_path)
         await rt.publish_output(
             source="supervisor",
             channel="text",
@@ -188,10 +188,10 @@ class PhaseRunner:
         )
         # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结；
         # 断点续传时若已有可解析的 frozen bundle，直接复用不重跑。
-        evaluator_ref = rt._supervisor.evaluator_ref
+        evaluator_ref = rt.supervisor.evaluator_ref
         if evaluator_ref is not None:
             try:
-                await rt._store.get_text(evaluator_ref)
+                await rt.store.get_text(evaluator_ref)
             except Exception:
                 # artifact 缺失或损坏 → 重新冻结评估器
                 evaluator_ref = None
@@ -199,29 +199,29 @@ class PhaseRunner:
             await rt.publish_output(
                 source="supervisor", channel="text", text="PREPARE: 冻结评估器…"
             )
-            evaluator_dir = rt._workspaces_root / "evaluator"
-            if not rt._registry.contains("evaluator"):
+            evaluator_dir = rt.workspaces_root / "evaluator"
+            if not rt.registry.contains("evaluator"):
                 register_evaluator_agent(
-                    rt._registry,
-                    provider=rt._provider,
-                    artifacts=rt._store,
+                    rt.registry,
+                    provider=rt.provider,
+                    artifacts=rt.store,
                     workspace=evaluator_dir,
-                    runtime=rt._execution,
+                    runtime=rt.execution,
                     extra_tools=rt.kaggle_tools("evaluator"),
                 )
             evaluator_ref = await run_evaluator_plan(
-                agents=rt._agents,
-                scripts=rt._scripts,
-                store=rt._store,
+                agents=rt.agents,
+                scripts=rt.scripts,
+                store=rt.store,
                 evaluator_dir=evaluator_dir,
-                execution=rt._execution,
-                task=rt._task_text,
+                execution=rt.execution,
+                task=rt.task_text,
                 max_turns=MAX_PLAN_TURNS,
-                publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
+                publish=lambda kind, ref, data: rt.events.project_agent_event(
                     "evaluator", kind, ref, data
                 ),
             )
-            await rt._supervisor.checkpoint_evaluator(evaluator_ref)
+            await rt.supervisor.checkpoint_evaluator(evaluator_ref)
             await rt.publish_output(
                 source="supervisor",
                 channel="text",
@@ -252,13 +252,13 @@ class PhaseRunner:
                 channel="text",
                 text="PREPARE: 生成 EDA_TODO.md…",
             )
-            if not rt._registry.contains(PREPARE_EDA_AGENT_TYPE):
+            if not rt.registry.contains(PREPARE_EDA_AGENT_TYPE):
                 register_prepare_eda_agent(
-                    rt._registry,
-                    provider=rt._provider,
-                    artifacts=rt._store,
+                    rt.registry,
+                    provider=rt.provider,
+                    artifacts=rt.store,
                     workspace=Path(workspace.path),
-                    runtime=rt._execution,
+                    runtime=rt.execution,
                     extra_tools=rt.kaggle_tools("prepare"),
                 )
             await self._run_handoff_agent(
@@ -266,13 +266,13 @@ class PhaseRunner:
                 agent_type=PREPARE_EDA_AGENT_TYPE,
                 workspace=str(workspace.path),
                 output_file="EDA_TODO.md",
-                content=rt._task_text,
+                content=rt.task_text,
             )
             failed = await run_eda_todos(
-                agents=rt._agents,
-                store=rt._store,
+                agents=rt.agents,
+                store=rt.store,
                 workspace=Path(workspace.path),
-                project_event=lambda aid, kind, ref, data: rt._events_bus.project_agent_event(
+                project_event=lambda aid, kind, ref, data: rt.events.project_agent_event(
                     aid, kind, ref, data
                 ),
             )
@@ -322,7 +322,7 @@ class PhaseRunner:
             _write_fallback_eda(Path(workspace.path))
             eda_ok = False
             try:
-                await rt._agents.reap(PREPARE_EDA_AGENT_ID)
+                await rt.agents.reap(PREPARE_EDA_AGENT_ID)
             except Exception:  # noqa: BLE001,S110 - GC must never mask EDA failure
                 pass
         # 步骤 2b：baseline_ideator 读 EDA handoff，写 BASELINE_DESIGN.md。
@@ -333,13 +333,13 @@ class PhaseRunner:
                     channel="text",
                     text="PREPARE: 生成 BASELINE_DESIGN.md…",
                 )
-                if not rt._registry.contains(BASELINE_IDEATOR_PROFILE.agent_type):
+                if not rt.registry.contains(BASELINE_IDEATOR_PROFILE.agent_type):
                     register_ideator_agent(
-                        rt._registry,
-                        provider=rt._provider,
-                        artifacts=rt._store,
+                        rt.registry,
+                        provider=rt.provider,
+                        artifacts=rt.store,
                         workspace=Path(workspace.path),
-                        runtime=rt._execution,
+                        runtime=rt.execution,
                         extra_tools=rt.ideator_tools(),
                         gated=True,
                         profile=BASELINE_IDEATOR_PROFILE,
@@ -350,7 +350,7 @@ class PhaseRunner:
                     workspace=str(workspace.path),
                     output_file="BASELINE_DESIGN.md",
                     content=(
-                        f"{rt._task_text}\n\nRead EDA_HANDOFF.md and write "
+                        f"{rt.task_text}\n\nRead EDA_HANDOFF.md and write "
                         "BASELINE_DESIGN.md."
                     ),
                     reap_after=True,
@@ -373,30 +373,30 @@ class PhaseRunner:
             channel="text",
             text="PREPARE: 运行 PREPARE Agent 并打分…",
         )
-        if not rt._registry.contains("prepare"):
+        if not rt.registry.contains("prepare"):
             register_prepare_agent(
-                rt._registry,
-                provider=rt._provider,
-                artifacts=rt._store,
+                rt.registry,
+                provider=rt.provider,
+                artifacts=rt.store,
                 workspace=Path(workspace.path),
-                runtime=rt._execution,
+                runtime=rt.execution,
                 extra_tools=rt.kaggle_tools("prepare"),
             )
-        tree_ref = await rt._store.put_text(
+        tree_ref = await rt.store.put_text(
             json.dumps(rt.tree.to_dict(), ensure_ascii=False, sort_keys=True)
         )
         return await run_prepare_plan(
-            agents=rt._agents,
-            evaluator=rt._evaluator,
-            git=rt._git,
+            agents=rt.agents,
+            evaluator=rt.evaluator,
+            git=rt.git,
             workspace=workspace,
-            execution=rt._execution,
-            store=rt._store,
+            execution=rt.execution,
+            store=rt.store,
             evaluator_ref=evaluator_ref,
             tree_ref=tree_ref,
-            task=rt._task_text,
+            task=rt.task_text,
             max_turns=MAX_PLAN_TURNS,
-            publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
+            publish=lambda kind, ref, data: rt.events.project_agent_event(
                 "prepare", kind, ref, data
             ),
         )
@@ -406,21 +406,21 @@ class PhaseRunner:
     ) -> ValidationResult:
         """Run the VALIDATE phase and return the validation result."""
         rt = self._runtime
-        if rt._validation_phase is not None:
-            return await rt._validation_phase(sota_commit, metric)
-        if rt._provider is None:
+        if rt.validation_phase is not None:
+            return await rt.validation_phase(sota_commit, metric)
+        if rt.provider is None:
             raise RuntimeError("VALIDATE requires a registered Agent provider")
-        evaluator_ref = rt._supervisor.evaluator_ref
+        evaluator_ref = rt.supervisor.evaluator_ref
         if evaluator_ref is None:
             raise RuntimeError("VALIDATE requires a frozen evaluator")
-        workspace = await rt._git.create(sota_commit, "athena/validate")
-        if not rt._registry.contains("validate"):
+        workspace = await rt.git.create(sota_commit, "athena/validate")
+        if not rt.registry.contains("validate"):
             register_validate_agent(
-                rt._registry,
-                provider=rt._provider,
-                artifacts=rt._store,
+                rt.registry,
+                provider=rt.provider,
+                artifacts=rt.store,
                 workspace=Path(workspace.path),
-                runtime=rt._execution,
+                runtime=rt.execution,
             )
         sota_id = rt.tree.best_experiment_id()
         if sota_id is None:
@@ -438,10 +438,10 @@ class PhaseRunner:
         frozen = ValidationInput(
             sota_commit=sota_commit,
             reference_metric=metric,
-            direction=rt._direction,
+            direction=rt.direction,
             final_evaluator_ref=evaluator_ref,
             validation_key=validation_key(
-                sota_commit, metric, rt._direction, evaluator_ref
+                sota_commit, metric, rt.direction, evaluator_ref
             ),
             sota_context=sota_context,
         )
@@ -452,16 +452,16 @@ class PhaseRunner:
                 result_ref = candidate
         return await run_validation_plan(
             input=frozen,
-            agents=rt._agents,
-            git=rt._git,
+            agents=rt.agents,
+            git=rt.git,
             workspace=workspace,
-            execution=rt._execution,
-            evaluator=rt._evaluator,
-            store=rt._store,
+            execution=rt.execution,
+            evaluator=rt.evaluator,
+            store=rt.store,
             independent_review=self.review_validation_diff,
             result_ref=result_ref,
-            checkpoint=rt._supervisor.checkpoint_validation,
-            publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
+            checkpoint=rt.supervisor.checkpoint_validation,
+            publish=lambda kind, ref, data: rt.events.project_agent_event(
                 "validate", kind, ref, data
             ),
         )
@@ -469,12 +469,12 @@ class PhaseRunner:
     async def review_validation_diff(self, prompt: str) -> ValidationDiffReview:
         """Independently review and accept/reject a proposed validation diff."""
         rt = self._runtime
-        if rt._model is None:
+        if rt.model is None:
             raise RuntimeError("independent validation review requires a model")
         answer = await single_turn_chat(
             prompt,
-            model=rt._model,
-            client=rt._client,
+            model=rt.model,
+            client=rt.client,
             system_prompt=(
                 "Independently review the proposed VALIDATE diff. Accept only "
                 "runtime compatibility repairs and reject changes to model, data, "

@@ -97,7 +97,7 @@ async def _wait_run_with_heartbeat(
                 pass
             raise RuntimeError(f"{label} timed out after {AGENT_TURN_TIMEOUT_SECONDS}s")
         if project:
-            events_bus = getattr(rt, "_events_bus", None)
+            events_bus = getattr(rt, "events", None)
             if events_bus is not None:
                 publish = lambda kind, ref, data: events_bus.project_agent_event(
                     plan or agent_id, kind, ref, data
@@ -161,13 +161,13 @@ class AgentTurnRunner:
     async def run_supervisor_turn(self, text: str) -> str:
         """Run one serialized SupervisorAgent turn and return its human-facing answer."""
         rt = self._runtime
-        if rt._provider is None:
+        if rt.provider is None:
             raise RuntimeError("SupervisorAgent provider is not registered")
         request = {"content": text, "context_refs": []}
-        if rt._agents.has_agent(SUPERVISOR_AGENT_ID):
-            run_id = await rt._agents.followup(SUPERVISOR_AGENT_ID, request)
+        if rt.agents.has_agent(SUPERVISOR_AGENT_ID):
+            run_id = await rt.agents.followup(SUPERVISOR_AGENT_ID, request)
         else:
-            _agent_id, run_id = await rt._agents.create_root(
+            _agent_id, run_id = await rt.agents.create_root(
                 "supervisor",
                 request,
                 agent_id=SUPERVISOR_AGENT_ID,
@@ -175,14 +175,14 @@ class AgentTurnRunner:
             )
         summary = await _wait_run_with_heartbeat(
             rt,
-            rt._agents,
+            rt.agents,
             run_id,
             agent_id=SUPERVISOR_AGENT_ID,
             label="SupervisorAgent turn",
             plan=SUPERVISOR_AGENT_ID,
             project=False,
         )
-        result = await load_agent_result(summary, rt._store, SupervisorAnswer)
+        result = await load_agent_result(summary, rt.store, SupervisorAnswer)
         if result is None:
             raise RuntimeError(summary.error or "SupervisorAgent turn failed")
         await rt.publish_output(source="supervisor", channel="text", text=result.answer)
@@ -195,7 +195,7 @@ class AgentTurnRunner:
         if not eda_dir:
             # PREPARE 失败后 state.eda_dir 可能为空，但默认 EDA 目录已建好；
             # 只要目录存在就继续，不因为状态字段缺失而误报“未捕获”。
-            default_eda = getattr(rt, "_workspaces_root", None)
+            default_eda = getattr(rt, "workspaces_root", None)
             if default_eda is not None and os.path.exists(Path(default_eda) / "eda"):
                 eda_dir = str(Path(default_eda) / "eda")
             else:
@@ -203,8 +203,8 @@ class AgentTurnRunner:
         eda_path = Path(eda_dir)
         # 相对项目根的路径（新契约）解析为绝对；旧 state 遗留的绝对路径原样保留。
         if not eda_path.is_absolute():
-            eda_path = (rt._root / eda_dir).resolve()
-        root = getattr(rt, "_root", None)
+            eda_path = (rt.root / eda_dir).resolve()
+        root = getattr(rt, "root", None)
         if not eda_path.is_dir() or (
             root is not None and not eda_path.is_relative_to(root)
         ):
@@ -226,37 +226,37 @@ class AgentTurnRunner:
         回合会读取更新后的 EDA。
         """
         rt = self._runtime
-        if rt._provider is None:
+        if rt.provider is None:
             raise RuntimeError("Ideator requires a registered Agent provider")
         # 按 state.handoff_sources 收集启用的 handoff；失败来源只返回空文本，
         # 不影响本地 EDA-only 的 idea generation。
         handoff_texts = await self._collect_handoff_texts()
-        if getattr(rt, "_ideation", "ideageneration") == "debate":
+        if getattr(rt, "ideation", "ideageneration") == "debate":
             return await self._run_debate_ideator_turn(count, handoff_texts)
         eda_dir = self._resolve_eda_dir(rt)
-        ideation = getattr(rt, "_ideation", "ideageneration")
+        ideation = getattr(rt, "ideation", "ideageneration")
         if ideation == "ideageneration":
             for profile in SEARCH_IDEATOR_PROFILES:
-                if not rt._registry.contains(profile.agent_type):
+                if not rt.registry.contains(profile.agent_type):
                     register_ideator_agent(
-                        rt._registry,
-                        provider=rt._provider,
-                        artifacts=rt._store,
+                        rt.registry,
+                        provider=rt.provider,
+                        artifacts=rt.store,
                         workspace=Path(eda_dir),
-                        runtime=rt._execution,
+                        runtime=rt.execution,
                         extra_tools=rt.ideator_tools(),
                         gated=True,
                         profile=profile,
                     )
             lane_profiles = itertools.cycle(SEARCH_IDEATOR_PROFILES)
         else:
-            if not rt._registry.contains("ideator"):
+            if not rt.registry.contains("ideator"):
                 register_ideator_agent(
-                    rt._registry,
-                    provider=rt._provider,
-                    artifacts=rt._store,
+                    rt.registry,
+                    provider=rt.provider,
+                    artifacts=rt.store,
                     workspace=Path(eda_dir),
-                    runtime=rt._execution,
+                    runtime=rt.execution,
                     extra_tools=rt.ideator_tools(),
                     gated=False,
                 )
@@ -271,7 +271,7 @@ class AgentTurnRunner:
         round_label = self._ideator_round
         # 引用核验按"本轮谁打开过哪几篇"判定，因此每轮先把上一轮的会话账本丢掉。
         rt.start_corpus_round()
-        events = getattr(rt, "_events_bus", None)
+        events = getattr(rt, "events", None)
         if events is not None:
             events.set_ideator_lanes(len(allocations))
             await events.publish_ideator_state()
@@ -319,16 +319,16 @@ class AgentTurnRunner:
     async def run_data_turn(self, request: str) -> None:
         """派发 Data Agent 在 EDA 目录上做补充分析并写回 report/figures。"""
         rt = self._runtime
-        if rt._provider is None:
+        if rt.provider is None:
             raise RuntimeError("Data Agent requires a registered Agent provider")
         eda_dir = self._resolve_eda_dir(rt)
-        if not rt._registry.contains("data"):
+        if not rt.registry.contains("data"):
             register_data_agent(
-                rt._registry,
-                provider=rt._provider,
-                artifacts=rt._store,
+                rt.registry,
+                provider=rt.provider,
+                artifacts=rt.store,
                 workspace=Path(eda_dir),
-                runtime=rt._execution,
+                runtime=rt.execution,
             )
         await rt.publish_output(
             source="agent",
@@ -337,10 +337,10 @@ class AgentTurnRunner:
             plan=DATA_AGENT_ID,
         )
         task = {"content": request, "context_refs": []}
-        if rt._agents.has_agent(DATA_AGENT_ID):
-            run_id = await rt._agents.followup(DATA_AGENT_ID, task)
+        if rt.agents.has_agent(DATA_AGENT_ID):
+            run_id = await rt.agents.followup(DATA_AGENT_ID, task)
         else:
-            _agent_id, run_id = await rt._agents.create_root(
+            _agent_id, run_id = await rt.agents.create_root(
                 "data",
                 task,
                 agent_id=DATA_AGENT_ID,
@@ -348,13 +348,13 @@ class AgentTurnRunner:
             )
         summary = await _wait_run_with_heartbeat(
             rt,
-            rt._agents,
+            rt.agents,
             run_id,
             agent_id=DATA_AGENT_ID,
             label="Data Agent turn",
             plan=DATA_AGENT_ID,
         )
-        result = await load_agent_result(summary, rt._store, EdaResult)
+        result = await load_agent_result(summary, rt.store, EdaResult)
         if result is None:
             raise RuntimeError(summary.error or "Data Agent turn failed")
         await rt.publish_output(
@@ -394,16 +394,16 @@ class AgentTurnRunner:
         never block on this optional evidence channel.
         """
         rt = self._runtime
-        if not getattr(rt._supervisor, "kaggle_enabled", False):
+        if not getattr(rt.supervisor, "kaggle_enabled", False):
             return ""
         eda_dir = Path(self._resolve_eda_dir(rt))
         handoff_path = eda_dir / KAGGLE_HANDOFF_FILENAME
         if handoff_path.is_file():
             text = handoff_path.read_text(encoding="utf-8")[:MAX_KAGGLE_HANDOFF_CHARS]
-            self._remember_handoff_ref("kaggle", await rt._store.put_text(text))
+            self._remember_handoff_ref("kaggle", await rt.store.put_text(text))
             return text
         task_text = (
-            getattr(rt, "_task_text", "") or getattr(rt.state, "task_text", "") or ""
+            getattr(rt, "task_text", "") or getattr(rt.state, "task_text", "") or ""
         )
         slug = kaggle_slug_from_task(task_text)
         if not slug:
@@ -417,16 +417,16 @@ class AgentTurnRunner:
                 and not any(ch.isspace() for ch in candidate)
             ):
                 slug = candidate
-        if not slug or rt._provider is None:
+        if not slug or rt.provider is None:
             return ""
         try:
-            if not rt._registry.contains(KAGGLE_HANDOFF_AGENT_TYPE):
+            if not rt.registry.contains(KAGGLE_HANDOFF_AGENT_TYPE):
                 register_kaggle_handoff_agent(
-                    rt._registry,
-                    provider=rt._provider,
-                    artifacts=rt._store,
+                    rt.registry,
+                    provider=rt.provider,
+                    artifacts=rt.store,
                     workspace=eda_dir,
-                    runtime=rt._execution,
+                    runtime=rt.execution,
                     extra_tools=self._kaggle_handoff_tools(),
                 )
             content = (
@@ -435,12 +435,12 @@ class AgentTurnRunner:
                 "Read the EDA workspace's RESEARCH_HANDOFF.md, pull relevant Kaggle "
                 "discussions and top notebooks, and write KAGGLE_HANDOFF.md."
             )
-            if rt._agents.has_agent(KAGGLE_HANDOFF_AGENT_ID):
-                run_id = await rt._agents.followup(
+            if rt.agents.has_agent(KAGGLE_HANDOFF_AGENT_ID):
+                run_id = await rt.agents.followup(
                     KAGGLE_HANDOFF_AGENT_ID, {"content": content, "context_refs": []}
                 )
             else:
-                _agent_id, run_id = await rt._agents.create_root(
+                _agent_id, run_id = await rt.agents.create_root(
                     KAGGLE_HANDOFF_AGENT_TYPE,
                     {"content": content, "context_refs": []},
                     agent_id=KAGGLE_HANDOFF_AGENT_ID,
@@ -448,13 +448,13 @@ class AgentTurnRunner:
                 )
             summary = await _wait_run_with_heartbeat(
                 rt,
-                rt._agents,
+                rt.agents,
                 run_id,
                 agent_id=KAGGLE_HANDOFF_AGENT_ID,
                 label="Kaggle handoff",
                 plan=KAGGLE_HANDOFF_AGENT_ID,
             )
-            result = await load_agent_result(summary, rt._store, KaggleHandoffResult)
+            result = await load_agent_result(summary, rt.store, KaggleHandoffResult)
             if handoff_path.is_file():
                 if result is not None:
                     await rt.publish_output(
@@ -466,7 +466,7 @@ class AgentTurnRunner:
                 text = handoff_path.read_text(encoding="utf-8")[
                     :MAX_KAGGLE_HANDOFF_CHARS
                 ]
-                self._remember_handoff_ref("kaggle", await rt._store.put_text(text))
+                self._remember_handoff_ref("kaggle", await rt.store.put_text(text))
                 return text
             message = (
                 "Kaggle handoff agent finished without KAGGLE_HANDOFF.md"
@@ -513,7 +513,7 @@ class AgentTurnRunner:
             return
         handoff_refs[source] = ref
         save = getattr(state, "save", None)
-        state_path = getattr(rt, "_state_path", None)
+        state_path = getattr(rt, "state_path", None)
         if save is not None and state_path:
             save(state_path)
 
@@ -526,7 +526,7 @@ class AgentTurnRunner:
         clarification_ref = getattr(state, "handoff_refs", {}).get("task_clarification")
         if clarification_ref:
             try:
-                texts.append(await rt._store.get_text(clarification_ref))
+                texts.append(await rt.store.get_text(clarification_ref))
             except Exception:  # noqa: BLE001 - 澄清记录是增益而非前提
                 pass
         if "kaggle" in sources:
@@ -560,12 +560,12 @@ class AgentTurnRunner:
                 "mailbox; use them as supporting evidence."
             )
         context_refs: list[ArtifactRef] = []
-        handoff = await read_eval_handoff(rt._store, rt._supervisor.evaluator_ref)
+        handoff = await read_eval_handoff(rt.store, rt.supervisor.evaluator_ref)
         if handoff:
             # 契约拼进 content。此前它只被塞进 context_refs 并在正文里声称"attached as
             # context"——而 context_refs 到不了 model，那句话一直是空头支票。
             context_refs.append(
-                await rt._store.put_text(
+                await rt.store.put_text(
                     json.dumps({"eval_handoff": handoff}, ensure_ascii=False)
                 )
             )
@@ -580,17 +580,17 @@ class AgentTurnRunner:
             if handoff_texts:
                 # 先注册 ideator 线程（不触发 turn），把 handoff 完成信息投进 mailbox，
                 # 再启动首个 turn；BaseAgentRunner 会把未读 mailbox 消息追加进模型上下文。
-                await rt._agents.resume_agent(label, agent_type=agent_type, name=label)
+                await rt.agents.resume_agent(label, agent_type=agent_type, name=label)
                 mailbox_content = "\n\n".join(handoff_texts)
-                await rt._agents.send_message(label, mailbox_content, [])
-                agent_id, run_id = await rt._agents.create_root(
+                await rt.agents.send_message(label, mailbox_content, [])
+                agent_id, run_id = await rt.agents.create_root(
                     agent_type, request, agent_id=label, name=label
                 )
             else:
-                agent_id, run_id = await rt._agents.create_root(
+                agent_id, run_id = await rt.agents.create_root(
                     agent_type, request, name=label
                 )
-            gated = getattr(rt, "_ideation", "ideageneration") == "ideageneration"
+            gated = getattr(rt, "ideation", "ideageneration") == "ideageneration"
             schema = IdeatorHypothesisBatch if gated else HypothesisBatch
 
             # 门禁全拒时带理由重新提案：拒绝本身就是给生成侧的有效信号。上限是硬的——
@@ -600,13 +600,13 @@ class AgentTurnRunner:
             for attempt in range(MAX_GATE_RETRIES + 1):
                 summary = await _wait_run_with_heartbeat(
                     rt,
-                    rt._agents,
+                    rt.agents,
                     run_id,
                     agent_id=agent_id,
                     label=label,
                     plan=label,
                 )
-                batch = await load_agent_result(summary, rt._store, schema)
+                batch = await load_agent_result(summary, rt.store, schema)
                 if batch is None:
                     raise RuntimeError(summary.error or "Ideator turn failed")
 
@@ -628,7 +628,7 @@ class AgentTurnRunner:
                 regenerate = _regenerate_prompt(rejections, target)
                 if profile is not None:
                     regenerate += f"\n\n{profile.task_hint}"
-                run_id = await rt._agents.followup(
+                run_id = await rt.agents.followup(
                     agent_id,
                     {"content": regenerate, "context_refs": []},
                 )
@@ -639,7 +639,7 @@ class AgentTurnRunner:
             # do not accumulate closed threads/rollout metadata.
             if agent_id is not None:
                 try:
-                    await rt._agents.reap(agent_id)
+                    await rt.agents.reap(agent_id)
                 except Exception:  # noqa: BLE001,S110 - GC must never mask lane failure
                     pass
 
@@ -658,7 +658,7 @@ class AgentTurnRunner:
         """
         rt = self._runtime
         eda_request = getattr(batch, "eda_request", None)
-        if getattr(rt, "_ideation", "ideageneration") != "ideageneration":
+        if getattr(rt, "ideation", "ideageneration") != "ideageneration":
             return HypothesisBatch(
                 hypotheses=await self._verify_sources(list(batch.hypotheses)),
                 eda_request=eda_request,
@@ -676,8 +676,8 @@ class AgentTurnRunner:
 
         kept = await run_light_pipeline(
             batch.hypotheses,
-            model=rt._model,
-            artifacts=rt._store,
+            model=rt.model,
+            artifacts=rt.store,
             progress=progress,
             rejections=rejections,
         )
@@ -769,7 +769,7 @@ class AgentTurnRunner:
         是单条判定内部的保守，整层不可用则不该改变已经通过前一关的结论。
         """
         rt = self._runtime
-        if rt._model is None or not any(item.sources for item in hypotheses):
+        if rt.model is None or not any(item.sources for item in hypotheses):
             return hypotheses
         passages = await rt.corpus_passages_read()
         checked: list[Hypothesis] = []
@@ -819,7 +819,7 @@ class AgentTurnRunner:
             evidence=format_evidence(passages),
         )
         content = await single_turn_chat(
-            prompt, model=rt._model, client=rt._client, max_tokens=200
+            prompt, model=rt.model, client=rt.client, max_tokens=200
         )
         return parse_verdict(paper_id, content)
 
@@ -865,8 +865,8 @@ class AgentTurnRunner:
                 value = await single_turn_structured_chat(
                     effective_prompt,
                     output_type,
-                    model=rt._model,
-                    artifacts=rt._store,
+                    model=rt.model,
+                    artifacts=rt.store,
                     tools=debate_tools,
                 )
                 return _StructuredResult(value)
@@ -878,7 +878,7 @@ class AgentTurnRunner:
         # 辩论 Ideator 的完整输入（DataProfile/papers/models）在 EDA-only 的 SEARCH
         # 组合根里没有现成来源；这里给最小画像 + 空文献/模型列表，保证模式可运行。
         profile = _DebateProfile()
-        ideator = Ideator(agent_factory=agent_factory, artifacts=rt._store)
+        ideator = Ideator(agent_factory=agent_factory, artifacts=rt.store)
         try:
             result = await ideator.generate(profile, [], [], rt.tree)
         except Exception as error:  # noqa: BLE001 - debate 失败按 lane 失败上报
@@ -900,24 +900,24 @@ class AgentTurnRunner:
         避免断点续传时重复调研。
         """
         rt = self._runtime
-        if rt._provider is None:
+        if rt.provider is None:
             raise RuntimeError("General Agent requires a registered Agent provider")
-        if not rt._registry.contains("general"):
+        if not rt.registry.contains("general"):
             register_general_agent(
-                rt._registry,
-                provider=rt._provider,
-                artifacts=rt._store,
-                project_root=rt._root,
-                runtime=rt._execution,
+                rt.registry,
+                provider=rt.provider,
+                artifacts=rt.store,
+                project_root=rt.root,
+                runtime=rt.execution,
                 extra_tools=self._general_tools(),
             )
         request = {"content": task, "context_refs": []}
-        if prior_agent_id is not None and rt._agents.has_agent(prior_agent_id):
+        if prior_agent_id is not None and rt.agents.has_agent(prior_agent_id):
             agent_id = prior_agent_id
-            run_id = await rt._agents.followup(agent_id, request)
+            run_id = await rt.agents.followup(agent_id, request)
         else:
             # ``agent_id=None`` 时新开随机 worker；给定 prior id 则经 rollout 恢复记忆。
-            agent_id, run_id = await rt._agents.create_root(
+            agent_id, run_id = await rt.agents.create_root(
                 "general", request, agent_id=prior_agent_id, name="general"
             )
         state = rt.state
@@ -931,16 +931,16 @@ class AgentTurnRunner:
                 state.task_research_agent_id = agent_id
                 changed = True
             if changed:
-                state.save(rt._state_path)
+                state.save(rt.state_path)
         summary = await _wait_run_with_heartbeat(
             rt,
-            rt._agents,
+            rt.agents,
             run_id,
             agent_id=agent_id,
             label="General Agent turn",
             plan="general",
         )
-        result = await load_agent_result(summary, rt._store, GeneralResult)
+        result = await load_agent_result(summary, rt.store, GeneralResult)
         if result is None:
             raise RuntimeError(summary.error or "General Agent turn failed")
         return GeneralTurnOutcome(agent_id=agent_id, result=result.model_dump())
