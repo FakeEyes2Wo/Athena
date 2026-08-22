@@ -76,7 +76,8 @@
 
 ### A3. 代码结构
 
-- `src/athena/agents/dataclean_agent.py`（新增）：
+- `src/athena/agents/prepare_dataclean_agent.py`（新增，命名沿用 evaluator/EDA 的
+  `prepare_*_agent` 系列）：
   `DATACLEAN_AGENT_ID = DATACLEAN_AGENT_TYPE = "dataclean"`；
   `register_dataclean_agent(registry, *, provider, artifacts, workspace, runtime,
   extra_tools)` → 调用 `register_prompt_agent(..., output_type=PlanDecision, ...)`。
