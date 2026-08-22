@@ -10,18 +10,19 @@ from typing import Literal
 
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS, SupervisorActions
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.agent.types import AgentCommandError, ErrorCode
+from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch, GitWorkspace
 from athena.research.contracts import GeneralTurnOutcome
+from athena.research.report import build_final_report
 from athena.research.supervisor.experiment import (
     PlanTurnResult,
     decide_settlement,
-    load_agent_result,
     handoff_block,
     hypothesis_block,
+    load_agent_result,
     load_best,
     read_eval_handoff,
 )
@@ -31,9 +32,8 @@ from athena.research.supervisor.plans import (
     PlanState,
     wait_run_events,
 )
-from athena.research.supervisor.prepare import PrepareResult
-from athena.research.report import build_final_report
 from athena.research.supervisor.policy import Outcome
+from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import (
     ScheduleKind,
@@ -1053,6 +1053,12 @@ class Supervisor(SupervisorActions):
         self.tree.save(self._tree_path)
         self.state.plans.pop(plan_id)
         self._save_state()
+        # A settled Plan owns a stable PlanAgent thread. Reap it now so finished
+        # SEARCH plans do not accumulate for the rest of the process lifetime.
+        try:
+            await self._agents.reap(plan_id)
+        except Exception:
+            logger.warning("failed to reap settled Plan agent %s", plan_id, exc_info=True)
 
     async def message(self, text: str) -> str:
         """Delegate ordinary Human text to the long-lived SupervisorAgent."""
@@ -1102,6 +1108,16 @@ class Supervisor(SupervisorActions):
         if self._running:
             await asyncio.gather(*self._running.values(), return_exceptions=True)
         self._running.clear()
+        # Stop is terminal for locally owned Plan agents: release their threads
+        # and facade metadata. If the same project is restarted, Recovery re-creates
+        # plan threads from durable state via resume_agent.
+        for plan_id in tuple(self.state.plans):
+            try:
+                await self._agents.reap(plan_id)
+            except Exception:
+                logger.warning(
+                    "failed to reap Plan agent %s during stop", plan_id, exc_info=True
+                )
 
     def _sota_parent(self) -> tuple[str, Hypothesis]:
         """Return (sota_experiment_id, sota_hypothesis) for seeding hypotheses."""

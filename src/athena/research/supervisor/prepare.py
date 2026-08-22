@@ -181,40 +181,48 @@ async def run_evaluator_plan(
         raise RuntimeError(f"evaluator Agent id must be {EVALUATOR_AGENT_ID}")
 
     feedback: str | None = None
-    for turn in range(max_turns):
-        if turn:
-            run_id = await agents.followup(
-                EVALUATOR_AGENT_ID,
-                {"content": feedback, "context_refs": []},
-            )
-        summary = await wait_run_events(agents, run_id, publish)
-        try:
-            decision = await _decision_from_summary(summary, store)
-        except (OSError, RuntimeError, ValueError) as exc:
-            # Agent 输出无效 → 转为反馈重试；真实 abort 由 decision == abandon 处理。
-            feedback = (
-                "previous evaluator turn did not produce a valid decision: "
-                f"{' '.join(str(exc).split())[:1000]}"
-            )
-            continue
-        if decision.decision == "abandon":
-            raise RuntimeError(f"evaluator Agent abandoned Plan: {decision.reason}")
-        try:
-            evaluator_ref = await _freeze_evaluator(
-                root=root, scripts=scripts, store=store
-            )
-            if decision.decision != "submit":
-                raise ValueError(
-                    "evaluator frozen successfully but the decision was "
-                    f"{decision.decision!r}. Return submit to advance to the "
-                    "experiment step."
+    try:
+        for turn in range(max_turns):
+            if turn:
+                run_id = await agents.followup(
+                    EVALUATOR_AGENT_ID,
+                    {"content": feedback, "context_refs": []},
                 )
-            return evaluator_ref
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            # 覆盖 evaluator 冻结（uv lock）的子进程失败 → 转成同 Plan 的反馈重试。
-            feedback = " ".join(str(exc).split())[:1000]
+            summary = await wait_run_events(agents, run_id, publish)
+            try:
+                decision = await _decision_from_summary(summary, store)
+            except (OSError, RuntimeError, ValueError) as exc:
+                # Agent 输出无效 → 转为反馈重试；真实 abort 由 decision == abandon 处理。
+                feedback = (
+                    "previous evaluator turn did not produce a valid decision: "
+                    f"{' '.join(str(exc).split())[:1000]}"
+                )
+                continue
+            if decision.decision == "abandon":
+                raise RuntimeError(f"evaluator Agent abandoned Plan: {decision.reason}")
+            try:
+                evaluator_ref = await _freeze_evaluator(
+                    root=root, scripts=scripts, store=store
+                )
+                if decision.decision != "submit":
+                    raise ValueError(
+                        "evaluator frozen successfully but the decision was "
+                        f"{decision.decision!r}. Return submit to advance to the "
+                        "experiment step."
+                    )
+                return evaluator_ref
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                # 覆盖 evaluator 冻结（uv lock）的子进程失败 → 转成同 Plan 的反馈重试。
+                feedback = " ".join(str(exc).split())[:1000]
 
-    raise RuntimeError("evaluator turn budget exhausted without a frozen evaluator")
+        raise RuntimeError("evaluator turn budget exhausted without a frozen evaluator")
+    finally:
+        # The evaluator Agent is a one-shot PREPARE worker; release it after the
+        # phase succeeds or exhausts its turn budget.
+        try:
+            await agents.reap(EVALUATOR_AGENT_ID)
+        except Exception:  # noqa: BLE001,S110 - GC must never mask PREPARE failure
+            pass
 
 
 async def run_prepare_plan(
@@ -271,104 +279,112 @@ async def run_prepare_plan(
         raise RuntimeError(f"prepare Agent id must be {PREPARE_AGENT_ID}")
 
     feedback: str | None = None
-    for turn in range(max_turns):
-        if turn:
-            run_id = await agents.followup(
-                PREPARE_AGENT_ID,
-                {"content": feedback, "context_refs": []},
-            )
-        summary = await wait_run_events(agents, run_id, publish)
-        try:
-            decision = await _decision_from_summary(summary, store)
-        except (OSError, RuntimeError, ValueError) as exc:
-            # Agent 输出无效（如结构化 PlanDecision 连续重试失败/流错误）→
-            # 转为反馈重试，不中断 PREPARE；真实 abort 由 decision == abandon 处理。
-            feedback = (
-                "previous Agent turn did not produce a valid decision: "
-                f"{' '.join(str(exc).split())[:1000]}"
-            )
-            continue
-        if decision.decision == "abandon":
-            raise RuntimeError(f"prepare Agent abandoned Plan: {decision.reason}")
-        try:
-            runner = PlanRunner(
-                execution=execution,
-                store=store,
-                evaluator=evaluator,
-                workspace=git,
-                branch=workspace,
-                context=ExecutionContext(
-                    project_root=execution.project_root,
-                    workspace_root=root,
-                    environment_root=execution.environment_root,
-                    experiment_id=PREPARE_PLAN_ID,
-                ),
-            )
-            outcome = await runner.run_turn(
-                PREPARE_PLAN_ID,
-                PlanState(
-                    kind="PREPARE",
-                    context_ref=context_ref,
-                    turns_used=turn,
-                    turn_limit=max_turns,
-                ),
-                PlanInput(
+    try:
+        for turn in range(max_turns):
+            if turn:
+                run_id = await agents.followup(
+                    PREPARE_AGENT_ID,
+                    {"content": feedback, "context_refs": []},
+                )
+            summary = await wait_run_events(agents, run_id, publish)
+            try:
+                decision = await _decision_from_summary(summary, store)
+            except (OSError, RuntimeError, ValueError) as exc:
+                # Agent 输出无效（如结构化 PlanDecision 连续重试失败/流错误）→
+                # 转为反馈重试，不中断 PREPARE；真实 abort 由 decision == abandon 处理。
+                feedback = (
+                    "previous Agent turn did not produce a valid decision: "
+                    f"{' '.join(str(exc).split())[:1000]}"
+                )
+                continue
+            if decision.decision == "abandon":
+                raise RuntimeError(f"prepare Agent abandoned Plan: {decision.reason}")
+            try:
+                runner = PlanRunner(
+                    execution=execution,
+                    store=store,
+                    evaluator=evaluator,
+                    workspace=git,
+                    branch=workspace,
+                    context=ExecutionContext(
+                        project_root=execution.project_root,
+                        workspace_root=root,
+                        environment_root=execution.environment_root,
+                        experiment_id=PREPARE_PLAN_ID,
+                    ),
+                )
+                outcome = await runner.run_turn(
+                    PREPARE_PLAN_ID,
+                    PlanState(
+                        kind="PREPARE",
+                        context_ref=context_ref,
+                        turns_used=turn,
+                        turn_limit=max_turns,
+                    ),
+                    PlanInput(
+                        evaluator_ref=evaluator_ref,
+                        tree_ref=tree_ref,
+                        initial_turn_limit=max_turns,
+                    ),
+                    emit=publish,
+                )
+                if outcome.kind == "evaluator_infrastructure_failed":
+                    raise RuntimeError(outcome.error or "evaluator unavailable")
+                if outcome.kind != "scored":
+                    raise ValueError(
+                        outcome.error or f"PREPARE validation failed: {outcome.kind}"
+                    )
+                if outcome.commit is None:
+                    raise ValueError("trusted commit is missing")
+                if outcome.predictions_ref is None:
+                    raise ValueError("trusted predictions are missing")
+                if outcome.evidence_ref is None:
+                    raise ValueError("trusted evidence is missing")
+                if outcome.report_ref is None:
+                    raise ValueError("trusted report is missing")
+                if outcome.metric is None:
+                    raise ValueError("trusted metric is missing")
+                if decision.decision != "submit":
+                    raise ValueError(
+                        "baseline validated successfully "
+                        f"(metric {outcome.metric:.4f}) but the decision was "
+                        f"{decision.decision!r}. Return submit to advance to SEARCH; "
+                        "continue means keep repairing this baseline, not move on."
+                    )
+                return PrepareResult(
                     evaluator_ref=evaluator_ref,
-                    tree_ref=tree_ref,
-                    initial_turn_limit=max_turns,
-                ),
-                emit=publish,
-            )
-            if outcome.kind == "evaluator_infrastructure_failed":
-                raise RuntimeError(outcome.error or "evaluator unavailable")
-            if outcome.kind != "scored":
-                raise ValueError(
-                    outcome.error or f"PREPARE validation failed: {outcome.kind}"
+                    metric=outcome.metric,
+                    commit=outcome.commit,
+                    predictions_ref=outcome.predictions_ref,
+                    evidence_ref=outcome.evidence_ref,
+                    report_ref=outcome.report_ref,
                 )
-            if outcome.commit is None:
-                raise ValueError("trusted commit is missing")
-            if outcome.predictions_ref is None:
-                raise ValueError("trusted predictions are missing")
-            if outcome.evidence_ref is None:
-                raise ValueError("trusted evidence is missing")
-            if outcome.report_ref is None:
-                raise ValueError("trusted report is missing")
-            if outcome.metric is None:
-                raise ValueError("trusted metric is missing")
-            if decision.decision != "submit":
-                raise ValueError(
-                    "baseline validated successfully "
-                    f"(metric {outcome.metric:.4f}) but the decision was "
-                    f"{decision.decision!r}. Return submit to advance to SEARCH; "
-                    "continue means keep repairing this baseline, not move on."
-                )
-            return PrepareResult(
-                evaluator_ref=evaluator_ref,
-                metric=outcome.metric,
-                commit=outcome.commit,
-                predictions_ref=outcome.predictions_ref,
-                evidence_ref=outcome.evidence_ref,
-                report_ref=outcome.report_ref,
-            )
-        except (
-            OSError,
-            ValueError,
-            subprocess.SubprocessError,
-            GitWorkspaceError,
-        ) as exc:
-            # 覆盖可信打分后的 git diff/commit 失败（GitWorkspaceError）与
-            # subprocess 失败，转成同 Plan 的反馈重试；evaluator_infrastructure_failed
-            # 仍走 RuntimeError 上抛（终端），由 Supervisor.start 统一观测，不在此处吞掉。
-            feedback = " ".join(str(exc).split())[:1000]
+            except (
+                OSError,
+                ValueError,
+                subprocess.SubprocessError,
+                GitWorkspaceError,
+            ) as exc:
+                # 覆盖可信打分后的 git diff/commit 失败（GitWorkspaceError）与
+                # subprocess 失败，转成同 Plan 的反馈重试；evaluator_infrastructure_failed
+                # 仍走 RuntimeError 上抛（终端），由 Supervisor.start 统一观测，不在此处吞掉。
+                feedback = " ".join(str(exc).split())[:1000]
 
-    raise RuntimeError("prepare turn budget exhausted without a trusted baseline")
+        raise RuntimeError("prepare turn budget exhausted without a trusted baseline")
+    finally:
+        # The prepare Agent is a one-shot PREPARE worker; release it after the
+        # phase succeeds or exhausts its turn budget.
+        try:
+            await agents.reap(PREPARE_AGENT_ID)
+        except Exception:  # noqa: BLE001,S110 - GC must never mask PREPARE failure
+            pass
 
 
 __all__ = [
-    "PREPARE_AGENT_ID",
-    "PREPARE_PLAN_ID",
     "EVALUATOR_AGENT_ID",
     "EVALUATOR_PLAN_ID",
+    "PREPARE_AGENT_ID",
+    "PREPARE_PLAN_ID",
     "PrepareResult",
     "run_evaluator_plan",
     "run_prepare_plan",

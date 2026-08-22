@@ -59,6 +59,9 @@ class _AgentRuntime:
             },
         )()
 
+    async def reap(self, agent_id: str) -> None:
+        del agent_id
+
 
 class _Scripts:
     """Freeze stub asserting the evaluator directory freezes to evaluate.py."""

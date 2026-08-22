@@ -1,6 +1,5 @@
 """Unit tests for the EDA_TODO.md scheduler."""
 
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,12 +13,16 @@ from athena.research.eda_todo import run_eda_todos
 class _FakeAgents:
     def __init__(self) -> None:
         self.spawned: list[dict] = []
+        self.reaped: list[str] = []
 
     async def spawn(self, parent_id, agent_type, task, *, name=None):
         self.spawned.append(
             {"parent": parent_id, "type": agent_type, "task": task, "name": name}
         )
         return f"agent-{len(self.spawned)}", f"run-{len(self.spawned)}"
+
+    async def reap(self, agent_id):
+        self.reaped.append(agent_id)
 
     async def wait_run(self, run_id):
         return SimpleNamespace(run_id=run_id, status="COMPLETED", error=None)
@@ -76,6 +79,7 @@ async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
     assert "- [x] 02 Columns" in text
     assert len(agents.spawned) == 3
     assert agents.spawned[0]["type"] == "eda_worker"
+    assert agents.reaped == [f"agent-{i}" for i in range(1, 4)]
 
 
 @pytest.mark.asyncio
@@ -113,3 +117,4 @@ async def test_run_eda_todos_keeps_failed_todo_unchecked(
     assert failed == ["00 Overview"]
     text = todo_file.read_text(encoding="utf-8")
     assert "- [ ] 00 Overview" in text
+    assert agents.reaped == ["agent-1", "agent-2"]

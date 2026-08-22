@@ -381,6 +381,9 @@ class _AgentSpy:
         self._sink.append(request)
         return name, f"run-{name}"
 
+    async def reap(self, agent_id: str) -> None:
+        pass
+
 
 @pytest.mark.asyncio
 async def test_aclose_cancels_a_survey_that_is_still_running() -> None:
@@ -664,6 +667,9 @@ class _AgentSpy:
         assert agent_type == "ideator"
         self._sink.append(request)
         return name, f"run-{name}"
+
+    async def reap(self, agent_id: str) -> None:
+        pass
 
 
 def test_a_corpus_restored_from_state_still_hands_the_ideator_its_operators(

@@ -7,9 +7,9 @@
 import asyncio
 import itertools
 import json
+import logging
 import os
 import time
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -99,7 +99,7 @@ async def _wait_run_with_heartbeat(
         if project:
             events_bus = getattr(rt, "_events_bus", None)
             if events_bus is not None:
-                publish = lambda kind, ref, data: events_bus.project_agent_event(  # noqa: E731
+                publish = lambda kind, ref, data: events_bus.project_agent_event(
                     plan or agent_id, kind, ref, data
                 )
             else:
@@ -575,62 +575,73 @@ class AgentTurnRunner:
             content += await self._corpus_block(corpus_ref)
         request = {"content": content, "context_refs": context_refs}
         agent_type = profile.agent_type if profile is not None else "ideator"
-        if handoff_texts:
-            # 先注册 ideator 线程（不触发 turn），把 handoff 完成信息投进 mailbox，
-            # 再启动首个 turn；BaseAgentRunner 会把未读 mailbox 消息追加进模型上下文。
-            await rt._agents.resume_agent(label, agent_type=agent_type, name=label)
-            mailbox_content = "\n\n".join(handoff_texts)
-            await rt._agents.send_message(label, mailbox_content, [])
-            agent_id, run_id = await rt._agents.create_root(
-                agent_type, request, agent_id=label, name=label
-            )
-        else:
-            agent_id, run_id = await rt._agents.create_root(
-                agent_type, request, name=label
-            )
-        gated = getattr(rt, "_ideation", "ideageneration") == "ideageneration"
-        schema = IdeatorHypothesisBatch if gated else HypothesisBatch
+        agent_id: str | None = None
+        try:
+            if handoff_texts:
+                # 先注册 ideator 线程（不触发 turn），把 handoff 完成信息投进 mailbox，
+                # 再启动首个 turn；BaseAgentRunner 会把未读 mailbox 消息追加进模型上下文。
+                await rt._agents.resume_agent(label, agent_type=agent_type, name=label)
+                mailbox_content = "\n\n".join(handoff_texts)
+                await rt._agents.send_message(label, mailbox_content, [])
+                agent_id, run_id = await rt._agents.create_root(
+                    agent_type, request, agent_id=label, name=label
+                )
+            else:
+                agent_id, run_id = await rt._agents.create_root(
+                    agent_type, request, name=label
+                )
+            gated = getattr(rt, "_ideation", "ideageneration") == "ideageneration"
+            schema = IdeatorHypothesisBatch if gated else HypothesisBatch
 
-        # 门禁全拒时带理由重新提案：拒绝本身就是给生成侧的有效信号。上限是硬的——
-        # 门禁若持续拒绝，无限重生成会变成死循环（真实跑测里 SEARCH 已因全拒而静默
-        # 死过一次：返回空列表 -> generated=False -> run_search 直接 return -> 状态停在
-        # RUNNING 既不推进也不终止）。
-        for attempt in range(MAX_GATE_RETRIES + 1):
-            summary = await _wait_run_with_heartbeat(
-                rt,
-                rt._agents,
-                run_id,
-                agent_id=agent_id,
-                label=label,
-                plan=label,
-            )
-            batch = await load_agent_result(summary, rt._store, schema)
-            if batch is None:
-                raise RuntimeError(summary.error or "Ideator turn failed")
+            # 门禁全拒时带理由重新提案：拒绝本身就是给生成侧的有效信号。上限是硬的——
+            # 门禁若持续拒绝，无限重生成会变成死循环（真实跑测里 SEARCH 已因全拒而静默
+            # 死过一次：返回空列表 -> generated=False -> run_search 直接 return -> 状态停在
+            # RUNNING 既不推进也不终止）。
+            for attempt in range(MAX_GATE_RETRIES + 1):
+                summary = await _wait_run_with_heartbeat(
+                    rt,
+                    rt._agents,
+                    run_id,
+                    agent_id=agent_id,
+                    label=label,
+                    plan=label,
+                )
+                batch = await load_agent_result(summary, rt._store, schema)
+                if batch is None:
+                    raise RuntimeError(summary.error or "Ideator turn failed")
 
-            rejections: list[str] = []
-            kept = await self._finish_ideator_batch(batch, rejections=rejections)
-            if kept.hypotheses or not rejections or attempt == MAX_GATE_RETRIES:
-                if not kept.hypotheses and rejections:
-                    await rt.publish_output(
-                        source="agent",
-                        channel="error",
-                        plan=label,
-                        text=(
-                            f"gate rejected every candidate after "
-                            f"{attempt + 1} attempt(s); this lane yields nothing"
-                        ),
-                    )
-                return kept
+                rejections: list[str] = []
+                kept = await self._finish_ideator_batch(batch, rejections=rejections)
+                if kept.hypotheses or not rejections or attempt == MAX_GATE_RETRIES:
+                    if not kept.hypotheses and rejections:
+                        await rt.publish_output(
+                            source="agent",
+                            channel="error",
+                            plan=label,
+                            text=(
+                                f"gate rejected every candidate after "
+                                f"{attempt + 1} attempt(s); this lane yields nothing"
+                            ),
+                        )
+                    return kept
 
-            regenerate = _regenerate_prompt(rejections, target)
-            if profile is not None:
-                regenerate += f"\n\n{profile.task_hint}"
-            run_id = await rt._agents.followup(
-                agent_id,
-                {"content": regenerate, "context_refs": []},
-            )
-        raise AssertionError("unreachable: retry loop always returns")
+                regenerate = _regenerate_prompt(rejections, target)
+                if profile is not None:
+                    regenerate += f"\n\n{profile.task_hint}"
+                run_id = await rt._agents.followup(
+                    agent_id,
+                    {"content": regenerate, "context_refs": []},
+                )
+            raise AssertionError("unreachable: retry loop always returns")
+        finally:
+            # Ideator lanes are per-round one-shot workers. Reap after the lane
+            # finishes (success, failure, or cancellation) so consecutive rounds
+            # do not accumulate closed threads/rollout metadata.
+            if agent_id is not None:
+                try:
+                    await rt._agents.reap(agent_id)
+                except Exception:  # noqa: BLE001,S110 - GC must never mask lane failure
+                    pass
 
     async def _finish_ideator_batch(
         self,
@@ -653,7 +664,7 @@ class AgentTurnRunner:
                 eda_request=eda_request,
             )
 
-        async def progress(message: str) -> None:  # noqa: D401
+        async def progress(message: str) -> None:
             """把门禁进度投影成普通输出事件。
 
             门禁全程只有 LLM 往返、没有本地计算，不报进度的话外部无法区分"正在跑十几个
@@ -690,7 +701,7 @@ class AgentTurnRunner:
                 f"- {item.paper_id} — {item.title.strip() or '(untitled)'}"
                 for item in summaries
             )
-        except Exception:  # noqa: BLE001 - 目录读不出来不该拖垮 ideation
+        except Exception:
             logger.warning("corpus overview unavailable for the lane", exc_info=True)
         listing = f"\n\nIt holds these papers:\n{papers}" if papers else ""
         return (

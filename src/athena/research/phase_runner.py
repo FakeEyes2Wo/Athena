@@ -122,34 +122,46 @@ class PhaseRunner:
         workspace: str,
         output_file: str,
         content: str,
+        reap_after: bool = False,
     ) -> str:
-        """Run one handoff-producing agent and return the output file text."""
+        """Run one handoff-producing agent and return the output file text.
+
+        ``reap_after`` should be True only on the agent's last use; it releases
+        the one-shot thread and facade metadata immediately.
+        """
         rt = self._runtime
         request = {"content": content, "context_refs": []}
-        if rt._agents.has_agent(agent_id):
-            run_id = await rt._agents.followup(agent_id, request)
-        else:
-            _id, run_id = await rt._agents.create_root(
-                agent_type, request, agent_id=agent_id, name=agent_id
-            )
+        try:
+            if rt._agents.has_agent(agent_id):
+                run_id = await rt._agents.followup(agent_id, request)
+            else:
+                _id, run_id = await rt._agents.create_root(
+                    agent_type, request, agent_id=agent_id, name=agent_id
+                )
 
-        def publish(kind: str, ref: str, data: dict | None = None) -> None:
-            """Forward one agent journal event to the runtime event bus."""
-            events_bus = getattr(rt, "_events_bus", None)
-            if events_bus is not None:
-                events_bus.project_agent_event(agent_id, kind, ref, data)
+            def publish(kind: str, ref: str, data: dict | None = None) -> None:
+                """Forward one agent journal event to the runtime event bus."""
+                events_bus = getattr(rt, "_events_bus", None)
+                if events_bus is not None:
+                    events_bus.project_agent_event(agent_id, kind, ref, data)
 
-        summary = await wait_run_events(rt._agents, run_id, publish)
-        result = await load_agent_result(summary, rt._store, HandoffResult)
-        path = Path(workspace) / output_file
-        # 文件已落盘但结果解析失败时，仍视为成功，避免“文件存在却标红”。
-        if result is None:
-            if path.is_file():
-                return path.read_text(encoding="utf-8")
-            raise RuntimeError(summary.error or f"{agent_type} handoff agent failed")
-        if not path.is_file():
-            raise RuntimeError(f"{agent_type} did not write {output_file}")
-        return path.read_text(encoding="utf-8")
+            summary = await wait_run_events(rt._agents, run_id, publish)
+            result = await load_agent_result(summary, rt._store, HandoffResult)
+            path = Path(workspace) / output_file
+            # 文件已落盘但结果解析失败时，仍视为成功，避免“文件存在却标红”。
+            if result is None:
+                if path.is_file():
+                    return path.read_text(encoding="utf-8")
+                raise RuntimeError(summary.error or f"{agent_type} handoff agent failed")
+            if not path.is_file():
+                raise RuntimeError(f"{agent_type} did not write {output_file}")
+            return path.read_text(encoding="utf-8")
+        finally:
+            if reap_after:
+                try:
+                    await rt._agents.reap(agent_id)
+                except Exception:  # noqa: BLE001,S110 - GC must never mask handoff failure
+                    pass
 
     async def run_prepare_phase(self) -> PrepareResult:
         """Run the PREPARE phase and return the trusted baseline result."""
@@ -287,6 +299,7 @@ class PhaseRunner:
                         "Finalize EDA: read all EDA_REPORT_*.md and write "
                         "EDA_INDEX.md and EDA_HANDOFF.md."
                     ),
+                    reap_after=True,
                 )
                 eda_dir = Path(workspace.path)
                 if (
@@ -308,6 +321,10 @@ class PhaseRunner:
             )
             _write_fallback_eda(Path(workspace.path))
             eda_ok = False
+            try:
+                await rt._agents.reap(PREPARE_EDA_AGENT_ID)
+            except Exception:  # noqa: BLE001,S110 - GC must never mask EDA failure
+                pass
         # 步骤 2b：baseline_ideator 读 EDA handoff，写 BASELINE_DESIGN.md。
         if eda_ok:
             try:
@@ -336,6 +353,7 @@ class PhaseRunner:
                         f"{rt._task_text}\n\nRead EDA_HANDOFF.md and write "
                         "BASELINE_DESIGN.md."
                     ),
+                    reap_after=True,
                 )
             except Exception as error:
                 await rt.publish_output(

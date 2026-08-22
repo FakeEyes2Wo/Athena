@@ -88,6 +88,14 @@ async def _run_one(
             if attempt >= retries:
                 return False
             await asyncio.sleep(0.2)
+        finally:
+            # EDA workers are one-shot subagents: reap immediately so a long
+            # PREPARE phase does not accumulate threads/rollout metadata.
+            if agent_id is not None:
+                try:
+                    await agents.reap(agent_id)
+                except Exception:  # noqa: BLE001,S110 - GC must never mask task failure
+                    pass
     return False
 
 
