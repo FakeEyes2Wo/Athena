@@ -90,7 +90,9 @@ class ResearchState(BaseModel):
     corpus_ref: str | None = None
     # Idea Generation 可用的 handoff 来源（前端 settings_set 可控制），
     # 取值示例：["kaggle"]、["kaggle", "literature"]、[]。
-    handoff_sources: list[str] = Field(default_factory=lambda: ["kaggle", "literature"])
+    # 从零启动时没有任何已生成的 handoff，因此默认为空列表；只有明确开启
+    # 或已由 PREPARE/调研产生后才由设置写入非空值。
+    handoff_sources: list[str] = Field(default_factory=list)
     # source -> artifact ref，记录已生成的 handoff，供断点续传复用。
     handoff_refs: dict[str, ArtifactRef] = Field(default_factory=dict)
     # 断点续传：首次完整任务文本（续跑时沿用，避免短消息污染 survey/PREPARE 提示词）。
