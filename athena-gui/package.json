@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/ensure-generated.mjs",
+    "prebuild": "node scripts/ensure-generated.mjs",
     "dev": "vite",
     "dev:web": "node scripts/dev-web.cjs",
     "backend": "node scripts/dev-backend.cjs",

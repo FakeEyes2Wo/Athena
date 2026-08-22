@@ -28,6 +28,8 @@ from the real competition:
   training data. Read them via `shell_command`, derive `labels.csv` from the
   training set's target column (hold out a validation split yourself), and
   write `evaluate.py` to compute the competition metric against that split.
+  In `HANDOFF.md`, explicitly state how many validation samples you held out
+  and why that number was chosen.
 
 Otherwise, when the task gives a local dataset path, proceed without Kaggle.
 

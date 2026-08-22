@@ -118,9 +118,12 @@ class PhaseRunner:
 
         summary = await wait_run_events(rt._agents, run_id, publish)
         result = await load_agent_result(summary, rt._store, HandoffResult)
-        if result is None:
-            raise RuntimeError(summary.error or f"{agent_type} handoff agent failed")
         path = Path(workspace) / output_file
+        # 文件已落盘但结果解析失败时，仍视为成功，避免“文件存在却标红”。
+        if result is None:
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+            raise RuntimeError(summary.error or f"{agent_type} handoff agent failed")
         if not path.is_file():
             raise RuntimeError(f"{agent_type} did not write {output_file}")
         return path.read_text(encoding="utf-8")
@@ -184,6 +187,11 @@ class PhaseRunner:
                 ),
             )
             await rt._supervisor.checkpoint_evaluator(evaluator_ref)
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text=f"PREPARE: evaluator 产物目录 {evaluator_dir.resolve()}。",
+            )
         else:
             await rt.publish_output(
                 source="supervisor",
@@ -191,6 +199,7 @@ class PhaseRunner:
                 text="PREPARE: 复用已冻结的评估器断点，跳过 evaluator Agent。",
             )
         # 步骤 2a：EDA orchestrator → todo workers → finalize。
+        eda_ok = True
         try:
             await rt.publish_output(
                 source="supervisor",
@@ -213,7 +222,7 @@ class PhaseRunner:
                 output_file="EDA_TODO.md",
                 content=rt._task_text,
             )
-            await run_eda_todos(
+            failed = await run_eda_todos(
                 agents=rt._agents,
                 store=rt._store,
                 workspace=Path(workspace.path),
@@ -221,27 +230,42 @@ class PhaseRunner:
                     aid, kind, ref, data
                 ),
             )
-            await rt.publish_output(
-                source="supervisor",
-                channel="text",
-                text="PREPARE: 汇总 EDA 报告…",
-            )
-            await self._run_handoff_agent(
-                agent_id=PREPARE_EDA_AGENT_ID,
-                agent_type=PREPARE_EDA_AGENT_TYPE,
-                workspace=str(workspace.path),
-                output_file="EDA_INDEX.md",
-                content=(
-                    "Finalize EDA: read all EDA_REPORT_*.md and write "
-                    "EDA_INDEX.md and EDA_HANDOFF.md."
-                ),
-            )
-            eda_dir = Path(workspace.path)
-            if (
-                not (eda_dir / "EDA_INDEX.md").is_file()
-                or not (eda_dir / "EDA_HANDOFF.md").is_file()
-            ):
-                _write_fallback_eda(eda_dir)
+            if failed:
+                await rt.publish_output(
+                    source="supervisor",
+                    channel="error",
+                    text=f"EDA todo failed: {failed}; writing fallback EDA files.",
+                )
+                _write_fallback_eda(Path(workspace.path))
+                eda_ok = False
+            else:
+                await rt.publish_output(
+                    source="supervisor",
+                    channel="text",
+                    text="PREPARE: 汇总 EDA 报告…",
+                )
+                await self._run_handoff_agent(
+                    agent_id=PREPARE_EDA_AGENT_ID,
+                    agent_type=PREPARE_EDA_AGENT_TYPE,
+                    workspace=str(workspace.path),
+                    output_file="EDA_INDEX.md",
+                    content=(
+                        "Finalize EDA: read all EDA_REPORT_*.md and write "
+                        "EDA_INDEX.md and EDA_HANDOFF.md."
+                    ),
+                )
+                eda_dir = Path(workspace.path)
+                if (
+                    not (eda_dir / "EDA_INDEX.md").is_file()
+                    or not (eda_dir / "EDA_HANDOFF.md").is_file()
+                ):
+                    _write_fallback_eda(eda_dir)
+                for report in sorted(eda_dir.glob("EDA_REPORT_*.md")):
+                    await rt.publish_output(
+                        source="supervisor",
+                        channel="text",
+                        text=f"EDA report: {report.resolve()}",
+                    )
         except Exception as error:
             await rt.publish_output(
                 source="supervisor",
@@ -249,40 +273,42 @@ class PhaseRunner:
                 text=f"EDA handoff failed ({error}); writing fallback EDA files.",
             )
             _write_fallback_eda(Path(workspace.path))
+            eda_ok = False
         # 步骤 2b：baseline_ideator 读 EDA handoff，写 BASELINE_DESIGN.md。
-        try:
-            await rt.publish_output(
-                source="supervisor",
-                channel="text",
-                text="PREPARE: 生成 BASELINE_DESIGN.md…",
-            )
-            if not rt._registry.contains(BASELINE_IDEATOR_PROFILE.agent_type):
-                register_ideator_agent(
-                    rt._registry,
-                    provider=rt._provider,
-                    artifacts=rt._store,
-                    workspace=Path(workspace.path),
-                    runtime=rt._execution,
-                    extra_tools=rt.ideator_tools(),
-                    gated=True,
-                    profile=BASELINE_IDEATOR_PROFILE,
+        if eda_ok:
+            try:
+                await rt.publish_output(
+                    source="supervisor",
+                    channel="text",
+                    text="PREPARE: 生成 BASELINE_DESIGN.md…",
                 )
-            await self._run_handoff_agent(
-                agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
-                agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
-                workspace=str(workspace.path),
-                output_file="BASELINE_DESIGN.md",
-                content=(
-                    f"{rt._task_text}\n\nRead EDA_HANDOFF.md and write "
-                    "BASELINE_DESIGN.md."
-                ),
-            )
-        except Exception as error:
-            await rt.publish_output(
-                source="supervisor",
-                channel="error",
-                text=f"Baseline design failed ({error}); prepare falls back to task-only.",
-            )
+                if not rt._registry.contains(BASELINE_IDEATOR_PROFILE.agent_type):
+                    register_ideator_agent(
+                        rt._registry,
+                        provider=rt._provider,
+                        artifacts=rt._store,
+                        workspace=Path(workspace.path),
+                        runtime=rt._execution,
+                        extra_tools=rt.ideator_tools(),
+                        gated=True,
+                        profile=BASELINE_IDEATOR_PROFILE,
+                    )
+                await self._run_handoff_agent(
+                    agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
+                    agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
+                    workspace=str(workspace.path),
+                    output_file="BASELINE_DESIGN.md",
+                    content=(
+                        f"{rt._task_text}\n\nRead EDA_HANDOFF.md and write "
+                        "BASELINE_DESIGN.md."
+                    ),
+                )
+            except Exception as error:
+                await rt.publish_output(
+                    source="supervisor",
+                    channel="error",
+                    text=f"Baseline design failed ({error}); prepare falls back to task-only.",
+                )
         # 步骤 3：prepare agent 按 BASELINE_DESIGN.md 实现并可信打分。
         await rt.publish_output(
             source="supervisor",
