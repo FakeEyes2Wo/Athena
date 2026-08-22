@@ -7,6 +7,7 @@ run_validation_phase / review_validation_diff）集中到一个组合单元。�
 """
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +62,28 @@ def _write_fallback_eda(workspace: Path) -> None:
             "# EDA Handoff\n\nEDA generation failed; baseline should explore the raw data.\n",
             encoding="utf-8",
         )
+    _write_missing_report_placeholders(workspace)
+
+
+def _write_missing_report_placeholders(workspace: Path) -> None:
+    """Create placeholder files for every EDA_REPORT_*.md named in EDA_TODO.md."""
+    todo_path = workspace / "EDA_TODO.md"
+    if not todo_path.is_file():
+        return
+    pattern = re.compile(r"^\- \[[ x]\]\s+.+?\s*->\s*([^\s#]+)")
+    for line in todo_path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        name = match.group(1)
+        if name in {"EDA_INDEX.md", "EDA_HANDOFF.md"}:
+            continue
+        target = workspace / name
+        if not target.exists():
+            target.write_text(
+                f"# {name}\n\nEDA generation failed or was skipped.\n",
+                encoding="utf-8",
+            )
 
 
 class PhaseRunner:
@@ -149,7 +172,7 @@ class PhaseRunner:
         await rt.publish_output(
             source="supervisor",
             channel="text",
-            text=f"PREPARE: EDA 工作区 {rt.state.eda_dir} 已就绪。",
+            text=f"PREPARE: EDA 工作区 {rt.state.eda_dir} 已就绪（绝对路径 {Path(workspace.path).resolve()}）。",
         )
         # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结；
         # 断点续传时若已有可解析的 frozen bundle，直接复用不重跑。
@@ -192,6 +215,17 @@ class PhaseRunner:
                 channel="text",
                 text=f"PREPARE: evaluator 产物目录 {evaluator_dir.resolve()}。",
             )
+            handoff_path = evaluator_dir / "HANDOFF.md"
+            if handoff_path.is_file():
+                for line in handoff_path.read_text(encoding="utf-8").splitlines():
+                    stripped = line.strip()
+                    if stripped.lower().startswith("validation_sample_count:"):
+                        await rt.publish_output(
+                            source="supervisor",
+                            channel="text",
+                            text=f"PREPARE: {stripped}",
+                        )
+                        break
         else:
             await rt.publish_output(
                 source="supervisor",
@@ -309,6 +343,12 @@ class PhaseRunner:
                     channel="error",
                     text=f"Baseline design failed ({error}); prepare falls back to task-only.",
                 )
+        else:
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 因 EDA 失败跳过 BASELINE_DESIGN，prepare 将基于任务原文降级。",
+            )
         # 步骤 3：prepare agent 按 BASELINE_DESIGN.md 实现并可信打分。
         await rt.publish_output(
             source="supervisor",
