@@ -10,18 +10,19 @@ from typing import Literal
 
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS, SupervisorActions
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.agent.types import AgentCommandError, ErrorCode
+from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch, GitWorkspace
 from athena.research.contracts import GeneralTurnOutcome
+from athena.research.report import build_final_report
 from athena.research.supervisor.experiment import (
     PlanTurnResult,
     decide_settlement,
-    load_agent_result,
     handoff_block,
     hypothesis_block,
+    load_agent_result,
     load_best,
     read_eval_handoff,
 )
@@ -31,9 +32,8 @@ from athena.research.supervisor.plans import (
     PlanState,
     wait_run_events,
 )
-from athena.research.supervisor.prepare import PrepareResult
-from athena.research.report import build_final_report
 from athena.research.supervisor.policy import Outcome
+from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import (
     ScheduleKind,
@@ -170,6 +170,10 @@ class Supervisor(SupervisorActions):
     def running_plan_ids(self) -> tuple[str, ...]:
         """Return currently dispatched Plan IDs."""
         return tuple(self._running)
+
+    def is_stopped(self) -> bool:
+        """Return whether this Supervisor has been told to stop."""
+        return self._stopped
 
     @property
     def next_hypothesis_id(self) -> str | None:

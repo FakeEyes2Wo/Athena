@@ -385,7 +385,13 @@ class _AgentSpy:
 @pytest.mark.asyncio
 async def test_aclose_cancels_a_survey_that_is_still_running() -> None:
     runtime = _runtime(_state())
-    runtime._events_bus = SimpleNamespace(_subscriber_ready={}, _subscribers={})
+
+    async def close_events() -> None:
+        pass
+
+    runtime._events_bus = SimpleNamespace(
+        _subscriber_ready={}, _subscribers={}, aclose=close_events
+    )
     runtime._task = None
     started = asyncio.Event()
 
