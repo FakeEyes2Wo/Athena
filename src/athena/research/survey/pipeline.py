@@ -449,126 +449,94 @@ class _PerPaperVision:
             raise
 
 
-class SurveyPipeline:
-    """把 scout / source / markdown / index 四段串成一次可测量的运行。
+class PipelineState:
+    """Mutable per-run state shared by the survey pipeline stage collaborators."""
 
-    每一段的失败都不终止流程：scout 一篇都没交付时后面各段自然为空，取源失败的
-    论文不进转换，转换失败的论文不进索引。这样一次运行总能产出完整的
-    ``SurveyReport``，而不是在半路抛异常丢掉已经付出的成本。
-    """
+    def __init__(self, report: SurveyReport, convert_cap: int) -> None:
+        self.report = report
+        self.outcomes: dict[str, PaperOutcome] = {}
+        self.by_identifier: dict[str, str] = {}
+        self.conversion_keys: dict[str, str] = {}
+        self.retained: list = []
+        self.paper_edges: dict[str, list[str]] = {}
+        self.convert_cap = convert_cap
+
+    def outcome_for(self, paper_key: str) -> PaperOutcome:
+        """取出或新建一篇论文的登记项。
+
+        取源阶段会用解析后的身份重算 ``paper_key``，可能与 scout 阶段不同（例如
+        补上了期刊 DOI），因此这里必须容忍新 key 而不是断言存在。
+        """
+        outcome = self.outcomes.get(paper_key)
+        if outcome is None:
+            outcome = PaperOutcome(
+                paper_key=paper_key,
+                fetch_status=NOT_ATTEMPTED,
+                conversion_status="no_source",
+            )
+            self.outcomes[paper_key] = outcome
+        return outcome
+
+    def register_identifiers(self, paper_key: str, source: object) -> None:
+        """给一篇论文的每个标识符登记它在本次运行里的规范 key。
+
+        scout 与 paper_source 的 ``paper_key`` 优先级不同——前者 arXiv 优先（``expand``
+        沿 arXiv id 工作），后者期刊 DOI 优先（arXiv 自铸 DOI 会让语料按投稿年份分裂）。
+        同一篇论文因此会在交接处换 key，两边各自都对，把它们并回一条是本层的职责。
+        """
+        for prefix, attribute in (
+            ("arxiv", "arxiv_id"),
+            ("doi", "doi"),
+            ("s2", "s2_paper_id"),
+        ):
+            value = getattr(source, attribute, "") or ""
+            if value:
+                self.by_identifier[f"{prefix}:{value.lower()}"] = paper_key
+
+    def canonical_key(self, record: PaperSourceRecord) -> str:
+        """把取源记录并回 scout 的那一条；查不到任何标识符时沿用记录自己的 key。"""
+        identity = record.identity
+        candidates = (
+            ("arxiv", identity.arxiv_id),
+            ("doi", identity.doi),
+            ("s2", identity.s2_paper_id),
+        )
+        for prefix, value in candidates:
+            if not value:
+                continue
+            known = self.by_identifier.get(f"{prefix}:{value.lower()}")
+            if known is not None:
+                return known
+        return record.paper_key
+
+    def count(self, field: str) -> int:
+        """统计登记项里某个进度字段成立的篇数，供中途的进度事件使用。
+
+        ``conversion_status`` 比对 ``"converted"``，其余字段按真值判断。
+        """
+        values = [getattr(item, field) for item in self.outcomes.values()]
+        if field == "conversion_status":
+            return sum(1 for value in values if value == "converted")
+        return sum(1 for value in values if value)
+
+
+class ScoutStage:
+    """PaperScout 阶段：检索、缓存、直接 arxiv 路径与结果登记。"""
 
     def __init__(
         self,
         stack: "SurveyStack",
         request: SurveyRequest,
-        *,
-        emit: EmitEvent | None = None,
+        state: PipelineState,
+        emit: EmitEvent,
     ) -> None:
         self.stack = stack
         self.request = request
-        self.report = SurveyReport(query=request.query, status="empty")
-        self._emit = emit or _silent_emit
-        self._outcomes: dict[str, PaperOutcome] = {}
-        self._by_identifier: dict[str, str] = {}
-        self._conversion_keys: dict[str, str] = {}
-        self._retained: list = []
-        self._paper_edges: dict[str, list[str]] = {}
-        # 取源可以多要几篇垫底，转换不能——转换才是花钱的那一段
-        self._convert_cap = request.max_papers
-        # 独立跑时事实全部落在 SurveyReport 里；接进 loop 后它是个十几分钟的后台任务，
-        # 没有逐段回报的话，外部无法区分"正在取第 7 篇"与"卡死了"。
+        self.state = state
+        self.emit = emit
 
-    async def run(self) -> SurveyReport:
-        """执行全链路，返回逐篇结果与成本账。"""
-        started = time.monotonic()
-        source_request_ref = await self._scout()
-        await self._emit(
-            "survey/scouted",
-            self.report.scout_result_ref or "",
-            {
-                "pool": self.report.scout.pool_size,
-                "retained": self.report.scout.retained_papers,
-            },
-        )
-        if source_request_ref is not None:
-            source_result = await self._fetch(source_request_ref)
-            await self._emit(
-                "survey/fetched",
-                self.report.source_result_ref or "",
-                {
-                    "fetched": self.report.fetched,
-                    "attempted": self.report.fetch_attempted,
-                },
-            )
-            papers = await self._convert(source_result)
-            # 逐篇计数只能从登记项来：``report.papers`` 要到 ``run`` 收尾时才成型，
-            # 在这里读 ``report.converted()`` 恒为 0
-            await self._emit(
-                "survey/converted",
-                "",
-                {"converted": self._count("conversion_status"), "papers": len(papers)},
-            )
-            await self._index(papers)
-            await self._emit(
-                "survey/indexed",
-                self.report.corpus_ref or "",
-                {"indexed": self._count("indexed")},
-            )
-        self.report.timings.total_seconds = round(time.monotonic() - started, 3)
-        self.report.http_requests = self.stack.http.request_count
-        self._collect_model_costs()
-        if self.stack.library is not None:
-            self.report.library = self.stack.library.stats()
-        # 报告的论文列表在此统一构建：登记项在各段被就地改写，最后一次成型才能
-        # 保证顺序稳定，也避免用 pydantic 的值相等去判断"这一项是否已加入"
-        self.report.papers = sorted(
-            self._outcomes.values(),
-            key=lambda item: (-item.relevance, item.paper_key),
-        )
-        self.report.status = self.final_status()
-        return self.report
-
-    def _count(self, field: str) -> int:
-        """统计登记项里某个进度字段成立的篇数，供中途的进度事件使用。
-
-        ``conversion_status`` 比对 ``"converted"``，其余字段按真值判断。
-        """
-        values = [getattr(item, field) for item in self._outcomes.values()]
-        if field == "conversion_status":
-            return sum(1 for value in values if value == "converted")
-        return sum(1 for value in values if value)
-
-    def final_status(self) -> str:
-        """本次运行的结论，只看它自己产出了什么。
-
-        ``empty`` 一篇都没转换成功；``partial`` 转换出了东西但要的产物缺了一件，
-        目前只有一种情况——要求建索引却没拿到 ``corpus_ref``；否则 ``complete``。
-
-        这里刻意不看上游后端的健康度。此前是直接沿用 ``PaperScoutResult.status``，
-        于是 Semantic Scholar 零星 429 就能把整轮标成 ``partial``——真机上出现过
-        语料建好、7 篇全进索引、报告却写着 ``partial`` 的情况，看报告的人只会以为
-        语料没建成。后端的问题在 ``warnings`` 与 ``scout_status`` 里，不该冒充结论。
-
-        逐篇的取源与转换失败同样不降级：那是尽力而为流水线的正常产出，篇数、失败率
-        和逐篇原因都已经在报告里，用一个总状态去概括只会丢掉信息。
-        """
-        if not self.report.converted():
-            return "empty"
-        if self.request.build_index and self.report.corpus_ref is None:
-            return "partial"
-        return "complete"
-
-    def candidate_cap(self) -> int:
-        """交给取源的候选上限；实际尝试几篇由 ``stop_after_fetched`` 决定。"""
-        return self.request.max_papers * self.request.source_candidate_multiple
-
-    async def _scout(self) -> ArtifactRef | None:
-        """跑 PaperScout，把交付集合转成取源请求引用；零交付时返回 ``None``。
-
-        给了 ``arxiv_ids`` 时整段跳过：检索是全链路里最慢也最贵的一段，而测量
-        取源与转换的健壮性并不需要它，把两者绑在一起只会让下游的样本量受制于
-        检索门槛。
-        """
+    async def run(self) -> ArtifactRef | None:
+        """跑 PaperScout，把交付集合转成取源请求引用；零交付时返回 ``None``。"""
         if self.request.arxiv_ids:
             return await self._direct_source_request()
         started = time.monotonic()
@@ -582,13 +550,10 @@ class SurveyPipeline:
             ),
             model=self.stack.model,
             client=self.stack.client,
-            # 边界档重排用策略模型那一档：这一次调用决定将近一半的交付集合，是全链路
-            # 里单次影响最大的一次判断，不该省在这里。
             selector=LlmBoundarySelector(self.stack.client, self.stack.model),
-            # 同分论文的次序信号。没配 ATHENA_RERANK_MODEL 时为 None，排序退回散列。
             reranker=self.stack.reranker,
         )
-        candidates = self.candidate_cap()
+        candidates = self.request.max_papers * self.request.source_candidate_multiple
         scout_request = ScoutRequest(
             query=self.request.query,
             published_to=self.request.published_to,
@@ -607,66 +572,49 @@ class SurveyPipeline:
             ),
         )
         request_json = scout_request.model_dump_json()
-        cached = await self._cached_scout(request_json)
+        cached = await self._cached(request_json)
         if cached is not None:
-            self.report.timings.scout_seconds = round(time.monotonic() - started, 3)
-            self.report.scout_cached = True
-            return await self._read_scout_result(cached)
+            self.state.report.timings.scout_seconds = round(time.monotonic() - started, 3)
+            self.state.report.scout_cached = True
+            return await self._read_result(cached)
         request_ref = await self.stack.artifacts.put_text(request_json)
         outcome = await agent.run(self._agent_context(request_ref))
-        self.report.timings.scout_seconds = round(time.monotonic() - started, 3)
-        await self._cache_scout(request_json, outcome.result_ref)
-        return await self._read_scout_result(outcome.result_ref)
+        self.state.report.timings.scout_seconds = round(time.monotonic() - started, 3)
+        await self._cache(request_json, outcome.result_ref)
+        return await self._read_result(outcome.result_ref)
 
-    def _scout_cache_key(self, request_json: str) -> str:
+    def cache_key(self, request_json: str) -> str:
         """本次检索在库里的键；请求 + 打分器指纹，见 ``library.scout_key``。"""
-        return scout_key(request_json, self._scorer_fingerprint())
+        return scout_key(request_json, self.fingerprint())
 
-    def _scorer_fingerprint(self) -> str:
-        """打分器的身份：模型名 + 打分遍数 + 同分次序用的交叉编码器。
-
-        三样都不在 ``ScoutRequest`` 里（由组合根决定），却都会改变交付集合，所以必须
-        显式进缓存键。``DEFAULT_PASSES`` 从 1 改成 2 的那次，正是因为它不在键里而让库里
-        的旧结果继续命中——改了等于没改，而报告上看不出任何异常。
-
-        rerank 模型同样要进：真机一轮 352 篇里 197 篇同分，换掉拆平局的那个信号，交付
-        集合里将近一半会变。
-        """
+    def fingerprint(self) -> str:
+        """打分器的身份：模型名 + 打分遍数 + 同分次序用的交叉编码器。"""
         return (
             f"{self.stack.effective_scorer_model()}"
             f"/{DEFAULT_PASSES}"
             f"/{self.stack.rerank_model()}"
         )
 
-    async def _cached_scout(self, request_json: str) -> ArtifactRef | None:
-        """取回同一份请求上次跑出的检索结果，并把它引用的 blob 复制回本地存储。
-
-        检索占 10 篇尺寸下 71% 的墙钟（实测 581/820 秒），而它是**确定性输入的函数**：
-        同一份 ``ScoutRequest`` 再跑一遍不会得到新东西，只会重付 4 次策略调用与几十次
-        打分。想要新的一批论文时应当改请求（或走 ``fresh_scout``），而不是靠"每次都
-        重跑"来碰运气——那正是 tie_break 散列造成的不可复现，不是特性。
-
-        任何一环缺失都当作未命中：缓存是纯加速，宁可重跑也不能交出半份结果。
-        """
+    async def _cached(self, request_json: str) -> ArtifactRef | None:
+        """取回同一份请求上次跑出的检索结果，并把它引用的 blob 复制回本地存储。"""
         library = self.stack.library
         if library is None or self.request.fresh_scout:
             return None
-        payload = await library.load_text(self._scout_cache_key(request_json))
+        payload = await library.load_text(self.cache_key(request_json))
         if payload is None:
             return None
         try:
             result = PaperScoutResult.model_validate_json(payload)
         except ValueError:
-            # 库里的结果与当前 schema 不兼容 → 重新检索
             return None
         refs = [result.corpus_ref, result.stats_ref, result.paper_source_request_ref]
         wanted = [ref for ref in refs if ref]
         if await copy_refs(library.store, self.stack.artifacts, wanted) != len(wanted):
             return None
-        self.report.warnings.append("scout_cache_hit")
+        self.state.report.warnings.append("scout_cache_hit")
         return await self.stack.artifacts.put_text(payload)
 
-    async def _cache_scout(self, request_json: str, result_ref: ArtifactRef) -> None:
+    async def _cache(self, request_json: str, result_ref: ArtifactRef) -> None:
         """把这次检索的结果连同它引用的 blob 一起存进库。"""
         library = self.stack.library
         if library is None:
@@ -675,46 +623,41 @@ class SurveyPipeline:
         try:
             result = PaperScoutResult.model_validate_json(payload)
         except ValueError:
-            # 结果读不出来就不缓存；这一轮照常继续
             return
         refs = [result.corpus_ref, result.stats_ref, result.paper_source_request_ref]
         await copy_refs(
             self.stack.artifacts, library.store, [ref for ref in refs if ref]
         )
-        await library.save_text(self._scout_cache_key(request_json), payload)
+        await library.save_text(self.cache_key(request_json), payload)
 
     async def _direct_source_request(self) -> ArtifactRef | None:
-        """把显式给出的 arXiv id 直接做成取源请求，并登记为待处理论文。
-
-        这条路径不做取源垫底：显式点名的论文就是要的全部，多取无从取起，少取也不该
-        被别的论文顶替。
-        """
+        """把显式给出的 arXiv id 直接做成取源请求，并登记为待处理论文。"""
         papers = []
         for raw in self.request.arxiv_ids:
             identity = PaperIdentity(arxiv_id=raw)
             key = identity.paper_key()
             papers.append(PaperRef(identity=identity))
-            self._outcomes[key] = PaperOutcome(
+            self.state.outcomes[key] = PaperOutcome(
                 paper_key=key,
                 title=raw,
                 relevance=1.0,
                 fetch_status=NOT_ATTEMPTED,
                 conversion_status="no_source",
             )
-            self._register_identifiers(key, identity)
-        self.report.scout.retained_papers = len(papers)
-        self._convert_cap = max(self.request.max_papers, len(papers))
+            self.state.register_identifiers(key, identity)
+        self.state.report.scout.retained_papers = len(papers)
+        self.state.convert_cap = max(self.request.max_papers, len(papers))
         request = PaperSourceRequest(
             papers=papers,
             policy=PaperSourcePolicy(
                 prefer=self.request.prefer,
-                max_papers=self._convert_cap,
+                max_papers=self.state.convert_cap,
                 visual_policy=self.request.visual_policy,
             ),
         )
         return await self.stack.artifacts.put_text(request.model_dump_json())
 
-    async def _read_scout_result(self, result_ref: str) -> ArtifactRef | None:
+    async def _read_result(self, result_ref: str) -> ArtifactRef | None:
         """读回 scout 结果，登记每篇论文的初始状态。"""
         result = PaperScoutResult.model_validate_json(
             await self.stack.artifacts.get_text(result_ref)
@@ -725,71 +668,66 @@ class SurveyPipeline:
         stats = ScoutStats.model_validate_json(
             await self.stack.artifacts.get_text(result.stats_ref)
         )
-        self.report.scout_result_ref = result_ref
-        self.report.scout = stats
-        self.report.retain_threshold = self.request.retain_threshold
-        # 分数分布是决定门槛该放在哪的唯一依据：交付 2 篇既可能是"池里只有 2 篇好的"，
-        # 也可能是"18 篇 2 分被门槛挡住了"，只看交付量分不出这两种情况
+        self.state.report.scout_result_ref = result_ref
+        self.state.report.scout = stats
+        self.state.report.retain_threshold = self.request.retain_threshold
         histogram: dict[str, int] = {}
         for paper in corpus.pool:
             bucket = f"{paper.relevance:.2f}"
             histogram[bucket] = histogram.get(bucket, 0) + 1
-        self.report.score_histogram = dict(sorted(histogram.items(), reverse=True))
-        self.report.warnings.extend(result.warnings)
-        self.report.scout_status = result.status
-        # 留着交付的 ScoutPaper 本体：取 references 需要它们的标识符，而 PaperOutcome
-        # 只存了 paper_key
-        self._retained = list(corpus.retained)
-        # 引用图由 scout 建好带过来：那一层本来就持有 reference backend，在这里另建一份
-        # 会让管线的单测打到真实网络上。
-        self._paper_edges = {
+        self.state.report.score_histogram = dict(sorted(histogram.items(), reverse=True))
+        self.state.report.warnings.extend(result.warnings)
+        self.state.report.scout_status = result.status
+        self.state.retained = list(corpus.retained)
+        self.state.paper_edges = {
             source: list(targets) for source, targets in corpus.reference_edges.items()
         }
-        self.report.reference_lookups = len(self._paper_edges)
+        self.state.report.reference_lookups = len(self.state.paper_edges)
         for paper in corpus.retained:
-            self._outcomes[paper.paper_key] = PaperOutcome(
+            self.state.outcomes[paper.paper_key] = PaperOutcome(
                 paper_key=paper.paper_key,
                 title=paper.title,
                 relevance=paper.relevance,
                 fetch_status=NOT_ATTEMPTED,
                 conversion_status="no_source",
             )
-            self._register_identifiers(paper.paper_key, paper)
+            self.state.register_identifiers(paper.paper_key, paper)
         return result.paper_source_request_ref
 
-    def _register_identifiers(self, paper_key: str, source: object) -> None:
-        """给一篇论文的每个标识符登记它在本次运行里的规范 key。
-
-        scout 与 paper_source 的 ``paper_key`` 优先级不同——前者 arXiv 优先（``expand``
-        沿 arXiv id 工作），后者期刊 DOI 优先（arXiv 自铸 DOI 会让语料按投稿年份分裂）。
-        同一篇论文因此会在交接处换 key，两边各自都对，把它们并回一条是本层的职责。
-        """
-        for prefix, attribute in (
-            ("arxiv", "arxiv_id"),
-            ("doi", "doi"),
-            ("s2", "s2_paper_id"),
-        ):
-            value = getattr(source, attribute, "") or ""
-            if value:
-                self._by_identifier[f"{prefix}:{value.lower()}"] = paper_key
-
-    def _canonical_key(self, record: PaperSourceRecord) -> str:
-        """把取源记录并回 scout 的那一条；查不到任何标识符时沿用记录自己的 key。"""
-        identity = record.identity
-        candidates = (
-            ("arxiv", identity.arxiv_id),
-            ("doi", identity.doi),
-            ("s2", identity.s2_paper_id),
+    def _agent_context(self, request_ref: ArtifactRef) -> AgentContext:
+        """构造 PaperScout 需要的最小 Turn 上下文。"""
+        thread = AthenaThread(
+            thread_id="survey",
+            session_id="survey",
+            status="running",
+            context_ref=request_ref,
         )
-        for prefix, value in candidates:
-            if not value:
-                continue
-            known = self._by_identifier.get(f"{prefix}:{value.lower()}")
-            if known is not None:
-                return known
-        return record.paper_key
+        turn = AthenaTurn(
+            turn_id="survey-turn",
+            thread_id="survey",
+            request_ref=request_ref,
+            status="running",
+        )
+        return AgentContext(
+            thread=thread,
+            turn=turn,
+            emit=self.emit,
+            tools=ToolRegistry(),
+            cancel=asyncio.Event(),
+        )
 
-    async def _fetch(self, source_request_ref: ArtifactRef) -> PaperSourceResult:
+
+class FetchStage:
+    """paper_source 阶段：批量取源并登记逐篇结果。"""
+
+    def __init__(
+        self, stack: "SurveyStack", request: SurveyRequest, state: PipelineState
+    ) -> None:
+        self.stack = stack
+        self.request = request
+        self.state = state
+
+    async def run(self, source_request_ref: ArtifactRef) -> PaperSourceResult:
         """批量取源，把逐篇结果登记进报告。"""
         started = time.monotonic()
         request = PaperSourceRequest.model_validate_json(
@@ -800,61 +738,62 @@ class SurveyPipeline:
             http=self.stack.http,
             contact_email=self.stack.contact_email or None,
             openalex_api_key=self.stack.openalex_api_key or None,
-            # 落盘的定位符缓存。内容寻址存储能去重字节，去重不了 HTTP 请求，而 arXiv
-            # 每 3 秒只允许一次——不给路径的话缓存只活在进程内，重跑必然重新下载一遍。
             cache=self.stack.locator_cache(),
         )
         result = await fetcher.fetch(request)
-        self.report.timings.source_seconds = round(time.monotonic() - started, 3)
-        self.report.source_result_ref = await self.stack.artifacts.put_text(
+        self.state.report.timings.source_seconds = round(time.monotonic() - started, 3)
+        self.state.report.source_result_ref = await self.stack.artifacts.put_text(
             result.model_dump_json()
         )
         for record in result.records:
-            key = self._canonical_key(record)
-            outcome = self._outcome_for(key)
+            key = self.state.canonical_key(record)
+            outcome = self.state.outcome_for(key)
             outcome.fetch_status = record.status
             outcome.source_locator = record.source_locator or ""
             outcome.source_kind = "tex" if record.tex_source_ref else ""
             if not outcome.source_kind and record.pdf_ref:
                 outcome.source_kind = "pdf"
-            # 取源阶段解析出的新标识符（例如补上期刊 DOI）也要能并回同一条，
-            # 否则转换阶段按 PaperContent.paper_id 查找时会再分裂一次
-            self._register_identifiers(key, record.identity)
-            self._conversion_keys[record.paper_key] = key
-        self.report.fetched = result.stats.fetched
-        self.report.fetch_failed = result.stats.failed + result.stats.skipped
-        self.report.fetch_attempted = result.stats.attempted
+            self.state.register_identifiers(key, record.identity)
+            self.state.conversion_keys[record.paper_key] = key
+        self.state.report.fetched = result.stats.fetched
+        self.state.report.fetch_failed = result.stats.failed + result.stats.skipped
+        self.state.report.fetch_attempted = result.stats.attempted
         return result
 
-    async def _convert(self, source_result: PaperSourceResult) -> list[PaperContent]:
-        """转换取到源的论文，按 ``_convert_cap`` 截断后并发执行。
 
-        ``paper_source`` 保持上游顺序（``fetcher.fetch`` 顺序遍历 ``accepted``），而
-        上游顺序就是相关性降序，所以"前 N 条取到源的记录"正是相关性最高的 N 篇。
-        截断放在转换之前而不是取源之前：垫底的意义就是先取回来再挑，取源不调模型，
-        转换才是花钱的那一段。
-        """
+class ConversionStage:
+    """paper_markdown 阶段：并发转换、按篇计数、缓存与失败收敛。"""
+
+    def __init__(
+        self, stack: "SurveyStack", request: SurveyRequest, state: PipelineState
+    ) -> None:
+        self.stack = stack
+        self.request = request
+        self.state = state
+
+    async def run(self, source_result: PaperSourceResult) -> list[PaperContent]:
+        """转换取到源的论文，按 ``state.convert_cap`` 截断后并发执行。"""
         started = time.monotonic()
         fetched = [
             (
-                self._conversion_keys.get(record.paper_key, record.paper_key),
+                self.state.conversion_keys.get(record.paper_key, record.paper_key),
                 record.conversion_request_ref,
             )
             for record in source_result.records
             if record.conversion_request_ref
         ]
-        jobs = fetched[: self._convert_cap]
-        for key, _ in fetched[self._convert_cap :]:
-            self._outcome_for(key).conversion_status = "surplus"
-        self.report.surplus_dropped = len(fetched) - len(jobs)
+        jobs = fetched[: self.state.convert_cap]
+        for key, _ in fetched[self.state.convert_cap :]:
+            self.state.outcome_for(key).conversion_status = "surplus"
+        self.state.report.surplus_dropped = len(fetched) - len(jobs)
         if not jobs:
-            self.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
+            self.state.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
             return []
         limit = asyncio.Semaphore(self.request.conversion_concurrency)
         results = await asyncio.gather(
             *(self._convert_one(limit, key, ref) for key, ref in jobs)
         )
-        self.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
+        self.state.report.timings.markdown_seconds = round(time.monotonic() - started, 3)
         return [item for item in results if item is not None]
 
     async def _convert_one(
@@ -863,11 +802,8 @@ class SurveyPipeline:
         paper_key: str,
         request_ref: ArtifactRef,
     ) -> PaperContent | None:
-        """转换一篇论文；失败只记进报告，不影响同批其他论文。
-
-        视觉解读器按篇套一层计数代理，而不是共用 stack 上那个：见 ``_PerPaperVision``。
-        """
-        outcome = self._outcome_for(paper_key)
+        """转换一篇论文；失败只记进报告，不影响同批其他论文。"""
+        outcome = self.state.outcome_for(paper_key)
         counter = _PerPaperVision(self.stack.visual_interpreter)
         processor = PaperProcessor(
             self.stack.artifacts,
@@ -880,8 +816,6 @@ class SurveyPipeline:
             outcome.conversion_cached = True
             content = cached
         else:
-            # 计时必须在拿到信号量之后开始：并发受限时排队等待会被算进单篇成本，
-            # 让每篇的耗时都趋同于批次总耗时，成本数字就失去意义
             async with limit:
                 started = time.monotonic()
                 content = await self._process(processor, outcome, request_ref)
@@ -905,17 +839,12 @@ class SurveyPipeline:
         return content
 
     async def _conversion_cache_key(self, request_ref: ArtifactRef) -> str | None:
-        """本篇转换在库里的键；请求读不出来时返回 ``None``（走正常转换路径）。
-
-        键取自 ``PaperConversionRequest`` 里的源引用，而那些引用本身就是内容散列——
-        "同一篇论文的同一份源码"因此天然是同一个键，不必另外指纹。
-        """
+        """本篇转换在库里的键；请求读不出来时返回 ``None``（走正常转换路径）。"""
         try:
             request = PaperConversionRequest.model_validate_json(
                 await self.stack.artifacts.get_text(request_ref)
             )
         except (ValueError, OSError):
-            # 请求本身有问题 → 交给 _process 去报这条失败，不在缓存层吞掉
             return None
         return conversion_key(
             request.paper_id or "",
@@ -925,13 +854,7 @@ class SurveyPipeline:
         )
 
     async def _cached_conversion(self, request_ref: ArtifactRef) -> PaperContent | None:
-        """取回这篇论文上次转换出来的结果。
-
-        转换是整条链路里唯一按篇调用多模态模型的一段（44 篇实测 1347 次视觉调用），
-        而它的输入完全由源字节决定。缓存键里带转换器版本与视觉策略，改了解析器或换了
-        策略会自动失效——需要人记得手动清的缓存迟早会喂回过期结果，而那种错误只会表现为
-        "这次改动没效果"。
-        """
+        """取回这篇论文上次转换出来的结果。"""
         library = self.stack.library
         if library is None:
             return None
@@ -963,12 +886,10 @@ class SurveyPipeline:
             request = PaperConversionRequest.model_validate_json(payload)
             content = await processor.process(request)
         except VisualInterpretationRequiredError as error:
-            # visual_policy=required 且视觉解读失败 → 整篇作废，这是该策略的定义
             outcome.conversion_status = "failed"
             outcome.error = f"VisualInterpretationRequiredError: {error}"
             return None
         except Exception as error:
-            # TeX/PDF 解析、编码、模型调用都可能失败 → 记录类型与消息后继续下一篇
             outcome.conversion_status = "failed"
             outcome.error = f"{type(error).__name__}: {error}"
             return None
@@ -977,7 +898,18 @@ class SurveyPipeline:
         )
         return content
 
-    async def _index(self, papers: list[PaperContent]) -> None:
+
+class IndexStage:
+    """paper_rag 阶段：质量门禁、碎片判定与建索引。"""
+
+    def __init__(
+        self, stack: "SurveyStack", request: SurveyRequest, state: PipelineState
+    ) -> None:
+        self.stack = stack
+        self.request = request
+        self.state = state
+
+    async def run(self, papers: list[PaperContent]) -> None:
         """按质量门禁筛选后建语料索引。"""
         if not self.request.build_index:
             return
@@ -985,13 +917,13 @@ class SurveyPipeline:
         chosen = {item.paper_id or "" for item in selected}
         for content in papers:
             raw = content.paper_id or ""
-            key = self._conversion_keys.get(raw, raw)
-            self._outcome_for(key).indexed = raw in chosen
+            key = self.state.conversion_keys.get(raw, raw)
+            self.state.outcome_for(key).indexed = raw in chosen
         if not selected:
             return
         started = time.monotonic()
         try:
-            self.report.corpus_ref = await build_corpus_index(
+            self.state.report.corpus_ref = await build_corpus_index(
                 self.stack.artifacts,
                 selected,
                 self.stack.embedder,
@@ -999,29 +931,35 @@ class SurveyPipeline:
                 paper_edges=self._index_edges(selected),
             )
         except OpenAIError as error:
-            # 建索引是最后一段，也是唯一会一次性打光编码配额的一段。异常逃出去会连同
-            # 前面所有已完成的取源与转换一起丢掉——而那才是真正花了钱的部分，且每篇的
-            # PaperContent 已经落盘，重跑只需重新编码。因此降级成"没有语料"而不是没有报告。
-            # 状态不在这里写：``corpus_ref`` 留空本身就是证据，``final_status``
-            # 统一按"要的产物缺没缺"下结论
-            self.report.warnings.append(f"index_failed: {type(error).__name__}")
+            self.state.report.warnings.append(f"index_failed: {type(error).__name__}")
             for content in selected:
                 raw = content.paper_id or ""
-                self._outcome_for(self._conversion_keys.get(raw, raw)).indexed = False
-        self.report.timings.index_seconds = round(time.monotonic() - started, 3)
+                self.state.outcome_for(
+                    self.state.conversion_keys.get(raw, raw)
+                ).indexed = False
+        self.state.report.timings.index_seconds = round(time.monotonic() - started, 3)
+
+    async def _indexable(self, content: PaperContent) -> bool:
+        """语料门禁：两条存在性判定一票否决，``degraded`` 默认放行。"""
+        raw = content.paper_id or ""
+        key = self.state.conversion_keys.get(raw, raw)
+        outcome = self.state.outcome_for(key)
+        if outcome.suspect_empty:
+            return False
+        if await judge_shredded(content, outcome, self.stack.artifacts, self.state.report):
+            return False
+        if not self.request.strict_quality:
+            return True
+        return content.quality_status in INDEXABLE_QUALITY
 
     def _index_edges(self, selected: list[PaperContent]) -> dict[str, list[str]]:
-        """把引用图从 scout 的 ``paper_key`` 翻成语料里的 ``paper_id``。
-
-        两套 id 不同是既有事实（``_register_identifiers`` 的注释说明了为什么），所以这一步
-        必须走同一套并表逻辑，否则边会连到不存在的落点上、在建索引时被整批丢掉。
-        """
+        """把引用图从 scout 的 ``paper_key`` 翻成语料里的 ``paper_id``。"""
         canonical_to_raw: dict[str, str] = {}
         for content in selected:
             raw = content.paper_id or ""
-            canonical_to_raw.setdefault(self._conversion_keys.get(raw, raw), raw)
+            canonical_to_raw.setdefault(self.state.conversion_keys.get(raw, raw), raw)
         translated: dict[str, list[str]] = {}
-        for source, targets in self._paper_edges.items():
+        for source, targets in self.state.paper_edges.items():
             source_raw = canonical_to_raw.get(source)
             if source_raw is None:
                 continue
@@ -1032,103 +970,140 @@ class SurveyPipeline:
             ]
             if linked:
                 translated[source_raw] = list(dict.fromkeys(linked))
-        self.report.reference_edges = sum(len(v) for v in translated.values())
+        self.state.report.reference_edges = sum(len(v) for v in translated.values())
         return translated
 
-    async def _indexable(self, content: PaperContent) -> bool:
-        """语料门禁：两条存在性判定一票否决，``degraded`` 默认放行。
 
-        ``degraded`` 是存在性判定——出现**一条**内容缺失诊断就否决整篇，与论文规模
-        无关。实测一批真实论文里，85 个 chunk 的论文因 1 条诊断出局，5 篇被挡的论文
-        逐条核对后 4 篇是误判、1 篇只是参考文献未解析而正文完整。而 ``paper_rag`` 本
-        身是 chunk 级检索：坏掉的公式或表格 chunk 不会被捞出来，局部缺陷不该否决整篇。
+async def judge_shredded(
+    content: PaperContent,
+    outcome: PaperOutcome,
+    artifacts,
+    report: SurveyReport,
+) -> bool:
+    """正文是否被切成了碎片而不是句子；是则拒绝入语料并登记原因。"""
+    units = await content.load_retrieval_units(artifacts)
+    lengths = [
+        end - start
+        for unit in units
+        if unit.kind != BIBLIOGRAPHY_KIND
+        for start, end in split_sentences(unit.text)
+    ]
+    if len(lengths) < SHRED_MIN_SENTENCES:
+        return False
+    mean_length = sum(lengths) / len(lengths)
+    if mean_length >= SHRED_MIN_SENTENCE_CHARS:
+        return False
+    outcome.shredded = True
+    report.shredded_papers.append(
+        f"{outcome.paper_key}: {len(lengths)} 句，平均 {mean_length:.0f} 字符"
+        f"（低于 {SHRED_MIN_SENTENCE_CHARS}），判为提取碎片，未入语料"
+    )
+    return True
 
-        一票否决的两条都不是"内容好不好"，而是"提取到底成没成功"：
 
-        - ``suspect_empty`` —— 正文根本没提取出来。空壳既提供不了证据，又会让语料
-          看起来已经覆盖这篇论文。
-        - ``shredded``（见 ``_shredded``）—— 提取出来的不是正文而是碎片。
+class SurveyPipeline:
+    """把 scout / source / markdown / index 四段串成一次可测量的运行。
 
-        ``strict_quality`` 保留严格口径，供需要"只要干净语料"的评测使用。
-        """
-        raw = content.paper_id or ""
-        key = self._conversion_keys.get(raw, raw)
-        outcome = self._outcome_for(key)
-        if outcome.suspect_empty:
-            return False
-        if await self._shredded(content, outcome):
-            return False
-        if not self.request.strict_quality:
-            return True
-        return content.quality_status in INDEXABLE_QUALITY
+    每一段的失败都不终止流程：scout 一篇都没交付时后面各段自然为空，取源失败的
+    论文不进转换，转换失败的论文不进索引。这样一次运行总能产出完整的
+    ``SurveyReport``，而不是在半路抛异常丢掉已经付出的成本。
+    """
 
-    async def _shredded(self, content: PaperContent, outcome: PaperOutcome) -> bool:
-        """正文是否被切成了碎片而不是句子；是则拒绝入语料并登记原因。
-
-        **这道闸门是按代价加的，判据却只能是内容。** 2026-08-17 真机一轮里
-        ``arxiv:1106.1813``（SMOTE）的 TeX 包缺 ``\\begin{document}``，入口推断失败，
-        转换器把整包连成 774904 字符、140 chunk、**35151 句**——一篇占掉整个语料的
-        66%、整次调研墙钟的 47%（2147 秒）。此前的门禁放行了它：``rag_chunk_oversized``
-        属于"记录但不拦"，而那套判据问的是内容对不对，**不问代价**。
-
-        但"太贵所以不要"不是个能写死的判据——长综述本来就该贵。真正的判据是那 35151
-        条根本不是句子。把三轮真机的 44 篇 ``PaperContent`` 逐篇回放本闸门：
-
-        ==========================  ========  ==========  ==========
-        论文                        句数      平均句长    判定
-        ==========================  ========  ==========  ==========
-        ``arxiv:1106.1813``         35151     **30**      拦下
-        ``arxiv:2512.05469``        957       69          放行（最接近门限）
-        ``arxiv:2506.16791``        3039      92          放行
-        ``doi:10.1038/s41598-...``  1077      99          放行
-        ==========================  ========  ==========  ==========
-
-        平均句长比"每 chunk 句数"更可靠：密度随体裁变化（综述天然长），而 30 个字符的
-        "句子"在任何体裁里都不是句子，是 2002 年双栏排版被拆出来的断行。
-
-        阈值取 40，落在 30 与 69 之间：比坏样本高 33%，比最接近的合法样本低 42%。
-        **样本很薄**——44 篇、同一条 query、只有一个坏例子——所以宁可放过也不误杀，
-        并且把每一次拒绝都记进 ``shredded_papers`` 让它可被复核。
-
-        走 ``load_retrieval_units`` + ``split_sentences``、并同样跳过参考文献单元，
-        与 ``build_corpus_index`` 逐字一致：闸门量的必须是建索引时**真会产生**的那些
-        句子，两处定义一旦漂移，闸门就在量别的东西。代价是 chunk 正文被多读一遍，
-        那是本地磁盘读，相对它要挡下的编码开销可以忽略。
-        """
-        units = await content.load_retrieval_units(self.stack.artifacts)
-        lengths = [
-            end - start
-            for unit in units
-            if unit.kind != BIBLIOGRAPHY_KIND
-            for start, end in split_sentences(unit.text)
-        ]
-        if len(lengths) < SHRED_MIN_SENTENCES:
-            return False
-        mean_length = sum(lengths) / len(lengths)
-        if mean_length >= SHRED_MIN_SENTENCE_CHARS:
-            return False
-        outcome.shredded = True
-        self.report.shredded_papers.append(
-            f"{outcome.paper_key}: {len(lengths)} 句，平均 {mean_length:.0f} 字符"
-            f"（低于 {SHRED_MIN_SENTENCE_CHARS}），判为提取碎片，未入语料"
+    def __init__(
+        self,
+        stack: "SurveyStack",
+        request: SurveyRequest,
+        *,
+        emit: EmitEvent | None = None,
+    ) -> None:
+        self.stack = stack
+        self.request = request
+        self.state = PipelineState(
+            SurveyReport(query=request.query, status="empty"), request.max_papers
         )
-        return True
+        self.report = self.state.report
+        self._emit = emit or _silent_emit
 
-    def _outcome_for(self, paper_key: str) -> PaperOutcome:
-        """取出或新建一篇论文的登记项。
-
-        取源阶段会用解析后的身份重算 ``paper_key``，可能与 scout 阶段不同（例如
-        补上了期刊 DOI），因此这里必须容忍新 key 而不是断言存在。
-        """
-        outcome = self._outcomes.get(paper_key)
-        if outcome is None:
-            outcome = PaperOutcome(
-                paper_key=paper_key,
-                fetch_status=NOT_ATTEMPTED,
-                conversion_status="no_source",
+    async def run(self) -> SurveyReport:
+        """执行全链路，返回逐篇结果与成本账。"""
+        started = time.monotonic()
+        source_request_ref = await ScoutStage(
+            self.stack, self.request, self.state, self._emit
+        ).run()
+        await self._emit(
+            "survey/scouted",
+            self.report.scout_result_ref or "",
+            {
+                "pool": self.report.scout.pool_size,
+                "retained": self.report.scout.retained_papers,
+            },
+        )
+        if source_request_ref is not None:
+            source_result = await FetchStage(
+                self.stack, self.request, self.state
+            ).run(source_request_ref)
+            await self._emit(
+                "survey/fetched",
+                self.report.source_result_ref or "",
+                {
+                    "fetched": self.report.fetched,
+                    "attempted": self.report.fetch_attempted,
+                },
             )
-            self._outcomes[paper_key] = outcome
-        return outcome
+            papers = await ConversionStage(
+                self.stack, self.request, self.state
+            ).run(source_result)
+            await self._emit(
+                "survey/converted",
+                "",
+                {
+                    "converted": self.state.count("conversion_status"),
+                    "papers": len(papers),
+                },
+            )
+            await IndexStage(self.stack, self.request, self.state).run(papers)
+            await self._emit(
+                "survey/indexed",
+                self.report.corpus_ref or "",
+                {"indexed": self.state.count("indexed")},
+            )
+        self.report.timings.total_seconds = round(time.monotonic() - started, 3)
+        self.report.http_requests = self.stack.http.request_count
+        self._collect_model_costs()
+        if self.stack.library is not None:
+            self.report.library = self.stack.library.stats()
+        self.report.papers = sorted(
+            self.state.outcomes.values(),
+            key=lambda item: (-item.relevance, item.paper_key),
+        )
+        self.report.status = self.final_status()
+        return self.report
+
+    def final_status(self) -> str:
+        """本次运行的结论，只看它自己产出了什么。"""
+        if not self.report.converted():
+            return "empty"
+        if self.request.build_index and self.report.corpus_ref is None:
+            return "partial"
+        return "complete"
+
+    def candidate_cap(self) -> int:
+        """交给取源的候选上限；实际尝试几篇由 ``stop_after_fetched`` 决定。"""
+        return self.request.max_papers * self.request.source_candidate_multiple
+
+    def _scout_cache_key(self, request_json: str) -> str:
+        """本次检索在库里的键；请求 + 打分器指纹，见 ``library.scout_key``。"""
+        return ScoutStage(
+            self.stack, self.request, self.state, self._emit
+        ).cache_key(request_json)
+
+    async def _shredded(
+        self, content: PaperContent, outcome: PaperOutcome
+    ) -> bool:
+        """正文是否被切成了碎片而不是句子；是则拒绝入语料并登记原因。"""
+        return await judge_shredded(
+            content, outcome, self.stack.artifacts, self.report
+        )
 
     def _collect_model_costs(self) -> None:
         """汇总视觉与编码模型的调用数。"""
@@ -1140,34 +1115,6 @@ class SurveyPipeline:
         if embedder is not None:
             self.report.embed_calls = embedder.calls
             self.report.embedded_texts = embedder.embedded
-
-    def _agent_context(self, request_ref: ArtifactRef) -> AgentContext:
-        """构造 PaperScout 需要的最小 Turn 上下文。
-
-        全链路是确定性流程，不由 ``AgentRuntime`` 派发，因此这里自建 thread/turn；
-        作为 agent type 注册后应改为由 ``BaseAgentRunner`` 注入。
-        """
-        thread = AthenaThread(
-            thread_id="survey",
-            session_id="survey",
-            status="running",
-            context_ref=request_ref,
-        )
-        turn = AthenaTurn(
-            turn_id="survey-turn",
-            thread_id="survey",
-            request_ref=request_ref,
-            status="running",
-        )
-        return AgentContext(
-            thread=thread,
-            turn=turn,
-            # 检索是全链路里最慢的一段（实测约占墙钟 70%），PaperScout 自己的
-            # started/step/completed 事件是这段唯一的进度来源，必须往外传
-            emit=self._emit,
-            tools=ToolRegistry(),
-            cancel=asyncio.Event(),
-        )
 
 
 async def _silent_emit(_kind: str, _ref: str, _data: dict | None = None) -> None:
