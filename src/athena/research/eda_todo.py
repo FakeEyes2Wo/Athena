@@ -1,25 +1,22 @@
-"""Run ``EDA_TODO.md`` by spawning ``eda_worker`` subagents.
+"""Run a Markdown checkbox todo list by spawning worker subagents.
 
-The Markdown todo list uses GitHub checkboxes and stage headers::
+The todo file uses stage headers and GitHub checkboxes::
 
     ## Stage 1: Overview (parallel: false)
     - [ ] 00 Overview -> EDA_REPORT_00_OVERVIEW.md
 
-    ## Stage 2: Independent Profiles (parallel: true)
-    - [ ] 01 Data Quality -> EDA_REPORT_01_DATA_QUALITY.md
+    ## Stage 2: Profiles (parallel: true)
+    - [ ] 01 Quality -> EDA_REPORT_01_DATA_QUALITY.md
 
-Each pending ``- [ ]`` line is executed by one ``eda_worker`` subagent.
-``parallel: false`` stages run strictly in order; ``parallel: true`` stages
-run up to ``max_workers`` workers concurrently. Failed items are retried and,
-if still failing, left as ``- [ ]``.
+``parallel: false`` stages run sequentially; ``parallel: true`` stages run up
+to ``max_workers`` workers concurrently. Failed items are retried and left
+unchecked if they still fail.
 """
 
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from athena.agents.ideator_agent import HandoffResult
 from athena.agents.prepare_eda_agent import EDA_WORKER_AGENT_TYPE, PREPARE_EDA_AGENT_ID
@@ -30,51 +27,28 @@ from athena.research.supervisor.plans import wait_run_events
 
 _STAGE_RE = re.compile(r"^##\s+.+?\(parallel:\s*(true|false)\)\s*$")
 _TODO_RE = re.compile(r"^- \[ \]\s+(.+?)(?:\s*->\s*([^\s#]+))?\s*$")
-
 PublishEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
+Todo = tuple[int, str, str]  # (line_index, text, output_file)
 
 
-@dataclass
-class _Todo:
-    line_index: int
-    text: str
-    output_file: str
-    parallel: bool
-
-
-@dataclass
-class _Stage:
-    parallel: bool
-    todos: list[_Todo] = field(default_factory=list)
-
-
-def _parse_todos(lines: list[str]) -> list[_Stage]:
-    """Parse stage headers and pending checkbox todos from markdown lines."""
-    stages: list[_Stage] = []
-    current: _Stage | None = None
+def _parse(lines: list[str]) -> list[tuple[bool, list[Todo]]]:
+    """Parse markdown lines into [(parallel, [(line_index, text, output_file)])]."""
+    stages: list[tuple[bool, list[Todo]]] = []
     for index, line in enumerate(lines):
-        stage_match = _STAGE_RE.match(line.strip())
-        if stage_match:
-            current = _Stage(parallel=stage_match.group(1) == "true")
-            stages.append(current)
+        stage = _STAGE_RE.match(line.strip())
+        if stage:
+            stages.append((stage.group(1) == "true", []))
             continue
-        todo_match = _TODO_RE.match(line.strip())
-        if todo_match and current is not None:
-            text = todo_match.group(1).strip()
-            output_file = todo_match.group(2) or "EDA_REPORT.md"
-            current.todos.append(
-                _Todo(
-                    line_index=index,
-                    text=text,
-                    output_file=output_file,
-                    parallel=current.parallel,
-                )
+        todo = _TODO_RE.match(line.strip())
+        if todo and stages:
+            stages[-1][1].append(
+                (index, todo.group(1).strip(), todo.group(2) or "EDA_REPORT.md")
             )
     return stages
 
 
-async def _run_one_todo(
-    todo: _Todo,
+async def _run_one(
+    todo: Todo,
     *,
     agents: AgentRuntime,
     store: ArtifactStore,
@@ -83,34 +57,32 @@ async def _run_one_todo(
     retries: int,
     project_event: PublishEvent | None,
 ) -> bool:
-    """Spawn one eda_worker, wait for it, and verify its report file."""
+    """Spawn one worker, wait for it, and verify its output file."""
+    _, text, output_file = todo
     for attempt in range(retries + 1):
         agent_id: str | None = None
         try:
-            task = {
-                "todo_line": todo.text,
-                "output_file": todo.output_file,
-                "workspace": str(workspace),
-            }
             agent_id, run_id = await agents.spawn(
                 parent_id,
                 EDA_WORKER_AGENT_TYPE,
-                task,
-                name=f"eda-{todo.output_file}",
+                {
+                    "todo_line": text,
+                    "output_file": output_file,
+                    "workspace": str(workspace),
+                },
+                name=f"eda-{output_file}",
             )
 
             def publish(kind: str, ref: str, data: dict | None = None) -> None:
-                """Forward one worker agent event to the runtime event bus."""
+                """Forward one worker event to the runtime event bus."""
                 if project_event is not None and agent_id is not None:
                     project_event(agent_id, kind, ref, data)
 
             summary = await wait_run_events(agents, run_id, publish)
-            result = await load_agent_result(summary, store, HandoffResult)
-            if result is None:
-                raise RuntimeError(f"{todo.output_file} worker returned no result")
-            output = workspace / todo.output_file
-            if not output.is_file():
-                raise RuntimeError(f"{todo.output_file} was not written")
+            if await load_agent_result(summary, store, HandoffResult) is None:
+                raise RuntimeError(f"{output_file} returned no result")
+            if not (workspace / output_file).is_file():
+                raise RuntimeError(f"{output_file} was not written")
             return True
         except Exception:
             if attempt >= retries:
@@ -120,7 +92,7 @@ async def _run_one_todo(
 
 
 async def _run_stage(
-    stage: _Stage,
+    stage: tuple[bool, list[Todo]],
     *,
     agents: AgentRuntime,
     store: ArtifactStore,
@@ -132,48 +104,30 @@ async def _run_stage(
     project_event: PublishEvent | None,
 ) -> list[str]:
     """Run one stage, updating checkboxes in ``lines``; return failed todo text."""
+    parallel, todos = stage
     failed: list[str] = []
-    if stage.parallel:
-        for start in range(0, len(stage.todos), max_workers):
-            batch = stage.todos[start : start + max_workers]
-            results = await asyncio.gather(
-                *(
-                    _run_one_todo(
-                        todo,
-                        agents=agents,
-                        store=store,
-                        workspace=workspace,
-                        parent_id=parent_id,
-                        retries=retries,
-                        project_event=project_event,
-                    )
-                    for todo in batch
+    batch_size = max_workers if parallel else 1
+    for start in range(0, len(todos), batch_size):
+        batch = todos[start : start + batch_size]
+        results = await asyncio.gather(
+            *(
+                _run_one(
+                    todo,
+                    agents=agents,
+                    store=store,
+                    workspace=workspace,
+                    parent_id=parent_id,
+                    retries=retries,
+                    project_event=project_event,
                 )
+                for todo in batch
             )
-            for todo, ok in zip(batch, results):
-                if ok:
-                    lines[todo.line_index] = lines[todo.line_index].replace(
-                        "- [ ]", "- [x]", 1
-                    )
-                else:
-                    failed.append(todo.text)
-    else:
-        for todo in stage.todos:
-            ok = await _run_one_todo(
-                todo,
-                agents=agents,
-                store=store,
-                workspace=workspace,
-                parent_id=parent_id,
-                retries=retries,
-                project_event=project_event,
-            )
+        )
+        for (line_index, text, _), ok in zip(batch, results):
             if ok:
-                lines[todo.line_index] = lines[todo.line_index].replace(
-                    "- [ ]", "- [x]", 1
-                )
+                lines[line_index] = lines[line_index].replace("- [ ]", "- [x]", 1)
             else:
-                failed.append(todo.text)
+                failed.append(text)
     return failed
 
 
@@ -188,17 +142,13 @@ async def run_eda_todos(
     retries: int = 2,
     project_event: PublishEvent | None = None,
 ) -> list[str]:
-    """Execute pending EDA todos by spawning eda_worker subagents.
-
-    Returns the text of todos that remain unfinished after retries.
-    """
+    """Execute pending todos by spawning worker subagents; return failed texts."""
     todo_path = workspace / todo_file
     if not todo_path.is_file():
         return [todo_file]
     lines = todo_path.read_text(encoding="utf-8").splitlines()
-    stages = _parse_todos(lines)
     failed: list[str] = []
-    for stage in stages:
+    for stage in _parse(lines):
         failed.extend(
             await _run_stage(
                 stage,
