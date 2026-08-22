@@ -6,6 +6,8 @@ import re
 from pathlib import PurePosixPath
 from collections.abc import Iterable
 
+from dataclasses import dataclass, field
+
 import pylatexenc
 from pylatexenc.latex2text import LatexNodes2Text
 from pylatexenc.latexwalker import (
@@ -669,6 +671,21 @@ def labels(raw: str) -> list[str]:
     )
 
 
+@dataclass(slots=True)
+class ParseSession:
+    """Mutable state accumulated while parsing one TeX source package."""
+
+    newlines: list[int]
+    elements: list[ParsedElement] = field(default_factory=list)
+    visuals: list[ParsedVisual] = field(default_factory=list)
+    diagnostics: list[ProcessingDiagnostic] = field(default_factory=list)
+    heading_path: list[str] = field(default_factory=list)
+    in_appendix: bool = False
+    graphic_paths: list[str] = field(default_factory=list)
+    bibliography_added: bool = False
+    external_bibliography: tuple[str, str, list[str], int] | None = None
+
+
 class TexPaperParser:
     """TeX Source 主通道解析器。"""
 
@@ -677,21 +694,18 @@ class TexPaperParser:
         self.context = latex_context()
         self.custom_macros = extract_zero_argument_macros(source.text)
         self.renderer = TexRenderer(source.text, self.context, self.custom_macros)
-        self.newlines = [
-            index for index, char in enumerate(source.text) if char == "\n"
-        ]
-        self.elements: list[ParsedElement] = []
-        self.visuals: list[ParsedVisual] = []
-        self.diagnostics = list(source.diagnostics)
-        self.heading_path: list[str] = []
-        self.in_appendix = False
-        self.graphic_paths = self.find_graphic_paths()
-        self.bibliography_added = False
-        self.external_bibliography = self.load_external_bibliography()
+        self.session = ParseSession(
+            newlines=[
+                index for index, char in enumerate(source.text) if char == "\n"
+            ],
+            diagnostics=list(source.diagnostics),
+            graphic_paths=self.find_graphic_paths(),
+        )
+        self.session.external_bibliography = self.load_external_bibliography()
 
     def line_index(self, position: int) -> int:
         """把展开文本字符位置映射为 0-based 行索引。"""
-        return bisect.bisect_right(self.newlines, position)
+        return bisect.bisect_right(self.session.newlines, position)
 
     def locator(self, node: LatexNode) -> SourceLocator:
         """把 AST 节点映射回原始 TeX 文件和行号。"""
@@ -745,7 +759,7 @@ class TexPaperParser:
         for path in candidates:
             if path not in self.source.files:
                 continue
-            text = decode_tex(path, self.source.files[path], self.diagnostics)
+            text = decode_tex(path, self.source.files[path], self.session.diagnostics)
             try:
                 nodes, _, _ = LatexWalker(
                     text, latex_context=self.context
@@ -767,7 +781,7 @@ class TexPaperParser:
                     raise ValueError("The bibliography rendered as empty content.")
                 return path, markdown, keys, max(1, len(text.splitlines()))
             except Exception as error:
-                self.diagnostics.append(
+                self.session.diagnostics.append(
                     ProcessingDiagnostic(
                         level="warning",
                         code="tex_bibliography_parse_failed",
@@ -778,9 +792,9 @@ class TexPaperParser:
 
     def add_external_bibliography(self) -> None:
         """在正文 bibliography 声明处插入已解析的外部参考文献。"""
-        if self.bibliography_added or self.external_bibliography is None:
+        if self.session.bibliography_added or self.session.external_bibliography is None:
             return
-        path, markdown, keys, line_count = self.external_bibliography
+        path, markdown, keys, line_count = self.session.external_bibliography
         self.add_bibliography_markdown(
             markdown,
             keys,
@@ -805,15 +819,15 @@ class TexPaperParser:
         position: int,
     ) -> None:
         """将 bibliography 拆为标题和逐条可安全分组的检索元素。"""
-        if self.bibliography_added:
+        if self.session.bibliography_added:
             return
         self.update_heading(1, "References")
-        self.elements.append(
+        self.session.elements.append(
             ParsedElement(
                 element_id=self.make_id("heading", f"{identity}:heading", position),
                 kind="heading",
                 markdown="## References",
-                heading_path=list(self.heading_path),
+                heading_path=list(self.session.heading_path),
                 locators=locators,
             )
         )
@@ -828,7 +842,7 @@ class TexPaperParser:
             for index, entry in enumerate(entries):
                 key = entry.group(1).strip()
                 entry_markdown = f"- [@{key}] {entry.group(2).strip()}"
-                self.elements.append(
+                self.session.elements.append(
                     ParsedElement(
                         element_id=self.make_id(
                             "bibliography",
@@ -837,25 +851,25 @@ class TexPaperParser:
                         ),
                         kind="bibliography",
                         markdown=entry_markdown,
-                        heading_path=list(self.heading_path),
+                        heading_path=list(self.session.heading_path),
                         locators=locators,
                         citation_keys=[key],
                     )
                 )
         elif body:
-            self.elements.append(
+            self.session.elements.append(
                 ParsedElement(
                     element_id=self.make_id(
                         "bibliography", f"{identity}:{body}", position + 1
                     ),
                     kind="bibliography",
                     markdown=body,
-                    heading_path=list(self.heading_path),
+                    heading_path=list(self.session.heading_path),
                     locators=locators,
                     citation_keys=keys,
                 )
             )
-        self.bibliography_added = True
+        self.session.bibliography_added = True
 
     def make_id(self, prefix: str, raw: str, position: int) -> str:
         """由源码内容和位置生成稳定短标识。"""
@@ -877,7 +891,7 @@ class TexPaperParser:
             return None
         raw = "".join(self.raw(node) for node in nodes)
         active_raw = mask_macro_scan_source(raw)
-        position = nodes[0].pos if nodes else len(self.elements)
+        position = nodes[0].pos if nodes else len(self.session.elements)
         identity = raw or normalized
         if identity_suffix is not None:
             identity = f"{identity}\0{identity_suffix}"
@@ -885,16 +899,16 @@ class TexPaperParser:
             element_id=self.make_id(kind, identity, position),
             kind=kind,
             markdown=normalized,
-            heading_path=list(self.heading_path),
+            heading_path=list(self.session.heading_path),
             locators=self.unique_locators(nodes),
             citation_keys=citations(active_raw),
             labels=labels(active_raw),
             visual_ids=visual_ids or [],
             repair_issue_codes=repair_issue_codes or [],
             reference_keys=references(active_raw),
-            semantic_heading_path=list(self.heading_path),
+            semantic_heading_path=list(self.session.heading_path),
         )
-        self.elements.append(element)
+        self.session.elements.append(element)
         return element
 
     def macro_value(self, nodes: Iterable[LatexNode], name: str) -> str:
@@ -962,8 +976,8 @@ class TexPaperParser:
 
     def update_heading(self, level: int, title: str) -> None:
         """更新当前章节祖先路径。"""
-        self.heading_path = self.heading_path[: level - 1]
-        self.heading_path.append(title)
+        self.session.heading_path = self.session.heading_path[: level - 1]
+        self.session.heading_path.append(title)
 
     def resolve_asset(
         self, requested: str, source_file: str | None
@@ -975,7 +989,7 @@ class TexPaperParser:
         )
         bases = [
             current_dir,
-            *(current_dir / path for path in self.graphic_paths),
+            *(current_dir / path for path in self.session.graphic_paths),
             PurePosixPath("."),
         ]
         choices: list[str] = []
@@ -1038,7 +1052,7 @@ class TexPaperParser:
         if not include_nodes:
             visual_id = self.make_id("figure", self.raw(node), node.pos)
             visual_ids.append(visual_id)
-            self.visuals.append(
+            self.session.visuals.append(
                 ParsedVisual(
                     visual_id=visual_id,
                     kind="figure",
@@ -1050,7 +1064,7 @@ class TexPaperParser:
                     surrounding_text=caption,
                 )
             )
-            self.diagnostics.append(
+            self.session.diagnostics.append(
                 ProcessingDiagnostic(
                     level="warning",
                     code="tex_figure_without_asset",
@@ -1071,7 +1085,7 @@ class TexPaperParser:
             asset_bytes = resolved[1] if resolved else None
             media_type = media_type_for_path(resolved[0]) if resolved else None
             if resolved is None:
-                self.diagnostics.append(
+                self.session.diagnostics.append(
                     ProcessingDiagnostic(
                         level="warning",
                         code="tex_figure_asset_missing",
@@ -1079,7 +1093,7 @@ class TexPaperParser:
                         locator=locator,
                     )
                 )
-            self.visuals.append(
+            self.session.visuals.append(
                 ParsedVisual(
                     visual_id=visual_id,
                     kind="figure",
@@ -1102,7 +1116,7 @@ class TexPaperParser:
         )
         element = self.add_element("figure", markdown, [node], visual_ids)
         if element:
-            for visual in self.visuals[-len(visual_ids) :]:
+            for visual in self.session.visuals[-len(visual_ids) :]:
                 visual.element_id = element.element_id
 
     def parse_table(self, node: LatexEnvironmentNode) -> None:
@@ -1124,7 +1138,7 @@ class TexPaperParser:
         )
         if not table_markdown:
             table_markdown = f"```latex\n{self.raw(node).strip()}\n```"
-            self.diagnostics.append(
+            self.session.diagnostics.append(
                 ProcessingDiagnostic(
                     level="warning",
                     code="tex_table_complex_fallback",
@@ -1137,7 +1151,7 @@ class TexPaperParser:
         element = self.add_element("table", markdown, [node], [visual_id])
         if element is None:
             return
-        self.visuals.append(
+        self.session.visuals.append(
             ParsedVisual(
                 visual_id=visual_id,
                 kind="table",
@@ -1186,13 +1200,13 @@ class TexPaperParser:
         for node in nodes:
             if isinstance(node, LatexMacroNode) and node.macroname in SECTION_LEVELS:
                 flush()
-                level = min(5, SECTION_LEVELS[node.macroname] + int(self.in_appendix))
+                level = min(5, SECTION_LEVELS[node.macroname] + int(self.session.in_appendix))
                 title = clean_inline(self.renderer.argument(last_argument(node)))
                 if title:
                     self.update_heading(level, title)
                     self.add_element("heading", f"{'#' * (level + 1)} {title}", [node])
                 else:
-                    self.diagnostics.append(
+                    self.session.diagnostics.append(
                         ProcessingDiagnostic(
                             level="warning",
                             code="tex_heading_empty",
@@ -1202,11 +1216,11 @@ class TexPaperParser:
                     )
             elif isinstance(node, LatexMacroNode) and node.macroname == "appendix":
                 flush()
-                self.in_appendix = True
+                self.session.in_appendix = True
                 self.update_heading(1, "Appendix")
                 self.add_element("heading", "## Appendix", [node])
             elif isinstance(node, LatexMacroNode) and node.macroname == "label":
-                previous = self.elements[-1] if self.elements else None
+                previous = self.session.elements[-1] if self.session.elements else None
                 label = clean_inline(self.renderer.argument(last_argument(node)))
                 if (
                     previous is not None
@@ -1282,11 +1296,11 @@ class TexPaperParser:
                 "addbibresource",
             }:
                 flush()
-                if self.external_bibliography is not None:
+                if self.session.external_bibliography is not None:
                     self.add_external_bibliography()
                 else:
                     self.add_element("bibliography", self.raw(node), [node])
-                    self.diagnostics.append(
+                    self.session.diagnostics.append(
                         ProcessingDiagnostic(
                             level="warning",
                             code="tex_bibliography_unresolved",
@@ -1301,12 +1315,12 @@ class TexPaperParser:
     def infer_float_semantic_headings(self) -> None:
         """用最近的同顶层引用上下文推断浮动体语义路径，不改变源码顺序。"""
         reference_contexts: dict[str, list[tuple[int, list[str]]]] = {}
-        for index, element in enumerate(self.elements):
+        for index, element in enumerate(self.session.elements):
             for key in element.reference_keys:
                 reference_contexts.setdefault(key, []).append(
                     (index, list(element.heading_path))
                 )
-        for index, element in enumerate(self.elements):
+        for index, element in enumerate(self.session.elements):
             if (
                 element.kind not in {"figure", "table"}
                 or not element.labels
@@ -1343,7 +1357,7 @@ class TexPaperParser:
                 if distance == best_distance and direction == best_direction
             }
             if len(best_paths) != 1:
-                self.diagnostics.append(
+                self.session.diagnostics.append(
                     ProcessingDiagnostic(
                         level="warning",
                         code="tex_float_semantic_heading_ambiguous",
@@ -1356,7 +1370,7 @@ class TexPaperParser:
             if semantic_path == element.heading_path:
                 continue
             element.semantic_heading_path = semantic_path
-            self.diagnostics.append(
+            self.session.diagnostics.append(
                 ProcessingDiagnostic(
                     level="info",
                     code="tex_float_semantic_heading_inferred",
@@ -1389,7 +1403,7 @@ class TexPaperParser:
         )
         body_nodes = document.nodelist if document else nodes
         if document is None:
-            self.diagnostics.append(
+            self.session.diagnostics.append(
                 ProcessingDiagnostic(
                     level="warning",
                     code="tex_document_environment_missing",
@@ -1423,14 +1437,14 @@ class TexPaperParser:
         self.parse_nodes(body_nodes)
         self.add_external_bibliography()
         self.infer_float_semantic_headings()
-        if not self.elements:
+        if not self.session.elements:
             raise ValueError("TeX source contains no recoverable paper content.")
         abstract_element = next(
-            (element for element in self.elements if element.kind == "abstract"), None
+            (element for element in self.session.elements if element.kind == "abstract"), None
         )
         bibliography_elements = [
             element.markdown
-            for element in self.elements
+            for element in self.session.elements
             if element.kind == "bibliography"
         ]
         bibliography = ""
@@ -1454,9 +1468,9 @@ class TexPaperParser:
                 if abstract_element
                 else ""
             ),
-            elements=self.elements,
-            visuals=self.visuals,
-            diagnostics=self.diagnostics,
+            elements=self.session.elements,
+            visuals=self.session.visuals,
+            diagnostics=self.session.diagnostics,
             bibliography=bibliography,
             source_labels=source_labels,
             source_reference_keys=source_reference_keys,

@@ -642,15 +642,22 @@ def formula_layout_fragments(
     return fragments
 
 
+@dataclass(slots=True)
+class PdfParseSession:
+    """Mutable state accumulated while parsing one PDF document."""
+
+    elements: list[ParsedElement] = field(default_factory=list)
+    visuals: list[ParsedVisual] = field(default_factory=list)
+    diagnostics: list[ProcessingDiagnostic] = field(default_factory=list)
+    heading_path: list[str] = field(default_factory=list)
+
+
 class PdfPaperParser:
     """PyMuPDF 论文版面解析器。"""
 
     def __init__(self, pdf_bytes: bytes) -> None:
         self.pdf_bytes = pdf_bytes
-        self.elements: list[ParsedElement] = []
-        self.visuals: list[ParsedVisual] = []
-        self.diagnostics: list[ProcessingDiagnostic] = []
-        self.heading_path: list[str] = []
+        self.session = PdfParseSession()
 
     def make_id(self, prefix: str, page: int, value: str) -> str:
         """由页码和内容生成稳定标识。"""
@@ -682,7 +689,7 @@ class PdfPaperParser:
             ),
             kind=kind,
             markdown=normalized,
-            heading_path=list(self.heading_path),
+            heading_path=list(self.session.heading_path),
             locators=[self.locator(block)],
             citation_keys=citation_keys(block.text),
             labels=labels or [],
@@ -694,13 +701,13 @@ class PdfPaperParser:
                 else reference_keys
             ),
         )
-        self.elements.append(element)
+        self.session.elements.append(element)
         return element
 
     def update_heading(self, level: int, title: str) -> None:
         """更新 PDF 标题层级路径。"""
-        self.heading_path = self.heading_path[: level - 1]
-        self.heading_path.append(title)
+        self.session.heading_path = self.session.heading_path[: level - 1]
+        self.session.heading_path.append(title)
 
     def add_visual_element(
         self, page: fitz.Page, block: PdfBlock, caption: PdfBlock | None
@@ -736,7 +743,7 @@ class PdfPaperParser:
                 else "image/png"
             )
         )
-        self.visuals.append(
+        self.session.visuals.append(
             ParsedVisual(
                 visual_id=visual_id,
                 kind=kind,
@@ -774,7 +781,7 @@ class PdfPaperParser:
         )
         if element is None:
             return
-        self.visuals.append(
+        self.session.visuals.append(
             ParsedVisual(
                 visual_id=visual_id,
                 kind="equation",
@@ -799,7 +806,7 @@ class PdfPaperParser:
         if element is None:
             return
         preview = render_page_region(page, bbox, dpi=160)
-        self.visuals.append(
+        self.session.visuals.append(
             ParsedVisual(
                 visual_id=visual_id,
                 kind="page",
@@ -813,7 +820,7 @@ class PdfPaperParser:
                 surrounding_text="Recover all readable paper content from this low-text page without summarizing.",
             )
         )
-        self.diagnostics.append(
+        self.session.diagnostics.append(
             ProcessingDiagnostic(
                 level="warning",
                 code="pdf_page_requires_visual_ocr",
@@ -883,21 +890,21 @@ class PdfPaperParser:
     def reflow_split_paragraphs(self) -> None:
         """合并被分页或浮动体打断的同章节 prose，修复跨 block 断词。"""
         index = 0
-        while index < len(self.elements):
-            current = self.elements[index]
+        while index < len(self.session.elements):
+            current = self.session.elements[index]
             if current.kind not in {"abstract", "paragraph"}:
                 index += 1
                 continue
             following = index + 1
-            while following < len(self.elements) and self.elements[following].kind in {
+            while following < len(self.session.elements) and self.session.elements[following].kind in {
                 "figure",
                 "front_matter",
                 "table",
             }:
                 following += 1
-            if following >= len(self.elements):
+            if following >= len(self.session.elements):
                 break
-            continuation = self.elements[following]
+            continuation = self.session.elements[following]
             same_context = (
                 continuation.kind == current.kind
                 and continuation.heading_path == current.heading_path
@@ -911,10 +918,10 @@ class PdfPaperParser:
                 markdown = current.markdown[:-1] + continuation.markdown
             else:
                 markdown = current.markdown + " " + continuation.markdown
-            self.elements[index] = self.merge_elements(
+            self.session.elements[index] = self.merge_elements(
                 [current, continuation], current.kind, markdown
             )
-            del self.elements[following]
+            del self.session.elements[following]
 
     @staticmethod
     def bibliography_entry_complete(text: str) -> bool:
@@ -951,7 +958,7 @@ class PdfPaperParser:
             result.append(self.merge_elements(pending, "bibliography", markdown))
             pending.clear()
 
-        for element in self.elements:
+        for element in self.session.elements:
             if element.kind != "bibliography":
                 flush()
                 result.append(element)
@@ -962,12 +969,12 @@ class PdfPaperParser:
             if self.bibliography_entry_complete(self.join_bibliography_text(pending)):
                 flush()
         flush()
-        self.elements = result
+        self.session.elements = result
 
     def infer_visual_semantic_headings(self) -> None:
         """用最近且唯一的正文显示引用推断视觉语义路径。"""
         contexts: dict[str, list[tuple[int, list[str]]]] = {}
-        for index, element in enumerate(self.elements):
+        for index, element in enumerate(self.session.elements):
             if element.kind in {"figure", "table"}:
                 continue
             for key in element.reference_keys:
@@ -975,7 +982,7 @@ class PdfPaperParser:
                     contexts.setdefault(key, []).append(
                         (index, list(element.heading_path))
                     )
-        for index, element in enumerate(self.elements):
+        for index, element in enumerate(self.session.elements):
             if element.kind not in {"figure", "table"} or not element.labels:
                 continue
             candidates = [
@@ -989,7 +996,7 @@ class PdfPaperParser:
             nearest = [item for item in candidates if item[0] == distance]
             paths = {tuple(item[2]) for item in nearest}
             if len(paths) != 1:
-                self.diagnostics.append(
+                self.session.diagnostics.append(
                     ProcessingDiagnostic(
                         level="warning",
                         code="pdf_visual_semantic_heading_ambiguous",
@@ -1002,7 +1009,7 @@ class PdfPaperParser:
             if semantic_path == element.heading_path:
                 continue
             element.semantic_heading_path = semantic_path
-            self.diagnostics.append(
+            self.session.diagnostics.append(
                 ProcessingDiagnostic(
                     level="info",
                     code="pdf_visual_semantic_heading_inferred",
@@ -1058,7 +1065,7 @@ class PdfPaperParser:
             )
         tables = [
             table
-            for table in extract_tables(page, self.diagnostics)
+            for table in extract_tables(page, self.session.diagnostics)
             if not any(
                 overlap_ratio(table.bbox, figure.bbox) > 0.5
                 for figure, _ in inferred_figures
@@ -1108,7 +1115,7 @@ class PdfPaperParser:
         for visual, caption in visual_blocks:
             if caption is None or visual.table_markdown:
                 continue
-            self.diagnostics.append(
+            self.session.diagnostics.append(
                 ProcessingDiagnostic(
                     level="info",
                     code="pdf_visual_region_inferred",
@@ -1153,7 +1160,7 @@ class PdfPaperParser:
             first = next(
                 block for block in text_blocks if id(block) in formula_fragments
             )
-            self.diagnostics.append(
+            self.session.diagnostics.append(
                 ProcessingDiagnostic(
                     level="warning",
                     code="pdf_formula_layout_fragment_omitted",
@@ -1207,7 +1214,7 @@ class PdfPaperParser:
                 )
             elif looks_like_equation(block, body_font, page_rect.width):
                 self.add_equation_visual_element(page, block)
-                self.diagnostics.append(
+                self.session.diagnostics.append(
                     ProcessingDiagnostic(
                         level="info",
                         code="pdf_equation_text_only",
@@ -1222,8 +1229,8 @@ class PdfPaperParser:
                 ):
                     continue
                 section = (
-                    normalized_heading_title(self.heading_path[-1])
-                    if self.heading_path
+                    normalized_heading_title(self.session.heading_path[-1])
+                    if self.session.heading_path
                     else ""
                 )
                 kind = (
@@ -1305,9 +1312,9 @@ class PdfPaperParser:
             self.reflow_split_paragraphs()
             self.merge_bibliography_elements()
             self.infer_visual_semantic_headings()
-            abstract = extract_abstract(self.elements)
-            bibliography = extract_bibliography(self.elements)
-            if not self.elements:
+            abstract = extract_abstract(self.session.elements)
+            bibliography = extract_bibliography(self.session.elements)
+            if not self.session.elements:
                 raise ValueError(
                     "PDF contains no extractable or visually recoverable content."
                 )
@@ -1318,15 +1325,15 @@ class PdfPaperParser:
                 title=recovered_title,
                 authors=authors,
                 abstract=abstract,
-                elements=self.elements,
-                visuals=self.visuals,
-                diagnostics=self.diagnostics,
+                elements=self.session.elements,
+                visuals=self.session.visuals,
+                diagnostics=self.session.diagnostics,
                 bibliography=bibliography,
-                source_labels=[visual.label for visual in self.visuals if visual.label],
+                source_labels=[visual.label for visual in self.session.visuals if visual.label],
                 source_reference_keys=list(
                     dict.fromkeys(
                         key
-                        for element in self.elements
+                        for element in self.session.elements
                         for key in element.reference_keys
                     )
                 ),
