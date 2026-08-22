@@ -433,11 +433,6 @@ class ResearchRuntime:
         return self._supervisor.state
 
     @property
-    def research_state(self) -> ResearchState:
-        """Compatibility alias for the same Supervisor-owned state object."""
-        return self.state
-
-    @property
     def tree(self) -> ResearchTree:
         """Return the Supervisor-owned research history."""
         return self._supervisor.tree

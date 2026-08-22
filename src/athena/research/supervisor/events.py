@@ -115,6 +115,10 @@ class EventProjector:
         self._sequence += 1
         return self._sequence
 
+    def next_sequence(self) -> int:
+        """Allocate the next output sequence number."""
+        return self._next_sequence()
+
     def resume(self, sequence: int) -> None:
         """Resume the sequence counter past replayed history.
 

@@ -306,7 +306,7 @@ class RuntimeEvents:
     def persist_user_message(self, text: str) -> None:
         """Append one Human message to the active session, sharing the output seq."""
         self._append_log(
-            {"type": "user", "seq": self._events._next_sequence(), "text": text}
+            {"type": "user", "seq": self._events.next_sequence(), "text": text}
         )
 
     def resume_sequence(self) -> None:

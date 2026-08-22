@@ -8,6 +8,8 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment
 from athena.core.workspace import GitWorkBranch
+from athena.execution.runtime import CommandResult
+from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.events import (
     EventProjector,
     OutputEvent,
@@ -15,9 +17,7 @@ from athena.research.supervisor.events import (
     redact,
     truncate_middle,
 )
-from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.plans import PlanState
-from athena.execution.runtime import CommandResult
 
 
 @pytest.mark.asyncio
@@ -500,7 +500,7 @@ def test_state_attempts_are_settled_experiments_plus_active_plans(tmp_path) -> N
             ),
         ),
     )
-    runtime.research_state.plans[active_id] = PlanState(
+    runtime.state.plans[active_id] = PlanState(
         kind="SEARCH",
         context_ref="sha256:" + "4" * 64,
         turns_used=1,
@@ -516,7 +516,7 @@ def test_state_attempts_are_settled_experiments_plus_active_plans(tmp_path) -> N
 
 def test_state_waiting_projection_has_exact_plan_ids_and_reason(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
-    runtime.research_state.plans["hyp_wait"] = PlanState(
+    runtime.state.plans["hyp_wait"] = PlanState(
         kind="SEARCH",
         context_ref="sha256:" + "5" * 64,
         turns_used=8,
