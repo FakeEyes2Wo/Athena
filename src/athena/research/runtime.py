@@ -52,6 +52,11 @@ from athena.research.survey import (
     build_survey_tools,
     run_survey,
 )
+from athena.tools.hf_dataset import HFDatasetDownloadTool, HFDatasetSearchTool
+from athena.tools.hf_model import HFModelDownloadTool, HFModelSearchTool
+from athena.tools.mcp import register_mcp_tools
+from athena.tools.mcp.client import McpClientManager
+from athena.tools.mcp.config import load_mcp_servers
 from athena.utils.single_turn_chat import single_turn_chat
 
 logger = logging.getLogger(__name__)
@@ -271,6 +276,8 @@ class ResearchRuntime:
         self._task: asyncio.Task[None] | None = None
         self._started = False
         self._auto_seed_task = auto_seed_task
+        self._mcp_registry: ToolRegistry | None = None
+        self._mcp_managers: list[McpClientManager] = []
         self._provider: object | None = None
         self._task_text = task
         self._model = model
@@ -427,6 +434,57 @@ class ResearchRuntime:
             )
 
         return build
+
+    # ── PR7 工具：HuggingFace + MCP，产物绑定项目工作区 ─────────────────
+
+    def hf_tools(self) -> ToolRegistry:
+        """装配 4 个 HuggingFace 搜索/下载工具，产物绑定到项目工作区。"""
+        work_root = str(self._root / "workspaces" / "pr7_tools")
+        registry = ToolRegistry()
+        for tool_cls in (
+            HFDatasetSearchTool,
+            HFDatasetDownloadTool,
+            HFModelSearchTool,
+            HFModelDownloadTool,
+        ):
+            registry.register(tool_cls(work_root=work_root))
+        return registry
+
+    async def init_mcp_tools(self) -> None:
+        """从项目根 mcp_servers.json 装配 MCP 工具；幂等，空配置为 no-op。"""
+        if self._mcp_registry is not None:
+            return
+        self._mcp_registry = ToolRegistry()
+        self._mcp_managers = []
+        servers = load_mcp_servers(self._root / "mcp_servers.json")
+        if not servers:
+            return
+        self._mcp_managers = await register_mcp_tools(
+            self._mcp_registry,
+            servers,
+            work_root=str(self._root / "workspaces" / "pr7_tools"),
+        )
+
+    def agent_tools(self, agent_type: str) -> ToolRegistry | None:
+        """PREPARE 子 agent 的共享 extra tools：Kaggle（按类型）+ HF + MCP。"""
+        return _merged(
+            self.kaggle_tools(agent_type),
+            self.hf_tools(),
+            self._mcp_registry,
+        )
+
+    def baseline_ideator_tools(self) -> Callable[[], ToolRegistry | None]:
+        """baseline_ideator 的懒加载 extra tools provider（含语料算子）。"""
+
+        def _provider() -> ToolRegistry | None:
+            return _merged(
+                self.kaggle_tools("ideator"),
+                self.corpus_tools(for_ideation=True),
+                self.hf_tools(),
+                self._mcp_registry,
+            )
+
+        return _provider
 
     # ── 文献语料：一次性构建，Ideator 只读 ──────────────────────────────
 
@@ -1113,6 +1171,9 @@ class ResearchRuntime:
         if self._task is not None and not self._task.done():
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
+        # _mcp_managers 仅 __init__ 装配；__new__ 绕过 __init__ 的测试对象没有该属性
+        for mgr in getattr(self, "_mcp_managers", ()):
+            await mgr.close()
         await self._agents.aclose()
 
 
