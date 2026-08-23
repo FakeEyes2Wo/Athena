@@ -12,6 +12,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.research.script_runner import (
     BundleMetadata,
     DataScriptRunner,
+    _with_frozen_header,
     _run_cmd,
     _run_cmd_capture,
     load_directory,
@@ -19,6 +20,22 @@ from athena.research.script_runner import (
 )
 
 _ENTRYPOINT = "src/inspect_anything.py"
+
+
+def test_frozen_header_preserves_utf8_bom_position() -> None:
+    """Windows UTF-8 BOM must remain byte zero so Python does not see U+FEFF."""
+    source = b"\xef\xbb\xbfprint('ok')\n"
+    frozen = _with_frozen_header(source)
+
+    assert frozen.startswith(b"\xef\xbb\xbf# ATHENA-FROZEN")
+    compile(frozen, "bom_script.py", "exec")
+
+
+def test_frozen_header_is_idempotent() -> None:
+    source = b"print('ok')\n"
+    once = _with_frozen_header(source)
+
+    assert _with_frozen_header(once) == once
 
 
 def _draft(tmp_path, entrypoint: str = _ENTRYPOINT) -> None:

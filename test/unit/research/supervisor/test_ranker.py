@@ -22,6 +22,7 @@ def _hypothesis(
     order: int | None = None,
     sources: list[str] | None = None,
     cost: float = 0.0,
+    rubric_score: float | None = None,
 ) -> Hypothesis:
     return Hypothesis(
         statement=statement,
@@ -31,6 +32,7 @@ def _hypothesis(
         order=order,
         sources=sources or [],
         cost=cost,
+        rubric_score=rubric_score,
     )
 
 
@@ -133,6 +135,27 @@ def test_selector_applies_cost_penalty() -> None:
     ranked = Selector(EloPolicy()).rank(tree, tree.pending_hypotheses())
 
     assert ranked[0].statement == "cheap change"
+
+
+def test_selector_prefers_layer_two_score_without_calling_a_model() -> None:
+    tree = ResearchTree()
+    lower = _hypothesis(
+        statement="well documented but lower review",
+        intervention="standardize every numeric feature",
+        sources=["paper://strong"],
+        rubric_score=0.2,
+    )
+    higher = _hypothesis(
+        statement="higher four-dimension review",
+        intervention="change one setting",
+        rubric_score=0.9,
+    )
+    tree.add_hypothesis(lower)
+    tree.add_hypothesis(higher)
+
+    ranked = Selector(EloPolicy()).rank(tree, tree.pending_hypotheses())
+
+    assert ranked[0].statement == "higher four-dimension review"
 
 
 def test_selector_config_is_reusable_and_deterministic() -> None:

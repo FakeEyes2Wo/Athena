@@ -38,11 +38,10 @@ def _text_similarity(left: Hypothesis, right: Hypothesis) -> float:
 
 
 def rubric_prior(hypothesis: Hypothesis, tree: ResearchTree) -> float:
-    """Cold-start prior in [0.4, 1.0] from specificity alone.
+    """Deterministic fallback prior in [0.4, 1.0] from specificity alone.
 
-    A pending hypothesis has no experiment data yet, so this rubric is the only
-    reliable signal. It is deliberately small and transparent; a future
-    ReflectionAgent rubric can replace it with richer scores.
+    Layer 2 normally stores a batch-review score before selection. This small
+    specificity heuristic remains the transparent no-model/error path.
 
     **有引用不再加分。** 早先这里给非空 ``sources`` 加 0.3（占总分 0.12），意图是让有据
     可依的假设先跑。真机（2026-08-16 第 12 次）表明它买到的是装饰而不是依据：带引用与
@@ -157,7 +156,11 @@ class Selector:
         strengths: dict[str | None, float],
     ) -> float:
         config = self._config
-        prior = rubric_prior(hypothesis, tree)
+        prior = (
+            hypothesis.rubric_score
+            if hypothesis.rubric_score is not None
+            else rubric_prior(hypothesis, tree)
+        )
         strength = strengths.get(hypothesis.id, 0.5)
         explore = novelty(hypothesis, tree)
         cost = min(max(hypothesis.cost, 0.0), 1.0)

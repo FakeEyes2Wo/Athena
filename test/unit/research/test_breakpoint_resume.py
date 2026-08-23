@@ -107,7 +107,15 @@ async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
 @pytest.mark.asyncio
 async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> None:
     runtime = _stub_runtime(
-        tmp_path, task_understanding={"title": "titanic", "target": "survival"}
+        tmp_path,
+        task_understanding={
+            "title": "titanic",
+            "dataset": "Titanic passenger table",
+            "target": "survival",
+            "task_type": "classification",
+            "metric_source": "unresolved",
+            "readiness": "READY",
+        },
     )
     outputs: list[dict[str, object]] = []
 
@@ -144,7 +152,7 @@ async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> 
             break
         await asyncio.sleep(0.01)
     assert any(
-        "断点续传：复用已持久化的任务理解" in str(output.get("text"))
+        "断点续传：复用已验证 READY 的任务理解" in str(output.get("text"))
         for output in outputs
     )
     assert not any("任务理解中" in str(output.get("text")) for output in outputs)

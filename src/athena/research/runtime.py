@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from athena.agents.plan_agent import register_plan_agent
+from athena.agents.rubric_agent import register_rubric_agents
 from athena.agents.supervisor_agent import register_supervisor_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import ResponsesProvider
@@ -16,6 +17,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.contracts import ArtifactRef
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_tree import ResearchTree
+from athena.core.research_models import TaskUnderstanding
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser
 from athena.execution.runtime import CommandResult, ExecutionRuntime
@@ -36,6 +38,7 @@ from athena.research.paper_rag.search import (
 )
 from athena.research.paper_rag.tool import MAX_OVERVIEW_PAPERS
 from athena.research.phase_runner import PhaseRunner
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.runtime_events import RuntimeEvents, recent_user_texts
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.events import EventProjector
@@ -307,6 +310,7 @@ class ResearchRuntime:
             run_plan_turn=self._phase_runner.run_plan_turn,
             run_supervisor_turn=self._agent_turns.run_supervisor_turn,
             run_ideator_turn=self._agent_turns.run_ideator_turn,
+            run_hypothesis_rubric=self._agent_turns.run_hypothesis_rubric,
             run_general_turn=self._agent_turns.run_general_turn,
             publish=self._events_bus.publish_from_supervisor,
             auto_validate=auto_validate,
@@ -363,6 +367,7 @@ class ResearchRuntime:
             ),
             kaggle_stack=supervisor_kaggle,
         )
+        register_rubric_agents(self._registry, provider=provider, artifacts=self._store)
         register_plan_agent(
             self._registry,
             provider=provider,
@@ -715,22 +720,82 @@ class ResearchRuntime:
         ]
         return " ".join(parts) if parts else fallback
 
-    async def _maybe_run_task_understanding(self) -> None:
-        """PREPARE 阶段运行任务理解；已有断点则直接跳过。
+    def _task_understanding(self) -> TaskUnderstanding | None:
+        """Return the validated persisted understanding, if one exists."""
+        payload = self.state.task_understanding
+        if payload is None:
+            return None
+        migrated = dict(payload)
+        legacy_needs_configuration = migrated.pop("needs_configuration", None)
+        if "metric_source" not in migrated:
+            # Legacy state did not record provenance and often defaulted to
+            # Accuracy. Treat that value as unresolved instead of silently
+            # granting it authority after an upgrade.
+            migrated["primary_metric"] = None
+            migrated["direction"] = None
+            migrated["metric_source"] = "unresolved"
+        if "readiness" not in migrated and legacy_needs_configuration is not None:
+            migrated["readiness"] = (
+                "NEEDS_INPUT" if legacy_needs_configuration else "READY"
+            )
+        return TaskUnderstanding.model_validate(migrated)
 
-        失败只降级为默认关闭 Kaggle 工具，不阻断启动。
-        """
+    def _task_needs_input(self) -> bool:
+        understanding = self._task_understanding()
+        return understanding is not None and understanding.readiness == "NEEDS_INPUT"
+
+    async def _ensure_evaluation_policy(self) -> None:
+        """Restore or freeze Layer 1 before PREPARE creates an evaluator."""
         if self._provider is None or self.state.phase != "PREPARE":
             return
-        if self.state.task_understanding is not None:
+        # Lightweight injected runners used by library consumers before Rubric V2
+        # remain valid; the production AgentTurnRunner always implements this.
+        if not hasattr(self._agent_turns, "run_evaluation_rubric"):
+            return
+        ref = self.state.evaluation_policy_ref
+        if ref is not None:
+            try:
+                policy = EvaluationPolicy.model_validate_json(
+                    await self._store.get_text(ref)
+                )
+            except (OSError, ValueError):
+                logger.warning(
+                    "persisted Evaluation Policy is invalid; regenerating",
+                    exc_info=True,
+                )
+            else:
+                self._supervisor.apply_evaluation_policy(policy)
+                self._direction = policy.direction
+                await self.publish_output(
+                    source="supervisor",
+                    channel="text",
+                    text=(
+                        "断点续传：复用已冻结的评价策略 "
+                        f"({policy.primary_metric}, {policy.direction})。"
+                    ),
+                    artifact_ref=ref,
+                )
+                return
+        if self._task_understanding() is None:
+            raise RuntimeError("Layer 1 requires completed task understanding")
+        policy, ref = await self._agent_turns.run_evaluation_rubric()
+        self._direction = policy.direction
+        await self._supervisor.checkpoint_evaluation_policy(ref, policy)
+
+    async def _maybe_run_task_understanding(self) -> bool:
+        """Run/re-run task understanding and stop PREPARE until it is READY."""
+        if self._provider is None or self.state.phase != "PREPARE":
+            return True
+        existing = self._task_understanding()
+        if existing is not None and existing.readiness == "READY":
             await self.publish_output(
                 source="supervisor",
                 channel="text",
-                text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
+                text="断点续传：复用已验证 READY 的任务理解。",
             )
-            return
+            return True
         if not self._task_text.strip():
-            return
+            return False
         context = self._task_context_text(self._task_text, self._recent_user_texts())
         await self.publish_output(
             source="supervisor",
@@ -739,19 +804,40 @@ class ResearchRuntime:
         )
         try:
             await self._agent_turns.run_supervisor_turn(context)
+            understanding = self._task_understanding()
+            if understanding is None:
+                raise RuntimeError("Supervisor did not record task understanding")
+            if understanding.readiness == "NEEDS_INPUT":
+                questions = (
+                    "\n".join(
+                        f"- {question}"
+                        for question in understanding.clarification_questions
+                    )
+                    or "- Please provide the missing critical task information."
+                )
+                await self.publish_output(
+                    source="supervisor",
+                    channel="text",
+                    text=f"任务信息不足，等待科学家补充：\n{questions}",
+                )
+                await self._supervisor.pause()
+                return False
             await self.publish_output(
-                source="supervisor", channel="text", text="任务理解完成。"
+                source="supervisor", channel="text", text="任务理解完整性检查通过。"
             )
+            return True
         except Exception as error:
             logger.warning(
-                "supervisor task-understanding turn failed; Kaggle tools stay off",
+                "supervisor task-understanding/readiness turn failed",
                 exc_info=True,
             )
             await self.publish_output(
                 source="supervisor",
                 channel="error",
-                text=f"任务理解失败（已降级继续）：{error}",
+                text=f"任务理解失败，已停止进入 PREPARE：{error}",
             )
+            await self._supervisor.pause()
+            return False
 
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.
@@ -763,8 +849,6 @@ class ResearchRuntime:
             return self._task
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
-        # 与 PREPARE 并行起跑：调研要十几分钟，而 PREPARE 也不快，串起来等于白等一遍。
-        self._start_survey()
         # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。
         self._task_text = self._resume_task_text(self._task_text)
         if self.state.status == "IDLE":
@@ -775,7 +859,24 @@ class ResearchRuntime:
         async def _run_lifecycle() -> None:
             # 任务理解也放进可取消的后台任务：否则 start_search RPC 会一直占住
             # 网关，pause/stop 根本进不来，且 self._task 还不存在、无法取消。
-            await self._maybe_run_task_understanding()
+            ready = await self._maybe_run_task_understanding()
+            if not ready:
+                self._started = False
+                return
+            try:
+                await self._ensure_evaluation_policy()
+            except Exception as error:
+                logger.warning("evaluation policy generation failed", exc_info=True)
+                await self.publish_output(
+                    source="supervisor",
+                    channel="error",
+                    text=f"评价策略无法安全冻结，已停止进入 PREPARE：{error}",
+                )
+                await self._supervisor.pause()
+                self._started = False
+                return
+            # 任务和评价策略均已冻结后，再与 PREPARE 并行启动文献调研。
+            self._start_survey()
             await self._supervisor.start()
 
         self._task = asyncio.create_task(_run_lifecycle())
@@ -990,6 +1091,14 @@ class ResearchRuntime:
         baseline/SOTA exists before SEARCH proposes hypotheses.
         """
         command = text.strip()
+        if command and not command.startswith("/") and self._task_needs_input():
+            self.persist_user_message(command)
+            self._agents.resume()
+            self.state.status = "RUNNING"
+            self.state.save(self._state_path)
+            self._task = None
+            self._started = False
+            return await self.start_task(self._task_text or command)
         if command == "/stop":
             status = await self._supervisor.request_stop()
             await self._cancel_supervisor_task()

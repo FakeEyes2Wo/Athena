@@ -10,9 +10,14 @@ from typing import Literal
 
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS, SupervisorActions
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
+from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash, new_id
 from athena.core.agent.types import AgentCommandError, ErrorCode
-from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_models import (
+    EvalResult,
+    ExperimentPlan,
+    Hypothesis,
+    TaskUnderstanding,
+)
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch, GitWorkspace
 from athena.research.contracts import GeneralTurnOutcome
@@ -33,6 +38,8 @@ from athena.research.supervisor.plans import (
 )
 from athena.research.supervisor.prepare import PrepareResult
 from athena.research.report import build_final_report
+from athena.research.rubrics.models import EvaluationPolicy
+from athena.research.rubrics.task import assess_task_readiness
 from athena.research.supervisor.policy import Outcome
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import (
@@ -50,6 +57,7 @@ Publish = Callable[[Literal["output", "state"], dict[str, object]], Awaitable[No
 PreparePhase = Callable[[], Awaitable[PrepareResult]]
 ValidationPhase = Callable[[CommitHash, float], Awaitable[object]]
 IdeatorTurn = Callable[[int], Awaitable[list[Hypothesis]]]
+HypothesisRubricTurn = Callable[[list[Hypothesis]], Awaitable[list[Hypothesis]]]
 GeneralTurn = Callable[[str, str | None], Awaitable[GeneralTurnOutcome]]
 PublishAgentEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 
@@ -117,6 +125,7 @@ class Supervisor(SupervisorActions):
         publish: Publish,
         auto_validate: bool = False,
         run_ideator_turn: IdeatorTurn | None = None,
+        run_hypothesis_rubric: HypothesisRubricTurn | None = None,
         run_general_turn: GeneralTurn | None = None,
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
@@ -147,6 +156,7 @@ class Supervisor(SupervisorActions):
         self._run_plan_turn = run_plan_turn
         self._run_supervisor_turn = run_supervisor_turn
         self._run_ideator_turn = run_ideator_turn
+        self._run_hypothesis_rubric = run_hypothesis_rubric
         self._run_general_turn = run_general_turn
         self._publish = publish
         self._auto_validate = auto_validate
@@ -161,6 +171,7 @@ class Supervisor(SupervisorActions):
         self._stopped = False
         # None=关闭, True=接入且下载, False=接入但不下载（任务理解阶段由 SupervisorAgent 决定）。
         self._kaggle_download: bool | None = state.kaggle_download
+        self._evaluation_policy: EvaluationPolicy | None = None
         # 手动模式下等待人工选定假设时，唤醒 run_search 循环的信号。
         self._wake = asyncio.Event()
         # SEARCH 调度循环的后台任务（供 WAITING→RUNNING 重入）；首轮由 start() 直接 await。
@@ -182,6 +193,16 @@ class Supervisor(SupervisorActions):
         return self._evaluator_ref
 
     @property
+    def evaluation_policy(self) -> EvaluationPolicy | None:
+        """Return the frozen single-primary evaluation policy."""
+        return self._evaluation_policy
+
+    @property
+    def evaluation_policy_ref(self) -> ArtifactRef | None:
+        """Return the persisted policy artifact reference."""
+        return self.state.evaluation_policy_ref
+
+    @property
     def kaggle_enabled(self) -> bool:
         return self._kaggle_download is not None
 
@@ -198,8 +219,10 @@ class Supervisor(SupervisorActions):
         return {"kaggle_enabled": self.kaggle_enabled, "download": self.kaggle_download}
 
     async def record_task_understanding(self, **payload: object) -> dict[str, object]:
-        """Persist the Supervisor's structured task understanding and surface it."""
-        self.state.task_understanding = dict(payload)
+        """Validate, deterministically assess, persist, and surface task readiness."""
+        understanding = TaskUnderstanding.model_validate(payload)
+        assessed = assess_task_readiness(understanding, project_root=self._project_root)
+        self.state.task_understanding = assessed.model_dump(mode="json")
         await self._persist_state()
         return {"recorded": True, "task_understanding": self.state.task_understanding}
 
@@ -209,6 +232,24 @@ class Supervisor(SupervisorActions):
         self.state.evaluator_ref = ref
         await self._persist_state()
         return {"evaluator_ref": ref}
+
+    def apply_evaluation_policy(self, policy: EvaluationPolicy) -> None:
+        """Apply the policy direction to every later comparison."""
+        self._evaluation_policy = policy
+        self._direction = policy.direction
+
+    async def checkpoint_evaluation_policy(
+        self, ref: ArtifactRef, policy: EvaluationPolicy
+    ) -> dict[str, object]:
+        """Apply and persist a validated policy before evaluator creation."""
+        self.apply_evaluation_policy(policy)
+        self.state.evaluation_policy_ref = ref
+        await self._persist_state()
+        return {
+            "evaluation_policy_ref": ref,
+            "primary_metric": policy.primary_metric,
+            "direction": policy.direction,
+        }
 
     async def read_hypotheses(self) -> dict[str, object]:
         """Read-only snapshot of pending hypotheses, SOTA and SEARCH attempts."""
@@ -1136,19 +1177,39 @@ class Supervisor(SupervisorActions):
         """
         parent_id, parent_hypothesis = self._sota_parent()
         priority = self._scheduler.seed(parent_hypothesis)
-        hypothesis_ids = [
-            self.tree.add_hypothesis(
-                hypothesis.model_copy(
-                    update={
-                        "id": None,
-                        "order": None,
-                        "parent_id": parent_id,
-                        "priority": priority,
-                    }
-                )
+        prepared = [
+            hypothesis.model_copy(
+                update={
+                    "id": new_id("hyp"),
+                    "order": None,
+                    "parent_id": parent_id,
+                    "priority": priority,
+                    "rubric_score": None,
+                    "rubric_ref": None,
+                }
             )
             for hypothesis in hypotheses
         ]
+        if prepared and self._run_hypothesis_rubric is not None:
+            try:
+                prepared = await self._run_hypothesis_rubric(prepared)
+            except Exception as error:
+                logger.warning(
+                    "hypothesis rubric failed; using deterministic fallback",
+                    exc_info=True,
+                )
+                await self._publish(
+                    "output",
+                    {
+                        "source": "supervisor",
+                        "channel": "error",
+                        "text": (
+                            "Hypothesis Rubric unavailable; Selector is using its "
+                            f"deterministic fallback: {error}"
+                        ),
+                    },
+                )
+        hypothesis_ids = [self.tree.add_hypothesis(item) for item in prepared]
         self.tree.save(self._tree_path)
         await self._publish_state()
         return {"hypothesis_ids": hypothesis_ids}

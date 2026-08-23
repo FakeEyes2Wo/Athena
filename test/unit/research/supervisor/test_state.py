@@ -276,6 +276,7 @@ def test_resume_checkpoint_fields_round_trip(tmp_path: Path) -> None:
         task_research_task="inspect competition",
         task_research_ref=_CONTEXT_REF,
         task_research_agent_id="general-worker",
+        evaluation_policy_ref=_CONTEXT_REF,
         evaluator_ref=_TRUSTED_REF,
     )
 
@@ -288,6 +289,7 @@ def test_resume_checkpoint_fields_round_trip(tmp_path: Path) -> None:
     assert loaded.task_research_task == "inspect competition"
     assert loaded.task_research_ref == _CONTEXT_REF
     assert loaded.task_research_agent_id == "general-worker"
+    assert loaded.evaluation_policy_ref == _CONTEXT_REF
     assert loaded.evaluator_ref == _TRUSTED_REF
     # 旧 schema 兼容：resume 字段不写进 state.json，而是落在 resume.json。
     core = json.loads(path.read_text(encoding="utf-8"))
@@ -298,6 +300,7 @@ def test_resume_checkpoint_fields_round_trip(tmp_path: Path) -> None:
             "task_research_task",
             "task_research_ref",
             "task_research_agent_id",
+            "evaluation_policy_ref",
             "evaluator_ref",
         }
     )
@@ -329,6 +332,7 @@ def test_legacy_state_without_resume_fields_defaults_to_none(tmp_path: Path) -> 
     assert loaded.task_research_task is None
     assert loaded.task_research_ref is None
     assert loaded.task_research_agent_id is None
+    assert loaded.evaluation_policy_ref is None
     assert loaded.evaluator_ref is None
 
 

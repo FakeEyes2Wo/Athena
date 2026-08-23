@@ -43,6 +43,8 @@ from athena.research.idea_generation.citation_support import (
 )
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
+from athena.research.rubrics.models import EvaluationPolicy
+from athena.research.rubrics.workflow import RubricWorkflow
 from athena.research.supervisor.experiment import (
     handoff_block,
     load_agent_result,
@@ -56,6 +58,10 @@ if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
 
 logger = logging.getLogger(__name__)
+
+# Compatibility for callers that imported this helper before Rubric orchestration
+# moved into its own maintainable module.
+_read_eval_handoff = read_eval_handoff
 
 
 MAX_GATE_RETRIES = 2
@@ -157,6 +163,9 @@ class AgentTurnRunner:
     def __init__(self, runtime: "ResearchRuntime") -> None:
         self._runtime = runtime
         self._ideator_round = 0
+        self._rubrics = RubricWorkflow(
+            runtime, eda_root=lambda: Path(self._resolve_eda_dir(runtime))
+        )
 
     async def run_supervisor_turn(self, text: str) -> str:
         """Run one serialized SupervisorAgent turn and return its human-facing answer."""
@@ -187,6 +196,18 @@ class AgentTurnRunner:
             raise RuntimeError(summary.error or "SupervisorAgent turn failed")
         await rt.publish_output(source="supervisor", channel="text", text=result.answer)
         return result.answer
+
+    async def run_evaluation_rubric(self) -> tuple[EvaluationPolicy, ArtifactRef]:
+        """Delegate Layer 1 to the isolated Rubric workflow."""
+        return await self._rubrics.run_evaluation()
+
+    async def run_hypothesis_rubric(
+        self, hypotheses: list[Hypothesis]
+    ) -> list[Hypothesis]:
+        """Delegate the single post-Gate batch review."""
+        if getattr(self._runtime, "_ideation", "ideageneration") != "ideageneration":
+            return hypotheses
+        return await self._rubrics.run_hypothesis_priority(hypotheses)
 
     @staticmethod
     def _resolve_eda_dir(rt: "ResearchRuntime") -> str:
@@ -554,6 +575,12 @@ class AgentTurnRunner:
         )
         if profile is not None:
             content += f"\n\n{profile.task_hint}"
+        policy = getattr(rt._supervisor, "evaluation_policy", None)
+        if policy is not None:
+            content += (
+                "\n\nThe frozen Evaluation Policy is authoritative:\n"
+                + json.dumps(policy.model_dump(mode="json"), ensure_ascii=False)
+            )
         if handoff_texts:
             content += (
                 "\n\nResearch handoff documents have been delivered to your "

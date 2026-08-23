@@ -72,10 +72,15 @@ Sanity-check it yourself before submitting, with **both** of these probes:
 Together these prove the score depends on which prediction belongs to which row,
 and on nothing else.
 
+The task context may contain a `FROZEN RESEARCH EVALUATION POLICY`. Treat its
+single `primary_metric` and `direction` as authoritative; do not replace or
+reinterpret them.
+
 Create:
 
-- a `metric.json` at the workspace root declaring the entrypoint, e.g.
-  `{"eval_script": "evaluate.py"}`;
+- a `metric.json` at the workspace root declaring the entrypoint and the exact
+  frozen policy, e.g. `{"eval_script": "evaluate.py", "primary_metric":
+  "roc_auc", "direction": "maximize"}`;
 - `evaluate.py`, the entrypoint. It runs with the workspace as its working
   directory after the predictions directory is materialized next to it. It must
   read the ground-truth `labels` (either a `labels.csv` file or a non-empty

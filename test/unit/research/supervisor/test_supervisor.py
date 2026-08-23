@@ -18,6 +18,7 @@ from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import ExecutionRuntime
 from athena.research.contracts import GeneralTurnOutcome
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
@@ -174,8 +175,7 @@ async def test_new_plan_freezes_evaluator_tree_and_human_context(
     persisted_tree = ResearchTree.load(tmp_path / ".athena" / "research_tree.json")
     assert persisted_tree.experiment_for_hypothesis("hyp_vit") == "exp_hyp_vit"
     assert (
-        persisted_tree.get_experiment("exp_hyp_vit").status
-        is ExperimentStatus.RUNNING
+        persisted_tree.get_experiment("exp_hyp_vit").status is ExperimentStatus.RUNNING
     )
     await supervisor.stop()
     await agents.aclose()
@@ -235,6 +235,34 @@ def _checkpoint_supervisor(tmp_path: Path, run_general_turn=None) -> Supervisor:
         publish=publish,
         run_general_turn=run_general_turn,
     )
+
+
+@pytest.mark.asyncio
+async def test_task_understanding_pauses_then_becomes_ready_after_data_is_supplied(
+    tmp_path: Path,
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    base = {
+        "title": "medical diagnosis",
+        "target": "diagnosis",
+        "task_type": "classification",
+        "metric_source": "unresolved",
+        "readiness": "NEEDS_INPUT",
+    }
+
+    missing = await supervisor.record_task_understanding(dataset="", **base)
+
+    assert missing["task_understanding"]["readiness"] == "NEEDS_INPUT"
+    assert missing["task_understanding"]["clarification_questions"]
+
+    data = tmp_path / "breast_cancer.csv"
+    data.write_text("feature,diagnosis\n1,benign\n", encoding="utf-8")
+    ready = await supervisor.record_task_understanding(
+        dataset="breast_cancer.csv", **base
+    )
+
+    assert ready["task_understanding"]["readiness"] == "READY"
+    assert ready["task_understanding"]["missing_items"] == []
 
 
 @pytest.mark.asyncio
@@ -326,6 +354,73 @@ async def test_checkpoint_evaluator_persists_frozen_bundle(tmp_path: Path) -> No
     assert supervisor.evaluator_ref == ref
     restored = _checkpoint_supervisor(tmp_path)
     assert restored.evaluator_ref == ref
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_evaluation_policy_persists_and_applies_direction(
+    tmp_path: Path,
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    policy = EvaluationPolicy(
+        primary_metric="log_loss",
+        direction="minimize",
+        metric_source="human",
+        locked=True,
+        confidence=1.0,
+        explanation="Explicit human objective.",
+    )
+    ref = await supervisor._store.put_text(policy.model_dump_json())
+
+    result = await supervisor.checkpoint_evaluation_policy(ref, policy)
+
+    assert result["primary_metric"] == "log_loss"
+    assert supervisor.evaluation_policy == policy
+    assert supervisor._direction == "minimize"
+    restored = ResearchState.load(tmp_path / ".athena" / "state.json")
+    assert restored.evaluation_policy_ref == ref
+
+
+@pytest.mark.asyncio
+async def test_register_hypotheses_runs_one_batch_rubric_before_tree_insert(
+    tmp_path: Path, monkeypatch
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    parent = Hypothesis(
+        id="baseline",
+        statement="baseline",
+        intervention="fit baseline",
+        expected_effect="establish a reference",
+    )
+    monkeypatch.setattr(supervisor, "_sota_parent", lambda: (None, parent))
+    calls: list[list[str]] = []
+
+    async def batch_rubric(items: list[Hypothesis]) -> list[Hypothesis]:
+        calls.append([item.id or "" for item in items])
+        assert all(item.id and item.id.startswith("hyp_") for item in items)
+        return [item.model_copy(update={"rubric_score": 0.8}) for item in items]
+
+    supervisor._run_hypothesis_rubric = batch_rubric
+    result = await supervisor.register_hypotheses(
+        [
+            Hypothesis(
+                statement="candidate one",
+                intervention="change feature one",
+                expected_effect="improve score",
+            ),
+            Hypothesis(
+                statement="candidate two",
+                intervention="change feature two",
+                expected_effect="improve score",
+            ),
+        ]
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == result["hypothesis_ids"]
+    assert all(
+        supervisor.tree.get_hypothesis(identifier).rubric_score == 0.8
+        for identifier in result["hypothesis_ids"]
+    )
 
 
 @pytest.mark.asyncio

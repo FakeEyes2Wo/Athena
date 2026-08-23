@@ -204,6 +204,7 @@ class PhaseRunner:
                 evaluator_dir=evaluator_dir,
                 execution=rt._execution,
                 task=rt._task_text,
+                evaluation_policy=rt._supervisor.evaluation_policy,
                 max_turns=MAX_PLAN_TURNS,
                 publish=lambda kind, ref, data: rt._events_bus.project_agent_event(
                     "evaluator", kind, ref, data

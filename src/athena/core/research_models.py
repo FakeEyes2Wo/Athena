@@ -2,7 +2,7 @@
 
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.contracts import ArtifactRef, NonBlankText
 
@@ -13,6 +13,78 @@ HypothesisStatus: TypeAlias = Literal[
     "INCONCLUSIVE",  # 实验无有效证据，无法支持或证伪
     "REJECTED",  # 彻底拒绝
 ]
+
+MetricDirection: TypeAlias = Literal["maximize", "minimize"]
+MetricSource: TypeAlias = Literal["human", "official", "protocol", "unresolved"]
+
+
+class TaskMissingItem(BaseModel):
+    """One actionable gap found before research is allowed to start."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    field: NonBlankText
+    severity: Literal["critical", "warning"]
+    reason: NonBlankText
+    question: NonBlankText | None = None
+
+
+class TaskUnderstanding(BaseModel):
+    """Shared task-understanding and readiness contract for Supervisor and GUI."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    title: str = ""
+    dataset: str = ""
+    target: str = ""
+    task_type: Literal[
+        "classification", "regression", "vision", "generation", "other"
+    ] = "other"
+    primary_metric: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
+    direction: MetricDirection | None = None
+    metric_source: MetricSource = "unresolved"
+    human_primary_metric: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
+    human_direction: MetricDirection | None = None
+    official_primary_metric: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    official_direction: MetricDirection | None = None
+    protocol_primary_metric: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    protocol_direction: MetricDirection | None = None
+    evaluation_plan: str = ""
+    constraints: list[str] = Field(default_factory=list)
+    readiness: Literal["READY", "NEEDS_INPUT"] = "NEEDS_INPUT"
+    missing_items: list[TaskMissingItem] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    clarification_questions: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _validate_metric_provenance(self) -> "TaskUnderstanding":
+        if self.metric_source == "unresolved":
+            if self.primary_metric is not None or self.direction is not None:
+                raise ValueError(
+                    "unresolved task understanding cannot guess metric or direction"
+                )
+        else:
+            if self.primary_metric is None:
+                raise ValueError("a resolved metric source requires primary_metric")
+            source_metric = getattr(self, f"{self.metric_source}_primary_metric")
+            source_direction = getattr(self, f"{self.metric_source}_direction")
+            if source_metric != self.primary_metric:
+                raise ValueError(
+                    f"{self.metric_source}_primary_metric must match primary_metric"
+                )
+            if source_direction != self.direction:
+                raise ValueError(f"{self.metric_source}_direction must match direction")
+        for source in ("human", "official", "protocol"):
+            metric = getattr(self, f"{source}_primary_metric")
+            source_direction = getattr(self, f"{source}_direction")
+            if metric is None and source_direction is not None:
+                raise ValueError(f"{source}_direction requires {source}_primary_metric")
+        return self
 
 
 class Hypothesis(BaseModel):
@@ -39,6 +111,17 @@ class Hypothesis(BaseModel):
     )
     sources: list[str] = Field(
         default_factory=list, description="Paper URLs or model repos"
+    )
+    rubric_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Aggregated four-dimension hypothesis priority score",
+    )
+    rubric_ref: ArtifactRef | None = Field(
+        default=None,
+        description="Artifact containing the complete hypothesis priority review",
     )
 
 

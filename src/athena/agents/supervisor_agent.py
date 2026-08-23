@@ -12,6 +12,7 @@ from athena.core.agent.models import AgentConfig
 from athena.core.agent.runtime import Agent
 from athena.core.agent.tools.user_input import RequestUserInputTool
 from athena.core.agent.types import AgentSpec, JsonCodec
+from athena.core.research_models import TaskUnderstanding
 from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import ToolContext, ToolSpec
 from athena.kaggle.tool import KaggleGetCompetitionTool
@@ -140,22 +141,6 @@ class _KaggleConfiguration(BaseModel):
 
     enabled: bool
     download: bool = True
-
-
-class _TaskUnderstanding(BaseModel):
-    """Structured task understanding recorded on the first task-understanding turn."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    title: str = ""
-    dataset: str = ""
-    target: str = ""
-    task_type: str = "other"
-    primary_metric: str = Field(
-        default="accuracy", pattern=r"^[a-z][a-z0-9_]*$"
-    )
-    direction: Literal["maximize", "minimize"] = "maximize"
-    evaluation_plan: str = ""
 
 
 class _Guidance(BaseModel):
@@ -339,10 +324,10 @@ def supervisor_tool_registry(
         ),
         (
             "record_task_understanding",
-            "Record the structured task understanding (title, dataset, target, task type, "
-            "primary metric + direction, evaluation plan) for the GUI intent preview. "
-            "Call this on the first task-understanding turn.",
-            _TaskUnderstanding,
+            "Record task understanding plus explicit metric provenance and readiness "
+            "evidence. Unknown metrics must remain unresolved; the deterministic "
+            "readiness wrapper returns any blocking questions.",
+            TaskUnderstanding,
             record_understanding,
         ),
         (

@@ -12,11 +12,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
-
 from athena.core.agent import settings
+from athena.core.research_models import TaskUnderstanding
 from athena.gui import experiments, graph, traces
 from athena.research.report import build_final_report
+from athena.research.rubrics.task import assess_task_readiness
 from athena.research.runtime import ResearchRuntime
 from athena.research.runtime_events import recent_user_texts
 
@@ -120,11 +120,17 @@ class GuiService:
             existing = getattr(state, "task_understanding", None)
             if isinstance(existing, dict) and existing:
                 return existing
-            return _heuristic_understanding(message)
+            understanding = _validated_understanding(_heuristic_understanding(message))
+            return assess_task_readiness(
+                understanding, project_root=_runtime_root(self._runtime)
+            ).model_dump(mode="json")
 
         if not understanding:
             understanding = _heuristic_understanding(message)
-        result = TaskUnderstanding.model_validate(understanding).model_dump(mode="json")
+        validated = _validated_understanding(understanding)
+        result = assess_task_readiness(
+            validated, project_root=_runtime_root(self._runtime)
+        ).model_dump(mode="json")
         await self._persist_clarification(message, qa_pairs, result)
         return result
 
@@ -165,7 +171,9 @@ class GuiService:
             save(state_path)
 
     async def start_search(self, config: dict[str, Any]) -> dict[str, Any]:
-        task = config.get("task") or config.get("message") or config.get("task_type") or ""
+        task = (
+            config.get("task") or config.get("message") or config.get("task_type") or ""
+        )
         if isinstance(task, dict):
             task = json.dumps(task, ensure_ascii=False)
         if not isinstance(task, str) or not task.strip():
@@ -286,7 +294,9 @@ class GuiService:
     def experiment_transition(
         self, experiment_id: str, status: str, error: str | None = None
     ) -> dict[str, Any]:
-        detail = experiments.transition(self._runtime.tree, experiment_id, status, error)
+        detail = experiments.transition(
+            self._runtime.tree, experiment_id, status, error
+        )
         self._runtime.save_tree()
         return {"experiment": detail}
 
@@ -309,14 +319,20 @@ def _find_eda_report(eda_path: Path) -> tuple[str | None, str | None]:
             if isinstance(report_rel, str) and report_rel:
                 candidate = (eda_path / report_rel).resolve()
                 if candidate.is_file():
-                    return candidate.read_text(encoding="utf-8", errors="replace"), candidate.name
+                    return (
+                        candidate.read_text(encoding="utf-8", errors="replace"),
+                        candidate.name,
+                    )
     except (OSError, ValueError, json.JSONDecodeError):
         pass
 
     for name in ("report.md", "REPORT.md", "eda.md", "EDA.md", "analysis.md"):
         candidate = eda_path / name
         if candidate.is_file():
-            return candidate.read_text(encoding="utf-8", errors="replace"), candidate.name
+            return (
+                candidate.read_text(encoding="utf-8", errors="replace"),
+                candidate.name,
+            )
 
     for candidate in sorted(eda_path.glob("*.md")):
         if candidate.name.upper() in {"RESEARCH_HANDOFF.MD", "HANDOFF.MD"}:
@@ -346,36 +362,6 @@ def _embed_images(markdown: str, figures: list[dict[str, Any]]) -> str:
     return markdown
 
 
-def _guess_metric(lower: str) -> str | None:
-    """Map task keywords to a likely primary metric name."""
-    if any(k in lower for k in ("accuracy", "acc", "准确率", "精确率")):
-        return "accuracy"
-    if any(k in lower for k in ("f1", "f-score", "f1score")):
-        return "f1"
-    if any(k in lower for k in ("auc", "roc", "auc-roc")):
-        return "auc"
-    if any(k in lower for k in ("mse", "mean squared")):
-        return "mse"
-    if any(k in lower for k in ("mae", "mean absolute")):
-        return "mae"
-    if any(k in lower for k in ("rmse",)):
-        return "rmse"
-    return None
-
-
-class TaskUnderstanding(BaseModel):
-    """Supervisor-style task understanding (mirrors ``task_understanding.md``)."""
-
-    title: str = ""
-    dataset: str = ""
-    target: str = ""
-    task_type: str = "other"
-    primary_metric: str = "accuracy"
-    direction: str = "maximize"
-    evaluation_plan: str = ""
-    needs_configuration: bool = True
-
-
 CLARIFY_MAX_QUESTIONS = 8
 
 _CLARIFYING_UNDERSTANDING_SYSTEM = (
@@ -389,9 +375,17 @@ _CLARIFYING_UNDERSTANDING_SYSTEM = (
     "Give 2-3 choices whenever possible. Ask one question at a time and stop when the answer "
     "no longer affects the understanding.\n"
     "2. When you have enough information:\n"
-    '{"done": true, "understanding": {"title": "...", "dataset": "...", "target": "...", '
-    '"task_type": "classification|regression|vision|generation|other", "primary_metric": "...", '
-    '"direction": "maximize|minimize", "evaluation_plan": "...", "needs_configuration": true|false}}\n'
+    '{"done": true, "understanding": {"title": "...", "dataset": "...", '
+    '"target": "...", "task_type": "classification|regression|vision|generation|other", '
+    '"primary_metric": "... or null", "direction": "maximize|minimize or null", '
+    '"metric_source": "human|official|protocol|unresolved", '
+    '"human_primary_metric": null, "human_direction": null, '
+    '"official_primary_metric": null, "official_direction": null, '
+    '"protocol_primary_metric": null, "protocol_direction": null, '
+    '"evaluation_plan": "...", "constraints": [], "readiness": "READY|NEEDS_INPUT", '
+    '"missing_items": [], "warnings": [], "clarification_questions": [], '
+    '"confidence": 0.0}}\n'
+    "Never guess Accuracy when no trusted source specifies it.\n"
     "Respond with only the JSON object."
 )
 
@@ -426,8 +420,30 @@ def _render_clarification(
     return "\n".join(lines)
 
 
+def _validated_understanding(payload: dict[str, Any]) -> TaskUnderstanding:
+    """Validate the shared contract while accepting the legacy GUI response shape."""
+    normalized = dict(payload)
+    normalized.pop("needs_configuration", None)
+    metric = normalized.get("primary_metric")
+    direction = normalized.get("direction")
+    source = normalized.get("metric_source")
+    if metric and direction and source in {None, "unresolved"}:
+        normalized["metric_source"] = "human"
+        normalized.setdefault("human_primary_metric", metric)
+        normalized.setdefault("human_direction", direction)
+    return TaskUnderstanding.model_validate(normalized)
+
+
+def _runtime_root(runtime: Any) -> Path:
+    """Return the project root for production and lightweight GUI test runtimes."""
+    root = getattr(runtime, "_root", None)
+    if root is not None:
+        return Path(root)
+    return Path(runtime.tree_path).parent
+
+
 def _heuristic_understanding(message: str) -> dict[str, Any]:
-    """Fallback heuristic (no LLM): guesses task type and metric from keywords."""
+    """Fallback heuristic that leaves every scientific metric unresolved."""
     lower = message.strip().lower()
     task_type = "other"
     if any(k in lower for k in ("classif", "分类", "cls", "label")):
@@ -439,21 +455,27 @@ def _heuristic_understanding(message: str) -> dict[str, Any]:
     elif any(k in lower for k in ("generate", "生成", "llm", "nlg")):
         task_type = "generation"
 
-    metric = _guess_metric(lower)
-    direction = (
-        "minimize"
-        if any(k in lower for k in ("loss", "error", "误差", "损失", "降低", "减小"))
-        else "maximize"
-    )
     return {
         "title": message.strip()[:40] or "新任务",
         "dataset": "",
         "target": "",
         "task_type": task_type,
-        "primary_metric": metric or "accuracy",
-        "direction": direction,
+        "primary_metric": None,
+        "direction": None,
+        "metric_source": "unresolved",
+        "human_primary_metric": None,
+        "human_direction": None,
+        "official_primary_metric": None,
+        "official_direction": None,
+        "protocol_primary_metric": None,
+        "protocol_direction": None,
         "evaluation_plan": "",
-        "needs_configuration": task_type == "other" or metric is None,
+        "constraints": [],
+        "readiness": "NEEDS_INPUT",
+        "missing_items": [],
+        "warnings": [],
+        "clarification_questions": [],
+        "confidence": 0.2,
     }
 
 

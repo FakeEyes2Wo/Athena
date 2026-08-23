@@ -9,6 +9,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import CandidateEvaluation, DataScriptBundle
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.supervisor.prepare import (
     _freeze_evaluator,
     run_evaluator_plan,
@@ -401,6 +402,40 @@ async def test_freeze_evaluator_accepts_eval_script_directory(tmp_path: Path) ->
     )
 
     assert evaluator_ref
+
+
+@pytest.mark.asyncio
+async def test_freeze_evaluator_rejects_policy_metric_mismatch(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    evaluator_dir.mkdir()
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text("id,label\n1,0\n", encoding="utf-8")
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps(
+            {
+                "eval_script": "evaluate.py",
+                "primary_metric": "accuracy",
+                "direction": "maximize",
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy = EvaluationPolicy(
+        primary_metric="log_loss",
+        direction="minimize",
+        metric_source="human",
+        locked=True,
+        confidence=1.0,
+        explanation="Human requested log loss.",
+    )
+
+    with pytest.raises(ValueError, match="does not match frozen Evaluation Policy"):
+        await _freeze_evaluator(
+            root=evaluator_dir,
+            scripts=_Scripts(),
+            store=LocalArtifactStore(tmp_path / "artifacts"),
+            evaluation_policy=policy,
+        )
 
 
 @pytest.mark.asyncio

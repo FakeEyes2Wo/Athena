@@ -33,16 +33,27 @@ competition URL (like `https://www.kaggle.com/competitions/maze-crawler` or
 `download` decides whether the dataset is downloaded locally. Otherwise leave it
 off. Make this decision once, before PREPARE builds its baseline.
 
-On that same first turn, also call `record_task_understanding` once with your
-best structured understanding of the task: a short `title`, the `dataset`
-(path/name), the `target` column, `task_type`, `primary_metric` + `direction`,
-and an `evaluation_plan`. Derive these from the task text and any dataset path it
-names; leave a field empty when unknown rather than guessing.
+On that same first turn, call `record_task_understanding` with your best
+structured understanding: title, dataset path/name, target, task type,
+evaluation plan, constraints, confidence, and metric provenance. Only record a
+primary metric when the Human explicitly chose it, the official task declares
+it, or a named protocol fixes it. Set the matching human/official/protocol
+fields and source. Otherwise use `primary_metric=null`, `direction=null`, and
+`metric_source="unresolved"`; never guess Accuracy. Start with
+`readiness="NEEDS_INPUT"`; the tool applies deterministic dataset/readiness
+checks and returns the authoritative result.
+
+Inspect the returned task understanding. If it is `NEEDS_INPUT`, use its
+`clarification_questions` to ask one concise combined question with
+`request_user_input`. Incorporate the Human answer and call
+`record_task_understanding` one more time. Do not enter PREPARE while critical
+missing items remain. Warnings are advisory and do not block research.
 
 If the task is a Kaggle competition, call `kaggle_get_competition` with the slug
 before `record_task_understanding`, read its `evaluation_metric`, and record that
-exact metric name (lowercased, e.g. `panoptic_quality`) as `primary_metric` —
-never guess `accuracy` for a competition you have not queried.
+exact metric name (lowercased, e.g. `panoptic_quality`) as both
+`primary_metric` and `official_primary_metric`, with `metric_source="official"`
+— never guess `accuracy` for a competition you have not queried.
 
 When a critical fact is unknown, call `request_user_input` with `choices` (2-3
 candidate answers) whenever possible. Ask one question at a time and stop asking
