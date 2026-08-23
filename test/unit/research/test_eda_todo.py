@@ -79,6 +79,9 @@ async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
     assert "- [x] 02 Columns" in text
     assert len(agents.spawned) == 3
     assert agents.spawned[0]["type"] == "eda_worker"
+    first_task = agents.spawned[0]["task"]
+    assert first_task["output_file"] == "EDA_REPORT_00_OVERVIEW.md"
+    assert "EDA_REPORT_00_OVERVIEW.md" in first_task["content"]
     assert agents.reaped == [f"agent-{i}" for i in range(1, 4)]
 
 
