@@ -36,6 +36,8 @@ PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
 EVALUATOR_AGENT_ID = "evaluator"
 EVALUATOR_PLAN_ID = "evaluator"
+FINAL_EVALUATOR_AGENT_ID = "final_evaluator"
+FINAL_EVALUATOR_PLAN_ID = "final_evaluator"
 
 
 class PrepareResult(BaseModel):
@@ -165,6 +167,8 @@ async def run_evaluator_plan(
     task: str,
     max_turns: int,
     publish: EmitEvent | None = None,
+    agent_id: str = EVALUATOR_AGENT_ID,
+    plan_id: str = EVALUATOR_PLAN_ID,
 ) -> ArtifactRef:
     """Run and repair one evaluator Agent until a frozen evaluator bundle exists."""
 
@@ -179,7 +183,7 @@ async def run_evaluator_plan(
     context_ref = await store.put_text(
         json.dumps(
             {
-                "plan_id": EVALUATOR_PLAN_ID,
+                "plan_id": plan_id,
                 "task": task,
             },
             ensure_ascii=False,
@@ -188,18 +192,16 @@ async def run_evaluator_plan(
     agent_id, run_id = await agents.create_root(
         "evaluator",
         {"content": task, "context_refs": [context_ref]},
-        agent_id=EVALUATOR_AGENT_ID,
-        name=EVALUATOR_PLAN_ID,
+        agent_id=agent_id,
+        name=plan_id,
     )
-    if agent_id != EVALUATOR_AGENT_ID:
-        raise RuntimeError(f"evaluator Agent id must be {EVALUATOR_AGENT_ID}")
 
     feedback: str | None = None
     try:
         for turn in range(max_turns):
             if turn:
                 run_id = await agents.followup(
-                    EVALUATOR_AGENT_ID,
+                    agent_id,
                     {"content": feedback, "context_refs": []},
                 )
             summary = await wait_run_events(agents, run_id, publish)
@@ -234,7 +236,7 @@ async def run_evaluator_plan(
         # The evaluator Agent is a one-shot PREPARE worker; release it after the
         # phase succeeds or exhausts its turn budget.
         try:
-            await agents.reap(EVALUATOR_AGENT_ID)
+            await agents.reap(agent_id)
         except Exception:  # noqa: BLE001,S110 - GC must never mask PREPARE failure
             pass
 

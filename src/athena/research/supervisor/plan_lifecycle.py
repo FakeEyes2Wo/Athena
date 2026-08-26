@@ -472,6 +472,15 @@ class PlanLifecycle:
         await self._persist_state()
         return {"evaluator_ref": ref}
 
+    async def checkpoint_final_evaluator(
+        self, ref: ArtifactRef
+    ) -> dict[str, object]:
+        """Persist the hidden final-test evaluator used only by VALIDATE."""
+        self._deps.final_evaluator_ref = ref
+        self._state.final_evaluator_ref = ref
+        await self._persist_state()
+        return {"final_evaluator_ref": ref}
+
     async def dispatch_general(self, task: str) -> dict[str, object]:
         """Dispatch one General Agent to do concrete work and return its result.
 

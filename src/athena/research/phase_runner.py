@@ -37,6 +37,8 @@ from athena.research.supervisor.experiment import (
 )
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.prepare import (
+    FINAL_EVALUATOR_AGENT_ID,
+    FINAL_EVALUATOR_PLAN_ID,
     PrepareResult,
     run_evaluator_plan,
     run_prepare_plan,
@@ -246,6 +248,58 @@ class PhaseRunner:
                 source="supervisor",
                 channel="text",
                 text="PREPARE: 复用已冻结的评估器断点，跳过 evaluator Agent。",
+            )
+        # 步骤 1b：final evaluator（隐藏、仅 VALIDATE 使用）。它与搜索 evaluator
+        # 分开冻结，避免把 SEARCH 用过的同一份标签再次称为 final test。
+        final_evaluator_ref = rt.supervisor.final_evaluator_ref
+        if final_evaluator_ref is not None:
+            try:
+                await rt.store.get_text(final_evaluator_ref)
+            except Exception:
+                final_evaluator_ref = None
+        if final_evaluator_ref is None:
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text="PREPARE: 冻结 final evaluator…",
+            )
+            final_evaluator_dir = rt.workspaces_root / "final_evaluator"
+            if not rt.registry.contains("evaluator"):
+                register_evaluator_agent(
+                    rt.registry,
+                    provider=rt.provider,
+                    artifacts=rt.store,
+                    workspace=final_evaluator_dir,
+                    runtime=rt.execution,
+                    extra_tools=rt.kaggle_tools("evaluator"),
+                )
+            final_evaluator_ref = await run_evaluator_plan(
+                agents=rt.agents,
+                scripts=rt.scripts,
+                store=rt.store,
+                evaluator_dir=final_evaluator_dir,
+                execution=rt.execution,
+                task=(
+                    f"{rt.task_text}\n\nYou are building the FINAL evaluator. "
+                    "Use a held-out split disjoint from the SEARCH evaluator's "
+                    "split. This evaluator is hidden from SEARCH and used only "
+                    "by VALIDATE."
+                ),
+                max_turns=MAX_PLAN_TURNS,
+                publish=lambda kind, ref, data: rt.events.project_agent_event(
+                    "final_evaluator", kind, ref, data
+                ),
+                agent_id=FINAL_EVALUATOR_AGENT_ID,
+                plan_id=FINAL_EVALUATOR_PLAN_ID,
+            )
+            await rt.supervisor.checkpoint_final_evaluator(final_evaluator_ref)
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text=(
+                    "PREPARE: final evaluator 产物目录 "
+                    f"{final_evaluator_dir.resolve()}。"
+                ),
             )
         # 步骤 2a：EDA orchestrator → todo workers → finalize。
         eda_ok = True
