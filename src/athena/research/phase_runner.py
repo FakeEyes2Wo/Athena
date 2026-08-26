@@ -37,6 +37,8 @@ from athena.research.supervisor.experiment import (
 )
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.prepare import (
+    EVALUATOR_AGENT_ID,
+    EVALUATOR_PLAN_ID,
     FINAL_EVALUATOR_AGENT_ID,
     FINAL_EVALUATOR_PLAN_ID,
     PrepareResult,
@@ -90,6 +92,42 @@ def _write_missing_report_placeholders(workspace: Path) -> None:
                 f"# {name}\n\nEDA generation failed or was skipped.\n",
                 encoding="utf-8",
             )
+
+
+async def _freeze_evaluator(
+    rt,
+    *,
+    directory_name: str,
+    agent_id: str,
+    plan_id: str,
+    task: str,
+    label: str,
+) -> str:
+    """Run one evaluator agent in a dedicated directory and freeze its bundle."""
+    evaluator_dir = rt.workspaces_root / directory_name
+    if not rt.registry.contains("evaluator"):
+        register_evaluator_agent(
+            rt.registry,
+            provider=rt.provider,
+            artifacts=rt.store,
+            workspace=evaluator_dir,
+            runtime=rt.execution,
+            extra_tools=rt.kaggle_tools("evaluator"),
+        )
+    return await run_evaluator_plan(
+        agents=rt.agents,
+        scripts=rt.scripts,
+        store=rt.store,
+        evaluator_dir=evaluator_dir,
+        execution=rt.execution,
+        task=task,
+        max_turns=MAX_PLAN_TURNS,
+        publish=lambda kind, ref, data: rt.events.project_agent_event(
+            label, kind, ref, data
+        ),
+        agent_id=agent_id,
+        plan_id=plan_id,
+    )
 
 
 class PhaseRunner:
@@ -232,27 +270,13 @@ class PhaseRunner:
             await rt.publish_output(
                 source="supervisor", channel="text", text="PREPARE: 冻结评估器…"
             )
-            evaluator_dir = rt.workspaces_root / "evaluator"
-            if not rt.registry.contains("evaluator"):
-                register_evaluator_agent(
-                    rt.registry,
-                    provider=rt.provider,
-                    artifacts=rt.store,
-                    workspace=evaluator_dir,
-                    runtime=rt.execution,
-                    extra_tools=rt.kaggle_tools("evaluator"),
-                )
-            evaluator_ref = await run_evaluator_plan(
-                agents=rt.agents,
-                scripts=rt.scripts,
-                store=rt.store,
-                evaluator_dir=evaluator_dir,
-                execution=rt.execution,
+            evaluator_ref = await _freeze_evaluator(
+                rt,
+                directory_name="evaluator",
+                agent_id=EVALUATOR_AGENT_ID,
+                plan_id=EVALUATOR_PLAN_ID,
                 task=evaluator_task,
-                max_turns=MAX_PLAN_TURNS,
-                publish=lambda kind, ref, data: rt.events.project_agent_event(
-                    "evaluator", kind, ref, data
-                ),
+                label="evaluator",
             )
             await rt.supervisor.checkpoint_evaluator(evaluator_ref)
             await rt.publish_output(
@@ -291,34 +315,18 @@ class PhaseRunner:
                 channel="text",
                 text="PREPARE: 冻结 final evaluator…",
             )
-            final_evaluator_dir = rt.workspaces_root / "final_evaluator"
-            if not rt.registry.contains("evaluator"):
-                register_evaluator_agent(
-                    rt.registry,
-                    provider=rt.provider,
-                    artifacts=rt.store,
-                    workspace=final_evaluator_dir,
-                    runtime=rt.execution,
-                    extra_tools=rt.kaggle_tools("evaluator"),
-                )
-            final_evaluator_ref = await run_evaluator_plan(
-                agents=rt.agents,
-                scripts=rt.scripts,
-                store=rt.store,
-                evaluator_dir=final_evaluator_dir,
-                execution=rt.execution,
+            final_evaluator_ref = await _freeze_evaluator(
+                rt,
+                directory_name="final_evaluator",
+                agent_id=FINAL_EVALUATOR_AGENT_ID,
+                plan_id=FINAL_EVALUATOR_PLAN_ID,
                 task=(
                     f"{evaluator_task}\n\nYou are building the FINAL evaluator. "
                     "Use a held-out split disjoint from the SEARCH evaluator's "
                     "split. This evaluator is hidden from SEARCH and used only "
                     "by VALIDATE."
                 ),
-                max_turns=MAX_PLAN_TURNS,
-                publish=lambda kind, ref, data: rt.events.project_agent_event(
-                    "final_evaluator", kind, ref, data
-                ),
-                agent_id=FINAL_EVALUATOR_AGENT_ID,
-                plan_id=FINAL_EVALUATOR_PLAN_ID,
+                label="final_evaluator",
             )
             await rt.supervisor.checkpoint_final_evaluator(final_evaluator_ref)
             await rt.publish_output(
