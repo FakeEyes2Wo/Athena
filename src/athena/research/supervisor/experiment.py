@@ -371,6 +371,8 @@ async def apply_trusted_score(
     store: ArtifactStore,
     evidence_ref: ArtifactRef,
     direction: Direction = "maximize",
+    std_error: float | None = None,
+    n: int | None = None,
 ) -> PlanState:
     """应用一次可信分数：更新不可变 best 并调整 stale_rounds。
 
@@ -382,7 +384,13 @@ async def apply_trusted_score(
         metric > current.metric if direction == "maximize" else metric < current.metric
     )
     if improved:
-        best = PlanBest(metric=metric, commit=commit, evidence_ref=evidence_ref)
+        best = PlanBest(
+            metric=metric,
+            commit=commit,
+            evidence_ref=evidence_ref,
+            std_error=std_error,
+            n=n,
+        )
         best_ref = await store.put_text(best.model_dump_json())
         return state.model_copy(update={"best_ref": best_ref, "stale_rounds": 0})
     return state.model_copy(update={"stale_rounds": state.stale_rounds + 1})
@@ -611,6 +619,8 @@ class PlanRunner:
                 store=self._store,
                 evidence_ref=evidence_ref,
                 direction=self._direction,
+                std_error=evaluation.test_se,
+                n=evaluation.test_n,
             )
         return PlanTurnResult(
             kind="scored",

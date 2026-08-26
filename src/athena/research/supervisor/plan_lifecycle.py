@@ -17,6 +17,7 @@ from athena.research.supervisor.plans import PlanInput, PlanState
 from athena.research.supervisor.policy import Outcome
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.state import ResearchState
+from athena.research.supervisor.statistics import MetricEvidence, settle_statistically
 
 logger = logging.getLogger(__name__)
 
@@ -323,16 +324,32 @@ class PlanLifecycle:
         else:
             best = await load_best(best_ref, self._deps.store)
             reference = plan_input.reference_metric
-            outcome = (
-                None
-                if reference is None
-                else _compare_metric(
+            if reference is None:
+                outcome = None
+            elif best.std_error is not None:
+                verdict = settle_statistically(
+                    MetricEvidence(
+                        metric=best.metric,
+                        std_error=best.std_error,
+                        n=best.n,
+                    ),
+                    reference,
+                    direction=plan_input.direction,
+                    min_effect_size=plan_input.min_effect_size,
+                    alpha=plan_input.alpha,
+                    family_size=plan_input.family_size,
+                )
+                outcome = {
+                    "SUPPORTED": Outcome.WIN,
+                    "REFUTED": Outcome.LOSS,
+                }.get(verdict)  # INCONCLUSIVE -> None
+            else:
+                outcome = _compare_metric(
                     best.metric,
                     reference,
                     plan_input.direction,
                     plan_input.tolerance,
                 )
-            )
             evidence_ref = best.evidence_ref
             artifacts = {"evidence": evidence_ref}
             try:
