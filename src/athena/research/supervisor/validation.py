@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from athena.agents.validate_agent import (
+from athena.agents.task_agents import (
     VALIDATE_AGENT_ID,
     VALIDATE_AGENT_TYPE,
     ValidationRepair,

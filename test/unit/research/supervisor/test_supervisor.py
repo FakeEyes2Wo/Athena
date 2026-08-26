@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from athena.agents.plan_agent import register_plan_agent
+from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry

@@ -7,8 +7,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from athena.agents.plan_agent import register_plan_agent
 from athena.agents.supervisor_agent import register_supervisor_agent
+from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import ResponsesProvider
 from athena.core.agent.registry import AgentTypeRegistry

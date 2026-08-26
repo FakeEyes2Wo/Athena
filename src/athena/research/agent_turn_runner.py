@@ -15,8 +15,12 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from athena.agents.data_agent import DATA_AGENT_ID, register_data_agent
-from athena.agents.general_agent import GeneralResult, register_general_agent
+from athena.agents.task_agents import (
+    DATA_AGENT_ID,
+    GeneralResult,
+    register_data_agent,
+    register_general_agent,
+)
 from athena.agents.ideator_agent import (
     SEARCH_IDEATOR_PROFILES,
     IdeatorProfile,

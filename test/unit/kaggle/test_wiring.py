@@ -1,7 +1,6 @@
 """Kaggle 组合根与 Agent 装配的单元测试。"""
 
-from athena.agents.general_agent import register_general_agent
-from athena.agents.plan_agent import register_plan_agent
+from athena.agents.task_agents import register_general_agent, register_plan_agent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.kaggle.auth import KaggleCredentials

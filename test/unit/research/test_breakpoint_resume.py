@@ -258,7 +258,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
 async def test_run_general_turn_persists_agent_id_before_wait(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from athena.agents.general_agent import GeneralResult
+    from athena.agents.task_agents import GeneralResult
     from athena.research import agent_turn_runner as atr
 
     saves: list[str] = []

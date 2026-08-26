@@ -27,7 +27,7 @@ from athena.agents.prepare_agent import (
     register_prepare_eda_agent,
 )
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
-from athena.agents.validate_agent import register_validate_agent
+from athena.agents.task_agents import register_validate_agent
 from athena.execution.runtime import ExecutionContext
 from athena.research.contracts import ValidationResult
 from athena.research.eda_todo import run_eda_todos
