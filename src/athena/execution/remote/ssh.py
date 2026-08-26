@@ -252,6 +252,9 @@ class SshBackend:
     ) -> CommandResult:
         """在远端执行一条命令，流式回传输出，超时/取消都杀整个进程组。"""
         cwd = self._remote_cwd(workdir)
+        # Ensure the remote working directory exists before spawning; this also
+        # makes a backend usable without an explicitly bound local root.
+        await self._channel.request("mkdir", path=cwd)
         display = " ".join(argv) if argv is not None else (command or "")
         await _dispatch(emit, "command/started", "exec:run", {"command": display})
 
