@@ -5,6 +5,7 @@ import {
   setProjectRoot,
   settingsGet,
   settingsSet,
+  type ComputeSettings,
   type GuiSettings,
 } from "../lib/tauri-bridge";
 import { Icon } from "./common/Icon";
@@ -17,7 +18,8 @@ type WritableField =
   | "direction"
   | "tolerance"
   | "auto_validate"
-  | "manual_mode";
+  | "manual_mode"
+  | "experiment_timeout_s";
 
 interface SettingsPanelProps {
   onClose(): void;
@@ -65,6 +67,14 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     }));
   }
 
+  function patchCompute(field: keyof ComputeSettings, value: unknown) {
+    setSaved(false);
+    setForm((prev) => ({
+      ...prev,
+      compute: { ...prev.compute, [field]: value },
+    }));
+  }
+
   async function save() {
     setSaving(true);
     setError(null);
@@ -77,6 +87,9 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       tolerance: form.tolerance,
       auto_validate: form.auto_validate,
       manual_mode: form.manual_mode,
+      experiment_timeout_s: form.experiment_timeout_s,
+      data_root: form.data_root,
+      compute: form.compute,
       model_connection: form.model_connection,
     };
     try {
@@ -278,7 +291,120 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                   onChange={(e) => patchField("tolerance", Number(e.target.value))}
                 />
               </label>
+
+              <label className="field">
+                <span className="field__label">实验超时（秒）</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  value={form.experiment_timeout_s}
+                  onChange={(e) =>
+                    patchField("experiment_timeout_s", Number(e.target.value))
+                  }
+                />
+              </label>
             </div>
+          </section>
+
+          <section className={styles.section}>
+            <h3 className={styles.sectionTitle}>算力 / Compute</h3>
+            <div className={styles.grid}>
+              <label className="field">
+                <span className="field__label">模式</span>
+                <select
+                  className="select"
+                  value={form.compute.mode}
+                  onChange={(e) => patchCompute("mode", e.target.value)}
+                >
+                  <option value="local">local · 本机</option>
+                  <option value="ssh">ssh · 远程 GPU</option>
+                </select>
+              </label>
+
+              <label className="field">
+                <span className="field__label">放置策略</span>
+                <select
+                  className="select"
+                  value={form.compute.placement}
+                  onChange={(e) => patchCompute("placement", e.target.value)}
+                >
+                  <option value="pack">pack</option>
+                  <option value="spread">spread</option>
+                  <option value="homogeneous">homogeneous</option>
+                </select>
+              </label>
+
+              <label className="field">
+                <span className="field__label">拿不到卡时</span>
+                <select
+                  className="select"
+                  value={form.compute.fallback}
+                  onChange={(e) => patchCompute("fallback", e.target.value)}
+                >
+                  <option value="never">never · 排队/失败</option>
+                  <option value="ask">ask · 询问</option>
+                </select>
+              </label>
+
+              <label className="field">
+                <span className="field__label">每实验 GPU 数</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  value={form.compute.gpus_per_experiment}
+                  onChange={(e) =>
+                    patchCompute("gpus_per_experiment", Number(e.target.value))
+                  }
+                />
+              </label>
+
+              <label className="field">
+                <span className="field__label">排队超时（秒）</span>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  value={form.compute.queue_timeout_s ?? ""}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    patchCompute(
+                      "queue_timeout_s",
+                      value === "" ? null : Number(value),
+                    );
+                  }}
+                />
+              </label>
+
+              <label className="field" style={{ gridColumn: "1 / -1" }}>
+                <span className="field__label">数据集根目录</span>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="留空表示不设置"
+                  value={form.data_root ?? ""}
+                  onChange={(e) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      data_root: e.target.value.trim() || null,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            {form.compute.hosts.length > 0 && (
+              <div className={styles.grid}>
+                {form.compute.hosts.map((host) => (
+                  <div key={host.name} className="field">
+                    <span className="field__label">{host.name}</span>
+                    <div className="input input--readonly">
+                      {host.ssh} · {host.gpus === "auto" ? "auto" : host.gpus.join(",")} · {host.max_leases} leases
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           <section className={styles.section}>

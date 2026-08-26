@@ -27,6 +27,7 @@ from athena.research.supervisor.supervisor import Supervisor
 from athena.research.survey import SurveyStack
 
 if TYPE_CHECKING:
+    from athena.execution.compute_config import ComputeConfig
     from athena.execution.pool import GpuPool, Lease
     from athena.research.agent_turn_runner import AgentTurnRunner
     from athena.research.phase_runner import PhaseRunner
@@ -64,5 +65,6 @@ class ResearchSession:
     task_text: str = ""
     kaggle_stack: KaggleStack | None = None
     data_root: Path | None = None
+    compute: ComputeConfig | None = None
     pool: GpuPool | None = None
     leases: dict[str, Lease] = field(default_factory=dict)

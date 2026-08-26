@@ -18,7 +18,11 @@ from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_tree import ResearchTree
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser
-from athena.execution.compute_config import ComputeConfig, load_compute_config
+from athena.execution.compute_config import (
+    ComputeConfig,
+    load_compute_config,
+    parse_compute_config,
+)
 from athena.execution.pool import GpuPool, Lease
 from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.kaggle import (
@@ -133,6 +137,9 @@ SETTINGS_WHITELIST: frozenset[str] = frozenset(
         "hypotheses_per_ideator",
         "handoff_sources",
         "model_connection",
+        "data_root",
+        "experiment_timeout_s",
+        "compute",
     }
 )
 
@@ -322,10 +329,11 @@ class ResearchRuntime:
         )
         session = ResearchSession(task_text=task)
         session.data_root = config.data_root
-        if config.compute is not None and config.compute.remote:
+        session.compute = config.compute
+        if session.compute is not None and session.compute.remote:
             session.pool = GpuPool(
-                list(config.compute.hosts),
-                placement=config.compute.placement,
+                list(session.compute.hosts),
+                placement=session.compute.placement,
                 store=store,
                 dataset_root=config.data_root,
             )
@@ -511,18 +519,15 @@ class ResearchRuntime:
         if pool is None:
             return self._execution
         lease = self._session.leases.get(plan_id)
+        compute = self._session.compute
         if lease is None:
             if not pool.cards():
                 await pool.preflight()
             lease = await pool.acquire(
                 plan_id,
                 local_workspace=Path(workspace),
-                gpus=self._config.compute.gpus_per_experiment if self._config.compute else 1,
-                timeout_s=(
-                    self._config.compute.queue_timeout_s
-                    if self._config.compute
-                    else None
-                ),
+                gpus=compute.gpus_per_experiment if compute else 1,
+                timeout_s=compute.queue_timeout_s if compute else None,
             )
             self._session.leases[plan_id] = lease
             logger.info(
@@ -800,6 +805,36 @@ class ResearchRuntime:
         """Reload the research tree from disk (a fresh read-only snapshot)."""
         return ResearchTree.load(self._tree_path)
 
+    def _compute_settings(self) -> dict[str, Any]:
+        """Serialize the active compute configuration for the GUI."""
+        session = getattr(self, "_session", None)
+        compute = session.compute if session is not None else None
+        if compute is None:
+            return {
+                "mode": "local",
+                "placement": "pack",
+                "fallback": "never",
+                "gpus_per_experiment": 1,
+                "queue_timeout_s": None,
+                "hosts": [],
+            }
+        return {
+            "mode": compute.mode,
+            "placement": compute.placement,
+            "fallback": compute.fallback,
+            "gpus_per_experiment": compute.gpus_per_experiment,
+            "queue_timeout_s": compute.queue_timeout_s,
+            "hosts": [
+                {
+                    "name": host.name,
+                    "ssh": host.alias,
+                    "gpus": list(host.gpus) if host.gpus is not None else "auto",
+                    "max_leases": host.max_leases,
+                }
+                for host in compute.hosts
+            ],
+        }
+
     def settings(self) -> dict[str, Any]:
         """Return a GUI-facing snapshot of runtime settings."""
         return {
@@ -817,6 +852,9 @@ class ResearchRuntime:
             "manual_mode": self.state.manual_mode,
             "phase": self.state.phase,
             "status": self.state.status,
+            "data_root": self.state.data_root,
+            "experiment_timeout_s": self.state.experiment_timeout_s,
+            "compute": self._compute_settings(),
             "model_connection": {
                 "provider": os.environ.get("LLM_PROVIDER") or "deepseek",
                 "base_url": os.environ.get("BASE_URL") or "",
@@ -903,6 +941,40 @@ class ResearchRuntime:
             if not isinstance(auto_validate, bool):
                 raise ValueError("auto_validate must be a bool")
             self._auto_validate = auto_validate
+        if "experiment_timeout_s" in patch:
+            value = patch["experiment_timeout_s"]
+            if not isinstance(value, int) or value < 1:
+                raise ValueError("experiment_timeout_s must be an integer >= 1")
+            self.state.experiment_timeout_s = value
+        if "data_root" in patch:
+            raw = patch["data_root"]
+            if raw in (None, ""):
+                self._session.data_root = None
+                self.state.data_root = None
+            else:
+                path = Path(str(raw)).resolve()
+                if not path.is_dir():
+                    raise ValueError(f"data_root does not exist: {path}")
+                self._session.data_root = path
+                self.state.data_root = str(path)
+        if "compute" in patch:
+            raw = patch["compute"]
+            if not isinstance(raw, dict):
+                raise ValueError("compute must be an object")
+            new_compute = parse_compute_config(raw)
+            self._session.compute = new_compute
+            if new_compute.remote:
+                if self._session.pool is None:
+                    self._session.pool = GpuPool(
+                        list(new_compute.hosts),
+                        placement=new_compute.placement,
+                        store=self._store,
+                        dataset_root=self._session.data_root,
+                    )
+            elif self._session.pool is not None:
+                await self._session.pool.aclose()
+                self._session.pool = None
+                self._session.leases.clear()
         if "model_connection" in patch:
             raw = patch["model_connection"]
             if not isinstance(raw, dict):
@@ -933,6 +1005,8 @@ class ResearchRuntime:
                 "ideator_count",
                 "hypotheses_per_ideator",
                 "handoff_sources",
+                "experiment_timeout_s",
+                "data_root",
             )
         ):
             self.state.save(self._state_path)
