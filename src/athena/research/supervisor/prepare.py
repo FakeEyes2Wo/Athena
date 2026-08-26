@@ -79,6 +79,18 @@ def _require_joinable_labels(labels_file: Path) -> None:
         )
 
 
+def _require_joinable_labels_dir(labels_dir: Path) -> None:
+    """Require every ``*.csv`` under ``labels/`` to carry the exact id column."""
+    csv_files = sorted(labels_dir.rglob("*.csv"))
+    if not csv_files:
+        raise ValueError(
+            f"labels/ must contain at least one .csv file carrying "
+            f"{ROW_ID_COLUMN!r}"
+        )
+    for path in csv_files:
+        _require_joinable_labels(path)
+
+
 async def _freeze_evaluator(
     *,
     root: Path,
@@ -130,6 +142,8 @@ async def _freeze_evaluator(
         )
     if labels_file.is_file() and labels_file.stat().st_size:
         _require_joinable_labels(labels_file)
+    elif labels_dir.is_dir():
+        _require_joinable_labels_dir(labels_dir)
     bundle = await scripts.freeze(evaluator_root, BundleMetadata(entrypoint=entrypoint))
     return await store.put_text(bundle.model_dump_json())
 

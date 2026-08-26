@@ -396,6 +396,30 @@ async def test_freeze_evaluator_accepts_labels_directory_and_handoff(
 
 
 @pytest.mark.asyncio
+async def test_freeze_evaluator_rejects_labels_directory_without_row_id(
+    tmp_path: Path,
+) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    (evaluator_dir / "labels").mkdir(parents=True)
+    (evaluator_dir / "labels" / "truth.csv").write_text(
+        "id,label\n1,0\n", encoding="utf-8"
+    )
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(ValueError, match="__athena_row_id"):
+        await _freeze_evaluator(
+            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        )
+
+
+@pytest.mark.asyncio
 async def test_freeze_evaluator_accepts_eval_script_directory(tmp_path: Path) -> None:
     """``eval_script`` may name a directory whose entrypoint is evaluate.py."""
     evaluator_dir = tmp_path / "evaluator"

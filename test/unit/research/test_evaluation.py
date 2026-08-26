@@ -59,3 +59,38 @@ async def test_score_accepts_finite_number_and_numeric_string() -> None:
     )
     assert result.test_score == 0.84
     assert math.isfinite(result.test_score)
+
+
+@pytest.mark.asyncio
+async def test_score_carries_optional_uncertainty_fields() -> None:
+    result = await _evaluator(
+        {"primary": 0.84, "test_se": 0.02, "test_n": 100}
+    ).score(
+        eval_bundle=None,  # type: ignore[arg-type]
+        predictions={},
+        candidate_id="c",
+        direction="maximize",
+        predictions_root="predictions",
+    )
+    assert result.test_se == 0.02
+    assert result.test_n == 100
+
+
+@pytest.mark.asyncio
+async def test_score_rejects_invalid_uncertainty_fields() -> None:
+    with pytest.raises(ValueError, match="test_se"):
+        await _evaluator({"primary": 0.84, "test_se": -1}).score(
+            eval_bundle=None,  # type: ignore[arg-type]
+            predictions={},
+            candidate_id="c",
+            direction="maximize",
+            predictions_root="predictions",
+        )
+    with pytest.raises(ValueError, match="test_n"):
+        await _evaluator({"primary": 0.84, "test_n": "many"}).score(
+            eval_bundle=None,  # type: ignore[arg-type]
+            predictions={},
+            candidate_id="c",
+            direction="maximize",
+            predictions_root="predictions",
+        )
