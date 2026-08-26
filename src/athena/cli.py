@@ -4,10 +4,17 @@ import argparse
 import asyncio
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from athena.core.agent import settings
+from athena.execution.check import check_compute, print_compute_check
+from athena.execution.compute_config import (
+    ComputeConfig,
+    ComputeConfigError,
+    load_compute_config,
+)
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
 from athena.research.fork import ForkError, fork_project
@@ -26,6 +33,7 @@ from athena.research.paper_rag.search import corpus_paper_ids
 from athena.research.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
 from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
 from athena.research.runtime import DEFAULT_SURVEY_PAPERS
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.survey import (
     SurveyRequest,
     build_survey_stack,
@@ -80,7 +88,19 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "survey_max_papers": args.survey_papers,
         "survey_search_top_k": args.survey_search_top_k,
         "survey_max_seconds": args.survey_max_seconds,
+        "experiment_timeout_s": args.experiment_timeout,
+        "compute": _compute_config(args),
     }
+
+
+def _compute_config(args: argparse.Namespace) -> ComputeConfig:
+    """把 ``--compute`` 覆盖叠到 ``config.toml`` 的 ``[compute]`` 上。"""
+    config = load_compute_config()
+    if args.compute is None or args.compute == config.mode:
+        return config
+    if args.compute == "ssh" and not config.hosts:
+        raise ComputeConfigError("--compute ssh needs [[compute.hosts]] in config.toml")
+    return replace(config, mode=args.compute)
 
 
 class _EventRenderer:
@@ -210,6 +230,14 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     finally:
         runtime.unsubscribe(subscription_id)
         await runtime.aclose()
+
+
+async def _cmd_compute(args: argparse.Namespace) -> int:
+    """连上 ``[compute]`` 里的每一台机器，把它实际长什么样打出来。"""
+    config = _compute_config(args)
+    dataset_root = Path(args.data_root).resolve() if args.data_root else None
+    check = await check_compute(config, dataset_root=dataset_root)
+    return print_compute_check(check)
 
 
 async def _cmd_status(args: argparse.Namespace) -> int:
@@ -373,6 +401,8 @@ async def _dispatch_command(args: argparse.Namespace) -> int:
         return await _cmd_bench(args)
     if args.command == "kaggle":
         return await _cmd_kaggle(args)
+    if args.command == "compute":
+        return await _cmd_compute(args)
     if args.command == "status":
         return await _cmd_status(args)
     return await _cmd_control(args)
@@ -408,6 +438,24 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_non_negative_int,
         default=None,
         help="abort the run after N seconds (unbounded by default)",
+    )
+    run.add_argument(
+        "--compute",
+        choices=["local", "ssh"],
+        default=None,
+        help=(
+            "算力：local 在本机跑，ssh 派到 config.toml 的 [[compute.hosts]] 上。"
+            "不给则按 config.toml 里的 [compute].mode。绝不静默降级"
+        ),
+    )
+    run.add_argument(
+        "--experiment-timeout",
+        type=int,
+        default=DEFAULT_EXPERIMENT_TIMEOUT_S,
+        help=(
+            "单条 experiment.json 命令的超时上限（秒，默认 "
+            f"{DEFAULT_EXPERIMENT_TIMEOUT_S}）"
+        ),
     )
     run.add_argument(
         "--ideation",
@@ -462,6 +510,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "变量——两臂各跑各的 PREPARE 时，基线方差与待测效应同量级"
         ),
     )
+    _add_compute_parser(subparsers)
     _add_survey_parser(subparsers)
     _add_bench_parser(subparsers)
     _add_kaggle_parser(subparsers)
@@ -840,6 +889,17 @@ async def _cmd_bench(args: argparse.Namespace) -> int:
     if args.out:
         print(f"\n报告已写入 {dump_report(report, args.out)}")
     return 0
+
+
+def _add_compute_parser(subparsers) -> None:
+    """挂上 ``compute`` 子命令：算力自检。"""
+    compute = subparsers.add_parser(
+        "compute", help="check the GPU hosts in [compute] before running anything"
+    )
+    compute.add_argument("--compute", choices=["local", "ssh"], help="临时覆盖 [compute].mode")
+    compute.add_argument(
+        "--data-root", default="", help="数据集根目录；与远端算力一起用时用于分发"
+    )
 
 
 def _add_kaggle_parser(subparsers) -> None:

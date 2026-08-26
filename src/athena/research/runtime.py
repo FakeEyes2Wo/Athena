@@ -253,6 +253,7 @@ class ResearchRuntime:
         execution = ExecutionRuntime(
             project_root=root,
             environment_root=root,
+            data_root=config.data_root,
             store=store,
         )
         scripts = DataScriptRunner(
@@ -293,6 +294,9 @@ class ResearchRuntime:
                 eda_path = (root / eda_dir).resolve()
             if not eda_path.is_relative_to(root):
                 state.eda_dir = None
+        state.experiment_timeout_s = experiment_timeout_s
+        if config.data_root is not None and state.data_root is None:
+            state.data_root = str(config.data_root)
 
         events_projector = EventProjector(store)
         events_bus = RuntimeEvents(
