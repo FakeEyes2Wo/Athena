@@ -91,3 +91,68 @@ openalex_key_env = "OPENALEX_API_KEY"
 # Ghostscript 可执行文件，用于光栅化 EPS/PS 插图（ATHENA_GHOSTSCRIPT）
 # 2015 年前的 arXiv 论文几乎全用 EPS；不设按 PATH 自动发现 gs / gswin64c / mgs 等。
 ghostscript = ""
+
+# ──────────────────────────────────────────────────────────────────────────
+# Compute（算力：本地还是派到 GPU 机上）
+# 由 execution/compute_config.py 解析；解析失败会直接报错，不静默按本地跑。
+# ──────────────────────────────────────────────────────────────────────────
+#
+# 配好之后先跑 `Athena-cli compute --check`：它连上每台机器，把实际的 GPU、
+# 解释器、已装的包、磁盘余量，以及**会被原样注入给 agent 的那段 Runtime 原文**
+# 打出来。不占卡、不留东西、几秒钟出结果。
+# 不先跑它的代价很具体：跑了两小时 PREPARE，在第一个实验才发现远端跑不了。
+[compute]
+# local = 在本机跑（默认）；ssh = 派到下面配置的 GPU 机上
+mode = "local"
+
+# 放置策略：
+#   pack        先把一台机器用满，留出整台空机给需要多卡的实验（默认）
+#   spread      摊开，单机故障影响面小
+#   homogeneous 同一次比较的各臂必须落在同型号硬件上
+#
+# 为什么需要 homogeneous：A 臂拿 A100、B 臂拿 3090，在墙钟受限的实验里两者的
+# 分数不可比。这与冻结评估器是同一个道理——把变量按住，只留一个。代价是并行度下降。
+placement = "pack"
+
+# 拿不到 GPU 时怎么办：never = 排队或明确失败；ask = 询问。
+# **没有 silent**。静默退回本地 CPU 会跑完、会出分、日志也齐，但那不是你要的实验，
+# 而且没有任何一层会报错。
+fallback = "never"
+
+# 每个实验要几张卡
+gpus_per_experiment = 1
+
+# 排队等待上限（秒）；不设则一直等到有卡
+# queue_timeout_s = 3600
+
+# 每台机器一节。可以有多台。
+# [[compute.hosts]]
+# 池子里的显示名（进实验证据的 placement.host）
+# name = "gpu-01"
+#
+# **~/.ssh/config 里的 Host 别名**，不是 user@ip。
+# 端口、密钥、跳板（ProxyJump）、known_hosts 全部留在 ssh_config 里——
+# Athena 的任何配置文件都不该出现凭据。写成 user@ip 会直接报错。
+# ssh = "gpu01.lab"
+#
+# 远端的工作目录根：租约工作区与分发过来的数据集都落在它下面。
+# 租约归还时它自己的工作区会被删掉；数据集按机器缓存、跨租约复用，不删。
+# 挑盘大的那个分区——没有共享存储时整份数据集要落在这里。
+# scratch = "/scratch/athena"
+#
+# 远端的 python 解释器。**实验也用它**——Athena 不在远端装任何东西，
+# 也不在远端管环境（本地那套 uv 项目在远端没有对应物）。所以这台机器上
+# 现成有什么包，实验就只能用什么；`compute --check` 会把清单打出来。
+#
+# 常见的坑：非交互式 ssh 不读 ~/.bashrc，所以 conda 装的解释器往往不在 PATH 上。
+# 写绝对路径最省事，例如 "/root/miniconda3/bin/python3"。
+# python = "python3"
+#
+# 可用的卡："auto" 由 nvidia-smi 探测，也可以写死 [0, 1, 2, 3]
+# gpus = "auto"
+#
+# 这台机器最多同时承载几份租约
+# max_leases = 1
+#
+# 额外的 ssh 选项（很少需要；连接细节应当写进 ssh_config）
+# ssh_options = []
