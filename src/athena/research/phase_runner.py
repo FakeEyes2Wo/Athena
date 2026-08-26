@@ -19,10 +19,11 @@ from athena.agents.ideator_agent import (
     HandoffResult,
     register_ideator_agent,
 )
-from athena.agents.prepare_agent import register_evaluator_agent, register_prepare_agent
-from athena.agents.prepare_eda_agent import (
+from athena.agents.prepare_agent import (
     PREPARE_EDA_AGENT_ID,
     PREPARE_EDA_AGENT_TYPE,
+    register_evaluator_agent,
+    register_prepare_agent,
     register_prepare_eda_agent,
 )
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS

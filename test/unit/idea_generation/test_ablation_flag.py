@@ -18,7 +18,7 @@ from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisDraft,
 )
 
-_PROMPT_DIR = Path("src/athena/core/agent/prompts")
+_PROMPT_DIR = Path("src/athena/agents/prompts")
 
 
 class _Registry:
@@ -122,9 +122,9 @@ def _runner(ideation: str) -> AgentTurnRunner:
     """AgentTurnRunner 只需要 runtime 上的这几个字段就能做出口分支。"""
     return AgentTurnRunner(
         SimpleNamespace(
-            _model="fake-model",
-            _store=SimpleNamespace(),
-            _ideation=ideation,
+            model="fake-model",
+            store=SimpleNamespace(),
+            ideation=ideation,
             corpus_paper_ids=_no_corpus,
         )
     )

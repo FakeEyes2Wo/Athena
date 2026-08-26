@@ -2,7 +2,7 @@
 
 业务 Agent 的两层结构（设计 prompt-driven-agents §2）：
 - 内层：``Agent``（ReAct 循环）+ ``ResponsesProvider`` + ``ToolRegistry``
-  （通用工具，沙箱限定 workspace）+ system prompt（``core/agent/prompts/*.md``）。
+  （通用工具，沙箱限定 workspace）+ system prompt（``agents/prompts/*.md``）。
 - 外层：Python 编排器（data/init/report）收集产物、提交 Bundle/Artifact。
 
 本模块只做内层构建：``load_prompt`` 读取固定格式 md；``build_llm_agent`` 把
@@ -27,11 +27,11 @@ from athena.core.tool import ToolRegistry
 if TYPE_CHECKING:
     from athena.execution.runtime import ExecutionRuntime
 
-_PROMPT_DIR = Path(__file__).resolve().parent.parent / "core" / "agent" / "prompts"
+_PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
 
 def load_prompt(agent_type: str) -> str:
-    """读取 core/agent/prompts/{agent_type}_agent.md；缺失直接报错。
+    """读取 agents/prompts/{agent_type}_agent.md；缺失直接报错。
 
     提示文件按 ``{agent_type}_agent.md`` 命名（如 ``data_agent.md``）；先按
     ``_agent`` 后缀直查（所有真实提示都用该命名），再回退到 ``{agent_type}.md``

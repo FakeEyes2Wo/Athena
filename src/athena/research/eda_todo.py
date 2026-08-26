@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from athena.agents.ideator_agent import HandoffResult
-from athena.agents.prepare_eda_agent import EDA_WORKER_AGENT_TYPE, PREPARE_EDA_AGENT_ID
+from athena.agents.prepare_agent import EDA_WORKER_AGENT_TYPE, PREPARE_EDA_AGENT_ID
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactStore
 from athena.research.supervisor.experiment import load_agent_result
