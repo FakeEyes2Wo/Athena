@@ -2,14 +2,19 @@
 
 import csv
 import json
+import logging
 import subprocess
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
+from athena.research.contracts import DataScriptBundle
+from athena.research.evaluator_trust import validate_evaluator_properties
 from athena.core.workspace import (
     GitWorkBranch,
     GitWorkspace,
@@ -169,6 +174,54 @@ async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
     return decision
 
 
+async def _validate_frozen_evaluator(
+    *,
+    root: Path,
+    evaluator_ref: ArtifactRef,
+    scripts: DataScriptRunner,
+    store: ArtifactStore,
+) -> None:
+    """Run deterministic row-order/value-permutation property tests.
+
+    A frozen evaluator that fails these checks is not trustworthy and should be
+    sent back to the agent for repair. Runners without ``run`` (test doubles)
+    skip the behavioral tests with a warning.
+    """
+    labels_file = root / "labels.csv"
+    labels_dir = root / "labels"
+    if labels_file.is_file():
+        labels_csv = labels_file.read_text(encoding="utf-8-sig")
+    elif labels_dir.is_dir():
+        csv_files = sorted(labels_dir.rglob("*.csv"))
+        if not csv_files:
+            raise ValueError("labels/ has no csv for evaluator property tests")
+        labels_csv = csv_files[0].read_text(encoding="utf-8-sig")
+    else:
+        raise ValueError("no labels found for evaluator property tests")
+
+    async def score(predictions_csv: str) -> float:
+        bundle = DataScriptBundle.model_validate_json(
+            await store.get_text(evaluator_ref)
+        )
+        result = await scripts.run(
+            bundle,
+            request={},
+            extra_files={
+                "predictions/predictions.csv": predictions_csv.encode("utf-8")
+            },
+            output_schema={"primary": None},
+        )
+        return float(result.outputs["primary"])
+
+    try:
+        outcome = await validate_evaluator_properties(labels_csv, score)
+    except AttributeError:
+        logger.warning("evaluator property tests skipped: runner has no run()")
+        return
+    if not outcome.get("ok"):
+        raise ValueError(outcome.get("reason", "evaluator property tests failed"))
+
+
 async def run_evaluator_plan(
     *,
     agents: AgentRuntime,
@@ -238,6 +291,12 @@ async def run_evaluator_plan(
                         f"{decision.decision!r}. Return submit to advance to the "
                         "experiment step."
                     )
+                await _validate_frozen_evaluator(
+                    root=root,
+                    evaluator_ref=evaluator_ref,
+                    scripts=scripts,
+                    store=store,
+                )
                 return evaluator_ref
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # 覆盖 evaluator 冻结（uv lock）的子进程失败 → 转成同 Plan 的反馈重试。
