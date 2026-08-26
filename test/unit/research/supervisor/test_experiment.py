@@ -101,7 +101,7 @@ class _FakeWorkspace:
         self.messages: list[str] = []
 
     async def diff(self, workspace: GitWorkBranch) -> GitDiff:
-        diff = GitDiff(ref=_OTHER_REF, paths=("experiment.json",))
+        diff = GitDiff(ref=_OTHER_REF, paths=("model.py", "experiment.json"))
         self.diffs.append(diff)
         return diff
 

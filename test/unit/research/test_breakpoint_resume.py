@@ -162,14 +162,23 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     class FakeSupervisor:
         def __init__(self, frozen_ref: str) -> None:
             self._evaluator_ref = frozen_ref
+            self._final_evaluator_ref = frozen_ref
             self.checked_refs: list[str] = []
+            self.checked_final_refs: list[str] = []
 
         @property
         def evaluator_ref(self) -> str:
             return self._evaluator_ref
 
+        @property
+        def final_evaluator_ref(self) -> str:
+            return self._final_evaluator_ref
+
         async def checkpoint_evaluator(self, ref: str) -> None:
             self.checked_refs.append(ref)
+
+        async def checkpoint_final_evaluator(self, ref: str) -> None:
+            self.checked_final_refs.append(ref)
 
     class FakeStore:
         async def get_text(self, ref):
@@ -201,25 +210,43 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     state = SimpleNamespace(
         phase="PREPARE", status="RUNNING", eda_dir=None, save=lambda path: None
     )
+    supervisor = FakeSupervisor(frozen_ref)
     rt = SimpleNamespace(
         _root=tmp_path,
         _state_path=tmp_path / ".athena" / "state.json",
         _workspaces_root=tmp_path / "workspaces",
         _prepare_phase=None,
+        prepare_phase=None,
         _provider=object(),
+        provider=object(),
         _task_text="predict survival",
-        _agents=object(),
+        _agents=SimpleNamespace(reap=lambda agent_id: None),
         _evaluator=object(),
         _execution=object(),
         _state=state,
         state=state,
-        _supervisor=FakeSupervisor(frozen_ref),
+        _supervisor=supervisor,
+        supervisor=supervisor,
         _store=FakeStore(),
         _git=FakeGit(),
         _registry=SimpleNamespace(contains=lambda name: True),
         _events_bus=FakeBus(),
         tree=SimpleNamespace(to_dict=lambda: {}),
         publish_output=publish_output,
+        root=tmp_path,
+        state_path=tmp_path / ".athena" / "state.json",
+        workspaces_root=tmp_path / "workspaces",
+        config=SimpleNamespace(dataset_path=None, target_column=None, split_seed=0),
+        git=FakeGit(),
+        store=FakeStore(),
+        events=FakeBus(),
+        registry=SimpleNamespace(contains=lambda name: True),
+        agents=SimpleNamespace(reap=lambda agent_id: None),
+        execution=object(),
+        evaluator=object(),
+        task_text="predict survival",
+        kaggle_tools=lambda agent_type: None,
+        ideator_tools=lambda: None,
     )
 
     async def run_evaluator_plan(**kwargs):
@@ -237,13 +264,29 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         )
 
     monkeypatch.setattr(
-        "athena.research.phase_runner.run_evaluator_plan",
+        "athena.research.prepare_phase.run_evaluator_plan",
         run_evaluator_plan,
         raising=False,
     )
     monkeypatch.setattr(
-        "athena.research.phase_runner.run_prepare_plan", run_prepare_plan, raising=False
+        "athena.research.prepare_phase.run_prepare_plan",
+        run_prepare_plan,
+        raising=False,
     )
+
+    async def fake_handoff(
+        self, agent_id, agent_type, workspace, output_file, content, *, reap_after=False
+    ):
+        del agent_id, agent_type, content, reap_after
+        Path(workspace).mkdir(parents=True, exist_ok=True)
+        (Path(workspace) / output_file).write_text("stub\n", encoding="utf-8")
+
+    monkeypatch.setattr(PhaseRunner, "_run_handoff_agent", fake_handoff)
+
+    async def fake_eda_todos(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr("athena.research.prepare_phase.run_eda_todos", fake_eda_todos)
 
     result = await PhaseRunner(rt).run_prepare_phase()
 
@@ -282,24 +325,41 @@ async def test_run_general_turn_persists_agent_id_before_wait(
         _state=state,
         state=state,
         _provider=object(),
+        provider=object(),
         _registry=SimpleNamespace(contains=lambda name: True),
+        registry=SimpleNamespace(contains=lambda name: True),
         _store=object(),
+        store=object(),
         _execution=object(),
+        execution=object(),
         _agents=FakeAgents(),
+        agents=FakeAgents(),
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
+        events=SimpleNamespace(project_agent_event=lambda *a, **k: None),
+        root=tmp_path,
+        state_path=tmp_path / ".athena" / "state.json",
+        kaggle_tools=lambda kind: None,
     )
 
     async def wait_run_events(*args, **kwargs):
         del args, kwargs
         return SimpleNamespace()
 
-    monkeypatch.setattr(atr, "wait_run_events", wait_run_events, raising=False)
+    monkeypatch.setattr(
+        "athena.research.agent_turn_common.wait_run_events",
+        wait_run_events,
+        raising=False,
+    )
 
     async def load_agent_result(summary, store, schema):
         del summary, store, schema
         return GeneralResult(result="done", files=["summary.md"])
 
-    monkeypatch.setattr(atr, "load_agent_result", load_agent_result, raising=False)
+    monkeypatch.setattr(
+        "athena.research.agent_turn_general.load_agent_result",
+        load_agent_result,
+        raising=False,
+    )
 
     outcome = await atr.AgentTurnRunner(rt).run_general_turn("inspect competition")
 
@@ -340,19 +400,34 @@ async def test_run_general_turn_interrupts_worker_on_timeout(
         _state=state,
         state=state,
         _provider=object(),
+        provider=object(),
         _registry=SimpleNamespace(contains=lambda name: True),
+        registry=SimpleNamespace(contains=lambda name: True),
         _store=object(),
+        store=object(),
         _execution=object(),
+        execution=object(),
         _agents=FakeAgents(),
+        agents=FakeAgents(),
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
+        events=SimpleNamespace(project_agent_event=lambda *a, **k: None),
+        root=tmp_path,
+        state_path=tmp_path / ".athena" / "state.json",
+        kaggle_tools=lambda kind: None,
     )
-    monkeypatch.setattr(atr, "AGENT_TURN_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        "athena.research.agent_turn_common.AGENT_TURN_TIMEOUT_SECONDS", 0
+    )
 
     async def never_finishes(*args, **kwargs):
         del args, kwargs
         await asyncio.sleep(10)
 
-    monkeypatch.setattr(atr, "wait_run_events", never_finishes, raising=False)
+    monkeypatch.setattr(
+        "athena.research.agent_turn_common.wait_run_events",
+        never_finishes,
+        raising=False,
+    )
 
     with pytest.raises(RuntimeError, match="timed out"):
         await atr.AgentTurnRunner(rt).run_general_turn("inspect competition")

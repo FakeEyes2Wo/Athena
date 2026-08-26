@@ -360,7 +360,7 @@ async def test_labels_with_duplicate_row_ids_never_freeze(tmp_path: Path) -> Non
     )
     store = LocalArtifactStore(tmp_path / "artifacts")
 
-    with pytest.raises(ValueError, match="duplicate __athena_row_id"):
+    with pytest.raises(ValueError, match="duplicate '__athena_row_id'"):
         await _freeze_evaluator(
             root=evaluator_dir, scripts=_TreeScripts(store), store=store
         )
@@ -462,7 +462,9 @@ async def test_evaluator_plan_freezes_on_submit(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     evaluator_dir.mkdir(parents=True, exist_ok=True)
     (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (evaluator_dir / "labels.csv").write_text("__athena_row_id,label\n1,0\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text(
+        "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
+    )
     (evaluator_dir / "pyproject.toml").write_text(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )

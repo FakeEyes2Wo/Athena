@@ -541,6 +541,15 @@ class PlanRunner:
 
         if state.kind == "SEARCH":
             diff = await self._workspace.diff(self._branch)
+            if not diff.paths:
+                return await self._failure(
+                    plan_id,
+                    "no_change",
+                    "this candidate changed no file, so it re-ran the parent unchanged and "
+                    "cannot test anything. Implement the intervention described in the "
+                    "hypothesis — edit the solution sources, then rerun and submit.",
+                    predictions_ref=predictions_ref,
+                )
             rejected = _diff_implements_intervention(diff.paths)
             if rejected is not None:
                 return await self._failure(
@@ -584,20 +593,6 @@ class PlanRunner:
         metric = evaluation.test_score
 
         diff = await self._workspace.diff(self._branch)
-        # 一个字都没改的 SEARCH 候选不是实验。真机（2026-08-16）：4 个候选的 commit
-        # 全等于 baseline，predictions artifact 逐字节相同，分数一模一样，却有 3 条被
-        # 判 REFUTED——Agent 读了继承来的基线脚本、原样重跑、看见 0.8823 就提交，说
-        # "The hypothesis has produced a working solution"。评估修好之前这一切都被
-        # 恒定的 0.502 盖住了。空 diff 是可以直接判掉的信号。
-        if state.kind == "SEARCH" and not diff.paths:
-            return await self._failure(
-                plan_id,
-                "no_change",
-                "this candidate changed no file, so it re-ran the parent unchanged and "
-                "cannot test anything. Implement the intervention described in the "
-                "hypothesis — edit the solution sources, then rerun and submit.",
-                predictions_ref=predictions_ref,
-            )
         commit = await self._workspace.commit(
             self._branch, diff, f"plan {plan_id} trusted score {metric:.4f}"
         )

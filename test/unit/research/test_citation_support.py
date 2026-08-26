@@ -72,7 +72,9 @@ class _Runtime:
 
     def __init__(self, verdicts: dict[str, str], passages: dict[str, list[str]]):
         self._model = "m"
+        self.model = "m"
         self._client = None
+        self.client = None
         self._verdicts = verdicts
         self._passages = passages
         self.published: list[dict] = []
@@ -102,7 +104,7 @@ class SupportVerificationTest(unittest.IsolatedAsyncioTestCase):
                     return reply
             return '{"supports": false}'
 
-        import athena.research.agent_turn_runner as module
+        import athena.research.agent_turn_support as module
 
         self._original = module.single_turn_chat
         module.single_turn_chat = fake_chat
@@ -112,7 +114,9 @@ class SupportVerificationTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_topically_related_survey_is_dropped(self) -> None:
         """真机形态：《数据增强综述》被引来支持"两两交互特征工程"。"""
         runtime = _Runtime(
-            verdicts={"doi:survey": '{"supports": false, "why": "a survey of augmentation"}'},
+            verdicts={
+                "doi:survey": '{"supports": false, "why": "a survey of augmentation"}'
+            },
             passages={"doi:survey": ["This survey reviews data augmentation methods."]},
         )
         runner = self._runner(runtime)
@@ -166,7 +170,7 @@ class SupportVerificationTest(unittest.IsolatedAsyncioTestCase):
         """整层不可用是增益消失，不该把已经通过前一关的结论一起清掉。"""
         runtime = _Runtime(verdicts={}, passages={"arxiv:1": ["evidence"]})
         runner = AgentTurnRunner(runtime)
-        import athena.research.agent_turn_runner as module
+        import athena.research.agent_turn_support as module
 
         async def exploding(*_args, **_kwargs):
             raise RuntimeError("endpoint down")

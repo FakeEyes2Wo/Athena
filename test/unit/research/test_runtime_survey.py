@@ -17,6 +17,7 @@ from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry, tool
 from athena.research import agent_turn_runner as atr_module
 from athena.research import runtime as runtime_module
+from athena.research import runtime_survey as runtime_survey_module
 from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.paper_rag.schemas import PaperSummary
 from athena.research.paper_source.http import HostRateLimiter
@@ -157,7 +158,7 @@ async def test_the_corpus_ref_lands_on_the_state_the_supervisor_will_persist(
     async def fake_survey(_stack, _request, *, emit=None):
         return SurveyReport(query="q", status="complete", corpus_ref="sha256:corpus")
 
-    monkeypatch.setattr(runtime_module, "run_survey", fake_survey)
+    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
 
     await runtime._run_survey()
 
@@ -177,7 +178,7 @@ async def test_a_failed_survey_is_reported_and_leaves_search_untouched(
     async def fake_survey(_stack, _request, *, emit=None):
         raise RuntimeError("upstream is down")
 
-    monkeypatch.setattr(runtime_module, "run_survey", fake_survey)
+    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
 
     await runtime._run_survey()
 
@@ -195,7 +196,7 @@ async def test_an_empty_corpus_is_reported_rather_than_recorded(monkeypatch) -> 
     async def fake_survey(_stack, _request, *, emit=None):
         return SurveyReport(query="q", status="empty")
 
-    monkeypatch.setattr(runtime_module, "run_survey", fake_survey)
+    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
 
     await runtime._run_survey()
 
@@ -221,7 +222,7 @@ async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
     async def finish(_batch, *, rejections=None):
         return HypothesisBatch()
 
-    monkeypatch.setattr(atr_module, "wait_run_events", wait)
+    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
     monkeypatch.setattr(atr_module, "load_agent_result", load)
     monkeypatch.setattr(runner, "_finish_ideator_batch", finish)
 
@@ -249,7 +250,7 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
     async def finish(_batch, *, rejections=None):
         return HypothesisBatch()
 
-    monkeypatch.setattr(atr_module, "wait_run_events", wait)
+    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
     monkeypatch.setattr(atr_module, "load_agent_result", load)
     monkeypatch.setattr(runner, "_finish_ideator_batch", finish)
 
@@ -365,7 +366,7 @@ def _lane_harness(monkeypatch) -> list[dict]:
     async def load(_summary, _store, _schema):
         return SimpleNamespace(hypotheses=[])
 
-    monkeypatch.setattr(runtime_module, "wait_run_events", wait)
+    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
     monkeypatch.setattr(runtime_module, "load_agent_result", load)
     return []
 
@@ -653,8 +654,8 @@ def _lane_harness(monkeypatch) -> list[dict]:
     async def load(_summary, _store, _schema):
         return SimpleNamespace(hypotheses=[])
 
-    monkeypatch.setattr(runtime_module, "run_survey", _unused_survey)
-    monkeypatch.setattr("athena.research.agent_turn_runner.wait_run_events", wait)
+    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", _unused_survey)
+    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
     monkeypatch.setattr("athena.research.agent_turn_runner.load_agent_result", load)
     return []
 
@@ -692,7 +693,7 @@ def test_a_corpus_restored_from_state_still_hands_the_ideator_its_operators(
     assert runtime._survey_stack is None
     built: list[object] = []
     monkeypatch.setattr(
-        runtime_module,
+        runtime_survey_module,
         "build_survey_stack",
         lambda **kwargs: built.append(kwargs) or _stack(),
     )
@@ -712,7 +713,9 @@ async def test_citations_are_verifiable_against_a_corpus_restored_from_state(
     """校验侧同一条惰性装配：否则续跑时已知集合为空，任何编造的 id 都会被放行。"""
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
     stack = _stack()
-    monkeypatch.setattr(runtime_module, "build_survey_stack", lambda **_kwargs: stack)
+    monkeypatch.setattr(
+        runtime_survey_module, "build_survey_stack", lambda **_kwargs: stack
+    )
 
     async def _load(_store, _corpus_ref, **_kwargs):
         return SimpleNamespace(
