@@ -25,6 +25,22 @@ interface SettingsPanelProps {
   onClose(): void;
 }
 
+function normalizeSettings(raw: Partial<GuiSettings> | GuiSettings): GuiSettings {
+  return {
+    ...DEFAULT_GUI_SETTINGS,
+    ...raw,
+    model_connection: {
+      ...DEFAULT_GUI_SETTINGS.model_connection,
+      ...(raw.model_connection ?? {}),
+    },
+    compute: {
+      ...DEFAULT_GUI_SETTINGS.compute,
+      ...(raw.compute ?? {}),
+      hosts: raw.compute?.hosts ?? [],
+    },
+  };
+}
+
 /** 运行设置：圆角纯白小窗，覆盖在主工作区之上。 */
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [settings, setSettings] = useState<GuiSettings>(DEFAULT_GUI_SETTINGS);
@@ -37,7 +53,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   const refresh = useCallback(async () => {
     try {
-      const next = await settingsGet();
+      const next = normalizeSettings(await settingsGet());
       setSettings(next);
       setForm(next);
       setProjectRootInput(next.project_root || "");
@@ -93,7 +109,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       model_connection: form.model_connection,
     };
     try {
-      const next = await settingsSet(patch);
+      const next = normalizeSettings(await settingsSet(patch));
       setSettings(next);
       setForm(next);
       setSaved(true);
@@ -109,7 +125,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     setError(null);
     setSaved(false);
     try {
-      const next = await setProjectRoot(projectRoot);
+      const next = normalizeSettings(await setProjectRoot(projectRoot));
       setSettings(next);
       setForm(next);
       setProjectRootInput(next.project_root || "");
