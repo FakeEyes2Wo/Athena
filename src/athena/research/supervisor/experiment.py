@@ -8,6 +8,7 @@
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -29,6 +30,7 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
     PlanBest,
     PlanDecision,
     PlanInput,
@@ -459,7 +461,8 @@ class PlanRunner:
         branch: GitWorkBranch,
         context: ExecutionContext,
         direction: Direction = "maximize",
-        timeout_s: int = 120,
+        timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
+        placement: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self._execution = execution
         self._store = store
@@ -469,6 +472,7 @@ class PlanRunner:
         self._context = context
         self._direction = direction
         self._timeout_s = timeout_s
+        self._placement = placement
 
     @property
     def workdir(self) -> Path:
@@ -606,6 +610,11 @@ class PlanRunner:
                     "predictions_ref": predictions_ref,
                     "report_ref": report_ref,
                     "outputs": manifest.outputs,
+                    **(
+                        {"placement": self._placement()}
+                        if self._placement is not None
+                        else {}
+                    ),
                 },
                 ensure_ascii=False,
             )
@@ -656,6 +665,11 @@ class PlanRunner:
                     "kind": kind,
                     "error": cleaned,
                     "predictions_ref": predictions_ref,
+                    **(
+                        {"placement": self._placement()}
+                        if self._placement is not None
+                        else {}
+                    ),
                 },
                 ensure_ascii=False,
             )

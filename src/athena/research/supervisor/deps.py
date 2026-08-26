@@ -51,6 +51,7 @@ class SupervisorDeps:
     run_prepare_phase: PreparePhase | None = None
     run_validation_phase: ValidationPhase | None = None
     publish_agent_event: PublishAgentEvent | None = None
+    on_plan_settled: Callable[[str], Awaitable[None]] | None = None
 
 
 __all__ = [

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from athena.core.agent.agent_runtime import AgentRuntime
@@ -26,6 +27,7 @@ from athena.research.supervisor.supervisor import Supervisor
 from athena.research.survey import SurveyStack
 
 if TYPE_CHECKING:
+    from athena.execution.pool import GpuPool, Lease
     from athena.research.agent_turn_runner import AgentTurnRunner
     from athena.research.phase_runner import PhaseRunner
 
@@ -61,3 +63,6 @@ class ResearchSession:
     corpus_sessions: list[RetrievalSession] = field(default_factory=list)
     task_text: str = ""
     kaggle_stack: KaggleStack | None = None
+    data_root: Path | None = None
+    pool: GpuPool | None = None
+    leases: dict[str, Lease] = field(default_factory=dict)

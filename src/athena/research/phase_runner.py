@@ -143,19 +143,23 @@ class PhaseRunner:
         if rt.plan_turn is not None:
             return await rt.plan_turn(plan_id, state)
         plan_input = await rt.supervisor.plan_input(plan_id)
+        workspace_path = rt.supervisor.workspace_path(plan_id)
+        execution = await rt.execution_for(plan_id, workspace_path)
         runner = PlanRunner(
-            execution=rt.execution,
+            execution=execution,
             store=rt.store,
             evaluator=rt.evaluator,
             workspace=rt.git,
             branch=rt.supervisor.workspace(plan_id),
             context=ExecutionContext(
                 project_root=rt.root,
-                workspace_root=rt.supervisor.workspace_path(plan_id),
+                workspace_root=workspace_path,
                 environment_root=rt.root,
                 experiment_id=plan_id,
             ),
             direction=plan_input.direction,
+            timeout_s=rt.state.experiment_timeout_s,
+            placement=lambda: rt.placement_for(plan_id),
         )
         return await runner.run_turn(plan_id, state, plan_input)
 

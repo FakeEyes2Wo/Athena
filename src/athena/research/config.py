@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from athena.execution.compute_config import ComputeConfig
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
+
 
 @dataclass(frozen=True)
 class ResearchPaths:
@@ -59,6 +62,10 @@ class ResearchConfig:
     dataset_path: Path | None = None
     target_column: str | None = None
     split_seed: int = 0
+    # Compute resources / remote GPU execution.
+    data_root: Path | None = None
+    experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
+    compute: ComputeConfig | None = None
     prepare_phase: Any = None
     validation_phase: Any = None
     plan_turn: Any = None

@@ -408,6 +408,8 @@ class PlanLifecycle:
         self._tree.save(self._deps.tree_path)
         self._state.plans.pop(plan_id)
         self._save_state()
+        if self._deps.on_plan_settled is not None:
+            await self._deps.on_plan_settled(plan_id)
         # A settled Plan owns a stable PlanAgent thread. Reap it now so finished
         # SEARCH plans do not accumulate for the rest of the process lifetime.
         try:

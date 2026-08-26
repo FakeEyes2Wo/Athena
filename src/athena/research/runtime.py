@@ -18,6 +18,8 @@ from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_tree import ResearchTree
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser
+from athena.execution.compute_config import ComputeConfig, load_compute_config
+from athena.execution.pool import GpuPool, Lease
 from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.kaggle import (
     AGENT_KAGGLE_TOOLS,
@@ -46,6 +48,7 @@ from athena.research.runtime_events import RuntimeEvents, recent_user_texts
 from athena.research.script_runner import DataScriptRunner
 from athena.research.services import ResearchServices, ResearchSession
 from athena.research.supervisor.events import EventProjector
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.supervisor.experiment import PlanTurnResult
 from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.recovery import Recovery
@@ -177,6 +180,9 @@ class ResearchRuntime:
         dataset_path: str | Path | None = None,
         target_column: str | None = None,
         split_seed: int = 0,
+        data_root: str | Path | None = None,
+        experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
+        compute: ComputeConfig | None = None,
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
@@ -228,6 +234,9 @@ class ResearchRuntime:
             dataset_path=Path(dataset_path).resolve() if dataset_path else None,
             target_column=target_column,
             split_seed=split_seed,
+            data_root=Path(data_root).resolve() if data_root else None,
+            experiment_timeout_s=experiment_timeout_s,
+            compute=compute if compute is not None else load_compute_config(),
             prepare_phase=prepare_phase,
             validation_phase=validation_phase,
             plan_turn=plan_turn,
@@ -308,6 +317,14 @@ class ResearchRuntime:
             state=state,
         )
         session = ResearchSession(task_text=task)
+        session.data_root = config.data_root
+        if config.compute is not None and config.compute.remote:
+            session.pool = GpuPool(
+                list(config.compute.hosts),
+                placement=config.compute.placement,
+                store=store,
+                dataset_root=config.data_root,
+            )
         self._config = config
         self._services = services
         self._session = session
@@ -336,6 +353,7 @@ class ResearchRuntime:
             run_prepare_phase=phase_runner.run_prepare_phase,
             run_validation_phase=phase_runner.run_validation_phase,
             publish_agent_event=events_bus.project_agent_event,
+            on_plan_settled=self.release_lease,
         )
         services.supervisor = supervisor
         services.agent_turns = agent_turns
@@ -482,6 +500,53 @@ class ResearchRuntime:
     @property
     def execution(self) -> ExecutionRuntime:
         return self._execution
+
+    async def execution_for(self, plan_id: str, workspace: Path) -> ExecutionRuntime:
+        """给一个 Plan 拿到它该用的执行运行时（本地共享或远程租约）。"""
+        pool = self._session.pool
+        if pool is None:
+            return self._execution
+        lease = self._session.leases.get(plan_id)
+        if lease is None:
+            if not pool.cards():
+                await pool.preflight()
+            lease = await pool.acquire(
+                plan_id,
+                local_workspace=Path(workspace),
+                gpus=self._config.compute.gpus_per_experiment if self._config.compute else 1,
+                timeout_s=(
+                    self._config.compute.queue_timeout_s
+                    if self._config.compute
+                    else None
+                ),
+            )
+            self._session.leases[plan_id] = lease
+            logger.info(
+                "plan %s leased %s gpu %s",
+                plan_id,
+                lease.host.name,
+                list(lease.gpu_ids),
+            )
+        return ExecutionRuntime(
+            project_root=self._root,
+            environment_root=self._root,
+            data_root=self._session.data_root,
+            store=self._store,
+            backend=lease.backend,
+        )
+
+    def placement_for(self, plan_id: str) -> dict[str, Any] | None:
+        """这个 Plan 跑在哪台机器、哪几张卡上；本地算力时为 None。"""
+        lease = self._session.leases.get(plan_id)
+        return None if lease is None else lease.placement()
+
+    async def release_lease(self, plan_id: str) -> None:
+        """归还一个 Plan 的租约（关通道 → 远端清场 → 卡回池子）。"""
+        pool = self._session.pool
+        if pool is None or plan_id not in self._session.leases:
+            return
+        self._session.leases.pop(plan_id, None)
+        await pool.release(plan_id)
 
     @property
     def scripts(self) -> DataScriptRunner:
@@ -1291,6 +1356,10 @@ class ResearchRuntime:
         return baselines[0].plan.run_config_ref if baselines else None
 
     async def aclose(self) -> None:
+        # 先还租约：通道一关远端才杀进程组，漏掉会一直占着显存。
+        if self._session.pool is not None:
+            await self._session.pool.aclose()
+            self._session.leases.clear()
         await self._events_bus.aclose()
         # 后台调研不属于任何 Plan，Supervisor.stop 管不到它；不在这里取消就会在
         # runtime 关掉之后继续下载、继续调模型，还会往已清空的订阅者发布。

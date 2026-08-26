@@ -23,6 +23,9 @@ _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
 PublishEvent = Callable[[str, str, dict | None], Awaitable[None] | None]
 
+DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
+"""Default wall-clock budget for one experiment command (seconds)."""
+
 
 async def forward_run_events(
     agents: AgentRuntime, run_id: str, publish: PublishEvent

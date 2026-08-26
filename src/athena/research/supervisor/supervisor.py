@@ -5,6 +5,7 @@ Most public API methods are delegated dynamically to those collaborators, so
 the class stays small while preserving the same callable surface.
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -109,6 +110,7 @@ class Supervisor:
         run_prepare_phase: PreparePhase | None = None,
         run_validation_phase: ValidationPhase | None = None,
         publish_agent_event: PublishAgentEvent | None = None,
+        on_plan_settled: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.state = state
         self.tree = tree
@@ -142,6 +144,7 @@ class Supervisor:
             run_prepare_phase=run_prepare_phase,
             run_validation_phase=run_validation_phase,
             publish_agent_event=publish_agent_event,
+            on_plan_settled=on_plan_settled,
         )
         run = SupervisorRunState(state.kaggle_download)
         plans = PlanLifecycle(self, deps, run)

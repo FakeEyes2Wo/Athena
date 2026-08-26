@@ -17,7 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.contracts import ArtifactRef
 from athena.core.persistence import atomic_write_json
-from athena.research.supervisor.plans import PlanState
+from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
+    PlanState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,11 @@ class ResearchState(BaseModel):
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
+    experiment_timeout_s: int = Field(
+        default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1
+    )
+    # 数据集根目录（供远端算力分发数据集；本地算力可空）。
+    data_root: str | None = None
     # 每轮 ideation 的并行 lane 数与每 lane 假设数（与 SEARCH 并发度解耦）。
     ideator_count: int = Field(default=3, ge=1, le=8)
     hypotheses_per_ideator: int = Field(default=2, ge=1, le=5)
