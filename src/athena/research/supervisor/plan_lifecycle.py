@@ -39,6 +39,19 @@ def _compare_metric(
     return Outcome.DRAW
 
 
+def _status_for_outcome(outcome: Outcome | None) -> str:
+    """Map a settlement outcome to a conservative hypothesis status.
+
+    DRAW and missing evidence must never be reported as REFUTED: a tie is not
+    evidence against the hypothesis, so it is INCONCLUSIVE.
+    """
+    if outcome is Outcome.WIN:
+        return "SUPPORTED"
+    if outcome is Outcome.LOSS:
+        return "REFUTED"
+    return "INCONCLUSIVE"
+
+
 class PlanLifecycle:
     """Own the stable identity and durable lifecycle of SEARCH Plans."""
 
@@ -311,7 +324,7 @@ class PlanLifecycle:
             best = await load_best(best_ref, self._deps.store)
             reference = plan_input.reference_metric
             outcome = (
-                Outcome.WIN
+                None
                 if reference is None
                 else _compare_metric(
                     best.metric,
@@ -356,7 +369,7 @@ class PlanLifecycle:
                 plan_input.reference_priority, outcome
             )
             self._tree.update_hypothesis_status(
-                plan_id, "SUPPORTED" if outcome is Outcome.WIN else "REFUTED"
+                plan_id, _status_for_outcome(outcome)
             )
         if primary is not None:
             sota_id = self._tree.best_experiment_id()
@@ -382,7 +395,7 @@ class PlanLifecycle:
         # SEARCH plans do not accumulate for the rest of the process lifetime.
         try:
             await self._deps.agents.reap(plan_id)
-        except Exception:  # noqa: BLE001 - GC must never block plan settlement
+        except Exception:
             logger.warning("failed to reap settled Plan agent %s", plan_id, exc_info=True)
 
     def _sota_parent(self) -> tuple[str, Hypothesis]:

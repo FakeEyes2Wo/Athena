@@ -69,7 +69,7 @@ def _require_joinable_labels(labels_file: Path) -> None:
     with labels_file.open(encoding="utf-8-sig", newline="") as handle:
         header = next(csv.reader(handle), [])
     columns = [name.strip() for name in header if name.strip()]
-    if len(columns) < 2:
+    if ROW_ID_COLUMN not in columns or len(columns) < 2:
         raise ValueError(
             f"labels.csv must carry a row-id column named {ROW_ID_COLUMN!r} next to "
             f"the target so predictions can be joined by id, but its header is "

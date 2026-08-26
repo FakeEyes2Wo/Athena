@@ -4,15 +4,24 @@ import pytest
 from pydantic import ValidationError
 
 from athena.core.research_models import Hypothesis
+from athena.research.supervisor.plan_lifecycle import _status_for_outcome
 from athena.research.supervisor.plans import (
     PlanBest,
     PlanDecision,
     PlanInput,
     PlanState,
 )
+from athena.research.supervisor.policy import Outcome
 
 _TRUSTED_REF = "sha256:" + "a" * 64
 _OTHER_TRUSTED_REF = "sha256:" + "c" * 64
+
+
+def test_status_for_outcome_maps_draw_to_inconclusive() -> None:
+    assert _status_for_outcome(Outcome.WIN) == "SUPPORTED"
+    assert _status_for_outcome(Outcome.LOSS) == "REFUTED"
+    assert _status_for_outcome(Outcome.DRAW) == "INCONCLUSIVE"
+    assert _status_for_outcome(None) == "INCONCLUSIVE"
 
 
 def test_plan_decision_requires_an_explicit_structured_decision() -> None:

@@ -54,14 +54,22 @@ class SearchLoop:
             task.add_done_callback(self._on_search_done)
             self._run.set_search_task(task)
 
-    @staticmethod
-    def _on_search_done(task: asyncio.Task) -> None:
+    def _on_search_done(self, task: asyncio.Task) -> None:
         """检索后台 SEARCH 任务的异常，避免 'Task exception was never retrieved'。"""
         if task.cancelled():
             return
         exc = task.exception()
         if exc is not None:
             logger.error("SEARCH scheduling loop crashed: %r", exc)
+            # A crashed scheduler must not leave the UI permanently RUNNING.
+            self._state.status = "FAILED"
+            try:
+                asyncio.create_task(self._owner._persist_state())
+            except Exception:
+                logger.warning(
+                    "failed to persist FAILED state after SEARCH crash",
+                    exc_info=True,
+                )
 
     async def run_search(self) -> None:
         """Run rolling SEARCH scheduling."""

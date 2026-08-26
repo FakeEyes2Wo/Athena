@@ -340,6 +340,18 @@ async def test_labels_without_a_row_id_column_never_freeze(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_labels_with_wrong_row_id_column_never_freeze(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    _evaluator_draft(evaluator_dir, "id,label\n0,0\n1,1\n")
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(ValueError, match="__athena_row_id"):
+        await _freeze_evaluator(
+            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        )
+
+
+@pytest.mark.asyncio
 async def test_labels_carrying_a_row_id_column_freeze_normally(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
@@ -361,7 +373,7 @@ async def test_freeze_evaluator_accepts_labels_directory_and_handoff(
     evaluator_dir = tmp_path / "evaluator"
     (evaluator_dir / "labels").mkdir(parents=True)
     (evaluator_dir / "labels" / "truth.csv").write_text(
-        "id,label\n1,0\n", encoding="utf-8"
+        "__athena_row_id,label\n1,0\n", encoding="utf-8"
     )
     (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
     (evaluator_dir / "pyproject.toml").write_text(
@@ -390,7 +402,7 @@ async def test_freeze_evaluator_accepts_eval_script_directory(tmp_path: Path) ->
     inner = evaluator_dir / "evaluator"
     inner.mkdir(parents=True)
     (inner / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (inner / "labels.csv").write_text("id,label\n1,0\n", encoding="utf-8")
+    (inner / "labels.csv").write_text("__athena_row_id,label\n1,0\n", encoding="utf-8")
     (inner / "pyproject.toml").write_text(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
@@ -411,7 +423,7 @@ async def test_evaluator_plan_freezes_on_submit(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     evaluator_dir.mkdir(parents=True, exist_ok=True)
     (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (evaluator_dir / "labels.csv").write_text("id,label\n1,0\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text("__athena_row_id,label\n1,0\n", encoding="utf-8")
     (evaluator_dir / "pyproject.toml").write_text(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
