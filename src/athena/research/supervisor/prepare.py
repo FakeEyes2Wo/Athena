@@ -69,16 +69,28 @@ def _require_joinable_labels(labels_file: Path) -> None:
     负责，运行期的判别性检查见 docs/evaluator_contract_ch.md。
     """
     with labels_file.open(encoding="utf-8-sig", newline="") as handle:
-        header = next(csv.reader(handle), [])
-    columns = [name.strip() for name in header if name.strip()]
-    if ROW_ID_COLUMN not in columns or len(columns) < 2:
-        raise ValueError(
-            f"labels.csv must carry a row-id column named {ROW_ID_COLUMN!r} next to "
-            f"the target so predictions can be joined by id, but its header is "
-            f"{columns or ['<empty>']}. Rewrite it as "
-            f"'{ROW_ID_COLUMN},<target>' and make evaluate.py join on that column "
-            "instead of comparing the two files row by row."
-        )
+        reader = csv.DictReader(handle)
+        columns = [name.strip() for name in (reader.fieldnames or []) if name.strip()]
+        if ROW_ID_COLUMN not in columns or len(columns) < 2:
+            raise ValueError(
+                f"labels.csv must carry a row-id column named {ROW_ID_COLUMN!r} next to "
+                f"the target so predictions can be joined by id, but its header is "
+                f"{columns or ['<empty>']}. Rewrite it as "
+                f"'{ROW_ID_COLUMN},<target>' and make evaluate.py join on that column "
+                "instead of comparing the two files row by row."
+            )
+        seen: set[str] = set()
+        for row in reader:
+            raw = (row.get(ROW_ID_COLUMN) or "").strip()
+            if not raw:
+                raise ValueError(
+                    f"labels.csv contains an empty {ROW_ID_COLUMN!r}"
+                )
+            if raw in seen:
+                raise ValueError(
+                    f"labels.csv contains duplicate {ROW_ID_COLUMN!r}: {raw}"
+                )
+            seen.add(raw)
 
 
 def _require_joinable_labels_dir(labels_dir: Path) -> None:

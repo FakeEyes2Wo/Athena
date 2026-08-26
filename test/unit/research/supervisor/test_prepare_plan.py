@@ -352,6 +352,21 @@ async def test_labels_with_wrong_row_id_column_never_freeze(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_labels_with_duplicate_row_ids_never_freeze(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    _evaluator_draft(
+        evaluator_dir,
+        "__athena_row_id,label\n0,0\n0,1\n",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(ValueError, match="duplicate __athena_row_id"):
+        await _freeze_evaluator(
+            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        )
+
+
+@pytest.mark.asyncio
 async def test_labels_carrying_a_row_id_column_freeze_normally(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
