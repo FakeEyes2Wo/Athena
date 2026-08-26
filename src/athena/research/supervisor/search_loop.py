@@ -257,6 +257,11 @@ class SearchLoop:
         if completed.result is not None and completed.result.next_state is not None:
             state = completed.result.next_state
             self._state.plans[plan_id] = state
+        if completed.result is not None and completed.result.kind == "diff_rejected":
+            # A diff that does not implement the intervention is not a trusted
+            # experiment; do not settle it. Let the PlanAgent repair and retry.
+            await self._owner._persist_state()
+            return
         if completed.decision is None:
             if state.turn_limit is not None and state.turns_used >= state.turn_limit:
                 self._state.status = "WAITING"

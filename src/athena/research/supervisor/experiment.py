@@ -42,6 +42,42 @@ _FORBIDDEN_EXECUTABLES = frozenset({"git", "git.exe"})
 _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
 # 回给 agent 的多余键名上限，避免超长键把反馈挤爆。
 _MAX_FIELD_NAME_CHARS = 40
+# 只有改动真正的实现源文件才算“实验”；只改 manifest/输出/文档会被拒绝。
+_SEMANTIC_SOURCE_SUFFIXES = (".py", ".ipynb", ".sh", ".R", ".jl")
+_NON_IMPLEMENTATION_MARKERS = (
+    "predictions/",
+    "report",
+    "experiment.json",
+    ".md",
+)
+
+
+def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
+    """Return a rejection reason when a SEARCH diff does not implement source.
+
+    This is a deterministic first line of defense for attribution: it does not
+    prove the diff implements the exact intervention, but it rejects the obvious
+    non-experiments (manifest-only, output-only, doc-only) that currently pass
+    the “non-empty diff” gate.
+    """
+    if not paths:
+        return (
+            "this candidate changed no file, so it re-ran the parent unchanged and "
+            "cannot test anything. Implement the intervention in source code."
+        )
+    semantic = [
+        path
+        for path in paths
+        if path.endswith(_SEMANTIC_SOURCE_SUFFIXES)
+        and not any(marker in path for marker in _NON_IMPLEMENTATION_MARKERS)
+    ]
+    if not semantic:
+        return (
+            "this candidate changed no implementation source file; only "
+            "manifest/output/documentation changed. Implement the intervention "
+            "in a source file (e.g. model.py, features.py, train.py)."
+        )
+    return None
 
 
 def handoff_block(handoff: str) -> str:
@@ -302,6 +338,8 @@ class PlanTurnResult(BaseModel):
         "manifest_invalid",
         # SEARCH 候选一个文件都没改：它重跑的是父实验，测不了任何东西。
         "no_change",
+        # SEARCH 候选只改了 manifest/输出/文档，没有实现假设中的源码改动。
+        "diff_rejected",
     ]
     metric: float | None = None
     commit: CommitHash | None = None
@@ -489,6 +527,17 @@ class PlanRunner:
                 predictions_ref=predictions_ref,
             )
 
+        if state.kind == "SEARCH":
+            diff = await self._workspace.diff(self._branch)
+            rejected = _diff_implements_intervention(diff.paths)
+            if rejected is not None:
+                return await self._failure(
+                    plan_id,
+                    "diff_rejected",
+                    rejected,
+                    predictions_ref=predictions_ref,
+                )
+
         bundle = await self._load_bundle(plan_input.evaluator_ref)
         if bundle is None:
             return await self._failure(
@@ -583,6 +632,7 @@ class PlanRunner:
             "execution_failed",
             "manifest_invalid",
             "no_change",
+            "diff_rejected",
         ],
         error: str,
         *,
