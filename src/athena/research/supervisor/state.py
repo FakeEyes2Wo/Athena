@@ -28,6 +28,7 @@ RESUME_FIELDS = (
     "task_research_ref",
     "task_research_agent_id",
     "evaluator_ref",
+    "final_evaluator_ref",
 )
 
 
@@ -106,6 +107,9 @@ class ResearchState(BaseModel):
     task_research_agent_id: str | None = None
     # 断点续传：已冻结评估器 bundle；PREPARE 重启时跳过 evaluator 重跑。
     evaluator_ref: ArtifactRef | None = None
+    # 断点续传：最终验证使用的独立 evaluator；未设置时 VALIDATE 应告警并避免
+    # 把搜索 evaluator 当作真正的 final-test authority。
+    final_evaluator_ref: ArtifactRef | None = None
     # 已经为哪一份语料补跑过 ideation。调研要十几分钟，第一轮 ideation 几乎必然早于它
     # 完成；而调度器只在"无假设可排"时才 GENERATE，短跑测里第一轮就把队列填满，于是
     # 语料一次都读不到。

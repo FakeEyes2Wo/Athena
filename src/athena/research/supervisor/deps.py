@@ -44,6 +44,7 @@ class SupervisorDeps:
     run_plan_turn: PlanTurn
     run_supervisor_turn: SupervisorTurn
     publish: Publish
+    final_evaluator_ref: ArtifactRef | None = None
     auto_validate: bool = False
     run_ideator_turn: IdeatorTurn | None = None
     run_general_turn: GeneralTurn | None = None

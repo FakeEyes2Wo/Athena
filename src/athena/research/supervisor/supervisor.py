@@ -49,6 +49,7 @@ _DEPS_ATTRS = {
     "_scheduler": "scheduler",
     "_recovery": "recovery",
     "_evaluator_ref": "evaluator_ref",
+    "_final_evaluator_ref": "final_evaluator_ref",
     "_direction": "direction",
     "_tolerance": "tolerance",
     "_run_plan_turn": "run_plan_turn",
@@ -129,6 +130,7 @@ class Supervisor:
             evaluator_ref=(
                 evaluator_ref if evaluator_ref is not None else state.evaluator_ref
             ),
+            final_evaluator_ref=state.final_evaluator_ref,
             direction=direction,
             tolerance=tolerance,
             run_plan_turn=run_plan_turn,

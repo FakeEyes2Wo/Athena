@@ -7,9 +7,12 @@ run_validation_phase / review_validation_diff）集中到一个组合单元。�
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 from athena.agents.ideator_agent import (
     BASELINE_IDEATOR_PROFILE,
@@ -413,6 +416,17 @@ class PhaseRunner:
         evaluator_ref = rt.supervisor.evaluator_ref
         if evaluator_ref is None:
             raise RuntimeError("VALIDATE requires a frozen evaluator")
+        final_evaluator_ref = getattr(rt.supervisor, "final_evaluator_ref", None)
+        if final_evaluator_ref is None:
+            # Legacy projects do not have a separate final evaluator yet. Keep
+            # working but make the limitation explicit instead of silently
+            # pretending the search evaluator is an unseen final test.
+            final_evaluator_ref = evaluator_ref
+            logger.warning(
+                "VALIDATE has no final_evaluator_ref; using the search evaluator "
+                "as final. Re-run PREPARE with final-evaluator support for a "
+                "true unseen final test."
+            )
         workspace = await rt.git.create(sota_commit, "athena/validate")
         if not rt.registry.contains("validate"):
             register_validate_agent(
@@ -439,9 +453,9 @@ class PhaseRunner:
             sota_commit=sota_commit,
             reference_metric=metric,
             direction=rt.direction,
-            final_evaluator_ref=evaluator_ref,
+            final_evaluator_ref=final_evaluator_ref,
             validation_key=validation_key(
-                sota_commit, metric, rt.direction, evaluator_ref
+                sota_commit, metric, rt.direction, final_evaluator_ref
             ),
             sota_context=sota_context,
         )
