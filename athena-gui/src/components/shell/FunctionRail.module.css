@@ -1,7 +1,7 @@
 /* 功能轨：48px 图标导航列。 */
 
 .rail {
-  width: 52px;
+  width: 56px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -27,6 +27,7 @@
 }
 
 .item {
+  position: relative;
   width: 100%;
   aspect-ratio: 1;
   display: grid;
@@ -50,6 +51,18 @@
   background: var(--accent-subtle);
   color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent-soft), var(--shadow-xs);
+}
+
+.item--active::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--accent);
 }
 
 .item--active:hover {

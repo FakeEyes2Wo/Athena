@@ -7,13 +7,28 @@
   gap: var(--space-sm);
   padding: var(--space-2xl) 24px;
   text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.welcome-hero::before {
+  content: "";
+  position: absolute;
+  top: -120px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 480px;
+  height: 480px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-subtle), transparent 65%);
+  pointer-events: none;
 }
 .welcome-hero__mark {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
+  position: relative;
+  width: 68px;
+  height: 68px;
+  border-radius: 20px;
   background: linear-gradient(135deg, var(--accent), var(--chart-4));
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 12px 28px var(--accent-soft), var(--shadow-md);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -22,36 +37,42 @@
   font-weight: 700;
 }
 .welcome-hero__title {
+  position: relative;
   margin: 0;
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 .welcome-hero__subtitle {
+  position: relative;
   margin: 0;
   color: var(--text-secondary);
   font-size: 14px;
 }
 .welcome-hero__prompts {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-sm);
   justify-content: center;
-  max-width: 540px;
-  margin-top: var(--space-sm);
+  max-width: 600px;
+  margin-top: var(--space-md);
 }
 .welcome-hero__prompt {
-  padding: 8px 14px;
+  padding: 9px 16px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-secondary);
   font-size: 13px;
   cursor: pointer;
-  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
+  box-shadow: var(--shadow-xs);
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .welcome-hero__prompt:hover {
   border-color: var(--border-hover);
   color: var(--accent);
   background: var(--accent-subtle);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }

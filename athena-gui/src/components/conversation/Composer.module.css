@@ -7,6 +7,7 @@
   gap: var(--space-sm);
   padding: var(--space-md) 24px var(--space-xl);
   border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--surface-muted) 55%, transparent));
 }
 .composer__input {
   width: 100%;
@@ -23,11 +24,14 @@
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease),
     box-shadow var(--dur) var(--ease);
 }
+.composer__input:hover {
+  border-color: var(--border-strong);
+}
 .composer__input:focus {
   outline: none;
   border-color: var(--border-focus);
   background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 0 0 3px var(--accent-subtle), var(--shadow-sm);
 }
 .composer__send {
   align-self: flex-end;
@@ -40,14 +44,18 @@
   border: none;
   background: var(--accent);
   color: #fff;
-  box-shadow: var(--shadow-xs);
+  box-shadow: 0 1px 2px var(--accent-soft), var(--shadow-xs);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 .composer__send:hover:not(:disabled) {
   background: var(--accent-hover);
+  box-shadow: 0 4px 12px var(--accent-soft);
+}
+.composer__send:active:not(:disabled) {
+  transform: translateY(1px);
 }
 .composer__send:disabled {
   opacity: 0.4;
