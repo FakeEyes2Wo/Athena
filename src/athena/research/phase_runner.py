@@ -43,6 +43,7 @@ from athena.research.supervisor.prepare import (
     run_evaluator_plan,
     run_prepare_plan,
 )
+from athena.research.splitter import materialize_csv_split
 from athena.research.supervisor.validation import (
     ValidationDiffReview,
     ValidationInput,
@@ -191,6 +192,33 @@ class PhaseRunner:
             channel="text",
             text=f"PREPARE: EDA 工作区 {rt.state.eda_dir} 已就绪（绝对路径 {Path(workspace.path).resolve()}）。",
         )
+        # 步骤 0：平台级数据划分（可选）。当任务显式给出本地 CSV 数据集时，
+        # 平台生成 train/search/final 文件，evaluator 不再自行划分。
+        evaluator_task = rt.task_text
+        split_dir: Path | None = None
+        if rt.config.dataset_path is not None and rt.config.target_column is not None:
+            split_dir = rt.workspaces_root / "data_split"
+            materialize_csv_split(
+                rt.config.dataset_path,
+                split_dir,
+                rt.config.target_column,
+                search_frac=0.2,
+                final_frac=0.2,
+                seed=rt.config.split_seed,
+            )
+            await rt.publish_output(
+                source="supervisor",
+                channel="text",
+                text=f"PREPARE: 平台已生成数据划分 {split_dir.resolve()}。",
+            )
+            evaluator_task = (
+                f"{rt.task_text}\n\n"
+                f"The platform has already split the dataset into train/search/final "
+                f"files under {split_dir.resolve()}.\n"
+                "Do NOT create your own split. Build evaluate.py using "
+                "search_labels.csv as the trusted search labels, and keep "
+                "final_labels.csv hidden from SEARCH."
+            )
         # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结；
         # 断点续传时若已有可解析的 frozen bundle，直接复用不重跑。
         evaluator_ref = rt.supervisor.evaluator_ref
@@ -220,7 +248,7 @@ class PhaseRunner:
                 store=rt.store,
                 evaluator_dir=evaluator_dir,
                 execution=rt.execution,
-                task=rt.task_text,
+                task=evaluator_task,
                 max_turns=MAX_PLAN_TURNS,
                 publish=lambda kind, ref, data: rt.events.project_agent_event(
                     "evaluator", kind, ref, data
@@ -280,7 +308,7 @@ class PhaseRunner:
                 evaluator_dir=final_evaluator_dir,
                 execution=rt.execution,
                 task=(
-                    f"{rt.task_text}\n\nYou are building the FINAL evaluator. "
+                    f"{evaluator_task}\n\nYou are building the FINAL evaluator. "
                     "Use a held-out split disjoint from the SEARCH evaluator's "
                     "split. This evaluator is hidden from SEARCH and used only "
                     "by VALIDATE."

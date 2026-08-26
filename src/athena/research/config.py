@@ -53,6 +53,12 @@ class ResearchConfig:
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
     ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration"
+    # Optional platform-owned local CSV dataset contract. When set, PREPARE
+    # materializes train/search/final splits instead of letting the evaluator
+    # agent create the split itself.
+    dataset_path: Path | None = None
+    target_column: str | None = None
+    split_seed: int = 0
     prepare_phase: Any = None
     validation_phase: Any = None
     plan_turn: Any = None

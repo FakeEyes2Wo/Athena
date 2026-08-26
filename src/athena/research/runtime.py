@@ -174,6 +174,9 @@ class ResearchRuntime:
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
         ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration",
+        dataset_path: str | Path | None = None,
+        target_column: str | None = None,
+        split_seed: int = 0,
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
@@ -222,6 +225,9 @@ class ResearchRuntime:
             direction=direction,
             tolerance=tolerance,
             ideation=ideation,
+            dataset_path=Path(dataset_path).resolve() if dataset_path else None,
+            target_column=target_column,
+            split_seed=split_seed,
             prepare_phase=prepare_phase,
             validation_phase=validation_phase,
             plan_turn=plan_turn,
@@ -520,6 +526,10 @@ class ResearchRuntime:
     @property
     def validation_phase(self):
         return self._validation_phase
+
+    @property
+    def config(self):
+        return self._config
 
     @property
     def plan_turn(self):
