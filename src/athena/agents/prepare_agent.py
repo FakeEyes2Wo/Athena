@@ -20,6 +20,32 @@ PREPARE_EDA_AGENT_TYPE = "prepare_eda"
 EDA_WORKER_AGENT_TYPE = "eda_worker"
 
 
+def _register(
+    registry: AgentTypeRegistry,
+    *,
+    provider: object,
+    artifacts: ArtifactStore,
+    workspace: Path,
+    runtime: ExecutionRuntime,
+    agent_type: str,
+    output_type: type,
+    extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
+    name: str | None = None,
+) -> None:
+    """Single registration path for PREPARE-family prompt agents."""
+    register_prompt_agent(
+        registry,
+        agent_type=agent_type,
+        output_type=output_type,
+        workspace=workspace,
+        runtime=runtime,
+        provider=provider,
+        artifacts=artifacts,
+        extra_tools=extra_tools,
+        name=name,
+    )
+
+
 def register_prepare_agent(
     registry: AgentTypeRegistry,
     *,
@@ -34,14 +60,14 @@ def register_prepare_agent(
     ``extra_tools`` 追加领域工具（如 Kaggle），让 PREPARE 在做任务理解时能自行
     决定是否连接竞赛、下载数据并合成 SOTA 方案。
     """
-    register_prompt_agent(
+    _register(
         registry,
-        agent_type=PREPARE_AGENT_TYPE,
-        output_type=PlanDecision,
-        workspace=workspace,
-        runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        workspace=workspace,
+        runtime=runtime,
+        agent_type=PREPARE_AGENT_TYPE,
+        output_type=PlanDecision,
         extra_tools=extra_tools,
     )
 
@@ -60,14 +86,14 @@ def register_evaluator_agent(
     ``extra_tools`` 追加领域工具（如 Kaggle），让 evaluator 能查竞赛评估指标并
     取训练数据生成 ``labels.csv``。
     """
-    register_prompt_agent(
+    _register(
         registry,
-        agent_type=EVALUATOR_AGENT_TYPE,
-        output_type=PlanDecision,
-        workspace=workspace,
-        runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        workspace=workspace,
+        runtime=runtime,
+        agent_type=EVALUATOR_AGENT_TYPE,
+        output_type=PlanDecision,
         extra_tools=extra_tools,
     )
 
@@ -82,24 +108,24 @@ def register_prepare_eda_agent(
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
 ) -> None:
     """Register the EDA orchestrator and its worker subagents."""
-    register_prompt_agent(
+    _register(
         registry,
+        provider=provider,
+        artifacts=artifacts,
+        workspace=workspace,
+        runtime=runtime,
         agent_type=PREPARE_EDA_AGENT_TYPE,
         output_type=HandoffResult,
-        workspace=workspace,
-        runtime=runtime,
-        provider=provider,
-        artifacts=artifacts,
         extra_tools=extra_tools,
     )
-    register_prompt_agent(
+    _register(
         registry,
-        agent_type=EDA_WORKER_AGENT_TYPE,
-        output_type=HandoffResult,
-        workspace=workspace,
-        runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        workspace=workspace,
+        runtime=runtime,
+        agent_type=EDA_WORKER_AGENT_TYPE,
+        output_type=HandoffResult,
         extra_tools=extra_tools,
         name="eda-worker",
     )

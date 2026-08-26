@@ -26,6 +26,32 @@ VALIDATE_AGENT_TYPE = "validate"
 PLAN_AGENT_TYPE = "plan"
 
 
+def _register(
+    registry: AgentTypeRegistry,
+    *,
+    provider: object,
+    artifacts: ArtifactStore,
+    workspace: Path | Callable[[str], Path],
+    runtime: ExecutionRuntime,
+    agent_type: str,
+    output_type: type,
+    extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
+    name: str | None = None,
+) -> None:
+    """Single registration path for thin prompt-driven task agents."""
+    register_prompt_agent(
+        registry,
+        agent_type=agent_type,
+        output_type=output_type,
+        workspace=workspace,
+        runtime=runtime,
+        provider=provider,
+        artifacts=artifacts,
+        extra_tools=extra_tools,
+        name=name,
+    )
+
+
 class GeneralResult(BaseModel):
     """General Agent 的通用杂活结果."""
 
@@ -53,14 +79,14 @@ def register_data_agent(
     extra_tools: ToolRegistry | None = None,
 ) -> None:
     """Register a fresh Data Agent factory bound to the EDA workspace."""
-    register_prompt_agent(
+    _register(
         registry,
-        agent_type=DATA_AGENT_TYPE,
-        output_type=EdaResult,
-        workspace=workspace,
-        runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        workspace=workspace,
+        runtime=runtime,
+        agent_type=DATA_AGENT_TYPE,
+        output_type=EdaResult,
         extra_tools=extra_tools,
     )
 
@@ -75,14 +101,14 @@ def register_general_agent(
     extra_tools: ToolRegistry | None = None,
 ) -> None:
     """Register a fresh General Agent factory rooted at ``project_root``."""
-    register_prompt_agent(
+    _register(
         registry,
-        agent_type=GENERAL_AGENT_TYPE,
-        output_type=GeneralResult,
-        workspace=project_root,
-        runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        workspace=project_root,
+        runtime=runtime,
+        agent_type=GENERAL_AGENT_TYPE,
+        output_type=GeneralResult,
         extra_tools=extra_tools,
     )
 
@@ -96,14 +122,14 @@ def register_validate_agent(
     runtime: ExecutionRuntime,
 ) -> None:
     """Register fresh validate Agent factories bound to one isolated workspace."""
-    register_prompt_agent(
+    _register(
         registry,
-        agent_type=VALIDATE_AGENT_TYPE,
-        output_type=ValidationRepair,
-        workspace=workspace,
-        runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        workspace=workspace,
+        runtime=runtime,
+        agent_type=VALIDATE_AGENT_TYPE,
+        output_type=ValidationRepair,
     )
 
 
@@ -117,16 +143,16 @@ def register_plan_agent(
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
 ) -> None:
     """Register fresh PlanAgent factories bound to each Hypothesis workspace."""
-    register_prompt_agent(
+    _register(
         registry,
-        agent_type=PLAN_AGENT_TYPE,
-        output_type=PlanDecision,
-        workspace=workspace_for,
-        runtime=execution,
         provider=provider,
         artifacts=artifacts,
-        name="plan-agent-{agent_id}",
+        workspace=workspace_for,
+        runtime=execution,
+        agent_type=PLAN_AGENT_TYPE,
+        output_type=PlanDecision,
         extra_tools=extra_tools,
+        name="plan-agent-{agent_id}",
     )
 
 
