@@ -17,6 +17,7 @@ from collections.abc import Callable
 from athena.gui.service import GuiService
 from athena.research import ResearchRuntime
 from gui_gateway.human import HumanRequestBroker
+from gui_gateway.state_store import GuiState, GuiStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -133,10 +134,12 @@ class GuiRequestHandler:
         runtime: ResearchRuntime,
         make_runtime: RuntimeFactory | None = None,
         broker: HumanRequestBroker | None = None,
+        state_store: GuiStateStore | None = None,
     ) -> None:
         self._runtime = runtime
         self._make_runtime = make_runtime
         self._broker = broker or HumanRequestBroker()
+        self._state_store = state_store or GuiStateStore()
         self._service = GuiService(runtime, broker=self._broker)
         self._project_root = Path(runtime.settings().get("project_root") or ".")
         self._current_session_id = "default"
@@ -147,12 +150,18 @@ class GuiRequestHandler:
         return self._runtime
 
     async def _swap_runtime(self, project_root: str, state_root: Path | None) -> None:
-        """Close the current runtime and rebuild a fresh one (project/session swap)."""
+        """Close the current runtime and rebuild a fresh one (project/session swap).
+
+        Build the replacement first. If construction fails, the previous runtime
+        stays open so the user can continue working instead of every RPC hitting
+        a closed AgentRuntime ("runtime is closed").
+        """
         if state_root is not None:
             # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
             state_root.mkdir(parents=True, exist_ok=True)
+        new_runtime = self._make_runtime(project_root, state_root)
         await self._runtime.aclose()
-        self._runtime = self._make_runtime(project_root, state_root)
+        self._runtime = new_runtime
         self._service = GuiService(self._runtime, broker=self._broker)
         await self._resume_running_session()
 
@@ -192,8 +201,10 @@ class GuiRequestHandler:
             raise ValueError(f"project path is not a directory: {root}")
         # 不存在的目录自动创建（含多级父目录），方便首次选择工作区。
         root.mkdir(parents=True, exist_ok=True)
+        root = root.resolve()
         self._project_root = root
         await self._swap_runtime(str(root), None)
+        self._state_store.save(GuiState(active_project_root=str(root)))
         return self._runtime.settings()
 
     async def session_switch(self, session_id: str) -> dict[str, object]:

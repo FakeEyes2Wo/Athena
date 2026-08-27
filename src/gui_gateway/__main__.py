@@ -15,6 +15,7 @@ from typing import Any
 
 from gui_gateway.handler import GuiRequestHandler
 from gui_gateway.human import HumanRequestBroker
+from gui_gateway.state_store import GuiStateStore, validate_project_root
 from gui_gateway.transport import WebSocketTransport
 from athena.core.agent import settings
 from athena.research import ResearchRuntime
@@ -72,13 +73,20 @@ async def start_server(
         ``(websockets.WebSocketServer, port)`` 元组。
     """
     broker = HumanRequestBroker()
+    state_store = GuiStateStore()
 
     def factory(
         project_root: str | None = None, state_root: Path | None = None
     ) -> ResearchRuntime:
         return make_runtime(project_root, state_root, ask_user=broker.ask)
 
-    handler = GuiRequestHandler(runtime or factory(), factory, broker)
+    stored_root = validate_project_root(state_store.load().active_project_root)
+    handler = GuiRequestHandler(
+        runtime or factory(stored_root),
+        factory,
+        broker,
+        state_store=state_store,
+    )
     transport = WebSocketTransport(handler)
     chosen_port = port if port is not None else _fixed_port()
     server = await transport.serve("127.0.0.1", chosen_port)

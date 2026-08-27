@@ -50,7 +50,10 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
     settingsGet()
       .then((settings) => {
         if (!mounted) return;
-        setCurrentRoot(settings.project_root || null);
+        const root = settings.project_root || null;
+        setCurrentRoot(root);
+        // 后端已恢复上次项目目录时直接进入主界面，不再弹选择页。
+        if (root) setPickerOpen(false);
         setReady(true);
       })
       .catch((err: unknown) => {
