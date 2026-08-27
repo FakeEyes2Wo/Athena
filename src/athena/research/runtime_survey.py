@@ -77,12 +77,14 @@ async def run_survey(runtime: Any) -> None:
             plan=SURVEY_PLAN_LABEL,
             tool="paper_survey",
         )
+
+        async def emit(kind: str, ref: str, data: dict[str, Any] | None = None) -> None:
+            await project_survey_event(runtime, kind, ref, data)
+
         report = await run_survey_pipeline(
             stack,
             SurveyRequest(query=topic, max_papers=runtime._survey_max_papers),
-            emit=lambda kind, ref, data=None: project_survey_event(
-                runtime, kind, ref, data
-            ),
+            emit=emit,
         )
     except asyncio.CancelledError:
         raise

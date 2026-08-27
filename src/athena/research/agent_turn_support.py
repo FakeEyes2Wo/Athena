@@ -20,6 +20,8 @@ from athena.utils.single_turn_chat import single_turn_chat
 class SupportVerificationMixin:
     """Mixin providing source and support verification for hypotheses."""
 
+    _runtime: Any
+
     async def _verify_sources(self, hypotheses: list[Hypothesis]) -> list[Hypothesis]:
         """只保留本轮**真正打开过正文**的论文，其余引用一律丢弃。
 

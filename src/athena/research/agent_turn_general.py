@@ -30,6 +30,10 @@ from athena.retrieval.web_search import WebFetchTool, WebSearchTool, WebSession
 class GeneralTurnMixin:
     """Mixin providing General Agent and Kaggle-handoff turns."""
 
+    _runtime: Any
+    _resolve_eda_dir: Any
+    _remember_handoff_ref: Any
+
     def _tools_with_kaggle(self, kind: str) -> ToolRegistry:
         """Kaggle（若接入）+ 共享会话的网页搜索/抓取。"""
         registry = ToolRegistry()

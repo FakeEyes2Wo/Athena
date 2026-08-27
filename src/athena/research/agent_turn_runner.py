@@ -9,8 +9,9 @@ import itertools
 import json
 import logging
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel
 
@@ -31,7 +32,10 @@ from athena.research.agent_turn_common import (
 from athena.research.agent_turn_general import GeneralTurnMixin
 from athena.research.agent_turn_support import SupportVerificationMixin
 from athena.research.idea_generation.gate import run_light_pipeline
-from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
+from athena.research.idea_generation.idea_schemas import (
+    IdeatorHypothesisBatch,
+    IdeatorHypothesisDraft,
+)
 from athena.research.supervisor.experiment import (
     handoff_block,
     load_agent_result,
@@ -144,6 +148,7 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
             return await self._run_debate_ideator_turn(count, handoff_texts)
         eda_dir = self._resolve_eda_dir(rt)
         ideation = getattr(rt, "ideation", "ideageneration")
+        lane_profiles: Iterator[IdeatorProfile | None]
         if ideation == "ideageneration":
             for profile in SEARCH_IDEATOR_PROFILES:
                 if not rt.registry.contains(profile.agent_type):
@@ -391,7 +396,10 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
                     raise RuntimeError(summary.error or "Ideator turn failed")
 
                 rejections: list[str] = []
-                kept = await self._finish_ideator_batch(batch, rejections=rejections)
+                kept = await self._finish_ideator_batch(
+                    cast(IdeatorHypothesisBatch | HypothesisBatch, batch),
+                    rejections=rejections,
+                )
                 if kept.hypotheses or not rejections or attempt == MAX_GATE_RETRIES:
                     if not kept.hypotheses and rejections:
                         await rt.publish_output(
@@ -440,7 +448,9 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
         eda_request = getattr(batch, "eda_request", None)
         if getattr(rt, "ideation", "ideageneration") != "ideageneration":
             return HypothesisBatch(
-                hypotheses=await self._verify_sources(list(batch.hypotheses)),
+                hypotheses=await self._verify_sources(
+                    cast(list[Hypothesis], batch.hypotheses)
+                ),
                 eda_request=eda_request,
             )
 
@@ -455,7 +465,7 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
                 await publish(source="agent", channel="text", text=f"gate> {message}")
 
         kept = await run_light_pipeline(
-            batch.hypotheses,
+            cast(list[IdeatorHypothesisDraft], batch.hypotheses),
             model=rt.model,
             artifacts=rt.store,
             progress=progress,
