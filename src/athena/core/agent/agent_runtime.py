@@ -18,9 +18,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from athena.core.agent.models import AgentOutcome
-from athena.core.agent.session import RunSession
-
 from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.agent.session import RunSession
 from athena.core.agent.types import (
     TERMINAL_RUN_STATUSES,
     AgentBusyError,
@@ -571,6 +570,52 @@ class AgentRuntime:
             handle = await self._manager.get(aid)
             await handle.shutdown_and_wait("agent close")
         self._closed_agents.update(order)
+
+    async def reap(self, agent_id: AgentId, *, recursive: bool = False) -> None:
+        """Close (if needed) and physically remove an agent from facade state.
+
+        Unlike ``close``, this also removes the agent's records, run history,
+        waits, and thread handle so one-shot subagents do not accumulate for the
+        lifetime of the process. It is idempotent: reaping an unknown or already
+        reaped agent is a no-op.
+        """
+        if agent_id not in self._records:
+            return
+        await self.close(agent_id, recursive=recursive)
+        order = [agent_id] + (self._descendants(agent_id) if recursive else [])
+        for aid in order:
+            await self._manager.delete(aid)
+        self._forget(order)
+
+    def _forget(self, agent_ids: Collection[AgentId]) -> None:
+        """Drop all facade bookkeeping for agents that have already been closed."""
+        doomed = set(agent_ids)
+        for aid in doomed:
+            self._records.pop(aid, None)
+            self._closed_agents.discard(aid)
+            self._active_turn.pop(aid, None)
+            self._last_terminal.pop(aid, None)
+        self._human_waits = {
+            request_id: owner
+            for request_id, owner in self._human_waits.items()
+            if owner not in doomed
+        }
+        remaining_waits: dict[AgentId, list[AgentId]] = {}
+        for owner, targets in self._agent_waits.items():
+            if owner in doomed:
+                continue
+            kept = [target for target in targets if target not in doomed]
+            if kept:
+                remaining_waits[owner] = kept
+        self._agent_waits = remaining_waits
+        run_ids = [
+            run_id
+            for run_id, owner in self._run_agent.items()
+            if owner in doomed
+        ]
+        for run_id in run_ids:
+            self._run_agent.pop(run_id, None)
+            self._run_summaries.pop(run_id, None)
 
     # 查询 / 投影
 

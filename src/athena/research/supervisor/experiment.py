@@ -8,6 +8,7 @@
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -29,6 +30,7 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
     PlanBest,
     PlanDecision,
     PlanInput,
@@ -42,6 +44,42 @@ _FORBIDDEN_EXECUTABLES = frozenset({"git", "git.exe"})
 _MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
 # 回给 agent 的多余键名上限，避免超长键把反馈挤爆。
 _MAX_FIELD_NAME_CHARS = 40
+# 只有改动真正的实现源文件才算“实验”；只改 manifest/输出/文档会被拒绝。
+_SEMANTIC_SOURCE_SUFFIXES = (".py", ".ipynb", ".sh", ".R", ".jl")
+_NON_IMPLEMENTATION_MARKERS = (
+    "predictions/",
+    "report",
+    "experiment.json",
+    ".md",
+)
+
+
+def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
+    """Return a rejection reason when a SEARCH diff does not implement source.
+
+    This is a deterministic first line of defense for attribution: it does not
+    prove the diff implements the exact intervention, but it rejects the obvious
+    non-experiments (manifest-only, output-only, doc-only) that currently pass
+    the “non-empty diff” gate.
+    """
+    if not paths:
+        return (
+            "this candidate changed no file, so it re-ran the parent unchanged and "
+            "cannot test anything. Implement the intervention in source code."
+        )
+    semantic = [
+        path
+        for path in paths
+        if path.endswith(_SEMANTIC_SOURCE_SUFFIXES)
+        and not any(marker in path for marker in _NON_IMPLEMENTATION_MARKERS)
+    ]
+    if not semantic:
+        return (
+            "this candidate changed no implementation source file; only "
+            "manifest/output/documentation changed. Implement the intervention "
+            "in a source file (e.g. model.py, features.py, train.py)."
+        )
+    return None
 
 
 def handoff_block(handoff: str) -> str:
@@ -302,6 +340,8 @@ class PlanTurnResult(BaseModel):
         "manifest_invalid",
         # SEARCH 候选一个文件都没改：它重跑的是父实验，测不了任何东西。
         "no_change",
+        # SEARCH 候选只改了 manifest/输出/文档，没有实现假设中的源码改动。
+        "diff_rejected",
     ]
     metric: float | None = None
     commit: CommitHash | None = None
@@ -333,6 +373,8 @@ async def apply_trusted_score(
     store: ArtifactStore,
     evidence_ref: ArtifactRef,
     direction: Direction = "maximize",
+    std_error: float | None = None,
+    n: int | None = None,
 ) -> PlanState:
     """应用一次可信分数：更新不可变 best 并调整 stale_rounds。
 
@@ -344,7 +386,13 @@ async def apply_trusted_score(
         metric > current.metric if direction == "maximize" else metric < current.metric
     )
     if improved:
-        best = PlanBest(metric=metric, commit=commit, evidence_ref=evidence_ref)
+        best = PlanBest(
+            metric=metric,
+            commit=commit,
+            evidence_ref=evidence_ref,
+            std_error=std_error,
+            n=n,
+        )
         best_ref = await store.put_text(best.model_dump_json())
         return state.model_copy(update={"best_ref": best_ref, "stale_rounds": 0})
     return state.model_copy(update={"stale_rounds": state.stale_rounds + 1})
@@ -413,7 +461,8 @@ class PlanRunner:
         branch: GitWorkBranch,
         context: ExecutionContext,
         direction: Direction = "maximize",
-        timeout_s: int = 120,
+        timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
+        placement: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self._execution = execution
         self._store = store
@@ -423,6 +472,7 @@ class PlanRunner:
         self._context = context
         self._direction = direction
         self._timeout_s = timeout_s
+        self._placement = placement
 
     @property
     def workdir(self) -> Path:
@@ -490,6 +540,26 @@ class PlanRunner:
                 predictions_ref=predictions_ref,
             )
 
+        if state.kind == "SEARCH":
+            diff = await self._workspace.diff(self._branch)
+            if not diff.paths:
+                return await self._failure(
+                    plan_id,
+                    "no_change",
+                    "this candidate changed no file, so it re-ran the parent unchanged and "
+                    "cannot test anything. Implement the intervention described in the "
+                    "hypothesis — edit the solution sources, then rerun and submit.",
+                    predictions_ref=predictions_ref,
+                )
+            rejected = _diff_implements_intervention(diff.paths)
+            if rejected is not None:
+                return await self._failure(
+                    plan_id,
+                    "diff_rejected",
+                    rejected,
+                    predictions_ref=predictions_ref,
+                )
+
         bundle = await self._load_bundle(plan_input.evaluator_ref)
         if bundle is None:
             return await self._failure(
@@ -524,20 +594,6 @@ class PlanRunner:
         metric = evaluation.test_score
 
         diff = await self._workspace.diff(self._branch)
-        # 一个字都没改的 SEARCH 候选不是实验。真机（2026-08-16）：4 个候选的 commit
-        # 全等于 baseline，predictions artifact 逐字节相同，分数一模一样，却有 3 条被
-        # 判 REFUTED——Agent 读了继承来的基线脚本、原样重跑、看见 0.8823 就提交，说
-        # "The hypothesis has produced a working solution"。评估修好之前这一切都被
-        # 恒定的 0.502 盖住了。空 diff 是可以直接判掉的信号。
-        if state.kind == "SEARCH" and not diff.paths:
-            return await self._failure(
-                plan_id,
-                "no_change",
-                "this candidate changed no file, so it re-ran the parent unchanged and "
-                "cannot test anything. Implement the intervention described in the "
-                "hypothesis — edit the solution sources, then rerun and submit.",
-                predictions_ref=predictions_ref,
-            )
         commit = await self._workspace.commit(
             self._branch, diff, f"plan {plan_id} trusted score {metric:.4f}"
         )
@@ -550,6 +606,11 @@ class PlanRunner:
                     "predictions_ref": predictions_ref,
                     "report_ref": report_ref,
                     "outputs": manifest.outputs,
+                    **(
+                        {"placement": self._placement()}
+                        if self._placement is not None
+                        else {}
+                    ),
                 },
                 ensure_ascii=False,
             )
@@ -563,6 +624,8 @@ class PlanRunner:
                 store=self._store,
                 evidence_ref=evidence_ref,
                 direction=self._direction,
+                std_error=evaluation.test_se,
+                n=evaluation.test_n,
             )
         return PlanTurnResult(
             kind="scored",
@@ -584,6 +647,7 @@ class PlanRunner:
             "execution_failed",
             "manifest_invalid",
             "no_change",
+            "diff_rejected",
         ],
         error: str,
         *,
@@ -597,6 +661,11 @@ class PlanRunner:
                     "kind": kind,
                     "error": cleaned,
                     "predictions_ref": predictions_ref,
+                    **(
+                        {"placement": self._placement()}
+                        if self._placement is not None
+                        else {}
+                    ),
                 },
                 ensure_ascii=False,
             )

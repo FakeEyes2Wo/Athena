@@ -36,10 +36,16 @@ class _Agents:
 def _runner(agents: _Agents, tmp_path) -> AgentTurnRunner:
     runtime = SimpleNamespace(
         _agents=agents,
+        agents=agents,
         _model="m",
+        model="m",
+        client=None,
         _store=SimpleNamespace(),
+        store=SimpleNamespace(),
         _ideation="ideageneration",
+        ideation="ideageneration",
         _supervisor=SimpleNamespace(evaluator_ref=None),
+        supervisor=SimpleNamespace(evaluator_ref=None),
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         publish_output=_noop_publish,
         survey_corpus_ref=lambda: None,
@@ -83,7 +89,7 @@ def _patch_turn(monkeypatch, kept_per_attempt):
             rejections.append(f"idea-{index}: risk_ok_methodology")
         return kept
 
-    monkeypatch.setattr(atr, "wait_run_events", _wait)
+    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", _wait)
     monkeypatch.setattr(atr, "load_agent_result", _load)
     monkeypatch.setattr(atr, "run_light_pipeline", _gate)
     return calls
@@ -138,6 +144,7 @@ async def test_baseline_mode_never_retries(tmp_path, monkeypatch):
     agents = _Agents()
     runner = _runner(agents, tmp_path)
     runner._runtime._ideation = "baseline"
+    runner._runtime.ideation = "baseline"
     _patch_turn(monkeypatch, [[]])
 
     kept = await runner._run_ideator_lane("ideator-1", 1, tmp_path)
@@ -170,7 +177,9 @@ async def test_a_lane_that_succeeds_survives_the_trip_back_to_run_ideator_turn(
 
     runner.run_data_turn = _record_data_turn
     runner._runtime._provider = object()
+    runner._runtime.provider = object()
     runner._runtime._registry = SimpleNamespace(contains=lambda _name: True)
+    runner._runtime.registry = SimpleNamespace(contains=lambda _name: True)
     runner._runtime.state = SimpleNamespace(
         ideator_count=1,
         hypotheses_per_ideator=1,
@@ -179,6 +188,7 @@ async def test_a_lane_that_succeeds_survives_the_trip_back_to_run_ideator_turn(
     )
     runner._runtime._events_bus.set_ideator_lanes = lambda _count: None
     runner._runtime._events_bus.publish_ideator_state = _publish_ideator_state
+    runner._runtime.events = runner._runtime._events_bus
     runner._resolve_eda_dir = lambda _rt: str(tmp_path)
 
     hypotheses = await runner.run_ideator_turn(1)

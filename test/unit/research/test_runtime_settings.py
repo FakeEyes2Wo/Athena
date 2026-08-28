@@ -32,6 +32,8 @@ def _runtime() -> ResearchRuntime:
             status="RUNNING",
             task_understanding=None,
             task_text=None,
+            data_root=None,
+            experiment_timeout_s=3600,
             save=lambda path: None,
         )
     )

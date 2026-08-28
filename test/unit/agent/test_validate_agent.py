@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from athena.agents.validate_agent import register_validate_agent
+from athena.agents.task_agents import register_validate_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry

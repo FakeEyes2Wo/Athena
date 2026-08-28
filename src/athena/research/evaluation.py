@@ -68,8 +68,30 @@ class TrustedEvaluator:
             ) from None
         if not math.isfinite(metric):
             raise ValueError(f"primary score must be finite, got {primary!r}")
+        test_se = result.outputs.get("test_se")
+        test_n = result.outputs.get("test_n")
+        if test_se is not None:
+            try:
+                test_se = float(test_se)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"test_se must be numeric, got {test_se!r}"
+                ) from None
+            if not math.isfinite(test_se) or test_se < 0:
+                raise ValueError(f"test_se must be a non-negative finite number, got {test_se!r}")
+        if test_n is not None:
+            try:
+                test_n = int(test_n)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"test_n must be an integer, got {test_n!r}"
+                ) from None
+            if test_n < 0:
+                raise ValueError(f"test_n must be non-negative, got {test_n!r}")
         return CandidateEvaluation(
             candidate_id=candidate_id,
             test_score=metric,
+            test_se=test_se,
+            test_n=test_n,
             direction=direction,
         )

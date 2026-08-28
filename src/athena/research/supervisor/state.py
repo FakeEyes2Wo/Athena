@@ -17,7 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.contracts import ArtifactRef
 from athena.core.persistence import atomic_write_json
-from athena.research.supervisor.plans import PlanState
+from athena.research.supervisor.plans import (
+    DEFAULT_EXPERIMENT_TIMEOUT_S,
+    PlanState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,9 @@ class ResearchState(BaseModel):
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
+    experiment_timeout_s: int = Field(default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1)
+    # 数据集根目录（供远端算力分发数据集；本地算力可空）。
+    data_root: str | None = None
     # 每轮 ideation 的并行 lane 数与每 lane 假设数（与 SEARCH 并发度解耦）。
     ideator_count: int = Field(default=3, ge=1, le=8)
     hypotheses_per_ideator: int = Field(default=2, ge=1, le=5)
@@ -92,7 +98,9 @@ class ResearchState(BaseModel):
     corpus_ref: str | None = None
     # Idea Generation 可用的 handoff 来源（前端 settings_set 可控制），
     # 取值示例：["kaggle"]、["kaggle", "literature"]、[]。
-    handoff_sources: list[str] = Field(default_factory=lambda: ["kaggle", "literature"])
+    # 从零启动时没有任何已生成的 handoff，因此默认为空列表；只有明确开启
+    # 或已由 PREPARE/调研产生后才由设置写入非空值。
+    handoff_sources: list[str] = Field(default_factory=list)
     # source -> artifact ref，记录已生成的 handoff，供断点续传复用。
     handoff_refs: dict[str, ArtifactRef] = Field(default_factory=dict)
     # 断点续传：首次完整任务文本（续跑时沿用，避免短消息污染 survey/PREPARE 提示词）。

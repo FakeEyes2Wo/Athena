@@ -207,6 +207,18 @@ class RuntimeThreadManager:
                 raise KeyError(f"unknown thread: {thread_id}")
             return self._handles[thread_id]
 
+    async def delete(self, thread_id: str) -> None:
+        """Shutdown (if needed) and remove one thread handle from the registry.
+
+        Used by ``AgentRuntime.reap`` so closed one-shot subagents no longer
+        accumulate in the process-wide thread registry.
+        """
+        self._require_ref(thread_id, "thread_id")
+        async with self._lock:
+            handle = self._handles.pop(thread_id, None)
+        if handle is not None:
+            await handle.shutdown_and_wait("agent reap")
+
     async def get_thread(self, thread_id: str) -> AthenaThread:
         """返回 Thread 的元数据快照。"""
         handle = await self.get(thread_id)

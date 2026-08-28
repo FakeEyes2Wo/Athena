@@ -212,7 +212,8 @@ select {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease), transform var(--dur) var(--ease);
+  box-shadow: var(--shadow-xs);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease), transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
   white-space: nowrap;
 }
 .btn:hover:not(:disabled) {
@@ -230,10 +231,12 @@ select {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+  box-shadow: 0 1px 2px var(--accent-soft), var(--shadow-xs);
 }
 .btn--primary:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
+  box-shadow: 0 4px 10px var(--accent-soft);
 }
 .btn--subtle {
   background: var(--accent-subtle);
@@ -408,6 +411,40 @@ select {
 .badge--danger  { background: var(--danger-subtle);  color: var(--danger);  border-color: var(--danger); }
 .badge--neutral { background: var(--surface-muted); color: var(--text-secondary); border-color: var(--border-strong); }
 .badge--info    { background: var(--info-subtle);    color: var(--info);    border-color: var(--info); }
+
+/* ===== Status pill ===== */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+.status-pill__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+.status-pill[data-status="running"] .status-pill__dot {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-subtle);
+}
+.status-pill[data-status="paused"] .status-pill__dot {
+  background: var(--warning);
+}
+.status-pill[data-status="completed"] .status-pill__dot {
+  background: var(--info);
+}
+.status-pill[data-status="error"] .status-pill__dot {
+  background: var(--danger);
+}
 
 /* ===== Empty state ===== */
 .empty-state {
@@ -978,7 +1015,32 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   color: var(--text-secondary);
   font-size: 14px;
   background: var(--bg);
+}
+.app-loading::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: icon-spin 0.8s linear infinite;
+}
+
+/* ===== Entrance animation ===== */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-in {
+  animation: fade-in-up 220ms var(--ease) both;
 }

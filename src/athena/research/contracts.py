@@ -47,6 +47,9 @@ class CandidateEvaluation(BaseModel):
 
     candidate_id: NonBlankText
     test_score: float
+    # Optional uncertainty evidence; when absent settlement must be conservative.
+    test_se: float | None = None
+    test_n: int | None = None
     kfold_mean: float | None = None
     kfold_std: float | None = None
     direction: Literal["maximize", "minimize"]

@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from athena.agents.ideator_agent import HandoffResult
-from athena.agents.prepare_eda_agent import EDA_WORKER_AGENT_TYPE, PREPARE_EDA_AGENT_ID
+from athena.agents.prepare_agent import EDA_WORKER_AGENT_TYPE, PREPARE_EDA_AGENT_ID
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactStore
 from athena.research.supervisor.experiment import load_agent_result
@@ -98,10 +98,23 @@ async def _run_one(
     for attempt in range(retries + 1):
         agent_id: str | None = None
         try:
+            # Prompt-driven agents read the task from ``content``. Passing only
+            # structured fields left the model with an empty user turn, so it
+            # started guessing which report file to write. Put the exact file
+            # name in the prompt and keep the structured fields for audit.
+            content = (
+                f"Write exactly one EDA report file.\n\n"
+                f"Assigned output file: {output_file}\n"
+                f"Todo: {text}\n"
+                f"Workspace: {workspace}\n\n"
+                "Do not write EDA_INDEX.md, EDA_HANDOFF.md, EDA_TODO.md, or any "
+                "file other than the assigned output file."
+            )
             agent_id, run_id = await agents.spawn(
                 parent_id,
                 EDA_WORKER_AGENT_TYPE,
                 {
+                    "content": content,
                     "todo_line": text,
                     "output_file": output_file,
                     "workspace": str(workspace),
@@ -137,6 +150,14 @@ async def _run_one(
             if attempt >= retries:
                 return False
             await asyncio.sleep(0.2)
+        finally:
+            # EDA workers are one-shot subagents: reap immediately so a long
+            # PREPARE phase does not accumulate threads/rollout metadata.
+            if agent_id is not None:
+                try:
+                    await agents.reap(agent_id)
+                except Exception:  # noqa: BLE001,S110 - GC must never mask task failure
+                    pass
     return False
 
 

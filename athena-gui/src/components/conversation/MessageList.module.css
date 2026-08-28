@@ -6,6 +6,22 @@
   scroll-behavior: smooth;
 }
 
+.message-list > * {
+  max-width: 860px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.message-list > .message-bubble--user {
+  margin-left: auto;
+}
+
+.message-list > .message-bubble--user,
+.message-list > .ideator-lane {
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .jump-to-bottom {
   position: sticky;
   bottom: 12px;
@@ -43,22 +59,27 @@
   font-weight: 400;
   white-space: pre-wrap;
   word-break: break-word;
+  box-shadow: var(--shadow-xs);
 }
 
 .message-bubble--user {
   background: var(--accent-subtle);
   border: 1px solid var(--accent-soft);
   color: var(--text-primary);
+  border-top-right-radius: 4px;
+  max-width: 720px;
 }
 
 .message-bubble--supervisor {
   background: var(--warning-subtle);
   border: 1px solid var(--warning);
+  border-left: 3px solid var(--warning);
 }
 
 .message-bubble--agent {
   background: var(--surface-muted);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
 }
 
 .marker {
@@ -82,6 +103,7 @@
   padding: 8px 12px;
   background: var(--surface-muted);
   font-size: 13px;
+  box-shadow: var(--shadow-xs);
 }
 
 .tool-call__head {
@@ -151,6 +173,7 @@
   border-radius: var(--radius-bubble);
   padding: var(--space-sm) var(--space-md);
   background: var(--surface);
+  box-shadow: var(--shadow-xs);
 }
 
 .ideator-lane__title {

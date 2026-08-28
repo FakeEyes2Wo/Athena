@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from athena.agents import prepare_eda_agent
+from athena.agents import prepare_agent
 from athena.research import eda_todo
 from athena.research.eda_todo import run_eda_todos
 
@@ -16,12 +16,16 @@ class _FakeAgents:
     def __init__(self) -> None:
         self.spawned: list[dict] = []
         self.cancelled: list[tuple[str, str, str]] = []
+        self.reaped: list[str] = []
 
     async def spawn(self, parent_id, agent_type, task, *, name=None):
         self.spawned.append(
             {"parent": parent_id, "type": agent_type, "task": task, "name": name}
         )
         return f"agent-{len(self.spawned)}", f"run-{len(self.spawned)}"
+
+    async def reap(self, agent_id):
+        self.reaped.append(agent_id)
 
     async def wait_run(self, run_id):
         return SimpleNamespace(run_id=run_id, status="COMPLETED", error=None)
@@ -75,6 +79,7 @@ async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
     assert "- [x] 01 Quality" in text
     assert "- [x] 02 Columns" in text
     assert agents.spawned == []
+    assert agents.reaped == []
 
 
 @pytest.mark.asyncio
@@ -110,6 +115,7 @@ async def test_run_eda_todos_keeps_failed_todo_unchecked(
     assert failed == ["00 Overview"]
     text = todo_file.read_text(encoding="utf-8")
     assert "- [ ] 00 Overview" in text
+    assert agents.reaped == ["agent-1", "agent-2"]
 
 
 @pytest.mark.asyncio
@@ -185,10 +191,8 @@ def test_prepare_eda_agents_use_strict_cost_budgets(
     def capture_registration(registry, **kwargs):
         registrations.append(kwargs)
 
-    monkeypatch.setattr(
-        prepare_eda_agent, "register_prompt_agent", capture_registration
-    )
-    prepare_eda_agent.register_prepare_eda_agent(
+    monkeypatch.setattr(prepare_agent, "register_prompt_agent", capture_registration)
+    prepare_agent.register_prepare_eda_agent(
         None,
         provider=object(),
         artifacts=None,

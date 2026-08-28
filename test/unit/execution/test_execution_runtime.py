@@ -200,6 +200,54 @@ async def test_truncation_caps_output_and_hashes(tmp_path: Path, monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_truncation_keeps_the_tail_where_the_failure_is(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """截断必须留尾。
+
+    训练日志前面是配置回显，最后才是 traceback / 最终指标 / OOM。只留头等于
+    精确地删掉唯一有用的那一段，而且流读过就没了。省略要在正文里说清楚断了多少，
+    否则 agent 会把拼接处当成真实内容读。
+    """
+    monkeypatch.setattr("athena.execution.runtime.MAX_OUTPUT_CHARS", 300)
+    script = (
+        "print('CONFIG-ECHO'); print('n' * 5000); "
+        "print('Traceback (most recent call last)'); print('RuntimeError: CUDA OOM')"
+    )
+    result = await _runtime(tmp_path).run(_context(tmp_path), f'{PY} -c "{script}"')
+
+    assert result.truncated
+    assert "CONFIG-ECHO" in result.stdout, "头部要留：它说明跑的是什么"
+    assert "RuntimeError: CUDA OOM" in result.stdout, "尾部要留：失败现场在最后"
+    assert "chars elided" in result.stdout, "省略必须写在正文里"
+
+
+@pytest.mark.asyncio
+async def test_the_artifact_behind_output_ref_is_the_complete_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``output_ref`` 承诺"完整输出在这里"，就必须真的完整。
+
+    存一份被砍过的，等于给了 agent 一个骗人的引用：它拿着 ref 去查 traceback，
+    查到的还是被砍掉 traceback 的那份。
+    """
+    monkeypatch.setattr("athena.execution.runtime.MAX_OUTPUT_CHARS", 300)
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    runtime = ExecutionRuntime(
+        project_root=tmp_path, environment_root=tmp_path, store=store
+    )
+    script = "print('HEAD-MARK'); print('n' * 5000); print('TAIL-MARK')"
+
+    result = await runtime.run(_context(tmp_path), f'{PY} -c "{script}"')
+
+    assert result.truncated and result.output_ref is not None
+    full = await store.get_text(result.output_ref)
+    assert "HEAD-MARK" in full and "TAIL-MARK" in full
+    assert full.count("n") >= 5000, "中间那 5000 行也必须在"
+    assert result.output_ref in result.stdout, "正文要告诉 agent 去哪儿取全的"
+
+
+@pytest.mark.asyncio
 async def test_missing_shell_reports_error(tmp_path: Path) -> None:
     """shell 路径不存在 → error=shell_not_found（FileNotFoundError 不穿透）。"""
     executor = CommandExecutor(env={})

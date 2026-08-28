@@ -184,7 +184,7 @@ class _ManifestExecution:
 
     def ensure_environment(self) -> None:
         """Stub：测试不涉及真实共享环境初始化。"""
-        return None
+        return
 
     async def run(self, context, command=None, *, argv=None, emit=None, **_kwargs):
         assert command is None
@@ -360,10 +360,9 @@ async def test_prepare_uses_one_agent_plan_and_workspace(tmp_path: Path) -> None
     await harness.start()
     try:
         await harness.run()
-        snapshots = harness.agents.list_agents()
-        assert [(item.agent_id, item.name) for item in snapshots] == [
-            ("prepare", "prepare")
-        ]
+        # PREPARE reaps its one-shot agent after the phase completes; the rollout
+        # file remains on disk for audit/resume, but the facade no longer holds it.
+        assert harness.agents.list_agents() == []
         assert (tmp_path / ".athena" / "logs" / "agents" / "prepare.jsonl").is_file()
     finally:
         await harness.close()
@@ -421,7 +420,9 @@ async def test_invalid_manifest_is_repaired_by_the_same_agent(tmp_path: Path) ->
     await harness.start()
     try:
         await harness.run()
-        assert len(harness.agents.list_agents()) == 1
+        # The repaired PREPARE agent is reaped after the run; the same logical
+        # agent is still evidenced by the provider having seen two turns.
+        assert harness.agents.list_agents() == []
         assert harness.prepare_provider.turn == 2
     finally:
         await harness.close()
@@ -461,7 +462,7 @@ async def test_prepare_has_no_internal_step_state(tmp_path: Path) -> None:
     await harness.start()
     try:
         await harness.run()
-        assert len(harness.agents.list_agents()) == 1
+        assert harness.agents.list_agents() == []
         assert not (
             Path(harness.branch.path) / ".athena" / "prepare-state.json"
         ).exists()

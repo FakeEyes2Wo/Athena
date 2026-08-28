@@ -130,12 +130,14 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
         )
 
     monkeypatch.setattr(
-        "athena.research.phase_runner.run_evaluator_plan",
+        "athena.research.prepare_phase.run_evaluator_plan",
         run_evaluator_plan,
         raising=False,
     )
     monkeypatch.setattr(
-        "athena.research.phase_runner.run_prepare_plan", run_prepare_plan, raising=False
+        "athena.research.prepare_phase.run_prepare_plan",
+        run_prepare_plan,
+        raising=False,
     )
     runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
     runtime.register_supervisor(provider=object())
@@ -187,12 +189,14 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
         )
 
     monkeypatch.setattr(
-        "athena.research.phase_runner.run_evaluator_plan",
+        "athena.research.prepare_phase.run_evaluator_plan",
         run_evaluator_plan,
         raising=False,
     )
     monkeypatch.setattr(
-        "athena.research.phase_runner.run_prepare_plan", run_prepare_plan, raising=False
+        "athena.research.prepare_phase.run_prepare_plan",
+        run_prepare_plan,
+        raising=False,
     )
     runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
     runtime.register_supervisor(provider=object())

@@ -287,6 +287,22 @@ export interface ModelConnection {
   llm_api_key: string;
 }
 
+export interface ComputeHostSettings {
+  name: string;
+  ssh: string;
+  gpus: number[] | "auto";
+  max_leases: number;
+}
+
+export interface ComputeSettings {
+  mode: "local" | "ssh";
+  placement: "pack" | "spread" | "homogeneous";
+  fallback: "never" | "ask";
+  gpus_per_experiment: number;
+  queue_timeout_s: number | null;
+  hosts: ComputeHostSettings[];
+}
+
 export interface GuiSettings {
   project_root: string;
   model: string | null;
@@ -299,6 +315,9 @@ export interface GuiSettings {
   manual_mode: boolean;
   phase: string;
   status: string;
+  data_root: string | null;
+  experiment_timeout_s: number;
+  compute: ComputeSettings;
   model_connection: ModelConnection;
 }
 
@@ -314,6 +333,16 @@ export const DEFAULT_GUI_SETTINGS: GuiSettings = {
   manual_mode: false,
   phase: "idle",
   status: "idle",
+  data_root: null,
+  experiment_timeout_s: 3600,
+  compute: {
+    mode: "local",
+    placement: "pack",
+    fallback: "never",
+    gpus_per_experiment: 1,
+    queue_timeout_s: null,
+    hosts: [],
+  },
   model_connection: {
     provider: "deepseek",
     base_url: "",

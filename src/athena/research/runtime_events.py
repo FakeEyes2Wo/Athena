@@ -286,6 +286,14 @@ class RuntimeEvents:
             *(invoke(key, emit) for key, emit in list(self._subscribers.items()))
         )
 
+    async def aclose(self) -> None:
+        """Cancel pending subscriber handshakes and drop all subscribers."""
+        for ready in self._subscriber_ready.values():
+            if not ready.done():
+                ready.cancel()
+        self._subscriber_ready.clear()
+        self._subscribers.clear()
+
     def _append_log(self, record: dict[str, object]) -> None:
         """Append one session record to the active session's transcript (best-effort)."""
         try:
@@ -298,7 +306,7 @@ class RuntimeEvents:
     def persist_user_message(self, text: str) -> None:
         """Append one Human message to the active session, sharing the output seq."""
         self._append_log(
-            {"type": "user", "seq": self._events._next_sequence(), "text": text}
+            {"type": "user", "seq": self._events.next_sequence(), "text": text}
         )
 
     def resume_sequence(self) -> None:

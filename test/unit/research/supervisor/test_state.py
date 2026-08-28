@@ -33,6 +33,13 @@ def _search_state() -> ResearchState:
     )
 
 
+def test_fresh_state_defaults_handoff_sources_to_empty() -> None:
+    state = _search_state()
+    assert state.handoff_sources == []
+    assert state.handoff_refs == {}
+    assert state.final_evaluator_ref is None
+
+
 def test_search_plan_round_trips_with_exact_durable_fields(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     state = _search_state()

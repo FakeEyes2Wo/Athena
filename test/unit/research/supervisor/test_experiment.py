@@ -15,6 +15,7 @@ from athena.research.contracts import CandidateEvaluation, DataScriptBundle
 from athena.research.script_runner import load_directory
 from athena.research.supervisor.experiment import (
     ExperimentManifest,
+    _diff_implements_intervention,
     _manifest_validation_summary,
     PlanRunner,
     PlanTurnResult,
@@ -37,6 +38,15 @@ def _decision(value: str) -> PlanDecision:
     return PlanDecision.model_validate(
         {"decision": value, "reason": f"test decision: {value}"}
     )
+
+
+def test_diff_implements_intervention_rejects_non_source_changes() -> None:
+    assert _diff_implements_intervention(()) is not None
+    assert _diff_implements_intervention(("experiment.json",)) is not None
+    assert _diff_implements_intervention(("predictions/test.csv",)) is not None
+    assert _diff_implements_intervention(("README.md",)) is not None
+    assert _diff_implements_intervention(("model.py",)) is None
+    assert _diff_implements_intervention(("features.py", "experiment.json")) is None
 
 
 def test_scored_turn_result_requires_next_state() -> None:
@@ -91,7 +101,7 @@ class _FakeWorkspace:
         self.messages: list[str] = []
 
     async def diff(self, workspace: GitWorkBranch) -> GitDiff:
-        diff = GitDiff(ref=_OTHER_REF, paths=("experiment.json",))
+        diff = GitDiff(ref=_OTHER_REF, paths=("model.py", "experiment.json"))
         self.diffs.append(diff)
         return diff
 

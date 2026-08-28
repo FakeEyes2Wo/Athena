@@ -61,6 +61,9 @@ class _AgentRuntime:
             },
         )()
 
+    async def reap(self, agent_id: str) -> None:
+        del agent_id
+
 
 class _Scripts:
     """Freeze stub asserting the evaluator directory freezes to evaluate.py."""
@@ -340,6 +343,33 @@ async def test_labels_without_a_row_id_column_never_freeze(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_labels_with_wrong_row_id_column_never_freeze(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    _evaluator_draft(evaluator_dir, "id,label\n0,0\n1,1\n")
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(ValueError, match="__athena_row_id"):
+        await _freeze_evaluator(
+            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        )
+
+
+@pytest.mark.asyncio
+async def test_labels_with_duplicate_row_ids_never_freeze(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    _evaluator_draft(
+        evaluator_dir,
+        "__athena_row_id,label\n0,0\n0,1\n",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(ValueError, match="duplicate '__athena_row_id'"):
+        await _freeze_evaluator(
+            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        )
+
+
+@pytest.mark.asyncio
 async def test_labels_carrying_a_row_id_column_freeze_normally(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
@@ -361,7 +391,7 @@ async def test_freeze_evaluator_accepts_labels_directory_and_handoff(
     evaluator_dir = tmp_path / "evaluator"
     (evaluator_dir / "labels").mkdir(parents=True)
     (evaluator_dir / "labels" / "truth.csv").write_text(
-        "id,label\n1,0\n", encoding="utf-8"
+        "__athena_row_id,label\n1,0\n", encoding="utf-8"
     )
     (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
     (evaluator_dir / "pyproject.toml").write_text(
@@ -384,13 +414,37 @@ async def test_freeze_evaluator_accepts_labels_directory_and_handoff(
 
 
 @pytest.mark.asyncio
+async def test_freeze_evaluator_rejects_labels_directory_without_row_id(
+    tmp_path: Path,
+) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    (evaluator_dir / "labels").mkdir(parents=True)
+    (evaluator_dir / "labels" / "truth.csv").write_text(
+        "id,label\n1,0\n", encoding="utf-8"
+    )
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    with pytest.raises(ValueError, match="__athena_row_id"):
+        await _freeze_evaluator(
+            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        )
+
+
+@pytest.mark.asyncio
 async def test_freeze_evaluator_accepts_eval_script_directory(tmp_path: Path) -> None:
     """``eval_script`` may name a directory whose entrypoint is evaluate.py."""
     evaluator_dir = tmp_path / "evaluator"
     inner = evaluator_dir / "evaluator"
     inner.mkdir(parents=True)
     (inner / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (inner / "labels.csv").write_text("id,label\n1,0\n", encoding="utf-8")
+    (inner / "labels.csv").write_text("__athena_row_id,label\n1,0\n", encoding="utf-8")
     (inner / "pyproject.toml").write_text(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
@@ -411,7 +465,12 @@ async def test_freeze_evaluator_rejects_policy_metric_mismatch(tmp_path: Path) -
     evaluator_dir = tmp_path / "evaluator"
     evaluator_dir.mkdir()
     (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (evaluator_dir / "labels.csv").write_text("id,label\n1,0\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text(
+        "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
+    )
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
     (evaluator_dir / "metric.json").write_text(
         json.dumps(
             {
@@ -443,23 +502,21 @@ async def test_freeze_evaluator_rejects_policy_metric_mismatch(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_evaluator_plan_freezes_on_submit(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
-    for split, row_id in (("search", "r1"), ("final", "r2")):
-        split_dir = evaluator_dir / split
-        split_dir.mkdir(parents=True, exist_ok=True)
-        (split_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-        (split_dir / "labels.csv").write_text(
-            f"__athena_row_id,label\n{row_id},0\n", encoding="utf-8"
-        )
-        (split_dir / "pyproject.toml").write_text(
-            "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
-        )
-        (split_dir / "metric.json").write_text(
-            json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
-        )
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text(
+        "__athena_row_id,label\nr1,0\nr2,1\n", encoding="utf-8"
+    )
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
+    )
     store = LocalArtifactStore(tmp_path / "artifacts")
     agents = _AgentRuntime(store, agent_id="evaluator")
 
-    evaluator_refs = await run_evaluator_plan(
+    evaluator_ref = await run_evaluator_plan(
         agents=agents,
         scripts=_Scripts(),
         store=store,
@@ -469,7 +526,7 @@ async def test_evaluator_plan_freezes_on_submit(tmp_path: Path) -> None:
         max_turns=2,
     )
 
-    assert evaluator_refs.search_ref != evaluator_refs.final_ref
+    assert evaluator_ref
     assert agents.created == ["evaluator"]
     assert agents.feedback == []
 
@@ -492,9 +549,7 @@ async def test_evaluator_plan_missing_metric_retries(tmp_path: Path) -> None:
         )
 
     assert agents.created == ["evaluator"]
-    assert agents.feedback == [
-        "evaluator must create search/labels.csv and final/labels.csv"
-    ]
+    assert agents.feedback == ["metric.json is missing"]
 
 
 @pytest.mark.asyncio

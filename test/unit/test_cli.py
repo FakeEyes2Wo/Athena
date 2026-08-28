@@ -107,6 +107,8 @@ def test_run_options_configure_runtime_constructor() -> None:
         "survey_max_papers": 20,
         "survey_search_top_k": 0,
         "survey_max_seconds": 0.0,
+        "experiment_timeout_s": args.experiment_timeout,
+        "compute": cli._compute_config(args),
     }
 
 

@@ -23,6 +23,9 @@ _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
 PublishEvent = Callable[[str, str, dict | None], Awaitable[None]]
 
+DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
+"""Default wall-clock budget for one experiment command (seconds)."""
+
 
 async def forward_run_events(
     agents: AgentRuntime, run_id: str, publish: PublishEvent
@@ -121,6 +124,11 @@ class PlanInput(BaseModel):
     reference_priority: float = 0.0
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    # Optional statistical decision knobs; used when the evaluator reports
+    # uncertainty (std_error/n).
+    min_effect_size: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    alpha: float = Field(default=0.05, gt=0, le=1)
+    family_size: int = Field(default=1, ge=1)
     evaluator_ref: ArtifactRef
     tree_ref: ArtifactRef
     # 冻结评估器的自述契约（HANDOFF.md 原文）。候选要写 predictions/，不给它这份东西
@@ -164,6 +172,9 @@ class PlanBest(BaseModel):
     metric: float = Field(allow_inf_nan=False)
     commit: CommitHash
     evidence_ref: ArtifactRef
+    # Optional uncertainty evidence from the trusted evaluator.
+    std_error: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    n: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _validate_evidence_ref(self) -> "PlanBest":

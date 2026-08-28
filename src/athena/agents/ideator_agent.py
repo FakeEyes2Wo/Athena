@@ -1,9 +1,10 @@
 """Autonomous Ideator Agent registration.
 
 SEARCH 空槽需要新假设时，ResearchRuntime 按 ``IdeatorProfile`` 派发不同激进级别的
-Ideator Agent：exploit / bold / moonshot。三个 profile 共用同一套 ``extra_tools``，
-唯一区别是 ``prompt_agent_type`` 和输出契约；baseline_ideator 复用同一机制，只是
-输出 ``HandoffResult``（写 handoff MD，不产 hypothesis）。
+Ideator Agent：exploit / bold / moonshot。三个 profile 共用同一套 ``extra_tools``
+和同一个 gated prompt（``ideator_gated_agent.md``），通过 ``task_hint`` 区分激进程度；
+baseline_ideator 复用同一机制，只是输出 ``HandoffResult``（写 handoff MD，不产
+hypothesis）。
 
 工具绑定 PREPARE 产生的 EDA 工作区目录；gated 模式下产出先经
 ``research/idea_generation/gate.run_light_pipeline`` 门禁，再写入 ResearchTree。
@@ -63,7 +64,7 @@ BASELINE_IDEATOR_PROFILE = IdeatorProfile(
 
 EXPLOIT_IDEATOR_PROFILE = IdeatorProfile(
     agent_type="ideator_exploit",
-    prompt_agent_type="ideator_exploit",
+    prompt_agent_type=GATED_PROMPT_TYPE,
     output_type=IdeatorHypothesisBatch,
     task_hint=(
         "Improve the existing baseline: repairs, component changes, and "
@@ -73,7 +74,7 @@ EXPLOIT_IDEATOR_PROFILE = IdeatorProfile(
 
 BOLD_IDEATOR_PROFILE = IdeatorProfile(
     agent_type="ideator_bold",
-    prompt_agent_type="ideator_bold",
+    prompt_agent_type=GATED_PROMPT_TYPE,
     output_type=IdeatorHypothesisBatch,
     task_hint=(
         "Replace major components and methods. Include at least one complete "
@@ -83,7 +84,7 @@ BOLD_IDEATOR_PROFILE = IdeatorProfile(
 
 MOONSHOT_IDEATOR_PROFILE = IdeatorProfile(
     agent_type="ideator_moonshot",
-    prompt_agent_type="ideator_moonshot",
+    prompt_agent_type=GATED_PROMPT_TYPE,
     output_type=IdeatorHypothesisBatch,
     task_hint=(
         "Forget the baseline entirely. Propose completely new architectures or "
