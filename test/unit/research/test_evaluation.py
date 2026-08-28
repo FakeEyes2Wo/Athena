@@ -1,6 +1,7 @@
 """TrustedEvaluator metric-validation tests (finite scalar primary)."""
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -14,7 +15,7 @@ class _FakeRunner:
     def __init__(self, outputs: dict[str, object]) -> None:
         self._outputs = outputs
 
-    async def run(self, *_args, **_kwargs) -> ScriptRunResult:
+    async def run_dir(self, *_args, **_kwargs) -> ScriptRunResult:
         return ScriptRunResult(outputs=self._outputs)
 
 
@@ -27,7 +28,7 @@ async def test_score_rejects_non_finite_metric() -> None:
     for bad in (float("nan"), float("inf"), float("-inf"), "nan", "Infinity"):
         with pytest.raises(ValueError, match="finite"):
             await _evaluator({"primary": bad}).score(
-                eval_bundle=None,  # type: ignore[arg-type]
+                evaluator_dir=Path("."),
                 predictions={},
                 candidate_id="c",
                 direction="maximize",
@@ -40,7 +41,7 @@ async def test_score_rejects_non_scalar_metric() -> None:
     for bad in ([0.8], {"x": 1}, True):
         with pytest.raises(ValueError, match="number"):
             await _evaluator({"primary": bad}).score(
-                eval_bundle=None,  # type: ignore[arg-type]
+                evaluator_dir=Path("."),
                 predictions={},
                 candidate_id="c",
                 direction="maximize",
@@ -51,7 +52,7 @@ async def test_score_rejects_non_scalar_metric() -> None:
 @pytest.mark.asyncio
 async def test_score_accepts_finite_number_and_numeric_string() -> None:
     result = await _evaluator({"primary": 0.84}).score(
-        eval_bundle=None,  # type: ignore[arg-type]
+        evaluator_dir=Path("."),
         predictions={},
         candidate_id="c",
         direction="maximize",
@@ -66,7 +67,7 @@ async def test_score_carries_optional_uncertainty_fields() -> None:
     result = await _evaluator(
         {"primary": 0.84, "test_se": 0.02, "test_n": 100}
     ).score(
-        eval_bundle=None,  # type: ignore[arg-type]
+        evaluator_dir=Path("."),
         predictions={},
         candidate_id="c",
         direction="maximize",
@@ -80,7 +81,7 @@ async def test_score_carries_optional_uncertainty_fields() -> None:
 async def test_score_rejects_invalid_uncertainty_fields() -> None:
     with pytest.raises(ValueError, match="test_se"):
         await _evaluator({"primary": 0.84, "test_se": -1}).score(
-            eval_bundle=None,  # type: ignore[arg-type]
+            evaluator_dir=Path("."),
             predictions={},
             candidate_id="c",
             direction="maximize",
@@ -88,7 +89,7 @@ async def test_score_rejects_invalid_uncertainty_fields() -> None:
         )
     with pytest.raises(ValueError, match="test_n"):
         await _evaluator({"primary": 0.84, "test_n": "many"}).score(
-            eval_bundle=None,  # type: ignore[arg-type]
+            evaluator_dir=Path("."),
             predictions={},
             candidate_id="c",
             direction="maximize",

@@ -11,8 +11,9 @@ SEARCH 的 Idea Generation 需要 Kaggle 社区证据（Discussion + Notebook）
 """
 
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from athena.agents.prompt_agent import register_prompt_agent
 from athena.core.agent.registry import AgentTypeRegistry
@@ -26,20 +27,18 @@ KAGGLE_HANDOFF_FILENAME = "KAGGLE_HANDOFF.md"
 KAGGLE_EVIDENCE_FILENAME = "KAGGLE_EVIDENCE.json"
 
 
+StrOrEmpty = Annotated[str, BeforeValidator(lambda v: str(v) if v is not None else "")]
+
+
 class KaggleNotebookEvidence(BaseModel):
     """One notebook actually read by the handoff agent."""
 
     model_config = ConfigDict(extra="forbid")
 
-    ref: str
-    version: str = ""
-    title: str = ""
-    url: str = ""
-
-    @field_validator("ref", "version", "title", "url", mode="before")
-    @classmethod
-    def _coerce_to_str(cls, value: object) -> object:
-        return str(value) if value is not None else ""
+    ref: StrOrEmpty
+    version: StrOrEmpty = ""
+    title: StrOrEmpty = ""
+    url: StrOrEmpty = ""
 
 
 class KaggleDiscussionEvidence(BaseModel):
@@ -47,14 +46,9 @@ class KaggleDiscussionEvidence(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ref: str
-    title: str = ""
-    url: str = ""
-
-    @field_validator("ref", "title", "url", mode="before")
-    @classmethod
-    def _coerce_to_str(cls, value: object) -> object:
-        return str(value) if value is not None else ""
+    ref: StrOrEmpty
+    title: StrOrEmpty = ""
+    url: StrOrEmpty = ""
 
 
 class KaggleHandoffResult(BaseModel):
@@ -64,19 +58,20 @@ class KaggleHandoffResult(BaseModel):
 
     summary: str = Field(min_length=1)
     handoff_file: str = Field(default=KAGGLE_HANDOFF_FILENAME)
-    notebooks: list[KaggleNotebookEvidence] = Field(
+    notebooks: Annotated[
+        list[KaggleNotebookEvidence],
+        BeforeValidator(lambda v: [] if v is None else v),
+    ] = Field(
         default_factory=list,
         description="Notebooks actually read; include the exact version when known.",
     )
-    discussions: list[KaggleDiscussionEvidence] = Field(
+    discussions: Annotated[
+        list[KaggleDiscussionEvidence],
+        BeforeValidator(lambda v: [] if v is None else v),
+    ] = Field(
         default_factory=list,
         description="Discussion threads actually read.",
     )
-
-    @field_validator("notebooks", "discussions", mode="before")
-    @classmethod
-    def _none_to_empty(cls, value: object) -> object:
-        return [] if value is None else value
 
 
 def register_kaggle_handoff_agent(

@@ -386,7 +386,21 @@ async def _finalize_step(
     # 写入工具返回结果到对话历史
     for i, tc in enumerate(tool_calls):
         r = results[i]
-        content = _to_str(r)
+        if isinstance(r, ToolResult):
+            if not r.success:
+                content = f"[ERROR] {r.error}" if r.error else "[ERROR]"
+            elif r.data is None:
+                content = "[OK]"
+            else:
+                content = (
+                    json.dumps(r.data, ensure_ascii=False)
+                    if isinstance(r.data, (dict, list))
+                    else str(r.data)
+                )
+        elif isinstance(r, BaseException):
+            content = f"[ERROR] {type(r).__name__}: {r}"
+        else:
+            content = str(r)
         if len(content) > 50000:
             content = content[:24950] + "\n...[TRUNCATED]...\n" + content[-24950:]
         mem.append(
@@ -536,23 +550,6 @@ def create_code_agent(
 ) -> Agent:
     """构造代码 agent（Agent 别名，供组合根使用）。"""
     return Agent(model, tools, system_prompt, config)
-
-
-def _to_str(r: Any) -> str:
-    """将 ToolResult 或异常转为字符串，用于写入对话历史。"""
-    if isinstance(r, ToolResult):
-        if not r.success:
-            return f"[ERROR] {r.error}" if r.error else "[ERROR]"
-        if r.data is None:
-            return "[OK]"
-        return (
-            json.dumps(r.data, ensure_ascii=False)
-            if isinstance(r.data, (dict, list))
-            else str(r.data)
-        )
-    if isinstance(r, BaseException):
-        return f"[ERROR] {type(r).__name__}: {r}"
-    return str(r)
 
 
 def _load_input(ctx: AgentContext) -> str:

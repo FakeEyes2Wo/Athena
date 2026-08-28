@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.execution.runtime import CommandResult, ExecutionContext
-from athena.research.contracts import CandidateEvaluation, DataScriptBundle
+from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.script_runner import load_directory
 from athena.research.supervisor.experiment import (
     ExperimentManifest,
@@ -122,12 +122,11 @@ class _FakeEvaluator:
     async def score(
         self,
         *,
-        eval_bundle: DataScriptBundle,
+        evaluator_dir: Path,
         predictions: dict[str, bytes],
         candidate_id: str,
         direction: str,
         predictions_root: str = "predictions.csv",
-        predictions_path: str = "predictions.csv",  # 兼容旧调用，Task 3/4 落定后移除
     ) -> CandidateEvaluation:
         if self._error is not None:
             raise self._error
@@ -158,8 +157,17 @@ async def _runner_setup(
     tmp_path: Path, *, execution: _FakeExecution, evaluator: _FakeEvaluator
 ):
     store = LocalArtifactStore(tmp_path / "artifacts")
-    bundle = DataScriptBundle(bundle_id="b1", entrypoint="eval.py")
-    evaluator_ref = await store.put_text(bundle.model_dump_json())
+    evaluator_dir = tmp_path / "eval"
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
+    readme = "# Evaluator Freeze Marker\n\nDo not edit.\n"
+    (evaluator_dir / "README.md").write_text(readme, encoding="utf-8")
+    readme_ref = await store.put_text(readme)
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(evaluator_dir),
+        readme_ref=readme_ref,
+        entrypoint="eval.py",
+    )
+    evaluator_ref = await store.put_text(descriptor.model_dump_json())
     plan_input = PlanInput(evaluator_ref=evaluator_ref, tree_ref=_OTHER_REF)
     branch = GitWorkBranch(
         path=str(tmp_path / "ws"), branch="athena/plan/h1", base_commit="c0"

@@ -6,14 +6,15 @@
 
 import math
 import subprocess
+from pathlib import Path
 from typing import Literal
 
-from athena.research.contracts import CandidateEvaluation, DataScriptBundle
+from athena.research.contracts import CandidateEvaluation
 from athena.research.script_runner import DataScriptRunner
 
 
 class TrustedEvaluator:
-    """唯一可信 test/final-test evaluator：运行冻结 eval bundle 对齐预测与标签。
+    """唯一可信 test/final-test evaluator：运行 README-only evaluator 目录。
 
     只有 trusted evaluator 读取 test/final labels；脚本异常、对齐失败或缺少
     ``primary`` 分数都视为该 evaluation 失败，不允许平台侧补救或重新评分。
@@ -25,28 +26,26 @@ class TrustedEvaluator:
     async def score(
         self,
         *,
-        eval_bundle: DataScriptBundle,
+        evaluator_dir: Path,
         predictions: dict[str, bytes],
         candidate_id: str,
         direction: Literal["maximize", "minimize"],
         predictions_root: str,
     ) -> CandidateEvaluation:
-        """运行 eval 入口，只注入 predictions 目录；labels 来自冻结 bundle（design 修复 5）。
+        """运行 eval 入口，只注入 predictions 目录；labels 留在 evaluator 目录。
 
         评估脚本崩溃/超时/缺字段/非有限分数，都视为该候选的评分失败（ValueError），
         由上层按 ``scoring_failed`` 重试，而不是误判成 evaluator 基础设施故障而终止。
         ``predictions`` 是预测目录的内存表示（相对路径 → 字节），``predictions_root``
-        是注入到重建 bundle 工作目录的目录根（如 "predictions"）；runner 据此把每个
-        文件写为 ``{predictions_root}/{相对路径}``，供 trusted evaluator 在对齐后运行
-        eval 入口读取。
+        是注入到 evaluator 临时运行目录的目录根（如 "predictions"）。
         """
         try:
             extra_files = {
                 f"{predictions_root}/{rel}": content
                 for rel, content in predictions.items()
             }
-            result = await self._runner.run(
-                eval_bundle,
+            result = await self._runner.run_dir(
+                evaluator_dir,
                 request={},
                 extra_files=extra_files,
                 output_schema={"primary": None},

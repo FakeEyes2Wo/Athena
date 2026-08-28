@@ -1,11 +1,15 @@
 """Evaluator behavioral property tests."""
 
 import asyncio
+import csv
+import io
 
 import pytest
 
 from athena.research.evaluator_trust import (
     _parse_labels,
+    extract_prediction_column,
+    extract_prediction_column_from_source,
     validate_evaluator_properties,
 )
 
@@ -46,30 +50,120 @@ class _GoodEvaluator:
         return correct / len(labels)
 
 
+class _PredColumnEvaluator:
+    """A tabular evaluator that expects the prediction column to be named ``pred``."""
+
+    async def __call__(self, predictions_csv: str) -> float:
+        reader = csv.DictReader(io.StringIO(predictions_csv))
+        if "pred" not in (reader.fieldnames or []):
+            return 0.0
+        preds = {row["__athena_row_id"]: row["pred"] for row in reader}
+        labels = dict(
+            line.split(",") for line in _LABELS.strip().splitlines()[1:]
+        )
+        correct = sum(1 for row_id, label in labels.items() if preds.get(row_id) == label)
+        return correct / len(labels)
+
+
 def test_parse_labels_extracts_ids_and_targets() -> None:
     ids, values = _parse_labels(_LABELS)
     assert ids == ["0", "1", "2", "3", "4", "5"]
     assert values == ["0", "1", "0", "1", "0", "1"]
 
 
+def test_extract_prediction_column_returns_none_when_not_declared() -> None:
+    assert extract_prediction_column("") is None
+    assert extract_prediction_column("# arbitrary handoff\n") is None
+
+
+def test_extract_prediction_column_parses_explicit_declaration() -> None:
+    handoff = (
+        "# Evaluator Handoff\n"
+        "prediction column: pred\n"
+        "join on __athena_row_id\n"
+    )
+    assert extract_prediction_column(handoff) == "pred"
+
+
+def test_extract_prediction_column_accepts_alternative_phrasing() -> None:
+    handoff = (
+        "The predictions file uses the exact schema `__athena_row_id,pred`.\n"
+        "prediction_column = pred\n"
+    )
+    assert extract_prediction_column(handoff) == "pred"
+
+
+def test_extract_prediction_column_from_source_reads_row_pred() -> None:
+    source = (
+        "import csv\n"
+        "with open('predictions/predictions.csv') as f:\n"
+        "    for row in csv.DictReader(f):\n"
+        "        value = row['pred']\n"
+    )
+    assert extract_prediction_column_from_source(source) == "pred"
+
+
+def test_extract_prediction_column_from_source_reads_dataframe_column() -> None:
+    source = (
+        "import pandas as pd\n"
+        "preds = pd.read_csv('predictions/predictions.csv')\n"
+        "score = preds['probability']\n"
+    )
+    assert extract_prediction_column_from_source(source) == "probability"
+
+
+def test_extract_prediction_column_from_source_ignores_identity_and_label() -> None:
+    source = (
+        "for row in reader:\n"
+        "    ident = row['__athena_row_id']\n"
+        "    truth = row['label']\n"
+    )
+    assert extract_prediction_column_from_source(source) is None
+
+
 @pytest.mark.asyncio
 async def test_row_order_invariance_failure_is_detected() -> None:
-    outcome = await validate_evaluator_properties(_LABELS, _RowOrderBroken())
+    outcome = await validate_evaluator_properties(
+        _LABELS, _RowOrderBroken(), prediction_column="prediction"
+    )
     assert outcome["ok"] is False
     assert "row-order" in outcome["reason"]
 
 
 @pytest.mark.asyncio
 async def test_value_permutation_sensitivity_failure_is_detected() -> None:
-    outcome = await validate_evaluator_properties(_LABELS, _ValueInsensitive())
+    outcome = await validate_evaluator_properties(
+        _LABELS, _ValueInsensitive(), prediction_column="prediction"
+    )
     assert outcome["ok"] is False
     assert "permutation" in outcome["reason"]
 
 
 @pytest.mark.asyncio
 async def test_good_evaluator_passes_property_tests() -> None:
-    outcome = await validate_evaluator_properties(_LABELS, _GoodEvaluator())
+    outcome = await validate_evaluator_properties(
+        _LABELS, _GoodEvaluator(), prediction_column="prediction"
+    )
     assert outcome["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_pred_column_evaluator_passes_with_declared_prediction_column() -> None:
+    outcome = await validate_evaluator_properties(
+        _LABELS, _PredColumnEvaluator(), prediction_column="pred"
+    )
+    assert outcome["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_pred_column_evaluator_fails_with_wrong_column() -> None:
+    # If the probe still writes the historical "prediction" header, an evaluator
+    # that only reads "pred" will be treated as value-insensitive.
+    outcome = await validate_evaluator_properties(
+        _LABELS, _PredColumnEvaluator(), prediction_column="prediction"
+    )
+    assert outcome["ok"] is False
+    assert "permutation" in outcome["reason"]
 
 
 @pytest.mark.asyncio
@@ -77,5 +171,6 @@ async def test_validate_rejects_too_few_rows() -> None:
     outcome = await validate_evaluator_properties(
         "__athena_row_id,label\n0,0\n",
         _GoodEvaluator(),
+        prediction_column="prediction",
     )
     assert outcome["ok"] is False

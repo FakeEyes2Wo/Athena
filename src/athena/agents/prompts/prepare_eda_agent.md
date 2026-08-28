@@ -27,8 +27,11 @@ You are the single EDA orchestrator. You run in two turns.
 
 ## Stage 4: Final (parallel: false)
 - [ ] 06 Baseline -> EDA_REPORT_06_BASELINE.md
-- [ ] 07 Index & Handoff -> EDA_INDEX.md + EDA_HANDOFF.md
 ```
+
+Note: `EDA_INDEX.md` and `EDA_HANDOFF.md` are NOT worker todos. They are
+written by your own finalize turn (Turn 2) after the todo runner finishes.
+Do not include an "Index & Handoff" checkbox in `EDA_TODO.md`.
 
 Rules:
 - `parallel: false` stages run one task at a time.

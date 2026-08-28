@@ -13,7 +13,7 @@ from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.execution.runtime import CommandResult, ExecutionRuntime
-from athena.research.contracts import DataScriptBundle
+from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.prepare import run_evaluator_plan, run_prepare_plan
@@ -53,7 +53,7 @@ class _EvaluatorProvider:
                 "requires-python = '>=3.11'\ndependencies = []\n",
             ),
             ("evaluate.py", _EVALUATE_SCRIPT),
-            ("labels.csv", "id,label\nr1,0\nr2,1\n"),
+            ("labels.csv", "__athena_row_id,label\nr1,0\nr2,1\n"),
             (
                 "HANDOFF.md",
                 "# Eval contract\npredictions/predictions.csv (id,prediction); "
@@ -322,13 +322,14 @@ async def test_evaluator_plan_freezes_a_bundle(tmp_path: Path) -> None:
     await harness.start()
     try:
         evaluator_ref = await harness.freeze_evaluator()
-        bundle = DataScriptBundle.model_validate_json(
+        descriptor = EvaluatorDescriptor.model_validate_json(
             await harness.store.get_text(evaluator_ref)
         )
-        tree = json.loads(await harness.store.get_text(bundle.tree_ref))
-        assert "evaluate.py" in tree
-        assert "labels.csv" in tree
-        assert "HANDOFF.md" in tree
+        evaluator_dir = Path(descriptor.dir_path)
+        assert (evaluator_dir / "README.md").is_file()
+        assert (evaluator_dir / "evaluate.py").is_file()
+        assert (evaluator_dir / "labels.csv").is_file()
+        assert (evaluator_dir / "HANDOFF.md").is_file()
     finally:
         await harness.close()
 

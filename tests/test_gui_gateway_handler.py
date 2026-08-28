@@ -93,6 +93,25 @@ async def test_handler_session_switch_swaps_runtime(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_handler_swap_failure_keeps_previous_runtime_open(tmp_path) -> None:
+    runtime = RecordingRuntime()
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        del root, state_root
+        raise RuntimeError("cannot build runtime")
+
+    handler = GuiRequestHandler(runtime, factory)
+
+    with pytest.raises(RuntimeError, match="cannot build runtime"):
+        await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    # A failed swap must not close the old runtime, or every later RPC fails
+    # with "runtime is closed".
+    assert handler.runtime is runtime
+    assert await handler.dispatch("ping", {}) == {"pong": True}
+
+
+@pytest.mark.asyncio
 async def test_handler_session_switch_default_has_no_state_root(tmp_path) -> None:
     created: list[Path | None] = []
 

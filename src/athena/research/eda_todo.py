@@ -30,6 +30,14 @@ _TODO_RE = re.compile(r"^- \[ \]\s+(.+?)(?:\s*->\s*([^\s#]+))?\s*$")
 PublishEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 Todo = tuple[int, str, str]  # (line_index, text, output_file)
 
+# EDA_INDEX/EDA_HANDOFF are written by the PREPARE_EDA orchestrator in its
+# finalize turn, not by an EDA worker (which is forbidden to write them).
+def _is_handoff_todo(text: str, output_file: str) -> bool:
+    if output_file.upper() in {"EDA_INDEX.MD", "EDA_HANDOFF.MD"}:
+        return True
+    lowered = text.lower()
+    return "index & handoff" in lowered or "index and handoff" in lowered
+
 
 def _parse(lines: list[str]) -> list[tuple[bool, list[Todo]]]:
     """Parse markdown lines into [(parallel, [(line_index, text, output_file)])]."""
@@ -41,9 +49,11 @@ def _parse(lines: list[str]) -> list[tuple[bool, list[Todo]]]:
             continue
         todo = _TODO_RE.match(line.strip())
         if todo and stages:
-            stages[-1][1].append(
-                (index, todo.group(1).strip(), todo.group(2) or "EDA_REPORT.md")
-            )
+            text = todo.group(1).strip()
+            output_file = todo.group(2) or "EDA_REPORT.md"
+            if _is_handoff_todo(text, output_file):
+                continue
+            stages[-1][1].append((index, text, output_file))
     return stages
 
 

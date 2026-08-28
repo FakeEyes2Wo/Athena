@@ -12,6 +12,7 @@ Runner 不按脚本文件名寻找入口，只认 Bundle metadata 声明的 entr
 import asyncio
 import hashlib
 import json
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -283,3 +284,80 @@ class DataScriptRunner:
             outputs=payload,
             strong_isolation=False,
         )
+
+    async def run_dir(
+        self,
+        evaluator_dir: Path,
+        request: dict[str, object],
+        output_schema: dict[str, object] | None = None,
+        *,
+        extra_files: dict[str, bytes] | None = None,
+    ) -> ScriptRunResult:
+        """Run a live evaluator directory without freezing/bundling it.
+
+        This is the README-only evaluator mode: the accepted evaluator stays in
+        its workspace, and each run is executed from a temporary copy so the
+        source directory is not mutated. The entrypoint is read from
+        ``metric.json``.
+        """
+        evaluator_dir = Path(evaluator_dir).resolve()
+        metric_path = evaluator_dir / "metric.json"
+        if not metric_path.is_file():
+            raise FileNotFoundError(f"metric.json missing in {evaluator_dir}")
+        try:
+            spec = json.loads(metric_path.read_text(encoding="utf-8"))
+            evaluator_rel = spec["eval_script"]
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError("metric.json must declare eval_script") from exc
+        eval_path = evaluator_dir / evaluator_rel
+        if eval_path.is_dir():
+            entrypoint = "evaluate.py"
+            run_cwd_rel = evaluator_rel
+        elif eval_path.is_file():
+            entrypoint = evaluator_rel
+            run_cwd_rel = "."
+        else:
+            raise FileNotFoundError(f"eval entrypoint missing: {evaluator_rel}")
+
+        self._workdir.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(tempfile.mkdtemp(prefix="athena-eval-run-", dir=self._workdir))
+        try:
+            shutil.copytree(
+                evaluator_dir,
+                run_dir,
+                ignore=shutil.ignore_patterns(".venv", "__pycache__", ".git"),
+                dirs_exist_ok=True,
+            )
+            for rel, content in (extra_files or {}).items():
+                target = run_dir / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            request_path = run_dir / "request.json"
+            output_path = run_dir / "result.json"
+            request_path.write_text(
+                json.dumps(request, ensure_ascii=False), encoding="utf-8"
+            )
+            cmd = [
+                "uv",
+                "run",
+                entrypoint,
+                "--request",
+                str(request_path),
+                "--output",
+                str(output_path),
+            ]
+            run_cwd = run_dir / run_cwd_rel if run_cwd_rel != "." else run_dir
+            stdout = await asyncio.to_thread(_run_cmd_capture, cmd, cwd=run_cwd)
+            payload = _read_output(output_path, stdout)
+            if output_schema is not None:
+                _validate_schema(payload, output_schema)
+            result_ref = await self._store.put_text(
+                json.dumps(payload, ensure_ascii=False)
+            )
+            return ScriptRunResult(
+                result_refs=[result_ref],
+                outputs=payload,
+                strong_isolation=False,
+            )
+        finally:
+            shutil.rmtree(run_dir, ignore_errors=True)

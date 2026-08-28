@@ -18,7 +18,7 @@ from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
 from athena.core.workspace import GitDiff, GitWorkBranch, GitWorkspace
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
-from athena.research.contracts import DataScriptBundle, ValidationResult
+from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
@@ -331,12 +331,15 @@ async def _score_result(
 ) -> ValidationResult:
     if current.predictions_ref is None:
         raise ValueError("validation scoring requires predictions")
-    bundle = DataScriptBundle.model_validate_json(
+    descriptor = EvaluatorDescriptor.model_validate_json(
         await store.get_text(input.final_evaluator_ref)
     )
+    evaluator_dir = Path(descriptor.dir_path)
+    if not (evaluator_dir / "README.md").is_file():
+        raise ValueError("final evaluator directory is missing its README freeze marker")
     predictions = await load_directory(store, current.predictions_ref)
     evaluation = await evaluator.score(
-        eval_bundle=bundle,
+        evaluator_dir=evaluator_dir,
         predictions=predictions,
         candidate_id=input.validation_key,
         direction=input.direction,
