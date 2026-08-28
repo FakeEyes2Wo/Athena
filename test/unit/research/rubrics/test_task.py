@@ -69,6 +69,40 @@ def test_utf8_bom_table_header_is_supported(tmp_path: Path) -> None:
     assert result.readiness == "READY"
 
 
+def test_descriptive_target_resolves_to_exact_header(tmp_path: Path) -> None:
+    dataset = tmp_path / "support2.csv"
+    dataset.write_text(
+        "age,mortality_180d\n62.8,0\n",
+        encoding="utf-8",
+    )
+
+    result = assess_task_readiness(
+        _understanding(
+            str(dataset),
+            target="mortality_180d (1 = death within 180 days)",
+        ),
+        project_root=tmp_path,
+    )
+
+    assert result.readiness == "READY"
+    assert result.missing_items == []
+
+
+def test_exact_parenthetical_header_is_not_truncated(tmp_path: Path) -> None:
+    dataset = tmp_path / "medical.csv"
+    dataset.write_text(
+        "feature,outcome (binary)\n1,0\n",
+        encoding="utf-8",
+    )
+
+    result = assess_task_readiness(
+        _understanding(str(dataset), target="outcome (binary)"),
+        project_root=tmp_path,
+    )
+
+    assert result.readiness == "READY"
+
+
 def test_resolved_metric_requires_matching_provenance_field() -> None:
     with pytest.raises(ValueError, match="human_primary_metric"):
         TaskUnderstanding(

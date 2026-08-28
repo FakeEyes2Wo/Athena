@@ -272,6 +272,57 @@ async def test_shell_tool_allows_framework_owned_athena_reads(tmp_path: Path) ->
     assert "{}" in result.data["stdout"]
 
 
+@pytest.mark.asyncio
+async def test_shell_tool_rejects_agent_owned_git_commits(tmp_path: Path) -> None:
+    """Plan files stay editable, but trusted staging/commit remains framework-owned."""
+    tool = _runtime(tmp_path).shell_command_tool(tmp_path)
+    ctx = ToolContext(
+        "shell_command", "c1", lambda *a: asyncio.sleep(0), asyncio.Event()
+    )
+
+    result = await tool.ainvoke(ctx, command='  git commit -m "agent commit"')
+
+    assert not result.success
+    assert "owned by the Athena runtime" in result.error
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_rejects_posix_inspection_on_windows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Native Windows workers get an actionable PowerShell replacement."""
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(
+        EnvironmentManager, "os_name", property(lambda _self: "Windows")
+    )
+    tool = runtime.shell_command_tool(tmp_path)
+    ctx = ToolContext(
+        "shell_command", "c1", lambda *a: asyncio.sleep(0), asyncio.Event()
+    )
+
+    result = await tool.ainvoke(ctx, command="head -1 data.csv")
+
+    assert not result.success
+    assert "Get-Content -TotalCount" in result.error
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_does_not_apply_windows_guard_on_linux(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """POSIX workers retain their native inspection commands."""
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(EnvironmentManager, "os_name", property(lambda _self: "Linux"))
+    tool = runtime.shell_command_tool(tmp_path)
+    ctx = ToolContext(
+        "shell_command", "c1", lambda *a: asyncio.sleep(0), asyncio.Event()
+    )
+
+    result = await tool.ainvoke(ctx, command="head -1 missing.csv")
+
+    assert "native Windows PowerShell" not in (result.error or "")
+
+
 def test_environment_hash_changes_with_declaration(tmp_path: Path) -> None:
     """环境哈希随 pyproject.toml 内容变化；缺声明文件也可计算。"""
     env = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path)

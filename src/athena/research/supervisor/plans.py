@@ -21,7 +21,7 @@ from athena.core.research_models import Hypothesis
 
 _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
-PublishEvent = Callable[[str, str, dict | None], Awaitable[None] | None]
+PublishEvent = Callable[[str, str, dict | None], Awaitable[None]]
 
 
 async def forward_run_events(

@@ -21,6 +21,7 @@ def _register_structured_agent(
     *,
     agent_type: str,
     provider: object,
+    repair_provider: object | None,
     artifacts: ArtifactStore,
     output_type: type,
 ) -> None:
@@ -35,6 +36,7 @@ def _register_structured_agent(
             AgentConfig(name=f"{agent_type}-agent:{agent_id}"),
             output_type=output_type,
             artifacts=artifacts,
+            structured_repair_provider=repair_provider,
         )
         return AgentSpec(
             runner=BaseAgentRunner(agent, tools=tools, agent_type=agent_type),
@@ -45,7 +47,11 @@ def _register_structured_agent(
 
 
 def register_rubric_agents(
-    registry, *, provider: object, artifacts: ArtifactStore
+    registry,
+    *,
+    provider: object,
+    artifacts: ArtifactStore,
+    repair_provider: object | None = None,
 ) -> None:
     """Register both one-shot Rubric agents without duplicated boilerplate."""
     registrations = (
@@ -58,6 +64,7 @@ def register_rubric_agents(
                 registry,
                 agent_type=agent_type,
                 provider=provider,
+                repair_provider=repair_provider,
                 artifacts=artifacts,
                 output_type=output_type,
             )

@@ -159,6 +159,8 @@ class ResearchRuntime:
         project_root: str | Path | None = None,
         state_root: str | Path | None = None,
         model: str | None = None,
+        reasoning_model: str | None = None,
+        reasoning_thinking: bool = False,
         client: Any = None,
         task: str = "",
         auto_seed_task: bool = False,
@@ -275,6 +277,7 @@ class ResearchRuntime:
         self._started = False
         self._auto_seed_task = auto_seed_task
         self._provider: object | None = None
+        self._reasoning_provider: object | None = None
         self._task_text = task
         self._model = model
         self._client = client
@@ -321,8 +324,23 @@ class ResearchRuntime:
             publish_agent_event=self._events_bus.project_agent_event,
         )
         self._events_bus.attach_supervisor(self._supervisor)
+        if reasoning_thinking and reasoning_model is None:
+            raise ValueError("reasoning_thinking requires reasoning_model")
         if model is not None:
-            self.register_supervisor(provider=ResponsesProvider(model, client=client))
+            provider = ResponsesProvider(model, client=client)
+            reasoning_provider = (
+                ResponsesProvider(
+                    reasoning_model,
+                    client=client,
+                    thinking=reasoning_thinking,
+                )
+                if reasoning_model is not None
+                else None
+            )
+            self.register_supervisor(
+                provider=provider,
+                reasoning_provider=reasoning_provider,
+            )
 
     @property
     def state(self) -> ResearchState:
@@ -347,11 +365,17 @@ class ResearchRuntime:
     def supervisor_provider(self) -> object | None:
         return self._provider
 
-    def register_supervisor(self, *, provider: object) -> None:
+    def register_supervisor(
+        self,
+        *,
+        provider: object,
+        reasoning_provider: object | None = None,
+    ) -> None:
         """Register the long-lived SupervisorAgent once."""
         if self._provider is not None:
             raise ValueError("SupervisorAgent provider is already registered")
         self._provider = provider
+        self._reasoning_provider = reasoning_provider or provider
         # 只读 stack 供 Supervisor 的 kaggle_get_competition 查主指标（不缓存，
         # 避免提前固化 download 标志）。
         supervisor_kaggle = build_kaggle_stack(
@@ -367,7 +391,12 @@ class ResearchRuntime:
             ),
             kaggle_stack=supervisor_kaggle,
         )
-        register_rubric_agents(self._registry, provider=provider, artifacts=self._store)
+        register_rubric_agents(
+            self._registry,
+            provider=self._reasoning_provider,
+            repair_provider=provider,
+            artifacts=self._store,
+        )
         register_plan_agent(
             self._registry,
             provider=provider,
@@ -745,9 +774,13 @@ class ResearchRuntime:
         return understanding is not None and understanding.readiness == "NEEDS_INPUT"
 
     async def _ensure_evaluation_policy(self) -> None:
-        """Restore or freeze Layer 1 before PREPARE creates an evaluator."""
-        if self._provider is None or self.state.phase != "PREPARE":
-            return
+        """Restore the frozen Layer 1 policy, or create it once in PREPARE.
+
+        Resuming SEARCH/VALIDATE must load the exact persisted artifact.  A
+        missing or invalid artifact after PREPARE is not grounds to ask an LLM
+        for a replacement: doing so would change the evaluation authority and
+        invalidate every later comparison.
+        """
         # Lightweight injected runners used by library consumers before Rubric V2
         # remain valid; the production AgentTurnRunner always implements this.
         if not hasattr(self._agent_turns, "run_evaluation_rubric"):
@@ -758,11 +791,11 @@ class ResearchRuntime:
                 policy = EvaluationPolicy.model_validate_json(
                     await self._store.get_text(ref)
                 )
-            except (OSError, ValueError):
-                logger.warning(
-                    "persisted Evaluation Policy is invalid; regenerating",
-                    exc_info=True,
-                )
+            except (OSError, ValueError) as error:
+                raise RuntimeError(
+                    "persisted Evaluation Policy is invalid; refusing to "
+                    "regenerate a frozen policy"
+                ) from error
             else:
                 self._supervisor.apply_evaluation_policy(policy)
                 self._direction = policy.direction
@@ -776,6 +809,20 @@ class ResearchRuntime:
                     artifact_ref=ref,
                 )
                 return
+        if self.state.phase != "PREPARE":
+            if self._provider is None:
+                # Dependency-injected library runtimes have no Rubric agent and
+                # intentionally exercise only the deterministic phase runner.
+                return
+            raise RuntimeError(
+                "frozen Evaluation Policy is missing outside PREPARE; "
+                "resume cannot continue safely"
+            )
+        if self._provider is None:
+            # Hermetic/library runtimes without an Agent provider predate the
+            # Rubric layer and cannot create one.  Production runtimes always
+            # have a provider and take the path below.
+            return
         if self._task_understanding() is None:
             raise RuntimeError("Layer 1 requires completed task understanding")
         policy, ref = await self._agent_turns.run_evaluation_rubric()
@@ -849,11 +896,16 @@ class ResearchRuntime:
             return self._task
         await self._git.init(initial_file=".gitignore", initial_content=".venv/\n")
         self._agents.start()
+        # ``run_headless`` enters through start() directly.  A persisted
+        # FAILED/STOPPED checkpoint must become schedulable before Supervisor
+        # recovery calls run_search(), which only runs while status is RUNNING.
+        self._rearm_if_terminal()
         # 断点续传：直接 start()（而非 start_task）的重启路径也恢复首次任务文本。
         self._task_text = self._resume_task_text(self._task_text)
         if self.state.status == "IDLE":
             self.state.status = "RUNNING"
-            self.state.save(self._state_path)
+            # ResearchState 仍由单写者 Supervisor 持久化；Runtime 只改变内存状态。
+            await self._supervisor._persist_state()
         self._started = True
 
         async def _run_lifecycle() -> None:
@@ -866,11 +918,11 @@ class ResearchRuntime:
             try:
                 await self._ensure_evaluation_policy()
             except Exception as error:
-                logger.warning("evaluation policy generation failed", exc_info=True)
+                logger.warning("evaluation policy restore/freeze failed", exc_info=True)
                 await self.publish_output(
                     source="supervisor",
                     channel="error",
-                    text=f"评价策略无法安全冻结，已停止进入 PREPARE：{error}",
+                    text=f"评价策略无法安全恢复或冻结，流程已暂停：{error}",
                 )
                 await self._supervisor.pause()
                 self._started = False
@@ -1037,10 +1089,21 @@ class ResearchRuntime:
         )
 
     def _rearm_if_terminal(self) -> None:
-        """Clear the done supervisor task so a terminal run can be restarted."""
-        if self._started and self._task is not None and self._task.done():
-            if self.state.status in {"FAILED", "STOPPED", "COMPLETED"}:
-                self._task = None
+        """Re-arm a persisted terminal run without discarding its checkpoints."""
+        if self.state.status not in {"FAILED", "STOPPED", "COMPLETED"}:
+            return
+        if self._started and self._task is not None and not self._task.done():
+            return
+        self._task = None
+        if (
+            self.state.status in {"FAILED", "STOPPED"}
+            and self.state.phase != "COMPLETED"
+        ):
+            # A new process loads terminal state with ``_started=False``.  Merely
+            # clearing the old task handle is insufficient: run_search() refuses
+            # to schedule while the durable status is still FAILED/STOPPED.
+            self.state.status = "RUNNING"
+            self.state.save(self._state_path)
 
     async def start_task(self, task: str) -> str:
         """Seed the research task and start PREPARE -> SEARCH -> VALIDATE.

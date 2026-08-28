@@ -133,11 +133,11 @@ class PhaseRunner:
                 agent_type, request, agent_id=agent_id, name=agent_id
             )
 
-        def publish(kind: str, ref: str, data: dict | None = None) -> None:
+        async def publish(kind: str, ref: str, data: dict | None = None) -> None:
             """Forward one agent journal event to the runtime event bus."""
             events_bus = getattr(rt, "_events_bus", None)
             if events_bus is not None:
-                events_bus.project_agent_event(agent_id, kind, ref, data)
+                await events_bus.project_agent_event(agent_id, kind, ref, data)
 
         summary = await wait_run_events(rt._agents, run_id, publish)
         result = await load_agent_result(summary, rt._store, HandoffResult)
@@ -177,13 +177,20 @@ class PhaseRunner:
         # 步骤 1：evaluator agent 在 workspaces/evaluator/ 写评估器并冻结；
         # 断点续传时若已有可解析的 frozen bundle，直接复用不重跑。
         evaluator_ref = rt._supervisor.evaluator_ref
-        if evaluator_ref is not None:
+        final_evaluator_ref = rt._supervisor.final_evaluator_ref
+        if evaluator_ref is not None and final_evaluator_ref is not None:
             try:
                 await rt._store.get_text(evaluator_ref)
+                await rt._store.get_text(final_evaluator_ref)
             except Exception:
                 # artifact 缺失或损坏 → 重新冻结评估器
                 evaluator_ref = None
-        if evaluator_ref is None:
+                final_evaluator_ref = None
+        else:
+            # 旧断点只有一个评估器，不能冒充独立最终留出集。
+            evaluator_ref = None
+            final_evaluator_ref = None
+        if evaluator_ref is None or final_evaluator_ref is None:
             await rt.publish_output(
                 source="supervisor", channel="text", text="PREPARE: 冻结评估器…"
             )
@@ -197,7 +204,7 @@ class PhaseRunner:
                     runtime=rt._execution,
                     extra_tools=rt.kaggle_tools("evaluator"),
                 )
-            evaluator_ref = await run_evaluator_plan(
+            evaluator_refs = await run_evaluator_plan(
                 agents=rt._agents,
                 scripts=rt._scripts,
                 store=rt._store,
@@ -210,13 +217,17 @@ class PhaseRunner:
                     "evaluator", kind, ref, data
                 ),
             )
-            await rt._supervisor.checkpoint_evaluator(evaluator_ref)
+            evaluator_ref = evaluator_refs.search_ref
+            final_evaluator_ref = evaluator_refs.final_ref
+            await rt._supervisor.checkpoint_evaluator(
+                evaluator_ref, final_evaluator_ref
+            )
             await rt.publish_output(
                 source="supervisor",
                 channel="text",
                 text=f"PREPARE: evaluator 产物目录 {evaluator_dir.resolve()}。",
             )
-            handoff_path = evaluator_dir / "HANDOFF.md"
+            handoff_path = evaluator_dir / "search" / "HANDOFF.md"
             if handoff_path.is_file():
                 for line in handoff_path.read_text(encoding="utf-8").splitlines():
                     stripped = line.strip()
@@ -368,7 +379,7 @@ class PhaseRunner:
         tree_ref = await rt._store.put_text(
             json.dumps(rt.tree.to_dict(), ensure_ascii=False, sort_keys=True)
         )
-        return await run_prepare_plan(
+        result = await run_prepare_plan(
             agents=rt._agents,
             evaluator=rt._evaluator,
             git=rt._git,
@@ -383,6 +394,7 @@ class PhaseRunner:
                 "prepare", kind, ref, data
             ),
         )
+        return result.model_copy(update={"final_evaluator_ref": final_evaluator_ref})
 
     async def run_validation_phase(
         self, sota_commit: str, metric: float
@@ -394,8 +406,13 @@ class PhaseRunner:
         if rt._provider is None:
             raise RuntimeError("VALIDATE requires a registered Agent provider")
         evaluator_ref = rt._supervisor.evaluator_ref
-        if evaluator_ref is None:
-            raise RuntimeError("VALIDATE requires a frozen evaluator")
+        final_evaluator_ref = rt._supervisor.final_evaluator_ref
+        if evaluator_ref is None or final_evaluator_ref is None:
+            raise RuntimeError(
+                "VALIDATE requires disjoint frozen search and final evaluators"
+            )
+        if evaluator_ref == final_evaluator_ref:
+            raise RuntimeError("VALIDATE final evaluator must differ from SEARCH")
         workspace = await rt._git.create(sota_commit, "athena/validate")
         if not rt._registry.contains("validate"):
             register_validate_agent(
@@ -422,9 +439,9 @@ class PhaseRunner:
             sota_commit=sota_commit,
             reference_metric=metric,
             direction=rt._direction,
-            final_evaluator_ref=evaluator_ref,
+            final_evaluator_ref=final_evaluator_ref,
             validation_key=validation_key(
-                sota_commit, metric, rt._direction, evaluator_ref
+                sota_commit, metric, rt._direction, final_evaluator_ref
             ),
             sota_context=sota_context,
         )

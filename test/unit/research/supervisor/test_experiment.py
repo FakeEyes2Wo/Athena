@@ -708,6 +708,37 @@ async def test_run_turn_execution_failure_does_not_increment_stale(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_run_turn_preserves_execution_timeout_reason(tmp_path) -> None:
+    execution = _FakeExecution(
+        [
+            CommandResult(
+                ok=False,
+                stdout="",
+                stderr="",
+                exit_code=-1,
+                error="timeout",
+            )
+        ]
+    )
+    runner, plan_input, _, branch, _ = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH",
+        context_ref=_REF,
+        turns_used=1,
+        turn_limit=12,
+        patience=4,
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "execution_failed"
+    assert result.error == "command failed (exit -1): timeout"
+
+
+@pytest.mark.asyncio
 async def test_run_turn_missing_predictions_returns_evidence_without_scoring(
     tmp_path,
 ) -> None:

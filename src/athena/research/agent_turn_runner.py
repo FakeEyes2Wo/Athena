@@ -256,12 +256,14 @@ class AgentTurnRunner:
             return await self._run_debate_ideator_turn(count, handoff_texts)
         eda_dir = self._resolve_eda_dir(rt)
         ideation = getattr(rt, "_ideation", "ideageneration")
+        ideator_provider = getattr(rt, "_reasoning_provider", None) or rt._provider
         if ideation == "ideageneration":
             for profile in SEARCH_IDEATOR_PROFILES:
                 if not rt._registry.contains(profile.agent_type):
                     register_ideator_agent(
                         rt._registry,
-                        provider=rt._provider,
+                        provider=ideator_provider,
+                        structured_repair_provider=rt._provider,
                         artifacts=rt._store,
                         workspace=Path(eda_dir),
                         runtime=rt._execution,
@@ -274,7 +276,8 @@ class AgentTurnRunner:
             if not rt._registry.contains("ideator"):
                 register_ideator_agent(
                     rt._registry,
-                    provider=rt._provider,
+                    provider=ideator_provider,
+                    structured_repair_provider=rt._provider,
                     artifacts=rt._store,
                     workspace=Path(eda_dir),
                     runtime=rt._execution,
@@ -311,14 +314,17 @@ class AgentTurnRunner:
         )
         hypotheses: list[Hypothesis] = []
         eda_requests: list[str] = []
+        lane_failures: list[str] = []
         for index, result in enumerate(lane_results, start=1):
             if isinstance(result, asyncio.CancelledError):
                 raise result
             if isinstance(result, BaseException):
+                failure = " ".join(str(result).split())[:500]
+                lane_failures.append(f"lane {index}: {failure}")
                 await rt.publish_output(
                     source="agent",
                     channel="error",
-                    text=f"Ideator {index} failed: {result}",
+                    text=f"Ideator {index} failed: {failure}",
                     plan=f"ideator-{round_label}-{index}",
                 )
             else:
@@ -332,9 +338,14 @@ class AgentTurnRunner:
             await self.run_data_turn(
                 "\n".join(f"- {request}" for request in eda_requests)
             )
-        # 全部 lane 都失败时不再中断 SEARCH：每条失败已作为 error 输出发布。
+        if not hypotheses:
+            detail = "; ".join(lane_failures) or "all candidates failed the Gate"
+            raise RuntimeError(
+                "Ideator batch produced no valid hypotheses; SEARCH cannot "
+                f"continue ({detail})"
+            )
         # 返回全部产物（不做截断）：所有生成假设都进入 graph，由调度器排序后按
-        # 并发度逐个启动。
+        # 并发度逐个启动。单个 lane 失败不会丢弃成功 peer 的结果。
         return hypotheses
 
     async def run_data_turn(self, request: str) -> None:
@@ -569,9 +580,11 @@ class AgentTurnRunner:
         rt = self._runtime
         content = (
             f"Inspect the EDA workspace at {eda_dir} without modifying any "
-            "files, then propose up to "
-            f"{target} falsifiable hypotheses that could improve the primary "
-            "metric. Return the hypotheses as structured output."
+            "files, then propose between 1 and "
+            f"{target} distinct, falsifiable hypotheses that could improve the "
+            "primary metric. Return the hypotheses as structured output. Never "
+            "return an empty hypotheses list; use the available task and EDA "
+            "evidence even when no further tool call is necessary."
         )
         if profile is not None:
             content += f"\n\n{profile.task_hint}"

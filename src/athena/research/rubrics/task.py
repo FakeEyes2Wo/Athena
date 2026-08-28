@@ -24,8 +24,26 @@ def _looks_like_path(value: str) -> bool:
     )
 
 
-def _target_name(value: str) -> str:
-    return re.split(r"\s*[:：]\s*", value.strip(), maxsplit=1)[0].strip()
+def _target_name(value: str, columns: list[str]) -> str:
+    """Resolve a described target to an exact table header when possible.
+
+    Supervisor output may add human-readable semantics, for example
+    ``mortality_180d (1 = death within 180 days)``.  Prefer an exact header or
+    a header followed by an explicit description separator; never use fuzzy
+    matching that could silently select a different scientific outcome.
+    """
+    text = value.strip()
+    if text in columns:
+        return text
+    matches = [
+        column
+        for column in columns
+        if text.startswith(column)
+        and re.match(r"^\s*(?:[:：(\[])", text[len(column) :])
+    ]
+    if matches:
+        return max(matches, key=len)
+    return re.split(r"\s*[:：]\s*", text, maxsplit=1)[0].strip()
 
 
 def _table_columns(path: Path) -> list[str] | None:
@@ -85,7 +103,7 @@ def assess_task_readiness(
                     )
                 )
                 columns = None
-            target = _target_name(understanding.target)
+            target = _target_name(understanding.target, columns or [])
             if columns is not None and target and target not in columns:
                 critical.append(
                     _missing(

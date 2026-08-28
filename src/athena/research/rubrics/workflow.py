@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -75,6 +76,22 @@ def _read_eda_context(root: Path, limit: int = 8000) -> str:
             chunks.append(f"## {name}\n{content}")
             remaining -= len(content)
     return "\n\n".join(chunks)
+
+
+def _declared_dependencies(root: Path) -> list[str]:
+    """Return bounded project dependency declarations for resource review."""
+    path = root / "pyproject.toml"
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return []
+    project = payload.get("project", {})
+    if not isinstance(project, dict):
+        return []
+    dependencies = project.get("dependencies", [])
+    if not isinstance(dependencies, list):
+        return []
+    return [str(item) for item in dependencies[:100]]
 
 
 class RubricWorkflow:
@@ -196,11 +213,13 @@ class RubricWorkflow:
 
     async def _priority_context(
         self, hypotheses: list[Hypothesis]
-    ) -> HypothesisPriorityContext | None:
+    ) -> HypothesisPriorityContext:
         rt = self._runtime
         policy = rt._supervisor.evaluation_policy
         if policy is None:
-            return None
+            raise RuntimeError(
+                "frozen Evaluation Policy is not loaded; Layer 2 cannot run safely"
+            )
         candidates = [
             HypothesisPriorityCandidate(
                 hypothesis_id=item.id or "",
@@ -220,6 +239,20 @@ class RubricWorkflow:
             if sota_id is not None
             else {}
         )
+        execution = getattr(rt, "_execution", None)
+        environment_context: dict[str, object] = {
+            "search_limit": rt.state.search_limit,
+            "concurrency": rt.state.concurrency,
+        }
+        if execution is not None:
+            environment_context.update(
+                {
+                    "runtime": execution.runtime_summary(rt._root),
+                    "declared_dependencies": _declared_dependencies(
+                        execution.environment_root
+                    ),
+                }
+            )
         return HypothesisPriorityContext(
             research_task=rt._task_text,
             evaluation_policy=policy,
@@ -232,10 +265,7 @@ class RubricWorkflow:
             research_history=[
                 item.model_dump(mode="json") for item in rt.tree.hypotheses()[-12:]
             ],
-            environment_context={
-                "search_limit": rt.state.search_limit,
-                "concurrency": rt.state.concurrency,
-            },
+            environment_context=environment_context,
         )
 
     async def run_hypothesis_priority(
@@ -244,8 +274,6 @@ class RubricWorkflow:
         """Score one post-Gate batch once; preserve fallback on any failure."""
         rt = self._runtime
         context = await self._priority_context(hypotheses)
-        if context is None:
-            return hypotheses
         expected_ids = [item.hypothesis_id for item in context.hypotheses]
         self._round += 1
         label = f"hypothesis-rubric-{self._round}"
@@ -278,16 +306,42 @@ class RubricWorkflow:
             await rt.publish_output(
                 source="agent",
                 channel="text",
-                text=f"假设优先级 Rubric 已批量评分 {len(scored)} 个候选。",
+                text=(
+                    "[rubric_status=success] 假设优先级 Rubric 已批量评分 "
+                    f"{len(scored)} 个候选。"
+                ),
                 plan=label,
             )
             return scored
         except Exception as error:
+            fallback_ref: ArtifactRef | None = None
+            try:
+                fallback_ref = await rt._store.put_text(
+                    json.dumps(
+                        {
+                            "rubric_status": "fallback",
+                            "reason_type": type(error).__name__,
+                            "reason": str(error),
+                            "expected_hypothesis_ids": expected_ids,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            except Exception:
+                # Evidence persistence is best-effort on the fallback path; a
+                # store outage must not disable the existing deterministic
+                # Selector fallback.
+                pass
             await rt.publish_output(
                 source="supervisor",
                 channel="error",
-                text=f"假设 Rubric 不可用，Selector 使用确定性回退：{error}",
+                text=(
+                    "[rubric_status=fallback] 假设 Rubric 不可用，"
+                    f"Selector 使用确定性回退：{error}"
+                ),
                 plan=label,
+                artifact_ref=fallback_ref,
             )
             return hypotheses
 

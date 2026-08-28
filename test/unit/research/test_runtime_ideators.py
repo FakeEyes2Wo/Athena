@@ -6,6 +6,7 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
+from athena.agents.ideator_agent import SEARCH_IDEATOR_PROFILES
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.idea_generation.idea_schemas import (
@@ -36,6 +37,60 @@ def _hypothesis(label: str) -> Hypothesis:
 )
 def test_ideator_allocations_cap_workers_at_lanes(count, lanes, expected) -> None:
     assert AgentTurnRunner._ideator_allocations(count, lanes) == expected
+
+
+@pytest.mark.asyncio
+async def test_all_ideator_profiles_use_reasoning_provider_and_default_repair(
+    monkeypatch, tmp_path
+) -> None:
+    runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._corpus_sessions = []
+    default_provider = object()
+    reasoning_provider = object()
+    runtime._provider = default_provider
+    runtime._reasoning_provider = reasoning_provider
+    runtime._ideation = "ideageneration"
+    runtime._root = tmp_path
+    runtime._store = object()
+    runtime._execution = object()
+    runtime._state = SimpleNamespace(
+        eda_dir=str(tmp_path),
+        ideator_count=3,
+        hypotheses_per_ideator=1,
+        handoff_sources=[],
+        handoff_refs={},
+    )
+    runtime._supervisor = SimpleNamespace(
+        state=runtime._state,
+        evaluation_policy=None,
+        evaluator_ref=None,
+    )
+    runtime._registry = SimpleNamespace(contains=lambda _name: False)
+    registrations: list[dict[str, object]] = []
+
+    def capture_registration(_registry, **kwargs) -> None:
+        registrations.append(kwargs)
+
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner.register_ideator_agent",
+        capture_registration,
+    )
+
+    async def run_lane(
+        self, label: str, target: int, _eda_dir, profile=None, handoff_texts=None
+    ):
+        return HypothesisBatch(hypotheses=[])
+
+    runner = AgentTurnRunner(runtime)
+    runner._run_ideator_lane = MethodType(run_lane, runner)
+
+    with pytest.raises(RuntimeError, match="no valid hypotheses"):
+        await runner.run_ideator_turn(1)
+    assert [item["profile"] for item in registrations] == list(SEARCH_IDEATOR_PROFILES)
+    assert all(item["provider"] is reasoning_provider for item in registrations)
+    assert all(
+        item["structured_repair_provider"] is default_provider for item in registrations
+    )
 
 
 @pytest.mark.asyncio
@@ -159,6 +214,35 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
         "change ideator-1-3",
     ]
     assert errors == [("ideator-1-2", "Ideator 2 failed: offline")]
+
+
+@pytest.mark.asyncio
+async def test_ideator_turn_fails_when_every_lane_yields_nothing(tmp_path) -> None:
+    """An empty candidate batch must not be mistaken for completed SEARCH."""
+
+    runtime = ResearchRuntime.__new__(ResearchRuntime)
+    runtime._corpus_sessions = []
+    runtime._provider = object()
+    runtime._state = SimpleNamespace(
+        eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
+    )
+    runtime._supervisor = SimpleNamespace(state=runtime._state)
+    runtime._registry = SimpleNamespace(contains=lambda _name: True)
+
+    async def run_lane(
+        self, label: str, _target: int, _eda_dir, profile=None, handoff_texts=None
+    ):
+        raise RuntimeError(f"{label} invalid batch")
+
+    async def publish_output(**_kwargs):
+        return None
+
+    runner = AgentTurnRunner(runtime)
+    runner._run_ideator_lane = MethodType(run_lane, runner)
+    runtime.publish_output = publish_output
+
+    with pytest.raises(RuntimeError, match="no valid hypotheses"):
+        await runner.run_ideator_turn(3)
 
 
 @pytest.mark.asyncio

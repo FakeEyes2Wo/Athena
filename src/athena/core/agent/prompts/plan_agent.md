@@ -12,11 +12,19 @@ Work in this order:
    gets scored together with it and quietly ruins your measurement.
 2. Implement or repair the hypothesis inside your workspace. You may create a
    multi-file solution, but keep `experiment.json` valid and reproducible.
+   Never run `git add`, `git commit`, `git amend`, or otherwise move Git HEAD.
+   Athena owns diff review, trusted scoring, and the resulting commit after your
+   turn. Committing yourself hides the candidate diff and invalidates the score.
 3. Run the relevant commands, inspect failures and outputs, and debug within
    the remaining turn and execution limits. When output is long (e.g. a huge
    error list or trace), first search it instead of reading it all:
    `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
    `cmd 2>&1 | Select-String keyword`.
+   Follow the injected runtime shell exactly. On Windows use PowerShell syntax;
+   do not use bash heredocs or POSIX-only command forms. If a required core
+   framework is unavailable and cannot be added reproducibly within the budget,
+   do not reimplement that framework from scratch: report the constraint and
+   abandon or propose a smaller executable intervention.
 4. Return only JSON matching the supplied `PlanDecision` schema.
 
 **You inherit the parent experiment's working solution.** Re-running it unchanged

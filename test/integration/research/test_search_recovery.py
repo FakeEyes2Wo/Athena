@@ -120,6 +120,20 @@ async def test_abandon_without_best_marks_inconclusive(harness: _Harness):
 
 
 @pytest.mark.asyncio
+async def test_auto_settlement_preserves_concrete_turn_failure(harness: _Harness):
+    harness.supervisor._auto_validate = True
+    harness.tree.get_hypothesis("h1").turn_limit = 1
+    await _start_one(harness)
+    await harness.finish("h1", None, decision="continue", kind="execution_failed")
+    await _eventually(lambda: "h1" not in harness.state.plans)
+
+    experiment = harness.tree.get_experiment(
+        harness.tree.experiment_for_hypothesis("h1")
+    )
+    assert experiment.error == "execution_failed: controlled execution_failed"
+
+
+@pytest.mark.asyncio
 async def test_execution_provider_and_infrastructure_failures_do_not_consume_patience(
     harness: _Harness,
 ):
@@ -259,9 +273,7 @@ async def test_recover_rebuilds_experiment_lost_before_tree_save(harness: _Harne
 
     assert "h1" in recovered.plans
     assert harness.supervisor.tree.experiment_for_hypothesis("h1") == "exp_h1"
-    assert (
-        harness.supervisor.tree.get_experiment("exp_h1").status.value == "RUNNING"
-    )
+    assert harness.supervisor.tree.get_experiment("exp_h1").status.value == "RUNNING"
     persisted = json.loads(tree_path.read_text(encoding="utf-8"))
     assert "exp_h1" in persisted["experiments"]
 

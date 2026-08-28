@@ -10,8 +10,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai.messages import ModelResponse, ThinkingPart, ToolCallPart
 
-from athena.core.agent.provider import ResponsesProvider, _DeepSeekTextFilter
+from athena.core.agent.provider import ResponsesProvider, _DeepSeekTextFilter, _to_api
 
 
 def _filtered(chunks):
@@ -38,6 +39,10 @@ def _filtered(chunks):
         ),
         (["<|DSML|tool_call>read</|DSML|tool_call> visible"], " visible"),
         (["<|DS", "ML|tool_call>read\n", "</|DSML|tool_calls>"], ""),
+        (
+            ["before <｜｜DS", "ML｜｜tool_calls>body</｜｜DSML｜｜tool_calls> after"],
+            "before  after",
+        ),
         (["visible <｜DSML｜tool_calls>partial body, no close"], "visible "),
         (
             [
@@ -76,8 +81,12 @@ def test_dsml_filter_preserves_clean_json():
     assert "".join(out) == '{"decision":"submit","reason":"ok"}'
 
 
-def _chunk(content=None, tool_calls=None, finish_reason=None):
-    delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+def _chunk(content=None, tool_calls=None, finish_reason=None, reasoning_content=None):
+    delta = SimpleNamespace(
+        content=content,
+        tool_calls=tool_calls,
+        reasoning_content=reasoning_content,
+    )
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
     return SimpleNamespace(choices=[choice])
 
@@ -85,14 +94,120 @@ def _chunk(content=None, tool_calls=None, finish_reason=None):
 class _StreamClient:
     def __init__(self, chunks):
         self._chunks = chunks
+        self.calls = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     async def _create(self, **kwargs):
+        self.calls.append(kwargs)
+
         async def gen():
             for chunk in self._chunks:
                 yield chunk
 
         return gen()
+
+
+@pytest.mark.asyncio
+async def test_deepseek_thinking_is_disabled_by_default():
+    client = _StreamClient([_chunk(content="done", finish_reason="stop")])
+    provider = ResponsesProvider(
+        "deepseek-test", client=client, provider_kind="deepseek"
+    )
+
+    _ = [
+        event
+        async for event in provider.stream(
+            SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto"),
+            SimpleNamespace(specs=[]),
+            [],
+            asyncio.Event(),
+        )
+    ]
+
+    assert provider.thinking_enabled is False
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_deepseek_thinking_can_be_enabled_explicitly():
+    client = _StreamClient([_chunk(content="done", finish_reason="stop")])
+    provider = ResponsesProvider(
+        "deepseek-pro",
+        client=client,
+        provider_kind="deepseek",
+        thinking=True,
+    )
+
+    _ = [
+        event
+        async for event in provider.stream(
+            SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto"),
+            SimpleNamespace(specs=[]),
+            [],
+            asyncio.Event(),
+        )
+    ]
+
+    assert provider.thinking_enabled is True
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_non_deepseek_provider_rejects_thinking_mode():
+    with pytest.raises(ValueError, match="only supported by the DeepSeek provider"):
+        ResponsesProvider("openai-test", provider_kind="openai", thinking=True)
+
+
+def test_deepseek_tool_call_replays_complete_reasoning_content():
+    messages = [
+        ModelResponse(
+            parts=[
+                ThinkingPart(content="first thought; second thought"),
+                ToolCallPart(tool_name="probe", args="{}", tool_call_id="call-1"),
+            ]
+        )
+    ]
+
+    assert _to_api(messages) == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "probe", "arguments": "{}"},
+                }
+            ],
+            "reasoning_content": "first thought; second thought",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_emits_private_reasoning_separately():
+    client = _StreamClient(
+        [
+            _chunk(reasoning_content="first "),
+            _chunk(reasoning_content="second", finish_reason="stop"),
+        ]
+    )
+    provider = ResponsesProvider(
+        "deepseek-pro", client=client, provider_kind="deepseek", thinking=True
+    )
+
+    events = [
+        event
+        async for event in provider.stream(
+            SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto"),
+            SimpleNamespace(specs=[]),
+            [],
+            asyncio.Event(),
+        )
+    ]
+
+    reasoning = [event for event in events if event.kind == "reasoning_delta"]
+    assert [event.data["delta"] for event in reasoning] == ["first ", "second"]
+    assert events[-1].data["reasoning_content"] == "first second"
 
 
 @pytest.mark.asyncio

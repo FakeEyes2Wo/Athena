@@ -25,6 +25,10 @@ from athena.research.idea_generation.idea_schemas import IdeatorHypothesisBatch
 
 IDEATOR_AGENT_TYPE = "ideator"
 GATED_PROMPT_TYPE = "ideator_gated"
+# One rich five-hypothesis batch exceeded the generic 4096-token ceiling in a
+# live SUPPORT2 run.  This is a ceiling, not a target, so short answers keep
+# their original cost while complete batches are no longer cut mid-JSON.
+IDEATOR_MAX_TOKENS = 8192
 
 
 class HandoffResult(BaseModel):
@@ -102,6 +106,7 @@ def register_ideator_agent(
     workspace: Path,
     runtime: ExecutionRuntime,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
+    structured_repair_provider: object | None = None,
     gated: bool = True,
     profile: IdeatorProfile | None = None,
 ) -> None:
@@ -140,6 +145,8 @@ def register_ideator_agent(
         provider=provider,
         artifacts=artifacts,
         extra_tools=extra_tools,
+        structured_repair_provider=structured_repair_provider,
+        max_tokens=IDEATOR_MAX_TOKENS,
     )
 
 
@@ -150,6 +157,7 @@ __all__ = [
     "GATED_PROMPT_TYPE",
     "HandoffResult",
     "IDEATOR_AGENT_TYPE",
+    "IDEATOR_MAX_TOKENS",
     "IdeatorProfile",
     "MOONSHOT_IDEATOR_PROFILE",
     "SEARCH_IDEATOR_PROFILES",

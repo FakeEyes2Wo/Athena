@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from athena.research.rubrics.models import (
     HypothesisPriorityBatch,
@@ -47,6 +48,11 @@ def test_batch_requires_exact_identifiers() -> None:
 
     with pytest.raises(ValueError, match=r"missing=\['h2'\]"):
         validate_hypothesis_priority_batch(batch, ["h1", "h2"])
+
+
+def test_batch_rejects_empty_reviews_at_structured_boundary() -> None:
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        HypothesisPriorityBatch(reviews=[])
 
 
 def test_batch_rejects_unknown_evidence_refs() -> None:

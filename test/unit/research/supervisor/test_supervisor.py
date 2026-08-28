@@ -238,6 +238,27 @@ def _checkpoint_supervisor(tmp_path: Path, run_general_turn=None) -> Supervisor:
 
 
 @pytest.mark.asyncio
+async def test_auto_validate_refuses_an_incomplete_search(tmp_path: Path) -> None:
+    """SEARCH returning with zero attempts cannot validate the baseline."""
+
+    supervisor = _checkpoint_supervisor(tmp_path)
+    supervisor.state.phase = "SEARCH"
+    supervisor.state.status = "RUNNING"
+    supervisor.state.search_limit = 3
+    supervisor._auto_validate = True
+
+    async def empty_search() -> None:
+        return None
+
+    supervisor.run_search = empty_search  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="0/3"):
+        await supervisor.continue_phase()
+
+    assert supervisor.state.phase == "SEARCH"
+
+
+@pytest.mark.asyncio
 async def test_task_understanding_pauses_then_becomes_ready_after_data_is_supplied(
     tmp_path: Path,
 ) -> None:
@@ -385,6 +406,16 @@ async def test_register_hypotheses_runs_one_batch_rubric_before_tree_insert(
     tmp_path: Path, monkeypatch
 ) -> None:
     supervisor = _checkpoint_supervisor(tmp_path)
+    supervisor.apply_evaluation_policy(
+        EvaluationPolicy(
+            primary_metric="roc_auc",
+            direction="maximize",
+            metric_source="human",
+            locked=True,
+            confidence=1.0,
+            explanation="Human objective.",
+        )
+    )
     parent = Hypothesis(
         id="baseline",
         statement="baseline",
@@ -411,6 +442,7 @@ async def test_register_hypotheses_runs_one_batch_rubric_before_tree_insert(
                 statement="candidate two",
                 intervention="change feature two",
                 expected_effect="improve score",
+                turn_limit=7,
             ),
         ]
     )
@@ -421,6 +453,43 @@ async def test_register_hypotheses_runs_one_batch_rubric_before_tree_insert(
         supervisor.tree.get_hypothesis(identifier).rubric_score == 0.8
         for identifier in result["hypothesis_ids"]
     )
+    assert [
+        supervisor.tree.get_hypothesis(identifier).turn_limit
+        for identifier in result["hypothesis_ids"]
+    ] == [4, 7]
+
+
+@pytest.mark.asyncio
+async def test_register_hypotheses_pauses_when_policy_is_not_loaded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    parent = Hypothesis(
+        id="baseline",
+        statement="baseline",
+        intervention="fit baseline",
+        expected_effect="establish a reference",
+    )
+    monkeypatch.setattr(supervisor, "_sota_parent", lambda: (None, parent))
+
+    async def must_not_run(_items: list[Hypothesis]) -> list[Hypothesis]:
+        raise AssertionError("Layer 2 must not run without the frozen policy")
+
+    supervisor._run_hypothesis_rubric = must_not_run
+
+    with pytest.raises(RuntimeError, match="frozen Evaluation Policy"):
+        await supervisor.register_hypotheses(
+            [
+                Hypothesis(
+                    statement="candidate",
+                    intervention="change model",
+                    expected_effect="improve score",
+                )
+            ]
+        )
+
+    assert supervisor.state.status == "WAITING"
+    assert supervisor.tree.hypotheses() == []
 
 
 @pytest.mark.asyncio

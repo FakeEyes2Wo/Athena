@@ -61,6 +61,8 @@ HypothesisRubricTurn = Callable[[list[Hypothesis]], Awaitable[list[Hypothesis]]]
 GeneralTurn = Callable[[str, str | None], Awaitable[GeneralTurnOutcome]]
 PublishAgentEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 
+DEFAULT_AUTO_PLAN_TURNS = 4
+
 
 def _compare_metric(
     candidate: float,
@@ -151,6 +153,7 @@ class Supervisor(SupervisorActions):
         self._evaluator_ref = (
             evaluator_ref if evaluator_ref is not None else state.evaluator_ref
         )
+        self._final_evaluator_ref = state.final_evaluator_ref
         self._direction = direction
         self._tolerance = tolerance
         self._run_plan_turn = run_plan_turn
@@ -193,6 +196,11 @@ class Supervisor(SupervisorActions):
         return self._evaluator_ref
 
     @property
+    def final_evaluator_ref(self) -> ArtifactRef | None:
+        """Return the disjoint held-out evaluator used only by VALIDATE."""
+        return self._final_evaluator_ref
+
+    @property
     def evaluation_policy(self) -> EvaluationPolicy | None:
         """Return the frozen single-primary evaluation policy."""
         return self._evaluation_policy
@@ -226,12 +234,21 @@ class Supervisor(SupervisorActions):
         await self._persist_state()
         return {"recorded": True, "task_understanding": self.state.task_understanding}
 
-    async def checkpoint_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
-        """Persist one frozen evaluator bundle so PREPARE resumes past evaluator."""
+    async def checkpoint_evaluator(
+        self, ref: ArtifactRef, final_ref: ArtifactRef | None = None
+    ) -> dict[str, object]:
+        """Persist frozen SEARCH and held-out evaluator bundles for resume."""
+        if final_ref is not None and final_ref == ref:
+            raise ValueError("search and final evaluator refs must be distinct")
         self._evaluator_ref = ref
+        self._final_evaluator_ref = final_ref
         self.state.evaluator_ref = ref
+        self.state.final_evaluator_ref = final_ref
         await self._persist_state()
-        return {"evaluator_ref": ref}
+        result: dict[str, object] = {"evaluator_ref": ref}
+        if final_ref is not None:
+            result["final_evaluator_ref"] = final_ref
+        return result
 
     def apply_evaluation_policy(self, policy: EvaluationPolicy) -> None:
         """Apply the policy direction to every later comparison."""
@@ -450,6 +467,13 @@ class Supervisor(SupervisorActions):
             if self._stopped:
                 return
             if self._auto_validate:
+                if not self._search_limit_reached():
+                    attempts = count_search_attempts(self.state, self.tree)
+                    raise RuntimeError(
+                        "SEARCH ended before its requested experiment budget was "
+                        f"completed ({attempts}/{self.state.search_limit}); refusing "
+                        "to validate the baseline as if search had succeeded"
+                    )
                 await self._transition_phase("VALIDATE")
             elif self._search_limit_reached() and self.state.status == "RUNNING":
                 self.state.status = "WAITING"
@@ -540,6 +564,9 @@ class Supervisor(SupervisorActions):
             self.tree.set_sota(experiment_id)
             self.tree.save(self._tree_path)
         self._evaluator_ref = result.evaluator_ref
+        self._final_evaluator_ref = result.final_evaluator_ref
+        self.state.evaluator_ref = result.evaluator_ref
+        self.state.final_evaluator_ref = result.final_evaluator_ref
         await self._publish(
             "output",
             {
@@ -742,12 +769,10 @@ class Supervisor(SupervisorActions):
         """Run rolling SEARCH scheduling."""
         while not self._stopped:
             if self.state.status != "RUNNING":
-                # 暂停/等待人工决策：不再派发新 turn，直到 /resume 或选择操作唤醒。
-                self._wake.clear()
-                await self._wake.wait()
-                if self._stopped:
-                    return
-                continue
+                # WAITING/STOPPED 必须让本轮调度任务退出；/resume 与选择操作会通过
+                # ``_spawn_search`` 建立新任务。把旧任务留在这里永久等待会让 headless
+                # 调用看似卡死，也会把失败预算误当成仍在运行。
+                return
             generated = await self._fill_slots()
             if not self._running:
                 if generated:
@@ -978,8 +1003,13 @@ class Supervisor(SupervisorActions):
             state = completed.result.next_state
             self.state.plans[plan_id] = state
         if completed.decision is None:
-            if state.turn_limit is not None and state.turns_used >= state.turn_limit:
-                self.state.status = "WAITING"
+            # A missing decision means the Agent turn itself failed (dispatch,
+            # terminal output, or structured-result loading).  Retrying here in
+            # a tight scheduler loop silently spends every remaining turn and
+            # can race past the durable first-turn checkpoint before observers
+            # can react.  Park the run after the first failed turn; an explicit
+            # resume may retry it after the underlying problem is corrected.
+            self.state.status = "WAITING"
             await self._persist_state()
             return
         if completed.decision.decision == "abandon" and state.best_ref is None:
@@ -1018,10 +1048,14 @@ class Supervisor(SupervisorActions):
         primary: float | None = None
         outcome: Outcome | None = None
         if best_ref is None:
+            failure = "settled without a trusted result"
+            if result is not None:
+                detail = result.error or "no trusted score was produced"
+                failure = f"{result.kind}: {detail}"
             self.tree.transition_experiment(
                 experiment_id,
                 ExperimentStatus.FAILED,
-                error="settled without a trusted result",
+                error=failure,
             )
         else:
             best = await load_best(best_ref, self._store)
@@ -1186,11 +1220,32 @@ class Supervisor(SupervisorActions):
                     "priority": priority,
                     "rubric_score": None,
                     "rubric_ref": None,
+                    "turn_limit": (
+                        hypothesis.turn_limit
+                        if hypothesis.turn_limit is not None
+                        else DEFAULT_AUTO_PLAN_TURNS
+                    ),
                 }
             )
             for hypothesis in hypotheses
         ]
         if prepared and self._run_hypothesis_rubric is not None:
+            if self._evaluation_policy is None:
+                self.state.status = "WAITING"
+                await self._persist_state()
+                await self._publish(
+                    "output",
+                    {
+                        "source": "supervisor",
+                        "channel": "error",
+                        "text": (
+                            "Frozen Evaluation Policy is not loaded; hypothesis "
+                            "registration paused instead of changing the evaluation "
+                            "contract or silently falling back."
+                        ),
+                    },
+                )
+                raise RuntimeError("frozen Evaluation Policy is not loaded")
             try:
                 prepared = await self._run_hypothesis_rubric(prepared)
             except Exception as error:

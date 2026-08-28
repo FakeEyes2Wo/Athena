@@ -185,7 +185,12 @@ async def test_interrupt_marks_run_interrupted(tmp_path):
             runner=BaseAgentRunner(BlockingAgent(gate)), codec=JsonCodec()
         ),
     )
-    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rollout_dir = tmp_path / "sessions"
+    rt = AgentRuntime(
+        type_registry=registry,
+        project_root=tmp_path,
+        rollout_dir=rollout_dir,
+    )
     rt.start()
     agent_id, run_id = await rt.create_root("block", {"content": "x"})
     await asyncio.wait_for(gate.wait(), timeout=2)  # 等 turn 进入运行
@@ -219,7 +224,12 @@ async def test_failed_run_summary_preserves_exception_message(tmp_path):
             runner=BaseAgentRunner(FailingAgent()), codec=JsonCodec()
         ),
     )
-    rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
+    rollout_dir = tmp_path / "sessions"
+    rt = AgentRuntime(
+        type_registry=registry,
+        project_root=tmp_path,
+        rollout_dir=rollout_dir,
+    )
     rt.start()
 
     _agent_id, run_id = await rt.create_root("fail", {"content": "x"})
@@ -227,6 +237,14 @@ async def test_failed_run_summary_preserves_exception_message(tmp_path):
 
     assert summary.status == RunStatus.FAILED
     assert summary.error == "RuntimeError: analysis.py failed: TypeError: labels"
+    evidence = [
+        json.loads(line)
+        for line in next(rollout_dir.glob("*.failures.jsonl"))
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert evidence[-1]["error"] == summary.error
+    assert evidence[-1]["status"] == "failed"
     await rt.aclose()
 
 

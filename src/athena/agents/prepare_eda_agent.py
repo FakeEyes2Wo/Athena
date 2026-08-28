@@ -16,6 +16,9 @@ from athena.execution.runtime import ExecutionRuntime
 PREPARE_EDA_AGENT_ID = "prepare_eda"
 PREPARE_EDA_AGENT_TYPE = "prepare_eda"
 EDA_WORKER_AGENT_TYPE = "eda_worker"
+EDA_ORCHESTRATOR_MAX_TURNS = 12
+EDA_WORKER_MAX_TURNS = 10
+EDA_MAX_TOKENS = 2048
 
 
 def register_prepare_eda_agent(
@@ -37,6 +40,8 @@ def register_prepare_eda_agent(
         provider=provider,
         artifacts=artifacts,
         extra_tools=extra_tools,
+        max_turns=EDA_ORCHESTRATOR_MAX_TURNS,
+        max_tokens=EDA_MAX_TOKENS,
     )
     register_prompt_agent(
         registry,
@@ -48,6 +53,8 @@ def register_prepare_eda_agent(
         artifacts=artifacts,
         extra_tools=extra_tools,
         name="eda-worker",
+        max_turns=EDA_WORKER_MAX_TURNS,
+        max_tokens=EDA_MAX_TOKENS,
     )
 
 

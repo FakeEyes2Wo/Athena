@@ -458,9 +458,10 @@ class PlanRunner:
                 emit=emit,
             )
             if not result.ok:
-                error = (
-                    f"command failed (exit {result.exit_code}): {result.stderr[:200]}"
-                )
+                failure_detail = result.error or result.stderr[:200] or "unknown error"
+                error = f"command failed (exit {result.exit_code}): {failure_detail}"
+                if result.error and result.stderr:
+                    error += f"; stderr={result.stderr[:200]}"
                 if "ModuleNotFoundError" in result.stderr:
                     error += (
                         ' Run "uv sync --project $ATHENA_ENV_ROOT" to install the '

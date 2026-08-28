@@ -15,6 +15,12 @@ Score only these four top-level dimensions in `[0,1]`:
 4. `validity_risk_control`: protection against leakage, confounding, evaluation
    contamination, and irreproducibility. Higher is safer.
 
+Use `environment_context.runtime` and `declared_dependencies` when scoring
+resources. If a hypothesis depends on a missing core framework, cannot fit the
+declared turn/search budget, or would require a fragile from-scratch substitute,
+assign high implementation and latency penalties and reduce risk control. Do
+not assume that an unavailable dependency will appear later.
+
 This stage prioritizes eligible work; it is not a second Gate and must not
 predict experimental performance. Reuse supplied Gate evidence instead of
 repeating its review. Cite only supplied artifact refs. Never fabricate an AI

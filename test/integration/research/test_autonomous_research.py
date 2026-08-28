@@ -14,7 +14,7 @@ from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import DataScriptBundle, ValidationResult
 from athena.research.runtime import ResearchRuntime
-from athena.research.supervisor.prepare import PrepareResult
+from athena.research.supervisor.prepare import FrozenEvaluatorRefs, PrepareResult
 from athena.research.supervisor.state import ResearchState
 
 
@@ -109,7 +109,14 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
                 bundle_id="prepare-evaluator", entrypoint="evaluate.py"
             ).model_dump_json()
         )
-        return frozen_ref["evaluator"]
+        frozen_ref["final"] = await kwargs["store"].put_text(
+            DataScriptBundle(
+                bundle_id="final-evaluator", entrypoint="evaluate.py"
+            ).model_dump_json()
+        )
+        return FrozenEvaluatorRefs(
+            search_ref=frozen_ref["evaluator"], final_ref=frozen_ref["final"]
+        )
 
     async def run_prepare_plan(**kwargs):
         captured.update(kwargs)
@@ -154,6 +161,7 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     assert captured["task"] == "predict survival"
     assert captured["workspace"].branch == "athena/prepare"
     assert captured["evaluator_ref"] == frozen_ref["evaluator"]
+    assert result.final_evaluator_ref == frozen_ref["final"]
     assert json.loads(await runtime._store.get_text(captured["tree_ref"])) == (
         runtime.tree.to_dict()
     )
@@ -195,14 +203,22 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
             bundle_id="prepare-evaluator", entrypoint="evaluate.py"
         ).model_dump_json()
     )
+    final_ref = await runtime._store.put_text(
+        DataScriptBundle(
+            bundle_id="final-evaluator", entrypoint="evaluate.py"
+        ).model_dump_json()
+    )
     runtime.state.evaluator_ref = frozen_ref
+    runtime.state.final_evaluator_ref = final_ref
     runtime.supervisor._evaluator_ref = frozen_ref
+    runtime.supervisor._final_evaluator_ref = final_ref
     events: list[tuple[str, dict[str, object]]] = []
     runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
 
     result = await runtime._phase_runner.run_prepare_phase()
 
     assert result.evaluator_ref == frozen_ref
+    assert result.final_evaluator_ref == final_ref
     assert any(
         kind == "output" and "复用已冻结的评估器断点" in str(payload.get("text"))
         for kind, payload in events
@@ -246,7 +262,13 @@ async def test_default_validation_adapter_uses_frozen_inputs_and_supervisor_chec
             bundle_id="frozen-evaluator", entrypoint="eval.py"
         ).model_dump_json()
     )
+    final_evaluator_ref = await runtime._store.put_text(
+        DataScriptBundle(
+            bundle_id="final-evaluator", entrypoint="eval.py"
+        ).model_dump_json()
+    )
     runtime.supervisor._evaluator_ref = evaluator_ref
+    runtime.supervisor._final_evaluator_ref = final_evaluator_ref
     evidence_ref = await runtime._store.put_text("baseline evidence")
     runtime.tree.add_hypothesis(
         Hypothesis(
@@ -288,7 +310,7 @@ async def test_default_validation_adapter_uses_frozen_inputs_and_supervisor_chec
     assert validation_input.sota_commit == base_commit
     assert validation_input.reference_metric == pytest.approx(0.82)
     assert validation_input.direction == "minimize"
-    assert validation_input.final_evaluator_ref == evaluator_ref
+    assert validation_input.final_evaluator_ref == final_evaluator_ref
     assert captured["workspace"].branch == "athena/validate"
     assert callable(captured["independent_review"])
     assert runtime.state.validation == {

@@ -100,7 +100,7 @@ class HypothesisPriorityBatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    reviews: list[HypothesisPriorityReview]
+    reviews: list[HypothesisPriorityReview] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _reject_duplicate_ids(self) -> "HypothesisPriorityBatch":

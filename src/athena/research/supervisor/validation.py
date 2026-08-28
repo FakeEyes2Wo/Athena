@@ -23,7 +23,9 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.experiment import (
+    handoff_block,
     load_agent_result,
+    read_eval_handoff,
     read_experiment_manifest,
 )
 from athena.research.validation import ValidationService
@@ -31,7 +33,7 @@ from athena.research.validation import ValidationService
 CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
 _MAX_REVIEW_DIFF_CHARS = 12_000
 # 校验修复循环的迭代上限，防止 preflight/review/工作区变化互相拉锯造成无限烧 token。
-_MAX_VALIDATION_REPAIR_ATTEMPTS = 16
+_MAX_VALIDATION_REPAIR_ATTEMPTS = 6
 
 
 class ValidationInput(BaseModel):
@@ -249,6 +251,10 @@ async def _decode_repair(
             "Validating the trusted SOTA hypothesis:\n"
             f"{json.dumps(input.sota_context, ensure_ascii=False)}\n\n"
             + task["content"]
+        )
+    if feedback is None:
+        task["content"] += handoff_block(
+            await read_eval_handoff(store, input.final_evaluator_ref)
         )
     if feedback is None:
         _agent_id, run_id = await agents.create_root(

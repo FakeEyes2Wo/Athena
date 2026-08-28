@@ -20,10 +20,14 @@ You have the file and shell tools, sandboxed to the project root:
 - `write_file` — create or overwrite a file.
 - `shell_command` — run one shell command; read stdout/stderr and fix the
   command on a nonzero exit before retrying.
+- Follow the injected Runtime block exactly. On native Windows use PowerShell
+  commands such as `Get-Content`, `Measure-Object`, and `Select-String`; never
+  start with POSIX-only commands such as `head`, `tail`, `wc`, `grep`, `sed`,
+  or `awk`.
 - When a command prints long output (a huge error list, registry dump, or
   trace), do not read it all — first pipe it through a text search to isolate
-  the relevant lines, e.g. `cmd 2>&1 | grep keyword`,
-  `cmd 2>&1 | findstr keyword`, or `cmd 2>&1 | Select-String keyword`.
+  the relevant lines using the current shell, e.g. PowerShell
+  `cmd 2>&1 | Select-String keyword` or POSIX `cmd 2>&1 | grep keyword`.
 
 When the task involves a Kaggle competition, you also have Kaggle tools
 (`kaggle_list_competitions`, `kaggle_get_competition`, `kaggle_list_notebooks`,

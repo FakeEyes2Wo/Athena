@@ -5,7 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
@@ -46,6 +46,7 @@ class PrepareResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     evaluator_ref: ArtifactRef
+    final_evaluator_ref: ArtifactRef | None = None
     metric: float = Field(allow_inf_nan=False)
     commit: CommitHash
     predictions_ref: ArtifactRef
@@ -54,6 +55,21 @@ class PrepareResult(BaseModel):
 
 
 ROW_ID_COLUMN = "__athena_row_id"
+
+
+class FrozenEvaluatorRefs(BaseModel):
+    """Disjoint search and final evaluator bundles frozen from one policy."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    search_ref: ArtifactRef
+    final_ref: ArtifactRef
+
+    @model_validator(mode="after")
+    def _require_distinct_bundles(self) -> "FrozenEvaluatorRefs":
+        if self.search_ref == self.final_ref:
+            raise ValueError("search and final evaluator bundles must be distinct")
+        return self
 
 
 def _require_joinable_labels(labels_file: Path) -> None:
@@ -79,6 +95,24 @@ def _require_joinable_labels(labels_file: Path) -> None:
             f"'{ROW_ID_COLUMN},<target>' and make evaluate.py join on that column "
             "instead of comparing the two files row by row."
         )
+
+
+def _label_ids(labels_file: Path) -> set[str]:
+    """Read the explicit evaluator row ids used to prove split isolation."""
+    with labels_file.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
+            raise ValueError(
+                f"labels.csv must contain the exact row-id column {ROW_ID_COLUMN!r}"
+            )
+        identifiers = {
+            str(row.get(ROW_ID_COLUMN, "")).strip()
+            for row in reader
+            if str(row.get(ROW_ID_COLUMN, "")).strip()
+        }
+    if not identifiers:
+        raise ValueError("labels.csv must contain at least one non-empty row id")
+    return identifiers
 
 
 async def _freeze_evaluator(
@@ -156,6 +190,44 @@ async def _freeze_evaluator(
     return await store.put_text(bundle.model_dump_json())
 
 
+async def _freeze_evaluator_pair(
+    *,
+    root: Path,
+    scripts: DataScriptRunner,
+    store: ArtifactStore,
+    evaluation_policy: EvaluationPolicy | None = None,
+) -> FrozenEvaluatorRefs:
+    """Freeze disjoint SEARCH and final evaluator directories."""
+    search_root = root / "search"
+    final_root = root / "final"
+    search_labels = search_root / "labels.csv"
+    final_labels = final_root / "labels.csv"
+    if not search_labels.is_file() or not final_labels.is_file():
+        raise ValueError("evaluator must create search/labels.csv and final/labels.csv")
+    search_ids = _label_ids(search_labels)
+    final_ids = _label_ids(final_labels)
+    overlap = search_ids & final_ids
+    if overlap:
+        sample = sorted(overlap)[:3]
+        raise ValueError(
+            "search and final evaluator labels must be disjoint; overlapping ids: "
+            f"{sample}"
+        )
+    search_ref = await _freeze_evaluator(
+        root=search_root,
+        scripts=scripts,
+        store=store,
+        evaluation_policy=evaluation_policy,
+    )
+    final_ref = await _freeze_evaluator(
+        root=final_root,
+        scripts=scripts,
+        store=store,
+        evaluation_policy=evaluation_policy,
+    )
+    return FrozenEvaluatorRefs(search_ref=search_ref, final_ref=final_ref)
+
+
 async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
     decision = await load_agent_result(summary, store, PlanDecision)
     if decision is None:
@@ -174,8 +246,8 @@ async def run_evaluator_plan(
     evaluation_policy: EvaluationPolicy | None = None,
     max_turns: int,
     publish: EmitEvent | None = None,
-) -> ArtifactRef:
-    """Run and repair one evaluator Agent until a frozen evaluator bundle exists."""
+) -> FrozenEvaluatorRefs:
+    """Run one evaluator Agent until disjoint search/final bundles exist."""
 
     if max_turns < 1:
         raise ValueError("max_turns must be at least 1")
@@ -236,7 +308,7 @@ async def run_evaluator_plan(
         if decision.decision == "abandon":
             raise RuntimeError(f"evaluator Agent abandoned Plan: {decision.reason}")
         try:
-            evaluator_ref = await _freeze_evaluator(
+            evaluator_refs = await _freeze_evaluator_pair(
                 root=root,
                 scripts=scripts,
                 store=store,
@@ -248,7 +320,7 @@ async def run_evaluator_plan(
                     f"{decision.decision!r}. Return submit to advance to the "
                     "experiment step."
                 )
-            return evaluator_ref
+            return evaluator_refs
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             # 覆盖 evaluator 冻结（uv lock）的子进程失败 → 转成同 Plan 的反馈重试。
             feedback = " ".join(str(exc).split())[:1000]
@@ -409,6 +481,7 @@ __all__ = [
     "EVALUATOR_AGENT_ID",
     "EVALUATOR_PLAN_ID",
     "PrepareResult",
+    "FrozenEvaluatorRefs",
     "run_evaluator_plan",
     "run_prepare_plan",
 ]

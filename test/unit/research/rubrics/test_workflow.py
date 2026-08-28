@@ -3,6 +3,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import json
+
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
@@ -69,6 +71,10 @@ async def test_evaluation_workflow_preserves_human_metric(tmp_path: Path) -> Non
 async def test_hypothesis_workflow_calls_llm_once_for_whole_batch(
     tmp_path: Path,
 ) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rubric-test"\ndependencies = ["scikit-learn"]\n',
+        encoding="utf-8",
+    )
     policy = EvaluationPolicy(
         primary_metric="roc_auc",
         direction="maximize",
@@ -83,6 +89,11 @@ async def test_hypothesis_workflow_calls_llm_once_for_whole_batch(
         _supervisor=SimpleNamespace(evaluation_policy=policy, evaluator_ref=None),
         tree=ResearchTree(),
         state=SimpleNamespace(search_limit=2, concurrency=1),
+        _root=tmp_path,
+        _execution=SimpleNamespace(
+            environment_root=tmp_path,
+            runtime_summary=lambda _root: "Runtime: Windows / PowerShell",
+        ),
         publish_output=_ignore_output,
     )
     workflow = RubricWorkflow(runtime, eda_root=lambda: tmp_path)
@@ -97,9 +108,11 @@ async def test_hypothesis_workflow_calls_llm_once_for_whole_batch(
     ]
     calls = 0
 
-    async def fake_agent(**_kwargs):
+    async def fake_agent(**kwargs):
         nonlocal calls
         calls += 1
+        assert "scikit-learn" in kwargs["content"]
+        assert "PowerShell" in kwargs["content"]
         return HypothesisPriorityBatch(
             reviews=[
                 HypothesisPriorityReview(
@@ -130,3 +143,83 @@ async def test_hypothesis_workflow_calls_llm_once_for_whole_batch(
     assert [item.id for item in scored] == ["h1", "h2"]
     assert all(item.rubric_score is not None for item in scored)
     assert all(item.rubric_ref is not None for item in scored)
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_workflow_requires_loaded_frozen_policy(
+    tmp_path: Path,
+) -> None:
+    runtime = SimpleNamespace(
+        _task_text="predict diagnosis",
+        _store=LocalArtifactStore(tmp_path / "artifacts"),
+        _supervisor=SimpleNamespace(evaluation_policy=None, evaluator_ref=None),
+        tree=ResearchTree(),
+        state=SimpleNamespace(search_limit=2, concurrency=1),
+        publish_output=_ignore_output,
+    )
+    workflow = RubricWorkflow(runtime, eda_root=lambda: tmp_path)
+    hypothesis = Hypothesis(
+        id="h1",
+        statement="test a bounded model",
+        intervention="fit the model",
+        expected_effect="improve ROC AUC",
+    )
+
+    with pytest.raises(RuntimeError, match="frozen Evaluation Policy"):
+        await workflow.run_hypothesis_priority([hypothesis])
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_workflow_records_model_failure_and_keeps_fallback(
+    tmp_path: Path,
+) -> None:
+    policy = EvaluationPolicy(
+        primary_metric="roc_auc",
+        direction="maximize",
+        metric_source="human",
+        locked=True,
+        confidence=1.0,
+        explanation="Human objective.",
+    )
+    outputs: list[dict[str, object]] = []
+
+    async def publish_output(**kwargs) -> None:
+        outputs.append(kwargs)
+
+    runtime = SimpleNamespace(
+        _task_text="predict diagnosis",
+        _store=LocalArtifactStore(tmp_path / "artifacts"),
+        _supervisor=SimpleNamespace(evaluation_policy=policy, evaluator_ref=None),
+        tree=ResearchTree(),
+        state=SimpleNamespace(search_limit=2, concurrency=1),
+        publish_output=publish_output,
+    )
+    workflow = RubricWorkflow(runtime, eda_root=lambda: tmp_path)
+    hypothesis = Hypothesis(
+        id="h1",
+        statement="test a bounded model",
+        intervention="fit the model",
+        expected_effect="improve ROC AUC",
+    )
+
+    async def unavailable_agent(**_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    workflow._run_agent = unavailable_agent  # type: ignore[method-assign]
+
+    result = await workflow.run_hypothesis_priority([hypothesis])
+
+    assert result == [hypothesis]
+    assert result[0].rubric_score is None
+    assert result[0].rubric_ref is None
+    fallback = next(item for item in outputs if "确定性回退" in str(item.get("text")))
+    assert "[rubric_status=fallback]" in str(fallback["text"])
+    fallback_payload = json.loads(
+        await runtime._store.get_text(str(fallback["artifact_ref"]))
+    )
+    assert fallback_payload == {
+        "expected_hypothesis_ids": ["h1"],
+        "reason": "provider unavailable",
+        "reason_type": "RuntimeError",
+        "rubric_status": "fallback",
+    }

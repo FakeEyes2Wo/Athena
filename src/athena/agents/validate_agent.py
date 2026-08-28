@@ -38,6 +38,7 @@ def register_validate_agent(
         runtime=runtime,
         provider=provider,
         artifacts=artifacts,
+        structured_repair_provider=provider,
     )
 
 
