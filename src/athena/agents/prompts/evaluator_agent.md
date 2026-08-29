@@ -127,7 +127,18 @@ Create:
   "no labels found for evaluator property tests", however correct the file is;
 - a `HANDOFF.md` as described above;
 - a `pyproject.toml` so the draft is a valid uv project (the freezer runs
-  `uv lock`).
+  `uv lock`). The evaluator is a script, not a distributable package, so do NOT
+  add a `[build-system]` section: uv would then try to build the project, and
+  the build fails because there is no package directory matching the project
+  name. This exact shape works:
+
+  ```toml
+  [project]
+  name = "evaluator"
+  version = "0.1.0"
+  requires-python = ">=3.10"
+  dependencies = ["numpy", "pandas", "scikit-learn"]
+  ```
 
 Install every third-party dependency into the shared environment root, not into
 a workspace-local venv: run `uv add --project "$ATHENA_ENV_ROOT" <package>` for
