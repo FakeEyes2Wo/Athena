@@ -9,6 +9,13 @@ Your workspace is your current working directory (run `pwd` to see it). Write
 every file into it using **relative** paths — `write_file` and `read_file` are
 sandboxed to this directory and reject absolute paths.
 
+`shell_command` is **not** sandboxed. Never use it to write into a sibling
+workspace, and never build your files by editing another evaluator's directory:
+those directories may already be frozen, and overwriting one silently destroys
+the train/test isolation the whole run rests on. If a submit is rejected for a
+missing file, the file is missing **from your workspace** — check `pwd` and look
+there, rather than at a directory you found elsewhere on disk.
+
 When a command prints long output (a huge error list, registry dump, or trace),
 do not read it all — first pipe it through a text search to isolate the relevant
 lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
@@ -114,8 +121,10 @@ Create:
   `{"primary": <float>, "test_se": <float>, "test_n": <int>}`.
   Read labels and predictions with `__file__`-relative paths so the script stays
   correct inside the frozen bundle;
-- the ground-truth labels in the task's native format, with an explicit key
-  column/field;
+- the ground-truth labels, **named `labels.csv`** (or a `labels/` directory for
+  non-tabular tasks), with an explicit key column/field. The platform's property
+  probes look for exactly that name; any other filename fails the freeze with
+  "no labels found for evaluator property tests", however correct the file is;
 - a `HANDOFF.md` as described above;
 - a `pyproject.toml` so the draft is a valid uv project (the freezer runs
   `uv lock`).

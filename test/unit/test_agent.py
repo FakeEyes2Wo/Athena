@@ -690,7 +690,9 @@ async def test_stream_does_not_retry_unrelated_bad_request() -> None:
 async def test_stream_disables_deepseek_thinking_for_tool_execution() -> None:
     """工具 Agent 禁用默认 thinking，避免推理耗尽输出预算却未调用工具。"""
     client = _CaptureClient()
-    provider = ResponsesProvider("model", client=client)
+    # 显式钉住后端：不钉的话它会去读 settings，于是本地 .env 里的 LLM_PROVIDER
+    # 决定这条用例断言的是哪一家的字段名。
+    provider = ResponsesProvider("model", client=client, provider_kind="deepseek")
 
     await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
 
@@ -773,6 +775,9 @@ def test_qwen_is_reachable_from_llm_provider(monkeypatch: pytest.MonkeyPatch) ->
     """``settings`` 早就允许 ``qwen`` 并配好了 DashScope 端点，但 ``create_provider``
     没有对应分支，于是照文档配好环境的用户只会撞上 ``unsupported LLM_PROVIDER``。"""
     monkeypatch.setenv("LLM_PROVIDER", "qwen")
+    # BASE_URL 一旦被设（本地 .env 常有），它优先于 provider 默认端点；清掉才能
+    # 断言"qwen 的默认端点是 DashScope"这件事本身。
+    monkeypatch.delenv("BASE_URL", raising=False)
 
     provider = create_provider("qwen-max")
 

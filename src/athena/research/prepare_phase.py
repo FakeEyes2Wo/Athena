@@ -5,6 +5,7 @@ the long PREPARE pipeline (evaluator freeze, EDA, baseline design, trusted
 baseline score) lives in one focused module.
 """
 
+import csv
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from athena.agents.ideator_agent import (
     register_ideator_agent,
 )
 from athena.agents.prepare_agent import (
+    EVALUATOR_AGENT_TYPE,
     PREPARE_EDA_AGENT_ID,
     PREPARE_EDA_AGENT_TYPE,
     register_evaluator_agent,
@@ -38,6 +40,56 @@ from athena.research.supervisor.prepare import (
 logger = logging.getLogger(__name__)
 
 HandoffFn = Callable[..., Awaitable[str]]
+
+
+def _label_row_ids(labels_csv: Path) -> set[str]:
+    """Row ids a frozen evaluator scores against, or an empty set if unreadable."""
+    try:
+        with labels_csv.open(encoding="utf-8-sig", newline="") as handle:
+            return {
+                row["__athena_row_id"]
+                for row in csv.DictReader(handle)
+                if row.get("__athena_row_id")
+            }
+    except (OSError, ValueError, KeyError):
+        return set()
+
+
+def _assert_evaluator_splits_are_disjoint(
+    search_labels: Path, final_labels: Path
+) -> None:
+    """Fail PREPARE if the two frozen evaluators score the same rows.
+
+    The whole point of freezing two evaluators is that SEARCH never sees the
+    rows VALIDATE will score on. Nothing checked it.
+
+    Real run (2026-08-29): the shared ``evaluator`` agent type bound its
+    workspace once, so the FINAL evaluator's file tools were still rooted at the
+    SEARCH evaluator's directory. Its ``labels.csv`` write landed inside the
+    already-frozen SEARCH evaluator and replaced those labels with the held-out
+    split. SEARCH would then have been scored on exactly the rows VALIDATE was
+    holding back, and every number the run produced would have been meaningless
+    -- silently, because the scores stay perfectly plausible.
+
+    That specific bug is fixed in ``_run_evaluator_agent``, but this check is
+    the standing guarantee: ``shell_command`` is not sandboxed, so an agent can
+    still write into a directory that is not its own, and this is the property
+    that has to hold regardless of how it got broken.
+    """
+    search_ids = _label_row_ids(search_labels)
+    final_ids = _label_row_ids(final_labels)
+    if not search_ids or not final_ids:
+        # A missing or unreadable labels file is the freeze step's problem, not
+        # this check's; do not turn it into a confusing isolation error.
+        return
+    overlap = search_ids & final_ids
+    if overlap:
+        raise RuntimeError(
+            "SEARCH and FINAL evaluators score overlapping rows "
+            f"({len(overlap)} of {len(final_ids)} final rows). The held-out "
+            "split is not held out. Check whether an agent wrote outside its "
+            f"own workspace: {search_labels} vs {final_labels}"
+        )
 
 
 def _write_missing_report_placeholders(workspace: Path) -> None:
@@ -87,15 +139,27 @@ async def _run_evaluator_agent(
 ) -> str:
     """Run one evaluator agent in a dedicated directory and write its README freeze marker."""
     evaluator_dir = rt.workspaces_root / directory_name
-    if not rt.registry.contains("evaluator"):
-        register_evaluator_agent(
-            rt.registry,
-            provider=rt.provider,
-            artifacts=rt.store,
-            workspace=evaluator_dir,
-            runtime=rt.execution,
-            extra_tools=rt.kaggle_tools("evaluator"),
-        )
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
+    # The factory binds its workspace at registration time, and both evaluators
+    # share the agent type "evaluator". Registering only when the type is absent
+    # therefore left the FINAL evaluator's read_file/write_file rooted at the
+    # SEARCH evaluator's directory.
+    #
+    # Real run (2026-08-29): the final-evaluator agent wrote labels.csv "into its
+    # workspace" exactly as told, and the platform put it inside the already
+    # frozen SEARCH evaluator -- replacing its labels with the held-out split.
+    # Meanwhile its own directory stayed empty, so every submit was rejected for
+    # a missing metric.json until the turn budget ran out. Re-bind per run.
+    if rt.registry.contains(EVALUATOR_AGENT_TYPE):
+        rt.registry.unregister(EVALUATOR_AGENT_TYPE)
+    register_evaluator_agent(
+        rt.registry,
+        provider=rt.provider,
+        artifacts=rt.store,
+        workspace=evaluator_dir,
+        runtime=rt.execution,
+        extra_tools=rt.kaggle_tools("evaluator"),
+    )
     return await run_evaluator_plan(
         agents=rt.agents,
         scripts=rt.scripts,
@@ -248,9 +312,26 @@ async def run_prepare_phase(
                 f"{evaluator_task}\n\nYou are building the FINAL evaluator. "
                 "Use a held-out split disjoint from the SEARCH evaluator's "
                 "split. This evaluator is hidden from SEARCH and used only "
-                "by VALIDATE."
+                "by VALIDATE.\n\n"
+                # 真机（2026-08-29）：不点名目录时，agent 用 shell_command 的绝对路径
+                # 跑去改**已冻结的 SEARCH evaluator**，把它的 labels.csv 换成了 final
+                # split 的标签——留出集就此泄漏——而自己的工作区一个文件都没有，于是
+                # 连交 10 次 submit 全被拒，直到轮次预算耗尽。
+                f"Your workspace is {final_evaluator_dir.resolve()} and it starts "
+                "EMPTY. Every file you create — metric.json, evaluate.py, labels.csv, "
+                "HANDOFF.md, pyproject.toml — must be written INSIDE it.\n"
+                "The SEARCH evaluator directory already exists next to yours. It is "
+                "frozen. Do NOT read from it, copy from it, or write into it, with "
+                "either the file tools or shell_command. Building the final labels by "
+                "editing the search evaluator's labels.csv leaks the held-out split "
+                "into SEARCH and invalidates the whole run.\n"
+                "Take the final labels from final_labels.csv in the platform's "
+                "data_split directory, and write your own copy into your workspace."
             ),
             label="final_evaluator",
+        )
+        _assert_evaluator_splits_are_disjoint(
+            evaluator_dir / "labels.csv", final_evaluator_dir / "labels.csv"
         )
         await rt.supervisor.checkpoint_final_evaluator(final_evaluator_ref)
         await rt.publish_output(

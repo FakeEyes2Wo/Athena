@@ -570,4 +570,9 @@ async def test_evaluator_plan_missing_metric_retries(tmp_path: Path) -> None:
         )
 
     assert agents.created == ["evaluator"]
-    assert agents.feedback == ["metric.json is missing"]
+    # 反馈必须点名**哪个目录**缺文件。只说 "metric.json is missing" 时，agent 会
+    # 去看它刚列过的那个目录（可能根本不是它的 workspace），发现文件都在，于是
+    # 原样再交一次——真机上就这样连交 10 次直到预算耗尽。
+    assert len(agents.feedback) == 1
+    assert "metric.json is missing from your workspace" in agents.feedback[0]
+    assert str(evaluator_dir) in agents.feedback[0]

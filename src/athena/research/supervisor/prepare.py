@@ -83,9 +83,7 @@ def _require_joinable_labels(labels_file: Path) -> None:
         for row in reader:
             raw = (row.get(ROW_ID_COLUMN) or "").strip()
             if not raw:
-                raise ValueError(
-                    f"labels.csv contains an empty {ROW_ID_COLUMN!r}"
-                )
+                raise ValueError(f"labels.csv contains an empty {ROW_ID_COLUMN!r}")
             if raw in seen:
                 raise ValueError(
                     f"labels.csv contains duplicate {ROW_ID_COLUMN!r}: {raw}"
@@ -113,7 +111,17 @@ def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
     """
     spec_path = root / "metric.json"
     if not spec_path.is_file():
-        raise ValueError("metric.json is missing")
+        # 报出绝对路径，因为最常见的失败不是"忘了写 metric.json"，而是**写到了别的
+        # 目录**：agent 可以用 shell_command 的绝对路径在 workspace 外面建好整套文件，
+        # 然后对着那份东西反复 submit。只说"metric.json is missing"时，它看自己刚
+        # 列过的目录，文件明明都在，于是原样再交一次。
+        existing = sorted(p.name for p in root.iterdir())[:10] if root.is_dir() else []
+        raise ValueError(
+            f"metric.json is missing from your workspace {root}. "
+            f"That directory currently holds: {existing or 'nothing'}. "
+            "Write every evaluator file inside that exact directory; files you "
+            "created anywhere else do not count."
+        )
     try:
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
         evaluator_rel = spec["eval_script"]
@@ -242,9 +250,7 @@ async def _validate_frozen_evaluator(
             labels_csv, score, prediction_column=prediction_column
         )
     except AttributeError:
-        logger.warning(
-            "evaluator property tests skipped: runner has no run_dir()"
-        )
+        logger.warning("evaluator property tests skipped: runner has no run_dir()")
         return
     if not outcome.get("ok"):
         raise ValueError(outcome.get("reason", "evaluator property tests failed"))
@@ -317,9 +323,7 @@ async def run_evaluator_plan(
                 )
                 continue
             try:
-                evaluator_root, entrypoint, prediction_format = _evaluator_layout(
-                    root
-                )
+                evaluator_root, entrypoint, prediction_format = _evaluator_layout(root)
                 readme_text = _evaluator_readme(
                     root,
                     entrypoint=entrypoint,
@@ -356,13 +360,29 @@ async def run_evaluator_plan(
                     if answer is not None:
                         lowered = str(answer).lower()
                         if "reject" in lowered or "拒绝" in answer:
-                            raise ValueError("human rejected custom evaluator acceptance")
+                            raise ValueError(
+                                "human rejected custom evaluator acceptance"
+                            )
                 return evaluator_ref
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # 写入 README/校验/目录运行失败 → 转成同 Plan 的反馈重试。
                 feedback = " ".join(str(exc).split())[:1000]
+                # 拒绝理由此前只发给 agent，操作者的日志里一个字都没有。真机
+                # （2026-08-29）上 agent 连交 10 次 submit 全被拒、直到预算耗尽，
+                # 而日志里只有一句"turn budget exhausted"——从外面看是无缘无故的
+                # 空转，没有任何线索指向真正的原因。
+                logger.warning(
+                    "evaluator %s submit rejected on turn %d/%d: %s",
+                    plan_id,
+                    turn + 1,
+                    max_turns,
+                    feedback,
+                )
 
-        raise RuntimeError("evaluator turn budget exhausted without an accepted evaluator")
+        raise RuntimeError(
+            f"evaluator turn budget exhausted without an accepted evaluator "
+            f"({plan_id}); last rejection: {feedback or 'none recorded'}"
+        )
     finally:
         # The evaluator Agent is a one-shot PREPARE worker; release it after the
         # phase succeeds or exhausts its turn budget.

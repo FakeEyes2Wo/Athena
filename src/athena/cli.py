@@ -88,12 +88,38 @@ def _platform_split_dataset(args: argparse.Namespace) -> Path | None:
     path = Path(args.data)
     if path.suffix.lower() != ".csv" or not path.is_file():
         return None
-    return path
+    return path.resolve()
+
+
+def _dataset_path_for_prompt(data: str) -> str:
+    """Absolutize a local ``--data`` path before it goes into the task text.
+
+    ``--data`` is resolved against the CLI's working directory, but every agent
+    runs with its own workspace (or the project root) as cwd. A relative path
+    therefore means two different things at the two ends, and the agent's end is
+    the one that is wrong.
+
+    Real run (2026-08-29): ``--data ../data/TESS-SF/windows/model_input.csv``
+    passed the CLI's existence pre-check, then the first agent spent its whole
+    turn budget hunting for it -- ``../data/...`` from the project root resolves
+    to a sibling of the project, not of the CLI. Non-paths (a Kaggle URL) are
+    passed through untouched.
+    """
+    path = Path(data)
+    try:
+        if path.exists():
+            return str(path.resolve())
+    except OSError:
+        pass
+    return data
 
 
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
-    task_lines = [args.task or "", f"Dataset path: {args.data}"]
+    task_lines = [
+        args.task or "",
+        f"Dataset path: {_dataset_path_for_prompt(args.data)}",
+    ]
     optional_context = (
         ("Target", args.target),
         ("Group column (rows sharing it must not span splits)", args.group_column),

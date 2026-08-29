@@ -166,6 +166,39 @@ def test_the_platform_split_stays_off_for_inputs_it_cannot_split(tmp_path) -> No
         assert options["target_column"] is None
 
 
+def test_the_dataset_path_in_the_prompt_is_absolute(tmp_path, monkeypatch) -> None:
+    """Agents run from their own workspace, so a relative --data path misleads them.
+
+    真机（2026-08-29）：``--data ../data/.../model_input.csv`` 通过了 CLI 的存在性
+    预检，然后第一个 agent 把整轮预算花在找这个文件上——从项目根解析
+    ``../data/...`` 得到的是项目的兄弟目录，不是 CLI 的。
+    """
+    source = tmp_path / "windows.csv"
+    source.write_text("TIC,feature,label\n1,2,0\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    options = cli._runtime_options(
+        cli._build_parser().parse_args(
+            ["run", "--project", "p", "--data", "windows.csv", "--target", "label"]
+        )
+    )
+
+    assert f"Dataset path: {source.resolve()}" in options["task"]
+    assert options["dataset_path"] == source.resolve()
+
+
+def test_a_non_path_dataset_argument_is_left_alone(tmp_path, monkeypatch) -> None:
+    """``--data`` 也可以是 Kaggle URL；不存在的东西不该被当路径展开。"""
+    monkeypatch.chdir(tmp_path)
+    url = "https://www.kaggle.com/competitions/titanic"
+
+    options = cli._runtime_options(
+        cli._build_parser().parse_args(["run", "--project", "p", "--data", url])
+    )
+
+    assert f"Dataset path: {url}" in options["task"]
+
+
 def test_tolerance_rejects_negative_values() -> None:
     """``PlanInput.tolerance`` 声明了 ge=0；负值该在解析期就失败，而不是烧掉一轮 PREPARE。"""
     with pytest.raises(SystemExit):
