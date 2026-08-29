@@ -20,7 +20,7 @@ from athena.execution.pool import GpuPool
 from athena.execution.remote.channel import RemoteChannel, SubprocessTransport
 from athena.execution.remote.ssh import SshHost
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
-from athena.research.contracts import CandidateEvaluation, DataScriptBundle
+from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.supervisor.experiment import PlanRunner
 from athena.research.supervisor.plans import PlanInput, PlanState
 
@@ -65,6 +65,20 @@ class _Evaluator:
             test_score=0.75,
             direction=kwargs.get("direction", "maximize"),
         )
+
+
+async def _evaluator_ref(store: LocalArtifactStore, base: Path) -> str:
+    evaluator_dir = base / "eval"
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
+    readme = "# Evaluator Freeze Marker\n\nDo not edit.\n"
+    (evaluator_dir / "README.md").write_text(readme, encoding="utf-8")
+    readme_ref = await store.put_text(readme)
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(evaluator_dir),
+        readme_ref=readme_ref,
+        entrypoint="eval.py",
+    )
+    return await store.put_text(descriptor.model_dump_json())
 
 
 class _Workspace:
@@ -158,9 +172,7 @@ async def test_an_experiment_runs_remotely_and_its_outputs_come_home(
 
     pool, lease, execution = await _lease_runtime(tmp_path, fake_gpus, workspace, store)
     evaluator = _Evaluator()
-    bundle_ref = await store.put_text(
-        DataScriptBundle(bundle_id="b1", entrypoint="eval.py").model_dump_json()
-    )
+    bundle_ref = await _evaluator_ref(store, tmp_path)
     branch = GitWorkBranch(
         path=str(workspace), branch="athena/plan/h1", base_commit="c0"
     )
@@ -215,9 +227,7 @@ async def test_the_evidence_says_which_machine_it_ran_on(tmp_path, fake_gpus) ->
     _write_experiment(workspace)
 
     pool, lease, execution = await _lease_runtime(tmp_path, fake_gpus, workspace, store)
-    bundle_ref = await store.put_text(
-        DataScriptBundle(bundle_id="b1", entrypoint="eval.py").model_dump_json()
-    )
+    bundle_ref = await _evaluator_ref(store, tmp_path)
     runner = PlanRunner(
         execution=execution,
         store=store,
@@ -263,9 +273,7 @@ async def test_local_execution_records_no_placement(tmp_path) -> None:
     workspace.mkdir()
     _write_experiment(workspace)
 
-    bundle_ref = await store.put_text(
-        DataScriptBundle(bundle_id="b1", entrypoint="eval.py").model_dump_json()
-    )
+    bundle_ref = await _evaluator_ref(store, tmp_path)
     runner = PlanRunner(
         execution=ExecutionRuntime(
             project_root=tmp_path, environment_root=tmp_path, store=store

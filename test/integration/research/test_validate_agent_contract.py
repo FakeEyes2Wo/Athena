@@ -12,7 +12,7 @@ from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.execution.runtime import ExecutionRuntime
-from athena.research.contracts import CandidateEvaluation, DataScriptBundle
+from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.supervisor.validation import (
     ValidationDiffReview,
     ValidationInput,
@@ -98,22 +98,21 @@ class _Evaluator:
     def __init__(self) -> None:
         self.calls = 0
         self.directions: list[str] = []
-        self.bundle_ids: list[str] = []
+        self.evaluator_dirs: list[Path] = []
 
     async def score(
         self,
         *,
-        eval_bundle: DataScriptBundle,
+        evaluator_dir: Path,
         predictions: dict[str, bytes],
         candidate_id: str,
         direction: str,
         predictions_root: str = "predictions.csv",
-        predictions_path: str = "predictions.csv",  # 兼容旧调用，Task 4 落定后移除
     ):
         del predictions
         self.calls += 1
         self.directions.append(direction)
-        self.bundle_ids.append(eval_bundle.bundle_id)
+        self.evaluator_dirs.append(evaluator_dir)
         return CandidateEvaluation(
             candidate_id=candidate_id, test_score=0.79, direction=direction
         )
@@ -201,9 +200,16 @@ class _Harness:
         )
         self.agents.start()
         self.execution = _Execution(Path(self.branch.path), self.store)
+        final_evaluator_dir = self.tmp_path / "final_eval"
+        final_evaluator_dir.mkdir(parents=True, exist_ok=True)
+        readme = "# Evaluator Freeze Marker\n\nDo not edit.\n"
+        (final_evaluator_dir / "README.md").write_text(readme, encoding="utf-8")
+        readme_ref = await self.store.put_text(readme)
         final_evaluator_ref = await self.store.put_text(
-            DataScriptBundle(
-                bundle_id="final-eval", entrypoint="eval.py"
+            EvaluatorDescriptor(
+                dir_path=str(final_evaluator_dir),
+                readme_ref=readme_ref,
+                entrypoint="eval.py",
             ).model_dump_json()
         )
         self.input = ValidationInput(
@@ -486,7 +492,8 @@ async def test_normal_validation_computes_gap_from_frozen_sota_metric(tmp_path) 
     assert result.final_test_score == pytest.approx(0.79)
     assert result.generalization_gap == pytest.approx(0.03)
     assert result.generalization_warning is True
-    assert harness.evaluator.bundle_ids == ["final-eval"]
+    assert len(harness.evaluator.evaluator_dirs) == 1
+    assert (harness.evaluator.evaluator_dirs[0] / "README.md").is_file()
     await harness.close()
 
 

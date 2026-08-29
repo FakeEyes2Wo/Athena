@@ -9,9 +9,9 @@ import pytest
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
+from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import (
-    BundleMetadata,
     DataScriptRunner,
     load_directory,
 )
@@ -46,11 +46,13 @@ main()
 
 
 async def _frozen_eval_bundle(tmp_path, store) -> str:
-    """Build and freeze a stdlib-only accuracy evaluator over frozen labels."""
-    runner = DataScriptRunner(store=store, workdir=tmp_path / "eval-work")
+    """Build a README-only evaluator descriptor with a stdlib accuracy script."""
     draft = tmp_path / "eval-draft"
     draft.mkdir(exist_ok=True)
     (draft / "eval.py").write_text(EVAL_PY, encoding="utf-8")
+    (draft / "metric.json").write_text(
+        json.dumps({"eval_script": "eval.py"}), encoding="utf-8"
+    )
     (draft / "labels.csv").write_text(
         "__athena_row_id,label\nrow_1,1\nrow_2,0\n", encoding="utf-8"
     )
@@ -62,8 +64,15 @@ async def _frozen_eval_bundle(tmp_path, store) -> str:
         "dependencies = []\n",
         encoding="utf-8",
     )
-    bundle = await runner.freeze(draft, BundleMetadata(entrypoint="eval.py"))
-    return await store.put_text(bundle.model_dump_json())
+    readme = "# Evaluator Freeze Marker\n\nDo not edit.\n"
+    (draft / "README.md").write_text(readme, encoding="utf-8")
+    readme_ref = await store.put_text(readme)
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(draft.resolve()),
+        readme_ref=readme_ref,
+        entrypoint="eval.py",
+    )
+    return await store.put_text(descriptor.model_dump_json())
 
 
 @pytest.mark.asyncio

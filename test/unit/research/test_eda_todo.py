@@ -83,6 +83,47 @@ async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
 
 
 @pytest.mark.asyncio
+async def test_run_eda_todos_skips_orchestrator_index_and_handoff_todo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path
+    todo_file = workspace / "EDA_TODO.md"
+    todo_file.write_text(
+        "# EDA Todo\n"
+        "\n"
+        "## Stage 1: Overview (parallel: false)\n"
+        "- [ ] 00 Overview -> EDA_REPORT_00_OVERVIEW.md\n"
+        "\n"
+        "## Stage 4: Final (parallel: false)\n"
+        "- [ ] 07 Index & Handoff -> EDA_INDEX.md + EDA_HANDOFF.md\n",
+        encoding="utf-8",
+    )
+    _write_reports(workspace, ["EDA_REPORT_00_OVERVIEW.md"])
+
+    agents = _FakeAgents()
+
+    async def fake_wait(agents, run_id, publish):
+        return SimpleNamespace(run_id=run_id, status="COMPLETED", error=None)
+
+    async def fake_load(summary, store, result_type):
+        return HandoffResult(summary="ok", handoff_file="EDA_REPORT.md")
+
+    monkeypatch.setattr(eda_todo, "wait_run_events", fake_wait)
+    monkeypatch.setattr(eda_todo, "load_agent_result", fake_load)
+
+    failed = await run_eda_todos(agents=agents, store=None, workspace=workspace)
+
+    # The Index & Handoff step belongs to the orchestrator finalize turn; it
+    # must not be scheduled as an EDA worker (which is forbidden to write it).
+    assert failed == []
+    assert len(agents.spawned) == 1
+    assert agents.spawned[0]["task"]["output_file"] == "EDA_REPORT_00_OVERVIEW.md"
+    text = todo_file.read_text(encoding="utf-8")
+    assert "- [x] 00 Overview" in text
+    assert "- [ ] 07 Index & Handoff" in text
+
+
+@pytest.mark.asyncio
 async def test_run_eda_todos_keeps_failed_todo_unchecked(
     tmp_path: Path, monkeypatch
 ) -> None:

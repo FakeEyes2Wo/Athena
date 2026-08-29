@@ -10,7 +10,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from athena.core.contracts import ArtifactRef, NonBlankText
 
@@ -40,6 +40,21 @@ class DataScriptBundle(BaseModel):
     tree_ref: ArtifactRef | None = None  # 完整源码树 manifest {relpath: content_ref}
     python_version: str | None = None  # 解析出的解释器版本
     environment_hash: str | None = None  # sha256(pyproject + uv.lock + python_version)
+
+
+class EvaluatorDescriptor(BaseModel):
+    """README-only frozen evaluator descriptor.
+
+    Replaces the old ``DataScriptBundle`` freeze: the evaluator stays in its
+    working directory and README.md is the prompt-level freeze marker.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    dir_path: str
+    readme_ref: ArtifactRef
+    prediction_format: str = "tabular_csv"
+    entrypoint: str = "evaluate.py"
 
 
 class CandidateEvaluation(BaseModel):

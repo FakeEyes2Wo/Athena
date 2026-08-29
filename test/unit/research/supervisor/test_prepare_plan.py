@@ -8,11 +8,9 @@ import pytest
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.execution.runtime import CommandResult
-from athena.research.contracts import CandidateEvaluation, DataScriptBundle
-from athena.research.rubrics.models import EvaluationPolicy
+from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.supervisor.prepare import (
-    _freeze_evaluator,
-    _freeze_evaluator_pair,
+    _validate_frozen_evaluator,
     run_evaluator_plan,
     run_prepare_plan,
 )
@@ -66,50 +64,7 @@ class _AgentRuntime:
 
 
 class _Scripts:
-    """Freeze stub asserting the evaluator directory freezes to evaluate.py."""
-
-    async def freeze(self, workspace, metadata):
-        workspace_name = Path(workspace).name
-        assert workspace_name in {"evaluator", "search", "final"}
-        assert metadata.entrypoint == "evaluate.py"
-        return DataScriptBundle(
-            bundle_id=f"bundle-{workspace_name}",
-            entrypoint="evaluate.py",
-            lock_ref="sha256:" + "1" * 64,
-            project_ref="sha256:" + "2" * 64,
-            source_ref="sha256:" + "3" * 64,
-            tree_ref="sha256:" + "4" * 64,
-            python_version="3.12",
-            environment_hash="5" * 64,
-        )
-
-
-class _TreeScripts:
-    """Freeze stub that builds a real tree manifest (rel path -> content ref)."""
-
-    def __init__(self, store: LocalArtifactStore) -> None:
-        self.store = store
-
-    async def freeze(self, workspace, metadata):
-        assert Path(workspace).name == "evaluator"
-        assert metadata.entrypoint == "evaluate.py"
-        tree: dict[str, str] = {}
-        for path in sorted(Path(workspace).rglob("*")):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(workspace).as_posix()
-            tree[rel] = await self.store.put_bytes(path.read_bytes())
-        tree_ref = await self.store.put_text(json.dumps(tree, ensure_ascii=False))
-        return DataScriptBundle(
-            bundle_id="bundle-eval",
-            entrypoint="evaluate.py",
-            lock_ref="sha256:" + "1" * 64,
-            project_ref="sha256:" + "2" * 64,
-            source_ref="sha256:" + "3" * 64,
-            tree_ref=tree_ref,
-            python_version="3.12",
-            environment_hash="5" * 64,
-        )
+    """Script runner stub: no freeze or run_dir, so property tests are skipped."""
 
 
 class _Execution:
@@ -200,12 +155,17 @@ def _write_eda_workspace(workspace_path: Path, *, missing: str | None) -> None:
     )
 
 
-async def _frozen_evaluator_ref(store) -> str:
-    return await store.put_text(
-        DataScriptBundle(
-            bundle_id="bundle-eval", entrypoint="evaluate.py"
-        ).model_dump_json()
+async def _frozen_evaluator_ref(store, dir_path: Path) -> str:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    readme = "# Evaluator Freeze Marker\n\nDo not edit.\n"
+    (dir_path / "README.md").write_text(readme, encoding="utf-8")
+    readme_ref = await store.put_text(readme)
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(dir_path),
+        readme_ref=readme_ref,
+        entrypoint="evaluate.py",
     )
+    return await store.put_text(descriptor.model_dump_json())
 
 
 @pytest.mark.asyncio
@@ -225,7 +185,7 @@ async def test_prepare_result_requires_every_trusted_artifact(
     _write_eda_workspace(workspace_path, missing=missing)
     store = _Store(tmp_path / "artifacts", missing_evidence=missing == "evidence")
     agents = _AgentRuntime(store.inner)
-    evaluator_ref = await _frozen_evaluator_ref(store)
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
     tree_ref = await store.put_text('{"experiments": []}')
 
     with pytest.raises(RuntimeError, match="turn budget exhausted"):
@@ -254,7 +214,7 @@ async def test_prepare_returns_result_on_trusted_baseline(tmp_path: Path) -> Non
     _write_eda_workspace(workspace_path, missing=None)
     store = _Store(tmp_path / "artifacts")
     agents = _AgentRuntime(store.inner)
-    evaluator_ref = await _frozen_evaluator_ref(store)
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
     tree_ref = await store.put_text('{"experiments": []}')
 
     result = await run_prepare_plan(
@@ -287,7 +247,7 @@ async def test_prepare_scoring_failure_retries_without_agent_repair(
     _write_eda_workspace(workspace_path, missing=None)
     store = _Store(tmp_path / "artifacts")
     agents = _AgentRuntime(store.inner)
-    evaluator_ref = await _frozen_evaluator_ref(store)
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
     tree_ref = await store.put_text('{"experiments": []}')
 
     with pytest.raises(RuntimeError, match="turn budget exhausted"):
@@ -321,41 +281,40 @@ def _evaluator_draft(root: Path, labels_csv: str) -> None:
     (root / "metric.json").write_text(
         json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
     )
+    (root / "HANDOFF.md").write_text(
+        "prediction column: prediction\n", encoding="utf-8"
+    )
 
 
 @pytest.mark.asyncio
-async def test_labels_without_a_row_id_column_never_freeze(tmp_path: Path) -> None:
-    """真实跑测（2026-08-16）：单列 labels.csv 让每个候选都恒定得 AUC≈0.502。
-
-    agent 交的 labels.csv 只有一列 ``label``（1200 行留出集），候选交的是 6000 行
-    ``row_id,probability``，evaluate.py 把两边截到较短长度后逐位比较——比的是毫不相干
-    的行。同一份预测按 row_id 正确 join 出来是 0.8668。没有 id 列时 join 在结构上就不
-    可能，所以这一条必须在冻结前拦下，而不是让 SEARCH 跑完全程给出无意义的判决。
-    """
+async def test_labels_without_row_id_are_rejected_by_validation(tmp_path: Path) -> None:
+    """单列 labels.csv 仍必须在 README 冻结前被结构性检查拦下。"""
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "label\n0\n1\n")
     store = LocalArtifactStore(tmp_path / "artifacts")
 
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _freeze_evaluator(
-            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        await _validate_frozen_evaluator(
+            root=evaluator_dir, scripts=_Scripts(), store=store
         )
 
 
 @pytest.mark.asyncio
-async def test_labels_with_wrong_row_id_column_never_freeze(tmp_path: Path) -> None:
+async def test_labels_with_wrong_row_id_are_rejected_by_validation(
+    tmp_path: Path,
+) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "id,label\n0,0\n1,1\n")
     store = LocalArtifactStore(tmp_path / "artifacts")
 
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _freeze_evaluator(
-            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        await _validate_frozen_evaluator(
+            root=evaluator_dir, scripts=_Scripts(), store=store
         )
 
 
 @pytest.mark.asyncio
-async def test_labels_with_duplicate_row_ids_never_freeze(tmp_path: Path) -> None:
+async def test_duplicate_row_ids_are_rejected_by_validation(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(
         evaluator_dir,
@@ -364,59 +323,51 @@ async def test_labels_with_duplicate_row_ids_never_freeze(tmp_path: Path) -> Non
     store = LocalArtifactStore(tmp_path / "artifacts")
 
     with pytest.raises(ValueError, match="duplicate '__athena_row_id'"):
-        await _freeze_evaluator(
-            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        await _validate_frozen_evaluator(
+            root=evaluator_dir, scripts=_Scripts(), store=store
         )
 
 
 @pytest.mark.asyncio
-async def test_labels_carrying_a_row_id_column_freeze_normally(tmp_path: Path) -> None:
+async def test_valid_tabular_labels_pass_validation(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     _evaluator_draft(evaluator_dir, "__athena_row_id,label\n0,0\n1,1\n")
     store = LocalArtifactStore(tmp_path / "artifacts")
 
-    evaluator_ref = await _freeze_evaluator(
-        root=evaluator_dir, scripts=_TreeScripts(store), store=store
+    # _Scripts has no run_dir(), so behavioral probes are skipped; label layout
+    # must still be accepted before the probe-skip path.
+    await _validate_frozen_evaluator(
+        root=evaluator_dir, scripts=_Scripts(), store=store
     )
-
-    bundle = DataScriptBundle.model_validate_json(await store.get_text(evaluator_ref))
-    assert "labels.csv" in json.loads(await store.get_text(bundle.tree_ref))
 
 
 @pytest.mark.asyncio
-async def test_freeze_evaluator_accepts_labels_directory_and_handoff(
-    tmp_path: Path,
-) -> None:
-    """Labels may be a ``labels/`` directory (no labels.csv); HANDOFF.md is bundled."""
+async def test_labels_directory_and_handoff_are_accepted(tmp_path: Path) -> None:
+    """Labels may be a ``labels/`` directory; HANDOFF.md stays next to evaluator."""
     evaluator_dir = tmp_path / "evaluator"
     (evaluator_dir / "labels").mkdir(parents=True)
     (evaluator_dir / "labels" / "truth.csv").write_text(
-        "__athena_row_id,label\n1,0\n", encoding="utf-8"
+        "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
     )
     (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
     (evaluator_dir / "pyproject.toml").write_text(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
-    (evaluator_dir / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    (evaluator_dir / "HANDOFF.md").write_text(
+        "# Handoff\n\nprediction column: prediction\n", encoding="utf-8"
+    )
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
     )
-
     store = LocalArtifactStore(tmp_path / "artifacts")
-    evaluator_ref = await _freeze_evaluator(
-        root=evaluator_dir, scripts=_TreeScripts(store), store=store
-    )
 
-    bundle = DataScriptBundle.model_validate_json(await store.get_text(evaluator_ref))
-    tree = json.loads(await store.get_text(bundle.tree_ref))
-    assert "labels/truth.csv" in tree
-    assert "HANDOFF.md" in tree
+    await _validate_frozen_evaluator(
+        root=evaluator_dir, scripts=_Scripts(), store=store
+    )
 
 
 @pytest.mark.asyncio
-async def test_freeze_evaluator_rejects_labels_directory_without_row_id(
-    tmp_path: Path,
-) -> None:
+async def test_labels_directory_without_row_id_is_rejected(tmp_path: Path) -> None:
     evaluator_dir = tmp_path / "evaluator"
     (evaluator_dir / "labels").mkdir(parents=True)
     (evaluator_dir / "labels" / "truth.csv").write_text(
@@ -432,38 +383,66 @@ async def test_freeze_evaluator_rejects_labels_directory_without_row_id(
     store = LocalArtifactStore(tmp_path / "artifacts")
 
     with pytest.raises(ValueError, match="__athena_row_id"):
-        await _freeze_evaluator(
-            root=evaluator_dir, scripts=_TreeScripts(store), store=store
+        await _validate_frozen_evaluator(
+            root=evaluator_dir, scripts=_Scripts(), store=store
         )
 
 
 @pytest.mark.asyncio
-async def test_freeze_evaluator_accepts_eval_script_directory(tmp_path: Path) -> None:
-    """``eval_script`` may name a directory whose entrypoint is evaluate.py."""
+async def test_eval_script_directory_labels_are_located_correctly(
+    tmp_path: Path,
+) -> None:
+    """``eval_script`` may name a directory; labels are found next to evaluate.py."""
     evaluator_dir = tmp_path / "evaluator"
     inner = evaluator_dir / "evaluator"
     inner.mkdir(parents=True)
     (inner / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (inner / "labels.csv").write_text("__athena_row_id,label\n1,0\n", encoding="utf-8")
+    (inner / "labels.csv").write_text(
+        "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
+    )
     (inner / "pyproject.toml").write_text(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (inner / "HANDOFF.md").write_text(
+        "prediction column: prediction\n", encoding="utf-8"
     )
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluator"}), encoding="utf-8"
     )
-
     store = LocalArtifactStore(tmp_path / "artifacts")
-    evaluator_ref = await _freeze_evaluator(
+
+    await _validate_frozen_evaluator(
         root=evaluator_dir, scripts=_Scripts(), store=store
     )
 
-    assert evaluator_ref
+
+@pytest.mark.asyncio
+async def test_custom_format_skips_csv_probes(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    evaluator_dir.mkdir(parents=True)
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py", "prediction_format": "custom"}),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+
+    # No CSV labels required: custom formats are validated by the agent's own
+    # format-aware probes instead of the platform CSV property tests.
+    await _validate_frozen_evaluator(
+        root=evaluator_dir, scripts=_Scripts(), store=store
+    )
 
 
 @pytest.mark.asyncio
-async def test_freeze_evaluator_rejects_policy_metric_mismatch(tmp_path: Path) -> None:
+async def test_evaluator_plan_writes_readme_and_descriptor_on_submit(
+    tmp_path: Path,
+) -> None:
     evaluator_dir = tmp_path / "evaluator"
-    evaluator_dir.mkdir()
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
     (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
     (evaluator_dir / "labels.csv").write_text(
         "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
@@ -471,44 +450,8 @@ async def test_freeze_evaluator_rejects_policy_metric_mismatch(tmp_path: Path) -
     (evaluator_dir / "pyproject.toml").write_text(
         "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
     )
-    (evaluator_dir / "metric.json").write_text(
-        json.dumps(
-            {
-                "eval_script": "evaluate.py",
-                "primary_metric": "accuracy",
-                "direction": "maximize",
-            }
-        ),
-        encoding="utf-8",
-    )
-    policy = EvaluationPolicy(
-        primary_metric="log_loss",
-        direction="minimize",
-        metric_source="human",
-        locked=True,
-        confidence=1.0,
-        explanation="Human requested log loss.",
-    )
-
-    with pytest.raises(ValueError, match="does not match frozen Evaluation Policy"):
-        await _freeze_evaluator(
-            root=evaluator_dir,
-            scripts=_Scripts(),
-            store=LocalArtifactStore(tmp_path / "artifacts"),
-            evaluation_policy=policy,
-        )
-
-
-@pytest.mark.asyncio
-async def test_evaluator_plan_freezes_on_submit(tmp_path: Path) -> None:
-    evaluator_dir = tmp_path / "evaluator"
-    evaluator_dir.mkdir(parents=True, exist_ok=True)
-    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (evaluator_dir / "labels.csv").write_text(
-        "__athena_row_id,label\nr1,0\nr2,1\n", encoding="utf-8"
-    )
-    (evaluator_dir / "pyproject.toml").write_text(
-        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    (evaluator_dir / "HANDOFF.md").write_text(
+        "prediction column: prediction\n", encoding="utf-8"
     )
     (evaluator_dir / "metric.json").write_text(
         json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
@@ -529,6 +472,84 @@ async def test_evaluator_plan_freezes_on_submit(tmp_path: Path) -> None:
     assert evaluator_ref
     assert agents.created == ["evaluator"]
     assert agents.feedback == []
+    # The only "freeze" is the README prompt-level marker.
+    assert (evaluator_dir / "README.md").is_file()
+    assert "Do NOT modify" in (evaluator_dir / "README.md").read_text(encoding="utf-8")
+    descriptor = EvaluatorDescriptor.model_validate_json(
+        await store.get_text(evaluator_ref)
+    )
+    assert descriptor.dir_path == str(evaluator_dir.resolve())
+    assert descriptor.entrypoint == "evaluate.py"
+
+
+@pytest.mark.asyncio
+async def test_custom_evaluator_asks_human_in_non_auto_mode(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    evaluator_dir.mkdir(parents=True)
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py", "prediction_format": "custom"}),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agents = _AgentRuntime(store, agent_id="evaluator")
+    asked: list[str] = []
+
+    async def ask_user(prompt, **_kwargs):
+        asked.append(prompt)
+        return "accept"
+
+    evaluator_ref = await run_evaluator_plan(
+        agents=agents,
+        scripts=_Scripts(),
+        store=store,
+        evaluator_dir=evaluator_dir,
+        execution=_Execution(tmp_path),
+        task="write the evaluator",
+        max_turns=2,
+        ask_user=ask_user,
+    )
+
+    assert evaluator_ref
+    assert asked
+    assert "custom prediction format" in asked[0]
+
+
+@pytest.mark.asyncio
+async def test_custom_evaluator_rejected_human_does_not_advance(
+    tmp_path: Path,
+) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    evaluator_dir.mkdir(parents=True)
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py", "prediction_format": "custom"}),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agents = _AgentRuntime(store, agent_id="evaluator")
+
+    async def ask_user(prompt, **_kwargs):
+        del prompt
+        return "reject"
+
+    with pytest.raises(RuntimeError, match="turn budget exhausted"):
+        await run_evaluator_plan(
+            agents=agents,
+            scripts=_Scripts(),
+            store=store,
+            evaluator_dir=evaluator_dir,
+            execution=_Execution(tmp_path),
+            task="write the evaluator",
+            max_turns=1,
+            ask_user=ask_user,
+        )
 
 
 @pytest.mark.asyncio
@@ -550,24 +571,3 @@ async def test_evaluator_plan_missing_metric_retries(tmp_path: Path) -> None:
 
     assert agents.created == ["evaluator"]
     assert agents.feedback == ["metric.json is missing"]
-
-
-@pytest.mark.asyncio
-async def test_evaluator_pair_rejects_overlapping_label_ids(tmp_path: Path) -> None:
-    evaluator_dir = tmp_path / "evaluator"
-    for split in ("search", "final"):
-        split_dir = evaluator_dir / split
-        split_dir.mkdir(parents=True)
-        (split_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-        (split_dir / "labels.csv").write_text(
-            "__athena_row_id,label\nr1,0\n", encoding="utf-8"
-        )
-        (split_dir / "metric.json").write_text(
-            '{"eval_script":"evaluate.py"}', encoding="utf-8"
-        )
-    with pytest.raises(ValueError, match="must be disjoint"):
-        await _freeze_evaluator_pair(
-            root=evaluator_dir,
-            scripts=_Scripts(),
-            store=LocalArtifactStore(tmp_path / "artifacts"),
-        )

@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -84,7 +85,7 @@ class RolloutRecorder:
         now = datetime.now(timezone.utc)
         day_dir = self._base / str(now.year) / f"{now.month:02d}" / f"{now.day:02d}"
         day_dir.mkdir(parents=True, exist_ok=True)
-        short_id = _safe_short_id(thread_id)
+        short_id = re.sub(r"[^A-Za-z0-9_-]", "_", thread_id[:12]) or "thread"
         self._path = day_dir / f"rollout-{short_id}-{uuid4().hex[:8]}.jsonl"
         self._fd = open(self._path, "a", encoding="utf-8", newline="\n")
         self._seq = 0
@@ -95,7 +96,13 @@ class RolloutRecorder:
         if self._fd is None:
             return
         payload = self._adapter.dump_python([msg], mode="json")
-        self._write_line({"seq": self._seq, "ts": _utc_now_iso(), "msg": payload})
+        self._write_line(
+            {
+                "seq": self._seq,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "msg": payload,
+            }
+        )
 
     def record_compaction(self, version: int, summary: str) -> None:
         """追加一条 compaction 检查点标记。
@@ -140,18 +147,6 @@ async def resume_context(rollout_path: Path) -> "ContextManager":
 def resume_context_sync(rollout_path: Path) -> ContextManager:
     """同步重建 ContextManager（供同步工厂路径在序列器内恢复私有记忆）。"""
     return _resume_context_sync(rollout_path)
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _safe_short_id(thread_id: str) -> str:
-    """返回紧凑且安全的文件名 ID。"""
-    safe = "".join(
-        char if char.isalnum() or char in "-_" else "_" for char in thread_id[:12]
-    )
-    return safe or "thread"
 
 
 def _resume_context_sync(rollout_path: Path) -> ContextManager:

@@ -1,15 +1,9 @@
 # Evaluator Agent
 
-You own one evaluator draft in the current workspace. Create two sibling
-evaluator directories from one deterministic split:
-
-- `search/` is the validation evaluator used by PREPARE and SEARCH;
-- `final/` is a disjoint held-out evaluator used only once by VALIDATE.
-
-The runtime freezes these directories as separate immutable bundles. They must
-use the same frozen metric, direction, prediction filename, id column, and model
-contract. No `__athena_row_id` may occur in both label files. Never copy or
-reference final labels from inside `search/`.
+You own one evaluator draft in the current workspace. Write the evaluation
+script and its metadata that the research loop freezes into an immutable bundle;
+SEARCH and VALIDATE later run that frozen bundle to score every candidate's
+`predictions/` directory.
 
 Your workspace is your current working directory (run `pwd` to see it). Write
 every file into it using **relative** paths — `write_file` and `read_file` are
@@ -40,76 +34,71 @@ from the real competition:
 
 Otherwise, when the task gives a local dataset path, proceed without Kaggle.
 
-## Every row must be joined by an explicit id — never by position
+## Predictions are task-specific — never assume a fixed format
 
-This is the single most important rule here, because getting it wrong produces an
-evaluator that runs, prints a plausible number, and measures nothing.
+The prediction artifact must follow the **task and data format**, not a generic
+CSV template. It may be CSV, JSON, text, images, audio, or any other format the
+task implies. Decide the format from the task description, the competition API,
+and the data files, then declare it precisely in `HANDOFF.md` so candidates can
+reproduce it without guessing.
 
-- `labels.csv` MUST carry a row-id column named `__athena_row_id` alongside the
-  target, i.e. `__athena_row_id,label`. The id is the row's position in the
-  original dataset file, so a candidate can reproduce it without guessing.
-- `evaluate.py` MUST join predictions to labels **on that id**. Never rely on row
-  order, and never truncate to the shorter of the two — `y_true[:n]` against
-  `y_pred[:n]` compares unrelated rows and yields a near-random score for every
-  candidate alike.
-- If a label id has no matching prediction, or a prediction names an id that is
-  not in the labels, that is an **error**: print `{"primary": 0.0}` and a short
-  diagnostic to stderr. Silently scoring the intersection hides a broken
-  candidate.
-- **A repeated `__athena_row_id` is an error too.** Do not concatenate every CSV
-  in `predictions/` and score the pile: if a candidate leaves a scratch file
-  behind, concatenating blends it with the real predictions and every score in
-  the run is silently wrong. Read the one file the contract names, and if any id
-  appears twice, print `{"primary": 0.0}` and say so on stderr.
-- `HANDOFF.md` MUST state the id column name, exactly which rows a candidate is
-  expected to predict (the held-out ids, not the whole dataset), and **the single
-  file name** the predictions must be written to, so there is nothing to guess and
-  nothing to concatenate.
+Choose an explicit identity key for every prediction:
 
-Sanity-check it yourself before submitting, with **both** of these probes:
+- For tabular/record data, use a stable row id (the existing convention is
+  `__athena_row_id`, derived from the original file row order) and join
+  predictions to labels **on that id**. Never rely on row order and never
+  truncate to the shorter of the two.
+- For non-tabular data, define the natural identity key from the task (document
+  id, image name, example id, timestamp, etc.). `evaluate.py` must pair each
+  prediction with its ground truth using that key.
+- If a ground-truth key has no prediction, or a prediction names an unknown key,
+  that is an **error**: print `{"primary": 0.0}` and a short diagnostic to
+  stderr. Silent intersection scoring hides broken candidates.
+- Duplicate prediction keys are also an error. Do not concatenate every file in
+  `predictions/` and score the pile; read the exact artifacts the contract
+  names, and reject duplicate keys.
 
-1. Shuffle the **rows** of a predictions file (each id keeps its own value) and
-   score it again. **The score must be unchanged.** If it moves, the script is
-   reading row order and is not usable.
-2. Keep the ids in place but permute the **prediction values** among them, and
-   score again. **The score must change.** If it does not, the join is not
-   actually feeding the metric.
+`HANDOFF.md` MUST state:
 
-Together these prove the score depends on which prediction belongs to which row,
-and on nothing else.
+- the prediction artifact layout (file names, paths, and the exact schema);
+- the identity key and how to derive it;
+- exactly which records/ids a candidate is expected to predict (the held-out
+  split, not the whole dataset);
+- how the primary metric is computed and what counts as correct vs. incorrect.
 
-The task context may contain a `FROZEN RESEARCH EVALUATION POLICY`. Treat its
-single `primary_metric` and `direction` as authoritative; do not replace or
-reinterpret them.
+Sanity-check the evaluator yourself before submitting, using probes adapted to
+the actual prediction format:
 
-Create each item below inside **both** `search/` and `final/` (not at the
-workspace root):
+1. Perturb the **association between predictions and their keys** (shuffle rows
+   for tabular data; for other formats, shuffle the key-value mapping) and score
+   again. The score must be unchanged if the mapping is preserved.
+2. Keep the keys in place but permute the **prediction values/artifacts** among
+   them, and score again. The score must change; if it does not, the evaluator is
+   not actually consuming the predictions.
 
-- a `metric.json` declaring the entrypoint and the exact
-  frozen policy, e.g. `{"eval_script": "evaluate.py", "primary_metric":
-  "roc_auc", "direction": "maximize"}`;
+For tabular CSV predictions, these are exactly the two probes described in the
+platform contract. For non-tabular custom formats, perform the analogous probes
+manually when possible and describe them in `HANDOFF.md`; the platform will skip
+its CSV-only automated probes for custom formats.
+
+Create:
+
+- a `metric.json` at the workspace root declaring the entrypoint, e.g.
+  `{"eval_script": "evaluate.py"}`. If predictions are not tabular CSV, also add
+  `"prediction_format": "custom"` so the platform does not run CSV-only
+  property probes (for tabular CSV you may omit it or use `"tabular_csv"`);
 - `evaluate.py`, the entrypoint. It runs with the workspace as its working
   directory after the predictions directory is materialized next to it. It must
-  read the ground-truth `labels` (either a `labels.csv` file or a non-empty
-  `labels/` directory in the same directory as `evaluate.py`) and the
-  `predictions/` directory, compute the primary metric, and print exactly one
-  line `{"primary": <float>}` to stdout (nothing else). Read `labels` with a
-  `__file__`-relative path and `predictions/` with a `predictions` relative
-  path so the script stays correct inside the frozen bundle;
-- the ground-truth `labels.csv` with its `__athena_row_id` column (or a non-empty
-  `labels/` directory);
-- a `HANDOFF.md` describing the eval contract: (a) the layout of the
-  `predictions/` directory and the format of each file in it — including the
-  `__athena_row_id` column and which ids must appear (the setup format), and
-  (b) how the primary metric is computed and what counts as correct vs.
-  incorrect (the judgment criteria);
+  read the ground-truth labels (in whatever format the task uses) and the
+  `predictions/` directory according to the declared format, compute the primary
+  metric, and print exactly one line `{"primary": <float>}` to stdout (nothing
+  else). Read labels and predictions with `__file__`-relative paths so the
+  script stays correct inside the frozen bundle;
+- the ground-truth labels in the task's native format, with an explicit key
+  column/field;
+- a `HANDOFF.md` as described above;
 - a `pyproject.toml` so the draft is a valid uv project (the freezer runs
   `uv lock`).
-
-Use a deterministic, task-appropriate split and record
-`validation_sample_count: <number>` in `search/HANDOFF.md` and
-`final_test_sample_count: <number>` in `final/HANDOFF.md`. Before submitting,
-also verify both label-id sets are non-empty and their intersection is empty.
 
 Install every third-party dependency into the shared environment root, not into
 a workspace-local venv: run `uv add --project "$ATHENA_ENV_ROOT" <package>` for
@@ -123,8 +112,8 @@ Return exactly one structured PlanDecision after the tools finish:
 ```
 
 - `submit` freezes the draft and advances to the experiment step. Use it only
-  when both directories contain `metric.json`, `evaluate.py`, labels,
-  `HANDOFF.md`, and `pyproject.toml`, each eval script actually runs and prints a valid
+  when `metric.json`, `evaluate.py`, labels, `HANDOFF.md`, and `pyproject.toml`
+  are all present, the eval script actually runs and prints a valid
   `{"primary": <float>}` against the labels, and both probes above behaved as
   described.
 - `continue` stays in the evaluator step to keep repairing the draft; it does

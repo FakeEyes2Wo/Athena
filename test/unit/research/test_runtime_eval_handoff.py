@@ -1,12 +1,14 @@
 """Focused tests for surfacing evaluator HANDOFF.md into SEARCH ideator context."""
 
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
+from athena.research.contracts import EvaluatorDescriptor
 from athena.research.runtime import ResearchRuntime
 from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.supervisor.experiment import read_eval_handoff
@@ -15,18 +17,21 @@ _HANDOFF = "# Eval contract\n\npredictions/predictions.csv: header,id,target\n"
 
 
 async def _freeze_bundle(store, *, include_handoff: bool) -> str:
-    tree: dict[str, str] = {}
+    evaluator_dir = Path(tempfile.mkdtemp(prefix="athena-eval-"))
     if include_handoff:
-        tree["HANDOFF.md"] = await store.put_bytes(_HANDOFF.encode("utf-8"))
-    tree["evaluate.py"] = await store.put_bytes(b"print('{\"primary\": 1.0}')\n")
-    tree_ref = await store.put_text(json.dumps(tree, ensure_ascii=False))
-    bundle = {
-        "bundle_id": "bundle:test",
-        "entrypoint": "evaluate.py",
-        "runtime": "python-uv",
-        "tree_ref": tree_ref,
-    }
-    return await store.put_text(json.dumps(bundle, ensure_ascii=False))
+        (evaluator_dir / "HANDOFF.md").write_text(_HANDOFF, encoding="utf-8")
+    (evaluator_dir / "evaluate.py").write_text(
+        "print('{\"primary\": 1.0}')\n", encoding="utf-8"
+    )
+    readme = "# Evaluator Freeze Marker\n\nDo not edit.\n"
+    (evaluator_dir / "README.md").write_text(readme, encoding="utf-8")
+    readme_ref = await store.put_text(readme)
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(evaluator_dir),
+        readme_ref=readme_ref,
+        entrypoint="evaluate.py",
+    )
+    return await store.put_text(descriptor.model_dump_json())
 
 
 @pytest.mark.asyncio

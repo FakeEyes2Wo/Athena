@@ -5,16 +5,21 @@ import json
 import logging
 import subprocess
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
-from athena.research.contracts import DataScriptBundle
-from athena.research.evaluator_trust import validate_evaluator_properties
+from athena.research.contracts import EvaluatorDescriptor
+from athena.research.evaluator_trust import (
+    extract_prediction_column,
+    extract_prediction_column_from_source,
+    validate_evaluator_properties,
+)
 from athena.core.workspace import (
     GitWorkBranch,
     GitWorkspace,
@@ -25,7 +30,7 @@ from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.rubrics.evaluation import normalize_metric_name
 from athena.research.rubrics.models import EvaluationPolicy
-from athena.research.script_runner import BundleMetadata, DataScriptRunner
+from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.experiment import (
     PlanRunner,
     handoff_block,
@@ -64,33 +69,8 @@ class PrepareResult(BaseModel):
 ROW_ID_COLUMN = "__athena_row_id"
 
 
-class FrozenEvaluatorRefs(BaseModel):
-    """Disjoint search and final evaluator bundles frozen from one policy."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    search_ref: ArtifactRef
-    final_ref: ArtifactRef
-
-    @model_validator(mode="after")
-    def _require_distinct_bundles(self) -> "FrozenEvaluatorRefs":
-        if self.search_ref == self.final_ref:
-            raise ValueError("search and final evaluator bundles must be distinct")
-        return self
-
-
 def _require_joinable_labels(labels_file: Path) -> None:
-    """``labels.csv`` 必须带 id 列，否则预测与标签只能按位置对齐。
-
-    真实跑测（2026-08-16）：agent 交上来的 labels.csv 只有一列 ``label``（1200 行
-    留出集），候选交的是 6000 行 ``row_id,probability``，而 evaluate.py 把两边截到较
-    短长度后逐位比较。**每个候选都恒定得到 AUC≈0.502**——同一份预测按 row_id 正确
-    join 是 0.8668。SEARCH 于是跑完全程、给出自信而无意义的判决。
-
-    没有 id 列时 join 在结构上就不可能，因此这是能在冻结前静态判掉的必要条件。它不
-    充分：带了 id 列仍可以写成按位置对齐。那一层由 evaluator prompt 的 shuffle 自检
-    负责，运行期的判别性检查见 docs/evaluator_contract_ch.md。
-    """
+    """``labels.csv`` 必须带 id 列，否则预测与标签只能按位置对齐。"""
     with labels_file.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         columns = [name.strip() for name in (reader.fieldnames or []) if name.strip()]
@@ -106,7 +86,9 @@ def _require_joinable_labels(labels_file: Path) -> None:
         for row in reader:
             raw = (row.get(ROW_ID_COLUMN) or "").strip()
             if not raw:
-                raise ValueError(f"labels.csv contains an empty {ROW_ID_COLUMN!r}")
+                raise ValueError(
+                    f"labels.csv contains an empty {ROW_ID_COLUMN!r}"
+                )
             if raw in seen:
                 raise ValueError(
                     f"labels.csv contains duplicate {ROW_ID_COLUMN!r}: {raw}"
@@ -127,7 +109,7 @@ def _require_joinable_labels_dir(labels_dir: Path) -> None:
 
 
 def _label_ids(labels_file: Path) -> set[str]:
-    """Read the explicit evaluator row ids used to prove split isolation."""
+    """Read explicit evaluator row ids for SEARCH/final isolation checks."""
     with labels_file.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
@@ -145,20 +127,14 @@ def _label_ids(labels_file: Path) -> set[str]:
 
 
 def require_disjoint_evaluator_labels(search_root: Path, final_root: Path) -> None:
-    """Prove that separately frozen SEARCH and final evaluators share no ids."""
+    """Prove separately accepted SEARCH and final evaluators share no row ids."""
 
     def evaluator_ids(root: Path) -> set[str]:
-        spec_path = root / "metric.json"
-        if not spec_path.is_file():
-            raise ValueError(f"metric.json is missing under {root}")
-        try:
-            spec = json.loads(spec_path.read_text(encoding="utf-8"))
-            evaluator_path = resolve_workspace_path(root, spec["eval_script"])
-        except (OSError, ValueError, KeyError) as exc:
-            raise ValueError(f"invalid evaluator metric.json under {root}") from exc
-        evaluator_root = (
-            evaluator_path if evaluator_path.is_dir() else evaluator_path.parent
-        )
+        evaluator_root, _entrypoint, prediction_format = _evaluator_layout(root)
+        if prediction_format != "tabular_csv":
+            raise ValueError(
+                "split-isolation proof currently requires tabular_csv evaluators"
+            )
         labels_file = evaluator_root / "labels.csv"
         if not labels_file.is_file():
             raise ValueError(
@@ -175,19 +151,15 @@ def require_disjoint_evaluator_labels(search_root: Path, final_root: Path) -> No
         )
 
 
-async def _freeze_evaluator(
-    *,
+def _evaluator_layout(
     root: Path,
-    scripts: DataScriptRunner,
-    store: ArtifactStore,
+    *,
     evaluation_policy: EvaluationPolicy | None = None,
-) -> ArtifactRef:
-    """Freeze the evaluator directory (metric.json's eval_script) into a bundle.
+) -> tuple[Path, str, str]:
+    """Return ``(evaluator_root, entrypoint, prediction_format)`` from metric.json.
 
-    Labels may be a ``labels.csv`` file or a non-empty ``labels/`` directory.
-    ``freeze`` walks the whole evaluator directory (``rglob("*")``), so an
-    ``evaluator/HANDOFF.md`` — the self-describing eval spec — is bundled
-    alongside the evaluator code for SEARCH to read.
+    This is the single source of truth shared by the README freeze marker and
+    the platform's format-aware validation.
     """
     spec_path = root / "metric.json"
     if not spec_path.is_file():
@@ -216,12 +188,12 @@ async def _freeze_evaluator(
                 "evaluator direction does not match frozen Evaluation Policy: "
                 f"{declared_direction!r} != {evaluation_policy.direction!r}"
             )
+    prediction_format = spec.get("prediction_format", "tabular_csv")
     try:
         evaluator_path = resolve_workspace_path(root, evaluator_rel)
     except ValueError as exc:
         raise ValueError(f"output path escapes workspace: {evaluator_rel}") from exc
     if evaluator_path.is_dir():
-        # eval_script 声明的是目录；入口文件约定为 evaluate.py。
         evaluator_root = evaluator_path
         entrypoint = "evaluate.py"
         if not (evaluator_root / entrypoint).is_file():
@@ -234,60 +206,26 @@ async def _freeze_evaluator(
         entrypoint = evaluator_path.name
     else:
         raise ValueError("eval_script is missing")
-    labels_file = evaluator_root / "labels.csv"
-    labels_dir = evaluator_root / "labels"
-    if not (
-        (labels_file.is_file() and labels_file.stat().st_size)
-        or (labels_dir.is_dir() and any(p.is_file() for p in labels_dir.rglob("*")))
-    ):
-        raise ValueError(
-            "eval labels are missing: labels.csv or a non-empty labels/ dir must "
-            f"sit next to the eval script (same directory as {evaluator_rel!r})"
-        )
-    if labels_file.is_file() and labels_file.stat().st_size:
-        _require_joinable_labels(labels_file)
-    elif labels_dir.is_dir():
-        _require_joinable_labels_dir(labels_dir)
-    bundle = await scripts.freeze(evaluator_root, BundleMetadata(entrypoint=entrypoint))
-    return await store.put_text(bundle.model_dump_json())
+    return evaluator_root, entrypoint, prediction_format
 
 
-async def _freeze_evaluator_pair(
-    *,
-    root: Path,
-    scripts: DataScriptRunner,
-    store: ArtifactStore,
-    evaluation_policy: EvaluationPolicy | None = None,
-) -> FrozenEvaluatorRefs:
-    """Freeze disjoint SEARCH and final evaluator directories."""
-    search_root = root / "search"
-    final_root = root / "final"
-    search_labels = search_root / "labels.csv"
-    final_labels = final_root / "labels.csv"
-    if not search_labels.is_file() or not final_labels.is_file():
-        raise ValueError("evaluator must create search/labels.csv and final/labels.csv")
-    search_ids = _label_ids(search_labels)
-    final_ids = _label_ids(final_labels)
-    overlap = search_ids & final_ids
-    if overlap:
-        sample = sorted(overlap)[:3]
-        raise ValueError(
-            "search and final evaluator labels must be disjoint; overlapping ids: "
-            f"{sample}"
-        )
-    search_ref = await _freeze_evaluator(
-        root=search_root,
-        scripts=scripts,
-        store=store,
-        evaluation_policy=evaluation_policy,
+def _evaluator_readme(root: Path, *, entrypoint: str, prediction_format: str) -> str:
+    """Build the prompt-level freeze marker for an accepted evaluator."""
+    return (
+        "# Evaluator Freeze Marker\n\n"
+        f"This evaluator in `{root}` has been accepted.\n\n"
+        "## Freeze contract\n\n"
+        "- Do NOT modify `evaluate.py`, `metric.json`, labels, `HANDOFF.md`, "
+        "`pyproject.toml`, or `README.md` further.\n"
+        "- This directory is the authoritative evaluator for the current run.\n"
+        "- If a change is required, create a new evaluator version and rerun the "
+        "full acceptance flow.\n\n"
+        "## Declared format\n\n"
+        f"- entrypoint: `{entrypoint}`\n"
+        f"- prediction_format: `{prediction_format}`\n"
+        "- See `HANDOFF.md` for the precise prediction schema, identity key, "
+        "held-out split, and metric definition.\n"
     )
-    final_ref = await _freeze_evaluator(
-        root=final_root,
-        scripts=scripts,
-        store=store,
-        evaluation_policy=evaluation_policy,
-    )
-    return FrozenEvaluatorRefs(search_ref=search_ref, final_ref=final_ref)
 
 
 async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
@@ -300,21 +238,30 @@ async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
 async def _validate_frozen_evaluator(
     *,
     root: Path,
-    evaluator_ref: ArtifactRef,
     scripts: DataScriptRunner,
     store: ArtifactStore,
 ) -> None:
-    """Run deterministic row-order/value-permutation property tests.
+    """Run format-aware property tests on a README-only evaluator directory.
 
-    A frozen evaluator that fails these checks is not trustworthy and should be
-    sent back to the agent for repair. Runners without ``run`` (test doubles)
-    skip the behavioral tests with a warning.
+    CSV row/value probes only apply to ``prediction_format: tabular_csv``.
+    Custom formats are validated by the agent's own probes described in
+    ``HANDOFF.md``; this function skips CSV-only checks for them.
     """
-    labels_file = root / "labels.csv"
-    labels_dir = root / "labels"
+    evaluator_root, entrypoint, prediction_format = _evaluator_layout(root)
+    if prediction_format != "tabular_csv":
+        logger.warning(
+            "evaluator property tests skipped: prediction_format=%s",
+            prediction_format,
+        )
+        return
+
+    labels_file = evaluator_root / "labels.csv"
+    labels_dir = evaluator_root / "labels"
     if labels_file.is_file():
+        _require_joinable_labels(labels_file)
         labels_csv = labels_file.read_text(encoding="utf-8-sig")
     elif labels_dir.is_dir():
+        _require_joinable_labels_dir(labels_dir)
         csv_files = sorted(labels_dir.rglob("*.csv"))
         if not csv_files:
             raise ValueError("labels/ has no csv for evaluator property tests")
@@ -322,12 +269,35 @@ async def _validate_frozen_evaluator(
     else:
         raise ValueError("no labels found for evaluator property tests")
 
-    async def score(predictions_csv: str) -> float:
-        bundle = DataScriptBundle.model_validate_json(
-            await store.get_text(evaluator_ref)
+    # HANDOFF.md is the evaluator's self-declared prediction contract. Use its
+    # declared CSV prediction column when present, falling back to the historical
+    # "prediction" column so existing tabular evaluators keep working.
+    handoff_path = evaluator_root / "HANDOFF.md"
+    handoff_text = (
+        handoff_path.read_text(encoding="utf-8") if handoff_path.is_file() else ""
+    )
+    prediction_column = extract_prediction_column(handoff_text)
+    if prediction_column is None:
+        # Do not depend on a prompt-specific HANDOFF wording. If the free-text
+        # declaration is not parseable, inspect the evaluator source itself for
+        # the CSV column it reads.
+        source_path = evaluator_root / entrypoint
+        source = (
+            source_path.read_text(encoding="utf-8", errors="replace")
+            if source_path.is_file()
+            else ""
         )
-        result = await scripts.run(
-            bundle,
+        prediction_column = extract_prediction_column_from_source(source)
+    if prediction_column is None:
+        raise ValueError(
+            "cannot determine the tabular prediction CSV column from either "
+            "HANDOFF.md or the evaluator source; declare it in HANDOFF.md or "
+            "make evaluate.py read a clearly named prediction column"
+        )
+
+    async def score(predictions_csv: str) -> float:
+        result = await scripts.run_dir(
+            evaluator_root,
             request={},
             extra_files={
                 "predictions/predictions.csv": predictions_csv.encode("utf-8")
@@ -337,9 +307,13 @@ async def _validate_frozen_evaluator(
         return float(result.outputs["primary"])
 
     try:
-        outcome = await validate_evaluator_properties(labels_csv, score)
+        outcome = await validate_evaluator_properties(
+            labels_csv, score, prediction_column=prediction_column
+        )
     except AttributeError:
-        logger.warning("evaluator property tests skipped: runner has no run()")
+        logger.warning(
+            "evaluator property tests skipped: runner has no run_dir()"
+        )
         return
     if not outcome.get("ok"):
         raise ValueError(outcome.get("reason", "evaluator property tests failed"))
@@ -356,10 +330,11 @@ async def run_evaluator_plan(
     evaluation_policy: EvaluationPolicy | None = None,
     max_turns: int,
     publish: EmitEvent | None = None,
+    ask_user: Any | None = None,
     agent_id: str = EVALUATOR_AGENT_ID,
     plan_id: str = EVALUATOR_PLAN_ID,
 ) -> ArtifactRef:
-    """Run and repair one evaluator Agent until a frozen evaluator bundle exists."""
+    """Run and repair one evaluator Agent until it is accepted via README."""
 
     if max_turns < 1:
         raise ValueError("max_turns must be at least 1")
@@ -384,16 +359,9 @@ async def run_evaluator_plan(
             ensure_ascii=False,
         )
     )
-    content = task
-    if policy_payload is not None:
-        content += (
-            "\n\nFROZEN RESEARCH EVALUATION POLICY (authoritative; do not "
-            "reselect the primary metric):\n"
-            + json.dumps(policy_payload, ensure_ascii=False, indent=2)
-        )
     agent_id, run_id = await agents.create_root(
         "evaluator",
-        {"content": content, "context_refs": [context_ref]},
+        {"content": task, "context_refs": [context_ref]},
         agent_id=agent_id,
         name=plan_id,
     )
@@ -418,31 +386,60 @@ async def run_evaluator_plan(
                 continue
             if decision.decision == "abandon":
                 raise RuntimeError(f"evaluator Agent abandoned Plan: {decision.reason}")
+            if decision.decision != "submit":
+                feedback = (
+                    f"Return submit to advance; got {decision.decision!r}. "
+                    "Continue means keep repairing the evaluator, not accept it."
+                )
+                continue
             try:
-                evaluator_ref = await _freeze_evaluator(
-                    root=root,
-                    scripts=scripts,
-                    store=store,
+                evaluator_root, entrypoint, prediction_format = _evaluator_layout(
+                    root,
                     evaluation_policy=evaluation_policy,
                 )
-                if decision.decision != "submit":
-                    raise ValueError(
-                        "evaluator frozen successfully but the decision was "
-                        f"{decision.decision!r}. Return submit to advance to the "
-                        "experiment step."
-                    )
+                readme_text = _evaluator_readme(
+                    root,
+                    entrypoint=entrypoint,
+                    prediction_format=prediction_format,
+                )
+                (root / "README.md").write_text(readme_text, encoding="utf-8")
+                readme_ref = await store.put_text(readme_text)
+                evaluator_ref = await store.put_text(
+                    EvaluatorDescriptor(
+                        dir_path=str(root.resolve()),
+                        readme_ref=readme_ref,
+                        prediction_format=prediction_format,
+                        entrypoint=entrypoint,
+                    ).model_dump_json()
+                )
                 await _validate_frozen_evaluator(
                     root=root,
-                    evaluator_ref=evaluator_ref,
                     scripts=scripts,
                     store=store,
                 )
+                if prediction_format != "tabular_csv" and ask_user is not None:
+                    answer = await ask_user(
+                        "This evaluator uses a custom prediction format, so the "
+                        "platform cannot run its CSV-only automated probes. "
+                        "Confirm the HANDOFF.md format declaration and the agent's "
+                        "format-aware probes are acceptable?",
+                        choices=[
+                            {"label": "接受", "value": "accept"},
+                            {"label": "拒绝", "value": "reject"},
+                        ],
+                        allow_custom=True,
+                        allow_skip=True,
+                    )
+                    if answer is not None:
+                        lowered = str(answer).lower()
+                        if "reject" in lowered or "拒绝" in answer:
+                            raise ValueError("human rejected custom evaluator acceptance")
                 return evaluator_ref
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                # 覆盖 evaluator 冻结（uv lock）的子进程失败 → 转成同 Plan 的反馈重试。
+                # 写入 README/校验/目录运行失败 → 转成同 Plan 的反馈重试。
                 feedback = " ".join(str(exc).split())[:1000]
 
-        raise RuntimeError("evaluator turn budget exhausted without a frozen evaluator")
+        raise RuntimeError("evaluator turn budget exhausted without an accepted evaluator")
     finally:
         # The evaluator Agent is a one-shot PREPARE worker; release it after the
         # phase succeeds or exhausts its turn budget.
@@ -610,10 +607,12 @@ async def run_prepare_plan(
 __all__ = [
     "EVALUATOR_AGENT_ID",
     "EVALUATOR_PLAN_ID",
+    "FINAL_EVALUATOR_AGENT_ID",
+    "FINAL_EVALUATOR_PLAN_ID",
     "PREPARE_AGENT_ID",
     "PREPARE_PLAN_ID",
     "PrepareResult",
-    "FrozenEvaluatorRefs",
+    "require_disjoint_evaluator_labels",
     "run_evaluator_plan",
     "run_prepare_plan",
 ]

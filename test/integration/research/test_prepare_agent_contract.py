@@ -13,7 +13,7 @@ from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.execution.runtime import CommandResult, ExecutionRuntime
-from athena.research.contracts import DataScriptBundle
+from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.prepare import run_evaluator_plan, run_prepare_plan
@@ -45,33 +45,26 @@ class _EvaluatorProvider:
         self._actions: list[tuple[str, str] | None] = []
 
     def _valid_actions(self) -> list[tuple[str, str] | None]:
-        actions: list[tuple[str, str] | None] = []
-        for split, labels in (
-            ("search", "__athena_row_id,label\nr1,0\nr2,1\n"),
-            ("final", "__athena_row_id,label\nr3,0\nr4,1\n"),
-        ):
-            actions.extend(
-                [
-                    (f"{split}/metric.json", '{"eval_script": "evaluate.py"}'),
-                    (
-                        f"{split}/pyproject.toml",
-                        "[project]\nname = 'eval'\nversion = '0.1.0'\n"
-                        "requires-python = '>=3.11'\ndependencies = []\n",
-                    ),
-                    (f"{split}/evaluate.py", _EVALUATE_SCRIPT),
-                    (f"{split}/labels.csv", labels),
-                    (
-                        f"{split}/HANDOFF.md",
-                        "# Eval contract\npredictions/predictions.csv "
-                        "(__athena_row_id,prediction); accuracy over aligned ids\n",
-                    ),
-                ]
-            )
-        actions.append(None)
+        actions: list[tuple[str, str] | None] = [
+            ("metric.json", '{"eval_script": "evaluate.py"}'),
+            (
+                "pyproject.toml",
+                "[project]\nname = 'eval'\nversion = '0.1.0'\n"
+                "requires-python = '>=3.11'\ndependencies = []\n",
+            ),
+            ("evaluate.py", _EVALUATE_SCRIPT),
+            ("labels.csv", "__athena_row_id,label\nr1,0\nr2,1\n"),
+            (
+                "HANDOFF.md",
+                "# Eval contract\npredictions/predictions.csv (id,prediction); "
+                "accuracy over aligned ids\n",
+            ),
+            None,
+        ]
         if self.missing == "labels":
-            actions = [a for a in actions if a is None or a[0] != "search/labels.csv"]
+            actions = [a for a in actions if a is None or a[0] != "labels.csv"]
         if self.missing == "evaluator":
-            actions = [a for a in actions if a is None or a[0] != "search/metric.json"]
+            actions = [a for a in actions if a is None or a[0] != "metric.json"]
         return actions
 
     async def stream(self, _config, _tools, _messages, _cancel, **_kwargs):
@@ -264,7 +257,7 @@ class _Harness:
             rollout_dir=self.tmp_path / ".athena" / "logs" / "agents",
         )
 
-    async def freeze_evaluator(self, *, max_turns: int = 3):
+    async def freeze_evaluator(self, *, max_turns: int = 3) -> str:
         evaluator_dir = self.tmp_path / "evaluator"
         evaluator_dir.mkdir(parents=True, exist_ok=True)
         registry = AgentTypeRegistry()
@@ -291,7 +284,7 @@ class _Harness:
             await agents.aclose()
 
     async def run(self, *, max_turns: int = 3, publish=None):
-        evaluator_refs = await self.freeze_evaluator()
+        evaluator_ref = await self.freeze_evaluator()
         workspace = Path(self.branch.path)
         registry = AgentTypeRegistry()
         register_prepare_agent(
@@ -310,7 +303,7 @@ class _Harness:
             workspace=self.branch,
             execution=self.execution,
             store=self.store,
-            evaluator_ref=evaluator_refs.search_ref,
+            evaluator_ref=evaluator_ref,
             tree_ref=self.tree_ref,
             task="inspect data and build a trusted baseline",
             max_turns=max_turns,
@@ -328,15 +321,15 @@ async def test_evaluator_plan_freezes_a_bundle(tmp_path: Path) -> None:
     harness = _Harness(tmp_path)
     await harness.start()
     try:
-        evaluator_refs = await harness.freeze_evaluator()
-        bundle = DataScriptBundle.model_validate_json(
-            await harness.store.get_text(evaluator_refs.search_ref)
+        evaluator_ref = await harness.freeze_evaluator()
+        descriptor = EvaluatorDescriptor.model_validate_json(
+            await harness.store.get_text(evaluator_ref)
         )
-        tree = json.loads(await harness.store.get_text(bundle.tree_ref))
-        assert "evaluate.py" in tree
-        assert "labels.csv" in tree
-        assert "HANDOFF.md" in tree
-        assert evaluator_refs.search_ref != evaluator_refs.final_ref
+        evaluator_dir = Path(descriptor.dir_path)
+        assert (evaluator_dir / "README.md").is_file()
+        assert (evaluator_dir / "evaluate.py").is_file()
+        assert (evaluator_dir / "labels.csv").is_file()
+        assert (evaluator_dir / "HANDOFF.md").is_file()
     finally:
         await harness.close()
 

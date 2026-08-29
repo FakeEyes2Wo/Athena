@@ -339,6 +339,59 @@ async def test_ideator_trailing_newline_is_stripped_from_text(tmp_path) -> None:
     assert [event["text"] for event in outputs] == ["first token", "second token"]
 
 
+@pytest.mark.asyncio
+async def test_streamed_agent_text_is_persisted_as_complete_messages(
+    tmp_path,
+) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    await runtime._events_bus.project_agent_event(
+        "hyp_1",
+        "agent/text_delta",
+        "event:text-1",
+        {"delta": "hello", "accumulated": "hello"},
+    )
+    await runtime._events_bus.project_agent_event(
+        "hyp_1",
+        "agent/text_delta",
+        "event:text-2",
+        {"delta": " world", "accumulated": "hello world"},
+    )
+    await runtime._events_bus.project_agent_event(
+        "hyp_1",
+        "agent/function_call",
+        "event:call-1",
+        {"name": "shell_command", "arguments": {"command": "ls"}},
+    )
+    await runtime._events_bus.project_agent_event(
+        "hyp_1",
+        "agent/text_delta",
+        "event:text-3",
+        {"delta": "password=secret123 done", "accumulated": "password=secret123 done"},
+    )
+    await runtime._events_bus.project_agent_event(
+        "hyp_1",
+        "turn_completed",
+        "event:end",
+        {},
+    )
+
+    replayed = runtime.replay_output_events()
+    # Two complete Agent messages are persisted around the tool call.
+    agent_text = [
+        record["text"]
+        for record in replayed
+        if record.get("type") == "output"
+        and record.get("source") == "agent"
+        and record.get("channel") == "text"
+        and record.get("tool") is None
+    ]
+    assert agent_text == ["hello world", "password=[REDACTED] done"]
+    # The first message is flushed before the tool call; redaction applies.
+    assert replayed[1]["tool"] == "shell_command"
+    assert all("secret123" not in text for text in agent_text)
+
+
 def test_state_projection_includes_announced_ideator_lane_count(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
     runtime._events_bus.set_ideator_lanes(3)

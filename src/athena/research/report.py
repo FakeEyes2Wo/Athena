@@ -11,13 +11,6 @@ from typing import Any
 from athena.core.research_tree import ResearchTree
 
 
-def _fmt(value: object, digits: int = 4) -> str:
-    """Format a numeric metric, falling back to a plain string for non-floats."""
-    if isinstance(value, float):
-        return f"{value:.{digits}f}"
-    return str(value)
-
-
 def build_final_report(
     tree: ResearchTree, validation: Mapping[str, Any] | None = None
 ) -> str:
@@ -38,7 +31,11 @@ def build_final_report(
         lines.append("## SOTA")
         lines.append(f"- **SOTA 实验**: `{sota_id}`")
         if primary is not None:
-            lines.append(f"- **最佳 primary**: {_fmt(primary)}")
+            lines.append(
+                f"- **最佳 primary**: "
+                f"{(f'{primary:.4f}' if isinstance(primary, float) else str(primary))}"
+            )
+
         lines.append(f"- **SOTA 假设**: {hypothesis['statement']}")
         lines.append("")
 
@@ -53,9 +50,15 @@ def build_final_report(
             lines.append("")
             lines.append("## 验证结果")
             if final_score is not None:
-                lines.append(f"- **最终测试分数**: {_fmt(final_score)}")
+                lines.append(
+                    f"- **最终测试分数**: "
+                    f"{(f'{final_score:.4f}' if isinstance(final_score, float) else str(final_score))}"
+                )
             if gap is not None:
-                lines.append(f"- **泛化差距**: {_fmt(gap)}")
+                lines.append(
+                    f"- **泛化差距**: "
+                    f"{(f'{gap:.4f}' if isinstance(gap, float) else str(gap))}"
+                )
             if warning:
                 lines.append(
                     "- **泛化警告**: 测试集表现与训练/验证集差距过大，存在过拟合风险"
@@ -78,7 +81,12 @@ def build_final_report(
     for exp_id, experiment in data["experiments"].items():
         hypothesis = data["hypotheses"][experiment["hypothesis_id"]]
         primary = experiment["eval"]["primary"] if experiment.get("eval") else None
-        suffix = f" — primary {_fmt(primary)}" if primary is not None else ""
+        suffix = (
+            f" — primary "
+            f"{(f'{primary:.4f}' if isinstance(primary, float) else str(primary))}"
+            if primary is not None
+            else ""
+        )
         lines.append(
             f"- **{exp_id}** [{experiment['status']}] "
             f"{hypothesis['statement']}{suffix}"

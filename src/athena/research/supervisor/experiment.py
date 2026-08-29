@@ -25,7 +25,7 @@ from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
 from athena.core.workspace import GitWorkBranch, GitWorkspace
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
-from athena.research.contracts import DataScriptBundle
+from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
@@ -145,34 +145,24 @@ def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
 async def read_eval_handoff(
     store: ArtifactStore, evaluator_ref: ArtifactRef | None
 ) -> str:
-    """Read the evaluator ``HANDOFF.md`` from a frozen bundle (empty when absent).
+    """Read the evaluator ``HANDOFF.md`` from a README-frozen directory.
 
-    冻结的评估器自带一份自述契约：预测该带哪个 id 列、该覆盖哪些行、怎么 join。
+    评估器目录自带一份自述契约：预测该带哪个 id/key、该覆盖哪些行、怎么 join。
     **写预测的那些 Agent 必须拿到它**——PREPARE 的基线与每个 SEARCH 候选都在写
-    ``predictions/``，而在 2026-08-16 第 10 次跑测之前只有 Ideator 收到过这份文件。
-    结果是基线交出 ``sample_id,probability,label_true`` 覆盖全部 6000 行，而评估器要
-    的是 ``__athena_row_id`` 与那 1200 行留出集，直接判 0.0。
+    ``predictions/``；如果读不到，后续 Agent 只能猜格式，评分会静默失真。
     """
     if evaluator_ref is None:
         return ""
     try:
-        bundle = DataScriptBundle.model_validate_json(
+        descriptor = EvaluatorDescriptor.model_validate_json(
             await store.get_text(evaluator_ref)
         )
     except (ValueError, OSError):
         return ""
-    if bundle.tree_ref is None:
-        return ""
+    handoff_path = Path(descriptor.dir_path) / "HANDOFF.md"
     try:
-        tree = json.loads(await store.get_text(bundle.tree_ref))
-    except (ValueError, OSError):
-        return ""
-    handoff_ref = tree.get("HANDOFF.md")
-    if not isinstance(handoff_ref, str):
-        return ""
-    try:
-        return await store.get_text(handoff_ref)
-    except (ValueError, OSError):
+        return handoff_path.read_text(encoding="utf-8")
+    except OSError:
         return ""
 
 
@@ -560,17 +550,17 @@ class PlanRunner:
                     predictions_ref=predictions_ref,
                 )
 
-        bundle = await self._load_bundle(plan_input.evaluator_ref)
-        if bundle is None:
+        evaluator_dir = await self._load_evaluator_dir(plan_input.evaluator_ref)
+        if evaluator_dir is None:
             return await self._failure(
                 plan_id,
                 "scoring_failed",
-                "frozen evaluator artifact is invalid",
+                "evaluator descriptor is invalid or its directory is missing",
                 predictions_ref=predictions_ref,
             )
         try:
             evaluation = await self._evaluator.score(
-                eval_bundle=bundle,
+                evaluator_dir=evaluator_dir,
                 predictions=predictions,
                 candidate_id=plan_id,
                 direction=self._direction,
@@ -677,17 +667,22 @@ class PlanRunner:
             error=cleaned,
         )
 
-    async def _load_bundle(self, evaluator_ref: ArtifactRef) -> DataScriptBundle | None:
-        """从 artifact 引用加载冻结评估 bundle；无效时返回 None。"""
+    async def _load_evaluator_dir(
+        self, evaluator_ref: ArtifactRef
+    ) -> Path | None:
+        """Load the README-only evaluator directory from its descriptor."""
         try:
             text = await self._store.get_text(evaluator_ref)
         except Exception:
-            # artifact 缺失或读取失败 → 无法打分
             return None
         try:
-            return DataScriptBundle.model_validate_json(text)
+            descriptor = EvaluatorDescriptor.model_validate_json(text)
         except ValueError:
             return None
+        path = Path(descriptor.dir_path)
+        if not path.is_dir() or not (path / "README.md").is_file():
+            return None
+        return path
 
     async def _store_report(self, manifest: ExperimentManifest) -> ArtifactRef | None:
         """存储声明且存在的 report 输出；缺省时返回 None。"""

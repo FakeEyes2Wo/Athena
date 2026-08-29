@@ -32,6 +32,15 @@ _MAX_COMMAND_CHARS = 400
 
 EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
 
+# Agent 流式增量不再逐 token 持久化到 session transcript。实时订阅仍逐 delta
+# 推送；落盘时在消息边界（函数调用 / turn 终态）合并成一条完整文本。
+_AGENT_TEXT_BOUNDARY_KINDS = {
+    "agent/function_call",
+    "turn_completed",
+    "turn_failed",
+    "turn_interrupted",
+}
+
 
 def recent_user_texts(
     records: list[dict[str, object]], limit: int = 6
@@ -65,6 +74,7 @@ class RuntimeEvents:
         self._ideator_lanes = 0
         self._subscribers: dict[str, EmitFn] = {}
         self._subscriber_ready: dict[str, asyncio.Task[object]] = {}
+        self._agent_buffers: dict[str, dict[str, Any]] = {}
 
     @property
     def _log_path(self) -> Path:
@@ -103,6 +113,7 @@ class RuntimeEvents:
         plan: str | None = None,
         tool: str | None = None,
         artifact_ref: ArtifactRef | None = None,
+        persist: bool = True,
     ) -> None:
         event = self._events.output(
             source=source,
@@ -112,7 +123,7 @@ class RuntimeEvents:
             tool=tool,
             artifact_ref=artifact_ref,
         )
-        await self._publish("output", event.model_dump(mode="json"))
+        await self._publish("output", event.model_dump(mode="json"), log=persist)
 
     async def project_command_result(
         self,
@@ -155,6 +166,19 @@ class RuntimeEvents:
         """True when ``plan`` labels a concurrent Ideator lane (``ideator-N``)."""
         return plan.startswith("ideator-")
 
+    def _flush_agent_text(self, plan: str) -> None:
+        """Persist one complete Agent text message at a natural boundary."""
+        buffer = self._agent_buffers.pop(plan or "", None)
+        if not buffer or not buffer.get("text"):
+            return
+        event = self._events.output(
+            source="agent",
+            channel="text",
+            text=buffer["text"],
+            plan=buffer.get("plan"),
+        )
+        self._append_log(event.model_dump(mode="json"))
+
     async def publish_ideator_state(self) -> None:
         """Announce the current Ideator lane count before lanes start streaming."""
         if not self._subscribers:
@@ -172,16 +196,30 @@ class RuntimeEvents:
         assert self._supervisor is not None
         payload = data or {}
         ideator = self._is_ideator_plan(plan)
+        if kind in _AGENT_TEXT_BOUNDARY_KINDS:
+            self._flush_agent_text(plan)
         if kind == "agent/text_delta":
-            text = str(payload.get("delta") or payload.get("accumulated") or "")
+            raw = str(payload.get("delta") or payload.get("accumulated") or "")
+            if not raw:
+                return
+            text = raw
             if ideator:
                 # Ideator 的流式 delta 常以换行结尾，逐 token 刷屏；去掉末尾换行。
                 text = text.rstrip("\n\r")
-            # 流式 deltas 常为纯空白（换行/缩进），显示无信息量且会刷出空行。
             if text.strip():
                 await self.publish_output(
-                    source="agent", channel="text", text=text, plan=plan
+                    source="agent",
+                    channel="text",
+                    text=text,
+                    plan=plan,
+                    persist=False,
                 )
+            key = plan or ""
+            previous = self._agent_buffers.get(key)
+            full_text = str(payload.get("accumulated") or "")
+            if not full_text:
+                full_text = (previous["text"] + raw) if previous else raw
+            self._agent_buffers[key] = {"text": full_text, "plan": plan}
         elif kind == "agent/function_call":
             # Ideator 只展示 LLM 话语，工具调用不进入显示流，便于阅读。
             if ideator:
@@ -261,10 +299,16 @@ class RuntimeEvents:
             payload = event.model_dump(mode="json")
         await self._publish(kind, payload)
 
-    async def _publish(self, kind: str, payload: dict[str, object]) -> None:
+    async def _publish(
+        self,
+        kind: str,
+        payload: dict[str, object],
+        *,
+        log: bool = True,
+    ) -> None:
         if kind not in {"output", "state"}:
             raise ValueError("runtime events must be output or state")
-        if kind == "output":
+        if kind == "output" and log:
             self._append_log(payload)
 
         async def invoke(subscription_id: str, emit: EmitFn) -> None:
@@ -288,6 +332,10 @@ class RuntimeEvents:
 
     async def aclose(self) -> None:
         """Cancel pending subscriber handshakes and drop all subscribers."""
+        # Flush any in-flight Agent text so an interrupted runtime still leaves a
+        # complete message in the resume transcript, not a dangling delta buffer.
+        for plan in list(self._agent_buffers):
+            self._flush_agent_text(plan)
         for ready in self._subscriber_ready.values():
             if not ready.done():
                 ready.cancel()

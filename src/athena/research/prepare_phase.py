@@ -77,7 +77,7 @@ def _write_fallback_eda(workspace: Path) -> None:
     _write_missing_report_placeholders(workspace)
 
 
-async def _freeze_evaluator(
+async def _run_evaluator_agent(
     rt: Any,
     *,
     directory_name: str,
@@ -87,7 +87,7 @@ async def _freeze_evaluator(
     label: str,
     evaluation_policy: Any | None,
 ) -> str:
-    """Run one evaluator agent in a dedicated directory and freeze its bundle."""
+    """Run one evaluator agent in a dedicated directory and write its README freeze marker."""
     evaluator_dir = rt.workspaces_root / directory_name
     if not rt.registry.contains("evaluator"):
         register_evaluator_agent(
@@ -110,6 +110,7 @@ async def _freeze_evaluator(
         publish=lambda kind, ref, data: rt.events.project_agent_event(
             label, kind, ref, data
         ),
+        ask_user=getattr(rt, "ask_user", None),
         agent_id=agent_id,
         plan_id=plan_id,
     )
@@ -184,9 +185,9 @@ async def run_prepare_phase(
             evaluator_ref = None
     if evaluator_ref is None:
         await rt.publish_output(
-            source="supervisor", channel="text", text="PREPARE: 冻结评估器…"
+            source="supervisor", channel="text", text="PREPARE: 生成评估器…"
         )
-        evaluator_ref = await _freeze_evaluator(
+        evaluator_ref = await _run_evaluator_agent(
             rt,
             directory_name="evaluator",
             agent_id=EVALUATOR_AGENT_ID,
@@ -200,7 +201,7 @@ async def run_prepare_phase(
         await rt.publish_output(
             source="supervisor",
             channel="text",
-            text=f"PREPARE: evaluator 产物目录 {evaluator_dir.resolve()}。",
+            text=f"PREPARE: evaluator 目录已接收 {evaluator_dir.resolve()}。",
         )
         handoff_path = evaluator_dir / "HANDOFF.md"
         if handoff_path.is_file():
@@ -234,9 +235,9 @@ async def run_prepare_phase(
         await rt.publish_output(
             source="supervisor",
             channel="text",
-            text="PREPARE: 冻结 final evaluator…",
+            text="PREPARE: 生成 final evaluator…",
         )
-        final_evaluator_ref = await _freeze_evaluator(
+        final_evaluator_ref = await _run_evaluator_agent(
             rt,
             directory_name="final_evaluator",
             agent_id=FINAL_EVALUATOR_AGENT_ID,
@@ -256,7 +257,7 @@ async def run_prepare_phase(
             source="supervisor",
             channel="text",
             text=(
-                "PREPARE: final evaluator 产物目录 "
+                "PREPARE: final evaluator 目录已接收 "
                 f"{final_evaluator_dir.resolve()}。"
             ),
         )
