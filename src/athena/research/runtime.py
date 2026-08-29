@@ -239,6 +239,15 @@ class ResearchRuntime:
                 eda_path = (root / eda_dir).resolve()
             if not eda_path.is_relative_to(root):
                 state.eda_dir = None
+        # 一次失败的运行必须还能续跑。``subscribe`` 会把当前状态立刻回放给订阅者，
+        # 而 CLI 把 ``FAILED`` 当作本次运行的终态——于是崩过一次的项目再也起不来：
+        # 状态在 ``start()`` 之前就被回放，进程当场退出，什么都没做。
+        #
+        # 真机（2026-08-29）：SEARCH 崩掉后每一次 `Athena-cli run` 都只打印
+        # ``phase=SEARCH status=FAILED`` 然后退出。新开一次运行本就应当取代上一次
+        # 的失败结论。
+        if state.status == "FAILED":
+            state.status = "IDLE"
         state.experiment_timeout_s = experiment_timeout_s
         if config.data_root is not None and state.data_root is None:
             state.data_root = str(config.data_root)

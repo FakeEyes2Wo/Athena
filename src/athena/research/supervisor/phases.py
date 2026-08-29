@@ -75,6 +75,11 @@ class PhaseMachine:
         except Exception as exc:
             # 阶段执行失败（如 evaluator 基础设施不可用）在此统一观测：置 FAILED
             # 并发布，避免被 fire-and-forget 的 supervisor task 吞掉、阶段卡在 PREPARE。
+            # 只发布 ``{exc}`` 会把 traceback 丢掉，而 phase 崩溃恰恰是最需要栈的
+            # 那一类：真机（2026-08-29）上 SEARCH 崩在
+            # "not enough values to unpack (expected 2, got 0)"，日志里只有这一句，
+            # 没有任何线索指向是哪一行。
+            logger.exception("research phase failed")
             self._state.status = "FAILED"
             self._plans._save_state()
             await self._deps.publish(
