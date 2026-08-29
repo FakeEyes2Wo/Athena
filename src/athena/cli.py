@@ -132,11 +132,9 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     dataset_path = _platform_split_dataset(args)
     return {
         "task": "\n".join(line for line in task_lines if line),
-        "search_limit": (
-            args.max_search_experiments
-            if args.max_search_experiments is not None
-            else 10
-        ),
+        # 传 None 而不是替换成默认值：运行时要能分辨"用户没给"和"用户给了 10"。
+        # 给了就该覆盖持久化的旧值，没给就该沿用。
+        "search_limit": args.max_search_experiments,
         "auto_validate": args.mode == "auto",
         "direction": args.direction or "maximize",
         "ideation": args.ideation,

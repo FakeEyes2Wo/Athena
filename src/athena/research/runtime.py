@@ -116,7 +116,7 @@ class ResearchRuntime:
         client: Any = None,
         task: str = "",
         auto_seed_task: bool = False,
-        search_limit: int = 10,
+        search_limit: int | None = None,
         concurrency: int = 1,
         ideator_count: int = 3,
         hypotheses_per_ideator: int = 2,
@@ -163,7 +163,7 @@ class ResearchRuntime:
             task=task,
             auto_seed_task=auto_seed_task,
             search=SearchLimits(
-                search_limit=search_limit,
+                search_limit=10 if search_limit is None else search_limit,
                 concurrency=concurrency,
                 ideator_count=ideator_count,
                 hypotheses_per_ideator=hypotheses_per_ideator,
@@ -222,7 +222,7 @@ class ResearchRuntime:
             else ResearchState(
                 status="IDLE",
                 phase="PREPARE",
-                search_limit=search_limit,
+                search_limit=10 if search_limit is None else search_limit,
                 concurrency=concurrency,
                 ideator_count=ideator_count,
                 hypotheses_per_ideator=hypotheses_per_ideator,
@@ -248,6 +248,11 @@ class ResearchRuntime:
         # 的失败结论。
         if state.status == "FAILED":
             state.status = "IDLE"
+        # 显式给的搜索预算要覆盖持久化的旧值。既有项目的 state.json 是整份原样加载
+        # 的，于是 ``--max-search-experiments`` 在续跑时**静默失效**——想加预算的人
+        # 看不出它没生效，只会看到搜索照旧在老上限停下。
+        if search_limit is not None:
+            state.search_limit = search_limit
         state.experiment_timeout_s = experiment_timeout_s
         if config.data_root is not None and state.data_root is None:
             state.data_root = str(config.data_root)
