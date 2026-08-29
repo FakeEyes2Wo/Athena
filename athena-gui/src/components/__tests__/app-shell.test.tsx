@@ -72,4 +72,41 @@ describe("AppShell", () => {
     fireEvent.click(screen.getByRole("button", { name: "分类 · f1_macro" }));
     expect(switchSession).toHaveBeenCalledWith("s-1");
   });
+
+  it("renders an empty state for a workspace without sessions", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({ sessions: [] }) as never}
+      />,
+    );
+
+    expect(screen.getByText("暂无会话")).toBeInTheDocument();
+    // 只剩顶部的「新会话」按钮，不再有一行凭空占位的会话。
+    expect(screen.getAllByText("新会话")).toHaveLength(1);
+  });
+
+  it("offers deletion for the default session too", () => {
+    const deleteSession = vi.fn();
+
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [{ id: "default", title: "默认会话" }],
+          currentSessionId: "default",
+          deleteSession,
+        }) as never}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "删除会话 默认会话" }));
+    expect(deleteSession).toHaveBeenCalledWith("default");
+  });
 });

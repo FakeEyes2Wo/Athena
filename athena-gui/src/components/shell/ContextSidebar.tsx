@@ -170,6 +170,7 @@ function SessionContext({
             <Icon name="folder" size={14} />
             <span>{group.name}</span>
           </button>
+          {group.sessions.length === 0 && <p className={styles.hint}>暂无会话</p>}
           <ul className={styles.list}>
             {group.sessions.map((session) => (
               <li key={session.id} className={styles.sessionRow}>
@@ -184,7 +185,7 @@ function SessionContext({
                 >
                   <span className={styles.sessionTitle}>{session.title}</span>
                 </button>
-                {group.isCurrent && session.id !== "default" && (
+                {group.isCurrent && (
                   <button
                     type="button"
                     className={styles.delete}

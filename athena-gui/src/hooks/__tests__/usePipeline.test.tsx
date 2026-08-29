@@ -70,8 +70,8 @@ describe("usePipeline", () => {
     bridgeMocks.startValidation.mockResolvedValue({ ok: true });
     bridgeMocks.generateReport.mockResolvedValue({ ok: true });
     bridgeMocks.stateGet.mockResolvedValue({});
-    bridgeMocks.sessionsList.mockResolvedValue({ sessions: [] });
-    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [] });
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: [], active: null });
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: [] });
     bridgeMocks.sessionDelete.mockResolvedValue({ deleted: true, sessions: [] });
     bridgeMocks.subscribeToPipelineEvents.mockResolvedValue([]);
   });
@@ -231,7 +231,9 @@ describe("usePipeline", () => {
     expect(result.current.viewModel.messages).toHaveLength(0);
   });
 
-  it("auto-deletes a blank new session when switching away", async () => {
+  it("leaves blank-session cleanup to the backend when switching away", async () => {
+    // 空白判定只有后端看得见（会话目录里有没有 transcript / state.json）：
+    // 前端曾用 view model 去猜，猜错就是误删一个真实会话。
     const { result } = renderHook(() => usePipeline());
 
     await waitFor(() => {
@@ -243,34 +245,53 @@ describe("usePipeline", () => {
     const blankId = result.current.currentSessionId;
     expect(blankId).not.toBe("default");
 
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
     await act(async () => {
       await result.current.switchSession("default");
     });
 
-    expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith(blankId);
+    expect(bridgeMocks.sessionDelete).not.toHaveBeenCalled();
+    expect(result.current.sessions.map((s) => s.id)).toEqual(["default"]);
   });
 
-  it("does not delete a non-blank session when creating a new one", async () => {
+  it("keeps the session list empty for an untouched workspace", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => {
+      expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default");
+    });
+    expect(result.current.sessions).toEqual([]);
+  });
+
+  it("restores the workspace's last active session on mount", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({
+      sessions: ["default", "s-2"],
+      active: "s-2",
+    });
+    bridgeMocks.sessionSwitch.mockResolvedValue({
+      records: [],
+      sessions: ["default", "s-2"],
+    });
+
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => {
+      expect(result.current.currentSessionId).toBe("s-2");
+    });
+    expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("s-2");
+  });
+
+  it("deletes the default session instead of silently ignoring it", async () => {
     const { result } = renderHook(() => usePipeline());
 
     await waitFor(() => {
       expect(result.current.currentSessionId).toBe("default");
     });
     await act(async () => {
-      result.current.newSession();
-    });
-    const usedId = result.current.currentSessionId;
-
-    // 在这个命名会话里发送并自动启动，使其不再是空白会话。
-    await act(async () => {
-      await result.current.sendPrompt("analyze this CSV");
-    });
-    expect(result.current.viewModel.messages.length).toBeGreaterThan(0);
-
-    await act(async () => {
-      result.current.newSession();
+      await result.current.deleteSession("default");
     });
 
-    expect(bridgeMocks.sessionDelete).not.toHaveBeenCalledWith(usedId);
+    expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith("default");
+    expect(result.current.sessions).toEqual([]);
   });
 });

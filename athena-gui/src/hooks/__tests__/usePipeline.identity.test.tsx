@@ -17,8 +17,8 @@ vi.mock("../../lib/tauri-bridge", () => ({
   humanChoice: vi.fn().mockResolvedValue({ ok: true }),
   humanSkip: vi.fn().mockResolvedValue({ ok: true }),
   stateGet: vi.fn().mockResolvedValue({}),
-  sessionsList: vi.fn().mockResolvedValue({ sessions: ["default"] }),
-  sessionSwitch: vi.fn().mockResolvedValue({ records: [] }),
+  sessionsList: vi.fn().mockResolvedValue({ sessions: ["default"], active: "default" }),
+  sessionSwitch: vi.fn().mockResolvedValue({ records: [], sessions: ["default"] }),
   sessionDelete: vi.fn().mockResolvedValue({ deleted: true, sessions: [] }),
   subscribeToPipelineEvents: vi.fn(async (handler) => {
     eventHandlers.push(handler);
@@ -55,10 +55,10 @@ function deferHistory(records: Array<Record<string, unknown>>): () => void {
   vi.mocked(sessionsList).mockImplementation(
     () =>
       new Promise((resolve) => {
-        release = () => resolve({ sessions: ["default"] });
+        release = () => resolve({ sessions: ["default"], active: "default" });
       }),
   );
-  vi.mocked(sessionSwitch).mockResolvedValue({ records: records as never });
+  vi.mocked(sessionSwitch).mockResolvedValue({ records: records as never, sessions: ["default"] });
   return () => release();
 }
 

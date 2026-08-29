@@ -214,3 +214,14 @@ async def test_dispatch_error_falls_back_to_exception_type() -> None:
     err = await _dispatch_error(RuntimeError())
 
     assert err["message"] == "RuntimeError"
+
+
+async def test_dispatch_error_reports_a_blocked_delete() -> None:
+    """删除会话因句柄占用失败时，前端拿到的是操作系统给的真实原因。"""
+    err = await _dispatch_error(
+        PermissionError("[WinError 32] the file is in use by another process")
+    )
+
+    assert err["code"] == -32603
+    assert "in use by another process" in err["message"]
+    assert err["data"]["exception"] == "PermissionError"

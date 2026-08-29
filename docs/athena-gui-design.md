@@ -81,8 +81,9 @@
 | `tree_get` | — | `{ "tree": ResearchTreeDict }`（含 version/sota_id/hypotheses/experiments） |
 | `tree_save` | — | `{ "saved": true, "path": str }` |
 | `tree_load` | — | `{ "loaded": true, "tree": ResearchTreeDict }` |
-| `sessions_list` | — | `{ "sessions": [str] }`（当前工作区内所有会话 id，最近修改在前） |
-| `session_switch` | `session_id: str` | `{ "records": [SessionRecord] }`（切到该会话并重放其 transcript，实现断点续传） |
+| `sessions_list` | — | `{ "sessions": [str], "active": str \| null }`（当前工作区内留下过痕迹的会话 id，最近活动在前；`active` 是本工作区上次打开的会话，列表为空时为 `null`） |
+| `session_switch` | `session_id: str` | `{ "session_id": str, "records": [SessionRecord], "sessions": [str] }`（切到该会话并重放其 transcript，实现断点续传；离开的空白会话由后端回收，故一并回传最新列表） |
+| `session_delete` | `session_id: str` | `{ "deleted": true, "sessions": [str] }`（`default` 没有独立目录，删它等于重置默认会话：清 transcript / state.json / resume.json / research_tree.json，保留工作区目录本体与 `workspaces/`） |
 
 #### C. 假设图与算法
 

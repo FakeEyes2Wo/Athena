@@ -210,9 +210,9 @@ export interface SessionRecord {
   [key: string]: unknown;
 }
 
-/** List session ids in the current workspace, most-recent first. */
-export function sessionsList(): Promise<{ sessions: string[] }> {
-  return rpc<{ sessions: string[] }>("sessions_list");
+/** Session ids in the current workspace (most-recent first) + the one last opened here. */
+export function sessionsList(): Promise<{ sessions: string[]; active: string | null }> {
+  return rpc<{ sessions: string[]; active: string | null }>("sessions_list");
 }
 
 /** List session ids in an arbitrary workspace directory (without switching runtime). */
@@ -220,13 +220,21 @@ export function sessionsListFor(path: string): Promise<{ sessions: string[] }> {
   return rpc<{ sessions: string[] }>("sessions_list_for", { path });
 }
 
-/** Switch the active session and return its transcript. */
-export function sessionSwitch(sessionId: string): Promise<{ records: SessionRecord[] }> {
+/** Switch the active session; returns its transcript and the updated session list
+  * (the backend recycles the blank session being left behind). */
+export function sessionSwitch(
+  sessionId: string,
+): Promise<{ records: SessionRecord[]; sessions?: string[] }> {
   if (hasTauri) return invoke("session_switch", { sessionId });
-  return wsBackend.call("session_switch", { session_id: sessionId }) as Promise<{ records: SessionRecord[] }>;
+  return wsBackend.call("session_switch", { session_id: sessionId }) as Promise<{
+    records: SessionRecord[];
+    sessions?: string[];
+  }>;
 }
 
-/** Delete a named session (its transcript + state) and return the updated id list. */
+/** Delete a session (its transcript + state) and return the updated id list.
+  * ``default`` has no directory of its own, so deleting it resets the workspace's
+  * default session instead of removing the workspace. */
 export function sessionDelete(
   sessionId: string,
 ): Promise<{ deleted: boolean; sessions: string[] }> {
