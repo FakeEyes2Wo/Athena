@@ -104,7 +104,9 @@ class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
                 expected_effect="average precision rises",
             )
         )
-        supervisor.state = SimpleNamespace(plans={"hyp_abc": _plan_state()})
+        supervisor.state = SimpleNamespace(
+            plans={"hyp_abc": _plan_state()}, data_contract=None
+        )
         supervisor._agents = Agents()
         supervisor._publish_agent_event = None
         supervisor._persist_state = _noop
@@ -144,7 +146,7 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
                 statement="s", intervention="i", expected_effect="e"
             )
         )
-        supervisor.state = SimpleNamespace(plans={"hyp_abc": state})
+        supervisor.state = SimpleNamespace(plans={"hyp_abc": state}, data_contract=None)
         supervisor._agents = Agents()
         supervisor._publish_agent_event = None
         supervisor._persist_state = _noop

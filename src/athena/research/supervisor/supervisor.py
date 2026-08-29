@@ -26,6 +26,7 @@ from athena.research.supervisor.deps import (
 )
 from athena.research.supervisor.experiment import (
     PlanTurnResult,
+    data_contract_block,
     failure_block,
     handoff_block,
     load_agent_result,
@@ -265,6 +266,7 @@ class Supervisor:
                         + self._hypothesis_block(plan_id)
                         + handoff_block(await self._plan_handoff(plan_id))
                         + self._corpus_block(plan_id)
+                        + data_contract_block(self.state.data_contract or "")
                         + self._previous_failure_block(previous_failure)
                     ),
                     "context_refs": [state.context_ref],

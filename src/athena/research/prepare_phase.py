@@ -265,10 +265,19 @@ async def run_prepare_phase(
             f"{(split_dir / 'search_features.csv').resolve()} holds exactly the "
             "rows to predict, with labels withheld."
         )
-        # SEARCH 的候选走的是持久化的 state.task_text，不是这里的局部变量。不写回
-        # 去的话，这条约束只对 PREPARE 的基线成立，之后每个候选又会回到"自己去数据
-        # 目录里找划分"的老路上。
-        rt.state.task_text = candidate_task
+        # 候选看不到任务文本（PlanInput 走 context_refs 死信道），所以这条约束必须
+        # 单独持久化，再由 Supervisor 每一轮拼进 content（见 data_contract_block）。
+        # 只改这里的局部变量的话，约束只对 PREPARE 的基线成立，之后每个候选又会回到
+        # "自己去数据目录里找划分"的老路上。
+        rt.state.data_contract = (
+            f"Train ONLY on {(split_dir / 'train.csv').resolve()}. {grouping}\n"
+            f"Do NOT read {rt.config.dataset_path} for training, and do NOT use "
+            "any other split of it you may find beside it. The rows you are "
+            "scored on are drawn from that same file, so fitting on it means "
+            "being scored on rows you already saw.\n"
+            f"Predict exactly the rows in "
+            f"{(split_dir / 'search_features.csv').resolve()} (labels withheld)."
+        )
         rt.state.save(rt.state_path)
 
     # Step 1: search evaluator. Reuse a checkpointed frozen bundle when present.

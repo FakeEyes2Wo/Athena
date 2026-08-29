@@ -142,6 +142,29 @@ def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
     )
 
 
+def data_contract_block(contract: str) -> str:
+    """把"训练用哪份数据"这条约束拼进每一轮 SEARCH 的 prompt 正文。
+
+    与 ``handoff_block`` / ``hypothesis_block`` / ``failure_block`` 是同一条教训的
+    第四处落点。候选**看不到任务文本**：``PlanInput`` 只经 ``context_refs``，而那是
+    死信道；能到 model 面前的只有假设、评估器 HANDOFF、语料与失败反馈。
+
+    真机（2026-08-29）：平台切好了 train/search/final，却只告诉了 evaluator。基线
+    agent 拿着"Dataset path: <原始 csv>"去那个目录里自己找划分，用了旁边一套早先切
+    的文件。平台 search split 的 14703 行里有 11978 行（81.5%）落进它的训练集，
+    PR-AUC 报到 0.9736——而参考值是 0.891。评估器只比对 predictions 与 labels，
+    结构上无法察觉候选在被打分的行上训练过。
+    """
+    body = contract.strip()
+    if not body:
+        return ""
+    return (
+        "\n\n--- Data contract (violating this invalidates your score) ---\n"
+        f"{body}\n"
+        "--- end of data contract ---"
+    )
+
+
 def failure_block(kind: str, error: str) -> str:
     """把上一轮实验的失败原因拼进下一轮 prompt 正文。
 

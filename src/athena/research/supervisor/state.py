@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 RESUME_FIELDS = (
     "task_text",
+    "data_contract",
     "kaggle_download",
     "task_research_task",
     "task_research_ref",
@@ -78,9 +79,7 @@ class ResearchState(BaseModel):
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
-    experiment_timeout_s: int = Field(
-        default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1
-    )
+    experiment_timeout_s: int = Field(default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1)
     # 数据集根目录（供远端算力分发数据集；本地算力可空）。
     data_root: str | None = None
     # 每轮 ideation 的并行 lane 数与每 lane 假设数（与 SEARCH 并发度解耦）。
@@ -106,6 +105,11 @@ class ResearchState(BaseModel):
     handoff_refs: dict[str, ArtifactRef] = Field(default_factory=dict)
     # 断点续传：首次完整任务文本（续跑时沿用，避免短消息污染 survey/PREPARE 提示词）。
     task_text: str | None = None
+    # 平台拥有数据划分时的数据契约：训练用哪个文件、预测哪些行、为什么不能读原始
+    # 数据集。**每一轮 SEARCH 都要把它拼进 content**——候选看不到任务文本（PlanInput
+    # 走的是 context_refs 死信道），它们能看到的只有假设、评估器 HANDOFF 与工作区。
+    # 不给的话候选会自己去数据目录里找划分，在被打分的那些行上训练。
+    data_contract: str | None = None
     # 断点续传：configure_kaggle 的持久化决定（None=未决定，False=已决定关闭）。
     kaggle_download: bool | None = None
     # 断点续传：任务理解阶段 general 调研的产物引用、worker 稳定 id 与任务原文；
