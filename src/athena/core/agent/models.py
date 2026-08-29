@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from athena.core.agent import settings
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser, EmitEvent
@@ -15,13 +16,20 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True, frozen=True)
 class AgentConfig:
-    """Agent 运行配置 — 模型、系统提示、工具集和采样参数。"""
+    """Agent 运行配置 — 模型、系统提示、工具集和采样参数。
+
+    ``temperature``/``seed`` 的默认值从 ``settings`` 取（``LLM_TEMPERATURE`` /
+    ``LLM_SEED`` 或 ``config.toml`` 的 ``[llm]``），不再是写死的字面量：评测规范
+    普遍要求申报并固定采样参数，而写死的默认值既申报不了也调不动。
+    ``seed=None`` 表示请求里不带该字段。
+    """
 
     max_turns: int = 200
     max_tokens: int = 4096
-    temperature: float = 0.1
+    temperature: float = field(default_factory=settings.temperature)
     name: str = "code-agent"
     tool_choice: Literal["auto", "required"] = "auto"
+    seed: int | None = field(default_factory=settings.seed)
 
 
 @dataclass(slots=True)

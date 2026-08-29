@@ -151,16 +151,30 @@ async def run_prepare_phase(
             search_frac=0.2,
             final_frac=0.2,
             seed=rt.config.split_seed,
+            group_column=rt.config.group_column,
+        )
+        grouping = (
+            f"Rows were kept together by {rt.config.group_column!r}, so no group "
+            "spans two splits."
+            if rt.config.group_column
+            else ""
         )
         await rt.publish_output(
             source="supervisor",
             channel="text",
-            text=f"PREPARE: 平台已生成数据划分 {split_dir.resolve()}。",
+            text=(
+                f"PREPARE: 平台已生成数据划分 {split_dir.resolve()}。"
+                + (
+                    f"（按 {rt.config.group_column} 分组，同组不跨 split）"
+                    if rt.config.group_column
+                    else ""
+                )
+            ),
         )
         evaluator_task = (
             f"{rt.task_text}\n\n"
             f"The platform has already split the dataset into train/search/final "
-            f"files under {split_dir.resolve()}.\n"
+            f"files under {split_dir.resolve()}. {grouping}\n"
             "Do NOT create your own split. Build evaluate.py using "
             "search_labels.csv as the trusted search labels, and keep "
             "final_labels.csv hidden from SEARCH."

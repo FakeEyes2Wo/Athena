@@ -85,6 +85,8 @@ class PlanState(BaseModel):
     patience: int | None = Field(default=None, ge=0)
     stale_rounds: int = Field(default=0, ge=0)
     best_ref: ArtifactRef | None = None
+    # 上一轮实验的失败摘要，供下一轮 prompt 引用；读到即清空（见 failure_block）。
+    last_failure: str | None = Field(default=None, max_length=1200)
 
     @field_validator("context_ref", "best_ref")
     @classmethod
@@ -109,6 +111,9 @@ class PlanState(BaseModel):
         if self.kind != "SEARCH":
             for field in ("patience", "stale_rounds", "best_ref"):
                 payload.pop(field, None)
+        # 只有真的挂了才落盘：没有失败时留一个 null 会污染每一个 Plan 的持久形状。
+        if self.last_failure is None:
+            payload.pop("last_failure", None)
         return payload
 
 

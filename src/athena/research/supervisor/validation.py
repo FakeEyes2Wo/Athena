@@ -26,6 +26,7 @@ from athena.research.supervisor.experiment import (
     load_agent_result,
     read_experiment_manifest,
 )
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.validation import ValidationService
 
 CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
@@ -273,7 +274,17 @@ async def _execute_predictions(
     workspace: GitWorkBranch,
     store: ArtifactStore,
     publish: EmitEvent | None,
+    timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
 ) -> tuple[ArtifactRef, str]:
+    """Re-run the frozen SOTA experiment and pack its predictions.
+
+    ``timeout_s`` must be passed explicitly. It used to be omitted, so this call
+    silently took ``ExecutionRuntime.run``'s 120-second default while SEARCH ran
+    the very same commands under ``experiment_timeout_s`` (an hour by default).
+    Any experiment that took longer than two minutes — which is most of them
+    once real training or a large feature extraction is involved — passed SEARCH
+    and then failed VALIDATE with a timeout that looked like a broken candidate.
+    """
     workdir = Path(workspace.path)
     manifest = read_experiment_manifest(workdir)
     context = ExecutionContext(
@@ -286,6 +297,7 @@ async def _execute_predictions(
             result = await execution.run(
                 context,
                 argv=argv,
+                timeout_s=timeout_s,
                 workdir=workdir,
                 emit=publish,
             )
@@ -336,7 +348,9 @@ async def _score_result(
     )
     evaluator_dir = Path(descriptor.dir_path)
     if not (evaluator_dir / "README.md").is_file():
-        raise ValueError("final evaluator directory is missing its README freeze marker")
+        raise ValueError(
+            "final evaluator directory is missing its README freeze marker"
+        )
     predictions = await load_directory(store, current.predictions_ref)
     evaluation = await evaluator.score(
         evaluator_dir=evaluator_dir,
@@ -391,8 +405,13 @@ async def run_validation_plan(
     result_ref: ArtifactRef | None,
     checkpoint: CheckpointValidation,
     publish: EmitEvent | None = None,
+    experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
 ) -> ValidationResult:
-    """Run or recover one independent validation attempt under its stable key."""
+    """Run or recover one independent validation attempt under its stable key.
+
+    ``experiment_timeout_s`` is the same budget SEARCH gave the experiment; the
+    re-run must not be held to a stricter one than the run it is reproducing.
+    """
 
     try:
         expected_key = validation_key(
@@ -454,6 +473,7 @@ async def run_validation_plan(
                     workspace=workspace,
                     store=store,
                     publish=publish,
+                    timeout_s=experiment_timeout_s,
                 )
                 if await git.diff(workspace) != reviewed_diff:
                     repair = await _decode_repair(

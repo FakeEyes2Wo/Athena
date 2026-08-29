@@ -200,6 +200,7 @@ class PhaseRunner:
             publish=lambda kind, ref, data: rt.events.project_agent_event(
                 "validate", kind, ref, data
             ),
+            experiment_timeout_s=rt.state.experiment_timeout_s,
         )
 
     async def review_validation_diff(self, prompt: str) -> ValidationDiffReview:

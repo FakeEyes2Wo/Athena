@@ -112,7 +112,7 @@ async def test_deepseek_stream_strips_dsml_from_accumulated():
 
     events = []
     async for event in provider.stream(
-        SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto"),
+        SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto", seed=None),
         SimpleNamespace(specs=[]),
         [],
         asyncio.Event(),
@@ -134,7 +134,7 @@ async def test_openai_stream_is_untouched_by_dsml_filter():
 
     events = []
     async for event in provider.stream(
-        SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto"),
+        SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto", seed=None),
         SimpleNamespace(specs=[]),
         [],
         asyncio.Event(),

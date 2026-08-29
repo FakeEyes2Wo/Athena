@@ -5,6 +5,7 @@ import json
 import pytest
 
 import athena.cli as cli
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 
 
 def _state(*, status: str = "RUNNING", phase: str = "SEARCH") -> dict[str, object]:
@@ -95,19 +96,82 @@ def test_run_options_configure_runtime_constructor() -> None:
         ]
     )
 
-    assert cli._runtime_options(args) == {
-        "task": "predict churn\nDataset path: dataset/train.csv\nTarget: churned",
-        "search_limit": 3,
-        "auto_validate": True,
-        "direction": "minimize",
-        # 消融开关默认走 idea generation 门禁；--ideation baseline 是对照组。
-        "ideation": "ideageneration",
-        "survey": False,
-        "survey_query": "",
-        "survey_max_papers": 20,
-        "survey_search_top_k": 0,
-        "survey_max_seconds": 0.0,
-    }
+    options = cli._runtime_options(args)
+    assert options["task"] == (
+        "predict churn\nDataset path: dataset/train.csv\nTarget: churned"
+    )
+    assert options["search_limit"] == 3
+    assert options["auto_validate"] is True
+    assert options["direction"] == "minimize"
+    # 消融开关默认走 idea generation 门禁；--ideation baseline 是对照组。
+    assert options["ideation"] == "ideageneration"
+    assert options["survey"] is False
+    assert options["survey_query"] == ""
+    assert options["survey_max_papers"] == 20
+    assert options["survey_search_top_k"] == 0
+    assert options["survey_max_seconds"] == 0.0
+    assert options["experiment_timeout_s"] == DEFAULT_EXPERIMENT_TIMEOUT_S
+    assert options["compute"] is not None
+
+
+def test_the_data_contract_reaches_the_runtime_not_just_the_prompt(tmp_path) -> None:
+    """``--target``/``--tolerance`` 之类此前只被拼进提示词文本，从没传给运行时。
+
+    后果不是"少一个参数"：``prepare_phase`` 要求 ``dataset_path`` 与
+    ``target_column`` 同时非空才做平台数据划分，两者永远是 None，于是那段代码
+    一次都没执行过——划分始终由评估器 Agent 自己做。
+    """
+    source = tmp_path / "windows.csv"
+    source.write_text("TIC,feature,label\n1,2,0\n1,3,1\n2,4,0\n", encoding="utf-8")
+
+    options = cli._runtime_options(
+        cli._build_parser().parse_args(
+            [
+                "run",
+                "--project",
+                "p",
+                "--data",
+                str(source),
+                "--target",
+                "label",
+                "--group-column",
+                "TIC",
+                "--split-seed",
+                "62",
+                "--tolerance",
+                "0.005",
+            ]
+        )
+    )
+
+    assert options["dataset_path"] == source
+    assert options["target_column"] == "label"
+    assert options["group_column"] == "TIC"
+    assert options["split_seed"] == 62
+    assert options["tolerance"] == 0.005
+    assert "TIC" in options["task"]
+
+
+def test_the_platform_split_stays_off_for_inputs_it_cannot_split(tmp_path) -> None:
+    """``--data`` 可以是目录或 Kaggle URL；对它们调 materialize_csv_split 会直接炸。"""
+    directory = tmp_path / "images"
+    directory.mkdir()
+
+    for argv in (
+        ["run", "--project", "p", "--data", str(directory), "--target", "label"],
+        ["run", "--project", "p", "--data", "https://kaggle.com/c/titanic"],
+    ):
+        options = cli._runtime_options(cli._build_parser().parse_args(argv))
+        assert options["dataset_path"] is None
+        assert options["target_column"] is None
+
+
+def test_tolerance_rejects_negative_values() -> None:
+    """``PlanInput.tolerance`` 声明了 ge=0；负值该在解析期就失败，而不是烧掉一轮 PREPARE。"""
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(
+            ["run", "--project", "p", "--data", "d.csv", "--tolerance", "-0.1"]
+        )
 
 
 def test_the_literature_survey_stays_off_unless_it_is_asked_for() -> None:

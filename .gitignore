@@ -50,7 +50,10 @@ Thumbs.db
 
 # Project-local generated or private files
 .superpowers
-uv.lock
+# uv.lock is deliberately tracked: an application's lock file is the only thing
+# that makes "same code, same environment" reproducible for anyone else. Ignoring
+# it means every clone resolves whatever is newest that day, which is exactly
+# what a reproduction check is supposed to rule out.
 XH-202619.pdf
 /docs/open-design/*
 /docs/autoresearch/

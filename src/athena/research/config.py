@@ -62,6 +62,8 @@ class ResearchConfig:
     dataset_path: Path | None = None
     target_column: str | None = None
     split_seed: int = 0
+    # Column whose value must not span two splits (active region, star, subject).
+    group_column: str | None = None
     # Compute resources / remote GPU execution.
     data_root: Path | None = None
     experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S

@@ -142,6 +142,32 @@ def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
     )
 
 
+def failure_block(kind: str, error: str) -> str:
+    """把上一轮实验的失败原因拼进下一轮 prompt 正文。
+
+    与 ``handoff_block`` / ``hypothesis_block`` 是同一条教训的第三处落点。失败的
+    ``PlanTurnResult`` 一直带着 ``kind`` 与 ``error``（manifest 不合法、命令非零退出
+    并附 stderr 摘要、predictions 目录空、打分失败），但它们只进了 evidence artifact
+    和事件流——**没有任何一条回到写代码的那个 Agent 面前**。
+
+    于是失败轮的实际语义是"什么都没发生"：Agent 下一轮看到的仍然是
+    ``Continue Plan …; turns used: N``，既不知道上一轮跑没跑、也不知道为什么没跑成，
+    只能把同一份 manifest 原样再交一次，直到 turn 预算耗尽。同一个 ModuleNotFoundError
+    可以就这样烧掉一整条 Plan。
+    """
+    detail = " ".join(error.split())[:800]
+    if not detail:
+        return ""
+    return (
+        "\n\n--- Previous attempt failed (fix this before anything else) ---\n"
+        f"Failure kind: {kind}\n"
+        f"Detail: {detail}\n"
+        "Do not resubmit the same experiment unchanged; diagnose this failure "
+        "first, then retry.\n"
+        "--- end of failure report ---"
+    )
+
+
 async def read_eval_handoff(
     store: ArtifactStore, evaluator_ref: ArtifactRef | None
 ) -> str:
@@ -666,9 +692,7 @@ class PlanRunner:
             error=cleaned,
         )
 
-    async def _load_evaluator_dir(
-        self, evaluator_ref: ArtifactRef
-    ) -> Path | None:
+    async def _load_evaluator_dir(self, evaluator_ref: ArtifactRef) -> Path | None:
         """Load the README-only evaluator directory from its descriptor."""
         try:
             text = await self._store.get_text(evaluator_ref)

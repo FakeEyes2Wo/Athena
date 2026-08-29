@@ -62,17 +62,48 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_float(value: str) -> float:
+    """argparse ``type``：把 ``--tolerance`` 约束为非负浮点数。
+
+    ``PlanInput.tolerance`` 声明了 ``ge=0``，负值要到构造 Plan 时才炸，那时已经
+    烧掉了一整轮 PREPARE。
+    """
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be a non-negative number, got {value}")
+    return parsed
+
+
+def _platform_split_dataset(args: argparse.Namespace) -> Path | None:
+    """Return the CSV the platform should split itself, or None.
+
+    ``--data`` is free-form: a CSV, a directory of images, a Kaggle URL. Only a
+    local CSV with a named target can be split by ``materialize_csv_split``;
+    handing it anything else raises inside PREPARE. So the platform-owned split
+    turns on exactly when the arguments describe one, and stays off otherwise —
+    which is the historical behaviour for every other shape of input.
+    """
+    if not args.target:
+        return None
+    path = Path(args.data)
+    if path.suffix.lower() != ".csv" or not path.is_file():
+        return None
+    return path
+
+
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
     task_lines = [args.task or "", f"Dataset path: {args.data}"]
     optional_context = (
         ("Target", args.target),
+        ("Group column (rows sharing it must not span splits)", args.group_column),
         ("Task type", args.task_type),
         ("Data type", args.data_type),
         ("Primary metric", args.metric),
         ("K-fold policy", args.kfold if args.kfold != "auto" else None),
     )
     task_lines.extend(f"{label}: {value}" for label, value in optional_context if value)
+    dataset_path = _platform_split_dataset(args)
     return {
         "task": "\n".join(line for line in task_lines if line),
         "search_limit": (
@@ -90,6 +121,15 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
         "survey_max_seconds": args.survey_max_seconds,
         "experiment_timeout_s": args.experiment_timeout,
         "compute": _compute_config(args),
+        # 这五项此前只被拼进任务提示词，从没传给运行时：平台数据划分因此永远
+        # 不触发（``prepare_phase`` 要求 dataset_path 与 target_column 同时非空），
+        # 判胜容差也永远是 0.0。
+        "dataset_path": dataset_path,
+        "target_column": args.target if dataset_path is not None else None,
+        "group_column": args.group_column if dataset_path is not None else None,
+        "split_seed": args.split_seed,
+        "tolerance": args.tolerance,
+        "data_root": args.data_root or None,
     }
 
 
@@ -416,6 +456,33 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--data", required=True, help="input dataset path")
     run.add_argument("--task", help="research intent")
     run.add_argument("--target", help="supervised target column")
+    run.add_argument(
+        "--group-column",
+        help=(
+            "分组列名：同一取值的行绝不跨 train/search/final（活动区、恒星、受试者）。"
+            "行与行不独立时，缺了它的随机划分会静默泄漏且分数只会更好看"
+        ),
+    )
+    run.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="平台数据划分的随机种子（默认 0）",
+    )
+    run.add_argument(
+        "--tolerance",
+        type=_non_negative_float,
+        default=0.0,
+        help=(
+            "判胜容差：候选须超过参考指标至少这么多才算 WIN（默认 0.0，"
+            "即任意大于都算赢）"
+        ),
+    )
+    run.add_argument(
+        "--data-root",
+        default="",
+        help="数据集根目录；与远端算力一起用时用于分发",
+    )
     run.add_argument("--task-type", help="task type, for example classification")
     run.add_argument("--data-type", help="data type, for example tabular")
     run.add_argument("--metric", help="primary evaluation metric")
@@ -700,7 +767,9 @@ def _add_bench_parser(subparsers) -> None:
         help=f"判为相关的分数线，默认 {RELEVANT_THRESHOLD}（2 分档）",
     )
 
-    retrieval = modes.add_parser("retrieval", help="known-item hit@k and MRR per channel")
+    retrieval = modes.add_parser(
+        "retrieval", help="known-item hit@k and MRR per channel"
+    )
     retrieval.add_argument("--corpus", required=True, help="corpus_ref to benchmark")
     retrieval.add_argument(
         "--queries",
@@ -725,9 +794,13 @@ def _add_bench_parser(subparsers) -> None:
 
     for parser in (retrieval, health, overlap, recall):
         parser.add_argument(
-            "--artifact-root", default="", help="artifact 根目录；默认 ~/.athena/artifacts"
+            "--artifact-root",
+            default="",
+            help="artifact 根目录；默认 ~/.athena/artifacts",
         )
-        parser.add_argument("--out", default="", help="把报告写成 JSON，供两次运行 diff")
+        parser.add_argument(
+            "--out", default="", help="把报告写成 JSON，供两次运行 diff"
+        )
 
 
 def _print_retrieval_report(report) -> None:
@@ -740,7 +813,9 @@ def _print_retrieval_report(report) -> None:
             f"  金标不在本语料、已排除: {', '.join(report.unusable_queries)}"
             "  （这不是检索失败）"
         )
-    header = f"  {'通道':<26}{'hit@1':>7}{'hit@3':>7}{'hit@5':>7}{'未命中':>8}{'MRR':>8}"
+    header = (
+        f"  {'通道':<26}{'hit@1':>7}{'hit@3':>7}{'hit@5':>7}{'未命中':>8}{'MRR':>8}"
+    )
     print(header)
     for channel in report.channels:
         print(
@@ -794,8 +869,10 @@ def _print_recall_report(report) -> None:
     """打印三段召回；每一段丢的东西该动的地方不同，所以分开报。"""
     print(f"\n召回评测：{report.query_set}")
     print(f"  课题: {report.topic}")
-    print(f"  金标 {report.gold_total} 篇 · 池子 {report.pool_size} 篇 · "
-          f"交付 {report.delivered_size} 篇 · 相关线 {report.threshold}")
+    print(
+        f"  金标 {report.gold_total} 篇 · 池子 {report.pool_size} 篇 · "
+        f"交付 {report.delivered_size} 篇 · 相关线 {report.threshold}"
+    )
     labels = {
         "in_pool": "进池（检索找到）",
         "judged_relevant": "判为相关（打分给够）",
@@ -855,9 +932,7 @@ async def _cmd_bench(args: argparse.Namespace) -> int:
     if args.bench_command == "overlap":
         runs = [
             sorted(
-                corpus_paper_ids(
-                    await stack.corpus_cache.load(stack.artifacts, ref)
-                )
+                corpus_paper_ids(await stack.corpus_cache.load(stack.artifacts, ref))
             )
             for ref in args.corpus
         ]
@@ -875,9 +950,7 @@ async def _cmd_bench(args: argparse.Namespace) -> int:
     else:
         embedder = None if args.no_semantic else stack.embedder
         if embedder is None and not args.no_semantic:
-            print(
-                "未配置 ATHENA_EMBEDDING_MODEL，只跑词面通道。", file=sys.stderr
-            )
+            print("未配置 ATHENA_EMBEDDING_MODEL，只跑词面通道。", file=sys.stderr)
         report = await run_known_item(
             corpus,
             load_query_set(args.queries),
@@ -896,7 +969,9 @@ def _add_compute_parser(subparsers) -> None:
     compute = subparsers.add_parser(
         "compute", help="check the GPU hosts in [compute] before running anything"
     )
-    compute.add_argument("--compute", choices=["local", "ssh"], help="临时覆盖 [compute].mode")
+    compute.add_argument(
+        "--compute", choices=["local", "ssh"], help="临时覆盖 [compute].mode"
+    )
     compute.add_argument(
         "--data-root", default="", help="数据集根目录；与远端算力一起用时用于分发"
     )
@@ -920,9 +995,7 @@ def _add_kaggle_parser(subparsers) -> None:
     )
     kaggle.add_argument("--list", action="store_true", help="列出竞赛而不是跑流水线")
     kaggle.add_argument("--search", default="", help="--list 时的标题过滤词")
-    kaggle.add_argument(
-        "--sort-by", default="latestDeadline", help="--list 排序字段"
-    )
+    kaggle.add_argument("--sort-by", default="latestDeadline", help="--list 排序字段")
     kaggle.add_argument("--check", action="store_true", help="只做装配自检")
     kaggle.add_argument("--out", default="", help="把报告 JSON 写到该路径")
 

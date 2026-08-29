@@ -204,7 +204,32 @@ research tree 里躺着状态齐全的实验记录，REFUTED/INCONCLUSIVE 一应
 任何"由 Agent 生成、之后被当作事实基准"的产物都该配一个判别性检验：**它对本该不同的
 两个输入，给不给出不同的输出。**
 
+## 九、分数还得带上它的不确定度
+
+`evaluate.py` 现在必须打印 `test_se` 与 `test_n`，而不只是 `primary`：
+
+```json
+{"primary": 0.8907, "test_se": 0.0231, "test_n": 7259}
+```
+
+这两个字段的通路早就是通的：`TrustedEvaluator` 读它们（`evaluation.py`），
+经 `PlanBest.std_error/n` 到 `plan_lifecycle._settle_plan`，那里
+**只有在 `std_error` 非空时**才走 `settle_statistically`——Bonferroni 校正的正态
+置信区间；否则退回比较两个点估计。
+
+也就是说：机制一直在，只是没有任何一处要求评估器把数吐出来，于是它从来没被启用过。
+留出集一小或一不平衡，纯噪声就会被记成一次 WIN，而搜索会顺着这个噪声继续走下去，
+后续每一条假设都建立在一个不存在的改进之上。
+
+`test_se` 用 bootstrap 估：对被打分的记录有放回重采样 ≥1000 次（固定种子），
+每次重算指标，取这些值的标准差。指标若是"逐条得分求平均"这种形式，
+`std / sqrt(n)` 等价且更省。
+
+指标确实没有可估计的抽样分布时，可以在 `HANDOFF.md` 里说明并有意省略——
+但默认省略就是让搜索去优化噪声。
+
 ## 相关文档
 
 - [Supervisor 设计基线](supervisor_design.md) — 三阶段与 trusted evaluator 的位置
 - [真机跑测暴露的 loop 失效模式](loop_failure_modes_ch.md) — 同一轮跑测的其余缺陷
+- [接真实评测任务时暴露的七个缺陷](task_readiness_ch.md) — 数据划分、超时、provider 与失败反馈

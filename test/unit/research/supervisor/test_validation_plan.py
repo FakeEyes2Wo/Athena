@@ -400,9 +400,11 @@ async def test_validation_rejects_binary_diff_without_llm_review(tmp_path) -> No
 class _StubExecution:
     def __init__(self, environment_root: Path) -> None:
         self.environment_root = environment_root
+        self.timeouts: list[object] = []
 
     async def run(self, context, command=None, *, argv=None, **kwargs):
-        del context, command, argv, kwargs
+        del context, command, argv
+        self.timeouts.append(kwargs.get("timeout_s"))
 
         class _Ok:
             ok = True
@@ -458,6 +460,45 @@ async def test_execute_predictions_packs_predictions_directory(tmp_path) -> None
         "nested/mask.bin": b"\x00\x01\x02",
     }
     assert git.restored == [("predictions", "REPORT.md")]
+
+
+@pytest.mark.asyncio
+async def test_validation_rerun_gets_the_same_budget_search_gave_the_experiment(
+    tmp_path,
+) -> None:
+    """VALIDATE 复跑此前不传 ``timeout_s``，于是拿的是 ``ExecutionRuntime.run`` 的
+    120 秒默认值，而 SEARCH 跑同样的命令用的是 ``experiment_timeout_s``（默认一小时）。
+
+    结果是：任何超过两分钟的实验——只要牵涉真训练或稍大的特征提取就都超过——
+    过得了 SEARCH，却在 VALIDATE 因超时挂掉，看起来像候选自己坏了。
+    """
+    workdir = tmp_path / "validate"
+    (workdir / "predictions").mkdir(parents=True)
+    (workdir / "predictions" / "pred.csv").write_bytes(b"id,pred\n1,0\n")
+    (workdir / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [["python", "infer.py"], ["python", "score.py"]],
+                "outputs": {"predictions": "predictions"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    execution = _StubExecution(workdir)
+
+    await _execute_predictions(
+        execution=execution,
+        git=_StubGit(),
+        workspace=GitWorkBranch(
+            path=str(workdir), branch="validate", base_commit="sota-a"
+        ),
+        store=LocalArtifactStore(tmp_path / "artifacts"),
+        publish=None,
+        timeout_s=5400,
+    )
+
+    assert execution.timeouts == [5400, 5400]
 
 
 @pytest.mark.asyncio

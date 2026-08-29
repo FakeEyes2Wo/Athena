@@ -26,6 +26,7 @@ from athena.research.supervisor.deps import (
 )
 from athena.research.supervisor.experiment import (
     PlanTurnResult,
+    failure_block,
     handoff_block,
     load_agent_result,
 )
@@ -116,9 +117,7 @@ class Supervisor:
         self.tree = tree
         project_root = Path(project_root)
         _athena = (
-            Path(state_root)
-            if state_root is not None
-            else project_root / ".athena"
+            Path(state_root) if state_root is not None else project_root / ".athena"
         )
         deps = SupervisorDeps(
             project_root=project_root,
@@ -217,6 +216,14 @@ class Supervisor:
                 f"{type(self).__name__!r} object has no attribute {name!r}"
             ) from None
 
+    @staticmethod
+    def _previous_failure_block(summary: str | None) -> str:
+        """Render the stored ``kind: error`` summary as a prompt block."""
+        if not summary:
+            return ""
+        kind, _, detail = summary.partition(": ")
+        return failure_block(kind or "failed", detail or summary)
+
     def _hypothesis_block(self, plan_id: str) -> str:
         """本 Plan 要检验的那条假设，拼进 prompt 正文。
 
@@ -236,7 +243,12 @@ class Supervisor:
     async def _run_one_turn(self, plan_id: str) -> _CompletedTurn:
         """Spend one turn durably, run the Agent, then execute trusted scoring."""
         state = self.state.plans[plan_id]
-        state = state.model_copy(update={"turns_used": state.turns_used + 1})
+        # 消费上一轮的失败摘要并同时清空：反馈只该出现在紧接着的那一轮，否则
+        # 早已修好的错误会一直挂在 prompt 里误导后续所有轮次。
+        previous_failure = state.last_failure
+        state = state.model_copy(
+            update={"turns_used": state.turns_used + 1, "last_failure": None}
+        )
         self.state.plans[plan_id] = state
         await self._persist_state()
         try:
@@ -247,11 +259,13 @@ class Supervisor:
                         f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
                         f"turn limit: {state.turn_limit}; patience: {state.patience}; "
                         f"stale rounds: {state.stale_rounds}."
-                        # 假设与契约都必须走 content：context_refs 到不了 model
-                        # （见 experiment.hypothesis_block / handoff_block）。
+                        # 假设、契约与失败反馈都必须走 content：context_refs 到不了
+                        # model（见 experiment.hypothesis_block / handoff_block /
+                        # failure_block）。
                         + self._hypothesis_block(plan_id)
                         + handoff_block(await self._plan_handoff(plan_id))
                         + self._corpus_block(plan_id)
+                        + self._previous_failure_block(previous_failure)
                     ),
                     "context_refs": [state.context_ref],
                 },
@@ -274,7 +288,24 @@ class Supervisor:
         if decision.decision == "abandon" and state.best_ref is None:
             return _CompletedTurn(plan_id, decision, None)
         result = await self._run_plan_turn(plan_id, state)
+        await self._record_turn_failure(plan_id, result)
         return _CompletedTurn(plan_id, decision, result)
+
+    async def _record_turn_failure(self, plan_id: str, result) -> None:
+        """Persist a failed turn's reason so the next turn's prompt can carry it.
+
+        Failed results never bring a ``next_state`` (the contract forbids it), so
+        writing here cannot be clobbered by the settlement path that follows.
+        """
+        error = getattr(result, "error", None)
+        if not error:
+            return
+        current = self.state.plans.get(plan_id)
+        if current is None:
+            return
+        summary = f"{getattr(result, 'kind', 'failed')}: {error}"[:1200]
+        self.state.plans[plan_id] = current.model_copy(update={"last_failure": summary})
+        await self._persist_state()
 
 
 __all__ = [

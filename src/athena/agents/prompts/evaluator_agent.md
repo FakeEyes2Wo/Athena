@@ -58,6 +58,25 @@ Choose an explicit identity key for every prediction:
   `predictions/` and score the pile; read the exact artifacts the contract
   names, and reject duplicate keys.
 
+## Report the metric's uncertainty, not just the metric
+
+`evaluate.py` MUST print `test_se` and `test_n` alongside `primary`:
+
+- `test_n` is the number of scored held-out records.
+- `test_se` is the standard error of `primary` on that set. Bootstrap it: resample
+  the scored records with replacement at least 1000 times (fixed seed), recompute
+  the metric on each resample, and take the standard deviation of those values.
+  For a plain mean-of-per-record-scores metric, `std / sqrt(n)` is equivalent and
+  cheaper.
+
+This is not decoration. The Supervisor compares a candidate against the frozen
+reference with a confidence interval **only when `test_se` and `test_n` are
+present**; without them it falls back to comparing two point estimates, so on a
+small or imbalanced held-out set pure noise gets recorded as a win and the search
+chases it. If the metric genuinely has no sampling distribution you can estimate,
+say so in `HANDOFF.md` and omit the fields deliberately — but omitting them by
+default is how a search ends up optimising noise.
+
 `HANDOFF.md` MUST state:
 
 - the prediction artifact layout (file names, paths, and the exact schema);
@@ -91,9 +110,10 @@ Create:
   directory after the predictions directory is materialized next to it. It must
   read the ground-truth labels (in whatever format the task uses) and the
   `predictions/` directory according to the declared format, compute the primary
-  metric, and print exactly one line `{"primary": <float>}` to stdout (nothing
-  else). Read labels and predictions with `__file__`-relative paths so the
-  script stays correct inside the frozen bundle;
+  metric, and print exactly one JSON line to stdout (nothing else):
+  `{"primary": <float>, "test_se": <float>, "test_n": <int>}`.
+  Read labels and predictions with `__file__`-relative paths so the script stays
+  correct inside the frozen bundle;
 - the ground-truth labels in the task's native format, with an explicit key
   column/field;
 - a `HANDOFF.md` as described above;
@@ -114,8 +134,8 @@ Return exactly one structured PlanDecision after the tools finish:
 - `submit` freezes the draft and advances to the experiment step. Use it only
   when `metric.json`, `evaluate.py`, labels, `HANDOFF.md`, and `pyproject.toml`
   are all present, the eval script actually runs and prints a valid
-  `{"primary": <float>}` against the labels, and both probes above behaved as
-  described.
+  `{"primary": <float>, "test_se": <float>, "test_n": <int>}` against the labels,
+  and both probes above behaved as described.
 - `continue` stays in the evaluator step to keep repairing the draft; it does
   NOT advance. Use it only when a concrete defect still needs work.
 - `abandon` gives up when no working evaluator is achievable.

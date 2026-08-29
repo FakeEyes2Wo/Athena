@@ -41,11 +41,20 @@ def split_ids(
     search_frac: float = 0.2,
     final_frac: float = 0.2,
     seed: int = 0,
+    groups: Sequence[str] | None = None,
 ) -> SplitManifest:
     """Split row ids deterministically into train/search/final sets.
 
     Fractions are applied to the shuffled order. The remaining fraction is the
     train set. Raises when fractions are outside [0, 1) or too large together.
+
+    ``groups`` gives each row a grouping key (one entry per row id, same order).
+    When present, rows sharing a key always land in the same split. Without it
+    a plain row-level shuffle silently leaks between splits for any dataset
+    whose rows are not independent -- consecutive frames of one active region,
+    windows cut from one star's light curve, repeated measurements of one
+    patient. The metric still goes up in that case; it just stops meaning
+    anything, and nothing downstream can detect it.
     """
     if not 0 <= search_frac < 1:
         raise ValueError("search_frac must be in [0, 1)")
@@ -59,16 +68,43 @@ def split_ids(
         raise ValueError("row_ids must be unique")
 
     rng = Random(seed)
-    shuffled = ids[:]
+    if groups is None:
+        units: list[tuple[str, ...]] = [(row_id,) for row_id in ids]
+    else:
+        keys = list(groups)
+        if len(keys) != len(ids):
+            raise ValueError("groups must have one entry per row id")
+        members: dict[str, list[str]] = {}
+        for row_id, key in zip(ids, keys):
+            members.setdefault(str(key), []).append(row_id)
+        # Sort before shuffling so the split depends on the seed alone, not on
+        # whatever order dict insertion happened to produce.
+        units = [tuple(members[key]) for key in sorted(members)]
+
+    shuffled = units[:]
     rng.shuffle(shuffled)
 
-    n = len(shuffled)
-    n_search = int(n * search_frac)
-    n_final = int(n * final_frac)
-    search = tuple(shuffled[:n_search])
-    final = tuple(shuffled[n_search : n_search + n_final])
-    train = tuple(shuffled[n_search + n_final :])
-    manifest = SplitManifest(train_ids=train, search_ids=search, final_ids=final)
+    # Fractions are over rows, not units: with uneven group sizes, cutting on
+    # unit counts would hand a wildly wrong share of the data to each split.
+    # Targets are floored exactly like the ungrouped path used to slice, so
+    # single-row groups reproduce the previous split byte for byte; a group
+    # larger than the remaining budget overshoots, which is unavoidable.
+    total = len(ids)
+    want_search = int(total * search_frac)
+    want_final = int(total * final_frac)
+    search: list[str] = []
+    final: list[str] = []
+    train: list[str] = []
+    for unit in shuffled:
+        if len(search) < want_search:
+            search.extend(unit)
+        elif len(final) < want_final:
+            final.extend(unit)
+        else:
+            train.extend(unit)
+    manifest = SplitManifest(
+        train_ids=tuple(train), search_ids=tuple(search), final_ids=tuple(final)
+    )
     manifest.validate()
     return manifest
 
@@ -89,26 +125,43 @@ def materialize_csv_split(
     search_frac: float = 0.2,
     final_frac: float = 0.2,
     seed: int = 0,
+    group_column: str | None = None,
 ) -> SplitManifest:
     """Read a local CSV and write platform-owned train/search/final files.
 
     Row identity is the row index (0-based), matching the existing
     ``__athena_row_id`` convention. The target column is removed from the
     feature files, so search/final labels are never visible to candidates.
+
+    ``group_column`` names a column whose value keeps related rows together
+    (active region id, star id, subject id). Rows sharing a value never span
+    two splits.
     """
     with source_csv.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        fieldnames = [name.strip() for name in (reader.fieldnames or []) if name.strip()]
+        fieldnames = [
+            name.strip() for name in (reader.fieldnames or []) if name.strip()
+        ]
         if target_column not in fieldnames:
-            raise ValueError(f"target column {target_column!r} not found in {source_csv}")
+            raise ValueError(
+                f"target column {target_column!r} not found in {source_csv}"
+            )
+        if group_column is not None and group_column not in fieldnames:
+            raise ValueError(f"group column {group_column!r} not found in {source_csv}")
         rows = [dict(row) for row in reader]
 
     ids = [str(index) for index in range(len(rows))]
+    groups = (
+        [str(row.get(group_column, "")) for row in rows]
+        if group_column is not None
+        else None
+    )
     manifest = split_ids(
         ids,
         search_frac=search_frac,
         final_frac=final_frac,
         seed=seed,
+        groups=groups,
     )
     by_id = dict(zip(ids, rows))
     feature_fields = [
@@ -118,10 +171,7 @@ def materialize_csv_split(
     label_fields = ["__athena_row_id", target_column]
 
     def feature_rows(id_set: Sequence[str]) -> list[dict[str, str]]:
-        return [
-            {"__athena_row_id": row_id, **by_id[row_id]}
-            for row_id in id_set
-        ]
+        return [{"__athena_row_id": row_id, **by_id[row_id]} for row_id in id_set]
 
     def label_rows(id_set: Sequence[str]) -> list[dict[str, str]]:
         return [
@@ -133,7 +183,9 @@ def materialize_csv_split(
         ]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(output_dir / "train.csv", fieldnames, [by_id[i] for i in manifest.train_ids])
+    _write_csv(
+        output_dir / "train.csv", fieldnames, [by_id[i] for i in manifest.train_ids]
+    )
     _write_csv(
         output_dir / "search_features.csv",
         feature_fields,

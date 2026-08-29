@@ -56,7 +56,9 @@ def _config_value(*path: str) -> object | None:
     return None
 
 
-def _resolve(key: str, config_path: tuple[str, ...] = (), default: str | None = None) -> str | None:
+def _resolve(
+    key: str, config_path: tuple[str, ...] = (), default: str | None = None
+) -> str | None:
     """环境变量 > config.toml > default（首个非空值）。"""
     value = os.environ.get(key)
     if value:
@@ -71,16 +73,20 @@ def _resolve(key: str, config_path: tuple[str, ...] = (), default: str | None = 
 
 
 def api_key() -> str | None:
-    """读取 LLM_API_KEY，回退 DEEPSEEK_API_KEY / OPENAI_API_KEY（只从环境变量读取）。
+    """读取 LLM_API_KEY，回退各家的专用变量（只从环境变量读取）。
 
     三层回退都必须走 ``default=`` 关键字：``_resolve`` 的第二个位置参数是 config.toml
     的路径元组，把回退值放进去会让它被当成路径逐字符展开，于是"只配了
     ``OPENAI_API_KEY``"这一种（也是最常见的一种）配置永远解析不出密钥。
+
+    ``DASHSCOPE_API_KEY`` 是阿里云百炼给出的变量名。少了它，``LLM_PROVIDER=qwen``
+    的用户即使按官方文档配好了环境也会撞上"Missing LLM API key"。
     """
     return _resolve(
         "LLM_API_KEY",
         default=_resolve(
-            "DEEPSEEK_API_KEY", default=_resolve("OPENAI_API_KEY")
+            "DEEPSEEK_API_KEY",
+            default=_resolve("OPENAI_API_KEY", default=_resolve("DASHSCOPE_API_KEY")),
         ),
     )
 
@@ -100,7 +106,10 @@ def model_name() -> str:
 
 def pro_model_name() -> str:
     """强/贵档模型：MODEL_PRO > config.toml ``[llm].model_pro`` > deepseek-v4-pro。"""
-    return _resolve("MODEL_PRO", ("llm", "model_pro"), DEFAULT_PRO_MODEL) or DEFAULT_PRO_MODEL
+    return (
+        _resolve("MODEL_PRO", ("llm", "model_pro"), DEFAULT_PRO_MODEL)
+        or DEFAULT_PRO_MODEL
+    )
 
 
 def provider_kind() -> str:
@@ -131,6 +140,48 @@ def _float_config(path: tuple[str, ...], default: float) -> float:
     return default
 
 
+def temperature() -> float:
+    """采样温度：LLM_TEMPERATURE > config.toml ``[llm].temperature`` > 0.1。
+
+    此前 ``AgentConfig.temperature`` 把 0.1 写死在 dataclass 默认值里，整个进程
+    没有任何入口能改它。评测规范普遍要求"可固定并申报采样参数"——写死等于既
+    申报不了、也调不动，两头都不满足。
+    """
+    raw = _resolve("LLM_TEMPERATURE", ("llm", "temperature"))
+    if raw is None:
+        return 0.1
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.1
+    return value if 0.0 <= value <= 2.0 else 0.1
+
+
+def seed() -> int | None:
+    """采样随机种子：LLM_SEED > config.toml ``[llm].seed`` > 不发送。
+
+    返回 ``None`` 表示不往请求里放 ``seed`` 字段——对不认这个参数的后端，凭空
+    加一个未知字段会直接 400，所以默认必须是"不发"。
+    """
+    raw = _resolve("LLM_SEED", ("llm", "seed"))
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def enable_thinking() -> bool:
+    """是否让模型走思考/推理模式：LLM_ENABLE_THINKING > ``[llm].enable_thinking`` > False。
+
+    默认关：Athena 的 Agent 循环靠工具调用推进，思考 token 只增加延迟与成本。
+    各后端的开关字段名不同，具体映射在 ``provider._extra_body`` 里。
+    """
+    raw = _resolve("LLM_ENABLE_THINKING", ("llm", "enable_thinking"))
+    return str(raw).strip().lower() in ("1", "true", "yes", "on") if raw else False
+
+
 def max_retries() -> int:
     """流式响应断线最多重连次数：config.toml ``[llm.retry].max_retries``，默认 5。"""
     return _int_config(("llm", "retry", "max_retries"), 5)
@@ -150,7 +201,8 @@ def get_client() -> AsyncOpenAI:
     key = api_key()
     if not key:
         raise RuntimeError(
-            "Missing LLM API key: set DEEPSEEK_API_KEY or OPENAI_API_KEY in .env"
+            "Missing LLM API key: set LLM_API_KEY, or the provider's own variable "
+            "(DEEPSEEK_API_KEY / OPENAI_API_KEY / DASHSCOPE_API_KEY) in .env"
         )
     return AsyncOpenAI(
         api_key=key,
