@@ -46,9 +46,7 @@ class SearchLoop:
             self._state.phase == "SEARCH"
             and self._state.status == "RUNNING"
             and not self._run.is_stopped()
-            and (
-                self._run.search_task is None or self._run.search_task.done()
-            )
+            and (self._run.search_task is None or self._run.search_task.done())
         ):
             task = asyncio.create_task(self.run_search())
             task.add_done_callback(self._on_search_done)
@@ -94,18 +92,21 @@ class SearchLoop:
             if self._run.is_stopped():
                 return
             task = next(iter(done))
-            plan_id = next(
-                item_id
-                for item_id, item_task in self._run.running_tasks
-                if item_task is task
-            )
-            self._run.pop_running(plan_id)
+            plan_id = self._run.pop_running_task(task)
+            if plan_id is None:
+                logger.warning("completed SEARCH task has no owning Plan")
+                continue
             try:
                 completed = task.result()
             except Exception:
                 await self._owner._publish_state()
                 continue
             await self._apply_completed_turn(completed)
+            if self._state.status != "RUNNING":
+                # End this scheduler invocation at a durable pause boundary.
+                # Resume/configure operations create a fresh loop after they
+                # explicitly move the state back to RUNNING.
+                return
 
     async def _wait_for_manual_selection(self) -> bool:
         """Block the SEARCH loop until a Human selects a hypothesis in manual mode.
@@ -263,8 +264,10 @@ class SearchLoop:
             await self._owner._persist_state()
             return
         if completed.decision is None:
-            if state.turn_limit is not None and state.turns_used >= state.turn_limit:
-                self._state.status = "WAITING"
+            # A provider/agent failure or an unusable structured response has
+            # no trusted instruction to continue. Pause instead of immediately
+            # dispatching the same turn again and consuming quota in a tight loop.
+            self._state.status = "WAITING"
             await self._owner._persist_state()
             return
         if completed.decision.decision == "abandon" and state.best_ref is None:

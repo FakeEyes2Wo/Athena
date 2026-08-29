@@ -342,15 +342,15 @@ class PhaseMachine:
         if self._run.running_tasks:
             await asyncio.gather(*self._run.running_tasks, return_exceptions=True)
         self._run.clear_running()
-        # Stop is terminal for locally owned Plan agents: release their threads
-        # and facade metadata. If the same project is restarted, Recovery re-creates
-        # plan threads from durable state via resume_agent.
+        # Preserve terminal run summaries for audit after interruption. The
+        # enclosing AgentRuntime owns final physical cleanup via ``aclose``;
+        # Recovery can resume these durable Plan identities in a new process.
         for plan_id in tuple(self._state.plans):
             try:
-                await self._deps.agents.reap(plan_id)
+                await self._deps.agents.close(plan_id)
             except Exception:  # noqa: BLE001 - GC must never block shutdown
                 logger.warning(
-                    "failed to reap Plan agent %s during stop", plan_id, exc_info=True
+                    "failed to close Plan agent %s during stop", plan_id, exc_info=True
                 )
 
     async def message(self, text: str) -> str:

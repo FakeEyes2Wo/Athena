@@ -115,9 +115,9 @@ async def test_run_eda_todos_skips_orchestrator_index_and_handoff_todo(
 
     # The Index & Handoff step belongs to the orchestrator finalize turn; it
     # must not be scheduled as an EDA worker (which is forbidden to write it).
+    # The overview report is already reusable, so it must not be regenerated.
     assert failed == []
-    assert len(agents.spawned) == 1
-    assert agents.spawned[0]["task"]["output_file"] == "EDA_REPORT_00_OVERVIEW.md"
+    assert agents.spawned == []
     text = todo_file.read_text(encoding="utf-8")
     assert "- [x] 00 Overview" in text
     assert "- [ ] 07 Index & Handoff" in text

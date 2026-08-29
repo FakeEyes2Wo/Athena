@@ -354,6 +354,7 @@ class ResearchRuntime:
     _CONFIG_FIELDS: ClassVar[dict[str, str | tuple[str, str]]] = {
         "_model": "model",
         "_client": "client",
+        "_auto_seed_task": "auto_seed_task",
         "_direction": "direction",
         "_tolerance": "tolerance",
         "_auto_validate": "auto_validate",

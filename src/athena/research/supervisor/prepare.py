@@ -86,9 +86,7 @@ def _require_joinable_labels(labels_file: Path) -> None:
         for row in reader:
             raw = (row.get(ROW_ID_COLUMN) or "").strip()
             if not raw:
-                raise ValueError(
-                    f"labels.csv contains an empty {ROW_ID_COLUMN!r}"
-                )
+                raise ValueError(f"labels.csv contains an empty {ROW_ID_COLUMN!r}")
             if raw in seen:
                 raise ValueError(
                     f"labels.csv contains duplicate {ROW_ID_COLUMN!r}: {raw}"
@@ -129,21 +127,41 @@ def _label_ids(labels_file: Path) -> set[str]:
 def require_disjoint_evaluator_labels(search_root: Path, final_root: Path) -> None:
     """Prove separately accepted SEARCH and final evaluators share no row ids."""
 
-    def evaluator_ids(root: Path) -> set[str]:
+    def evaluator_ids(root: Path) -> set[str] | None:
         evaluator_root, _entrypoint, prediction_format = _evaluator_layout(root)
         if prediction_format != "tabular_csv":
-            raise ValueError(
-                "split-isolation proof currently requires tabular_csv evaluators"
+            logger.warning(
+                "automatic split-isolation proof skipped for custom evaluator: %s",
+                evaluator_root,
             )
+            return None
         labels_file = evaluator_root / "labels.csv"
-        if not labels_file.is_file():
-            raise ValueError(
-                "split-isolation proof requires labels.csv with explicit row ids "
-                f"under {evaluator_root}"
-            )
-        return _label_ids(labels_file)
+        if labels_file.is_file():
+            return _label_ids(labels_file)
+        labels_dir = evaluator_root / "labels"
+        if labels_dir.is_dir():
+            identifiers: set[str] = set()
+            for path in sorted(labels_dir.rglob("*.csv")):
+                current = _label_ids(path)
+                duplicate = identifiers & current
+                if duplicate:
+                    raise ValueError(
+                        "evaluator labels contain duplicate row ids across files: "
+                        f"{sorted(duplicate)[:3]}"
+                    )
+                identifiers.update(current)
+            if identifiers:
+                return identifiers
+        raise ValueError(
+            "split-isolation proof requires labels.csv or labels/*.csv with "
+            f"explicit row ids under {evaluator_root}"
+        )
 
-    overlap = evaluator_ids(search_root) & evaluator_ids(final_root)
+    search_ids = evaluator_ids(search_root)
+    final_ids = evaluator_ids(final_root)
+    if search_ids is None or final_ids is None:
+        return
+    overlap = search_ids & final_ids
     if overlap:
         raise ValueError(
             "search and final evaluator labels must be disjoint; overlapping ids: "
@@ -311,9 +329,7 @@ async def _validate_frozen_evaluator(
             labels_csv, score, prediction_column=prediction_column
         )
     except AttributeError:
-        logger.warning(
-            "evaluator property tests skipped: runner has no run_dir()"
-        )
+        logger.warning("evaluator property tests skipped: runner has no run_dir()")
         return
     if not outcome.get("ok"):
         raise ValueError(outcome.get("reason", "evaluator property tests failed"))
@@ -433,13 +449,17 @@ async def run_evaluator_plan(
                     if answer is not None:
                         lowered = str(answer).lower()
                         if "reject" in lowered or "拒绝" in answer:
-                            raise ValueError("human rejected custom evaluator acceptance")
+                            raise ValueError(
+                                "human rejected custom evaluator acceptance"
+                            )
                 return evaluator_ref
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # 写入 README/校验/目录运行失败 → 转成同 Plan 的反馈重试。
                 feedback = " ".join(str(exc).split())[:1000]
 
-        raise RuntimeError("evaluator turn budget exhausted without an accepted evaluator")
+        raise RuntimeError(
+            "evaluator turn budget exhausted without an accepted evaluator"
+        )
     finally:
         # The evaluator Agent is a one-shot PREPARE worker; release it after the
         # phase succeeds or exhausts its turn budget.

@@ -314,10 +314,14 @@ class PlanLifecycle:
         primary: float | None = None
         outcome: Outcome | None = None
         if best_ref is None:
+            error = "settled without a trusted result"
+            if result is not None and result.kind != "scored":
+                detail = result.error or "no trusted result"
+                error = f"{result.kind}: {detail}"
             self._tree.transition_experiment(
                 experiment_id,
                 ExperimentStatus.FAILED,
-                error="settled without a trusted result",
+                error=error,
             )
         else:
             best = await load_best(best_ref, self._deps.store)

@@ -73,6 +73,7 @@ class _FakeExecution:
         self.calls: list[list[str]] = []
         self.workdirs: list[str | None] = []
         self.emit_seen: list[object] = []
+        self.collected_outputs: list[tuple[str, ...]] = []
 
     async def run(
         self,
@@ -90,6 +91,9 @@ class _FakeExecution:
             emit("command/started", "exec:run", {"command": argv})
             self.emit_seen.append(emit)
         return self._results.pop(0)
+
+    async def collect_outputs(self, subdirs: tuple[str, ...]) -> None:
+        self.collected_outputs.append(subdirs)
 
 
 class _FakeWorkspace:
