@@ -206,6 +206,7 @@ async def run_prepare_phase(
     # Optional platform-level data split: when the task names a local CSV,
     # generate train/search/final files so the evaluator does not split itself.
     evaluator_task = rt.task_text
+    candidate_task = rt.task_text
     if rt.config.dataset_path is not None and rt.config.target_column is not None:
         split_dir = rt.workspaces_root / "data_split"
         materialize_csv_split(
@@ -243,6 +244,32 @@ async def run_prepare_phase(
             "search_labels.csv as the trusted search labels, and keep "
             "final_labels.csv hidden from SEARCH."
         )
+        # 同一段事实也必须告诉**写模型的那些 agent**。此前只有 evaluator 知道平台
+        # 划分存在；基线 agent 拿到的是原始任务文本（里面只有一句"Dataset path:
+        # <原始 csv>"），于是它去数据目录里自己找划分。
+        #
+        # 真机（2026-08-29）：数据目录里恰好还放着另一套按同一分组键切的
+        # windows_{train,val,test}.csv，基线 agent 直接拿来用了。平台 search split
+        # 的 14703 行里有 **11978 行（81.5%）落在它的训练集**里，于是 PR-AUC 报到
+        # 0.9736——那不是本事，是背下来的。评估器只看 predictions 与 labels，
+        # 结构上无法察觉候选是不是在被打分的那些行上训练过。
+        candidate_task = (
+            f"{rt.task_text}\n\n"
+            f"The platform owns the data split. Train ONLY on "
+            f"{(split_dir / 'train.csv').resolve()}. {grouping}\n"
+            f"Do NOT read {rt.config.dataset_path} for training, and do NOT use "
+            "any other split of it you may find beside it. The rows you are "
+            "scored on are drawn from that same file, so fitting on it means "
+            "being scored on rows you already saw, and the metric stops "
+            "measuring skill.\n"
+            f"{(split_dir / 'search_features.csv').resolve()} holds exactly the "
+            "rows to predict, with labels withheld."
+        )
+        # SEARCH 的候选走的是持久化的 state.task_text，不是这里的局部变量。不写回
+        # 去的话，这条约束只对 PREPARE 的基线成立，之后每个候选又会回到"自己去数据
+        # 目录里找划分"的老路上。
+        rt.state.task_text = candidate_task
+        rt.state.save(rt.state_path)
 
     # Step 1: search evaluator. Reuse a checkpointed frozen bundle when present.
     evaluator_dir = rt.workspaces_root / "evaluator"
@@ -450,7 +477,7 @@ async def run_prepare_phase(
                 workspace=str(workspace.path),
                 output_file="BASELINE_DESIGN.md",
                 content=(
-                    f"{rt.task_text}\n\nRead EDA_HANDOFF.md and write "
+                    f"{candidate_task}\n\nRead EDA_HANDOFF.md and write "
                     "BASELINE_DESIGN.md."
                 ),
                 reap_after=True,
@@ -495,7 +522,7 @@ async def run_prepare_phase(
         store=rt.store,
         evaluator_ref=evaluator_ref,
         tree_ref=tree_ref,
-        task=rt.task_text,
+        task=candidate_task,
         max_turns=MAX_PLAN_TURNS,
         publish=lambda kind, ref, data: rt.events.project_agent_event(
             "prepare", kind, ref, data
