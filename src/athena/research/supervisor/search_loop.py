@@ -46,9 +46,7 @@ class SearchLoop:
             self._state.phase == "SEARCH"
             and self._state.status == "RUNNING"
             and not self._run.is_stopped()
-            and (
-                self._run.search_task is None or self._run.search_task.done()
-            )
+            and (self._run.search_task is None or self._run.search_task.done())
         ):
             task = asyncio.create_task(self.run_search())
             task.add_done_callback(self._on_search_done)
@@ -94,9 +92,16 @@ class SearchLoop:
             if self._run.is_stopped():
                 return
             task = next(iter(done))
+            # ``running_items``、不是 ``running_tasks``：后者给的是裸 Task，把它
+            # 解包成 ``(id, task)`` 不会得到一条有用的报错——**已完成**的 asyncio
+            # Task 迭代出 0 个元素，于是这里抛的是
+            # ``not enough values to unpack (expected 2, got 0)``。
+            #
+            # 真机（2026-08-29）：SEARCH 每次有候选跑完就崩在这里，两次实验分别拿到
+            # 0.8523 和 0.8621 却一次都没能结算。日志里只有那句解包错误。
             plan_id = next(
                 item_id
-                for item_id, item_task in self._run.running_tasks
+                for item_id, item_task in self._run.running_items
                 if item_task is task
             )
             self._run.pop_running(plan_id)

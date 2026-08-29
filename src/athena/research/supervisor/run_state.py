@@ -109,6 +109,17 @@ class SupervisorRunState:
     def running_tasks(self) -> tuple[asyncio.Task, ...]:
         return tuple(self._running.values())
 
+    @property
+    def running_items(self) -> tuple[tuple[str, asyncio.Task], ...]:
+        """(plan_id, task) pairs, for finding which plan a finished task belongs to.
+
+        ``running_tasks`` yields bare Tasks. Unpacking one into ``(id, task)``
+        does not raise a helpful error: a *completed* asyncio Task iterates to
+        zero items, so the caller gets ``not enough values to unpack (expected
+        2, got 0)`` from deep inside a generator expression.
+        """
+        return tuple(self._running.items())
+
     def clear_running(self) -> None:
         self._running.clear()
 
