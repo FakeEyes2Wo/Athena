@@ -162,3 +162,72 @@ async def test_run_eda_todos_keeps_failed_todo_unchecked(
     text = todo_file.read_text(encoding="utf-8")
     assert "- [ ] 00 Overview" in text
     assert agents.reaped == ["agent-1", "agent-2"]
+
+
+@pytest.mark.asyncio
+async def test_a_report_already_on_disk_is_not_regenerated(tmp_path) -> None:
+    """EDA 必须能续跑。
+
+    ``EDA_TODO.md`` 的复选框是名义上的续跑标记，但每次 PREPARE 重启时
+    prepare_eda agent 会**重新生成**这份 todo 列表，把所有复选框清回未完成。
+    于是续跑会对着磁盘上已经写好的报告从头再跑一遍——真机（2026-08-29）上
+    因此反复重入 EDA。持久的信号是产物本身，不是复选框。
+    """
+
+    class Agents:
+        def __init__(self) -> None:
+            self.spawned = 0
+
+        async def spawn(self, *a, **k):
+            self.spawned += 1
+            return "w1", "run-1"
+
+        async def reap(self, agent_id):
+            pass
+
+    workspace = tmp_path
+    (workspace / "EDA_REPORT_00_OVERVIEW.md").write_text("x" * 500, encoding="utf-8")
+    (workspace / "EDA_TODO.md").write_text(
+        "## Stage (parallel: true)\n- [ ] 00 Overview -> EDA_REPORT_00_OVERVIEW.md\n",
+        encoding="utf-8",
+    )
+    agents = Agents()
+
+    failed = await run_eda_todos(
+        agents=agents, store=object(), workspace=workspace, project_event=None
+    )
+
+    assert failed == []
+    assert agents.spawned == 0, "已经写好的报告不该再花一个 worker"
+    assert "- [x]" in (workspace / "EDA_TODO.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_stub_sized_report_is_still_regenerated(tmp_path) -> None:
+    """占位文件（EDA 失败时写的那种）必须重跑，不能当成已完成。"""
+
+    class Agents:
+        def __init__(self) -> None:
+            self.spawned = 0
+
+        async def spawn(self, *a, **k):
+            self.spawned += 1
+            raise RuntimeError("worker unavailable")
+
+        async def reap(self, agent_id):
+            pass
+
+    workspace = tmp_path
+    (workspace / "EDA_REPORT_00_OVERVIEW.md").write_text("stub\n", encoding="utf-8")
+    (workspace / "EDA_TODO.md").write_text(
+        "## Stage (parallel: true)\n- [ ] 00 Overview -> EDA_REPORT_00_OVERVIEW.md\n",
+        encoding="utf-8",
+    )
+    agents = Agents()
+
+    failed = await run_eda_todos(
+        agents=agents, store=object(), workspace=workspace, project_event=None
+    )
+
+    assert agents.spawned > 0
+    assert failed
