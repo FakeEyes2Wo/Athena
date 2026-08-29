@@ -135,13 +135,14 @@ describe("usePipeline event mapping", () => {
   it("coalesces streaming agent text deltas into one message", async () => {    const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
+      // 同一条消息的 delta 带同一个 message_id（后端在建立文本缓冲时分配）。
       eventHandlers[0]?.({
         kind: "output",
-        data: { seq: 1, source: "agent", channel: "text", text: "正在" },
+        data: { seq: 1, source: "agent", channel: "text", text: "正在", message_id: "msg-1" },
       });
       eventHandlers[0]?.({
         kind: "output",
-        data: { seq: 2, source: "agent", channel: "text", text: "生成假设" },
+        data: { seq: 2, source: "agent", channel: "text", text: "生成假设", message_id: "msg-1" },
       });
     });
 

@@ -200,6 +200,8 @@ export function treeLoad(): Promise<{ loaded: boolean; tree: ResearchTreeData }>
 export interface SessionRecord {
   type: string;
   seq: number;
+  /** 消息身份：同一条消息的所有投影共用它。升级前写下的记录没有该字段。 */
+  message_id?: string | null;
   text?: string;
   source?: string;
   channel?: string;

@@ -267,6 +267,24 @@ class ResponsesProvider(BaseProvider):
             _DeepSeekTextFilter() if self.provider_kind == "deepseek" else None
         )
 
+        def release_filtered_tail() -> "StreamEvent | None":
+            """放出 DSML 过滤器扣留的尾部文本，无残留时返回 None。
+
+            过滤器为了不把跨 chunk 的 ``<｜DSML｜…>`` 标记劈开，每次 push 都扣留
+            最后若干字符；这些字符必须在消息边界（function_call / 流结束）之前
+            放出来，否则消费方看到的每条 agent 文本都会少一截尾巴。
+            """
+            nonlocal text
+            if dsml_filter is None:
+                return None
+            tail = dsml_filter.flush()
+            if not tail:
+                return None
+            text += tail
+            return StreamEvent(
+                kind="text_delta", data={"delta": tail, "accumulated": text}
+            )
+
         try:
             async for chunk in stream:
                 if cancel.is_set():
@@ -305,8 +323,13 @@ class ResponsesProvider(BaseProvider):
                                 if t.function.arguments:
                                     bufs[i]["arguments"] += t.function.arguments
 
-                # tool_calls finish：组装并发出所有缓冲的函数调用
+                # tool_calls finish：组装并发出所有缓冲的函数调用。
+                # function_call 是下游投影层的消息边界，先把扣留的文本尾部放出去，
+                # 否则这条 agent 消息会缺尾，尾巴还会粘到下一条消息头上。
                 if finish == "tool_calls":
+                    pending = release_filtered_tail()
+                    if pending is not None:
+                        yield pending
                     for event in self._assemble_function_calls(bufs):
                         yield event
                     finish = ""
@@ -319,19 +342,14 @@ class ResponsesProvider(BaseProvider):
             )
             return
 
+        pending = release_filtered_tail()
+        if pending is not None:
+            yield pending
+
         # 流结束仍残留缓冲的工具调用（finish 非 tool_calls，如 length 截断或空尾部
         # chunk）——不能静默丢弃，否则 agent 空转成功或报误导性的结构化输出错误。
         for event in self._assemble_function_calls(bufs):
             yield event
-
-        if dsml_filter is not None:
-            tail = dsml_filter.flush()
-            if tail:
-                text += tail
-                yield StreamEvent(
-                    kind="text_delta",
-                    data={"delta": tail, "accumulated": text},
-                )
 
         yield StreamEvent(
             kind="response_completed",

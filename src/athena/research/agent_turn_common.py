@@ -36,6 +36,15 @@ async def wait_run_with_heartbeat(
 ):
     """Wait for an Agent run, publishing heartbeats and enforcing a hard timeout."""
     deadline = time.monotonic() + AGENT_TURN_TIMEOUT_SECONDS
+    # 心跳超时会取消当前 waiter 并重新转发 journal；游标跨轮保留，否则超过 5 分钟的
+    # turn（SEARCH/训练是常态）会把整段 agent 文本和工具调用重新投影一遍。
+    forwarded = 0
+
+    def advance(sequence: int) -> None:
+        """把游标推进到已成功转发的最新 journal sequence。"""
+        nonlocal forwarded
+        forwarded = max(forwarded, sequence)
+
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -52,7 +61,9 @@ async def wait_run_with_heartbeat(
                 )
             else:
                 publish = None
-            waiter = wait_run_events(agents, run_id, publish)
+            waiter = wait_run_events(
+                agents, run_id, publish, after_sequence=forwarded, on_sequence=advance
+            )
         else:
             waiter = agents.wait_run(run_id)
         try:

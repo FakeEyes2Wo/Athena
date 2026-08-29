@@ -110,14 +110,23 @@ function applyHistoryRecords(current: PipelineViewModel, records: SessionRecord[
         ],
       };
     } else {
-      next = applyPipelineEvent(next, { kind: "output", data: record });
+      next = applyPipelineEvent(next, { kind: "output", data: record }, true);
     }
   }
   return next;
 }
 
-/** Applies a single backend event (``state`` / ``output``) to the view model. */
-function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): PipelineViewModel {
+/**
+ * Applies a single backend event (``state`` / ``output``) to the view model.
+ *
+ * ``replay`` 区分事件来源：实时订阅推的 agent 文本是增量 delta，落盘 transcript
+ * 回放的是已合并的整条消息——两者形状相同，只有来源能区分该追加还是该替换。
+ */
+function applyPipelineEvent(
+  current: PipelineViewModel,
+  event: PipelineEvent,
+  replay = false,
+): PipelineViewModel {
   const next: PipelineViewModel = { ...current, rightRail: { ...current.rightRail } };
   const { data } = event;
 
@@ -178,13 +187,34 @@ function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): P
 
   if (event.kind === "output") {
     const text = typeof data.text === "string" ? data.text : "";
-    if (!text.trim()) return next;
+    if (!text) return next;
     const source = typeof data.source === "string" ? data.source : undefined;
     const tool = typeof data.tool === "string" ? data.tool : undefined;
     const channel = typeof data.channel === "string" ? data.channel : undefined;
     const plan = typeof data.plan === "string" ? data.plan : undefined;
-    const id = `out-${typeof data.seq === "number" ? data.seq : 0}`;
+    // 消息身份来自后端的 message_id（同一条消息的所有 delta 与落盘记录共用它）；
+    // 升级前写下的 transcript 没有该字段，退回按 seq 兜底，每条记录自成一条消息。
+    const id =
+      typeof data.message_id === "string" && data.message_id
+        ? data.message_id
+        : `out-${typeof data.seq === "number" ? data.seq : 0}`;
     const messages = [...current.messages];
+
+    let target = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].id === id) { target = i; break; }
+    }
+    if (target >= 0) {
+      // 同一条消息再次到达：实时 delta 是增量所以追加，落盘回放是整条所以替换。
+      // 这一步同时让「挂载回放叠加在 live 之上」自然去重，不再产生重复 React key。
+      const existing = messages[target];
+      messages[target] = { ...existing, content: replay ? text : existing.content + text };
+      next.messages = messages;
+      return next;
+    }
+
+    // 纯空白只用于把已有消息的两个词分开，不足以独立成一条消息。
+    if (!text.trim()) return next;
 
     if (channel === "error") {
       messages.push({ id, role: "athena", kind: "error", content: text });
@@ -194,21 +224,6 @@ function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): P
     } else if (tool) {
       // 工具调用（agent function_call）。
       messages.push({ id, role: "athena", kind: "text", content: text, source, tool, plan });
-    } else if (source === "agent") {
-      // 在「流式窗口」内回溯找同 plan 的开放消息追加，处理多 Ideator 并发交错。
-      let target = -1;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        const isAgentText =
-          m.role === "athena" && m.kind === "text" && !m.tool && m.source === "agent";
-        if (!isAgentText) break; // 撞到非流式边界 → 新建
-        if (m.plan === plan) { target = i; break; }
-      }
-      if (target >= 0) {
-        messages[target] = { ...messages[target], content: messages[target].content + text };
-      } else {
-        messages.push({ id, role: "athena", kind: "text", content: text, source, plan });
-      }
     } else {
       messages.push({ id, role: "athena", kind: "text", content: text, source, plan });
     }

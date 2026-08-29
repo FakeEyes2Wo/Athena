@@ -213,7 +213,7 @@ async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
     runtime._agents = _AgentSpy(requests)
     runner = AgentTurnRunner(runtime)
 
-    async def wait(_agents, _run_id, _publish):
+    async def wait(_agents, _run_id, _publish, **_cursor):
         return SimpleNamespace(error=None)
 
     async def load(_summary, _store, _schema):
@@ -241,7 +241,7 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
     runtime._agents = _AgentSpy(requests)
     runner = AgentTurnRunner(runtime)
 
-    async def wait(_agents, _run_id, _publish):
+    async def wait(_agents, _run_id, _publish, **_cursor):
         return SimpleNamespace(error=None)
 
     async def load(_summary, _store, _schema):
@@ -360,7 +360,7 @@ def _recorder(sink: list[dict]):
 def _lane_harness(monkeypatch) -> list[dict]:
     """Short out the agent kernel so a lane run only exercises request assembly."""
 
-    async def wait(_agents, _run_id, _publish):
+    async def wait(_agents, _run_id, _publish, **_cursor):
         return SimpleNamespace(error=None)
 
     async def load(_summary, _store, _schema):
@@ -648,7 +648,7 @@ def _eda_dir() -> Path:
 def _lane_harness(monkeypatch) -> list[dict]:
     """Short out the agent kernel so a lane run only exercises request assembly."""
 
-    async def wait(_agents, _run_id, _publish):
+    async def wait(_agents, _run_id, _publish, **_cursor):
         return SimpleNamespace(error=None)
 
     async def load(_summary, _store, _schema):

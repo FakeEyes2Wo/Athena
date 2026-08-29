@@ -144,3 +144,53 @@ async def test_openai_stream_is_untouched_by_dsml_filter():
 
     final = [e for e in events if e.kind == "response_completed"][0]
     assert final.data["accumulated_text"] == '{"a": 1}'
+
+
+def _tool_call(
+    index=0, call_id="call-1", name="shell_command", arguments='{"command": "ls"}'
+):
+    """构造一个流式 tool_call 增量（与 openai SDK 的 delta.tool_calls 形状一致）。"""
+    return SimpleNamespace(
+        index=index,
+        id=call_id,
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_emits_full_text_before_function_call():
+    """过滤器扣留的尾部必须在 function_call 之前放出。
+
+    ``agent/function_call`` 是投影层的消息边界：晚到的尾巴会让整条消息少一截，
+    并被当成下一条消息的开头粘上去。
+    """
+    sentence = "Let me check the state.json to understand the task context better."
+    client = _StreamClient(
+        [
+            _chunk(content=sentence),
+            _chunk(tool_calls=[_tool_call()], finish_reason="tool_calls"),
+        ]
+    )
+    provider = ResponsesProvider(
+        "deepseek-test", client=client, provider_kind="deepseek"
+    )
+
+    events = []
+    async for event in provider.stream(
+        SimpleNamespace(max_tokens=512, temperature=0.0, tool_choice="auto"),
+        SimpleNamespace(specs=[]),
+        [],
+        asyncio.Event(),
+        output_type=None,
+    ):
+        events.append(event)
+
+    kinds = [e.kind for e in events]
+    assert "function_call" in kinds
+    call_at = kinds.index("function_call")
+    before = "".join(
+        e.data["delta"] for e in events[:call_at] if e.kind == "text_delta"
+    )
+    assert before == sentence
+    # 边界之后不该再冒出属于上一条消息的文本。
+    assert "text_delta" not in kinds[call_at:]

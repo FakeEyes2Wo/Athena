@@ -193,22 +193,21 @@ describe("usePipeline", () => {
 
     const { result } = renderHook(() => usePipeline());
 
+    // 这些记录是升级前的形状（没有 message_id）：每条落盘记录各自成为一条消息，
+    // 不会被并进上一条的尾巴里。
     await waitFor(() => {
-      expect(result.current.viewModel.messages).toHaveLength(3);
+      expect(result.current.viewModel.messages).toHaveLength(4);
     });
     expect(result.current.viewModel.messages[0]).toMatchObject({
       id: "user-1",
       role: "user",
       content: "analyze this CSV",
     });
-    expect(result.current.viewModel.messages[1]).toMatchObject({
-      role: "athena",
-      content: "开始准备",
-    });
-    expect(result.current.viewModel.messages[2]).toMatchObject({
-      role: "athena",
-      content: "正在生成假设",
-    });
+    expect(result.current.viewModel.messages.slice(1).map((m) => m.content)).toEqual([
+      "开始准备",
+      "正在",
+      "生成假设",
+    ]);
   });
 
   it("clears the conversation view on new session without clearing the transcript", async () => {

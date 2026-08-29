@@ -42,9 +42,7 @@ _AGENT_TEXT_BOUNDARY_KINDS = {
 }
 
 
-def recent_user_texts(
-    records: list[dict[str, object]], limit: int = 6
-) -> list[str]:
+def recent_user_texts(records: list[dict[str, object]], limit: int = 6) -> list[str]:
     """Return the last ``limit`` non-empty Human message texts from a transcript."""
     texts = [
         record.get("text")
@@ -114,6 +112,7 @@ class RuntimeEvents:
         tool: str | None = None,
         artifact_ref: ArtifactRef | None = None,
         persist: bool = True,
+        message_id: str | None = None,
     ) -> None:
         event = self._events.output(
             source=source,
@@ -122,6 +121,7 @@ class RuntimeEvents:
             plan=plan,
             tool=tool,
             artifact_ref=artifact_ref,
+            message_id=message_id,
         )
         await self._publish("output", event.model_dump(mode="json"), log=persist)
 
@@ -176,6 +176,7 @@ class RuntimeEvents:
             channel="text",
             text=buffer["text"],
             plan=buffer.get("plan"),
+            message_id=buffer.get("message_id"),
         )
         self._append_log(event.model_dump(mode="json"))
 
@@ -206,20 +207,30 @@ class RuntimeEvents:
             if ideator:
                 # Ideator 的流式 delta 常以换行结尾，逐 token 刷屏；去掉末尾换行。
                 text = text.rstrip("\n\r")
-            if text.strip():
+            key = plan or ""
+            previous = self._agent_buffers.get(key)
+            # 一条 agent 消息在缓冲建立时拿到 message_id，之后每条 delta 与最终 flush
+            # 落盘记录都带着它；边界事件 pop 掉缓冲，下一条消息因此拿到新的 id。
+            message_id = previous["message_id"] if previous else new_id("msg")
+            # 只跳过空串，不跳过纯空白：词与词之间的空格常常自成一个 delta，
+            # 丢了它实时视图里两个词就粘在一起（落盘的整条文本仍是对的）。
+            if text:
                 await self.publish_output(
                     source="agent",
                     channel="text",
                     text=text,
                     plan=plan,
                     persist=False,
+                    message_id=message_id,
                 )
-            key = plan or ""
-            previous = self._agent_buffers.get(key)
             full_text = str(payload.get("accumulated") or "")
             if not full_text:
                 full_text = (previous["text"] + raw) if previous else raw
-            self._agent_buffers[key] = {"text": full_text, "plan": plan}
+            self._agent_buffers[key] = {
+                "text": full_text,
+                "plan": plan,
+                "message_id": message_id,
+            }
         elif kind == "agent/function_call":
             # Ideator 只展示 LLM 话语，工具调用不进入显示流，便于阅读。
             if ideator:
