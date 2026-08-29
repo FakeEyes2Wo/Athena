@@ -86,6 +86,16 @@ default is how a search ends up optimising noise.
 
 `HANDOFF.md` MUST state:
 
+- for tabular CSV predictions, a **machine-readable declaration on its own
+  line**, exactly in this form (the platform parses it; prose describing the
+  column elsewhere in the file does not count and the freeze will be rejected
+  with "cannot determine the tabular prediction CSV column"):
+
+  ```text
+  prediction_column: <the column holding the predicted value>
+  prediction_id_column: __athena_row_id
+  ```
+
 - the prediction artifact layout (file names, paths, and the exact schema);
 - the identity key and how to derive it;
 - exactly which records/ids a candidate is expected to predict (the held-out
