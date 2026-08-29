@@ -30,6 +30,7 @@ _TODO_RE = re.compile(r"^- \[ \]\s+(.+?)(?:\s*->\s*([^\s#]+))?\s*$")
 PublishEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 Todo = tuple[int, str, str]  # (line_index, text, output_file)
 
+
 # EDA_INDEX/EDA_HANDOFF are written by the PREPARE_EDA orchestrator in its
 # finalize turn, not by an EDA worker (which is forbidden to write them).
 def _is_handoff_todo(text: str, output_file: str) -> bool:
@@ -96,10 +97,24 @@ async def _run_one(
                 name=f"eda-{output_file}",
             )
 
-            def publish(kind: str, ref: str, data: dict | None = None) -> None:
-                """Forward one worker event to the runtime event bus."""
+            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
+                """Forward one worker event to the runtime event bus.
+
+                Must be a coroutine function: ``forward_run_events`` does
+                ``await publish(...)`` on every event, and ``project_agent_event``
+                is itself async. As a plain ``def`` this returned None, so the
+                first event of every EDA worker raised ``object NoneType can't be
+                used in 'await' expression`` -- swallowed by the retry block,
+                which then failed the todo. The dropped coroutine also meant the
+                events were never projected.
+
+                Real run (2026-08-29): EDA finished 3 of 7 reports and the rest
+                were marked failed, with only a RuntimeWarning ("coroutine
+                'RuntimeEvents.project_agent_event' was never awaited") to say
+                why. Same defect as ``phase_runner._run_handoff_agent``.
+                """
                 if project_event is not None and agent_id is not None:
-                    project_event(agent_id, kind, ref, data)
+                    await project_event(agent_id, kind, ref, data)
 
             summary = await wait_run_events(agents, run_id, publish)
             if await load_agent_result(summary, store, HandoffResult) is None:

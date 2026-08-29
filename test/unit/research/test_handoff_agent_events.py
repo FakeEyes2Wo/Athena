@@ -117,3 +117,31 @@ def test_project_agent_event_is_async() -> None:
     from athena.research.runtime_events import RuntimeEvents
 
     assert asyncio.iscoroutinefunction(RuntimeEvents.project_agent_event)
+
+
+def test_no_event_callback_is_left_synchronous() -> None:
+    """同一个 bug 出现过两次：``phase_runner`` 一次，``eda_todo`` 一次。
+
+    ``forward_run_events`` 对每个事件做 ``await publish(...)``。任何交给
+    ``wait_run_events`` 的回调只要写成普通 ``def``，就会在第一个事件上抛
+    ``object NoneType can't be used in 'await' expression``，而且顺手把
+    ``project_agent_event`` 的协程丢掉。两次都只留下一条 RuntimeWarning。
+
+    这条用例守的是整类问题，而不是那两个具体位置。
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[3] / "src" / "athena"
+    offenders = []
+    for path in src.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "wait_run_events" not in text:
+            continue
+        for match in re.finditer(r"^(\s*)def publish\(", text, re.MULTILINE):
+            line = text[: match.start()].count("\n") + 1
+            offenders.append(f"{path.relative_to(src)}:{line}")
+    assert not offenders, (
+        "these publish callbacks must be `async def` -- forward_run_events "
+        f"awaits them: {offenders}"
+    )
