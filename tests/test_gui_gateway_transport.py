@@ -94,6 +94,9 @@ class _FakeRuntime:
     def unsubscribe(self, subscription_id: int) -> None:
         self._subscribers.pop(subscription_id, None)
 
+    async def suspend(self) -> str:
+        return "IDLE"
+
     async def aclose(self) -> None:
         self._subscribers.clear()
 

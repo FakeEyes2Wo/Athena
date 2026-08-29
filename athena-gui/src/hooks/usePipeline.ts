@@ -666,8 +666,13 @@ export function usePipeline(workspaceRoot?: string | null) {
     setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
   }, []);
 
+  // 后端报上来的 running/paused 同样意味着"这次运行确实存在"。切换会话时
+  // runStarted 被清空，而停在 PREPARE 的会话没有 plans/attempts/实验可作证据，
+  // 只认客户端证据会把暂停/继续/停止三个按钮一起禁掉。全新会话是 IDLE，不受影响。
   const runActive =
     runStarted.current ||
+    viewModel.status === "running" ||
+    viewModel.status === "paused" ||
     viewModel.plans.length > 0 ||
     viewModel.rightRail.searchAttempts > 0 ||
     viewModel.rightRail.latestExperimentId !== null;

@@ -149,4 +149,33 @@ describe("usePipeline event mapping", () => {
     expect(result.current.viewModel.messages).toHaveLength(1);
     expect(result.current.viewModel.messages[0].content).toBe("正在生成假设");
   });
+
+  it("keeps the run controls live for a session restored as paused in PREPARE", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "WAITING" },
+      });
+    });
+
+    expect(result.current.viewModel.status).toBe("paused");
+    // 切走会话时 runStarted 被清空，而 PREPARE 阶段没有 plans/attempts/experiment，
+    // runActive 若只看客户端证据就会是 false，"继续"按钮被永久禁用。
+    expect(result.current.runActive).toBe(true);
+  });
+
+  it("leaves the run controls dead for a brand-new idle session", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "IDLE" },
+      });
+    });
+
+    expect(result.current.runActive).toBe(false);
+  });
 });

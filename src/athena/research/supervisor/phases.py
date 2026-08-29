@@ -309,6 +309,22 @@ class PhaseMachine:
             self._search._spawn_search()
         return self._state.status
 
+    async def suspend(self) -> str:
+        """Park a live run at WAITING before its Supervisor is torn down.
+
+        ``stop()`` never touches ``state.status``, so closing a runtime used to
+        leave ``status="RUNNING"`` on disk with nothing running — the GUI then
+        reopened the session showing "运行中" over a dead supervisor. WAITING
+        rather than STOPPED keeps breakpoint-resume intact: ``rearm_if_terminal``
+        only clears the supervisor task for FAILED/STOPPED/COMPLETED. Any other
+        status is already an honest resting state and is left untouched.
+        """
+        if self._state.status != "RUNNING":
+            return self._state.status
+        self._state.status = "WAITING"
+        await self._plans._persist_state()
+        return self._state.status
+
     async def request_stop(self) -> str:
         """Persist an explicit Human stop and cancel locally running Plans."""
         await self.stop()

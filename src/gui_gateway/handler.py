@@ -160,30 +160,41 @@ class GuiRequestHandler:
             # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
             state_root.mkdir(parents=True, exist_ok=True)
         new_runtime = self._make_runtime(project_root, state_root)
+        # aclose 马上就要杀掉旧会话的 supervisor，而 Supervisor.stop 从不写 status：
+        # 不先降级就会在磁盘上留下一个"运行中"、实际没人跑的悬空态。
+        await self._suspend_runtime()
         await self._runtime.aclose()
         self._runtime = new_runtime
         self._service = GuiService(self._runtime, broker=self._broker)
         await self._resume_running_session()
+
+    async def _suspend_runtime(self) -> None:
+        """把当前 runtime 的 RUNNING 降级为 WAITING 并落盘（拆卸侧与加载侧共用）。"""
+        try:
+            await self._runtime.suspend()
+        except OSError:
+            # state.json 落盘失败（磁盘满 / 无写权限 / 目录已被删）→ 只记一条日志：
+            # 会话切换和快照推送不能因为写不进状态文件就卡住。
+            logger.warning("failed to persist the suspended run state", exc_info=True)
 
     async def _resume_running_session(self) -> None:
         """重建 runtime 后自动续跑「进行中」的会话，实现断点续传。
 
         只续跑 SEARCH/VALIDATE 且状态为 RUNNING 的会话；COMPLETED/FAILED/STOPPED
         保持静止，WAITING（等待人工决策）也不自动续跑，避免跳过人工决策或重跑
-        已完成阶段。续跑失败降级为静默空闲，不阻断会话切换本身。
+        已完成阶段。PREPARE 一律不续跑：它是一整段协程而不是带检查点的调度循环，
+        tree 里还没落下可信 baseline 时重进就会从头重跑 EDA 与基线，点一下侧栏
+        会话不该付这个代价——降级为 WAITING，等用户手动点继续。
+        续跑失败降级为静默空闲，不阻断会话切换本身。
         """
         try:
             state = getattr(self._runtime, "state", None)
             state_path = getattr(self._runtime, "_state_path", None)
             # 只有从磁盘恢复出的状态才可能是“进行中”；全新会话的内存默认状态
-            # （phase=SEARCH/status=RUNNING）不能被误判成需要续跑。
+            # （IDLE/PREPARE）既不该被误判成需要续跑，也不该被降级。
             persisted = state_path is not None and Path(state_path).is_file()
-            mid_run = (
-                persisted
-                and state is not None
-                and state.phase in {"SEARCH", "VALIDATE"}
-                and state.status == "RUNNING"
-            )
+            running = persisted and state is not None and state.status == "RUNNING"
+            mid_run = running and state.phase in {"SEARCH", "VALIDATE"}
         except Exception:
             return
         if mid_run:
@@ -191,6 +202,11 @@ class GuiRequestHandler:
                 await self._runtime.start()
             except Exception:
                 logger.exception("auto-resume failed; leaving the session idle")
+            return
+        if running:
+            # 不续跑的持久化 RUNNING 就是悬空态（写下它的进程早已退出）：降级并落盘，
+            # 让 subscribe 推给前端的第一帧快照等于真实运行状态。
+            await self._suspend_runtime()
 
     async def set_project_root(self, path: str) -> dict[str, object]:
         """切换到新项目目录：目录不存在时自动创建，再用工厂重建 runtime。"""

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from athena.research.supervisor.state import ResearchState
 from gui_gateway.handler import GuiRequestHandler, _session_state_root
 from gui_gateway.human import HumanRequestBroker
 
@@ -15,6 +16,9 @@ class RecordingRuntime:
         self.messages: list[str] = []
         self.tree_path = Path("/tmp/athena-runtime")
         self.project_root = "/tmp"
+        # 拆卸顺序断言用：suspend 必须发生在 aclose 之前。
+        self.calls: list[str] = []
+        self.suspend_error: Exception | None = None
 
     async def start(self) -> None:
         self.started = True
@@ -23,7 +27,20 @@ class RecordingRuntime:
         self.messages.append(text)
         return "accepted"
 
+    async def suspend(self) -> str:
+        """替身版 ``ResearchRuntime.suspend``：真实落盘，状态守卫由真 Supervisor 负责。"""
+        self.calls.append("suspend")
+        if self.suspend_error is not None:
+            raise self.suspend_error
+        state = getattr(self, "state", None)
+        if state is None or state.status != "RUNNING":
+            return getattr(state, "status", "IDLE")
+        state.status = "WAITING"
+        state.save(self._state_path)
+        return state.status
+
     async def aclose(self) -> None:
+        self.calls.append("aclose")
         self.started = False
 
     async def start_validation(self) -> str:
@@ -40,6 +57,11 @@ def _handler_at(tmp_path: Path, factory=None) -> GuiRequestHandler:
     runtime = RecordingRuntime()
     runtime.project_root = str(tmp_path)
     return GuiRequestHandler(runtime, factory)
+
+
+def _running_state(phase: str = "SEARCH") -> ResearchState:
+    """一个「进行中」的研究状态，用于伪造断点续传场景。"""
+    return ResearchState(status="RUNNING", phase=phase, search_limit=10, concurrency=4)
 
 
 @pytest.mark.asyncio
@@ -187,6 +209,92 @@ async def test_handler_session_switch_does_not_resume_completed(tmp_path) -> Non
     await handler.dispatch("session_switch", {"session_id": "s-1"})
 
     assert created[0].started is False
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_suspends_running_runtime_before_close(
+    tmp_path,
+) -> None:
+    """切走一个正在跑的会话：先把 RUNNING 落成 WAITING，再关掉它的 runtime。"""
+    outgoing = RecordingRuntime()
+    outgoing.project_root = str(tmp_path)
+    state_path = tmp_path / ".athena" / "state.json"
+    outgoing.state = _running_state()
+    outgoing._state_path = state_path
+    outgoing.state.save(state_path)
+
+    handler = GuiRequestHandler(outgoing, lambda root, state_root: RecordingRuntime())
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert outgoing.calls == ["suspend", "aclose"]
+    assert ResearchState.load(state_path).status == "WAITING"
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_downgrades_unresumed_prepare_to_waiting(
+    tmp_path,
+) -> None:
+    """PREPARE 不续跑：状态必须降级为 WAITING，否则前端显示悬空的「运行中」。"""
+    created: list[RecordingRuntime] = []
+    state_path = tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        state = _running_state(phase="PREPARE")
+        state.save(state_path)
+        runtime.state = state
+        runtime._state_path = state_path
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert created[0].started is False
+    assert created[0].state.status == "WAITING"
+    assert ResearchState.load(state_path).status == "WAITING"
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_does_not_suspend_a_fresh_session(
+    tmp_path,
+) -> None:
+    """全新会话没落过盘：默认的 SEARCH/RUNNING 不是悬空态，不能被降级。"""
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.state = _running_state()
+        runtime._state_path = (
+            tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
+        )
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert "suspend" not in created[0].calls
+    assert created[0].state.status == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_handler_swap_survives_a_failed_state_persist(tmp_path) -> None:
+    """suspend 落盘失败（磁盘满/权限）只该少一条状态记录，不该卡住会话切换。"""
+    outgoing = RecordingRuntime()
+    outgoing.project_root = str(tmp_path)
+    outgoing.suspend_error = OSError("state.json is not writable")
+    incoming = RecordingRuntime()
+
+    handler = GuiRequestHandler(outgoing, lambda root, state_root: incoming)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert outgoing.calls == ["suspend", "aclose"]
+    assert handler.runtime is incoming
 
 
 @pytest.mark.asyncio

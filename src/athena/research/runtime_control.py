@@ -7,6 +7,7 @@ interface and existing tests remain unchanged.
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 from athena.research.runtime_events import recent_user_texts
@@ -197,7 +198,13 @@ async def message(runtime: Any, text: str) -> str:
     if command == "/resume":
         if runtime._supervisor.is_stopped():
             return runtime.state.status
-        if (runtime._task is None or runtime._task.done()) and runtime._started:
+        # ``_started`` 只认得"这个 runtime 实例跑过"。GUI 切走会话时 supervisor 被
+        # suspend + aclose，切回来是一个全新的 runtime：``_started`` 为 False，却
+        # 确确实实是一次续跑。落过盘的 state.json 才是"这次运行开始过"的判据——
+        # 少了它，PREPARE 会掉进 ensure_started（无 baseline 即不启动），停在
+        # "status=RUNNING 但没有任何协程在跑"的悬空态。
+        resumable = runtime._started or Path(runtime._state_path).is_file()
+        if (runtime._task is None or runtime._task.done()) and resumable:
             await runtime._supervisor.resume(restarting=True)
             await runtime.start()
         else:
