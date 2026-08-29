@@ -73,6 +73,7 @@ class _FakeExecution:
         self.calls: list[list[str]] = []
         self.workdirs: list[str | None] = []
         self.emit_seen: list[object] = []
+        self.collected_outputs: list[tuple[str, ...]] = []
 
     async def run(
         self,
@@ -90,6 +91,9 @@ class _FakeExecution:
             emit("command/started", "exec:run", {"command": argv})
             self.emit_seen.append(emit)
         return self._results.pop(0)
+
+    async def collect_outputs(self, subdirs: tuple[str, ...]) -> None:
+        self.collected_outputs.append(subdirs)
 
 
 class _FakeWorkspace:
@@ -723,6 +727,37 @@ async def test_run_turn_execution_failure_does_not_increment_stale(tmp_path) -> 
     assert result.next_state is None
     assert workspace.messages == []
     assert state.stale_rounds == 2
+
+
+@pytest.mark.asyncio
+async def test_run_turn_preserves_execution_timeout_reason(tmp_path) -> None:
+    execution = _FakeExecution(
+        [
+            CommandResult(
+                ok=False,
+                stdout="",
+                stderr="",
+                exit_code=-1,
+                error="timeout",
+            )
+        ]
+    )
+    runner, plan_input, _, branch, _ = await _runner_setup(
+        tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
+    )
+    _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    state = PlanState(
+        kind="SEARCH",
+        context_ref=_REF,
+        turns_used=1,
+        turn_limit=12,
+        patience=4,
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "execution_failed"
+    assert result.error == "command failed (exit -1): timeout"
 
 
 @pytest.mark.asyncio

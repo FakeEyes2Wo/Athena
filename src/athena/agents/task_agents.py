@@ -37,6 +37,7 @@ def _register(
     output_type: type,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
     name: str | None = None,
+    structured_repair_provider: object | None = None,
 ) -> None:
     """Single registration path for thin prompt-driven task agents."""
     register_prompt_agent(
@@ -49,6 +50,7 @@ def _register(
         artifacts=artifacts,
         extra_tools=extra_tools,
         name=name,
+        structured_repair_provider=structured_repair_provider,
     )
 
 
@@ -130,6 +132,7 @@ def register_validate_agent(
         runtime=runtime,
         agent_type=VALIDATE_AGENT_TYPE,
         output_type=ValidationRepair,
+        structured_repair_provider=provider,
     )
 
 

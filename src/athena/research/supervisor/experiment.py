@@ -498,9 +498,10 @@ class PlanRunner:
                 emit=emit,
             )
             if not result.ok:
-                error = (
-                    f"command failed (exit {result.exit_code}): {result.stderr[:200]}"
-                )
+                failure_detail = result.error or result.stderr[:200] or "unknown error"
+                error = f"command failed (exit {result.exit_code}): {failure_detail}"
+                if result.error and result.stderr:
+                    error += f"; stderr={result.stderr[:200]}"
                 if "ModuleNotFoundError" in result.stderr:
                     error += (
                         ' Run "uv sync --project $ATHENA_ENV_ROOT" to install the '
@@ -509,6 +510,14 @@ class PlanRunner:
                 return await self._failure(plan_id, "execution_failed", error)
 
         predictions_root = manifest.outputs["predictions"]
+        try:
+            await self._execution.collect_outputs((predictions_root,))
+        except Exception as exc:  # noqa: BLE001 - backend failures are turn evidence
+            return await self._failure(
+                plan_id,
+                "output_failed",
+                f"failed to collect predictions output: {exc}",
+            )
         predictions_dir = self.workdir / predictions_root
         if not predictions_dir.is_dir() or not any(
             p.is_file() for p in predictions_dir.rglob("*")
@@ -666,9 +675,7 @@ class PlanRunner:
             error=cleaned,
         )
 
-    async def _load_evaluator_dir(
-        self, evaluator_ref: ArtifactRef
-    ) -> Path | None:
+    async def _load_evaluator_dir(self, evaluator_ref: ArtifactRef) -> Path | None:
         """Load the README-only evaluator directory from its descriptor."""
         try:
             text = await self._store.get_text(evaluator_ref)

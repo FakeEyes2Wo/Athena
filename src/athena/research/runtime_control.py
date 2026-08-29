@@ -9,6 +9,8 @@ import asyncio
 import logging
 from typing import Any
 
+from athena.core.research_models import TaskUnderstanding
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.runtime_events import recent_user_texts
 
 logger = logging.getLogger(__name__)
@@ -54,22 +56,41 @@ def resume_task_text(runtime: Any, fallback: str) -> str:
     return " ".join(parts) if parts else fallback
 
 
-async def maybe_run_task_understanding(runtime: Any) -> None:
-    """Run PREPARE task understanding unless a checkpoint already exists.
+def task_understanding(runtime: Any) -> TaskUnderstanding | None:
+    """Return a validated understanding, conservatively migrating legacy state."""
+    payload = runtime.state.task_understanding
+    if payload is None:
+        return None
+    migrated = dict(payload)
+    legacy_needs_configuration = migrated.pop("needs_configuration", None)
+    if "metric_source" not in migrated:
+        migrated["primary_metric"] = None
+        migrated["direction"] = None
+        migrated["metric_source"] = "unresolved"
+    if "readiness" not in migrated and legacy_needs_configuration is not None:
+        migrated["readiness"] = "NEEDS_INPUT" if legacy_needs_configuration else "READY"
+    return TaskUnderstanding.model_validate(migrated)
 
-    Failures only degrade to Kaggle tools staying off; they never block start.
-    """
+
+def task_needs_input(runtime: Any) -> bool:
+    understanding = task_understanding(runtime)
+    return understanding is not None and understanding.readiness == "NEEDS_INPUT"
+
+
+async def maybe_run_task_understanding(runtime: Any) -> bool:
+    """Run/re-run task understanding and stop PREPARE until it is READY."""
     if runtime._provider is None or runtime.state.phase != "PREPARE":
-        return
-    if runtime.state.task_understanding is not None:
+        return True
+    existing = task_understanding(runtime)
+    if existing is not None and existing.readiness == "READY":
         await runtime.publish_output(
             source="supervisor",
             channel="text",
-            text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
+            text="断点续传：复用已验证 READY 的任务理解。",
         )
-        return
+        return True
     if not runtime._task_text.strip():
-        return
+        return False
     context = task_context_text(runtime._task_text, recent_user_texts_from(runtime))
     await runtime.publish_output(
         source="supervisor",
@@ -78,19 +99,83 @@ async def maybe_run_task_understanding(runtime: Any) -> None:
     )
     try:
         await runtime._agent_turns.run_supervisor_turn(context)
+        understanding = task_understanding(runtime)
+        if understanding is None:
+            raise RuntimeError("Supervisor did not record task understanding")
+        if understanding.readiness == "NEEDS_INPUT":
+            questions = (
+                "\n".join(
+                    f"- {question}"
+                    for question in understanding.clarification_questions
+                )
+                or "- Please provide the missing critical task information."
+            )
+            await runtime.publish_output(
+                source="supervisor",
+                channel="text",
+                text=f"任务信息不足，等待科学家补充：\n{questions}",
+            )
+            await runtime._supervisor.pause()
+            return False
         await runtime.publish_output(
-            source="supervisor", channel="text", text="任务理解完成。"
+            source="supervisor", channel="text", text="任务理解完整性检查通过。"
         )
+        return True
     except Exception as error:
         logger.warning(
-            "supervisor task-understanding turn failed; Kaggle tools stay off",
+            "supervisor task-understanding/readiness turn failed",
             exc_info=True,
         )
         await runtime.publish_output(
             source="supervisor",
             channel="error",
-            text=f"任务理解失败（已降级继续）：{error}",
+            text=f"任务理解失败，已停止进入 PREPARE：{error}",
         )
+        await runtime._supervisor.pause()
+        return False
+
+
+async def ensure_evaluation_policy(runtime: Any) -> None:
+    """Restore the frozen Layer 1 policy, or create it once in PREPARE."""
+    if not hasattr(runtime._agent_turns, "run_evaluation_rubric"):
+        return
+    ref = runtime.state.evaluation_policy_ref
+    if ref is not None:
+        try:
+            policy = EvaluationPolicy.model_validate_json(
+                await runtime._store.get_text(ref)
+            )
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                "persisted Evaluation Policy is invalid; refusing to regenerate "
+                "a frozen policy"
+            ) from error
+        runtime._supervisor.apply_evaluation_policy(policy)
+        runtime._direction = policy.direction
+        await runtime.publish_output(
+            source="supervisor",
+            channel="text",
+            text=(
+                "断点续传：复用已冻结的评价策略 "
+                f"({policy.primary_metric}, {policy.direction})。"
+            ),
+            artifact_ref=ref,
+        )
+        return
+    if runtime.state.phase != "PREPARE":
+        if runtime._provider is None:
+            return
+        raise RuntimeError(
+            "frozen Evaluation Policy is missing outside PREPARE; resume cannot "
+            "continue safely"
+        )
+    if runtime._provider is None:
+        return
+    if task_understanding(runtime) is None:
+        raise RuntimeError("Layer 1 requires completed task understanding")
+    policy, ref = await runtime._agent_turns.run_evaluation_rubric()
+    runtime._direction = policy.direction
+    await runtime._supervisor.checkpoint_evaluation_policy(ref, policy)
 
 
 async def start(runtime: Any) -> asyncio.Task[None]:
@@ -103,9 +188,7 @@ async def start(runtime: Any) -> asyncio.Task[None]:
         return runtime._task
     await runtime._git.init(initial_file=".gitignore", initial_content=".venv/\n")
     runtime._agents.start()
-    # Run the survey in parallel with PREPARE: it is slow, and PREPARE does not
-    # depend on it.
-    runtime._start_survey()
+    rearm_if_terminal(runtime)
     # Resume path: a direct start() also restores the first task text.
     runtime._task_text = resume_task_text(runtime, runtime._task_text)
     if runtime.state.status == "IDLE":
@@ -117,7 +200,23 @@ async def start(runtime: Any) -> asyncio.Task[None]:
         # Task understanding also lives in a cancellable background task so
         # start_search RPC does not block pause/stop, and the task is
         # cancellable before it is assigned to runtime._task.
-        await maybe_run_task_understanding(runtime)
+        ready = await runtime._maybe_run_task_understanding()
+        if not ready:
+            runtime._started = False
+            return
+        try:
+            await runtime._ensure_evaluation_policy()
+        except Exception as error:
+            logger.warning("evaluation policy restore/freeze failed", exc_info=True)
+            await runtime.publish_output(
+                source="supervisor",
+                channel="error",
+                text=f"评价策略无法安全恢复或冻结，流程已暂停：{error}",
+            )
+            await runtime._supervisor.pause()
+            runtime._started = False
+            return
+        runtime._start_survey()
         await runtime._supervisor.start()
 
     runtime._task = asyncio.create_task(_run_lifecycle())
@@ -125,10 +224,18 @@ async def start(runtime: Any) -> asyncio.Task[None]:
 
 
 def rearm_if_terminal(runtime: Any) -> None:
-    """Clear the done supervisor task so a terminal run can be restarted."""
-    if runtime._started and runtime._task is not None and runtime._task.done():
-        if runtime.state.status in {"FAILED", "STOPPED", "COMPLETED"}:
-            runtime._task = None
+    """Re-arm a persisted failed/stopped run without discarding checkpoints."""
+    if runtime.state.status not in {"FAILED", "STOPPED", "COMPLETED"}:
+        return
+    if runtime._started and runtime._task is not None and not runtime._task.done():
+        return
+    runtime._task = None
+    if (
+        runtime.state.status in {"FAILED", "STOPPED"}
+        and runtime.state.phase != "COMPLETED"
+    ):
+        runtime.state.status = "RUNNING"
+        runtime.state.save(runtime._state_path)
 
 
 async def start_task(runtime: Any, task: str) -> str:
@@ -183,6 +290,14 @@ async def message(runtime: Any, text: str) -> str:
     baseline/SOTA exists before SEARCH proposes hypotheses.
     """
     command = text.strip()
+    if command and not command.startswith("/") and task_needs_input(runtime):
+        runtime.persist_user_message(command)
+        runtime._agents.resume()
+        runtime.state.status = "RUNNING"
+        runtime.state.save(runtime._state_path)
+        runtime._task = None
+        runtime._started = False
+        return await runtime.start_task(runtime._task_text or command)
     if command == "/stop":
         status = await runtime._supervisor.request_stop()
         await cancel_supervisor_task(runtime)

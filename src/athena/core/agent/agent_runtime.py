@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import json
 import logging
 from collections import deque
 from collections.abc import AsyncIterator, Collection
@@ -131,6 +132,7 @@ class AgentRuntime:
             llm=llm,
             on_turn_terminal=self._on_turn_terminal,
         )
+        self._rollout_dir = Path(rollout_dir) if rollout_dir is not None else None
         self._records: dict[AgentId, _FacadeRecord] = {}
         self._run_agent: dict[RunId, AgentId] = {}
         self._run_summaries: dict[RunId, RunSummary] = {}
@@ -714,6 +716,25 @@ class AgentRuntime:
         error = terminal.exception_type
         if error is not None and terminal.error_message:
             error = f"{error}: {terminal.error_message}"
+        if status == RunStatus.FAILED and self._rollout_dir is not None:
+            try:
+                self._rollout_dir.mkdir(parents=True, exist_ok=True)
+                failure_path = self._rollout_dir / f"{agent_id}.failures.jsonl"
+                with failure_path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "run_id": turn_id,
+                                "agent_id": agent_id,
+                                "status": status.value,
+                                "error": error or "agent run failed",
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+            except OSError:
+                logger.exception("failed to persist Agent failure evidence")
         self._run_summaries[turn_id] = RunSummary(
             run_id=turn_id,
             agent_id=agent_id,

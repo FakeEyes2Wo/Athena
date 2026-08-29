@@ -23,14 +23,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class StreamEvent:
-    """流式响应事件 — kind 区分文本增量、函数调用、完成和错误四种类型。"""
+    """流式响应事件：文本、私有推理、函数调用、完成或错误。"""
 
-    kind: Literal["text_delta", "function_call", "response_completed", "error"]
+    kind: Literal[
+        "text_delta",
+        "reasoning_delta",
+        "function_call",
+        "response_completed",
+        "error",
+    ]
     data: dict[str, Any] = field(default_factory=dict)
 
 
 _DSML_KINDS = ("tool_use_error", "tool_calls", "tool_call", "function_calls")
-_DSML_BARS = ("|", "｜")
+# DeepSeek has emitted both the documented single-bar framing and a doubled
+# full-width variant in real structured-correction responses.  Treat each
+# exact framing as transport syntax; ordinary text containing "DSML" remains
+# untouched.
+_DSML_BARS = ("|", "｜", "||", "｜｜")
 
 _DSML_OPEN_TOKENS = tuple(
     f"<{bar}DSML{bar}{kind}>" for bar in _DSML_BARS for kind in _DSML_KINDS
@@ -132,7 +142,7 @@ class BaseProvider(ABC):
         *,
         output_type: type | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """流式调用 LLM,产出文本增量 / 工具调用 / 完成 / 错误事件。"""
+        """流式调用 LLM，产出文本/推理增量、工具调用、完成或错误。"""
 
 
 class ResponsesProvider(BaseProvider):
@@ -151,10 +161,14 @@ class ResponsesProvider(BaseProvider):
         *,
         client: AsyncOpenAI | None = None,
         provider_kind: str | None = None,
+        thinking: bool = False,
     ) -> None:
         self._model_name = model
         self._client = client
         self.provider_kind = provider_kind or settings.provider_kind()
+        if thinking and self.provider_kind != "deepseek":
+            raise ValueError("thinking mode is only supported by the DeepSeek provider")
+        self._thinking = thinking
 
     @property
     def model_name(self) -> str:
@@ -167,6 +181,11 @@ class ResponsesProvider(BaseProvider):
         if self._client is None:
             self._client = settings.get_client()
         return self._client
+
+    @property
+    def thinking_enabled(self) -> bool:
+        """Whether DeepSeek thinking mode is enabled for this provider."""
+        return self._thinking
 
     def _response_format(self, output_type: type) -> dict[str, Any] | None:
         """按 provider 能力返回 response_format;不支持的 provider 返回 None。
@@ -237,7 +256,9 @@ class ResponsesProvider(BaseProvider):
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
             "stream": True,
-            "extra_body": {"thinking": {"type": "disabled"}},
+            "extra_body": {
+                "thinking": {"type": "enabled" if self._thinking else "disabled"}
+            },
         }
         if output_type is not None and not tool_defs:
             response_format = self._response_format(output_type)
@@ -263,6 +284,7 @@ class ResponsesProvider(BaseProvider):
         bufs: dict[int, dict] = {}
         finish: str = ""
         text = ""
+        reasoning = ""
         dsml_filter = (
             _DeepSeekTextFilter() if self.provider_kind == "deepseek" else None
         )
@@ -276,6 +298,16 @@ class ResponsesProvider(BaseProvider):
                     d = c.delta
                     if c.finish_reason:
                         finish = c.finish_reason
+                    reasoning_delta = getattr(d, "reasoning_content", None)
+                    if reasoning_delta:
+                        reasoning += reasoning_delta
+                        yield StreamEvent(
+                            kind="reasoning_delta",
+                            data={
+                                "delta": reasoning_delta,
+                                "accumulated": reasoning,
+                            },
+                        )
                     if d.content:
                         delta = (
                             dsml_filter.push(d.content)
@@ -335,7 +367,11 @@ class ResponsesProvider(BaseProvider):
 
         yield StreamEvent(
             kind="response_completed",
-            data={"finish_reason": finish or "stop", "accumulated_text": text},
+            data={
+                "finish_reason": finish or "stop",
+                "accumulated_text": text,
+                "reasoning_content": reasoning,
+            },
         )
 
 
@@ -359,8 +395,14 @@ class DeepSeekProvider(ResponsesProvider):
         model: str,
         *,
         client: AsyncOpenAI | None = None,
+        thinking: bool = False,
     ) -> None:
-        super().__init__(model, client=client, provider_kind="deepseek")
+        super().__init__(
+            model,
+            client=client,
+            provider_kind="deepseek",
+            thinking=thinking,
+        )
 
 
 _ANTHROPIC_NOT_IMPLEMENTED = (
@@ -483,28 +525,36 @@ def _to_api(msgs: list[ModelMessage]) -> list[dict]:
             parts = list(m.parts)
             tc = [p for p in parts if getattr(p, "part_kind", None) == "tool-call"]
             if tc:
-                out.append(
-                    {
-                        "role": "assistant",
-                        "content": "".join(
-                            str(getattr(p, "content", ""))
-                            for p in parts
-                            if getattr(p, "part_kind", None) == "text"
-                        )
-                        or None,
-                        "tool_calls": [
-                            {
-                                "id": str(getattr(p, "tool_call_id", "")),
-                                "type": "function",
-                                "function": {
-                                    "name": str(getattr(p, "tool_name", "")),
-                                    "arguments": str(getattr(p, "args", "{}")),
-                                },
-                            }
-                            for p in tc
-                        ],
-                    }
+                assistant = {
+                    "role": "assistant",
+                    "content": "".join(
+                        str(getattr(p, "content", ""))
+                        for p in parts
+                        if getattr(p, "part_kind", None) == "text"
+                    )
+                    or None,
+                    "tool_calls": [
+                        {
+                            "id": str(getattr(p, "tool_call_id", "")),
+                            "type": "function",
+                            "function": {
+                                "name": str(getattr(p, "tool_name", "")),
+                                "arguments": str(getattr(p, "args", "{}")),
+                            },
+                        }
+                        for p in tc
+                    ],
+                }
+                reasoning = "".join(
+                    str(getattr(p, "content", ""))
+                    for p in parts
+                    if getattr(p, "part_kind", None) == "thinking"
                 )
+                if reasoning:
+                    # DeepSeek requires the complete reasoning_content to be
+                    # replayed with an assistant tool-call message.
+                    assistant["reasoning_content"] = reasoning
+                out.append(assistant)
             else:
                 out.append(
                     {

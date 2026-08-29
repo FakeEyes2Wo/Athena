@@ -23,6 +23,27 @@ class _ExplanationProvider:
         yield StreamEvent(kind="response_completed", data={"finish_reason": "stop"})
 
 
+class _ProseThenFormatRepairProvider:
+    """Return prose to the normal agent and JSON only to its no-tools repair pass."""
+
+    model_name = "validate-format-repair-test"
+
+    def __init__(self) -> None:
+        self.tool_sets: list[tuple[str, ...]] = []
+
+    async def stream(self, _config, tools, _messages, _cancel, **_kwargs):
+        names = tuple(sorted(spec.name for spec in tools.specs))
+        self.tool_sets.append(names)
+        if names:
+            payload = "Result: Runtime-only repair is complete."
+        else:
+            payload = '{"explanation":"Runtime-only repair is complete."}'
+        yield StreamEvent(
+            kind="text_delta", data={"delta": payload, "accumulated": payload}
+        )
+        yield StreamEvent(kind="response_completed", data={"finish_reason": "stop"})
+
+
 @pytest.mark.asyncio
 async def test_validate_agent_registers_with_stable_identity_and_structured_output(
     tmp_path,
@@ -59,4 +80,45 @@ async def test_validate_agent_registers_with_stable_identity_and_structured_outp
     result = json.loads(await store.get_text(outer["result_ref"]))
     assert result == {"explanation": "Repair the runtime-only device selection."}
     assert (tmp_path / ".athena" / "logs" / "agents" / "validate.jsonl").is_file()
+    await agents.aclose()
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_repairs_prose_with_one_tool_free_format_pass(
+    tmp_path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    provider = _ProseThenFormatRepairProvider()
+    registry = AgentTypeRegistry()
+    register_validate_agent(
+        registry,
+        provider=provider,
+        artifacts=store,
+        workspace=workspace,
+        runtime=ExecutionRuntime(project_root=workspace, store=store),
+    )
+    agents = AgentRuntime(
+        type_registry=registry,
+        project_root=tmp_path,
+        rollout_dir=tmp_path / ".athena" / "logs" / "agents",
+    )
+    agents.start()
+
+    _agent_id, run_id = await agents.create_root(
+        "validate",
+        {"content": "Return the completed validation repair."},
+        name="validate",
+        agent_id="validate",
+    )
+    summary = await agents.wait_run(run_id, timeout=5)
+
+    assert summary.status is RunStatus.COMPLETED
+    outer = json.loads(summary.response_ref)
+    result = json.loads(await store.get_text(outer["result_ref"]))
+    assert result == {"explanation": "Runtime-only repair is complete."}
+    assert len(provider.tool_sets) == 2
+    assert provider.tool_sets[0]
+    assert provider.tool_sets[1] == ()
     await agents.aclose()

@@ -57,6 +57,7 @@ class ResearchSession:
     """Transient state that belongs to one running ResearchRuntime process."""
 
     provider: object | None = None
+    reasoning_provider: object | None = None
     task: asyncio.Task | None = None
     started: bool = False
     survey_task: asyncio.Task | None = None

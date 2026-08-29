@@ -28,6 +28,8 @@ from athena.core.workspace import (
 )
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.rubrics.evaluation import normalize_metric_name
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.experiment import (
     PlanRunner,
@@ -56,6 +58,7 @@ class PrepareResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     evaluator_ref: ArtifactRef
+    final_evaluator_ref: ArtifactRef | None = None
     metric: float = Field(allow_inf_nan=False)
     commit: CommitHash
     predictions_ref: ArtifactRef
@@ -83,9 +86,7 @@ def _require_joinable_labels(labels_file: Path) -> None:
         for row in reader:
             raw = (row.get(ROW_ID_COLUMN) or "").strip()
             if not raw:
-                raise ValueError(
-                    f"labels.csv contains an empty {ROW_ID_COLUMN!r}"
-                )
+                raise ValueError(f"labels.csv contains an empty {ROW_ID_COLUMN!r}")
             if raw in seen:
                 raise ValueError(
                     f"labels.csv contains duplicate {ROW_ID_COLUMN!r}: {raw}"
@@ -105,7 +106,74 @@ def _require_joinable_labels_dir(labels_dir: Path) -> None:
         _require_joinable_labels(path)
 
 
-def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
+def _label_ids(labels_file: Path) -> set[str]:
+    """Read explicit evaluator row ids for SEARCH/final isolation checks."""
+    with labels_file.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
+            raise ValueError(
+                f"labels.csv must contain the exact row-id column {ROW_ID_COLUMN!r}"
+            )
+        identifiers = {
+            str(row.get(ROW_ID_COLUMN, "")).strip()
+            for row in reader
+            if str(row.get(ROW_ID_COLUMN, "")).strip()
+        }
+    if not identifiers:
+        raise ValueError("labels.csv must contain at least one non-empty row id")
+    return identifiers
+
+
+def require_disjoint_evaluator_labels(search_root: Path, final_root: Path) -> None:
+    """Prove separately accepted SEARCH and final evaluators share no row ids."""
+
+    def evaluator_ids(root: Path) -> set[str] | None:
+        evaluator_root, _entrypoint, prediction_format = _evaluator_layout(root)
+        if prediction_format != "tabular_csv":
+            logger.warning(
+                "automatic split-isolation proof skipped for custom evaluator: %s",
+                evaluator_root,
+            )
+            return None
+        labels_file = evaluator_root / "labels.csv"
+        if labels_file.is_file():
+            return _label_ids(labels_file)
+        labels_dir = evaluator_root / "labels"
+        if labels_dir.is_dir():
+            identifiers: set[str] = set()
+            for path in sorted(labels_dir.rglob("*.csv")):
+                current = _label_ids(path)
+                duplicate = identifiers & current
+                if duplicate:
+                    raise ValueError(
+                        "evaluator labels contain duplicate row ids across files: "
+                        f"{sorted(duplicate)[:3]}"
+                    )
+                identifiers.update(current)
+            if identifiers:
+                return identifiers
+        raise ValueError(
+            "split-isolation proof requires labels.csv or labels/*.csv with "
+            f"explicit row ids under {evaluator_root}"
+        )
+
+    search_ids = evaluator_ids(search_root)
+    final_ids = evaluator_ids(final_root)
+    if search_ids is None or final_ids is None:
+        return
+    overlap = search_ids & final_ids
+    if overlap:
+        raise ValueError(
+            "search and final evaluator labels must be disjoint; overlapping ids: "
+            f"{sorted(overlap)[:3]}"
+        )
+
+
+def _evaluator_layout(
+    root: Path,
+    *,
+    evaluation_policy: EvaluationPolicy | None = None,
+) -> tuple[Path, str, str]:
     """Return ``(evaluator_root, entrypoint, prediction_format)`` from metric.json.
 
     This is the single source of truth shared by the README freeze marker and
@@ -119,6 +187,25 @@ def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
         evaluator_rel = spec["eval_script"]
     except (OSError, ValueError, KeyError):
         raise ValueError("metric.json must declare eval_script")
+    if evaluation_policy is not None:
+        try:
+            declared_metric = normalize_metric_name(spec["primary_metric"])
+            declared_direction = spec["direction"]
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise ValueError(
+                "metric.json must declare primary_metric and direction from the "
+                "frozen Evaluation Policy"
+            ) from None
+        if declared_metric != evaluation_policy.primary_metric:
+            raise ValueError(
+                "evaluator primary_metric does not match frozen Evaluation Policy: "
+                f"{declared_metric!r} != {evaluation_policy.primary_metric!r}"
+            )
+        if declared_direction != evaluation_policy.direction:
+            raise ValueError(
+                "evaluator direction does not match frozen Evaluation Policy: "
+                f"{declared_direction!r} != {evaluation_policy.direction!r}"
+            )
     prediction_format = spec.get("prediction_format", "tabular_csv")
     try:
         evaluator_path = resolve_workspace_path(root, evaluator_rel)
@@ -242,9 +329,7 @@ async def _validate_frozen_evaluator(
             labels_csv, score, prediction_column=prediction_column
         )
     except AttributeError:
-        logger.warning(
-            "evaluator property tests skipped: runner has no run_dir()"
-        )
+        logger.warning("evaluator property tests skipped: runner has no run_dir()")
         return
     if not outcome.get("ok"):
         raise ValueError(outcome.get("reason", "evaluator property tests failed"))
@@ -258,6 +343,7 @@ async def run_evaluator_plan(
     evaluator_dir: Path,
     execution: ExecutionRuntime,
     task: str,
+    evaluation_policy: EvaluationPolicy | None = None,
     max_turns: int,
     publish: EmitEvent | None = None,
     ask_user: Any | None = None,
@@ -274,11 +360,17 @@ async def run_evaluator_plan(
     # `uv add --project "$ATHENA_ENV_ROOT"` 因缺 pyproject 失败。
     execution.ensure_environment()
 
+    policy_payload = (
+        evaluation_policy.model_dump(mode="json")
+        if evaluation_policy is not None
+        else None
+    )
     context_ref = await store.put_text(
         json.dumps(
             {
                 "plan_id": plan_id,
                 "task": task,
+                "evaluation_policy": policy_payload,
             },
             ensure_ascii=False,
         )
@@ -318,7 +410,8 @@ async def run_evaluator_plan(
                 continue
             try:
                 evaluator_root, entrypoint, prediction_format = _evaluator_layout(
-                    root
+                    root,
+                    evaluation_policy=evaluation_policy,
                 )
                 readme_text = _evaluator_readme(
                     root,
@@ -356,13 +449,17 @@ async def run_evaluator_plan(
                     if answer is not None:
                         lowered = str(answer).lower()
                         if "reject" in lowered or "拒绝" in answer:
-                            raise ValueError("human rejected custom evaluator acceptance")
+                            raise ValueError(
+                                "human rejected custom evaluator acceptance"
+                            )
                 return evaluator_ref
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # 写入 README/校验/目录运行失败 → 转成同 Plan 的反馈重试。
                 feedback = " ".join(str(exc).split())[:1000]
 
-        raise RuntimeError("evaluator turn budget exhausted without an accepted evaluator")
+        raise RuntimeError(
+            "evaluator turn budget exhausted without an accepted evaluator"
+        )
     finally:
         # The evaluator Agent is a one-shot PREPARE worker; release it after the
         # phase succeeds or exhausts its turn budget.
@@ -530,9 +627,12 @@ async def run_prepare_plan(
 __all__ = [
     "EVALUATOR_AGENT_ID",
     "EVALUATOR_PLAN_ID",
+    "FINAL_EVALUATOR_AGENT_ID",
+    "FINAL_EVALUATOR_PLAN_ID",
     "PREPARE_AGENT_ID",
     "PREPARE_PLAN_ID",
     "PrepareResult",
+    "require_disjoint_evaluator_labels",
     "run_evaluator_plan",
     "run_prepare_plan",
 ]

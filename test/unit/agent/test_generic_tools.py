@@ -5,6 +5,8 @@ import asyncio
 from pathlib import Path
 
 from athena.agents.tools.generic_tools import generic_tool_registry
+from athena.core.agent.registry import AgentTypeRegistry
+from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool_types import ToolContext
 
 
@@ -79,3 +81,24 @@ def test_build_llm_agent_injects_runtime_summary(tmp_path: Path) -> None:
     )
     assert agent.system_prompt.startswith("Runtime:")
     assert "shell_command" in {spec.name for spec in agent.tools.specs}
+
+
+def test_registered_prompt_agent_injects_runtime_summary(tmp_path: Path) -> None:
+    """Factory-created workers receive the same runtime block as direct agents."""
+    from athena.agents.general_agent import register_general_agent
+    from athena.execution.runtime import ExecutionRuntime
+
+    registry = AgentTypeRegistry()
+    runtime = ExecutionRuntime(project_root=tmp_path, environment_root=tmp_path)
+    register_general_agent(
+        registry,
+        provider=object(),
+        artifacts=LocalArtifactStore(tmp_path / "artifacts"),
+        project_root=tmp_path,
+        runtime=runtime,
+    )
+
+    spec = registry.require_spec("general", agent_id="general-test")
+
+    assert spec.runner._agent.system_prompt.startswith("Runtime:")
+    assert "native PowerShell only" in spec.runner._agent.system_prompt

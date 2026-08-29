@@ -18,6 +18,9 @@ EVALUATOR_AGENT_TYPE = "evaluator"
 PREPARE_EDA_AGENT_ID = "prepare_eda"
 PREPARE_EDA_AGENT_TYPE = "prepare_eda"
 EDA_WORKER_AGENT_TYPE = "eda_worker"
+EDA_ORCHESTRATOR_MAX_TURNS = 12
+EDA_WORKER_MAX_TURNS = 10
+EDA_MAX_TOKENS = 2048
 
 
 def _register(
@@ -31,6 +34,8 @@ def _register(
     output_type: type,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
     name: str | None = None,
+    max_turns: int = 200,
+    max_tokens: int = 4096,
 ) -> None:
     """Single registration path for PREPARE-family prompt agents."""
     register_prompt_agent(
@@ -43,6 +48,8 @@ def _register(
         artifacts=artifacts,
         extra_tools=extra_tools,
         name=name,
+        max_turns=max_turns,
+        max_tokens=max_tokens,
     )
 
 
@@ -117,6 +124,8 @@ def register_prepare_eda_agent(
         agent_type=PREPARE_EDA_AGENT_TYPE,
         output_type=HandoffResult,
         extra_tools=extra_tools,
+        max_turns=EDA_ORCHESTRATOR_MAX_TURNS,
+        max_tokens=EDA_MAX_TOKENS,
     )
     _register(
         registry,
@@ -128,6 +137,8 @@ def register_prepare_eda_agent(
         output_type=HandoffResult,
         extra_tools=extra_tools,
         name="eda-worker",
+        max_turns=EDA_WORKER_MAX_TURNS,
+        max_tokens=EDA_MAX_TOKENS,
     )
 
 

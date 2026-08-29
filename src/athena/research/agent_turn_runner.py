@@ -36,6 +36,8 @@ from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisBatch,
     IdeatorHypothesisDraft,
 )
+from athena.research.rubrics.models import EvaluationPolicy
+from athena.research.rubrics.workflow import RubricWorkflow
 from athena.research.supervisor.experiment import (
     handoff_block,
     load_agent_result,
@@ -46,6 +48,10 @@ if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
 
 logger = logging.getLogger(__name__)
+
+# Compatibility for callers that imported this helper before Rubric orchestration
+# moved into its own maintainable module.
+_read_eval_handoff = read_eval_handoff
 
 
 MAX_GATE_RETRIES = 2
@@ -70,6 +76,9 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
     def __init__(self, runtime: "ResearchRuntime") -> None:
         self._runtime = runtime
         self._ideator_round = 0
+        self._rubrics = RubricWorkflow(
+            runtime, eda_root=lambda: Path(self._resolve_eda_dir(runtime))
+        )
 
     async def run_supervisor_turn(self, text: str) -> str:
         """Run one serialized SupervisorAgent turn and return its human-facing answer."""
@@ -100,6 +109,18 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
             raise RuntimeError(summary.error or "SupervisorAgent turn failed")
         await rt.publish_output(source="supervisor", channel="text", text=result.answer)
         return result.answer
+
+    async def run_evaluation_rubric(self) -> tuple[EvaluationPolicy, ArtifactRef]:
+        """Delegate Layer 1 to the isolated Rubric workflow."""
+        return await self._rubrics.run_evaluation()
+
+    async def run_hypothesis_rubric(
+        self, hypotheses: list[Hypothesis]
+    ) -> list[Hypothesis]:
+        """Delegate the single post-Gate batch review."""
+        if getattr(self._runtime, "_ideation", "ideageneration") != "ideageneration":
+            return hypotheses
+        return await self._rubrics.run_hypothesis_priority(hypotheses)
 
     @staticmethod
     def _resolve_eda_dir(rt: "ResearchRuntime") -> str:
@@ -148,13 +169,15 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
             return await self._run_debate_ideator_turn(count, handoff_texts)
         eda_dir = self._resolve_eda_dir(rt)
         ideation = getattr(rt, "ideation", "ideageneration")
+        ideator_provider = getattr(rt, "reasoning_provider", None) or rt.provider
         lane_profiles: Iterator[IdeatorProfile | None]
         if ideation == "ideageneration":
             for profile in SEARCH_IDEATOR_PROFILES:
                 if not rt.registry.contains(profile.agent_type):
                     register_ideator_agent(
                         rt.registry,
-                        provider=rt.provider,
+                        provider=ideator_provider,
+                        structured_repair_provider=rt.provider,
                         artifacts=rt.store,
                         workspace=Path(eda_dir),
                         runtime=rt.execution,
@@ -167,7 +190,8 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
             if not rt.registry.contains("ideator"):
                 register_ideator_agent(
                     rt.registry,
-                    provider=rt.provider,
+                    provider=ideator_provider,
+                    structured_repair_provider=rt.provider,
                     artifacts=rt.store,
                     workspace=Path(eda_dir),
                     runtime=rt.execution,
@@ -204,14 +228,17 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
         )
         hypotheses: list[Hypothesis] = []
         eda_requests: list[str] = []
+        lane_failures: list[str] = []
         for index, result in enumerate(lane_results, start=1):
             if isinstance(result, asyncio.CancelledError):
                 raise result
             if isinstance(result, BaseException):
+                failure = " ".join(str(result).split())[:500]
+                lane_failures.append(f"lane {index}: {failure}")
                 await rt.publish_output(
                     source="agent",
                     channel="error",
-                    text=f"Ideator {index} failed: {result}",
+                    text=f"Ideator {index} failed: {failure}",
                     plan=f"ideator-{round_label}-{index}",
                 )
             else:
@@ -225,9 +252,14 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
             await self.run_data_turn(
                 "\n".join(f"- {request}" for request in eda_requests)
             )
-        # 全部 lane 都失败时不再中断 SEARCH：每条失败已作为 error 输出发布。
+        if not hypotheses:
+            detail = "; ".join(lane_failures) or "all candidates failed the Gate"
+            raise RuntimeError(
+                "Ideator batch produced no valid hypotheses; SEARCH cannot "
+                f"continue ({detail})"
+            )
         # 返回全部产物（不做截断）：所有生成假设都进入 graph，由调度器排序后按
-        # 并发度逐个启动。
+        # 并发度逐个启动。单个 lane 失败不会丢弃成功 peer 的结果。
         return hypotheses
 
     async def run_data_turn(self, request: str) -> None:
@@ -333,12 +365,20 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
         rt = self._runtime
         content = (
             f"Inspect the EDA workspace at {eda_dir} without modifying any "
-            "files, then propose up to "
-            f"{target} falsifiable hypotheses that could improve the primary "
-            "metric. Return the hypotheses as structured output."
+            "files, then propose between 1 and "
+            f"{target} distinct, falsifiable hypotheses that could improve the "
+            "primary metric. Return the hypotheses as structured output. Never "
+            "return an empty hypotheses list; use the available task and EDA "
+            "evidence even when no further tool call is necessary."
         )
         if profile is not None:
             content += f"\n\n{profile.task_hint}"
+        policy = getattr(rt._supervisor, "evaluation_policy", None)
+        if policy is not None:
+            content += (
+                "\n\nThe frozen Evaluation Policy is authoritative:\n"
+                + json.dumps(policy.model_dump(mode="json"), ensure_ascii=False)
+            )
         if handoff_texts:
             content += (
                 "\n\nResearch handoff documents have been delivered to your "

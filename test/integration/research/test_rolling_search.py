@@ -426,6 +426,8 @@ async def test_turn_is_persisted_before_dispatch(harness: _Harness):
     persisted = ResearchState.load(harness.root / ".athena" / "state.json")
 
     assert persisted.plans["h1"].turns_used == 1
+    await _eventually(lambda: harness.state.status == "WAITING")
+    assert harness.started_turns["h1"] == 1
 
 
 @pytest.mark.asyncio

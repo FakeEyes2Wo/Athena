@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from athena.agents.ideator_agent import (
     BASELINE_IDEATOR_PROFILE,
+    IDEATOR_MAX_TOKENS,
     MOONSHOT_IDEATOR_PROFILE,
     SEARCH_IDEATOR_PROFILES,
     HandoffResult,
@@ -64,6 +65,7 @@ def test_search_profiles_cover_exploit_bold_moonshot() -> None:
 def test_moonshot_profile_binds_gated_output_contract() -> None:
     spec = _register(MOONSHOT_IDEATOR_PROFILE)
     assert spec.runner._agent._output_type is IdeatorHypothesisBatch
+    assert spec.runner._agent.config.max_tokens == IDEATOR_MAX_TOKENS
 
 
 def test_baseline_profile_binds_handoff_output_contract() -> None:

@@ -83,8 +83,10 @@ its CSV-only automated probes for custom formats.
 
 Create:
 
-- a `metric.json` at the workspace root declaring the entrypoint, e.g.
-  `{"eval_script": "evaluate.py"}`. If predictions are not tabular CSV, also add
+- a `metric.json` at the workspace root declaring the entrypoint and the exact
+  frozen policy, e.g. `{"eval_script": "evaluate.py", "primary_metric":
+  "roc_auc", "direction": "maximize"}`. Do not rename, replace, or reinterpret
+  the policy metric. If predictions are not tabular CSV, also add
   `"prediction_format": "custom"` so the platform does not run CSV-only
   property probes (for tabular CSV you may omit it or use `"tabular_csv"`);
 - `evaluate.py`, the entrypoint. It runs with the workspace as its working

@@ -30,6 +30,7 @@ RESUME_FIELDS = (
     "task_research_task",
     "task_research_ref",
     "task_research_agent_id",
+    "evaluation_policy_ref",
     "evaluator_ref",
     "final_evaluator_ref",
 )
@@ -78,9 +79,7 @@ class ResearchState(BaseModel):
     phase: Literal["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     search_limit: int = Field(ge=0)
     concurrency: int = Field(ge=1)
-    experiment_timeout_s: int = Field(
-        default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1
-    )
+    experiment_timeout_s: int = Field(default=DEFAULT_EXPERIMENT_TIMEOUT_S, ge=1)
     # 数据集根目录（供远端算力分发数据集；本地算力可空）。
     data_root: str | None = None
     # 每轮 ideation 的并行 lane 数与每 lane 假设数（与 SEARCH 并发度解耦）。
@@ -113,10 +112,11 @@ class ResearchState(BaseModel):
     task_research_task: str | None = None
     task_research_ref: ArtifactRef | None = None
     task_research_agent_id: str | None = None
+    # Task Understanding 后冻结；恢复时必须在 evaluator 之前重新加载。
+    evaluation_policy_ref: ArtifactRef | None = None
     # 断点续传：已冻结评估器 bundle；PREPARE 重启时跳过 evaluator 重跑。
     evaluator_ref: ArtifactRef | None = None
-    # 断点续传：最终验证使用的独立 evaluator；未设置时 VALIDATE 应告警并避免
-    # 把搜索 evaluator 当作真正的 final-test authority。
+    # 断点续传：与 SEARCH 标签互斥的最终留出评估器，仅供 VALIDATE 使用。
     final_evaluator_ref: ArtifactRef | None = None
     # 已经为哪一份语料补跑过 ideation。调研要十几分钟，第一轮 ideation 几乎必然早于它
     # 完成；而调度器只在"无假设可排"时才 GENERATE，短跑测里第一轮就把队列填满，于是

@@ -5,8 +5,16 @@ import json
 from dataclasses import fields
 from inspect import signature
 
-from pydantic import BaseModel
-from pydantic_ai.messages import ToolReturnPart
+from pydantic import BaseModel, Field, ValidationError
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 import pytest
 import httpx
 from openai import BadRequestError
@@ -31,6 +39,7 @@ from athena.core.agent.provider import (
 from athena.core.agent.runtime import (
     Agent,
     BaseAgent,
+    _validate_structured_text,
     agent_runner,
     create_agent,
     create_code_agent,
@@ -117,7 +126,15 @@ def test_environment_builds_three_independent_core_agents() -> None:
     ]
     assert all(
         set(vars(agent))
-        == {"model", "tools", "system_prompt", "config", "_output_type", "_artifacts"}
+        == {
+            "model",
+            "tools",
+            "system_prompt",
+            "config",
+            "_output_type",
+            "_artifacts",
+            "_structured_repair_provider",
+        }
         for agent in agents
     )
     assert len({id(agent) for agent in agents}) == 3
@@ -407,6 +424,71 @@ class TestBaseAgent:
             "name": "probe",
             "arguments": {"path": "data.csv"},
         }
+
+    async def test_reasoning_is_retained_privately_for_tool_continuation(self):
+        class ProbeTool(BaseTool):
+            spec = ToolSpec(name="probe", description="probe", input_schema={})
+
+            async def execute(self, input: dict, ctx: ToolContext):
+                return "tool result"
+
+        class ReasoningToolProvider:
+            def __init__(self):
+                self.calls = 0
+
+            async def stream(self, _config, _tools, messages, _cancel, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    yield StreamEvent(
+                        "reasoning_delta",
+                        {"delta": "private thought", "accumulated": "private thought"},
+                    )
+                    yield StreamEvent(
+                        "function_call",
+                        {"call_id": "call-1", "name": "probe", "arguments": {}},
+                    )
+                else:
+                    thinking = [
+                        part
+                        for message in messages
+                        for part in message.parts
+                        if isinstance(part, ThinkingPart)
+                    ]
+                    assert [part.content for part in thinking] == ["private thought"]
+                    yield StreamEvent(
+                        "text_delta", {"delta": "done", "accumulated": "done"}
+                    )
+                yield StreamEvent("response_completed")
+
+        tools = ToolRegistry()
+        tools.register(ProbeTool())
+        provider = ReasoningToolProvider()
+        agent = Agent(ResponsesProvider("model"), tools, "system")
+        agent.model = provider
+        emitted: list[str] = []
+
+        async def emit(kind, _event_ref, _data=None):
+            emitted.append(kind)
+
+        ctx = AgentContext(
+            AthenaThread(
+                thread_id="t1", session_id="s1", status="running", context_ref="ctx://0"
+            ),
+            AthenaTurn(
+                turn_id="t1.1",
+                thread_id="t1",
+                request_ref="request",
+                status="running",
+            ),
+            emit,
+            tools,
+            asyncio.Event(),
+        )
+
+        await agent.run(ctx)
+
+        assert provider.calls == 2
+        assert "agent/reasoning_delta" not in emitted
 
     async def test_non_concurrency_safe_tool_is_a_barrier(self):
         timeline: list[str] = []
@@ -788,6 +870,10 @@ class _StructuredOut(BaseModel):
     answer: str
 
 
+class _NonEmptyStructuredBatch(BaseModel):
+    hypotheses: list[str] = Field(min_length=1)
+
+
 class _StructuredProvider:
     def __init__(self):
         self.calls = 0
@@ -879,6 +965,35 @@ class _FencedStructuredProvider:
         yield StreamEvent("response_completed")
 
 
+class _RecordingStructuredRepairProvider:
+    """Tool-free structured repair fake that records the supplied contract."""
+
+    model_name = "structured-repair-test"
+
+    def __init__(self, body: str) -> None:
+        self.body = body
+        self.calls = 0
+        self.configs = []
+        self.tool_names: list[tuple[str, ...]] = []
+        self.output_types: list[type | None] = []
+
+    async def stream(
+        self,
+        config,
+        tools,
+        _messages,
+        _cancel,
+        *,
+        output_type=None,
+    ):
+        self.calls += 1
+        self.configs.append(config)
+        self.tool_names.append(tuple(spec.name for spec in tools.specs))
+        self.output_types.append(output_type)
+        yield StreamEvent("text_delta", {"delta": self.body, "accumulated": self.body})
+        yield StreamEvent("response_completed")
+
+
 def _structured_context(tools: ToolRegistry) -> AgentContext:
     return AgentContext(
         AthenaThread(
@@ -914,6 +1029,350 @@ async def test_a_fenced_json_answer_is_accepted_on_the_first_try(body: str) -> N
 
     assert outcome.result_ref
     assert agent.model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_opted_in_structured_repair_accepts_embedded_json() -> None:
+    """Opt-in agents may recover valid JSON embedded in explanatory prose."""
+    tools = ToolRegistry()
+    provider = _FencedStructuredProvider(
+        'Formatting note: {"answer":"hi"} End of explanation.'
+    )
+    repair = _RecordingStructuredRepairProvider("not used")
+    agent = Agent(
+        provider,
+        tools,
+        "system",
+        output_type=_StructuredOut,
+        structured_repair_provider=repair,
+    )
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert outcome.result_ref
+    assert provider.calls == 1
+    assert repair.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_structured_repair_runs_tool_free_without_replaying_agent(
+    tmp_path,
+) -> None:
+    """The repair pass receives no tools and replaces no agent experiment."""
+    from athena.core.artifact_store import LocalArtifactStore
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    tools = ToolRegistry()
+    provider = _FencedStructuredProvider("answer repaired (not JSON)")
+    repair = _RecordingStructuredRepairProvider('{"answer":"repaired"}')
+    agent = Agent(
+        provider,
+        tools,
+        "system",
+        output_type=_StructuredOut,
+        artifacts=store,
+        structured_repair_provider=repair,
+    )
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert provider.calls == 1
+    assert repair.calls == 1
+    assert repair.tool_names == [()]
+    assert repair.output_types == [_StructuredOut]
+    assert await store.get_text(outcome.result_ref) == '{"answer":"repaired"}'
+
+
+@pytest.mark.asyncio
+async def test_structured_repair_invalid_output_fails_explicitly() -> None:
+    """An invalid format-only response must fail closed without a virtual result."""
+    tools = ToolRegistry()
+    provider = _AlwaysInvalidStructuredProvider()
+    repair = _RecordingStructuredRepairProvider("still not json")
+    agent = Agent(
+        provider,
+        tools,
+        "system",
+        output_type=_StructuredOut,
+        structured_repair_provider=repair,
+    )
+
+    with pytest.raises(RuntimeError, match="semantic correction failed"):
+        await agent.run(_structured_context(tools))
+
+    assert provider.calls == 2
+    assert repair.calls == 1
+    assert repair.tool_names == [()]
+    assert repair.output_types == [_StructuredOut]
+
+
+@pytest.mark.asyncio
+async def test_structured_repair_rejects_ungrounded_scalar() -> None:
+    """Repair cannot invent a schema-valid value absent from the source text."""
+    tools = ToolRegistry()
+    provider = _AlwaysInvalidStructuredProvider()
+    repair = _RecordingStructuredRepairProvider('{"answer":"fabricated"}')
+    agent = Agent(
+        provider,
+        tools,
+        "system",
+        output_type=_StructuredOut,
+        structured_repair_provider=repair,
+    )
+
+    with pytest.raises(RuntimeError, match="semantic correction failed"):
+        await agent.run(_structured_context(tools))
+
+    assert provider.calls == 2
+    assert repair.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_semantic_structured_retry_repairs_an_empty_required_batch(
+    tmp_path,
+) -> None:
+    """A non-empty semantic field is corrected without exposing any tools."""
+
+    from athena.core.artifact_store import LocalArtifactStore
+
+    class EmptyThenValidProvider:
+        model_name = "semantic-correction-test"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.tool_names: list[tuple[str, ...]] = []
+            self.output_types: list[type | None] = []
+            self.max_tokens: list[int] = []
+            self.messages = []
+
+        async def stream(self, config, tools, messages, _cancel, *, output_type=None):
+            self.calls += 1
+            self.max_tokens.append(config.max_tokens)
+            self.tool_names.append(tuple(spec.name for spec in tools.specs))
+            self.output_types.append(output_type)
+            self.messages.append(messages)
+            body = (
+                '{"hypotheses":[]}'
+                if self.calls == 1
+                else '{"hypotheses":["use calibrated probabilities"]}'
+            )
+            yield StreamEvent("text_delta", {"delta": body, "accumulated": body})
+            yield StreamEvent("response_completed")
+
+    provider = EmptyThenValidProvider()
+    repair = _RecordingStructuredRepairProvider('{"hypotheses":[]}')
+    tools = ToolRegistry()
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agent = Agent(
+        provider,
+        tools,
+        "system",
+        output_type=_NonEmptyStructuredBatch,
+        artifacts=store,
+        structured_repair_provider=repair,
+    )
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert provider.calls == 2
+    assert provider.tool_names == [(), ()]
+    assert provider.output_types == [_NonEmptyStructuredBatch, None]
+    assert provider.max_tokens == [4096, 8192]
+    assert repair.calls == 1
+    correction_text = "\n".join(
+        str(part.content)
+        for message in provider.messages[-1]
+        for part in message.parts
+        if hasattr(part, "content")
+    )
+    assert 'Previous final answer:\n{"hypotheses":[]}' in correction_text
+    assert "List should have at least 1 item" in correction_text
+    assert await store.get_text(outcome.result_ref) == (
+        '{"hypotheses":["use calibrated probabilities"]}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_semantic_structured_retry_disables_thinking_for_correction(
+    monkeypatch, tmp_path
+) -> None:
+    """The bounded Pro correction must reserve tokens for visible JSON."""
+
+    from athena.core.artifact_store import LocalArtifactStore
+
+    class ThinkingProvider:
+        model_name = "deepseek-pro-test"
+        thinking_enabled = True
+        client = object()
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(self, _config, _tools, _messages, _cancel, **_kwargs):
+            self.calls += 1
+            body = '{"hypotheses":[]}'
+            yield StreamEvent("text_delta", {"delta": body, "accumulated": body})
+            yield StreamEvent("response_completed")
+
+    correction = _RecordingStructuredRepairProvider(
+        '{"hypotheses":["use calibrated probabilities"]}'
+    )
+    created: list[tuple[str, object]] = []
+
+    def create_non_thinking(model, *, client=None):
+        created.append((model, client))
+        return correction
+
+    monkeypatch.setattr(
+        "athena.core.agent.runtime.create_provider", create_non_thinking
+    )
+    provider = ThinkingProvider()
+    repair = _RecordingStructuredRepairProvider('{"hypotheses":[]}')
+    tools = ToolRegistry()
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agent = Agent(
+        provider,
+        tools,
+        "system",
+        output_type=_NonEmptyStructuredBatch,
+        artifacts=store,
+        structured_repair_provider=repair,
+    )
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert provider.calls == 1
+    assert created == [("deepseek-pro-test", provider.client)]
+    assert correction.calls == 1
+    assert correction.output_types == [None]
+    assert correction.configs[0].max_tokens == 8192
+    assert await store.get_text(outcome.result_ref) == (
+        '{"hypotheses":["use calibrated probabilities"]}'
+    )
+
+
+def test_semantic_correction_history_removes_tool_protocol_parts() -> None:
+    from athena.core.agent.runtime import _semantic_correction_history
+
+    history = [
+        ModelRequest(parts=[UserPromptPart(content="analyze the dataset")]),
+        ModelResponse(
+            parts=[
+                ThinkingPart(content="private reasoning"),
+                ToolCallPart(
+                    tool_name="shell_command",
+                    args='{"command":"probe"}',
+                    tool_call_id="call-1",
+                ),
+            ]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="shell_command",
+                    content="AUROC evidence: 0.7434",
+                    tool_call_id="call-1",
+                )
+            ]
+        ),
+        ModelResponse(parts=[TextPart(content='{"hypotheses":[]}')]),
+    ]
+
+    cleaned = _semantic_correction_history(history)
+    parts = [part for message in cleaned for part in message.parts]
+
+    assert not any(
+        isinstance(part, (ThinkingPart, ToolCallPart, ToolReturnPart)) for part in parts
+    )
+    visible = "\n".join(str(part.content) for part in parts if hasattr(part, "content"))
+    assert "analyze the dataset" in visible
+    assert "Completed tool evidence (shell_command; outcome=success)" in visible
+    assert "AUROC evidence: 0.7434" in visible
+
+
+def test_embedded_structured_output_rejects_ambiguous_valid_objects() -> None:
+    """Two distinct schema-valid objects are ambiguous and must not be guessed."""
+    with pytest.raises(ValidationError):
+        _validate_structured_text(
+            _StructuredOut,
+            'draft {"answer":"first"} final {"answer":"second"}',
+            allow_embedded=True,
+        )
+
+
+def test_opted_in_structured_parser_wraps_one_required_top_level_list() -> None:
+    """A bare list is recoverable only for a schema with one required field."""
+
+    instance = _validate_structured_text(
+        _NonEmptyStructuredBatch,
+        '["use calibrated probabilities"]',
+        allow_embedded=True,
+    )
+
+    assert instance.hypotheses == ["use calibrated probabilities"]
+
+
+@pytest.mark.asyncio
+async def test_format_repair_does_not_repeat_prior_tool_work(tmp_path) -> None:
+    """An invalid final answer repairs immediately after one completed tool call."""
+    from athena.core.artifact_store import LocalArtifactStore
+
+    executions = 0
+
+    class CountingTool(BaseTool):
+        spec = ToolSpec(name="probe", description="probe", input_schema={})
+
+        async def execute(self, input: dict, ctx: ToolContext):
+            nonlocal executions
+            executions += 1
+            return "answer repaired"
+
+    class ToolThenInvalidProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def stream(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamEvent(
+                    "function_call",
+                    {"call_id": "probe-1", "name": "probe", "arguments": {}},
+                )
+            elif self.calls == 2:
+                yield StreamEvent(
+                    "text_delta",
+                    {
+                        "delta": "answer repaired (not JSON)",
+                        "accumulated": "answer repaired (not JSON)",
+                    },
+                )
+            else:  # pragma: no cover - immediate repair must prevent this call
+                yield StreamEvent(
+                    "function_call",
+                    {"call_id": "probe-2", "name": "probe", "arguments": {}},
+                )
+            yield StreamEvent("response_completed")
+
+    tools = ToolRegistry()
+    tools.register(CountingTool())
+    provider = ToolThenInvalidProvider()
+    repair = _RecordingStructuredRepairProvider('{"answer":"repaired"}')
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agent = Agent(
+        provider,
+        tools,
+        "system",
+        output_type=_StructuredOut,
+        artifacts=store,
+        structured_repair_provider=repair,
+    )
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert provider.calls == 2
+    assert executions == 1
+    assert repair.calls == 1
+    assert await store.get_text(outcome.result_ref) == '{"answer":"repaired"}'
 
 
 @pytest.mark.asyncio

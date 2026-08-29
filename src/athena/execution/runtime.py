@@ -216,6 +216,23 @@ _ATHENA_WRITE_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+_AGENT_GIT_MUTATION = re.compile(
+    r"(?:^|[\r\n;&|])\s*git(?:\.exe)?\s+(?:add|commit)\b", re.IGNORECASE
+)
+
+_WINDOWS_POSIX_INSPECTION = re.compile(
+    r"(?:^|[\r\n;&|])\s*(head|tail|wc|grep|sed|awk)(?=\s|$)", re.IGNORECASE
+)
+
+_POWERSHELL_INSPECTION_HINTS = {
+    "head": "Get-Content -TotalCount or Select-Object -First",
+    "tail": "Get-Content -Tail or Select-Object -Last",
+    "wc": "Measure-Object -Line",
+    "grep": "Select-String",
+    "sed": "ForEach-Object or -replace",
+    "awk": "ForEach-Object",
+}
+
 
 def _reject_athena_shell_write(
     command: str, workdir: str | None, workspace_root: Path
@@ -235,6 +252,30 @@ def _reject_athena_shell_write(
             ".athena/ is owned by the Athena runtime and is read-only for agents; "
             "inspect it with read_file/Get-Content, never write it."
         )
+
+
+def _reject_agent_git_commit(command: str) -> None:
+    """Keep Git staging/commits under the trusted workspace owner."""
+    if _AGENT_GIT_MUTATION.search(command):
+        raise ValueError(
+            "Git staging and commits are owned by the Athena runtime. Edit and "
+            "test workspace files only; Athena will review the diff, score it, "
+            "and create the trusted commit after the turn."
+        )
+
+
+def _reject_posix_inspection_on_windows(command: str, os_name: str) -> None:
+    """Reject common POSIX-only inspection forms before native PowerShell runs."""
+    if os_name != "Windows":
+        return
+    match = _WINDOWS_POSIX_INSPECTION.search(command)
+    if match is None:
+        return
+    name = match.group(1).lower()
+    raise ValueError(
+        f"{name!r} is a POSIX-only command in this native Windows PowerShell "
+        f"runtime. Use {_POWERSHELL_INSPECTION_HINTS[name]} instead."
+    )
 
 
 class EnvironmentManager:
@@ -398,6 +439,12 @@ class EnvironmentManager:
             f"- Workspace: {workspace_root}",
             f"- Python: {python}, {state}",
         ]
+        if self.os_name == "Windows":
+            lines.append(
+                "- Command syntax: native PowerShell only; do not use bash "
+                "heredocs or POSIX-only commands. Use Get-Content/Select-String "
+                "for inspection."
+            )
         if self._data_root is not None:
             data_ref = self.env_ref("ATHENA_DATA_ROOT")
             lines.append(
@@ -699,6 +746,20 @@ class ExecutionRuntime:
         """当前执行后端（命令真正落在哪台机器上）。"""
         return self._backend
 
+    @property
+    def os_name(self) -> str:
+        """Return the platform reported by the backend that executes commands."""
+        environment = getattr(self._backend, "environment", None)
+        if environment is not None:
+            return str(environment.os_name)
+        inner = getattr(self._backend, "inner", None)
+        facts = getattr(inner or self._backend, "facts", {})
+        if isinstance(facts, dict) and facts.get("os"):
+            return str(facts["os"])
+        summary = self._backend.describe(self._project_root)
+        match = re.search(r"(?m)^- OS:\s*([^\s(]+)", summary)
+        return match.group(1) if match is not None else "unknown"
+
     def runtime_summary(self, workspace_root: str | Path) -> str:
         """注入 system prompt 的简洁运行时块——来自真正执行命令的那台机器。"""
         return self._backend.describe(Path(workspace_root))
@@ -751,10 +812,14 @@ class _ShellCommandTool(BaseTool):
             "Run a shell command in the workspace and return stdout/stderr/exit_code. "
             "A nonzero exit is a normal result; read stderr, fix the command, "
             "and retry in the same turn. "
-            "When output is long (e.g. a huge error list or registry dump), do not "
-            "read it all; pipe the command through a text search first, e.g. "
-            "`cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or "
-            "`cmd 2>&1 | Select-String keyword`."
+            "Follow the injected Runtime shell exactly. On native Windows use "
+            "PowerShell commands (Get-Content, Measure-Object, Select-String), not "
+            "POSIX-only head/tail/wc/grep/sed/awk forms. When output is long (e.g. "
+            "a huge error list or registry dump), do not read it all; pipe the "
+            "command through the current shell's native text search first. "
+            "If stdout and stderr are both empty, the command produced no matching "
+            "output; do not repeat the exact same command - change the pattern or "
+            "inspect why the expected output is missing."
         ),
         input_schema={
             "type": "object",
@@ -776,6 +841,8 @@ class _ShellCommandTool(BaseTool):
         command = str(input["command"])
         workdir = input.get("workdir")
         _reject_athena_shell_write(command, workdir, self._workspace_root)
+        _reject_agent_git_commit(command)
+        _reject_posix_inspection_on_windows(command, self._runtime.os_name)
         context = ExecutionContext(
             project_root=self._runtime.project_root,
             workspace_root=self._workspace_root,

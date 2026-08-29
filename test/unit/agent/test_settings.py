@@ -21,6 +21,8 @@ def test_settings_defaults_when_env_unset(monkeypatch):
 
 
 def test_settings_reads_env(monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("BASE_URL", "https://api.deepseek.com")
     monkeypatch.setenv("MODEL_NAME", "deepseek-chat")

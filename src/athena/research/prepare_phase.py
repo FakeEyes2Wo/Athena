@@ -31,6 +31,7 @@ from athena.research.supervisor.prepare import (
     FINAL_EVALUATOR_AGENT_ID,
     FINAL_EVALUATOR_PLAN_ID,
     PrepareResult,
+    require_disjoint_evaluator_labels,
     run_evaluator_plan,
     run_prepare_plan,
 )
@@ -84,6 +85,7 @@ async def _run_evaluator_agent(
     plan_id: str,
     task: str,
     label: str,
+    evaluation_policy: Any | None,
 ) -> str:
     """Run one evaluator agent in a dedicated directory and write its README freeze marker."""
     evaluator_dir = rt.workspaces_root / directory_name
@@ -103,6 +105,7 @@ async def _run_evaluator_agent(
         evaluator_dir=evaluator_dir,
         execution=rt.execution,
         task=task,
+        evaluation_policy=evaluation_policy,
         max_turns=MAX_PLAN_TURNS,
         publish=lambda kind, ref, data: rt.events.project_agent_event(
             label, kind, ref, data
@@ -167,8 +170,14 @@ async def run_prepare_phase(
         )
 
     # Step 1: search evaluator. Reuse a checkpointed frozen bundle when present.
+    evaluation_policy = rt.supervisor.evaluation_policy
+    if evaluation_policy is None:
+        raise RuntimeError(
+            "PREPARE requires a frozen Evaluation Policy before evaluator creation"
+        )
     evaluator_dir = rt.workspaces_root / "evaluator"
     evaluator_ref = rt.supervisor.evaluator_ref
+    evaluator_created = False
     if evaluator_ref is not None:
         try:
             await rt.store.get_text(evaluator_ref)
@@ -185,7 +194,9 @@ async def run_prepare_phase(
             plan_id=EVALUATOR_PLAN_ID,
             task=evaluator_task,
             label="evaluator",
+            evaluation_policy=evaluation_policy,
         )
+        evaluator_created = True
         await rt.supervisor.checkpoint_evaluator(evaluator_ref)
         await rt.publish_output(
             source="supervisor",
@@ -214,6 +225,7 @@ async def run_prepare_phase(
     # so the SEARCH evaluator's labels are never reused as the final test.
     final_evaluator_dir = rt.workspaces_root / "final_evaluator"
     final_evaluator_ref = rt.supervisor.final_evaluator_ref
+    final_evaluator_created = False
     if final_evaluator_ref is not None:
         try:
             await rt.store.get_text(final_evaluator_ref)
@@ -237,7 +249,9 @@ async def run_prepare_phase(
                 "by VALIDATE."
             ),
             label="final_evaluator",
+            evaluation_policy=evaluation_policy,
         )
+        final_evaluator_created = True
         await rt.supervisor.checkpoint_final_evaluator(final_evaluator_ref)
         await rt.publish_output(
             source="supervisor",
@@ -247,6 +261,9 @@ async def run_prepare_phase(
                 f"{final_evaluator_dir.resolve()}。"
             ),
         )
+
+    if evaluator_created or final_evaluator_created:
+        require_disjoint_evaluator_labels(evaluator_dir, final_evaluator_dir)
 
     # Step 2a: EDA orchestrator -> todo workers -> finalize.
     eda_ok = True
@@ -391,7 +408,7 @@ async def run_prepare_phase(
     tree_ref = await rt.store.put_text(
         json.dumps(rt.tree.to_dict(), ensure_ascii=False, sort_keys=True)
     )
-    return await run_prepare_plan(
+    result = await run_prepare_plan(
         agents=rt.agents,
         evaluator=rt.evaluator,
         git=rt.git,
@@ -406,3 +423,4 @@ async def run_prepare_phase(
             "prepare", kind, ref, data
         ),
     )
+    return result.model_copy(update={"final_evaluator_ref": final_evaluator_ref})

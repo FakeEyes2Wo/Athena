@@ -9,8 +9,8 @@ The todo file uses stage headers and GitHub checkboxes::
     - [ ] 01 Quality -> EDA_REPORT_01_DATA_QUALITY.md
 
 ``parallel: false`` stages run sequentially; ``parallel: true`` stages run up
-to ``max_workers`` workers concurrently. Failed items are retried and left
-unchecked if they still fail.
+to ``max_workers`` workers concurrently. Existing reports are reused, while
+failed items are left unchecked for the deterministic fallback path.
 """
 
 import asyncio
@@ -27,8 +27,41 @@ from athena.research.supervisor.plans import wait_run_events
 
 _STAGE_RE = re.compile(r"^##\s+.+?\(parallel:\s*(true|false)\)\s*$")
 _TODO_RE = re.compile(r"^- \[ \]\s+(.+?)(?:\s*->\s*([^\s#]+))?\s*$")
-PublishEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
+PublishEvent = Callable[[str, str, str, dict | None], Awaitable[None]]
 Todo = tuple[int, str, str]  # (line_index, text, output_file)
+EDA_WORKER_TIMEOUT_SECONDS = 180
+EDA_WORKER_RETRIES = 0
+_MIN_REPORT_BYTES = 64
+
+
+def _usable_report(workspace: Path, output_file: str) -> bool:
+    """Return whether an existing report is safe to reuse after interruption."""
+    try:
+        root = workspace.resolve()
+        path = (workspace / output_file).resolve()
+        path.relative_to(root)
+        if not path.is_file() or path.stat().st_size < _MIN_REPORT_BYTES:
+            return False
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, ValueError):
+        return False
+    stripped = text.lstrip()
+    return stripped.startswith("#") and (
+        "eda:" in text or "EDA generation failed or was skipped." in text
+    )
+
+
+async def _cancel_worker(agents: AgentRuntime, agent_id: str, run_id: str) -> None:
+    """Stop the exact timed-out run so it cannot keep spending API quota."""
+    cancel_run = getattr(agents, "cancel_run", None)
+    try:
+        if callable(cancel_run):
+            await cancel_run(agent_id, run_id, "eda_worker_timeout")
+        else:
+            await agents.interrupt(agent_id, "eda_worker_timeout")
+    except Exception:
+        # The run may already have reached a terminal state.
+        pass
 
 # EDA_INDEX/EDA_HANDOFF are written by the PREPARE_EDA orchestrator in its
 # finalize turn, not by an EDA worker (which is forbidden to write them).
@@ -66,9 +99,12 @@ async def _run_one(
     parent_id: str,
     retries: int,
     project_event: PublishEvent | None,
+    timeout_seconds: float,
 ) -> bool:
     """Spawn one worker, wait for it, and verify its output file."""
     _, text, output_file = todo
+    if _usable_report(workspace, output_file):
+        return True
     for attempt in range(retries + 1):
         agent_id: str | None = None
         try:
@@ -96,18 +132,31 @@ async def _run_one(
                 name=f"eda-{output_file}",
             )
 
-            def publish(kind: str, ref: str, data: dict | None = None) -> None:
+            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
                 """Forward one worker event to the runtime event bus."""
                 if project_event is not None and agent_id is not None:
-                    project_event(agent_id, kind, ref, data)
+                    await project_event(agent_id, kind, ref, data)
 
-            summary = await wait_run_events(agents, run_id, publish)
+            try:
+                summary = await asyncio.wait_for(
+                    wait_run_events(agents, run_id, publish),
+                    timeout=timeout_seconds,
+                )
+            except TimeoutError:
+                await _cancel_worker(agents, agent_id, run_id)
+                raise RuntimeError(
+                    f"{output_file} timed out after {timeout_seconds:g}s"
+                ) from None
+            # The report is the durable contract. Accept it even if the model's
+            # final JSON was malformed, avoiding a full EDA rerun for formatting.
+            if _usable_report(workspace, output_file):
+                return True
             if await load_agent_result(summary, store, HandoffResult) is None:
                 raise RuntimeError(f"{output_file} returned no result")
-            if not (workspace / output_file).is_file():
-                raise RuntimeError(f"{output_file} was not written")
-            return True
+            raise RuntimeError(f"{output_file} was not written or was incomplete")
         except Exception:
+            if _usable_report(workspace, output_file):
+                return True
             if attempt >= retries:
                 return False
             await asyncio.sleep(0.2)
@@ -133,6 +182,7 @@ async def _run_stage(
     max_workers: int,
     retries: int,
     project_event: PublishEvent | None,
+    timeout_seconds: float,
 ) -> list[str]:
     """Run one stage, updating checkboxes in ``lines``; return failed todo text."""
     parallel, todos = stage
@@ -150,6 +200,7 @@ async def _run_stage(
                     parent_id=parent_id,
                     retries=retries,
                     project_event=project_event,
+                    timeout_seconds=timeout_seconds,
                 )
                 for todo in batch
             )
@@ -170,7 +221,8 @@ async def run_eda_todos(
     todo_file: str = "EDA_TODO.md",
     parent_id: str = PREPARE_EDA_AGENT_ID,
     max_workers: int = 3,
-    retries: int = 2,
+    retries: int = EDA_WORKER_RETRIES,
+    timeout_seconds: float = EDA_WORKER_TIMEOUT_SECONDS,
     project_event: PublishEvent | None = None,
 ) -> list[str]:
     """Execute pending todos by spawning worker subagents; return failed texts."""
@@ -191,6 +243,7 @@ async def run_eda_todos(
                 max_workers=max_workers,
                 retries=retries,
                 project_event=project_event,
+                timeout_seconds=timeout_seconds,
             )
         )
     todo_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")

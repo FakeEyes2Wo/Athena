@@ -5,7 +5,9 @@ import logging
 
 from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.contracts import ArtifactRef
+from athena.core.research_models import TaskUnderstanding
 from athena.research.report import build_final_report
+from athena.research.rubrics.task import assess_task_readiness
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
 from athena.research.supervisor.run_state import SupervisorRunState
@@ -97,10 +99,17 @@ class PhaseMachine:
         machine here to actually run the chosen phase.
         """
         if self._state.phase == "SEARCH":
-            await self._search.run_search()
+            await self._owner.run_search()
             if self._run.is_stopped():
                 return
             if self._deps.auto_validate:
+                if not self._search_limit_reached():
+                    attempts = count_search_attempts(self._state, self._tree)
+                    raise RuntimeError(
+                        "SEARCH ended before its requested experiment budget was "
+                        f"completed ({attempts}/{self._state.search_limit}); refusing "
+                        "to validate the baseline as if search had succeeded"
+                    )
                 await self._transition_phase("VALIDATE")
             elif self._search_limit_reached() and self._state.status == "RUNNING":
                 self._state.status = "WAITING"
@@ -195,6 +204,9 @@ class PhaseMachine:
             self._tree.set_sota(experiment_id)
             self._tree.save(self._deps.tree_path)
         self._deps.evaluator_ref = result.evaluator_ref
+        self._deps.final_evaluator_ref = result.final_evaluator_ref
+        self._state.evaluator_ref = result.evaluator_ref
+        self._state.final_evaluator_ref = result.final_evaluator_ref
         await self._deps.publish(
             "output",
             {
@@ -330,15 +342,15 @@ class PhaseMachine:
         if self._run.running_tasks:
             await asyncio.gather(*self._run.running_tasks, return_exceptions=True)
         self._run.clear_running()
-        # Stop is terminal for locally owned Plan agents: release their threads
-        # and facade metadata. If the same project is restarted, Recovery re-creates
-        # plan threads from durable state via resume_agent.
+        # Preserve terminal run summaries for audit after interruption. The
+        # enclosing AgentRuntime owns final physical cleanup via ``aclose``;
+        # Recovery can resume these durable Plan identities in a new process.
         for plan_id in tuple(self._state.plans):
             try:
-                await self._deps.agents.reap(plan_id)
+                await self._deps.agents.close(plan_id)
             except Exception:  # noqa: BLE001 - GC must never block shutdown
                 logger.warning(
-                    "failed to reap Plan agent %s during stop", plan_id, exc_info=True
+                    "failed to close Plan agent %s during stop", plan_id, exc_info=True
                 )
 
     async def message(self, text: str) -> str:
@@ -357,8 +369,12 @@ class PhaseMachine:
         }
 
     async def record_task_understanding(self, **payload: object) -> dict[str, object]:
-        """Persist the Supervisor's structured task understanding and surface it."""
-        self._state.task_understanding = dict(payload)
+        """Validate, assess, persist, and surface task readiness."""
+        understanding = TaskUnderstanding.model_validate(payload)
+        assessed = assess_task_readiness(
+            understanding, project_root=self._deps.project_root
+        )
+        self._state.task_understanding = assessed.model_dump(mode="json")
         await self._plans._persist_state()
         return {
             "recorded": True,

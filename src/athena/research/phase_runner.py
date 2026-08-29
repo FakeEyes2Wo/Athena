@@ -1,19 +1,9 @@
-"""Phase execution for the research lifecycle (PREPARE / VALIDATE / plan turn).
+"""Phase execution for the research lifecycle (PREPARE / VALIDATE / plan turn)."""
 
-拆自 ``ResearchRuntime``：把 phase 编排（run_plan_turn / run_prepare_phase /
-run_validation_phase / review_validation_diff）集中到一个组合单元。持有
-``runtime`` 引用以访问组合根的共享基础设施；避免在构造期重复注入十余个
-可变字段。
-"""
-
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-logger = logging.getLogger(__name__)
-
 from athena.agents.ideator_agent import HandoffResult
-from athena.agents.prepare_agent import PREPARE_EDA_AGENT_ID, PREPARE_EDA_AGENT_TYPE
 from athena.agents.task_agents import register_validate_agent
 from athena.execution.runtime import ExecutionContext
 from athena.research.contracts import ValidationResult
@@ -79,31 +69,29 @@ class PhaseRunner:
         content: str,
         reap_after: bool = False,
     ) -> str:
-        """Run one handoff-producing agent and return the output file text.
-
-        ``reap_after`` should be True only on the agent's last use; it releases
-        the one-shot thread and facade metadata immediately.
-        """
+        """Run one handoff-producing agent and return the output file text."""
         rt = self._runtime
+        agents = getattr(rt, "agents", None) or getattr(rt, "_agents")
+        store = getattr(rt, "store", None) or getattr(rt, "_store")
         request = {"content": content, "context_refs": []}
         try:
-            if rt.agents.has_agent(agent_id):
-                run_id = await rt.agents.followup(agent_id, request)
+            if agents.has_agent(agent_id):
+                run_id = await agents.followup(agent_id, request)
             else:
-                _id, run_id = await rt.agents.create_root(
+                _id, run_id = await agents.create_root(
                     agent_type, request, agent_id=agent_id, name=agent_id
                 )
 
-            def publish(kind: str, ref: str, data: dict | None = None) -> None:
-                """Forward one agent journal event to the runtime event bus."""
-                events_bus = getattr(rt, "events", None)
+            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
+                events_bus = getattr(rt, "events", None) or getattr(
+                    rt, "_events_bus", None
+                )
                 if events_bus is not None:
-                    events_bus.project_agent_event(agent_id, kind, ref, data)
+                    await events_bus.project_agent_event(agent_id, kind, ref, data)
 
-            summary = await wait_run_events(rt.agents, run_id, publish)
-            result = await load_agent_result(summary, rt.store, HandoffResult)
+            summary = await wait_run_events(agents, run_id, publish)
+            result = await load_agent_result(summary, store, HandoffResult)
             path = Path(workspace) / output_file
-            # 文件已落盘但结果解析失败时，仍视为成功，避免“文件存在却标红”。
             if result is None:
                 if path.is_file():
                     return path.read_text(encoding="utf-8")
@@ -116,39 +104,31 @@ class PhaseRunner:
         finally:
             if reap_after:
                 try:
-                    await rt.agents.reap(agent_id)
-                except (
-                    Exception
-                ):  # noqa: BLE001,S110 - GC must never mask handoff failure
+                    await agents.reap(agent_id)
+                except Exception:  # noqa: BLE001,S110
                     pass
 
     async def run_prepare_phase(self) -> PrepareResult:
-        """Run the PREPARE phase and return the trusted baseline result."""
+        """Run PREPARE and return the trusted baseline result."""
         return await run_prepare_phase(self._runtime, self._run_handoff_agent)
 
     async def run_validation_phase(
         self, sota_commit: str, metric: float
     ) -> ValidationResult:
-        """Run the VALIDATE phase and return the validation result."""
+        """Run VALIDATE against the disjoint frozen final evaluator."""
         rt = self._runtime
         if rt.validation_phase is not None:
             return await rt.validation_phase(sota_commit, metric)
         if rt.provider is None:
             raise RuntimeError("VALIDATE requires a registered Agent provider")
         evaluator_ref = rt.supervisor.evaluator_ref
-        if evaluator_ref is None:
-            raise RuntimeError("VALIDATE requires a frozen evaluator")
-        final_evaluator_ref = getattr(rt.supervisor, "final_evaluator_ref", None)
-        if final_evaluator_ref is None:
-            # Legacy projects do not have a separate final evaluator yet. Keep
-            # working but make the limitation explicit instead of silently
-            # pretending the search evaluator is an unseen final test.
-            final_evaluator_ref = evaluator_ref
-            logger.warning(
-                "VALIDATE has no final_evaluator_ref; using the search evaluator "
-                "as final. Re-run PREPARE with final-evaluator support for a "
-                "true unseen final test."
+        final_evaluator_ref = rt.supervisor.final_evaluator_ref
+        if evaluator_ref is None or final_evaluator_ref is None:
+            raise RuntimeError(
+                "VALIDATE requires disjoint frozen search and final evaluators"
             )
+        if evaluator_ref == final_evaluator_ref:
+            raise RuntimeError("VALIDATE final evaluator must differ from SEARCH")
         workspace = await rt.git.create(sota_commit, "athena/validate")
         if not rt.registry.contains("validate"):
             register_validate_agent(

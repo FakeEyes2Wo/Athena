@@ -21,7 +21,7 @@ from athena.core.research_models import Hypothesis
 
 _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
-PublishEvent = Callable[[str, str, dict | None], Awaitable[None] | None]
+PublishEvent = Callable[[str, str, dict | None], Awaitable[None]]
 
 DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
 """Default wall-clock budget for one experiment command (seconds)."""

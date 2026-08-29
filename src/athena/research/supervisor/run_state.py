@@ -102,6 +102,14 @@ class SupervisorRunState:
     def pop_running(self, plan_id: str) -> asyncio.Task | None:
         return self._running.pop(plan_id, None)
 
+    def pop_running_task(self, task: asyncio.Task) -> str | None:
+        """Remove a completed task and return its owning Plan ID."""
+        for plan_id, running_task in self._running.items():
+            if running_task is task:
+                del self._running[plan_id]
+                return plan_id
+        return None
+
     def running_ids(self) -> Iterable[str]:
         return tuple(self._running)
 

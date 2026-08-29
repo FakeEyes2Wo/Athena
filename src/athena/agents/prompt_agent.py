@@ -86,6 +86,9 @@ def register_prompt_agent(
     name: str | None = None,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
     prompt_agent_type: str | None = None,
+    structured_repair_provider: object | None = None,
+    max_turns: int = 200,
+    max_tokens: int = 4096,
 ) -> None:
     """注册 prompt-driven ReAct Agent 工厂（各 ``register_*_agent`` 的共性）。
 
@@ -101,6 +104,9 @@ def register_prompt_agent(
     ``prompt_agent_type`` 让 prompt 文件名与注册名解耦，缺省二者相同。ideator 的
     消融开关要在同一个注册名下切换两份不同契约的 prompt（``ideator_agent.md`` 与
     ``ideator_gated_agent.md``），是目前唯一的用例。
+
+    ``max_turns`` 和 ``max_tokens`` 允许高成本的专用 Agent 收紧预算；默认值保持
+    原有行为，避免影响其他 Agent。
     """
 
     def factory(agent_id: str, _config: str | None = None) -> AgentSpec:
@@ -110,13 +116,25 @@ def register_prompt_agent(
         if resolved is not None:
             for spec in resolved.specs:
                 tools.register(resolved.resolve(spec.name))
+        prompt = load_prompt(prompt_agent_type or agent_type)
+        if runtime is not None:
+            summarize = getattr(runtime, "runtime_summary", None)
+            if callable(summarize):
+                runtime_context = summarize(root).strip()
+                if runtime_context:
+                    prompt = runtime_context + "\n\n" + prompt
         agent = Agent(
             provider,
             tools,
-            load_prompt(prompt_agent_type or agent_type),
-            AgentConfig(name=(name or f"{agent_type}-agent").format(agent_id=agent_id)),
+            prompt,
+            AgentConfig(
+                max_turns=max_turns,
+                max_tokens=max_tokens,
+                name=(name or f"{agent_type}-agent").format(agent_id=agent_id),
+            ),
             output_type=output_type,
             artifacts=artifacts,
+            structured_repair_provider=structured_repair_provider,
         )
         return AgentSpec(
             runner=BaseAgentRunner(agent, tools=tools, agent_type=agent_type),

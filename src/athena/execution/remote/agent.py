@@ -42,18 +42,23 @@ def _fail(request_id, message):
 def _pump(job_id, stream, fd):
     """把一条子进程输出流按块回传，直到 EOF。"""
     try:
-        while True:
-            block = stream.read1(CHUNK_BYTES)
-            if not block:
-                return
-            _send(
-                {
-                    "op": "out",
-                    "id": job_id,
-                    "fd": fd,
-                    "b64": base64.b64encode(block).decode("ascii"),
-                }
-            )
+        try:
+            while True:
+                block = stream.read1(CHUNK_BYTES)
+                if not block:
+                    return
+                _send(
+                    {
+                        "op": "out",
+                        "id": job_id,
+                        "fd": fd,
+                        "b64": base64.b64encode(block).decode("ascii"),
+                    }
+                )
+        except (OSError, ValueError):
+            # Cancellation may close the pipe while this daemon reader is
+            # blocked.  That is an expected end-of-stream, not an agent crash.
+            return
     finally:
         try:
             stream.close()
@@ -65,7 +70,18 @@ def _wait(job_id, proc, readers):
     """等子进程结束，把两条流抽干，再回报退出码。"""
     code = proc.wait()
     for reader in readers:
-        reader.join()
+        reader.join(timeout=5)
+    # Windows descendants can briefly keep inherited pipe handles open even
+    # after taskkill has ended the process tree.  Never let that delay the exit
+    # event forever; close our read ends and give the daemon readers one last
+    # bounded chance to finish.
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (AttributeError, OSError):
+            pass
+    for reader in readers:
+        reader.join(timeout=1)
     with _jobs_lock:
         _jobs.pop(job_id, None)
     _send({"op": "exit", "id": job_id, "code": code})
@@ -146,20 +162,44 @@ def _kill(proc):
             pass
         return
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=15,
         )
-    except OSError:
-        pass
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if proc.poll() is None and (result is None or result.returncode != 0):
+        # Last-resort termination of the direct child.  The bounded stream
+        # cleanup in ``_wait`` still guarantees a terminal event.
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def _cancel(message):
+    target = message.get("target") or message["id"]
     with _jobs_lock:
-        proc = _jobs.get(message.get("target") or message["id"])
+        proc = _jobs.get(target)
     if proc is not None:
         _kill(proc)
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+                code = proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                code = -1
+        with _jobs_lock:
+            if _jobs.get(target) is proc:
+                _jobs.pop(target, None)
+        # A cancel acknowledgement must not race ahead of the terminal event.
+        # The background waiter may emit the same event later; the controller
+        # deliberately ignores duplicate exits after resolving the future.
+        _send({"op": "exit", "id": target, "code": code})
     _send({"op": "ok", "id": message["id"]})
 
 

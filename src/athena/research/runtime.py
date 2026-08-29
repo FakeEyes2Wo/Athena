@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+from athena.agents.rubric_agent import register_rubric_agents
 from athena.agents.supervisor_agent import register_supervisor_agent
 from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
@@ -15,6 +16,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.contracts import ArtifactRef
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_tree import ResearchTree
+from athena.core.research_models import TaskUnderstanding
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser
 from athena.execution.compute_config import ComputeConfig, load_compute_config
@@ -39,6 +41,7 @@ from athena.research.paper_rag.schemas import PaperSummary
 from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime_control import (
     cancel_supervisor_task as cancel_supervisor_task_impl,
+    ensure_evaluation_policy as ensure_evaluation_policy_impl,
     ensure_started as ensure_started_impl,
     maybe_run_task_understanding as maybe_run_task_understanding_impl,
     message as message_impl,
@@ -49,6 +52,8 @@ from athena.research.runtime_control import (
     start_task as start_task_impl,
     start_validation as start_validation_impl,
     task_context_text as task_context_text_impl,
+    task_needs_input as task_needs_input_impl,
+    task_understanding as task_understanding_impl,
 )
 from athena.research.runtime_corpus import (
     corpus_paper_ids as corpus_paper_ids_impl,
@@ -113,6 +118,8 @@ class ResearchRuntime:
         project_root: str | Path | None = None,
         state_root: str | Path | None = None,
         model: str | None = None,
+        reasoning_model: str | None = None,
+        reasoning_thinking: bool = False,
         client: Any = None,
         task: str = "",
         auto_seed_task: bool = False,
@@ -294,6 +301,7 @@ class ResearchRuntime:
             run_plan_turn=phase_runner.run_plan_turn,
             run_supervisor_turn=agent_turns.run_supervisor_turn,
             run_ideator_turn=agent_turns.run_ideator_turn,
+            run_hypothesis_rubric=agent_turns.run_hypothesis_rubric,
             run_general_turn=agent_turns.run_general_turn,
             publish=events_bus.publish_from_supervisor,
             auto_validate=auto_validate,
@@ -304,12 +312,27 @@ class ResearchRuntime:
             publish_agent_event=events_bus.project_agent_event,
             on_plan_settled=self.release_lease,
         )
+        if reasoning_thinking and reasoning_model is None:
+            raise ValueError("reasoning_thinking requires reasoning_model")
         services.supervisor = supervisor
         services.agent_turns = agent_turns
         services.phase_runner = phase_runner
         events_bus.attach_supervisor(supervisor)
         if model is not None:
-            self.register_supervisor(provider=ResponsesProvider(model, client=client))
+            provider = ResponsesProvider(model, client=client)
+            reasoning_provider = (
+                ResponsesProvider(
+                    reasoning_model,
+                    client=client,
+                    thinking=reasoning_thinking,
+                )
+                if reasoning_model is not None
+                else None
+            )
+            self.register_supervisor(
+                provider=provider,
+                reasoning_provider=reasoning_provider,
+            )
 
     # ── Compatibility accessors: keep existing method bodies small while the
     # runtime now stores only _config/_services/_session. Tests that construct
@@ -318,6 +341,7 @@ class ResearchRuntime:
 
     _SESSION_FIELDS: ClassVar[dict[str, str]] = {
         "_provider": "provider",
+        "_reasoning_provider": "reasoning_provider",
         "_task": "task",
         "_started": "started",
         "_task_text": "task_text",
@@ -330,6 +354,7 @@ class ResearchRuntime:
     _CONFIG_FIELDS: ClassVar[dict[str, str | tuple[str, str]]] = {
         "_model": "model",
         "_client": "client",
+        "_auto_seed_task": "auto_seed_task",
         "_direction": "direction",
         "_tolerance": "tolerance",
         "_auto_validate": "auto_validate",
@@ -519,6 +544,15 @@ class ResearchRuntime:
         return self._provider
 
     @property
+    def reasoning_provider(self) -> object | None:
+        session = self.__dict__.get("_session")
+        if session is not None:
+            return session.reasoning_provider
+        # Compatibility for lightweight tests and integrations that construct
+        # the runtime with ``__new__`` and seed the legacy private field.
+        return self.__dict__.get("_reasoning_provider")
+
+    @property
     def task_text(self) -> str:
         return self._task_text
 
@@ -554,11 +588,17 @@ class ResearchRuntime:
     def plan_turn(self):
         return self._config.plan_turn
 
-    def register_supervisor(self, *, provider: object) -> None:
+    def register_supervisor(
+        self,
+        *,
+        provider: object,
+        reasoning_provider: object | None = None,
+    ) -> None:
         """Register the long-lived SupervisorAgent once."""
         if self._provider is not None:
             raise ValueError("SupervisorAgent provider is already registered")
         self._provider = provider
+        self._reasoning_provider = reasoning_provider or provider
         # 只读 stack 供 Supervisor 的 kaggle_get_competition 查主指标（不缓存，
         # 避免提前固化 download 标志）。
         supervisor_kaggle = build_kaggle_stack(
@@ -573,6 +613,12 @@ class ResearchRuntime:
                 (lambda _t, _u: self._ask_user) if self._ask_user is not None else None
             ),
             kaggle_stack=supervisor_kaggle,
+        )
+        register_rubric_agents(
+            self._registry,
+            provider=self._reasoning_provider,
+            repair_provider=provider,
+            artifacts=self._store,
         )
         register_plan_agent(
             self._registry,
@@ -705,9 +751,17 @@ class ResearchRuntime:
         """Reconstruct the effective task text from persisted resume state."""
         return resume_task_text_impl(self, fallback)
 
-    async def _maybe_run_task_understanding(self) -> None:
-        """Run PREPARE task understanding unless a checkpoint already exists."""
-        await maybe_run_task_understanding_impl(self)
+    def _task_understanding(self) -> TaskUnderstanding | None:
+        return task_understanding_impl(self)
+
+    def _task_needs_input(self) -> bool:
+        return task_needs_input_impl(self)
+
+    async def _ensure_evaluation_policy(self) -> None:
+        await ensure_evaluation_policy_impl(self)
+
+    async def _maybe_run_task_understanding(self) -> bool:
+        return await maybe_run_task_understanding_impl(self)
 
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.

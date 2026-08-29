@@ -1,9 +1,4 @@
-"""Thin facade for Athena's autonomous research Supervisor.
-
-The Supervisor class intentionally keeps only a small set of collaborators.
-Most public API methods are delegated dynamically to those collaborators, so
-the class stays small while preserving the same callable surface.
-"""
+"""Thin facade for Athena's autonomous research Supervisor."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -15,6 +10,7 @@ from athena.core.research_tree import ResearchTree
 from athena.core.workspace import GitWorkspace
 from athena.research.supervisor.deps import (
     GeneralTurn,
+    HypothesisRubricTurn,
     IdeatorTurn,
     PlanTurn,
     PreparePhase,
@@ -38,8 +34,6 @@ from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.search_loop import SearchLoop
 from athena.research.supervisor.state import ResearchState
 
-# Private-name compatibility mappings used by ``__setattr__`` so existing tests
-# and callers that mutate supervisor internals keep updating the collaborators.
 _DEPS_ATTRS = {
     "_project_root": "project_root",
     "_state_path": "state_path",
@@ -51,11 +45,13 @@ _DEPS_ATTRS = {
     "_recovery": "recovery",
     "_evaluator_ref": "evaluator_ref",
     "_final_evaluator_ref": "final_evaluator_ref",
+    "_evaluation_policy": "evaluation_policy",
     "_direction": "direction",
     "_tolerance": "tolerance",
     "_run_plan_turn": "run_plan_turn",
     "_run_supervisor_turn": "run_supervisor_turn",
     "_run_ideator_turn": "run_ideator_turn",
+    "_run_hypothesis_rubric": "run_hypothesis_rubric",
     "_run_general_turn": "run_general_turn",
     "_publish": "publish",
     "_auto_validate": "auto_validate",
@@ -104,6 +100,7 @@ class Supervisor:
         publish: Publish,
         auto_validate: bool = False,
         run_ideator_turn: IdeatorTurn | None = None,
+        run_hypothesis_rubric: HypothesisRubricTurn | None = None,
         run_general_turn: GeneralTurn | None = None,
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
@@ -115,15 +112,13 @@ class Supervisor:
         self.state = state
         self.tree = tree
         project_root = Path(project_root)
-        _athena = (
-            Path(state_root)
-            if state_root is not None
-            else project_root / ".athena"
+        athena_state = (
+            Path(state_root) if state_root is not None else project_root / ".athena"
         )
         deps = SupervisorDeps(
             project_root=project_root,
-            state_path=_athena / "state.json",
-            tree_path=_athena / "research_tree.json",
+            state_path=athena_state / "state.json",
+            tree_path=athena_state / "research_tree.json",
             store=store,
             agents=agents,
             workspaces=workspaces,
@@ -140,6 +135,7 @@ class Supervisor:
             publish=publish,
             auto_validate=auto_validate,
             run_ideator_turn=run_ideator_turn,
+            run_hypothesis_rubric=run_hypothesis_rubric,
             run_general_turn=run_general_turn,
             run_prepare_phase=run_prepare_phase,
             run_validation_phase=run_validation_phase,
@@ -157,8 +153,6 @@ class Supervisor:
         self._phases = phases
 
     def __setattr__(self, name: str, value: object) -> None:
-        # Collaborator fields are real attributes; everything else is either a
-        # compatibility private alias or a plain test override.
         if name in {
             "state",
             "tree",
@@ -218,11 +212,6 @@ class Supervisor:
             ) from None
 
     def _hypothesis_block(self, plan_id: str) -> str:
-        """本 Plan 要检验的那条假设，拼进 prompt 正文。
-
-        ``plan_id`` 就是 ``hypothesis_id``（见 ``start_plan``）。树里取不到时返回空串
-        而不是抛异常：少一段上下文该降级，不该让整条 Plan 挂掉。
-        """
         try:
             hypothesis = self.tree.get_hypothesis(plan_id)
         except KeyError:
@@ -230,7 +219,9 @@ class Supervisor:
         from athena.research.supervisor.experiment import hypothesis_block
 
         return hypothesis_block(
-            hypothesis.statement, hypothesis.intervention, hypothesis.expected_effect
+            hypothesis.statement,
+            hypothesis.intervention,
+            hypothesis.expected_effect,
         )
 
     async def _run_one_turn(self, plan_id: str) -> _CompletedTurn:
@@ -247,8 +238,6 @@ class Supervisor:
                         f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
                         f"turn limit: {state.turn_limit}; patience: {state.patience}; "
                         f"stale rounds: {state.stale_rounds}."
-                        # 假设与契约都必须走 content：context_refs 到不了 model
-                        # （见 experiment.hypothesis_block / handoff_block）。
                         + self._hypothesis_block(plan_id)
                         + handoff_block(await self._plan_handoff(plan_id))
                         + self._corpus_block(plan_id)

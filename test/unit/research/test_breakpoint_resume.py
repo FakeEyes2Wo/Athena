@@ -11,7 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from athena.core.artifact_store import LocalArtifactStore
 from athena.research.phase_runner import PhaseRunner
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.prepare import PrepareResult
 
@@ -31,6 +33,7 @@ def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime
         status="RUNNING",
         task_understanding=task_understanding,
         task_text="predict titanic survival" if task_understanding else None,
+        evaluation_policy_ref=None,
         save=lambda path: None,
     )
     runtime._supervisor = SimpleNamespace(state=runtime._state)
@@ -46,6 +49,93 @@ def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime
     runtime._git = FakeGit()
     runtime._agents = FakeAgents()
     return runtime
+
+
+class _PolicySupervisor:
+    def __init__(self, state) -> None:
+        self.state = state
+        self.evaluation_policy = None
+
+    def apply_evaluation_policy(self, policy: EvaluationPolicy) -> None:
+        self.evaluation_policy = policy
+
+
+@pytest.mark.asyncio
+async def test_search_resume_restores_exact_frozen_evaluation_policy(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path)
+    runtime._state.phase = "SEARCH"
+    runtime._store = LocalArtifactStore(tmp_path / "artifacts")
+    policy = EvaluationPolicy(
+        primary_metric="roc_auc",
+        direction="maximize",
+        metric_source="human",
+        locked=True,
+        confidence=1.0,
+        explanation="Explicit human objective.",
+    )
+    ref = await runtime._store.put_text(policy.model_dump_json())
+    runtime._state.evaluation_policy_ref = ref
+    runtime._supervisor = _PolicySupervisor(runtime._state)
+    outputs: list[dict[str, object]] = []
+
+    async def publish_output(**kwargs) -> None:
+        outputs.append(kwargs)
+
+    runtime.publish_output = publish_output  # type: ignore[method-assign]
+
+    class FakeAgentTurns:
+        async def run_evaluation_rubric(self):
+            raise AssertionError("resume must not call the Evaluation Rubric LLM")
+
+    runtime._agent_turns = FakeAgentTurns()
+
+    await runtime._ensure_evaluation_policy()
+
+    assert runtime._supervisor.evaluation_policy == policy
+    assert runtime._direction == "maximize"
+    assert runtime._state.evaluation_policy_ref == ref
+    assert any("复用已冻结的评价策略" in str(item.get("text")) for item in outputs)
+
+
+@pytest.mark.asyncio
+async def test_invalid_frozen_policy_is_not_regenerated(tmp_path: Path) -> None:
+    runtime = _stub_runtime(tmp_path)
+    runtime._state.phase = "PREPARE"
+    runtime._state.evaluation_policy_ref = "sha256:" + "f" * 64
+    runtime._store = LocalArtifactStore(tmp_path / "artifacts")
+    runtime._supervisor = _PolicySupervisor(runtime._state)
+    calls = 0
+
+    class FakeAgentTurns:
+        async def run_evaluation_rubric(self):
+            nonlocal calls
+            calls += 1
+
+    runtime._agent_turns = FakeAgentTurns()
+
+    with pytest.raises(RuntimeError, match="refusing to regenerate"):
+        await runtime._ensure_evaluation_policy()
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_search_without_frozen_policy_fails_closed(tmp_path: Path) -> None:
+    runtime = _stub_runtime(tmp_path)
+    runtime._state.phase = "SEARCH"
+    runtime._store = LocalArtifactStore(tmp_path / "artifacts")
+    runtime._supervisor = _PolicySupervisor(runtime._state)
+
+    class FakeAgentTurns:
+        async def run_evaluation_rubric(self):
+            raise AssertionError("SEARCH must not generate a replacement policy")
+
+    runtime._agent_turns = FakeAgentTurns()
+
+    with pytest.raises(RuntimeError, match="missing outside PREPARE"):
+        await runtime._ensure_evaluation_policy()
 
 
 @pytest.mark.asyncio
@@ -79,6 +169,45 @@ async def test_start_task_persists_first_task_text_and_reuses_it(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["FAILED", "STOPPED"])
+async def test_start_task_rearms_persisted_search_terminal_state(
+    tmp_path: Path, terminal_status: str
+) -> None:
+    """The direct headless start path must re-arm a persisted terminal SEARCH."""
+
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "support2"})
+    runtime._state.phase = "SEARCH"
+    runtime._state.status = terminal_status
+    saves: list[tuple[str, str]] = []
+    started_with: list[str] = []
+
+    def save(path) -> None:
+        saves.append((str(path), runtime._state.status))
+
+    async def supervisor_start() -> None:
+        started_with.append(runtime._state.status)
+
+    async def ready() -> bool:
+        return True
+
+    async def no_op() -> None:
+        return None
+
+    runtime._state.save = save
+    runtime._supervisor.start = supervisor_start
+    runtime._maybe_run_task_understanding = ready
+    runtime._ensure_evaluation_policy = no_op
+    runtime._start_survey = lambda: None
+
+    task = await runtime.start()
+    await task
+
+    assert runtime._state.status == "RUNNING"
+    assert started_with == ["RUNNING"]
+    assert saves == [(str(runtime._state_path), "RUNNING")]
+
+
+@pytest.mark.asyncio
 async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
     tmp_path: Path,
 ) -> None:
@@ -107,7 +236,15 @@ async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
 @pytest.mark.asyncio
 async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> None:
     runtime = _stub_runtime(
-        tmp_path, task_understanding={"title": "titanic", "target": "survival"}
+        tmp_path,
+        task_understanding={
+            "title": "titanic",
+            "dataset": "Titanic passenger table",
+            "target": "survival",
+            "task_type": "classification",
+            "metric_source": "unresolved",
+            "readiness": "READY",
+        },
     )
     outputs: list[dict[str, object]] = []
 
@@ -144,7 +281,7 @@ async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> 
             break
         await asyncio.sleep(0.01)
     assert any(
-        "断点续传：复用已持久化的任务理解" in str(output.get("text"))
+        "断点续传：复用已验证 READY 的任务理解" in str(output.get("text"))
         for output in outputs
     )
     assert not any("任务理解中" in str(output.get("text")) for output in outputs)
@@ -160,9 +297,10 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     from athena.research.phase_runner import PhaseRunner
 
     class FakeSupervisor:
-        def __init__(self, frozen_ref: str) -> None:
+        def __init__(self, frozen_ref: str, final_ref: str) -> None:
             self._evaluator_ref = frozen_ref
-            self._final_evaluator_ref = frozen_ref
+            self._final_evaluator_ref = final_ref
+            self.evaluation_policy = object()
             self.checked_refs: list[str] = []
             self.checked_final_refs: list[str] = []
 
@@ -207,10 +345,11 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         outputs.append(kwargs)
 
     frozen_ref = "sha256:" + "f" * 64
+    final_ref = "sha256:" + "e" * 64
     state = SimpleNamespace(
         phase="PREPARE", status="RUNNING", eda_dir=None, save=lambda path: None
     )
-    supervisor = FakeSupervisor(frozen_ref)
+    supervisor = FakeSupervisor(frozen_ref, final_ref)
     rt = SimpleNamespace(
         _root=tmp_path,
         _state_path=tmp_path / ".athena" / "state.json",
@@ -291,6 +430,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     result = await PhaseRunner(rt).run_prepare_phase()
 
     assert result.evaluator_ref == frozen_ref
+    assert result.final_evaluator_ref == final_ref
     assert any(
         "复用已冻结的评估器断点" in str(output.get("text")) for output in outputs
     )

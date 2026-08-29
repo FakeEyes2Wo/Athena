@@ -25,6 +25,19 @@ def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRu
     )
 
 
+def _bypass_preflight(runtime: ResearchRuntime) -> None:
+    """Keep task-seeding tests focused on seeding, not LLM preflight behavior."""
+
+    async def ready() -> bool:
+        return True
+
+    async def policy() -> None:
+        return None
+
+    runtime._maybe_run_task_understanding = ready  # type: ignore[method-assign]
+    runtime._ensure_evaluation_policy = policy  # type: ignore[method-assign]
+
+
 async def _close(runtime: ResearchRuntime) -> None:
     task = runtime._task
     if task is not None:
@@ -48,6 +61,7 @@ async def test_fresh_runtime_starts_idle_in_prepare_phase(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_start_task_explicit_seeds_prepare_and_starts(tmp_path: Path) -> None:
     runtime = _make_runtime(tmp_path)
+    _bypass_preflight(runtime)
     try:
         status = await runtime.start_task("predict titanic survival")
         assert status == "RUNNING"
@@ -63,6 +77,7 @@ async def test_auto_seed_task_first_message_starts_prepare(
     tmp_path: Path,
 ) -> None:
     runtime = _make_runtime(tmp_path, auto_seed_task=True)
+    _bypass_preflight(runtime)
     try:
         status = await runtime.message("predict titanic survival")
         assert status == "RUNNING"
@@ -120,7 +135,14 @@ async def test_start_task_reuses_persisted_task_understanding(
 ) -> None:
     runtime = _make_runtime(tmp_path)
     try:
-        runtime.state.task_understanding = {"title": "titanic"}
+        runtime.state.task_understanding = {
+            "title": "titanic",
+            "dataset": "Titanic passenger table",
+            "target": "survival",
+            "task_type": "classification",
+            "metric_source": "unresolved",
+            "readiness": "READY",
+        }
         runtime.state.task_text = "predict titanic survival"
         runs: list[str] = []
 
@@ -129,6 +151,11 @@ async def test_start_task_reuses_persisted_task_understanding(
             return "should not run"
 
         runtime._agent_turns.run_supervisor_turn = fake_supervisor_turn  # type: ignore[method-assign]
+
+        async def skip_policy() -> None:
+            return None
+
+        runtime._ensure_evaluation_policy = skip_policy  # type: ignore[method-assign]
         events: list[tuple[str, dict[str, object]]] = []
         runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
 
@@ -147,7 +174,7 @@ async def test_start_task_reuses_persisted_task_understanding(
             await asyncio.sleep(0.01)
         assert any(
             kind == "output"
-            and "断点续传：复用已持久化的任务理解" in str(payload.get("text"))
+            and "断点续传：复用已验证 READY 的任务理解" in str(payload.get("text"))
             for kind, payload in events
         )
         assert not any(

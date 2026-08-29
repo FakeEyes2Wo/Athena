@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from athena.core.contracts import ArtifactRef
+from athena.core.contracts import ArtifactRef, new_id
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
@@ -18,8 +18,10 @@ from athena.research.supervisor.policy import Outcome
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.statistics import MetricEvidence, settle_statistically
+from athena.research.rubrics.models import EvaluationPolicy
 
 logger = logging.getLogger(__name__)
+DEFAULT_AUTO_PLAN_TURNS = 4
 
 
 def _compare_metric(
@@ -28,11 +30,7 @@ def _compare_metric(
     direction: str,
     tolerance: float,
 ) -> Outcome:
-    delta = (
-        candidate - reference
-        if direction == "maximize"
-        else reference - candidate
-    )
+    delta = candidate - reference if direction == "maximize" else reference - candidate
     if delta > tolerance:
         return Outcome.WIN
     if delta < -tolerance:
@@ -316,10 +314,14 @@ class PlanLifecycle:
         primary: float | None = None
         outcome: Outcome | None = None
         if best_ref is None:
+            error = "settled without a trusted result"
+            if result is not None and result.kind != "scored":
+                detail = result.error or "no trusted result"
+                error = f"{result.kind}: {detail}"
             self._tree.transition_experiment(
                 experiment_id,
                 ExperimentStatus.FAILED,
-                error="settled without a trusted result",
+                error=error,
             )
         else:
             best = await load_best(best_ref, self._deps.store)
@@ -342,7 +344,9 @@ class PlanLifecycle:
                 outcome = {
                     "SUPPORTED": Outcome.WIN,
                     "REFUTED": Outcome.LOSS,
-                }.get(verdict)  # INCONCLUSIVE -> None
+                }.get(
+                    verdict
+                )  # INCONCLUSIVE -> None
             else:
                 outcome = _compare_metric(
                     best.metric,
@@ -385,9 +389,7 @@ class PlanLifecycle:
             hypothesis.priority = self._deps.scheduler.settle(
                 plan_input.reference_priority, outcome
             )
-            self._tree.update_hypothesis_status(
-                plan_id, _status_for_outcome(outcome)
-            )
+            self._tree.update_hypothesis_status(plan_id, _status_for_outcome(outcome))
         if primary is not None:
             sota_id = self._tree.best_experiment_id()
             if sota_id is None:
@@ -415,10 +417,15 @@ class PlanLifecycle:
         try:
             await self._deps.agents.reap(plan_id)
         except Exception:
-            logger.warning("failed to reap settled Plan agent %s", plan_id, exc_info=True)
+            logger.warning(
+                "failed to reap settled Plan agent %s", plan_id, exc_info=True
+            )
 
     def _sota_parent(self) -> tuple[str, Hypothesis]:
         """Return (sota_experiment_id, sota_hypothesis) for seeding hypotheses."""
+        override = getattr(self._owner, "__dict__", {}).get("_sota_parent")
+        if callable(override):
+            return override()
         parent_id = self._tree.best_experiment_id()
         if parent_id is None:
             raise ValueError("cannot propose SEARCH hypotheses without a SOTA")
@@ -450,19 +457,60 @@ class PlanLifecycle:
         """
         parent_id, parent_hypothesis = self._sota_parent()
         priority = self._deps.scheduler.seed(parent_hypothesis)
-        hypothesis_ids = [
-            self._tree.add_hypothesis(
-                hypothesis.model_copy(
-                    update={
-                        "id": None,
-                        "order": None,
-                        "parent_id": parent_id,
-                        "priority": priority,
-                    }
-                )
+        prepared = [
+            hypothesis.model_copy(
+                update={
+                    "id": new_id("hyp"),
+                    "order": None,
+                    "parent_id": parent_id,
+                    "priority": priority,
+                    "rubric_score": None,
+                    "rubric_ref": None,
+                    "turn_limit": (
+                        hypothesis.turn_limit
+                        if hypothesis.turn_limit is not None
+                        else DEFAULT_AUTO_PLAN_TURNS
+                    ),
+                }
             )
             for hypothesis in hypotheses
         ]
+        if prepared and self._deps.run_hypothesis_rubric is not None:
+            if self._deps.evaluation_policy is None:
+                self._state.status = "WAITING"
+                await self._persist_state()
+                await self._deps.publish(
+                    "output",
+                    {
+                        "source": "supervisor",
+                        "channel": "error",
+                        "text": (
+                            "Frozen Evaluation Policy is not loaded; hypothesis "
+                            "registration paused instead of changing the evaluation "
+                            "contract or silently falling back."
+                        ),
+                    },
+                )
+                raise RuntimeError("frozen Evaluation Policy is not loaded")
+            try:
+                prepared = await self._deps.run_hypothesis_rubric(prepared)
+            except Exception as error:
+                logger.warning(
+                    "hypothesis rubric failed; using deterministic fallback",
+                    exc_info=True,
+                )
+                await self._deps.publish(
+                    "output",
+                    {
+                        "source": "supervisor",
+                        "channel": "error",
+                        "text": (
+                            "Hypothesis Rubric unavailable; Selector is using its "
+                            f"deterministic fallback: {error}"
+                        ),
+                    },
+                )
+        hypothesis_ids = [self._tree.add_hypothesis(item) for item in prepared]
         self._tree.save(self._deps.tree_path)
         await self._publish_state()
         return {"hypothesis_ids": hypothesis_ids}
@@ -474,9 +522,40 @@ class PlanLifecycle:
         await self._persist_state()
         return {"evaluator_ref": ref}
 
-    async def checkpoint_final_evaluator(
-        self, ref: ArtifactRef
+    @property
+    def evaluator_ref(self) -> ArtifactRef | None:
+        return self._deps.evaluator_ref
+
+    @property
+    def final_evaluator_ref(self) -> ArtifactRef | None:
+        return self._deps.final_evaluator_ref
+
+    @property
+    def evaluation_policy(self) -> EvaluationPolicy | None:
+        return self._deps.evaluation_policy
+
+    @property
+    def evaluation_policy_ref(self) -> ArtifactRef | None:
+        return self._state.evaluation_policy_ref
+
+    def apply_evaluation_policy(self, policy: EvaluationPolicy) -> None:
+        """Apply the frozen policy direction to every later comparison."""
+        self._deps.evaluation_policy = policy
+        self._deps.direction = policy.direction
+
+    async def checkpoint_evaluation_policy(
+        self, ref: ArtifactRef, policy: EvaluationPolicy
     ) -> dict[str, object]:
+        self.apply_evaluation_policy(policy)
+        self._state.evaluation_policy_ref = ref
+        await self._persist_state()
+        return {
+            "evaluation_policy_ref": ref,
+            "primary_metric": policy.primary_metric,
+            "direction": policy.direction,
+        }
+
+    async def checkpoint_final_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
         """Persist the hidden final-test evaluator used only by VALIDATE."""
         self._deps.final_evaluator_ref = ref
         self._state.final_evaluator_ref = ref

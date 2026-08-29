@@ -9,8 +9,11 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
+from athena.research.rubrics.models import EvaluationPolicy
 from athena.research.supervisor.prepare import (
+    _evaluator_layout,
     _validate_frozen_evaluator,
+    require_disjoint_evaluator_labels,
     run_evaluator_plan,
     run_prepare_plan,
 )
@@ -65,6 +68,61 @@ class _AgentRuntime:
 
 class _Scripts:
     """Script runner stub: no freeze or run_dir, so property tests are skipped."""
+
+
+def _write_evaluator_contract(
+    root: Path,
+    *,
+    row_ids: tuple[str, ...] = ("1", "2"),
+    primary_metric: str = "roc_auc",
+    direction: str = "maximize",
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (root / "metric.json").write_text(
+        json.dumps(
+            {
+                "eval_script": "evaluate.py",
+                "primary_metric": primary_metric,
+                "direction": direction,
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = "\n".join(f"{row_id},0" for row_id in row_ids)
+    (root / "labels.csv").write_text(
+        f"__athena_row_id,label\n{rows}\n",
+        encoding="utf-8",
+    )
+
+
+def _frozen_policy() -> EvaluationPolicy:
+    return EvaluationPolicy(
+        primary_metric="roc_auc",
+        direction="maximize",
+        metric_source="human",
+        locked=True,
+        confidence=1.0,
+        explanation="Human requested AUROC.",
+    )
+
+
+def test_evaluator_layout_enforces_frozen_policy(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    _write_evaluator_contract(evaluator_dir, primary_metric="accuracy")
+
+    with pytest.raises(ValueError, match="does not match frozen Evaluation Policy"):
+        _evaluator_layout(evaluator_dir, evaluation_policy=_frozen_policy())
+
+
+def test_search_and_final_evaluator_labels_must_be_disjoint(tmp_path: Path) -> None:
+    search_dir = tmp_path / "search"
+    final_dir = tmp_path / "final"
+    _write_evaluator_contract(search_dir, row_ids=("1", "2"))
+    _write_evaluator_contract(final_dir, row_ids=("2", "3"))
+
+    with pytest.raises(ValueError, match="must be disjoint"):
+        require_disjoint_evaluator_labels(search_dir, final_dir)
 
 
 class _Execution:
