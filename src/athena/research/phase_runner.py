@@ -94,11 +94,25 @@ class PhaseRunner:
                     agent_type, request, agent_id=agent_id, name=agent_id
                 )
 
-            def publish(kind: str, ref: str, data: dict | None = None) -> None:
-                """Forward one agent journal event to the runtime event bus."""
+            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
+                """Forward one agent journal event to the runtime event bus.
+
+                Must be a coroutine function. ``forward_run_events`` does
+                ``await publish(...)`` on every journal event, and
+                ``project_agent_event`` is itself async. As a plain ``def`` this
+                returned None, so the first event of every handoff run raised
+                ``object NoneType can't be used in 'await' expression`` -- and
+                the coroutine it dropped on the floor meant the events were
+                never projected either.
+
+                Real run (2026-08-29): all nine EDA_REPORT_*.md were written,
+                then the handoff died on its first event and PREPARE fell back
+                to "EDA failed, degrade to the raw task text". The reports were
+                right there on disk and nothing read them.
+                """
                 events_bus = getattr(rt, "events", None)
                 if events_bus is not None:
-                    events_bus.project_agent_event(agent_id, kind, ref, data)
+                    await events_bus.project_agent_event(agent_id, kind, ref, data)
 
             summary = await wait_run_events(rt.agents, run_id, publish)
             result = await load_agent_result(summary, rt.store, HandoffResult)
