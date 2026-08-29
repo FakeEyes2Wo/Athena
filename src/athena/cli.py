@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from athena.core.agent import settings
+from athena.core.project_lock import ProjectBusyError, project_lock
 from athena.execution.check import check_compute, print_compute_check
 from athena.execution.compute_config import (
     ComputeConfig,
@@ -249,6 +250,19 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     forked = _apply_fork(args)
     if forked:
         return forked
+    # 一个项目同时只允许一个 run。两个进程写同一份 state.json / research_tree.json
+    # 时是最后写入者获胜，已结算的实验会静默消失（真机 2026-08-30：一个 SOTA 就这
+    # 样从树里没了，两个进程都还在正常跑，唯一的迹象是树变短了）。
+    try:
+        with project_lock(Path(args.project) / ".athena"):
+            return await _run_locked(args)
+    except ProjectBusyError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+async def _run_locked(args: argparse.Namespace) -> int:
+    """Run one research session; the caller holds the project lock."""
     runtime = _runtime(args.project, **_runtime_options(args))
     terminal = asyncio.Event()
     exit_code = 0
