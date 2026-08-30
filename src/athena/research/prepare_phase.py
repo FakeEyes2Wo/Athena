@@ -93,6 +93,9 @@ def _assert_evaluator_splits_are_disjoint(
         )
 
 
+_PLACEHOLDER_MARK = "EDA generation failed or was skipped."
+
+
 def _write_missing_report_placeholders(workspace: Path) -> None:
     """Create placeholder files for every EDA_REPORT_*.md named in EDA_TODO.md."""
     todo_path = workspace / "EDA_TODO.md"
@@ -109,9 +112,25 @@ def _write_missing_report_placeholders(workspace: Path) -> None:
         target = workspace / name
         if not target.exists():
             target.write_text(
-                f"# {name}\n\nEDA generation failed or was skipped.\n",
+                f"# {name}\n\n{_PLACEHOLDER_MARK}\n",
                 encoding="utf-8",
             )
+
+
+def _usable_eda_reports(workspace: Path) -> list[Path]:
+    """真正有内容的 EDA_REPORT_*.md（排除占位符）。
+
+    单份报告写失败不该让另外几份陪葬——它们就在盘上，只是原来没人读。
+    """
+    usable: list[Path] = []
+    for report in sorted(workspace.glob("EDA_REPORT_*.md")):
+        try:
+            body = report.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if _PLACEHOLDER_MARK not in body:
+            usable.append(report)
+    return usable
 
 
 def _write_fallback_eda(workspace: Path) -> None:
@@ -426,13 +445,28 @@ async def run_prepare_phase(
                 aid, kind, ref, data
             ),
         )
+        eda_root = Path(workspace.path)
         if failed:
+            # 缺哪份补哪份的占位符，但不因此判定整个 EDA 失败：把 eda_ok 打成
+            # False 会连锁跳过 EDA_INDEX/EDA_HANDOFF 汇总和 BASELINE_DESIGN，
+            # 让盘上写好的其余报告一份都没人读。2026-08-29 与 2026-08-30 两轮
+            # 都栽在这里：前者是汇总环节死掉，后者是单份报告被输出上限截断。
+            _write_missing_report_placeholders(eda_root)
             await rt.publish_output(
                 source="supervisor",
                 channel="error",
-                text=f"EDA todo failed: {failed}; writing fallback EDA files.",
+                text=(
+                    f"EDA todo failed: {failed}；已写占位符，"
+                    f"用其余 {len(_usable_eda_reports(eda_root))} 份报告继续。"
+                ),
             )
-            _write_fallback_eda(Path(workspace.path))
+        if not _usable_eda_reports(eda_root):
+            await rt.publish_output(
+                source="supervisor",
+                channel="error",
+                text="EDA 无一份可用报告；降级为任务原文。",
+            )
+            _write_fallback_eda(eda_root)
             eda_ok = False
         else:
             await rt.publish_output(

@@ -1,6 +1,11 @@
-"""通用文件工具集：read_file / write_file + 统一的 shell_command。
+"""通用文件工具集：read_file / write_file / append_file + 统一的 shell_command。
 
-沙箱约定：``read_file``/``write_file`` 限定 workspace 内（路径逃逸防护）；
+``append_file`` 是 2026-08-30 补上的：原先只有覆盖式 ``write_file``，一份超过
+输出上限的文件就**没有任何办法写出来**——模型只能一次性给出全部内容，被 max_tokens
+从中间切断后整个工具调用作废，重试还是同样长度。有了追加，长文件可以拆成若干次
+调用逐段落盘。详见 ``docs/Athena_TESS_运行记录.md`` §11。
+
+沙箱约定：``read_file``/``write_file``/``append_file`` 限定 workspace 内（路径逃逸防护）；
 命令执行统一走 ``ExecutionRuntime.shell_command``（shared-execution-runtime-design）。
 ``generic_tool_registry`` 需要 ``runtime`` 才注册命令工具——bash/pwsh 已在迁移中
 移除（design §Tool Contract），无 runtime 的旧调用只得到文件工具。
@@ -40,7 +45,7 @@ def _reject_framework_write(path_obj: Path) -> None:
 def generic_tool_registry(
     workspace: Path, *, runtime: "ExecutionRuntime | None" = None
 ) -> ToolRegistry:
-    """构造通用工具集：read_file / write_file + 可选 shell_command。
+    """构造通用工具集：read_file / write_file / append_file + 可选 shell_command。
 
     ``runtime`` 提供时注册统一命令工具 ``shell_command``（唯一命令工具，design
     §Tool Contract）；缺省（旧调用/测试）只提供文件工具。
@@ -64,16 +69,45 @@ def generic_tool_registry(
 
     @tool
     async def write_file(path: str, content: str) -> dict:
-        """Create or overwrite a file in the workspace (never under .athena/)."""
+        """Create or overwrite a file in the workspace (never under .athena/).
+
+        For a long document, write the first section here and add the rest with
+        append_file: one oversized call gets cut off at the output-token limit,
+        and a cut-off call writes nothing at all.
+        """
         path_obj = _workspace_path(root, path)
         _reject_framework_write(path_obj)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
-        path_obj.write_text(content, encoding="utf-8")
-        return {"path": str(path_obj)}
+        # newline="" 关掉换行翻译：内容按模型给出的样子逐字节落盘。开着的话
+        # Windows 上每个 \n 会变成 \r\n，写回的字节数与 content 对不上，
+        # append_file 报的进度也就跟着失真。
+        with path_obj.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        return {"path": str(path_obj), "bytes": len(content.encode("utf-8"))}
+
+    @tool
+    async def append_file(path: str, content: str) -> dict:
+        """Append to a file in the workspace, creating it if absent.
+
+        Use this to build a long file in several calls instead of one huge
+        write_file. Each call should carry one section; the tool reports the
+        running size so you can tell how much has landed.
+        """
+        path_obj = _workspace_path(root, path)
+        _reject_framework_write(path_obj)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        with path_obj.open("a", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        return {
+            "path": str(path_obj),
+            "appended_bytes": len(content.encode("utf-8")),
+            "total_bytes": path_obj.stat().st_size,
+        }
 
     reg = ToolRegistry()
     reg.register(read_file)
     reg.register(write_file)
+    reg.register(append_file)
     if runtime is not None:
         reg.register(runtime.shell_command_tool(root))
     return reg

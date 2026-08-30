@@ -203,22 +203,40 @@ class ResponsesProvider(BaseProvider):
         return {}
 
     @staticmethod
-    def _assemble_function_calls(bufs: dict[int, dict]) -> list[StreamEvent]:
-        """把缓冲的工具调用按 index 顺序组装为 function_call 事件。"""
+    def _assemble_function_calls(
+        bufs: dict[int, dict], finish: str = ""
+    ) -> list[StreamEvent]:
+        """把缓冲的工具调用按 index 顺序组装为 function_call 事件。
+
+        实参 JSON 解析失败时**不能**静默当成空参数。撞上 ``max_tokens`` 时实参会
+        从中间被切断，吞成 ``{}`` 后模型只看得到"缺必填参数"，于是原样重发同一个
+        调用、再次被截断——死循环。2026-08-30 的 TESS 轮里
+        ``EDA_REPORT_04_RELATIONSHIPS.md`` 因此连废三次（每次约 20 个 write_file
+        片段），最终整个 PREPARE 降级。这里把截断事实原样带给下游，由 runtime 转成
+        一条可恢复的工具错误，明确告诉模型"你被截断了，要分块写"。
+        """
         events: list[StreamEvent] = []
         for i in sorted(bufs):
             b = bufs[i]
             if not (b["id"] and b["name"]):
                 continue
+            raw = b["arguments"]
+            truncated = False
             try:
-                args = json.loads(b["arguments"]) if b["arguments"] else {}
+                args = json.loads(raw) if raw else {}
             except json.JSONDecodeError:
-                # LLM 返回了非 JSON 格式的工具参数，视为空参数
-                args = {}
+                args, truncated = {}, True
             events.append(
                 StreamEvent(
                     kind="function_call",
-                    data={"call_id": b["id"], "name": b["name"], "arguments": args},
+                    data={
+                        "call_id": b["id"],
+                        "name": b["name"],
+                        "arguments": args,
+                        "truncated": truncated,
+                        "raw_argument_chars": len(raw),
+                        "finish_reason": finish,
+                    },
                 )
             )
         return events
@@ -352,7 +370,9 @@ class ResponsesProvider(BaseProvider):
                     pending = release_filtered_tail()
                     if pending is not None:
                         yield pending
-                    for event in self._assemble_function_calls(bufs):
+                    for event in self._assemble_function_calls(
+                        bufs, finish
+                    ):
                         yield event
                     finish = ""
                     bufs.clear()
@@ -370,7 +390,7 @@ class ResponsesProvider(BaseProvider):
 
         # 流结束仍残留缓冲的工具调用（finish 非 tool_calls，如 length 截断或空尾部
         # chunk）——不能静默丢弃，否则 agent 空转成功或报误导性的结构化输出错误。
-        for event in self._assemble_function_calls(bufs):
+        for event in self._assemble_function_calls(bufs, finish):
             yield event
 
         yield StreamEvent(

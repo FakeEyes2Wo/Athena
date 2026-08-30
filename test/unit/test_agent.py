@@ -171,6 +171,29 @@ class TestBaseAgent:
         assert agent.model.model_name == "test-model"
         assert agent.model.client is client
 
+    def test_create_agent_takes_max_tokens_from_settings(self, monkeypatch):
+        """不显式传就必须走 settings，否则 config.toml 配了也不生效。
+
+        回归自 2026-08-30：``AgentConfig.max_tokens`` 改成从 settings 取之后，
+        ``create_agent`` 的签名里仍写死 4096，经它构造的 Agent 全都还是 4096。
+        """
+        monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+        agent = create_agent(
+            model="test-model", tools=ToolRegistry(), system_prompt="s", client=object()
+        )
+        assert agent.config.max_tokens == 16384
+
+    def test_create_agent_explicit_max_tokens_still_wins(self, monkeypatch):
+        monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+        agent = create_agent(
+            model="test-model",
+            tools=ToolRegistry(),
+            system_prompt="s",
+            client=object(),
+            max_tokens=512,
+        )
+        assert agent.config.max_tokens == 512
+
     def test_run_receives_context(self):
         agent = _SpyAgent()
         tools = ToolRegistry()

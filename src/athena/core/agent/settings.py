@@ -172,6 +172,28 @@ def seed() -> int | None:
         return None
 
 
+def max_tokens() -> int:
+    """单次响应最大输出 token：LLM_MAX_TOKENS > config.toml ``[llm].max_tokens`` > 8192。
+
+    与 ``temperature``/``seed`` 是同一类问题的第三处落点：``AgentConfig.max_tokens``
+    把 4096 写死在 dataclass 默认值里，整个进程没有入口能改。对要写文件的 Agent
+    这个值尤其危险——一份 12 KB 的 Markdown 报告做完 JSON 转义（换行要写成两个字符
+    的转义序列，成本翻倍）就已经贴着 4096，再大一点整个工具调用会被从中间切断。2026-08-30 的
+    TESS 轮就是这么废掉一份 EDA 报告、连带把整个 PREPARE 打成降级的。
+
+    默认抬到 8192。**这不是"越大越好"**：上限受后端模型约束，配得比模型支持的还大
+    会被网关直接 400。改之前先用 ``scripts/probe_max_tokens.py`` 探一下实际上限。
+    """
+    raw = _resolve("LLM_MAX_TOKENS", ("llm", "max_tokens"))
+    if raw is None:
+        return 8192
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 8192
+    return value if value > 0 else 8192
+
+
 def enable_thinking() -> bool:
     """是否让模型走思考/推理模式：LLM_ENABLE_THINKING > ``[llm].enable_thinking`` > False。
 
