@@ -7,10 +7,15 @@ module provides the deterministic primitive to replace that step.
 """
 
 import csv
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from random import Random
 from typing import Sequence
+
+#: Written beside the split files so a finished project can say how it split.
+SPLIT_MANIFEST_NAME = "split_manifest.json"
 
 
 @dataclass(frozen=True)
@@ -206,4 +211,67 @@ def materialize_csv_split(
         label_fields,
         label_rows(manifest.final_ids),
     )
+    _write_split_manifest(
+        output_dir,
+        source_csv=source_csv,
+        target_column=target_column,
+        search_frac=search_frac,
+        final_frac=final_frac,
+        seed=seed,
+        group_column=group_column,
+    )
     return manifest
+
+
+def _write_split_manifest(
+    output_dir: Path,
+    *,
+    source_csv: Path,
+    target_column: str,
+    search_frac: float,
+    final_frac: float,
+    seed: int,
+    group_column: str | None,
+) -> Path:
+    """Record how this split was made, next to the files it made.
+
+    The split is fully determined by (source bytes, target, group column,
+    fractions, seed) -- but none of those were written down anywhere, and
+    ``state.json`` does not carry them either. So a finished project could not
+    say which split its frozen evaluator was scoring against.
+
+    Real cost (2026-08-30): reconstructing a run's split needed a brute-force
+    sweep over candidate seeds, comparing row-id sets until one matched at 62.
+    That only worked because the source CSV was still byte-identical; had it
+    moved or been regenerated, the run's numbers would have been unfalsifiable.
+    """
+    payload = {
+        "source_csv": {
+            "path": str(source_csv.resolve()),
+            "sha256": _sha256(source_csv),
+        },
+        "params": {
+            "target_column": target_column,
+            "group_column": group_column,
+            "search_frac": search_frac,
+            "final_frac": final_frac,
+            "seed": seed,
+        },
+        "files": {
+            path.name: {"sha256": _sha256(path), "bytes": path.stat().st_size}
+            for path in sorted(output_dir.glob("*.csv"))
+        },
+    }
+    manifest_path = output_dir / SPLIT_MANIFEST_NAME
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return manifest_path
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()

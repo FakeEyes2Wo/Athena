@@ -1,11 +1,14 @@
 """Platform-owned data splitter tests."""
 
 import csv
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from athena.research.splitter import (
+    SPLIT_MANIFEST_NAME,
     SplitManifest,
     materialize_csv_split,
     split_ids,
@@ -187,3 +190,83 @@ def test_materialize_csv_split_rejects_missing_group_column(tmp_path: Path) -> N
         materialize_csv_split(
             source, tmp_path / "out", "target", group_column="missing"
         )
+
+
+def _grouped_source(path: Path) -> Path:
+    rows = ["TIC,feature,label"]
+    for star in range(20):
+        for window in range(6):
+            rows.append(f"TIC{star},{window},{window % 2}")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+def test_the_split_records_how_it_was_made(tmp_path: Path) -> None:
+    """真机 2026-08-30：项目跑完后，没有任何地方写着它是用哪个 seed 划分的。
+
+    参数只活在那一次命令行里；``state.json`` 不存，划分目录里也没有。要把一次
+    运行的划分复原出来，只能拿候选 seed 一个个重划、比对 row-id 集合，直到
+    seed=62 命中——而这还得指望源 CSV 一个字节没变过。
+    """
+    source = _grouped_source(tmp_path / "windows.csv")
+    out = tmp_path / "split"
+
+    materialize_csv_split(
+        source, out, "label", search_frac=0.2, final_frac=0.2, seed=62,
+        group_column="TIC",
+    )
+
+    manifest = json.loads((out / SPLIT_MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["params"] == {
+        "target_column": "label",
+        "group_column": "TIC",
+        "search_frac": 0.2,
+        "final_frac": 0.2,
+        "seed": 62,
+    }
+    assert manifest["source_csv"]["path"] == str(source.resolve())
+    assert manifest["source_csv"]["sha256"] == hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+    # Every split file it wrote is listed, with the hash it had when written --
+    # so a later "the numbers moved" can be told apart from "the data moved".
+    assert set(manifest["files"]) == {
+        "train.csv",
+        "search_features.csv",
+        "search_labels.csv",
+        "final_features.csv",
+        "final_labels.csv",
+    }
+    for name, entry in manifest["files"].items():
+        assert entry["sha256"] == hashlib.sha256((out / name).read_bytes()).hexdigest()
+
+
+def test_the_manifest_is_enough_to_replay_the_split(tmp_path: Path) -> None:
+    """记录的意义在于能照着它重划一遍，而不是只留个好看的 JSON。"""
+    source = _grouped_source(tmp_path / "windows.csv")
+    original = tmp_path / "original"
+    materialize_csv_split(
+        source, original, "label", search_frac=0.2, final_frac=0.2, seed=62,
+        group_column="TIC",
+    )
+    manifest = json.loads(
+        (original / SPLIT_MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+
+    replayed = tmp_path / "replayed"
+    params = manifest["params"]
+    materialize_csv_split(
+        Path(manifest["source_csv"]["path"]),
+        replayed,
+        params["target_column"],
+        search_frac=params["search_frac"],
+        final_frac=params["final_frac"],
+        seed=params["seed"],
+        group_column=params["group_column"],
+    )
+
+    for name, entry in manifest["files"].items():
+        assert (
+            hashlib.sha256((replayed / name).read_bytes()).hexdigest()
+            == entry["sha256"]
+        ), f"{name} did not replay byte for byte"
