@@ -10,12 +10,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from athena.core.tool import ToolRegistry, tool
-from athena.core.workspace import resolve_workspace_path
+from athena.core.workspace import is_framework_owned, resolve_workspace_path
 
 if TYPE_CHECKING:
     from athena.execution.runtime import ExecutionRuntime
-
-_FRAMEWORK_OWNED_DIR = ".athena"
 
 
 def _workspace_path(root: Path, path: str) -> Path:
@@ -28,9 +26,13 @@ def _workspace_path(root: Path, path: str) -> Path:
         ) from None
 
 
-def _reject_framework_write(path_obj: Path) -> None:
-    """框架私有目录只读：agent 不得写 ``.athena/**``（state/tree/logs/artifacts）。"""
-    if _FRAMEWORK_OWNED_DIR in path_obj.parts:
+def _reject_framework_write(path_obj: Path, root: Path) -> None:
+    """框架私有目录只读：agent 不得写 ``.athena/**``（state/tree/logs/artifacts）。
+
+    判定以工作区为界：命名会话的工作区本身就在 ``.athena/`` 下，见 ``.athena``
+    就拒会让这些会话连自己的文件都写不了。
+    """
+    if is_framework_owned(path_obj, root):
         raise ValueError(
             f".athena/ is owned by the Athena runtime and is read-only for agents; "
             f"refusing to write {path_obj}"
@@ -66,7 +68,7 @@ def generic_tool_registry(
     async def write_file(path: str, content: str) -> dict:
         """Create or overwrite a file in the workspace (never under .athena/)."""
         path_obj = _workspace_path(root, path)
-        _reject_framework_write(path_obj)
+        _reject_framework_write(path_obj, root)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         path_obj.write_text(content, encoding="utf-8")
         return {"path": str(path_obj)}

@@ -13,6 +13,7 @@ from athena.execution.runtime import (
     EnvironmentManager,
     ExecutionContext,
     ExecutionRuntime,
+    _reject_athena_shell_write,
 )
 
 PY = "python"
@@ -415,3 +416,57 @@ async def test_runtime_does_not_persist_success(tmp_path: Path) -> None:
     result = await runtime.run(_context(tmp_path), f"{PY} -c \"print('ok')\"")
     assert result.ok
     assert result.output_ref is None
+
+
+def _named_session_workspace(tmp_path: Path) -> Path:
+    """命名会话的 plan worktree：它本身就落在 ``.athena/`` 下。
+
+    ``ResearchRuntime`` 传入 ``state_root`` 时 workspaces 根就是
+    ``<state_root>/workspaces``，而 state_root 是 ``.athena/conversations/<sid>``。
+    """
+    workspace = (
+        tmp_path
+        / ".athena"
+        / "conversations"
+        / "s-1"
+        / "workspaces"
+        / "final_evaluator"
+    )
+    workspace.mkdir(parents=True)
+    return workspace
+
+
+def test_shell_guard_allows_a_named_session_workspace(tmp_path: Path) -> None:
+    """命名会话的 worktree 在 .athena 下，但那是它自己的工作区，必须放行。"""
+    workspace = _named_session_workspace(tmp_path)
+
+    _reject_athena_shell_write("python evaluate.py", str(workspace), workspace)
+    _reject_athena_shell_write("python evaluate.py", None, workspace)
+
+
+def test_shell_guard_allows_absolute_writes_inside_a_named_session_workspace(
+    tmp_path: Path,
+) -> None:
+    """工作区的绝对路径本身含 .athena，不能因此把写自己工作区的命令也毙掉。"""
+    workspace = _named_session_workspace(tmp_path)
+    for form in (str(workspace), str(workspace).replace("\\", "/")):
+        _reject_athena_shell_write(
+            f"python -c \"open(r'{form}/metric.json', 'w').write('{{}}')\"",
+            str(workspace),
+            workspace,
+        )
+
+
+def test_shell_guard_still_rejects_framework_state_outside_the_workspace(
+    tmp_path: Path,
+) -> None:
+    """工作区之外的 .athena 仍然是框架私有的。"""
+    workspace = _named_session_workspace(tmp_path)
+    session_root = tmp_path / ".athena" / "conversations" / "s-1"
+
+    with pytest.raises(ValueError, match="read-only"):
+        _reject_athena_shell_write(
+            f"Set-Content {session_root / 'state.json'} '{{}}'", None, workspace
+        )
+    with pytest.raises(ValueError, match="read-only"):
+        _reject_athena_shell_write("ls", str(session_root), workspace)
