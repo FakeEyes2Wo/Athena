@@ -94,11 +94,11 @@ class PhaseRunner:
                     agent_type, request, agent_id=agent_id, name=agent_id
                 )
 
-            def publish(kind: str, ref: str, data: dict | None = None) -> None:
+            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
                 """Forward one agent journal event to the runtime event bus."""
                 events_bus = getattr(rt, "events", None)
                 if events_bus is not None:
-                    events_bus.project_agent_event(agent_id, kind, ref, data)
+                    await events_bus.project_agent_event(agent_id, kind, ref, data)
 
             summary = await wait_run_events(rt.agents, run_id, publish)
             result = await load_agent_result(summary, rt.store, HandoffResult)

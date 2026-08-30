@@ -30,6 +30,7 @@ _TODO_RE = re.compile(r"^- \[ \]\s+(.+?)(?:\s*->\s*([^\s#]+))?\s*$")
 PublishEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 Todo = tuple[int, str, str]  # (line_index, text, output_file)
 
+
 # EDA_INDEX/EDA_HANDOFF are written by the PREPARE_EDA orchestrator in its
 # finalize turn, not by an EDA worker (which is forbidden to write them).
 def _is_handoff_todo(text: str, output_file: str) -> bool:
@@ -96,10 +97,10 @@ async def _run_one(
                 name=f"eda-{output_file}",
             )
 
-            def publish(kind: str, ref: str, data: dict | None = None) -> None:
+            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
                 """Forward one worker event to the runtime event bus."""
                 if project_event is not None and agent_id is not None:
-                    project_event(agent_id, kind, ref, data)
+                    await project_event(agent_id, kind, ref, data)
 
             summary = await wait_run_events(agents, run_id, publish)
             if await load_agent_result(summary, store, HandoffResult) is None:
