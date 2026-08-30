@@ -16,6 +16,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | [结构化输出与工具调用](agent_structured_output_ch.md) | current | `response_format` 与工具互斥、schema 注入、围栏剥离 |
 | [真机跑测暴露的 loop 失效模式](loop_failure_modes_ch.md) | current | lane 契约、CLI 终态、修复反馈可执行性、环境自检 |
 | [Evaluator 契约](evaluator_contract_ch.md) | current | 预测与标签必须按 id 对齐；一个"安静地成功"的失效 |
+| [PREPARE 的切分隔离](prepare_split_isolation_ch.md) | current | GUI 路径上平台切分不启用，SEARCH 与 FINAL 的 held-out 重叠 |
 | [可运行研究工作流](../README.md#运行) | current | `Athena-cli` 安装、认证、CLI 参数、产物和失败语义 |
 | [测试指南](operations/testing.md) | current | 本地测试层次与验收命令 |
 | [Core 工具设计](architecture/2026-08-09-core-tool-simplification-design.md) | current | Core 工具极简改造设计（历史） |
@@ -58,6 +59,13 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | 文档 | 状态 | 用途 |
 |---|---|---|
 | [Kaggle 接入与 Supervisor 人类门](kaggle_supervisor_gate_ch.md) | current | 下载/预算/VALIDATE 三个门、假设监控、每 Agent 最少 Kaggle 工具 |
+
+## GUI（athena-gui + gui_gateway）
+
+| 文档 | 状态 | 用途 |
+|---|---|---|
+| [Athena GUI 完整设计规格](athena-gui-design.md) | current | 前端 / Rust 桥 / Python 网关三方对齐的唯一协议契约 |
+| [GUI 会话链路的四类缺陷](gui_session_defects_ch.md) | current | state 不对齐、多会话、消息被吞、会话增删的根因与分支化修复方案 |
 
 ## 维护规则
 
