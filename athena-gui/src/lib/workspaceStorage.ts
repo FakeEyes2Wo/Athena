@@ -3,12 +3,15 @@
 const RECENT_KEY = "athena.workspace.recent";
 const MAX_RECENT = 8;
 
-/** Add a root to the front of the recent list, de-duplicating and capping length. */
+/** Add a root to the list, capping length; a known root keeps its position.
+  *
+  * 只有没见过的工作区才进列表头部。已经在列表里的**原地不动**：切到某个工作区
+  * （包括点它下面的会话）不该把它拽到最前面，侧栏顺序要稳定。 */
 export function addRecentRoot(root: string, existing: readonly string[]): string[] {
   const trimmed = root.trim();
   if (!trimmed) return [...existing];
-  const next = [trimmed, ...existing.filter((item) => item !== trimmed)];
-  return next.slice(0, MAX_RECENT);
+  if (existing.includes(trimmed)) return [...existing];
+  return [trimmed, ...existing].slice(0, MAX_RECENT);
 }
 
 /** Read recent roots from localStorage (never throws; returns [] on parse errors). */

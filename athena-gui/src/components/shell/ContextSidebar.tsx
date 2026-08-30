@@ -163,7 +163,16 @@ function SessionContext({
     sessions,
     running: runningSessions,
   };
-  const groups = [currentGroup, ...otherGroups];
+  // 按 recentRoots 的顺序排，当前工作区就地渲染而不是被置顶——点某个工作区下的会话
+  // 会把它切成当前工作区，置顶会让侧栏在每次选择后重排一次。列表里没有的（首次打开
+  // 的工作区）才放最前面。
+  const byRoot = new Map(otherGroups.map((group) => [group.root, group]));
+  const ordered = recentRoots
+    .map((root) => (root === currentGroup.root ? currentGroup : byRoot.get(root)))
+    .filter((group): group is WorkspaceGroup => group !== undefined);
+  const groups = ordered.some((group) => group.isCurrent)
+    ? ordered
+    : [currentGroup, ...ordered];
 
   return (
     <>
