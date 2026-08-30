@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { UIMessage } from "../../types/ui";
 import { IntentPreviewCard } from "../cards/IntentPreviewCard";
 import { ErrorCard } from "../cards/ErrorCard";
@@ -7,6 +7,8 @@ import styles from "./MessageList.module.css";
 
 interface MessageListProps {
   messages: UIMessage[];
+  /** 后端因回放上限丢掉的更早记录条数；>0 时在顶部说明历史被截断。 */
+  truncatedCount?: number;
   onStartRun(task?: string, messageId?: string): Promise<void>;
 }
 
@@ -32,8 +34,13 @@ function segmentMessages(messages: UIMessage[]): Array<{ lane: number | null; it
   return segments;
 }
 
-/** A single trajectory record (user / supervisor / agent / tool / error). */
-function TrajectoryItem({ msg, onStartRun }: { msg: UIMessage; onStartRun: MessageListProps["onStartRun"] }) {
+/** A single trajectory record (user / supervisor / agent / tool / error).
+ *
+ * ``memo`` 不是可选优化：流式输出每来一个 delta 就更新一次 view model，而 reducer
+ * 只替换变了的那一条消息，其余消息对象身份不变。不 memo 的话每个 delta 都要把整
+ * 张列表重新走一遍 —— 长会话下这是主要的渲染开销。
+ */
+const TrajectoryItem = memo(function TrajectoryItem({ msg, onStartRun }: { msg: UIMessage; onStartRun: MessageListProps["onStartRun"] }) {
   if (msg.kind === "intent-preview" && msg.preview) {
     return (
       <IntentPreviewCard
@@ -88,10 +95,10 @@ function TrajectoryItem({ msg, onStartRun }: { msg: UIMessage; onStartRun: Messa
       {msg.content}
     </article>
   );
-}
+});
 
 /** Renders chat messages, intent preview cards, and the trajectory (agent/tool/supervisor/ideator). */
-export function MessageList({ messages, onStartRun }: MessageListProps) {
+export function MessageList({ messages, truncatedCount = 0, onStartRun }: MessageListProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const segments = segmentMessages(messages);
@@ -121,6 +128,11 @@ export function MessageList({ messages, onStartRun }: MessageListProps) {
 
   return (
     <div className={styles["message-list"]} role="log" aria-live="polite" ref={listRef}>
+      {truncatedCount > 0 && (
+        <p className={styles["history-truncated"]}>
+          更早的 {truncatedCount} 条记录未载入（仍完整保存在磁盘上）
+        </p>
+      )}
       {segments.map((segment, index) => {
         if (segment.lane === null) {
           return segment.items.map((msg) => (

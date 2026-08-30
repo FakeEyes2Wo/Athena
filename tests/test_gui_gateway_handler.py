@@ -7,7 +7,11 @@ import pytest
 
 from athena.research.supervisor.state import ResearchState
 from gui_gateway import state_store
-from gui_gateway.handler import GuiRequestHandler, _session_state_root
+from gui_gateway.handler import (
+    GUI_REPLAY_LIMIT,
+    GuiRequestHandler,
+    _session_state_root,
+)
 from gui_gateway.human import HumanRequestBroker
 from gui_gateway.state_store import GuiState, GuiStateStore
 
@@ -31,6 +35,8 @@ class RecordingRuntime:
         # 拆卸顺序断言用：suspend 必须发生在 aclose 之前。
         self.calls: list[str] = []
         self.suspend_error: Exception | None = None
+        # 后台会话在没人订阅的时候仍然落盘：切回来要能把这些记录取回。
+        self.records: list[dict] = []
 
     async def start(self) -> None:
         self.started = True
@@ -62,7 +68,7 @@ class RecordingRuntime:
         return {"project_root": self.project_root}
 
     def replay_output_events(self) -> list[dict]:
-        return []
+        return list(self.records)
 
 
 def _handler_at(tmp_path: Path, factory=None) -> GuiRequestHandler:
@@ -130,7 +136,12 @@ async def test_handler_session_switch_swaps_runtime(tmp_path) -> None:
 
     result = await handler.dispatch("session_switch", {"session_id": "s-1"})
 
-    assert result == {"session_id": "s-1", "records": [], "sessions": ["s-1"]}
+    assert result == {
+        "session_id": "s-1",
+        "records": [],
+        "truncated": 0,
+        "sessions": ["s-1"],
+    }
     assert len(created) == 1
     assert created[0] == (str(tmp_path), tmp_path / ".athena" / "conversations" / "s-1")
 
@@ -164,8 +175,11 @@ async def test_handler_session_switch_default_has_no_state_root(tmp_path) -> Non
 
     handler = _handler_at(tmp_path, factory)
 
+    # default 一开始就在注册表里，「取或建」直接命中；先切走再切回来才会重建它。
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
     await handler.dispatch("session_switch", {"session_id": "default"})
-    assert created == [None]
+
+    assert created == [tmp_path / ".athena" / "conversations" / "s-1", None]
 
 
 @pytest.mark.asyncio
@@ -233,10 +247,10 @@ async def test_handler_session_switch_does_not_resume_completed(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_handler_session_switch_suspends_running_runtime_before_close(
+async def test_handler_session_switch_keeps_a_running_session_resident(
     tmp_path,
 ) -> None:
-    """切走一个正在跑的会话：先把 RUNNING 落成 WAITING，再关掉它的 runtime。"""
+    """切走一个正在跑的会话：留活在注册表里，不 suspend 也不 aclose。"""
     outgoing = RecordingRuntime()
     outgoing.project_root = str(tmp_path)
     state_path = tmp_path / ".athena" / "state.json"
@@ -248,8 +262,240 @@ async def test_handler_session_switch_suspends_running_runtime_before_close(
 
     await handler.dispatch("session_switch", {"session_id": "s-1"})
 
+    assert outgoing.calls == []
+    assert handler._runtimes["default"] is outgoing
+    assert outgoing.state.status == "RUNNING"
+    assert ResearchState.load(state_path).status == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_closes_an_idle_session(tmp_path) -> None:
+    """切走一个没在跑的会话：仍然先 suspend 落盘再 aclose，并移出注册表。"""
+    outgoing = RecordingRuntime()
+    outgoing.project_root = str(tmp_path)
+
+    handler = GuiRequestHandler(outgoing, lambda root, state_root: RecordingRuntime())
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
     assert outgoing.calls == ["suspend", "aclose"]
+    assert "default" not in handler._runtimes
+
+
+@pytest.mark.asyncio
+async def test_handler_switching_back_reuses_the_resident_runtime(tmp_path) -> None:
+    """切回后台会话：命中注册表（不重建、不续跑），并拿到期间追加的 transcript。"""
+    created: list[tuple[str, RecordingRuntime]] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        runtime.state = _running_state()
+        created.append((state_root.name if state_root else "default", runtime))
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    resident = created[-1][1]
+    # 没人订阅的这段时间里，后台会话照常往 transcript 里追加记录。
+    resident.records.append({"type": "output", "seq": 1, "text": "still training"})
+
+    await handler.dispatch("session_switch", {"session_id": "s-2"})
+    result = await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert [sid for sid, _ in created] == ["s-1", "s-2"]
+    assert handler.runtime is resident
+    assert resident.calls == []
+    assert resident.started is False
+    assert result["records"] == [{"type": "output", "seq": 1, "text": "still training"}]
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_to_the_current_session_is_a_no_op(
+    tmp_path,
+) -> None:
+    """切到当前会话不重建 runtime，但仍回传 sessions 并记住 last-active。"""
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
+    handler._state_store = store
+    _touch(tmp_path / ".athena" / "conversations" / "s-1" / "state.json")
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    resident = handler.runtime
+    result = await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert handler.runtime is resident
+    assert resident.calls == []
+    assert result["sessions"] == ["s-1"]
+    assert store.load().last_sessions == {str(tmp_path): "s-1"}
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_keeps_a_blank_running_session(tmp_path) -> None:
+    """常驻会话还没落盘就切走：不能当成空白会话把它的目录回收掉。"""
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        runtime.state = _running_state(phase="PREPARE")
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    result = await handler.dispatch("session_switch", {"session_id": "s-2"})
+
+    assert (tmp_path / ".athena" / "conversations" / "s-1").is_dir()
+    assert "s-1" in handler._runtimes
+    assert set(result["sessions"]) == {"s-1", "s-2"}
+
+
+@pytest.mark.asyncio
+async def test_handler_releases_a_background_session_once_it_finishes(
+    tmp_path,
+) -> None:
+    """后台会话跑完就不再常驻：下一次激活会把它 suspend + aclose 并移出表。"""
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        runtime.state = _running_state()
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    background = created[0]
+    await handler.dispatch("session_switch", {"session_id": "s-2"})
+    background.state.status = "COMPLETED"
+    await handler.dispatch("session_switch", {"session_id": "s-3"})
+
+    assert background.calls == ["suspend", "aclose"]
+    assert "s-1" not in handler._runtimes
+
+
+@pytest.mark.asyncio
+async def test_handler_rejects_a_second_run_while_another_session_runs(
+    tmp_path,
+) -> None:
+    """已有会话在跑时，在另一个会话里 start/start_search 显式失败并点名是谁在跑。"""
+    running = RecordingRuntime()
+    running.project_root = str(tmp_path)
+    running.state = _running_state()
+
+    handler = GuiRequestHandler(running, lambda root, state_root: RecordingRuntime())
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    for method, params in (("start", {}), ("start_search", {"config": {}})):
+        with pytest.raises(RuntimeError, match="default"):
+            await handler.dispatch(method, params)
+
+    # 被拒绝的一方不能反过来打断正在跑的那个会话。
+    assert running.calls == []
+    assert running.state.status == "RUNNING"
+    assert handler._runtimes["default"] is running
+
+
+@pytest.mark.asyncio
+async def test_handler_allows_starting_the_session_that_is_already_running(
+    tmp_path,
+) -> None:
+    """闸门只拦别的会话：正在跑的那个会话自己仍然可以 start（续跑/重入）。"""
+    running = RecordingRuntime()
+    running.project_root = str(tmp_path)
+    running.state = _running_state()
+    handler = GuiRequestHandler(running)
+
+    assert await handler.dispatch("start", {}) == {"started": True}
+
+
+@pytest.mark.asyncio
+async def test_handler_session_delete_closes_a_background_session_first(
+    tmp_path,
+) -> None:
+    """删除后台常驻会话（哪怕正在跑）也先 aclose 释放句柄，再删目录。"""
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        runtime.state = _running_state()
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    background = created[0]
+    _touch(tmp_path / ".athena" / "conversations" / "s-1" / "state.json")
+    await handler.dispatch("session_switch", {"session_id": "s-2"})
+
+    result = await handler.dispatch("session_delete", {"session_id": "s-1"})
+
+    assert background.calls[-1] == "aclose"
+    assert "s-1" not in handler._runtimes
+    assert not (tmp_path / ".athena" / "conversations" / "s-1").exists()
+    assert result["sessions"] == ["s-2"]
+
+
+@pytest.mark.asyncio
+async def test_handler_failed_activation_leaves_the_registry_untouched(
+    tmp_path,
+) -> None:
+    """目标会话 runtime 构造失败：当前会话与后台常驻会话都不受影响。"""
+    running = RecordingRuntime()
+    running.project_root = str(tmp_path)
+    running.state = _running_state()
+    calls: list[Path | None] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        calls.append(state_root)
+        if len(calls) > 1:
+            raise RuntimeError("cannot build runtime")
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        return runtime
+
+    handler = GuiRequestHandler(running, factory)
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    survivor = handler.runtime
+
+    with pytest.raises(RuntimeError, match="cannot build runtime"):
+        await handler.dispatch("session_switch", {"session_id": "s-2"})
+
+    assert handler.runtime is survivor
+    assert "s-2" not in handler._runtimes
+    assert handler._runtimes["default"] is running
+    assert running.state.status == "RUNNING"
+    assert await handler.dispatch("ping", {}) == {"pong": True}
+
+
+@pytest.mark.asyncio
+async def test_set_project_root_suspends_and_closes_every_resident_runtime(
+    tmp_path,
+) -> None:
+    """换工作区换掉一整套会话命名空间：常驻会话（含在跑的）全部 suspend + aclose。"""
+    running = RecordingRuntime()
+    running.project_root = str(tmp_path)
+    state_path = tmp_path / ".athena" / "state.json"
+    running.state = _running_state()
+    running._state_path = state_path
+    running.state.save(state_path)
+
+    handler = GuiRequestHandler(running, lambda root, state_root: RecordingRuntime())
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    viewed = handler.runtime
+
+    await handler.dispatch("set_project_root", {"path": str(tmp_path / "other")})
+
+    assert running.calls == ["suspend", "aclose"]
+    assert viewed.calls == ["suspend", "aclose"]
     assert ResearchState.load(state_path).status == "WAITING"
+    assert list(handler._runtimes) == ["default"]
+    assert handler.runtime is not running
+    assert handler.runtime is not viewed
 
 
 @pytest.mark.asyncio
@@ -589,6 +835,96 @@ async def test_set_project_root_keeps_remembered_sessions(tmp_path) -> None:
     saved = store.load()
     assert saved.active_project_root == str(target.resolve())
     assert saved.last_sessions == {"/old": "s-9"}
+
+
+@pytest.mark.asyncio
+async def test_handler_sessions_list_reports_the_running_session(tmp_path) -> None:
+    """``running`` 来自注册表的内存态：侧栏据此把后台会话标成运行中。"""
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        if state_root is not None and state_root.name == "s-1":
+            runtime.state = _running_state()
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    await handler.dispatch("session_switch", {"session_id": "s-2"})
+
+    result = await handler.dispatch("sessions_list", {})
+
+    assert result["running"] == ["s-1"]
+    assert set(result["sessions"]) == {"s-1", "s-2"}
+
+
+@pytest.mark.asyncio
+async def test_handler_sessions_list_reports_nothing_running_when_idle(
+    tmp_path,
+) -> None:
+    handler = _handler_at(tmp_path)
+    _touch(tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl")
+
+    result = await handler.dispatch("sessions_list", {})
+
+    assert result["sessions"] == ["default"]
+    assert result["running"] == []
+
+
+@pytest.mark.asyncio
+async def test_handler_sessions_list_for_reports_no_run_in_other_workspaces(
+    tmp_path,
+) -> None:
+    """别的工作区没有活 runtime：``running`` 恒为空（「不知道」，不是「没在跑」）。"""
+    running = RecordingRuntime()
+    running.project_root = str(tmp_path)
+    running.state = _running_state()
+    handler = GuiRequestHandler(running, lambda root, state_root: RecordingRuntime())
+    other = tmp_path / "other"
+    _touch(other / ".athena" / "logs" / "sessions" / "default.jsonl")
+
+    assert (await handler.dispatch("sessions_list", {}))["running"] == ["default"]
+
+    elsewhere = await handler.dispatch("sessions_list_for", {"path": str(other)})
+    assert elsewhere["sessions"] == ["default"]
+    assert elsewhere["running"] == []
+
+    # 同一个工作区被问到时仍然如实回答。
+    here = await handler.dispatch("sessions_list_for", {"path": str(tmp_path)})
+    assert here["running"] == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_caps_the_replayed_transcript(tmp_path) -> None:
+    """只回放最近一段：transcript 只追加从不轮转，全量回放会拖死切换。"""
+    runtime = RecordingRuntime()
+    runtime.project_root = str(tmp_path)
+    runtime.records = [
+        {"type": "output", "seq": i} for i in range(GUI_REPLAY_LIMIT + 25)
+    ]
+    handler = GuiRequestHandler(runtime, lambda root, state_root: RecordingRuntime())
+
+    result = await handler.dispatch("session_switch", {"session_id": "default"})
+
+    assert len(result["records"]) == GUI_REPLAY_LIMIT
+    # 丢的是最早的那 25 条，留下的是最近的。
+    assert result["records"][0]["seq"] == 25
+    assert result["records"][-1]["seq"] == GUI_REPLAY_LIMIT + 24
+    assert result["truncated"] == 25
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_reports_a_complete_transcript(tmp_path) -> None:
+    """没超上限就一条不少，``truncated`` 为 0（前端据此决定要不要提示）。"""
+    runtime = RecordingRuntime()
+    runtime.project_root = str(tmp_path)
+    runtime.records = [{"type": "output", "seq": 1}, {"type": "output", "seq": 2}]
+    handler = GuiRequestHandler(runtime, lambda root, state_root: RecordingRuntime())
+
+    result = await handler.dispatch("session_switch", {"session_id": "default"})
+
+    assert result["records"] == runtime.records
+    assert result["truncated"] == 0
 
 
 def test_session_state_root_rejects_traversal(tmp_path) -> None:

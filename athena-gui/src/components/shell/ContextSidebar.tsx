@@ -17,6 +17,8 @@ interface WorkspaceGroup {
   name: string;
   isCurrent: boolean;
   sessions: SessionItem[];
+  /** 该工作区里仍在跑的会话 id；别的工作区没有活 runtime，恒为空。 */
+  running: string[];
 }
 
 interface ContextSidebarProps {
@@ -24,6 +26,7 @@ interface ContextSidebarProps {
   currentRoot: string | null;
   recentRoots: string[];
   sessions: SessionItem[];
+  runningSessions: string[];
   currentSessionId: string;
   onSwitchWorkspace(): void;
   onSelectWorkspace(path: string): void;
@@ -39,6 +42,7 @@ export function ContextSidebar({
   currentRoot,
   recentRoots,
   sessions,
+  runningSessions,
   currentSessionId,
   onSwitchWorkspace,
   onSelectWorkspace,
@@ -56,6 +60,7 @@ export function ContextSidebar({
           currentRoot={currentRoot}
           recentRoots={recentRoots}
           sessions={sessions}
+          runningSessions={runningSessions}
           currentSessionId={currentSessionId}
           onSwitchWorkspace={onSwitchWorkspace}
           onSelectWorkspace={onSelectWorkspace}
@@ -92,6 +97,7 @@ function SessionContext({
   currentRoot,
   recentRoots,
   sessions,
+  runningSessions,
   currentSessionId,
   onSwitchWorkspace,
   onSelectWorkspace,
@@ -102,6 +108,7 @@ function SessionContext({
   currentRoot: string | null;
   recentRoots: string[];
   sessions: SessionItem[];
+  runningSessions: string[];
   currentSessionId: string;
   onSwitchWorkspace(): void;
   onSelectWorkspace(path: string): void;
@@ -122,16 +129,23 @@ function SessionContext({
     Promise.all(
       others.map(async (root) => {
         try {
-          const { sessions: ids } = await sessionsListFor(root);
+          const { sessions: ids, running } = await sessionsListFor(root);
           const titles = loadSessionTitles(root);
           return {
             root,
             name: basename(root),
             isCurrent: false,
             sessions: ids.map((id) => ({ id, title: titles[id] ?? "新会话" })),
+            running: running ?? [],
           };
         } catch {
-          return { root, name: basename(root), isCurrent: false, sessions: [] };
+          return {
+            root,
+            name: basename(root),
+            isCurrent: false,
+            sessions: [],
+            running: [],
+          };
         }
       }),
     ).then((groups) => {
@@ -147,6 +161,7 @@ function SessionContext({
     name: basename(currentRoot),
     isCurrent: true,
     sessions,
+    running: runningSessions,
   };
   const groups = [currentGroup, ...otherGroups];
 
@@ -183,6 +198,14 @@ function SessionContext({
                   aria-current={group.isCurrent && session.id === currentSessionId ? "page" : undefined}
                   title={`${group.name} · ${session.title}`}
                 >
+                  {group.running.includes(session.id) && (
+                    <span
+                      className={styles.runningDot}
+                      role="img"
+                      aria-label="运行中"
+                      title="运行中"
+                    />
+                  )}
                   <span className={styles.sessionTitle}>{session.title}</span>
                 </button>
                 {group.isCurrent && (

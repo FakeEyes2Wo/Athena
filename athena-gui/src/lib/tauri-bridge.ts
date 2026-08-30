@@ -210,25 +210,39 @@ export interface SessionRecord {
   [key: string]: unknown;
 }
 
-/** Session ids in the current workspace (most-recent first) + the one last opened here. */
-export function sessionsList(): Promise<{ sessions: string[]; active: string | null }> {
-  return rpc<{ sessions: string[]; active: string | null }>("sessions_list");
+/** Session ids in the current workspace (most-recent first), the one last opened
+  * here, and the ones the gateway still has running in memory. 后台会话没有实时
+  * 输出，``running`` 是"它还在跑"的唯一线索；旧网关不带这个字段，故为可选。 */
+export function sessionsList(): Promise<{
+  sessions: string[];
+  active: string | null;
+  running?: string[];
+}> {
+  return rpc<{ sessions: string[]; active: string | null; running?: string[] }>(
+    "sessions_list",
+  );
 }
 
-/** List session ids in an arbitrary workspace directory (without switching runtime). */
-export function sessionsListFor(path: string): Promise<{ sessions: string[] }> {
-  return rpc<{ sessions: string[] }>("sessions_list_for", { path });
+/** List session ids in an arbitrary workspace directory (without switching runtime).
+  * 运行态只存在于网关内存里，别的工作区没有活 runtime，``running`` 恒为空。 */
+export function sessionsListFor(
+  path: string,
+): Promise<{ sessions: string[]; running?: string[] }> {
+  return rpc<{ sessions: string[]; running?: string[] }>("sessions_list_for", { path });
 }
 
 /** Switch the active session; returns its transcript and the updated session list
-  * (the backend recycles the blank session being left behind). */
+  * (the backend recycles the blank session being left behind).
+  * ``truncated`` 是被尾部上限丢掉的更早记录条数（0 表示这就是全部）——transcript
+  * 只追加从不轮转，全量回放会拖死切换，所以后端只回放最近一段。 */
 export function sessionSwitch(
   sessionId: string,
-): Promise<{ records: SessionRecord[]; sessions?: string[] }> {
+): Promise<{ records: SessionRecord[]; sessions?: string[]; truncated?: number }> {
   if (hasTauri) return invoke("session_switch", { sessionId });
   return wsBackend.call("session_switch", { session_id: sessionId }) as Promise<{
     records: SessionRecord[];
     sessions?: string[];
+    truncated?: number;
   }>;
 }
 

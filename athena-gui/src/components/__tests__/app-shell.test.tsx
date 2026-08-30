@@ -8,6 +8,7 @@ function makePipeline(overrides: Record<string, unknown> = {}) {
   return {
     viewModel: createEmptyPipelineViewModel(),
     sessions: [],
+    runningSessions: [],
     currentSessionId: "default",
     sendPrompt: vi.fn().mockResolvedValue(undefined),
     startRun: vi.fn().mockResolvedValue(undefined),
@@ -87,6 +88,58 @@ describe("AppShell", () => {
     expect(screen.getByText("暂无会话")).toBeInTheDocument();
     // 只剩顶部的「新会话」按钮，不再有一行凭空占位的会话。
     expect(screen.getAllByText("新会话")).toHaveLength(1);
+  });
+
+  it("marks a session that is running in the background", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [
+            { id: "default", title: "默认会话" },
+            { id: "s-1", title: "分类 · f1_macro" },
+          ],
+          currentSessionId: "default",
+          runningSessions: ["s-1"],
+        }) as never}
+      />,
+    );
+
+    // 后台会话没有实时输出，侧栏那颗点是"它还在跑"的唯一线索。
+    expect(screen.getAllByRole("img", { name: "运行中" })).toHaveLength(1);
+  });
+
+  it("names the background session a human question came from", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/projects/titanic"
+        recentRoots={[]}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [
+            { id: "default", title: "默认会话" },
+            { id: "s-1", title: "分类 · f1_macro" },
+          ],
+          currentSessionId: "default",
+          runningSessions: ["s-1"],
+          humanRequests: [
+            {
+              request_id: "r-1",
+              prompt: "accept competition rules?",
+              choices: null,
+              allow_custom: true,
+              allow_skip: true,
+            },
+          ],
+        }) as never}
+      />,
+    );
+
+    expect(screen.getByText("来自会话 分类 · f1_macro")).toBeInTheDocument();
   });
 
   it("offers deletion for the default session too", () => {

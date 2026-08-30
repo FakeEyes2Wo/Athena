@@ -32,7 +32,11 @@ export function ConversationPane({ pipeline }: ConversationPaneProps) {
       {viewModel.messages.length === 0 ? (
         <WelcomeHero onPrompt={(prompt) => void pipeline.sendPrompt(prompt)} />
       ) : (
-        <MessageList messages={viewModel.messages} onStartRun={pipeline.startRun} />
+        <MessageList
+          messages={viewModel.messages}
+          truncatedCount={pipeline.truncatedRecords}
+          onStartRun={pipeline.startRun}
+        />
       )}
       <Composer onSend={pipeline.sendPrompt} />
     </section>

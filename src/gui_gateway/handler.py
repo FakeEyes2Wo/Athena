@@ -3,6 +3,12 @@
 Routes canonical GUI methods (see ``docs/athena-gui-design.md`` §3) to
 ``GuiService``. The ``runtime`` attribute is retained for the WebSocket
 transport, which subscribes to runtime ``state``/``output`` events directly.
+
+会话 runtime 存在一张注册表里：切会话只换「正在看的那个」（transport 据此迁订阅），
+正在跑的会话常驻后台不被拆掉。后台会话不订阅也照常落盘，所以切回来只需
+``replay_output_events()`` 补对话 + ``subscribe()`` 补状态快照，事件帧无需带会话身份。
+代价是看不到后台会话的实时输出，且同一时刻只允许一个会话在跑（见
+``_reject_concurrent_run``）。
 """
 
 import asyncio
@@ -22,6 +28,15 @@ from gui_gateway.state_store import GuiState, GuiStateStore
 logger = logging.getLogger(__name__)
 
 RuntimeFactory = Callable[[str | None, Path | None], ResearchRuntime]
+
+GUI_REPLAY_LIMIT = 4000
+"""``session_switch`` 单次回放给前端的记录条数上限。
+
+transcript 只追加、从不轮转：一个用久了的工作区里 ``default.jsonl`` 会攒到几万条，
+全量回放既拖慢切换也把浏览器塞满 DOM 节点。这里只回放最近这些条，更早的记录仍
+完整留在磁盘上——断点续传与 task context 走的是 ``replay_output_events()`` 全量
+路径，不受这个上限影响。丢掉的条数经 ``truncated`` 如实回传，前端会提示。
+"""
 
 # 权威 GUI 方法集合（docs/athena-gui-design.md §3.2 + set_project_root）。
 # 与 ``dispatch`` 的分支一一对应；契约测试（tests/test_gui_protocol_contract.py）
@@ -121,6 +136,15 @@ def _session_activity(state_root: Path) -> tuple[bool, float]:
     return False, state_root.stat().st_mtime if state_root.is_dir() else 0.0
 
 
+def _is_running(runtime: ResearchRuntime) -> bool:
+    """会话是否真的在跑。
+
+    注册表里的 runtime 都是活的，内存里的 ``state.status`` 就是真相——不必像加载侧
+    那样先确认这份状态是从磁盘读出来的。
+    """
+    return getattr(getattr(runtime, "state", None), "status", None) == "RUNNING"
+
+
 def _rmtree_force(path: Path) -> None:
     """删除目录树；先清除只读属性（Windows Git 对象文件），再删除。"""
     for root, dirs, files in os.walk(path, topdown=False):
@@ -155,42 +179,88 @@ class GuiRequestHandler:
         broker: HumanRequestBroker | None = None,
         state_store: GuiStateStore | None = None,
     ) -> None:
-        self._runtime = runtime
+        self._runtimes: dict[str, ResearchRuntime] = {"default": runtime}
+        self._current_session_id = "default"
         self._make_runtime = make_runtime
         self._broker = broker or HumanRequestBroker()
         self._state_store = state_store or GuiStateStore()
         self._service = GuiService(runtime, broker=self._broker)
+        self._service_for: ResearchRuntime = runtime
         self._project_root = Path(runtime.settings().get("project_root") or ".")
-        self._current_session_id = "default"
 
     @property
     def runtime(self) -> ResearchRuntime:
-        """当前 runtime（transport 订阅用；可被 set_project_root/session_switch 替换）。"""
-        return self._runtime
+        """当前正在看的那个会话的 runtime（transport 据此迁订阅）。"""
+        return self._runtimes[self._current_session_id]
 
-    async def _swap_runtime(self, project_root: str, state_root: Path | None) -> None:
-        """Close the current runtime and rebuild a fresh one (project/session swap).
+    def _current_service(self) -> GuiService:
+        """当前会话的 GuiService；runtime 换了就重建，避免两处状态各记一半。"""
+        runtime = self.runtime
+        if self._service_for is not runtime:
+            self._service = GuiService(runtime, broker=self._broker)
+            self._service_for = runtime
+        return self._service
 
-        Build the replacement first. If construction fails, the previous runtime
-        stays open so the user can continue working instead of every RPC hitting
-        a closed AgentRuntime ("runtime is closed").
+    async def _activate_session(self, session_id: str) -> None:
+        """激活目标会话：注册表里有就直接用，没有才建。
+
+        「取或建」是常驻的全部实现。命中表里活着的 runtime 时既不重建也不
+        ``_resume_running_session``——后者是给从磁盘冷启的会话准备的断点续传，对
+        内存里的活 runtime 跑一遍要么重进一次生命周期，要么反过来把一个真在跑的
+        PREPARE 降级成 WAITING。建新的一律先建后关：构造失败时当前会话原样可用，
+        而不是每个 RPC 都撞上已关闭的 AgentRuntime（"runtime is closed"）。
         """
-        if state_root is not None:
-            # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
-            state_root.mkdir(parents=True, exist_ok=True)
-        new_runtime = self._make_runtime(project_root, state_root)
-        # aclose 马上就要杀掉旧会话的 supervisor，而 Supervisor.stop 从不写 status：
-        # 不先降级就会在磁盘上留下一个"运行中"、实际没人跑的悬空态。
-        await self._suspend_runtime()
-        await self._runtime.aclose()
-        self._runtime = new_runtime
-        self._service = GuiService(self._runtime, broker=self._broker)
-        await self._resume_running_session()
+        fresh = session_id not in self._runtimes
+        if fresh:
+            state_root = _session_state_root(self._project_root, session_id)
+            if state_root is not None:
+                # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
+                state_root.mkdir(parents=True, exist_ok=True)
+            self._runtimes[session_id] = self._make_runtime(
+                str(self._project_root), state_root
+            )
+        self._current_session_id = session_id
+        await self._release_idle_sessions()
+        if fresh:
+            await self._resume_running_session()
 
-    async def _suspend_runtime(self) -> None:
-        """把当前 runtime 的 RUNNING 降级为 WAITING 并落盘（拆卸侧与加载侧共用）。"""
+    async def _release_idle_sessions(self) -> None:
+        """回收注册表里既不是当前会话、也不在跑的 runtime。
+
+        这是常驻的代价边界：正在跑的会话留活（它照常落盘，切回来靠 replay +
+        subscribe 补齐），其余一律 suspend + aclose 并移出表——否则每个点开过的会话
+        都会一直占着 git 句柄与显存租约。跑完的后台会话在下一次激活时同样被扫掉。
+        """
+        for session_id in [
+            sid for sid in self._runtimes if sid != self._current_session_id
+        ]:
+            runtime = self._runtimes[session_id]
+            if _is_running(runtime):
+                continue
+            del self._runtimes[session_id]
+            # aclose 马上就要杀掉这个会话的 supervisor，而 Supervisor.stop 从不写
+            # status：不先降级就会在磁盘上留下一个"运行中"、实际没人跑的悬空态。
+            await self._suspend_runtime(runtime)
+            await runtime.aclose()
+
+    def _reject_concurrent_run(self) -> None:
+        """并发闸门：同一时刻只允许一个会话在跑，撞上就显式失败，不排队。
+
+        每个 runtime 各自持有 GpuPool、git repo 与 worktree；真并行会让第二个会话在
+        显存租约上无限期等待，而用户只看到「点了开始但什么都没发生」。``RuntimeError``
+        经 ``map_exception_to_error_code`` 映射为 FAILED_PRECONDITION。
+        """
+        for session_id, runtime in self._runtimes.items():
+            if session_id != self._current_session_id and _is_running(runtime):
+                raise RuntimeError(
+                    f"session {session_id} is still running; only one session may "
+                    "run at a time - pause or stop it first"
+                )
+
+    async def _suspend_runtime(self, runtime: ResearchRuntime) -> None:
+        """把一个 runtime 的 RUNNING 降级为 WAITING 并落盘（拆卸侧与加载侧共用）。"""
         try:
-            await self._runtime.suspend()
+            await runtime.suspend()
         except OSError:
             # state.json 落盘失败（磁盘满 / 无写权限 / 目录已被删）→ 只记一条日志：
             # 会话切换和快照推送不能因为写不进状态文件就卡住。
@@ -206,9 +276,10 @@ class GuiRequestHandler:
         会话不该付这个代价——降级为 WAITING，等用户手动点继续。
         续跑失败降级为静默空闲，不阻断会话切换本身。
         """
+        runtime = self.runtime
         try:
-            state = getattr(self._runtime, "state", None)
-            state_path = getattr(self._runtime, "_state_path", None)
+            state = getattr(runtime, "state", None)
+            state_path = getattr(runtime, "_state_path", None)
             # 只有从磁盘恢复出的状态才可能是“进行中”；全新会话的内存默认状态
             # （IDLE/PREPARE）既不该被误判成需要续跑，也不该被降级。
             persisted = state_path is not None and Path(state_path).is_file()
@@ -218,14 +289,14 @@ class GuiRequestHandler:
             return
         if mid_run:
             try:
-                await self._runtime.start()
+                await runtime.start()
             except Exception:
                 logger.exception("auto-resume failed; leaving the session idle")
             return
         if running:
             # 不续跑的持久化 RUNNING 就是悬空态（写下它的进程早已退出）：降级并落盘，
             # 让 subscribe 推给前端的第一帧快照等于真实运行状态。
-            await self._suspend_runtime()
+            await self._suspend_runtime(runtime)
 
     async def set_project_root(self, path: str) -> dict[str, object]:
         """切换到新项目目录：目录不存在时自动创建，再用工厂重建 runtime。"""
@@ -237,32 +308,41 @@ class GuiRequestHandler:
         # 不存在的目录自动创建（含多级父目录），方便首次选择工作区。
         root.mkdir(parents=True, exist_ok=True)
         root = root.resolve()
+        # 先建后关。换工作区就换了一整套会话命名空间（每个工作区都有自己的
+        # default），常驻会话——包括正在跑的——一律拆掉，否则旧工作区的会话 id 会
+        # 撞上新工作区的同名会话。
+        incoming = self._make_runtime(str(root), None)
+        outgoing = list(self._runtimes.values())
         self._project_root = root
-        await self._swap_runtime(str(root), None)
-        # 换工作区就换了一整套会话命名空间，旧工作区的会话 id 不能带过去。
+        self._runtimes = {"default": incoming}
         self._current_session_id = "default"
+        for runtime in outgoing:
+            await self._suspend_runtime(runtime)
+            await runtime.aclose()
+        await self._resume_running_session()
         self._state_store.save(
             GuiState(
                 active_project_root=str(root),
                 last_sessions=self._state_store.load().last_sessions,
             )
         )
-        return self._runtime.settings()
+        return self.runtime.settings()
 
     async def session_switch(self, session_id: str) -> dict[str, object]:
-        """切换到独立会话（断点续传）：重建该会话的 runtime 并重放其 transcript。"""
+        """切到目标会话并重放其 transcript：只换正在看的那个，不打断正在跑的那个。"""
         if self._make_runtime is None:
             raise ValueError("session switching is not configured")
-        state_root = _session_state_root(self._project_root, session_id)
         previous = self._current_session_id
-        await self._swap_runtime(str(self._project_root), state_root)
-        self._current_session_id = session_id
+        await self._activate_session(session_id)
         if previous != session_id:
             await self._discard_blank_session(previous)
         self._remember_session(session_id)
+        records = self.runtime.replay_output_events()
+        dropped = max(0, len(records) - GUI_REPLAY_LIMIT)
         return {
             "session_id": session_id,
-            "records": self._runtime.replay_output_events(),
+            "records": records[dropped:],
+            "truncated": dropped,
             "sessions": self._session_ids(),
         }
 
@@ -273,6 +353,9 @@ class GuiRequestHandler:
         「这个会话是空的」，猜错就是误删真实会话。判定挪到后端，只看磁盘痕迹。
         删除失败不阻断切换本身——会话仍在列表里，用户可以手动删。
         """
+        if session_id in self._runtimes:
+            # 还常驻在表里 = 它正在后台跑，只是还没来得及落盘：不是空白会话。
+            return
         state_root = _session_state_root(self._project_root, session_id)
         if state_root is None or not state_root.is_dir():
             return
@@ -324,28 +407,47 @@ class GuiRequestHandler:
             )
         return [name for _, name in sorted(entries, key=lambda e: e[0], reverse=True)]
 
+    def _running_ids(self) -> list[str]:
+        """当前工作区里正在跑的会话 id（注册表的内存态，不读磁盘）。
+
+        磁盘上的 ``RUNNING`` 只说明"写下它的那个进程认为自己在跑"，跨进程重启后就是
+        悬空态；表里的 runtime 都是本进程活着的对象，状态即真相。
+        """
+        return [sid for sid, runtime in self._runtimes.items() if _is_running(runtime)]
+
     def sessions_list(self) -> dict[str, object]:
-        """返回当前工作区的会话 id（最近活动在前）与上次使用的会话 id。"""
+        """返回当前工作区的会话 id（最近活动在前）、上次使用的会话与正在跑的会话。"""
         ids = self._session_ids()
         remembered = (self._state_store.load().last_sessions or {}).get(
             str(self._project_root)
         )
         active = remembered if remembered in ids else (ids[0] if ids else None)
-        return {"sessions": ids, "active": active}
+        return {"sessions": ids, "active": active, "running": self._running_ids()}
 
     def sessions_list_for(self, path: str) -> dict[str, object]:
-        """列出任意工作区目录的会话 id（不切换 runtime），供前端按工作区分组。"""
-        return {"sessions": self._session_ids(Path(path))}
+        """列出任意工作区目录的会话 id（不切换 runtime），供前端按工作区分组。
+
+        运行态只存在于本进程的注册表里，而这条路径通常问的是别的工作区——那里没有
+        活 runtime，``running`` 恒为空，语义是"本网关不知道那边在不在跑"而不是
+        "那边没在跑"。被问到当前工作区时照常如实回答。
+        """
+        root = Path(path)
+        running = self._running_ids() if root == self._project_root else []
+        return {"sessions": self._session_ids(root), "running": running}
 
     async def session_delete(self, session_id: str) -> dict[str, object]:
-        """删除会话；删当前会话时先切回 default 释放句柄，再删目录。"""
+        """删除会话；它只要还常驻在注册表里就先 aclose 释放句柄，再删目录。"""
         if session_id == "default":
             await self._reset_default_session()
             return {"deleted": True, "sessions": self._session_ids()}
         state_root = _session_state_root(self._project_root, session_id)
         if session_id == self._current_session_id and self._make_runtime is not None:
-            await self._swap_runtime(str(self._project_root), None)
-            self._current_session_id = "default"
+            await self._activate_session("default")
+        doomed = self._runtimes.pop(session_id, None)
+        if doomed is not None:
+            # 后台常驻的会话（含正在跑的那个）同样要先还句柄，否则 Windows 删不掉
+            # 目录。状态不必落 WAITING——state.json 下一步就没了。
+            await doomed.aclose()
         if state_root is not None and state_root.is_dir():
             await _rmtree_when_released(state_root)
         return {"deleted": True, "sessions": self._session_ids()}
@@ -360,9 +462,10 @@ class GuiRequestHandler:
         """
         athena = self._project_root / ".athena"
         reopen = self._make_runtime is not None
-        if reopen:
-            await self._suspend_runtime()
-            await self._runtime.aclose()
+        doomed = self._runtimes.pop("default", None) if reopen else None
+        if doomed is not None:
+            await self._suspend_runtime(doomed)
+            await doomed.aclose()
         try:
             sessions_dir = athena / "logs" / "sessions"
             if sessions_dir.is_dir():
@@ -373,12 +476,15 @@ class GuiRequestHandler:
             # 删不掉（句柄占用）也要留下一个能继续服务的 runtime；异常照常上抛给
             # transport，前端才看得到真实原因。
             if reopen:
-                self._runtime = self._make_runtime(str(self._project_root), None)
-                self._service = GuiService(self._runtime, broker=self._broker)
+                self._runtimes["default"] = self._make_runtime(
+                    str(self._project_root), None
+                )
         self._current_session_id = "default"
 
     async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, object]:
-        service = self._service
+        service = self._current_service()
+        if method in {"start", "start_search"}:
+            self._reject_concurrent_run()
         if method == "ping":
             return await service.ping()
         if method == "start":
