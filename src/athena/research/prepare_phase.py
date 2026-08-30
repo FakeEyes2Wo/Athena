@@ -87,7 +87,10 @@ async def _run_evaluator_agent(
 ) -> str:
     """Run one evaluator agent in a dedicated directory and write its README freeze marker."""
     evaluator_dir = rt.workspaces_root / directory_name
-    if not rt.registry.contains("evaluator"):
+    # 按 agent_id 而不是固定的 "evaluator" 判定：工作区是随类型注册进工厂的，
+    # 两个 evaluator 共用一个类型名时，final 那次会因为类型已存在而被跳过注册，
+    # 于是继承 search evaluator 的工作区——留出集标签会被写进 SEARCH 看得见的目录。
+    if not rt.registry.contains(agent_id):
         register_evaluator_agent(
             rt.registry,
             provider=rt.provider,
@@ -95,6 +98,7 @@ async def _run_evaluator_agent(
             workspace=evaluator_dir,
             runtime=rt.execution,
             extra_tools=rt.kaggle_tools("evaluator"),
+            agent_type=agent_id,
         )
     return await run_evaluator_plan(
         agents=rt.agents,
@@ -110,6 +114,7 @@ async def _run_evaluator_agent(
         ask_user=getattr(rt, "ask_user", None),
         agent_id=agent_id,
         plan_id=plan_id,
+        agent_type=agent_id,
     )
 
 

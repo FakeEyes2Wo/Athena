@@ -438,6 +438,46 @@ async def test_custom_format_skips_csv_probes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluator_plan_starts_the_requested_agent_type(tmp_path: Path) -> None:
+    """``agent_type`` 决定用哪个工厂，也就决定 agent 的工具落在哪个工作区。
+
+    final evaluator 必须以自己的类型起 run，否则会复用 search evaluator 的工作区。
+    """
+    evaluator_dir = tmp_path / "final_evaluator"
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text(
+        "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
+    )
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "HANDOFF.md").write_text(
+        "prediction column: prediction\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agents = _AgentRuntime(store, agent_id="final_evaluator")
+
+    await run_evaluator_plan(
+        agents=agents,
+        scripts=_Scripts(),
+        store=store,
+        evaluator_dir=evaluator_dir,
+        execution=_Execution(tmp_path),
+        task="write the final evaluator",
+        max_turns=2,
+        agent_id="final_evaluator",
+        plan_id="final_evaluator",
+        agent_type="final_evaluator",
+    )
+
+    assert agents.created == ["final_evaluator"]
+
+
+@pytest.mark.asyncio
 async def test_evaluator_plan_writes_readme_and_descriptor_on_submit(
     tmp_path: Path,
 ) -> None:

@@ -94,11 +94,17 @@ class PhaseRunner:
                     agent_type, request, agent_id=agent_id, name=agent_id
                 )
 
-            def publish(kind: str, ref: str, data: dict | None = None) -> None:
-                """Forward one agent journal event to the runtime event bus."""
+            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
+                """Forward one agent journal event to the runtime event bus.
+
+                必须是协程：``forward_run_events`` 无条件 ``await publish(...)``，
+                同步版返回 None，第一条 journal 事件就会抛 "object NoneType can't
+                be used in 'await' expression"，把整段 handoff 打成 fallback。
+                ``project_agent_event`` 本身也是协程，漏掉 await 事件投影不出去。
+                """
                 events_bus = getattr(rt, "events", None)
                 if events_bus is not None:
-                    events_bus.project_agent_event(agent_id, kind, ref, data)
+                    await events_bus.project_agent_event(agent_id, kind, ref, data)
 
             summary = await wait_run_events(rt.agents, run_id, publish)
             result = await load_agent_result(summary, rt.store, HandoffResult)

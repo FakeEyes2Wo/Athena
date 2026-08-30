@@ -31,6 +31,7 @@ def _register(
     output_type: type,
     extra_tools: ToolRegistry | Callable[[], ToolRegistry | None] | None = None,
     name: str | None = None,
+    prompt_agent_type: str | None = None,
 ) -> None:
     """Single registration path for PREPARE-family prompt agents."""
     register_prompt_agent(
@@ -43,6 +44,7 @@ def _register(
         artifacts=artifacts,
         extra_tools=extra_tools,
         name=name,
+        prompt_agent_type=prompt_agent_type,
     )
 
 
@@ -80,11 +82,16 @@ def register_evaluator_agent(
     workspace: Path,
     runtime: ExecutionRuntime,
     extra_tools: ToolRegistry | None = None,
+    agent_type: str = EVALUATOR_AGENT_TYPE,
 ) -> None:
     """Register a fresh evaluator Agent factory writing the eval script draft.
 
     ``extra_tools`` 追加领域工具（如 Kaggle），让 evaluator 能查竞赛评估指标并
     取训练数据生成 ``labels.csv``。
+
+    ``agent_type`` 可指定：``workspace`` 是随类型注册进工厂的，PREPARE 里的
+    search 与 final 两个 evaluator 必须各占一个类型名，否则第二个会因为类型已存在
+    而复用第一个的工作区。
     """
     _register(
         registry,
@@ -92,9 +99,11 @@ def register_evaluator_agent(
         artifacts=artifacts,
         workspace=workspace,
         runtime=runtime,
-        agent_type=EVALUATOR_AGENT_TYPE,
+        agent_type=agent_type,
         output_type=PlanDecision,
         extra_tools=extra_tools,
+        # 注册名可能是 final_evaluator，但 prompt 只有 evaluator_agent.md 一份。
+        prompt_agent_type=EVALUATOR_AGENT_TYPE,
     )
 
 

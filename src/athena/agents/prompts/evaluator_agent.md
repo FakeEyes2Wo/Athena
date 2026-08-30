@@ -83,10 +83,15 @@ its CSV-only automated probes for custom formats.
 
 Create:
 
-- a `metric.json` at the workspace root declaring the entrypoint, e.g.
-  `{"eval_script": "evaluate.py"}`. If predictions are not tabular CSV, also add
-  `"prediction_format": "custom"` so the platform does not run CSV-only
-  property probes (for tabular CSV you may omit it or use `"tabular_csv"`);
+- a `metric.json` at the workspace root declaring the entrypoint and, for tabular
+  CSV predictions, the prediction column, e.g.
+  `{"eval_script": "evaluate.py", "prediction_column": "prediction"}`.
+  `prediction_column` must name the column that `predictions/predictions.csv`
+  carries next to `__athena_row_id` — the platform builds its property probes
+  from it, so an unnamed or wrongly named column makes them fail. If predictions
+  are not tabular CSV, add `"prediction_format": "custom"` instead so the
+  platform does not run CSV-only property probes (for tabular CSV you may omit
+  `prediction_format` or use `"tabular_csv"`);
 - `evaluate.py`, the entrypoint. It runs with the workspace as its working
   directory after the predictions directory is materialized next to it. It must
   read the ground-truth labels (in whatever format the task uses) and the
