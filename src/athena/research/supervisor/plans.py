@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from typing import Literal
 
@@ -28,6 +29,36 @@ SequenceSink = Callable[[int], None]
 
 DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
 """Default wall-clock budget for one experiment command (seconds)."""
+
+@dataclass(frozen=True)
+class PlanFailure:
+    """Value object pairing a Plan failure kind with its diagnostic detail.
+
+    ``PlanState.last_failure`` keeps the compact string form (for durable state
+    compatibility), but construction and prompt rendering go through this object
+    so the same ``kind: detail`` shape is used in both directions.
+    """
+
+    kind: str
+    detail: str
+
+    @classmethod
+    def from_summary(cls, summary: str | None) -> "PlanFailure | None":
+        if not summary:
+            return None
+        kind, sep, detail = summary.partition(": ")
+        if not sep:
+            return cls(kind="failed", detail=summary)
+        return cls(kind=kind or "failed", detail=detail or summary)
+
+    def to_summary(self) -> str:
+        return f"{self.kind}: {self.detail}"
+
+    def to_prompt_block(self) -> str:
+        from athena.research.supervisor.experiment import failure_block
+
+        return failure_block(self.kind, self.detail)
+
 
 
 async def forward_run_events(

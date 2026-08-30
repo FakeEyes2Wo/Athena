@@ -27,13 +27,12 @@ from athena.research.supervisor.deps import (
 from athena.research.supervisor.experiment import (
     PlanTurnResult,
     data_contract_block,
-    failure_block,
     handoff_block,
     load_agent_result,
 )
 from athena.research.supervisor.phases import PhaseMachine, _final_report_text
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
-from athena.research.supervisor.plans import PlanDecision, wait_run_events
+from athena.research.supervisor.plans import PlanDecision, PlanFailure, wait_run_events
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.scheduler import Scheduler
@@ -220,10 +219,8 @@ class Supervisor:
     @staticmethod
     def _previous_failure_block(summary: str | None) -> str:
         """Render the stored ``kind: error`` summary as a prompt block."""
-        if not summary:
-            return ""
-        kind, _, detail = summary.partition(": ")
-        return failure_block(kind or "failed", detail or summary)
+        failure = PlanFailure.from_summary(summary)
+        return failure.to_prompt_block() if failure is not None else ""
 
     def _hypothesis_block(self, plan_id: str) -> str:
         """本 Plan 要检验的那条假设，拼进 prompt 正文。
@@ -305,7 +302,11 @@ class Supervisor:
         current = self.state.plans.get(plan_id)
         if current is None:
             return
-        summary = f"{getattr(result, 'kind', 'failed')}: {error}"[:1200]
+        summary = (
+            PlanFailure(
+                kind=getattr(result, "kind", "failed"), detail=str(error)
+            ).to_summary()[:1200]
+        )
         self.state.plans[plan_id] = current.model_copy(update={"last_failure": summary})
         await self._persist_state()
 

@@ -5,6 +5,7 @@ import os
 import pytest
 
 from athena.execution.runtime import (
+    CommandRequest,
     EnvironmentManager,
     ExecutionContext,
     ExecutionRuntime,
@@ -98,7 +99,9 @@ async def test_runtime_reads_utf8_cjk_file_without_mojibake(tmp_path) -> None:
     context = ExecutionContext(
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )
-    result = await runtime.run(context, f'type "{target}"')
+    result = await runtime.run(
+        context, CommandRequest(command=f'type "{target}"')
+    )
     assert result.ok, result.stderr
     assert "的任务数据目录" in result.stdout
     assert "挑战杯" in result.stdout
@@ -118,7 +121,9 @@ async def test_chain_operator_works_under_powershell7(tmp_path) -> None:
     context = ExecutionContext(
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )
-    result = await runtime.run(context, "echo a && echo b")
+    result = await runtime.run(
+        context, CommandRequest(command="echo a && echo b")
+    )
     assert result.ok, result.stderr
     assert "a" in result.stdout and "b" in result.stdout
-    assert "�" not in result.stderr
+    assert "�" not in result.stderr  # 无替换字符 = 无 mojibake

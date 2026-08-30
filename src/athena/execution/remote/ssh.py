@@ -9,7 +9,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from athena.core.contracts import ArtifactStore
-from athena.core.tool_types import EmitEvent
 from athena.execution.remote.channel import (
     LINE_LIMIT_BYTES,
     RemoteChannel,
@@ -17,7 +16,12 @@ from athena.execution.remote.channel import (
     StderrTail,
     bootstrap_code,
 )
-from athena.execution.runtime import BoundedOutput, CommandResult, _dispatch
+from athena.execution.runtime import (
+    BoundedOutput,
+    CommandRequest,
+    CommandResult,
+    _dispatch,
+)
 
 # Win32-OpenSSH 会把远端命令静默截断在 8189 字节；留一半余量，越界在本地就红。
 REMOTE_COMMAND_LIMIT_BYTES = 4096
@@ -217,22 +221,6 @@ class SshBackend:
         """远端没有 Athena 管的环境——解释器是现成的（见 ``_environment_lines``）。"""
         return None
 
-    def set_predict_features(self, path: Path | None) -> None:
-        """远端暂不支持平台划分的 VALIDATE 换靶；显式拒绝而不是悄悄注错。
-
-        ``path`` 是控制节点上的绝对路径。远端只同步 workspace，平台划分写在
-        ``workspaces/data_split`` 下，未必存在于远端；即使存在，Windows 控制节点
-        的路径在 Linux 远端也解析不了。注进去只会让候选读到一个不存在的文件，
-        然后以一个和真实原因无关的错误失败。
-        """
-        if path is not None:
-            raise NotImplementedError(
-                "ATHENA_PREDICT_FEATURES is not supported on the ssh backend: "
-                "the control node's path does not resolve on the remote host. "
-                "Run platform-split projects with --compute local, or stage the "
-                "split under the remote data root first."
-            )
-
     async def prepare_remote(self) -> None:
         """在远端建好工作区。"""
         await self._channel.request("mkdir", path=str(self._workspace))
@@ -259,19 +247,31 @@ class SshBackend:
     async def run(
         self,
         *,
-        command: str | None = None,
-        argv: list[str] | None = None,
         workspace_root: Path,
-        workdir: Path,
-        timeout_s: int,
-        emit: EmitEvent | None = None,
+        request: CommandRequest,
     ) -> CommandResult:
         """在远端执行一条命令，流式回传输出，超时/取消都杀整个进程组。"""
-        cwd = self._remote_cwd(workdir)
+        if request.predict_features is not None:
+            raise NotImplementedError(
+                "ATHENA_PREDICT_FEATURES is not supported on the ssh backend: "
+                "the control node's path does not resolve on the remote host. "
+                "Run platform-split projects with --compute local, or stage the "
+                "split under the remote data root first."
+            )
+        cwd = self._remote_cwd(
+            Path(request.workdir)
+            if request.workdir is not None
+            else workspace_root
+        )
         # Ensure the remote working directory exists before spawning; this also
         # makes a backend usable without an explicitly bound local root.
         await self._channel.request("mkdir", path=cwd)
-        display = " ".join(argv) if argv is not None else (command or "")
+        display = (
+            " ".join(request.argv)
+            if request.argv is not None
+            else (request.command or "")
+        )
+        emit = request.emit
         await _dispatch(emit, "command/started", "exec:run", {"command": display})
 
         keep_full = self._store is not None
@@ -297,8 +297,8 @@ class SshBackend:
 
         try:
             job_id, exited = await self._channel.spawn(
-                argv=argv,
-                command=command,
+                argv=request.argv,
+                command=request.command,
                 cwd=cwd,
                 env=self.build_env(),
                 on_output=on_output,
@@ -310,7 +310,7 @@ class SshBackend:
             )
 
         try:
-            code = await asyncio.wait_for(exited, timeout=timeout_s)
+            code = await asyncio.wait_for(exited, timeout=request.timeout_s)
             error = None
         except asyncio.TimeoutError:
             await self._channel.cancel(job_id)

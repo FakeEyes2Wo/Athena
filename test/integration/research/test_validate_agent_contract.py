@@ -1,6 +1,8 @@
 import hashlib
 import json
+import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -14,11 +16,24 @@ from athena.core.git_workspace import LocalGitWorkspace
 from athena.execution.runtime import ExecutionRuntime
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.supervisor.validation import (
+    ValidationDeps,
     ValidationDiffReview,
     ValidationInput,
+    ValidationOptions,
     run_validation_plan,
     validation_key,
 )
+
+
+@pytest.fixture
+def tmp_path():
+    """Worktree-scoped temp dir; the sandbox blocks the default pytest temp root."""
+    base = Path(__file__).resolve().parents[3] / ".pytest-tmp-validate-contract"
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"tmp-{uuid.uuid4().hex[:8]}"
+    path.mkdir()
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
 
 
 class _RepairProvider:
@@ -78,14 +93,9 @@ class _Execution(ExecutionRuntime):
         self.calls = 0
         self.mutate_source_once = False
 
-    async def run(self, context, command=None, *, argv=None, **kwargs):
+    async def run(self, context, request):
         self.calls += 1
-        result = await super().run(
-            context,
-            command,
-            argv=argv,
-            **kwargs,
-        )
+        result = await super().run(context, request)
         if self.mutate_source_once:
             self.mutate_source_once = False
             (Path(context.workspace_root) / "solution" / "runtime.py").write_text(
@@ -235,8 +245,7 @@ class _Harness:
         self.checkpoints.append(result_ref)
 
     async def run(self):
-        return await run_validation_plan(
-            input=self.input,
+        deps = ValidationDeps(
             agents=self.agents,
             git=self.git,
             workspace=self.branch,
@@ -244,8 +253,13 @@ class _Harness:
             evaluator=self.evaluator,
             store=self.store,
             independent_review=self.reviewer,
-            result_ref=self.result_ref,
             checkpoint=self.checkpoint,
+        )
+        return await run_validation_plan(
+            input=self.input,
+            deps=deps,
+            options=ValidationOptions(),
+            result_ref=self.result_ref,
         )
 
     async def close(self) -> None:

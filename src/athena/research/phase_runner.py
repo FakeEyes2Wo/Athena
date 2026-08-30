@@ -26,8 +26,10 @@ from athena.research.supervisor.experiment import (
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.validation import (
+    ValidationDeps,
     ValidationDiffReview,
     ValidationInput,
+    ValidationOptions,
     run_validation_plan,
     validation_key,
 )
@@ -51,6 +53,7 @@ class PhaseRunner:
         plan_input = await rt.supervisor.plan_input(plan_id)
         workspace_path = rt.supervisor.workspace_path(plan_id)
         execution = await rt.execution_for(plan_id, workspace_path)
+        search_features = rt.workspaces_root / "data_split" / "search_features.csv"
         runner = PlanRunner(
             execution=execution,
             store=rt.store,
@@ -62,6 +65,7 @@ class PhaseRunner:
                 workspace_root=workspace_path,
                 environment_root=rt.root,
                 experiment_id=plan_id,
+                predict_features=search_features if search_features.is_file() else None,
             ),
             direction=plan_input.direction,
             timeout_s=rt.state.experiment_timeout_s,
@@ -204,9 +208,7 @@ class PhaseRunner:
         # 候选的 argv 是冻结的，所以换靶只能靠环境变量；不换的话重跑产出的还是
         # search 行的预测，final evaluator 报 {"primary": 0.0}。
         final_features = rt.workspaces_root / "data_split" / "final_features.csv"
-        return await run_validation_plan(
-            input=frozen,
-            predict_features=final_features if final_features.is_file() else None,
+        deps = ValidationDeps(
             agents=rt.agents,
             git=rt.git,
             workspace=workspace,
@@ -214,12 +216,20 @@ class PhaseRunner:
             evaluator=rt.evaluator,
             store=rt.store,
             independent_review=self.review_validation_diff,
-            result_ref=result_ref,
             checkpoint=rt.supervisor.checkpoint_validation,
             publish=lambda kind, ref, data: rt.events.project_agent_event(
                 "validate", kind, ref, data
             ),
-            experiment_timeout_s=rt.state.experiment_timeout_s,
+        )
+        options = ValidationOptions(
+            timeout_s=rt.state.experiment_timeout_s,
+            predict_features=final_features if final_features.is_file() else None,
+        )
+        return await run_validation_plan(
+            input=frozen,
+            deps=deps,
+            options=options,
+            result_ref=result_ref,
         )
 
     async def review_validation_diff(self, prompt: str) -> ValidationDiffReview:
