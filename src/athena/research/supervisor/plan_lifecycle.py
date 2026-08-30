@@ -5,7 +5,12 @@ import logging
 from pathlib import Path
 
 from athena.core.contracts import ArtifactRef
-from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_models import (
+    ComparisonVerdict,
+    EvalResult,
+    ExperimentPlan,
+    Hypothesis,
+)
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.research.supervisor.deps import SupervisorDeps
@@ -17,7 +22,11 @@ from athena.research.supervisor.plans import PlanInput, PlanState
 from athena.research.supervisor.policy import Outcome
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.state import ResearchState
-from athena.research.supervisor.statistics import MetricEvidence, settle_statistically
+from athena.research.supervisor.statistics import (
+    MetricEvidence,
+    settle_statistically,
+    two_sided_p_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +135,13 @@ class PlanLifecycle:
             reference_priority=reference_hypothesis.priority,
             direction=self._deps.direction,
             tolerance=self._deps.tolerance,
+            # 判胜阈值必须随搜索预算变严。预算 N 意味着要在 N 个候选里挑最大值，
+            # 而最大值本身会随 N 增长：纯噪声（σ≈0.0074）下 N=4 的冠军期望
+            # +0.0076，N=16 是 +0.0131，N=64 是 +0.0174——最后这个数已经和本次
+            # 真机冠军实际拿到的 +0.0180 一样大。不做校正，加预算买到的只是
+            # 更好看的数字。
+            min_effect_size=self._deps.tolerance,
+            family_size=max(1, self._state.search_limit),
             evaluator_ref=self._deps.evaluator_ref,
             tree_ref=tree_ref,
             eval_handoff=await read_eval_handoff(
@@ -323,6 +339,7 @@ class PlanLifecycle:
             )
         else:
             best = await load_best(best_ref, self._deps.store)
+            comparison: ComparisonVerdict | None = None
             reference = plan_input.reference_metric
             if reference is None:
                 outcome = None
@@ -343,6 +360,15 @@ class PlanLifecycle:
                     "SUPPORTED": Outcome.WIN,
                     "REFUTED": Outcome.LOSS,
                 }.get(verdict)  # INCONCLUSIVE -> None
+                p_value = two_sided_p_value(best.metric, reference, best.std_error)
+                if p_value is not None:
+                    comparison = ComparisonVerdict(
+                        winner={
+                            "SUPPORTED": "candidate",
+                            "REFUTED": "baseline",
+                        }.get(verdict, "tie"),
+                        p_value=p_value,
+                    )
             else:
                 outcome = _compare_metric(
                     best.metric,
@@ -374,7 +400,7 @@ class PlanLifecycle:
                     primary=best.metric,
                     per_sample=evidence_ref,
                 ),
-                verdict=None,
+                verdict=comparison,
                 artifacts=artifacts,
                 commit=best.commit,
             )
@@ -404,6 +430,27 @@ class PlanLifecycle:
                     )
                     is Outcome.WIN
                 ):
+                    # SOTA 指针是**操作性**的："下一条假设从哪儿分叉"，用点估计
+                    # 选最有希望的那个是对的。但它不是科学结论，而下游（报告、
+                    # VALIDATE、人）会把"SOTA 迁移了"读成"找到了改进"。
+                    #
+                    # 真机 2026-08-30：hyp_a058326db0e8 的区间判据在 family_size=1
+                    # 时就已经是 INCONCLUSIVE（0.8716 ± 1.96×0.0200 覆盖了基线
+                    # 0.8535），SOTA 指针仍然迁了过去，并且没有任何一处记下这个
+                    # 分歧。留出集后来证实：ΔPR-AUC 的 95% 区间含 0。
+                    if comparison is not None and comparison.winner != "candidate":
+                        logger.warning(
+                            "SOTA moved to %s on a point estimate (%.4f vs %.4f) "
+                            "while the interval verdict was %s (p=%.3f, "
+                            "family_size=%d). The pointer is operational, not a "
+                            "demonstrated improvement.",
+                            experiment_id,
+                            primary,
+                            sota.eval.primary if sota.eval else float("nan"),
+                            comparison.winner,
+                            comparison.p_value,
+                            plan_input.family_size,
+                        )
                     self._tree.set_sota(experiment_id)
         self._tree.save(self._deps.tree_path)
         self._state.plans.pop(plan_id)

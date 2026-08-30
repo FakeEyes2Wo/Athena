@@ -29,6 +29,22 @@ def _critical_value(alpha: float, family_size: int) -> float:
     return NormalDist().inv_cdf(1 - adjusted / 2)
 
 
+def two_sided_p_value(
+    candidate: float, reference: float, std_error: float | None
+) -> float | None:
+    """Uncorrected two-sided p-value for candidate minus reference.
+
+    Deliberately uncorrected: ``settle_statistically`` applies the family
+    correction to the *decision*, and burying it in the p-value too would
+    correct twice. This number exists so a settled experiment carries the
+    strength of its own evidence, not just the verdict it produced.
+    """
+    if std_error is None or std_error <= 0:
+        return None
+    z = abs(candidate - reference) / std_error
+    return 2 * (1 - NormalDist().cdf(z))
+
+
 def settle_statistically(
     candidate: MetricEvidence,
     reference_metric: float,

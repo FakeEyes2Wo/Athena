@@ -78,6 +78,10 @@ class MirroredBackend:
         """环境根在租约建立时已经建好。"""
         self._inner.ensure_environment()
 
+    def set_predict_features(self, path: Path | None) -> None:
+        """转发给远端后端——由它决定接不接（目前是明确拒绝）。"""
+        self._inner.set_predict_features(path)
+
     async def aclose(self) -> None:
         """关掉底层通道。"""
         await self._inner.aclose()
