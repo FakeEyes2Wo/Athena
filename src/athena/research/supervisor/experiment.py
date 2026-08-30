@@ -32,6 +32,11 @@ from athena.execution.runtime import (
 )
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.output_freshness import (
+    OutputFreshnessError,
+    archive_output_roots,
+    assert_output_roots,
+)
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.plans import (
@@ -565,6 +570,14 @@ class PlanRunner:
                 plan_id, "manifest_invalid", " ".join(str(exc).split())[:1000]
             )
 
+        version = f"{plan_id}-{state.turns_used}"
+        try:
+            archive_output_roots(self.workdir, manifest.outputs, version=version)
+        except Exception as exc:  # noqa: BLE001 - archive failure is an output failure
+            return await self._failure(
+                plan_id, "output_failed", f"failed to archive old outputs: {exc}"
+            )
+
         for argv in manifest.commands:
             result = await self._execution.run(
                 self._context,
@@ -586,16 +599,16 @@ class PlanRunner:
                     )
                 return await self._failure(plan_id, "execution_failed", error)
 
+        required = {"predictions"}
+        if state.kind == "PREPARE":
+            required.add("report")
+        try:
+            assert_output_roots(self.workdir, manifest.outputs, required=required)
+        except OutputFreshnessError as exc:
+            return await self._failure(plan_id, "output_failed", str(exc))
+
         predictions_root = manifest.outputs["predictions"]
         predictions_dir = self.workdir / predictions_root
-        if not predictions_dir.is_dir() or not any(
-            p.is_file() for p in predictions_dir.rglob("*")
-        ):
-            return await self._failure(
-                plan_id,
-                "output_failed",
-                f"missing predictions directory: {predictions_root}",
-            )
         predictions_ref = await pack_directory(self._store, predictions_dir)
         predictions = await load_directory(self._store, predictions_ref)
         report_ref = await self._store_report(manifest)

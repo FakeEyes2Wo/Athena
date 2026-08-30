@@ -398,13 +398,18 @@ async def test_validation_rejects_binary_diff_without_llm_review(tmp_path) -> No
 
 
 class _StubExecution:
-    def __init__(self, environment_root: Path) -> None:
+    def __init__(self, environment_root: Path, *, produce_predictions: bool = False) -> None:
         self.environment_root = environment_root
+        self.produce_predictions = produce_predictions
         self.timeouts: list[object] = []
 
     async def run(self, context, command=None, *, argv=None, **kwargs):
-        del context, command, argv
+        del command, argv
         self.timeouts.append(kwargs.get("timeout_s"))
+        if self.produce_predictions:
+            out = Path(context.workspace_root) / "predictions" / "new.csv"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("id,pred\n1,0\n", encoding="utf-8")
 
         class _Ok:
             ok = True
@@ -427,14 +432,14 @@ class _StubGit:
 @pytest.mark.asyncio
 async def test_execute_predictions_packs_predictions_directory(tmp_path) -> None:
     workdir = tmp_path / "validate"
-    (workdir / "predictions" / "nested").mkdir(parents=True)
-    (workdir / "predictions" / "pred.csv").write_bytes(b"id,pred\n1,0\n")
-    (workdir / "predictions" / "nested" / "mask.bin").write_bytes(b"\x00\x01\x02")
+    # If stale files exist before the run, the freshness guard must archive them.
+    (workdir / "predictions").mkdir(parents=True)
+    (workdir / "predictions" / "stale.csv").write_bytes(b"id,pred\n0,0\n")
     (workdir / "experiment.json").write_text(
         json.dumps(
             {
                 "version": 1,
-                "commands": [],
+                "commands": [["python", "infer.py"]],
                 "outputs": {"predictions": "predictions", "report": "REPORT.md"},
             }
         ),
@@ -446,19 +451,20 @@ async def test_execute_predictions_packs_predictions_directory(tmp_path) -> None
     )
     git = _StubGit()
 
-    ref, rel_path = await _execute_predictions(
-        execution=_StubExecution(workdir),
+    run = await _execute_predictions(
+        execution=_StubExecution(workdir, produce_predictions=True),
         git=git,
         workspace=workspace,
         store=store,
         publish=None,
     )
 
-    assert rel_path == "predictions"
-    assert await load_directory(store, ref) == {
-        "pred.csv": b"id,pred\n1,0\n",
-        "nested/mask.bin": b"\x00\x01\x02",
-    }
+    assert run.predictions_path == "predictions"
+    packed = await load_directory(store, run.predictions_ref)
+    assert list(packed) == ["new.csv"]
+    # Stale file is archived outside the Git worktree, not packed.
+    history = workdir.parent / "validate-output-history" / "validate"
+    assert (history / "predictions" / "stale.csv").is_file()
     assert git.restored == [("predictions", "REPORT.md")]
 
 
@@ -485,7 +491,7 @@ async def test_validation_rerun_gets_the_same_budget_search_gave_the_experiment(
         ),
         encoding="utf-8",
     )
-    execution = _StubExecution(workdir)
+    execution = _StubExecution(workdir, produce_predictions=True)
 
     await _execute_predictions(
         execution=execution,
@@ -521,7 +527,7 @@ async def test_execute_predictions_rejects_missing_directory(tmp_path) -> None:
     )
     git = _StubGit()
 
-    with pytest.raises(ValueError, match="predictions output is missing"):
+    with pytest.raises(ValueError, match="produced no new artifact"):
         await _execute_predictions(
             execution=_StubExecution(workdir),
             git=git,

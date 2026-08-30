@@ -26,6 +26,11 @@ from athena.execution.runtime import (
 )
 from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.output_freshness import (
+    OutputFreshnessError,
+    archive_output_roots,
+    assert_output_roots,
+)
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
 from athena.research.supervisor.experiment import (
@@ -313,6 +318,7 @@ async def _execute_predictions(
     publish: EmitEvent | None,
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     predict_features: Path | None = None,
+    version: str | None = None,
 ) -> PredictionRun:
     """Re-run the frozen SOTA experiment and pack its predictions.
 
@@ -335,7 +341,9 @@ async def _execute_predictions(
         environment_root=getattr(execution, "environment_root", workdir),
         predict_features=predict_features,
     )
+    version = version or "validate"
     try:
+        archive_output_roots(workdir, manifest.outputs, version=version)
         for argv in manifest.commands:
             result = await execution.run(
                 context,
@@ -349,10 +357,12 @@ async def _execute_predictions(
             )
             if not result.ok:
                 raise RuntimeError(result.stderr or "validation command failed")
+        try:
+            assert_output_roots(workdir, manifest.outputs, required={"predictions"})
+        except OutputFreshnessError as exc:
+            raise ValueError(str(exc)) from exc
         rel_path = manifest.outputs["predictions"]
         predictions_dir = workdir / rel_path
-        if not predictions_dir.is_dir() or not any(predictions_dir.iterdir()):
-            raise ValueError("validation predictions output is missing")
         if predict_features is not None:
             _assert_predictions_cover(predictions_dir, predict_features)
         ref = await pack_directory(store, predictions_dir)
@@ -597,6 +607,7 @@ class ValidationSession:
                 publish=deps.publish,
                 timeout_s=options.timeout_s,
                 predict_features=options.predict_features,
+                version=f"validate-{input.validation_key}",
             )
             if await deps.git.diff(deps.workspace) != reviewed_diff:
                 repair = await _decode_repair(
