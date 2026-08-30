@@ -263,7 +263,11 @@ async def run_prepare_phase(
             "being scored on rows you already saw, and the metric stops "
             "measuring skill.\n"
             f"{(split_dir / 'search_features.csv').resolve()} holds exactly the "
-            "rows to predict, with labels withheld."
+            "rows to predict, with labels withheld. Read that path from the "
+            'environment variable ATHENA_PREDICT_FEATURES (os.environ) rather '
+            "than hardcoding it: VALIDATE re-runs your unchanged command with "
+            "the variable pointing at the held-out split, and a hardcoded path "
+            "makes your result unscoreable there."
         )
         # 候选看不到任务文本（PlanInput 走 context_refs 死信道），所以这条约束必须
         # 单独持久化，再由 Supervisor 每一轮拼进 content（见 data_contract_block）。
@@ -275,9 +279,19 @@ async def run_prepare_phase(
             "any other split of it you may find beside it. The rows you are "
             "scored on are drawn from that same file, so fitting on it means "
             "being scored on rows you already saw.\n"
-            f"Predict exactly the rows in "
-            f"{(split_dir / 'search_features.csv').resolve()} (labels withheld)."
+            "Predict exactly the rows in the CSV named by the environment "
+            "variable ATHENA_PREDICT_FEATURES (labels withheld); during SEARCH "
+            f"that is {(split_dir / 'search_features.csv').resolve()}. Read it "
+            "from os.environ, do not hardcode it -- VALIDATE re-runs this very "
+            "command with the variable pointing at the held-out split, and a "
+            "hardcoded path silently produces predictions for rows nobody asked "
+            "for."
         )
+        # 让候选真的能读到它。此前 VALIDATE 重跑的是 experiment.json 里同一条 argv，
+        # 而路径写死在候选自己的源码里，于是重跑产出的还是 search 行的预测；
+        # final evaluator 只看到未知 id，报 {"primary": 0.0}。真机 2026-08-30：
+        # 14539 行留出集**一行都没对上**，平台自切分的项目里 VALIDATE 从没打出过分。
+        rt.execution.set_predict_features((split_dir / "search_features.csv").resolve())
         rt.state.save(rt.state_path)
 
     # Step 1: search evaluator. Reuse a checkpointed frozen bundle when present.

@@ -10,7 +10,8 @@ import shutil
 import signal
 import subprocess
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -254,6 +255,28 @@ class EnvironmentManager:
         self._host = host if host is not None else os.environ
         self._versions: dict[str, str] = {}
         self._needs_repair: str | None = None
+        self._predict_features: Path | None = None
+
+    @property
+    def predict_features(self) -> Path | None:
+        """Which feature file candidates are told to predict, or None."""
+        return self._predict_features
+
+    def set_predict_features(self, path: str | Path | None) -> None:
+        """Point ``ATHENA_PREDICT_FEATURES`` at a feature file.
+
+        SEARCH scores candidates on one split and VALIDATE re-runs the winner
+        on another, but VALIDATE re-runs the *same* argv from experiment.json.
+        With the path baked into the candidate's own source, that re-run
+        produced predictions for the split it had already been scored on, and
+        the final evaluator -- which sees only unknown row ids -- reported
+        ``{"primary": 0.0}``. Real run 2026-08-30: every one of the 14539
+        held-out rows came back unpredicted, and VALIDATE had in fact never
+        scored anything in a platform-split project.
+
+        So the file to predict is a run-time input, not a constant.
+        """
+        self._predict_features = Path(path) if path is not None else None
 
     def env_ref(self, name: str) -> str:
         """按当前 shell 的语法引用一个环境变量。"""
@@ -306,6 +329,8 @@ class EnvironmentManager:
         env["ATHENA_ENV_ROOT"] = str(self._environment_root)
         if self._data_root is not None:
             env["ATHENA_DATA_ROOT"] = str(self._data_root)
+        if self._predict_features is not None:
+            env["ATHENA_PREDICT_FEATURES"] = str(self._predict_features)
         return env
 
     def tool_versions(self) -> dict[str, str]:
@@ -404,6 +429,15 @@ class EnvironmentManager:
                 f'- Dataset directory: "{data_ref}" in the shell, '
                 'os.environ["ATHENA_DATA_ROOT"] in Python. '
                 "Never hardcode an absolute dataset path: it differs per machine."
+            )
+        if self._predict_features is not None:
+            predict_ref = self.env_ref("ATHENA_PREDICT_FEATURES")
+            lines.append(
+                f'- Rows to predict: read the CSV at "{predict_ref}" in the shell, '
+                'os.environ["ATHENA_PREDICT_FEATURES"] in Python. '
+                "Never hardcode that path: VALIDATE re-runs your unchanged "
+                "command with this variable pointing at the held-out split, and "
+                "a hardcoded path makes your result unscoreable there."
             )
         lines.append(
             f'- Add dependencies with: uv add --project "{env_root}" <package>'
@@ -706,6 +740,33 @@ class ExecutionRuntime:
     def env_ref(self, name: str) -> str:
         """按执行机器的 shell 语法引用一个环境变量。"""
         return self._backend.env_ref(name)
+
+    def set_predict_features(self, path: str | Path | None) -> None:
+        """Tell the backend which feature file candidates must predict.
+
+        ``getattr`` rather than a hard call: a backend that predates this --
+        including the fakes in the test suite -- simply does not scope its
+        predictions, and that is the old behaviour, not a crash.
+        """
+        setter = getattr(self._backend, "set_predict_features", None)
+        if setter is not None:
+            setter(path)
+
+    @contextmanager
+    def predicting(self, path: str | Path | None) -> Iterator[None]:
+        """Scope ``ATHENA_PREDICT_FEATURES`` to one block, then restore it.
+
+        VALIDATE flips the target for the length of one re-run. Leaving it
+        flipped would make every later SEARCH command predict the held-out
+        split -- the exact leak the split exists to prevent.
+        """
+        backend = getattr(self._backend, "environment", None)
+        previous = getattr(backend, "predict_features", None)
+        self.set_predict_features(path)
+        try:
+            yield
+        finally:
+            self.set_predict_features(previous)
 
     def ensure_environment(self) -> None:
         """确保共享环境根已初始化（含可被 uv 使用的 pyproject.toml）。"""

@@ -1,8 +1,10 @@
 """Independent frozen-SOTA validation orchestration."""
 
+import csv
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Literal
 
@@ -275,6 +277,7 @@ async def _execute_predictions(
     store: ArtifactStore,
     publish: EmitEvent | None,
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
+    predict_features: Path | None = None,
 ) -> tuple[ArtifactRef, str]:
     """Re-run the frozen SOTA experiment and pack its predictions.
 
@@ -292,25 +295,77 @@ async def _execute_predictions(
         workspace_root=workdir,
         environment_root=getattr(execution, "environment_root", workdir),
     )
+    scope = getattr(execution, "predicting", None)
     try:
-        for argv in manifest.commands:
-            result = await execution.run(
-                context,
-                argv=argv,
-                timeout_s=timeout_s,
-                workdir=workdir,
-                emit=publish,
-            )
-            if not result.ok:
-                raise RuntimeError(result.stderr or "validation command failed")
+        with scope(predict_features) if scope else nullcontext():
+            for argv in manifest.commands:
+                result = await execution.run(
+                    context,
+                    argv=argv,
+                    timeout_s=timeout_s,
+                    workdir=workdir,
+                    emit=publish,
+                )
+                if not result.ok:
+                    raise RuntimeError(result.stderr or "validation command failed")
         rel_path = manifest.outputs["predictions"]
         predictions_dir = workdir / rel_path
         if not predictions_dir.is_dir() or not any(predictions_dir.iterdir()):
             raise ValueError("validation predictions output is missing")
+        if predict_features is not None:
+            _assert_predictions_cover(predictions_dir, predict_features)
         ref = await pack_directory(store, predictions_dir)
         return ref, rel_path
     finally:
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
+
+
+ROW_ID_COLUMN = "__athena_row_id"
+
+
+def _row_ids(path: Path) -> set[str]:
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
+            return set()
+        return {row[ROW_ID_COLUMN].strip() for row in reader}
+
+
+def _assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None:
+    """Fail with the real cause when the re-run predicted the wrong rows.
+
+    Without this the symptom is the final evaluator returning
+    ``{"primary": 0.0}`` next to ``14539 ground truth rows have no prediction``
+    -- which reads like a broken evaluator or a broken model, and is neither.
+    The actual cause is a candidate that hardcoded the SEARCH feature path, so
+    re-running its frozen argv produced predictions for rows VALIDATE is not
+    scoring. Diagnosing that from the outside took a full manual replay; the
+    information to say it outright was here all along.
+    """
+    expected = _row_ids(expected_csv)
+    if not expected:
+        return
+    produced: set[str] = set()
+    for path in sorted(predictions_dir.rglob("*.csv")):
+        produced |= _row_ids(path)
+    if not produced:
+        return
+    missing = expected - produced
+    if not missing:
+        return
+    overlap = len(expected & produced)
+    detail = (
+        f"{len(missing)} of {len(expected)} rows in {expected_csv.name} have no "
+        f"prediction (overlap {overlap})."
+    )
+    if overlap == 0:
+        detail += (
+            " Zero overlap means the re-run predicted a different split "
+            "entirely: the candidate hardcoded its feature path instead of "
+            "reading ATHENA_PREDICT_FEATURES, so its frozen command cannot be "
+            "pointed at the held-out rows."
+        )
+    raise ValueError(detail)
 
 
 async def _deterministic_preflight(
@@ -406,11 +461,18 @@ async def run_validation_plan(
     checkpoint: CheckpointValidation,
     publish: EmitEvent | None = None,
     experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
+    predict_features: Path | None = None,
 ) -> ValidationResult:
     """Run or recover one independent validation attempt under its stable key.
 
     ``experiment_timeout_s`` is the same budget SEARCH gave the experiment; the
     re-run must not be held to a stricter one than the run it is reproducing.
+
+    ``predict_features`` is the held-out feature file this phase exists to score
+    against. It is exported as ``ATHENA_PREDICT_FEATURES`` for the length of the
+    re-run only. Without it the re-run reproduces the *search* predictions --
+    which is what a platform-split project did until 2026-08-30, so the final
+    evaluator saw nothing but unknown row ids and reported ``{"primary": 0.0}``.
     """
 
     try:
@@ -474,6 +536,7 @@ async def run_validation_plan(
                     store=store,
                     publish=publish,
                     timeout_s=experiment_timeout_s,
+                    predict_features=predict_features,
                 )
                 if await git.diff(workspace) != reviewed_diff:
                     repair = await _decode_repair(

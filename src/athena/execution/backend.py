@@ -29,6 +29,9 @@ class ExecutionBackend(Protocol):
     def ensure_environment(self) -> None:
         """确保这台机器上的环境根可用（幂等）。"""
 
+    def set_predict_features(self, path: "Path | None") -> None:
+        """把 ``ATHENA_PREDICT_FEATURES`` 指向候选应当预测的那份特征文件。"""
+
     async def run(
         self,
         *,
@@ -87,6 +90,10 @@ class LocalBackend:
     def ensure_environment(self) -> None:
         """补齐环境根的 pyproject.toml。"""
         self._environment.ensure_project()
+
+    def set_predict_features(self, path: Path | None) -> None:
+        """本机直接把绝对路径注进子进程环境。"""
+        self._environment.set_predict_features(path)
 
     async def run(
         self,

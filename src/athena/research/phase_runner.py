@@ -200,8 +200,13 @@ class PhaseRunner:
             candidate = rt.state.validation.get("result_ref")
             if isinstance(candidate, str):
                 result_ref = candidate
+        # VALIDATE 的全部意义就是在**没被搜索过的那一份**上重打一次分。
+        # 候选的 argv 是冻结的，所以换靶只能靠环境变量；不换的话重跑产出的还是
+        # search 行的预测，final evaluator 报 {"primary": 0.0}。
+        final_features = rt.workspaces_root / "data_split" / "final_features.csv"
         return await run_validation_plan(
             input=frozen,
+            predict_features=final_features if final_features.is_file() else None,
             agents=rt.agents,
             git=rt.git,
             workspace=workspace,

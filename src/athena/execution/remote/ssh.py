@@ -217,6 +217,22 @@ class SshBackend:
         """远端没有 Athena 管的环境——解释器是现成的（见 ``_environment_lines``）。"""
         return None
 
+    def set_predict_features(self, path: Path | None) -> None:
+        """远端暂不支持平台划分的 VALIDATE 换靶；显式拒绝而不是悄悄注错。
+
+        ``path`` 是控制节点上的绝对路径。远端只同步 workspace，平台划分写在
+        ``workspaces/data_split`` 下，未必存在于远端；即使存在，Windows 控制节点
+        的路径在 Linux 远端也解析不了。注进去只会让候选读到一个不存在的文件，
+        然后以一个和真实原因无关的错误失败。
+        """
+        if path is not None:
+            raise NotImplementedError(
+                "ATHENA_PREDICT_FEATURES is not supported on the ssh backend: "
+                "the control node's path does not resolve on the remote host. "
+                "Run platform-split projects with --compute local, or stage the "
+                "split under the remote data root first."
+            )
+
     async def prepare_remote(self) -> None:
         """在远端建好工作区。"""
         await self._channel.request("mkdir", path=str(self._workspace))
