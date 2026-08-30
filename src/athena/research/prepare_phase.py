@@ -8,6 +8,7 @@ baseline score) lives in one focused module.
 import json
 import logging
 import re
+import traceback
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -321,7 +322,10 @@ async def run_prepare_phase(
         await rt.publish_output(
             source="supervisor",
             channel="error",
-            text=f"EDA handoff failed ({error}); writing fallback EDA files.",
+            text=(
+                f"EDA handoff failed ({error}); writing fallback EDA files.\n\n"
+                f"{traceback.format_exc()}"
+            ),
         )
         _write_fallback_eda(Path(workspace.path))
         eda_ok = False
@@ -364,7 +368,10 @@ async def run_prepare_phase(
             await rt.publish_output(
                 source="supervisor",
                 channel="error",
-                text=f"Baseline design failed ({error}); prepare falls back to task-only.",
+                text=(
+                    f"Baseline design failed ({error}); prepare falls back to task-only.\n\n"
+                    f"{traceback.format_exc()}"
+                ),
             )
     else:
         await rt.publish_output(

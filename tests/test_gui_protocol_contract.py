@@ -35,7 +35,6 @@ CANONICAL_METHODS: frozenset[str] = frozenset(
         "pause",
         "resume",
         "stop",
-        "parse_intent",
         "start_search",
         "start_validation",
         "generate_report",
@@ -74,7 +73,6 @@ CANONICAL_METHODS: frozenset[str] = frozenset(
 # Rust 命令名（tauri 命令函数名）→ Python 方法名。这是唯一映射表；未来 TS 后端
 # 复刻同一份方法表即可保持双后端契约一致。
 COMMAND_TO_METHOD: dict[str, str] = {
-    "send_message": "parse_intent",
     "message": "message",
     "start_search": "start_search",
     "pause_search": "pause",

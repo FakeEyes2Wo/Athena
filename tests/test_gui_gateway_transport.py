@@ -74,8 +74,9 @@ async def test_invalid_json_returns_error() -> None:
 class _FakeRuntime:
     """Minimal runtime double with subscribe/unsubscribe + snapshot emission."""
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, state_root: Path | None = None) -> None:
         self.root = root
+        self.state_root = state_root
         self.tree_path = Path(root) / ".athena" / "research_tree.json"
         self._subscribers: dict[int, Any] = {}
         self._next = 0
@@ -134,8 +135,8 @@ async def test_transport_resubscribes_after_project_switch() -> None:
     created: list[_FakeRuntime] = []
     old = _FakeRuntime("/old-root")
 
-    def factory(path: str) -> _FakeRuntime:
-        runtime = _FakeRuntime(path)
+    def factory(path: str, state_root: Path | None = None) -> _FakeRuntime:
+        runtime = _FakeRuntime(path, state_root)
         created.append(runtime)
         return runtime
 

@@ -2,7 +2,6 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const bridgeMocks = vi.hoisted(() => ({
-  sendMessage: vi.fn(),
   startSearch: vi.fn(),
   pauseSearch: vi.fn(),
   resumeSearch: vi.fn(),
@@ -18,7 +17,6 @@ const bridgeMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/tauri-bridge", () => ({
-  sendMessage: bridgeMocks.sendMessage,
   startSearch: bridgeMocks.startSearch,
   pauseSearch: bridgeMocks.pauseSearch,
   resumeSearch: bridgeMocks.resumeSearch,
@@ -38,7 +36,6 @@ import { usePipeline } from "../usePipeline";
 
 describe("usePipeline", () => {
   beforeEach(() => {
-    bridgeMocks.sendMessage.mockReset();
     bridgeMocks.startSearch.mockReset();
     bridgeMocks.pauseSearch.mockReset();
     bridgeMocks.resumeSearch.mockReset();
@@ -52,16 +49,6 @@ describe("usePipeline", () => {
     bridgeMocks.sessionDelete.mockReset();
     bridgeMocks.subscribeToPipelineEvents.mockReset();
 
-    bridgeMocks.sendMessage.mockResolvedValue({
-      title: "图像分类 · f1_macro",
-      dataset: "train.csv (tabular)",
-      target: "label: multiclass",
-      task_type: "classification",
-      primary_metric: "f1_macro",
-      direction: "maximize",
-      evaluation_plan: "f1_macro over a held-out split",
-      needs_configuration: true,
-    });
     bridgeMocks.startSearch.mockResolvedValue({ ok: true });
     bridgeMocks.pauseSearch.mockResolvedValue({ ok: true });
     bridgeMocks.resumeSearch.mockResolvedValue({ ok: true });
@@ -76,7 +63,7 @@ describe("usePipeline", () => {
     bridgeMocks.subscribeToPipelineEvents.mockResolvedValue([]);
   });
 
-  it("adds a user message and an intent preview card when a prompt is sent", async () => {
+  it("adds a user message and a placeholder intent preview card when a prompt is sent", async () => {
     const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
@@ -91,8 +78,11 @@ describe("usePipeline", () => {
       role: "user",
       content: "analyze this CSV",
     });
-    expect(result.current.viewModel.messages[1].preview?.primary_metric).toBe("f1_macro");
-    // 发送即启动：拿到任务理解后应自动调用 start_search。
+    // The frontend only shows a placeholder; the backend Supervisor owns the
+    // actual task understanding and will fill this card through a state event.
+    expect(result.current.viewModel.messages[1].preview?.primary_metric).toBe("");
+    expect(result.current.viewModel.messages[1].preview?.needs_configuration).toBe(true);
+    // 发送即启动：不调用前端的独立理解，直接交给后端统一理解并进入 PREPARE。
     expect(bridgeMocks.startSearch).toHaveBeenCalledWith({ task: "analyze this CSV" });
     expect(result.current.viewModel.status).toBe("running");
   });
@@ -123,14 +113,13 @@ describe("usePipeline", () => {
     expect(result.current.viewModel.status).toBe("completed");
   });
 
-  it("routes slash commands to the matching runtime control instead of parse_intent", async () => {
+  it("routes slash commands to the matching runtime control", async () => {
     const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
       await result.current.sendPrompt("/pause");
     });
     expect(bridgeMocks.pauseSearch).toHaveBeenCalledTimes(1);
-    expect(bridgeMocks.sendMessage).not.toHaveBeenCalled();
     expect(result.current.viewModel.status).toBe("paused");
 
     await act(async () => {
@@ -143,10 +132,9 @@ describe("usePipeline", () => {
       await result.current.sendPrompt("/select hyp-7");
     });
     expect(bridgeMocks.sendControl).toHaveBeenCalledWith("/select hyp-7");
-    expect(bridgeMocks.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("routes prose to the supervisor while a run is active instead of parse_intent", async () => {
+  it("routes prose to the supervisor while a run is active", async () => {
     bridgeMocks.startSearch.mockResolvedValue({ ok: true });
     bridgeMocks.sendControl.mockResolvedValue({ response: "收到，已调整计划。" });
     const { result } = renderHook(() => usePipeline());
@@ -158,7 +146,6 @@ describe("usePipeline", () => {
       await result.current.sendPrompt("请优先做草莓");
     });
 
-    expect(bridgeMocks.sendMessage).not.toHaveBeenCalled();
     expect(bridgeMocks.sendControl).toHaveBeenCalledWith("请优先做草莓");
     expect(result.current.viewModel.messages.some(
       (message) => message.role === "athena" && message.content === "收到，已调整计划。",

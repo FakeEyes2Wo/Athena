@@ -564,14 +564,22 @@ class ResearchRuntime:
         supervisor_kaggle = build_kaggle_stack(
             download_root=self._root, artifacts=self._store, download=True
         )
+        ask_user = self._ask_user
+        if ask_user is not None:
+            def ask_user_recorder(prompt, *args, **kwargs):
+                answer = ask_user(prompt, *args, **kwargs)
+                if answer is not None:
+                    self._session.clarification_qa.append((prompt, str(answer)))
+                return answer
+            ask_user_factory = lambda _thread, _turn: ask_user_recorder
+        else:
+            ask_user_factory = None
         register_supervisor_agent(
             self._registry,
             provider=provider,
             artifacts=self._store,
             actions=self._supervisor,
-            ask_user=(
-                (lambda _t, _u: self._ask_user) if self._ask_user is not None else None
-            ),
+            ask_user=ask_user_factory,
             kaggle_stack=supervisor_kaggle,
         )
         register_plan_agent(

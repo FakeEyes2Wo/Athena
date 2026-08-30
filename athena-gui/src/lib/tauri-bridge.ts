@@ -11,7 +11,8 @@ export interface TaskUnderstanding {
   primary_metric: string;
   direction: string;
   evaluation_plan: string;
-  needs_configuration: boolean;
+  /** Present on the old GUI-side understanding; backend Supervisor state may omit it. */
+  needs_configuration?: boolean;
 }
 
 export interface BudgetState {
@@ -134,11 +135,6 @@ function normalizePipelineEvent(
     kind: payload?.kind ?? channel,
     data: payload?.data ?? {},
   };
-}
-
-/** Send a user message to the backend and receive the supervisor's task understanding. */
-export function sendMessage(msg: string): Promise<TaskUnderstanding> {
-  return rpc<TaskUnderstanding>("parse_intent", { message: msg }, "send_message");
 }
 
 /** Kick off the automated ML search loop. */

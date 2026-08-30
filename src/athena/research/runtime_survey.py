@@ -8,6 +8,7 @@ failure semantics stay in one place.
 
 import asyncio
 import logging
+import traceback
 from typing import Any
 
 from athena.research.survey import (
@@ -92,7 +93,7 @@ async def run_survey(runtime: Any) -> None:
         await runtime.publish_output(
             source="tool",
             channel="error",
-            text=f"literature survey failed: {exc}",
+            text=f"literature survey failed: {exc}\n\n{traceback.format_exc()}",
             plan=SURVEY_PLAN_LABEL,
             tool="paper_survey",
         )

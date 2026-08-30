@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import traceback
 
 from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.contracts import ArtifactRef
@@ -77,12 +78,14 @@ class PhaseMachine:
             # 并发布，避免被 fire-and-forget 的 supervisor task 吞掉、阶段卡在 PREPARE。
             self._state.status = "FAILED"
             self._plans._save_state()
+            tb = traceback.format_exc()
+            logger.exception("research phase failed")
             await self._deps.publish(
                 "output",
                 {
                     "source": "supervisor",
                     "channel": "error",
-                    "text": f"research failed: {exc}",
+                    "text": f"research failed: {exc}\n\n{tb}",
                 },
             )
             await self._plans._publish_state()

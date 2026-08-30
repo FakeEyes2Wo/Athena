@@ -36,7 +36,6 @@ SUPPORTED_METHODS: frozenset[str] = frozenset(
         "pause",
         "resume",
         "stop",
-        "parse_intent",
         "start_search",
         "start_validation",
         "generate_report",
@@ -389,10 +388,6 @@ class GuiRequestHandler:
             return await service.message(_require_str(params, "text", "message text"))
         if method in {"pause", "resume", "stop"}:
             return await getattr(service, method)()
-        if method == "parse_intent":
-            return await service.parse_intent(
-                _require_str(params, "message", "message")
-            )
         if method == "start_search":
             return await service.start_search(_require_dict(params, "config", "config"))
         if method == "start_validation":
