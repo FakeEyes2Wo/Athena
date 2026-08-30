@@ -45,6 +45,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_REPEAT_LIMIT = 3
+"""连续发出多少次完全相同的工具调用即判定为退化循环。"""
+
+_NO_TOOLS = ToolRegistry()
+"""强制收尾轮用的空工具集。
+
+不带工具时 provider 走的是"严格 ``response_format``"那条既有路径（见
+``docs/agent_structured_output_ch.md``），模型在结构上无法再发工具调用，只能
+交出可校验的 JSON。这比"再劝它一次"可靠，因为它不依赖模型是否听劝。
+"""
+
+_LOOP_NOTICE = (
+    "You have issued the identical tool call several times in a row and received "
+    "the same result each time. Repeating it cannot produce new information. "
+    "Stop calling tools, use what you already have, and return your final answer now."
+)
+
 _MAX_STRUCTURED_RETRIES = 3
 
 # ```json … ``` — 模型在带工具的对话里习惯把最终 JSON 包进 markdown 代码块。
@@ -52,18 +69,25 @@ _FENCED_JSON = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.DOTALL)
 
 
 def _unfenced(text: str) -> str:
-    """剥掉结构化输出外面的 markdown 代码块围栏。
+    """从模型回复里取出结构化输出的 JSON 主体。
 
     带工具时不能再发 ``response_format``（见 ``provider.stream``），模型于是自由地
-    把终态 JSON 包进 ```json 围栏。真机上这一条足以打死整个 SEARCH：Ideator 连着三次
-    返回围栏 JSON，重试预算耗尽后抛 ``structured output invalid after retries``。
-    围栏是格式噪声不是内容错误，直接剥掉，把重试预算留给真正的 schema 不匹配。
+    把终态 JSON 包进 ```json 围栏，而且**经常先写一段散文再给围栏**。真机上这一条
+    足以打死整个 PREPARE：evaluator 的 19 轮回灌里 10 轮是"散文 + 围栏"，每轮白吃
+    一次结构化重试，最后以 ``evaluator turn budget exhausted`` 收场。
+
+    围栏与散文都是格式噪声不是内容错误：先在全文里找**内容像 JSON 的围栏块**，
+    找不到再退回最外层 ``{...}``；两者都没有才原样返回，让上层拿模型的真实措辞报错。
     """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return text
-    match = _FENCED_JSON.search(stripped)
-    return match.group(1) if match else text
+    for match in _FENCED_JSON.finditer(text):
+        body = match.group(1).strip()
+        if body.startswith("{"):
+            return body
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return text[start : end + 1]
+    return text
 
 
 # LLM 响应流断线最多重连次数（supervisor_design §6.1）+ 退避基准秒数。
@@ -144,10 +168,13 @@ class Agent(BaseAgent):
 
         # 多轮采样循环：LLM 输出工具调用 → 执行 → 写入结果 → 再次请求
         retries = 0
+        repeats = 0
+        last_signature = ""
+        finalizing = False
         for _ in range(self.config.max_turns):
             if ctx.cancel.is_set():
                 break
-            outcome = await _sampling_loop(self, ctx)
+            outcome = await _sampling_loop(self, ctx, _NO_TOOLS if finalizing else None)
             if outcome.kind == "done":
                 if self._output_type is not None:
                     try:
@@ -191,6 +218,25 @@ class Agent(BaseAgent):
             if outcome.kind == "error":
                 raise RuntimeError(outcome.text or "provider stream failed")
 
+            if finalizing:
+                # 收尾轮已经不带工具了还没收住：再转下去也只是重复，交给下面报错。
+                break
+            if outcome.signature and outcome.signature == last_signature:
+                repeats += 1
+            else:
+                repeats = 0
+                last_signature = outcome.signature
+            if repeats + 1 >= _REPEAT_LIMIT:
+                # 先把"你在重复"写进对话让模型看见，再用无工具的收尾轮逼出答案。
+                logger.warning(
+                    "agent %s repeated an identical tool call %d times; forcing "
+                    "a tool-less finalization turn",
+                    self.config.name,
+                    repeats + 1,
+                )
+                mem.append(ModelRequest(parts=[UserPromptPart(content=_LOOP_NOTICE)]))
+                finalizing = True
+
         if self._output_type is not None:
             raise RuntimeError("max turns exhausted without structured output")
 
@@ -218,7 +264,9 @@ async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any] | None]) -> None
         await asyncio.gather(*pending, return_exceptions=True)
 
 
-async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
+async def _sampling_loop(
+    agent: Agent, ctx: AgentContext, tools: ToolRegistry | None = None
+) -> StepOutcome:
     """单次 LLM 采样 + 工具执行 + 结果回写；对瞬时流错误自动重连。
 
     Codex 式技术重试：LLM 响应流断线最多重连 ``_MAX_STREAM_RETRIES`` 次，指数
@@ -227,7 +275,7 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
     """
     retries_left = _MAX_STREAM_RETRIES
     while True:
-        outcome, transient = await _sample_once(agent, ctx)
+        outcome, transient = await _sample_once(agent, ctx, tools)
         if not transient or retries_left <= 1:
             return outcome
         retries_left -= 1
@@ -239,7 +287,9 @@ async def _sampling_loop(agent: Agent, ctx: AgentContext) -> StepOutcome:
         await asyncio.sleep(delay)
 
 
-async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bool]:
+async def _sample_once(
+    agent: Agent, ctx: AgentContext, tools: ToolRegistry | None = None
+) -> tuple[StepOutcome, bool]:
     """单次采样步进；返回 (outcome, transient)。
 
     并发策略：
@@ -251,6 +301,7 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
     """
     mem = ctx.memory
     assert mem is not None
+    active_tools = agent.tools if tools is None else tools
 
     tool_calls: list[ToolCall] = []
     tool_tasks: list[asyncio.Task[Any] | None] = []
@@ -262,7 +313,7 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
         async with aclosing(
             agent.model.stream(
                 agent.config,
-                agent.tools,
+                active_tools,
                 mem.items,
                 ctx.cancel,
                 output_type=agent._output_type,
@@ -295,12 +346,12 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
                         tool_tasks.append(None)
 
                         try:
-                            tool = agent.tools.resolve(tc.name)
+                            tool = active_tools.resolve(tc.name)
                         except KeyError:
                             # 未知工具名 → 可恢复工具错误（同一 turn 重试，不终止 worker）
                             tool_tasks[idx] = asyncio.create_task(
                                 _unknown_tool_result(
-                                    tc.name, [spec.name for spec in agent.tools.specs]
+                                    tc.name, [spec.name for spec in active_tools.specs]
                                 )
                             )
                             continue
@@ -357,6 +408,7 @@ async def _finalize_step(
     had_calls: bool,
 ) -> StepOutcome:
     """收集工具结果、写回消息历史，并决定下一步的 StepOutcome。"""
+    signature = _call_signature(tool_calls)
     results: list[Any] = [None] * len(tool_tasks)
     if tool_tasks:
         gathered = await asyncio.gather(
@@ -418,8 +470,24 @@ async def _finalize_step(
         mem.append(ModelResponse(parts=[TextPart(content=text)]))
         return StepOutcome(kind="done", text=text)
     if had_calls:
-        return StepOutcome(kind="continue")
+        return StepOutcome(kind="continue", signature=signature)
     return StepOutcome(kind="done", text=text)
+
+
+def _call_signature(tool_calls: list[ToolCall]) -> str:
+    """把本轮工具调用规范化成一个可比较的指纹。
+
+    只看名字与参数，不看 ``call_id``——后者每轮都不同，带上它任何重复都识别不出来。
+    """
+    if not tool_calls:
+        return ""
+    return json.dumps(
+        [
+            [tc.name, json.dumps(tc.arguments, sort_keys=True, ensure_ascii=False)]
+            for tc in tool_calls
+        ],
+        ensure_ascii=False,
+    )
 
 
 def _dispatch_tool_call(
