@@ -3,6 +3,8 @@
 import asyncio
 import logging
 
+from athena.agents.supervisor_agent import MAX_PLAN_TURNS
+from athena.core.research_tree import ExperimentStatus
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import decide_settlement
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
@@ -46,9 +48,7 @@ class SearchLoop:
             self._state.phase == "SEARCH"
             and self._state.status == "RUNNING"
             and not self._run.is_stopped()
-            and (
-                self._run.search_task is None or self._run.search_task.done()
-            )
+            and (self._run.search_task is None or self._run.search_task.done())
         ):
             task = asyncio.create_task(self.run_search())
             task.add_done_callback(self._on_search_done)
@@ -96,7 +96,7 @@ class SearchLoop:
             task = next(iter(done))
             plan_id = next(
                 item_id
-                for item_id, item_task in self._run.running_tasks
+                for item_id, item_task in self._run.running_items()
                 if item_task is task
             )
             self._run.pop_running(plan_id)
@@ -295,8 +295,6 @@ class SearchLoop:
         await self._owner._publish_state()
 
     async def select_next_hypothesis(self, hypothesis_id: str) -> dict[str, object]:
-        from athena.core.research_tree import ExperimentStatus
-
         self._tree.get_hypothesis(hypothesis_id)
         existing = self._tree.experiment_for_hypothesis(hypothesis_id)
         if existing is not None and self._tree.get_experiment(existing).status in {
@@ -335,8 +333,6 @@ class SearchLoop:
         }
 
     async def update_waiting_plan_budget(self, **payload: object) -> dict[str, object]:
-        from athena.agents.supervisor_agent import MAX_PLAN_TURNS
-
         plan_id = str(payload.get("plan_id", ""))
         try:
             plan = self._state.plans[plan_id]

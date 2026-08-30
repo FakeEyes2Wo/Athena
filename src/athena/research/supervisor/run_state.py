@@ -109,6 +109,16 @@ class SupervisorRunState:
     def running_tasks(self) -> tuple[asyncio.Task, ...]:
         return tuple(self._running.values())
 
+    def running_items(self) -> tuple[tuple[str, asyncio.Task], ...]:
+        """Return ``(plan_id, task)`` pairs for every in-flight Plan.
+
+        ``running_tasks`` 只给 task，用来喂 ``asyncio.wait``；想从 task 反查
+        plan_id 必须用这个。别拿 ``running_tasks`` 解包成二元组——那是在迭代
+        ``asyncio.Task`` 本身（Future 的 ``__iter__`` 即 ``__await__``），已完成的
+        task 迭代结果为空，正好是 ``asyncio.wait`` 交回来的那些。
+        """
+        return tuple(self._running.items())
+
     def clear_running(self) -> None:
         self._running.clear()
 

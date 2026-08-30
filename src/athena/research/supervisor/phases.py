@@ -5,6 +5,9 @@ import logging
 
 from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.contracts import ArtifactRef
+from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_tree import Experiment, ExperimentStatus
+from athena.core.workspace import GitWorkBranch
 from athena.research.report import build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
@@ -75,6 +78,9 @@ class PhaseMachine:
         except Exception as exc:
             # 阶段执行失败（如 evaluator 基础设施不可用）在此统一观测：置 FAILED
             # 并发布，避免被 fire-and-forget 的 supervisor task 吞掉、阶段卡在 PREPARE。
+            # traceback 只能记在这里：这是 supervisor task 的唯一兜底，发给前端的
+            # 只有 str(exc)，不落日志的话异常出处在磁盘上不留任何痕迹。
+            logger.exception("research phase failed")
             self._state.status = "FAILED"
             self._plans._save_state()
             await self._deps.publish(
@@ -149,10 +155,6 @@ class PhaseMachine:
             return
         hypothesis_id = "baseline"
         experiment_id = "exp_baseline"
-        from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
-        from athena.core.research_tree import Experiment, ExperimentStatus
-        from athena.core.workspace import GitWorkBranch
-
         if self._tree.best_experiment_id() is None:
             self._tree.add_hypothesis(
                 Hypothesis(
