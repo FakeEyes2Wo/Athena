@@ -135,17 +135,47 @@ describe("usePipeline event mapping", () => {
   it("coalesces streaming agent text deltas into one message", async () => {    const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
+      // 同一条消息的 delta 带同一个 message_id（后端在建立文本缓冲时分配）。
       eventHandlers[0]?.({
         kind: "output",
-        data: { seq: 1, source: "agent", channel: "text", text: "正在" },
+        data: { seq: 1, source: "agent", channel: "text", text: "正在", message_id: "msg-1" },
       });
       eventHandlers[0]?.({
         kind: "output",
-        data: { seq: 2, source: "agent", channel: "text", text: "生成假设" },
+        data: { seq: 2, source: "agent", channel: "text", text: "生成假设", message_id: "msg-1" },
       });
     });
 
     expect(result.current.viewModel.messages).toHaveLength(1);
     expect(result.current.viewModel.messages[0].content).toBe("正在生成假设");
+  });
+
+  it("keeps the run controls live for a session restored as paused in PREPARE", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "WAITING" },
+      });
+    });
+
+    expect(result.current.viewModel.status).toBe("paused");
+    // 切走会话时 runStarted 被清空，而 PREPARE 阶段没有 plans/attempts/experiment，
+    // runActive 若只看客户端证据就会是 false，"继续"按钮被永久禁用。
+    expect(result.current.runActive).toBe(true);
+  });
+
+  it("leaves the run controls dead for a brand-new idle session", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "IDLE" },
+      });
+    });
+
+    expect(result.current.runActive).toBe(false);
   });
 });

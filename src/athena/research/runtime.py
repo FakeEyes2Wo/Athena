@@ -814,6 +814,16 @@ class ResearchRuntime:
         baselines = self._tree.experiments(kind="baseline")
         return baselines[0].plan.run_config_ref if baselines else None
 
+    async def suspend(self) -> str:
+        """Park a live run at WAITING so a torn-down session stops reading as running.
+
+        Deliberately *not* called from ``aclose()``: for the headless
+        entrypoints a persisted ``RUNNING`` is the resume token that lets
+        ``SearchLoop.run_search`` keep scheduling, so only the owner of a
+        session's lifecycle (the GUI gateway) may downgrade it.
+        """
+        return await self._supervisor.suspend()
+
     async def aclose(self) -> None:
         # 先还租约：通道一关远端才杀进程组，漏掉会一直占着显存。
         session = getattr(self, "_session", None)

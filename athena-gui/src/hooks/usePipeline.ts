@@ -110,14 +110,23 @@ function applyHistoryRecords(current: PipelineViewModel, records: SessionRecord[
         ],
       };
     } else {
-      next = applyPipelineEvent(next, { kind: "output", data: record });
+      next = applyPipelineEvent(next, { kind: "output", data: record }, true);
     }
   }
   return next;
 }
 
-/** Applies a single backend event (``state`` / ``output``) to the view model. */
-function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): PipelineViewModel {
+/**
+ * Applies a single backend event (``state`` / ``output``) to the view model.
+ *
+ * ``replay`` 区分事件来源：实时订阅推的 agent 文本是增量 delta，落盘 transcript
+ * 回放的是已合并的整条消息——两者形状相同，只有来源能区分该追加还是该替换。
+ */
+function applyPipelineEvent(
+  current: PipelineViewModel,
+  event: PipelineEvent,
+  replay = false,
+): PipelineViewModel {
   const next: PipelineViewModel = { ...current, rightRail: { ...current.rightRail } };
   const { data } = event;
 
@@ -178,13 +187,34 @@ function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): P
 
   if (event.kind === "output") {
     const text = typeof data.text === "string" ? data.text : "";
-    if (!text.trim()) return next;
+    if (!text) return next;
     const source = typeof data.source === "string" ? data.source : undefined;
     const tool = typeof data.tool === "string" ? data.tool : undefined;
     const channel = typeof data.channel === "string" ? data.channel : undefined;
     const plan = typeof data.plan === "string" ? data.plan : undefined;
-    const id = `out-${typeof data.seq === "number" ? data.seq : 0}`;
+    // 消息身份来自后端的 message_id（同一条消息的所有 delta 与落盘记录共用它）；
+    // 升级前写下的 transcript 没有该字段，退回按 seq 兜底，每条记录自成一条消息。
+    const id =
+      typeof data.message_id === "string" && data.message_id
+        ? data.message_id
+        : `out-${typeof data.seq === "number" ? data.seq : 0}`;
     const messages = [...current.messages];
+
+    let target = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].id === id) { target = i; break; }
+    }
+    if (target >= 0) {
+      // 同一条消息再次到达：实时 delta 是增量所以追加，落盘回放是整条所以替换。
+      // 这一步同时让「挂载回放叠加在 live 之上」自然去重，不再产生重复 React key。
+      const existing = messages[target];
+      messages[target] = { ...existing, content: replay ? text : existing.content + text };
+      next.messages = messages;
+      return next;
+    }
+
+    // 纯空白只用于把已有消息的两个词分开，不足以独立成一条消息。
+    if (!text.trim()) return next;
 
     if (channel === "error") {
       messages.push({ id, role: "athena", kind: "error", content: text });
@@ -194,21 +224,6 @@ function applyPipelineEvent(current: PipelineViewModel, event: PipelineEvent): P
     } else if (tool) {
       // 工具调用（agent function_call）。
       messages.push({ id, role: "athena", kind: "text", content: text, source, tool, plan });
-    } else if (source === "agent") {
-      // 在「流式窗口」内回溯找同 plan 的开放消息追加，处理多 Ideator 并发交错。
-      let target = -1;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        const isAgentText =
-          m.role === "athena" && m.kind === "text" && !m.tool && m.source === "agent";
-        if (!isAgentText) break; // 撞到非流式边界 → 新建
-        if (m.plan === plan) { target = i; break; }
-      }
-      if (target >= 0) {
-        messages[target] = { ...messages[target], content: messages[target].content + text };
-      } else {
-        messages.push({ id, role: "athena", kind: "text", content: text, source, plan });
-      }
     } else {
       messages.push({ id, role: "athena", kind: "text", content: text, source, plan });
     }
@@ -237,16 +252,6 @@ export function usePipeline(workspaceRoot?: string | null) {
   const runStarted = useRef(false);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
-  // 空白会话：命名会话、无消息、且没有真实运行活动。切换/新建时自动清理。
-  const currentSessionBlank =
-    currentSessionId !== "default" &&
-    viewModel.messages.length === 0 &&
-    !(
-      runStarted.current ||
-      viewModel.plans.length > 0 ||
-      viewModel.rightRail.searchAttempts > 0 ||
-      viewModel.rightRail.latestExperimentId !== null
-    );
 
   const nextId = useCallback((prefix: string) => {
     counter.current += 1;
@@ -270,6 +275,16 @@ export function usePipeline(workspaceRoot?: string | null) {
   }, []);
 
   const clearLogs = useCallback(() => setLogs([]), []);
+
+  // 会话列表一律由后端给：哪些会话存在（有 transcript / state.json）只有它知道。
+  const applySessions = useCallback(
+    (ids: string[] | undefined) => {
+      if (!ids) return;
+      const titles = loadTitles(titlesKey);
+      setSessions(ids.map((id) => ({ id, title: titles[id] ?? "新会话" })));
+    },
+    [titlesKey],
+  );
 
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
   const restoreRecords = useCallback(
@@ -316,27 +331,26 @@ export function usePipeline(workspaceRoot?: string | null) {
         // Non-fatal: the live subscription above will still drive updates.
       });
 
-    // 断点续传：列出会话 → 切到最近会话 → 重放其 transcript。
+    // 断点续传：列出会话 → 切到本工作区上次用的会话 → 重放其 transcript。
     sessionsList()
-      .then(({ sessions: list }) => {
-        const active = list.length ? list[0] : "default";
-        return sessionSwitch(active).then(({ records }) => ({ active, list, records }));
+      .then(({ sessions: list, active }) => {
+        // active 由后端按工作区记住；从没用过的工作区列表为空，落在 default 上，
+        // 它同样要等到真跑起来才会出现在侧栏里。
+        const target = active ?? "default";
+        return sessionSwitch(target).then((result) => ({ target, list, result }));
       })
-      .then(({ active, list, records }) => {
+      .then(({ target, list, result }) => {
         if (!mounted) return;
-        const titles = loadTitles(titlesKey);
-        setSessions(
-          (list.length ? list : [active]).map((id) => ({ id, title: titles[id] ?? "新会话" })),
-        );
-        setCurrentSessionId(active);
-        restoreRecords(records, false);
+        applySessions(result.sessions ?? list);
+        setCurrentSessionId(target);
+        restoreRecords(result.records, false);
       })
       .catch(() => {
         // 非致命：无历史或后端不支持时保持空白会话。
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendLog, titlesKey]);
+  }, [appendLog, applySessions]);
 
   // Poll for outstanding supervisor human questions while a run is active or
   // while the initial intent clarification is pending.
@@ -374,6 +388,10 @@ export function usePipeline(workspaceRoot?: string | null) {
     try {
       // 原始任务文本即后端 start_search 所需的 `task`；task understanding 只用于展示与标题。
       await startSearch({ task });
+      // 任务落盘后这个会话才算存在（后端只列留下痕迹的会话）：刷新侧栏。
+      void sessionsList()
+        .then(({ sessions: list }) => applySessions(list))
+        .catch(() => {});
     } catch (err) {
       // start_search 失败 → 阶段机没起来，重置运行标记。
       runStarted.current = false;
@@ -383,7 +401,7 @@ export function usePipeline(workspaceRoot?: string | null) {
       }));
       throw err;
     }
-  }, []);
+  }, [applySessions]);
 
   const sendPrompt = useCallback(async (msg: string) => {
     const content = msg.trim();
@@ -548,41 +566,29 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   const newSession = useCallback(() => {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
+    // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
     const id = `s-${Date.now()}`;
     runStarted.current = false;
-    void (async () => {
-      const previousId = currentSessionId;
-      const shouldDeleteBlank = currentSessionBlank;
-      await sessionSwitch(id);
-      // 新会话创建成功后再清理旧空白会话，避免删除失败阻塞切换/新建。
-      if (shouldDeleteBlank) {
-        try {
-          await sessionDelete(previousId);
-        } catch {
-          // 非致命：删除失败不阻塞新建会话。
-        }
-      }
-    })();
+    saveTitle(titlesKey, id, "新会话");
+    void sessionSwitch(id)
+      .then((result) => applySessions(result.sessions))
+      .catch(() => {
+        // 非致命：切换失败时保留乐观插入的这一行，用户可以再点一次。
+      });
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
-    saveTitle(titlesKey, id, "新会话");
-  }, [currentSessionBlank, currentSessionId, titlesKey]);
+  }, [applySessions, titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
-    const previousId = currentSessionId;
-    const shouldDeleteBlank = currentSessionBlank && id !== previousId;
     try {
-      const { records } = await sessionSwitch(id);
+      const { records, sessions: list } = await sessionSwitch(id);
       // 换会话即换 runtime，运行标记不能带过去。
       runStarted.current = false;
       setCurrentSessionId(id);
       restoreRecords(records, true);
-      // 切换成功后再清理旧空白会话，避免删除失败阻塞切换。
-      if (shouldDeleteBlank) {
-        void sessionDelete(previousId).catch(() => {});
-      }
+      applySessions(list);
     } catch (err) {
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       setViewModel((prev) => ({
@@ -599,17 +605,16 @@ export function usePipeline(workspaceRoot?: string | null) {
         ],
       }));
     }
-  }, [currentSessionBlank, currentSessionId, nextId, restoreRecords]);
+  }, [applySessions, nextId, restoreRecords]);
 
   const deleteSession = useCallback(async (id: string) => {
-    // default 是主项目会话，不可删除；命名会话删除后返回更新列表。
-    if (id === "default") return;
+    // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
     try {
       const { sessions: list } = await sessionDelete(id);
       const titles = loadTitles(titlesKey);
       delete titles[id];
       localStorage.setItem(titlesKey, JSON.stringify(titles));
-      setSessions(list.map((sid) => ({ id: sid, title: titles[sid] ?? "新会话" })));
+      applySessions(list);
       if (id === currentSessionId) {
         await switchSession("default");
       }
@@ -628,7 +633,7 @@ export function usePipeline(workspaceRoot?: string | null) {
         ],
       }));
     }
-  }, [currentSessionId, nextId, switchSession, titlesKey]);
+  }, [applySessions, currentSessionId, nextId, switchSession, titlesKey]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);
@@ -651,8 +656,13 @@ export function usePipeline(workspaceRoot?: string | null) {
     setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
   }, []);
 
+  // 后端报上来的 running/paused 同样意味着"这次运行确实存在"。切换会话时
+  // runStarted 被清空，而停在 PREPARE 的会话没有 plans/attempts/实验可作证据，
+  // 只认客户端证据会把暂停/继续/停止三个按钮一起禁掉。全新会话是 IDLE，不受影响。
   const runActive =
     runStarted.current ||
+    viewModel.status === "running" ||
+    viewModel.status === "paused" ||
     viewModel.plans.length > 0 ||
     viewModel.rightRail.searchAttempts > 0 ||
     viewModel.rightRail.latestExperimentId !== null;

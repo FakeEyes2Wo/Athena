@@ -1,6 +1,6 @@
 """Persistent GUI state: remembers the active project directory.
 
-Only a single root path is stored; no secrets or session payloads. The file
+Only paths and session ids are stored; no secrets or session payloads. The file
 lives outside user projects so switching directories never pollutes them.
 """
 
@@ -17,13 +17,27 @@ DEFAULT_STATE_PATH = Path.home() / ".athena" / "gui_state.json"
 
 @dataclass(frozen=True, slots=True)
 class GuiState:
-    """The only persisted GUI state: the active project root."""
+    """Persisted GUI state: the active project root plus each root's last session.
+
+    ``last_sessions`` maps a project root to the session id last opened *in that
+    root* — a single global id would make every workspace switch land in another
+    workspace's session. ``None`` means "never recorded" (upgrade from a state
+    file written before the field existed).
+    """
 
     active_project_root: str | None = None
+    last_sessions: dict[str, str] | None = None
 
 
 def _default_state() -> GuiState:
     return GuiState()
+
+
+def _parse_last_sessions(raw: object) -> dict[str, str] | None:
+    """解析「工作区 → 上次会话」映射：缺字段返回 None，脏条目逐条丢弃。"""
+    if not isinstance(raw, dict):
+        return None
+    return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
 
 
 def validate_project_root(path: str | None) -> str | None:
@@ -56,9 +70,13 @@ class GuiStateStore:
             self._backup_corrupt()
             return _default_state()
         raw_root = payload.get("active_project_root")
-        if not isinstance(raw_root, str):
-            return _default_state()
-        return GuiState(active_project_root=validate_project_root(raw_root))
+        # 活动工作区不可用（被删/被改名）不影响其余字段：last-active 记录要留着，
+        # 用户下次打开那个工作区时还得靠它恢复会话。
+        root = validate_project_root(raw_root) if isinstance(raw_root, str) else None
+        return GuiState(
+            active_project_root=root,
+            last_sessions=_parse_last_sessions(payload.get("last_sessions")),
+        )
 
     def save(self, state: GuiState) -> None:
         """Atomically write state, preserving the old file on failure."""
@@ -67,6 +85,7 @@ class GuiStateStore:
             data = json.dumps(
                 {
                     "active_project_root": state.active_project_root,
+                    "last_sessions": state.last_sessions,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
                 ensure_ascii=False,

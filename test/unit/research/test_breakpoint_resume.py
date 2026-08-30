@@ -456,3 +456,91 @@ async def test_start_task_reconstructs_task_text_from_legacy_understanding(
         "Kaggriculture farming simulation kaggriculture environment maximize income"
     )
     assert runtime._state.task_text is None
+
+
+@pytest.mark.asyncio
+async def test_resume_restarts_a_rebuilt_runtime_for_a_persisted_prepare_run(
+    tmp_path: Path,
+) -> None:
+    """会话切换后 runtime 是新建的（``_started=False``）：``/resume`` 必须真的重进阶段机。
+
+    GUI 切走会话时 supervisor 被 suspend + aclose，切回来拿到的是一个全新的
+    runtime。旧逻辑靠 ``_started`` 判断"这次是续跑"，新 runtime 一律落到
+    ``ensure_started``，而它在没有可信 baseline 时不启动，于是 PREPARE 停在
+    "status=RUNNING 但没有任何协程在跑"的悬空态——正是用户点"继续"没反应的原因。
+    """
+    runtime = _stub_runtime(tmp_path)
+    runtime._state.phase = "PREPARE"
+    runtime._state.status = "WAITING"
+    runtime._state_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime._state_path.write_text("{}", encoding="utf-8")
+    runtime._started = False
+    runtime._task = None
+    started: list[bool] = []
+    resumed: list[bool] = []
+
+    class FakeTree:
+        def best_experiment_id(self):
+            return None
+
+    class FakeSupervisor:
+        def __init__(self, state) -> None:
+            self.state = state
+            self.tree = FakeTree()
+
+        def is_stopped(self) -> bool:
+            return False
+
+        async def resume(self, *, restarting: bool = False) -> str:
+            resumed.append(restarting)
+            self.state.status = "RUNNING"
+            return self.state.status
+
+    runtime._supervisor = FakeSupervisor(runtime._state)
+
+    async def start():
+        started.append(True)
+
+    runtime.start = start
+
+    assert await runtime.message("/resume") == "RUNNING"
+    assert started == [True], "PREPARE 续跑必须重新进入阶段机"
+    assert resumed == [True], "restarting=True 才不会重复 spawn SEARCH 调度器"
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_start_a_project_without_durable_state(
+    tmp_path: Path,
+) -> None:
+    """全新项目还没落过盘：``/resume`` 不得凭空把它推进阶段机。"""
+    runtime = _stub_runtime(tmp_path)
+    runtime._state.status = "WAITING"
+    runtime._started = False
+    runtime._task = None
+    started: list[bool] = []
+
+    class FakeTree:
+        def best_experiment_id(self):
+            return None
+
+    class FakeSupervisor:
+        def __init__(self, state) -> None:
+            self.state = state
+            self.tree = FakeTree()
+
+        def is_stopped(self) -> bool:
+            return False
+
+        async def resume(self, *, restarting: bool = False) -> str:
+            self.state.status = "RUNNING"
+            return self.state.status
+
+    runtime._supervisor = FakeSupervisor(runtime._state)
+
+    async def start():
+        started.append(True)
+
+    runtime.start = start
+
+    await runtime.message("/resume")
+    assert started == []
