@@ -4,7 +4,7 @@ import csv
 import hashlib
 import json
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,7 +19,11 @@ from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
 from athena.core.workspace import GitDiff, GitWorkBranch, GitWorkspace
-from athena.execution.runtime import ExecutionContext, ExecutionRuntime
+from athena.execution.runtime import (
+    CommandRequest,
+    ExecutionContext,
+    ExecutionRuntime,
+)
 from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
@@ -60,6 +64,37 @@ class ValidationDiffReview(BaseModel):
 
     accepted: bool
     reason: str = Field(min_length=1)
+
+
+@dataclass
+class ValidationDeps:
+    """All injected collaborators owned by one validation phase."""
+
+    agents: AgentRuntime
+    git: GitWorkspace
+    workspace: GitWorkBranch
+    execution: ExecutionRuntime
+    evaluator: TrustedEvaluator
+    store: ArtifactStore
+    independent_review: Callable[[str], Awaitable[ValidationDiffReview]]
+    checkpoint: CheckpointValidation
+    publish: EmitEvent | None = None
+
+
+@dataclass
+class ValidationOptions:
+    """Per-attempt validation knobs that are not part of the logical input."""
+
+    timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
+    predict_features: Path | None = None
+
+
+@dataclass(frozen=True)
+class PredictionRun:
+    """One re-run of the frozen experiment and its packed predictions."""
+
+    predictions_ref: ArtifactRef
+    predictions_path: str
 
 
 def validation_key(
@@ -278,7 +313,7 @@ async def _execute_predictions(
     publish: EmitEvent | None,
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     predict_features: Path | None = None,
-) -> tuple[ArtifactRef, str]:
+) -> PredictionRun:
     """Re-run the frozen SOTA experiment and pack its predictions.
 
     ``timeout_s`` must be passed explicitly. It used to be omitted, so this call
@@ -287,6 +322,10 @@ async def _execute_predictions(
     Any experiment that took longer than two minutes — which is most of them
     once real training or a large feature extraction is involved — passed SEARCH
     and then failed VALIDATE with a timeout that looked like a broken candidate.
+
+    With the Task B execution API, the held-out target travels on
+    ``ExecutionContext.predict_features`` and is materialised onto each
+    ``CommandRequest`` by ``ExecutionRuntime.run`` before the backend runs it.
     """
     workdir = Path(workspace.path)
     manifest = read_experiment_manifest(workdir)
@@ -294,20 +333,22 @@ async def _execute_predictions(
         project_root=workdir,
         workspace_root=workdir,
         environment_root=getattr(execution, "environment_root", workdir),
+        predict_features=predict_features,
     )
-    scope = getattr(execution, "predicting", None)
     try:
-        with scope(predict_features) if scope else nullcontext():
-            for argv in manifest.commands:
-                result = await execution.run(
-                    context,
+        for argv in manifest.commands:
+            result = await execution.run(
+                context,
+                CommandRequest(
                     argv=argv,
                     timeout_s=timeout_s,
                     workdir=workdir,
                     emit=publish,
-                )
-                if not result.ok:
-                    raise RuntimeError(result.stderr or "validation command failed")
+                    predict_features=predict_features,
+                ),
+            )
+            if not result.ok:
+                raise RuntimeError(result.stderr or "validation command failed")
         rel_path = manifest.outputs["predictions"]
         predictions_dir = workdir / rel_path
         if not predictions_dir.is_dir() or not any(predictions_dir.iterdir()):
@@ -315,7 +356,7 @@ async def _execute_predictions(
         if predict_features is not None:
             _assert_predictions_cover(predictions_dir, predict_features)
         ref = await pack_directory(store, predictions_dir)
-        return ref, rel_path
+        return PredictionRun(predictions_ref=ref, predictions_path=rel_path)
     finally:
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
 
@@ -447,187 +488,232 @@ async def _score_result(
     return current.model_copy(update=update)
 
 
+class ValidationSession:
+    """Stateful run/score/commit phases for one frozen-SOTA validation key."""
+
+    def __init__(
+        self,
+        input: ValidationInput,
+        deps: ValidationDeps,
+        options: ValidationOptions,
+        result_ref: ArtifactRef | None,
+    ) -> None:
+        self.input = input
+        self.deps = deps
+        self.options = options
+        self.result_ref = result_ref
+        self.current: ValidationResult | None = None
+
+    async def run(self) -> ValidationResult:
+        """Recover by durable action and execute the missing validation phases."""
+        try:
+            await self._verify_key()
+            self.current = await _load_result(self.result_ref, self.deps.store)
+            action = await recovery_action(
+                self.result_ref, self.deps.store, self.input
+            )
+            if (
+                action == "commit"
+                and self.current is not None
+                and self.current.validation_commit is not None
+                and self.current.final_test_score is not None
+                and self.current.evidence_ref is not None
+            ):
+                return self.current
+
+            if action == "run":
+                self.current = await self._run_phase()
+                action = "score"
+            if action == "score":
+                self.current = await self._score_phase()
+                action = "commit"
+            if action == "commit":
+                return await self._commit_phase()
+
+            raise RuntimeError(f"unsupported validation recovery action: {action}")
+        finally:
+            # The validate Agent is a one-shot VALIDATE worker; release it after
+            # the phase succeeds or fails so repeated runs do not accumulate.
+            try:
+                await self.deps.agents.reap(VALIDATE_AGENT_ID)
+            except Exception:  # noqa: BLE001,S110 - GC must never mask VALIDATE failure
+                pass
+
+    async def _verify_key(self) -> None:
+        expected_key = validation_key(
+            self.input.sota_commit,
+            self.input.reference_metric,
+            self.input.direction,
+            self.input.final_evaluator_ref,
+        )
+        if self.input.validation_key != expected_key:
+            raise ValueError(
+                "validation_key does not match frozen validation inputs"
+            )
+
+    async def _run_phase(self) -> ValidationResult:
+        """Repair, review, execute, and checkpoint the un-scored prediction run."""
+        deps = self.deps
+        input = self.input
+        options = self.options
+        repair = await _decode_repair(deps.agents, deps.store, input=input)
+        for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
+            diff = await deps.git.diff(deps.workspace)
+            preflight = await _deterministic_preflight(
+                workspace=deps.workspace,
+                diff=diff,
+                explanation=repair.explanation,
+                store=deps.store,
+            )
+            if not preflight.accepted:
+                repair = await _decode_repair(
+                    deps.agents,
+                    deps.store,
+                    input=input,
+                    feedback=f"Validation policy rejected the repair: {preflight.reason}",
+                )
+                continue
+            review = await review_validation_diff(
+                workspace=deps.workspace,
+                diff=diff,
+                explanation=repair.explanation,
+                independent_review=deps.independent_review,
+                store=deps.store,
+            )
+            if not review.accepted:
+                repair = await _decode_repair(
+                    deps.agents,
+                    deps.store,
+                    input=input,
+                    feedback=f"Independent review rejected the repair: {review.reason}",
+                )
+                continue
+            reviewed_diff = diff
+            prediction_run = await _execute_predictions(
+                execution=deps.execution,
+                git=deps.git,
+                workspace=deps.workspace,
+                store=deps.store,
+                publish=deps.publish,
+                timeout_s=options.timeout_s,
+                predict_features=options.predict_features,
+            )
+            if await deps.git.diff(deps.workspace) != reviewed_diff:
+                repair = await _decode_repair(
+                    deps.agents,
+                    deps.store,
+                    input=input,
+                    feedback="Validation workspace changed after independent review",
+                )
+                continue
+            break
+        else:
+            raise RuntimeError(
+                "validation repair budget exhausted after "
+                f"{_MAX_VALIDATION_REPAIR_ATTEMPTS} attempts"
+            )
+        review_evidence_ref = await deps.store.put_text(
+            json.dumps(
+                {
+                    "reviewed_diff_ref": reviewed_diff.ref,
+                    "reviewed_diff_paths": list(reviewed_diff.paths),
+                },
+                sort_keys=True,
+            )
+        )
+        current = ValidationResult(
+            result_id=input.validation_key,
+            status="FAILED",
+            test_score=input.reference_metric,
+            sota_commit=input.sota_commit,
+            predictions_ref=prediction_run.predictions_ref,
+            predictions_path=prediction_run.predictions_path,
+            evidence_ref=review_evidence_ref,
+        )
+        await _save_result(current, deps.store, deps.checkpoint)
+        return current
+
+    async def _score_phase(self) -> ValidationResult:
+        """Score packed predictions and checkpoint the completed result."""
+        if self.current is None:
+            raise RuntimeError("validation recovery result is unavailable")
+        self.current = await _score_result(
+            input=self.input,
+            current=self.current,
+            evaluator=self.deps.evaluator,
+            store=self.deps.store,
+        )
+        await _save_result(self.current, self.deps.store, self.deps.checkpoint)
+        return self.current
+
+    async def _commit_phase(self) -> ValidationResult:
+        """Commit the reviewed workspace and return the finalized validation."""
+        if self.current is None:
+            raise RuntimeError("validation recovery result is unavailable")
+        reviewed_diff = None
+        if self.current.evidence_ref is not None:
+            try:
+                evidence = json.loads(
+                    await self.deps.store.get_text(self.current.evidence_ref)
+                )
+                reviewed_diff = GitDiff(
+                    ref=evidence["reviewed_diff_ref"],
+                    paths=tuple(evidence["reviewed_diff_paths"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                reviewed_diff = None
+        if reviewed_diff is None:
+            raise RuntimeError("validation commit requires reviewed diff evidence")
+        diff = await self.deps.git.diff(self.deps.workspace)
+        if diff != reviewed_diff:
+            raise RuntimeError(
+                "validation workspace changed after independent review"
+            )
+        commit = await self.deps.git.commit(
+            self.deps.workspace,
+            diff,
+            f"validate frozen SOTA {self.input.sota_commit}",
+        )
+        self.current = self.current.model_copy(update={"validation_commit": commit})
+        await _save_result(self.current, self.deps.store, self.deps.checkpoint)
+        return self.current
+
+
 async def run_validation_plan(
-    *,
     input: ValidationInput,
-    agents: AgentRuntime,
-    git: GitWorkspace,
-    workspace: GitWorkBranch,
-    execution: ExecutionRuntime,
-    evaluator: TrustedEvaluator,
-    store: ArtifactStore,
-    independent_review: Callable[[str], Awaitable[ValidationDiffReview]],
+    deps: ValidationDeps,
+    options: ValidationOptions,
     result_ref: ArtifactRef | None,
-    checkpoint: CheckpointValidation,
-    publish: EmitEvent | None = None,
-    experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
-    predict_features: Path | None = None,
 ) -> ValidationResult:
     """Run or recover one independent validation attempt under its stable key.
 
-    ``experiment_timeout_s`` is the same budget SEARCH gave the experiment; the
+    ``options.timeout_s`` is the same budget SEARCH gave the experiment; the
     re-run must not be held to a stricter one than the run it is reproducing.
 
-    ``predict_features`` is the held-out feature file this phase exists to score
-    against. It is exported as ``ATHENA_PREDICT_FEATURES`` for the length of the
-    re-run only. Without it the re-run reproduces the *search* predictions --
-    which is what a platform-split project did until 2026-08-30, so the final
-    evaluator saw nothing but unknown row ids and reported ``{"primary": 0.0}``.
+    ``options.predict_features`` is the held-out feature file this phase exists
+    to score against. It is exported as ``ATHENA_PREDICT_FEATURES`` for the
+    length of the re-run only. Without it the re-run reproduces the *search*
+    predictions -- which is what a platform-split project did until 2026-08-30,
+    so the final evaluator saw nothing but unknown row ids and reported
+    ``{"primary": 0.0}``.
     """
-
-    try:
-        expected_key = validation_key(
-            input.sota_commit,
-            input.reference_metric,
-            input.direction,
-            input.final_evaluator_ref,
-        )
-        if input.validation_key != expected_key:
-            raise ValueError("validation_key does not match frozen validation inputs")
-        current = await _load_result(result_ref, store)
-        action = await recovery_action(result_ref, store, input)
-        if (
-            action == "commit"
-            and current is not None
-            and current.validation_commit is not None
-            and current.final_test_score is not None
-            and current.evidence_ref is not None
-        ):
-            return current
-
-        if action == "run":
-            repair = await _decode_repair(agents, store, input=input)
-            for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
-                diff = await git.diff(workspace)
-                preflight = await _deterministic_preflight(
-                    workspace=workspace,
-                    diff=diff,
-                    explanation=repair.explanation,
-                    store=store,
-                )
-                if not preflight.accepted:
-                    repair = await _decode_repair(
-                        agents,
-                        store,
-                        input=input,
-                        feedback=f"Validation policy rejected the repair: {preflight.reason}",
-                    )
-                    continue
-                review = await review_validation_diff(
-                    workspace=workspace,
-                    diff=diff,
-                    explanation=repair.explanation,
-                    independent_review=independent_review,
-                    store=store,
-                )
-                if not review.accepted:
-                    repair = await _decode_repair(
-                        agents,
-                        store,
-                        input=input,
-                        feedback=f"Independent review rejected the repair: {review.reason}",
-                    )
-                    continue
-                reviewed_diff = diff
-                predictions_ref, predictions_path = await _execute_predictions(
-                    execution=execution,
-                    git=git,
-                    workspace=workspace,
-                    store=store,
-                    publish=publish,
-                    timeout_s=experiment_timeout_s,
-                    predict_features=predict_features,
-                )
-                if await git.diff(workspace) != reviewed_diff:
-                    repair = await _decode_repair(
-                        agents,
-                        store,
-                        input=input,
-                        feedback="Validation workspace changed after independent review",
-                    )
-                    continue
-                break
-            else:
-                raise RuntimeError(
-                    "validation repair budget exhausted after "
-                    f"{_MAX_VALIDATION_REPAIR_ATTEMPTS} attempts"
-                )
-            review_evidence_ref = await store.put_text(
-                json.dumps(
-                    {
-                        "reviewed_diff_ref": reviewed_diff.ref,
-                        "reviewed_diff_paths": list(reviewed_diff.paths),
-                    },
-                    sort_keys=True,
-                )
-            )
-            current = ValidationResult(
-                result_id=input.validation_key,
-                status="FAILED",
-                test_score=input.reference_metric,
-                sota_commit=input.sota_commit,
-                predictions_ref=predictions_ref,
-                predictions_path=predictions_path,
-                evidence_ref=review_evidence_ref,
-            )
-            await _save_result(current, store, checkpoint)
-            action = "score"
-
-        if action == "score":
-            if current is None:
-                raise RuntimeError("validation recovery result is unavailable")
-            current = await _score_result(
-                input=input,
-                current=current,
-                evaluator=evaluator,
-                store=store,
-            )
-            await _save_result(current, store, checkpoint)
-            action = "commit"
-
-        if action == "commit":
-            if current is None:
-                raise RuntimeError("validation recovery result is unavailable")
-            reviewed_diff = None
-            if current.evidence_ref is not None:
-                try:
-                    evidence = json.loads(await store.get_text(current.evidence_ref))
-                    reviewed_diff = GitDiff(
-                        ref=evidence["reviewed_diff_ref"],
-                        paths=tuple(evidence["reviewed_diff_paths"]),
-                    )
-                except (KeyError, TypeError, ValueError):
-                    reviewed_diff = None
-            if reviewed_diff is None:
-                raise RuntimeError("validation commit requires reviewed diff evidence")
-            diff = await git.diff(workspace)
-            if diff != reviewed_diff:
-                raise RuntimeError(
-                    "validation workspace changed after independent review"
-                )
-            commit = await git.commit(
-                workspace,
-                diff,
-                f"validate frozen SOTA {input.sota_commit}",
-            )
-            current = current.model_copy(update={"validation_commit": commit})
-            await _save_result(current, store, checkpoint)
-            return current
-
-        raise RuntimeError(f"unsupported validation recovery action: {action}")
-    finally:
-        # The validate Agent is a one-shot VALIDATE worker; release it after the
-        # phase succeeds or fails so repeated validation runs do not accumulate.
-        try:
-            await agents.reap(VALIDATE_AGENT_ID)
-        except Exception:  # noqa: BLE001,S110 - GC must never mask VALIDATE failure
-            pass
+    session = ValidationSession(
+        input=input,
+        deps=deps,
+        options=options,
+        result_ref=result_ref,
+    )
+    return await session.run()
 
 
 __all__ = [
     "CheckpointValidation",
+    "PredictionRun",
+    "ValidationDeps",
     "ValidationDiffReview",
     "ValidationInput",
+    "ValidationOptions",
+    "ValidationSession",
     "recovery_action",
     "review_validation_diff",
     "run_validation_plan",

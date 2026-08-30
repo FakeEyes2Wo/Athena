@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from athena.research.prepare_phase import DataContract
 from athena.research.supervisor.experiment import data_contract_block
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
@@ -35,6 +36,40 @@ def test_the_block_names_the_training_file_and_the_reason() -> None:
 def test_an_absent_contract_adds_nothing() -> None:
     assert data_contract_block("") == ""
     assert data_contract_block("   \n ") == ""
+
+def test_data_contract_value_object_prompts_train_only_never_raw_and_predict_env(
+    tmp_path,
+) -> None:
+    """The value object must render every platform-data rule for candidates.
+
+    The durable contract and the baseline task prompt both have to say the same
+    three facts: train only on the platform train file, never read the raw
+    dataset, and read ATHENA_PREDICT_FEATURES for the prediction rows.
+    """
+    raw = tmp_path / "model_input.csv"
+    train = tmp_path / "data_split" / "train.csv"
+    search = tmp_path / "data_split" / "search_features.csv"
+    contract = DataContract(
+        train_csv=train,
+        predict_features_csv=search,
+        dataset_path=raw,
+        group_column="TIC",
+    )
+
+    contract_text = contract.contract_text()
+    assert "Train ONLY on" in contract_text
+    assert str(train) in contract_text
+    assert "Do NOT read" in contract_text
+    assert str(raw) in contract_text
+    assert "ATHENA_PREDICT_FEATURES" in contract_text
+
+    candidate_text = contract.candidate_task("baseline task")
+    assert "Train ONLY on" in candidate_text
+    assert str(train) in candidate_text
+    assert "Do NOT read" in candidate_text
+    assert str(raw) in candidate_text
+    assert "ATHENA_PREDICT_FEATURES" in candidate_text
+
 
 
 def test_the_state_carries_the_contract_across_a_save_load(tmp_path) -> None:

@@ -19,6 +19,19 @@ SPLIT_MANIFEST_NAME = "split_manifest.json"
 
 
 @dataclass(frozen=True)
+class SplitSpec:
+    """Configuration for a deterministic train/search/final split."""
+
+    search_frac: float = 0.2
+    final_frac: float = 0.2
+    seed: int = 0
+    group_column: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_spec(self)
+
+
+@dataclass(frozen=True)
 class SplitManifest:
     """Disjoint train/search/final row-id sets produced by the platform."""
 
@@ -40,39 +53,39 @@ class SplitManifest:
             raise ValueError("train/search/final splits must be disjoint")
 
 
+def _validate_spec(spec: SplitSpec) -> None:
+    if not 0 <= spec.search_frac < 1:
+        raise ValueError("search_frac must be in [0, 1)")
+    if not 0 <= spec.final_frac < 1:
+        raise ValueError("final_frac must be in [0, 1)")
+    if spec.search_frac + spec.final_frac >= 1:
+        raise ValueError("search_frac + final_frac must be less than 1")
+
+
 def split_ids(
     row_ids: Sequence[str],
+    spec: SplitSpec,
     *,
-    search_frac: float = 0.2,
-    final_frac: float = 0.2,
-    seed: int = 0,
     groups: Sequence[str] | None = None,
 ) -> SplitManifest:
     """Split row ids deterministically into train/search/final sets.
 
-    Fractions are applied to the shuffled order. The remaining fraction is the
-    train set. Raises when fractions are outside [0, 1) or too large together.
-
-    ``groups`` gives each row a grouping key (one entry per row id, same order).
-    When present, rows sharing a key always land in the same split. Without it
-    a plain row-level shuffle silently leaks between splits for any dataset
-    whose rows are not independent -- consecutive frames of one active region,
-    windows cut from one star's light curve, repeated measurements of one
-    patient. The metric still goes up in that case; it just stops meaning
-    anything, and nothing downstream can detect it.
+    ``spec`` holds the fractions, seed, and (for CSV callers) the optional
+    grouping column. ``groups`` gives each row a grouping key (one entry per row
+    id, same order). When present, rows sharing a key always land in the same
+    split. Without it a plain row-level shuffle silently leaks between splits
+    for any dataset whose rows are not independent -- consecutive frames of one
+    active region, windows cut from one star's light curve, repeated
+    measurements of one patient. The metric still goes up in that case; it just
+    stops meaning anything, and nothing downstream can detect it.
     """
-    if not 0 <= search_frac < 1:
-        raise ValueError("search_frac must be in [0, 1)")
-    if not 0 <= final_frac < 1:
-        raise ValueError("final_frac must be in [0, 1)")
-    if search_frac + final_frac >= 1:
-        raise ValueError("search_frac + final_frac must be less than 1")
+    _validate_spec(spec)
 
     ids = list(row_ids)
     if len(set(ids)) != len(ids):
         raise ValueError("row_ids must be unique")
 
-    rng = Random(seed)
+    rng = Random(spec.seed)
     if groups is None:
         units: list[tuple[str, ...]] = [(row_id,) for row_id in ids]
     else:
@@ -95,8 +108,8 @@ def split_ids(
     # single-row groups reproduce the previous split byte for byte; a group
     # larger than the remaining budget overshoots, which is unavoidable.
     total = len(ids)
-    want_search = int(total * search_frac)
-    want_final = int(total * final_frac)
+    want_search = int(total * spec.search_frac)
+    want_final = int(total * spec.final_frac)
     search: list[str] = []
     final: list[str] = []
     train: list[str] = []
@@ -114,34 +127,13 @@ def split_ids(
     return manifest
 
 
-def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fieldnames})
-
-
-def materialize_csv_split(
+def _read_csv_table(
     source_csv: Path,
-    output_dir: Path,
-    target_column: str,
     *,
-    search_frac: float = 0.2,
-    final_frac: float = 0.2,
-    seed: int = 0,
-    group_column: str | None = None,
-) -> SplitManifest:
-    """Read a local CSV and write platform-owned train/search/final files.
-
-    Row identity is the row index (0-based), matching the existing
-    ``__athena_row_id`` convention. The target column is removed from the
-    feature files, so search/final labels are never visible to candidates.
-
-    ``group_column`` names a column whose value keeps related rows together
-    (active region id, star id, subject id). Rows sharing a value never span
-    two splits.
-    """
+    target_column: str,
+    group_column: str | None,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Read a CSV and validate that its target/group columns exist."""
     with source_csv.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames = [
@@ -154,21 +146,27 @@ def materialize_csv_split(
         if group_column is not None and group_column not in fieldnames:
             raise ValueError(f"group column {group_column!r} not found in {source_csv}")
         rows = [dict(row) for row in reader]
+    return fieldnames, rows
 
-    ids = [str(index) for index in range(len(rows))]
-    groups = (
-        [str(row.get(group_column, "")) for row in rows]
-        if group_column is not None
-        else None
-    )
-    manifest = split_ids(
-        ids,
-        search_frac=search_frac,
-        final_frac=final_frac,
-        seed=seed,
-        groups=groups,
-    )
-    by_id = dict(zip(ids, rows))
+
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def _write_split_files(
+    output_dir: Path,
+    *,
+    fieldnames: list[str],
+    rows: list[dict[str, str]],
+    manifest: SplitManifest,
+    target_column: str,
+) -> None:
+    """Write train/search features/search labels/final features/final labels."""
+    by_id = {str(index): row for index, row in enumerate(rows)}
     feature_fields = [
         "__athena_row_id",
         *(field for field in fieldnames if field != target_column),
@@ -211,14 +209,47 @@ def materialize_csv_split(
         label_fields,
         label_rows(manifest.final_ids),
     )
+
+
+def materialize_csv_split(
+    source_csv: Path,
+    output_dir: Path,
+    target_column: str,
+    spec: SplitSpec,
+) -> SplitManifest:
+    """Read a local CSV and write platform-owned train/search/final files.
+
+    Row identity is the row index (0-based), matching the existing
+    ``__athena_row_id`` convention. The target column is removed from the
+    feature files, so search/final labels are never visible to candidates.
+
+    ``spec.group_column`` names a column whose value keeps related rows together
+    (active region id, star id, subject id). Rows sharing a value never span
+    two splits.
+    """
+    fieldnames, rows = _read_csv_table(
+        source_csv, target_column=target_column, group_column=spec.group_column
+    )
+    ids = [str(index) for index in range(len(rows))]
+    groups = (
+        [str(row.get(spec.group_column, "")) for row in rows]
+        if spec.group_column is not None
+        else None
+    )
+    manifest = split_ids(ids, spec, groups=groups)
+
+    _write_split_files(
+        output_dir,
+        fieldnames=fieldnames,
+        rows=rows,
+        manifest=manifest,
+        target_column=target_column,
+    )
     _write_split_manifest(
         output_dir,
         source_csv=source_csv,
         target_column=target_column,
-        search_frac=search_frac,
-        final_frac=final_frac,
-        seed=seed,
-        group_column=group_column,
+        spec=spec,
     )
     return manifest
 
@@ -228,10 +259,7 @@ def _write_split_manifest(
     *,
     source_csv: Path,
     target_column: str,
-    search_frac: float,
-    final_frac: float,
-    seed: int,
-    group_column: str | None,
+    spec: SplitSpec,
 ) -> Path:
     """Record how this split was made, next to the files it made.
 
@@ -252,10 +280,10 @@ def _write_split_manifest(
         },
         "params": {
             "target_column": target_column,
-            "group_column": group_column,
-            "search_frac": search_frac,
-            "final_frac": final_frac,
-            "seed": seed,
+            "group_column": spec.group_column,
+            "search_frac": spec.search_frac,
+            "final_frac": spec.final_frac,
+            "seed": spec.seed,
         },
         "files": {
             path.name: {"sha256": _sha256(path), "bytes": path.stat().st_size}

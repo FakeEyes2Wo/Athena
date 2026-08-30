@@ -18,145 +18,150 @@ def _number(value: Any, *, signed: bool = False) -> str:
     return f"{value:+.4f}" if signed else f"{value:.4f}"
 
 
-def build_final_report(
-    tree: ResearchTree, validation: Mapping[str, Any] | None = None
-) -> str:
-    """Render the research tree plus optional VALIDATE results as Markdown."""
-    data = tree.to_dict()
-    executed = {
-        experiment["hypothesis_id"] for experiment in data["experiments"].values()
-    }
-    lines: list[str] = ["# Athena 研究报告", ""]
-
+def _sota_section(data: Mapping[str, Any]) -> list[str]:
+    """Render the SOTA block, if the tree has one."""
     sota_id = data.get("sota_id")
-    if sota_id:
-        sota_experiment = data["experiments"][sota_id]
-        primary = (
-            sota_experiment["eval"]["primary"] if sota_experiment.get("eval") else None
+    if not sota_id:
+        return []
+    sota_experiment = data["experiments"][sota_id]
+    primary = (
+        sota_experiment["eval"]["primary"] if sota_experiment.get("eval") else None
+    )
+    hypothesis = data["hypotheses"][sota_experiment["hypothesis_id"]]
+    lines = ["", "## SOTA"]
+    lines.append(f"- **SOTA 实验**: `{sota_id}`")
+    if primary is not None:
+        lines.append(
+            f"- **最佳 primary**: "
+            f"{(f'{primary:.4f}' if isinstance(primary, float) else str(primary))}"
         )
-        hypothesis = data["hypotheses"][sota_experiment["hypothesis_id"]]
-        lines.append("## SOTA")
-        lines.append(f"- **SOTA 实验**: `{sota_id}`")
-        if primary is not None:
-            lines.append(
-                f"- **最佳 primary**: "
-                f"{(f'{primary:.4f}' if isinstance(primary, float) else str(primary))}"
-            )
-
-        lines.append(f"- **SOTA 假设**: {hypothesis['statement']}")
-        secondary = (
-            sota_experiment["eval"].get("secondary") or {}
-            if sota_experiment.get("eval")
-            else {}
+    lines.append(f"- **SOTA 假设**: {hypothesis['statement']}")
+    secondary = (
+        sota_experiment["eval"].get("secondary") or {}
+        if sota_experiment.get("eval")
+        else {}
+    )
+    if secondary:
+        rendered = ", ".join(
+            f"{name} {_number(value)}" for name, value in sorted(secondary.items())
         )
-        if secondary:
-            rendered = ", ".join(
-                f"{name} {_number(value)}" for name, value in sorted(secondary.items())
-            )
-            lines.append(f"- **次要指标**: {rendered}")
-        lines.append("")
+        lines.append(f"- **次要指标**: {rendered}")
+    lines.append("")
+    return lines
 
-    lines.append(f"- 实验总数: {len(data['experiments'])}")
-    lines.append(f"- 假设总数: {len(data['hypotheses'])}")
 
-    if validation:
-        final_score = validation.get("final_test_score")
-        gap = validation.get("generalization_gap")
-        warning = validation.get("generalization_warning")
-        if final_score is not None or gap is not None or warning:
-            lines.append("")
-            lines.append("## 验证结果")
-            if final_score is not None:
-                lines.append(
-                    f"- **最终测试分数**: "
-                    f"{(f'{final_score:.4f}' if isinstance(final_score, float) else str(final_score))}"
-                )
-            if gap is not None:
-                lines.append(
-                    f"- **泛化差距**: "
-                    f"{(f'{gap:.4f}' if isinstance(gap, float) else str(gap))}"
-                )
-            if warning:
-                lines.append(
-                    "- **泛化警告**: 测试集表现与训练/验证集差距过大，存在过拟合风险"
-                )
+def _validation_section(validation: Mapping[str, Any] | None) -> list[str]:
+    """Render optional VALIDATE results even when the tree has no SOTA yet."""
+    if not validation:
+        return []
+    final_score = validation.get("final_test_score")
+    gap = validation.get("generalization_gap")
+    warning = validation.get("generalization_warning")
+    if final_score is None and gap is None and not warning:
+        return []
+    lines = ["", "## 验证结果"]
+    if final_score is not None:
+        lines.append(
+            f"- **最终测试分数**: "
+            f"{(f'{final_score:.4f}' if isinstance(final_score, float) else str(final_score))}"
+        )
+    if gap is not None:
+        lines.append(
+            f"- **泛化差距**: "
+            f"{(f'{gap:.4f}' if isinstance(gap, float) else str(gap))}"
+        )
+    if warning:
+        lines.append(
+            "- **泛化警告**: 测试集表现与训练/验证集差距过大，存在过拟合风险"
+        )
+    return lines
 
-    # 迭代对照表：每次改动相对 SOTA 的增减，以及判定与显著性。评审要的"关键改动
-    # 前后指标对比"就是这张表；只报一个最终分数看不出任何一步是否真的有用。
+
+def _iteration_table_section(
+    data: Mapping[str, Any], sota_id: str | None
+) -> list[str]:
+    """Render the per-experiment primary-vs-SOTA comparison table."""
     scored = [
         (exp_id, experiment)
         for exp_id, experiment in data["experiments"].items()
         if experiment.get("eval") and experiment["eval"].get("primary") is not None
     ]
-    if scored:
-        reference = (
-            data["experiments"][sota_id]["eval"]["primary"]
-            if sota_id and data["experiments"][sota_id].get("eval")
-            else None
+    if not scored:
+        return []
+    reference = (
+        data["experiments"][sota_id]["eval"]["primary"]
+        if sota_id and data["experiments"][sota_id].get("eval")
+        else None
+    )
+    lines = ["", "## 迭代对照", ""]
+    lines.append("| 实验 | 状态 | primary | Δ vs SOTA | 判定 | 假设 |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    for exp_id, experiment in scored:
+        primary = experiment["eval"]["primary"]
+        delta = (
+            _number(primary - reference, signed=True)
+            if isinstance(primary, (int, float))
+            and isinstance(reference, (int, float))
+            else "—"
         )
-        lines.append("")
-        lines.append("## 迭代对照")
-        lines.append("")
-        lines.append("| 实验 | 状态 | primary | Δ vs SOTA | 判定 | 假设 |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
-        for exp_id, experiment in scored:
-            primary = experiment["eval"]["primary"]
-            delta = (
-                _number(primary - reference, signed=True)
-                if isinstance(primary, (int, float))
-                and isinstance(reference, (int, float))
-                else "—"
-            )
-            verdict = experiment.get("verdict") or {}
-            winner = verdict.get("winner")
-            p_value = verdict.get("p_value")
-            judged = (
-                f"{winner} (p={_number(p_value)})"
-                if winner and p_value is not None
-                else (winner or "—")
-            )
-            statement = data["hypotheses"][experiment["hypothesis_id"]]["statement"]
-            lines.append(
-                f"| `{exp_id}` | {experiment['status']} | {_number(primary)} | "
-                f"{delta} | {judged} | {statement} |"
-            )
+        verdict = experiment.get("verdict") or {}
+        winner = verdict.get("winner")
+        p_value = verdict.get("p_value")
+        judged = (
+            f"{winner} (p={_number(p_value)})"
+            if winner and p_value is not None
+            else (winner or "—")
+        )
+        statement = data["hypotheses"][experiment["hypothesis_id"]]["statement"]
+        lines.append(
+            f"| `{exp_id}` | {experiment['status']} | {_number(primary)} | "
+            f"{delta} | {judged} | {statement} |"
+        )
+    return lines
 
-    # 失败实验：报告此前完全不提它们，于是"跑了 8 次只成 2 次"和"跑了 2 次都成"
-    # 在最终材料里长得一模一样。
+
+def _failed_experiments_section(data: Mapping[str, Any]) -> list[str]:
+    """Render failed experiments so 'ran 8 only succeeded 2' is visible."""
     failed = [
         (exp_id, experiment)
         for exp_id, experiment in data["experiments"].items()
         if experiment.get("error")
     ]
-    if failed:
-        lines.append("")
-        lines.append("## 失败实验与原因")
-        for exp_id, experiment in failed:
-            reason = " ".join(str(experiment["error"]).split())[:300]
-            lines.append(f"- **{exp_id}** [{experiment['status']}] {reason}")
+    if not failed:
+        return []
+    lines = ["", "## 失败实验与原因"]
+    for exp_id, experiment in failed:
+        reason = " ".join(str(experiment["error"]).split())[:300]
+        lines.append(f"- **{exp_id}** [{experiment['status']}] {reason}")
+    return lines
 
-    # 只列出"尚未执行"的假设（已创建实验的假设不算待选，例如 baseline）。
+
+def _next_steps_section(
+    tree: ResearchTree, data: Mapping[str, Any], executed: set[str]
+) -> list[str]:
+    """Render pending hypotheses and the intervention/observation plan."""
     pending = [
         hypothesis
         for hypothesis in tree.pending_hypotheses()
         if hypothesis.id not in executed
     ]
-    if pending:
-        lines.append("")
-        lines.append("## 待选假设")
-        for hypothesis in pending:
-            lines.append(f"- {hypothesis.statement}")
-        # 同一批假设再按"干预 → 预期观测"展开一次：这正是评审要的下一步验证方案，
-        # 光有 statement 看不出该做什么实验、看到什么才算成立。
-        lines.append("")
-        lines.append("## 下一步验证方案")
-        for index, hypothesis in enumerate(pending, start=1):
-            lines.append(f"{index}. {hypothesis.statement}")
-            lines.append(f"   - 干预: {hypothesis.intervention}")
-            lines.append(f"   - 预期观测: {hypothesis.expected_effect}")
-
+    if not pending:
+        return []
+    lines = ["", "## 待选假设"]
+    for hypothesis in pending:
+        lines.append(f"- {hypothesis.statement}")
     lines.append("")
-    lines.append("## 实验记录")
+    lines.append("## 下一步验证方案")
+    for index, hypothesis in enumerate(pending, start=1):
+        lines.append(f"{index}. {hypothesis.statement}")
+        lines.append(f"   - 干预: {hypothesis.intervention}")
+        lines.append(f"   - 预期观测: {hypothesis.expected_effect}")
+    return lines
+
+
+def _experiment_records_section(data: Mapping[str, Any]) -> list[str]:
+    """Render every experiment in chronological/display order."""
+    lines = ["", "## 实验记录"]
     for exp_id, experiment in data["experiments"].items():
         hypothesis = data["hypotheses"][experiment["hypothesis_id"]]
         primary = experiment["eval"]["primary"] if experiment.get("eval") else None
@@ -170,6 +175,26 @@ def build_final_report(
             f"- **{exp_id}** [{experiment['status']}] "
             f"{hypothesis['statement']}{suffix}"
         )
+    return lines
+
+
+def build_final_report(
+    tree: ResearchTree, validation: Mapping[str, Any] | None = None
+) -> str:
+    """Render the research tree plus optional VALIDATE results as Markdown."""
+    data = tree.to_dict()
+    executed = {
+        experiment["hypothesis_id"] for experiment in data["experiments"].values()
+    }
+    lines = ["# Athena 研究报告", ""]
+    lines += _sota_section(data)
+    lines.append(f"- 实验总数: {len(data['experiments'])}")
+    lines.append(f"- 假设总数: {len(data['hypotheses'])}")
+    lines += _validation_section(validation)
+    lines += _iteration_table_section(data, data.get("sota_id"))
+    lines += _failed_experiments_section(data)
+    lines += _next_steps_section(tree, data, executed)
+    lines += _experiment_records_section(data)
     return "\n".join(lines)
 
 

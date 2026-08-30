@@ -405,6 +405,7 @@ async def run_prepare_plan(
     task: str,
     max_turns: int,
     publish: EmitEvent | None = None,
+    predict_features: Path | None = None,
 ) -> PrepareResult:
     """Run and repair one stable PREPARE Agent until a trusted baseline exists.
 
@@ -478,6 +479,7 @@ async def run_prepare_plan(
                         workspace_root=root,
                         environment_root=execution.environment_root,
                         experiment_id=PREPARE_PLAN_ID,
+                        predict_features=predict_features,
                     ),
                 )
                 outcome = await runner.run_turn(

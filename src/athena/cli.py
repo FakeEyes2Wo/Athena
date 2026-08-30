@@ -5,7 +5,7 @@ import asyncio
 import json
 import sys
 import traceback
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +115,57 @@ def _dataset_path_for_prompt(data: str) -> str:
         pass
     return data
 
+@dataclass(frozen=True)
+class CliRunConfig:
+    """Typed translation of ``run`` CLI arguments passed to ``ResearchRuntime``.
+
+    The CLI intentionally keeps this type internal: test-facing
+    ``_runtime_options`` still returns the plain dict accepted by the runtime
+    constructor, while the mapping stays one-directional here.
+    """
+
+    task: str
+    search_limit: int | None
+    auto_validate: bool
+    direction: str
+    ideation: str
+    survey: bool
+    survey_query: str
+    survey_max_papers: int
+    survey_search_top_k: int
+    survey_max_seconds: float
+    experiment_timeout_s: int
+    compute: ComputeConfig
+    dataset_path: Path | None
+    target_column: str | None
+    group_column: str | None
+    split_seed: int
+    tolerance: float
+    data_root: str | None
+
+    def as_options(self) -> dict[str, object]:
+        return {
+            "task": self.task,
+            "search_limit": self.search_limit,
+            "auto_validate": self.auto_validate,
+            "direction": self.direction,
+            "ideation": self.ideation,
+            "survey": self.survey,
+            "survey_query": self.survey_query,
+            "survey_max_papers": self.survey_max_papers,
+            "survey_search_top_k": self.survey_search_top_k,
+            "survey_max_seconds": self.survey_max_seconds,
+            "experiment_timeout_s": self.experiment_timeout_s,
+            "compute": self.compute,
+            "dataset_path": self.dataset_path,
+            "target_column": self.target_column,
+            "group_column": self.group_column,
+            "split_seed": self.split_seed,
+            "tolerance": self.tolerance,
+            "data_root": self.data_root,
+        }
+
+
 
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
@@ -132,31 +183,31 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     )
     task_lines.extend(f"{label}: {value}" for label, value in optional_context if value)
     dataset_path = _platform_split_dataset(args)
-    return {
-        "task": "\n".join(line for line in task_lines if line),
+    return CliRunConfig(
+        task="\n".join(line for line in task_lines if line),
         # 传 None 而不是替换成默认值：运行时要能分辨"用户没给"和"用户给了 10"。
         # 给了就该覆盖持久化的旧值，没给就该沿用。
-        "search_limit": args.max_search_experiments,
-        "auto_validate": args.mode == "auto",
-        "direction": args.direction or "maximize",
-        "ideation": args.ideation,
-        "survey": args.survey,
-        "survey_query": args.survey_query or "",
-        "survey_max_papers": args.survey_papers,
-        "survey_search_top_k": args.survey_search_top_k,
-        "survey_max_seconds": args.survey_max_seconds,
-        "experiment_timeout_s": args.experiment_timeout,
-        "compute": _compute_config(args),
+        search_limit=args.max_search_experiments,
+        auto_validate=args.mode == "auto",
+        direction=args.direction or "maximize",
+        ideation=args.ideation,
+        survey=args.survey,
+        survey_query=args.survey_query or "",
+        survey_max_papers=args.survey_papers,
+        survey_search_top_k=args.survey_search_top_k,
+        survey_max_seconds=args.survey_max_seconds,
+        experiment_timeout_s=args.experiment_timeout,
+        compute=_compute_config(args),
         # 这五项此前只被拼进任务提示词，从没传给运行时：平台数据划分因此永远
         # 不触发（``prepare_phase`` 要求 dataset_path 与 target_column 同时非空），
         # 判胜容差也永远是 0.0。
-        "dataset_path": dataset_path,
-        "target_column": args.target if dataset_path is not None else None,
-        "group_column": args.group_column if dataset_path is not None else None,
-        "split_seed": args.split_seed,
-        "tolerance": args.tolerance,
-        "data_root": args.data_root or None,
-    }
+        dataset_path=dataset_path,
+        target_column=args.target if dataset_path is not None else None,
+        group_column=args.group_column if dataset_path is not None else None,
+        split_seed=args.split_seed,
+        tolerance=args.tolerance,
+        data_root=args.data_root or None,
+    ).as_options()
 
 
 def _compute_config(args: argparse.Namespace) -> ComputeConfig:
