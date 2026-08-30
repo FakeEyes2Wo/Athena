@@ -7,10 +7,28 @@ module provides the deterministic primitive to replace that step.
 """
 
 import csv
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from random import Random
 from typing import Sequence
+
+#: Written beside the split files so a finished project can say how it split.
+SPLIT_MANIFEST_NAME = "split_manifest.json"
+
+
+@dataclass(frozen=True)
+class SplitSpec:
+    """Configuration for a deterministic train/search/final split."""
+
+    search_frac: float = 0.2
+    final_frac: float = 0.2
+    seed: int = 0
+    group_column: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_spec(self)
 
 
 @dataclass(frozen=True)
@@ -35,42 +53,100 @@ class SplitManifest:
             raise ValueError("train/search/final splits must be disjoint")
 
 
+def _validate_spec(spec: SplitSpec) -> None:
+    if not 0 <= spec.search_frac < 1:
+        raise ValueError("search_frac must be in [0, 1)")
+    if not 0 <= spec.final_frac < 1:
+        raise ValueError("final_frac must be in [0, 1)")
+    if spec.search_frac + spec.final_frac >= 1:
+        raise ValueError("search_frac + final_frac must be less than 1")
+
+
 def split_ids(
     row_ids: Sequence[str],
+    spec: SplitSpec,
     *,
-    search_frac: float = 0.2,
-    final_frac: float = 0.2,
-    seed: int = 0,
+    groups: Sequence[str] | None = None,
 ) -> SplitManifest:
     """Split row ids deterministically into train/search/final sets.
 
-    Fractions are applied to the shuffled order. The remaining fraction is the
-    train set. Raises when fractions are outside [0, 1) or too large together.
+    ``spec`` holds the fractions, seed, and (for CSV callers) the optional
+    grouping column. ``groups`` gives each row a grouping key (one entry per row
+    id, same order). When present, rows sharing a key always land in the same
+    split. Without it a plain row-level shuffle silently leaks between splits
+    for any dataset whose rows are not independent -- consecutive frames of one
+    active region, windows cut from one star's light curve, repeated
+    measurements of one patient. The metric still goes up in that case; it just
+    stops meaning anything, and nothing downstream can detect it.
     """
-    if not 0 <= search_frac < 1:
-        raise ValueError("search_frac must be in [0, 1)")
-    if not 0 <= final_frac < 1:
-        raise ValueError("final_frac must be in [0, 1)")
-    if search_frac + final_frac >= 1:
-        raise ValueError("search_frac + final_frac must be less than 1")
+    _validate_spec(spec)
 
     ids = list(row_ids)
     if len(set(ids)) != len(ids):
         raise ValueError("row_ids must be unique")
 
-    rng = Random(seed)
-    shuffled = ids[:]
+    rng = Random(spec.seed)
+    if groups is None:
+        units: list[tuple[str, ...]] = [(row_id,) for row_id in ids]
+    else:
+        keys = list(groups)
+        if len(keys) != len(ids):
+            raise ValueError("groups must have one entry per row id")
+        members: dict[str, list[str]] = {}
+        for row_id, key in zip(ids, keys):
+            members.setdefault(str(key), []).append(row_id)
+        # Sort before shuffling so the split depends on the seed alone, not on
+        # whatever order dict insertion happened to produce.
+        units = [tuple(members[key]) for key in sorted(members)]
+
+    shuffled = units[:]
     rng.shuffle(shuffled)
 
-    n = len(shuffled)
-    n_search = int(n * search_frac)
-    n_final = int(n * final_frac)
-    search = tuple(shuffled[:n_search])
-    final = tuple(shuffled[n_search : n_search + n_final])
-    train = tuple(shuffled[n_search + n_final :])
-    manifest = SplitManifest(train_ids=train, search_ids=search, final_ids=final)
+    # Fractions are over rows, not units: with uneven group sizes, cutting on
+    # unit counts would hand a wildly wrong share of the data to each split.
+    # Targets are floored exactly like the ungrouped path used to slice, so
+    # single-row groups reproduce the previous split byte for byte; a group
+    # larger than the remaining budget overshoots, which is unavoidable.
+    total = len(ids)
+    want_search = int(total * spec.search_frac)
+    want_final = int(total * spec.final_frac)
+    search: list[str] = []
+    final: list[str] = []
+    train: list[str] = []
+    for unit in shuffled:
+        if len(search) < want_search:
+            search.extend(unit)
+        elif len(final) < want_final:
+            final.extend(unit)
+        else:
+            train.extend(unit)
+    manifest = SplitManifest(
+        train_ids=tuple(train), search_ids=tuple(search), final_ids=tuple(final)
+    )
     manifest.validate()
     return manifest
+
+
+def _read_csv_table(
+    source_csv: Path,
+    *,
+    target_column: str,
+    group_column: str | None,
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Read a CSV and validate that its target/group columns exist."""
+    with source_csv.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [
+            name.strip() for name in (reader.fieldnames or []) if name.strip()
+        ]
+        if target_column not in fieldnames:
+            raise ValueError(
+                f"target column {target_column!r} not found in {source_csv}"
+            )
+        if group_column is not None and group_column not in fieldnames:
+            raise ValueError(f"group column {group_column!r} not found in {source_csv}")
+        rows = [dict(row) for row in reader]
+    return fieldnames, rows
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
@@ -81,36 +157,16 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) ->
             writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
-def materialize_csv_split(
-    source_csv: Path,
+def _write_split_files(
     output_dir: Path,
-    target_column: str,
     *,
-    search_frac: float = 0.2,
-    final_frac: float = 0.2,
-    seed: int = 0,
-) -> SplitManifest:
-    """Read a local CSV and write platform-owned train/search/final files.
-
-    Row identity is the row index (0-based), matching the existing
-    ``__athena_row_id`` convention. The target column is removed from the
-    feature files, so search/final labels are never visible to candidates.
-    """
-    with source_csv.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = [name.strip() for name in (reader.fieldnames or []) if name.strip()]
-        if target_column not in fieldnames:
-            raise ValueError(f"target column {target_column!r} not found in {source_csv}")
-        rows = [dict(row) for row in reader]
-
-    ids = [str(index) for index in range(len(rows))]
-    manifest = split_ids(
-        ids,
-        search_frac=search_frac,
-        final_frac=final_frac,
-        seed=seed,
-    )
-    by_id = dict(zip(ids, rows))
+    fieldnames: list[str],
+    rows: list[dict[str, str]],
+    manifest: SplitManifest,
+    target_column: str,
+) -> None:
+    """Write train/search features/search labels/final features/final labels."""
+    by_id = {str(index): row for index, row in enumerate(rows)}
     feature_fields = [
         "__athena_row_id",
         *(field for field in fieldnames if field != target_column),
@@ -118,10 +174,7 @@ def materialize_csv_split(
     label_fields = ["__athena_row_id", target_column]
 
     def feature_rows(id_set: Sequence[str]) -> list[dict[str, str]]:
-        return [
-            {"__athena_row_id": row_id, **by_id[row_id]}
-            for row_id in id_set
-        ]
+        return [{"__athena_row_id": row_id, **by_id[row_id]} for row_id in id_set]
 
     def label_rows(id_set: Sequence[str]) -> list[dict[str, str]]:
         return [
@@ -133,7 +186,9 @@ def materialize_csv_split(
         ]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(output_dir / "train.csv", fieldnames, [by_id[i] for i in manifest.train_ids])
+    _write_csv(
+        output_dir / "train.csv", fieldnames, [by_id[i] for i in manifest.train_ids]
+    )
     _write_csv(
         output_dir / "search_features.csv",
         feature_fields,
@@ -154,4 +209,97 @@ def materialize_csv_split(
         label_fields,
         label_rows(manifest.final_ids),
     )
+
+
+def materialize_csv_split(
+    source_csv: Path,
+    output_dir: Path,
+    target_column: str,
+    spec: SplitSpec,
+) -> SplitManifest:
+    """Read a local CSV and write platform-owned train/search/final files.
+
+    Row identity is the row index (0-based), matching the existing
+    ``__athena_row_id`` convention. The target column is removed from the
+    feature files, so search/final labels are never visible to candidates.
+
+    ``spec.group_column`` names a column whose value keeps related rows together
+    (active region id, star id, subject id). Rows sharing a value never span
+    two splits.
+    """
+    fieldnames, rows = _read_csv_table(
+        source_csv, target_column=target_column, group_column=spec.group_column
+    )
+    ids = [str(index) for index in range(len(rows))]
+    groups = (
+        [str(row.get(spec.group_column, "")) for row in rows]
+        if spec.group_column is not None
+        else None
+    )
+    manifest = split_ids(ids, spec, groups=groups)
+
+    _write_split_files(
+        output_dir,
+        fieldnames=fieldnames,
+        rows=rows,
+        manifest=manifest,
+        target_column=target_column,
+    )
+    _write_split_manifest(
+        output_dir,
+        source_csv=source_csv,
+        target_column=target_column,
+        spec=spec,
+    )
     return manifest
+
+
+def _write_split_manifest(
+    output_dir: Path,
+    *,
+    source_csv: Path,
+    target_column: str,
+    spec: SplitSpec,
+) -> Path:
+    """Record how this split was made, next to the files it made.
+
+    The split is fully determined by (source bytes, target, group column,
+    fractions, seed) -- but none of those were written down anywhere, and
+    ``state.json`` does not carry them either. So a finished project could not
+    say which split its frozen evaluator was scoring against.
+
+    Real cost (2026-08-30): reconstructing a run's split needed a brute-force
+    sweep over candidate seeds, comparing row-id sets until one matched at 62.
+    That only worked because the source CSV was still byte-identical; had it
+    moved or been regenerated, the run's numbers would have been unfalsifiable.
+    """
+    payload = {
+        "source_csv": {
+            "path": str(source_csv.resolve()),
+            "sha256": _sha256(source_csv),
+        },
+        "params": {
+            "target_column": target_column,
+            "group_column": spec.group_column,
+            "search_frac": spec.search_frac,
+            "final_frac": spec.final_frac,
+            "seed": spec.seed,
+        },
+        "files": {
+            path.name: {"sha256": _sha256(path), "bytes": path.stat().st_size}
+            for path in sorted(output_dir.glob("*.csv"))
+        },
+    }
+    manifest_path = output_dir / SPLIT_MANIFEST_NAME
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return manifest_path
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()

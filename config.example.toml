@@ -16,10 +16,12 @@
 # LLM 基础配置
 # ──────────────────────────────────────────────────────────────────────────
 [llm]
-# 后端类型：deepseek | openai | anthropic（默认 deepseek）
+# 后端类型：deepseek | openai | qwen（默认 deepseek）
+# qwen 走阿里云百炼 DashScope 的 OpenAI 兼容模式，端点会自动切到
+# https://dashscope.aliyuncs.com/compatible-mode/v1，密钥读 DASHSCOPE_API_KEY。
 provider = "deepseek"
 
-# OpenAI 兼容 API 端点（默认 DeepSeek 官方端点）
+# OpenAI 兼容 API 端点（不设则按 provider 取默认端点）
 base_url = "https://api.deepseek.com"
 
 # 快/省档模型：搜索、审阅、门禁等日常调用默认走它
@@ -28,8 +30,23 @@ model_name = "deepseek-v4-flash"
 # 强/贵档模型：需要更强推理时手动切换
 model_pro = "deepseek-v4-pro"
 
+# 采样温度（默认 0.1）。评测规范通常要求申报并固定采样参数，所以它必须可配置，
+# 而不是写死在代码里。环境变量 LLM_TEMPERATURE 覆盖本项。
+# temperature = 0.1
+
+# 采样随机种子；不设则请求里根本不带 seed 字段——不认这个参数的后端会因为一个
+# 凭空多出来的字段直接 400。要可复现的运行就把它设成定值。（LLM_SEED）
+# seed = 62
+
+# 是否让模型走思考/推理模式（默认 false）。Athena 的 Agent 循环靠工具调用推进，
+# 思考 token 只增加延迟与成本。各后端字段名不同，由 provider 负责映射：
+# DeepSeek 是 thinking.type，DashScope 是 enable_thinking，OpenAI 两者都不认。
+# （LLM_ENABLE_THINKING）
+# enable_thinking = false
+
 # API Key 不写在这里。
-# settings.api_key() 依次读取环境变量 DEEPSEEK_API_KEY、OPENAI_API_KEY。
+# settings.api_key() 依次读取环境变量 LLM_API_KEY、DEEPSEEK_API_KEY、
+# OPENAI_API_KEY、DASHSCOPE_API_KEY。
 # 请把真实 key 放在 .env 中，不要提交进仓库。
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ runner so the runner is easier to read.
 """
 
 import asyncio
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -157,7 +158,8 @@ class GeneralTurnMixin:
                 channel="error",
                 text=(
                     f"Kaggle handoff failed ({type(exc).__name__}: {exc}); "
-                    "idea generation continues without Kaggle evidence."
+                    "idea generation continues without Kaggle evidence.\n\n"
+                    f"{traceback.format_exc()}"
                 ),
                 plan=KAGGLE_HANDOFF_AGENT_ID,
             )

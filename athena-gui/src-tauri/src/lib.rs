@@ -23,7 +23,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::chat::send_message,
             commands::chat::message,
             commands::search::start_search,
             commands::search::pause_search,

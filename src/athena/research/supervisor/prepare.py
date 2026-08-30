@@ -134,7 +134,17 @@ def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
     """
     spec_path = root / "metric.json"
     if not spec_path.is_file():
-        raise ValueError("metric.json is missing")
+        # 报出绝对路径，因为最常见的失败不是"忘了写 metric.json"，而是**写到了别的
+        # 目录**：agent 可以用 shell_command 的绝对路径在 workspace 外面建好整套文件，
+        # 然后对着那份东西反复 submit。只说"metric.json is missing"时，它看自己刚
+        # 列过的目录，文件明明都在，于是原样再交一次。
+        existing = sorted(p.name for p in root.iterdir())[:10] if root.is_dir() else []
+        raise ValueError(
+            f"metric.json is missing from your workspace {root}. "
+            f"That directory currently holds: {existing or 'nothing'}. "
+            "Write every evaluator file inside that exact directory; files you "
+            "created anywhere else do not count."
+        )
     try:
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
         evaluator_rel = spec["eval_script"]
@@ -306,13 +316,8 @@ async def run_evaluator_plan(
     ask_user: Any | None = None,
     agent_id: str = EVALUATOR_AGENT_ID,
     plan_id: str = EVALUATOR_PLAN_ID,
-    agent_type: str = EVALUATOR_AGENT_ID,
 ) -> ArtifactRef:
-    """Run and repair one evaluator Agent until it is accepted via README.
-
-    ``agent_type`` 决定用哪个已注册的工厂，也就决定 agent 的工具落在哪个工作区；
-    search 与 final evaluator 各有一个类型，不能共用。
-    """
+    """Run and repair one evaluator Agent until it is accepted via README."""
 
     if max_turns < 1:
         raise ValueError("max_turns must be at least 1")
@@ -332,7 +337,7 @@ async def run_evaluator_plan(
         )
     )
     agent_id, run_id = await agents.create_root(
-        agent_type,
+        "evaluator",
         {"content": task, "context_refs": [context_ref]},
         agent_id=agent_id,
         name=plan_id,
@@ -409,9 +414,21 @@ async def run_evaluator_plan(
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # 写入 README/校验/目录运行失败 → 转成同 Plan 的反馈重试。
                 feedback = _feedback_text(exc)
+                # 拒绝理由此前只发给 agent，操作者的日志里一个字都没有。真机
+                # （2026-08-29）上 agent 连交 10 次 submit 全被拒、直到预算耗尽，
+                # 而日志里只有一句"turn budget exhausted"——从外面看是无缘无故的
+                # 空转，没有任何线索指向真正的原因。
+                logger.warning(
+                    "evaluator %s submit rejected on turn %d/%d: %s",
+                    plan_id,
+                    turn + 1,
+                    max_turns,
+                    feedback,
+                )
 
         raise RuntimeError(
-            "evaluator turn budget exhausted without an accepted evaluator"
+            f"evaluator turn budget exhausted without an accepted evaluator "
+            f"({plan_id}); last rejection: {feedback or 'none recorded'}"
         )
     finally:
         # The evaluator Agent is a one-shot PREPARE worker; release it after the
@@ -435,6 +452,7 @@ async def run_prepare_plan(
     task: str,
     max_turns: int,
     publish: EmitEvent | None = None,
+    predict_features: Path | None = None,
 ) -> PrepareResult:
     """Run and repair one stable PREPARE Agent until a trusted baseline exists.
 
@@ -508,6 +526,7 @@ async def run_prepare_plan(
                         workspace_root=root,
                         environment_root=execution.environment_root,
                         experiment_id=PREPARE_PLAN_ID,
+                        predict_features=predict_features,
                     ),
                 )
                 outcome = await runner.run_turn(

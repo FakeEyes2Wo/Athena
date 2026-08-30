@@ -4,11 +4,13 @@ import argparse
 import asyncio
 import json
 import sys
-from dataclasses import replace
+import traceback
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from athena.core.agent import settings
+from athena.core.project_lock import ProjectBusyError, project_lock
 from athena.execution.check import check_compute, print_compute_check
 from athena.execution.compute_config import (
     ComputeConfig,
@@ -62,35 +64,150 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_float(value: str) -> float:
+    """argparse ``type``：把 ``--tolerance`` 约束为非负浮点数。
+
+    ``PlanInput.tolerance`` 声明了 ``ge=0``，负值要到构造 Plan 时才炸，那时已经
+    烧掉了一整轮 PREPARE。
+    """
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be a non-negative number, got {value}")
+    return parsed
+
+
+def _platform_split_dataset(args: argparse.Namespace) -> Path | None:
+    """Return the CSV the platform should split itself, or None.
+
+    ``--data`` is free-form: a CSV, a directory of images, a Kaggle URL. Only a
+    local CSV with a named target can be split by ``materialize_csv_split``;
+    handing it anything else raises inside PREPARE. So the platform-owned split
+    turns on exactly when the arguments describe one, and stays off otherwise —
+    which is the historical behaviour for every other shape of input.
+    """
+    if not args.target:
+        return None
+    path = Path(args.data)
+    if path.suffix.lower() != ".csv" or not path.is_file():
+        return None
+    return path.resolve()
+
+
+def _dataset_path_for_prompt(data: str) -> str:
+    """Absolutize a local ``--data`` path before it goes into the task text.
+
+    ``--data`` is resolved against the CLI's working directory, but every agent
+    runs with its own workspace (or the project root) as cwd. A relative path
+    therefore means two different things at the two ends, and the agent's end is
+    the one that is wrong.
+
+    Real run (2026-08-29): ``--data ../data/TESS-SF/windows/model_input.csv``
+    passed the CLI's existence pre-check, then the first agent spent its whole
+    turn budget hunting for it -- ``../data/...`` from the project root resolves
+    to a sibling of the project, not of the CLI. Non-paths (a Kaggle URL) are
+    passed through untouched.
+    """
+    path = Path(data)
+    try:
+        if path.exists():
+            return str(path.resolve())
+    except OSError:
+        pass
+    return data
+
+@dataclass(frozen=True)
+class CliRunConfig:
+    """Typed translation of ``run`` CLI arguments passed to ``ResearchRuntime``.
+
+    The CLI intentionally keeps this type internal: test-facing
+    ``_runtime_options`` still returns the plain dict accepted by the runtime
+    constructor, while the mapping stays one-directional here.
+    """
+
+    task: str
+    search_limit: int | None
+    auto_validate: bool
+    direction: str
+    ideation: str
+    survey: bool
+    survey_query: str
+    survey_max_papers: int
+    survey_search_top_k: int
+    survey_max_seconds: float
+    experiment_timeout_s: int
+    compute: ComputeConfig
+    dataset_path: Path | None
+    target_column: str | None
+    group_column: str | None
+    split_seed: int
+    tolerance: float
+    data_root: str | None
+
+    def as_options(self) -> dict[str, object]:
+        return {
+            "task": self.task,
+            "search_limit": self.search_limit,
+            "auto_validate": self.auto_validate,
+            "direction": self.direction,
+            "ideation": self.ideation,
+            "survey": self.survey,
+            "survey_query": self.survey_query,
+            "survey_max_papers": self.survey_max_papers,
+            "survey_search_top_k": self.survey_search_top_k,
+            "survey_max_seconds": self.survey_max_seconds,
+            "experiment_timeout_s": self.experiment_timeout_s,
+            "compute": self.compute,
+            "dataset_path": self.dataset_path,
+            "target_column": self.target_column,
+            "group_column": self.group_column,
+            "split_seed": self.split_seed,
+            "tolerance": self.tolerance,
+            "data_root": self.data_root,
+        }
+
+
+
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
-    task_lines = [args.task or "", f"Dataset path: {args.data}"]
+    task_lines = [
+        args.task or "",
+        f"Dataset path: {_dataset_path_for_prompt(args.data)}",
+    ]
     optional_context = (
         ("Target", args.target),
+        ("Group column (rows sharing it must not span splits)", args.group_column),
         ("Task type", args.task_type),
         ("Data type", args.data_type),
         ("Primary metric", args.metric),
         ("K-fold policy", args.kfold if args.kfold != "auto" else None),
     )
     task_lines.extend(f"{label}: {value}" for label, value in optional_context if value)
-    return {
-        "task": "\n".join(line for line in task_lines if line),
-        "search_limit": (
-            args.max_search_experiments
-            if args.max_search_experiments is not None
-            else 10
-        ),
-        "auto_validate": args.mode == "auto",
-        "direction": args.direction or "maximize",
-        "ideation": args.ideation,
-        "survey": args.survey,
-        "survey_query": args.survey_query or "",
-        "survey_max_papers": args.survey_papers,
-        "survey_search_top_k": args.survey_search_top_k,
-        "survey_max_seconds": args.survey_max_seconds,
-        "experiment_timeout_s": args.experiment_timeout,
-        "compute": _compute_config(args),
-    }
+    dataset_path = _platform_split_dataset(args)
+    return CliRunConfig(
+        task="\n".join(line for line in task_lines if line),
+        # 传 None 而不是替换成默认值：运行时要能分辨"用户没给"和"用户给了 10"。
+        # 给了就该覆盖持久化的旧值，没给就该沿用。
+        search_limit=args.max_search_experiments,
+        auto_validate=args.mode == "auto",
+        direction=args.direction or "maximize",
+        ideation=args.ideation,
+        survey=args.survey,
+        survey_query=args.survey_query or "",
+        survey_max_papers=args.survey_papers,
+        survey_search_top_k=args.survey_search_top_k,
+        survey_max_seconds=args.survey_max_seconds,
+        experiment_timeout_s=args.experiment_timeout,
+        compute=_compute_config(args),
+        # 这五项此前只被拼进任务提示词，从没传给运行时：平台数据划分因此永远
+        # 不触发（``prepare_phase`` 要求 dataset_path 与 target_column 同时非空），
+        # 判胜容差也永远是 0.0。
+        dataset_path=dataset_path,
+        target_column=args.target if dataset_path is not None else None,
+        group_column=args.group_column if dataset_path is not None else None,
+        split_seed=args.split_seed,
+        tolerance=args.tolerance,
+        data_root=args.data_root or None,
+    ).as_options()
 
 
 def _compute_config(args: argparse.Namespace) -> ComputeConfig:
@@ -185,6 +302,19 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     forked = _apply_fork(args)
     if forked:
         return forked
+    # 一个项目同时只允许一个 run。两个进程写同一份 state.json / research_tree.json
+    # 时是最后写入者获胜，已结算的实验会静默消失（真机 2026-08-30：一个 SOTA 就这
+    # 样从树里没了，两个进程都还在正常跑，唯一的迹象是树变短了）。
+    try:
+        with project_lock(Path(args.project) / ".athena"):
+            return await _run_locked(args)
+    except ProjectBusyError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+
+async def _run_locked(args: argparse.Namespace) -> int:
+    """Run one research session; the caller holds the project lock."""
     runtime = _runtime(args.project, **_runtime_options(args))
     terminal = asyncio.Event()
     exit_code = 0
@@ -224,8 +354,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         return 1
     except Exception as exc:
         # 启动或执行失败（缺 API key、git 初始化失败、模型连接失败等）：
-        # 打印一行干净错误而非裸 traceback，返回非零退出码供脚本判失败。
+        # 打印完整 traceback，返回非零退出码供脚本判失败。
         print(f"RUN FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return 1
     finally:
         runtime.unsubscribe(subscription_id)
@@ -416,6 +547,33 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--data", required=True, help="input dataset path")
     run.add_argument("--task", help="research intent")
     run.add_argument("--target", help="supervised target column")
+    run.add_argument(
+        "--group-column",
+        help=(
+            "分组列名：同一取值的行绝不跨 train/search/final（活动区、恒星、受试者）。"
+            "行与行不独立时，缺了它的随机划分会静默泄漏且分数只会更好看"
+        ),
+    )
+    run.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="平台数据划分的随机种子（默认 0）",
+    )
+    run.add_argument(
+        "--tolerance",
+        type=_non_negative_float,
+        default=0.0,
+        help=(
+            "判胜容差：候选须超过参考指标至少这么多才算 WIN（默认 0.0，"
+            "即任意大于都算赢）"
+        ),
+    )
+    run.add_argument(
+        "--data-root",
+        default="",
+        help="数据集根目录；与远端算力一起用时用于分发",
+    )
     run.add_argument("--task-type", help="task type, for example classification")
     run.add_argument("--data-type", help="data type, for example tabular")
     run.add_argument("--metric", help="primary evaluation metric")
@@ -700,7 +858,9 @@ def _add_bench_parser(subparsers) -> None:
         help=f"判为相关的分数线，默认 {RELEVANT_THRESHOLD}（2 分档）",
     )
 
-    retrieval = modes.add_parser("retrieval", help="known-item hit@k and MRR per channel")
+    retrieval = modes.add_parser(
+        "retrieval", help="known-item hit@k and MRR per channel"
+    )
     retrieval.add_argument("--corpus", required=True, help="corpus_ref to benchmark")
     retrieval.add_argument(
         "--queries",
@@ -725,9 +885,13 @@ def _add_bench_parser(subparsers) -> None:
 
     for parser in (retrieval, health, overlap, recall):
         parser.add_argument(
-            "--artifact-root", default="", help="artifact 根目录；默认 ~/.athena/artifacts"
+            "--artifact-root",
+            default="",
+            help="artifact 根目录；默认 ~/.athena/artifacts",
         )
-        parser.add_argument("--out", default="", help="把报告写成 JSON，供两次运行 diff")
+        parser.add_argument(
+            "--out", default="", help="把报告写成 JSON，供两次运行 diff"
+        )
 
 
 def _print_retrieval_report(report) -> None:
@@ -740,7 +904,9 @@ def _print_retrieval_report(report) -> None:
             f"  金标不在本语料、已排除: {', '.join(report.unusable_queries)}"
             "  （这不是检索失败）"
         )
-    header = f"  {'通道':<26}{'hit@1':>7}{'hit@3':>7}{'hit@5':>7}{'未命中':>8}{'MRR':>8}"
+    header = (
+        f"  {'通道':<26}{'hit@1':>7}{'hit@3':>7}{'hit@5':>7}{'未命中':>8}{'MRR':>8}"
+    )
     print(header)
     for channel in report.channels:
         print(
@@ -794,8 +960,10 @@ def _print_recall_report(report) -> None:
     """打印三段召回；每一段丢的东西该动的地方不同，所以分开报。"""
     print(f"\n召回评测：{report.query_set}")
     print(f"  课题: {report.topic}")
-    print(f"  金标 {report.gold_total} 篇 · 池子 {report.pool_size} 篇 · "
-          f"交付 {report.delivered_size} 篇 · 相关线 {report.threshold}")
+    print(
+        f"  金标 {report.gold_total} 篇 · 池子 {report.pool_size} 篇 · "
+        f"交付 {report.delivered_size} 篇 · 相关线 {report.threshold}"
+    )
     labels = {
         "in_pool": "进池（检索找到）",
         "judged_relevant": "判为相关（打分给够）",
@@ -855,9 +1023,7 @@ async def _cmd_bench(args: argparse.Namespace) -> int:
     if args.bench_command == "overlap":
         runs = [
             sorted(
-                corpus_paper_ids(
-                    await stack.corpus_cache.load(stack.artifacts, ref)
-                )
+                corpus_paper_ids(await stack.corpus_cache.load(stack.artifacts, ref))
             )
             for ref in args.corpus
         ]
@@ -875,9 +1041,7 @@ async def _cmd_bench(args: argparse.Namespace) -> int:
     else:
         embedder = None if args.no_semantic else stack.embedder
         if embedder is None and not args.no_semantic:
-            print(
-                "未配置 ATHENA_EMBEDDING_MODEL，只跑词面通道。", file=sys.stderr
-            )
+            print("未配置 ATHENA_EMBEDDING_MODEL，只跑词面通道。", file=sys.stderr)
         report = await run_known_item(
             corpus,
             load_query_set(args.queries),
@@ -896,7 +1060,9 @@ def _add_compute_parser(subparsers) -> None:
     compute = subparsers.add_parser(
         "compute", help="check the GPU hosts in [compute] before running anything"
     )
-    compute.add_argument("--compute", choices=["local", "ssh"], help="临时覆盖 [compute].mode")
+    compute.add_argument(
+        "--compute", choices=["local", "ssh"], help="临时覆盖 [compute].mode"
+    )
     compute.add_argument(
         "--data-root", default="", help="数据集根目录；与远端算力一起用时用于分发"
     )
@@ -920,9 +1086,7 @@ def _add_kaggle_parser(subparsers) -> None:
     )
     kaggle.add_argument("--list", action="store_true", help="列出竞赛而不是跑流水线")
     kaggle.add_argument("--search", default="", help="--list 时的标题过滤词")
-    kaggle.add_argument(
-        "--sort-by", default="latestDeadline", help="--list 排序字段"
-    )
+    kaggle.add_argument("--sort-by", default="latestDeadline", help="--list 排序字段")
     kaggle.add_argument("--check", action="store_true", help="只做装配自检")
     kaggle.add_argument("--out", default="", help="把报告 JSON 写到该路径")
 

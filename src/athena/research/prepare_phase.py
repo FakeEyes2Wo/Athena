@@ -5,9 +5,12 @@ the long PREPARE pipeline (evaluator freeze, EDA, baseline design, trusted
 baseline score) lives in one focused module.
 """
 
+import csv
 import json
 import logging
 import re
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -16,6 +19,7 @@ from athena.agents.ideator_agent import (
     register_ideator_agent,
 )
 from athena.agents.prepare_agent import (
+    EVALUATOR_AGENT_TYPE,
     PREPARE_EDA_AGENT_ID,
     PREPARE_EDA_AGENT_TYPE,
     register_evaluator_agent,
@@ -24,7 +28,7 @@ from athena.agents.prepare_agent import (
 )
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.research.eda_todo import run_eda_todos
-from athena.research.splitter import materialize_csv_split
+from athena.research.splitter import SplitSpec, materialize_csv_split
 from athena.research.supervisor.prepare import (
     EVALUATOR_AGENT_ID,
     EVALUATOR_PLAN_ID,
@@ -38,6 +42,172 @@ from athena.research.supervisor.prepare import (
 logger = logging.getLogger(__name__)
 
 HandoffFn = Callable[..., Awaitable[str]]
+
+@dataclass(frozen=True)
+class PlatformSplit:
+    """Value object describing a platform-owned train/search/final CSV split.
+
+    This is the post-``materialize_csv_split`` shape: the platform owns the
+    split, so candidates never have to invent one or accidentally train on
+    held-out rows.
+    """
+
+    split_dir: Path
+    train_csv: Path
+    search_features_csv: Path
+    search_labels_csv: Path
+    final_features_csv: Path
+    final_labels_csv: Path
+    dataset_path: Path
+    target_column: str
+    group_column: str | None = None
+
+    @property
+    def grouping(self) -> str:
+        if self.group_column is None:
+            return ""
+        return (
+            f"Rows were kept together by {self.group_column!r}, so no group "
+            "spans two splits."
+        )
+
+    def data_contract(self) -> "DataContract":
+        return DataContract(
+            train_csv=self.train_csv,
+            predict_features_csv=self.search_features_csv,
+            dataset_path=self.dataset_path,
+            group_column=self.group_column,
+        )
+
+
+@dataclass(frozen=True)
+class DataContract:
+    """Platform-owned data rules, rendered consistently for every agent role.
+
+    PREPARE needs the same facts in three slightly different phrasings: the
+    evaluator must build against the platform split, the baseline must train
+    only on the platform train file, and every later SEARCH candidate must see
+    the same constraint through ``state.data_contract`` (because candidates do
+    not receive the task text via ``context_refs``).
+    """
+
+    train_csv: Path
+    predict_features_csv: Path
+    dataset_path: Path
+    group_column: str | None = None
+
+    @property
+    def grouping(self) -> str:
+        if self.group_column is None:
+            return ""
+        return (
+            f"Rows were kept together by {self.group_column!r}, so no group "
+            "spans two splits."
+        )
+
+    def candidate_task(self, task: str) -> str:
+        """Render the task text handed to baseline/model-writing agents."""
+        return (
+            f"{task}\n\n"
+            f"The platform owns the data split. Train ONLY on "
+            f"{self.train_csv.resolve()}. {self.grouping}\n"
+            f"Do NOT read {self.dataset_path} for training, and do NOT use "
+            "any other split of it you may find beside it. The rows you are "
+            "scored on are drawn from that same file, so fitting on it means "
+            "being scored on rows you already saw, and the metric stops "
+            "measuring skill.\n"
+            f"{self.predict_features_csv.resolve()} holds exactly the "
+            "rows to predict, with labels withheld. Read that path from the "
+            "environment variable ATHENA_PREDICT_FEATURES (os.environ) rather "
+            "than hardcoding it: VALIDATE re-runs your unchanged command with "
+            "the variable pointing at the held-out split, and a hardcoded path "
+            "makes your result unscoreable there."
+        )
+
+    def evaluator_task(self, task: str) -> str:
+        """Render the task text handed to the evaluator-building agent."""
+        return (
+            f"{task}\n\n"
+            f"The platform has already split the dataset into train/search/final "
+            f"files under {self.train_csv.parent.resolve()}. {self.grouping}\n"
+            "Do NOT create your own split. Build evaluate.py using "
+            "search_labels.csv as the trusted search labels, and keep "
+            "final_labels.csv hidden from SEARCH."
+        )
+
+    def contract_text(self) -> str:
+        """Render the durable contract stored in ``ResearchState.data_contract``."""
+        return (
+            f"Train ONLY on {self.train_csv.resolve()}. {self.grouping}\n"
+            f"Do NOT read {self.dataset_path} for training, and do NOT use "
+            "any other split of it you may find beside it. The rows you are "
+            "scored on are drawn from that same file, so fitting on it means "
+            "being scored on rows you already saw.\n"
+            "Predict exactly the rows in the CSV named by the environment "
+            "variable ATHENA_PREDICT_FEATURES (labels withheld); during SEARCH "
+            f"that is {self.predict_features_csv.resolve()}. Read it "
+            "from os.environ, do not hardcode it -- VALIDATE re-runs this very "
+            "command with the variable pointing at the held-out split, and a "
+            "hardcoded path silently produces predictions for rows nobody asked "
+            "for."
+        )
+
+    def prompt_block(self) -> str:
+        """Render the Supervisor prompt block for the durable contract text."""
+        from athena.research.supervisor.experiment import data_contract_block
+
+        return data_contract_block(self.contract_text())
+
+
+
+def _label_row_ids(labels_csv: Path) -> set[str]:
+    """Row ids a frozen evaluator scores against, or an empty set if unreadable."""
+    try:
+        with labels_csv.open(encoding="utf-8-sig", newline="") as handle:
+            return {
+                row["__athena_row_id"]
+                for row in csv.DictReader(handle)
+                if row.get("__athena_row_id")
+            }
+    except (OSError, ValueError, KeyError):
+        return set()
+
+
+def _assert_evaluator_splits_are_disjoint(
+    search_labels: Path, final_labels: Path
+) -> None:
+    """Fail PREPARE if the two frozen evaluators score the same rows.
+
+    The whole point of freezing two evaluators is that SEARCH never sees the
+    rows VALIDATE will score on. Nothing checked it.
+
+    Real run (2026-08-29): the shared ``evaluator`` agent type bound its
+    workspace once, so the FINAL evaluator's file tools were still rooted at the
+    SEARCH evaluator's directory. Its ``labels.csv`` write landed inside the
+    already-frozen SEARCH evaluator and replaced those labels with the held-out
+    split. SEARCH would then have been scored on exactly the rows VALIDATE was
+    holding back, and every number the run produced would have been meaningless
+    -- silently, because the scores stay perfectly plausible.
+
+    That specific bug is fixed in ``_run_evaluator_agent``, but this check is
+    the standing guarantee: ``shell_command`` is not sandboxed, so an agent can
+    still write into a directory that is not its own, and this is the property
+    that has to hold regardless of how it got broken.
+    """
+    search_ids = _label_row_ids(search_labels)
+    final_ids = _label_row_ids(final_labels)
+    if not search_ids or not final_ids:
+        # A missing or unreadable labels file is the freeze step's problem, not
+        # this check's; do not turn it into a confusing isolation error.
+        return
+    overlap = search_ids & final_ids
+    if overlap:
+        raise RuntimeError(
+            "SEARCH and FINAL evaluators score overlapping rows "
+            f"({len(overlap)} of {len(final_ids)} final rows). The held-out "
+            "split is not held out. Check whether an agent wrote outside its "
+            f"own workspace: {search_labels} vs {final_labels}"
+        )
 
 
 def _write_missing_report_placeholders(workspace: Path) -> None:
@@ -87,19 +257,27 @@ async def _run_evaluator_agent(
 ) -> str:
     """Run one evaluator agent in a dedicated directory and write its README freeze marker."""
     evaluator_dir = rt.workspaces_root / directory_name
-    # 按 agent_id 而不是固定的 "evaluator" 判定：工作区是随类型注册进工厂的，
-    # 两个 evaluator 共用一个类型名时，final 那次会因为类型已存在而被跳过注册，
-    # 于是继承 search evaluator 的工作区——留出集标签会被写进 SEARCH 看得见的目录。
-    if not rt.registry.contains(agent_id):
-        register_evaluator_agent(
-            rt.registry,
-            provider=rt.provider,
-            artifacts=rt.store,
-            workspace=evaluator_dir,
-            runtime=rt.execution,
-            extra_tools=rt.kaggle_tools("evaluator"),
-            agent_type=agent_id,
-        )
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
+    # The factory binds its workspace at registration time, and both evaluators
+    # share the agent type "evaluator". Registering only when the type is absent
+    # therefore left the FINAL evaluator's read_file/write_file rooted at the
+    # SEARCH evaluator's directory.
+    #
+    # Real run (2026-08-29): the final-evaluator agent wrote labels.csv "into its
+    # workspace" exactly as told, and the platform put it inside the already
+    # frozen SEARCH evaluator -- replacing its labels with the held-out split.
+    # Meanwhile its own directory stayed empty, so every submit was rejected for
+    # a missing metric.json until the turn budget ran out. Re-bind per run.
+    if rt.registry.contains(EVALUATOR_AGENT_TYPE):
+        rt.registry.unregister(EVALUATOR_AGENT_TYPE)
+    register_evaluator_agent(
+        rt.registry,
+        provider=rt.provider,
+        artifacts=rt.store,
+        workspace=evaluator_dir,
+        runtime=rt.execution,
+        extra_tools=rt.kaggle_tools("evaluator"),
+    )
     return await run_evaluator_plan(
         agents=rt.agents,
         scripts=rt.scripts,
@@ -114,19 +292,12 @@ async def _run_evaluator_agent(
         ask_user=getattr(rt, "ask_user", None),
         agent_id=agent_id,
         plan_id=plan_id,
-        agent_type=agent_id,
     )
 
 
-async def run_prepare_phase(
-    runtime: Any, run_handoff_agent: HandoffFn
-) -> PrepareResult:
-    """Run the PREPARE phase and return the trusted baseline result."""
+async def _prepare_workspace(runtime: Any) -> Any:
+    """Initialize the PREPARE EDA workspace and persist its project-relative path."""
     rt = runtime
-    if rt.prepare_phase is not None:
-        return await rt.prepare_phase()
-    if rt.provider is None:
-        raise RuntimeError("PREPARE requires a registered Agent provider")
     await rt.publish_output(
         source="supervisor", channel="text", text="PREPARE: 初始化项目仓库…"
     )
@@ -143,33 +314,68 @@ async def run_prepare_phase(
         channel="text",
         text=f"PREPARE: EDA 工作区 {rt.state.eda_dir} 已就绪（绝对路径 {Path(workspace.path).resolve()}）。",
     )
+    return workspace
 
-    # Optional platform-level data split: when the task names a local CSV,
-    # generate train/search/final files so the evaluator does not split itself.
-    evaluator_task = rt.task_text
-    if rt.config.dataset_path is not None and rt.config.target_column is not None:
-        split_dir = rt.workspaces_root / "data_split"
-        materialize_csv_split(
-            rt.config.dataset_path,
-            split_dir,
-            rt.config.target_column,
+
+async def _prepare_platform_split(runtime: Any) -> DataContract | None:
+    """Materialize and persist the platform-owned split when the CLI names a CSV.
+
+    Returns the value object used to render evaluator/candidate prompts and the
+    durable ``state.data_contract`` string. Returns ``None`` for directory or
+    Kaggle/URL datasets, preserving the old no-platform-split path.
+    """
+    rt = runtime
+    if rt.config.dataset_path is None or rt.config.target_column is None:
+        return None
+
+    split_dir = rt.workspaces_root / "data_split"
+    materialize_csv_split(
+        rt.config.dataset_path,
+        split_dir,
+        rt.config.target_column,
+        SplitSpec(
             search_frac=0.2,
             final_frac=0.2,
             seed=rt.config.split_seed,
-        )
-        await rt.publish_output(
-            source="supervisor",
-            channel="text",
-            text=f"PREPARE: 平台已生成数据划分 {split_dir.resolve()}。",
-        )
-        evaluator_task = (
-            f"{rt.task_text}\n\n"
-            f"The platform has already split the dataset into train/search/final "
-            f"files under {split_dir.resolve()}.\n"
-            "Do NOT create your own split. Build evaluate.py using "
-            "search_labels.csv as the trusted search labels, and keep "
-            "final_labels.csv hidden from SEARCH."
-        )
+            group_column=rt.config.group_column,
+        ),
+    )
+    split = PlatformSplit(
+        split_dir=split_dir,
+        train_csv=split_dir / "train.csv",
+        search_features_csv=split_dir / "search_features.csv",
+        search_labels_csv=split_dir / "search_labels.csv",
+        final_features_csv=split_dir / "final_features.csv",
+        final_labels_csv=split_dir / "final_labels.csv",
+        dataset_path=rt.config.dataset_path,
+        target_column=rt.config.target_column,
+        group_column=rt.config.group_column,
+    )
+    await rt.publish_output(
+        source="supervisor",
+        channel="text",
+        text=(
+            f"PREPARE: 平台已生成数据划分 {split_dir.resolve()}。"
+            + (
+                f"（按 {rt.config.group_column} 分组，同组不跨 split）"
+                if rt.config.group_column
+                else ""
+            )
+        ),
+    )
+    data_contract = split.data_contract()
+    # 候选看不到任务文本（PlanInput 走 context_refs 死信道），所以这条约束必须
+    # 单独持久化，再由 Supervisor 每一轮拼进 content（见 data_contract_block）。
+    rt.state.data_contract = data_contract.contract_text()
+    rt.state.save(rt.state_path)
+    return data_contract
+
+
+async def _prepare_evaluators(
+    runtime: Any, evaluator_task: str
+) -> tuple[Any, Any, Path, Path]:
+    """Freeze the SEARCH evaluator and the hidden FINAL evaluator."""
+    rt = runtime
 
     # Step 1: search evaluator. Reuse a checkpointed frozen bundle when present.
     evaluator_dir = rt.workspaces_root / "evaluator"
@@ -239,9 +445,26 @@ async def run_prepare_phase(
                 f"{evaluator_task}\n\nYou are building the FINAL evaluator. "
                 "Use a held-out split disjoint from the SEARCH evaluator's "
                 "split. This evaluator is hidden from SEARCH and used only "
-                "by VALIDATE."
+                "by VALIDATE.\n\n"
+                # 真机（2026-08-29）：不点名目录时，agent 用 shell_command 的绝对路径
+                # 跑去改**已冻结的 SEARCH evaluator**，把它的 labels.csv 换成了 final
+                # split 的标签——留出集就此泄漏——而自己的工作区一个文件都没有，于是
+                # 连交 10 次 submit 全被拒，直到轮次预算耗尽。
+                f"Your workspace is {final_evaluator_dir.resolve()} and it starts "
+                "EMPTY. Every file you create — metric.json, evaluate.py, labels.csv, "
+                "HANDOFF.md, pyproject.toml — must be written INSIDE it.\n"
+                "The SEARCH evaluator directory already exists next to yours. It is "
+                "frozen. Do NOT read from it, copy from it, or write into it, with "
+                "either the file tools or shell_command. Building the final labels by "
+                "editing the search evaluator's labels.csv leaks the held-out split "
+                "into SEARCH and invalidates the whole run.\n"
+                "Take the final labels from final_labels.csv in the platform's "
+                "data_split directory, and write your own copy into your workspace."
             ),
             label="final_evaluator",
+        )
+        _assert_evaluator_splits_are_disjoint(
+            evaluator_dir / "labels.csv", final_evaluator_dir / "labels.csv"
         )
         await rt.supervisor.checkpoint_final_evaluator(final_evaluator_ref)
         await rt.publish_output(
@@ -253,7 +476,14 @@ async def run_prepare_phase(
             ),
         )
 
-    # Step 2a: EDA orchestrator -> todo workers -> finalize.
+    return evaluator_ref, final_evaluator_ref, evaluator_dir, final_evaluator_dir
+
+
+async def _prepare_eda(
+    runtime: Any, workspace: Any, handoff_agent: HandoffFn
+) -> bool:
+    """Run the EDA orchestration; falls back to placeholder files on failure."""
+    rt = runtime
     eda_ok = True
     try:
         await rt.publish_output(
@@ -270,7 +500,7 @@ async def run_prepare_phase(
                 runtime=rt.execution,
                 extra_tools=rt.kaggle_tools("prepare"),
             )
-        await run_handoff_agent(
+        await handoff_agent(
             agent_id=PREPARE_EDA_AGENT_ID,
             agent_type=PREPARE_EDA_AGENT_TYPE,
             workspace=str(workspace.path),
@@ -299,7 +529,7 @@ async def run_prepare_phase(
                 channel="text",
                 text="PREPARE: 汇总 EDA 报告…",
             )
-            await run_handoff_agent(
+            await handoff_agent(
                 agent_id=PREPARE_EDA_AGENT_ID,
                 agent_type=PREPARE_EDA_AGENT_TYPE,
                 workspace=str(workspace.path),
@@ -326,7 +556,10 @@ async def run_prepare_phase(
         await rt.publish_output(
             source="supervisor",
             channel="error",
-            text=f"EDA handoff failed ({error}); writing fallback EDA files.",
+            text=(
+                f"EDA handoff failed ({error}); writing fallback EDA files.\n\n"
+                f"{traceback.format_exc()}"
+            ),
         )
         _write_fallback_eda(Path(workspace.path))
         eda_ok = False
@@ -334,51 +567,73 @@ async def run_prepare_phase(
             await rt.agents.reap(PREPARE_EDA_AGENT_ID)
         except Exception:  # noqa: BLE001,S110 - GC must never mask EDA failure
             pass
+    return eda_ok
 
-    # Step 2b: baseline ideator reads EDA handoff and writes BASELINE_DESIGN.md.
-    if eda_ok:
-        try:
-            await rt.publish_output(
-                source="supervisor",
-                channel="text",
-                text="PREPARE: 生成 BASELINE_DESIGN.md…",
-            )
-            if not rt.registry.contains(BASELINE_IDEATOR_PROFILE.agent_type):
-                register_ideator_agent(
-                    rt.registry,
-                    provider=rt.provider,
-                    artifacts=rt.store,
-                    workspace=Path(workspace.path),
-                    runtime=rt.execution,
-                    extra_tools=rt.ideator_tools(),
-                    gated=True,
-                    profile=BASELINE_IDEATOR_PROFILE,
-                )
-            await run_handoff_agent(
-                agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
-                agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
-                workspace=str(workspace.path),
-                output_file="BASELINE_DESIGN.md",
-                content=(
-                    f"{rt.task_text}\n\nRead EDA_HANDOFF.md and write "
-                    "BASELINE_DESIGN.md."
-                ),
-                reap_after=True,
-            )
-        except Exception as error:
-            await rt.publish_output(
-                source="supervisor",
-                channel="error",
-                text=f"Baseline design failed ({error}); prepare falls back to task-only.",
-            )
-    else:
+
+async def _prepare_baseline_design(
+    runtime: Any,
+    workspace: Any,
+    candidate_task: str,
+    eda_ok: bool,
+    handoff_agent: HandoffFn,
+) -> None:
+    """Have the baseline ideator read EDA and write BASELINE_DESIGN.md."""
+    rt = runtime
+    if not eda_ok:
         await rt.publish_output(
             source="supervisor",
             channel="text",
             text="PREPARE: 因 EDA 失败跳过 BASELINE_DESIGN，prepare 将基于任务原文降级。",
         )
+        return
+    try:
+        await rt.publish_output(
+            source="supervisor",
+            channel="text",
+            text="PREPARE: 生成 BASELINE_DESIGN.md…",
+        )
+        if not rt.registry.contains(BASELINE_IDEATOR_PROFILE.agent_type):
+            register_ideator_agent(
+                rt.registry,
+                provider=rt.provider,
+                artifacts=rt.store,
+                workspace=Path(workspace.path),
+                runtime=rt.execution,
+                extra_tools=rt.ideator_tools(),
+                gated=True,
+                profile=BASELINE_IDEATOR_PROFILE,
+            )
+        await handoff_agent(
+            agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
+            agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
+            workspace=str(workspace.path),
+            output_file="BASELINE_DESIGN.md",
+            content=(
+                f"{candidate_task}\n\nRead EDA_HANDOFF.md and write "
+                "BASELINE_DESIGN.md."
+            ),
+            reap_after=True,
+        )
+    except Exception as error:
+        await rt.publish_output(
+            source="supervisor",
+            channel="error",
+            text=(
+                f"Baseline design failed ({error}); prepare falls back to task-only.\n\n"
+                f"{traceback.format_exc()}"
+            ),
+        )
 
-    # Step 3: prepare agent implements the baseline and receives a trusted score.
+
+async def _run_prepare_agent(
+    runtime: Any,
+    workspace: Any,
+    evaluator_ref: Any,
+    candidate_task: str,
+    predict_features: Path | None,
+) -> PrepareResult:
+    """Run the PREPARE agent implementing the baseline and return trusted score."""
+    rt = runtime
     await rt.publish_output(
         source="supervisor",
         channel="text",
@@ -405,9 +660,46 @@ async def run_prepare_phase(
         store=rt.store,
         evaluator_ref=evaluator_ref,
         tree_ref=tree_ref,
-        task=rt.task_text,
+        task=candidate_task,
         max_turns=MAX_PLAN_TURNS,
         publish=lambda kind, ref, data: rt.events.project_agent_event(
             "prepare", kind, ref, data
         ),
+        predict_features=predict_features,
+    )
+
+
+async def run_prepare_phase(
+    runtime: Any, run_handoff_agent: HandoffFn
+) -> PrepareResult:
+    """Run the PREPARE phase and return the trusted baseline result."""
+    rt = runtime
+    if rt.prepare_phase is not None:
+        return await rt.prepare_phase()
+    if rt.provider is None:
+        raise RuntimeError("PREPARE requires a registered Agent provider")
+
+    workspace = await _prepare_workspace(rt)
+    data_contract = await _prepare_platform_split(rt)
+    evaluator_task = (
+        data_contract.evaluator_task(rt.task_text)
+        if data_contract is not None
+        else rt.task_text
+    )
+    candidate_task = (
+        data_contract.candidate_task(rt.task_text)
+        if data_contract is not None
+        else rt.task_text
+    )
+    evaluator_ref, _final_evaluator_ref, _evaluator_dir, _final_evaluator_dir = (
+        await _prepare_evaluators(rt, evaluator_task)
+    )
+    eda_ok = await _prepare_eda(rt, workspace, run_handoff_agent)
+    await _prepare_baseline_design(rt, workspace, candidate_task, eda_ok, run_handoff_agent)
+    return await _run_prepare_agent(
+        rt,
+        workspace,
+        evaluator_ref,
+        candidate_task,
+        data_contract.predict_features_csv if data_contract is not None else None,
     )

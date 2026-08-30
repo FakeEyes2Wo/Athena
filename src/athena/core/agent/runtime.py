@@ -598,15 +598,23 @@ def create_agent(
     client: "AsyncOpenAI | None" = None,
     max_turns: int = 200,
     max_tokens: int = 4096,
-    temperature: float = 0.1,
+    temperature: float | None = None,
     name: str = "agent",
+    seed: int | None = None,
 ) -> Agent:
     """创建 Agent 实例的便捷工厂函数。
 
-    将分散的配置参数统一构造为 AgentConfig 和 Agent 对象。
+    将分散的配置参数统一构造为 AgentConfig 和 Agent 对象。``temperature``/``seed``
+    留空时交给 ``AgentConfig`` 从 settings 解析，避免这里的字面量默认值把
+    ``LLM_TEMPERATURE`` / ``LLM_SEED`` 悄悄覆盖掉。
     """
     provider = create_provider(model, client=client)
-    config = AgentConfig(max_turns, max_tokens, temperature, name)
+    overrides: dict[str, object] = {}
+    if temperature is not None:
+        overrides["temperature"] = temperature
+    if seed is not None:
+        overrides["seed"] = seed
+    config = AgentConfig(max_turns, max_tokens, name=name, **overrides)
     return create_code_agent(provider, tools, system_prompt, config)
 
 

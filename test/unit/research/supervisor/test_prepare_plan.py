@@ -438,46 +438,6 @@ async def test_custom_format_skips_csv_probes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_evaluator_plan_starts_the_requested_agent_type(tmp_path: Path) -> None:
-    """``agent_type`` 决定用哪个工厂，也就决定 agent 的工具落在哪个工作区。
-
-    final evaluator 必须以自己的类型起 run，否则会复用 search evaluator 的工作区。
-    """
-    evaluator_dir = tmp_path / "final_evaluator"
-    evaluator_dir.mkdir(parents=True, exist_ok=True)
-    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
-    (evaluator_dir / "labels.csv").write_text(
-        "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
-    )
-    (evaluator_dir / "pyproject.toml").write_text(
-        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
-    )
-    (evaluator_dir / "HANDOFF.md").write_text(
-        "prediction column: prediction\n", encoding="utf-8"
-    )
-    (evaluator_dir / "metric.json").write_text(
-        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
-    )
-    store = LocalArtifactStore(tmp_path / "artifacts")
-    agents = _AgentRuntime(store, agent_id="final_evaluator")
-
-    await run_evaluator_plan(
-        agents=agents,
-        scripts=_Scripts(),
-        store=store,
-        evaluator_dir=evaluator_dir,
-        execution=_Execution(tmp_path),
-        task="write the final evaluator",
-        max_turns=2,
-        agent_id="final_evaluator",
-        plan_id="final_evaluator",
-        agent_type="final_evaluator",
-    )
-
-    assert agents.created == ["final_evaluator"]
-
-
-@pytest.mark.asyncio
 async def test_evaluator_plan_writes_readme_and_descriptor_on_submit(
     tmp_path: Path,
 ) -> None:
@@ -610,4 +570,9 @@ async def test_evaluator_plan_missing_metric_retries(tmp_path: Path) -> None:
         )
 
     assert agents.created == ["evaluator"]
-    assert agents.feedback == ["metric.json is missing"]
+    # 反馈必须点名**哪个目录**缺文件。只说 "metric.json is missing" 时，agent 会
+    # 去看它刚列过的那个目录（可能根本不是它的 workspace），发现文件都在，于是
+    # 原样再交一次——真机上就这样连交 10 次直到预算耗尽。
+    assert len(agents.feedback) == 1
+    assert "metric.json is missing from your workspace" in agents.feedback[0]
+    assert str(evaluator_dir) in agents.feedback[0]

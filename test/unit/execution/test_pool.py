@@ -22,6 +22,7 @@ from athena.execution.pool import (
 )
 from athena.execution.remote.channel import RemoteChannel, SubprocessTransport
 from athena.execution.remote.ssh import SshHost
+from athena.execution.runtime import CommandRequest
 
 
 class _FakeGpuTransport(SubprocessTransport):
@@ -282,10 +283,12 @@ async def test_a_lease_can_actually_run_a_command_in_its_workspace(
     lease = await pool.acquire("h1", local_workspace=workspace)
     try:
         result = await lease.backend.run(
-            argv=[sys.executable, "hello.py"],
             workspace_root=workspace,
-            workdir=workspace,
-            timeout_s=60,
+            request=CommandRequest(
+                argv=[sys.executable, "hello.py"],
+                workdir=workspace,
+                timeout_s=60,
+            ),
         )
         assert result.ok, result.stderr
         assert "from the lease" in result.stdout

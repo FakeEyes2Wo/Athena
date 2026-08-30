@@ -24,6 +24,7 @@ from athena.core.agent.models import (
 from athena.core.agent.provider import (
     DeepSeekProvider,
     OpenAIProvider,
+    QwenProvider,
     ResponsesProvider,
     StreamEvent,
     create_provider,
@@ -63,6 +64,7 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert agent_api.create_provider is create_provider
     assert agent_api.OpenAIProvider is OpenAIProvider
     assert agent_api.DeepSeekProvider is DeepSeekProvider
+    assert agent_api.QwenProvider is QwenProvider
 
     assert core_api.Agent is Agent
     assert core_api.AgentConfig is AgentConfig
@@ -75,7 +77,7 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert core_api.create_agent is create_agent
 
 
-def test_code_agent_interface_has_four_parameters_and_five_fields() -> None:
+def test_code_agent_interface_has_four_parameters_and_six_fields() -> None:
     assert list(signature(create_code_agent).parameters) == [
         "model",
         "tools",
@@ -88,6 +90,7 @@ def test_code_agent_interface_has_four_parameters_and_five_fields() -> None:
         "temperature",
         "name",
         "tool_choice",
+        "seed",
     ]
 
 
@@ -687,7 +690,9 @@ async def test_stream_does_not_retry_unrelated_bad_request() -> None:
 async def test_stream_disables_deepseek_thinking_for_tool_execution() -> None:
     """工具 Agent 禁用默认 thinking，避免推理耗尽输出预算却未调用工具。"""
     client = _CaptureClient()
-    provider = ResponsesProvider("model", client=client)
+    # 显式钉住后端：不钉的话它会去读 settings，于是本地 .env 里的 LLM_PROVIDER
+    # 决定这条用例断言的是哪一家的字段名。
+    provider = ResponsesProvider("model", client=client, provider_kind="deepseek")
 
     await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
 
@@ -764,6 +769,107 @@ def test_create_provider_routes_by_llm_provider_env(
     monkeypatch.setenv("LLM_PROVIDER", "bogus")
     with pytest.raises(ValueError, match="LLM_PROVIDER"):
         create_provider("m")
+
+
+def test_qwen_is_reachable_from_llm_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``settings`` 早就允许 ``qwen`` 并配好了 DashScope 端点，但 ``create_provider``
+    没有对应分支，于是照文档配好环境的用户只会撞上 ``unsupported LLM_PROVIDER``。"""
+    monkeypatch.setenv("LLM_PROVIDER", "qwen")
+    # BASE_URL 一旦被设（本地 .env 常有），它优先于 provider 默认端点；清掉才能
+    # 断言"qwen 的默认端点是 DashScope"这件事本身。
+    monkeypatch.delenv("BASE_URL", raising=False)
+
+    provider = create_provider("qwen-max")
+
+    assert isinstance(provider, QwenProvider)
+    assert provider.provider_kind == "qwen"
+    assert settings.base_url() == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def test_dashscope_key_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+
+    assert settings.api_key() == "sk-test"
+
+
+@pytest.mark.asyncio
+async def test_qwen_stream_uses_its_own_thinking_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``{"thinking": {"type": "disabled"}}`` 是 DeepSeek 的字段名。
+
+    此前它被无条件发给所有后端：DashScope 认的是 ``enable_thinking``，OpenAI 对
+    未知请求参数直接回 400。于是"关思考"这个本意只在 DeepSeek 上成立。
+    """
+    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
+    client = _CaptureClient()
+    provider = QwenProvider("qwen-max", client=client)
+
+    await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
+
+    assert client.kwargs["extra_body"] == {"enable_thinking": False}
+    assert "thinking" not in client.kwargs["extra_body"]
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_sends_no_unknown_extra_body() -> None:
+    client = _CaptureClient()
+    provider = OpenAIProvider("gpt", client=client)
+
+    await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
+
+    assert "extra_body" not in client.kwargs
+
+
+@pytest.mark.asyncio
+async def test_qwen_injects_the_schema_like_deepseek() -> None:
+    """DashScope 兼容端点对 ``json_schema`` 的支持随模型而变；``json_object``
+    加 prompt 注入是各型号都成立的那一档。"""
+    client = _CaptureClient()
+    provider = QwenProvider("qwen-max", client=client)
+
+    await anext(
+        provider.stream(
+            AgentConfig(), ToolRegistry(), [], asyncio.Event(), output_type=_Out
+        )
+    )
+
+    assert client.kwargs["response_format"] == {"type": "json_object"}
+    msgs = client.kwargs["messages"]
+    assert msgs and msgs[-1]["role"] == "system"
+    assert json.dumps(_Out.model_json_schema()) in msgs[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_sampling_parameters_are_configurable_and_declarable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """评测规范要求申报并固定采样参数；写死在 dataclass 默认值里两头都做不到。"""
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.0")
+    monkeypatch.setenv("LLM_SEED", "62")
+    client = _CaptureClient()
+    provider = ResponsesProvider("model", client=client)
+
+    await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
+
+    assert client.kwargs["temperature"] == 0.0
+    assert client.kwargs["seed"] == 62
+
+
+@pytest.mark.asyncio
+async def test_no_seed_is_sent_when_none_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不认 ``seed`` 的后端会因为一个凭空多出来的字段直接 400。"""
+    monkeypatch.delenv("LLM_SEED", raising=False)
+    client = _CaptureClient()
+    provider = ResponsesProvider("model", client=client)
+
+    await anext(provider.stream(AgentConfig(), ToolRegistry(), [], asyncio.Event()))
+
+    assert "seed" not in client.kwargs
 
 
 def test_settings_provider_kind_default_and_validation(

@@ -183,9 +183,24 @@ class ResponsesProvider(BaseProvider):
                     "schema": output_type.model_json_schema(),
                 },
             }
-        if self.provider_kind == "deepseek":
+        if self.provider_kind in ("deepseek", "qwen"):
             return {"type": "json_object"}
         return None
+
+    def _extra_body(self) -> dict[str, Any]:
+        """按后端返回 ``extra_body``；不认识的字段一律不发。
+
+        这里曾经无条件发 ``{"thinking": {"type": "disabled"}}``。那是 DeepSeek 的
+        字段名：OpenAI 对未知请求参数直接回 400，DashScope 认的也是另一个名字
+        (``enable_thinking``)。于是"关思考"这个本意只在 DeepSeek 上成立，另外两个
+        后端要么报错要么被无视。字段名必须跟着后端走。
+        """
+        thinking = settings.enable_thinking()
+        if self.provider_kind == "deepseek":
+            return {"thinking": {"type": "enabled" if thinking else "disabled"}}
+        if self.provider_kind == "qwen":
+            return {"enable_thinking": thinking}
+        return {}
 
     @staticmethod
     def _assemble_function_calls(bufs: dict[int, dict]) -> list[StreamEvent]:
@@ -228,7 +243,9 @@ class ResponsesProvider(BaseProvider):
         """
         api_msgs = _to_api(messages)
         tool_defs = [spec.to_openai_tool() for spec in tools.specs]
-        if output_type is not None and (tool_defs or self.provider_kind == "deepseek"):
+        if output_type is not None and (
+            tool_defs or self.provider_kind in ("deepseek", "qwen")
+        ):
             api_msgs = [*api_msgs, _schema_instruction(output_type)]
 
         kw: dict = {
@@ -237,8 +254,13 @@ class ResponsesProvider(BaseProvider):
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
             "stream": True,
-            "extra_body": {"thinking": {"type": "disabled"}},
         }
+        extra_body = self._extra_body()
+        if extra_body:
+            kw["extra_body"] = extra_body
+        # 只有显式配置了种子才发送：不认这个参数的后端会因未知字段直接 400。
+        if config.seed is not None:
+            kw["seed"] = config.seed
         if output_type is not None and not tool_defs:
             response_format = self._response_format(output_type)
             if response_format is not None:
@@ -381,6 +403,24 @@ class DeepSeekProvider(ResponsesProvider):
         super().__init__(model, client=client, provider_kind="deepseek")
 
 
+class QwenProvider(ResponsesProvider):
+    """通义千问(阿里云百炼 DashScope 兼容模式)后端。
+
+    兼容模式说的就是 OpenAI Chat Completions 协议,所以流式、工具调用与
+    ``json_object`` 都能直接复用 ``ResponsesProvider``。按 DeepSeek 而不是 OpenAI
+    的档位适配结构化输出:DashScope 兼容端点对 ``json_schema`` 的支持随模型而变,
+    ``json_object`` + schema 注入 prompt 是各型号都成立的那一档。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        super().__init__(model, client=client, provider_kind="qwen")
+
+
 _ANTHROPIC_NOT_IMPLEMENTED = (
     "native Anthropic provider is not yet implemented; "
     "set LLM_PROVIDER=deepseek|openai"
@@ -437,6 +477,8 @@ def create_provider(
         return OpenAIProvider(model, client=client)
     if kind == "deepseek":
         return DeepSeekProvider(model, client=client)
+    if kind == "qwen":
+        return QwenProvider(model, client=client)
     if kind == "anthropic":
         return AnthropicProvider(model, client=client)
     raise ValueError(f"unsupported LLM_PROVIDER={kind!r}")

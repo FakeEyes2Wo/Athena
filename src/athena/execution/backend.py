@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from athena.core.contracts import ArtifactStore
-from athena.core.tool_types import EmitEvent
 from athena.execution.runtime import (
     CommandExecutor,
+    CommandRequest,
     CommandResult,
     EnvironmentManager,
 )
@@ -32,12 +32,8 @@ class ExecutionBackend(Protocol):
     async def run(
         self,
         *,
-        command: str | None = None,
-        argv: list[str] | None = None,
         workspace_root: Path,
-        workdir: Path,
-        timeout_s: int,
-        emit: EmitEvent | None = None,
+        request: CommandRequest,
     ) -> CommandResult:
         """执行一条命令并流式推送事件。"""
 
@@ -91,30 +87,28 @@ class LocalBackend:
     async def run(
         self,
         *,
-        command: str | None = None,
-        argv: list[str] | None = None,
         workspace_root: Path,
-        workdir: Path,
-        timeout_s: int,
-        emit: EmitEvent | None = None,
+        request: CommandRequest,
     ) -> CommandResult:
-        """在本机执行；``argv`` 不经 shell，``command`` 走本机 shell。"""
-        if argv is not None:
+        """在本机执行；``request.argv`` 不经 shell，``request.command`` 走本机 shell。"""
+        if request.argv is not None:
             shell, shell_args = None, None
         else:
             shell, shell_args = self._environment.shell_parts()
         executor = CommandExecutor(
-            env=self._environment.build_env(workspace_root),
+            env=self._environment.build_env(
+                workspace_root, predict_features=request.predict_features
+            ),
             persist=self._store.put_text if self._store is not None else None,
         )
         return await executor.run(
-            command=command,
-            argv=argv,
-            workdir=workdir,
+            command=request.command,
+            argv=request.argv,
+            workdir=Path(request.workdir) if request.workdir is not None else workspace_root,
             shell=shell,
             shell_args=shell_args,
-            timeout_s=timeout_s,
-            emit=emit,
+            timeout_s=request.timeout_s,
+            emit=request.emit,
         )
 
     async def collect_outputs(self, subdirs: tuple[str, ...]) -> None:

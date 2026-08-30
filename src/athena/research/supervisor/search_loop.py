@@ -3,8 +3,6 @@
 import asyncio
 import logging
 
-from athena.agents.supervisor_agent import MAX_PLAN_TURNS
-from athena.core.research_tree import ExperimentStatus
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import decide_settlement
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
@@ -94,9 +92,16 @@ class SearchLoop:
             if self._run.is_stopped():
                 return
             task = next(iter(done))
+            # ``running_items``、不是 ``running_tasks``：后者给的是裸 Task，把它
+            # 解包成 ``(id, task)`` 不会得到一条有用的报错——**已完成**的 asyncio
+            # Task 迭代出 0 个元素，于是这里抛的是
+            # ``not enough values to unpack (expected 2, got 0)``。
+            #
+            # 真机（2026-08-29）：SEARCH 每次有候选跑完就崩在这里，两次实验分别拿到
+            # 0.8523 和 0.8621 却一次都没能结算。日志里只有那句解包错误。
             plan_id = next(
                 item_id
-                for item_id, item_task in self._run.running_items()
+                for item_id, item_task in self._run.running_items
                 if item_task is task
             )
             self._run.pop_running(plan_id)
@@ -295,6 +300,8 @@ class SearchLoop:
         await self._owner._publish_state()
 
     async def select_next_hypothesis(self, hypothesis_id: str) -> dict[str, object]:
+        from athena.core.research_tree import ExperimentStatus
+
         self._tree.get_hypothesis(hypothesis_id)
         existing = self._tree.experiment_for_hypothesis(hypothesis_id)
         if existing is not None and self._tree.get_experiment(existing).status in {
@@ -333,6 +340,8 @@ class SearchLoop:
         }
 
     async def update_waiting_plan_budget(self, **payload: object) -> dict[str, object]:
+        from athena.agents.supervisor_agent import MAX_PLAN_TURNS
+
         plan_id = str(payload.get("plan_id", ""))
         try:
             plan = self._state.plans[plan_id]

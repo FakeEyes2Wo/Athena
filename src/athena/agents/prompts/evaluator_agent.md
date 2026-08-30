@@ -9,6 +9,13 @@ Your workspace is your current working directory (run `pwd` to see it). Write
 every file into it using **relative** paths — `write_file` and `read_file` are
 sandboxed to this directory and reject absolute paths.
 
+`shell_command` is **not** sandboxed. Never use it to write into a sibling
+workspace, and never build your files by editing another evaluator's directory:
+those directories may already be frozen, and overwriting one silently destroys
+the train/test isolation the whole run rests on. If a submit is rejected for a
+missing file, the file is missing **from your workspace** — check `pwd` and look
+there, rather than at a directory you found elsewhere on disk.
+
 When a command prints long output (a huge error list, registry dump, or trace),
 do not read it all — first pipe it through a text search to isolate the relevant
 lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
@@ -58,7 +65,36 @@ Choose an explicit identity key for every prediction:
   `predictions/` and score the pile; read the exact artifacts the contract
   names, and reject duplicate keys.
 
+## Report the metric's uncertainty, not just the metric
+
+`evaluate.py` MUST print `test_se` and `test_n` alongside `primary`:
+
+- `test_n` is the number of scored held-out records.
+- `test_se` is the standard error of `primary` on that set. Bootstrap it: resample
+  the scored records with replacement at least 1000 times (fixed seed), recompute
+  the metric on each resample, and take the standard deviation of those values.
+  For a plain mean-of-per-record-scores metric, `std / sqrt(n)` is equivalent and
+  cheaper.
+
+This is not decoration. The Supervisor compares a candidate against the frozen
+reference with a confidence interval **only when `test_se` and `test_n` are
+present**; without them it falls back to comparing two point estimates, so on a
+small or imbalanced held-out set pure noise gets recorded as a win and the search
+chases it. If the metric genuinely has no sampling distribution you can estimate,
+say so in `HANDOFF.md` and omit the fields deliberately — but omitting them by
+default is how a search ends up optimising noise.
+
 `HANDOFF.md` MUST state:
+
+- for tabular CSV predictions, a **machine-readable declaration on its own
+  line**, exactly in this form (the platform parses it; prose describing the
+  column elsewhere in the file does not count and the freeze will be rejected
+  with "cannot determine the tabular prediction CSV column"):
+
+  ```text
+  prediction_column: <the column holding the predicted value>
+  prediction_id_column: __athena_row_id
+  ```
 
 - the prediction artifact layout (file names, paths, and the exact schema);
 - the identity key and how to derive it;
@@ -96,14 +132,28 @@ Create:
   directory after the predictions directory is materialized next to it. It must
   read the ground-truth labels (in whatever format the task uses) and the
   `predictions/` directory according to the declared format, compute the primary
-  metric, and print exactly one line `{"primary": <float>}` to stdout (nothing
-  else). Read labels and predictions with `__file__`-relative paths so the
-  script stays correct inside the frozen bundle;
-- the ground-truth labels in the task's native format, with an explicit key
-  column/field;
+  metric, and print exactly one JSON line to stdout (nothing else):
+  `{"primary": <float>, "test_se": <float>, "test_n": <int>}`.
+  Read labels and predictions with `__file__`-relative paths so the script stays
+  correct inside the frozen bundle;
+- the ground-truth labels, **named `labels.csv`** (or a `labels/` directory for
+  non-tabular tasks), with an explicit key column/field. The platform's property
+  probes look for exactly that name; any other filename fails the freeze with
+  "no labels found for evaluator property tests", however correct the file is;
 - a `HANDOFF.md` as described above;
 - a `pyproject.toml` so the draft is a valid uv project (the freezer runs
-  `uv lock`).
+  `uv lock`). The evaluator is a script, not a distributable package, so do NOT
+  add a `[build-system]` section: uv would then try to build the project, and
+  the build fails because there is no package directory matching the project
+  name. This exact shape works:
+
+  ```toml
+  [project]
+  name = "evaluator"
+  version = "0.1.0"
+  requires-python = ">=3.10"
+  dependencies = ["numpy", "pandas", "scikit-learn"]
+  ```
 
 Install every third-party dependency into the shared environment root, not into
 a workspace-local venv: run `uv add --project "$ATHENA_ENV_ROOT" <package>` for
@@ -119,8 +169,8 @@ Return exactly one structured PlanDecision after the tools finish:
 - `submit` freezes the draft and advances to the experiment step. Use it only
   when `metric.json`, `evaluate.py`, labels, `HANDOFF.md`, and `pyproject.toml`
   are all present, the eval script actually runs and prints a valid
-  `{"primary": <float>}` against the labels, and both probes above behaved as
-  described.
+  `{"primary": <float>, "test_se": <float>, "test_n": <int>}` against the labels,
+  and both probes above behaved as described.
 - `continue` stays in the evaluator step to keep repairing the draft; it does
   NOT advance. Use it only when a concrete defect still needs work.
 - `abandon` gives up when no working evaluator is achievable.

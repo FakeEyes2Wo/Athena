@@ -9,6 +9,7 @@ import itertools
 import json
 import logging
 import os
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -211,7 +212,10 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
                 await rt.publish_output(
                     source="agent",
                     channel="error",
-                    text=f"Ideator {index} failed: {result}",
+                    text=(
+                        f"Ideator {index} failed: {result}\n\n"
+                        f"{''.join(traceback.format_exception(type(result), result, result.__traceback__))}"
+                    ),
                     plan=f"ideator-{round_label}-{index}",
                 )
             else:
@@ -568,7 +572,7 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
                 source="agent",
                 channel="error",
                 plan="ideator-debate",
-                text=f"Debate Ideator failed: {error}",
+                text=f"Debate Ideator failed: {error}\n\n{traceback.format_exc()}",
             )
             return []
         return result.hypotheses[:count]

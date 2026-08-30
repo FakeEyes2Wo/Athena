@@ -105,24 +105,7 @@ class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         supervisor.state = SimpleNamespace(
-            plans={
-                "hyp_abc": SimpleNamespace(
-                    turns_used=0,
-                    turn_limit=4,
-                    patience=2,
-                    stale_rounds=0,
-                    context_ref="sha256:ctx",
-                    best_ref=None,
-                    model_copy=lambda update: SimpleNamespace(
-                        turns_used=update["turns_used"],
-                        turn_limit=4,
-                        patience=2,
-                        stale_rounds=0,
-                        context_ref="sha256:ctx",
-                        best_ref=None,
-                    ),
-                )
-            }
+            plans={"hyp_abc": _plan_state()}, data_contract=None
         )
         supervisor._agents = Agents()
         supervisor._publish_agent_event = None
@@ -139,6 +122,115 @@ class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("row_id", content)
 
 
+class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
+    """同一条教训的第三处落点：上一轮为什么没跑成，Agent 必须看得见。
+
+    失败结果一直带着 ``kind``/``error``，但它们只进了 evidence artifact 和事件流。
+    Agent 下一轮收到的仍然是 ``Continue Plan …; turns used: N``，于是只能把同一份
+    manifest 原样再交一次——同一个 ModuleNotFoundError 能烧掉一整条 Plan。
+    """
+
+    @staticmethod
+    def _supervisor(sent: dict, state) -> Supervisor:
+        class Agents:
+            async def followup(self, plan_id, message):
+                sent["content"] = message["content"]
+                return "run-1"
+
+            async def wait_run(self, run_id):
+                return SimpleNamespace(result_ref=None)
+
+        supervisor = Supervisor.__new__(Supervisor)
+        supervisor.tree = SimpleNamespace(
+            get_hypothesis=lambda plan_id: SimpleNamespace(
+                statement="s", intervention="i", expected_effect="e"
+            )
+        )
+        supervisor.state = SimpleNamespace(plans={"hyp_abc": state}, data_contract=None)
+        supervisor._agents = Agents()
+        supervisor._publish_agent_event = None
+        supervisor._persist_state = _noop
+        supervisor._plan_handoff = _handoff
+        supervisor._corpus_block = lambda plan_id: ""
+        return supervisor
+
+    async def test_the_previous_failure_reaches_the_next_prompt(self) -> None:
+        sent: dict[str, object] = {}
+        state = _plan_state(
+            last_failure="execution_failed: command failed (exit 1): ModuleNotFoundError: astropy"
+        )
+        supervisor = self._supervisor(sent, state)
+
+        await supervisor._run_one_turn("hyp_abc")
+
+        content = sent["content"]
+        self.assertIn("ModuleNotFoundError: astropy", content)
+        self.assertIn("execution_failed", content)
+        self.assertIn("Do not resubmit the same experiment unchanged", content)
+
+    async def test_the_failure_is_consumed_once_not_repeated_forever(self) -> None:
+        """已经修好的错误不该一直挂在 prompt 里误导后续每一轮。"""
+        sent: dict[str, object] = {}
+        supervisor = self._supervisor(
+            sent, _plan_state(last_failure="output_failed: nope")
+        )
+
+        await supervisor._run_one_turn("hyp_abc")
+
+        self.assertIsNone(supervisor.state.plans["hyp_abc"].last_failure)
+
+    async def test_a_clean_previous_turn_adds_nothing(self) -> None:
+        sent: dict[str, object] = {}
+        supervisor = self._supervisor(sent, _plan_state())
+
+        await supervisor._run_one_turn("hyp_abc")
+
+        self.assertNotIn("Previous attempt failed", sent["content"])
+
+    async def test_a_failed_result_is_recorded_for_the_next_turn(self) -> None:
+        supervisor = self._supervisor({}, _plan_state())
+
+        await supervisor._record_turn_failure(
+            "hyp_abc",
+            SimpleNamespace(kind="scoring_failed", error="primary score is not finite"),
+        )
+
+        stored = supervisor.state.plans["hyp_abc"].last_failure
+        self.assertIn("scoring_failed", stored)
+        self.assertIn("primary score is not finite", stored)
+
+    async def test_a_scored_result_records_nothing(self) -> None:
+        supervisor = self._supervisor({}, _plan_state())
+
+        await supervisor._record_turn_failure(
+            "hyp_abc", SimpleNamespace(kind="scored", error=None)
+        )
+
+        self.assertIsNone(supervisor.state.plans["hyp_abc"].last_failure)
+
+
+def _plan_state(*, last_failure: str | None = None) -> SimpleNamespace:
+    """A stand-in for ``PlanState`` that supports the one ``model_copy`` we use."""
+    state = SimpleNamespace(
+        turns_used=0,
+        turn_limit=4,
+        patience=2,
+        stale_rounds=0,
+        context_ref="sha256:ctx",
+        best_ref=None,
+        last_failure=last_failure,
+    )
+
+    def model_copy(update):
+        clone = _plan_state(last_failure=state.last_failure)
+        for key, value in update.items():
+            setattr(clone, key, value)
+        return clone
+
+    state.model_copy = model_copy
+    return state
+
+
 async def _noop() -> None:
     """占位的持久化。"""
 
@@ -146,7 +238,6 @@ async def _noop() -> None:
 async def _handoff(plan_id: str) -> str:
     """占位的评估契约。"""
     return "id column: row_id"
-
 
 
 if __name__ == "__main__":

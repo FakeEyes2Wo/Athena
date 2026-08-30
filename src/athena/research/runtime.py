@@ -116,7 +116,7 @@ class ResearchRuntime:
         client: Any = None,
         task: str = "",
         auto_seed_task: bool = False,
-        search_limit: int = 10,
+        search_limit: int | None = None,
         concurrency: int = 1,
         ideator_count: int = 3,
         hypotheses_per_ideator: int = 2,
@@ -127,6 +127,7 @@ class ResearchRuntime:
         dataset_path: str | Path | None = None,
         target_column: str | None = None,
         split_seed: int = 0,
+        group_column: str | None = None,
         data_root: str | Path | None = None,
         experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
         compute: ComputeConfig | None = None,
@@ -162,7 +163,7 @@ class ResearchRuntime:
             task=task,
             auto_seed_task=auto_seed_task,
             search=SearchLimits(
-                search_limit=search_limit,
+                search_limit=10 if search_limit is None else search_limit,
                 concurrency=concurrency,
                 ideator_count=ideator_count,
                 hypotheses_per_ideator=hypotheses_per_ideator,
@@ -181,6 +182,7 @@ class ResearchRuntime:
             dataset_path=Path(dataset_path).resolve() if dataset_path else None,
             target_column=target_column,
             split_seed=split_seed,
+            group_column=group_column,
             data_root=Path(data_root).resolve() if data_root else None,
             experiment_timeout_s=experiment_timeout_s,
             compute=compute if compute is not None else load_compute_config(),
@@ -220,7 +222,7 @@ class ResearchRuntime:
             else ResearchState(
                 status="IDLE",
                 phase="PREPARE",
-                search_limit=search_limit,
+                search_limit=10 if search_limit is None else search_limit,
                 concurrency=concurrency,
                 ideator_count=ideator_count,
                 hypotheses_per_ideator=hypotheses_per_ideator,
@@ -237,6 +239,20 @@ class ResearchRuntime:
                 eda_path = (root / eda_dir).resolve()
             if not eda_path.is_relative_to(root):
                 state.eda_dir = None
+        # 一次失败的运行必须还能续跑。``subscribe`` 会把当前状态立刻回放给订阅者，
+        # 而 CLI 把 ``FAILED`` 当作本次运行的终态——于是崩过一次的项目再也起不来：
+        # 状态在 ``start()`` 之前就被回放，进程当场退出，什么都没做。
+        #
+        # 真机（2026-08-29）：SEARCH 崩掉后每一次 `Athena-cli run` 都只打印
+        # ``phase=SEARCH status=FAILED`` 然后退出。新开一次运行本就应当取代上一次
+        # 的失败结论。
+        if state.status == "FAILED":
+            state.status = "IDLE"
+        # 显式给的搜索预算要覆盖持久化的旧值。既有项目的 state.json 是整份原样加载
+        # 的，于是 ``--max-search-experiments`` 在续跑时**静默失效**——想加预算的人
+        # 看不出它没生效，只会看到搜索照旧在老上限停下。
+        if search_limit is not None:
+            state.search_limit = search_limit
         state.experiment_timeout_s = experiment_timeout_s
         if config.data_root is not None and state.data_root is None:
             state.data_root = str(config.data_root)
@@ -564,14 +580,22 @@ class ResearchRuntime:
         supervisor_kaggle = build_kaggle_stack(
             download_root=self._root, artifacts=self._store, download=True
         )
+        ask_user = self._ask_user
+        if ask_user is not None:
+            def ask_user_recorder(prompt, *args, **kwargs):
+                answer = ask_user(prompt, *args, **kwargs)
+                if answer is not None:
+                    self._session.clarification_qa.append((prompt, str(answer)))
+                return answer
+            ask_user_factory = lambda _thread, _turn: ask_user_recorder
+        else:
+            ask_user_factory = None
         register_supervisor_agent(
             self._registry,
             provider=provider,
             artifacts=self._store,
             actions=self._supervisor,
-            ask_user=(
-                (lambda _t, _u: self._ask_user) if self._ask_user is not None else None
-            ),
+            ask_user=ask_user_factory,
             kaggle_stack=supervisor_kaggle,
         )
         register_plan_agent(

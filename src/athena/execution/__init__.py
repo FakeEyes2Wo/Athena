@@ -14,6 +14,7 @@ from athena.execution.events import (
 from athena.execution.monitor import ExecutionMonitor
 from athena.execution.runtime import (
     CommandExecutor,
+    CommandRequest,
     CommandResult,
     EnvironmentManager,
     ExecutionContext,
@@ -22,6 +23,7 @@ from athena.execution.runtime import (
 
 __all__ = [
     "CommandExecutor",
+    "CommandRequest",
     "CommandResult",
     "EnvironmentManager",
     "ExecutionBackend",

@@ -133,5 +133,5 @@ def test_running_items_pairs_ids_with_tasks() -> None:
     task = asyncio.new_event_loop().run_until_complete(make())
     run.add_running("hyp_1", task)
 
-    assert tuple(run.running_items()) == (("hyp_1", task),)
+    assert tuple(run.running_items) == (("hyp_1", task),)
     assert run.running_tasks == (task,)

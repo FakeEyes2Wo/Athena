@@ -20,6 +20,14 @@ dependencies = [
     "kagglehub>=1.0.2",
 ]
 
+[project.optional-dependencies]
+# 天文数据任务用：FITS 读写。放 extra 而不是核心依赖——Athena 是通用框架，
+# 而实验侧的依赖本来就该由 Agent 自己 `uv add --project "$ATHENA_ENV_ROOT"`
+# 装进实验环境。需要时 `uv sync --extra astro`。
+astro = [
+    "astropy>=6.0",
+]
+
 [dependency-groups]
 dev = [
     "black==26.5.1",

@@ -16,7 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from athena.execution.runtime import EnvironmentManager, ExecutionRuntime
+from athena.execution.runtime import (
+    CommandRequest,
+    EnvironmentManager,
+    ExecutionRuntime,
+)
 
 
 def _manager(tmp_path: Path, *, data_root: Path | None = None) -> EnvironmentManager:
@@ -70,7 +74,7 @@ async def test_the_shell_form_in_the_summary_actually_resolves(tmp_path) -> None
 
     这是上面那几条断言的兜底——只比对字符串的话，换个 shell 又会悄悄错回去。
     """
-    from athena.execution.runtime import ExecutionContext
+    from athena.execution.runtime import CommandRequest, ExecutionContext
 
     data = tmp_path / "data"
     data.mkdir()
@@ -81,7 +85,9 @@ async def test_the_shell_form_in_the_summary_actually_resolves(tmp_path) -> None
     context = ExecutionContext(
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )
-    result = await runtime.run(context, f'echo "{ref}"', timeout_s=60)
+    result = await runtime.run(
+        context, CommandRequest(command=f'echo "{ref}"', timeout_s=60)
+    )
 
     assert result.ok
     assert result.stdout.strip() == str(data)

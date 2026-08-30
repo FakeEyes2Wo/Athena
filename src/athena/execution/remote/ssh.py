@@ -9,7 +9,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from athena.core.contracts import ArtifactStore
-from athena.core.tool_types import EmitEvent
 from athena.execution.remote.channel import (
     LINE_LIMIT_BYTES,
     RemoteChannel,
@@ -17,7 +16,12 @@ from athena.execution.remote.channel import (
     StderrTail,
     bootstrap_code,
 )
-from athena.execution.runtime import BoundedOutput, CommandResult, _dispatch
+from athena.execution.runtime import (
+    BoundedOutput,
+    CommandRequest,
+    CommandResult,
+    _dispatch,
+)
 
 # Win32-OpenSSH 会把远端命令静默截断在 8189 字节；留一半余量，越界在本地就红。
 REMOTE_COMMAND_LIMIT_BYTES = 4096
@@ -243,19 +247,31 @@ class SshBackend:
     async def run(
         self,
         *,
-        command: str | None = None,
-        argv: list[str] | None = None,
         workspace_root: Path,
-        workdir: Path,
-        timeout_s: int,
-        emit: EmitEvent | None = None,
+        request: CommandRequest,
     ) -> CommandResult:
         """在远端执行一条命令，流式回传输出，超时/取消都杀整个进程组。"""
-        cwd = self._remote_cwd(workdir)
+        if request.predict_features is not None:
+            raise NotImplementedError(
+                "ATHENA_PREDICT_FEATURES is not supported on the ssh backend: "
+                "the control node's path does not resolve on the remote host. "
+                "Run platform-split projects with --compute local, or stage the "
+                "split under the remote data root first."
+            )
+        cwd = self._remote_cwd(
+            Path(request.workdir)
+            if request.workdir is not None
+            else workspace_root
+        )
         # Ensure the remote working directory exists before spawning; this also
         # makes a backend usable without an explicitly bound local root.
         await self._channel.request("mkdir", path=cwd)
-        display = " ".join(argv) if argv is not None else (command or "")
+        display = (
+            " ".join(request.argv)
+            if request.argv is not None
+            else (request.command or "")
+        )
+        emit = request.emit
         await _dispatch(emit, "command/started", "exec:run", {"command": display})
 
         keep_full = self._store is not None
@@ -281,8 +297,8 @@ class SshBackend:
 
         try:
             job_id, exited = await self._channel.spawn(
-                argv=argv,
-                command=command,
+                argv=request.argv,
+                command=request.command,
                 cwd=cwd,
                 env=self.build_env(),
                 on_output=on_output,
@@ -294,7 +310,7 @@ class SshBackend:
             )
 
         try:
-            code = await asyncio.wait_for(exited, timeout=timeout_s)
+            code = await asyncio.wait_for(exited, timeout=request.timeout_s)
             error = None
         except asyncio.TimeoutError:
             await self._channel.cancel(job_id)

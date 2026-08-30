@@ -26,8 +26,10 @@ from athena.research.supervisor.experiment import (
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.validation import (
+    ValidationDeps,
     ValidationDiffReview,
     ValidationInput,
+    ValidationOptions,
     run_validation_plan,
     validation_key,
 )
@@ -51,6 +53,7 @@ class PhaseRunner:
         plan_input = await rt.supervisor.plan_input(plan_id)
         workspace_path = rt.supervisor.workspace_path(plan_id)
         execution = await rt.execution_for(plan_id, workspace_path)
+        search_features = rt.workspaces_root / "data_split" / "search_features.csv"
         runner = PlanRunner(
             execution=execution,
             store=rt.store,
@@ -62,6 +65,7 @@ class PhaseRunner:
                 workspace_root=workspace_path,
                 environment_root=rt.root,
                 experiment_id=plan_id,
+                predict_features=search_features if search_features.is_file() else None,
             ),
             direction=plan_input.direction,
             timeout_s=rt.state.experiment_timeout_s,
@@ -97,10 +101,18 @@ class PhaseRunner:
             async def publish(kind: str, ref: str, data: dict | None = None) -> None:
                 """Forward one agent journal event to the runtime event bus.
 
-                必须是协程：``forward_run_events`` 无条件 ``await publish(...)``，
-                同步版返回 None，第一条 journal 事件就会抛 "object NoneType can't
-                be used in 'await' expression"，把整段 handoff 打成 fallback。
-                ``project_agent_event`` 本身也是协程，漏掉 await 事件投影不出去。
+                Must be a coroutine function. ``forward_run_events`` does
+                ``await publish(...)`` on every journal event, and
+                ``project_agent_event`` is itself async. As a plain ``def`` this
+                returned None, so the first event of every handoff run raised
+                ``object NoneType can't be used in 'await' expression`` -- and
+                the coroutine it dropped on the floor meant the events were
+                never projected either.
+
+                Real run (2026-08-29): all nine EDA_REPORT_*.md were written,
+                then the handoff died on its first event and PREPARE fell back
+                to "EDA failed, degrade to the raw task text". The reports were
+                right there on disk and nothing read them.
                 """
                 events_bus = getattr(rt, "events", None)
                 if events_bus is not None:
@@ -192,8 +204,11 @@ class PhaseRunner:
             candidate = rt.state.validation.get("result_ref")
             if isinstance(candidate, str):
                 result_ref = candidate
-        return await run_validation_plan(
-            input=frozen,
+        # VALIDATE 的全部意义就是在**没被搜索过的那一份**上重打一次分。
+        # 候选的 argv 是冻结的，所以换靶只能靠环境变量；不换的话重跑产出的还是
+        # search 行的预测，final evaluator 报 {"primary": 0.0}。
+        final_features = rt.workspaces_root / "data_split" / "final_features.csv"
+        deps = ValidationDeps(
             agents=rt.agents,
             git=rt.git,
             workspace=workspace,
@@ -201,11 +216,20 @@ class PhaseRunner:
             evaluator=rt.evaluator,
             store=rt.store,
             independent_review=self.review_validation_diff,
-            result_ref=result_ref,
             checkpoint=rt.supervisor.checkpoint_validation,
             publish=lambda kind, ref, data: rt.events.project_agent_event(
                 "validate", kind, ref, data
             ),
+        )
+        options = ValidationOptions(
+            timeout_s=rt.state.experiment_timeout_s,
+            predict_features=final_features if final_features.is_file() else None,
+        )
+        return await run_validation_plan(
+            input=frozen,
+            deps=deps,
+            options=options,
+            result_ref=result_ref,
         )
 
     async def review_validation_diff(self, prompt: str) -> ValidationDiffReview:

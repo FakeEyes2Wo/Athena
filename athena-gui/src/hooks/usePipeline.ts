@@ -8,7 +8,6 @@ import {
   pauseSearch,
   resumeSearch,
   sendControl,
-  sendMessage,
   sessionDelete,
   sessionSwitch,
   sessionsList,
@@ -314,7 +313,6 @@ export function usePipeline(workspaceRoot?: string | null) {
   // 后端因尾部上限丢掉的更早记录条数；>0 时对话顶部要说明，不能让历史静默消失。
   const [truncatedRecords, setTruncatedRecords] = useState(0);
   const [humanRequests, setHumanRequests] = useState<HumanRequest[]>([]);
-  const [awaitingIntent, setAwaitingIntent] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
   const logCounter = useRef(0);
@@ -443,13 +441,15 @@ export function usePipeline(workspaceRoot?: string | null) {
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
   }, [appendLog, applySessions, refreshSessions]);
 
-  // Poll for outstanding supervisor human questions while any session is running
-  // or while the initial intent clarification is pending. 只看当前 view model 是不
-  // 够的：在看 B 的时候 A 触发 ask_user，broker 会 park 住 A 的执行，而 A 没有实时
-  // 输出——不轮询就是静默卡死，用户既看不见问题也回答不了。
+  // Poll for outstanding supervisor human questions while any session is running.
+  // Task understanding and any initial clarification are owned by the backend
+  // Supervisor, so the frontend only has to surface these pending requests.
+  //
+  // 只看当前 view model 是不够的：在看 B 的时候 A 触发 ask_user，broker 会 park 住
+  // A 的执行，而 A 没有实时输出——不轮询就是静默卡死，用户既看不见问题也回答不了。
   useEffect(() => {
     const anyRunning = viewModel.status === "running" || runningSessions.length > 0;
-    if (!anyRunning && !awaitingIntent) {
+    if (!anyRunning) {
       setHumanRequests([]);
       return;
     }
@@ -465,7 +465,26 @@ export function usePipeline(workspaceRoot?: string | null) {
     void poll();
     const timer = setInterval(poll, 1500);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [viewModel.status, awaitingIntent, runningSessions]);
+  }, [viewModel.status, runningSessions]);
+
+  // The backend is the only owner of task understanding. When its authoritative
+  // state event fills the preview card, use that understanding to name the
+  // session (the frontend never computes understanding itself).
+  const latestUnderstanding = useMemo(() => {
+    for (let i = viewModel.messages.length - 1; i >= 0; i -= 1) {
+      const message = viewModel.messages[i];
+      if (message.kind === "intent-preview" && message.preview?.title?.trim()) {
+        return message.preview;
+      }
+    }
+    return null;
+  }, [viewModel.messages]);
+
+  useEffect(() => {
+    if (latestUnderstanding) {
+      renameSession(currentSessionId, titleFromTask(latestUnderstanding));
+    }
+  }, [currentSessionId, latestUnderstanding, renameSession]);
 
   // User actions.
 
@@ -583,36 +602,41 @@ export function usePipeline(workspaceRoot?: string | null) {
       return;
     }
 
-    setAwaitingIntent(true);
-    // 任务理解放到后台：不阻塞启动，避免澄清问答让界面一直停在 PREPARE · 空闲。
-    void sendMessage(content)
-      .then((preview) => {
-        renameSession(currentSessionId, titleFromTask(preview));
-        setViewModel((prev) => ({
-          ...prev,
-          messages: [
-            ...prev.messages,
-            {
-              id: nextId("preview"),
-              role: "athena",
-              kind: "intent-preview",
-              content: preview.title || `任务类型: ${preview.task_type} · 主指标: ${preview.primary_metric}`,
-              preview,
-              task: content,
-              started: true,
-            },
-          ],
-        }));
-      })
-      .catch(() => {
-        // 非致命：任务已经启动，preview 拿不到不阻塞运行。
-      })
-      .finally(() => setAwaitingIntent(false));
+    // Task understanding belongs to the backend Supervisor. The frontend only
+    // adds a placeholder preview card; the backend state event will fill it
+    // with the authoritative task_understanding once the Supervisor records it.
+    const previewId = nextId("preview");
+    const title = content.trim().slice(0, 40) || "新任务";
+    setViewModel((prev) => ({
+      ...prev,
+      messages: [
+        ...prev.messages,
+        {
+          id: previewId,
+          role: "athena",
+          kind: "intent-preview",
+          content: "任务理解中…",
+          preview: {
+            title: "",
+            dataset: "",
+            target: "",
+            task_type: "other",
+            primary_metric: "",
+            direction: "maximize",
+            evaluation_plan: "",
+            needs_configuration: true,
+          },
+          task: content,
+          started: true,
+        },
+      ],
+    }));
+    renameSession(currentSessionId, title);
+
     try {
-      // 发送即启动：直接进入 PREPARE，不再等任务理解返回。
-      await startRun(content);
+      // 发送即启动：由后端 Supervisor 统一执行任务理解与 PREPARE。
+      await startRun(content, previewId);
     } catch (err) {
-      setAwaitingIntent(false);
       const text = errorMessage(err);
       setViewModel((prev) => ({
         ...prev,

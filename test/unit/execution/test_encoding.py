@@ -4,7 +4,12 @@ import os
 
 import pytest
 
-from athena.execution.runtime import ExecutionContext, ExecutionRuntime, _StreamDecoder
+from athena.execution.runtime import (
+    CommandRequest,
+    ExecutionContext,
+    ExecutionRuntime,
+    _StreamDecoder,
+)
 
 
 def _feed(decoder: _StreamDecoder, chunks: list[bytes], final: bool = True) -> str:
@@ -61,7 +66,7 @@ async def test_runtime_decodes_powershell_parse_error_gbk(tmp_path) -> None:
     context = ExecutionContext(
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )
-    result = await runtime.run(context, "echo a && echo b")
+    result = await runtime.run(context, CommandRequest(command="echo a && echo b"))
     assert not result.ok
     assert "&&" in result.stderr  # 源命令的 token 会回显在错误里
     assert "�" not in result.stderr  # 无替换字符 = 无 mojibake

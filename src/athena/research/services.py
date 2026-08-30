@@ -63,6 +63,9 @@ class ResearchSession:
     survey_stack: SurveyStack | None = None
     corpus_sessions: list[RetrievalSession] = field(default_factory=list)
     task_text: str = ""
+    # Q&A recorded while the Supervisor task-understanding workflow asks the
+    # human questions through ask_user. Used to build TASK_CLARIFICATION.md.
+    clarification_qa: list[tuple[str, str]] = field(default_factory=list)
     kaggle_stack: KaggleStack | None = None
     data_root: Path | None = None
     compute: ComputeConfig | None = None

@@ -10,6 +10,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool_types import ToolContext
 from athena.execution.runtime import (
     CommandExecutor,
+    CommandRequest,
     EnvironmentManager,
     ExecutionContext,
     ExecutionRuntime,
@@ -105,8 +106,7 @@ async def test_run_echo_success(tmp_path: Path) -> None:
 
     result = await _runtime(tmp_path).run(
         _context(tmp_path),
-        f"{PY} -c \"print('hello-athena')\"",
-        emit=emit,
+        CommandRequest(command=f"{PY} -c \"print('hello-athena')\"", emit=emit),
     )
     assert result.ok
     assert result.exit_code == 0
@@ -120,27 +120,28 @@ async def test_run_echo_success(tmp_path: Path) -> None:
 async def test_run_rejects_command_and_argv_together(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="exactly one"):
         await _runtime(tmp_path).run(
-            _context(tmp_path), "echo shell", argv=[PY, "-c", "print('argv')"]
+            _context(tmp_path),
+            CommandRequest(command="echo shell", argv=[PY, "-c", "print('argv')"]),
         )
 
 
 @pytest.mark.asyncio
 async def test_run_requires_command_or_argv(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="exactly one"):
-        await _runtime(tmp_path).run(_context(tmp_path))
+        await _runtime(tmp_path).run(_context(tmp_path), CommandRequest())
 
 
 @pytest.mark.asyncio
 async def test_run_rejects_empty_argv(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-empty"):
-        await _runtime(tmp_path).run(_context(tmp_path), argv=[])
+        await _runtime(tmp_path).run(_context(tmp_path), CommandRequest(argv=[]))
 
 
 @pytest.mark.asyncio
 async def test_run_nonzero_exit_is_tool_result(tmp_path: Path) -> None:
     """exit(3) → ok=False, exit_code=3, 无 error（非零退出是工具结果，不是运行时失败）。"""
     result = await _runtime(tmp_path).run(
-        _context(tmp_path), f'{PY} -c "import sys; sys.exit(3)"'
+        _context(tmp_path), CommandRequest(command=f'{PY} -c "import sys; sys.exit(3)"')
     )
     assert not result.ok
     assert result.exit_code == 3
@@ -153,8 +154,9 @@ async def test_run_timeout_terminates_process(tmp_path: Path) -> None:
     result = await asyncio.wait_for(
         _runtime(tmp_path).run(
             _context(tmp_path),
-            f'{PY} -c "import time; time.sleep(30)"',
-            timeout_s=1,
+            CommandRequest(
+                command=f'{PY} -c "import time; time.sleep(30)"', timeout_s=1
+            ),
         ),
         timeout=10,
     )
@@ -168,8 +170,9 @@ async def test_run_cancel_terminates_process_tree(tmp_path: Path) -> None:
     task = asyncio.create_task(
         _runtime(tmp_path).run(
             _context(tmp_path),
-            f'{PY} -c "import time; time.sleep(30)"',
-            timeout_s=30,
+            CommandRequest(
+                command=f'{PY} -c "import time; time.sleep(30)"', timeout_s=30
+            ),
         )
     )
     await asyncio.sleep(0.5)  # 让子进程起来
@@ -182,7 +185,8 @@ async def test_run_cancel_terminates_process_tree(tmp_path: Path) -> None:
 async def test_run_utf8_chinese_output(tmp_path: Path) -> None:
     """中文输出不 mojibake（UTF-8 强制）。"""
     result = await _runtime(tmp_path).run(
-        _context(tmp_path), f"{PY} -c \"print('中文路径测试')\""
+        _context(tmp_path),
+        CommandRequest(command=f"{PY} -c \"print('中文路径测试')\""),
     )
     assert "中文路径测试" in result.stdout
 
@@ -192,7 +196,7 @@ async def test_truncation_caps_output_and_hashes(tmp_path: Path, monkeypatch) ->
     """超长输出截断为有界头部，并给出 sha256 output_ref。"""
     monkeypatch.setattr("athena.execution.runtime.MAX_OUTPUT_CHARS", 200)
     result = await _runtime(tmp_path).run(
-        _context(tmp_path), f"{PY} -c \"print('x' * 10000)\""
+        _context(tmp_path), CommandRequest(command=f"{PY} -c \"print('x' * 10000)\"")
     )
     assert result.truncated
     assert result.output_ref is not None
@@ -215,7 +219,9 @@ async def test_truncation_keeps_the_tail_where_the_failure_is(
         "print('CONFIG-ECHO'); print('n' * 5000); "
         "print('Traceback (most recent call last)'); print('RuntimeError: CUDA OOM')"
     )
-    result = await _runtime(tmp_path).run(_context(tmp_path), f'{PY} -c "{script}"')
+    result = await _runtime(tmp_path).run(
+        _context(tmp_path), CommandRequest(command=f'{PY} -c "{script}"')
+    )
 
     assert result.truncated
     assert "CONFIG-ECHO" in result.stdout, "头部要留：它说明跑的是什么"
@@ -239,7 +245,9 @@ async def test_the_artifact_behind_output_ref_is_the_complete_log(
     )
     script = "print('HEAD-MARK'); print('n' * 5000); print('TAIL-MARK')"
 
-    result = await runtime.run(_context(tmp_path), f'{PY} -c "{script}"')
+    result = await runtime.run(
+        _context(tmp_path), CommandRequest(command=f'{PY} -c "{script}"')
+    )
 
     assert result.truncated and result.output_ref is not None
     full = await store.get_text(result.output_ref)
@@ -398,7 +406,7 @@ async def test_runtime_persists_failed_output_to_store(tmp_path: Path) -> None:
         project_root=tmp_path, environment_root=tmp_path, store=store
     )
     result = await runtime.run(
-        _context(tmp_path), f"{PY} -c \"raise RuntimeError('boom')\""
+        _context(tmp_path), CommandRequest(command=f"{PY} -c \"raise RuntimeError('boom')\"")
     )
     assert not result.ok
     assert result.output_ref is not None
@@ -413,7 +421,9 @@ async def test_runtime_does_not_persist_success(tmp_path: Path) -> None:
     runtime = ExecutionRuntime(
         project_root=tmp_path, environment_root=tmp_path, store=store
     )
-    result = await runtime.run(_context(tmp_path), f"{PY} -c \"print('ok')\"")
+    result = await runtime.run(
+        _context(tmp_path), CommandRequest(command=f"{PY} -c \"print('ok')\"")
+    )
     assert result.ok
     assert result.output_ref is None
 

@@ -11,7 +11,7 @@ import signal
 import subprocess
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -160,13 +160,35 @@ _POSIX_SHELLS: tuple[tuple[str, list[str]], ...] = (
 
 
 @dataclass(frozen=True, slots=True)
+class CommandRequest:
+    """一条命令的不可变执行请求。
+
+    Defaults match the historical ``ExecutionRuntime.run`` behaviour: a shell
+    command, 120-second timeout, ``workspace_root`` as the working directory,
+    and no event emitter unless one is supplied.
+    """
+
+    command: str | None = None
+    argv: list[str] | None = None
+    timeout_s: int = 120
+    workdir: str | Path | None = None
+    emit: EmitEvent | None = None
+    # Internal plumbing: populated by ExecutionRuntime from
+    # ExecutionContext.predict_features before the backend sees the request.
+    # Kept here so SSH can reject it via the request object instead of a
+    # global mutable protocol method.
+    predict_features: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionContext:
-    """一次命令执行的上下文：三个根路径 + 可选 experiment_id。"""
+    """一次命令执行的上下文：三个根路径 + 可选 experiment_id + 可选预测目标。"""
 
     project_root: Path
     workspace_root: Path
     environment_root: Path
     experiment_id: str | None = None
+    predict_features: Path | None = None
 
 
 @dataclass(slots=True)
@@ -304,8 +326,18 @@ class EnvironmentManager:
                 return shell, args
         raise RuntimeError(f"no shell found on {self.os_name}")
 
-    def build_env(self, workspace_root: Path | None = None) -> dict[str, str]:
-        """构造子进程环境：白名单宿主变量 + 环境根/workspace venv 前置 PATH + UTF-8。"""
+    def build_env(
+        self,
+        workspace_root: Path | None = None,
+        *,
+        predict_features: str | Path | None = None,
+    ) -> dict[str, str]:
+        """构造子进程环境：白名单宿主变量 + 环境根/workspace venv 前置 PATH + UTF-8。
+
+        ``predict_features`` is per-call, not stored on the manager.  A caller
+        that wants this command to see ``ATHENA_PREDICT_FEATURES`` passes the
+        target from its immutable ``ExecutionContext`` / ``CommandRequest``.
+        """
         env = {
             key.upper(): value
             for key, value in self._host.items()
@@ -326,6 +358,8 @@ class EnvironmentManager:
         env["ATHENA_ENV_ROOT"] = str(self._environment_root)
         if self._data_root is not None:
             env["ATHENA_DATA_ROOT"] = str(self._data_root)
+        if predict_features is not None:
+            env["ATHENA_PREDICT_FEATURES"] = str(Path(predict_features))
         return env
 
     def tool_versions(self) -> dict[str, str]:
@@ -734,23 +768,30 @@ class ExecutionRuntime:
     async def run(
         self,
         context: ExecutionContext,
-        command: str | None = None,
-        *,
-        argv: list[str] | None = None,
-        timeout_s: int = 120,
-        workdir: str | Path | None = None,
-        emit: EmitEvent | None = None,
+        request: CommandRequest,
     ) -> CommandResult:
-        """直接执行 API（Supervisor/Service/Runner 复用同一语义）。"""
-        _validate_command_input(command, argv)
-        cwd = Path(workdir) if workdir is not None else context.workspace_root
+        """直接执行 API（Supervisor/Service/Runner 复用同一语义）。
+
+        ``predict_features`` travels on the immutable execution context and is
+        materialised onto the per-command request before it reaches the backend.
+        """
+        _validate_command_input(request.command, request.argv)
+        cwd = (
+            Path(request.workdir)
+            if request.workdir is not None
+            else context.workspace_root
+        )
+        backend_request = replace(
+            request,
+            predict_features=(
+                context.predict_features
+                if context.predict_features is not None
+                else request.predict_features
+            ),
+        )
         return await self._backend.run(
-            command=command,
-            argv=argv,
             workspace_root=context.workspace_root,
-            workdir=cwd,
-            timeout_s=timeout_s,
-            emit=emit,
+            request=backend_request,
         )
 
     async def collect_outputs(self, subdirs: tuple[str, ...]) -> None:
@@ -803,9 +844,11 @@ class _ShellCommandTool(BaseTool):
         )
         result = await self._runtime.run(
             context,
-            command,
-            timeout_s=int(input.get("timeout_s", 120)),
-            workdir=workdir,
-            emit=ctx.emit,
+            CommandRequest(
+                command=command,
+                timeout_s=int(input.get("timeout_s", 120)),
+                workdir=workdir,
+                emit=ctx.emit,
+            ),
         )
         return result.to_dict()

@@ -16,6 +16,7 @@ import pytest
 
 from athena.execution import ExecutionBackend, LocalBackend
 from athena.execution.runtime import (
+    CommandRequest,
     CommandResult,
     ExecutionContext,
     ExecutionRuntime,
@@ -45,21 +46,22 @@ class _FakeBackend:
     async def run(
         self,
         *,
-        command=None,
-        argv=None,
         workspace_root: Path,
-        workdir: Path,
-        timeout_s: int,
-        emit=None,
+        request: CommandRequest,
     ) -> CommandResult:
         self.calls.append(
             {
                 "op": "run",
-                "command": command,
-                "argv": argv,
+                "command": request.command,
+                "argv": request.argv,
                 "workspace_root": workspace_root,
-                "workdir": workdir,
-                "timeout_s": timeout_s,
+                "workdir": (
+                    Path(request.workdir)
+                    if request.workdir is not None
+                    else workspace_root
+                ),
+                "timeout_s": request.timeout_s,
+                "predict_features": request.predict_features,
             }
         )
         return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
@@ -106,8 +108,12 @@ async def test_every_command_goes_through_the_backend(tmp_path) -> None:
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )
 
-    await runtime.run(context, "echo hi", timeout_s=11)
-    await runtime.run(context, argv=["python", "train.py"], timeout_s=22)
+    await runtime.run(
+        context, CommandRequest(command="echo hi", timeout_s=11)
+    )
+    await runtime.run(
+        context, CommandRequest(argv=["python", "train.py"], timeout_s=22)
+    )
 
     runs = [call for call in backend.calls if call["op"] == "run"]
     assert [call["command"] for call in runs] == ["echo hi", None]
@@ -127,8 +133,11 @@ async def test_workdir_defaults_to_the_workspace_and_is_passed_through(
         project_root=tmp_path, workspace_root=workspace, environment_root=tmp_path
     )
 
-    await runtime.run(context, "pwd", timeout_s=5)
-    await runtime.run(context, "pwd", timeout_s=5, workdir=workspace / "sub")
+    await runtime.run(context, CommandRequest(command="pwd", timeout_s=5))
+    await runtime.run(
+        context,
+        CommandRequest(command="pwd", timeout_s=5, workdir=workspace / "sub"),
+    )
 
     runs = [call for call in backend.calls if call["op"] == "run"]
     assert all(call["workspace_root"] == workspace for call in runs)

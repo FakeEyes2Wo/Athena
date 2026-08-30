@@ -26,6 +26,7 @@ from athena.execution.remote import (
 from athena.execution.remote.mirrored import MirroredBackend
 from athena.execution.remote.channel import SubprocessTransport
 from athena.execution.remote.ssh import REMOTE_COMMAND_LIMIT_BYTES
+from athena.execution.runtime import CommandRequest
 
 
 @pytest.fixture
@@ -201,10 +202,12 @@ def test_the_lease_pins_the_gpus_it_was_given(backend) -> None:
 @pytest.mark.asyncio
 async def test_a_command_runs_remotely_and_reports_its_exit_code(backend) -> None:
     result = await backend.run(
-        argv=[sys.executable, "-c", "import sys; print('hello'); sys.exit(0)"],
         workspace_root=Path(backend.remote_workspace),
-        workdir=Path(backend.remote_workspace),
-        timeout_s=60,
+        request=CommandRequest(
+            argv=[sys.executable, "-c", "import sys; print('hello'); sys.exit(0)"],
+            workdir=Path(backend.remote_workspace),
+            timeout_s=60,
+        ),
     )
     assert result.ok
     assert result.exit_code == 0
@@ -215,14 +218,16 @@ async def test_a_command_runs_remotely_and_reports_its_exit_code(backend) -> Non
 async def test_a_failing_command_is_a_normal_result_not_an_exception(backend) -> None:
     """非零退出是正常结果：agent 要读 stderr 自己修，而不是让 turn 崩掉。"""
     result = await backend.run(
-        argv=[
-            sys.executable,
-            "-c",
-            "import sys; sys.stderr.write('boom'); sys.exit(7)",
-        ],
         workspace_root=Path(backend.remote_workspace),
-        workdir=Path(backend.remote_workspace),
-        timeout_s=60,
+        request=CommandRequest(
+            argv=[
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('boom'); sys.exit(7)",
+            ],
+            workdir=Path(backend.remote_workspace),
+            timeout_s=60,
+        ),
     )
     assert not result.ok
     assert result.exit_code == 7
@@ -233,15 +238,17 @@ async def test_a_failing_command_is_a_normal_result_not_an_exception(backend) ->
 async def test_the_experiment_env_reaches_the_remote_process(backend) -> None:
     """ATHENA_DATA_ROOT 要真的到子进程手里，否则 agent 写的脚本读不到数据。"""
     result = await backend.run(
-        argv=[
-            sys.executable,
-            "-c",
-            "import os; print(os.environ['ATHENA_DATA_ROOT']); "
-            "print(os.environ['CUDA_VISIBLE_DEVICES'])",
-        ],
         workspace_root=Path(backend.remote_workspace),
-        workdir=Path(backend.remote_workspace),
-        timeout_s=60,
+        request=CommandRequest(
+            argv=[
+                sys.executable,
+                "-c",
+                "import os; print(os.environ['ATHENA_DATA_ROOT']); "
+                "print(os.environ['CUDA_VISIBLE_DEVICES'])",
+            ],
+            workdir=Path(backend.remote_workspace),
+            timeout_s=60,
+        ),
     )
     assert result.ok
     lines = result.stdout.strip().splitlines()
@@ -254,16 +261,18 @@ async def test_a_timeout_kills_the_remote_process_group(backend, tmp_path) -> No
     """超时不能只是「不等了」：远端进程必须真的死掉，否则显存一直被占着。"""
     marker = tmp_path / "remote-alive"
     result = await backend.run(
-        argv=[
-            sys.executable,
-            "-c",
-            "import pathlib, sys, time; "
-            "pathlib.Path(sys.argv[1]).write_text('1'); time.sleep(120)",
-            str(marker),
-        ],
         workspace_root=Path(backend.remote_workspace),
-        workdir=Path(backend.remote_workspace),
-        timeout_s=3,
+        request=CommandRequest(
+            argv=[
+                sys.executable,
+                "-c",
+                "import pathlib, sys, time; "
+                "pathlib.Path(sys.argv[1]).write_text('1'); time.sleep(120)",
+                str(marker),
+            ],
+            workdir=Path(backend.remote_workspace),
+            timeout_s=3,
+        ),
     )
     assert not result.ok
     assert result.error == "timeout"
@@ -282,11 +291,13 @@ async def test_output_is_emitted_as_events_while_the_command_runs(backend) -> No
         events.append((kind, data))
 
     result = await backend.run(
-        argv=[sys.executable, "-c", "print('progress 1'); print('progress 2')"],
         workspace_root=Path(backend.remote_workspace),
-        workdir=Path(backend.remote_workspace),
-        timeout_s=60,
-        emit=emit,
+        request=CommandRequest(
+            argv=[sys.executable, "-c", "print('progress 1'); print('progress 2')"],
+            workdir=Path(backend.remote_workspace),
+            timeout_s=60,
+            emit=emit,
+        ),
     )
     assert result.ok
     kinds = [kind for kind, _ in events]
@@ -325,14 +336,16 @@ async def test_a_long_remote_log_keeps_its_tail_and_its_full_copy(
 
     try:
         result = await backend.run(
-            argv=[
-                sys.executable,
-                "-c",
-                "print('HEAD-MARK'); print('n' * 5000); print('TAIL-MARK')",
-            ],
             workspace_root=workspace,
-            workdir=workspace,
-            timeout_s=60,
+            request=CommandRequest(
+                argv=[
+                    sys.executable,
+                    "-c",
+                    "print('HEAD-MARK'); print('n' * 5000); print('TAIL-MARK')",
+                ],
+                workdir=workspace,
+                timeout_s=60,
+            ),
         )
     finally:
         await backend.aclose()
@@ -366,10 +379,12 @@ async def test_a_backend_without_a_bound_local_root_still_runs(tmp_path) -> None
     try:
         assert "Runtime:" in backend.describe(tmp_path)
         result = await backend.run(
-            argv=[sys.executable, "-c", "print('ok')"],
             workspace_root=tmp_path,
-            workdir=tmp_path / "somewhere-else",
-            timeout_s=30,
+            request=CommandRequest(
+                argv=[sys.executable, "-c", "print('ok')"],
+                workdir=tmp_path / "somewhere-else",
+                timeout_s=30,
+            ),
         )
         assert result.ok and result.stdout.strip() == "ok"
     finally:

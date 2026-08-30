@@ -7,6 +7,7 @@
 import argparse
 import asyncio
 import sys
+import traceback
 from pathlib import Path
 
 from athena.core.agent import settings
@@ -93,6 +94,7 @@ async def _run(args: argparse.Namespace) -> int:
         await supervisor_task
     except Exception as exc:
         print(f"RUN FAILED: {type(exc).__name__}: {exc}", flush=True)
+        traceback.print_exc()
         await runtime.aclose()
         return 1
     state = runtime.state

@@ -2,10 +2,9 @@
 
 from pathlib import Path
 
-from athena.core.tool_types import EmitEvent
 from athena.execution.remote.mirror import PullReport, WorkspaceMirror
 from athena.execution.remote.ssh import SshBackend
-from athena.execution.runtime import CommandResult
+from athena.execution.runtime import CommandRequest, CommandResult
 
 # 命令后拉回本地的后缀：只回收会进 git 提交的源码/配置/报告。
 PULLED_SUFFIXES: frozenset[str] = frozenset(
@@ -85,22 +84,14 @@ class MirroredBackend:
     async def run(
         self,
         *,
-        command: str | None = None,
-        argv: list[str] | None = None,
         workspace_root: Path,
-        workdir: Path,
-        timeout_s: int,
-        emit: EmitEvent | None = None,
+        request: CommandRequest,
     ) -> CommandResult:
         """推增量 → 远端执行 → 拉回源码类改动。"""
         await self._mirror.push()
         result = await self._inner.run(
-            command=command,
-            argv=argv,
             workspace_root=workspace_root,
-            workdir=workdir,
-            timeout_s=timeout_s,
-            emit=emit,
+            request=request,
         )
         await self._pull_sources()
         return result

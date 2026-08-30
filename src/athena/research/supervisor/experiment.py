@@ -9,6 +9,7 @@
 import json
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -24,7 +25,11 @@ from athena.core.agent.types import RunStatus
 from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
 from athena.core.tool_types import EmitEvent
 from athena.core.workspace import GitWorkBranch, GitWorkspace
-from athena.execution.runtime import ExecutionContext, ExecutionRuntime
+from athena.execution.runtime import (
+    CommandRequest,
+    ExecutionContext,
+    ExecutionRuntime,
+)
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import load_directory, pack_directory
@@ -52,6 +57,30 @@ _NON_IMPLEMENTATION_MARKERS = (
     "experiment.json",
     ".md",
 )
+
+
+@dataclass(frozen=True)
+class PromptBlock:
+    """Small renderer for the repeated ``--- title --- ... --- end ---`` blocks.
+
+    All the prompt blocks in this module follow the same shape: a heading line,
+    the body, and an end marker. Keeping that shape in one helper avoids four
+    copies diverging in blank lines or missing end markers.
+    """
+
+    title: str
+    body: str
+    end_marker: str
+
+    def render(self) -> str:
+        body = self.body.strip()
+        if not body:
+            return ""
+        return (
+            f"\n\n--- {self.title} ---\n"
+            f"{body}\n"
+            f"{self.end_marker}"
+        )
 
 
 def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
@@ -92,14 +121,14 @@ def handoff_block(handoff: str) -> str:
     is attached as context"，而同一次 turn 的完整 user prompt 只有 374 字符，契约一个
     字都不在里面；PREPARE 那边同样，基线因此只能猜列名，交出 join 不上的预测判 0.0。
     """
-    if not handoff.strip():
-        return ""
-    return (
-        "\n\n--- Evaluator contract (authoritative; your predictions must match it "
-        "exactly) ---\n"
-        f"{handoff.strip()}\n"
-        "--- end of evaluator contract ---"
-    )
+    return PromptBlock(
+        title=(
+            "Evaluator contract (authoritative; your predictions must match it "
+            "exactly)"
+        ),
+        body=handoff,
+        end_marker="--- end of evaluator contract ---",
+    ).render()
 
 
 def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
@@ -133,13 +162,60 @@ def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
     body = "\n".join(
         f"{label}: {value.strip()}" for label, value in parts if value and value.strip()
     )
-    if not body:
-        return ""
-    return (
-        "\n\n--- Hypothesis under test (implement exactly this, nothing else) ---\n"
-        f"{body}\n"
-        "--- end of hypothesis ---"
-    )
+    return PromptBlock(
+        title="Hypothesis under test (implement exactly this, nothing else)",
+        body=body,
+        end_marker="--- end of hypothesis ---",
+    ).render()
+
+
+def data_contract_block(contract: str) -> str:
+    """把"训练用哪份数据"这条约束拼进每一轮 SEARCH 的 prompt 正文。
+
+    与 ``handoff_block`` / ``hypothesis_block`` / ``failure_block`` 是同一条教训的
+    第四处落点。候选**看不到任务文本**：``PlanInput`` 只经 ``context_refs``，而那是
+    死信道；能到 model 面前的只有假设、评估器 HANDOFF、语料与失败反馈。
+
+    真机（2026-08-29）：平台切好了 train/search/final，却只告诉了 evaluator。基线
+    agent 拿着"Dataset path: <原始 csv>"去那个目录里自己找划分，用了旁边一套早先切
+    的文件。平台 search split 的 14703 行里有 11978 行（81.5%）落进它的训练集，
+    PR-AUC 报到 0.9736——而参考值是 0.891。评估器只比对 predictions 与 labels，
+    结构上无法察觉候选在被打分的行上训练过。
+    """
+    return PromptBlock(
+        title="Data contract (violating this invalidates your score)",
+        body=contract,
+        end_marker="--- end of data contract ---",
+    ).render()
+
+
+def failure_block(kind: str, error: str) -> str:
+    """把上一轮实验的失败原因拼进下一轮 prompt 正文。
+
+    与 ``handoff_block`` / ``hypothesis_block`` 是同一条教训的第三处落点。失败的
+    ``PlanTurnResult`` 一直带着 ``kind`` 与 ``error``（manifest 不合法、命令非零退出
+    并附 stderr 摘要、predictions 目录空、打分失败），但它们只进了 evidence artifact
+    和事件流——**没有任何一条回到写代码的那个 Agent 面前**。
+
+    于是失败轮的实际语义是"什么都没发生"：Agent 下一轮看到的仍然是
+    ``Continue Plan …; turns used: N``，既不知道上一轮跑没跑、也不知道为什么没跑成，
+    只能把同一份 manifest 原样再交一次，直到 turn 预算耗尽。同一个 ModuleNotFoundError
+    可以就这样烧掉一整条 Plan。
+    """
+    detail = " ".join(error.split())[:800]
+    body = ""
+    if detail:
+        body = (
+            f"Failure kind: {kind}\n"
+            f"Detail: {detail}\n"
+            "Do not resubmit the same experiment unchanged; diagnose this failure "
+            "first, then retry."
+        )
+    return PromptBlock(
+        title="Previous attempt failed (fix this before anything else)",
+        body=body,
+        end_marker="--- end of failure report ---",
+    ).render()
 
 
 async def read_eval_handoff(
@@ -492,10 +568,12 @@ class PlanRunner:
         for argv in manifest.commands:
             result = await self._execution.run(
                 self._context,
-                argv=argv,
-                timeout_s=self._timeout_s,
-                workdir=str(self.workdir),
-                emit=emit,
+                CommandRequest(
+                    argv=argv,
+                    timeout_s=self._timeout_s,
+                    workdir=str(self.workdir),
+                    emit=emit,
+                ),
             )
             if not result.ok:
                 error = (
@@ -666,9 +744,7 @@ class PlanRunner:
             error=cleaned,
         )
 
-    async def _load_evaluator_dir(
-        self, evaluator_ref: ArtifactRef
-    ) -> Path | None:
+    async def _load_evaluator_dir(self, evaluator_ref: ArtifactRef) -> Path | None:
         """Load the README-only evaluator directory from its descriptor."""
         try:
             text = await self._store.get_text(evaluator_ref)

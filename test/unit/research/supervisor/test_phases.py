@@ -68,7 +68,8 @@ async def test_start_still_reports_the_reason_to_the_frontend() -> None:
 
     assert state.status == "FAILED"
     errors = [p for p in published if p.get("channel") == "error"]
-    assert errors and errors[0]["text"] == "research failed: boom"
+    # 主干把 traceback 也一并发给前端，所以断言"以原因开头"而不是全等。
+    assert errors and errors[0]["text"].startswith("research failed: boom")
 
 
 @pytest.mark.asyncio
