@@ -580,14 +580,22 @@ class ResearchRuntime:
         supervisor_kaggle = build_kaggle_stack(
             download_root=self._root, artifacts=self._store, download=True
         )
+        ask_user = self._ask_user
+        if ask_user is not None:
+            def ask_user_recorder(prompt, *args, **kwargs):
+                answer = ask_user(prompt, *args, **kwargs)
+                if answer is not None:
+                    self._session.clarification_qa.append((prompt, str(answer)))
+                return answer
+            ask_user_factory = lambda _thread, _turn: ask_user_recorder
+        else:
+            ask_user_factory = None
         register_supervisor_agent(
             self._registry,
             provider=provider,
             artifacts=self._store,
             actions=self._supervisor,
-            ask_user=(
-                (lambda _t, _u: self._ask_user) if self._ask_user is not None else None
-            ),
+            ask_user=ask_user_factory,
             kaggle_stack=supervisor_kaggle,
         )
         register_plan_agent(
@@ -829,6 +837,16 @@ class ResearchRuntime:
     def _baseline_evaluator_ref(self) -> ArtifactRef | None:
         baselines = self._tree.experiments(kind="baseline")
         return baselines[0].plan.run_config_ref if baselines else None
+
+    async def suspend(self) -> str:
+        """Park a live run at WAITING so a torn-down session stops reading as running.
+
+        Deliberately *not* called from ``aclose()``: for the headless
+        entrypoints a persisted ``RUNNING`` is the resume token that lets
+        ``SearchLoop.run_search`` keep scheduling, so only the owner of a
+        session's lifecycle (the GUI gateway) may downgrade it.
+        """
+        return await self._supervisor.suspend()
 
     async def aclose(self) -> None:
         # 先还租约：通道一关远端才杀进程组，漏掉会一直占着显存。

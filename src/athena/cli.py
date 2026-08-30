@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+import traceback
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -302,8 +303,9 @@ async def _run_locked(args: argparse.Namespace) -> int:
         return 1
     except Exception as exc:
         # 启动或执行失败（缺 API key、git 初始化失败、模型连接失败等）：
-        # 打印一行干净错误而非裸 traceback，返回非零退出码供脚本判失败。
+        # 打印完整 traceback，返回非零退出码供脚本判失败。
         print(f"RUN FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return 1
     finally:
         runtime.unsubscribe(subscription_id)

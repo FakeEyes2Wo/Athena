@@ -5,8 +5,21 @@ from pathlib import Path
 
 import pytest
 
+from athena.research.supervisor.state import ResearchState
+from gui_gateway import state_store
 from gui_gateway.handler import GuiRequestHandler, _session_state_root
 from gui_gateway.human import HumanRequestBroker
+from gui_gateway.state_store import GuiState, GuiStateStore
+
+
+@pytest.fixture(autouse=True)
+def isolated_gui_state(tmp_path, monkeypatch):
+    """把 GuiStateStore 的默认路径挪进 tmp_path。
+
+    默认是 ``~/.athena/gui_state.json``：没有这层隔离，任何构造 handler 而不注入
+    store 的用例都会覆盖开发机上真实的 GUI 配置（活动工作区、每个工作区上次会话）。
+    """
+    monkeypatch.setattr(state_store, "DEFAULT_STATE_PATH", tmp_path / "gui_state.json")
 
 
 class RecordingRuntime:
@@ -15,6 +28,9 @@ class RecordingRuntime:
         self.messages: list[str] = []
         self.tree_path = Path("/tmp/athena-runtime")
         self.project_root = "/tmp"
+        # 拆卸顺序断言用：suspend 必须发生在 aclose 之前。
+        self.calls: list[str] = []
+        self.suspend_error: Exception | None = None
 
     async def start(self) -> None:
         self.started = True
@@ -23,7 +39,20 @@ class RecordingRuntime:
         self.messages.append(text)
         return "accepted"
 
+    async def suspend(self) -> str:
+        """替身版 ``ResearchRuntime.suspend``：真实落盘，状态守卫由真 Supervisor 负责。"""
+        self.calls.append("suspend")
+        if self.suspend_error is not None:
+            raise self.suspend_error
+        state = getattr(self, "state", None)
+        if state is None or state.status != "RUNNING":
+            return getattr(state, "status", "IDLE")
+        state.status = "WAITING"
+        state.save(self._state_path)
+        return state.status
+
     async def aclose(self) -> None:
+        self.calls.append("aclose")
         self.started = False
 
     async def start_validation(self) -> str:
@@ -40,6 +69,20 @@ def _handler_at(tmp_path: Path, factory=None) -> GuiRequestHandler:
     runtime = RecordingRuntime()
     runtime.project_root = str(tmp_path)
     return GuiRequestHandler(runtime, factory)
+
+
+def _touch(path: Path, when: float | None = None) -> Path:
+    """建一个占位文件（必要时连带父目录），可指定 mtime 以便断言排序。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x", encoding="utf-8")
+    if when is not None:
+        os.utime(path, (when, when))
+    return path
+
+
+def _running_state(phase: str = "SEARCH") -> ResearchState:
+    """一个「进行中」的研究状态，用于伪造断点续传场景。"""
+    return ResearchState(status="RUNNING", phase=phase, search_limit=10, concurrency=4)
 
 
 @pytest.mark.asyncio
@@ -87,7 +130,7 @@ async def test_handler_session_switch_swaps_runtime(tmp_path) -> None:
 
     result = await handler.dispatch("session_switch", {"session_id": "s-1"})
 
-    assert result == {"session_id": "s-1", "records": []}
+    assert result == {"session_id": "s-1", "records": [], "sessions": ["s-1"]}
     assert len(created) == 1
     assert created[0] == (str(tmp_path), tmp_path / ".athena" / "conversations" / "s-1")
 
@@ -190,14 +233,100 @@ async def test_handler_session_switch_does_not_resume_completed(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_handler_session_switch_suspends_running_runtime_before_close(
+    tmp_path,
+) -> None:
+    """切走一个正在跑的会话：先把 RUNNING 落成 WAITING，再关掉它的 runtime。"""
+    outgoing = RecordingRuntime()
+    outgoing.project_root = str(tmp_path)
+    state_path = tmp_path / ".athena" / "state.json"
+    outgoing.state = _running_state()
+    outgoing._state_path = state_path
+    outgoing.state.save(state_path)
+
+    handler = GuiRequestHandler(outgoing, lambda root, state_root: RecordingRuntime())
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert outgoing.calls == ["suspend", "aclose"]
+    assert ResearchState.load(state_path).status == "WAITING"
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_downgrades_unresumed_prepare_to_waiting(
+    tmp_path,
+) -> None:
+    """PREPARE 不续跑：状态必须降级为 WAITING，否则前端显示悬空的「运行中」。"""
+    created: list[RecordingRuntime] = []
+    state_path = tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        state = _running_state(phase="PREPARE")
+        state.save(state_path)
+        runtime.state = state
+        runtime._state_path = state_path
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert created[0].started is False
+    assert created[0].state.status == "WAITING"
+    assert ResearchState.load(state_path).status == "WAITING"
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_does_not_suspend_a_fresh_session(
+    tmp_path,
+) -> None:
+    """全新会话没落过盘：默认的 SEARCH/RUNNING 不是悬空态，不能被降级。"""
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.state = _running_state()
+        runtime._state_path = (
+            tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
+        )
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert "suspend" not in created[0].calls
+    assert created[0].state.status == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_handler_swap_survives_a_failed_state_persist(tmp_path) -> None:
+    """suspend 落盘失败（磁盘满/权限）只该少一条状态记录，不该卡住会话切换。"""
+    outgoing = RecordingRuntime()
+    outgoing.project_root = str(tmp_path)
+    outgoing.suspend_error = OSError("state.json is not writable")
+    incoming = RecordingRuntime()
+
+    handler = GuiRequestHandler(outgoing, lambda root, state_root: incoming)
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert outgoing.calls == ["suspend", "aclose"]
+    assert handler.runtime is incoming
+
+
+@pytest.mark.asyncio
 async def test_handler_sessions_list_lists_namespaces(tmp_path) -> None:
     handler = _handler_at(tmp_path)
+    _touch(tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl")
     for sid in ("s-1", "s-2"):
         (tmp_path / ".athena" / "conversations" / sid).mkdir(parents=True)
 
     result = await handler.dispatch("sessions_list", {})
 
-    assert result["sessions"][0] == "default"
     assert set(result["sessions"]) == {"default", "s-1", "s-2"}
 
 
@@ -210,7 +339,7 @@ async def test_handler_session_delete_removes_named_session(tmp_path) -> None:
     result = await handler.dispatch("session_delete", {"session_id": "s-1"})
 
     assert result["deleted"] is True
-    assert set(result["sessions"]) == {"default", "s-2"}
+    assert set(result["sessions"]) == {"s-2"}
     assert not (tmp_path / ".athena" / "conversations" / "s-1").exists()
 
 
@@ -268,6 +397,198 @@ async def test_handler_session_delete_default_clears_transcript(tmp_path) -> Non
 
     assert result["deleted"] is True
     assert not log.exists()
+
+
+@pytest.mark.asyncio
+async def test_handler_sessions_list_is_empty_for_an_untouched_workspace(
+    tmp_path,
+) -> None:
+    """空工作区没有任何会话：default 也要有痕迹才算存在。"""
+    handler = _handler_at(tmp_path)
+
+    result = await handler.dispatch("sessions_list", {})
+
+    assert result["sessions"] == []
+    assert result["active"] is None
+
+
+@pytest.mark.asyncio
+async def test_handler_sessions_list_shows_default_once_it_has_a_transcript(
+    tmp_path,
+) -> None:
+    handler = _handler_at(tmp_path)
+    _touch(tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl")
+
+    result = await handler.dispatch("sessions_list", {})
+
+    assert result["sessions"] == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_handler_sessions_list_shows_default_once_it_has_state(tmp_path) -> None:
+    """只落了 state.json（跑过但还没产生 transcript）同样算存在。"""
+    handler = _handler_at(tmp_path)
+    _touch(tmp_path / ".athena" / "state.json")
+
+    result = await handler.dispatch("sessions_list", {})
+
+    assert result["sessions"] == ["default"]
+
+
+def test_session_ids_sort_by_mtime_without_pinning_default(tmp_path) -> None:
+    """default 参与 mtime 排序，不再恒占首位。"""
+    handler = _handler_at(tmp_path)
+    transcript = _touch(
+        tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl", when=1_000.0
+    )
+    named = tmp_path / ".athena" / "conversations" / "s-1"
+    named.mkdir(parents=True)
+    os.utime(named, (2_000.0, 2_000.0))
+
+    assert handler._session_ids() == ["s-1", "default"]
+
+    os.utime(transcript, (3_000.0, 3_000.0))
+    assert handler._session_ids() == ["default", "s-1"]
+
+
+@pytest.mark.asyncio
+async def test_handler_session_delete_default_resets_persisted_state(tmp_path) -> None:
+    """删 default = 重置默认会话：清痕迹，但保留工作区本体、workspaces/ 与命名会话。"""
+    created: list[RecordingRuntime] = []
+
+    def factory(root: str, state_root: Path | None) -> RecordingRuntime:
+        runtime = RecordingRuntime()
+        runtime.project_root = root
+        created.append(runtime)
+        return runtime
+
+    handler = _handler_at(tmp_path, factory)
+    athena = tmp_path / ".athena"
+    for name in ("state.json", "resume.json", "research_tree.json"):
+        _touch(athena / name)
+    _touch(athena / "logs" / "sessions" / "default.jsonl")
+    kept = [
+        _touch(tmp_path / "workspaces" / "exp-1" / "train.py"),
+        _touch(athena / "conversations" / "s-1" / "state.json"),
+        _touch(athena / "artifacts" / "blob.json"),
+    ]
+
+    result = await handler.dispatch("session_delete", {"session_id": "default"})
+
+    assert result["deleted"] is True
+    assert result["sessions"] == ["s-1"]
+    for name in ("state.json", "resume.json", "research_tree.json"):
+        assert not (athena / name).exists()
+    assert not (athena / "logs" / "sessions" / "default.jsonl").exists()
+    assert athena.is_dir()
+    assert all(path.exists() for path in kept)
+    # 句柄先释放再删除，最后重开一个干净 runtime 供后续 RPC 使用。
+    assert created and handler.runtime is created[-1]
+
+
+@pytest.mark.asyncio
+async def test_handler_session_delete_default_reports_a_blocked_deletion(
+    tmp_path, monkeypatch
+) -> None:
+    """删除被占用时如实抛出原因（transport 会把它回传前端），并留下可用 runtime。"""
+
+    async def blocked(path: Path, attempts: int = 10) -> None:
+        raise PermissionError("[WinError 32] the file is in use by another process")
+
+    monkeypatch.setattr("gui_gateway.handler._rmtree_when_released", blocked)
+    outgoing = RecordingRuntime()
+    outgoing.project_root = str(tmp_path)
+    handler = GuiRequestHandler(outgoing, lambda root, state_root: RecordingRuntime())
+    _touch(tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl")
+
+    with pytest.raises(PermissionError, match="in use by another process"):
+        await handler.dispatch("session_delete", {"session_id": "default"})
+
+    # 句柄已经释放掉了：失败也必须留下一个能继续服务的 runtime，而不是关掉的那个。
+    assert handler.runtime is not outgoing
+    assert outgoing.calls[-1] == "aclose"
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_discards_the_blank_session_it_leaves(
+    tmp_path,
+) -> None:
+    """离开一个没留下痕迹的命名会话即回收它——判定在后端，前端不再猜。"""
+    handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    result = await handler.dispatch("session_switch", {"session_id": "s-2"})
+
+    assert not (tmp_path / ".athena" / "conversations" / "s-1").exists()
+    assert result["sessions"] == ["s-2"]
+
+
+@pytest.mark.asyncio
+async def test_handler_session_switch_keeps_a_session_with_a_transcript(
+    tmp_path,
+) -> None:
+    handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
+    conversations = tmp_path / ".athena" / "conversations"
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    _touch(conversations / "s-1" / "logs" / "sessions" / "default.jsonl")
+    result = await handler.dispatch("session_switch", {"session_id": "s-2"})
+
+    assert (conversations / "s-1").is_dir()
+    assert set(result["sessions"]) == {"s-1", "s-2"}
+
+
+@pytest.mark.asyncio
+async def test_handler_remembers_the_last_session_per_workspace(tmp_path) -> None:
+    """last-active 按工作区隔离：切工作区不会串到另一个工作区的会话。"""
+    other = tmp_path / "other"
+    other.mkdir()
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    store.save(
+        GuiState(active_project_root=str(other), last_sessions={str(other): "s-9"})
+    )
+    handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert (await handler.dispatch("sessions_list", {}))["active"] == "s-1"
+    assert store.load().last_sessions == {str(tmp_path): "s-1", str(other): "s-9"}
+
+
+@pytest.mark.asyncio
+async def test_handler_sessions_list_active_falls_back_when_the_session_is_gone(
+    tmp_path,
+) -> None:
+    """记住的会话已被删除时退回列表首位，而不是指向一个不存在的会话。"""
+    handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
+    GuiStateStore(tmp_path / "gui_state.json").save(
+        GuiState(
+            active_project_root=str(tmp_path), last_sessions={str(tmp_path): "s-9"}
+        )
+    )
+    _touch(tmp_path / ".athena" / "logs" / "sessions" / "default.jsonl")
+
+    result = await handler.dispatch("sessions_list", {})
+
+    assert result["sessions"] == ["default"]
+    assert result["active"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_set_project_root_keeps_remembered_sessions(tmp_path) -> None:
+    """切工作区只改活动工作区，不能顺手清空每个工作区的 last-active 记录。"""
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    store.save(
+        GuiState(active_project_root=str(tmp_path), last_sessions={"/old": "s-9"})
+    )
+    handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
+    target = tmp_path / "another"
+
+    await handler.dispatch("set_project_root", {"path": str(target)})
+
+    saved = store.load()
+    assert saved.active_project_root == str(target.resolve())
+    assert saved.last_sessions == {"/old": "s-9"}
 
 
 def test_session_state_root_rejects_traversal(tmp_path) -> None:

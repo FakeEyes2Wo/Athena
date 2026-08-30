@@ -36,7 +36,6 @@ SUPPORTED_METHODS: frozenset[str] = frozenset(
         "pause",
         "resume",
         "stop",
-        "parse_intent",
         "start_search",
         "start_validation",
         "generate_report",
@@ -102,6 +101,25 @@ def _session_state_root(project_root: Path, session_id: str) -> Path | None:
     return project_root / ".athena" / "conversations" / session_id
 
 
+def _session_activity(state_root: Path) -> tuple[bool, float]:
+    """Return ``(has content, last activity)`` for one session state root.
+
+    痕迹 = 持久化状态或 transcript。两者都没有就是空白会话，时间退回目录本身的
+    mtime，让刚建出来还没写过东西的新会话仍然排在最前。
+    """
+    stamps = [
+        path.stat().st_mtime
+        for path in (
+            state_root / "state.json",
+            state_root / "logs" / "sessions" / "default.jsonl",
+        )
+        if path.is_file()
+    ]
+    if stamps:
+        return True, max(stamps)
+    return False, state_root.stat().st_mtime if state_root.is_dir() else 0.0
+
+
 def _rmtree_force(path: Path) -> None:
     """删除目录树；先清除只读属性（Windows Git 对象文件），再删除。"""
     for root, dirs, files in os.walk(path, topdown=False):
@@ -160,30 +178,41 @@ class GuiRequestHandler:
             # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
             state_root.mkdir(parents=True, exist_ok=True)
         new_runtime = self._make_runtime(project_root, state_root)
+        # aclose 马上就要杀掉旧会话的 supervisor，而 Supervisor.stop 从不写 status：
+        # 不先降级就会在磁盘上留下一个"运行中"、实际没人跑的悬空态。
+        await self._suspend_runtime()
         await self._runtime.aclose()
         self._runtime = new_runtime
         self._service = GuiService(self._runtime, broker=self._broker)
         await self._resume_running_session()
+
+    async def _suspend_runtime(self) -> None:
+        """把当前 runtime 的 RUNNING 降级为 WAITING 并落盘（拆卸侧与加载侧共用）。"""
+        try:
+            await self._runtime.suspend()
+        except OSError:
+            # state.json 落盘失败（磁盘满 / 无写权限 / 目录已被删）→ 只记一条日志：
+            # 会话切换和快照推送不能因为写不进状态文件就卡住。
+            logger.warning("failed to persist the suspended run state", exc_info=True)
 
     async def _resume_running_session(self) -> None:
         """重建 runtime 后自动续跑「进行中」的会话，实现断点续传。
 
         只续跑 SEARCH/VALIDATE 且状态为 RUNNING 的会话；COMPLETED/FAILED/STOPPED
         保持静止，WAITING（等待人工决策）也不自动续跑，避免跳过人工决策或重跑
-        已完成阶段。续跑失败降级为静默空闲，不阻断会话切换本身。
+        已完成阶段。PREPARE 一律不续跑：它是一整段协程而不是带检查点的调度循环，
+        tree 里还没落下可信 baseline 时重进就会从头重跑 EDA 与基线，点一下侧栏
+        会话不该付这个代价——降级为 WAITING，等用户手动点继续。
+        续跑失败降级为静默空闲，不阻断会话切换本身。
         """
         try:
             state = getattr(self._runtime, "state", None)
             state_path = getattr(self._runtime, "_state_path", None)
             # 只有从磁盘恢复出的状态才可能是“进行中”；全新会话的内存默认状态
-            # （phase=SEARCH/status=RUNNING）不能被误判成需要续跑。
+            # （IDLE/PREPARE）既不该被误判成需要续跑，也不该被降级。
             persisted = state_path is not None and Path(state_path).is_file()
-            mid_run = (
-                persisted
-                and state is not None
-                and state.phase in {"SEARCH", "VALIDATE"}
-                and state.status == "RUNNING"
-            )
+            running = persisted and state is not None and state.status == "RUNNING"
+            mid_run = running and state.phase in {"SEARCH", "VALIDATE"}
         except Exception:
             return
         if mid_run:
@@ -191,6 +220,11 @@ class GuiRequestHandler:
                 await self._runtime.start()
             except Exception:
                 logger.exception("auto-resume failed; leaving the session idle")
+            return
+        if running:
+            # 不续跑的持久化 RUNNING 就是悬空态（写下它的进程早已退出）：降级并落盘，
+            # 让 subscribe 推给前端的第一帧快照等于真实运行状态。
+            await self._suspend_runtime()
 
     async def set_project_root(self, path: str) -> dict[str, object]:
         """切换到新项目目录：目录不存在时自动创建，再用工厂重建 runtime。"""
@@ -204,7 +238,14 @@ class GuiRequestHandler:
         root = root.resolve()
         self._project_root = root
         await self._swap_runtime(str(root), None)
-        self._state_store.save(GuiState(active_project_root=str(root)))
+        # 换工作区就换了一整套会话命名空间，旧工作区的会话 id 不能带过去。
+        self._current_session_id = "default"
+        self._state_store.save(
+            GuiState(
+                active_project_root=str(root),
+                last_sessions=self._state_store.load().last_sessions,
+            )
+        )
         return self._runtime.settings()
 
     async def session_switch(self, session_id: str) -> dict[str, object]:
@@ -212,30 +253,84 @@ class GuiRequestHandler:
         if self._make_runtime is None:
             raise ValueError("session switching is not configured")
         state_root = _session_state_root(self._project_root, session_id)
+        previous = self._current_session_id
         await self._swap_runtime(str(self._project_root), state_root)
         self._current_session_id = session_id
+        if previous != session_id:
+            await self._discard_blank_session(previous)
+        self._remember_session(session_id)
         return {
             "session_id": session_id,
             "records": self._runtime.replay_output_events(),
+            "sessions": self._session_ids(),
         }
 
-    def _session_ids(self, project_root: Path | None = None) -> list[str]:
-        """返回会话 id（``default`` + 命名空间子目录），最近修改在前。"""
-        root = (project_root or self._project_root) / ".athena" / "conversations"
-        ids = ["default"]
-        if root.is_dir():
-            ids.extend(
-                p.name
-                for p in sorted(
-                    root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
-                )
-                if p.is_dir()
+    async def _discard_blank_session(self, session_id: str) -> None:
+        """回收刚离开的空白命名会话（没有 state.json 也没有 transcript）。
+
+        以前由前端猜：它靠 view model 和一个切会话时就被清零的运行标记判断
+        「这个会话是空的」，猜错就是误删真实会话。判定挪到后端，只看磁盘痕迹。
+        删除失败不阻断切换本身——会话仍在列表里，用户可以手动删。
+        """
+        state_root = _session_state_root(self._project_root, session_id)
+        if state_root is None or not state_root.is_dir():
+            return
+        has_content, _ = _session_activity(state_root)
+        if has_content:
+            return
+        try:
+            await _rmtree_when_released(state_root)
+        except OSError:
+            # 句柄未释放 / 无写权限 → 保留该会话，只记一条日志。
+            logger.warning(
+                "failed to discard the blank session %s", session_id, exc_info=True
             )
-        return ids
+
+    def _remember_session(self, session_id: str) -> None:
+        """记住「本工作区上次用的会话」，供下次挂载时恢复。"""
+        try:
+            stored = self._state_store.load()
+            sessions = dict(stored.last_sessions or {})
+            sessions[str(self._project_root)] = session_id
+            self._state_store.save(
+                GuiState(
+                    active_project_root=stored.active_project_root
+                    or str(self._project_root),
+                    last_sessions=sessions,
+                )
+            )
+        except OSError:
+            # 状态文件写不进去（磁盘满 / 无写权限）→ 下次挂载退回列表首位即可。
+            logger.warning("failed to persist the last active session", exc_info=True)
+
+    def _session_ids(self, project_root: Path | None = None) -> list[str]:
+        """返回会话 id（``default`` + 命名空间子目录），最近活动在前。
+
+        ``default`` 也要有痕迹才算存在，否则每个从没用过的工作区都会在侧栏里
+        凭空占一行「新会话」；它同样参与排序，不再硬编码为第一位。
+        """
+        athena = (project_root or self._project_root) / ".athena"
+        entries: list[tuple[float, str]] = []
+        has_content, mtime = _session_activity(athena)
+        if has_content:
+            entries.append((mtime, "default"))
+        conversations = athena / "conversations"
+        if conversations.is_dir():
+            entries.extend(
+                (_session_activity(path)[1], path.name)
+                for path in conversations.iterdir()
+                if path.is_dir()
+            )
+        return [name for _, name in sorted(entries, key=lambda e: e[0], reverse=True)]
 
     def sessions_list(self) -> dict[str, object]:
-        """返回当前工作区的会话 id，最近修改在前。"""
-        return {"sessions": self._session_ids()}
+        """返回当前工作区的会话 id（最近活动在前）与上次使用的会话 id。"""
+        ids = self._session_ids()
+        remembered = (self._state_store.load().last_sessions or {}).get(
+            str(self._project_root)
+        )
+        active = remembered if remembered in ids else (ids[0] if ids else None)
+        return {"sessions": ids, "active": active}
 
     def sessions_list_for(self, path: str) -> dict[str, object]:
         """列出任意工作区目录的会话 id（不切换 runtime），供前端按工作区分组。"""
@@ -244,8 +339,7 @@ class GuiRequestHandler:
     async def session_delete(self, session_id: str) -> dict[str, object]:
         """删除会话；删当前会话时先切回 default 释放句柄，再删目录。"""
         if session_id == "default":
-            log = self._project_root / ".athena" / "logs" / "sessions" / "default.jsonl"
-            log.unlink(missing_ok=True)
+            await self._reset_default_session()
             return {"deleted": True, "sessions": self._session_ids()}
         state_root = _session_state_root(self._project_root, session_id)
         if session_id == self._current_session_id and self._make_runtime is not None:
@@ -254,6 +348,33 @@ class GuiRequestHandler:
         if state_root is not None and state_root.is_dir():
             await _rmtree_when_released(state_root)
         return {"deleted": True, "sessions": self._session_ids()}
+
+    async def _reset_default_session(self) -> None:
+        """重置默认会话：释放句柄 → 清掉它的痕迹 → 重开一个干净 runtime。
+
+        default 没有独立目录（状态就落在工作区的 ``.athena/`` 里），所以只删它
+        自己的那几份文件：工作区目录本体、``workspaces/``、artifacts 与命名会话
+        都保留。顺序不能反——先建新 runtime 会让它读到马上要被删掉的 state.json，
+        ``_resume_running_session`` 甚至会把这份悬空的 RUNNING 续跑起来。
+        """
+        athena = self._project_root / ".athena"
+        reopen = self._make_runtime is not None
+        if reopen:
+            await self._suspend_runtime()
+            await self._runtime.aclose()
+        try:
+            sessions_dir = athena / "logs" / "sessions"
+            if sessions_dir.is_dir():
+                await _rmtree_when_released(sessions_dir)
+            for name in ("state.json", "resume.json", "research_tree.json"):
+                (athena / name).unlink(missing_ok=True)
+        finally:
+            # 删不掉（句柄占用）也要留下一个能继续服务的 runtime；异常照常上抛给
+            # transport，前端才看得到真实原因。
+            if reopen:
+                self._runtime = self._make_runtime(str(self._project_root), None)
+                self._service = GuiService(self._runtime, broker=self._broker)
+        self._current_session_id = "default"
 
     async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, object]:
         service = self._service
@@ -267,10 +388,6 @@ class GuiRequestHandler:
             return await service.message(_require_str(params, "text", "message text"))
         if method in {"pause", "resume", "stop"}:
             return await getattr(service, method)()
-        if method == "parse_intent":
-            return await service.parse_intent(
-                _require_str(params, "message", "message")
-            )
         if method == "start_search":
             return await service.start_search(_require_dict(params, "config", "config"))
         if method == "start_validation":

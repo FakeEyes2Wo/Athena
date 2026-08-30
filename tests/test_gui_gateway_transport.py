@@ -50,7 +50,7 @@ async def test_unknown_method_returns_error() -> None:
         resp = await _recv_response(ws)
         assert resp["request_id"] == 2
         assert resp["error"]["code"] == -32602
-        assert resp["error"]["message"] == "request failed"
+        assert resp["error"]["message"] == "unsupported GUI method: unknown_method"
 
     server.close()
     await server.wait_closed()
@@ -74,8 +74,9 @@ async def test_invalid_json_returns_error() -> None:
 class _FakeRuntime:
     """Minimal runtime double with subscribe/unsubscribe + snapshot emission."""
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, state_root: Path | None = None) -> None:
         self.root = root
+        self.state_root = state_root
         self.tree_path = Path(root) / ".athena" / "research_tree.json"
         self._subscribers: dict[int, Any] = {}
         self._next = 0
@@ -85,12 +86,17 @@ class _FakeRuntime:
         self._subscribers[self._next] = emit
         # 与真实 runtime 一致：订阅后立即推送一条 state 快照。
         asyncio.get_running_loop().create_task(
-            emit("state", {"phase": "idle", "status": "idle", "project_root": self.root})
+            emit(
+                "state", {"phase": "idle", "status": "idle", "project_root": self.root}
+            )
         )
         return self._next
 
     def unsubscribe(self, subscription_id: int) -> None:
         self._subscribers.pop(subscription_id, None)
+
+    async def suspend(self) -> str:
+        return "IDLE"
 
     async def aclose(self) -> None:
         self._subscribers.clear()
@@ -129,8 +135,8 @@ async def test_transport_resubscribes_after_project_switch() -> None:
     created: list[_FakeRuntime] = []
     old = _FakeRuntime("/old-root")
 
-    def factory(path: str) -> _FakeRuntime:
-        runtime = _FakeRuntime(path)
+    def factory(path: str, state_root: Path | None = None) -> _FakeRuntime:
+        runtime = _FakeRuntime(path, state_root)
         created.append(runtime)
         return runtime
 
@@ -139,7 +145,11 @@ async def test_transport_resubscribes_after_project_switch() -> None:
     ws = _FakeWS(
         [
             json.dumps(
-                {"request_id": 1, "method": "set_project_root", "params": {"path": target}}
+                {
+                    "request_id": 1,
+                    "method": "set_project_root",
+                    "params": {"path": target},
+                }
             )
         ]
     )
@@ -151,3 +161,68 @@ async def test_transport_resubscribes_after_project_switch() -> None:
     states = [json.loads(m) for m in ws.sent if json.loads(m).get("kind") == "state"]
     assert len(states) >= 2
     assert states[-1]["data"]["project_root"] == target
+
+
+class _RaisingHandler:
+    """Handler double whose ``dispatch`` always raises the configured exception."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.runtime = _FakeRuntime("/root")
+        self._exc = exc
+
+    async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        raise self._exc
+
+
+async def _dispatch_error(
+    exc: Exception, method: str = "session_delete"
+) -> dict[str, Any]:
+    """用抛 ``exc`` 的 handler 跑一次 dispatch，返回响应里的 error 对象。"""
+    from gui_gateway.transport import WebSocketTransport
+
+    transport = WebSocketTransport(_RaisingHandler(exc))
+    ws = _FakeWS([json.dumps({"request_id": 7, "method": method, "params": {}})])
+    await transport.handle(ws)
+    responses = [json.loads(m) for m in ws.sent if "kind" not in json.loads(m)]
+    assert len(responses) == 1
+    assert responses[0]["request_id"] == 7
+    return responses[0]["error"]
+
+
+async def test_dispatch_error_carries_reason_and_keeps_code() -> None:
+    """异常的真实信息回传前端，错误码仍由异常类型决定。"""
+    err = await _dispatch_error(ValueError("session 'default' is protected"))
+
+    assert err["code"] == -32602
+    assert "session 'default' is protected" in err["message"]
+    assert err["data"] == {"exception": "ValueError", "method": "session_delete"}
+
+
+async def test_dispatch_error_redacts_secrets() -> None:
+    """错误文本里的密钥在回传前被脱敏。"""
+    err = await _dispatch_error(
+        RuntimeError("provider rejected api_key=sk-abcd0123456789 for runtime"),
+        method="start",
+    )
+
+    assert err["code"] == -32000
+    assert "sk-abcd0123456789" not in err["message"]
+    assert "[REDACTED]" in err["message"]
+
+
+async def test_dispatch_error_falls_back_to_exception_type() -> None:
+    """异常没有消息文本时，退回异常类型名而不是空串。"""
+    err = await _dispatch_error(RuntimeError())
+
+    assert err["message"] == "RuntimeError"
+
+
+async def test_dispatch_error_reports_a_blocked_delete() -> None:
+    """删除会话因句柄占用失败时，前端拿到的是操作系统给的真实原因。"""
+    err = await _dispatch_error(
+        PermissionError("[WinError 32] the file is in use by another process")
+    )
+
+    assert err["code"] == -32603
+    assert "in use by another process" in err["message"]
+    assert err["data"]["exception"] == "PermissionError"

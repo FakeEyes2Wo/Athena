@@ -6,7 +6,10 @@ interface and existing tests remain unchanged.
 """
 
 import asyncio
+import json
 import logging
+from pathlib import Path
+import traceback
 from typing import Any
 
 from athena.research.runtime_events import recent_user_texts
@@ -54,6 +57,56 @@ def resume_task_text(runtime: Any, fallback: str) -> str:
     return " ".join(parts) if parts else fallback
 
 
+def render_task_clarification(
+    task_text: str,
+    qa_pairs: list[tuple[str, str]],
+    understanding: dict[str, object],
+) -> str:
+    """Render the minimal TASK_CLARIFICATION.md produced by the Supervisor flow."""
+    lines = [
+        "# TASK_CLARIFICATION",
+        "",
+        "## Original task",
+        task_text or "",
+        "",
+        "## Clarification Q&A",
+    ]
+    if qa_pairs:
+        for index, (question, answer) in enumerate(qa_pairs, start=1):
+            lines.append(f"{index}. Q: {question}")
+            lines.append(f"   A: {answer}")
+    else:
+        lines.append("(no clarification questions were needed)")
+    lines.extend(
+        [
+            "",
+            "## Final understanding",
+            json.dumps(understanding or {}, ensure_ascii=False, indent=2),
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def persist_task_clarification(runtime: Any) -> None:
+    """Persist the Supervisor-owned task-understanding Q&A as a handoff."""
+    session = getattr(runtime, "_session", None)
+    qa_pairs = list(getattr(session, "clarification_qa", []) or [])
+    understanding = getattr(runtime.state, "task_understanding", None) or {}
+    if not qa_pairs and not understanding:
+        return
+    try:
+        markdown = render_task_clarification(
+            runtime._task_text or "", qa_pairs, understanding
+        )
+        ref = await runtime.store.put_text(markdown)
+        runtime.state.handoff_refs["task_clarification"] = ref
+        runtime.state.save(runtime.state_path)
+    except Exception:
+        logger.warning(
+            "failed to persist task clarification handoff", exc_info=True
+        )
+
+
 async def maybe_run_task_understanding(runtime: Any) -> None:
     """Run PREPARE task understanding unless a checkpoint already exists.
 
@@ -67,6 +120,7 @@ async def maybe_run_task_understanding(runtime: Any) -> None:
             channel="text",
             text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
         )
+        await persist_task_clarification(runtime)
         return
     if not runtime._task_text.strip():
         return
@@ -78,6 +132,7 @@ async def maybe_run_task_understanding(runtime: Any) -> None:
     )
     try:
         await runtime._agent_turns.run_supervisor_turn(context)
+        await persist_task_clarification(runtime)
         await runtime.publish_output(
             source="supervisor", channel="text", text="任务理解完成。"
         )
@@ -89,7 +144,7 @@ async def maybe_run_task_understanding(runtime: Any) -> None:
         await runtime.publish_output(
             source="supervisor",
             channel="error",
-            text=f"任务理解失败（已降级继续）：{error}",
+            text=f"任务理解失败（已降级继续）：{error}\n\n{traceback.format_exc()}",
         )
 
 
@@ -197,7 +252,13 @@ async def message(runtime: Any, text: str) -> str:
     if command == "/resume":
         if runtime._supervisor.is_stopped():
             return runtime.state.status
-        if (runtime._task is None or runtime._task.done()) and runtime._started:
+        # ``_started`` 只认得"这个 runtime 实例跑过"。GUI 切走会话时 supervisor 被
+        # suspend + aclose，切回来是一个全新的 runtime：``_started`` 为 False，却
+        # 确确实实是一次续跑。落过盘的 state.json 才是"这次运行开始过"的判据——
+        # 少了它，PREPARE 会掉进 ensure_started（无 baseline 即不启动），停在
+        # "status=RUNNING 但没有任何协程在跑"的悬空态。
+        resumable = runtime._started or Path(runtime._state_path).is_file()
+        if (runtime._task is None or runtime._task.done()) and resumable:
             await runtime._supervisor.resume(restarting=True)
             await runtime.start()
         else:

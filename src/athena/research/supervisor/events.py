@@ -5,7 +5,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from athena.core.contracts import ArtifactRef
+from athena.core.contracts import ArtifactRef, new_id
 
 _PREVIEW_BYTES = 512
 _ANSI_STRING = re.compile(
@@ -37,6 +37,10 @@ class OutputEvent(BaseModel):
 
     type: Literal["output"] = "output"
     seq: int = Field(ge=1)
+    # 一条显示消息的身份：同一条 agent 文本的所有流式 delta 与最终落盘记录共用一个
+    # id，订阅方据此 upsert，而不是靠"上一条是不是同 plan"猜测该不该合并。升级前
+    # 写下的 transcript 没有这个字段，回放时为 None，消费方按 seq 兜底。
+    message_id: str | None = None
     source: Literal["supervisor", "agent", "tool"]
     channel: Literal["text", "stdout", "stderr", "error"]
     text: str
@@ -138,10 +142,16 @@ class EventProjector:
         tool: str | None = None,
         artifact_ref: ArtifactRef | None = None,
         truncated: bool = False,
+        message_id: str | None = None,
     ) -> OutputEvent:
-        """Project one already classified display record."""
+        """Project one already classified display record.
+
+        调用方传入 ``message_id`` 把同一条消息的多次投影绑在一起；不传则这条记录
+        自成一条消息。
+        """
         return OutputEvent(
             seq=self._next_sequence(),
+            message_id=message_id or new_id("msg"),
             source=source,
             channel=channel,
             text=redact(text),
@@ -186,6 +196,7 @@ class EventProjector:
         channel: Literal["stdout", "stderr"] = "stderr" if safe_stderr else "stdout"
         return OutputEvent(
             seq=self._next_sequence(),
+            message_id=new_id("msg"),
             source="tool",
             channel=channel,
             text=preview,

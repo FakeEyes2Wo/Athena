@@ -13,11 +13,22 @@ from athena.app_server.protocol import (
     map_exception_to_error_code,
     rpc_error,
 )
+from athena.research.supervisor.events import redact
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from gui_gateway.handler import GuiRequestHandler
+
+
+def _error_message(exc: Exception) -> str:
+    """异常的可展示原因：脱敏后的 ``str(exc)``，为空时退回异常类型名。
+
+    前端只能看到这段文本，统一文案会把「会话被占用/路径非法/runtime 已关闭」
+    压成同一句话；``redact`` 保证异常里携带的密钥不会随 payload 出网。
+    """
+    detail = redact(str(exc)).strip()
+    return detail or type(exc).__name__
 
 
 class WebSocketTransport:
@@ -55,10 +66,12 @@ class WebSocketTransport:
         try:
             async for raw in ws:
                 request_id = 0
+                method = "?"
                 try:
                     data: dict[str, Any] = json.loads(raw)
                     req = RequestEnvelope.model_validate(data)
                     request_id = req.request_id
+                    method = req.method
                     result = await self._handler.dispatch(req.method, req.params or {})
                     # ``set_project_root`` 会替换 handler.runtime；切换后需重新订阅
                     # 新 runtime 的事件流，否则后续 state/output 事件会丢。
@@ -74,13 +87,14 @@ class WebSocketTransport:
                     )
                     await send(resp.model_dump_json())
                 except Exception as exc:
-                    logger.exception("dispatch %s failed", req.method if "req" in locals() else "?")
+                    logger.exception("dispatch %s failed", method)
                     err = ResponseEnvelope(
                         request_id=request_id,
                         result=None,
                         error=rpc_error(
                             map_exception_to_error_code(exc),
-                            "request failed",
+                            _error_message(exc),
+                            {"exception": type(exc).__name__, "method": method},
                         ),
                     )
                     await send(err.model_dump_json())

@@ -23,16 +23,29 @@ _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
 PublishEvent = Callable[[str, str, dict | None], Awaitable[None] | None]
 
+SequenceSink = Callable[[int], None]
+"""转发游标的回写口：每成功转发一条 journal 事件回调它的 sequence。"""
+
 DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
 """Default wall-clock budget for one experiment command (seconds)."""
 
 
 async def forward_run_events(
-    agents: AgentRuntime, run_id: str, publish: PublishEvent
+    agents: AgentRuntime,
+    run_id: str,
+    publish: PublishEvent,
+    after_sequence: int = 0,
+    on_sequence: SequenceSink | None = None,
 ) -> None:
-    """Forward one Agent run's journal until its terminal event."""
-    async for event in agents.run_events(run_id, after_sequence=0):
+    """Forward one Agent run's journal from ``after_sequence`` to its terminal event.
+
+    ``on_sequence`` 在每条事件**投影成功之后**才回写游标：转发中途被取消或抛错时，
+    游标停在最后一条确实送达的事件上，重入从那里续传而不是从头重放。
+    """
+    async for event in agents.run_events(run_id, after_sequence=after_sequence):
         await publish(event.kind, event.event_ref, event.data)
+        if on_sequence is not None:
+            on_sequence(event.sequence)
         if event.kind in _TERMINAL_EVENT_KINDS:
             return
 
@@ -41,11 +54,15 @@ async def wait_run_events(
     agents: AgentRuntime,
     run_id: str,
     publish: PublishEvent | None,
+    after_sequence: int = 0,
+    on_sequence: SequenceSink | None = None,
 ):
     """Wait for an Agent run while forwarding its journal when requested."""
     if publish is None:
         return await agents.wait_run(run_id)
-    events = asyncio.create_task(forward_run_events(agents, run_id, publish))
+    events = asyncio.create_task(
+        forward_run_events(agents, run_id, publish, after_sequence, on_sequence)
+    )
     wait = asyncio.create_task(agents.wait_run(run_id))
     try:
         summary = await wait

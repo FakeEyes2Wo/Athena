@@ -11,7 +11,8 @@ export interface TaskUnderstanding {
   primary_metric: string;
   direction: string;
   evaluation_plan: string;
-  needs_configuration: boolean;
+  /** Present on the old GUI-side understanding; backend Supervisor state may omit it. */
+  needs_configuration?: boolean;
 }
 
 export interface BudgetState {
@@ -136,11 +137,6 @@ function normalizePipelineEvent(
   };
 }
 
-/** Send a user message to the backend and receive the supervisor's task understanding. */
-export function sendMessage(msg: string): Promise<TaskUnderstanding> {
-  return rpc<TaskUnderstanding>("parse_intent", { message: msg }, "send_message");
-}
-
 /** Kick off the automated ML search loop. */
 export function startSearch(config: Record<string, unknown>): Promise<unknown> {
   return rpc("start_search", { config });
@@ -200,6 +196,8 @@ export function treeLoad(): Promise<{ loaded: boolean; tree: ResearchTreeData }>
 export interface SessionRecord {
   type: string;
   seq: number;
+  /** 消息身份：同一条消息的所有投影共用它。升级前写下的记录没有该字段。 */
+  message_id?: string | null;
   text?: string;
   source?: string;
   channel?: string;
@@ -208,9 +206,9 @@ export interface SessionRecord {
   [key: string]: unknown;
 }
 
-/** List session ids in the current workspace, most-recent first. */
-export function sessionsList(): Promise<{ sessions: string[] }> {
-  return rpc<{ sessions: string[] }>("sessions_list");
+/** Session ids in the current workspace (most-recent first) + the one last opened here. */
+export function sessionsList(): Promise<{ sessions: string[]; active: string | null }> {
+  return rpc<{ sessions: string[]; active: string | null }>("sessions_list");
 }
 
 /** List session ids in an arbitrary workspace directory (without switching runtime). */
@@ -218,13 +216,21 @@ export function sessionsListFor(path: string): Promise<{ sessions: string[] }> {
   return rpc<{ sessions: string[] }>("sessions_list_for", { path });
 }
 
-/** Switch the active session and return its transcript. */
-export function sessionSwitch(sessionId: string): Promise<{ records: SessionRecord[] }> {
+/** Switch the active session; returns its transcript and the updated session list
+  * (the backend recycles the blank session being left behind). */
+export function sessionSwitch(
+  sessionId: string,
+): Promise<{ records: SessionRecord[]; sessions?: string[] }> {
   if (hasTauri) return invoke("session_switch", { sessionId });
-  return wsBackend.call("session_switch", { session_id: sessionId }) as Promise<{ records: SessionRecord[] }>;
+  return wsBackend.call("session_switch", { session_id: sessionId }) as Promise<{
+    records: SessionRecord[];
+    sessions?: string[];
+  }>;
 }
 
-/** Delete a named session (its transcript + state) and return the updated id list. */
+/** Delete a session (its transcript + state) and return the updated id list.
+  * ``default`` has no directory of its own, so deleting it resets the workspace's
+  * default session instead of removing the workspace. */
 export function sessionDelete(
   sessionId: string,
 ): Promise<{ deleted: boolean; sessions: string[] }> {

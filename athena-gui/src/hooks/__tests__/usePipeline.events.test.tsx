@@ -4,16 +4,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const eventHandlers: Array<(event: { kind: string; data: Record<string, unknown> }) => void> = [];
 
 vi.mock("../../lib/tauri-bridge", () => ({
-  sendMessage: vi.fn().mockResolvedValue({
-    title: "图像分类 · f1_macro",
-    dataset: "train.csv (tabular)",
-    target: "label: multiclass",
-    task_type: "classification",
-    primary_metric: "f1_macro",
-    direction: "maximize",
-    evaluation_plan: "f1_macro over a held-out split",
-    needs_configuration: true,
-  }),
   sendControl: vi.fn().mockResolvedValue({ ok: true }),
   startSearch: vi.fn().mockResolvedValue({ ok: true }),
   pauseSearch: vi.fn().mockResolvedValue({ ok: true }),
@@ -31,14 +21,14 @@ vi.mock("../../lib/tauri-bridge", () => ({
   PIPELINE_EVENT_NAMES: ["state", "output"],
 }));
 
-import { sendControl, sendMessage } from "../../lib/tauri-bridge";
+import { sendControl, startSearch } from "../../lib/tauri-bridge";
 import { usePipeline } from "../usePipeline";
 
 describe("usePipeline event mapping", () => {
   beforeEach(() => {
     eventHandlers.length = 0;
     vi.mocked(sendControl).mockClear();
-    vi.mocked(sendMessage).mockClear();
+    vi.mocked(startSearch).mockClear();
   });
 
   it("maps a state event to phase, status, budget, and SOTA", async () => {
@@ -78,7 +68,9 @@ describe("usePipeline event mapping", () => {
     });
 
     expect(result.current.viewModel.status).toBe("running");
-    expect(sendMessage).toHaveBeenCalledWith("kaggle URL");
+    // No frontend-side parse_intent: a new prompt starts the backend-owned
+    // task understanding/run instead of calling the Supervisor directly.
+    expect(startSearch).toHaveBeenCalledWith({ task: "kaggle URL" });
     expect(sendControl).not.toHaveBeenCalled();
   });
 
@@ -135,17 +127,47 @@ describe("usePipeline event mapping", () => {
   it("coalesces streaming agent text deltas into one message", async () => {    const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
+      // 同一条消息的 delta 带同一个 message_id（后端在建立文本缓冲时分配）。
       eventHandlers[0]?.({
         kind: "output",
-        data: { seq: 1, source: "agent", channel: "text", text: "正在" },
+        data: { seq: 1, source: "agent", channel: "text", text: "正在", message_id: "msg-1" },
       });
       eventHandlers[0]?.({
         kind: "output",
-        data: { seq: 2, source: "agent", channel: "text", text: "生成假设" },
+        data: { seq: 2, source: "agent", channel: "text", text: "生成假设", message_id: "msg-1" },
       });
     });
 
     expect(result.current.viewModel.messages).toHaveLength(1);
     expect(result.current.viewModel.messages[0].content).toBe("正在生成假设");
+  });
+
+  it("keeps the run controls live for a session restored as paused in PREPARE", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "WAITING" },
+      });
+    });
+
+    expect(result.current.viewModel.status).toBe("paused");
+    // 切走会话时 runStarted 被清空，而 PREPARE 阶段没有 plans/attempts/experiment，
+    // runActive 若只看客户端证据就会是 false，"继续"按钮被永久禁用。
+    expect(result.current.runActive).toBe(true);
+  });
+
+  it("leaves the run controls dead for a brand-new idle session", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "IDLE" },
+      });
+    });
+
+    expect(result.current.runActive).toBe(false);
   });
 });

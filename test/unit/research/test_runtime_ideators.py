@@ -158,7 +158,14 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
         "change ideator-1-1",
         "change ideator-1-3",
     ]
-    assert errors == [("ideator-1-2", "Ideator 2 failed: offline")]
+    # cd899a5 起，失败的一路会连 traceback 一起报出来（与 d4605d1 同一取向：
+    # 失败的原因必须能到达看它的人）。断言退化为"标签 + 原因 + 附了 traceback"，
+    # 而不是逐字相等——否则每次错误信息变详细都要改测试。
+    assert len(errors) == 1
+    plan, text = errors[0]
+    assert plan == "ideator-1-2"
+    assert text.startswith("Ideator 2 failed: offline")
+    assert "RuntimeError: offline" in text
 
 
 @pytest.mark.asyncio

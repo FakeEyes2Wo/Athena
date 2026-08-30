@@ -46,7 +46,7 @@ def map_exception_to_error_code(exc: Exception) -> ErrorCode:
 
 
 class RpcError(ProtocolModel):
-    """协议错误——仅含稳定通用文案，不含异常消息/prompt/traceback。"""
+    """协议错误——``message`` 为脱敏后的失败原因，不含 prompt/traceback。"""
 
     code: int
     message: str
