@@ -403,9 +403,10 @@ class _StubExecution:
         self.produce_predictions = produce_predictions
         self.timeouts: list[object] = []
 
-    async def run(self, context, command=None, *, argv=None, **kwargs):
-        del command, argv
-        self.timeouts.append(kwargs.get("timeout_s"))
+    async def run(self, context, request):
+        # ``ExecutionRuntime.run`` 现在收一个 CommandRequest（138c5b6）。旧签名下
+        # 那个对象被位置绑到 ``command``，于是 timeout 永远读成 None。
+        self.timeouts.append(request.timeout_s)
         if self.produce_predictions:
             out = Path(context.workspace_root) / "predictions" / "new.csv"
             out.parent.mkdir(parents=True, exist_ok=True)

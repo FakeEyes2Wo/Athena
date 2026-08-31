@@ -10,7 +10,11 @@ from pydantic import ValidationError
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
-from athena.execution.runtime import CommandResult, ExecutionContext
+from athena.execution.runtime import (
+    CommandRequest,
+    CommandResult,
+    ExecutionContext,
+)
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.script_runner import load_directory
 from athena.research.supervisor.experiment import (
@@ -75,21 +79,38 @@ class _FakeExecution:
         self.emit_seen: list[object] = []
 
     async def run(
-        self,
-        context: ExecutionContext,
-        command: str | None = None,
-        *,
-        argv: list[str] | None = None,
-        timeout_s: int = 120,
-        workdir: str | None = None,
-        emit=None,
+        self, context: ExecutionContext, request: CommandRequest
     ) -> CommandResult:
-        self.calls.append(list(argv) if argv is not None else [])
-        self.workdirs.append(workdir)
-        if emit is not None:
-            emit("command/started", "exec:run", {"command": argv})
-            self.emit_seen.append(emit)
+        self.calls.append(list(request.argv) if request.argv is not None else [])
+        self.workdirs.append(request.workdir)
+        if request.emit is not None:
+            request.emit("command/started", "exec:run", {"command": request.argv})
+            self.emit_seen.append(request.emit)
+        _produce_declared_outputs(request.workdir)
         return self._results.pop(0)
+
+
+# 声明产物在命令跑之前会被新鲜度守卫归档走（42748ff）。真实命令会把它们写回来，
+# 所以这个替身也必须写——否则每个用例都退化成"命令什么也没产出"。要写什么由
+# fixture 记在 sidecar 里；sidecar 放在声明产物之外，归档带不走它。
+_PRODUCES = "_produces.json"
+
+
+def _record_produces(workdir: Path, files: dict[str, str]) -> None:
+    (workdir / _PRODUCES).write_text(json.dumps(files), encoding="utf-8")
+
+
+def _produce_declared_outputs(workdir: str | None) -> None:
+    if workdir is None:
+        return
+    sidecar = Path(workdir) / _PRODUCES
+    if not sidecar.is_file():
+        return
+    for rel, content in json.loads(sidecar.read_text(encoding="utf-8")).items():
+        target = Path(workdir) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # 逐字节写：文本模式在 Windows 上会改写换行，而断言比的是字节。
+        target.write_bytes(content.encode("utf-8"))
 
 
 class _FakeWorkspace:
@@ -195,6 +216,7 @@ def _write_manifest(
     commands: list[list[str]],
     outputs: dict[str, str] | None = None,
     predictions: str = "id,pred\n",
+    produces_predictions: bool = True,
 ) -> None:
     workdir = Path(branch.path)
     outputs = outputs or {
@@ -209,6 +231,10 @@ def _write_manifest(
     predictions_dir.mkdir(parents=True, exist_ok=True)
     (predictions_dir / "predictions.csv").write_bytes(predictions.encode("utf-8"))
     (workdir / "report.md").write_text("# report\n", encoding="utf-8")
+    produces = {"report.md": "# report\n"}
+    if produces_predictions:
+        produces[f"{outputs['predictions']}/predictions.csv"] = predictions
+    _record_produces(workdir, produces)
 
 
 def test_manifest_rejects_shell_strings_and_path_escape() -> None:
@@ -735,8 +761,12 @@ async def test_run_turn_missing_predictions_returns_evidence_without_scoring(
     runner, plan_input, workspace, branch, store = await _runner_setup(
         tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
     )
-    _write_manifest(branch, commands=[[sys.executable, "predict.py"]])
-    # remove the predictions directory the manifest promises to produce
+    # the manifest promises predictions; the command does not produce them
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "predict.py"]],
+        produces_predictions=False,
+    )
     shutil.rmtree(Path(branch.path) / "outputs" / "predictions")
     state = PlanState(
         kind="SEARCH",
