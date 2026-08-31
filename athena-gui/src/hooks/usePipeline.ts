@@ -20,7 +20,11 @@ import {
   type SessionRecord,
   type TaskUnderstanding,
 } from "../lib/tauri-bridge";
-import { createEmptyPipelineViewModel, type PipelineViewModel } from "../types/ui";
+import {
+  createEmptyPipelineViewModel,
+  type PipelineViewModel,
+  type UIMessage,
+} from "../types/ui";
 
 export interface LogEntry {
   id: string;
@@ -93,26 +97,98 @@ function titleFromTask(preview: TaskUnderstanding): string {
   return parts.length ? parts.join(" · ") : "新会话";
 }
 
-/** Rebuilds the conversation from persisted records by replaying each output
-  * record through the same reducer the live stream uses (TUI-style resume). */
+/** 由一条 output 记录构造一条消息（error / 工具输出 / 工具调用 / 普通文本）。 */
+function outputMessage(
+  id: string,
+  text: string,
+  source: string | undefined,
+  channel: string | undefined,
+  tool: string | undefined,
+  plan: string | undefined,
+): UIMessage {
+  if (channel === "error") {
+    return { id, role: "athena", kind: "error", content: text };
+  }
+  if (source === "tool" || channel === "stdout" || channel === "stderr") {
+    // 工具输出（命令结果 / 文件读写），先于 tool 调用判定。
+    return { id, role: "athena", kind: "text", content: text, source: "tool", tool, channel, plan };
+  }
+  if (tool) {
+    // 工具调用（agent function_call）。
+    return { id, role: "athena", kind: "text", content: text, source, tool, plan };
+  }
+  return { id, role: "athena", kind: "text", content: text, source, plan };
+}
+
+/**
+ * Rebuilds the conversation from persisted records in a single pass.
+ *
+ * 不再逐条走 live reducer：那样每条记录都要整表拷贝一次消息数组，一次两万多条的
+ * 重放要拷三亿多个元素，切会话因此卡死、CPU 打满。这里只攒一个数组，用 id → 下标
+ * 的表定位要合并的消息。
+ *
+ * ``message_id`` 上线之前写下的记录没有消息身份，而当时每个 token 各占一行：按 seq
+ * 兜底会把一条消息碎成一串单词气泡。对这些旧记录沿用当时的合并口径——连续、同
+ * plan、非工具调用的 agent 文本算同一条消息；带 ``message_id`` 的新记录不受影响。
+ */
 function applyHistoryRecords(current: PipelineViewModel, records: SessionRecord[]): PipelineViewModel {
-  let next = current;
+  const messages = [...current.messages];
+  const index = new Map<string, number>();
+  messages.forEach((message, position) => index.set(message.id, position));
+  let legacyRun: { plan: string | undefined; id: string } | null = null;
+
   for (const record of records) {
     if (record.type === "user") {
+      legacyRun = null;
       const text = typeof record.text === "string" ? record.text : "";
       if (!text.trim()) continue;
-      next = {
-        ...next,
-        messages: [
-          ...next.messages,
-          { id: `user-${record.seq}`, role: "user", kind: "text", content: text },
-        ],
-      };
-    } else {
-      next = applyPipelineEvent(next, { kind: "output", data: record }, true);
+      const id = `user-${record.seq}`;
+      index.set(id, messages.length);
+      messages.push({ id, role: "user", kind: "text", content: text });
+      continue;
     }
+
+    const text = typeof record.text === "string" ? record.text : "";
+    if (!text) continue;
+    const source = typeof record.source === "string" ? record.source : undefined;
+    const tool = typeof record.tool === "string" ? record.tool : undefined;
+    const channel = typeof record.channel === "string" ? record.channel : undefined;
+    const plan = typeof record.plan === "string" ? record.plan : undefined;
+    const messageId =
+      typeof record.message_id === "string" && record.message_id ? record.message_id : null;
+    const legacyProse =
+      messageId === null && source === "agent" && channel === "text" && !tool;
+
+    let id: string;
+    // 旧记录是碎片所以追加；带 message_id 的落盘记录是整条所以替换。
+    let append = false;
+    if (messageId !== null) {
+      id = messageId;
+      legacyRun = null;
+    } else if (legacyProse && legacyRun && legacyRun.plan === plan) {
+      id = legacyRun.id;
+      append = true;
+    } else {
+      id = `out-${typeof record.seq === "number" ? record.seq : 0}`;
+      legacyRun = legacyProse ? { plan, id } : null;
+    }
+
+    const target = index.get(id);
+    if (target !== undefined) {
+      const existing = messages[target];
+      messages[target] = {
+        ...existing,
+        content: append ? existing.content + text : text,
+      };
+      continue;
+    }
+    // 纯空白只用于把已有消息的两个词分开，不足以独立成一条消息。
+    if (!text.trim()) continue;
+    index.set(id, messages.length);
+    messages.push(outputMessage(id, text, source, channel, tool, plan));
   }
-  return next;
+
+  return { ...current, messages };
 }
 
 /**
@@ -215,17 +291,7 @@ function applyPipelineEvent(
     // 纯空白只用于把已有消息的两个词分开，不足以独立成一条消息。
     if (!text.trim()) return next;
 
-    if (channel === "error") {
-      messages.push({ id, role: "athena", kind: "error", content: text });
-    } else if (source === "tool" || channel === "stdout" || channel === "stderr") {
-      // 工具输出（命令结果 / 文件读写），先于 tool 调用判定。
-      messages.push({ id, role: "athena", kind: "text", content: text, source: "tool", tool, channel, plan });
-    } else if (tool) {
-      // 工具调用（agent function_call）。
-      messages.push({ id, role: "athena", kind: "text", content: text, source, tool, plan });
-    } else {
-      messages.push({ id, role: "athena", kind: "text", content: text, source, plan });
-    }
+    messages.push(outputMessage(id, text, source, channel, tool, plan));
     next.messages = messages;
     return next;
   }
@@ -241,7 +307,11 @@ function applyPipelineEvent(
 export function usePipeline(workspaceRoot?: string | null) {
   const [viewModel, setViewModel] = useState<PipelineViewModel>(createEmptyPipelineViewModel);
   const [sessions, setSessions] = useState<Array<{ id: string; title: string }>>([]);
+  // 网关内存里仍在跑的会话（含没在看的那些）：后台会话不推实时事件，只有它能证明"还在跑"。
+  const [runningSessions, setRunningSessions] = useState<string[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState("default");
+  // 后端因尾部上限丢掉的更早记录条数；>0 时对话顶部要说明，不能让历史静默消失。
+  const [truncatedRecords, setTruncatedRecords] = useState(0);
   const [humanRequests, setHumanRequests] = useState<HumanRequest[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
@@ -274,9 +344,11 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
-  // 会话列表一律由后端给：哪些会话存在（有 transcript / state.json）只有它知道。
+  // 会话列表一律由后端给：哪些会话存在（有 transcript / state.json）、哪些还在跑
+  // 只有它知道。``running`` 缺省表示"这次没带回运行态"，保留上一次的值而不是清空。
   const applySessions = useCallback(
-    (ids: string[] | undefined) => {
+    (ids: string[] | undefined, running?: string[]) => {
+      if (running) setRunningSessions(running);
       if (!ids) return;
       const titles = loadTitles(titlesKey);
       setSessions(ids.map((id) => ({ id, title: titles[id] ?? "新会话" })));
@@ -284,12 +356,29 @@ export function usePipeline(workspaceRoot?: string | null) {
     [titlesKey],
   );
 
+  // 运行态只有 sessions_list 带得回来（session_switch 只回传 id 列表）：会话集合或
+  // 运行态可能变了就再问一次，别让"有没有会话在跑"停在上一次快照上。
+  const refreshSessions = useCallback(async () => {
+    try {
+      const { sessions: list, running } = await sessionsList();
+      applySessions(list, running ?? []);
+    } catch {
+      // 非致命：保留上一次的列表与运行态。
+    }
+  }, [applySessions]);
+
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
   const restoreRecords = useCallback(
-    (records: SessionRecord[], resetMessages: boolean) => {
-      if (records.length) {
-        counter.current = Math.max(counter.current, ...records.map((r) => r.seq));
+    (records: SessionRecord[], resetMessages: boolean, truncated = 0) => {
+      // 逐条比较而不是 Math.max(counter, ...records.map(...))：后者把整个数组展开成
+      // 实参，记录一多就 RangeError，而异常被挂载路径的 catch 吞掉 —— 表现为整段
+      // 对话静默消失。transcript 只增不减，这条迟早会撞上。
+      for (const record of records) {
+        if (typeof record.seq === "number" && record.seq > counter.current) {
+          counter.current = record.seq;
+        }
       }
+      setTruncatedRecords(truncated);
       setViewModel((prev) =>
         applyHistoryRecords(resetMessages ? { ...prev, messages: [] } : prev, records),
       );
@@ -341,20 +430,26 @@ export function usePipeline(workspaceRoot?: string | null) {
         if (!mounted) return;
         applySessions(result.sessions ?? list);
         setCurrentSessionId(target);
-        restoreRecords(result.records, false);
+        restoreRecords(result.records, false, result.truncated ?? 0);
+        // session_switch 不回传运行态，而它可能刚把一个断点续传的会话拉起来。
+        void refreshSessions();
       })
       .catch(() => {
         // 非致命：无历史或后端不支持时保持空白会话。
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendLog, applySessions]);
+  }, [appendLog, applySessions, refreshSessions]);
 
-  // Poll for outstanding supervisor human questions while a run is active.
+  // Poll for outstanding supervisor human questions while any session is running.
   // Task understanding and any initial clarification are owned by the backend
   // Supervisor, so the frontend only has to surface these pending requests.
+  //
+  // 只看当前 view model 是不够的：在看 B 的时候 A 触发 ask_user，broker 会 park 住
+  // A 的执行，而 A 没有实时输出——不轮询就是静默卡死，用户既看不见问题也回答不了。
   useEffect(() => {
-    if (viewModel.status !== "running") {
+    const anyRunning = viewModel.status === "running" || runningSessions.length > 0;
+    if (!anyRunning) {
       setHumanRequests([]);
       return;
     }
@@ -370,7 +465,7 @@ export function usePipeline(workspaceRoot?: string | null) {
     void poll();
     const timer = setInterval(poll, 1500);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [viewModel.status]);
+  }, [viewModel.status, runningSessions]);
 
   // The backend is the only owner of task understanding. When its authoritative
   // state event fills the preview card, use that understanding to name the
@@ -406,10 +501,8 @@ export function usePipeline(workspaceRoot?: string | null) {
     try {
       // 原始任务文本即后端 start_search 所需的 `task`；task understanding 只用于展示与标题。
       await startSearch({ task });
-      // 任务落盘后这个会话才算存在（后端只列留下痕迹的会话）：刷新侧栏。
-      void sessionsList()
-        .then(({ sessions: list }) => applySessions(list))
-        .catch(() => {});
+      // 任务落盘后这个会话才算存在（后端只列留下痕迹的会话）：刷新侧栏与运行态。
+      void refreshSessions();
     } catch (err) {
       // start_search 失败 → 阶段机没起来，重置运行标记。
       runStarted.current = false;
@@ -419,7 +512,7 @@ export function usePipeline(workspaceRoot?: string | null) {
       }));
       throw err;
     }
-  }, [applySessions]);
+  }, [refreshSessions]);
 
   const sendPrompt = useCallback(async (msg: string) => {
     const content = msg.trim();
@@ -594,24 +687,25 @@ export function usePipeline(workspaceRoot?: string | null) {
     runStarted.current = false;
     saveTitle(titlesKey, id, "新会话");
     void sessionSwitch(id)
-      .then((result) => applySessions(result.sessions))
+      .then(() => refreshSessions())
       .catch(() => {
         // 非致命：切换失败时保留乐观插入的这一行，用户可以再点一次。
       });
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
-  }, [applySessions, titlesKey]);
+  }, [refreshSessions, titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
     try {
-      const { records, sessions: list } = await sessionSwitch(id);
+      const { records, sessions: list, truncated } = await sessionSwitch(id);
       // 换会话即换 runtime，运行标记不能带过去。
       runStarted.current = false;
       setCurrentSessionId(id);
-      restoreRecords(records, true);
+      restoreRecords(records, true, truncated ?? 0);
       applySessions(list);
+      void refreshSessions();
     } catch (err) {
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       setViewModel((prev) => ({
@@ -628,7 +722,7 @@ export function usePipeline(workspaceRoot?: string | null) {
         ],
       }));
     }
-  }, [applySessions, nextId, restoreRecords]);
+  }, [applySessions, nextId, refreshSessions, restoreRecords]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
@@ -638,6 +732,7 @@ export function usePipeline(workspaceRoot?: string | null) {
       delete titles[id];
       localStorage.setItem(titlesKey, JSON.stringify(titles));
       applySessions(list);
+      void refreshSessions();
       if (id === currentSessionId) {
         await switchSession("default");
       }
@@ -656,7 +751,7 @@ export function usePipeline(workspaceRoot?: string | null) {
         ],
       }));
     }
-  }, [applySessions, currentSessionId, nextId, switchSession, titlesKey]);
+  }, [applySessions, currentSessionId, nextId, refreshSessions, switchSession, titlesKey]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);
@@ -694,7 +789,9 @@ export function usePipeline(workspaceRoot?: string | null) {
     viewModel,
     runActive,
     sessions,
+    runningSessions,
     currentSessionId,
+    truncatedRecords,
     humanRequests,
     logs,
     clearLogs,
@@ -711,5 +808,5 @@ export function usePipeline(workspaceRoot?: string | null) {
     answerHuman,
     chooseHumanAnswer,
     skipHumanAnswer,
-  }), [answerHuman, chooseHumanAnswer, skipHumanAnswer, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, runActive, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
+  }), [answerHuman, chooseHumanAnswer, skipHumanAnswer, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, runActive, runningSessions, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, truncatedRecords, viewModel]);
 }

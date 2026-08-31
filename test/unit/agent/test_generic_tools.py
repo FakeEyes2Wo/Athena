@@ -113,3 +113,33 @@ def test_build_llm_agent_injects_runtime_summary(tmp_path: Path) -> None:
     )
     assert agent.system_prompt.startswith("Runtime:")
     assert "shell_command" in {spec.name for spec in agent.tools.specs}
+
+
+async def test_write_file_allows_a_named_session_workspace(tmp_path: Path) -> None:
+    """命名会话的工作区本身就在 .athena 下：不能因此禁掉它自己的 write_file。"""
+    workspace = (
+        tmp_path / ".athena" / "conversations" / "s-1" / "workspaces" / "evaluator"
+    )
+    workspace.mkdir(parents=True)
+    tool = generic_tool_registry(workspace).resolve("write_file")
+
+    result = await tool.ainvoke(_ctx(), path="evaluate.py", content="print(1)")
+
+    assert result.error is None
+    assert (workspace / "evaluate.py").read_text(encoding="utf-8") == "print(1)"
+
+
+async def test_write_file_still_rejects_athena_inside_the_workspace(
+    tmp_path: Path,
+) -> None:
+    """工作区内部出现的 .athena 仍然按框架私有处理。"""
+    workspace = (
+        tmp_path / ".athena" / "conversations" / "s-1" / "workspaces" / "evaluator"
+    )
+    workspace.mkdir(parents=True)
+    tool = generic_tool_registry(workspace).resolve("write_file")
+
+    result = await tool.ainvoke(_ctx(), path=".athena/state.json", content="{}")
+
+    assert result.error is not None
+    assert ".athena" in result.error

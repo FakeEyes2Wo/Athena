@@ -81,8 +81,8 @@
 | `tree_get` | — | `{ "tree": ResearchTreeDict }`（含 version/sota_id/hypotheses/experiments） |
 | `tree_save` | — | `{ "saved": true, "path": str }` |
 | `tree_load` | — | `{ "loaded": true, "tree": ResearchTreeDict }` |
-| `sessions_list` | — | `{ "sessions": [str], "active": str \| null }`（当前工作区内留下过痕迹的会话 id，最近活动在前；`active` 是本工作区上次打开的会话，列表为空时为 `null`） |
-| `session_switch` | `session_id: str` | `{ "session_id": str, "records": [SessionRecord], "sessions": [str] }`（切到该会话并重放其 transcript，实现断点续传；离开的空白会话由后端回收，故一并回传最新列表） |
+| `sessions_list` | — | `{ "sessions": [str], "active": str \| null, "running": [str] }`（当前工作区内留下过痕迹的会话 id，最近活动在前；`active` 是本工作区上次打开的会话，列表为空时为 `null`；`running` 是网关内存里仍在跑的会话——切走不打断它，同一时刻至多一个，别的工作区恒为空） |
+| `session_switch` | `session_id: str` | `{ "session_id": str, "records": [SessionRecord], "truncated": int, "sessions": [str] }`（切到该会话并重放其 transcript，实现断点续传；离开的空白会话由后端回收，故一并回传最新列表；transcript 只追加从不轮转，`records` 只含最近 `GUI_REPLAY_LIMIT` 条，`truncated` 是被丢掉的更早记录条数，磁盘上仍是全量） |
 | `session_delete` | `session_id: str` | `{ "deleted": true, "sessions": [str] }`（`default` 没有独立目录，删它等于重置默认会话：清 transcript / state.json / resume.json / research_tree.json，保留工作区目录本体与 `workspaces/`） |
 
 #### C. 假设图与算法

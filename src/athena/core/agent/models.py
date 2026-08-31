@@ -46,10 +46,15 @@ class AgentOutcome:
 
 @dataclass(slots=True)
 class StepOutcome:
-    """采样步进结果 — kind 驱动循环分派。"""
+    """采样步进结果 — kind 驱动循环分派。
+
+    ``signature`` 是本轮工具调用的指纹（名字 + 规范化参数）。ReAct 循环靠它识别
+    "模型在原地重复同一个调用"这种退化，空串表示这轮没有调用工具。
+    """
 
     kind: Literal["done", "continue", "error"]
     text: str = ""
+    signature: str = ""
 
 
 @dataclass(slots=True)

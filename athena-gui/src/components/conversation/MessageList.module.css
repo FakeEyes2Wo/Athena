@@ -10,6 +10,21 @@
   max-width: 860px;
   margin-left: auto;
   margin-right: auto;
+  /* 长会话下列表会有几千行：让浏览器跳过离屏行的排版与绘制。contain-intrinsic-size
+     是未渲染时的高度估值，保证滚动条长度与滚动位置仍然稳定。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
+}
+
+/* 回放被尾部上限截断时的说明，置于对话顶部。 */
+.history-truncated {
+  margin: 0 auto var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
 }
 
 .message-list > .message-bubble--user {

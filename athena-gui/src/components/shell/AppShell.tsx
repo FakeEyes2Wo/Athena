@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useState } from "react";
 import type { ContextPanelKey, ModuleKey } from "../../types/ui";
 import { usePipeline } from "../../hooks/usePipeline";
 import { ConversationPane } from "../conversation/ConversationPane";
@@ -37,20 +37,19 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
   const def = MODULE_BY_KEY[module];
   const { viewModel } = pipeline;
 
-  // 切回「会话」模块时，重新拉取当前会话的 transcript，让右侧工作区恢复历史对话；
-  // 运行中跳过（此时消息由实时事件驱动，避免重放打断进行中的执行）。
-  const previousModule = useRef(module);
-  useEffect(() => {
-    const wasAway = previousModule.current !== "session";
-    previousModule.current = module;
-    if (
-      module === "session" &&
-      wasAway &&
-      pipeline.viewModel.status !== "running"
-    ) {
-      void pipeline.switchSession(pipeline.currentSessionId);
-    }
-  }, [module, pipeline]);
+  // 网关同时只允许一个会话在跑，所以待答问题必然属于那个唯一在跑的会话。它不是
+  // 正在看的这个时要说清是谁在问，否则用户面对的是一个没有上下文的弹窗。
+  const backgroundRun = pipeline.runningSessions.find(
+    (id: string) => id !== pipeline.currentSessionId,
+  );
+  const askingSession = backgroundRun
+    ? pipeline.sessions.find((s: { id: string }) => s.id === backgroundRun)?.title ??
+      backgroundRun
+    : undefined;
+
+  // 切模块不再重放 transcript：usePipeline 挂在 App 上，离开「会话」模块期间实时
+  // 事件照样进 view model，对话不会丢。以前那次 switchSession 借的是会重建 runtime
+  // 的路径，等于每次切回来都把当前会话拆一遍。
 
   return (
     <div className={styles.shell}>
@@ -96,6 +95,7 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
             currentRoot={currentRoot}
             recentRoots={recentRoots}
             sessions={pipeline.sessions}
+            runningSessions={pipeline.runningSessions}
             currentSessionId={pipeline.currentSessionId}
             onSwitchWorkspace={onSwitchWorkspace}
             onSelectWorkspace={onSelectWorkspace}
@@ -130,6 +130,7 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
 
       <HumanRequestDialog
         requests={pipeline.humanRequests}
+        fromSession={askingSession}
         onAnswer={pipeline.answerHuman}
         onChoice={pipeline.chooseHumanAnswer}
         onSkip={pipeline.skipHumanAnswer}

@@ -103,6 +103,29 @@ def _require_joinable_labels_dir(labels_dir: Path) -> None:
         _require_joinable_labels(path)
 
 
+def declared_prediction_column(root: Path) -> str | None:
+    """从 ``metric.json`` 读 agent 显式声明的预测列名；没声明返回 None。
+
+    预测列名是**结构化事实**，不该靠正则去刮 HANDOFF.md 的自由文本。真机上 agent
+    用最清楚的英语写了 "The prediction value column is named `prediction`"，而解析器
+    只认冒号语法，于是连续 10 轮回灌"请声明"却从不说该用什么语法——契约两端都无法
+    满足，PREPARE 以 turn budget exhausted 收场。``metric.json`` 本就是被结构化解析
+    的契约载体（已含 ``eval_script`` / ``prediction_format``），列名归它。
+
+    这里对缺文件/坏 JSON 一律返回 None：报错是 ``_evaluator_layout`` 的职责，本函数
+    只回答"有没有显式声明"。
+    """
+    spec_path = root / "metric.json"
+    if not spec_path.is_file():
+        return None
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    name = spec.get("prediction_column") if isinstance(spec, dict) else None
+    return name if isinstance(name, str) and name.strip() else None
+
+
 def _evaluator_layout(root: Path) -> tuple[Path, str, str]:
     """Return ``(evaluator_root, entrypoint, prediction_format)`` from metric.json.
 
@@ -215,7 +238,10 @@ async def _validate_frozen_evaluator(
     handoff_text = (
         handoff_path.read_text(encoding="utf-8") if handoff_path.is_file() else ""
     )
-    prediction_column = extract_prediction_column(handoff_text)
+    # 优先结构化声明；散文与源码只是兜底，供尚未升级的旧 evaluator 继续工作。
+    prediction_column = declared_prediction_column(evaluator_root)
+    if prediction_column is None:
+        prediction_column = extract_prediction_column(handoff_text)
     if prediction_column is None:
         # Do not depend on a prompt-specific HANDOFF wording. If the free-text
         # declaration is not parseable, inspect the evaluator source itself for
@@ -229,9 +255,11 @@ async def _validate_frozen_evaluator(
         prediction_column = extract_prediction_column_from_source(source)
     if prediction_column is None:
         raise ValueError(
-            "cannot determine the tabular prediction CSV column from either "
-            "HANDOFF.md or the evaluator source; declare it in HANDOFF.md or "
-            "make evaluate.py read a clearly named prediction column"
+            "cannot determine the tabular prediction CSV column. Add a "
+            '"prediction_column" field to metric.json naming the column that '
+            "predictions/predictions.csv carries next to __athena_row_id, for "
+            'example {"eval_script": "evaluate.py", "prediction_column": '
+            '"prediction"}'
         )
 
     async def score(predictions_csv: str) -> float:
@@ -254,6 +282,25 @@ async def _validate_frozen_evaluator(
         return
     if not outcome.get("ok"):
         raise ValueError(outcome.get("reason", "evaluator property tests failed"))
+
+
+_FEEDBACK_LIMIT = 1000
+_TRUNCATION_MARK = " ...[TRUNCATED]... "
+
+
+def _feedback_text(exc: BaseException) -> str:
+    """把失败原因压进反馈预算，并保证**尾部**留下。
+
+    尾部才是 Traceback 所在。只截头部时，``uv`` 的 VIRTUAL_ENV 告警加上评估器自己的
+    DEBUG 行就能吃光 1000 字符预算，agent 收到的反馈里一个字的异常都没有——真机实测
+    它因此连续 8 轮在盲修，只好自己往脚本里加 DEBUG 打印来换取可见性。
+    """
+    text = " ".join(str(exc).split())
+    if len(text) <= _FEEDBACK_LIMIT:
+        return text
+    budget = _FEEDBACK_LIMIT - len(_TRUNCATION_MARK)
+    head = budget // 3
+    return text[:head] + _TRUNCATION_MARK + text[-(budget - head) :]
 
 
 async def run_evaluator_plan(
@@ -366,7 +413,7 @@ async def run_evaluator_plan(
                 return evaluator_ref
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # 写入 README/校验/目录运行失败 → 转成同 Plan 的反馈重试。
-                feedback = " ".join(str(exc).split())[:1000]
+                feedback = _feedback_text(exc)
                 # 拒绝理由此前只发给 agent，操作者的日志里一个字都没有。真机
                 # （2026-08-29）上 agent 连交 10 次 submit 全被拒、直到预算耗尽，
                 # 而日志里只有一句"turn budget exhausted"——从外面看是无缘无故的
@@ -537,7 +584,7 @@ async def run_prepare_plan(
                 # 覆盖可信打分后的 git diff/commit 失败（GitWorkspaceError）与
                 # subprocess 失败，转成同 Plan 的反馈重试；evaluator_infrastructure_failed
                 # 仍走 RuntimeError 上抛（终端），由 Supervisor.start 统一观测，不在此处吞掉。
-                feedback = " ".join(str(exc).split())[:1000]
+                feedback = _feedback_text(exc)
 
         raise RuntimeError("prepare turn budget exhausted without a trusted baseline")
     finally:

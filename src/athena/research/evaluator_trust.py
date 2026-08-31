@@ -42,6 +42,13 @@ _PREDICTION_COLUMN_PATTERNS = (
         r"schema[^,\n]*,\s*[`\"]?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[`\"]?",
         re.IGNORECASE,
     ),
+    # agent 真实写出来的说法：“The prediction value column is named `prediction`”。
+    # 只认冒号语法会把这种清清楚楚的声明判为“未声明”。
+    re.compile(
+        r"prediction[\w ]*column\s+is(?:\s+named|\s+called)?\s*[`\"]?"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)[`\"]?",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -64,8 +71,12 @@ def extract_prediction_column(handoff_text: str) -> str | None:
     return None
 
 
+# 引号必须成对出现：``row[ID_COL]`` 里的 ID_COL 是 Python 变量，不是列名。真机上
+# 它的值恰恰是行 id 列（``ID_COL = "__athena_row_id"``），被当成预测列之后，平台按
+# 一个评估器根本不认的列名去造探针预测，属性测试于是永远过不了。
 _SOURCE_COLUMN_RE = re.compile(
-    r"\b(?:row|df|data|preds|predictions|reader|frame)\s*\[\s*[`'\"]?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[`'\"]?\s*\]",
+    r"\b(?:row|df|data|preds|predictions|reader|frame)\s*\[\s*"
+    r"(?P<q>[`'\"])(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P=q)\s*\]",
     re.IGNORECASE,
 )
 
@@ -123,9 +134,7 @@ def _parse_labels(labels_csv: str) -> tuple[list[str], list[str]]:
     reader = csv.DictReader(io.StringIO(labels_csv))
     if reader.fieldnames is None or "__athena_row_id" not in reader.fieldnames:
         raise ValueError("labels CSV must contain __athena_row_id")
-    target_fields = [
-        field for field in reader.fieldnames if field != "__athena_row_id"
-    ]
+    target_fields = [field for field in reader.fieldnames if field != "__athena_row_id"]
     if not target_fields:
         raise ValueError("labels CSV must contain a target column")
     target_field = target_fields[0]
@@ -156,7 +165,9 @@ async def validate_evaluator_properties(
         return {"ok": False, "reason": "need at least two labeled rows"}
 
     rng = random.Random(seed)
-    baseline = await score(_build_predictions(ids, values, prediction_column=prediction_column))
+    baseline = await score(
+        _build_predictions(ids, values, prediction_column=prediction_column)
+    )
 
     # Row-order invariance: shuffle complete (id, value) pairs, not values.
     pairs = list(zip(ids, values))
@@ -164,7 +175,9 @@ async def validate_evaluator_properties(
     shuffled_ids, shuffled_values = zip(*pairs) if pairs else ((), ())
     shuffled = await score(
         _build_predictions(
-            list(shuffled_ids), list(shuffled_values), prediction_column=prediction_column
+            list(shuffled_ids),
+            list(shuffled_values),
+            prediction_column=prediction_column,
         )
     )
     if shuffled != baseline:

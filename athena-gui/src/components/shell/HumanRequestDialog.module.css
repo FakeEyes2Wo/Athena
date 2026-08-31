@@ -23,6 +23,13 @@
   font-size: 15px;
 }
 
+/* 提问来自后台会话时的出处：那个会话没有实时输出，不写出来就没有上下文。 */
+.origin {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
 .prompt {
   margin: 0 0 14px;
   line-height: 1.5;

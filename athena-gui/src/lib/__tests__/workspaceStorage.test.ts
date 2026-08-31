@@ -15,6 +15,12 @@ describe("workspaceStorage", () => {
     expect(addRecentRoot("/b", ["/b", "/a"])).toEqual(["/b", "/a"]);
   });
 
+  it("addRecentRoot keeps an already-known root where it is", () => {
+    // 选中某个已知工作区不该把它拽到最前面：顺序要稳定。
+    expect(addRecentRoot("/b", ["/a", "/b", "/c"])).toEqual(["/a", "/b", "/c"]);
+    expect(addRecentRoot("/c", ["/a", "/b", "/c"])).toEqual(["/a", "/b", "/c"]);
+  });
+
   it("addRecentRoot ignores blank and caps at 8 entries", () => {
     expect(addRecentRoot("  ", ["/a"])).toEqual(["/a"]);
     const many = ["/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8"];

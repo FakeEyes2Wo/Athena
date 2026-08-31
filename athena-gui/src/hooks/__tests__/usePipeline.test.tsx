@@ -13,6 +13,7 @@ const bridgeMocks = vi.hoisted(() => ({
   sessionsList: vi.fn(),
   sessionSwitch: vi.fn(),
   sessionDelete: vi.fn(),
+  humanPending: vi.fn(),
   subscribeToPipelineEvents: vi.fn(),
 }));
 
@@ -28,6 +29,7 @@ vi.mock("../../lib/tauri-bridge", () => ({
   sessionsList: bridgeMocks.sessionsList,
   sessionSwitch: bridgeMocks.sessionSwitch,
   sessionDelete: bridgeMocks.sessionDelete,
+  humanPending: bridgeMocks.humanPending,
   subscribeToPipelineEvents: bridgeMocks.subscribeToPipelineEvents,
   PIPELINE_EVENT_NAMES: ["state", "output"],
 }));
@@ -47,6 +49,7 @@ describe("usePipeline", () => {
     bridgeMocks.sessionsList.mockReset();
     bridgeMocks.sessionSwitch.mockReset();
     bridgeMocks.sessionDelete.mockReset();
+    bridgeMocks.humanPending.mockReset();
     bridgeMocks.subscribeToPipelineEvents.mockReset();
 
     bridgeMocks.startSearch.mockResolvedValue({ ok: true });
@@ -60,6 +63,7 @@ describe("usePipeline", () => {
     bridgeMocks.sessionsList.mockResolvedValue({ sessions: [], active: null });
     bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: [] });
     bridgeMocks.sessionDelete.mockResolvedValue({ deleted: true, sessions: [] });
+    bridgeMocks.humanPending.mockResolvedValue({ requests: [] });
     bridgeMocks.subscribeToPipelineEvents.mockResolvedValue([]);
   });
 
@@ -180,10 +184,13 @@ describe("usePipeline", () => {
 
     const { result } = renderHook(() => usePipeline());
 
-    // 这些记录是升级前的形状（没有 message_id）：每条落盘记录各自成为一条消息，
-    // 不会被并进上一条的尾巴里。
+    // 这些记录是升级前的形状（没有 message_id），而那时每个 token 各占一行：
+    // seq 3/4 本来就是同一句话的两个 delta。按记录逐条成消息会把它碎成两个气泡
+    // （真实工作区实测 25,664 条旧记录 = 25,085 条单词气泡），所以重放时按
+    // 「连续 + 同 plan + 非工具调用的 agent 文本」合并回一条。supervisor 那条来源
+    // 不同，不参与合并。
     await waitFor(() => {
-      expect(result.current.viewModel.messages).toHaveLength(4);
+      expect(result.current.viewModel.messages).toHaveLength(3);
     });
     expect(result.current.viewModel.messages[0]).toMatchObject({
       id: "user-1",
@@ -192,8 +199,7 @@ describe("usePipeline", () => {
     });
     expect(result.current.viewModel.messages.slice(1).map((m) => m.content)).toEqual([
       "开始准备",
-      "正在",
-      "生成假设",
+      "正在生成假设",
     ]);
   });
 
@@ -233,6 +239,11 @@ describe("usePipeline", () => {
     expect(blankId).not.toBe("default");
 
     bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    bridgeMocks.sessionsList.mockResolvedValue({
+      sessions: ["default"],
+      active: "default",
+      running: [],
+    });
     await act(async () => {
       await result.current.switchSession("default");
     });
@@ -266,6 +277,41 @@ describe("usePipeline", () => {
       expect(result.current.currentSessionId).toBe("s-2");
     });
     expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("s-2");
+  });
+
+  it("keeps polling human questions while another session runs in the background", async () => {
+    // 后台会话触发 ask_user 会 park 住它的执行，而当前 view model 不是 running。
+    // 只看当前 view model 就等于静默卡死——这条是那个死角的回归锁。
+    bridgeMocks.sessionsList.mockResolvedValue({
+      sessions: ["default", "s-1"],
+      active: "default",
+      running: ["s-1"],
+    });
+    bridgeMocks.sessionSwitch.mockResolvedValue({
+      records: [],
+      sessions: ["default", "s-1"],
+    });
+    bridgeMocks.humanPending.mockResolvedValue({
+      requests: [
+        {
+          request_id: "r-1",
+          prompt: "accept competition rules?",
+          choices: null,
+          allow_custom: true,
+          allow_skip: true,
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => {
+      expect(result.current.runningSessions).toEqual(["s-1"]);
+    });
+    expect(result.current.viewModel.status).not.toBe("running");
+    await waitFor(() => {
+      expect(result.current.humanRequests).toHaveLength(1);
+    });
   });
 
   it("deletes the default session instead of silently ignoring it", async () => {

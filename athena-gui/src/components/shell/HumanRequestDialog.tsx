@@ -4,6 +4,8 @@ import styles from "./HumanRequestDialog.module.css";
 
 interface HumanRequestDialogProps {
   requests: HumanRequest[];
+  /** 提问的会话标题；只在提问来自后台会话（不是正在看的那个）时给。 */
+  fromSession?: string;
   onAnswer(requestId: string, answer: string): void;
   onChoice?(requestId: string, value: string): void;
   onSkip?(requestId: string): void;
@@ -12,6 +14,7 @@ interface HumanRequestDialogProps {
 /** Modal asking the human to answer the supervisor's outstanding question. */
 export function HumanRequestDialog({
   requests = [],
+  fromSession,
   onAnswer,
   onChoice,
   onSkip,
@@ -38,6 +41,7 @@ export function HumanRequestDialog({
     <div className={styles.backdrop} role="dialog" aria-modal="true">
       <div className={styles.dialog}>
         <h2 className={styles.title}>需要你的确认</h2>
+        {fromSession && <p className={styles.origin}>来自会话 {fromSession}</p>}
         <p className={styles.prompt}>{request.prompt}</p>
 
         {request.choices && request.choices.length > 0 && (

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from athena.core.contracts import ArtifactStore
 from athena.core.tool import BaseTool
+from athena.core.workspace import FRAMEWORK_OWNED_DIR, is_framework_owned
 from athena.core.tool_types import EmitEvent, ToolContext, ToolSpec
 
 if TYPE_CHECKING:
@@ -244,20 +245,39 @@ _ATHENA_WRITE_MARKERS = re.compile(
 )
 
 
+def _outside_workspace(command: str, workspace_root: Path) -> str:
+    """摘掉命令文本里自身工作区的路径前缀，只留下工作区之外的部分。
+
+    命名会话的工作区路径本身就含 ``.athena``：不先摘掉它，任何一条写自己工作区的
+    绝对路径命令都会被误判成在写框架私有目录。Windows 上正反斜杠与大小写都可能与
+    ``Path`` 的写法不同，三种形式一起摘并忽略大小写。
+    """
+    native = str(workspace_root.resolve())
+    forms = {native, native.replace("\\", "/"), native.replace("/", "\\")}
+    pattern = "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+    return re.sub(pattern, "", command, flags=re.IGNORECASE)
+
+
 def _reject_athena_shell_write(
     command: str, workdir: str | None, workspace_root: Path
 ) -> None:
-    """框架私有目录只读：shell 不得在 ``.athena/`` 内工作或对其执行写操作。"""
+    """框架私有目录只读：shell 不得在 ``.athena/`` 内工作或对其执行写操作。
+
+    判定以工作区为界（``is_framework_owned``）：命名会话的 worktree 本身就落在
+    ``.athena/conversations/<sid>/workspaces/`` 下，见 ``.athena`` 就拒会让这些
+    会话在自己的工作区里一条命令都跑不了。
+    """
     if workdir:
         workdir_path = Path(workdir)
         if not workdir_path.is_absolute():
             workdir_path = workspace_root / workdir_path
-        if ".athena" in workdir_path.resolve().parts:
+        if is_framework_owned(workdir_path, workspace_root):
             raise ValueError(
                 ".athena/ is owned by the Athena runtime and is read-only for "
                 "agents; run shell commands from your workspace instead."
             )
-    if ".athena" in command and _ATHENA_WRITE_MARKERS.search(command):
+    outside = _outside_workspace(command, workspace_root)
+    if FRAMEWORK_OWNED_DIR in outside and _ATHENA_WRITE_MARKERS.search(command):
         raise ValueError(
             ".athena/ is owned by the Athena runtime and is read-only for agents; "
             "inspect it with read_file/Get-Content, never write it."
