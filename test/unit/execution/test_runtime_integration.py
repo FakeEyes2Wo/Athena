@@ -32,6 +32,7 @@ def test_wired_agent_toolset_is_read_write_shell(tmp_path) -> None:
     assert {s.name for s in agent.tools.specs} == {
         "read_file",
         "write_file",
+        "append_file",
         "shell_command",
     }
     assert agent.system_prompt.startswith("Runtime:")

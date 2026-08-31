@@ -26,7 +26,7 @@ def _validate(
     prompt: str,
     model: str,
     max_turns: int,
-    max_tokens: int,
+    max_tokens: int | None,
     temperature: float,
 ) -> None:
     if not isinstance(prompt, str) or not prompt.strip():
@@ -35,7 +35,8 @@ def _validate(
         raise ValueError("model must be a non-empty string")
     if isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns <= 0:
         raise ValueError("max_turns must be a positive integer")
-    if (
+    # None = 交给 settings 解析（LLM_MAX_TOKENS / config.toml），不是非法值。
+    if max_tokens is not None and (
         isinstance(max_tokens, bool)
         or not isinstance(max_tokens, int)
         or max_tokens <= 0
@@ -74,7 +75,7 @@ async def single_turn_chat(
     system_prompt: str | None = None,
     client: "AsyncOpenAI | None" = None,
     max_turns: int = 200,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     temperature: float = 0.1,
     emit: EmitEvent | None = None,
     cancel: asyncio.Event | None = None,

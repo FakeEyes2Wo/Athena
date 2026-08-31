@@ -209,6 +209,34 @@ async def _unknown_tool_result(name: str, available: list[str]) -> ToolResult:
     )
 
 
+async def _truncated_tool_result(
+    name: str, raw_chars: int, finish_reason: str
+) -> ToolResult:
+    """实参被输出上限截断 → 可恢复的工具错误，直说原因并给出可执行的出路。
+
+    关键是让模型知道"不是你参数写错了，是你写太长被切了"。只报 schema 校验失败
+    的话，模型会原样重发同一个超长调用，每次都在同一个地方被截断。
+    """
+    return ToolResult(
+        success=False,
+        error=(
+            f"tool call '{name}' was cut off at the model output-token limit "
+            f"(finish_reason={finish_reason or 'length'}; {raw_chars} characters "
+            "of arguments arrived before the cut, so the JSON is incomplete and "
+            "no argument could be parsed). This is NOT a schema mistake — your "
+            "arguments were too long. Resending the same call will be cut off at "
+            "the same place. Split the work into several smaller calls: for a "
+            "file, write the first section with write_file, then add each "
+            "remaining section with a separate append_file call."
+        ),
+        data={
+            "truncated": True,
+            "raw_argument_chars": raw_chars,
+            "finish_reason": finish_reason or "length",
+        },
+    )
+
+
 async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any] | None]) -> None:
     """取消并等待所有在途工具任务；吞掉取消引发的异常。"""
     pending = [t for t in tool_tasks if t is not None and not t.done()]
@@ -293,6 +321,20 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
                         idx = len(tool_calls)
                         tool_calls.append(tc)
                         tool_tasks.append(None)
+
+                        if event.data.get("truncated"):
+                            # 实参被 max_tokens 截断 → 可恢复工具错误（同一 turn
+                            # 重试，不终止 worker）。必须在 resolve 之前拦下：工具
+                            # 本身会把空参数报成"缺必填参数"，那条信息会把模型引向
+                            # 原样重发，而不是分块重写。
+                            tool_tasks[idx] = asyncio.create_task(
+                                _truncated_tool_result(
+                                    tc.name,
+                                    int(event.data.get("raw_argument_chars", 0)),
+                                    str(event.data.get("finish_reason", "")),
+                                )
+                            )
+                            continue
 
                         try:
                             tool = agent.tools.resolve(tc.name)
@@ -529,24 +571,29 @@ def create_agent(
     *,
     client: "AsyncOpenAI | None" = None,
     max_turns: int = 200,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     temperature: float | None = None,
     name: str = "agent",
     seed: int | None = None,
 ) -> Agent:
     """创建 Agent 实例的便捷工厂函数。
 
-    将分散的配置参数统一构造为 AgentConfig 和 Agent 对象。``temperature``/``seed``
-    留空时交给 ``AgentConfig`` 从 settings 解析，避免这里的字面量默认值把
-    ``LLM_TEMPERATURE`` / ``LLM_SEED`` 悄悄覆盖掉。
+    将分散的配置参数统一构造为 AgentConfig 和 Agent 对象。``max_tokens``/
+    ``temperature``/``seed`` 留空时交给 ``AgentConfig`` 从 settings 解析，避免
+    这里的字面量默认值把 ``LLM_MAX_TOKENS`` / ``LLM_TEMPERATURE`` / ``LLM_SEED``
+    悄悄覆盖掉。``max_tokens`` 一度漏在这个保护之外：dataclass 默认值改成从
+    settings 取之后，这里仍写死 4096，于是经本函数构造的 Agent 全都还是 4096，
+    config.toml 配了也不生效。
     """
     provider = create_provider(model, client=client)
     overrides: dict[str, object] = {}
+    if max_tokens is not None:
+        overrides["max_tokens"] = max_tokens
     if temperature is not None:
         overrides["temperature"] = temperature
     if seed is not None:
         overrides["seed"] = seed
-    config = AgentConfig(max_turns, max_tokens, name=name, **overrides)
+    config = AgentConfig(max_turns, name=name, **overrides)
     return create_code_agent(provider, tools, system_prompt, config)
 
 

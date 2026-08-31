@@ -18,14 +18,14 @@ if TYPE_CHECKING:
 class AgentConfig:
     """Agent 运行配置 — 模型、系统提示、工具集和采样参数。
 
-    ``temperature``/``seed`` 的默认值从 ``settings`` 取（``LLM_TEMPERATURE`` /
-    ``LLM_SEED`` 或 ``config.toml`` 的 ``[llm]``），不再是写死的字面量：评测规范
+    ``max_tokens``/``temperature``/``seed`` 的默认值从 ``settings`` 取（``LLM_MAX_TOKENS`` /
+    ``LLM_TEMPERATURE`` / ``LLM_SEED`` 或 ``config.toml`` 的 ``[llm]``），不再是写死的字面量：评测规范
     普遍要求申报并固定采样参数，而写死的默认值既申报不了也调不动。
     ``seed=None`` 表示请求里不带该字段。
     """
 
     max_turns: int = 200
-    max_tokens: int = 4096
+    max_tokens: int = field(default_factory=settings.max_tokens)
     temperature: float = field(default_factory=settings.temperature)
     name: str = "code-agent"
     tool_choice: Literal["auto", "required"] = "auto"

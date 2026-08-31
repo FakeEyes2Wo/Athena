@@ -145,6 +145,11 @@ _WIN_SHELLS: tuple[tuple[str, list[str]], ...] = (
         r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
         ["-NoProfile", "-NonInteractive", "-Command"],
     ),
+    # 裸名走 PATH。Microsoft Store / winget / scoop 装的 pwsh 7 不在上面两个
+    # 固定目录下，只认绝对路径就会漏掉它、掉到 5.1；而 5.1 的 Get-Content 按
+    # 系统 ANSI 代码页读文件，中文 Windows 上会把 UTF-8 文本读成乱码直接喂给
+    # agent（2026-08-30 实测：README.md 被读成「Athena 鐨勪换鍔℃暟鎹洰褰」）。
+    ("pwsh", ["-NoProfile", "-NonInteractive", "-Command"]),
     (
         r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
         ["-NoProfile", "-NonInteractive", "-Command"],
@@ -295,15 +300,20 @@ class EnvironmentManager:
         return "Windows" if os.name == "nt" else "Linux"
 
     def shell_parts(self) -> tuple[str, list[str]]:
-        """返回 ``(shell 绝对路径, 启动参数)``。"""
+        """返回 ``(shell 绝对路径, 启动参数)``。
+
+        候选项可以是绝对路径（查文件是否存在）或裸名（查 PATH）。原先 Windows
+        分支只查绝对路径，装在非标准目录的 pwsh 7 一律探测不到。
+        """
         pool = _WIN_SHELLS if os.name == "nt" else _POSIX_SHELLS
         for shell, args in pool:
-            if os.name != "nt":
-                found = shutil.which(shell)
-                if found:
-                    return found, args
-            elif Path(shell).is_file():
-                return shell, args
+            if Path(shell).is_absolute():
+                if Path(shell).is_file():
+                    return shell, args
+                continue
+            found = shutil.which(shell)
+            if found:
+                return found, args
         raise RuntimeError(f"no shell found on {self.os_name}")
 
     def build_env(
@@ -489,7 +499,23 @@ class _StreamDecoder:
             return self._decoder.decode(raw, final=final)
         self._buf.extend(raw)
         if not final and self._buf.isascii():
-            return ""
+            # 纯 ASCII 直接放行，不要攒着等编码判定。
+            #
+            # 放行是安全的：ASCII 字节在 UTF-8 和各 ANSI 代码页下含义相同，且不可能
+            # 是某个多字节字符的后续字节——GBK 的尾字节确实可以落在 0x40-0x7E，但那
+            # 需要一个 >=0x80 的前导字节，而缓冲区全是 ASCII 就说明没有前导字节。
+            # 编码判定照旧推迟到第一批非 ASCII 字节到达，所以“别把后续 GBK 误判成
+            # UTF-8”这条保证不变。
+            #
+            # 攒着的代价是致命的：``BoundedOutput`` 的 60000 字符上限在本类**下游**，
+            # 这里返回空串就等于绕过它，整条输出会原封不动堆在内存里直到进程退出。
+            # 2026-08-30 实测：shell 从 PowerShell 5.1 换到 7 之后，``dir`` 的表头从
+            # 中文“目录:”变成纯英文 "Directory:"，这条分支不再被非 ASCII 打断，
+            # 主进程工作集冲到 20 GB（物理内存共 31.5 GB）。5.1 时代是靠输出里恰好
+            # 有中文才没炸——一个谁也没设计过的安全阀。
+            text = self._buf.decode("ascii")
+            self._buf.clear()
+            return text
         encoding = self._classify(final)
         if encoding is None:
             return ""
@@ -537,6 +563,10 @@ class CommandExecutor:
             return (
                 "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
                 "$OutputEncoding=[Text.Encoding]::UTF8;"
+                # 兜底：上面两行只管**写**出去的编码。PowerShell 5.1 读文件
+                # 默认用系统 ANSI，UTF-8 文本会在读入时就变成乱码，再怎么
+                # 正确地写出去也没用。7 默认就是 UTF-8，这行对它无害。
+                "$PSDefaultParameterValues['*:Encoding']='utf8';"
                 + command
                 + "\nexit $LASTEXITCODE"
             )
