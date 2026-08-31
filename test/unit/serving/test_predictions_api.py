@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from athena.serving.predictions_api import (
+    PredictionRequest,
     ID_COL,
     MAX_RECORDS,
     EXAMPLE_RECORDS,
@@ -105,9 +106,9 @@ def test_accepts_records_envelope_bare_list_and_single_object() -> None:
         [_record()],
         _record(),
     ):
-        records, threshold = bundle.validate(payload)
-        assert len(records) == 1
-        assert threshold is None
+        req = bundle.validate(payload)
+        assert len(req.records) == 1
+        assert req.threshold == bundle.default_threshold
 
 
 def test_missing_required_field_names_every_one_of_them() -> None:
@@ -153,8 +154,8 @@ def test_empty_and_oversized_batches_are_rejected() -> None:
 
 def test_threshold_override_is_range_checked() -> None:
     bundle = _bundle()
-    _, threshold = bundle.validate({"records": [_record()], "threshold": 0.9})
-    assert threshold == 0.9
+    req = bundle.validate({"records": [_record()], "threshold": 0.9})
+    assert req.threshold == 0.9
     for bad in (1.5, -0.1):
         with pytest.raises(ValidationError, match="0 到 1"):
             bundle.validate({"records": [_record()], "threshold": bad})
@@ -171,7 +172,7 @@ def test_absent_nullable_column_is_imputed_not_crashed() -> None:
     rec = _record()
     del rec["Teff"]
     del rec["Rad"]
-    out = bundle.predict([rec], 0.5)
+    out = bundle.predict(PredictionRequest([rec], 0.5))
     assert len(out) == 1
     frame_values = bundle.booster.seen[-1]
     assert frame_values[0][FEATURES.index("Teff")] == PREPROC["teff_median"]
@@ -180,7 +181,7 @@ def test_absent_nullable_column_is_imputed_not_crashed() -> None:
 
 def test_present_nullable_value_sets_missing_flag_to_zero() -> None:
     bundle = _bundle()
-    bundle.predict([_record(Teff=3400.0)], 0.5)
+    bundle.predict(PredictionRequest([_record(Teff=3400.0)], 0.5))
     values = bundle.booster.seen[-1]
     assert values[0][FEATURES.index("teff_missing_flag")] == 0
 
@@ -189,13 +190,13 @@ def test_prediction_flips_with_the_threshold() -> None:
     """同一条记录，只改阈值，判决必须跟着翻——阈值确实被用上了。"""
     bundle = _bundle()
     rec = _record(max_snr=11.0)  # sigmoid(1) ≈ 0.731
-    assert bundle.predict([rec], 0.5)[0]["prediction"] == 1
-    assert bundle.predict([rec], 0.9)[0]["prediction"] == 0
+    assert bundle.predict(PredictionRequest([rec], 0.5))[0]["prediction"] == 1
+    assert bundle.predict(PredictionRequest([rec], 0.9))[0]["prediction"] == 0
 
 
 def test_id_is_echoed_or_null() -> None:
     bundle = _bundle()
-    out = bundle.predict([_record(**{ID_COL: "TIC1_s0001_w00000"}), _record()], 0.5)
+    out = bundle.predict(PredictionRequest([_record(**{ID_COL: "TIC1_s0001_w00000"}), _record()], 0.5))
     assert out[0][ID_COL] == "TIC1_s0001_w00000"
     assert out[1][ID_COL] is None
 
@@ -204,7 +205,7 @@ def test_row_order_is_preserved() -> None:
     """响应必须按请求顺序，否则调用方无法对齐。"""
     bundle = _bundle()
     snrs = [30.0, 1.0, 20.0, 2.0]
-    out = bundle.predict([_record(max_snr=s) for s in snrs], 0.5)
+    out = bundle.predict(PredictionRequest([_record(max_snr=s) for s in snrs], 0.5))
     assert [p["prediction"] for p in out] == [1, 0, 1, 0]
 
 
