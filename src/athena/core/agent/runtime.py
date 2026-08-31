@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import random
-import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import aclosing
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
+from athena.core.fenced_json import unfence_json
 from athena.core.retry import is_transient_error
 
 from pydantic_ai.messages import (
@@ -47,23 +47,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_STRUCTURED_RETRIES = 3
 
-# ```json … ``` — 模型在带工具的对话里习惯把最终 JSON 包进 markdown 代码块。
-_FENCED_JSON = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.DOTALL)
-
-
-def _unfenced(text: str) -> str:
-    """剥掉结构化输出外面的 markdown 代码块围栏。
-
-    带工具时不能再发 ``response_format``（见 ``provider.stream``），模型于是自由地
-    把终态 JSON 包进 ```json 围栏。真机上这一条足以打死整个 SEARCH：Ideator 连着三次
-    返回围栏 JSON，重试预算耗尽后抛 ``structured output invalid after retries``。
-    围栏是格式噪声不是内容错误，直接剥掉，把重试预算留给真正的 schema 不匹配。
-    """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return text
-    match = _FENCED_JSON.search(stripped)
-    return match.group(1) if match else text
+# 围栏剥离搬到了 ``athena.utils.fenced_json``：2026-08-31 的 VALIDATE 崩溃说明
+# 这件事不只发生在 agent 这条路径上，私有副本挡不住别的调用点。
+_unfenced = unfence_json
 
 
 # LLM 响应流断线最多重连次数（supervisor_design §6.1）+ 退避基准秒数。

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 logger = logging.getLogger(__name__)
 
 from athena.agents.ideator_agent import HandoffResult
+from athena.core.fenced_json import unfence_json
 from athena.agents.prepare_agent import PREPARE_EDA_AGENT_ID, PREPARE_EDA_AGENT_TYPE
 from athena.agents.task_agents import register_validate_agent
 from athena.execution.runtime import ExecutionContext
@@ -249,4 +250,6 @@ class PhaseRunner:
             ),
             max_turns=200,
         )
-        return ValidationDiffReview.model_validate_json(answer)
+        # 模型会把 JSON 裹进 ```json 围栏；不剥掉就是 2026-08-31 那次
+        # VALIDATE 崩溃——内容本身是 {"accepted": true, ...}。
+        return ValidationDiffReview.model_validate_json(unfence_json(answer))
