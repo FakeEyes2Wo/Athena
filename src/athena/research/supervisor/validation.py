@@ -27,6 +27,10 @@ from athena.execution.runtime import (
 )
 from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.predictions_cover import (
+    PredictionsCoverageError,
+    assert_predictions_cover,
+)
 from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
@@ -477,59 +481,15 @@ async def _execute_predictions(
         rel_path = manifest.outputs["predictions"]
         predictions_dir = workdir / rel_path
         if predict_features is not None:
-            _assert_predictions_cover(predictions_dir, predict_features)
+            try:
+                assert_predictions_cover(predictions_dir, predict_features)
+            except PredictionsCoverageError as exc:
+                # 与产物新鲜度一样，这是候选可以自己修的失败，不是编排器的 bug。
+                raise PredictionsRejected(str(exc)) from exc
         ref = await pack_directory(store, predictions_dir)
         return PredictionRun(predictions_ref=ref, predictions_path=rel_path)
     finally:
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
-
-
-ROW_ID_COLUMN = "__athena_row_id"
-
-
-def _row_ids(path: Path) -> set[str]:
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
-            return set()
-        return {row[ROW_ID_COLUMN].strip() for row in reader}
-
-
-def _assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None:
-    """Fail with the real cause when the re-run predicted the wrong rows.
-
-    Without this the symptom is the final evaluator returning
-    ``{"primary": 0.0}`` next to ``14539 ground truth rows have no prediction``
-    -- which reads like a broken evaluator or a broken model, and is neither.
-    The actual cause is a candidate that hardcoded the SEARCH feature path, so
-    re-running its frozen argv produced predictions for rows VALIDATE is not
-    scoring. Diagnosing that from the outside took a full manual replay; the
-    information to say it outright was here all along.
-    """
-    expected = _row_ids(expected_csv)
-    if not expected:
-        return
-    produced: set[str] = set()
-    for path in sorted(predictions_dir.rglob("*.csv")):
-        produced |= _row_ids(path)
-    if not produced:
-        return
-    missing = expected - produced
-    if not missing:
-        return
-    overlap = len(expected & produced)
-    detail = (
-        f"{len(missing)} of {len(expected)} rows in {expected_csv.name} have no "
-        f"prediction (overlap {overlap})."
-    )
-    if overlap == 0:
-        detail += (
-            " Zero overlap means the re-run predicted a different split "
-            "entirely: the candidate hardcoded its feature path instead of "
-            "reading ATHENA_PREDICT_FEATURES, so its frozen command cannot be "
-            "pointed at the held-out rows."
-        )
-    raise PredictionsRejected(detail)
 
 
 def _run_failure_feedback(
