@@ -1,5 +1,12 @@
 # Implementation Plan: Task Understanding 多轮选择题澄清
 
+> **FROZEN — DO NOT EXECUTE.** This plan describes the pre-PR21 `parse_intent`
+> architecture and its checked boxes are historical, not fresh acceptance evidence. The
+> replacement design is
+> `docs/superpowers/specs/2026-09-01-task-clarification-confirmation-gate-design.md`.
+> A decision-complete replacement implementation plan will supersede this document after
+> the revised design receives written-spec review.
+
 关联设计：`docs/superpowers/specs/2026-08-18-task-understanding-clarification-design.md`
 
 ## 目标
