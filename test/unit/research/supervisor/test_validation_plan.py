@@ -15,6 +15,7 @@ from athena.research.supervisor.validation import (
     _execute_predictions,
     _MAX_FAILURE_FEEDBACK_CHARS,
     _run_failure_feedback,
+    drop_output_sections,
     recovery_action,
     review_validation_diff,
     validation_key,
@@ -190,6 +191,216 @@ async def _validation_branch(tmp_path, path: str, content: str = ""):
         GitWorkBranch(path=str(workspace), branch="validate", base_commit="sota-a"),
         GitDiff(ref=diff_ref, paths=(path,)),
     )
+
+
+def _write_manifest_for_review(workspace: Path) -> None:
+    """The manifest the review reads to learn which paths are outputs."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [["python", "solution/train_model.py"]],
+                "outputs": {"predictions": "predictions", "report": "REPORT.md"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _diff_section(path: str, body: str) -> str:
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body}\n"
+
+
+@pytest.mark.asyncio
+async def test_review_hides_the_outputs_the_agent_rewrote_while_testing(
+    tmp_path,
+) -> None:
+    """The Agent must run the command to test its repair; that rewrites outputs.
+
+    On 2026-09-02 the reviewer rejected a correct repair because the diff carried
+    the regenerated predictions file: "replacing the entire prediction file
+    implies a change in the model's inference results". Worse, ``predictions/``
+    sorts before ``solution/``, so a 169,965-row CSV pushed the source change
+    past the review's character bound — the reviewer was rejecting a repair it
+    could not see.
+    """
+    workspace_dir = tmp_path / "validate"
+    _write_manifest_for_review(workspace_dir)
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    huge = "\n".join(f"+{i},0.5,0" for i in range(50_000))
+    raw = (
+        _diff_section("predictions/predictions.csv", huge)
+        + _diff_section("REPORT.md", "+Search PR-AUC: 0.8361")
+        + _diff_section("solution/train_model.py", "+SEARCH_LABELS_PATH = None")
+    ).encode()
+    diff = GitDiff(
+        ref=await store.put_bytes(raw),
+        paths=("REPORT.md", "predictions/predictions.csv", "solution/train_model.py"),
+    )
+    seen = ""
+
+    async def reviewer(prompt: str) -> ValidationDiffReview:
+        nonlocal seen
+        seen = prompt
+        return ValidationDiffReview(accepted=True, reason="runtime-only")
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="drop the hardcoded search label path",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    assert result.accepted is True
+    payload = json.loads(seen)
+    assert payload["paths"] == ["solution/train_model.py"]
+    assert "SEARCH_LABELS_PATH = None" in payload["changed_text"]
+    assert "predictions/predictions.csv" not in payload["changed_text"]
+    assert "REPORT.md" not in payload["changed_text"]
+    assert "[DIFF TRUNCATED]" not in payload["changed_text"]
+    # 评审必须知道产物是被有意剔除的，否则会以为候选压根没改代码。
+    assert "excluded_outputs" in payload
+
+
+@pytest.mark.asyncio
+async def test_review_says_nothing_about_exclusions_when_only_source_changed(
+    tmp_path,
+) -> None:
+    workspace_dir = tmp_path / "validate"
+    _write_manifest_for_review(workspace_dir)
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    diff = GitDiff(
+        ref=await store.put_bytes(
+            _diff_section("solution/runtime.py", "+SEED = 7").encode()
+        ),
+        paths=("solution/runtime.py",),
+    )
+    seen = ""
+
+    async def reviewer(prompt: str) -> ValidationDiffReview:
+        nonlocal seen
+        seen = prompt
+        return ValidationDiffReview(accepted=True, reason="runtime-only")
+
+    await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="make the seed deterministic",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    assert "excluded_outputs" not in json.loads(seen)
+
+
+@pytest.mark.asyncio
+async def test_a_binary_declared_output_no_longer_blocks_a_text_repair(
+    tmp_path,
+) -> None:
+    """A pickled model beside the predictions used to fail the whole review."""
+    workspace_dir = tmp_path / "validate"
+    _write_manifest_for_review(workspace_dir)
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    raw = (
+        b"diff --git a/predictions/model.pkl b/predictions/model.pkl\n"
+        b"GIT binary patch\n\x00\x01\x02\n"
+        + _diff_section("solution/runtime.py", "+SEED = 7").encode()
+    )
+    diff = GitDiff(
+        ref=await store.put_bytes(raw),
+        paths=("predictions/model.pkl", "solution/runtime.py"),
+    )
+
+    async def reviewer(_prompt: str) -> ValidationDiffReview:
+        return ValidationDiffReview(accepted=True, reason="runtime-only")
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="make the seed deterministic",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    assert result.accepted is True
+
+
+@pytest.mark.asyncio
+async def test_editing_the_manifest_forfeits_the_output_exclusion(tmp_path) -> None:
+    """Otherwise "declare solution an output" hides the source change.
+
+    The manifest read for the exclusion lives in the Agent's own worktree, so
+    the exclusion has to cost the edit that would abuse it.
+    """
+    workspace_dir = tmp_path / "validate"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [["python", "solution/train_model.py"]],
+                "outputs": {"predictions": "solution"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    raw = (
+        _diff_section("experiment.json", '+  "outputs": {"predictions": "solution"}')
+        + _diff_section("solution/train_model.py", "+LEARNING_RATE = 0.9")
+    ).encode()
+    diff = GitDiff(
+        ref=await store.put_bytes(raw),
+        paths=("experiment.json", "solution/train_model.py"),
+    )
+    reviewer_called = False
+
+    async def reviewer(_prompt: str) -> ValidationDiffReview:
+        nonlocal reviewer_called
+        reviewer_called = True
+        return ValidationDiffReview(accepted=True, reason="looks fine")
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="runtime path repair",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    # 产物没有被排除，所以改动的 learning_rate 仍然撞上确定性语义闸门。
+    assert result.accepted is False
+    assert reviewer_called is False
+
+
+def test_dropping_output_sections_leaves_a_diff_without_outputs_alone() -> None:
+    raw = _diff_section("solution/a.py", "+x = 1").encode()
+
+    assert drop_output_sections(raw, ("predictions", "REPORT.md")) == raw
+    assert drop_output_sections(raw, ()) == raw
+
+
+def test_dropping_output_sections_matches_whole_segments_only() -> None:
+    """`predictions_backup/` is not inside `predictions/`."""
+    raw = (
+        _diff_section("predictions_backup/old.csv", "+1,2")
+        + _diff_section("predictions/predictions.csv", "+3,4")
+    ).encode()
+
+    kept = drop_output_sections(raw, ("predictions",)).decode()
+
+    assert "predictions_backup/old.csv" in kept
+    assert "b/predictions/predictions.csv" not in kept
 
 
 @pytest.mark.asyncio

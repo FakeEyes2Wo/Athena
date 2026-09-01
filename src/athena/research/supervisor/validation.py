@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -207,10 +208,88 @@ _SEMANTIC_MARKERS = (
 )
 
 
-async def _reviewed_diff_text(diff: GitDiff, store: ArtifactStore) -> str | None:
-    """Load, redact, and bound the exact diff artifact approved for commit."""
+_DIFF_HEADER = re.compile(rb"^diff --git a/(?P<a>.*?) b/(?P<b>.*?)$", re.MULTILINE)
 
-    raw = await store.get_bytes(diff.ref)
+
+def _under(path: str, root: str) -> bool:
+    """True when ``path`` is ``root`` or lives inside it (either slash)."""
+    norm = path.replace("\\", "/").strip("/")
+    base = root.replace("\\", "/").strip("/")
+    return bool(base) and (norm == base or norm.startswith(base + "/"))
+
+
+MANIFEST_NAME = "experiment.json"
+
+
+def declared_output_paths(
+    workspace: GitWorkBranch, changed: tuple[str, ...] = ()
+) -> tuple[str, ...]:
+    """The manifest's declared outputs, or none if they cannot be trusted.
+
+    The manifest read here is the one in the worktree, which the Agent can edit.
+    That would otherwise be a way to hide a source change from review: declare
+    ``solution`` an output and its diff disappears. So if this repair touched
+    the manifest at all, nothing is excluded and the reviewer sees everything —
+    hiding then costs the very edit that makes it visible.
+    """
+    if any(Path(path).name == MANIFEST_NAME for path in changed):
+        return ()
+    try:
+        manifest = read_experiment_manifest(Path(workspace.path))
+    except (OSError, ValueError):
+        # A broken manifest is the Agent's to repair; the review still runs.
+        return ()
+    return tuple(manifest.outputs.values())
+
+
+def drop_output_sections(raw: bytes, outputs: tuple[str, ...]) -> bytes:
+    """Remove the declared outputs' file sections from a unified diff.
+
+    The validate Agent is told to repair the frozen command, which means running
+    it — and running it writes exactly the paths the manifest declares. Those
+    land in the worktree diff, where they do two kinds of damage.
+
+    The reviewer sees a rewritten predictions file and reads it as tampering
+    with the scored artifact. On 2026-09-02 it rejected a correct repair for
+    precisely that: "replacing the entire prediction file implies a change in
+    the model's inference results". And a 169,965-row predictions.csv is far
+    past ``_MAX_REVIEW_DIFF_CHARS``; ``predictions/`` sorts before ``solution/``,
+    so truncation cut the source change out of the prompt entirely. The reviewer
+    was rejecting a repair it could not see.
+
+    Dropping them is safe *because* of the freshness guard: ``_execute_predictions``
+    archives every declared output before the command runs, so whatever the Agent
+    left there is moved aside and the scored artifact can only be the command's
+    own. Outputs are not review material — the review judges the repair.
+    """
+    if not outputs:
+        return raw
+    matches = list(_DIFF_HEADER.finditer(raw))
+    if not matches:
+        return raw
+    kept = [raw[: matches[0].start()]]
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        path = match.group("b").decode("utf-8", "replace")
+        if not any(_under(path, out) for out in outputs):
+            kept.append(raw[match.start() : end])
+    return b"".join(kept)
+
+
+async def _reviewed_diff_text(
+    diff: GitDiff,
+    store: ArtifactStore,
+    *,
+    outputs: tuple[str, ...] = (),
+) -> str | None:
+    """Load, redact, and bound the repair being reviewed, minus its outputs.
+
+    The binary and NUL checks run on what *remains*: a binary declared output
+    (a pickled model beside the predictions) used to fail the whole review as
+    unreviewable, even though the repair itself was plain text.
+    """
+
+    raw = drop_output_sections(await store.get_bytes(diff.ref), outputs)
     if b"\x00" in raw or b"GIT binary patch" in raw:
         return None
     try:
@@ -238,16 +317,21 @@ async def review_validation_diff(
             accepted=False,
             reason="validation repair requires an agent explanation",
         )
+    outputs = declared_output_paths(workspace, diff.paths)
+    source_paths = [
+        path
+        for path in diff.paths
+        if not any(_under(path, out) for out in outputs)
+    ]
     semantic_paths = [
-        path for path in diff.paths if Path(path).name.lower() in _SEMANTIC_FILENAMES
+        path for path in source_paths if Path(path).name.lower() in _SEMANTIC_FILENAMES
     ]
     if semantic_paths:
         return ValidationDiffReview(
             accepted=False,
             reason="validation cannot change model or training semantics",
         )
-    del workspace
-    changed_text = await _reviewed_diff_text(diff, store)
+    changed_text = await _reviewed_diff_text(diff, store, outputs=outputs)
     if changed_text is None:
         return ValidationDiffReview(
             accepted=False,
@@ -264,16 +348,22 @@ async def review_validation_diff(
             accepted=False,
             reason="validation cannot change model or training semantics",
         )
-    prompt = json.dumps(
-        {
-            "policy": "Accept runtime-only repairs; reject semantic tuning or label access.",
-            "paths": list(diff.paths),
-            "explanation": explanation.strip(),
-            "changed_text": changed_text,
-        },
-        sort_keys=True,
-    )
-    return await independent_review(prompt)
+    payload: dict[str, Any] = {
+        "policy": "Accept runtime-only repairs; reject semantic tuning or label access.",
+        "paths": source_paths,
+        "explanation": explanation.strip(),
+        "changed_text": changed_text,
+    }
+    if len(source_paths) != len(diff.paths):
+        # 不说明的话，评审会以为候选偷偷不改代码就改了产物。
+        payload["excluded_outputs"] = (
+            "Declared experiment outputs are excluded from this diff. The Agent "
+            "runs the command to test its repair, which rewrites them; they are "
+            "archived and regenerated by the frozen command before scoring, so "
+            "their contents are not evidence about the repair. Judge the source "
+            "change only."
+        )
+    return await independent_review(json.dumps(payload, sort_keys=True))
 
 
 async def _load_result(
