@@ -13,13 +13,15 @@ from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
-from athena.execution.runtime import ExecutionRuntime
+from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
+from athena.research.supervisor import validation as validation_module
 from athena.research.supervisor.validation import (
     ValidationDeps,
     ValidationDiffReview,
     ValidationInput,
     ValidationOptions,
+    ValidationRunFailed,
     run_validation_plan,
     validation_key,
 )
@@ -92,9 +94,21 @@ class _Execution(ExecutionRuntime):
         super().__init__(project_root=workdir, store=store)
         self.calls = 0
         self.mutate_source_once = False
+        # 让前 N 次运行以候选脚本的方式失败（非零退出 + traceback），
+        # 用于验证修复循环会把失败正文回灌给 validate Agent。
+        self.fail_runs = 0
+        self.failure_stderr = ""
 
     async def run(self, context, request):
         self.calls += 1
+        if self.fail_runs > 0:
+            self.fail_runs -= 1
+            return CommandResult(
+                ok=False,
+                stdout="",
+                stderr=self.failure_stderr,
+                exit_code=1,
+            )
         result = await super().run(context, request)
         if self.mutate_source_once:
             self.mutate_source_once = False
@@ -478,6 +492,66 @@ async def test_complete_result_commits_without_execution_or_scoring(tmp_path) ->
     assert harness.evaluator.calls == evaluator_calls
     assert diff_calls == 0
     assert commit_calls == 0
+    await harness.close()
+
+
+_REAL_CRASH_STDERR = (
+    "Traceback (most recent call last):\n"
+    '  File "solution/train_model.py", line 255, in main\n'
+    "    pr_auc_search = average_precision_score(y_search_true, y_pred_search)\n"
+    "ValueError: Found input variables with inconsistent numbers of "
+    "samples: [169725, 169965]"
+)
+
+
+@pytest.mark.asyncio
+async def test_run_failure_is_returned_to_the_validate_agent(tmp_path) -> None:
+    """A crashing frozen command must reach the Agent hired to repair crashes.
+
+    Until this passed, the first failure propagated straight out of the repair
+    loop: the Agent was created with "repair runtime-only failures" and then
+    never shown one. On 2026-08-31 that discarded a five-hour run whose eight
+    SEARCH experiments had all completed.
+    """
+    harness = _Harness(tmp_path)
+    await harness.start()
+    harness.execution.fail_runs = 1
+    harness.execution.failure_stderr = _REAL_CRASH_STDERR
+
+    result = await harness.run()
+
+    assert result.final_test_score == pytest.approx(0.79)
+    assert harness.execution.calls == 2
+    assert harness.review_calls == 2
+    assert "inconsistent numbers of samples" in harness.provider.feedback_seen
+    assert "The frozen SOTA command failed when re-run" in harness.provider.feedback_seen
+    # 失败后仍要还原声明产物，否则第二次运行会在陈旧目录上打分。
+    assert harness.restore_calls == [("predictions",), ("predictions",)]
+    await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_budget_exhaustion_names_the_last_run_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """Exhaustion must carry the cause, not just the count.
+
+    A bare "budget exhausted after N attempts" sends the operator back to the
+    logs to find the traceback that repeated N times.
+    """
+    monkeypatch.setattr(validation_module, "_MAX_VALIDATION_REPAIR_ATTEMPTS", 2)
+    harness = _Harness(tmp_path)
+    await harness.start()
+    harness.execution.fail_runs = 99
+    harness.execution.failure_stderr = _REAL_CRASH_STDERR
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await harness.run()
+
+    assert "budget exhausted after 2 attempts" in str(excinfo.value)
+    assert "inconsistent numbers of samples" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, ValidationRunFailed)
+    assert harness.execution.calls == 2
     await harness.close()
 
 

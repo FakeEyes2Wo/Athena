@@ -8,13 +8,54 @@ from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.research.contracts import ValidationResult
 from athena.research.script_runner import load_directory
 from athena.research.supervisor.validation import (
+    PredictionsRejected,
     ValidationDiffReview,
     ValidationInput,
+    ValidationRunFailed,
     _execute_predictions,
+    _MAX_FAILURE_FEEDBACK_CHARS,
+    _run_failure_feedback,
     recovery_action,
     review_validation_diff,
     validation_key,
 )
+
+
+def test_run_failure_feedback_keeps_the_end_of_a_long_traceback() -> None:
+    """The exception type and the raising frame are at the tail, not the head."""
+    noise = "\n".join(f'  File "f{i}.py", line {i}, in main' for i in range(4000))
+    exc = ValidationRunFailed(noise + "\nValueError: inconsistent numbers of samples")
+
+    feedback = _run_failure_feedback(exc, Path("final_features.csv"))
+
+    assert "ValueError: inconsistent numbers of samples" in feedback
+    assert "[EARLIER FRAMES TRUNCATED]" in feedback
+    assert 'File "f0.py"' not in feedback
+    assert len(feedback) < len(noise)
+
+
+def test_run_failure_feedback_names_the_held_out_target_and_forbids_remodelling() -> (
+    None
+):
+    """The Agent must be able to see *why* a fixed row count disagrees."""
+    feedback = _run_failure_feedback(
+        ValidationRunFailed("boom"), Path("/split/final_features.csv")
+    )
+
+    assert "final_features.csv" in feedback
+    assert "different row count" in feedback
+    assert "Do not change the modelling" in feedback
+
+
+def test_rejected_predictions_are_described_as_a_clean_exit() -> None:
+    """A zero exit with unusable output is a different repair than a crash."""
+    feedback = _run_failure_feedback(PredictionsRejected("no rows overlap"), None)
+
+    assert "exited 0 but its predictions were rejected" in feedback
+    assert "no rows overlap" in feedback
+    # 没有 predict_features 时不能凭空编造一个路径。
+    assert "ATHENA_PREDICT_FEATURES pointed at" not in feedback
+    assert _MAX_FAILURE_FEEDBACK_CHARS > 0
 
 
 def test_validation_key_is_stable_and_input_sensitive() -> None:

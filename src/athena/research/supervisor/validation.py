@@ -44,6 +44,27 @@ CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
 _MAX_REVIEW_DIFF_CHARS = 12_000
 # 校验修复循环的迭代上限，防止 preflight/review/工作区变化互相拉锯造成无限烧 token。
 _MAX_VALIDATION_REPAIR_ATTEMPTS = 16
+# 回灌给 validate Agent 的失败正文上限。候选脚本的 traceback 可以有几十 KB，
+# 而有用的部分（异常类型与最后几帧）在末尾，所以超长时保留尾部。
+_MAX_FAILURE_FEEDBACK_CHARS = 4_000
+
+
+class ValidationRunFailed(RuntimeError):
+    """The frozen command ran and failed — a candidate defect, not a bug here.
+
+    Subclasses ``RuntimeError`` because that is what this raised before the
+    repair loop learned to feed failures back, and callers outside the loop
+    still catch the broad type.
+    """
+
+
+class PredictionsRejected(ValueError):
+    """The command exited 0 but its predictions cannot be scored.
+
+    A missing/empty declared output, or rows that do not answer the file
+    VALIDATE asked about. Same repairability as ``ValidationRunFailed``;
+    subclasses ``ValueError`` for the same backward-compatibility reason.
+    """
 
 
 class ValidationInput(BaseModel):
@@ -356,11 +377,13 @@ async def _execute_predictions(
                 ),
             )
             if not result.ok:
-                raise RuntimeError(result.stderr or "validation command failed")
+                raise ValidationRunFailed(
+                    result.stderr or "validation command failed"
+                )
         try:
             assert_output_roots(workdir, manifest.outputs, required={"predictions"})
         except OutputFreshnessError as exc:
-            raise ValueError(str(exc)) from exc
+            raise PredictionsRejected(str(exc)) from exc
         rel_path = manifest.outputs["predictions"]
         predictions_dir = workdir / rel_path
         if predict_features is not None:
@@ -416,7 +439,50 @@ def _assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None
             "reading ATHENA_PREDICT_FEATURES, so its frozen command cannot be "
             "pointed at the held-out rows."
         )
-    raise ValueError(detail)
+    raise PredictionsRejected(detail)
+
+
+def _run_failure_feedback(
+    exc: ValidationRunFailed | PredictionsRejected,
+    predict_features: Path | None,
+) -> str:
+    """Turn a failed re-run into the task text the validate Agent can act on.
+
+    The Agent is created to "repair runtime-only failures", but until this
+    existed the repair loop never told it about one: the first crash of the
+    frozen command propagated straight out of ``_run_phase``. On 2026-08-31 that
+    threw away a five-hour run whose eight SEARCH experiments had all finished,
+    over a candidate that hardcoded the SEARCH *label* path while correctly
+    reading ``ATHENA_PREDICT_FEATURES`` for the features -- so VALIDATE fed it
+    169965 feature rows to score against 169725 search labels.
+
+    Long tracebacks are truncated from the *front*: the exception type and the
+    frame that raised it are at the end.
+    """
+    body = str(exc).strip() or exc.__class__.__name__
+    if len(body) > _MAX_FAILURE_FEEDBACK_CHARS:
+        body = "[EARLIER FRAMES TRUNCATED]\n" + body[-_MAX_FAILURE_FEEDBACK_CHARS:]
+    kind = (
+        "The frozen SOTA command failed when re-run"
+        if isinstance(exc, ValidationRunFailed)
+        else "The frozen SOTA command exited 0 but its predictions were rejected"
+    )
+    target = (
+        f"\n\nATHENA_PREDICT_FEATURES pointed at {predict_features} for this "
+        "re-run. That file is the held-out split: it has a different row count "
+        "and different row ids than the SEARCH split the candidate was "
+        "developed against. Any label file, row count, or index the code holds "
+        "fixed alongside it will disagree with it."
+        if predict_features is not None
+        else ""
+    )
+    return (
+        f"{kind}:\n\n{body}{target}\n\n"
+        "Repair the runtime failure only. Do not change the modelling: no new "
+        "features, no retuned hyperparameters, no different algorithm, and "
+        "nothing that reads held-out labels. The scored artifact must remain "
+        "predictions for exactly the rows in ATHENA_PREDICT_FEATURES."
+    )
 
 
 async def _deterministic_preflight(
@@ -567,6 +633,7 @@ class ValidationSession:
         input = self.input
         options = self.options
         repair = await _decode_repair(deps.agents, deps.store, input=input)
+        last_failure: Exception | None = None
         for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
             diff = await deps.git.diff(deps.workspace)
             preflight = await _deterministic_preflight(
@@ -599,16 +666,26 @@ class ValidationSession:
                 )
                 continue
             reviewed_diff = diff
-            prediction_run = await _execute_predictions(
-                execution=deps.execution,
-                git=deps.git,
-                workspace=deps.workspace,
-                store=deps.store,
-                publish=deps.publish,
-                timeout_s=options.timeout_s,
-                predict_features=options.predict_features,
-                version=f"validate-{input.validation_key}",
-            )
+            try:
+                prediction_run = await _execute_predictions(
+                    execution=deps.execution,
+                    git=deps.git,
+                    workspace=deps.workspace,
+                    store=deps.store,
+                    publish=deps.publish,
+                    timeout_s=options.timeout_s,
+                    predict_features=options.predict_features,
+                    version=f"validate-{input.validation_key}",
+                )
+            except (ValidationRunFailed, PredictionsRejected) as exc:
+                last_failure = exc
+                repair = await _decode_repair(
+                    deps.agents,
+                    deps.store,
+                    input=input,
+                    feedback=_run_failure_feedback(exc, options.predict_features),
+                )
+                continue
             if await deps.git.diff(deps.workspace) != reviewed_diff:
                 repair = await _decode_repair(
                     deps.agents,
@@ -619,10 +696,15 @@ class ValidationSession:
                 continue
             break
         else:
-            raise RuntimeError(
+            detail = (
                 "validation repair budget exhausted after "
                 f"{_MAX_VALIDATION_REPAIR_ATTEMPTS} attempts"
             )
+            if last_failure is not None:
+                # 不这样做，操作者只会看到「预算耗尽」，而真正的原因——候选脚本
+                # 每一次都以同一个 traceback 挂掉——被丢在日志之外。
+                detail += f"; last run failure: {last_failure}"
+            raise RuntimeError(detail) from last_failure
         review_evidence_ref = await deps.store.put_text(
             json.dumps(
                 {
@@ -720,10 +802,12 @@ async def run_validation_plan(
 __all__ = [
     "CheckpointValidation",
     "PredictionRun",
+    "PredictionsRejected",
     "ValidationDeps",
     "ValidationDiffReview",
     "ValidationInput",
     "ValidationOptions",
+    "ValidationRunFailed",
     "ValidationSession",
     "recovery_action",
     "review_validation_diff",
