@@ -166,7 +166,7 @@ class BaselineResearch(BaseModel):
             self.dataset.minority_class_samples,
         )
         if any(value is not None for value in numeric_fields) and not any(
-            item.startswith(("eda:", "data:", "calculation:"))
+            item.startswith(("eda:", "data_contract:", "data:", "calculation:"))
             for item in self.dataset.evidence
         ):
             raise ValueError(
@@ -176,7 +176,8 @@ class BaselineResearch(BaseModel):
         if self.dataset.recommended_strategy == "train_from_scratch":
             evidence = self.dataset.evidence
             if not any(
-                item.startswith(("eda:", "data:", "calculation:")) for item in evidence
+                item.startswith(("eda:", "data_contract:", "data:", "calculation:"))
+                for item in evidence
             ):
                 raise ValueError("scratch training requires local data evidence")
             prefix = f"source:{self.selected_candidate_id}:"
@@ -221,6 +222,23 @@ class BaselineVerification(BaseModel):
     publication_year: int | None = Field(default=None, ge=1)
     cited_by_count: int | None = Field(default=None, ge=0)
     attempts: list[VerificationAttempt]
+
+    @model_validator(mode="after")
+    def validate_route_evidence(self) -> "BaselineVerification":
+        """Require evidence fields and a successful attempt for the chosen route."""
+        if not any(
+            attempt.route == self.route and attempt.success for attempt in self.attempts
+        ):
+            raise ValueError(f"verification has no successful {self.route} attempt")
+        if self.route == "git" and (not self.repository_url or not self.commit):
+            raise ValueError("git verification requires repository_url and commit")
+        if self.route == "openalex" and (
+            not self.openalex_id or not self.title or self.cited_by_count is None
+        ):
+            raise ValueError(
+                "openalex verification requires id, title, and citation count"
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -307,6 +325,7 @@ def load_cached_verified_baseline(root: Path) -> VerifiedBaseline | None:
             path.read_text(encoding="utf-8")
         )
     except (OSError, ValidationError, ValueError):
+        # 缓存不可读或格式非法 → 忽略并重新执行来源验证。
         return None
     if verification.selected_candidate_id != artifacts.selected.candidate_id:
         return None
@@ -317,9 +336,17 @@ def load_cached_verified_baseline(root: Path) -> VerifiedBaseline | None:
 
 def assert_verified_files(root: Path, verified: VerifiedBaseline) -> None:
     """Raise when current research files no longer match cached verification."""
-    current = load_baseline_artifacts(root)
+    try:
+        current = load_baseline_artifacts(root)
+    except BaselineResearchError as error:
+        raise BaselineResearchError(
+            "research digest could not be revalidated",
+            error.diagnostics or (str(error),),
+        ) from error
     if research_sha256(current.raw_research) != verified.verification.research_sha256:
-        raise BaselineResearchError("research artifact changed after verification")
+        raise BaselineResearchError(
+            "research artifact digest changed after verification"
+        )
     if current.selected.candidate_id != verified.verification.selected_candidate_id:
         raise BaselineResearchError("selected candidate changed after verification")
     if current.design != verified.artifacts.design:

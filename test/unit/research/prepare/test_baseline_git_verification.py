@@ -56,6 +56,12 @@ async def test_git_verifier_uses_shallow_no_checkout_and_no_prompt() -> None:
         "https://user:pass@github.com/org/repo.git",
         "https://github.com/org/repo.git?ref=main",
         "https://github.com/org/repo.git#main",
+        "https://github.com/org/repo.git?",
+        "https://github.com/org/repo.git#",
+        "https://localhost/org/repo.git",
+        "https://127.0.0.1/org/repo.git",
+        "https://10.0.0.1/org/repo.git",
+        "https://[::1]/org/repo.git",
     ],
 )
 async def test_git_verifier_rejects_non_public_https_urls(url: str) -> None:

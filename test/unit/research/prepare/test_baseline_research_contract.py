@@ -135,6 +135,16 @@ def test_small_tabular_classical_is_allowed() -> None:
     assert BaselineResearch.model_validate(payload).dataset.modality == "tabular"
 
 
+def test_data_contract_evidence_is_accepted() -> None:
+    payload = valid_payload()
+    payload["dataset"]["evidence"] = ["data_contract:labels.csv: grouped labels"]
+    assert (
+        BaselineResearch.model_validate(payload)
+        .dataset.evidence[0]
+        .startswith("data_contract:")
+    )
+
+
 @pytest.mark.parametrize(
     "change",
     [

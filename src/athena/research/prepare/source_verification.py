@@ -1,6 +1,7 @@
 """Verify public baseline sources without executing third-party code."""
 
 import asyncio
+import ipaddress
 import os
 import re
 import subprocess
@@ -34,7 +35,19 @@ MAX_DIAGNOSTIC = 4_000
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
-CommandRunner = Callable[[Sequence[str]], Awaitable[subprocess.CompletedProcess[str]]]
+
+class CommandRunner(Protocol):
+    """Async command boundary used by the Git verifier and its tests."""
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None,
+        env: Mapping[str, str],
+        timeout_s: float,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a command with an explicit working directory and environment."""
 
 
 @dataclass(frozen=True)
@@ -98,16 +111,36 @@ def _validate_repository_url(value: str) -> str:
     if (
         parsed.scheme.lower() != "https"
         or not parsed.hostname
+        or "?" in value
+        or "#" in value
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
         or not parsed.path
+        or _is_local_host(parsed.hostname)
     ):
         raise BaselineResearchError(
             "Git source verification failed", ["repository URL is not public HTTPS"]
         )
     return value
+
+
+def _is_local_host(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").casefold()
+    if normalized in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        # hostname 不是 IP 字面量 → 按普通公网域名继续。
+        return False
+    return any(
+        (
+            address.is_loopback,
+            address.is_private,
+            address.is_link_local,
+            address.is_reserved,
+        )
+    )
 
 
 class GitCloneVerifier:
@@ -266,6 +299,7 @@ class BaselineSourceVerifier:
             else:
                 if (
                     work is not None
+                    and bool(work.openalex_id)
                     and titles_match(selected.title, work.title)
                     and work.cited_by_count >= 100
                 ):

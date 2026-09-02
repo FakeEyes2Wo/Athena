@@ -1,11 +1,14 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from athena.research.literature.paper_source.openalex import OpenAlexWork
 from athena.research.prepare.baseline_research import (
     BaselineResearchError,
+    BaselineVerification,
     load_baseline_artifacts,
 )
 from athena.research.prepare.source_verification import (
@@ -196,3 +199,19 @@ async def test_title_mismatch_and_openalex_outage_are_bounded_diagnostics(
 
     assert "no qualifying source" in str(caught.value)
     assert any("title" in item.lower() for item in caught.value.diagnostics)
+
+
+def test_openalex_verification_requires_identity_and_success_attempt() -> None:
+    base = {
+        "research_sha256": "0" * 64,
+        "selected_candidate_id": "candidate",
+        "route": "openalex",
+        "verified_at": datetime.now(timezone.utc),
+        "title": "A paper title that is long enough",
+        "cited_by_count": 100,
+        "attempts": [{"route": "openalex", "success": True, "diagnostic": "ok"}],
+    }
+    with pytest.raises(ValidationError):
+        BaselineVerification.model_validate(base)
+    base["openalex_id"] = "W123"
+    assert BaselineVerification.model_validate(base).openalex_id == "W123"

@@ -325,6 +325,9 @@ class WebFetchTool(_WebTool):
     )
 
     async def fetch(self, url: str, max_chars: int = 12000) -> dict:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("web_fetch only supports http and https URLs")
         response = await self.http.get(url, {"User-Agent": BROWSER_UA})
         if not response.ok:
             raise RuntimeError(f"web_fetch returned HTTP {response.status}")

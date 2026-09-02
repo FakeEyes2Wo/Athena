@@ -125,6 +125,12 @@ async def test_web_fetch_rejects_unknown_ref() -> None:
         await tool.execute({"ref_id": "turn0search9-9"}, ctx=None)
 
 
+async def test_web_fetch_rejects_non_http_urls() -> None:
+    tool = WebFetchTool(http=_FakeHttp(_PAGE_HTML))
+    with pytest.raises(ValueError, match="only supports http and https"):
+        await tool.execute({"url": "file:///tmp/private.txt"}, ctx=None)
+
+
 def test_find_in_page_is_case_insensitive_and_bounded() -> None:
     found = find_in_page("Alpha alpha ALPHA", "alpha", max_matches=2)
     assert found["total"] == 3

@@ -37,10 +37,12 @@ Write `BASELINE_DESIGN.md` with these sections:
 - `## Implementation steps`
 - `## Risks and fallback`
 
-The Markdown must contain these exact lines, with values matching the JSON:
+The Markdown must contain these exact lines, with values matching the JSON.
+The values below are format examples only; replace them with the selected
+candidate ID and strategy from your JSON:
 
 ```markdown
-Selected candidate: `resnet-transfer`
+Selected candidate: `candidate-id-from-json`
 Training strategy: `partial_finetune`
 ```
 
@@ -50,6 +52,11 @@ and expected metric. Select `classical`, `frozen_pretrained`, or
 `partial_finetune` when the labeled data is limited. `train_from_scratch` is
 permitted only for an `adequate` regime supported by concrete EDA/calculation
 evidence and comparable-source evidence.
+
+Completed Kaggle winner or high-ranking write-ups are auxiliary evidence. A
+Kaggle write-up may be selected only when the selected candidate is also bound
+to a qualifying paper locator or public Git repository that the platform can
+verify; the write-up alone is not an authority exception.
 
 Do not execute, clone, install, import, or copy candidate repositories. Do not
 write evaluator files, predictions, scores, or files under `.athena/`.
