@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -12,8 +13,45 @@ from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import DataScriptBundle, ValidationResult
+from athena.research.prepare.baseline_research import (
+    BaselineVerification,
+    VerifiedBaseline,
+    load_baseline_artifacts,
+    research_sha256,
+)
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.prepare import PrepareResult
+
+from test.unit.research.prepare.test_baseline_research_contract import write_artifacts
+
+
+def _verified_baseline(root: Path) -> VerifiedBaseline:
+    """Build a verified fixture while this test focuses on phase wiring."""
+    root.mkdir(parents=True, exist_ok=True)
+    write_artifacts(root)
+    artifacts = load_baseline_artifacts(root)
+    verification = BaselineVerification(
+        research_sha256=research_sha256(artifacts.raw_research),
+        selected_candidate_id=artifacts.selected.candidate_id,
+        route="git",
+        verified_at=datetime.now(timezone.utc),
+        repository_url="https://github.com/pytorch/vision.git",
+        commit="a" * 40,
+        attempts=[{"route": "git", "success": True, "diagnostic": "test"}],
+    )
+    return VerifiedBaseline(artifacts, verification)
+
+
+async def _fake_prepare_baseline_design(
+    _runtime, workspace, *_args, **_kwargs
+) -> VerifiedBaseline:
+    """Isolate phase/evaluator tests from the separately tested research gate."""
+    return _verified_baseline(Path(workspace.path))
+
+
+async def _ready_eda(*_args, **_kwargs) -> bool:
+    """Provide the completed EDA prerequisite for phase adapter tests."""
+    return True
 
 
 async def _eventually(predicate, timeout: float = 5) -> None:
@@ -121,6 +159,11 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
         run_prepare_plan,
         raising=False,
     )
+    monkeypatch.setattr("athena.research.prepare.orchestrator.prepare_eda", _ready_eda)
+    monkeypatch.setattr(
+        "athena.research.prepare.orchestrator.prepare_baseline_design",
+        _fake_prepare_baseline_design,
+    )
     runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
@@ -184,6 +227,11 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
         "athena.research.prepare.baseline.run_prepare_plan",
         run_prepare_plan,
         raising=False,
+    )
+    monkeypatch.setattr("athena.research.prepare.orchestrator.prepare_eda", _ready_eda)
+    monkeypatch.setattr(
+        "athena.research.prepare.orchestrator.prepare_baseline_design",
+        _fake_prepare_baseline_design,
     )
     runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
     runtime.register_supervisor(provider=object())

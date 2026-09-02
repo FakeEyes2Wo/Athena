@@ -6,6 +6,7 @@ the sandbox denies named pipes used by real ``git`` subprocess capture.
 
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,32 @@ import pytest
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
 from athena.research.runtime.control import start as start_lifecycle
+from athena.research.prepare.baseline_research import (
+    BaselineVerification,
+    VerifiedBaseline,
+    load_baseline_artifacts,
+    research_sha256,
+)
 from athena.research.supervisor.prepare import PrepareResult
+
+from test.unit.research.prepare.test_baseline_research_contract import write_artifacts
+
+
+def _verified_baseline(root: Path) -> VerifiedBaseline:
+    """Build a valid gate result for tests focused on evaluator reuse."""
+    root.mkdir(parents=True, exist_ok=True)
+    write_artifacts(root)
+    artifacts = load_baseline_artifacts(root)
+    verification = BaselineVerification(
+        research_sha256=research_sha256(artifacts.raw_research),
+        selected_candidate_id=artifacts.selected.candidate_id,
+        route="git",
+        verified_at=datetime.now(timezone.utc),
+        repository_url="https://github.com/pytorch/vision.git",
+        commit="a" * 40,
+        attempts=[{"route": "git", "success": True, "diagnostic": "test"}],
+    )
+    return VerifiedBaseline(artifacts, verification)
 
 
 def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime:
@@ -276,6 +302,20 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         "athena.research.prepare.baseline.run_prepare_plan",
         run_prepare_plan,
         raising=False,
+    )
+
+    async def fake_prepare_baseline_design(_runtime, workspace, *_args, **_kwargs):
+        return _verified_baseline(Path(workspace.path))
+
+    async def fake_prepare_eda(*_args, **_kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "athena.research.prepare.orchestrator.prepare_baseline_design",
+        fake_prepare_baseline_design,
+    )
+    monkeypatch.setattr(
+        "athena.research.prepare.orchestrator.prepare_eda", fake_prepare_eda
     )
 
     async def fake_handoff(
