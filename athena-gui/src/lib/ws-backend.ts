@@ -1,5 +1,7 @@
 /** Direct WebSocket client for the Python gateway (browser preview without Tauri). */
 
+import { toBackendError } from "./rpc-error";
+
 type EventHandler = (kind: string, data: unknown) => void;
 
 interface PendingCall {
@@ -10,7 +12,15 @@ interface PendingCall {
 interface ResponseEnvelope {
   request_id: number;
   result?: unknown;
-  error?: { code: number; message: string };
+  error?: {
+    code: number;
+    message: string;
+    data?: {
+      code?: string;
+      retryable?: boolean;
+      current_revision?: number;
+    };
+  };
 }
 
 interface EventEnvelope {
@@ -105,7 +115,7 @@ export class WsBackend {
       if (!pending) return;
       this.pending.delete(envelope.request_id);
       if (envelope.error) {
-        pending.reject(new Error(envelope.error.message || "backend error"));
+        pending.reject(toBackendError(envelope.error));
       } else {
         pending.resolve(envelope.result);
       }

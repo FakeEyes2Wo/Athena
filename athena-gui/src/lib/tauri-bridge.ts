@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { wsBackend } from "./ws-backend";
+import { toBackendError } from "./rpc-error";
 
 /** Supervisor-style task understanding returned by the backend after parsing. */
 export interface TaskUnderstanding {
@@ -109,10 +110,15 @@ export const EMPTY_RESEARCH_TREE: ResearchTreeData = {
 
 /** Known pipeline event channel names subscribed by the frontend.
 
-  The Python gateway emits exactly two event kinds over the WebSocket relay:
-  ``state`` (a replaceable snapshot) and ``output`` (append-only display records).
+  Python emits ``state``, ``output``, ``clarification``, and ``human_request``
+  over the WebSocket relay.
 */
-export const PIPELINE_EVENT_NAMES = ["state", "output"] as const;
+export const PIPELINE_EVENT_NAMES = [
+  "state",
+  "output",
+  "clarification",
+  "human_request",
+] as const;
 
 /** True when running inside a Tauri webview (detected via window internals). */
 const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -120,10 +126,40 @@ const hasTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in windo
 /** Exported backend connectivity flag (true only in the Tauri desktop shell). */
 export const isTauri = hasTauri;
 
+async function invokeWithDomainErrors<T>(promise: Promise<T>): Promise<T> {
+  try {
+    return await promise;
+  } catch (err) {
+    throw toBackendError(err);
+  }
+}
+
 /** Route one RPC: Tauri → ``invoke(command)``, browser preview → WebSocket call. */
 function rpc<T>(method: string, params?: Record<string, unknown>, tauriCmd = method): Promise<T> {
-  if (hasTauri) return invoke<T>(tauriCmd, params);
-  return wsBackend.call(method, params ?? {}) as Promise<T>;
+  const call = hasTauri
+    ? invoke<T>(tauriCmd, params)
+    : wsBackend.call(method, params ?? {}) as Promise<T>;
+  return invokeWithDomainErrors(call);
+}
+
+/** Normalize snake_case WebSocket fields to camelCase Tauri command arguments. */
+function invokeOrRequest<T>(
+  method: string,
+  params: Record<string, unknown>,
+  tauriCmd = method,
+): Promise<T> {
+  const call = !hasTauri
+    ? wsBackend.call(method, params) as Promise<T>
+    : invoke<T>(
+        tauriCmd,
+        Object.fromEntries(
+          Object.entries(params).map(([key, value]) => [
+            key.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase()),
+            value,
+          ]),
+        ),
+      );
+  return invokeWithDomainErrors(call);
 }
 
 /** Ensures every pipeline event has a kind and data payload, defaulting to the channel name. */
@@ -137,9 +173,17 @@ function normalizePipelineEvent(
   };
 }
 
-/** Kick off the automated ML search loop. */
-export function startSearch(config: Record<string, unknown>): Promise<unknown> {
-  return rpc("start_search", { config });
+/** Kick off PREPARE after the user confirms the latest clarification draft. */
+export function startSearch(
+  draftId: string,
+  revision: number,
+  acknowledgeUnresolved: boolean,
+): Promise<unknown> {
+  return invokeOrRequest("start_search", {
+    draft_id: draftId,
+    revision,
+    acknowledge_unresolved: acknowledgeUnresolved,
+  });
 }
 
 /** Pause the active search loop (changes are preserved). */
@@ -546,59 +590,153 @@ export function experimentSetSota(experimentId: string): Promise<{ sota_id: stri
   return rpc<{ sota_id: string }>("experiment_set_sota", { experiment_id: experimentId });
 }
 
-/* ── Human requests ───────────────────────────────────────────────── */
+/* ── Clarification / confirmed context ─────────────────────────────── */
 
-/** One optional answer for a clarification question. */
-export interface ClarificationChoice {
+/** One selectable option for a human request. */
+export interface HumanChoice {
   label: string;
   value: string;
 }
 
-/** One outstanding supervisor question awaiting a human reply. */
+/** One typed human request (shared with Python and Rust). */
 export interface HumanRequest {
   request_id: string;
+  session_id: string;
+  scope_id: string;
+  scope_kind: string;
   prompt: string;
-  choices?: ClarificationChoice[] | null;
+  choices?: HumanChoice[] | null;
   allow_custom: boolean;
   allow_skip: boolean;
+  created_at: string;
+  expires_at: string;
 }
+
+/** Typed client reply: exactly one of choice / text / skip. */
+export type HumanReply =
+  | { kind: "choice"; value: string }
+  | { kind: "text"; text: string }
+  | { kind: "skip" };
+
+/** Structured task understanding used by the pre-run clarification draft. */
+export interface ClarificationUnderstanding {
+  title: string;
+  dataset: string | null;
+  target: string | null;
+  task_type: string;
+  primary_metric: string | null;
+  direction: string | null;
+  evaluation_plan: string | null;
+}
+
+/** One persisted clarification answer/outcome. */
+export interface ClarificationAnswer {
+  request_id: string;
+  question: string;
+  outcome: "choice" | "text" | "skip" | "timeout" | "cancelled";
+  value: string | null;
+  choice_label: string | null;
+  answered_at: string;
+}
+
+/** A missing or unresolved understanding field. */
+export interface UnresolvedItem {
+  field: string;
+  reason: string;
+  critical: boolean;
+}
+
+/** Retryable failure information shown on FAILED drafts. */
+export interface ClarificationFailure {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+/** Clarification draft DTO mirrored from the Python controller. */
+export interface ClarificationDraftDto {
+  schema_version?: 1;
+  draft_id: string;
+  revision: number;
+  session_id: string;
+  original_task: string;
+  status: string;
+  understanding: ClarificationUnderstanding;
+  answers: ClarificationAnswer[];
+  revisions?: unknown[];
+  unresolved: UnresolvedItem[];
+  pending_request?: HumanRequest | null;
+  failure: ClarificationFailure | null;
+  questions_asked: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Start or resume clarification for the active session. */
+export function taskClarificationStart(
+  task: string,
+): Promise<{ draft_id: string; revision: number; status: string }> {
+  return invokeOrRequest("task_clarification_start", { task });
+}
+
+/** Read the authoritative latest draft. */
+export function taskClarificationGet(
+  draftId: string,
+): Promise<ClarificationDraftDto> {
+  return invokeOrRequest("task_clarification_get", { draft_id: draftId });
+}
+
+/** Retry a failed clarification draft. */
+export function taskClarificationRetry(
+  draftId: string,
+  revision: number,
+): Promise<ClarificationDraftDto> {
+  return invokeOrRequest("task_clarification_retry", {
+    draft_id: draftId,
+    revision,
+  });
+}
+
+/** Ask the model to revise the draft from the displayed revision. */
+export function taskClarificationRevise(
+  draftId: string,
+  revision: number,
+  instruction: string,
+): Promise<ClarificationDraftDto> {
+  return invokeOrRequest("task_clarification_revise", {
+    draft_id: draftId,
+    revision,
+    instruction,
+  });
+}
+
+/** Cancel the active clarification draft. */
+export function taskClarificationCancel(
+  draftId: string,
+  revision: number,
+): Promise<ClarificationDraftDto> {
+  return invokeOrRequest("task_clarification_cancel", {
+    draft_id: draftId,
+    revision,
+  });
+}
+
+/* ── Human requests ───────────────────────────────────────────────── */
 
 /** List the supervisor's outstanding human questions. */
 export function humanPending(): Promise<{ requests: HumanRequest[] }> {
-  return rpc<{ requests: HumanRequest[] }>("human_pending");
+  return invokeOrRequest("human_pending", {});
 }
 
-/** Answer one outstanding human question with free text. */
+/** Answer one outstanding human question with one typed reply. */
 export function humanReply(
   requestId: string,
-  answer: string,
+  reply: HumanReply,
 ): Promise<{ replied: boolean }> {
-  if (hasTauri) return invoke("human_reply", { requestId, answer });
-  return wsBackend.call("human_reply", {
+  return invokeOrRequest("human_reply", {
     request_id: requestId,
-    answer,
-  }) as Promise<{ replied: boolean }>;
-}
-
-/** Answer one outstanding multiple-choice question. */
-export function humanChoice(
-  requestId: string,
-  value: string,
-): Promise<{ replied: boolean }> {
-  if (hasTauri) return invoke("human_reply", { requestId, choice: value });
-  return wsBackend.call("human_reply", {
-    request_id: requestId,
-    choice: value,
-  }) as Promise<{ replied: boolean }>;
-}
-
-/** Skip one outstanding human question. */
-export function humanSkip(requestId: string): Promise<{ replied: boolean }> {
-  if (hasTauri) return invoke("human_reply", { requestId, skip: true });
-  return wsBackend.call("human_reply", {
-    request_id: requestId,
-    skip: true,
-  }) as Promise<{ replied: boolean }>;
+    reply,
+  });
 }
 
 /** Subscribe to all known pipeline event channels and invoke the handler on each emission. */

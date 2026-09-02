@@ -32,6 +32,8 @@ async def _run(args: argparse.Namespace) -> int:
         model=settings.model_name(),
         auto_seed_task=True,
         auto_validate=True,
+        task_confirmation_gate=False,
+        auto_confirm=True,
     )
     # Resume: a prior run with a trusted baseline/SOTA auto-recovers and
     # continues; otherwise the first Human message seeds the task.

@@ -4,7 +4,7 @@ Status: P0–P4 已实现（见第十一节）；P5 未做
 Date: 2026-08-19
 Base: main @ c31c8a7
 Source of truth: `src/athena/execution/runtime.py`、`src/athena/research/supervisor/experiment.py`、
-`src/athena/research/supervisor/scheduler.py`、`src/athena/cli.py`
+`src/athena/research/supervisor/scheduling.py`、`src/athena/cli.py`
 
 需求：把若干 GPU 服务器或集群交给 Athena，让它通过 SSH 远程跑实验验证。
 
@@ -57,7 +57,7 @@ Athena 的价值在于横向比较假设（同一个冻结评估器、同一个 
 - experiment manifest 的 argv 命令（确定性实验）→ `ExecutionRuntime.run(argv=...)`
   （`supervisor/experiment.py:336`）
 
-全仓库只有一处构造它（`research/runtime.py:189`）。它的类 docstring 里已经写着
+全仓库只有一处构造它（`research/runtime/facade.py:189`）。它的类 docstring 里已经写着
 `TODO(remote-executor)` 与 `TODO(container-executor)`——这条缝是设计时就留好的。
 
 ### 1.2 第二条执行路径，而且必须留在本地
@@ -77,7 +77,7 @@ Athena 的价值在于横向比较假设（同一个冻结评估器、同一个 
 
 ### 1.3 调度单元
 
-`Scheduler.next_actions` 按 `state.concurrency` 填槽（`scheduler.py:129`，默认 1）。
+`Scheduler.next_actions` 按 `state.concurrency` 填槽（`scheduling.py:129`，默认 1）。
 每个槽 = 一个 git worktree（`workspaces/` 下）+ 一个 PlanAgent。
 
 **这就是租约的天然粒度：1 个 Plan 槽 ↔ 1 份 GPU 租约。**
@@ -93,11 +93,11 @@ Athena 的价值在于横向比较假设（同一个冻结评估器、同一个 
 |---|------|------|------|
 | 1 | manifest 命令硬编码 120 s 超时 | `experiment.py:299` `timeout_s: int = 120`；两处构造（`phase_runner.py:47`、`prepare.py:257`）都不覆盖 | 值得派去 GPU 集群的作业没有一个能在 120 秒跑完。不改这条，远程实验 100% 返回 `error="timeout"` |
 | 2 | 数据集只是 prompt 里的一句绝对路径 | `cli.py:44` 的 `Dataset path: {args.data}` | agent 写出的脚本里是宿主机绝对路径。换到 Linux GPU 机，第一行 `read_csv` 就炸。`DataCard.dataset_ref` 存在但只喂 Rust 契约固件，不在活路径上 |
-| 3 | 环境描述来自本地 `os.name` | `runtime.py:189/193/316` | 远端是 Linux 时，模型仍被告知 `OS: Windows` / `Shell: powershell.exe` / 用 `;` 而非 `&&`，于是给 bash 写 PowerShell |
-| 4 | `build_env` 转发本地路径变量 | `runtime.py:209`，`_HOST_VARS` 含 `PATH`/`HOME`/`TEMP`/`SSL_CERT_FILE`/`UV_CACHE_DIR` | 这些值在远端全是无效路径；`SSL_CERT_FILE` 还会让远端 TLS 直接失败 |
-| 5 | 进程树终止用本地 `taskkill`/`killpg` | `runtime.py:470` | 远端不适用。断线留下占着几十 GB 显存的孤儿训练进程，是这类系统第一位的运维故障 |
-| 6 | 输出解码回退用本地代码页 | `runtime.py:371` 的 `locale.getpreferredencoding()` | 远程 Linux 是 UTF-8，用本地 GBK 回退制造 mojibake |
-| 7 | 环境变更无锁 | `runtime.py:655` `TODO(environment-lock)` | `concurrency > 1` 时多个臂并发 `uv add` 同一个 env root。远程化会把并发默认值推上去，这条从“理论问题”变成常态 |
+| 3 | 环境描述来自本地 `os.name` | `runtime/facade.py:189/193/316` | 远端是 Linux 时，模型仍被告知 `OS: Windows` / `Shell: powershell.exe` / 用 `;` 而非 `&&`，于是给 bash 写 PowerShell |
+| 4 | `build_env` 转发本地路径变量 | `runtime/facade.py:209`，`_HOST_VARS` 含 `PATH`/`HOME`/`TEMP`/`SSL_CERT_FILE`/`UV_CACHE_DIR` | 这些值在远端全是无效路径；`SSL_CERT_FILE` 还会让远端 TLS 直接失败 |
+| 5 | 进程树终止用本地 `taskkill`/`killpg` | `runtime/facade.py:470` | 远端不适用。断线留下占着几十 GB 显存的孤儿训练进程，是这类系统第一位的运维故障 |
+| 6 | 输出解码回退用本地代码页 | `runtime/facade.py:371` 的 `locale.getpreferredencoding()` | 远程 Linux 是 UTF-8，用本地 GBK 回退制造 mojibake |
+| 7 | 环境变更无锁 | `runtime/facade.py:655` `TODO(environment-lock)` | `concurrency > 1` 时多个臂并发 `uv add` 同一个 env root。远程化会把并发默认值推上去，这条从“理论问题”变成常态 |
 | 8 | 全仓库没有 GPU 概念 | 在 `src` 下检索 gpu/cuda/nvidia：0 命中 | 无法表达“这个实验要 1 张卡 / 40 GB 显存”，也无法把硬件写进证据 |
 
 第 1、2 条即使**永远不做远程**也该修：前者让长实验能跑完，后者让项目可搬迁。
@@ -143,7 +143,7 @@ ExecutionRuntime             门面不变；按租约选后端
 `EnvironmentManager` 需要一分为二：
 
 - `EnvironmentSpec`（声明式，两端共享）：uv 项目哈希、python 版本。
-  `environment_hash()`（`runtime.py:244`）已经是现成的缓存键。
+  `environment_hash()`（`runtime/facade.py:244`）已经是现成的缓存键。
 - `HostEnvironment`（后端提供）：shell、PATH、env 变量、工具版本、`runtime_summary`。
 
 第 3、4、6 条阻塞是同一个根因：`EnvironmentManager` 现在既**描述**环境又**构造**
@@ -155,7 +155,7 @@ ExecutionRuntime             门面不变；按租约选后端
 
 ### 4.2 租约：粒度是 Plan
 
-`ExecutionContext` 已经带 `experiment_id`（`runtime.py:96`），就是租约键。
+`ExecutionContext` 已经带 `experiment_id`（`runtime/facade.py:96`），就是租约键。
 
 - 生命周期 = Plan 的生命周期。Plan 结算或放弃即归还。
 - 持久化：Athena 重启后租约不能凭空消失，否则显存被孤儿占着而池子以为它空闲。
@@ -350,9 +350,9 @@ agent 看到的机器描述因此是此刻问出来的，不是配置里写的�
 设计是否“完善”，就看这六条守不守得住。每条后面是今天违反它的位置。
 
 1. **一个 Plan 的所有命令落在同一台机器同一个目录。**（今天：无租约概念）
-2. **模型看到的环境描述来自真正执行命令的那台机器。**（今天：`runtime.py:316` 读本地 `os.name`）
+2. **模型看到的环境描述来自真正执行命令的那台机器。**（今天：`runtime/facade.py:316` 读本地 `os.name`）
 3. **评估器与标签永不出门。**（今天：已经满足——`DataScriptRunner` 与 `ExecutionRuntime` 本就分离。别改坏）
-4. **通道断开必然杀死远端进程组。**（今天：`runtime.py:470` 只会本地 `taskkill`）
+4. **通道断开必然杀死远端进程组。**（今天：`runtime/facade.py:470` 只会本地 `taskkill`）
 5. **绝不静默降级。** 拿不到 GPU 就排队或明确失败，不偷偷用本地 CPU 跑完再报一个分数。
 6. **硬件写进证据。** `PlanRunner` 写 evidence 时加一个 `placement` 块：host、
    GPU 型号、卡数、驱动/CUDA 版本、排队与传输耗时。
@@ -424,7 +424,7 @@ STALLED/TIMEOUT 推导，但目前只接在 `app_server/observability.py`，研�
 
 - 专用非特权用户；每份租约一个 scratch 子目录；不共享 home。
 - `ForwardAgent no`；不向远端转发任何本地密钥类环境变量。
-  `_HOST_VARS`（`runtime.py:32`）对远端应收缩到近乎只剩 `LANG`/`LC_*`。
+  `_HOST_VARS`（`runtime/facade.py:32`）对远端应收缩到近乎只剩 `LANG`/`LC_*`。
 - 远端 supervisor 脚本按哈希校验，每份租约上传一次。
 - 可选 `Match User athena` + `ForceCommand`，让该账号除了 supervisor 什么都跑不了。
 - **这不是沙箱。** 需要真隔离就走 `DockerLauncher`。`docker/experiment.Dockerfile`

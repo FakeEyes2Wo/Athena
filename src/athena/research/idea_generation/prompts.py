@@ -4,8 +4,6 @@ Design convention: every prompt and every Pydantic ``description=`` uses English
 text is only produced in final-report post-processing.
 """
 
-# ====== FalsifiabilityChecker（可证伪性判断，pre_gate） ======
-
 FALSIFIABILITY_CHECK_SYSTEM_PROMPT = (
     "You are a skeptical falsifiability auditor. Given a hypothesis's predicted and "
     "disconfirming observations, decide whether a genuinely testable implication "
@@ -21,8 +19,6 @@ FALSIFIABILITY_CHECK_USER_PROMPT_TEMPLATE = (
 )
 
 
-# ====== SkepticReviewer（反方审阅） ======
-
 SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE = (
     "Novel hypothesis: {novel_hypothesis}\n"
     "Supported premises:\n{supported_premises}\n"
@@ -31,8 +27,6 @@ SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE = (
     "Provide an independent critique."
 )
 
-
-# ====== 多视角审阅（ReviewBoard） ======
 
 REVIEW_PERSPECTIVE_HEADER_TEMPLATE = "Review perspective: {perspective_id}\n"
 """每份审阅 prompt 的第一行，既让模型知道自己的角色，也给测试路由一个确定的锚点。"""

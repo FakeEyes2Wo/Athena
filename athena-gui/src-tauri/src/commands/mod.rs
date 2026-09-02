@@ -1,9 +1,10 @@
 pub mod chat;
-pub mod search;
-pub mod validate;
-pub mod research;
-pub mod settings;
-pub mod traces;
-pub mod graph;
+pub mod clarification;
 pub mod experiments;
+pub mod graph;
+pub mod research;
+pub mod search;
+pub mod settings;
 pub mod state;
+pub mod traces;
+pub mod validate;

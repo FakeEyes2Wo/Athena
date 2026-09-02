@@ -3,8 +3,8 @@
 Status: current
 Owner: Athena maintainers
 Last verified: 2026-08-17
-Source of truth: `src/athena/research/bench/`、`src/athena/research/survey/library.py`、
-`src/athena/research/paper_scout/selection.py`、`src/athena/research/fork.py`
+Source of truth: `src/athena/research/literature/bench/`、`src/athena/research/literature/survey/library.py`、
+`src/athena/research/literature/paper_scout/selection.py`、`src/athena/research/fork.py`
 
 一次针对整条 Academic Survey 链路的整改，分六段落地，外加一轮真机对照（第六点五节）。本文记录每一段**改了什么、为什么
 是这个改法、以及用什么数字判定它做成了**。
@@ -32,7 +32,7 @@ Source of truth: `src/athena/research/bench/`、`src/athena/research/survey/libr
 后果很简单：**任何改动都无法证明变好，任何回归都不会被发现。** 所以第一件事不是改链路，
 是先能量它。
 
-`athena.research.bench` 给出三把尺子：
+`athena.research.literature.bench` 给出三把尺子：
 
 | 命令 | 回答的问题 | 是否需要模型 |
 |---|---|---|
@@ -51,7 +51,7 @@ Source of truth: `src/athena/research/bench/`、`src/athena/research/survey/libr
 金标不在语料里的查询单独列出、**不进任何通道的分母**：那是出题问题或语料构成变化，算进
 未命中就是让检索背一个不属于它的锅。这一步在真机上当场抓出过一个错标。
 
-查询集（`bench/datasets/imbalance_auc.json`）是版本化输入数据，每条带 `rationale`——金标
+查询集（`literature/bench/datasets/imbalance_auc.json`）是版本化输入数据，每条带 `rationale`——金标
 改动会让前后两次基准不可比，而这种不可比是静默的，必须能在 diff 里看见。
 
 ## 二、Phase 1：语料 → 论文库
@@ -583,7 +583,7 @@ evaluator + 训基线）才能分叉。
 | 100 | 22 | 21 |
 
 这局天然偏袒打分器——金标是它自己的意见。**这张表只能读成"两者不一致"，读不出谁对**，
-正是 `bench/recall.py` 里写下的那条坑的又一个实例。要判谁对得有一份独立于两者的金标，
+正是 `literature/bench/recall.py` 里写下的那条坑的又一个实例。要判谁对得有一份独立于两者的金标，
 目前没有，这是一个明确的未决项。
 
 另外还有一条实际的：affinity 区间是 [0.006, 0.364]，与 ρ 完全不同的尺度。只拿它排序

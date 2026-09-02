@@ -13,8 +13,9 @@ from types import SimpleNamespace
 import pytest
 
 from athena.core.research_models import Hypothesis, HypothesisBatch
-from athena.research import agent_turn_runner as atr
-from athena.research.agent_turn_runner import MAX_GATE_RETRIES, AgentTurnRunner
+from athena.research.turns import ideator as atr
+from athena.research.turns.ideator import MAX_GATE_RETRIES
+from athena.research.turns.runner import AgentTurnRunner
 
 
 class _Agents:
@@ -89,7 +90,7 @@ def _patch_turn(monkeypatch, kept_per_attempt):
             rejections.append(f"idea-{index}: risk_ok_methodology")
         return kept
 
-    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", _wait)
+    monkeypatch.setattr("athena.research.turns.common.wait_run_events", _wait)
     monkeypatch.setattr(atr, "load_agent_result", _load)
     monkeypatch.setattr(atr, "run_light_pipeline", _gate)
     return calls
@@ -107,7 +108,7 @@ async def test_all_rejected_triggers_a_followup_with_the_blocking_reasons(
     agents = _Agents()
     _patch_turn(monkeypatch, [[], [_hyp()]])
 
-    kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1", 1, tmp_path)
+    kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1-1", 1, tmp_path)
 
     assert len(kept.hypotheses) == 1
     assert len(agents.followups) == 1
@@ -120,7 +121,7 @@ async def test_retries_are_capped(tmp_path, monkeypatch):
     agents = _Agents()
     calls = _patch_turn(monkeypatch, [])
 
-    kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1", 1, tmp_path)
+    kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1-1", 1, tmp_path)
 
     assert kept.hypotheses == []
     assert len(agents.followups) == MAX_GATE_RETRIES
@@ -132,7 +133,7 @@ async def test_first_round_success_does_not_retry(tmp_path, monkeypatch):
     agents = _Agents()
     _patch_turn(monkeypatch, [[_hyp()]])
 
-    kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1", 1, tmp_path)
+    kept = await _runner(agents, tmp_path)._run_ideator_lane("ideator-1-1", 1, tmp_path)
 
     assert len(kept.hypotheses) == 1
     assert agents.followups == []
@@ -147,7 +148,7 @@ async def test_baseline_mode_never_retries(tmp_path, monkeypatch):
     runner._runtime.ideation = "baseline"
     _patch_turn(monkeypatch, [[]])
 
-    kept = await runner._run_ideator_lane("ideator-1", 1, tmp_path)
+    kept = await runner._run_ideator_lane("ideator-1-1", 1, tmp_path)
 
     assert kept.hypotheses == []
     assert agents.followups == []

@@ -422,13 +422,14 @@ MRR 相差 8.7 倍，R@1 只有 0.025——40 题里对 1 题。
 5. **并发要有上限、限流要重试。** 50 篇论文约 36900 条句子、2300 个批次，无上限地
    `gather` 会一次性打光配额——而且是在取源与转换都已完成之后。
 
-生产实现见 `athena/research/survey/wiring.py` 的 `OpenAIEmbedder`，说明见
+生产实现见 `athena/research/literature/survey/providers.py` 的 `OpenAIEmbedder`，装配入口见
+`athena/research/literature/survey/wiring.py`，说明见
 [全链路文档](research_pipeline_ch.md)。
 
 ### 校验方式
 
 ```python
-from athena.research.paper_rag import require_semantic_embedder
+from athena.research.literature.paper_rag import require_semantic_embedder
 
 margin = await require_semantic_embedder(embedder)  # 不合格抛 NonSemanticEmbedderError
 ```

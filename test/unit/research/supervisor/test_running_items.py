@@ -16,13 +16,15 @@ import pytest
 
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.search_loop import SearchLoop
+from athena.research.supervisor.plans import PlanState
 from athena.research.supervisor.state import ResearchState
 
 
 def _run() -> SupervisorRunState:
-    return SupervisorRunState(
-        ResearchState(status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1)
+    state = ResearchState(
+        status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1
     )
+    return SupervisorRunState(lambda: state)
 
 
 @pytest.mark.asyncio
@@ -63,7 +65,7 @@ def test_run_status_and_kaggle_settings_come_from_research_state() -> None:
     state = ResearchState(
         status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1
     )
-    run = SupervisorRunState(state)
+    run = SupervisorRunState(lambda: state)
 
     state.status = "STOPPED"
     state.kaggle_download = False
@@ -78,7 +80,7 @@ async def test_search_loop_dispatches_through_public_plan_turn_callback() -> Non
     state = ResearchState(
         status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1
     )
-    run = SupervisorRunState(state)
+    run = SupervisorRunState(lambda: state)
     completed = SimpleNamespace(plan_id="hyp_callback")
 
     async def run_turn(plan_id: str):
@@ -97,3 +99,44 @@ async def test_search_loop_dispatches_through_public_plan_turn_callback() -> Non
     [task] = run.running_tasks
 
     assert await task is completed
+
+
+@pytest.mark.asyncio
+async def test_search_loop_persists_through_public_plan_lifecycle_surface() -> None:
+    state = ResearchState(
+        status="RUNNING",
+        phase="SEARCH",
+        search_limit=1,
+        concurrency=1,
+        plans={
+            "hyp_public": PlanState(
+                kind="SEARCH",
+                context_ref="sha256:" + "a" * 64,
+                turns_used=1,
+                turn_limit=2,
+                patience=1,
+            )
+        },
+    )
+    run = SupervisorRunState(lambda: state)
+
+    class PublicPlanLifecycle:
+        persisted = False
+
+        async def persist_state(self) -> None:
+            self.persisted = True
+
+    plans = PublicPlanLifecycle()
+    loop = SearchLoop(
+        owner=SimpleNamespace(state=state, tree=SimpleNamespace()),
+        deps=SimpleNamespace(),
+        run=run,
+        plans=plans,
+        run_turn=lambda _plan_id: asyncio.sleep(0),
+    )
+
+    await loop._apply_completed_turn(
+        SimpleNamespace(plan_id="hyp_public", decision=None, result=None)
+    )
+
+    assert plans.persisted is True

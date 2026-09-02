@@ -3,7 +3,7 @@
 Status: current
 Owner: Athena maintainers
 Last verified: 2026-08-16
-Source of truth: `src/athena/core/agent/prompts/evaluator_agent.md`,
+Source of truth: `src/athena/agents/prompts/evaluator_agent.md`,
 `src/athena/research/supervisor/prepare.py`,
 `test/unit/research/supervisor/test_prepare_plan.py`
 
@@ -212,7 +212,7 @@ research tree 里躺着状态齐全的实验记录，REFUTED/INCONCLUSIVE 一应
 {"primary": 0.8907, "test_se": 0.0231, "test_n": 7259}
 ```
 
-这两个字段的通路早就是通的：`TrustedEvaluator` 读它们（`evaluation.py`），
+这两个字段的通路早就是通的：`TrustedEvaluator` 读它们（`evaluation/evaluator.py`），
 经 `PlanBest.std_error/n` 到 `plan_lifecycle._settle_plan`，那里
 **只有在 `std_error` 非空时**才走 `settle_statistically`——Bonferroni 校正的正态
 置信区间；否则退回比较两个点估计。

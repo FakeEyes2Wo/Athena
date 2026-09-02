@@ -7,7 +7,7 @@ from unittest import mock
 
 from athena.kaggle.auth import KaggleCredentials
 from athena.kaggle.client import KaggleApiClient, KaggleApiError
-from athena.research.paper_source.http import HttpResponse
+from athena.research.literature.paper_source.http import HttpResponse
 
 
 class FakeHttp:
@@ -69,7 +69,9 @@ async def test_get_notebook_returns_source_from_json() -> None:
 async def test_get_notebook_reads_blob_source_from_pull_response() -> None:
     """Kaggle v1 pull 响应把 notebook 源码放在 ``blob.source``。"""
     http = FakeHttp(
-        json.dumps({"metadata": {"ref": "owner/slug"}, "blob": {"source": '{"cells": []}'}}).encode()
+        json.dumps(
+            {"metadata": {"ref": "owner/slug"}, "blob": {"source": '{"cells": []}'}}
+        ).encode()
     )
     client = _client(http)
 

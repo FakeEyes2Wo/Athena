@@ -3,8 +3,8 @@
 Status: current
 Owner: Athena maintainers
 Last verified: 2026-08-16
-Source of truth: `src/athena/research/runtime.py`,
-`src/athena/research/agent_turn_runner.py`, `src/athena/research/survey/wiring.py`,
+Source of truth: `src/athena/research/runtime/facade.py`,
+`src/athena/research/turns/ideator.py`, `src/athena/research/literature/survey/wiring.py`,
 `test/unit/research/test_runtime_survey.py`
 
 Academic Survey 能把一句主题变成可检索的论文语料库；Ideator 需要证据来提假设。本文说明
@@ -53,7 +53,7 @@ def survey_corpus_ref(self) -> str | None:
 >
 > 第 9 次跑测把它证伪了：语料在 seq 908 就绪，唯一一轮 ideation 在 seq 785 就启动了，
 > 早约两分钟；全程 0 次 `paper_*` 调用，6 条假设 0 条引用语料。原因是调度器只在"没有
-> 假设可排"时才 `GENERATE`（`scheduler.next_actions`），而第一轮生成的 6 条假设已经
+> 假设可排"时才 `GENERATE`（`scheduling.Scheduler.next_actions`），而第一轮生成的 6 条假设已经
 > 填满了 4 个实验额度，此后再没需要生成过。**非阻塞本身没错，错的是它单独并不成立
 > ——缺一个"语料就绪 → 补一轮"的触发器。** 见约束四。
 
@@ -94,7 +94,7 @@ return len(await self.register_hypotheses(hypotheses)) > 0
   （见 `PaperLibrary`），布尔标记会让扩充进来的新论文永远读不到——第一轮补过就再也不补
   了。旧 `state.json` 里的 `corpus_ideation_done` 由 before-validator 迁移，续跑不会崩。
 - **不动实验预算。** 它只往队列里加候选，跑几个仍由 `search_limit` 决定；新候选按
-  `ranker` 的优先级与既有候选竞争，不插队。
+  `scheduling.Selector` 的优先级与既有候选竞争，不插队。
 - **没有 Ideator 时直接标记完成**，避免每轮重试一个不存在的能力。
 
 ## 二、工具必须惰性求值

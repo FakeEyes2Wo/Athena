@@ -10,7 +10,7 @@ Source of truth: `src/athena/`, `src/gui_gateway/`, `athena-gui/`, `tests/`, `te
 | 文档 | 状态 | 用途 |
 |---|---|---|
 | [Supervisor 设计基线](supervisor_design.md) | current | 目标架构：研究流程、控制面、数据隔离与验收门（最终产品合同） |
-| [Supervisor 实现计划](supervisor_imp_docs.md) | current | 实现状态、任务拆分、全局约束与冻结验证命令 |
+| [Supervisor 实现计划](supervisor_imp_docs.md) | historical | 历史实现快照；当前路径以 active layout goal 与代码为准 |
 | [研究核心机制整理](research_core_mechanisms_ch.md) | current | ResearchTree / SEARCH 搜索 / IdeaGenerator / Hypothesis 排序 / 动态 EDA |
 | [代码规范](代码规范.md) | current | 导入/注释/异常/格式/测试约定 |
 | [结构化输出与工具调用](agent_structured_output_ch.md) | current | `response_format` 与工具互斥、schema 注入、围栏剥离 |

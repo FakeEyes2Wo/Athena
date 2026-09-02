@@ -67,6 +67,7 @@ class ClaimEvidence(BaseModel):
 
     @model_validator(mode="after")
     def check_layered_rule(self) -> "ClaimEvidence":
+        """Enforce evidence binding for supported and novel claim roles."""
         # 分层规则：支撑前提必须绑证据；新假设本身不得直接带证据（否则不算"新"）
         if self.role == ClaimRole.SUPPORTED_PREMISE and not self.supporting_refs:
             raise ValueError("supported premise must bind evidence refs")
@@ -129,6 +130,7 @@ class IdeatorHypothesisDraft(BaseModel):
 
     @model_validator(mode="after")
     def check_novel_hypothesis_testability(self) -> "IdeatorHypothesisDraft":
+        """Require predictions and disconfirmers for a testable hypothesis."""
         if not self.predicted_observations or not self.disconfirming_observations:
             raise ValueError("novel hypothesis requires predictions and disconfirmers")
         return self
@@ -191,6 +193,7 @@ class HypothesisPackage(BaseModel):
 
     @model_validator(mode="after")
     def check_novel_hypothesis_testability(self) -> "HypothesisPackage":
+        """Require predictions and disconfirmers on the persisted package."""
         # 与 IdeatorHypothesisDraft 相同的不变量；在最终落盘对象上再校验一次
         if not self.predicted_observations or not self.disconfirming_observations:
             raise ValueError("novel hypothesis requires predictions and disconfirmers")
@@ -239,6 +242,7 @@ class FalsifiabilityJudgment(BaseModel):
 
     @model_validator(mode="after")
     def check_falsifiable_has_evidence(self) -> "FalsifiabilityJudgment":
+        """Require evidence text whenever the judgment is falsifiable."""
         # gatekeeper 会把 testable_implication 原文当作 falsifiable 这一项的 evidence；
         # PASS 不允许带空证据，故在此收紧不变量。
         if self.is_falsifiable and not self.testable_implication.strip():
@@ -270,6 +274,7 @@ class FalsifiabilityReport(BaseModel):
 
     @model_validator(mode="after")
     def check_falsifiable_has_evidence(self) -> "FalsifiabilityReport":
+        """Require evidence text on a falsifiable persisted report."""
         # 与 FalsifiabilityJudgment 相同的不变量；在最终落盘对象上再校验一次
         if self.is_falsifiable and not self.testable_implication.strip():
             raise ValueError(

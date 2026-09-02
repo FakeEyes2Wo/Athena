@@ -67,6 +67,7 @@ class CandidateEvaluation(BaseModel):
     test_n: int | None = None
     kfold_mean: float | None = None
     kfold_std: float | None = None
+    metrics_ref: ArtifactRef | None = None
     direction: Literal["maximize", "minimize"]
 
 
@@ -83,4 +84,5 @@ class ValidationResult(BaseModel):
     validation_commit: str | None = None
     predictions_ref: ArtifactRef | None = None
     predictions_path: str | None = None
+    metrics_ref: ArtifactRef | None = None
     evidence_ref: ArtifactRef | None = None

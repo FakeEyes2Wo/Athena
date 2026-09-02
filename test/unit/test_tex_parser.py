@@ -6,10 +6,13 @@ import unittest
 
 import fitz
 
-from athena.research.paper_markdown.chunking import build_chunks
-from athena.research.paper_markdown.schemas import ChunkingConfig
-from athena.research.paper_markdown.tex_parser import normalize_title, parse_tex_paper
-from athena.research.paper_markdown.tex_source import load_tex_source
+from athena.research.literature.contracts import ChunkingConfig
+from athena.research.literature.paper_markdown.chunking import build_chunks
+from athena.research.literature.paper_markdown.tex_parser import (
+    normalize_title,
+    parse_tex_paper,
+)
+from athena.research.literature.paper_markdown.tex_source import load_tex_source
 
 
 def png_bytes() -> bytes:

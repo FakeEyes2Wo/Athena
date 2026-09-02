@@ -24,9 +24,9 @@ from athena.research.supervisor.deps import (
     SupervisorRuntime,
 )
 from athena.research.supervisor.experiment import PlanTurnResult, apply_trusted_score
-from athena.research.supervisor.policy import EloPolicy
+from athena.research.supervisor.scheduling import EloPolicy
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import Scheduler, count_search_attempts
+from athena.research.supervisor.scheduling import Scheduler, count_search_attempts
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 

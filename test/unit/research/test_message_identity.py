@@ -9,7 +9,7 @@ import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_tree import ResearchTree
-from athena.research.runtime_events import RuntimeEvents
+from athena.research.runtime.events import RuntimeEvents
 from athena.research.supervisor.events import EventProjector, OutputEvent
 from athena.research.supervisor.state import ResearchState
 

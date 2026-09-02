@@ -10,7 +10,10 @@ import urllib.parse
 
 from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
-from athena.research.paper_source.http import HostRateLimiter, UrllibTransport
+from athena.research.literature.paper_source.http import (
+    HostRateLimiter,
+    UrllibTransport,
+)
 
 DDG_HTML = "https://html.duckduckgo.com/html/"
 BROWSER_UA = (
@@ -187,7 +190,10 @@ class WebSearchTool(_WebTool):
                     "maximum": 20,
                     "default": 8,
                 },
-                "response_length": {"type": "string", "enum": ["short", "medium", "long"]},
+                "response_length": {
+                    "type": "string",
+                    "enum": ["short", "medium", "long"],
+                },
                 "domains": {"type": "array", "items": {"type": "string"}},
                 "recency": {"type": "integer", "minimum": 1},
             },
@@ -199,7 +205,9 @@ class WebSearchTool(_WebTool):
         batch = input.get("search_query")
         if isinstance(batch, list) and batch:
             if len(batch) > MAX_QUERIES:
-                raise ValueError(f"search_query must have at most {MAX_QUERIES} queries")
+                raise ValueError(
+                    f"search_query must have at most {MAX_QUERIES} queries"
+                )
             if len(batch) > 3 and input.get("response_length") == "short":
                 raise ValueError(
                     "more than 3 search_query entries requires response_length medium or long"
@@ -321,7 +329,9 @@ class WebFetchTool(_WebTool):
         if not response.ok:
             raise RuntimeError(f"web_fetch returned HTTP {response.status}")
         return extract_page_text(
-            response.body.decode("utf-8", errors="replace"), url=url, max_chars=max_chars
+            response.body.decode("utf-8", errors="replace"),
+            url=url,
+            max_chars=max_chars,
         )
 
     async def fetch_ref(self, ref_id: str, max_chars: int = 12000) -> dict:

@@ -129,10 +129,16 @@ export function AppShell({ currentRoot, recentRoots, onSwitchWorkspace, onSelect
       </div>
 
       <HumanRequestDialog
-        requests={pipeline.humanRequests}
-        onAnswer={pipeline.answerHuman}
-        onChoice={pipeline.chooseHumanAnswer}
-        onSkip={pipeline.skipHumanAnswer}
+        request={pipeline.humanRequests?.[0] ?? null}
+        onReply={(reply) => {
+          const current = pipeline.humanRequests?.[0];
+          if (current && typeof pipeline.replyToHumanRequest === "function") {
+            return pipeline.replyToHumanRequest(current.request_id, reply);
+          }
+          return undefined;
+        }}
+        settling={pipeline.settlingRequestId === pipeline.humanRequests?.[0]?.request_id}
+        error={pipeline.humanPendingError}
       />
     </div>
   );

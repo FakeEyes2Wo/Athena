@@ -1,11 +1,19 @@
-"""Projection records for the runtime's output/state subscriber protocol."""
+"""Projection records and Agent journal forwarding for runtime subscribers."""
 
+import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, new_id
+
+_TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
+
+PublishEvent = Callable[[str, str, dict | None], Awaitable[None] | None]
+SequenceSink = Callable[[int], None]
 
 _PREVIEW_BYTES = 512
 _ANSI_STRING = re.compile(
@@ -105,7 +113,7 @@ def truncate_middle(text: str, max_chars: int) -> str:
     left = max_chars // 2
     right = max_chars - left
     removed = len(text) - max_chars
-    return f"{text[:left]}…{removed} chars truncated…{text[len(text) - right:]}"
+    return f"{text[:left]}…{removed} chars truncated…{text[len(text) - right :]}"
 
 
 class EventProjector:
@@ -205,3 +213,44 @@ class EventProjector:
             artifact_ref=artifact_ref,
             truncated=truncated,
         )
+
+
+async def forward_run_events(
+    agents: AgentRuntime,
+    run_id: str,
+    publish: PublishEvent,
+    after_sequence: int = 0,
+    on_sequence: SequenceSink | None = None,
+) -> None:
+    """Forward one Agent journal through its terminal event."""
+    async for event in agents.run_events(run_id, after_sequence=after_sequence):
+        await publish(event.kind, event.event_ref, event.data)
+        if on_sequence is not None:
+            on_sequence(event.sequence)
+        if event.kind in _TERMINAL_EVENT_KINDS:
+            return
+
+
+async def wait_run_events(
+    agents: AgentRuntime,
+    run_id: str,
+    publish: PublishEvent | None,
+    after_sequence: int = 0,
+    on_sequence: SequenceSink | None = None,
+):
+    """Wait for an Agent run and optionally forward its journal."""
+    if publish is None:
+        return await agents.wait_run(run_id)
+    events = asyncio.create_task(
+        forward_run_events(agents, run_id, publish, after_sequence, on_sequence)
+    )
+    wait = asyncio.create_task(agents.wait_run(run_id))
+    try:
+        summary = await wait
+        await events
+        return summary
+    finally:
+        for task in (events, wait):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(events, wait, return_exceptions=True)

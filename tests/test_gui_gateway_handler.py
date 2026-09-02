@@ -667,6 +667,119 @@ async def test_human_broker_choice_and_skip_replies() -> None:
     assert await task == "skip"
 
 
+class _ClarificationRuntime(RecordingRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.clarification_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.confirm_calls: list[tuple[str, int, bool]] = []
+
+    async def task_clarification_start(self, task: str) -> dict:
+        self.clarification_calls.append(("start", (task,)))
+        return {"draft_id": "draft-1", "revision": 1, "status": "CLARIFYING"}
+
+    async def task_clarification_get(self, draft_id: str) -> dict:
+        self.clarification_calls.append(("get", (draft_id,)))
+        return {"draft_id": draft_id, "revision": 1, "status": "READY_FOR_CONFIRMATION"}
+
+    async def task_clarification_retry(self, draft_id: str, revision: int) -> dict:
+        self.clarification_calls.append(("retry", (draft_id, revision)))
+        return {"draft_id": draft_id, "revision": revision, "status": "CLARIFYING"}
+
+    async def task_clarification_revise(
+        self, draft_id: str, revision: int, instruction: str
+    ) -> dict:
+        self.clarification_calls.append(("revise", (draft_id, revision, instruction)))
+        return {"draft_id": draft_id, "revision": revision, "status": "CLARIFYING"}
+
+    async def task_clarification_cancel(self, draft_id: str, revision: int) -> dict:
+        self.clarification_calls.append(("cancel", (draft_id, revision)))
+        return {"draft_id": draft_id, "revision": revision, "status": "CANCELLED"}
+
+    async def confirm_and_start(
+        self, draft_id: str, revision: int, acknowledge_unresolved: bool
+    ) -> dict:
+        self.confirm_calls.append((draft_id, revision, acknowledge_unresolved))
+        return {"draft_id": draft_id, "revision": revision, "status": "RUNNING"}
+
+
+@pytest.mark.asyncio
+async def test_handler_dispatches_task_clarification_methods() -> None:
+    runtime = _ClarificationRuntime()
+    handler = GuiRequestHandler(runtime)
+
+    assert await handler.dispatch(
+        "task_clarification_start", {"task": "predict churn"}
+    ) == {"draft_id": "draft-1", "revision": 1, "status": "CLARIFYING"}
+    assert await handler.dispatch("task_clarification_get", {"draft_id": "draft-1"})
+    assert await handler.dispatch(
+        "task_clarification_retry", {"draft_id": "draft-1", "revision": 1}
+    )
+    assert await handler.dispatch(
+        "task_clarification_revise",
+        {"draft_id": "draft-1", "revision": 1, "instruction": "add target"},
+    )
+    assert await handler.dispatch(
+        "task_clarification_cancel", {"draft_id": "draft-1", "revision": 1}
+    )
+    assert runtime.clarification_calls == [
+        ("start", ("predict churn",)),
+        ("get", ("draft-1",)),
+        ("retry", ("draft-1", 1)),
+        ("revise", ("draft-1", 1, "add target")),
+        ("cancel", ("draft-1", 1)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gated_start_search_calls_confirm_and_start() -> None:
+    runtime = _ClarificationRuntime()
+    handler = GuiRequestHandler(runtime)
+
+    result = await handler.dispatch(
+        "start_search",
+        {
+            "draft_id": "draft-1",
+            "revision": 4,
+            "acknowledge_unresolved": True,
+        },
+    )
+
+    assert result == {"draft_id": "draft-1", "revision": 4, "status": "RUNNING"}
+    assert runtime.confirm_calls == [("draft-1", 4, True)]
+
+
+@pytest.mark.asyncio
+async def test_human_reply_accepts_structured_reply_object() -> None:
+    from gui_gateway.human import HumanRequestBroker
+
+    broker = HumanRequestBroker()
+    handler = GuiRequestHandler(RecordingRuntime(), broker=broker)
+
+    async def ask():
+        return await broker.ask(
+            "choose metric",
+            choices=[
+                {"label": "F1", "value": "f1"},
+                {"label": "AUC", "value": "auc"},
+            ],
+        )
+
+    task = asyncio.create_task(ask())
+    await asyncio.sleep(0)
+    request_id = (await handler.dispatch("human_pending", {}))["requests"][0][
+        "request_id"
+    ]
+
+    assert await handler.dispatch(
+        "human_reply",
+        {
+            "request_id": request_id,
+            "reply": {"kind": "choice", "value": "f1"},
+        },
+    ) == {"replied": True}
+    assert await task == "choice:f1"
+
+
 @pytest.mark.asyncio
 async def test_handler_rejects_unknown_methods() -> None:
     handler = GuiRequestHandler(RecordingRuntime())

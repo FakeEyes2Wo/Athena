@@ -2,8 +2,8 @@
 
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
-from athena.research.supervisor.policy import EloPolicy
-from athena.research.supervisor.ranker import (
+from athena.research.supervisor.scheduling import EloPolicy
+from athena.research.supervisor.scheduling import (
     RankConfig,
     Selector,
     deduplicate,

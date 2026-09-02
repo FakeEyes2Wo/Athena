@@ -8,9 +8,9 @@ import time
 import unittest
 import urllib.error
 from unittest import mock
-import athena.research.paper_scout.agent as agent_module
-from athena.research.paper_scout.selection import DeliverySelection
-from athena.research.paper_source.schemas import PaperSourcePolicy
+import athena.research.literature.paper_scout.agent as agent_module
+from athena.research.literature.paper_scout.selection import DeliverySelection
+from athena.research.literature.paper_source.schemas import PaperSourcePolicy
 from types import SimpleNamespace
 import zlib
 
@@ -20,8 +20,11 @@ from athena.core.agent.models import AgentContext
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext
-from athena.research.paper_scout.agent import PaperScoutAgent, dispatch_tool_calls
-from athena.research.paper_scout.backends import (
+from athena.research.literature.paper_scout.agent import (
+    PaperScoutAgent,
+    dispatch_tool_calls,
+)
+from athena.research.literature.paper_scout.backends import (
     ARXIV_MAX_RESULTS,
     SEMANTIC_SCHOLAR_MAX_RESULTS,
     SEMANTIC_SCHOLAR_FIELDS,
@@ -32,7 +35,7 @@ from athena.research.paper_scout.backends import (
     paper_key_for,
     within_cutoff,
 )
-from athena.research.paper_scout.pool import (
+from athena.research.literature.paper_scout.pool import (
     EMPTY_POOL,
     PaperPool,
     has_retrievable_source,
@@ -41,14 +44,14 @@ from athena.research.paper_scout.pool import (
     tie_break,
     truncate_abstract,
 )
-from athena.research.paper_scout.reranker import (
+from athena.research.literature.paper_scout.reranker import (
     RERANK_ATTEMPTS,
     DashScopeReranker,
     document_for,
     parse_scores,
 )
-from athena.research.paper_scout.prompts import format_history
-from athena.research.paper_scout.schemas import (
+from athena.research.literature.paper_scout.prompts import format_history
+from athena.research.literature.paper_scout.schemas import (
     ACCEPT_THRESHOLD,
     PASA_RETAIN_THRESHOLD,
     RETAIN_THRESHOLD,
@@ -59,7 +62,7 @@ from athena.research.paper_scout.schemas import (
     ScoutRequest,
     ScoutStats,
 )
-from athena.research.paper_scout.scorer import (
+from athena.research.literature.paper_scout.scorer import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_PASSES,
     GradedRelevanceScorer,
@@ -67,13 +70,13 @@ from athena.research.paper_scout.scorer import (
     parse_grades,
     true_probability,
 )
-from athena.research.paper_scout.session import ScoutSession, process_reward
-from athena.research.paper_scout.tool import (
+from athena.research.literature.paper_scout.session import ScoutSession, process_reward
+from athena.research.literature.paper_scout.tool import (
     PaperScoutExpandTool,
     PaperScoutSearchTool,
 )
-from athena.research.paper_source.http import HostRateLimiter, HttpResponse
-from athena.research.paper_source.schemas import PaperSourceRequest
+from athena.research.literature.paper_source.http import HostRateLimiter, HttpResponse
+from athena.research.literature.paper_source.schemas import PaperSourceRequest
 from athena.core.artifact_store import LocalArtifactStore
 
 ATOM_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>

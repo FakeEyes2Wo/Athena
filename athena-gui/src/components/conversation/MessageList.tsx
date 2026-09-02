@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { UIMessage } from "../../types/ui";
+import type { ClarificationPreview, UIMessage, UIMessagePreview } from "../../types/ui";
 import { IntentPreviewCard } from "../cards/IntentPreviewCard";
 import { ErrorCard } from "../cards/ErrorCard";
 import { Icon } from "../common/Icon";
@@ -7,7 +7,10 @@ import styles from "./MessageList.module.css";
 
 interface MessageListProps {
   messages: UIMessage[];
-  onStartRun(task?: string, messageId?: string): Promise<void>;
+  onConfirmPreview(acknowledgeUnresolved: boolean): Promise<void> | void;
+  onRevisePreview(instruction: string): Promise<void> | void;
+  onRetryPreview(): Promise<void> | void;
+  onCancelPreview(): Promise<void> | void;
 }
 
 /** True for parallel Ideator lanes (plan ids like ``ideator-1`` or ``ideator-<round>-1``). */
@@ -32,14 +35,58 @@ function segmentMessages(messages: UIMessage[]): Array<{ lane: number | null; it
   return segments;
 }
 
+function toClarificationPreview(
+  preview: UIMessagePreview,
+  started: boolean,
+): ClarificationPreview {
+  if ("draftId" in preview) return preview;
+  return {
+    draftId: "",
+    revision: 0,
+    status: started ? "RUNNING" : "READY_FOR_CONFIRMATION",
+    understanding: {
+      title: preview.title ?? "",
+      dataset: preview.dataset ?? null,
+      target: preview.target ?? null,
+      task_type: preview.task_type ?? "other",
+      primary_metric: preview.primary_metric ?? null,
+      direction: preview.direction ?? null,
+      evaluation_plan: preview.evaluation_plan ?? null,
+    },
+    answers: [],
+    unresolved: [],
+    failure: null,
+  };
+}
+
 /** A single trajectory record (user / supervisor / agent / tool / error). */
-function TrajectoryItem({ msg, onStartRun }: { msg: UIMessage; onStartRun: MessageListProps["onStartRun"] }) {
+function TrajectoryItem({ msg, onConfirmPreview, onRevisePreview, onRetryPreview, onCancelPreview }: {
+  msg: UIMessage;
+  onConfirmPreview: MessageListProps["onConfirmPreview"];
+  onRevisePreview: MessageListProps["onRevisePreview"];
+  onRetryPreview: MessageListProps["onRetryPreview"];
+  onCancelPreview: MessageListProps["onCancelPreview"];
+}) {
   if (msg.kind === "intent-preview" && msg.preview) {
+    const preview = toClarificationPreview(msg.preview, msg.started === true);
+    // While the authoritative draft is still being built, keep the chat focused
+    // on the task-understanding conversation. The decision card appears only
+    // once the draft is ready/failed/running (or for legacy previews).
+    if ("draftId" in msg.preview && preview.status === "CLARIFYING") {
+      return (
+        <article className={`${styles["message-bubble"]} ${styles["message-bubble--supervisor"]}`}>
+          <span className={`${styles.marker} ${styles["marker--supervisor"]}`}>任务理解</span>
+          {msg.content || "任务理解中…"}
+        </article>
+      );
+    }
     return (
       <IntentPreviewCard
-        preview={msg.preview}
-        started={msg.started === true}
-        onConfirm={() => onStartRun(msg.task, msg.id)}
+        preview={preview}
+        onConfirm={onConfirmPreview}
+        onRevise={onRevisePreview}
+        onRetry={onRetryPreview}
+        onCancel={onCancelPreview}
       />
     );
   }
@@ -91,7 +138,13 @@ function TrajectoryItem({ msg, onStartRun }: { msg: UIMessage; onStartRun: Messa
 }
 
 /** Renders chat messages, intent preview cards, and the trajectory (agent/tool/supervisor/ideator). */
-export function MessageList({ messages, onStartRun }: MessageListProps) {
+export function MessageList({
+  messages,
+  onConfirmPreview,
+  onRevisePreview,
+  onRetryPreview,
+  onCancelPreview,
+}: MessageListProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const segments = segmentMessages(messages);
@@ -124,14 +177,28 @@ export function MessageList({ messages, onStartRun }: MessageListProps) {
       {segments.map((segment, index) => {
         if (segment.lane === null) {
           return segment.items.map((msg) => (
-            <TrajectoryItem key={msg.id} msg={msg} onStartRun={onStartRun} />
+            <TrajectoryItem
+              key={msg.id}
+              msg={msg}
+              onConfirmPreview={onConfirmPreview}
+              onRevisePreview={onRevisePreview}
+              onRetryPreview={onRetryPreview}
+              onCancelPreview={onCancelPreview}
+            />
           ));
         }
         return (
           <section key={`ideator-${segment.lane}-${index}`} className={styles["ideator-lane"]}>
             <div className={styles["ideator-lane__title"]}>Ideator {segment.lane}</div>
             {segment.items.map((msg) => (
-              <TrajectoryItem key={msg.id} msg={msg} onStartRun={onStartRun} />
+              <TrajectoryItem
+                key={msg.id}
+                msg={msg}
+                onConfirmPreview={onConfirmPreview}
+                onRevisePreview={onRevisePreview}
+                onRetryPreview={onRetryPreview}
+                onCancelPreview={onCancelPreview}
+              />
             ))}
           </section>
         );

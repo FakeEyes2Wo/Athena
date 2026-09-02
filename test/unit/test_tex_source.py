@@ -6,7 +6,10 @@ import tarfile
 import unittest
 import zipfile
 
-from athena.research.paper_markdown.tex_source import TexSourceError, load_tex_source
+from athena.research.literature.paper_markdown.tex_source import (
+    TexSourceError,
+    load_tex_source,
+)
 
 
 def tar_bytes(files: dict[str, bytes]) -> bytes:

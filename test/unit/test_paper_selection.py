@@ -10,10 +10,10 @@
 
 import unittest
 
-from athena.research.bench.reproducibility import delivery_overlap
-from athena.research.paper_scout.pool import tie_break
-from athena.research.paper_scout.schemas import ScoutPaper
-from athena.research.paper_scout.selection import (
+from athena.research.literature.bench.reproducibility import delivery_overlap
+from athena.research.literature.paper_scout.pool import tie_break
+from athena.research.literature.paper_scout.schemas import ScoutPaper
+from athena.research.literature.paper_scout.selection import (
     MAX_RANKED,
     DeliverySelection,
     fill_by_coverage,
@@ -112,7 +112,9 @@ class SelectDeliveryTest(unittest.IsolatedAsyncioTestCase):
 
         selection = await select_delivery("q", papers, 3, selector)
 
-        self.assertEqual(["a", "b"], sorted(item.paper_key for item in selection.delivered[:2]))
+        self.assertEqual(
+            ["a", "b"], sorted(item.paper_key for item in selection.delivered[:2])
+        )
         self.assertEqual(["a", "b"], sorted(selector.seen[0]))
         self.assertEqual({"t1", "t2", "t3"}, set(selector.seen[1]))
 
@@ -122,14 +124,16 @@ class SelectDeliveryTest(unittest.IsolatedAsyncioTestCase):
 
         selection = await select_delivery("q", papers, 3, selector)
 
-        self.assertEqual(["a", "t3", "t1"], [item.paper_key for item in selection.delivered])
+        self.assertEqual(
+            ["a", "t3", "t1"], [item.paper_key for item in selection.delivered]
+        )
         self.assertTrue(selection.reranked)
         self.assertEqual(3, selection.boundary_size)
 
     async def test_an_uncovered_facet_outranks_a_better_paper_on_a_covered_one(
         self,
     ) -> None:
-        """"再多一篇讲同一个方法的"远不如"第一篇讲主指标的"。
+        """ "再多一篇讲同一个方法的"远不如"第一篇讲主指标的"。
 
         按相关性排序无法表达这件事——同一档里的论文按定义分数相同。
         """
@@ -204,7 +208,9 @@ class FallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(selection.delivered))
         self.assertIn("no ranking", selection.note)
 
-    async def test_without_a_selector_behaviour_matches_the_old_hash_order(self) -> None:
+    async def test_without_a_selector_behaviour_matches_the_old_hash_order(
+        self,
+    ) -> None:
         papers = _ranked({"t1": 0.45, "t2": 0.45, "t3": 0.45})
 
         selection = await select_delivery("q", papers, 2, None)
@@ -353,7 +359,9 @@ class BoundaryCapTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(selection.reranked)
         self.assertEqual(60, selection.boundary_size)
 
-    async def test_the_reported_boundary_size_is_the_real_tier_not_the_cap(self) -> None:
+    async def test_the_reported_boundary_size_is_the_real_tier_not_the_cap(
+        self,
+    ) -> None:
         """报告要说清"有多少篇在争"，而不是"我们看了多少篇"。"""
         papers = _ranked({f"t{i:02d}": 0.45 for i in range(60)})
 

@@ -14,36 +14,40 @@ import httpx
 from openai import RateLimitError
 
 from athena.core.agent.models import AgentOutcome
-from athena.research.survey import pipeline as pipeline_module
-from athena.research.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.processor import (
+    VisualInterpretationRequiredError,
+)
+from athena.research.literature.paper_markdown.schemas import (
     PaperChunk,
     PaperContent,
+    PaperConversionRequest,
     PaperProvenance,
 )
-from athena.research.paper_scout.schemas import (
+from athena.research.literature.paper_scout.schemas import (
     PaperScoutResult,
     ScoutCorpus,
     ScoutPaper,
     ScoutRequest,
     ScoutStats,
 )
-from athena.research.paper_source.http import HostRateLimiter
-from athena.research.paper_source.schemas import (
+from athena.research.literature.survey import stages as pipeline_module
+from athena.research.literature.paper_source.http import HostRateLimiter
+from athena.research.literature.paper_source.schemas import (
     PaperIdentity,
     PaperSourceRecord,
     PaperSourceRequest,
     PaperSourceResult,
     PaperSourceStats,
 )
-from athena.research.survey.library import PaperLibrary
-from athena.research.paper_rag.index import split_sentences
-from athena.research.survey.pipeline import (
+from athena.research.literature.survey.library import PaperLibrary
+from athena.research.literature.paper_rag.index import split_sentences
+from athena.research.literature.survey.pipeline import (
     SHRED_MIN_SENTENCES,
     PaperOutcome,
     SurveyPipeline,
     SurveyRequest,
 )
-from athena.research.survey.wiring import SurveyStack
+from athena.research.literature.survey.wiring import SurveyStack
 from athena.core.artifact_store import LocalArtifactStore
 
 PAPERS = [
@@ -324,7 +328,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
 
     async def _conversion_ref(self, paper_id: str) -> str:
         return await self.store.put_text(
-            pipeline_module.PaperConversionRequest(
+            PaperConversionRequest(
                 pdf_ref="sha256:" + "2" * 64,
                 paper_id=paper_id,
                 visual_policy="best_effort",
@@ -427,7 +431,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_required_visual_failure_is_reported_as_its_own_kind(self) -> None:
         FakeProcessor.outcomes = {
-            PAPERS[0][0]: pipeline_module.VisualInterpretationRequiredError("no vlm"),
+            PAPERS[0][0]: VisualInterpretationRequiredError("no vlm"),
             PAPERS[1][0]: "pass",
         }
 
@@ -968,7 +972,7 @@ class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
 
     async def _conversion_ref(self, paper_id: str) -> str:
         return await self.store.put_text(
-            pipeline_module.PaperConversionRequest(
+            PaperConversionRequest(
                 pdf_ref="sha256:" + "2" * 64,
                 paper_id=paper_id,
                 visual_policy="best_effort",

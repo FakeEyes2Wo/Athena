@@ -9,7 +9,7 @@ import unittest
 from types import SimpleNamespace
 
 from athena.core.research_models import Hypothesis
-from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.turns.runner import AgentTurnRunner
 from athena.research.idea_generation.citation_support import (
     EVIDENCE_CHARS,
     MAX_EVIDENCE_CHUNKS,
@@ -104,7 +104,7 @@ class SupportVerificationTest(unittest.IsolatedAsyncioTestCase):
                     return reply
             return '{"supports": false}'
 
-        import athena.research.agent_turn_support as module
+        import athena.research.turns.support as module
 
         self._original = module.single_turn_chat
         module.single_turn_chat = fake_chat
@@ -170,7 +170,7 @@ class SupportVerificationTest(unittest.IsolatedAsyncioTestCase):
         """整层不可用是增益消失，不该把已经通过前一关的结论一起清掉。"""
         runtime = _Runtime(verdicts={}, passages={"arxiv:1": ["evidence"]})
         runner = AgentTurnRunner(runtime)
-        import athena.research.agent_turn_support as module
+        import athena.research.turns.support as module
 
         async def exploding(*_args, **_kwargs):
             raise RuntimeError("endpoint down")

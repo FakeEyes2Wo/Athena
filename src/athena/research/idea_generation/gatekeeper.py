@@ -24,9 +24,6 @@ from athena.research.idea_generation.idea_schemas import (
     ValidationPlan,
 )
 
-
-# ====== 常量 ======
-
 MAX_TOLERATED_RISKS: int = 6
 """单个视角"未处理风险"条数上限。
 
@@ -60,8 +57,6 @@ def max_total_risks(perspective_count: int) -> int:
     return MAX_TOLERATED_RISKS * perspective_count - 1
 
 
-# ====== 两个门共用的 rubric 项 ======
-
 def structural_rubric_scores(
     structural: StructuralCheckReport, falsifiability: FalsifiabilityReport
 ) -> tuple[bool, RubricItemScore, RubricItemScore]:
@@ -77,7 +72,9 @@ def structural_rubric_scores(
         >>> traceable.item
         'evidence_traceable'
     """
-    evidence_traceable_ok = structural.premise_evidence_ok and structural.novel_hypothesis_testable
+    evidence_traceable_ok = (
+        structural.premise_evidence_ok and structural.novel_hypothesis_testable
+    )
     evidence_traceable_score = RubricItemScore(
         item="evidence_traceable",
         score=1.0 if evidence_traceable_ok else 0.0,
@@ -107,14 +104,16 @@ def perspective_ok(review: SkepticReport) -> bool:
         ...     critique="c", unaddressed_risks=[], fatal_flaw_found=False))
         True
     """
-    return (not review.failed
-            and not review.fatal_flaw_found
-            and len(review.unaddressed_risks) <= MAX_TOLERATED_RISKS)
+    return (
+        not review.failed
+        and not review.fatal_flaw_found
+        and len(review.unaddressed_risks) <= MAX_TOLERATED_RISKS
+    )
 
 
-# ====== 门控逻辑 ======
-
-def pre_gate(structural: StructuralCheckReport, falsifiability: FalsifiabilityReport) -> GateDecision:
+def pre_gate(
+    structural: StructuralCheckReport, falsifiability: FalsifiabilityReport
+) -> GateDecision:
     """依据 StructuralCheckReport 与 FalsifiabilityReport 产出 pre_gate 阶段的 GateDecision。
 
     Example:
@@ -122,10 +121,12 @@ def pre_gate(structural: StructuralCheckReport, falsifiability: FalsifiabilityRe
         <GateVerdict.PASS: 'PASS'>
     """
     if structural.idea_id != falsifiability.idea_id:
-        raise ValueError("structural and falsifiability reports refer to different ideas")
+        raise ValueError(
+            "structural and falsifiability reports refer to different ideas"
+        )
 
-    evidence_traceable_ok, evidence_traceable_score, falsifiable_score = structural_rubric_scores(
-        structural, falsifiability
+    evidence_traceable_ok, evidence_traceable_score, falsifiable_score = (
+        structural_rubric_scores(structural, falsifiability)
     )
 
     if evidence_traceable_ok and falsifiability.is_falsifiable:
@@ -170,7 +171,9 @@ def light_hard_gate(
     """
     perspective_ids = [r.perspective for r in reviews]
     if len(perspective_ids) != len(set(perspective_ids)):
-        raise ValueError(f"light_hard_gate requires distinct perspectives, got {perspective_ids}")
+        raise ValueError(
+            f"light_hard_gate requires distinct perspectives, got {perspective_ids}"
+        )
 
     idea_ids = {structural.idea_id, falsifiability.idea_id, validation_plan.idea_id} | {
         r.idea_id for r in reviews
@@ -179,8 +182,8 @@ def light_hard_gate(
         raise ValueError(f"reports refer to different ideas: {sorted(idea_ids)}")
     idea_id = structural.idea_id
 
-    evidence_traceable_ok, evidence_traceable_score, falsifiable_score = structural_rubric_scores(
-        structural, falsifiability
+    evidence_traceable_ok, evidence_traceable_score, falsifiable_score = (
+        structural_rubric_scores(structural, falsifiability)
     )
 
     ordered = sorted(reviews, key=lambda r: r.perspective)
@@ -206,28 +209,38 @@ def light_hard_gate(
         f" (incomplete: {failed_count} perspective(s) failed)" if failed_count else ""
     )
     risk_total_score = RubricItemScore(
-        item="risk_total", score=1.0 if total_ok else 0.0,
+        item="risk_total",
+        score=1.0 if total_ok else 0.0,
         evidence=f"{total_note} (ceiling {ceiling}){incomplete_note}",
     )
 
     verifier_ok = validation_plan.verifier is not None
     verifier_score = RubricItemScore(
-        item="verifier_ok", score=1.0 if verifier_ok else 0.0,
+        item="verifier_ok",
+        score=1.0 if verifier_ok else 0.0,
         evidence=(
-            f"verifier={validation_plan.verifier.verifier_type}" if verifier_ok
+            f"verifier={validation_plan.verifier.verifier_type}"
+            if verifier_ok
             else "no verifier matched; validation plan is EXPLORATORY"
         ),
     )
 
-    item_scores = [evidence_traceable_score, falsifiable_score, risk_total_score,
-                   verifier_score, *risk_scores]
+    item_scores = [
+        evidence_traceable_score,
+        falsifiable_score,
+        risk_total_score,
+        verifier_score,
+        *risk_scores,
+    ]
 
     fatal = next((r for r in ordered if r.fatal_flaw_found), None)
     blocked = next((r for r in ordered if not perspective_ok(r)), None)
 
     if not evidence_traceable_ok or not falsifiability.is_falsifiable:
         verdict = GateVerdict.REVISE
-        blocking_factor = "evidence_traceable" if not evidence_traceable_ok else "falsifiable"
+        blocking_factor = (
+            "evidence_traceable" if not evidence_traceable_ok else "falsifiable"
+        )
     elif fatal is not None:
         verdict, blocking_factor = GateVerdict.REJECT, f"risk_ok_{fatal.perspective}"
     elif blocked is not None:
@@ -240,7 +253,10 @@ def light_hard_gate(
         verdict, blocking_factor = GateVerdict.PASS, None
 
     return GateDecision(
-        idea_id=idea_id, gate_phase="full", verdict=verdict,
-        rubric_version=GATE_RUBRIC_VERSION, item_scores=item_scores,
+        idea_id=idea_id,
+        gate_phase="full",
+        verdict=verdict,
+        rubric_version=GATE_RUBRIC_VERSION,
+        item_scores=item_scores,
         blocking_factor=blocking_factor,
     )

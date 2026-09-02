@@ -71,15 +71,11 @@ def _validation_section(validation: Mapping[str, Any] | None) -> list[str]:
             f"{(f'{gap:.4f}' if isinstance(gap, float) else str(gap))}"
         )
     if warning:
-        lines.append(
-            "- **泛化警告**: 测试集表现与训练/验证集差距过大，存在过拟合风险"
-        )
+        lines.append("- **泛化警告**: 测试集表现与训练/验证集差距过大，存在过拟合风险")
     return lines
 
 
-def _iteration_table_section(
-    data: Mapping[str, Any], sota_id: str | None
-) -> list[str]:
+def _iteration_table_section(data: Mapping[str, Any], sota_id: str | None) -> list[str]:
     """Render the per-experiment primary-vs-SOTA comparison table."""
     scored = [
         (exp_id, experiment)
@@ -100,8 +96,7 @@ def _iteration_table_section(
         primary = experiment["eval"]["primary"]
         delta = (
             _number(primary - reference, signed=True)
-            if isinstance(primary, (int, float))
-            and isinstance(reference, (int, float))
+            if isinstance(primary, (int, float)) and isinstance(reference, (int, float))
             else "—"
         )
         verdict = experiment.get("verdict") or {}

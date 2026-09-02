@@ -3,12 +3,14 @@
 import json
 from pathlib import Path
 
-from athena.research.clarification.journal import ConfirmationJournalStore
 from athena.research.clarification.models import (
     ClarificationDraft,
     ConfirmationJournal,
 )
-from athena.research.clarification.store import ClarificationStore
+from athena.research.clarification.persistence import (
+    ClarificationStore,
+    ConfirmationJournalStore,
+)
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "clarification"
 

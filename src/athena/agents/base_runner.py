@@ -110,7 +110,7 @@ class BaseAgentRunner:
         )
         thread = AthenaThread(
             thread_id=session.agent_id,
-            session_id=session.agent_id,
+            session_id=session.runtime.session_id,
             status="running",
             context_ref=session.context_ref,
         )

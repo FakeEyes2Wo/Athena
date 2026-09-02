@@ -3,7 +3,7 @@
 Status: current
 Owner: Athena maintainers
 Last verified: 2026-08-16
-Source of truth: `src/athena/research/agent_turn_runner.py`, `src/athena/cli.py`,
+Source of truth: `src/athena/research/turns/ideator.py`, `src/athena/cli.py`,
 `src/athena/research/supervisor/experiment.py`
 
 2026-08-16 用一个 6000×22、正例 5.98% 的不平衡二分类任务跑了 8 次完整 loop，模型是

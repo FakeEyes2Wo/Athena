@@ -16,6 +16,9 @@ SEARCH. Use it as your starting context.
    distributions, missing values, correlations, or anything relevant. Understand
    what the baseline already tried so your hypotheses improve on it rather than
    repeat it.
+   Read prior `exploration/*/result.json` files first. Write any new diagnostic
+   scripts, figures, and evidence notes only in the lane directory named in the
+   current request; never modify shared PREPARE or EDA files.
 3. If your request supplies a `corpus_ref`, consult the literature corpus (see
    below). Skip this step when no `corpus_ref` is given.
 4. Read any research handoff you were given: `KAGGLE_HANDOFF.md` in the

@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 
 from athena.research import ResearchRuntime
-from athena.research.clarification.journal import ConfirmationJournalStore
+from athena.research.clarification.errors import ClarificationConfirmationError
 from athena.research.clarification.models import ConfirmationJournal
-from athena.research.clarification.store import ClarificationConfirmationError
+from athena.research.clarification.persistence import ConfirmationJournalStore
 
 
 async def _close(runtime: ResearchRuntime) -> None:

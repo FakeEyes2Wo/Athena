@@ -25,7 +25,7 @@ from athena.research.supervisor.deps import (
 )
 from athena.research.supervisor.prompt_context import hypothesis_block
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import Scheduler
+from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.supervisor import Supervisor
 
 
@@ -158,7 +158,7 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_failed_result_is_recorded_for_the_next_turn(self) -> None:
         supervisor = self._supervisor({}, _plan_state())
 
-        await supervisor._plans._record_turn_failure(
+        await supervisor._plans._runtime._record_turn_failure(
             "hyp_abc",
             SimpleNamespace(kind="scoring_failed", error="primary score is not finite"),
         )
@@ -170,7 +170,7 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_scored_result_records_nothing(self) -> None:
         supervisor = self._supervisor({}, _plan_state())
 
-        await supervisor._plans._record_turn_failure(
+        await supervisor._plans._runtime._record_turn_failure(
             "hyp_abc", SimpleNamespace(kind="scored", error=None)
         )
 
@@ -223,7 +223,7 @@ def _configured_supervisor(tree, state, agents) -> Supervisor:
             search=SearchServices(Scheduler(), Recovery()),
         ),
     )
-    supervisor._plans.persist_state = _noop
+    supervisor._plans._runtime._persist_state = _noop
 
     async def plan_input(plan_id: str):
         try:
@@ -236,7 +236,7 @@ def _configured_supervisor(tree, state, agents) -> Supervisor:
             eval_handoff=await _handoff(plan_id),
         )
 
-    supervisor._plans.plan_input = plan_input
+    supervisor._plans._runtime.plan_input = plan_input
     return supervisor
 
 

@@ -1,6 +1,6 @@
-mod python;
 mod commands;
 mod events;
+mod python;
 
 use python::bridge::PythonBridge;
 use std::sync::Arc;
@@ -24,6 +24,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::chat::message,
+            commands::clarification::task_clarification_start,
+            commands::clarification::task_clarification_get,
+            commands::clarification::task_clarification_retry,
+            commands::clarification::task_clarification_revise,
+            commands::clarification::task_clarification_cancel,
             commands::search::start_search,
             commands::search::pause_search,
             commands::search::resume_search,
@@ -52,7 +57,7 @@ pub fn run() {
             commands::state::session_switch,
             commands::state::session_delete,
             commands::state::human_pending,
-            commands::state::human_reply,
+            commands::clarification::human_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

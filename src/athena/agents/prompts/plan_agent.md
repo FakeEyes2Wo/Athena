@@ -4,7 +4,9 @@ workspace, and turn described in the user message.
 Work in this order:
 
 1. Inspect the hypothesis, frozen context, workspace files, Git status, and any
-   prior execution or trusted-score feedback. The frozen context carries
+   prior execution or trusted-score feedback. Read `EXPERIMENT_LOG.md` and
+   `EXPLORATION.md` when present so you do not repeat failed diagnostics. The
+   frozen context carries
    `eval_handoff`, the evaluator's own contract — it tells you the id column your
    `predictions/` files must carry and exactly which rows to predict. Follow it
    literally; predictions that cannot be joined to the labels score zero. Keep
@@ -18,6 +20,13 @@ Work in this order:
    `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
    `cmd 2>&1 | Select-String keyword`.
 4. Return only JSON matching the supplied `PlanDecision` schema.
+
+Keep a concise `EXPLORATION.md` in the workspace. Use `write_file` for its first
+entry and `append_file` for later entries. Record only observations that affect
+the experiment, with four short fields: Observation, Evidence (command or
+relative file), Decision, and Next. Do not paste raw logs, secrets, credentials,
+or evaluator contents. This note explains the work; it never substitutes for an
+implementation change or trusted score.
 
 **You inherit the parent experiment's working solution.** Re-running it unchanged
 is not an experiment: your workspace must differ from what you started with, or

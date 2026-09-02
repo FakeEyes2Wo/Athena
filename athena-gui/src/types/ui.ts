@@ -1,4 +1,27 @@
-import type { BudgetState, ExperimentEvent, TaskUnderstanding } from "../lib/tauri-bridge";
+import type {
+  BudgetState,
+  ClarificationAnswer,
+  ClarificationDraftDto,
+  ClarificationFailure,
+  ClarificationUnderstanding,
+  ExperimentEvent,
+  HumanChoice,
+  HumanReply,
+  HumanRequest,
+  TaskUnderstanding,
+  UnresolvedItem,
+} from "../lib/tauri-bridge";
+
+export type {
+  ClarificationAnswer,
+  ClarificationDraftDto,
+  ClarificationFailure,
+  ClarificationUnderstanding,
+  HumanChoice,
+  HumanReply,
+  HumanRequest,
+  UnresolvedItem,
+};
 
 export const CONTEXT_PANELS = [
   "metrics",
@@ -29,6 +52,22 @@ export type ModuleKey =
 
 export type PipelineStatus = "idle" | "running" | "paused" | "completed" | "error";
 
+/**
+ * Frontend clarification/run state.
+ *
+ * IDLE -> CLARIFYING -> READY_FOR_CONFIRMATION -> CONFIRMING -> RUNNING
+ *                       |-> revise -> CLARIFYING
+ *                       |-> cancel -> IDLE
+ *                       `-> retry -> CLARIFYING (from FAILED)
+ */
+export type ClarificationStatus =
+  | "IDLE"
+  | "CLARIFYING"
+  | "READY_FOR_CONFIRMATION"
+  | "CONFIRMING"
+  | "RUNNING"
+  | "FAILED";
+
 export type UIMessageKind =
   | "text"
   | "intent-preview"
@@ -36,12 +75,26 @@ export type UIMessageKind =
   | "result-summary"
   | "error";
 
+/** Frontend projection of the authoritative clarification draft. */
+export interface ClarificationPreview {
+  draftId: string;
+  revision: number;
+  status: ClarificationStatus;
+  understanding: ClarificationUnderstanding;
+  answers: ClarificationAnswer[];
+  unresolved: UnresolvedItem[];
+  failure: ClarificationFailure | null;
+}
+
+export type UIMessagePreview = ClarificationPreview | TaskUnderstanding;
+
 export interface UIMessage {
   id: string;
   role: "user" | "athena";
   kind: UIMessageKind;
   content: string;
-  preview?: TaskUnderstanding;
+  /** New clarification projection, or a legacy supervisor-style understanding. */
+  preview?: UIMessagePreview;
   /** Original task text the user typed (carried to ``start_search`` on confirm). */
   task?: string;
   /** True once the user confirmed and started this intent. */

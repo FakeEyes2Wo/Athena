@@ -47,13 +47,13 @@ async def test_whitespace_only_agent_text_deltas_are_not_projected(tmp_path) -> 
     seen: list[tuple[str, dict[str, object]]] = []
     runtime.subscribe(lambda kind, data: seen.append((kind, data)))
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare", "agent/text_delta", "event:1", {"delta": "\n", "accumulated": "\n"}
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare", "agent/text_delta", "event:2", {"delta": "  ", "accumulated": "  \n"}
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare",
         "agent/text_delta",
         "event:3",

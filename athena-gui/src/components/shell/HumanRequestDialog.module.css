@@ -16,6 +16,7 @@
   max-width: 460px;
   width: calc(100% - 40px);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  outline: none;
 }
 
 .title {
@@ -38,18 +39,7 @@
 
 .choices .button {
   text-align: left;
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-}
-
-.input {
-  flex: 1;
-  padding: 8px 10px;
-  border: 1px solid var(--color-border, #ccc);
-  border-radius: 6px;
+  width: 100%;
 }
 
 .button {
@@ -59,4 +49,42 @@
   background: var(--color-accent, #2563eb);
   color: #fff;
   cursor: pointer;
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.buttonActive {
+  outline: 2px solid var(--color-accent, #2563eb);
+  outline-offset: 1px;
+}
+
+.buttonSkip {
+  background: var(--color-muted, #6b7280);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.input {
+  flex: 1;
+  min-width: 180px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border, #ccc);
+  border-radius: 6px;
+}
+
+.error {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--color-danger-subtle, #fee2e2);
+  color: var(--color-danger, #b91c1c);
+  font-size: 12px;
 }

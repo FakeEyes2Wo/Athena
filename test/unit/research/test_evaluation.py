@@ -1,5 +1,6 @@
 """TrustedEvaluator metric-validation tests (finite scalar primary)."""
 
+import json
 import math
 from pathlib import Path
 
@@ -14,8 +15,10 @@ class _FakeRunner:
 
     def __init__(self, outputs: dict[str, object]) -> None:
         self._outputs = outputs
+        self.extra_files: dict[str, bytes] = {}
 
     async def run_dir(self, *_args, **_kwargs) -> ScriptRunResult:
+        self.extra_files = _kwargs.get("extra_files", {})
         return ScriptRunResult(outputs=self._outputs)
 
 
@@ -64,9 +67,7 @@ async def test_score_accepts_finite_number_and_numeric_string() -> None:
 
 @pytest.mark.asyncio
 async def test_score_carries_optional_uncertainty_fields() -> None:
-    result = await _evaluator(
-        {"primary": 0.84, "test_se": 0.02, "test_n": 100}
-    ).score(
+    result = await _evaluator({"primary": 0.84, "test_se": 0.02, "test_n": 100}).score(
         evaluator_dir=Path("."),
         predictions={},
         candidate_id="c",
@@ -75,6 +76,52 @@ async def test_score_carries_optional_uncertainty_fields() -> None:
     )
     assert result.test_se == 0.02
     assert result.test_n == 100
+
+
+@pytest.mark.asyncio
+async def test_score_carries_public_metrics_artifact() -> None:
+    result = await _evaluator(
+        {"primary": 0.84, "metrics_ref": "sha256:" + "1" * 64}
+    ).score(
+        evaluator_dir=Path("."),
+        predictions={},
+        candidate_id="c",
+        direction="maximize",
+        predictions_root="predictions",
+    )
+
+    assert result.metrics_ref == "sha256:" + "1" * 64
+
+
+@pytest.mark.asyncio
+async def test_score_adapts_single_legacy_csv_to_declared_filename(tmp_path) -> None:
+    (tmp_path / "metric.json").write_text(
+        json.dumps(
+            {
+                "task_id": "future-task",
+                "prediction_file": "predictions__future-task.csv",
+                "prediction_id_column": "sample_id",
+                "prediction_column": "pred_label",
+                "probability_columns": [],
+                "metrics_file": "metrics_public_test.csv",
+                "eval_script": "eval_metrics.py",
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = _FakeRunner({"primary": 0.84})
+
+    await TrustedEvaluator(runner).score(
+        evaluator_dir=tmp_path,
+        predictions={"predictions.csv": b"sample_id,pred_label\na,0\n"},
+        candidate_id="c",
+        direction="maximize",
+        predictions_root="predictions",
+    )
+
+    assert runner.extra_files["predictions/predictions__future-task.csv"] == (
+        b"sample_id,pred_label\na,0\n"
+    )
 
 
 @pytest.mark.asyncio

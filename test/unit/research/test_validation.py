@@ -2,7 +2,7 @@
 
 import pytest
 
-from athena.research.validation import (
+from athena.research.evaluation.validation import (
     ValidationService,
     generalization_gap,
     generalization_warning,

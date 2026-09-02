@@ -6,17 +6,21 @@ ValidationPlanner 标 EXPLORATORY，不得虚构 verifier。
 import json
 
 from athena.core.contracts import ArtifactStore
-from athena.research.idea_generation.idea_schemas import HypothesisPackage, ValidationPlan, VerifierSpec
-
-
-# ====== 常量：内置 verifier 列表 ======
+from athena.research.idea_generation.idea_schemas import (
+    HypothesisPackage,
+    ValidationPlan,
+    VerifierSpec,
+)
 
 BUILTIN_VERIFIERS: tuple[VerifierSpec, ...] = (
     VerifierSpec(
         verifier_type="ablation_replication",
         applicable_domains=["machine_learning", "ai4s"],
         observable_vars=["metric_before_ablation", "metric_after_ablation"],
-        statistical_assumptions=["same random seed budget as baseline", "same evaluation split"],
+        statistical_assumptions=[
+            "same random seed budget as baseline",
+            "same evaluation split",
+        ],
         success_condition="metric change matches expected_effect direction beyond noise floor",
         failure_condition="metric change is within noise floor or in the opposite direction",
         inconclusive_condition="baseline run itself failed to reproduce",
@@ -26,8 +30,6 @@ BUILTIN_VERIFIERS: tuple[VerifierSpec, ...] = (
     ),
 )
 
-
-# ====== VerifierRegistry（步骤 [7]，纯规则匹配） ======
 
 def match_verifier(package: HypothesisPackage, domain: str) -> VerifierSpec | None:
     """按研究领域从内置列表匹配一个可用 verifier；纯函数，不调用外部服务。找不到就返回
@@ -45,8 +47,6 @@ def match_verifier(package: HypothesisPackage, domain: str) -> VerifierSpec | No
             return verifier
     return None
 
-
-# ====== ValidationPlanner（步骤 [7]） ======
 
 async def plan_validation(
     package: HypothesisPackage,
@@ -77,11 +77,15 @@ async def plan_validation(
             estimated_cost_ref=cost_ref,
         )
 
-    cost_ref = await artifacts.put_text(json.dumps({
-        "verifier_type": verifier.verifier_type,
-        "supports_auto_exec": verifier.supports_auto_exec,
-        "requires_human_approval": verifier.requires_human_approval,
-    }))
+    cost_ref = await artifacts.put_text(
+        json.dumps(
+            {
+                "verifier_type": verifier.verifier_type,
+                "supports_auto_exec": verifier.supports_auto_exec,
+                "requires_human_approval": verifier.requires_human_approval,
+            }
+        )
+    )
     bound_verifier = verifier.model_copy(update={"cost_ref": cost_ref})
     return ValidationPlan(
         idea_id=package.idea_id,

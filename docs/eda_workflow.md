@@ -1,19 +1,21 @@
 # EDA Workflow
 
-This document describes how EDA files are generated and consumed.
+This document describes how EDA files are generated and consumed. The runtime
+entry points live in `src/athena/research/prepare/eda.py`; phase ordering is
+kept in `src/athena/research/prepare/orchestrator.py`.
 
 ## Flow
 
 ```text
 PREPARE
   → create EDA worktree
-  → prepare_eda (turn 1)
+  → `prepare/eda.py` (orchestrator turn 1)
       → writes EDA_TODO.md
   → Python todo runner
       → spawns eda_worker subagents
       → each worker writes one EDA_REPORT_*.md
       → marks - [x] on success
-  → prepare_eda (turn 2 / followup)
+  → `prepare/eda.py` (orchestrator turn 2 / follow-up)
       → reads EDA_REPORT_*.md
       → writes EDA_INDEX.md
       → writes EDA_HANDOFF.md
@@ -28,10 +30,10 @@ PREPARE
 
 | File | Owner | Purpose |
 |---|---|---|
-| `EDA_TODO.md` | prepare_eda | checkbox task list |
+| `EDA_TODO.md` | `prepare/eda.py` | checkbox task list |
 | `EDA_REPORT_*.md` | eda_worker | detailed reports |
-| `EDA_INDEX.md` | prepare_eda | navigation index |
-| `EDA_HANDOFF.md` | prepare_eda | concise handoff for baseline |
+| `EDA_INDEX.md` | `prepare/eda.py` | navigation index |
+| `EDA_HANDOFF.md` | `prepare/eda.py` | concise handoff for baseline |
 | `BASELINE_DESIGN.md` | baseline_ideator | baseline implementation plan |
 
 ## Finding files

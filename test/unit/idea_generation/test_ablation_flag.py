@@ -12,7 +12,7 @@ import pytest
 
 from athena.agents.ideator_agent import register_ideator_agent
 from athena.core.research_models import Hypothesis, HypothesisBatch
-from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.turns.runner import AgentTurnRunner
 from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisBatch,
     IdeatorHypothesisDraft,
@@ -139,9 +139,7 @@ async def test_baseline_mode_registers_ideator_output_untouched(monkeypatch):
         called["gate"] += 1
         return []
 
-    monkeypatch.setattr(
-        "athena.research.agent_turn_runner.run_light_pipeline", _tripwire
-    )
+    monkeypatch.setattr("athena.research.turns.ideator.run_light_pipeline", _tripwire)
     produced = [Hypothesis(statement="s", intervention="i", expected_effect="e")]
 
     result = await _runner("baseline")._finish_ideator_batch(
@@ -161,9 +159,7 @@ async def test_ideageneration_mode_sends_drafts_through_the_gate(monkeypatch):
         called["gate"] += 1
         return kept
 
-    monkeypatch.setattr(
-        "athena.research.agent_turn_runner.run_light_pipeline", _fake_gate
-    )
+    monkeypatch.setattr("athena.research.turns.ideator.run_light_pipeline", _fake_gate)
     draft = IdeatorHypothesisDraft(
         statement="s",
         intervention="i",

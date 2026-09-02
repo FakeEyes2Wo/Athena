@@ -12,14 +12,14 @@ from pathlib import Path
 import numpy
 
 from athena.core.artifact_store import LocalArtifactStore
-from athena.research.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.schemas import (
     PaperChunk,
     PaperContent,
     PaperProvenance,
     PaperVisual,
     SourceLocator,
 )
-from athena.research.survey.library import (
+from athena.research.literature.survey.library import (
     LibraryVectorCache,
     PaperLibrary,
     conversion_key,
@@ -41,7 +41,9 @@ def _library() -> PaperLibrary:
 
 async def _content(store: LocalArtifactStore, *, visual: bool = False) -> PaperContent:
     """造一篇最小但结构完整的论文，所有 blob 都真实落在 ``store`` 里。"""
-    locator = SourceLocator(source_kind="tex", file="main.tex", line_start=1, line_end=2)
+    locator = SourceLocator(
+        source_kind="tex", file="main.tex", line_start=1, line_end=2
+    )
     chunk = PaperChunk(
         chunk_id="chunk-1",
         kind="paragraph",
@@ -287,9 +289,7 @@ class ScoutKeyTest(unittest.TestCase):
     def test_changing_the_scorer_model_invalidates_it_too(self) -> None:
         request = '{"query":"x","max_steps":6}'
 
-        self.assertNotEqual(
-            scout_key(request, "flash/2"), scout_key(request, "plus/2")
-        )
+        self.assertNotEqual(scout_key(request, "flash/2"), scout_key(request, "plus/2"))
 
     def test_the_same_request_and_scorer_still_hit(self) -> None:
         request = '{"query":"x","max_steps":6}'

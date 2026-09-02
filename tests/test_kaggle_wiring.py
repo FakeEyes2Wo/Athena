@@ -5,7 +5,7 @@ import pytest
 from athena.kaggle.auth import KaggleCredentials
 from athena.kaggle.client import KaggleApiClient, _multipart_file
 from athena.kaggle.wiring import kaggle_slug_from_task
-from athena.research.paper_source.http import HttpResponse
+from athena.research.literature.paper_source.http import HttpResponse
 
 
 def test_extracts_slug_from_competition_url() -> None:

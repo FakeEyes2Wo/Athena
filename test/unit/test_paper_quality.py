@@ -4,18 +4,22 @@ import pathlib
 import re
 import unittest
 
-import athena.research.paper_markdown
+import athena.research.literature.paper_markdown
 
-from athena.research.paper_markdown.chunking import build_chunks
-from athena.research.paper_markdown.document import ParsedElement, ParsedPaper
-from athena.research.paper_markdown.quality import (
+from athena.research.literature.contracts import ChunkingConfig
+from athena.research.literature.paper_markdown.chunking import build_chunks
+from athena.research.literature.paper_markdown.document import (
+    ParsedElement,
+    ParsedPaper,
+)
+from athena.research.literature.paper_markdown.quality import (
     ALIGNMENT_ENVIRONMENTS,
     BOOKKEEPING_CODES,
     CONTENT_LOSS_CODES,
     grade_quality,
 )
-from athena.research.paper_markdown.quality import validate_rag_quality
-from athena.research.paper_markdown.schemas import ChunkingConfig, SourceLocator
+from athena.research.literature.paper_markdown.quality import validate_rag_quality
+from athena.research.literature.paper_markdown.schemas import SourceLocator
 
 LOCATOR = SourceLocator(source_kind="tex", file="main.tex", line_start=1, line_end=1)
 
@@ -172,7 +176,9 @@ class QualityGradingTest(unittest.TestCase):
 
     def test_every_emitted_code_is_classified(self):
         """A new diagnostic code must be graded explicitly, not silently inherit one."""
-        package = pathlib.Path(athena.research.paper_markdown.__file__).parent
+        package = pathlib.Path(
+            athena.research.literature.paper_markdown.__file__
+        ).parent
         emitted = set()
         for path in package.glob("*.py"):
             emitted.update(

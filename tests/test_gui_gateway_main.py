@@ -16,3 +16,5 @@ def test_make_runtime_enables_auto_validate(monkeypatch) -> None:
 
     assert seen.get("auto_validate") is True
     assert seen.get("project_root") == "/tmp/proj"
+    assert seen.get("task_confirmation_gate") is True
+    assert seen.get("auto_confirm") is False

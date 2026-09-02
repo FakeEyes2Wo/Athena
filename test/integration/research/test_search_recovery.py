@@ -20,9 +20,9 @@ from athena.research.supervisor.deps import (
 )
 from athena.research.supervisor.experiment import load_best
 from athena.research.supervisor.plans import PlanInput
-from athena.research.supervisor.policy import EloPolicy
+from athena.research.supervisor.scheduling import EloPolicy
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import Scheduler
+from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 from test.integration.research.test_rolling_search import (

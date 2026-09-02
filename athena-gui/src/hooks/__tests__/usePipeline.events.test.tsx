@@ -14,14 +14,34 @@ vi.mock("../../lib/tauri-bridge", () => ({
   stateGet: vi.fn().mockResolvedValue({}),
   sessionsList: vi.fn().mockResolvedValue({ sessions: [] }),
   sessionSwitch: vi.fn().mockResolvedValue({ records: [] }),
+  sessionDelete: vi.fn().mockResolvedValue({ deleted: true, sessions: [] }),
   subscribeToPipelineEvents: vi.fn(async (handler) => {
     eventHandlers.push(handler);
     return [];
   }),
-  PIPELINE_EVENT_NAMES: ["state", "output"],
+  taskClarificationStart: vi.fn().mockResolvedValue({
+    draft_id: "draft-1",
+    revision: 1,
+    status: "CLARIFYING",
+  }),
+  taskClarificationGet: vi.fn().mockResolvedValue({
+    draft_id: "draft-1",
+    revision: 1,
+    status: "READY_FOR_CONFIRMATION",
+    understanding: { title: "Titanic 分类", dataset: "train.csv", target: "survived" },
+    answers: [],
+    unresolved: [],
+    failure: null,
+  }),
+  taskClarificationRevise: vi.fn().mockResolvedValue({ draft_id: "draft-1", revision: 2, status: "CLARIFYING" }),
+  taskClarificationRetry: vi.fn().mockResolvedValue({ draft_id: "draft-1", revision: 2, status: "CLARIFYING" }),
+  taskClarificationCancel: vi.fn().mockResolvedValue({ ok: true }),
+  humanPending: vi.fn().mockResolvedValue({ requests: [] }),
+  humanReply: vi.fn().mockResolvedValue({ ok: true }),
+  PIPELINE_EVENT_NAMES: ["state", "output", "clarification", "human_request"],
 }));
 
-import { sendControl, startSearch } from "../../lib/tauri-bridge";
+import { sendControl, startSearch, taskClarificationStart } from "../../lib/tauri-bridge";
 import { usePipeline } from "../usePipeline";
 
 describe("usePipeline event mapping", () => {
@@ -29,6 +49,12 @@ describe("usePipeline event mapping", () => {
     eventHandlers.length = 0;
     vi.mocked(sendControl).mockClear();
     vi.mocked(startSearch).mockClear();
+    vi.mocked(taskClarificationStart).mockClear();
+    vi.mocked(taskClarificationStart).mockResolvedValue({
+      draft_id: "draft-1",
+      revision: 1,
+      status: "CLARIFYING",
+    });
   });
 
   it("maps a state event to phase, status, budget, and SOTA", async () => {
@@ -67,11 +93,10 @@ describe("usePipeline event mapping", () => {
       await result.current.sendPrompt("kaggle URL");
     });
 
-    expect(result.current.viewModel.status).toBe("running");
-    // No frontend-side parse_intent: a new prompt starts the backend-owned
-    // task understanding/run instead of calling the Supervisor directly.
-    expect(startSearch).toHaveBeenCalledWith({ task: "kaggle URL" });
+    expect(taskClarificationStart).toHaveBeenCalledWith("kaggle URL");
+    expect(startSearch).not.toHaveBeenCalled();
     expect(sendControl).not.toHaveBeenCalled();
+    expect(result.current.status).toBe("CLARIFYING");
   });
 
   it("updates the intent preview card from the supervisor task understanding", async () => {
@@ -103,8 +128,166 @@ describe("usePipeline event mapping", () => {
     const preview = result.current.viewModel.messages.find(
       (m) => m.kind === "intent-preview",
     );
-    expect(preview?.preview?.title).toBe("Titanic 分类");
-    expect(preview?.preview?.primary_metric).toBe("accuracy");
+    expect(preview?.preview).toMatchObject({
+      title: "Titanic 分类",
+      primary_metric: "accuracy",
+    });
+  });
+
+  it("applies clarification events to the authoritative preview", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "clarification",
+        data: {
+          session_id: "default",
+          draft: {
+            schema_version: 1,
+            draft_id: "draft-1",
+            revision: 3,
+            session_id: "default",
+            original_task: "predict churn",
+            status: "READY_FOR_CONFIRMATION",
+            understanding: {
+              title: "Predict churn",
+              dataset: "churn.csv",
+              target: "churned",
+              task_type: "classification",
+              primary_metric: "f1",
+              direction: "maximize",
+              evaluation_plan: "holdout f1",
+            },
+            answers: [],
+            unresolved: [],
+            failure: null,
+            questions_asked: 2,
+            created_at: "2026-09-01T10:00:00Z",
+            updated_at: "2026-09-01T10:00:00Z",
+          },
+        },
+      });
+    });
+
+    const preview = result.current.viewModel.messages.find(
+      (m) => m.kind === "intent-preview",
+    );
+    expect(preview?.preview).toMatchObject({ draftId: "draft-1", revision: 3 });
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+  });
+
+  it("shows clarification questions and user replies in the conversation flow", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "human_request",
+        data: {
+          session_id: "default",
+          action: "created",
+          request: {
+            request_id: "req-1",
+            session_id: "default",
+            scope_id: "draft-1",
+            scope_kind: "clarification",
+            prompt: "Which metric should be primary?",
+            choices: [
+              { label: "F1", value: "f1" },
+              { label: "AUC", value: "auc" },
+            ],
+            allow_custom: true,
+            allow_skip: true,
+            created_at: "2026-09-01T10:00:00Z",
+            expires_at: "2026-09-01T10:02:00Z",
+          },
+        },
+      });
+    });
+
+    expect(
+      result.current.viewModel.messages.find((m) => m.id === "clarify-q-req-1"),
+    ).toMatchObject({
+      role: "athena",
+      content: expect.stringContaining("Which metric should be primary?"),
+    });
+
+    await act(async () => {
+      await result.current.replyToHumanRequest("req-1", { kind: "text", text: "macro F1" });
+    });
+
+    expect(
+      result.current.viewModel.messages.find((m) => m.id === "clarify-a-req-1"),
+    ).toMatchObject({
+      role: "user",
+      content: "macro F1",
+    });
+  });
+
+  it("ignores human requests from another session", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "human_request",
+        data: {
+          session_id: "other-session",
+          action: "created",
+          request: {
+            request_id: "req-other",
+            session_id: "other-session",
+            scope_id: "draft-other",
+            scope_kind: "clarification",
+            prompt: "Should not appear",
+            choices: [],
+            allow_custom: true,
+            allow_skip: true,
+            created_at: "2026-09-01T10:00:00Z",
+            expires_at: "2026-09-01T10:02:00Z",
+          },
+        },
+      });
+    });
+
+    expect(
+      result.current.viewModel.messages.find((m) => m.id === "clarify-q-req-other"),
+    ).toBeUndefined();
+    expect(result.current.humanRequests).toHaveLength(0);
+  });
+
+  it("records server-generated timeout as a clarification note", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "human_request",
+        data: {
+          session_id: "default",
+          action: "settled",
+          request_id: "req-timeout",
+          outcome: { kind: "timeout", request_id: "req-timeout", value: null },
+        },
+      });
+    });
+
+    expect(
+      result.current.viewModel.messages.find((m) => m.id === "clarify-o-req-timeout"),
+    ).toMatchObject({ content: "该问题已超时" });
   });
 
   it("appends output events as athena messages", async () => {

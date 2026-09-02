@@ -1,12 +1,12 @@
 """PlanAgent structured-output and workspace-isolation contracts."""
 
 import json
-from importlib import import_module
 from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelRequest
 
+from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
@@ -79,12 +79,6 @@ class _WorkspaceProvider:
 def _runtime(
     tmp_path: Path, provider: object, workspace_for
 ) -> tuple[AgentRuntime, LocalArtifactStore]:
-    try:
-        register_plan_agent = import_module(
-            "athena.agents.plan_agent"
-        ).register_plan_agent
-    except ModuleNotFoundError:
-        pytest.fail("PlanAgent registration is missing")
     store = LocalArtifactStore(tmp_path / "artifacts")
     registry = AgentTypeRegistry()
     register_plan_agent(
@@ -147,8 +141,12 @@ async def test_plan_agent_uses_its_named_workspace(tmp_path: Path) -> None:
 
     assert (roots["h1"] / "identity.txt").read_text() == "owned"
     assert (roots["h2"] / "identity.txt").read_text() == "owned"
-    assert (roots["h1"] / "shell-identity.txt").read_text().strip() == "shell-owned"
-    assert (roots["h2"] / "shell-identity.txt").read_text().strip() == "shell-owned"
+    assert (roots["h1"] / "shell-identity.txt").read_text(
+        encoding="utf-8-sig"
+    ).strip() == "shell-owned"
+    assert (roots["h2"] / "shell-identity.txt").read_text(
+        encoding="utf-8-sig"
+    ).strip() == "shell-owned"
     assert provider.completed_agents == 2
     assert roots["h1"] != roots["h2"]
     await runtime.aclose()

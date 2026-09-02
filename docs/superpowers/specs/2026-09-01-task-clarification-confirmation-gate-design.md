@@ -1,7 +1,7 @@
 # Task Clarification Confirmation Gate Design
 
 Date: 2026-09-01
-Status: draft for written-spec review; product direction approved
+Status: approved for implementation planning
 
 ## 1. Problem summary
 
@@ -91,6 +91,16 @@ class UnresolvedItem(BaseModel):
     reason: str
     critical: bool
 
+class ClarificationFailure(BaseModel):
+    code: str
+    message: str
+    retryable: bool
+
+class ClarificationRevision(BaseModel):
+    base_revision: int
+    instruction: str
+    requested_at: str
+
 class ClarificationDraft(BaseModel):
     schema_version: Literal[1]
     draft_id: str
@@ -102,8 +112,10 @@ class ClarificationDraft(BaseModel):
     ]
     understanding: DraftUnderstanding
     answers: list[ClarificationAnswer]
+    revisions: list[ClarificationRevision]
     unresolved: list[UnresolvedItem]
     pending_request: HumanRequest | None
+    failure: ClarificationFailure | None
     questions_asked: int
     created_at: str
     updated_at: str
@@ -221,12 +233,14 @@ a typed conflict and the GUI reloads the latest draft.
 ### 7.4 Revise or cancel
 
 ```text
+task_clarification_retry({ draft_id, revision })
 task_clarification_revise({ draft_id, revision, instruction })
 task_clarification_cancel({ draft_id, revision })
 ```
 
-Revision returns the draft to `CLARIFYING` without discarding prior answers. Cancellation
-settles any pending broker request and returns the session to `IDLE`.
+Retry clears a retryable failure and returns the draft to `CLARIFYING`. Revision returns
+the draft to `CLARIFYING` without discarding prior answers or revision instructions.
+Cancellation settles any pending broker request and returns the session to `IDLE`.
 
 ## 8. Controller behavior
 

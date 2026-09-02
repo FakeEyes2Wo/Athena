@@ -54,6 +54,7 @@ def archive_output_roots(
     history = _history_root(workdir, version)
     for rel in outputs.values():
         root = resolve_workspace_path(workdir, rel)
+        was_directory = root.is_dir()
         if root.exists():
             target = history / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -63,7 +64,8 @@ def archive_output_roots(
                 else:
                     target.unlink()
             shutil.move(str(root), str(target))
-        root.mkdir(parents=True, exist_ok=True)
+        if was_directory:
+            root.mkdir(parents=True, exist_ok=True)
 
 
 def restore_output_roots(
@@ -93,12 +95,15 @@ def assert_output_roots(
     *,
     required: set[str],
 ) -> None:
-    """Assert every required declared output directory exists and is non-empty."""
+    """Assert every required output is a non-empty file or directory."""
     for name, rel in outputs.items():
         if name not in required:
             continue
         root = resolve_workspace_path(workdir, rel)
-        if not root.is_dir() or not any(root.iterdir()):
+        populated = root.stat().st_size > 0 if root.is_file() else False
+        if root.is_dir():
+            populated = any(root.iterdir())
+        if not populated:
             raise OutputFreshnessError(name, root)
 
 

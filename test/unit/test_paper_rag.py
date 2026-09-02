@@ -7,14 +7,14 @@ import unittest
 
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext
-from athena.research.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.schemas import (
     PaperChunk,
     PaperContent,
     PaperProvenance,
     PaperVisual,
     SourceLocator,
 )
-from athena.research.paper_rag.index import (
+from athena.research.literature.paper_rag.index import (
     SEMANTIC_MARGIN_THRESHOLD,
     SEMANTIC_PROBES,
     NonSemanticEmbedderError,
@@ -29,25 +29,27 @@ from athena.research.paper_rag.index import (
     title_matches,
     unpack_vectors,
 )
-from athena.research.paper_scout.pool import title_key
-from athena.research.paper_rag.schemas import PaperCorpusIndex
-from athena.research.paper_rag.search import (
-    ALREADY_READ_NOTICE,
+from athena.research.literature.paper_scout.pool import title_key
+from athena.research.literature.paper_rag.schemas import PaperCorpusIndex
+from athena.research.literature.paper_rag.search import (
     CorpusCache,
     RetrievalSession,
-    citation_links,
     corpus_overview,
     heading_variants,
     keyword_search,
-    read_chunks,
-    paper_namespace,
     score_by_keywords,
-    section_search,
     self_contained_weight,
     semantic_search,
+)
+from athena.research.literature.paper_rag.traversal import (
+    ALREADY_READ_NOTICE,
+    citation_links,
+    paper_namespace,
+    read_chunks,
+    section_search,
     visual_links,
 )
-from athena.research.paper_rag.tool import (
+from athena.research.literature.paper_rag.tool import (
     PaperChunkReadTool,
     PaperCitesTool,
     PaperCorpusOverviewTool,
@@ -1419,7 +1421,7 @@ class ReferenceEdgeTest(unittest.TestCase):
 
     @staticmethod
     def _units(namespace: str, count: int = 2) -> list:
-        from athena.research.paper_markdown.schemas import RetrievalUnit
+        from athena.research.literature.paper_markdown.schemas import RetrievalUnit
 
         return [
             RetrievalUnit(

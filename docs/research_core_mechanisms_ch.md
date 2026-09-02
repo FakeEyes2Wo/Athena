@@ -3,8 +3,8 @@
 > 状态：current
 > 覆盖范围：`src/athena/core/research_tree.py`、`src/athena/core/research_models.py`、
 > `src/athena/research/supervisor/`、`src/athena/research/idea_generation/`、
-> `src/athena/research/agent_turn_runner.py`、`src/athena/research/phase_runner.py`、
-> `src/athena/research/runtime.py`、`src/athena/agents/ideator_agent.py`、`src/athena/agents/data_agent.py`。
+> `src/athena/research/turns/`、`src/athena/research/runtime/phase_runner.py`、
+> `src/athena/research/runtime/facade.py`、`src/athena/agents/ideator_agent.py`、`src/athena/agents/task_agents.py`。
 > 本文整理的是当前 `main` 分支的真实实现，不描述已删除或未接线的历史代码。
 
 ---
@@ -20,7 +20,7 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
   └─ 在固定名称 worktree（name="eda"）里做 EDA，冻结 evaluator，产出 baseline 并写入 ResearchTree 作为 SOTA
 ```
 
-- 组合根：`src/athena/research/runtime.py` 的 `ResearchRuntime`。
+- 组合根：`src/athena/research/runtime/facade.py` 的 `ResearchRuntime`。
 - 唯一写者：`src/athena/research/supervisor/supervisor.py` 的 `Supervisor`，它独占 `ResearchState` 与 `ResearchTree` 的变更。
 - 状态落盘：`.athena/state.json`（`ResearchState`）与 `.athena/research_tree.json`（`ResearchTree`）。
 
@@ -99,7 +99,7 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 
 ## 2. SEARCH 搜索机制
 
-> 当前 `main` 中已没有独立的 `src/athena/research/search.py`（历史 `SearchService` 已在
+> 当前 `main` 中已没有独立的 SearchService 模块（历史实现已在
 > `d8282c5` 中删除）。滚动搜索的实现收敛在 `src/athena/research/supervisor/` 包中。
 
 ### 2.1 参与模块
@@ -107,9 +107,7 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 | 文件 | 职责 |
 |---|---|
 | `supervisor/supervisor.py` | `Supervisor`：唯一写者，运行 `run_search` 调度循环，创建/结算 Plan，维护 SOTA |
-| `supervisor/scheduler.py` | `Scheduler`：纯确定性的槽位填充，输出 `ScheduleAction`；`count_search_attempts` |
-| `supervisor/policy.py` | `HypothesisPolicy` 协议 + `EloPolicy`（单边 Elo）；`queue_order` |
-| `supervisor/ranker.py` | `Selector`：UCB 风格排序 + Jaccard 去重 |
+| `supervisor/scheduling.py` | `Scheduler`、`EloPolicy` 与 `Selector`：调度、评级、排序和去重 |
 | `supervisor/recovery.py` | `Recovery`：崩溃恢复，协调 `state.json` 与 `research_tree.json` |
 | `supervisor/state.py` | `ResearchState`：`status` / `phase` / `search_limit` / `concurrency` / `ideator_count` / `hypotheses_per_ideator` / `manual_mode` / `plans` / `eda_dir` |
 | `supervisor/plans.py` | `PlanState` / `PlanInput` / `PlanBest` / `PlanDecision` |
@@ -127,7 +125,7 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 
 ### 2.3 `Scheduler.next_actions` 的槽位填充顺序
 
-文件：`supervisor/scheduler.py`
+文件：`supervisor/scheduling.py`
 
 在 `state.phase == "SEARCH"` 时，按固定优先级填满 `free_slots = concurrency - len(running)`：
 
@@ -164,7 +162,7 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 ### 2.6 指标比较与评级策略
 
 - `_compare_metric`：`maximize` 时 `delta = candidate - reference`；`minimize` 时 `delta = reference - candidate`；`delta > tolerance` → WIN，`delta < -tolerance` → LOSS，否则 DRAW。
-- `EloPolicy`（`supervisor/policy.py`）：
+- `EloPolicy`（`supervisor/scheduling.py`）：
   - `seed(parent)`：新假设继承父假设 priority（无父则 1000.0）。
   - `settle(reference_priority, outcome)`：`reference_priority + k * (score - 0.5)`，score 为 WIN=1.0 / DRAW=0.5 / LOSS=0.0，默认 `k=32`。
 - `Scheduler` 默认使用 `EloPolicy` 和 `Selector(EloPolicy)`。
@@ -186,8 +184,8 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 
 ### 3.1 路径 A：SEARCH 内的实时 EDA-grounded Ideator（线上主路径）
 
-文件：`src/athena/research/agent_turn_runner.py`、`src/athena/agents/ideator_agent.py`、
-`src/athena/core/agent/prompts/ideator_agent.md`、`ideator_gated_agent.md`
+文件：`src/athena/research/turns/ideator.py`、`src/athena/agents/ideator_agent.py`、
+`src/athena/agents/prompts/ideator_agent.md`、`src/athena/agents/prompts/ideator_gated_agent.md`
 
 流程：
 
@@ -208,30 +206,11 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 4. 汇总各 lane 的 `HypothesisBatch`：合并 `hypotheses`，并收集所有非空 `eda_request` 触发动态 EDA（见第 5 节）。
 5. 返回全部 hypotheses 给 `Supervisor.register_hypotheses` 写入 ResearchTree。
 
-### 3.2 路径 B：离线全流程 Idea Generation（论文挖掘 / 批量候选场景）
+### 3.2 单一 Idea Generation 路径
 
-文件：`src/athena/research/idea_generation/workflow.py` → `run_full_pipeline`
-
-入口：`run_full_pipeline(problem, gap_miner_agent, novelty_agent, domain_review_agent, artifacts, corpus_ref, ...)`
-
-步骤：
-
-1. **[2] 空白挖掘**：`mine_research_gaps` 产出一组研究空白 `GapCandidate`。
-2. **[3] 多候选生成 + 去重**：`generate_candidates` 并行跑最多 `MAX_VERBALIZED_SAMPLES = 5` 个策略 Agent：
-   - `analogical_transfer`（类比迁移）
-   - `mechanistic_reasoning`（机制推演）
-   - `counterintuitive`（反直觉假设）
-   - `constraint_relaxation`（约束松弛）
-   - `boundary_extrapolation`（边界外推）
-   - 每个策略单轮产出一个 `HypothesisPackage`；`deduplicate_candidates` 按 `novel_hypothesis` 词集 Jaccard ≥ 0.8 去重，同组保留 `sampling_probability` 最高者。
-3. **[4]-[8] 每个候选并发过闸**：`_process_one_candidate`
-   - [4] `structural_check` + `falsifiability_check` → `pre_gate`（不合格直接淘汰，跳过后续昂贵步骤）。
-   - [5] 新颖性审计：`collect_novelty_evidence`（失败降级为空报告）。
-   - [6] 三视角审阅委员会：`review_board`。
-   - [7] 验证方案：`match_verifier` + `plan_validation`。
-   - [8] `hard_gate`；若判 `REVISE` 且 `is_revisable`，进入 [8'] 修订闭环：`run_debate` → `refresh_stale_evidence` → 再次 `hard_gate`。
-4. **[9] Pairwise Elo 排序**：对存活候选（PASS/EXPLORATORY）两两匿名双向比较，`HypoPriList` 排名（见第 4 节）。
-5. 返回 `(results, ranking)`；`hypothesis_selector.select_next_hypotheses` 按预算截断。
+当前生产实现只有实时 Ideator 门禁路径。历史离线 `workflow.py`、候选生成器和
+局部排序器已删除；论文证据由 `literature/` 提供，所有通过门禁的候选按提交顺序
+进入统一的 ResearchTree/Supervisor 假设池。
 
 ### 3.3 实时 Ideator 的门禁：`run_light_pipeline`
 
@@ -244,7 +223,7 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 - 审阅：无语料时只跑 `methodology + statistics` 两个视角；有 `corpus_ref` 时先跑新颖性审计，再跑全部三个视角。
 - `light_hard_gate`（无语料）或 `hard_gate`（有语料）。
 - REVISE/REJECT 的候选本轮直接丢弃（不进入修订闭环），但逐条理由返回给生成侧。
-- 存活候选若 > 1，匿名双向 pairwise Elo 排名，按名次转回 `core.Hypothesis`。
+- 存活候选按提交顺序转回 `core.Hypothesis`，不在门禁内部维护第二套排序状态。
 - 语料半配置（给了 `corpus_ref` 没给 agent）直接抛错，绝不静默降级。
 
 ### 3.4 门禁判定逻辑
@@ -271,11 +250,11 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 
 ## 4. Hypothesis 排序机制
 
-系统中存在两层排序，分别服务于不同阶段。
+系统只保留一套由 Supervisor 拥有的排序，避免生成侧和执行侧各自维护优先级。
 
 ### 4.1 层 1：SEARCH 调度排序（决定先跑哪个假设）
 
-文件：`src/athena/research/supervisor/ranker.py`、`policy.py`、`scheduler.py`
+文件：`src/athena/research/supervisor/scheduling.py`
 
 `Selector.rank(tree, candidates)` 对 pending 候选计算确定性分数：
 
@@ -315,34 +294,10 @@ score = WIN 1.0 / DRAW 0.5 / LOSS 0.0
 
 新假设通过 `seed(parent)` 继承父假设 priority；没有父则 1000.0。结算时用**冻结的 reference priority**，不受期间其它结算影响。
 
-### 4.2 层 2：Idea Generation 候选排序（决定候选质量顺序）
+### 4.2 Idea Generation 与调度的边界
 
-文件：`src/athena/research/idea_generation/ranking.py`、`workflow.py`
-
-`HypoPriList` 是在线 Elo 优先队列：
-
-- 初始 rating 1200，K=32。
-- `record_comparison(PairwiseComparison)`：标准 Elo 公式即时更新双方 rating，并把 rationale 存为该候选的证据。
-- `rank()`：rating 降序，tie-break 为 `idea_id` 升序，输出 `RankedCandidate(rating, comparisons, evidence)`。
-
-`workflow._pairwise_compare` 的偏置控制：
-
-- 两个候选匿名化后**双向各评一次**（A vs B 和 B vs A）。
-- 双向一致才认为 winner 可靠；不一致则记录 disagreement（可能存在 position bias）。
-- 所有配对 `asyncio.gather` 并发。
-
-`gate._pairwise_compare`（实时 Ideator 门禁内部）使用同样模式。
-
-`hypothesis_selector.select_next_hypotheses(results, ranking, budget)`：
-
-- 按 rating 降序取前 `budget` 个，交叉引用出完整审计记录；
-- budget ≤ 0 返回空；ranking 引用了 results 不存在的 idea_id 时抛 `KeyError`（调用方传错 pair 要显式失败）。
-
-### 4.3 两者关系
-
-- **层 2** 决定“Ideator 产出的候选按质量怎么排”，产出 `Hypothesis` 列表。
-- **层 1** 决定“进入 ResearchTree 后，在 SEARCH 并发槽位中先执行谁”，以及“实验结算后假设的优先级如何演化”。
-- 两者不共享状态：层 2 是生成侧的横向比较；层 1 是搜索侧基于真实实验反馈的纵向演化。
+Idea Generation 只负责产出和门禁，不维护局部 Elo 或候选池。候选进入
+ResearchTree 后，统一由 `supervisor/scheduling.py` 去重、排序和按实验结果更新优先级。
 
 ---
 
@@ -350,7 +305,7 @@ score = WIN 1.0 / DRAW 0.5 / LOSS 0.0
 
 ### 5.1 PREPARE 固定 EDA 工作区
 
-文件：`src/athena/research/phase_runner.py`、`src/athena/research/runtime.py`
+文件：`src/athena/research/runtime/phase_runner.py`、`src/athena/research/runtime/facade.py`
 
 1. PREPARE 开始时，`LocalGitWorkspace.create(base_commit, "athena/prepare", name="eda")` 创建**固定名称** `eda` worktree。
 2. `run_prepare_phase` 把 EDA 目录相对项目根的路径写入 `rt._state.eda_dir`（例如 `workspaces/eda`），随 `state.json` 持久化。
@@ -359,7 +314,7 @@ score = WIN 1.0 / DRAW 0.5 / LOSS 0.0
 
 ### 5.2 断点续传保护
 
-文件：`src/athena/research/runtime.py`（构造期）
+文件：`src/athena/research/runtime/facade.py`（构造期）
 
 - 恢复 `state.json` 时，如果 `eda_dir` 指向项目根之外（例如跨目录拷贝的旧 state），强制置空，让 PREPARE 重建。
 
@@ -367,7 +322,7 @@ score = WIN 1.0 / DRAW 0.5 / LOSS 0.0
 
 文件：`src/athena/core/research_models.py`（`HypothesisBatch.eda_request`）、
 `src/athena/research/idea_generation/idea_schemas.py`（`IdeatorHypothesisBatch.eda_request`）、
-`agent_turn_runner.py`
+`turns/ideator.py`
 
 1. 普通（baseline）Ideator 输出 `HypothesisBatch`、gated Ideator 输出 `IdeatorHypothesisBatch`，两者都带可选字段 `eda_request`：
    - 非空：表示“现有 EDA 不足以支撑可靠假设，请求补充分析”。
@@ -378,8 +333,8 @@ score = WIN 1.0 / DRAW 0.5 / LOSS 0.0
 
 ### 5.4 Data Agent 执行补充分析
 
-文件：`src/athena/agents/data_agent.py`、`src/athena/core/agent/prompts/data_agent.md`、
-`agent_turn_runner.run_data_turn`
+文件：`src/athena/agents/task_agents.py`、`src/athena/agents/prompts/data_agent.md`、
+`turns/runner.py::AgentTurnRunner.run_data_turn`
 
 1. `run_data_turn` 注册 Data Agent（agent type/id 均为 `data`），工具绑定 EDA 工作区。
 2. Prompt 约束 Data Agent：
@@ -408,26 +363,70 @@ SEARCH 空槽 → Ideator 探索 EDA 目录 → 输出假设 + eda_request
 | 研究树模型 | `src/athena/core/research_tree.py` |
 | 核心研究模型 | `src/athena/core/research_models.py` |
 | SEARCH 调度循环 | `src/athena/research/supervisor/supervisor.py` |
-| SEARCH 调度器 | `src/athena/research/supervisor/scheduler.py` |
-| 评级策略 | `src/athena/research/supervisor/policy.py` |
-| 排序与去重 | `src/athena/research/supervisor/ranker.py` |
+| SEARCH 调度、评级、排序与去重 | `src/athena/research/supervisor/scheduling.py` |
 | Plan 状态/输入 | `src/athena/research/supervisor/plans.py` |
 | Plan 执行与结算 | `src/athena/research/supervisor/experiment.py` |
 | 崩溃恢复 | `src/athena/research/supervisor/recovery.py` |
-| Idea Generation 全流程 | `src/athena/research/idea_generation/workflow.py` |
-| 候选生成与去重 | `src/athena/research/idea_generation/candidate_generation.py` |
+| Idea Generation 门禁流程 | `src/athena/research/idea_generation/gate.py` |
+| 候选调度与去重 | `src/athena/research/supervisor/scheduling.py` |
 | 门禁判定 | `src/athena/research/idea_generation/gatekeeper.py` |
 | 实时 Ideator 门禁 | `src/athena/research/idea_generation/gate.py` |
-| Pairwise Elo 排序 | `src/athena/research/idea_generation/ranking.py` |
-| 候选选择 | `src/athena/research/idea_generation/hypothesis_selector.py` |
+| Pairwise Elo 排序 | `src/athena/research/supervisor/scheduling.py` |
+| 候选选择 | `src/athena/research/supervisor/scheduling.py` |
 | Ideator 注册 | `src/athena/agents/ideator_agent.py` |
-| Data Agent 注册 | `src/athena/agents/data_agent.py` |
-| Agent turn 编排 | `src/athena/research/agent_turn_runner.py` |
-| PREPARE/EDA 目录创建 | `src/athena/research/phase_runner.py` |
-| 组合根 | `src/athena/research/runtime.py` |
+| Data Agent 注册 | `src/athena/agents/task_agents.py` |
+| Agent turn 编排 | `src/athena/research/turns/runner.py`、`turns/ideator.py` |
+| PREPARE/EDA 目录创建 | `src/athena/research/prepare/eda.py` |
+| 组合根 | `src/athena/research/runtime/facade.py` |
 | GUI 图算法 | `src/athena/gui/graph.py` |
-| Ideator 提示词 | `src/athena/core/agent/prompts/ideator_agent.md`、`ideator_gated_agent.md` |
-| Data Agent 提示词 | `src/athena/core/agent/prompts/data_agent.md` |
+| Ideator 提示词 | `src/athena/agents/prompts/ideator_agent.md`、`src/athena/agents/prompts/ideator_gated_agent.md` |
+| Data Agent 提示词 | `src/athena/agents/prompts/data_agent.md` |
+
+### 6.1 Research 包布局与新增职责
+
+本轮整理后的 `src/athena/research` 有 142 个 Python 文件、30,394 行；根目录只保留
+10 个 Python 文件。新增文件都对应可单独测试的职责，而不是旧模块路径的兼容转发：
+
+| 文件 | 独立职责 |
+|---|---|
+| `exploration_files.py` | 校验并发布 Agent exploration-file 产物 |
+| `turns/__init__.py` | turns 功能包边界，不转发内部实现 |
+| `turns/common.py` | turn 等待、再生成与事件公共逻辑 |
+| `turns/runner.py` | 按 Agent 角色分派 turn，并持有共享运行依赖 |
+| `turns/ideator.py` | Ideator lane、提示词、结果、引用与探索文件处理 |
+| `turns/general.py` | General/Kaggle turn 执行 |
+| `turns/support.py` | 引用支持证据验证 |
+| `prepare/__init__.py` | PREPARE 功能包边界，不转发内部实现 |
+| `prepare/orchestrator.py` | PREPARE 阶段顺序，不承载各步骤实现 |
+| `prepare/data.py` | 数据切分与平台数据合同 |
+| `prepare/baseline.py` | baseline 设计与可信执行 |
+| `prepare/eda.py` | EDA 工作区、TODO 解析与执行 |
+| `prepare/evaluator.py` | SEARCH/FINAL evaluator 冻结与准备 |
+| `evaluation/__init__.py` | 仅公开稳定的 `TrustedEvaluator` 入口 |
+| `evaluation/evaluator.py` | `TrustedEvaluator` 执行入口 |
+| `evaluation/spec.py` | 数据集自适应 evaluator 文件、列与指标合同 |
+| `evaluation/trust.py` | evaluator 的确定性与隔离属性检查 |
+| `evaluation/validation.py` | 泛化差距与顶层验证服务 |
+| `clarification/persistence.py` | clarification draft 与确认 journal 的持久化/恢复 |
+| `clarification/context.py` | 已确认任务上下文的验证读取与 prompt 渲染 |
+| `supervisor/scheduling.py` | outcome、Elo、候选排序与槽位调度 |
+| `supervisor/plan_runtime.py` | Plan 输入、工作区、turn 执行与恢复 |
+| `supervisor/settlement.py` | 指标比较、Plan 结算、SOTA 与结果投影 |
+| `supervisor/validation_contracts.py` | 验证输入、结果、选项与恢复数据合同 |
+| `runtime/__init__.py` | 公开稳定的 `ResearchRuntime` 与默认 survey 数量 |
+| `runtime/event_projection.py` | Supervisor 事件到输出/状态的纯投影 |
+| `runtime/phase_runner.py` | PREPARE、SEARCH、VALIDATE 的阶段动作 |
+| `literature/__init__.py` | literature 功能包边界，不转发子系统实现 |
+| `literature/contracts.py` | Source/Markdown 转换边界共享类型 |
+| `paper_markdown/tex_render.py` | TeX 节点到 Markdown 的纯渲染变换 |
+| `paper_markdown/tex_tables.py` | TeX 表格识别与结构化转换 |
+| `paper_markdown/tex_bibliography.py` | TeX 参考文献和引用关系解析 |
+| `paper_markdown/pdf_layout.py` | PDF 阅读顺序与版面变换 |
+| `paper_markdown/pdf_elements.py` | PDF 元素、表格与引用提取 |
+| `paper_source/payloads.py` | 下载 payload 识别、locator 与转换请求构造 |
+| `paper_rag/traversal.py` | 引用、章节、视觉和 chunk 图遍历 |
+| `survey/stages.py` | Scout/Fetch/Convert/Index 各阶段执行 |
+| `survey/providers.py` | embedding 与视觉模型生产实现 |
 
 ## 7. 相关测试
 

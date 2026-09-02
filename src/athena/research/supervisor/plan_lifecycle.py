@@ -1,100 +1,42 @@
-"""Plan creation, workspace ownership, settlement, and recovery helpers."""
+"""Explicit orchestration facade for durable Supervisor Plans."""
 
 import json
-import logging
-from dataclasses import dataclass
-from pathlib import Path
 
 from athena.core.contracts import ArtifactRef
-from athena.core.research_models import (
-    ComparisonVerdict,
-    EvalResult,
-    ExperimentPlan,
-    Hypothesis,
-)
-from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
-from athena.core.workspace import GitWorkBranch, GitWorkspaceError
-from athena.research.clarification.context import (
-    ConfirmedTaskContextError,
-    ConfirmedTaskContextProvider,
-)
+from athena.core.research_models import Hypothesis
 from athena.research.supervisor.deps import SupervisorDeps
-from athena.research.supervisor.evaluator_plan import read_eval_handoff
-from athena.research.supervisor.experiment import (
-    PlanTurnResult,
-    load_agent_result,
-    load_best,
+from athena.research.supervisor.plan_runtime import (
+    CompletedPlanTurn,
+    PlanRuntime,
 )
-from athena.research.supervisor.plans import (
-    PlanDecision,
-    PlanFailure,
-    PlanInput,
-    PlanState,
-    wait_run_events,
-)
-from athena.research.supervisor.policy import Outcome
-from athena.research.supervisor.prompt_context import (
-    data_contract_block,
-    handoff_block,
-    hypothesis_block,
-)
+from athena.research.supervisor.plans import PlanInput
 from athena.research.supervisor.run_state import SupervisorRunState
-from athena.research.supervisor.state import ResearchState
-from athena.research.supervisor.statistics import (
-    MetricEvidence,
-    settle_statistically,
-    two_sided_p_value,
-)
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class CompletedPlanTurn:
-    """One Agent decision and its optional trusted experiment result."""
-
-    plan_id: str
-    decision: PlanDecision | None
-    result: PlanTurnResult | None
-    failure: PlanFailure | None = None
-
-
-def _compare_metric(
-    candidate: float,
-    reference: float,
-    direction: str,
-    tolerance: float,
-) -> Outcome:
-    delta = candidate - reference if direction == "maximize" else reference - candidate
-    if delta > tolerance:
-        return Outcome.WIN
-    if delta < -tolerance:
-        return Outcome.LOSS
-    return Outcome.DRAW
-
-
-def _status_for_outcome(outcome: Outcome | None) -> str:
-    """Map a settlement outcome to a conservative hypothesis status.
-
-    DRAW and missing evidence must never be reported as REFUTED: a tie is not
-    evidence against the hypothesis, so it is INCONCLUSIVE.
-    """
-    if outcome is Outcome.WIN:
-        return "SUPPORTED"
-    if outcome is Outcome.LOSS:
-        return "REFUTED"
-    return "INCONCLUSIVE"
+from athena.research.supervisor.settlement import PlanSettlement
 
 
 class PlanLifecycle:
-    """Own the stable identity and durable lifecycle of SEARCH Plans."""
+    """Coordinate Plan runtime, settlement, and durable state publication."""
 
     def __init__(
         self, owner: object, deps: SupervisorDeps, run: SupervisorRunState
     ) -> None:
         self._owner = owner
         self._deps = deps
-        self._run = run
+        self._runtime = PlanRuntime(
+            owner,
+            deps,
+            run,
+            save_state=self.save_state,
+            publish_state=self.publish_state,
+            persist_state=self.persist_state,
+        )
+        self._settlement = PlanSettlement(
+            owner,
+            deps,
+            run,
+            plan_input=self.plan_input,
+            save_state=self.save_state,
+        )
 
     @property
     def _state(self):
@@ -119,557 +61,43 @@ class PlanLifecycle:
         self.save_state()
         await self.publish_state()
 
-    @staticmethod
-    def _previous_failure_block(summary: str | None) -> str:
-        failure = PlanFailure.from_summary(summary)
-        return failure.to_prompt_block() if failure is not None else ""
-
-    def _corpus_block(self, plan_input: PlanInput) -> str:
-        """Render corpus pointers named by the Plan's frozen hypothesis."""
-        corpus_ref = getattr(self._state, "corpus_ref", None)
-        hypothesis = plan_input.hypothesis
-        if corpus_ref is None or hypothesis is None or not hypothesis.sources:
-            return ""
-        return (
-            f"\n\nThe literature corpus for this task is available "
-            f"(corpus_ref={corpus_ref!r}). This hypothesis was formed from: "
-            f"{', '.join(hypothesis.sources)}. Use paper_search and "
-            "paper_chunk_read on those papers for the implementation details the "
-            "hypothesis leaves open — exact loss formulation, hyper-parameter "
-            "ranges, preprocessing. Follow what they report; do not invent "
-            "numbers they do not give."
-        )
-
-    def _turn_prompt(
-        self,
-        plan_id: str,
-        state: PlanState,
-        plan_input: PlanInput,
-        previous_failure: str | None,
-    ) -> str:
-        """Assemble the complete model-visible prompt for one Plan turn."""
-        hypothesis = plan_input.hypothesis
-        hypothesis_context = (
-            hypothesis_block(
-                hypothesis.statement,
-                hypothesis.intervention,
-                hypothesis.expected_effect,
-            )
-            if hypothesis is not None
-            else ""
-        )
-        return (
-            f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
-            f"turn limit: {state.turn_limit}; patience: {state.patience}; "
-            f"stale rounds: {state.stale_rounds}."
-            + (f"\n\n{plan_input.task_context}" if plan_input.task_context else "")
-            + hypothesis_context
-            + handoff_block(plan_input.eval_handoff)
-            + self._corpus_block(plan_input)
-            + data_contract_block(self._state.data_contract or "")
-            + self._previous_failure_block(previous_failure)
-        )
-
-    async def _confirmed_task_context(self, state: ResearchState | None = None) -> str:
-        """Load the authoritative task snapshot for a new or legacy Plan."""
-        return (
-            await ConfirmedTaskContextProvider(
-                state or self._state,
-                self._deps.runtime.store,
-                self._deps.paths.state_path.parent,
-            ).load()
-        ).render_prompt_block()
-
     async def run_turn(self, plan_id: str) -> CompletedPlanTurn:
-        """Own one Plan Agent turn from prompt assembly through failure recording."""
-        state = self._state.plans[plan_id]
-        previous_failure = state.last_failure
-        state = state.model_copy(
-            update={"turns_used": state.turns_used + 1, "last_failure": None}
-        )
-        self._state.plans[plan_id] = state
-        await self.persist_state()
-        try:
-            plan_input = await self.plan_input(plan_id)
-            run_id = await self._deps.runtime.agents.followup(
-                plan_id,
-                {
-                    "content": self._turn_prompt(
-                        plan_id, state, plan_input, previous_failure
-                    ),
-                    "context_refs": [state.context_ref],
-                },
-            )
-            publish = self._deps.phases.publish_agent_event
-            if publish is None:
-                summary = await self._deps.runtime.agents.wait_run(run_id)
-            else:
-                summary = await wait_run_events(
-                    self._deps.runtime.agents,
-                    run_id,
-                    lambda kind, ref, data: publish(plan_id, kind, ref, data),
-                )
-            decision = await load_agent_result(
-                summary, self._deps.runtime.store, PlanDecision
-            )
-            if decision is None:
-                return CompletedPlanTurn(plan_id, None, None)
-        except Exception as exc:  # noqa: BLE001 - normalize external turn boundary
-            failure = PlanFailure(
-                kind="turn_infrastructure_failed",
-                detail=f"{type(exc).__name__}: {' '.join(str(exc).split())}",
-            )
-            await self._record_failure(plan_id, failure)
-            return CompletedPlanTurn(plan_id, None, None, failure)
-        if decision.decision == "abandon" and state.best_ref is None:
-            return CompletedPlanTurn(plan_id, decision, None)
-        result = await self._deps.research.plan(plan_id, state)
-        await self._record_turn_failure(plan_id, result)
-        return CompletedPlanTurn(plan_id, decision, result)
-
-    async def _record_turn_failure(self, plan_id: str, result: PlanTurnResult) -> None:
-        """Persist a failed turn's reason for the immediately following prompt."""
-        if not result.error:
-            return
-        await self._record_failure(
-            plan_id,
-            PlanFailure(kind=result.kind, detail=result.error),
-        )
-
-    async def _record_failure(self, plan_id: str, failure: PlanFailure) -> None:
-        """Persist one normalized Plan failure diagnostic."""
-        current = self._state.plans.get(plan_id)
-        if current is None:
-            return
-        summary = failure.to_summary()[:1200]
-        self._state.plans[plan_id] = current.model_copy(
-            update={"last_failure": summary}
-        )
-        await self.persist_state()
+        """Run one Plan Agent turn through the runtime boundary."""
+        return await self._runtime.run_turn(plan_id)
 
     async def start_plan(self, hypothesis_id: str) -> str:
-        """Freeze one Hypothesis input and create its stable execution identity."""
-        evaluator_ref = self._state.evaluator_ref
-        if evaluator_ref is None:
-            baselines = self._tree.experiments(kind="baseline")
-            if not baselines:
-                raise RuntimeError("SEARCH Plan requires a frozen evaluator")
-            evaluator_ref = baselines[0].plan.run_config_ref
-            self._state.evaluator_ref = evaluator_ref
-        if hypothesis_id in self._state.plans:
-            if self._tree.experiment_for_hypothesis(hypothesis_id) is None:
-                raise RuntimeError(
-                    f"active plan {hypothesis_id} is missing experiment "
-                    f"exp_{hypothesis_id}; remove the plan or repair the tree"
-                )
-            return hypothesis_id
-        hypothesis = self._tree.get_hypothesis(hypothesis_id)
-        existing = self._tree.experiment_for_hypothesis(hypothesis_id)
-        if existing is not None and self._tree.get_experiment(existing).status in {
-            ExperimentStatus.SUCCEEDED,
-            ExperimentStatus.FAILED,
-        }:
-            raise ValueError(f"hypothesis already settled: {hypothesis_id}")
-
-        reference_id = hypothesis.parent_id or self._tree.best_experiment_id()
-        if reference_id is None:
-            raise ValueError("SEARCH Plan requires a frozen reference experiment")
-        reference = self._tree.get_experiment(reference_id)
-        if reference.eval is None:
-            raise ValueError("reference experiment requires a trusted metric")
-        reference_hypothesis = self._tree.get_hypothesis(reference.hypothesis_id)
-        active = self._tree.active_hypotheses(reference_id, hypothesis)[:-1]
-        tree_ref = await self._deps.runtime.store.put_text(
-            json.dumps(self._tree.to_dict(), ensure_ascii=False, sort_keys=True)
-        )
-        guidance = self._run.take_guidance()
-        task_context = await self._confirmed_task_context()
-        plan_input = PlanInput(
-            hypothesis=hypothesis,
-            active_ancestor_hypotheses=active,
-            reference_experiment_id=reference_id,
-            reference_metric=reference.eval.primary,
-            reference_priority=reference_hypothesis.priority,
-            direction=self._deps.search.direction,
-            tolerance=self._deps.search.tolerance,
-            # 判胜阈值必须随搜索预算变严。预算 N 意味着要在 N 个候选里挑最大值，
-            # 而最大值本身会随 N 增长：纯噪声（σ≈0.0074）下 N=4 的冠军期望
-            # +0.0076，N=16 是 +0.0131，N=64 是 +0.0174——最后这个数已经和本次
-            # 真机冠军实际拿到的 +0.0180 一样大。不做校正，加预算买到的只是
-            # 更好看的数字。
-            min_effect_size=self._deps.search.tolerance,
-            family_size=max(1, self._state.search_limit),
-            evaluator_ref=evaluator_ref,
-            tree_ref=tree_ref,
-            eval_handoff=await read_eval_handoff(
-                self._deps.runtime.store, evaluator_ref
-            ),
-            human_context="\n".join(guidance),
-            task_context=task_context,
-            initial_turn_limit=hypothesis.turn_limit,
-            initial_patience=hypothesis.patience,
-        )
-        context_ref = await self._deps.runtime.store.put_text(
-            plan_input.model_dump_json()
-        )
-        branch = await self._deps.runtime.workspaces.create(
-            reference.commit, hypothesis_id
-        )
-        self._run.add_branch(hypothesis_id, branch)
-        experiment_id = f"exp_{hypothesis_id}"
-        self._tree.add_experiment(
-            experiment_id,
-            Experiment(
-                parent_id=hypothesis.parent_id,
-                hypothesis_id=hypothesis_id,
-                commit=reference.commit,
-                plan=ExperimentPlan(
-                    kind="search",
-                    change=hypothesis.intervention,
-                    run_config_ref=context_ref,
-                    budget={},
-                    acceptance_rule="trusted score",
-                ),
-                gitwork=branch,
-            ),
-        )
-        self._tree.transition_experiment(experiment_id, ExperimentStatus.RUNNING)
-        self._state.plans[hypothesis_id] = PlanState(
-            kind="SEARCH",
-            context_ref=context_ref,
-            turns_used=0,
-            turn_limit=hypothesis.turn_limit,
-            patience=hypothesis.patience,
-        )
-        self.save_state()
-        # start_plan 与 settle_plan 之间可能隔很多个 turn/很久；若这里只保存
-        # state.json 而不保存 research_tree.json，进程一旦在这段窗口内崩溃，
-        # 恢复时 state.plans 仍在但 tree 缺少 exp_{hypothesis_id}，最终在
-        # settle_plan 中抛 unknown experiment id。先落 state、再落 tree，并让
-        # recover() 具备“state 有 Plan、tree 缺实验”时的重建能力。
-        self._tree.save(self._deps.paths.tree_path)
-        await self._deps.runtime.agents.resume_agent(
-            hypothesis_id, agent_type="plan", name=hypothesis_id
-        )
-        await self.publish_state()
-        return hypothesis_id
+        """Create one Plan through the runtime boundary."""
+        return await self._runtime.start_plan(hypothesis_id)
 
     async def plan_input(self, plan_id: str) -> PlanInput:
         """Load the immutable input frozen for one active Plan."""
-        return PlanInput.model_validate_json(
-            await self._deps.runtime.store.get_text(
-                self._state.plans[plan_id].context_ref
-            )
-        )
+        return await self._runtime.plan_input(plan_id)
 
-    def workspace_path(self, plan_id: str) -> Path:
-        """Return the real worktree path bound to a stable Plan identity."""
-        return Path(self._run.get_branch(plan_id).path)
+    def workspace_path(self, plan_id: str):
+        """Return the worktree path bound to a stable Plan identity."""
+        return self._runtime.workspace_path(plan_id)
 
-    def workspace(self, plan_id: str) -> GitWorkBranch:
+    def workspace(self, plan_id: str):
         """Return the branch owned by one active Plan."""
-        return self._run.get_branch(plan_id)
+        return self._runtime.workspace(plan_id)
 
     @staticmethod
     def plan_identity(plan_id: str) -> dict[str, str]:
-        """Project the stable SEARCH identity shared by all owned resources."""
-        return {
-            "plan": plan_id,
-            "agent": plan_id,
-            "workspace": plan_id,
-            "log": plan_id,
-        }
+        """Project the stable identity shared by all Plan resources."""
+        return PlanRuntime.plan_identity(plan_id)
 
-    async def recover(self, state: ResearchState | None = None) -> ResearchState:
-        """Reconcile persisted Plans without inventing missing frozen resources."""
-        if self._deps.paths.tree_path.is_file():
-            self._owner.tree = ResearchTree.load(self._deps.paths.tree_path)
-        candidate = state or self._state
-        artifact_presence: dict[str, bool] = {}
-        workspace_presence: dict[str, bool] = {}
-        tree_changed = False
-        for plan_id, original_plan in list(candidate.plans.items()):
-            plan = original_plan
-            try:
-                context_json = await self._deps.runtime.store.get_text(plan.context_ref)
-            except (OSError, ValueError):
-                artifact_presence[plan.context_ref] = False
-                workspace_presence[plan_id] = False
-                continue
-            artifact_presence[plan.context_ref] = True
-            try:
-                plan_input = PlanInput.model_validate_json(context_json)
-                if plan.kind == "SEARCH" and not plan_input.task_context.strip():
-                    task_context = await self._confirmed_task_context(candidate)
-                    migrated_ref = await self._deps.runtime.store.put_text(
-                        plan_input.model_copy(
-                            update={"task_context": task_context}
-                        ).model_dump_json()
-                    )
-                    plan = plan.model_copy(update={"context_ref": migrated_ref})
-                    candidate.plans[plan_id] = plan
-                    artifact_presence[migrated_ref] = True
-                    plan_input = PlanInput.model_validate_json(
-                        await self._deps.runtime.store.get_text(migrated_ref)
-                    )
-                    experiment_id = self._tree.experiment_for_hypothesis(plan_id)
-                    if experiment_id is not None:
-                        experiment = self._tree.get_experiment(experiment_id)
-                        experiment.plan = experiment.plan.model_copy(
-                            update={"run_config_ref": migrated_ref}
-                        )
-                        tree_changed = True
-                if plan_input.reference_experiment_id is None:
-                    raise ValueError("Plan input has no reference experiment")
-                reference = self._tree.get_experiment(
-                    plan_input.reference_experiment_id
-                )
-                branch = await self._deps.runtime.workspaces.create(
-                    reference.commit, plan_id
-                )
-            except ConfirmedTaskContextError as exc:
-                logger.warning(
-                    "parking legacy Plan %s without confirmed task context: %s",
-                    plan_id,
-                    exc,
-                )
-                workspace_presence[plan_id] = False
-            except (GitWorkspaceError, KeyError, OSError, ValueError):
-                workspace_presence[plan_id] = False
-            else:
-                self._run.add_branch(plan_id, branch)
-                workspace_presence[plan_id] = Path(branch.path).is_dir()
-                if (
-                    plan.kind == "SEARCH"
-                    and workspace_presence[plan_id]
-                    and self._repair_missing_experiment(
-                        plan_id, plan.context_ref, plan_input, branch
-                    )
-                ):
-                    tree_changed = True
-        if tree_changed:
-            self._tree.save(self._deps.paths.tree_path)
-        self._owner.state = self._deps.search.recovery.reconcile(
-            candidate,
-            self._tree,
-            workspace_exists=lambda plan_id: workspace_presence.get(plan_id, False),
-            artifact_exists=lambda ref: artifact_presence.get(ref, False),
-        )
-        for plan_id in self._state.plans:
-            if workspace_presence.get(plan_id):
-                await self._deps.runtime.agents.resume_agent(
-                    plan_id, agent_type="plan", name=plan_id
-                )
-        await self.persist_state()
-        return self._state
-
-    def _repair_missing_experiment(
-        self,
-        plan_id: str,
-        context_ref: str,
-        plan_input: PlanInput,
-        branch: GitWorkBranch,
-    ) -> bool:
-        """Recreate a RUNNING search experiment lost in the state-saved/tree-not-saved window.
-
-        Returns True when the experiment was added to the in-memory tree and should be
-        persisted by the caller. If the hypothesis/reference cannot be found the orphan
-        Plan is left for ``Recovery.reconcile`` to drop.
-        """
-        if self._tree.experiment_for_hypothesis(plan_id) is not None:
-            return False
-        try:
-            hypothesis = self._tree.get_hypothesis(plan_id)
-            reference = self._tree.get_experiment(plan_input.reference_experiment_id)
-        except KeyError as exc:
-            logger.warning("cannot repair missing experiment exp_%s: %s", plan_id, exc)
-            return False
-        experiment_id = f"exp_{plan_id}"
-        try:
-            self._tree.add_experiment(
-                experiment_id,
-                Experiment(
-                    parent_id=hypothesis.parent_id,
-                    hypothesis_id=plan_id,
-                    commit=reference.commit,
-                    plan=ExperimentPlan(
-                        kind="search",
-                        change=hypothesis.intervention,
-                        run_config_ref=context_ref,
-                        budget={},
-                        acceptance_rule="trusted score",
-                    ),
-                    gitwork=branch,
-                    status=ExperimentStatus.RUNNING,
-                ),
-            )
-        except (KeyError, ValueError) as exc:
-            logger.warning("cannot repair missing experiment exp_%s: %s", plan_id, exc)
-            return False
-        return True
+    async def recover(self, state=None):
+        """Reconcile persisted Plans through the runtime boundary."""
+        return await self._runtime.recover(state)
 
     async def settle_plan(
-        self,
-        plan_id: str,
-        best_ref: ArtifactRef | None,
-        result,
+        self, plan_id: str, best_ref: ArtifactRef | None, result
     ) -> None:
-        """Persist one final Experiment before removing the active Plan."""
-        plan_input = await self.plan_input(plan_id)
-        hypothesis = self._tree.get_hypothesis(plan_id)
-        experiment_id = f"exp_{plan_id}"
-        primary: float | None = None
-        outcome: Outcome | None = None
-        if best_ref is None:
-            self._tree.transition_experiment(
-                experiment_id,
-                ExperimentStatus.FAILED,
-                error="settled without a trusted result",
-            )
-        else:
-            best = await load_best(best_ref, self._deps.runtime.store)
-            comparison: ComparisonVerdict | None = None
-            reference = plan_input.reference_metric
-            if reference is None:
-                outcome = None
-            elif best.std_error is not None:
-                verdict = settle_statistically(
-                    MetricEvidence(
-                        metric=best.metric,
-                        std_error=best.std_error,
-                        n=best.n,
-                    ),
-                    reference,
-                    direction=plan_input.direction,
-                    min_effect_size=plan_input.min_effect_size,
-                    alpha=plan_input.alpha,
-                    family_size=plan_input.family_size,
-                )
-                outcome = {
-                    "SUPPORTED": Outcome.WIN,
-                    "REFUTED": Outcome.LOSS,
-                }.get(
-                    verdict
-                )  # INCONCLUSIVE -> None
-                p_value = two_sided_p_value(best.metric, reference, best.std_error)
-                if p_value is not None:
-                    comparison = ComparisonVerdict(
-                        winner={
-                            "SUPPORTED": "candidate",
-                            "REFUTED": "baseline",
-                        }.get(verdict, "tie"),
-                        p_value=p_value,
-                    )
-            else:
-                outcome = _compare_metric(
-                    best.metric,
-                    reference,
-                    plan_input.direction,
-                    plan_input.tolerance,
-                )
-            evidence_ref = best.evidence_ref
-            artifacts = {"evidence": evidence_ref}
-            try:
-                evidence = json.loads(
-                    await self._deps.runtime.store.get_text(evidence_ref)
-                )
-            except (json.JSONDecodeError, OSError, ValueError):
-                evidence = {}
-            for key in (
-                "predictions_ref",
-                "metrics_ref",
-                "report_ref",
-                "exploration_ref",
-            ):
-                ref = evidence.get(key) if isinstance(evidence, dict) else None
-                if isinstance(ref, str):
-                    artifacts[key.removesuffix("_ref")] = ref
-            if (
-                "predictions" not in artifacts
-                and result is not None
-                and result.predictions_ref is not None
-            ):
-                artifacts["predictions"] = result.predictions_ref
-            if (
-                "report" not in artifacts
-                and result is not None
-                and result.report_ref is not None
-            ):
-                artifacts["report"] = result.report_ref
-            primary = best.metric
-            self._tree.complete_experiment(
-                experiment_id,
-                eval=EvalResult(
-                    experiment_id=experiment_id,
-                    primary=best.metric,
-                    per_sample=evidence_ref,
-                ),
-                verdict=comparison,
-                artifacts=artifacts,
-                commit=best.commit,
-            )
-        if outcome is None:
-            # 实验无有效证据：标记 INCONCLUSIVE，不按胜负更新评级。
-            self._tree.update_hypothesis_status(plan_id, "INCONCLUSIVE")
-        else:
-            hypothesis.priority = self._deps.search.scheduler.settle(
-                plan_input.reference_priority, outcome
-            )
-            self._tree.update_hypothesis_status(plan_id, _status_for_outcome(outcome))
-        if primary is not None:
-            sota_id = self._tree.best_experiment_id()
-            if sota_id is None:
-                self._tree.set_sota(experiment_id)
-            else:
-                sota = self._tree.get_experiment(sota_id)
-                if (
-                    sota.eval is None
-                    or _compare_metric(
-                        primary,
-                        sota.eval.primary,
-                        plan_input.direction,
-                        plan_input.tolerance,
-                    )
-                    is Outcome.WIN
-                ):
-                    # SOTA 指针是**操作性**的："下一条假设从哪儿分叉"，用点估计
-                    # 选最有希望的那个是对的。但它不是科学结论，而下游（报告、
-                    # VALIDATE、人）会把"SOTA 迁移了"读成"找到了改进"。
-                    #
-                    # 真机 2026-08-30：hyp_a058326db0e8 的区间判据在 family_size=1
-                    # 时就已经是 INCONCLUSIVE（0.8716 ± 1.96×0.0200 覆盖了基线
-                    # 0.8535），SOTA 指针仍然迁了过去，并且没有任何一处记下这个
-                    # 分歧。留出集后来证实：ΔPR-AUC 的 95% 区间含 0。
-                    if comparison is not None and comparison.winner != "candidate":
-                        logger.warning(
-                            "SOTA moved to %s on a point estimate (%.4f vs %.4f) "
-                            "while the interval verdict was %s (p=%.3f, "
-                            "family_size=%d). The pointer is operational, not a "
-                            "demonstrated improvement.",
-                            experiment_id,
-                            primary,
-                            sota.eval.primary if sota.eval else float("nan"),
-                            comparison.winner,
-                            comparison.p_value,
-                            plan_input.family_size,
-                        )
-                    self._tree.set_sota(experiment_id)
-        self._tree.save(self._deps.paths.tree_path)
-        self._state.plans.pop(plan_id)
-        self.save_state()
-        if self._deps.phases.on_plan_settled is not None:
-            await self._deps.phases.on_plan_settled(plan_id)
-        # A settled Plan owns a stable PlanAgent thread. Reap it now so finished
-        # SEARCH plans do not accumulate for the rest of the process lifetime.
-        try:
-            await self._deps.runtime.agents.reap(plan_id)
-        except Exception:
-            logger.warning(
-                "failed to reap settled Plan agent %s", plan_id, exc_info=True
-            )
+        """Settle one trusted result through the settlement boundary."""
+        await self._settlement.settle_plan(plan_id, best_ref, result)
 
     def _sota_parent(self) -> tuple[str, Hypothesis]:
-        """Return (sota_experiment_id, sota_hypothesis) for seeding hypotheses."""
+        """Return the current SOTA experiment and its hypothesis."""
         parent_id = self._tree.best_experiment_id()
         if parent_id is None:
             raise ValueError("cannot propose SEARCH hypotheses without a SOTA")
@@ -694,12 +122,7 @@ class PlanLifecycle:
     async def register_hypotheses(
         self, hypotheses: list[Hypothesis]
     ) -> dict[str, object]:
-        """Register every Ideator hypothesis into the graph in one write.
-
-        每个 Ideator 生成的假设都进入 graph（含多 lane 的近似重复候选），统一
-        挂在当前 SOTA 下并播种优先级后单次保存/发布。去重只发生在排序/选择阶段
-        （见 ``Scheduler._queued``），不在入图时丢弃任何结构有效的假设。
-        """
+        """Register one Ideator batch under the current SOTA."""
         parent_id, parent_hypothesis = self._sota_parent()
         priority = self._deps.search.scheduler.seed(parent_hypothesis)
         hypothesis_ids = [
@@ -720,24 +143,19 @@ class PlanLifecycle:
         return {"hypothesis_ids": hypothesis_ids}
 
     async def checkpoint_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
-        """Persist one frozen evaluator bundle so PREPARE resumes past evaluator."""
+        """Persist one frozen evaluator bundle."""
         self._state.evaluator_ref = ref
         await self.persist_state()
         return {"evaluator_ref": ref}
 
     async def checkpoint_final_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
-        """Persist the hidden final-test evaluator used only by VALIDATE."""
+        """Persist the hidden final evaluator used only by VALIDATE."""
         self._state.final_evaluator_ref = ref
         await self.persist_state()
         return {"final_evaluator_ref": ref}
 
     async def dispatch_general(self, task: str) -> dict[str, object]:
-        """Dispatch one General Agent to do concrete work and return its result.
-
-        第一次成功的 general 调研作为断点写入 state；同一任务后续调用直接返回
-        缓存，避免续跑时重复派发 worker。不同任务不命中缓存，照常派发且不覆盖
-        已保存的调研断点。
-        """
+        """Dispatch one General Agent task and cache its result."""
         if self._deps.research.general is None:
             raise RuntimeError("General Agent dispatch is not configured")
         task = task.strip()
@@ -749,15 +167,12 @@ class PlanLifecycle:
             try:
                 cached = json.loads(await self._deps.runtime.store.get_text(ref))
             except (OSError, ValueError):
-                # artifact 缺失或内容损坏 → 清掉引用并落盘，避免重启后反复撞坏缓存
                 self._state.task_research_ref = None
                 ref = None
                 await self.persist_state()
                 cached = None
             if isinstance(cached, dict) and cached:
                 return {"cached": True, **cached}
-        # 仅在"同一任务且尚无缓存"时复用旧 worker id；不同任务必须开新线程，
-        # 否则新任务会混进调研线程记忆并劫持调研断点。
         prior_agent_id = (
             self._state.task_research_agent_id if ref is None and owned else None
         )
@@ -772,4 +187,7 @@ class PlanLifecycle:
         return outcome.result
 
 
-__all__ = ["CompletedPlanTurn", "PlanLifecycle"]
+__all__ = [
+    "CompletedPlanTurn",
+    "PlanLifecycle",
+]

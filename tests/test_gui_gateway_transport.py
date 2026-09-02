@@ -23,7 +23,7 @@ async def test_server_starts_and_prints_port() -> None:
     """服务端启动并返回有效端口，接受 WS 连接并响应 ping。"""
     from gui_gateway.__main__ import start_server
 
-    server, port = await start_server(test_mode=True)
+    server, port = await start_server(test_mode=True, port=0)
     assert port > 0
 
     async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
@@ -41,7 +41,7 @@ async def test_unknown_method_returns_error() -> None:
     """未知方法返回错误响应。"""
     from gui_gateway.__main__ import start_server
 
-    server, port = await start_server(test_mode=True)
+    server, port = await start_server(test_mode=True, port=0)
 
     async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
         await ws.send(
@@ -60,7 +60,7 @@ async def test_invalid_json_returns_error() -> None:
     """格式错误的 JSON 返回错误响应。"""
     from gui_gateway.__main__ import start_server
 
-    server, port = await start_server(test_mode=True)
+    server, port = await start_server(test_mode=True, port=0)
 
     async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
         await ws.send("not valid json")
@@ -226,3 +226,20 @@ async def test_dispatch_error_reports_a_blocked_delete() -> None:
     assert err["code"] == -32603
     assert "in use by another process" in err["message"]
     assert err["data"]["exception"] == "PermissionError"
+
+
+class _DomainError(Exception):
+    def __init__(self) -> None:
+        super().__init__("stale revision")
+        self.code = "stale_revision"
+        self.retryable = True
+        self.current_revision = 7
+
+
+async def test_dispatch_error_preserves_domain_error_metadata() -> None:
+    """澄清/确认领域的字符串错误码必须原样带到 WebSocket 响应 data 中。"""
+    err = await _dispatch_error(_DomainError(), method="task_clarification_revise")
+
+    assert err["data"]["code"] == "stale_revision"
+    assert err["data"]["retryable"] is True
+    assert err["data"]["current_revision"] == 7

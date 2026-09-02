@@ -13,7 +13,7 @@
 ## 一、它是什么
 
 四段流水线 `paper_scout` → `paper_source` → `paper_markdown` → `paper_rag`，由
-`survey/pipeline.py` 驱动、`survey/wiring.py` 装配，产出一个 `corpus_ref`。Ideator 与
+`research/literature/survey/pipeline.py` 驱动、`research/literature/survey/wiring.py` 装配，产出一个 `corpus_ref`。Ideator 与
 PlanAgent 拿到只读检索算子，可以搜、可以打开正文；假设里的 `sources` 要经三层核验。
 
 接口、环境变量、降级行为见 [Academic Survey 全链路](academic_survey_ch.md)；

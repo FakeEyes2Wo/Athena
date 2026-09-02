@@ -9,13 +9,13 @@ import unittest
 
 from pydantic import ValidationError
 
-from athena.research.bench.health import (
+from athena.research.literature.bench.health import (
     MIN_ANCHOR_PROSE_CHARS,
     all_headings,
     corpus_health,
     novel_prose_chars,
 )
-from athena.research.bench.known_item import (
+from athena.research.literature.bench.known_item import (
     KEYWORD_CHANNEL,
     SEMANTIC_CHANNEL,
     compare,
@@ -26,21 +26,25 @@ from athena.research.bench.known_item import (
     score_channel,
     usable_queries,
 )
-from athena.research.bench.query_sets import (
+from athena.research.literature.bench.query_sets import (
     available,
     load_query_set,
     load_recall_set,
 )
-from athena.research.bench.recall import RecallQuerySet, evaluate_recall
-from athena.research.bench.reproducibility import delivery_overlap, jaccard
-from athena.research.bench.schemas import KnownItemQuery, QueryOutcome, QuerySet
-from athena.research.paper_rag.schemas import (
+from athena.research.literature.bench.recall import RecallQuerySet, evaluate_recall
+from athena.research.literature.bench.reproducibility import delivery_overlap, jaccard
+from athena.research.literature.bench.schemas import (
+    KnownItemQuery,
+    QueryOutcome,
+    QuerySet,
+)
+from athena.research.literature.paper_rag.schemas import (
     CorpusEntry,
     CorpusSentence,
     PaperCorpusIndex,
     SearchHit,
 )
-from athena.research.paper_rag.search import LoadedCorpus, keyword_search
+from athena.research.literature.paper_rag.search import LoadedCorpus, keyword_search
 
 
 def _entry(
@@ -171,7 +175,9 @@ class KnownItemRunTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         corpus = _corpus(
             [
-                _entry("p1:a", "p1", "This paper studies focal loss for boosted trees."),
+                _entry(
+                    "p1:a", "p1", "This paper studies focal loss for boosted trees."
+                ),
                 _entry("p2:a", "p2", "This paper studies protein folding kinetics."),
             ]
         )
@@ -214,7 +220,9 @@ class KnownItemRunTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(SEMANTIC_CHANNEL, [item.channel for item in report.channels])
 
-    async def test_a_channel_that_raises_records_the_error_and_keeps_going(self) -> None:
+    async def test_a_channel_that_raises_records_the_error_and_keeps_going(
+        self,
+    ) -> None:
         """一条查询炸掉不该丢掉整个通道的成绩，否则一次偶发失败就抹掉全部读数。"""
         corpus = _corpus([_entry("p1:a", "p1", "focal loss")])
         query_set = QuerySet(
@@ -255,7 +263,7 @@ class CompareTest(unittest.TestCase):
 
 def await_free_report(pairs: list[tuple[str, int | None]]):
     """构造一份只有名次信息的报告，用于比对逻辑的用例。"""
-    from athena.research.bench.schemas import RetrievalBenchReport
+    from athena.research.literature.bench.schemas import RetrievalBenchReport
 
     return RetrievalBenchReport(
         query_set="t",
@@ -280,7 +288,9 @@ class CorpusHealthTest(unittest.TestCase):
             [
                 _entry("p1:a", "p1", "| a | b |", kind="table", title="T"),
                 _entry("p1:b", "p1", "Body text here.", title="T"),
-                _entry("p2:a", "p2", "We propose a method.", kind="abstract", title="U"),
+                _entry(
+                    "p2:a", "p2", "We propose a method.", kind="abstract", title="U"
+                ),
             ]
         )
 
@@ -371,7 +381,9 @@ class AnchorProseTest(unittest.TestCase):
             "threshold and report consistent gains across nine tabular datasets."
         )
 
-        self.assertGreater(novel_prose_chars(text, "Some Title"), MIN_ANCHOR_PROSE_CHARS)
+        self.assertGreater(
+            novel_prose_chars(text, "Some Title"), MIN_ANCHOR_PROSE_CHARS
+        )
 
     def test_the_structural_section_prefix_is_stripped_before_counting(self) -> None:
         body = "We reweight the minority class and report gains on nine datasets here."

@@ -58,7 +58,10 @@ async def single_turn_structured_chat(
         context_ref=f"context:structured-chat:{identity}",
     )
     turn = AthenaTurn(
-        turn_id=turn_id, thread_id=thread_id, request_ref=prompt, status="running",
+        turn_id=turn_id,
+        thread_id=thread_id,
+        request_ref=prompt,
+        status="running",
     )
     agent = Agent(
         create_provider(model, client=client),
@@ -69,8 +72,12 @@ async def single_turn_structured_chat(
         artifacts=artifacts,
     )
     ctx = AgentContext(
-        thread=thread, turn=turn, emit=_noop_emit, tools=active_tools,
-        cancel=asyncio.Event(), input_text=prompt,
+        thread=thread,
+        turn=turn,
+        emit=_noop_emit,
+        tools=active_tools,
+        cancel=asyncio.Event(),
+        input_text=prompt,
     )
     outcome = await agent.run(ctx)
     return schema.model_validate_json(await artifacts.get_text(outcome.result_ref))

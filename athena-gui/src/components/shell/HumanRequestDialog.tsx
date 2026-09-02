@@ -1,84 +1,230 @@
-import { useState } from "react";
-import type { HumanRequest } from "../../lib/tauri-bridge";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { HumanChoice, HumanReply, HumanRequest } from "../../types/ui";
 import styles from "./HumanRequestDialog.module.css";
 
 interface HumanRequestDialogProps {
-  requests: HumanRequest[];
-  onAnswer(requestId: string, answer: string): void;
-  onChoice?(requestId: string, value: string): void;
-  onSkip?(requestId: string): void;
+  request: HumanRequest | null;
+  onReply(reply: HumanReply): Promise<void> | void;
+  /** True while one reply is being submitted. */
+  settling?: boolean;
+  /** A transport/contract error to surface without dismissing the dialog. */
+  error?: string | null;
 }
+
+const FOCUSABLE_SELECTOR =
+  "button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
 /** Modal asking the human to answer the supervisor's outstanding question. */
 export function HumanRequestDialog({
-  requests = [],
-  onAnswer,
-  onChoice,
-  onSkip,
+  request,
+  onReply,
+  settling = false,
+  error = null,
 }: HumanRequestDialogProps) {
   const [answer, setAnswer] = useState("");
-  if (requests.length === 0) return null;
-  const request = requests[0];
+  const [errorVisible, setErrorVisible] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const titleId = useMemo(() => `human-request-title-${request?.request_id ?? "none"}`, [request?.request_id]);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+  const submittingRef = useRef(false);
+  const [activeChoiceIndex, setActiveChoiceIndex] = useState(0);
 
-  const submit = () => {
-    if (!answer.trim()) return;
-    onAnswer(request.request_id, answer);
+  const isOpen = request !== null;
+
+  // Reset local state whenever the request identity changes.
+  useEffect(() => {
     setAnswer("");
+    setErrorVisible(null);
+    setActiveChoiceIndex(0);
+    submittingRef.current = false;
+  }, [request?.request_id]);
+
+  // Remember the focused element when opening and restore it when closing.
+  useEffect(() => {
+    if (isOpen) {
+      previouslyFocused.current = document.activeElement as HTMLElement | null;
+      const first =
+        dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ??
+        document.body;
+      first.focus();
+      return;
+    }
+    const previous = previouslyFocused.current;
+    if (previous && document.contains(previous)) {
+      previous.focus();
+    }
+    previouslyFocused.current = null;
+  }, [isOpen]);
+
+  // Trap focus and provide keyboard navigation while the dialog is open.
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (request?.allow_skip && !settling && !submittingRef.current) {
+          event.preventDefault();
+          void submitReply({ kind: "skip" });
+        }
+        return;
+      }
+
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        const choices = request?.choices ?? [];
+        if (choices.length > 0) {
+          const current = document.activeElement;
+          const buttons = Array.from(
+            dialogRef.current?.querySelectorAll<HTMLButtonElement>("button[data-choice]") ?? [],
+          );
+          const currentIndex = buttons.findIndex((button) => button === current);
+          if (currentIndex >= 0) {
+            event.preventDefault();
+            const delta = event.key === "ArrowDown" ? 1 : -1;
+            const next = (currentIndex + delta + buttons.length) % buttons.length;
+            buttons[next].focus();
+            setActiveChoiceIndex(next);
+          }
+        }
+        return;
+      }
+
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      event.preventDefault();
+      if (event.shiftKey) {
+        if (active === first) {
+          last.focus();
+        } else {
+          const index = focusable.findIndex((element) => element === active);
+          const previous = focusable[Math.max(0, (index < 0 ? 0 : index) - 1)];
+          previous.focus();
+        }
+      } else if (active === last) {
+        first.focus();
+      } else {
+        const index = focusable.findIndex((element) => element === active);
+        const next = focusable[Math.min(focusable.length - 1, (index < 0 ? -1 : index) + 1)];
+        next.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, request, settling]);
+
+  const submitReply = async (reply: HumanReply) => {
+    if (!request || settling || submittingRef.current) return;
+    if (reply.kind === "text" && !answer.trim()) return;
+    submittingRef.current = true;
+    try {
+      await onReply(reply);
+      setErrorVisible(null);
+    } catch (err) {
+      setErrorVisible(err instanceof Error ? err.message : String(err));
+    } finally {
+      submittingRef.current = false;
+      if (reply.kind !== "text") setAnswer("");
+    }
   };
 
-  const choose = (value: string) => {
-    onChoice?.(request.request_id, value);
+  if (!request) return null;
+
+  const choices = request.choices ?? [];
+  const showText = request.allow_custom !== false;
+  const showSkip = request.allow_skip !== false;
+  const allDisabled = settling || submittingRef.current;
+  const visibleError = error ?? errorVisible;
+
+  const submitText = () => {
+    if (!answer.trim()) return;
+    void submitReply({ kind: "text", text: answer.trim() });
+  };
+
+  const choose = (choice: HumanChoice) => {
+    void submitReply({ kind: "choice", value: choice.value });
   };
 
   const skip = () => {
-    onSkip?.(request.request_id);
+    void submitReply({ kind: "skip" });
   };
 
   return (
-    <div className={styles.backdrop} role="dialog" aria-modal="true">
-      <div className={styles.dialog}>
-        <h2 className={styles.title}>需要你的确认</h2>
+    <div className={styles.backdrop}>
+      <div
+        ref={dialogRef}
+        className={styles.dialog}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
+        <h2 id={titleId} className={styles.title}>需要你的确认</h2>
         <p className={styles.prompt}>{request.prompt}</p>
 
-        {request.choices && request.choices.length > 0 && (
-          <div className={styles.choices}>
-            {request.choices.map((choice, index) => (
+        {choices.length > 0 && (
+          <div className={styles.choices} role="listbox" aria-label="Options">
+            {choices.map((choice, index) => (
               <button
                 key={choice.value}
-                className={styles.button}
+                className={`${styles.button}${index === activeChoiceIndex ? ` ${styles.buttonActive}` : ""}`}
                 type="button"
-                onClick={() => choose(choice.value)}
+                data-choice
+                onClick={() => choose(choice)}
+                disabled={allDisabled}
               >
-                {index + 1}. {choice.label}
+                <span aria-hidden>{index + 1}.</span> {choice.label}
               </button>
             ))}
           </div>
         )}
 
         <div className={styles.actions}>
-          {request.allow_custom !== false && (
-            <input
-              className={styles.input}
-              value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-              }}
-              placeholder="其他回答（可选）"
-              autoFocus={!request.choices || request.choices.length === 0}
-            />
+          {showText && (
+            <>
+              <input
+                className={styles.input}
+                value={answer}
+                onChange={(event) => setAnswer(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") submitText();
+                }}
+                placeholder="Other answer (optional)"
+                disabled={allDisabled}
+                aria-label="Free text answer"
+              />
+              <button
+                className={styles.button}
+                type="button"
+                onClick={submitText}
+                disabled={allDisabled || !answer.trim()}
+              >
+                Reply
+              </button>
+            </>
           )}
-          {request.allow_custom !== false && (
-            <button className={styles.button} type="button" onClick={submit}>
-              回复
-            </button>
-          )}
-          {request.allow_skip !== false && (
-            <button className={styles.button} type="button" onClick={skip}>
-              跳过
+          {showSkip && (
+            <button
+              className={`${styles.button} ${styles.buttonSkip}`}
+              type="button"
+              onClick={skip}
+              disabled={allDisabled}
+            >
+              Skip
             </button>
           )}
         </div>
+
+        {visibleError && (
+          <div className={styles.error} role="alert">
+            {visibleError}
+          </div>
+        )}
       </div>
     </div>
   );

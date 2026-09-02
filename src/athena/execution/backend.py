@@ -97,14 +97,18 @@ class LocalBackend:
             shell, shell_args = self._environment.shell_parts()
         executor = CommandExecutor(
             env=self._environment.build_env(
-                workspace_root, predict_features=request.predict_features
+                workspace_root,
+                predict_features=request.predict_features,
+                evaluation_split=request.evaluation_split,
             ),
             persist=self._store.put_text if self._store is not None else None,
         )
         return await executor.run(
             command=request.command,
             argv=request.argv,
-            workdir=Path(request.workdir) if request.workdir is not None else workspace_root,
+            workdir=(
+                Path(request.workdir) if request.workdir is not None else workspace_root
+            ),
             shell=shell,
             shell_args=shell_args,
             timeout_s=request.timeout_s,

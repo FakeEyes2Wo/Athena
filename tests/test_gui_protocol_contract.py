@@ -48,6 +48,12 @@ CANONICAL_METHODS: frozenset[str] = frozenset(
         "session_switch",
         "session_delete",
         "eda_report",
+        # B2. 任务澄清与确认门
+        "task_clarification_start",
+        "task_clarification_get",
+        "task_clarification_retry",
+        "task_clarification_revise",
+        "task_clarification_cancel",
         # C. 假设图与算法
         "hypothesis_graph",
         "graph_algorithms",
@@ -88,6 +94,11 @@ COMMAND_TO_METHOD: dict[str, str] = {
     "session_switch": "session_switch",
     "session_delete": "session_delete",
     "eda_report": "eda_report",
+    "task_clarification_start": "task_clarification_start",
+    "task_clarification_get": "task_clarification_get",
+    "task_clarification_retry": "task_clarification_retry",
+    "task_clarification_revise": "task_clarification_revise",
+    "task_clarification_cancel": "task_clarification_cancel",
     "settings_get": "settings_get",
     "settings_set": "settings_set",
     "set_project_root": "set_project_root",
@@ -120,7 +131,7 @@ def _dispatch_route_literals() -> set[str]:
     # `if method == "name":`
     routed.update(re.findall(r'if method == "([a-z_]+)"', text))
     # `if method in {"a", "b", "c"}:`
-    for block in re.findall(r'if method in \{([^}]*)\}', text):
+    for block in re.findall(r"if method in \{([^}]*)\}", text):
         routed.update(re.findall(r'"([a-z_]+)"', block))
     return routed
 
@@ -143,15 +154,13 @@ def test_dispatch_routes_every_supported_method() -> None:
 def test_rust_commands_map_to_supported_methods() -> None:
     """Every registered Tauri command maps to a gateway method, and vice versa."""
     commands = _rust_command_names()
-    assert commands == set(COMMAND_TO_METHOD), (
-        "lib.rs 命令与 COMMAND_TO_METHOD 表不一致；若新增/改名命令，请同步映射表"
-    )
+    assert commands == set(
+        COMMAND_TO_METHOD
+    ), "lib.rs 命令与 COMMAND_TO_METHOD 表不一致；若新增/改名命令，请同步映射表"
     mapped_methods = set(COMMAND_TO_METHOD.values())
-    assert mapped_methods <= SUPPORTED_METHODS, (
-        f"以下 Rust 命令映射的方法未被网关支持: {sorted(mapped_methods - SUPPORTED_METHODS)}"
-    )
+    assert (
+        mapped_methods <= SUPPORTED_METHODS
+    ), f"以下 Rust 命令映射的方法未被网关支持: {sorted(mapped_methods - SUPPORTED_METHODS)}"
     # 仅 ping/start/start_task 为 WebSocket 专用（无 Tauri 命令），其余方法均应被命令覆盖。
     ws_only = {"ping", "start", "start_task"}
     assert SUPPORTED_METHODS - mapped_methods == ws_only
-
-

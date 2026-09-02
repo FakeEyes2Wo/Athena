@@ -5,11 +5,8 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
-
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
 from athena.agents.task_agents import (
     VALIDATE_AGENT_ID,
@@ -27,6 +24,7 @@ from athena.execution.runtime import (
 )
 from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.evaluation.validation import ValidationService
 from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
@@ -37,71 +35,19 @@ from athena.research.supervisor.events import redact
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.manifest import read_experiment_manifest
 from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
-from athena.research.validation import ValidationService
+from athena.research.supervisor.validation_contracts import (
+    CheckpointValidation,
+    PredictionRun,
+    ValidationDeps,
+    ValidationDiffReview,
+    ValidationInput,
+    ValidationOptions,
+    ValidationRecoveryAction,
+)
 
-CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
 _MAX_REVIEW_DIFF_CHARS = 12_000
 # 校验修复循环的迭代上限，防止 preflight/review/工作区变化互相拉锯造成无限烧 token。
 _MAX_VALIDATION_REPAIR_ATTEMPTS = 16
-
-
-class ValidationInput(BaseModel):
-    """Immutable inputs identifying one logical validation attempt."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    sota_commit: CommitHash
-    reference_metric: float = Field(allow_inf_nan=False)
-    direction: Literal["maximize", "minimize"]
-    final_evaluator_ref: ArtifactRef
-    validation_key: str = Field(min_length=1)
-    # 只读 SOTA 上下文（假设/干预/预期效果/metric/commit），供 ValidateAgent
-    # 审阅 diff 时知晓被验证对象；绝不进入 validation_key（身份仍由
-    # commit+metric+direction+evaluator 决定）。
-    sota_context: dict[str, Any] | None = None
-    # Confirmed task contract block, rendered in the actual model-visible
-    # content. Default empty so older validation artifacts still deserialize.
-    task_context: str = ""
-
-
-class ValidationDiffReview(BaseModel):
-    """Independent decision on a proposed runtime-only repair."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    accepted: bool
-    reason: str = Field(min_length=1)
-
-
-@dataclass
-class ValidationDeps:
-    """All injected collaborators owned by one validation phase."""
-
-    agents: AgentRuntime
-    git: GitWorkspace
-    workspace: GitWorkBranch
-    execution: ExecutionRuntime
-    evaluator: TrustedEvaluator
-    store: ArtifactStore
-    independent_review: Callable[[str], Awaitable[ValidationDiffReview]]
-    checkpoint: CheckpointValidation
-    publish: EmitEvent | None = None
-
-
-@dataclass
-class ValidationOptions:
-    """Per-attempt validation knobs that are not part of the logical input."""
-
-    timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
-    predict_features: Path | None = None
-
-
-@dataclass(frozen=True)
-class PredictionRun:
-    """One re-run of the frozen experiment and its packed predictions."""
-
-    predictions_ref: ArtifactRef
-    predictions_path: str
 
 
 def validation_key(
@@ -126,7 +72,7 @@ async def recovery_action(
     result_ref: ArtifactRef | None,
     store: ArtifactStore,
     input: ValidationInput,
-) -> Literal["run", "score", "commit"]:
+) -> ValidationRecoveryAction:
     """Choose the next action from durable validation output."""
 
     if result_ref is None:

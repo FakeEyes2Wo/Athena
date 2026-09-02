@@ -51,13 +51,104 @@ class GuiService:
     async def stop(self) -> dict[str, Any]:
         return {"status": await self._runtime.message("/stop")}
 
-    async def start_search(self, config: dict[str, Any]) -> dict[str, Any]:
-        task = config.get("task") or config.get("message") or config.get("task_type") or ""
+    async def start_search(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        draft_id: str | None = None,
+        revision: int | None = None,
+        acknowledge_unresolved: bool | None = None,
+    ) -> dict[str, Any]:
+        """Start PREPARE through the confirmed draft path.
+
+        On the gated GUI path this accepts only the confirmed draft parameters.
+        The legacy ``{config: {task: ...}}`` shape is kept for non-gated callers.
+        """
+        if config is not None:
+            # Accept the legacy ``{"config": {task: ...}}`` envelope as well as
+            # the gated flat params emitted by the native/WebSocket adapters.
+            nested = config.get("config")
+            if (
+                draft_id is None
+                and revision is None
+                and acknowledge_unresolved is None
+                and isinstance(nested, dict)
+            ):
+                config = nested
+            draft_id = draft_id or config.get("draft_id")
+            revision = revision if revision is not None else config.get("revision")
+            if acknowledge_unresolved is None:
+                acknowledge_unresolved = config.get("acknowledge_unresolved")
+        if draft_id is not None or revision is not None:
+            if not isinstance(draft_id, str) or not draft_id.strip():
+                raise ValueError("start_search requires a non-empty 'draft_id'")
+            if revision is None:
+                raise ValueError("start_search requires an integer 'revision'")
+            if acknowledge_unresolved is None:
+                raise ValueError("start_search requires 'acknowledge_unresolved'")
+            confirm = getattr(self._runtime, "confirm_and_start", None)
+            if confirm is None:
+                raise ValueError(
+                    "start_search requires a confirmed clarification draft"
+                )
+            result = await confirm(
+                draft_id,
+                int(revision),
+                bool(acknowledge_unresolved),
+            )
+            if hasattr(result, "model_dump"):
+                result = result.model_dump(mode="json")
+            elif not isinstance(result, dict):
+                result = {"draft_id": draft_id, "result": result}
+            return result
+
+        task = (
+            config.get("task") or config.get("message") or config.get("task_type") or ""
+            if config
+            else ""
+        )
         if isinstance(task, dict):
             task = json.dumps(task, ensure_ascii=False)
         if not isinstance(task, str) or not task.strip():
             raise ValueError("start_search requires a non-empty 'task' string")
         return {"status": await self._runtime.start_task(task)}
+
+    @staticmethod
+    def _clarification_response(result: object) -> dict[str, Any]:
+        """Serialize a draft without translating its domain exception."""
+        if hasattr(result, "model_dump"):
+            return result.model_dump(mode="json")
+        if isinstance(result, dict):
+            return result
+        return {"result": result}
+
+    async def task_clarification_start(self, task: str) -> dict[str, Any]:
+        result = await self._runtime.task_clarification_start(task)
+        return self._clarification_response(result)
+
+    async def task_clarification_get(self, draft_id: str) -> dict[str, Any]:
+        result = await self._runtime.task_clarification_get(draft_id)
+        return self._clarification_response(result)
+
+    async def task_clarification_retry(
+        self, draft_id: str, revision: int
+    ) -> dict[str, Any]:
+        result = await self._runtime.task_clarification_retry(draft_id, revision)
+        return self._clarification_response(result)
+
+    async def task_clarification_revise(
+        self, draft_id: str, revision: int, instruction: str
+    ) -> dict[str, Any]:
+        result = await self._runtime.task_clarification_revise(
+            draft_id, revision, instruction
+        )
+        return self._clarification_response(result)
+
+    async def task_clarification_cancel(
+        self, draft_id: str, revision: int
+    ) -> dict[str, Any]:
+        result = await self._runtime.task_clarification_cancel(draft_id, revision)
+        return self._clarification_response(result)
 
     async def start_validation(self) -> dict[str, Any]:
         """Run the VALIDATE phase and return the resulting runtime status."""
@@ -173,7 +264,9 @@ class GuiService:
     def experiment_transition(
         self, experiment_id: str, status: str, error: str | None = None
     ) -> dict[str, Any]:
-        detail = experiments.transition(self._runtime.tree, experiment_id, status, error)
+        detail = experiments.transition(
+            self._runtime.tree, experiment_id, status, error
+        )
         self._runtime.save_tree()
         return {"experiment": detail}
 
@@ -196,14 +289,20 @@ def _find_eda_report(eda_path: Path) -> tuple[str | None, str | None]:
             if isinstance(report_rel, str) and report_rel:
                 candidate = (eda_path / report_rel).resolve()
                 if candidate.is_file():
-                    return candidate.read_text(encoding="utf-8", errors="replace"), candidate.name
+                    return (
+                        candidate.read_text(encoding="utf-8", errors="replace"),
+                        candidate.name,
+                    )
     except (OSError, ValueError, json.JSONDecodeError):
         pass
 
     for name in ("report.md", "REPORT.md", "eda.md", "EDA.md", "analysis.md"):
         candidate = eda_path / name
         if candidate.is_file():
-            return candidate.read_text(encoding="utf-8", errors="replace"), candidate.name
+            return (
+                candidate.read_text(encoding="utf-8", errors="replace"),
+                candidate.name,
+            )
 
     for candidate in sorted(eda_path.glob("*.md")):
         if candidate.name.upper() in {"RESEARCH_HANDOFF.MD", "HANDOFF.MD"}:

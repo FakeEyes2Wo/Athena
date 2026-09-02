@@ -259,9 +259,7 @@ class SshBackend:
                 "split under the remote data root first."
             )
         cwd = self._remote_cwd(
-            Path(request.workdir)
-            if request.workdir is not None
-            else workspace_root
+            Path(request.workdir) if request.workdir is not None else workspace_root
         )
         # Ensure the remote working directory exists before spawning; this also
         # makes a backend usable without an explicitly bound local root.
@@ -296,11 +294,14 @@ class SshBackend:
                 )
 
         try:
+            env = self.build_env()
+            if request.evaluation_split is not None:
+                env["ATHENA_EVALUATION_SPLIT"] = request.evaluation_split
             job_id, exited = await self._channel.spawn(
                 argv=request.argv,
                 command=request.command,
                 cwd=cwd,
-                env=self.build_env(),
+                env=env,
                 on_output=on_output,
                 shell=self._channel.ready.get("shell"),
             )

@@ -3,10 +3,11 @@
 import asyncio
 import csv
 import io
+from types import SimpleNamespace
 
 import pytest
 
-from athena.research.evaluator_trust import (
+from athena.research.evaluation.trust import (
     _parse_labels,
     extract_prediction_column,
     extract_prediction_column_from_source,
@@ -43,10 +44,10 @@ class _GoodEvaluator:
         preds = dict(
             line.split(",") for line in predictions_csv.strip().splitlines()[1:]
         )
-        labels = dict(
-            line.split(",") for line in _LABELS.strip().splitlines()[1:]
+        labels = dict(line.split(",") for line in _LABELS.strip().splitlines()[1:])
+        correct = sum(
+            1 for row_id, label in labels.items() if preds.get(row_id) == label
         )
-        correct = sum(1 for row_id, label in labels.items() if preds.get(row_id) == label)
         return correct / len(labels)
 
 
@@ -58,10 +59,10 @@ class _PredColumnEvaluator:
         if "pred" not in (reader.fieldnames or []):
             return 0.0
         preds = {row["__athena_row_id"]: row["pred"] for row in reader}
-        labels = dict(
-            line.split(",") for line in _LABELS.strip().splitlines()[1:]
+        labels = dict(line.split(",") for line in _LABELS.strip().splitlines()[1:])
+        correct = sum(
+            1 for row_id, label in labels.items() if preds.get(row_id) == label
         )
-        correct = sum(1 for row_id, label in labels.items() if preds.get(row_id) == label)
         return correct / len(labels)
 
 
@@ -78,9 +79,7 @@ def test_extract_prediction_column_returns_none_when_not_declared() -> None:
 
 def test_extract_prediction_column_parses_explicit_declaration() -> None:
     handoff = (
-        "# Evaluator Handoff\n"
-        "prediction column: pred\n"
-        "join on __athena_row_id\n"
+        "# Evaluator Handoff\n" "prediction column: pred\n" "join on __athena_row_id\n"
     )
     assert extract_prediction_column(handoff) == "pred"
 
@@ -174,3 +173,28 @@ async def test_validate_rejects_too_few_rows() -> None:
         prediction_column="prediction",
     )
     assert outcome["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_property_probe_uses_declared_dataset_columns() -> None:
+    labels = "sample_key,target\na,0\nb,1\nc,0\nd,1\n"
+    seen: list[str] = []
+
+    async def score(predictions_csv: str) -> float:
+        seen.append(predictions_csv)
+        rows = list(csv.DictReader(io.StringIO(predictions_csv)))
+        truth = {"a": "0", "b": "1", "c": "0", "d": "1"}
+        return sum(truth[row["sample_key"]] == row["pred_label"] for row in rows)
+
+    outcome = await validate_evaluator_properties(
+        labels,
+        score,
+        spec=SimpleNamespace(
+            prediction_id_column="sample_key",
+            prediction_column="pred_label",
+            probability_columns=("prob_0", "prob_1"),
+        ),
+    )
+
+    assert outcome["ok"] is True
+    assert seen[0].splitlines()[0] == "sample_key,pred_label,prob_0,prob_1"

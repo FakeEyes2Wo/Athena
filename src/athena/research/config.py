@@ -18,6 +18,9 @@ class ResearchPaths:
     state: Path
     tree: Path
     sessions: Path
+    clarification: Path
+    clarification_confirmation: Path
+    handoffs: Path
 
 
 @dataclass(frozen=True)
@@ -46,10 +49,13 @@ class ResearchConfig:
     """Everything ResearchRuntime needs to know that does not change per run."""
 
     paths: ResearchPaths
+    session_id: str = "default"
     model: str | None = None
     client: Any = None
     task: str = ""
     auto_seed_task: bool = False
+    task_confirmation_gate: bool = False
+    auto_confirm: bool = False
     search: SearchLimits = field(default_factory=SearchLimits)
     survey: SurveyConfig = field(default_factory=SurveyConfig)
     auto_validate: bool = False

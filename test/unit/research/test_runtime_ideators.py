@@ -7,7 +7,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from athena.core.research_models import Hypothesis, HypothesisBatch
-from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.turns.runner import AgentTurnRunner
 from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisBatch,
     IdeatorHypothesisDraft,
@@ -80,18 +80,16 @@ def _lane_runner(monkeypatch, batches: list[HypothesisBatch]):
         return batch
 
     monkeypatch.setattr(
-        "athena.research.agent_turn_runner.confirmed_task_context_block",
+        "athena.research.turns.ideator.confirmed_task_context_block",
         no_task_context,
     )
     monkeypatch.setattr(
-        "athena.research.agent_turn_runner.read_eval_handoff", no_eval_handoff
+        "athena.research.turns.ideator.read_eval_handoff", no_eval_handoff
     )
     monkeypatch.setattr(
-        "athena.research.agent_turn_runner._wait_run_with_heartbeat", completed_run
+        "athena.research.turns.ideator._wait_run_with_heartbeat", completed_run
     )
-    monkeypatch.setattr(
-        "athena.research.agent_turn_runner.load_agent_result", next_batch
-    )
+    monkeypatch.setattr("athena.research.turns.ideator.load_agent_result", next_batch)
     runner = AgentTurnRunner(runtime)
     runner._finish_ideator_batch = MethodType(accept_batch, runner)
     return runner, agents
@@ -230,7 +228,7 @@ class _EventRuntime:
 
 @pytest.mark.asyncio
 async def test_ideator_event_forwarding_uses_stable_lane_label() -> None:
-    from athena.research.supervisor.plans import wait_run_events
+    from athena.research.supervisor.events import wait_run_events
 
     events = _EventRuntime()
     projected: list[tuple[str, str, str, dict | None]] = []
@@ -390,7 +388,7 @@ async def test_gated_batch_preserves_eda_request(monkeypatch, tmp_path) -> None:
         return [_hypothesis("kept")]
 
     monkeypatch.setattr(
-        "athena.research.agent_turn_runner.run_light_pipeline", fake_pipeline
+        "athena.research.turns.ideator.run_light_pipeline", fake_pipeline
     )
     runner = AgentTurnRunner(runtime)
     draft = IdeatorHypothesisDraft(

@@ -24,8 +24,8 @@ from athena.execution import (
     ExecutionContext,
     ExecutionRuntime,
 )
-from athena.execution.runtime import CommandResult, EnvironmentManager
 from athena.execution.remote.ssh import SshBackend, SshHost
+from athena.execution.runtime import CommandResult, EnvironmentManager
 
 
 class _RecordingBackend:
@@ -48,7 +48,9 @@ class _RecordingBackend:
     def ensure_environment(self) -> None:
         pass
 
-    async def run(self, *, workspace_root: Path, request: CommandRequest) -> CommandResult:
+    async def run(
+        self, *, workspace_root: Path, request: CommandRequest
+    ) -> CommandResult:
         self.requests.append(request)
         self.workspaces.append(workspace_root)
         return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
@@ -98,6 +100,7 @@ def test_command_request_defaults_preserve_old_behaviour() -> None:
     assert request.workdir is None
     assert request.emit is None
     assert request.predict_features is None
+    assert request.evaluation_split is None
 
 
 def test_environment_manager_injects_predict_features_exactly_when_requested() -> None:
@@ -115,6 +118,22 @@ def test_environment_manager_injects_predict_features_exactly_when_requested() -
         _cleanup(work_dir)
 
 
+def test_environment_manager_injects_evaluation_split_per_request() -> None:
+    work_dir = _work_dir()
+    try:
+        manager = EnvironmentManager(project_root=work_dir, environment_root=work_dir)
+
+        search = manager.build_env(work_dir, evaluation_split="search")
+        final = manager.build_env(work_dir, evaluation_split="final")
+        plain = manager.build_env(work_dir)
+
+        assert search["ATHENA_EVALUATION_SPLIT"] == "search"
+        assert final["ATHENA_EVALUATION_SPLIT"] == "final"
+        assert "ATHENA_EVALUATION_SPLIT" not in plain
+    finally:
+        _cleanup(work_dir)
+
+
 @pytest.mark.asyncio
 async def test_predict_features_is_materialised_onto_the_per_run_request() -> None:
     work_dir = _work_dir()
@@ -125,7 +144,10 @@ async def test_predict_features_is_materialised_onto_the_per_run_request() -> No
             project_root=work_dir, environment_root=work_dir, backend=backend
         )
 
-        await runtime.run(_context(work_dir, predict_features=target), CommandRequest(command="python train.py"))
+        await runtime.run(
+            _context(work_dir, predict_features=target),
+            CommandRequest(command="python train.py"),
+        )
         await runtime.run(_context(work_dir), CommandRequest(command="python train.py"))
 
         assert [request.predict_features for request in backend.requests] == [
@@ -148,10 +170,12 @@ async def test_no_leakage_between_two_sequential_runs_with_different_targets() -
         )
 
         await runtime.run(
-            _context(work_dir, predict_features=first), CommandRequest(command="run one")
+            _context(work_dir, predict_features=first),
+            CommandRequest(command="run one"),
         )
         await runtime.run(
-            _context(work_dir, predict_features=second), CommandRequest(command="run two")
+            _context(work_dir, predict_features=second),
+            CommandRequest(command="run two"),
         )
         await runtime.run(_context(work_dir), CommandRequest(command="run three"))
 
@@ -165,7 +189,9 @@ async def test_no_leakage_between_two_sequential_runs_with_different_targets() -
 
 
 @pytest.mark.asyncio
-async def test_ssh_backend_rejects_unsupported_predict_features_with_clear_error() -> None:
+async def test_ssh_backend_rejects_unsupported_predict_features_with_clear_error() -> (
+    None
+):
     target = Path.cwd() / f".test-ssh-predict-{uuid.uuid4().hex}" / "final.csv"
     backend = SshBackend(
         SshHost(name="gpu-01", alias="gpu01.lab"),

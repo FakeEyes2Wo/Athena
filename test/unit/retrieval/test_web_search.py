@@ -4,7 +4,7 @@ import urllib.parse
 
 import pytest
 
-from athena.research.paper_source.http import HttpResponse
+from athena.research.literature.paper_source.http import HttpResponse
 from athena.retrieval.web_search import (
     WebFetchTool,
     WebSearchTool,
@@ -135,7 +135,10 @@ async def test_more_than_three_queries_requires_medium_or_long() -> None:
     tool = WebSearchTool(http=_FakeHttp())
     with pytest.raises(ValueError, match="medium or long"):
         await tool.execute(
-            {"search_query": [{"q": str(i)} for i in range(4)], "response_length": "short"},
+            {
+                "search_query": [{"q": str(i)} for i in range(4)],
+                "response_length": "short",
+            },
             ctx=None,
         )
 

@@ -3,7 +3,7 @@
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import Experiment, ResearchTree
 from athena.research.supervisor.plans import PlanState
-from athena.research.supervisor.scheduler import (
+from athena.research.supervisor.scheduling import (
     ScheduleAction,
     ScheduleKind,
     Scheduler,

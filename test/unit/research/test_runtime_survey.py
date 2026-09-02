@@ -15,16 +15,15 @@ import pytest
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry, tool
-from athena.research import agent_turn_runner as atr_module
-from athena.research import runtime as runtime_module
-from athena.research import runtime_survey as runtime_survey_module
-from athena.research.agent_turn_runner import AgentTurnRunner
-from athena.research.paper_rag.schemas import PaperSummary
-from athena.research.paper_source.http import HostRateLimiter
+from athena.research.turns import ideator as atr_module
+from athena.research.runtime import survey as runtime_survey_module
+from athena.research.turns.runner import AgentTurnRunner
+from athena.research.literature.paper_rag.schemas import PaperSummary
+from athena.research.literature.paper_source.http import HostRateLimiter
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.state import ResearchState
-from athena.research.survey import SurveyReport, SurveyStack
-from athena.research.survey.wiring import build_survey_tools
+from athena.research.literature.survey import SurveyReport, SurveyStack
+from athena.research.literature.survey.wiring import build_survey_tools
 
 READ_ONLY_TOOLS = {
     "paper_chunk_read",
@@ -62,29 +61,34 @@ def _stack() -> SurveyStack:
     )
 
 
-def _runtime(state: ResearchState, **attributes) -> ResearchRuntime:
-    """Build a runtime shell carrying only what the survey paths touch."""
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._state = state
-    runtime._supervisor = SimpleNamespace(
+def _runtime(
+    state: ResearchState,
+    *,
+    survey: bool = False,
+    survey_query: str = "",
+    survey_stack: SurveyStack | None = None,
+    ideation: str = "ideageneration",
+) -> ResearchRuntime:
+    """Build a real runtime with explicit survey collaborators."""
+    runtime = ResearchRuntime(
+        project_root=tempfile.mkdtemp(prefix="survey_runtime_"),
+        model="m",
+        survey=survey,
+        survey_query=survey_query,
+        survey_max_papers=10,
+        ideation=ideation,
+    )
+    runtime.services.durable.state = state
+    runtime.services.workflow.supervisor = SimpleNamespace(
         state=state, evaluator_ref=None, kaggle_enabled=False
     )
-    runtime._survey_enabled = False
-    runtime._survey_query = ""
-    runtime._survey_max_papers = 10
-    runtime._survey_stack = None
-    runtime._corpus_sessions = []
-    runtime._kaggle_stack = None
-    runtime._survey_task = None
-    runtime._model = "m"
-    runtime._client = None
-    runtime._ideation = "ideageneration"
-    runtime._store = LocalArtifactStore(tempfile.mkdtemp(prefix="survey_store_"))
-    runtime._events_bus = SimpleNamespace(
+    runtime.session.survey.stack = survey_stack
+    runtime.services.infrastructure.store = LocalArtifactStore(
+        tempfile.mkdtemp(prefix="survey_store_")
+    )
+    runtime.services.infrastructure.events = SimpleNamespace(
         project_agent_event=_discard_event, publish_output=_discard_event
     )
-    for name, value in attributes.items():
-        setattr(runtime, name, value)
     return runtime
 
 
@@ -111,35 +115,35 @@ def _recorder(sink: list[dict]):
 def test_survey_is_off_by_default_so_no_run_pays_for_it_unasked() -> None:
     runtime = _runtime(_state())
 
-    runtime._start_survey()
+    runtime.start_survey()
 
-    assert runtime._survey_task is None
+    assert runtime.session.survey.task is None
 
 
 @pytest.mark.asyncio
 async def test_enabling_the_survey_starts_exactly_one_background_run() -> None:
-    runtime = _runtime(_state(), _survey_enabled=True)
+    runtime = _runtime(_state(), survey=True)
     runs = 0
 
     async def fake_run(self) -> None:
         nonlocal runs
         runs += 1
 
-    runtime._run_survey = MethodType(fake_run, runtime)
+    runtime.run_survey = MethodType(fake_run, runtime)
 
-    runtime._start_survey()
-    runtime._start_survey()
-    await runtime._survey_task
+    runtime.start_survey()
+    runtime.start_survey()
+    await runtime.session.survey.task
 
     assert runs == 1
 
 
 def test_an_existing_corpus_is_never_paid_for_twice() -> None:
-    runtime = _runtime(_state(corpus_ref="sha256:cached"), _survey_enabled=True)
+    runtime = _runtime(_state(corpus_ref="sha256:cached"), survey=True)
 
-    runtime._start_survey()
+    runtime.start_survey()
 
-    assert runtime._survey_task is None
+    assert runtime.session.survey.task is None
 
 
 @pytest.mark.asyncio
@@ -149,10 +153,11 @@ async def test_the_corpus_ref_lands_on_the_state_the_supervisor_will_persist(
     """recover() 会用 model_copy 换掉状态对象，写在旧对象上的字段会被覆盖掉。"""
     stale = _state()
     live = stale.model_copy()
-    runtime = _runtime(stale, _survey_query="tabular deep learning")
-    runtime._supervisor = SimpleNamespace(state=live)
-    runtime._state_path = tmp_path / "state.json"
-    runtime._survey_stack = _stack()
+    runtime = _runtime(
+        live,
+        survey_query="tabular deep learning",
+        survey_stack=_stack(),
+    )
     runtime.publish_output = _recorder([])
 
     async def fake_survey(_stack, _request, *, emit=None):
@@ -160,11 +165,11 @@ async def test_the_corpus_ref_lands_on_the_state_the_supervisor_will_persist(
 
     monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
 
-    await runtime._run_survey()
+    await runtime.run_survey()
 
     assert live.corpus_ref == "sha256:corpus"
     assert stale.corpus_ref is None
-    assert ResearchState.load(runtime._state_path).corpus_ref == "sha256:corpus"
+    assert ResearchState.load(runtime.state_path).corpus_ref == "sha256:corpus"
 
 
 @pytest.mark.asyncio
@@ -172,7 +177,7 @@ async def test_a_failed_survey_is_reported_and_leaves_search_untouched(
     monkeypatch,
 ) -> None:
     published: list[dict] = []
-    runtime = _runtime(_state(), _survey_query="topic", _survey_stack=_stack())
+    runtime = _runtime(_state(), survey_query="topic", survey_stack=_stack())
     runtime.publish_output = _recorder(published)
 
     async def fake_survey(_stack, _request, *, emit=None):
@@ -180,7 +185,7 @@ async def test_a_failed_survey_is_reported_and_leaves_search_untouched(
 
     monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
 
-    await runtime._run_survey()
+    await runtime.run_survey()
 
     assert runtime.state.corpus_ref is None
     assert [item["channel"] for item in published] == ["text", "error"]
@@ -190,7 +195,7 @@ async def test_a_failed_survey_is_reported_and_leaves_search_untouched(
 @pytest.mark.asyncio
 async def test_an_empty_corpus_is_reported_rather_than_recorded(monkeypatch) -> None:
     published: list[dict] = []
-    runtime = _runtime(_state(), _survey_query="topic", _survey_stack=_stack())
+    runtime = _runtime(_state(), survey_query="topic", survey_stack=_stack())
     runtime.publish_output = _recorder(published)
 
     async def fake_survey(_stack, _request, *, emit=None):
@@ -198,7 +203,7 @@ async def test_an_empty_corpus_is_reported_rather_than_recorded(monkeypatch) -> 
 
     monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
 
-    await runtime._run_survey()
+    await runtime.run_survey()
 
     assert runtime.state.corpus_ref is None
     assert published[-1]["channel"] == "error"
@@ -210,7 +215,7 @@ async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
 ) -> None:
     requests: list[dict] = []
     runtime = _runtime(_state())
-    runtime._agents = _AgentSpy(requests)
+    runtime.services.infrastructure.agents = _AgentSpy(requests)
     runner = AgentTurnRunner(runtime)
 
     async def wait(_agents, _run_id, _publish, **_cursor):
@@ -222,11 +227,11 @@ async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
     async def finish(_batch, *, rejections=None):
         return HypothesisBatch()
 
-    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
+    monkeypatch.setattr("athena.research.turns.common.wait_run_events", wait)
     monkeypatch.setattr(atr_module, "load_agent_result", load)
     monkeypatch.setattr(runner, "_finish_ideator_batch", finish)
 
-    await runner._run_ideator_lane("ideator-1", 2, _eda_dir())
+    await runner._run_ideator_lane("ideator-1-1", 2, _eda_dir())
 
     assert runtime.survey_corpus_ref() is None
     assert "corpus_ref" not in requests[0]["content"]
@@ -238,7 +243,7 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
 ) -> None:
     requests: list[dict] = []
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
-    runtime._agents = _AgentSpy(requests)
+    runtime.services.infrastructure.agents = _AgentSpy(requests)
     runner = AgentTurnRunner(runtime)
 
     async def wait(_agents, _run_id, _publish, **_cursor):
@@ -250,11 +255,11 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
     async def finish(_batch, *, rejections=None):
         return HypothesisBatch()
 
-    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
+    monkeypatch.setattr("athena.research.turns.common.wait_run_events", wait)
     monkeypatch.setattr(atr_module, "load_agent_result", load)
     monkeypatch.setattr(runner, "_finish_ideator_batch", finish)
 
-    await runner._run_ideator_lane("ideator-1", 2, _eda_dir())
+    await runner._run_ideator_lane("ideator-1-1", 2, _eda_dir())
 
     content = requests[0]["content"]
     assert "sha256:corpus" in content
@@ -262,7 +267,7 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
 
 
 def test_the_ideator_gets_read_only_operators_and_no_producers() -> None:
-    runtime = _runtime(_state(corpus_ref="sha256:corpus"), _survey_stack=_stack())
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"), survey_stack=_stack())
     tools = runtime.ideator_tools()()
 
     names = {spec.name for spec in tools.specs}
@@ -271,7 +276,7 @@ def test_the_ideator_gets_read_only_operators_and_no_producers() -> None:
 
 
 def test_no_paper_tools_are_attached_before_a_corpus_exists() -> None:
-    runtime = _runtime(_state(), _survey_stack=_stack())
+    runtime = _runtime(_state(), survey_stack=_stack())
     tools = runtime.ideator_tools()()
 
     assert tools is None
@@ -300,9 +305,8 @@ async def test_debate_ideation_receives_corpus_instruction_and_read_only_tools(
     monkeypatch,
 ) -> None:
     """--ideation debate 同样接入 survey：提示带 corpus_ref，agent 拿只读论文工具。"""
-    runtime = _runtime(_state(corpus_ref="sha256:corpus"), _survey_stack=_stack())
-    runtime._model = "m"
-    runtime._supervisor.tree = SimpleNamespace(
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"), survey_stack=_stack())
+    runtime.services.workflow.supervisor.tree = SimpleNamespace(
         best_experiment_id=lambda: None, to_dict=lambda: {}
     )
     runtime.publish_output = _recorder([])
@@ -366,8 +370,8 @@ def _lane_harness(monkeypatch) -> list[dict]:
     async def load(_summary, _store, _schema):
         return SimpleNamespace(hypotheses=[])
 
-    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
-    monkeypatch.setattr(runtime_module, "load_agent_result", load)
+    monkeypatch.setattr("athena.research.turns.common.wait_run_events", wait)
+    monkeypatch.setattr(atr_module, "load_agent_result", load)
     return []
 
 
@@ -393,36 +397,39 @@ async def test_aclose_cancels_a_survey_that_is_still_running() -> None:
     async def close_events() -> None:
         pass
 
-    runtime._events_bus = SimpleNamespace(
+    runtime.services.infrastructure.events = SimpleNamespace(
         _subscriber_ready={}, _subscribers={}, aclose=close_events
     )
-    runtime._task = None
+    runtime.session.lifecycle.task = None
     started = asyncio.Event()
 
     async def never_finishes() -> None:
         started.set()
         await asyncio.Event().wait()
 
-    runtime._survey_task = asyncio.create_task(never_finishes())
+    runtime.session.survey.task = asyncio.create_task(never_finishes())
     await started.wait()
     stopped = asyncio.Event()
 
     async def stop() -> None:
         stopped.set()
 
-    runtime._supervisor = SimpleNamespace(state=runtime._state, stop=stop)
-    runtime._agents = SimpleNamespace(aclose=stop)
+    runtime.services.workflow.supervisor = SimpleNamespace(
+        state=runtime.state,
+        stop=stop,
+    )
+    runtime.services.infrastructure.agents = SimpleNamespace(aclose=stop)
 
     await runtime.aclose()
 
-    assert runtime._survey_task.cancelled()
+    assert runtime.session.survey.task.cancelled()
 
 
 # ── 交给 Ideator ────────────────────────────────────────────────────────
 
 
 def test_the_ideator_gets_read_only_operators_and_no_producers() -> None:
-    runtime = _runtime(_state(corpus_ref="sha256:corpus"), _survey_stack=_stack())
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"), survey_stack=_stack())
 
     tools = runtime.corpus_tools()
 
@@ -432,7 +439,7 @@ def test_the_ideator_gets_read_only_operators_and_no_producers() -> None:
 
 
 def test_no_paper_tools_are_offered_before_a_corpus_exists() -> None:
-    runtime = _runtime(_state(), _survey_stack=_stack())
+    runtime = _runtime(_state(), survey_stack=_stack())
 
     assert runtime.corpus_tools() is None
     assert runtime.survey_corpus_ref() is None
@@ -444,7 +451,7 @@ def test_the_ideator_tool_set_merges_kaggle_and_corpus_lazily() -> None:
     ideator 只注册一次，而语料要十几分钟才建好——把注册时刻的工具表冻结下来，语料就
     永远接不进来。
     """
-    runtime = _runtime(_state(corpus_ref="sha256:corpus"), _survey_stack=_stack())
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"), survey_stack=_stack())
     kaggle = ToolRegistry()
     kaggle.register(_kaggle_stub)
     runtime.kaggle_tools = lambda _agent_type: kaggle
@@ -454,7 +461,7 @@ def test_the_ideator_tool_set_merges_kaggle_and_corpus_lazily() -> None:
     assert READ_ONLY_TOOLS <= both
     assert "_kaggle_stub" in both
 
-    runtime._supervisor.state.corpus_ref = None
+    runtime.state.corpus_ref = None
     kaggle_only = {spec.name for spec in build().specs}
     assert kaggle_only == {"_kaggle_stub"}
 
@@ -465,9 +472,9 @@ async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
 ) -> None:
     requests = _lane_harness(monkeypatch)
     runtime = _runtime(_state())
-    runtime._agents = _AgentSpy(requests)
+    runtime.services.infrastructure.agents = _AgentSpy(requests)
 
-    await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1", 2, _eda_dir())
+    await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1-1", 2, _eda_dir())
 
     assert runtime.survey_corpus_ref() is None
     assert "corpus_ref" not in requests[0]["content"]
@@ -479,7 +486,7 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
 ) -> None:
     requests = _lane_harness(monkeypatch)
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
-    runtime._agents = _AgentSpy(requests)
+    runtime.services.infrastructure.agents = _AgentSpy(requests)
     # 有 corpus_ref 就会真去装载语料做引用核验；这里只关心提示词，给个空的已知集合。
     runtime.corpus_paper_ids = _no_corpus
 
@@ -501,7 +508,7 @@ async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
 
     runtime.corpus_summaries = summaries
 
-    await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1", 2, _eda_dir())
+    await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1-1", 2, _eda_dir())
 
     content = requests[0]["content"]
     assert "sha256:corpus" in content
@@ -520,7 +527,7 @@ async def test_an_unreadable_corpus_listing_does_not_break_ideation(
     """目录读不出来只该少一段提示，不该让这一轮 ideation 挂掉。"""
     requests = _lane_harness(monkeypatch)
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
-    runtime._agents = _AgentSpy(requests)
+    runtime.services.infrastructure.agents = _AgentSpy(requests)
     runtime.corpus_paper_ids = _no_corpus
 
     async def broken():
@@ -528,7 +535,7 @@ async def test_an_unreadable_corpus_listing_does_not_break_ideation(
 
     runtime.corpus_summaries = broken
 
-    await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1", 2, _eda_dir())
+    await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1-1", 2, _eda_dir())
 
     content = requests[0]["content"]
     assert "sha256:corpus" in content
@@ -614,7 +621,7 @@ async def test_sources_are_left_alone_when_no_corpus_was_offered() -> None:
 @pytest.mark.asyncio
 async def test_the_baseline_arm_verifies_citations_too(monkeypatch) -> None:
     """消融对照组不过门禁，但引用照样要能核验——排序对两条臂是同一个。"""
-    runtime = _runtime(_state(corpus_ref="sha256:corpus"), _ideation="baseline")
+    runtime = _runtime(_state(corpus_ref="sha256:corpus"), ideation="baseline")
     runtime.publish_output = _recorder([])
 
     async def known() -> set[str]:
@@ -655,8 +662,8 @@ def _lane_harness(monkeypatch) -> list[dict]:
         return SimpleNamespace(hypotheses=[])
 
     monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", _unused_survey)
-    monkeypatch.setattr("athena.research.agent_turn_common.wait_run_events", wait)
-    monkeypatch.setattr("athena.research.agent_turn_runner.load_agent_result", load)
+    monkeypatch.setattr("athena.research.turns.common.wait_run_events", wait)
+    monkeypatch.setattr("athena.research.turns.ideator.load_agent_result", load)
     return []
 
 
@@ -690,7 +697,7 @@ def test_a_corpus_restored_from_state_still_hands_the_ideator_its_operators(
     实测：0 次 paper_* 调用、0 条 sources，而提示词还在让它去调 paper_corpus_overview。
     """
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
-    assert runtime._survey_stack is None
+    assert runtime.session.survey.stack is None
     built: list[object] = []
     monkeypatch.setattr(
         runtime_survey_module,
@@ -703,7 +710,7 @@ def test_a_corpus_restored_from_state_still_hands_the_ideator_its_operators(
     assert READ_ONLY_TOOLS <= names
     assert not (PRODUCER_TOOLS & names)
     # artifact store 必须是本项目那一份，否则算子会去另一个库里找语料
-    assert built and built[0]["artifacts"] is runtime._store
+    assert built and built[0]["artifacts"] is runtime.store
 
 
 @pytest.mark.asyncio

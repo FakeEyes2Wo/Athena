@@ -12,25 +12,37 @@ def _python_module_names(root: Path) -> set[str]:
 def test_supervisor_has_only_coarse_plan_modules() -> None:
     assert _python_module_names(SUPERVISOR_ROOT) == {
         "__init__",
+        "deps",
+        "evaluator_plan",
         "events",
         "experiment",
+        "manifest",
+        "phases",
+        "plan_lifecycle",
+        "plan_runtime",
         "plans",
-        "policy",
         "prepare",
-        "ranker",
+        "prompt_context",
         "recovery",
-        "scheduler",
+        "run_state",
+        "scheduling",
+        "search_loop",
+        "settlement",
         "state",
+        "statistics",
         "supervisor",
         "validation",
+        "validation_contracts",
     }
+    for retired in ("policy", "ranker", "scheduler"):
+        assert not (SUPERVISOR_ROOT / f"{retired}.py").exists()
     assert not (SUPERVISOR_ROOT / "planning").exists()
     assert not (SUPERVISOR_ROOT / "storage").exists()
 
 
 def test_active_surfaces_have_no_legacy_protocol_or_session_reader() -> None:
     sources = [
-        Path("src/athena/research/runtime.py"),
+        Path("src/athena/research/runtime/facade.py"),
         Path("src/athena/cli.py"),
         *Path("src/athena_tui").glob("*.py"),
     ]

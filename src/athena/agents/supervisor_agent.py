@@ -143,19 +143,21 @@ class _KaggleConfiguration(BaseModel):
 
 
 class _TaskUnderstanding(BaseModel):
-    """Structured task understanding recorded on the first task-understanding turn."""
+    """Structured task understanding recorded on the first task-understanding turn.
+
+    No metric/direction defaults are invented here. Unknown values remain
+    ``None`` so the confirmed contract never silently becomes accuracy/maximize.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    title: str = ""
-    dataset: str = ""
-    target: str = ""
+    title: str
+    dataset: str | None = None
+    target: str | None = None
     task_type: str = "other"
-    primary_metric: str = Field(
-        default="accuracy", pattern=r"^[a-z][a-z0-9_]*$"
-    )
-    direction: Literal["maximize", "minimize"] = "maximize"
-    evaluation_plan: str = ""
+    primary_metric: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
+    direction: Literal["maximize", "minimize"] | None = None
+    evaluation_plan: str | None = None
 
 
 class _Guidance(BaseModel):

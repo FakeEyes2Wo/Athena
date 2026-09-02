@@ -6,7 +6,7 @@ import pytest
 
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
-from athena.research.supervisor.policy import (
+from athena.research.supervisor.scheduling import (
     EloPolicy,
     HypothesisPolicy,
     Outcome,

@@ -3,7 +3,7 @@
 Status: current
 Owner: Athena maintainers
 Last verified: 2026-08-16
-Source of truth: `src/athena/research/paper_rag/`, 实测数据见本文各节
+Source of truth: `src/athena/research/literature/paper_rag/`, 实测数据见本文各节
 
 2026-08-16 在真实语料上测了七个检索算子的**性能**与**质量**。所有数字来自
 `~/.athena/artifacts` 里的真实语料，不是构造数据；模型是 qwen3.7-plus，编码器是
@@ -228,7 +228,7 @@ p95 的 1.3 秒是进程内第一次调用，它额外付了一次性的向量�
 > Athena-cli bench overlap   --corpus <ref> --corpus <ref>   # 交付可复现性
 > ```
 >
-> 查询集是版本化数据（`bench/datasets/imbalance_auc.json`），与本文第三节那 12 条**不是
+> 查询集是版本化数据（`literature/bench/datasets/imbalance_auc.json`），与本文第三节那 12 条**不是
 > 同一组**——原来那组从未进过仓库。此后以随包那组为准，绝对值因此与本文不同，但通道之间
 > 的关系没变。
 

@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from athena.research.phase_runner import PhaseRunner
+from athena.research.runtime.phase_runner import PhaseRunner
 
 
 class _Events:
@@ -114,7 +114,7 @@ async def test_a_runtime_without_an_event_bus_still_works(tmp_path: Path) -> Non
 
 def test_project_agent_event_is_async() -> None:
     """这条用例钉住上面那条断言的前提：事件投递本身是协程。"""
-    from athena.research.runtime_events import RuntimeEvents
+    from athena.research.runtime.events import RuntimeEvents
 
     assert asyncio.iscoroutinefunction(RuntimeEvents.project_agent_event)
 

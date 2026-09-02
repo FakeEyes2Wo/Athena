@@ -30,7 +30,11 @@ model_name = "deepseek-v4-flash"
 # 强/贵档模型：需要更强推理时手动切换
 model_pro = "deepseek-v4-pro"
 
-# 单次响应最大输出 token（默认 8192）。环境变量 LLM_MAX_TOKENS 覆盖本项。
+# 模型上下文窗口（默认 1_000_000，对应 DeepSeek V4 Flash 的 1M 上下文）。
+# 环境变量 LLM_CONTEXT_WINDOW 覆盖本项。
+# context_window = 1000000
+
+# 单次响应最大输出 token（默认 384_000）。环境变量 LLM_MAX_TOKENS 覆盖本项。
 #
 # 这个值直接决定"Agent 一次能写多大的文件"。原先写死 4096，写文件的 Agent 一旦
 # 生成超过上限的 write_file 实参，工具调用的 JSON 会被从中间切断，整次调用作废；
@@ -38,7 +42,7 @@ model_pro = "deepseek-v4-pro"
 #
 # 别凭感觉调大：配得比后端模型支持的还大，网关会直接 400。先实测再填：
 #   uv run python scripts/probe_max_tokens.py
-# max_tokens = 8192
+# max_tokens = 384000
 
 # 采样温度（默认 0.1）。评测规范通常要求申报并固定采样参数，所以它必须可配置，
 # 而不是写死在代码里。环境变量 LLM_TEMPERATURE 覆盖本项。

@@ -352,7 +352,7 @@ import asyncio
 
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext
-from athena.research.paper_markdown import (
+from athena.research.literature.paper_markdown import (
     PaperContent,
     PaperConversionRequest,
     PaperMarkdownTool,

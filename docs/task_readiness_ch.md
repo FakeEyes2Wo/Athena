@@ -14,7 +14,7 @@ Source of truth: `src/athena/cli.py`, `src/athena/research/splitter.py`,
 
 ## 一、平台数据划分从来没有执行过
 
-`prepare_phase` 里有一整段"平台自己切分 train/search/final"的逻辑，条件是
+`prepare/orchestrator.py` 里有一整段"平台自己切分 train/search/final"的逻辑，条件是
 `config.dataset_path` 与 `config.target_column` 同时非空。而 `cli._runtime_options`
 只把 `--data` / `--target` 拼进**任务提示词文本**，从不把它们传给 `ResearchRuntime`
 ——尽管 `ResearchConfig` 早就声明了这两个字段。
@@ -58,7 +58,7 @@ final。
 过得了 SEARCH，却在 VALIDATE 因超时挂掉，日志里看起来像候选自己坏了。
 
 修复：`run_validation_plan(..., experiment_timeout_s=...)` 一路传到
-`_execute_predictions(..., timeout_s=...)`，由 `phase_runner` 从
+`_execute_predictions(..., timeout_s=...)`，由 `runtime/phase_runner.py` 从
 `state.experiment_timeout_s` 取值——复跑不该被比它要复现的那次运行更严的预算卡住。
 
 ## 四、`LLM_PROVIDER=qwen` 配好也用不了

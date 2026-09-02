@@ -124,9 +124,9 @@ async def runtime(tmp_path: Path, monkeypatch):
 
     instance = ResearchRuntime(project_root=tmp_path, validation_phase=validate)
     instance.register_supervisor(provider=provider)
-    base_commit = await instance._git.init()
-    evaluator_ref = await instance._store.put_text('{"frozen":true}')
-    evidence_ref = await instance._store.put_text("baseline evidence")
+    base_commit = await instance.git.init()
+    evaluator_ref = await instance.store.put_text('{"frozen":true}')
+    evidence_ref = await instance.store.put_text("baseline evidence")
     instance.tree.add_hypothesis(
         Hypothesis(
             id="baseline",
@@ -162,7 +162,7 @@ async def runtime(tmp_path: Path, monkeypatch):
     instance.tree.set_sota("exp_baseline")
     instance.state.phase = "SEARCH"
     instance.state.status = "RUNNING"
-    instance.supervisor._evaluator_ref = evaluator_ref
+    instance.supervisor.evaluator_ref = evaluator_ref
     for hypothesis_id in ("h_existing", "h_vit", "h_other"):
         instance.tree.add_hypothesis(
             Hypothesis(
@@ -250,14 +250,14 @@ async def test_unlimited_waiting_plan_keeps_execution_safety_limits(runtime):
     runtime.state.plans["h_existing"] = plan.model_copy(
         update={"turns_used": plan.turn_limit}
     )
-    execution = runtime._execution
+    execution = runtime.execution
 
     await runtime.supervisor.update_waiting_plan_budget(
         plan_id="h_existing", unlimited_turns=True
     )
 
     assert runtime.state.plans["h_existing"].turn_limit is None
-    assert runtime._execution is execution
+    assert runtime.execution is execution
 
 
 @pytest.mark.asyncio
@@ -291,7 +291,7 @@ async def test_explicit_validate_and_stop_are_applied(runtime):
 @pytest.mark.asyncio
 async def test_start_validation_transitions_search_to_completed(runtime):
     """GUI ``start_validation`` runs VALIDATE from a parked SEARCH phase."""
-    runtime._started = (
+    runtime.session.lifecycle.started = (
         True  # 模拟 start_search 已启动、SEARCH 后停在 WAITING 的交互路径
     )
     assert runtime.state.phase == "SEARCH"

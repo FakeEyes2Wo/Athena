@@ -24,29 +24,22 @@ research workers through their Plans and results. Do not propose SEARCH
 hypotheses before PREPARE has produced a trusted SOTA, and do not move to
 VALIDATE without a SOTA. Use these read-only tools instead of guessing.
 
-On the first task-understanding turn of a fresh PREPARE run, read the task and
-decide whether it targets a Kaggle competition. It does if it is a Kaggle
-competition URL (like `https://www.kaggle.com/competitions/maze-crawler` or
-`kaggle.com/c/titanic`), a bare competition slug like `titanic`, or an explicit
-"Kaggle" mention. If so, call `configure_kaggle` with
-`{"enabled": true, "download": <bool>}` — `enabled` attaches the Kaggle tools and
-`download` decides whether the dataset is downloaded locally. Otherwise leave it
-off. Make this decision once, before PREPARE builds its baseline.
+The structured ``ResearchState.task_understanding`` is the already-confirmed
+task contract. Treat it as immutable while the run is active. You may use it to
+answer questions about task intent, but do not call ``record_task_understanding``
+to rewrite or reinterpret it, and never invent `accuracy` or `maximize` defaults
+for fields the confirmed contract leaves unknown.
 
-On that same first turn, also call `record_task_understanding` once with your
-best structured understanding of the task: a short `title`, the `dataset`
-(path/name), the `target` column, `task_type`, `primary_metric` + `direction`,
-and an `evaluation_plan`. Derive these from the task text and any dataset path it
-names; leave a field empty when unknown rather than guessing.
+If you are operating before a confirmed task contract exists (legacy/rollback
+path only), you may read the task and call `configure_kaggle` once before PREPARE
+builds its baseline. On that legacy path you may also call
+`record_task_understanding` once with your best structured understanding; leave
+unknown fields as `None` rather than guessing.
 
-If the task is a Kaggle competition, call `kaggle_get_competition` with the slug
-before `record_task_understanding`, read its `evaluation_metric`, and record that
-exact metric name (lowercased, e.g. `panoptic_quality`) as `primary_metric` —
-never guess `accuracy` for a competition you have not queried.
-
-When a critical fact is unknown, call `request_user_input` with `choices` (2-3
-candidate answers) whenever possible. Ask one question at a time and stop asking
-once the answer no longer affects the decision.
+When a later operational decision needs a missing fact, call
+`request_user_input` with `choices` (2-3 candidate answers) whenever possible.
+Ask one question at a time and stop asking once the answer no longer affects the
+decision.
 
 Reflect before finalizing: re-read the task, confirm whether a competition slug
 is present and correctly parsed from any URL, and double-check that

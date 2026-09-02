@@ -201,9 +201,30 @@ def task_context_block(context: ConfirmedTaskContext | None) -> str:
     return context.render_prompt_block()
 
 
+async def confirmed_task_context_block(runtime: Any) -> str:
+    """Load confirmed context, allowing ungated legacy checkpoints to omit it."""
+    try:
+        context = await ConfirmedTaskContextProvider.from_runtime(runtime).load()
+    except ConfirmedTaskContextError as exc:
+        state = getattr(runtime, "state", None)
+        confirmed = getattr(state, "task_understanding", None) is not None
+        gated = bool(getattr(runtime, "task_confirmation_gate", False))
+        if confirmed or gated:
+            raise RuntimeError("confirmed task handoff is missing or corrupt") from exc
+        return ""
+    return context.render_prompt_block()
+
+
+def task_prompt(task: str, context_block: str) -> str:
+    """Prepend the verified task contract to a model-visible task."""
+    return f"{context_block}\n\n{task}".strip() if context_block else task
+
+
 __all__ = [
     "ConfirmedTaskContext",
     "ConfirmedTaskContextError",
     "ConfirmedTaskContextProvider",
+    "confirmed_task_context_block",
     "task_context_block",
+    "task_prompt",
 ]

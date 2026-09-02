@@ -2,7 +2,9 @@
 
 `paper_scout` → `paper_source` → `paper_markdown` → `paper_rag` 四个模块的交接契约本来就是
 闭合的，缺的只是两样东西：一个把依赖装配起来的地方，和一个把四段依次推进的驱动。本文档描述
-这两样——`athena/research/survey/wiring.py` 与 `athena/research/survey/pipeline.py`。
+这两样——`athena/research/literature/survey/wiring.py` 与 `athena/research/literature/survey/pipeline.py`。
+阶段执行位于 `survey/stages.py`，embedding 与视觉模型实现位于 `survey/providers.py`；
+`wiring.py` 只负责依赖装配，`pipeline.py` 只保留请求、状态、报告和顶层推进。
 
 ## 为什么需要它们
 

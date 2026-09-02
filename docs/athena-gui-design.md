@@ -16,7 +16,7 @@
 | 桥 | `athena-gui/src/lib/tauri-bridge.ts` | `invoke`/`listen` 封装，含 `ResearchTreeData` 等类型 |
 | Rust | `athena-gui/src-tauri` | `PythonBridge`（`uv run python -m gui_gateway` 起子进程 + WS 读端口 + RPC `call(method, params)` + 事件广播 `EventNotification{kind,data}`）；命令：`send_message`、`start/pause/resume/stop_search`、`start_validation`、`generate_report`、`tree_get/save/load` |
 | Python 网关 | `src/gui_gateway/{__main__,handler,transport}.py` | `GuiRequestHandler.dispatch` 仅实现 `ping/start/message/pause/resume/stop`；`WebSocketTransport` 桥接 `RequestEnvelope`/`ResponseEnvelope` |
-| Python 运行时 | `src/athena/research/runtime.py` → `ResearchRuntime` | 唯一门面：`subscribe(emit)` 推 `state`/`output` 事件，`tree`、`state`、`message()`、`start()`、`start_task()` |
+| Python 运行时 | `src/athena/research/runtime/facade.py` → `ResearchRuntime` | 唯一门面：`subscribe(emit)` 推 `state`/`output` 事件，`tree`、`state`、`message()`、`start()`、`start_task()` |
 | 领域模型 | `src/athena/core/{research_tree,research_models}.py` | `ResearchTree`（hypotheses/experiments/sota）、`Hypothesis`、`Experiment`、`ExperimentPlan`、`EvalResult`、`ComparisonVerdict`、`HypothesisStatus` |
 | 状态 | `src/athena/research/supervisor/{state,plans,events}.py` | `ResearchState`（status/phase/search_limit/concurrency/manual_mode/plans/validation/eda_dir）、`PlanState`、`StateEvent`/`OutputEvent` |
 | LLM I/O 源 | `src/athena/memory/rollout.py` + `app_server/thread_manager.py` | 确定性 rollout JSONL：`.athena/logs/agents/{agent_id}.jsonl`，每行 `{"seq","ts","msg":[ModelMessage…]}` 或 `{"type":"compaction",…}`，`msg` 为 PydanticAI `ModelMessagesTypeAdapter` 序列化 |

@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from athena.research.clarification.errors import ClarificationPersistenceError
 from athena.research.clarification.handoff import materialize_handoff, render_handoff
-from athena.research.clarification.journal import ConfirmationJournalStore
 from athena.research.clarification.models import ClarificationDraft, ConfirmationJournal
-from athena.research.clarification.store import (
-    ClarificationPersistenceError,
+from athena.research.clarification.persistence import (
     ClarificationStore,
+    ConfirmationJournalStore,
 )
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "clarification"

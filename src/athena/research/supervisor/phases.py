@@ -13,7 +13,7 @@ from athena.research.report import build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
 from athena.research.supervisor.run_state import SupervisorRunState
-from athena.research.supervisor.scheduler import count_search_attempts
+from athena.research.supervisor.scheduling import count_search_attempts
 from athena.research.supervisor.search_loop import SearchLoop
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class PhaseMachine:
             "STOPPED",
         }:
             self._state.status = "RUNNING"
-            await self._plans._persist_state()
+            await self._plans.persist_state()
         try:
             if self._state.phase == "PREPARE":
                 await self._run_prepare()
@@ -92,7 +92,7 @@ class PhaseMachine:
             # 没有任何线索指向是哪一行。
             failed_phase = self._state.phase
             self._state.status = "FAILED"
-            self._plans._save_state()
+            self._plans.save_state()
             tb = traceback.format_exc()
             logger.exception("research phase failed")
             await self._deps.phases.publish(
@@ -103,7 +103,7 @@ class PhaseMachine:
                     "text": f"research failed: {exc}\n\n{tb}",
                 },
             )
-            await self._plans._publish_state()
+            await self._plans.publish_state()
             if failed_phase == "PREPARE":
                 raise
 
@@ -124,7 +124,7 @@ class PhaseMachine:
                 await self._transition_phase("VALIDATE")
             elif self._search_limit_reached() and self._state.status == "RUNNING":
                 self._state.status = "WAITING"
-                await self._plans._persist_state()
+                await self._plans.persist_state()
                 await self._budget_gate()
         if self._state.phase == "VALIDATE":
             await self._run_validation()
@@ -245,7 +245,7 @@ class PhaseMachine:
         self._state.validation = validation
         self._state.phase = "COMPLETED"
         self._state.status = "COMPLETED"
-        self._plans._save_state()
+        self._plans.save_state()
         await self._deps.phases.publish(
             "output",
             {
@@ -254,7 +254,7 @@ class PhaseMachine:
                 "text": _final_report_text(self._state.validation),
             },
         )
-        await self._plans._publish_state()
+        await self._plans.publish_state()
         # Kaggle 竞赛：COMPLETED 后让 SupervisorAgent 自行决定是否提交最终预测。
         if self._run.kaggle_enabled:
             try:
@@ -271,12 +271,12 @@ class PhaseMachine:
             self._state.status = "STOPPED"
         elif self._state.status != "WAITING":
             self._state.status = "RUNNING"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
 
     async def checkpoint_validation(self, result_ref: ArtifactRef) -> None:
         """Persist one recoverable VALIDATE result through the single writer."""
         self._state.validation = {"result_ref": result_ref}
-        await self._plans._persist_state()
+        await self._plans.persist_state()
 
     def _search_limit_reached(self) -> bool:
         attempts = count_search_attempts(self._state, self._tree)
@@ -308,7 +308,7 @@ class PhaseMachine:
         """Pause new Agent dispatch while retaining durable unfinished work."""
         self._state.status = "WAITING"
         self._deps.runtime.agents.pause()
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         return self._state.status
 
     async def resume(self, *, restarting: bool = False) -> str:
@@ -320,7 +320,7 @@ class PhaseMachine:
         """
         self._deps.runtime.agents.resume()
         self._state.status = "RUNNING"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         if not restarting:
             self._run.wake()
             self._search._spawn_search()
@@ -336,13 +336,13 @@ class PhaseMachine:
         if self._state.status != "RUNNING":
             return self._state.status
         self._state.status = "WAITING"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         return self._state.status
 
     async def request_stop(self) -> str:
         """Persist an explicit Human stop and cancel locally running Plans."""
         self._state.status = "STOPPED"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         await self.stop()
         return self._state.status
 
@@ -350,7 +350,7 @@ class PhaseMachine:
         """Park scheduling and interrupt every locally owned Plan turn."""
         if self._state.status == "RUNNING":
             self._state.status = "WAITING"
-            await self._plans._persist_state()
+            await self._plans.persist_state()
         self._run.wake()
         for plan_id in tuple(self._run.running_ids()):
             try:
@@ -385,7 +385,7 @@ class PhaseMachine:
     ) -> dict[str, object]:
         """Persist the Kaggle integration and download policy for this run."""
         self._run.set_kaggle_download(bool(download) if enabled else None)
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         return {
             "kaggle_enabled": self._run.kaggle_enabled,
             "download": self._run.kaggle_download,
@@ -394,7 +394,7 @@ class PhaseMachine:
     async def record_task_understanding(self, **payload: object) -> dict[str, object]:
         """Persist the Supervisor's structured task understanding and surface it."""
         self._state.task_understanding = dict(payload)
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         return {
             "recorded": True,
             "task_understanding": self._state.task_understanding,

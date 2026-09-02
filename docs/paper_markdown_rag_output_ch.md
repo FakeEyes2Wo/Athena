@@ -15,7 +15,7 @@
 `load_retrieval_units()` 得到唯一允许直接进入检索索引的标准单元。
 
 ```python
-from athena.research.paper_markdown.schemas import PaperContent
+from athena.research.literature.paper_markdown.schemas import PaperContent
 
 content = PaperContent.model_validate_json(await store.get_text(result_ref))
 units = await content.load_retrieval_units(store)

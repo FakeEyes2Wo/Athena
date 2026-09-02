@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
-from athena.research.agent_turn_runner import AgentTurnRunner
+from athena.research.turns.runner import AgentTurnRunner
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.evaluator_plan import read_eval_handoff

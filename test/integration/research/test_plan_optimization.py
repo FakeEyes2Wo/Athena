@@ -136,7 +136,6 @@ async def test_plan_turn_executes_manifest_scores_and_commits(
             workspace_root=workdir,
             environment_root=tmp_path,
         ),
-        direction="maximize",
     )
     state = PlanState(
         kind="SEARCH", context_ref=_REF, turns_used=0, turn_limit=12, patience=3

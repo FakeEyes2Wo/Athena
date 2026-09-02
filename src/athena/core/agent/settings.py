@@ -9,6 +9,7 @@ import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -19,6 +20,8 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PRO_MODEL = "deepseek-v4-pro"
 DEFAULT_PROVIDER = "deepseek"
+DEFAULT_CONTEXT_WINDOW = 1_000_000
+DEFAULT_MAX_TOKENS = 384_000
 
 ALLOWED_PROVIDERS = ("deepseek", "openai", "qwen")
 
@@ -29,6 +32,8 @@ DEFAULT_BASE_URLS = {
 }
 
 _CONFIG_PATH = Path("config.toml")
+
+T = TypeVar("T")
 
 
 @lru_cache(maxsize=1)
@@ -56,68 +61,81 @@ def _config_value(*path: str) -> object | None:
     return None
 
 
-def _resolve(
-    key: str, config_path: tuple[str, ...] = (), default: str | None = None
-) -> str | None:
-    """环境变量 > config.toml > default（首个非空值）。"""
-    value = os.environ.get(key)
-    if value:
-        return value
-    if config_path:
-        configured = _config_value(*config_path)
-        if isinstance(configured, bool):
-            return str(configured).lower()
-        if isinstance(configured, (str, int, float)):
-            return str(configured)
+def _coerce(raw: object, default: T, cast: Callable[[object], T] | None) -> T:
+    if cast is None:
+        return raw  # type: ignore[return-value]
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _setting(
+    env_name: str,
+    *,
+    path: tuple[str, ...] = (),
+    default: T | None = None,
+    cast: Callable[[object], T] | None = None,
+) -> T | None:
+    """环境变量 > config.toml > default（首个非空值）。
+
+    这是 settings 的唯一取值入口：字符串、布尔、整数、浮点都通过 ``cast``
+    归一化，避免每个公共函数各写一套解析逻辑。
+    """
+    raw = os.environ.get(env_name)
+    if raw not in (None, ""):
+        if default is None:
+            return _coerce(raw, None, cast)  # type: ignore[arg-type]
+        return _coerce(raw, default, cast)
+    if path:
+        value = _config_value(*path)
+        if value is not None:
+            if default is None:
+                return _coerce(value, None, cast)  # type: ignore[arg-type]
+            return _coerce(value, default, cast)
     return default
 
 
 def api_key() -> str | None:
-    """读取 LLM_API_KEY，回退各家的专用变量（只从环境变量读取）。
-
-    三层回退都必须走 ``default=`` 关键字：``_resolve`` 的第二个位置参数是 config.toml
-    的路径元组，把回退值放进去会让它被当成路径逐字符展开，于是"只配了
-    ``OPENAI_API_KEY``"这一种（也是最常见的一种）配置永远解析不出密钥。
-
-    ``DASHSCOPE_API_KEY`` 是阿里云百炼给出的变量名。少了它，``LLM_PROVIDER=qwen``
-    的用户即使按官方文档配好了环境也会撞上"Missing LLM API key"。
-    """
-    return _resolve(
-        "LLM_API_KEY",
-        default=_resolve(
-            "DEEPSEEK_API_KEY",
-            default=_resolve("OPENAI_API_KEY", default=_resolve("DASHSCOPE_API_KEY")),
-        ),
+    """读取 LLM_API_KEY，回退各家的专用变量（只从环境变量读取）。"""
+    return (
+        _setting("LLM_API_KEY")
+        or _setting("DEEPSEEK_API_KEY")
+        or _setting("OPENAI_API_KEY")
+        or _setting("DASHSCOPE_API_KEY")
     )
 
 
 def base_url() -> str:
     """OpenAI 兼容端点：BASE_URL > config.toml ``[llm].base_url`` > provider 默认端点。"""
-    configured = _resolve("BASE_URL", ("llm", "base_url"))
+    configured = _setting("BASE_URL", path=("llm", "base_url"))
     if configured:
-        return configured
+        return str(configured)
     return DEFAULT_BASE_URLS.get(provider_kind(), DEFAULT_BASE_URL)
 
 
 def model_name() -> str:
     """快/省档模型：MODEL_NAME > config.toml ``[llm].model_name`` > deepseek-v4-flash。"""
-    return _resolve("MODEL_NAME", ("llm", "model_name"), DEFAULT_MODEL) or DEFAULT_MODEL
+    return str(
+        _setting("MODEL_NAME", path=("llm", "model_name"), default=DEFAULT_MODEL)
+        or DEFAULT_MODEL
+    )
 
 
 def pro_model_name() -> str:
     """强/贵档模型：MODEL_PRO > config.toml ``[llm].model_pro`` > deepseek-v4-pro。"""
-    return (
-        _resolve("MODEL_PRO", ("llm", "model_pro"), DEFAULT_PRO_MODEL)
+    return str(
+        _setting("MODEL_PRO", path=("llm", "model_pro"), default=DEFAULT_PRO_MODEL)
         or DEFAULT_PRO_MODEL
     )
 
 
 def provider_kind() -> str:
-    """LLM 后端类型：LLM_PROVIDER > config.toml ``[llm].provider`` > deepseek。
-
-    仅显式选择，不做 base_url/model 前缀推断；非法值在构造期抛 ``ValueError``。
-    """
-    kind = _resolve("LLM_PROVIDER", ("llm", "provider"), DEFAULT_PROVIDER)
+    """LLM 后端类型：LLM_PROVIDER > config.toml ``[llm].provider`` > deepseek。"""
+    kind = str(
+        _setting("LLM_PROVIDER", path=("llm", "provider"), default=DEFAULT_PROVIDER)
+        or DEFAULT_PROVIDER
+    )
     if kind not in ALLOWED_PROVIDERS:
         raise ValueError(
             f"unsupported LLM_PROVIDER={kind!r}; "
@@ -126,92 +144,82 @@ def provider_kind() -> str:
     return kind
 
 
-def _int_config(path: tuple[str, ...], default: int) -> int:
-    value = _config_value(*path)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    return default
-
-
-def _float_config(path: tuple[str, ...], default: float) -> float:
-    value = _config_value(*path)
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    return default
-
-
 def temperature() -> float:
-    """采样温度：LLM_TEMPERATURE > config.toml ``[llm].temperature`` > 0.1。
-
-    此前 ``AgentConfig.temperature`` 把 0.1 写死在 dataclass 默认值里，整个进程
-    没有任何入口能改它。评测规范普遍要求"可固定并申报采样参数"——写死等于既
-    申报不了、也调不动，两头都不满足。
-    """
-    raw = _resolve("LLM_TEMPERATURE", ("llm", "temperature"))
-    if raw is None:
-        return 0.1
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return 0.1
+    """采样温度：LLM_TEMPERATURE > config.toml ``[llm].temperature`` > 0.1。"""
+    raw = _setting("LLM_TEMPERATURE", path=("llm", "temperature"))
+    value = _coerce(raw, 0.1, float)
     return value if 0.0 <= value <= 2.0 else 0.1
 
 
 def seed() -> int | None:
-    """采样随机种子：LLM_SEED > config.toml ``[llm].seed`` > 不发送。
+    """采样随机种子：LLM_SEED > config.toml ``[llm].seed`` > 不发送。"""
+    raw = _setting("LLM_SEED", path=("llm", "seed"))
+    return _coerce(raw, None, int) if raw is not None else None
 
-    返回 ``None`` 表示不往请求里放 ``seed`` 字段——对不认这个参数的后端，凭空
-    加一个未知字段会直接 400，所以默认必须是"不发"。
+
+def context_window() -> int:
+    """模型上下文窗口：LLM_CONTEXT_WINDOW > config.toml ``[llm].context_window`` > 1_000_000。
+
+    DeepSeek V4 Flash 的最大上下文窗口为 1M token。
     """
-    raw = _resolve("LLM_SEED", ("llm", "seed"))
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
+    return int(
+        _setting(
+            "LLM_CONTEXT_WINDOW",
+            path=("llm", "context_window"),
+            default=DEFAULT_CONTEXT_WINDOW,
+            cast=int,
+        )
+        or DEFAULT_CONTEXT_WINDOW
+    )
 
 
 def max_tokens() -> int:
-    """单次响应最大输出 token：LLM_MAX_TOKENS > config.toml ``[llm].max_tokens`` > 8192。
+    """单次响应最大输出 token：LLM_MAX_TOKENS > config.toml ``[llm].max_tokens`` > 384_000。
 
-    与 ``temperature``/``seed`` 是同一类问题的第三处落点：``AgentConfig.max_tokens``
-    把 4096 写死在 dataclass 默认值里，整个进程没有入口能改。对要写文件的 Agent
-    这个值尤其危险——一份 12 KB 的 Markdown 报告做完 JSON 转义（换行要写成两个字符
-    的转义序列，成本翻倍）就已经贴着 4096，再大一点整个工具调用会被从中间切断。2026-08-30 的
-    TESS 轮就是这么废掉一份 EDA 报告、连带把整个 PREPARE 打成降级的。
-
-    默认抬到 8192。**这不是"越大越好"**：上限受后端模型约束，配得比模型支持的还大
-    会被网关直接 400。改之前先用 ``scripts/probe_max_tokens.py`` 探一下实际上限。
+    默认值跟随 DeepSeek V4 Flash 的可用输出能力/配置口径。仍可通过
+    ``LLM_MAX_TOKENS`` 或 ``[llm].max_tokens`` 覆盖。
     """
-    raw = _resolve("LLM_MAX_TOKENS", ("llm", "max_tokens"))
-    if raw is None:
-        return 8192
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 8192
-    return value if value > 0 else 8192
+    return int(
+        _setting(
+            "LLM_MAX_TOKENS",
+            path=("llm", "max_tokens"),
+            default=DEFAULT_MAX_TOKENS,
+            cast=int,
+        )
+        or DEFAULT_MAX_TOKENS
+    )
 
 
 def enable_thinking() -> bool:
-    """是否让模型走思考/推理模式：LLM_ENABLE_THINKING > ``[llm].enable_thinking`` > False。
-
-    默认关：Athena 的 Agent 循环靠工具调用推进，思考 token 只增加延迟与成本。
-    各后端的开关字段名不同，具体映射在 ``provider._extra_body`` 里。
-    """
-    raw = _resolve("LLM_ENABLE_THINKING", ("llm", "enable_thinking"))
+    """是否让模型走思考/推理模式：LLM_ENABLE_THINKING > ``[llm].enable_thinking`` > False。"""
+    raw = _setting("LLM_ENABLE_THINKING", path=("llm", "enable_thinking"))
     return str(raw).strip().lower() in ("1", "true", "yes", "on") if raw else False
 
 
 def max_retries() -> int:
     """流式响应断线最多重连次数：config.toml ``[llm.retry].max_retries``，默认 5。"""
-    return _int_config(("llm", "retry", "max_retries"), 5)
+    return int(
+        _setting(
+            "LLM_MAX_RETRIES",
+            path=("llm", "retry", "max_retries"),
+            default=5,
+            cast=int,
+        )
+        or 5
+    )
 
 
 def timeout_s() -> float:
     """单次流式请求总超时（秒）：config.toml ``[llm.retry].timeout_s``，默认 300。"""
-    return _float_config(("llm", "retry", "timeout_s"), 300.0)
+    return float(
+        _setting(
+            "LLM_TIMEOUT_S",
+            path=("llm", "retry", "timeout_s"),
+            default=300.0,
+            cast=float,
+        )
+        or 300.0
+    )
 
 
 def get_client() -> AsyncOpenAI:

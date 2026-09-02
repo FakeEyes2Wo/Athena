@@ -1,5 +1,14 @@
 # Athena Supervisor Implementation Plan
 
+> 历史实现计划：本文保留当时的路径和决策记录，不代表当前目录结构。当前实现入口见
+> `src/athena/research/runtime/`、`src/athena/research/supervisor/` 与
+> `docs/research_core_mechanisms_ch.md`。
+
+> Status: historical implementation plan. The current research layout and ownership
+> are recorded in [`codex_docs/2026-09-02-research-layout-simplification-goal.md`](../codex_docs/2026-09-02-research-layout-simplification-goal.md).
+> The numbered task snapshots below are retained for audit history and are not a
+> source of truth for present module paths.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 用确定性的 `Planner -> Validator -> Executor` Supervisor 接管 Athena 的完整研究流程，通过 `ResearchRuntime` 和 `Athena-cli` 从任意数据目录完成 `PREPARE -> SEARCH -> VALIDATE -> COMPLETED`。
@@ -113,13 +122,13 @@ SEARCH 首版只有一组确定性 fallback 候选，因此首轮选出 SOTA 后
 
 | File | Single responsibility |
 |---|---|
-| `src/athena/research/runtime.py` | composition root、公开 dispatch、execution 生命周期、事件订阅；不判断具体阶段业务 |
+| `src/athena/research/runtime/facade.py` | composition root、公开 dispatch、execution 生命周期、事件订阅；不判断具体阶段业务 |
 | `src/athena/cli.py` | 参数转换、状态显示、HumanRequest 命令行交互；不拥有流程状态 |
 | `src/athena/research/contracts.py` | Dataset、EvalSpec、EDA、baseline、ranking、ablation、final-test 的 Artifact payload 合同 |
 | `src/athena/research/data_service.py` | 原始摄取、不可变 manifest、split/derived 数据不变量、Bundle 冻结 |
 | `src/athena/research/script_runner.py` | `python-uv` DRAFT/FROZEN 生命周期和统一 CLI+JSON entrypoint 执行 |
-| `src/athena/research/services.py` | `RUN_SERVICE` 静态白名单与已实现领域服务的窄适配；不编排 Agent、不决定下一步 |
-| `src/athena/research/evaluation.py` | K-fold/single-test policy、可信 test/final-test evaluator、分数合同 |
+| `src/athena/research/runtime/services.py` | `RUN_SERVICE` 静态白名单与已实现领域服务的窄适配；不编排 Agent、不决定下一步 |
+| `src/athena/research/evaluation/` | K-fold/single-test policy、可信 test/final-test evaluator、分数合同 |
 | `src/athena/research/search.py` | 图入库、Selector、RankingRound、唯一 SOTA 事务输入 |
 | `src/athena/research/validation.py` | SOTA reproduce、ablation closure、FinalTestAttempt 状态推进 |
 | `src/athena/research/supervisor/models.py` | Plan/Operation/execution/HumanRequest/lease 的持久化领域模型 |
@@ -318,8 +327,8 @@ git commit -m "feat: make supervisor journal restart safe"
 
 **Files:**
 
-- Modify: `src/athena/research/runtime.py`
-- Create: `src/athena/research/services.py`
+- Modify: `src/athena/research/runtime/facade.py`
+- Create: `src/athena/research/runtime/services.py`
 - Modify: `src/athena/cli.py`
 - Modify: `pyproject.toml`
 - Create: `test/unit/research/test_services.py`
@@ -372,7 +381,7 @@ Expected: PASS；无硬编码 task/data type/metric；mode 和 execution selecti
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add pyproject.toml src/athena/research/runtime.py src/athena/cli.py test/unit/test_cli.py tests/test_research_runtime.py
+git add pyproject.toml src/athena/research/runtime/facade.py src/athena/cli.py test/unit/test_cli.py tests/test_research_runtime.py
 git commit -m "feat: stabilize supervisor runtime and cli"
 ```
 
@@ -532,7 +541,7 @@ git commit -m "feat: complete generic prepare workflow"
 
 **Files:**
 
-- Create: `src/athena/research/evaluation.py`
+- Create: `src/athena/research/evaluation/evaluator.py`
 - Create: `src/athena/research/search.py`
 - Modify: `src/athena/core/research_tree.py`
 - Modify: `src/athena/core/research_models.py`
@@ -604,7 +613,7 @@ Expected: PASS；leaderboard SOTA、graph SOTA、下一轮父节点和 VALIDATE 
 - [ ] **Step 7: Commit**
 
 ```powershell
-git add src/athena/research/evaluation.py src/athena/research/search.py src/athena/core/research_tree.py src/athena/core/research_models.py src/athena/research/supervisor test/unit/research/test_search.py
+git add src/athena/research/evaluation src/athena/research/search.py src/athena/core/research_tree.py src/athena/core/research_models.py src/athena/research/supervisor test/unit/research/test_search.py
 git commit -m "feat: add graph based search and unique sota"
 ```
 

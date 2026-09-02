@@ -13,7 +13,7 @@
 
 from pathlib import Path
 
-from athena.research.prepare_eda import (
+from athena.research.prepare.eda import (
     PLACEHOLDER_MARK,
     usable_eda_reports,
     write_missing_report_placeholders,

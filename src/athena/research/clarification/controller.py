@@ -7,7 +7,10 @@ from typing import Protocol
 from uuid import uuid4
 
 from athena.core.human_request import HumanOutcome, HumanRequest
-from athena.research.clarification.errors import ClarificationControllerError
+from athena.research.clarification.errors import (
+    ClarificationControllerError,
+    ClarificationPersistenceError,
+)
 from athena.research.clarification.generator import (
     ClarificationFinalStep,
     ClarificationGenerator,
@@ -17,6 +20,7 @@ from athena.research.clarification.generator import (
     generate_step,
 )
 from athena.research.clarification.models import ClarificationDraft
+from athena.research.clarification.persistence import ClarificationStore
 from athena.research.clarification.requirements import (
     initial_task_understanding,
     normalize_task,
@@ -37,13 +41,7 @@ from athena.research.clarification.state import (
 from athena.research.clarification.state import (
     retry as retry_draft,
 )
-from athena.research.clarification.state import (
-    revise as revise_draft,
-)
-from athena.research.clarification.store import (
-    ClarificationPersistenceError,
-    ClarificationStore,
-)
+from athena.research.clarification.state import revise as revise_draft
 
 
 class HumanBroker(Protocol):

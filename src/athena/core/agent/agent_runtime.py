@@ -113,10 +113,12 @@ class AgentRuntime:
         type_registry: AgentTypeRegistry,
         project_root: Path | None = None,
         rollout_dir: Path | None = None,
+        session_id: str = "default",
         compactor: Any = None,
         llm: Any = None,
     ) -> None:
         self._registry = type_registry
+        self._session_id = session_id
         root = Path(project_root) if project_root is not None else Path.cwd()
         from athena.app_server.thread_manager import (
             RuntimeThreadManager,
@@ -151,6 +153,10 @@ class AgentRuntime:
         """
         self._manager._memory_kwargs["compactor"] = compactor
         self._manager._memory_kwargs["llm"] = llm
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
     # 生命周期
 
@@ -607,9 +613,7 @@ class AgentRuntime:
                 remaining_waits[owner] = kept
         self._agent_waits = remaining_waits
         run_ids = [
-            run_id
-            for run_id, owner in self._run_agent.items()
-            if owner in doomed
+            run_id for run_id, owner in self._run_agent.items() if owner in doomed
         ]
         for run_id in run_ids:
             self._run_agent.pop(run_id, None)

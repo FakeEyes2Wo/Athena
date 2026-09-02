@@ -11,9 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from athena.research.phase_runner import PhaseRunner
+from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
-from athena.research.runtime_control import start as start_lifecycle
+from athena.research.runtime.control import start as start_lifecycle
 from athena.research.supervisor.prepare import PrepareResult
 
 
@@ -268,12 +268,12 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         )
 
     monkeypatch.setattr(
-        "athena.research.prepare_evaluator.run_evaluator_plan",
+        "athena.research.prepare.evaluator.run_evaluator_plan",
         run_evaluator_plan,
         raising=False,
     )
     monkeypatch.setattr(
-        "athena.research.prepare_baseline.run_prepare_plan",
+        "athena.research.prepare.baseline.run_prepare_plan",
         run_prepare_plan,
         raising=False,
     )
@@ -298,7 +298,7 @@ async def test_run_general_turn_persists_agent_id_before_wait(
     tmp_path: Path, monkeypatch
 ) -> None:
     from athena.agents.task_agents import GeneralResult
-    from athena.research import agent_turn_runner as atr
+    from athena.research.turns import runner as atr
 
     saves: list[str] = []
     state = SimpleNamespace(
@@ -333,7 +333,7 @@ async def test_run_general_turn_persists_agent_id_before_wait(
         return SimpleNamespace()
 
     monkeypatch.setattr(
-        "athena.research.agent_turn_common.wait_run_events",
+        "athena.research.turns.common.wait_run_events",
         wait_run_events,
         raising=False,
     )
@@ -343,7 +343,7 @@ async def test_run_general_turn_persists_agent_id_before_wait(
         return GeneralResult(result="done", files=["summary.md"])
 
     monkeypatch.setattr(
-        "athena.research.agent_turn_general.load_agent_result",
+        "athena.research.turns.general.load_agent_result",
         load_agent_result,
         raising=False,
     )
@@ -361,7 +361,7 @@ async def test_run_general_turn_persists_agent_id_before_wait(
 async def test_run_general_turn_interrupts_worker_on_timeout(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from athena.research import agent_turn_runner as atr
+    from athena.research.turns import runner as atr
 
     state = SimpleNamespace(
         phase="PREPARE",
@@ -393,16 +393,14 @@ async def test_run_general_turn_interrupts_worker_on_timeout(
         state_path=tmp_path / ".athena" / "state.json",
         kaggle_tools=lambda kind: None,
     )
-    monkeypatch.setattr(
-        "athena.research.agent_turn_common.AGENT_TURN_TIMEOUT_SECONDS", 0
-    )
+    monkeypatch.setattr("athena.research.turns.common.AGENT_TURN_TIMEOUT_SECONDS", 0)
 
     async def never_finishes(*args, **kwargs):
         del args, kwargs
         await asyncio.sleep(10)
 
     monkeypatch.setattr(
-        "athena.research.agent_turn_common.wait_run_events",
+        "athena.research.turns.common.wait_run_events",
         never_finishes,
         raising=False,
     )

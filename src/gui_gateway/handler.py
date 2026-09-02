@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
+from athena.core.human_request import ChoiceReply, SkipReply, TextReply
 from athena.gui.service import GuiService
 from athena.research import ResearchRuntime
 from gui_gateway.human import HumanRequestBroker
@@ -49,6 +50,12 @@ SUPPORTED_METHODS: frozenset[str] = frozenset(
         "session_switch",
         "session_delete",
         "eda_report",
+        # B2. 任务澄清与确认门
+        "task_clarification_start",
+        "task_clarification_get",
+        "task_clarification_retry",
+        "task_clarification_revise",
+        "task_clarification_cancel",
         # C. 假设图与算法
         "hypothesis_graph",
         "graph_algorithms",
@@ -178,6 +185,9 @@ class GuiRequestHandler:
             # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
             state_root.mkdir(parents=True, exist_ok=True)
         new_runtime = self._make_runtime(project_root, state_root)
+        # 切走前把旧会话仍未回复的 human requests 全部取消，避免新会话或重建后的
+        # runtime 继续在同一个 broker 上看到旧会话的 pending 请求。
+        await self._broker.cancel_session(self._current_session_id)
         # aclose 马上就要杀掉旧会话的 supervisor，而 Supervisor.stop 从不写 status：
         # 不先降级就会在磁盘上留下一个"运行中"、实际没人跑的悬空态。
         await self._suspend_runtime()
@@ -389,7 +399,7 @@ class GuiRequestHandler:
         if method in {"pause", "resume", "stop"}:
             return await getattr(service, method)()
         if method == "start_search":
-            return await service.start_search(_require_dict(params, "config", "config"))
+            return await service.start_search(params)
         if method == "start_validation":
             return await service.start_validation()
         if method == "generate_report":
@@ -417,6 +427,31 @@ class GuiRequestHandler:
             )
         if method == "eda_report":
             return service.eda_report()
+
+        if method == "task_clarification_start":
+            return await service.task_clarification_start(
+                _require_str(params, "task", "task")
+            )
+        if method == "task_clarification_get":
+            return await service.task_clarification_get(
+                _require_str(params, "draft_id", "draft_id")
+            )
+        if method == "task_clarification_retry":
+            return await service.task_clarification_retry(
+                _require_str(params, "draft_id", "draft_id"),
+                int(params.get("revision")),
+            )
+        if method == "task_clarification_revise":
+            return await service.task_clarification_revise(
+                _require_str(params, "draft_id", "draft_id"),
+                int(params.get("revision")),
+                _require_str(params, "instruction", "instruction"),
+            )
+        if method == "task_clarification_cancel":
+            return await service.task_clarification_cancel(
+                _require_str(params, "draft_id", "draft_id"),
+                int(params.get("revision")),
+            )
 
         if method == "hypothesis_graph":
             return service.hypothesis_graph()
@@ -463,7 +498,12 @@ class GuiRequestHandler:
             )
 
         if method == "human_pending":
-            return {"requests": self._broker.pending()}
+            return {
+                "requests": [
+                    request.model_dump(mode="json")
+                    for request in await self._broker.pending(self._current_session_id)
+                ]
+            }
         if method == "human_reply":
             request_id = _require_str(params, "request_id", "request_id")
             answer = params.get("answer")
@@ -473,13 +513,25 @@ class GuiRequestHandler:
             if choice is not None and not isinstance(choice, str):
                 raise ValueError("choice must be a string")
             skip = bool(params.get("skip", False))
-            return {
-                "replied": self._broker.reply(
-                    request_id,
-                    answer,
-                    choice=choice,
-                    skip=skip,
+            reply_payload = params.get("reply")
+            legacy_present = answer is not None or choice is not None or skip
+            if reply_payload is not None and legacy_present:
+                raise ValueError(
+                    "provide exactly one of reply or legacy answer/choice/skip"
                 )
-            }
+            if reply_payload is None and not legacy_present:
+                raise ValueError("human_reply requires reply or answer")
+            if reply_payload is not None:
+                from athena.core.human_request import parse_human_reply
+
+                reply = parse_human_reply(reply_payload)
+            elif skip:
+                reply = SkipReply(kind="skip")
+            elif choice is not None:
+                reply = ChoiceReply(kind="choice", value=choice)
+            else:
+                reply = TextReply(kind="text", text=answer or "")
+            await self._broker.reply(self._current_session_id, request_id, reply)
+            return {"replied": True}
 
         raise ValueError(f"unsupported GUI method: {method}")

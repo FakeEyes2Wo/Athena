@@ -176,6 +176,36 @@ async def test_run_frozen_bundle_uses_configured_workdir(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_dir_persists_declared_metrics_file(tmp_path, monkeypatch) -> None:
+    """A live evaluator's declared public metrics table survives its temporary run."""
+    evaluator = tmp_path / "evaluate"
+    evaluator.mkdir()
+    (evaluator / "evaluate.py").write_text("", encoding="utf-8")
+    (evaluator / "metric.json").write_text(
+        json.dumps(
+            {
+                "eval_script": "evaluate.py",
+                "metrics_file": "metrics_public_test.csv",
+            }
+        ),
+        encoding="utf-8",
+    )
+    metrics = b"team_name,task_id,F1\nAthena,example,0.8\n"
+
+    def run_evaluator(_cmd, *, cwd):
+        (cwd / "metrics_public_test.csv").write_bytes(metrics)
+        return json.dumps({"primary": 0.8})
+
+    monkeypatch.setattr("athena.research.script_runner._run_cmd_capture", run_evaluator)
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    runner = DataScriptRunner(store=store, workdir=tmp_path / "runs")
+
+    result = await runner.run_dir(evaluator, {}, output_schema={"primary": None})
+
+    assert await store.get_bytes(result.outputs["metrics_ref"]) == metrics
+
+
+@pytest.mark.asyncio
 async def test_freeze_rejects_missing_declared_entrypoint(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     runner = DataScriptRunner(store=store, workdir=tmp_path / "work")

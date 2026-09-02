@@ -10,6 +10,7 @@ from athena.core.research_tree import Experiment
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.runtime import ResearchRuntime
+from athena.research.runtime.event_projection import supervisor_state
 from athena.research.supervisor.events import (
     EventProjector,
     OutputEvent,
@@ -396,7 +397,7 @@ def test_state_projection_includes_announced_ideator_lane_count(tmp_path) -> Non
     runtime = ResearchRuntime(project_root=tmp_path)
     runtime.events.set_ideator_lanes(3)
 
-    event = runtime.events._state_event()
+    event = supervisor_state(runtime.supervisor, 3)
 
     assert event.search["ideator_lanes"] == 3
 
@@ -517,7 +518,7 @@ def test_state_projection_reads_successes_and_sota_from_research_tree(tmp_path) 
     )
     runtime.tree.set_sota("exp_1")
 
-    event = runtime.events._state_event()
+    event = supervisor_state(runtime.supervisor, 0)
 
     assert event.search["attempts"] == 1
     assert event.search["successes"] == 1
@@ -561,7 +562,7 @@ def test_state_attempts_are_settled_experiments_plus_active_plans(tmp_path) -> N
         patience=3,
     )
 
-    event = runtime.events._state_event()
+    event = supervisor_state(runtime.supervisor, 0)
 
     assert event.search["attempts"] == 1
     assert event.search["successes"] == 0
@@ -577,7 +578,7 @@ def test_state_waiting_projection_has_exact_plan_ids_and_reason(tmp_path) -> Non
         patience=3,
     )
 
-    event = runtime.events._state_event()
+    event = supervisor_state(runtime.supervisor, 0)
 
     assert event.waiting == {
         "plans": ["hyp_wait"],
@@ -638,7 +639,7 @@ async def test_completed_command_replaces_an_unsanitized_full_output_ref(
         )
     )
 
-    event = [payload for kind, payload in seen if kind == "output"][0]
+    event = next(payload for kind, payload in seen if kind == "output")
     assert event["text"] == "complete\nnext"
     assert event["artifact_ref"] != unsafe_ref
     assert await runtime.store.get_text(event["artifact_ref"]) == "complete\nnext"

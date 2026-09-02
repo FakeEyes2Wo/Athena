@@ -14,18 +14,19 @@ from athena.core.tool_types import EmitEvent
 from athena.core.workspace import resolve_workspace_path
 from athena.execution.runtime import ExecutionRuntime
 from athena.research.contracts import EvaluatorDescriptor
-from athena.research.evaluator_spec import (
+from athena.research.evaluation.spec import (
     DEFAULT_PREDICTION_ID_COLUMN,
     load_evaluator_spec,
 )
-from athena.research.evaluator_trust import (
+from athena.research.evaluation.trust import (
     extract_prediction_column,
     extract_prediction_column_from_source,
     validate_evaluator_properties,
 )
 from athena.research.script_runner import DataScriptRunner
+from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import load_agent_result
-from athena.research.supervisor.plans import PlanDecision, wait_run_events
+from athena.research.supervisor.plans import PlanDecision
 
 logger = logging.getLogger(__name__)
 

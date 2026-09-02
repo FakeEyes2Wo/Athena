@@ -116,6 +116,133 @@ async def test_run_echo_success(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_returns_when_completed_event_consumer_hangs(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """completed 消费者卡住时，命令结果仍在投递边界后返回。"""
+    events: list[str] = []
+
+    async def emit(kind: str, _ref: str, _data: object) -> None:
+        events.append(kind)
+        if kind == "command/completed":
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "athena.execution.runtime.COMPLETION_EMIT_TIMEOUT_S", 0.01, raising=False
+    )
+
+    result = await asyncio.wait_for(
+        _runtime(tmp_path).run(
+            _context(tmp_path),
+            CommandRequest(command=f"{PY} -c \"print('completed-result')\"", emit=emit),
+        ),
+        timeout=2.0,
+    )
+
+    assert result.ok
+    assert "completed-result" in result.stdout
+    assert "command/completed" in events
+    assert "command/completed delivery timed out" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_run_returns_when_exited_process_pipe_never_reaches_eof(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """子进程已退出但 pipe 不送 EOF 时，保留已读输出并在 drain 边界内返回。"""
+
+    class HangingStream:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            if not self._sent:
+                self._sent = True
+                return b"captured-before-eof\n"
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    class ClosedStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise StopAsyncIteration
+
+    class ExitedProcess:
+        returncode = 0
+        stdout = HangingStream()
+        stderr = ClosedStream()
+
+        async def wait(self) -> int:
+            return 0
+
+    async def create_process(*_args, **_kwargs):
+        return ExitedProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(
+        "athena.execution.runtime.POST_EXIT_DRAIN_TIMEOUT_S", 0.01, raising=False
+    )
+
+    result = await asyncio.wait_for(
+        CommandExecutor(env={}).run(
+            argv=["finished-command"],
+            workdir=tmp_path,
+            timeout_s=10,
+        ),
+        timeout=0.2,
+    )
+
+    assert result.ok
+    assert result.stdout == "captured-before-eof\n"
+
+
+@pytest.mark.asyncio
+async def test_run_uses_returncode_when_process_wait_never_returns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """OS 已报告退出时，不再等待仍被 pipe transport 阻塞的 Process.wait。"""
+
+    class ClosedStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise StopAsyncIteration
+
+    class ExitedProcess:
+        returncode = 0
+        stdout = ClosedStream()
+        stderr = ClosedStream()
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return 0
+
+    async def create_process(*_args, **_kwargs):
+        return ExitedProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(CommandExecutor, "_terminate", lambda _self, _proc: None)
+
+    result = await asyncio.wait_for(
+        CommandExecutor(env={}).run(
+            argv=["finished-command"],
+            workdir=tmp_path,
+            timeout_s=10,
+        ),
+        timeout=0.2,
+    )
+
+    assert result.ok
+    assert result.exit_code == 0
+
+
+@pytest.mark.asyncio
 async def test_run_rejects_command_and_argv_together(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="exactly one"):
         await _runtime(tmp_path).run(
@@ -405,7 +532,8 @@ async def test_runtime_persists_failed_output_to_store(tmp_path: Path) -> None:
         project_root=tmp_path, environment_root=tmp_path, store=store
     )
     result = await runtime.run(
-        _context(tmp_path), CommandRequest(command=f"{PY} -c \"raise RuntimeError('boom')\"")
+        _context(tmp_path),
+        CommandRequest(command=f"{PY} -c \"raise RuntimeError('boom')\""),
     )
     assert not result.ok
     assert result.output_ref is not None

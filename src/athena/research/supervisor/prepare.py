@@ -1,6 +1,8 @@
 """Narrow one-Agent PREPARE phase execution."""
 
+import asyncio
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -15,19 +17,21 @@ from athena.core.workspace import (
     GitWorkspaceError,
 )
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
+from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
-from athena.research.supervisor.evaluator_plan import _reap_agent, read_eval_handoff
+from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import PlanRunner, load_agent_result
 from athena.research.supervisor.plans import (
     PlanDecision,
     PlanInput,
     PlanState,
-    wait_run_events,
 )
 from athena.research.supervisor.prompt_context import handoff_block
 
 PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
+_REAP_TIMEOUT_SECONDS = 5.0
+logger = logging.getLogger(__name__)
 
 
 class PrepareResult(BaseModel):
@@ -41,6 +45,47 @@ class PrepareResult(BaseModel):
     predictions_ref: ArtifactRef
     evidence_ref: ArtifactRef
     report_ref: ArtifactRef
+
+
+async def _reap_agent(agents: AgentRuntime, agent_id: str) -> None:
+    """Release the one-shot PREPARE agent within a short cleanup budget."""
+    task = asyncio.create_task(agents.reap(agent_id))
+    done, _ = await asyncio.wait({task}, timeout=_REAP_TIMEOUT_SECONDS)
+    if task not in done:
+        task.add_done_callback(_consume_reap_result)
+        task.cancel()
+        logger.warning("timed out reaping PREPARE Agent %s", agent_id)
+        return
+    if task.cancelled():
+        logger.warning("PREPARE Agent reap was cancelled for %s", agent_id)
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning(
+            "failed to reap PREPARE Agent %s",
+            agent_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
+def _consume_reap_result(task: "asyncio.Task[None]") -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+async def _read_eval_handoff(
+    store: ArtifactStore, evaluator_ref: ArtifactRef | None
+) -> str:
+    """Read the frozen evaluator handoff used by the PREPARE agent."""
+    if evaluator_ref is None:
+        return ""
+    try:
+        descriptor = EvaluatorDescriptor.model_validate_json(
+            await store.get_text(evaluator_ref)
+        )
+        return (Path(descriptor.dir_path) / "HANDOFF.md").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
 
 
 async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:
@@ -94,7 +139,7 @@ async def run_prepare_plan(
     # 列名和行集合——真机上就交出了 ``sample_id,probability,label_true`` 覆盖全部 6000
     # 行，而评估器要 ``__athena_row_id`` 与 1200 行留出集，直接判 0.0。
     # 契约拼进 content：context_refs 到不了 model（见 ``handoff_block``）。
-    content = task + handoff_block(await read_eval_handoff(store, evaluator_ref))
+    content = task + handoff_block(await _read_eval_handoff(store, evaluator_ref))
     agent_id, run_id = await agents.create_root(
         "prepare",
         {"content": content, "context_refs": [context_ref]},

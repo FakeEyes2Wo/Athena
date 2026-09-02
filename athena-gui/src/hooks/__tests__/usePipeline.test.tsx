@@ -14,6 +14,13 @@ const bridgeMocks = vi.hoisted(() => ({
   sessionSwitch: vi.fn(),
   sessionDelete: vi.fn(),
   subscribeToPipelineEvents: vi.fn(),
+  taskClarificationStart: vi.fn(),
+  taskClarificationGet: vi.fn(),
+  taskClarificationRevise: vi.fn(),
+  taskClarificationRetry: vi.fn(),
+  taskClarificationCancel: vi.fn(),
+  humanPending: vi.fn(),
+  humanReply: vi.fn(),
 }));
 
 vi.mock("../../lib/tauri-bridge", () => ({
@@ -29,25 +36,53 @@ vi.mock("../../lib/tauri-bridge", () => ({
   sessionSwitch: bridgeMocks.sessionSwitch,
   sessionDelete: bridgeMocks.sessionDelete,
   subscribeToPipelineEvents: bridgeMocks.subscribeToPipelineEvents,
-  PIPELINE_EVENT_NAMES: ["state", "output"],
+  taskClarificationStart: bridgeMocks.taskClarificationStart,
+  taskClarificationGet: bridgeMocks.taskClarificationGet,
+  taskClarificationRevise: bridgeMocks.taskClarificationRevise,
+  taskClarificationRetry: bridgeMocks.taskClarificationRetry,
+  taskClarificationCancel: bridgeMocks.taskClarificationCancel,
+  humanPending: bridgeMocks.humanPending,
+  humanReply: bridgeMocks.humanReply,
+  PIPELINE_EVENT_NAMES: ["state", "output", "clarification", "human_request"],
 }));
 
 import { usePipeline } from "../usePipeline";
 
+const readyDraft = {
+  schema_version: 1 as const,
+  draft_id: "draft-1",
+  revision: 2,
+  session_id: "default",
+  original_task: "predict churn",
+  status: "READY_FOR_CONFIRMATION",
+  understanding: {
+    title: "Predict churn",
+    dataset: "churn.csv",
+    target: "churned",
+    task_type: "classification",
+    primary_metric: "f1",
+    direction: "maximize",
+    evaluation_plan: "holdout f1",
+  },
+  answers: [],
+  unresolved: [],
+  failure: null,
+  questions_asked: 3,
+  created_at: "2026-09-01T10:00:00Z",
+  updated_at: "2026-09-01T10:00:00Z",
+};
+
+const clarifyingDraft = {
+  ...readyDraft,
+  revision: 1,
+  status: "CLARIFYING",
+};
+
 describe("usePipeline", () => {
   beforeEach(() => {
-    bridgeMocks.startSearch.mockReset();
-    bridgeMocks.pauseSearch.mockReset();
-    bridgeMocks.resumeSearch.mockReset();
-    bridgeMocks.stopSearch.mockReset();
-    bridgeMocks.sendControl.mockReset();
-    bridgeMocks.startValidation.mockReset();
-    bridgeMocks.generateReport.mockReset();
-    bridgeMocks.stateGet.mockReset();
-    bridgeMocks.sessionsList.mockReset();
-    bridgeMocks.sessionSwitch.mockReset();
-    bridgeMocks.sessionDelete.mockReset();
-    bridgeMocks.subscribeToPipelineEvents.mockReset();
+    for (const key of Object.keys(bridgeMocks) as Array<keyof typeof bridgeMocks>) {
+      bridgeMocks[key].mockReset();
+    }
 
     bridgeMocks.startSearch.mockResolvedValue({ ok: true });
     bridgeMocks.pauseSearch.mockResolvedValue({ ok: true });
@@ -61,56 +96,74 @@ describe("usePipeline", () => {
     bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: [] });
     bridgeMocks.sessionDelete.mockResolvedValue({ deleted: true, sessions: [] });
     bridgeMocks.subscribeToPipelineEvents.mockResolvedValue([]);
+    bridgeMocks.taskClarificationStart.mockResolvedValue({
+      draft_id: "draft-1",
+      revision: 0,
+      status: "CLARIFYING",
+    });
+    bridgeMocks.taskClarificationGet.mockResolvedValue(readyDraft);
+    bridgeMocks.taskClarificationRevise.mockResolvedValue(clarifyingDraft);
+    bridgeMocks.taskClarificationRetry.mockResolvedValue(clarifyingDraft);
+    bridgeMocks.taskClarificationCancel.mockResolvedValue({ ok: true });
+    bridgeMocks.humanPending.mockResolvedValue({ requests: [] });
+    bridgeMocks.humanReply.mockResolvedValue({ replied: true });
   });
 
-  it("adds a user message and a placeholder intent preview card when a prompt is sent", async () => {
+  it("does not start search when a task is submitted", async () => {
     const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
-      await result.current.sendPrompt("analyze this CSV");
+      await result.current.sendPrompt("predict churn");
     });
 
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith("predict churn");
+    expect(bridgeMocks.startSearch).not.toHaveBeenCalled();
+    expect(result.current.status).toBe("CLARIFYING");
     expect(result.current.viewModel.messages.map((message) => message.kind)).toEqual([
       "text",
       "intent-preview",
     ]);
-    expect(result.current.viewModel.messages[0]).toMatchObject({
-      role: "user",
-      content: "analyze this CSV",
-    });
-    // The frontend only shows a placeholder; the backend Supervisor owns the
-    // actual task understanding and will fill this card through a state event.
-    expect(result.current.viewModel.messages[1].preview?.primary_metric).toBe("");
-    expect(result.current.viewModel.messages[1].preview?.needs_configuration).toBe(true);
-    // 发送即启动：不调用前端的独立理解，直接交给后端统一理解并进入 PREPARE。
-    expect(bridgeMocks.startSearch).toHaveBeenCalledWith({ task: "analyze this CSV" });
-    expect(result.current.viewModel.status).toBe("running");
+    expect(result.current.viewModel.messages[1].started).toBe(false);
   });
 
-  it("updates run state and context surface controls through the exposed API", async () => {
+  it("reloads the authoritative draft after a stale confirmation revision", async () => {
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    bridgeMocks.startSearch.mockRejectedValueOnce(
+      Object.assign(new Error("stale revision"), { code: "stale_revision" }),
+    );
+
     const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
-      await result.current.startRun("analyze this CSV");
+      await result.current.sendPrompt("predict churn");
+    });
+    expect(result.current.status).toBe("READY_FOR_CONFIRMATION");
+
+    await act(async () => {
+      await result.current.confirmDraft(false).catch(() => undefined);
     });
 
-    expect(bridgeMocks.startSearch).toHaveBeenCalledWith({ task: "analyze this CSV" });
+    expect(bridgeMocks.startSearch).toHaveBeenCalledWith("draft-1", 2, false);
+    expect(bridgeMocks.taskClarificationGet).toHaveBeenCalledWith("draft-1");
+  });
+
+  it("enters RUNNING only after the gated start succeeds", async () => {
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+
+    await act(async () => {
+      await result.current.confirmDraft(false);
+    });
+
+    expect(bridgeMocks.startSearch).toHaveBeenCalledWith("draft-1", 2, false);
+    expect(result.current.status).toBe("RUNNING");
+    expect(result.current.viewModel.messages.find((m) => m.kind === "intent-preview")?.started).toBe(true);
     expect(result.current.viewModel.status).toBe("running");
-
-    await act(async () => {
-      await result.current.pauseRun();
-    });
-    expect(result.current.viewModel.status).toBe("paused");
-
-    await act(async () => {
-      await result.current.resumeRun();
-    });
-    expect(result.current.viewModel.status).toBe("running");
-
-    await act(async () => {
-      await result.current.stopRun();
-    });
-    expect(result.current.viewModel.status).toBe("completed");
   });
 
   it("routes slash commands to the matching runtime control", async () => {
@@ -135,12 +188,16 @@ describe("usePipeline", () => {
   });
 
   it("routes prose to the supervisor while a run is active", async () => {
-    bridgeMocks.startSearch.mockResolvedValue({ ok: true });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
     bridgeMocks.sendControl.mockResolvedValue({ response: "收到，已调整计划。" });
+
     const { result } = renderHook(() => usePipeline());
 
     await act(async () => {
-      await result.current.startRun("analyze this CSV");
+      await result.current.sendPrompt("analyze this CSV");
+    });
+    await act(async () => {
+      await result.current.confirmDraft(false);
     });
     await act(async () => {
       await result.current.sendPrompt("请优先做草莓");
@@ -168,6 +225,50 @@ describe("usePipeline", () => {
     expect(result.current.viewModel.manual).toBe(false);
   });
 
+  it("unifies human replies and protects against double submission", async () => {
+    let resolveReply: (() => void) | undefined;
+    bridgeMocks.humanReply.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveReply = () => resolve({ replied: true });
+        }),
+    );
+    bridgeMocks.humanPending.mockResolvedValue({
+      requests: [
+        {
+          request_id: "req-1",
+          session_id: "s-1",
+          scope_id: "draft-1",
+          scope_kind: "clarification",
+          prompt: "Choose metric",
+          choices: [{ label: "F1", value: "f1" }],
+          allow_custom: true,
+          allow_skip: true,
+          created_at: "2026-09-01T10:00:00Z",
+          expires_at: "2026-09-01T10:02:00Z",
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.startClarification("predict churn");
+    });
+    expect(result.current.humanRequests).toHaveLength(1);
+
+    await act(async () => {
+      const first = result.current.replyToHumanRequest("req-1", { kind: "text", text: "F1" });
+      const second = result.current.replyToHumanRequest("req-1", { kind: "text", text: "F1 again" });
+      expect(bridgeMocks.humanReply).toHaveBeenCalledTimes(1);
+      expect(bridgeMocks.humanReply).toHaveBeenCalledWith("req-1", { kind: "text", text: "F1" });
+      resolveReply?.();
+      await Promise.allSettled([first, second]);
+    });
+
+    await waitFor(() => expect(result.current.humanRequests).toHaveLength(0));
+  });
+
   it("restores persisted session records into the conversation on mount", async () => {
     bridgeMocks.sessionSwitch.mockResolvedValue({
       records: [
@@ -180,8 +281,6 @@ describe("usePipeline", () => {
 
     const { result } = renderHook(() => usePipeline());
 
-    // 这些记录是升级前的形状（没有 message_id）：每条落盘记录各自成为一条消息，
-    // 不会被并进上一条的尾巴里。
     await waitFor(() => {
       expect(result.current.viewModel.messages).toHaveLength(4);
     });
@@ -219,8 +318,6 @@ describe("usePipeline", () => {
   });
 
   it("leaves blank-session cleanup to the backend when switching away", async () => {
-    // 空白判定只有后端看得见（会话目录里有没有 transcript / state.json）：
-    // 前端曾用 view model 去猜，猜错就是误删一个真实会话。
     const { result } = renderHook(() => usePipeline());
 
     await waitFor(() => {

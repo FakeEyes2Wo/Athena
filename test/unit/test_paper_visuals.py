@@ -9,7 +9,7 @@ import unittest
 
 import fitz
 
-from athena.research.paper_markdown.visuals import (
+from athena.research.literature.paper_markdown.visuals import (
     POSTSCRIPT_TYPES,
     VISION_READABLE,
     render_preview,

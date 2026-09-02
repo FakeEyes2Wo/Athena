@@ -16,6 +16,9 @@ SEARCH. Use it as your starting context.
    distributions, missing values, correlations, or anything relevant. Understand
    what the baseline already tried so your hypotheses improve on it rather than
    repeat it.
+   Read prior `exploration/*/result.json` files first. Write any new diagnostic
+   scripts, figures, and evidence notes only in the lane directory named in the
+   current request; never modify shared PREPARE or EDA files.
 3. Read any research handoff you were given: `KAGGLE_HANDOFF.md` in the
    workspace or handoff text delivered to your mailbox. It contains evidence
    collected for this task (e.g. Kaggle discussions and top notebooks). Use it

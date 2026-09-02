@@ -4,7 +4,7 @@ import pytest
 
 from athena.research.config import ResearchConfig, ResearchPaths, SearchLimits
 from athena.research.runtime import ResearchRuntime
-from athena.research.runtime_bootstrap import build_services
+from athena.research.runtime.bootstrap import build_services
 
 
 def test_build_services_reads_search_limit_from_config(tmp_path) -> None:

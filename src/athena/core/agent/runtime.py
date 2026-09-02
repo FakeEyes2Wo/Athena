@@ -88,7 +88,14 @@ class BaseAgent(ABC):
     async def tool(self, ctx: AgentContext, name: str, **inp: Any) -> ToolResult:
         """按名称调用工具并返回 ToolResult（业务 Agent 编排用）。"""
         return await ctx.tools.resolve(name).ainvoke(
-            ToolContext(name, f"{ctx.turn.turn_id}:{name}", ctx.emit, ctx.cancel), **inp
+            ToolContext(
+                name,
+                f"{ctx.turn.turn_id}:{name}",
+                ctx.emit,
+                ctx.cancel,
+                session_id=ctx.thread.session_id,
+            ),
+            **inp,
         )
 
 
@@ -352,6 +359,7 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
                             ctx.emit,
                             ctx.cancel,
                             ask_user=ctx.ask_user,
+                            session_id=ctx.thread.session_id,
                         )
 
                         task = _dispatch_tool_call(

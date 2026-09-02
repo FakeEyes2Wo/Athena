@@ -1,13 +1,14 @@
 """Unit tests for the EDA_TODO.md scheduler."""
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from athena.agents.ideator_agent import HandoffResult
-from athena.research import eda_todo
-from athena.research.eda_todo import run_eda_todos
+from athena.research.prepare import eda as eda_todo
+from athena.research.prepare.eda import run_eda_todos
 
 
 class _FakeAgents:
@@ -81,7 +82,13 @@ async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
     assert agents.spawned[0]["type"] == "eda_worker"
     first_task = agents.spawned[0]["task"]
     assert first_task["output_file"] == "EDA_REPORT_00_OVERVIEW.md"
-    assert "EDA_REPORT_00_OVERVIEW.md" in first_task["content"]
+    content = first_task["content"]
+    assert "EDA_REPORT_00_OVERVIEW.md" in content
+    assert "at most 8 tool calls" in content
+    assert "Use only installed dependencies" in content
+    assert "do not install packages with pip, conda, or uv" in content
+    assert "Keep the report focused" in content
+    assert "do not exhaustively enumerate the dataset" in content
     assert agents.reaped == [f"agent-{i}" for i in range(1, 4)]
 
 
@@ -162,6 +169,38 @@ async def test_run_eda_todos_keeps_failed_todo_unchecked(
     text = todo_file.read_text(encoding="utf-8")
     assert "- [ ] 00 Overview" in text
     assert agents.reaped == ["agent-1", "agent-2"]
+
+
+@pytest.mark.asyncio
+async def test_timed_out_todo_fails_once_and_reaps_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A hung worker must consume one attempt, not three unbounded retries."""
+    todo_file = tmp_path / "EDA_TODO.md"
+    todo_file.write_text(
+        "## Stage 1 (parallel: false)\n"
+        "- [ ] 00 Overview -> EDA_REPORT_00_OVERVIEW.md\n",
+        encoding="utf-8",
+    )
+    agents = _FakeAgents()
+
+    async def never_finishes(_agents, _run_id, _publish):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(eda_todo, "wait_run_events", never_finishes)
+    monkeypatch.setattr(eda_todo, "AGENT_TURN_TIMEOUT_SECONDS", 0.01)
+
+    failed = await run_eda_todos(
+        agents=agents,
+        store=None,
+        workspace=tmp_path,
+        retries=2,
+    )
+
+    assert failed == ["00 Overview"]
+    assert len(agents.spawned) == 1
+    assert agents.reaped == ["agent-1"]
+    assert "- [ ] 00 Overview" in todo_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

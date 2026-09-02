@@ -3,26 +3,27 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.contracts import ArtifactStore, CommitHash
-from athena.core.research_models import Hypothesis
-from athena.core.workspace import GitWorkspace
-from athena.research.contracts import GeneralTurnOutcome
-from athena.research.supervisor.experiment import PlanTurnResult
-from athena.research.supervisor.plans import PlanState
-from athena.research.supervisor.prepare import PrepareResult
-from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import Scheduler
+if TYPE_CHECKING:
+    from athena.core.agent.agent_runtime import AgentRuntime
+    from athena.core.contracts import ArtifactStore, CommitHash
+    from athena.core.research_models import Hypothesis
+    from athena.core.workspace import GitWorkspace
+    from athena.research.contracts import GeneralTurnOutcome
+    from athena.research.supervisor.experiment import PlanTurnResult
+    from athena.research.supervisor.plans import PlanState
+    from athena.research.supervisor.prepare import PrepareResult
+    from athena.research.supervisor.recovery import Recovery
+    from athena.research.supervisor.scheduling import Scheduler
 
-PlanTurn = Callable[[str, PlanState], Awaitable[PlanTurnResult]]
+PlanTurn = Callable[[str, "PlanState"], Awaitable["PlanTurnResult"]]
 SupervisorTurn = Callable[[str], Awaitable[str]]
 Publish = Callable[[Literal["output", "state"], dict[str, object]], Awaitable[None]]
-PreparePhase = Callable[[], Awaitable[PrepareResult]]
-ValidationPhase = Callable[[CommitHash, float], Awaitable[object]]
-IdeatorTurn = Callable[[int], Awaitable[list[Hypothesis]]]
-GeneralTurn = Callable[[str, str | None], Awaitable[GeneralTurnOutcome]]
+PreparePhase = Callable[[], Awaitable["PrepareResult"]]
+ValidationPhase = Callable[["CommitHash", float], Awaitable[object]]
+IdeatorTurn = Callable[[int], Awaitable[list["Hypothesis"]]]
+GeneralTurn = Callable[[str, str | None], Awaitable["GeneralTurnOutcome"]]
 PublishAgentEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 
 
@@ -39,9 +40,9 @@ class SupervisorPaths:
 class SupervisorRuntime:
     """Provide the artifact, Agent, and Git runtimes used by Plans."""
 
-    store: ArtifactStore
-    agents: AgentRuntime
-    workspaces: GitWorkspace
+    store: "ArtifactStore"
+    agents: "AgentRuntime"
+    workspaces: "GitWorkspace"
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,8 @@ class PhaseActions:
 class SearchServices:
     """Own SEARCH scheduling and comparison policy services."""
 
-    scheduler: Scheduler
-    recovery: Recovery
+    scheduler: "Scheduler"
+    recovery: "Recovery"
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
 

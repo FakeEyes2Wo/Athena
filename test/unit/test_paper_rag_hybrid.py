@@ -11,19 +11,19 @@ import unittest
 import numpy
 
 from athena.core.artifact_store import LocalArtifactStore
-from athena.research.paper_rag.index import (
+from athena.research.literature.paper_rag.index import (
     MIN_ANCHOR_PROSE_CHARS,
     anchor_index,
     novel_prose_chars,
     pack_vectors,
 )
-from athena.research.paper_rag.schemas import (
+from athena.research.literature.paper_rag.schemas import (
     CorpusEntry,
     CorpusSentence,
     PaperCorpusIndex,
     SearchHit,
 )
-from athena.research.paper_rag.search import (
+from athena.research.literature.paper_rag.search import (
     CorpusCache,
     RetrievalSession,
     _mapped_vectors,
@@ -154,7 +154,7 @@ class HybridSearchTest(unittest.TestCase):
             CorpusSentence(entry_index=0, char_start=0, char_end=len(entries[0].text)),
             CorpusSentence(entry_index=1, char_start=0, char_end=len(entries[1].text)),
         ]
-        from athena.research.paper_rag.search import LoadedCorpus
+        from athena.research.literature.paper_rag.search import LoadedCorpus
 
         return LoadedCorpus(
             index=PaperCorpusIndex(entries=entries, sentences=sentences),
@@ -171,9 +171,7 @@ class HybridSearchTest(unittest.TestCase):
 
     def test_without_keywords_it_degrades_to_the_semantic_half(self) -> None:
         corpus = self._corpus()
-        corpus.vectors = numpy.asarray(
-            [[1.0, 0.0], [0.0, 1.0]], dtype=numpy.float32
-        )
+        corpus.vectors = numpy.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=numpy.float32)
         corpus.weights = numpy.asarray([1.0, 1.0], dtype=numpy.float32)
 
         hits = hybrid_search(corpus, [1.0, 0.0], [], 5)

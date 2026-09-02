@@ -24,7 +24,24 @@ vi.mock("../../lib/tauri-bridge", () => ({
     eventHandlers.push(handler);
     return [];
   }),
-  PIPELINE_EVENT_NAMES: ["state", "output"],
+  taskClarificationStart: vi.fn().mockResolvedValue({
+    draft_id: "draft-1",
+    revision: 1,
+    status: "CLARIFYING",
+  }),
+  taskClarificationGet: vi.fn().mockResolvedValue({
+    draft_id: "draft-1",
+    revision: 1,
+    status: "CLARIFYING",
+    understanding: { title: "", dataset: null, target: null, task_type: "other", primary_metric: null, direction: null, evaluation_plan: null },
+    answers: [],
+    unresolved: [],
+    failure: null,
+  }),
+  taskClarificationRevise: vi.fn().mockResolvedValue({ draft_id: "draft-1", revision: 2, status: "CLARIFYING" }),
+  taskClarificationRetry: vi.fn().mockResolvedValue({ draft_id: "draft-1", revision: 2, status: "CLARIFYING" }),
+  taskClarificationCancel: vi.fn().mockResolvedValue({ ok: true }),
+  PIPELINE_EVENT_NAMES: ["state", "output", "clarification", "human_request"],
 }));
 
 import { sessionSwitch, sessionsList } from "../../lib/tauri-bridge";

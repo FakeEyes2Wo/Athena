@@ -4,7 +4,7 @@ import unittest
 
 import fitz
 
-from athena.research.paper_markdown.pdf_parser import (
+from athena.research.literature.paper_markdown.pdf_parser import (
     PdfBlock,
     citation_keys,
     display_reference_keys,

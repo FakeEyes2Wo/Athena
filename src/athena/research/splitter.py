@@ -40,6 +40,7 @@ class SplitManifest:
     final_ids: tuple[str, ...]
 
     def validate(self) -> None:
+        """Reject duplicate row ids and overlap between the three splits."""
         train = set(self.train_ids)
         search = set(self.search_ids)
         final = set(self.final_ids)
@@ -174,9 +175,11 @@ def _write_split_files(
     label_fields = ["__athena_row_id", target_column]
 
     def feature_rows(id_set: Sequence[str]) -> list[dict[str, str]]:
+        """Return feature rows for the selected row ids."""
         return [{"__athena_row_id": row_id, **by_id[row_id]} for row_id in id_set]
 
     def label_rows(id_set: Sequence[str]) -> list[dict[str, str]]:
+        """Return label-only rows for the selected row ids."""
         return [
             {
                 "__athena_row_id": row_id,

@@ -1,26 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { errorMessage } from "../lib/errors";
 import {
-  humanChoice,
-  humanPending,
-  humanReply,
-  humanSkip,
-  pauseSearch,
-  resumeSearch,
-  sendControl,
-  sessionDelete,
-  sessionSwitch,
-  sessionsList,
-  startSearch,
-  stateGet,
-  stopSearch,
-  subscribeToPipelineEvents,
+  hasClarificationMessage,
+  renderClarificationOutcome,
+  renderClarificationQuestion,
+  renderClarificationReply,
+} from "../lib/clarification-conversation";
+import { errorMessage } from "../lib/errors";
+import * as bridge from "../lib/tauri-bridge";
+import {
+  createEmptyPipelineViewModel,
+  type ClarificationDraftDto,
+  type ClarificationPreview,
+  type ClarificationStatus,
+  type HumanReply,
   type HumanRequest,
-  type PipelineEvent,
-  type SessionRecord,
-  type TaskUnderstanding,
-} from "../lib/tauri-bridge";
-import { createEmptyPipelineViewModel, type PipelineViewModel } from "../types/ui";
+  type PipelineViewModel,
+} from "../types/ui";
 
 export interface LogEntry {
   id: string;
@@ -86,8 +81,89 @@ export function loadSessionTitles(workspaceRoot?: string | null): Record<string,
   return loadTitles(sessionTitlesKey(workspaceRoot));
 }
 
+/** Draft statuses the frontend exposes directly (backend may also emit CONFIRMED/CANCELLED). */
+function normalizeClarificationStatus(status: string | undefined): ClarificationStatus | null {
+  if (!status) return null;
+  if (status === "CONFIRMED" || status === "RUNNING") return "RUNNING";
+  if (status === "CANCELLED") return "IDLE";
+  if (status === "CLARIFYING" || status === "READY_FOR_CONFIRMATION" || status === "CONFIRMING" || status === "FAILED") {
+    return status as ClarificationStatus;
+  }
+  return null;
+}
+
+/** Read an id from either the snake_case RPC DTO or a camelCase bridge return. */
+function draftIdOf(value: { draft_id?: string; draftId?: string } | null | undefined): string | undefined {
+  return value?.draft_id ?? value?.draftId;
+}
+
+/** Convert the backend draft DTO into the frontend preview projection. */
+function toClarificationPreview(draft: ClarificationDraftDto & { draftId?: string }): ClarificationPreview {
+  return {
+    draftId: draftIdOf(draft) ?? "",
+    revision: draft.revision,
+    status: normalizeClarificationStatus(draft.status) ?? "CLARIFYING",
+    understanding: {
+      title: draft.understanding?.title ?? "",
+      dataset: draft.understanding?.dataset ?? null,
+      target: draft.understanding?.target ?? null,
+      task_type: draft.understanding?.task_type ?? "other",
+      primary_metric: draft.understanding?.primary_metric ?? null,
+      direction: draft.understanding?.direction ?? null,
+      evaluation_plan: draft.understanding?.evaluation_plan ?? null,
+    },
+    answers: Array.isArray(draft.answers) ? draft.answers : [],
+    unresolved: Array.isArray(draft.unresolved) ? draft.unresolved : [],
+    failure: draft.failure ?? null,
+  };
+}
+
+/** Is this RPC result a full draft (rather than a start summary)? */
+function isFullDraft(value: unknown): value is ClarificationDraftDto {
+  return typeof value === "object" && value !== null && typeof (value as ClarificationDraftDto).understanding === "object";
+}
+
+/** Find the latest intent-preview message whose draftId matches (or the latest one). */
+function findPreviewIndex(
+  messages: Array<{ id: string; kind: string; preview?: unknown }>,
+  draftId?: string,
+): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.kind !== "intent-preview" || !message.preview) continue;
+    const preview = message.preview as Partial<ClarificationPreview>;
+    if (draftId) {
+      if (preview.draftId === draftId) return i;
+    } else if (preview.draftId !== undefined) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Apply a draft update to the most relevant intent-preview message. */
+function replacePreview(
+  current: PipelineViewModel,
+  draftId: string | undefined,
+  patch: (preview: ClarificationPreview) => ClarificationPreview,
+): PipelineViewModel {
+  let idx = findPreviewIndex(current.messages, draftId);
+  // A newly submitted placeholder has draftId ""; once the start RPC returns a
+  // real id, the authoritative draft replaces that placeholder.
+  if (idx < 0 && draftId) idx = findPreviewIndex(current.messages, undefined);
+  if (idx < 0) return current;
+  const message = current.messages[idx];
+  const currentPreview = message.preview as ClarificationPreview | undefined;
+  if (!currentPreview) return current;
+  const nextPreview = patch(currentPreview);
+  return {
+    ...current,
+    messages: current.messages.map((m, i) => (i === idx ? { ...m, preview: nextPreview } : m)),
+  };
+}
+
 /** 从 task understanding（TaskUnderstanding）推导会话标题。 */
-function titleFromTask(preview: TaskUnderstanding): string {
+function titleFromTask(preview: { title?: string; task_type?: string; primary_metric?: string | null }): string {
   if (preview.title?.trim()) return preview.title.trim();
   const parts = [preview.task_type, preview.primary_metric].filter((p) => p && p !== "other");
   return parts.length ? parts.join(" · ") : "新会话";
@@ -95,7 +171,7 @@ function titleFromTask(preview: TaskUnderstanding): string {
 
 /** Rebuilds the conversation from persisted records by replaying each output
   * record through the same reducer the live stream uses (TUI-style resume). */
-function applyHistoryRecords(current: PipelineViewModel, records: SessionRecord[]): PipelineViewModel {
+function applyHistoryRecords(current: PipelineViewModel, records: bridge.SessionRecord[]): PipelineViewModel {
   let next = current;
   for (const record of records) {
     if (record.type === "user") {
@@ -109,25 +185,32 @@ function applyHistoryRecords(current: PipelineViewModel, records: SessionRecord[
         ],
       };
     } else {
-      next = applyPipelineEvent(next, { kind: "output", data: record }, true);
+      next = applyPipelineEvent(next, { kind: "output", data: record as unknown as Record<string, unknown> }, true);
     }
   }
   return next;
 }
 
 /**
- * Applies a single backend event (``state`` / ``output``) to the view model.
+ * Applies a single backend event (``state`` / ``output`` / ``clarification``) to the view model.
  *
  * ``replay`` 区分事件来源：实时订阅推的 agent 文本是增量 delta，落盘 transcript
  * 回放的是已合并的整条消息——两者形状相同，只有来源能区分该追加还是该替换。
  */
 function applyPipelineEvent(
   current: PipelineViewModel,
-  event: PipelineEvent,
+  event: bridge.PipelineEvent,
   replay = false,
 ): PipelineViewModel {
   const next: PipelineViewModel = { ...current, rightRail: { ...current.rightRail } };
   const { data } = event;
+
+  if (event.kind === "clarification") {
+    const draft = (data as { draft?: ClarificationDraftDto }).draft;
+    if (!draft) return next;
+    const preview = toClarificationPreview(draft);
+    return replacePreview(next, preview.draftId, () => preview);
+  }
 
   if (event.kind === "state") {
     if (typeof data.phase === "string" && data.phase.trim()) {
@@ -166,7 +249,7 @@ function applyPipelineEvent(
       next.manual = data.manual;
     }
     // Supervisor 结构化任务理解：更新最新一张意图预览卡（取代预解析占位值）。
-    const understanding = data.task_understanding as TaskUnderstanding | undefined;
+    const understanding = data.task_understanding as bridge.TaskUnderstanding | undefined;
     if (understanding && typeof understanding === "object") {
       let idx = -1;
       for (let i = next.messages.length - 1; i >= 0; i -= 1) {
@@ -233,30 +316,56 @@ function applyPipelineEvent(
   return next;
 }
 
+const {
+  stateGet,
+  sessionsList,
+  sessionSwitch,
+  sessionDelete,
+  pauseSearch,
+  resumeSearch,
+  stopSearch,
+  sendControl,
+} = bridge;
+
+function errorCode(err: unknown): string | undefined {
+  if (typeof err === "object" && err !== null && "code" in err) {
+    return String((err as { code: unknown }).code);
+  }
+  return undefined;
+}
+
 /**
  * Central pipeline state hook.
  * Manages the view model, subscribes to backend events, and exposes all user actions
- * (send prompt, start/stop/pause/resume search, open/close panels).
+ * (send prompt, clarify/confirm/revise/retry/cancel, pause/resume/stop, etc).
  */
 export function usePipeline(workspaceRoot?: string | null) {
   const [viewModel, setViewModel] = useState<PipelineViewModel>(createEmptyPipelineViewModel);
+  const [clarificationStatus, setClarificationStatus] = useState<ClarificationStatus>("IDLE");
   const [sessions, setSessions] = useState<Array<{ id: string; title: string }>>([]);
   const [currentSessionId, setCurrentSessionId] = useState("default");
   const [humanRequests, setHumanRequests] = useState<HumanRequest[]>([]);
+  const [humanPendingError, setHumanPendingError] = useState<string | null>(null);
+  const [settlingRequestId, setSettlingRequestId] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
   const logCounter = useRef(0);
+  const activeSessionIdRef = useRef(currentSessionId);
+  const currentDraftIdRef = useRef<string | null>(null);
+  const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
   const runStarted = useRef(false);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
+  const settlingRequestRef = useRef<string | null>(null);
+  const humanPollFailures = useRef(0);
 
   const nextId = useCallback((prefix: string) => {
     counter.current += 1;
     return `${prefix}-${counter.current}`;
   }, []);
 
-  const appendLog = useCallback((event: PipelineEvent) => {
+  const appendLog = useCallback((event: bridge.PipelineEvent) => {
     const data = event.data as Record<string, unknown> | undefined;
     logCounter.current += 1;
     const entry: LogEntry = {
@@ -274,6 +383,17 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
+  const appendError = useCallback((text: string) => {
+    setViewModel((prev) => ({
+      ...prev,
+      status: "error",
+      messages: [
+        ...prev.messages,
+        { id: nextId("error"), role: "athena", kind: "error", content: text },
+      ],
+    }));
+  }, [nextId]);
+
   // 会话列表一律由后端给：哪些会话存在（有 transcript / state.json）只有它知道。
   const applySessions = useCallback(
     (ids: string[] | undefined) => {
@@ -286,7 +406,7 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
   const restoreRecords = useCallback(
-    (records: SessionRecord[], resetMessages: boolean) => {
+    (records: bridge.SessionRecord[], resetMessages: boolean) => {
       if (records.length) {
         counter.current = Math.max(counter.current, ...records.map((r) => r.seq));
       }
@@ -303,6 +423,87 @@ export function usePipeline(workspaceRoot?: string | null) {
     saveTitle(titlesKey, id, title);
   }, [titlesKey]);
 
+  // The latest clarification preview stored on any intent-preview message.
+  const latestPreview = useMemo(() => {
+    const messages = viewModel.messages;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message.kind === "intent-preview" && message.preview && "draftId" in message.preview) {
+        return message.preview as ClarificationPreview;
+      }
+    }
+    return null;
+  }, [viewModel.messages]);
+
+  // Apply a full draft or a start summary to the latest matching preview message.
+  const applyDraftToPreview = useCallback((
+    draft: (ClarificationDraftDto & { draftId?: string }) | { draft_id?: string; draftId?: string; revision: number; status: string } | null,
+    draftId?: string,
+  ) => {
+    if (!draft) return;
+    const targetDraftId = draftId ?? draftIdOf(draft);
+    const incomingRevision = (draft as { revision?: number }).revision ?? -1;
+    if (targetDraftId) currentDraftIdRef.current = targetDraftId;
+    if (incomingRevision >= 0) currentRevisionRef.current = incomingRevision;
+    setViewModel((prev) => {
+      const patch = (current: ClarificationPreview): ClarificationPreview => {
+        if (isFullDraft(draft)) {
+          return toClarificationPreview(draft);
+        }
+        return {
+          ...current,
+          draftId: targetDraftId || current.draftId,
+          revision: incomingRevision,
+          status: normalizeClarificationStatus((draft as { status?: string }).status) ?? current.status,
+        };
+      };
+      const next = replacePreview(prev, targetDraftId || undefined, patch);
+      // When clarification finishes, move the authoritative card to the end so
+      // it appears after the Q&A conversation instead of above it.
+      if (isFullDraft(draft) && draft.status !== "CLARIFYING") {
+        const idx = findPreviewIndex(next.messages, targetDraftId);
+        if (idx >= 0 && idx < next.messages.length - 1) {
+          const message = next.messages[idx];
+          next.messages = [...next.messages.filter((_, i) => i !== idx), message];
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  /** Show one clarification question in the chat as part of the task-understanding flow. */
+  const appendClarificationQuestion = useCallback((request: HumanRequest) => {
+    const requestId = request.request_id;
+    setViewModel((prev) => {
+      if (hasClarificationMessage(prev.messages, requestId, "question")) return prev;
+      return { ...prev, messages: [...prev.messages, renderClarificationQuestion(request)] };
+    });
+  }, []);
+
+  /** Show the user's typed reply in the chat once the backend accepts it. */
+  const appendClarificationReply = useCallback((requestId: string, reply: HumanReply) => {
+    setViewModel((prev) => {
+      if (hasClarificationMessage(prev.messages, requestId, "reply")) return prev;
+      return { ...prev, messages: [...prev.messages, renderClarificationReply(requestId, reply)] };
+    });
+  }, []);
+
+  /** Show server-generated timeout/cancellation outcomes that did not come from a user reply. */
+  const appendClarificationOutcome = useCallback((
+    requestId: string,
+    outcome: { kind?: string; value?: string | null; choice_label?: string | null } | null | undefined,
+  ) => {
+    setViewModel((prev) => {
+      const message = renderClarificationOutcome(requestId, outcome);
+      if (!message || hasClarificationMessage(prev.messages, requestId, "outcome") || hasClarificationMessage(prev.messages, requestId, "reply")) return prev;
+      return { ...prev, messages: [...prev.messages, message] };
+    });
+  }, []);
+
+  useEffect(() => {
+    activeSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
   // Subscribe to backend pipeline events on mount.
   useEffect(() => {
     let mounted = true;
@@ -310,6 +511,66 @@ export function usePipeline(workspaceRoot?: string | null) {
 
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
+
+      if (event.kind === "clarification") {
+        const payload = event.data as { session_id?: string; draft?: ClarificationDraftDto };
+        if (payload.session_id && payload.session_id !== activeSessionIdRef.current) {
+          appendLog(event);
+          return;
+        }
+        const draft = payload.draft;
+        if (draft) {
+          const incomingDraftId = draftIdOf(draft);
+          const currentRevision =
+            currentDraftIdRef.current === incomingDraftId ? currentRevisionRef.current : -1;
+          setViewModel((prev) => {
+            const currentSoon = prev.messages.find((m) => {
+              const p = m.preview as ClarificationPreview | undefined;
+              return m.kind === "intent-preview" && p?.draftId === incomingDraftId;
+            })?.preview as ClarificationPreview | undefined;
+            if (currentSoon && draft.revision < currentSoon.revision) return prev;
+            return replacePreview(prev, incomingDraftId, () => toClarificationPreview(draft));
+          });
+          if (currentRevision <= draft.revision) {
+            setClarificationStatus(normalizeClarificationStatus(draft.status) ?? "CLARIFYING");
+          }
+        }
+        appendLog(event);
+        return;
+      }
+
+      if (event.kind === "human_request") {
+        const payload = event.data as {
+          action?: "created" | "settled";
+          session_id?: string;
+          request?: HumanRequest;
+          request_id?: string;
+          outcome?: { kind?: string; value?: string | null; choice_label?: string | null } | null;
+        };
+        // Ignore questions belonging to another session; the frontend must not
+        // render or settle another conversation's request.
+        if (payload.session_id && payload.session_id !== activeSessionIdRef.current) {
+          appendLog(event);
+          return;
+        }
+        if (payload?.action === "created" && payload.request) {
+          setHumanRequests((prev) =>
+            prev.some((r) => r.request_id === payload.request?.request_id)
+              ? prev
+              : [...prev, payload.request as HumanRequest],
+          );
+          appendClarificationQuestion(payload.request);
+          setHumanPendingError(null);
+        } else if (payload?.action === "settled" && payload.request_id) {
+          setHumanRequests((prev) => prev.filter((r) => r.request_id !== payload.request_id));
+          if (payload.outcome?.kind === "timeout" || payload.outcome?.kind === "cancelled") {
+            appendClarificationOutcome(payload.request_id, payload.outcome);
+          }
+        }
+        appendLog(event);
+        return;
+      }
+
       setViewModel((prev) => applyPipelineEvent(prev, event));
       appendLog(event);
     }).then((fns) => {
@@ -348,29 +609,46 @@ export function usePipeline(workspaceRoot?: string | null) {
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendLog, applySessions]);
+  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, restoreRecords]);
 
-  // Poll for outstanding supervisor human questions while a run is active.
-  // Task understanding and any initial clarification are owned by the backend
-  // Supervisor, so the frontend only has to surface these pending requests.
+  // Poll for outstanding human questions. Pre-run states use a low-frequency
+  // fallback (10s); once RUNNING we keep the existing 1.5s recovery poll.
   useEffect(() => {
-    if (viewModel.status !== "running") {
+    const preRun =
+      clarificationStatus === "CLARIFYING" ||
+      clarificationStatus === "READY_FOR_CONFIRMATION" ||
+      clarificationStatus === "CONFIRMING";
+    const running = clarificationStatus === "RUNNING" || viewModel.status === "running";
+
+    if (!preRun && !running) {
       setHumanRequests([]);
+      setHumanPendingError(null);
+      humanPollFailures.current = 0;
       return;
     }
+
     let cancelled = false;
+    const interval = running ? 1500 : 10000;
     const poll = async () => {
       try {
-        const { requests } = await humanPending();
-        if (!cancelled) setHumanRequests(requests);
-      } catch {
-        // Non-fatal: ignore polling errors.
+        const { requests } = await bridge.humanPending();
+        if (!cancelled) {
+          setHumanRequests(requests);
+          requests.forEach((request) => appendClarificationQuestion(request));
+          setHumanPendingError(null);
+          humanPollFailures.current = 0;
+        }
+      } catch (err) {
+        humanPollFailures.current += 1;
+        if (humanPollFailures.current >= 3 && !cancelled) {
+          setHumanPendingError(`无法获取待确认问题：${errorMessage(err)}`);
+        }
       }
     };
     void poll();
-    const timer = setInterval(poll, 1500);
+    const timer = setInterval(poll, interval);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [viewModel.status]);
+  }, [appendClarificationQuestion, clarificationStatus, viewModel.status]);
 
   // The backend is the only owner of task understanding. When its authoritative
   // state event fills the preview card, use that understanding to name the
@@ -378,9 +656,10 @@ export function usePipeline(workspaceRoot?: string | null) {
   const latestUnderstanding = useMemo(() => {
     for (let i = viewModel.messages.length - 1; i >= 0; i -= 1) {
       const message = viewModel.messages[i];
-      if (message.kind === "intent-preview" && message.preview?.title?.trim()) {
-        return message.preview;
-      }
+      if (message.kind !== "intent-preview" || !message.preview) continue;
+      const understanding =
+        "draftId" in message.preview ? message.preview.understanding : message.preview;
+      if (understanding?.title?.trim()) return understanding;
     }
     return null;
   }, [viewModel.messages]);
@@ -393,33 +672,214 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   // User actions.
 
-  const startRun = useCallback(async (task?: string, messageId?: string) => {
-    runStarted.current = true;
+  /** Start (or resume) clarification for a task. This never starts research. */
+  const startClarification = useCallback(async (task: string) => {
+    const content = task.trim();
+    if (!content) return;
+
+    const previewId = nextId("preview");
+    const title = content.slice(0, 40) || "新任务";
+    setClarificationStatus("CLARIFYING");
     setViewModel((prev) => ({
       ...prev,
-      phase: "PREPARE",
-      status: "running",
-      messages: prev.messages.map((m) =>
-        m.id === messageId ? { ...m, started: true } : m,
-      ),
+      phase: "idle",
+      status: "idle",
+      messages: [
+        ...prev.messages,
+        { id: nextId("user"), role: "user", kind: "text", content },
+        {
+          id: previewId,
+          role: "athena",
+          kind: "intent-preview",
+          content: "任务理解中…",
+          preview: {
+            draftId: "",
+            revision: 0,
+            status: "CLARIFYING",
+            understanding: {
+              title: "",
+              dataset: null,
+              target: null,
+              task_type: "other",
+              primary_metric: null,
+              direction: null,
+              evaluation_plan: null,
+            },
+            answers: [],
+            unresolved: [],
+            failure: null,
+          },
+          task: content,
+          started: false,
+        },
+      ],
     }));
+    renameSession(currentSessionId, title);
+
     try {
-      // 原始任务文本即后端 start_search 所需的 `task`；task understanding 只用于展示与标题。
-      await startSearch({ task });
-      // 任务落盘后这个会话才算存在（后端只列留下痕迹的会话）：刷新侧栏。
+      const result = await bridge.taskClarificationStart(content);
+      applyDraftToPreview(result, draftIdOf(result));
+      setClarificationStatus(
+        normalizeClarificationStatus(result.status) ?? "CLARIFYING",
+      );
+    } catch (err) {
+      setClarificationStatus("FAILED");
+      appendError(errorMessage(err));
+      throw err;
+    }
+  }, [appendError, applyDraftToPreview, currentSessionId, nextId, renameSession]);
+
+  /** Confirm the latest draft and start research only after the gated RPC succeeds. */
+  const confirmDraft = useCallback(async (acknowledgeUnresolved: boolean) => {
+    const preview = latestPreview;
+    const draftId = preview?.draftId || currentDraftIdRef.current || "";
+    const revision = preview?.revision ?? currentRevisionRef.current;
+    if (!draftId || revision < 0) return;
+    setClarificationStatus("CONFIRMING");
+    setViewModel((prev) => replacePreview(prev, draftId, (p) => ({ ...p, status: "CONFIRMING" })));
+
+    try {
+      await bridge.startSearch(draftId, revision, acknowledgeUnresolved);
+      runStarted.current = true;
+      setClarificationStatus("RUNNING");
+      setViewModel((prev) => ({
+        ...replacePreview(prev, draftId, (p) => ({ ...p, status: "RUNNING" })),
+        phase: "PREPARE",
+        status: "running",
+        messages: prev.messages.map((m) => {
+          const messagePreview = m.preview as ClarificationPreview | undefined;
+          if (m.kind === "intent-preview" && messagePreview?.draftId === draftId) {
+            return { ...m, started: true };
+          }
+          return m;
+        }),
+      }));
       void sessionsList()
         .then(({ sessions: list }) => applySessions(list))
         .catch(() => {});
     } catch (err) {
-      // start_search 失败 → 阶段机没起来，重置运行标记。
-      runStarted.current = false;
-      setViewModel((prev) => ({
-        ...prev,
-        status: "error",
-      }));
+      const code = errorCode(err);
+      if (code === "stale_revision") {
+        try {
+          const fresh = await bridge.taskClarificationGet(draftId);
+          applyDraftToPreview(fresh, draftId);
+          setClarificationStatus(normalizeClarificationStatus(fresh.status) ?? "CLARIFYING");
+        } catch (reloadErr) {
+          setClarificationStatus("FAILED");
+          appendError(errorMessage(reloadErr));
+        }
+        throw err;
+      }
+
+      setClarificationStatus("FAILED");
+      appendError(errorMessage(err));
       throw err;
     }
-  }, [applySessions]);
+  }, [appendError, applyDraftToPreview, latestPreview, nextId, applySessions]);
+
+  /** Send a revision instruction and return the draft to CLARIFYING. */
+  const reviseDraft = useCallback(async (instruction: string) => {
+    const preview = latestPreview;
+    if (!preview || !preview.draftId) return;
+    const text = instruction.trim();
+    if (!text) return;
+
+    setClarificationStatus("CLARIFYING");
+    try {
+      const draft = await bridge.taskClarificationRevise(preview.draftId, preview.revision, text);
+      applyDraftToPreview(draft, preview.draftId);
+      setClarificationStatus(normalizeClarificationStatus(draft.status) ?? "CLARIFYING");
+    } catch (err) {
+      setClarificationStatus("FAILED");
+      throw err;
+    }
+  }, [applyDraftToPreview, latestPreview]);
+
+  /** Retry a retryable FAILED draft. */
+  const retryDraft = useCallback(async () => {
+    const preview = latestPreview;
+    if (!preview || !preview.draftId) return;
+
+    setClarificationStatus("CLARIFYING");
+    try {
+      const draft = await bridge.taskClarificationRetry(preview.draftId, preview.revision);
+      applyDraftToPreview(draft, preview.draftId);
+      setClarificationStatus(normalizeClarificationStatus(draft.status) ?? "CLARIFYING");
+    } catch (err) {
+      setClarificationStatus("FAILED");
+      throw err;
+    }
+  }, [applyDraftToPreview, latestPreview]);
+
+  /** Cancel the current draft; backend settles any pending request and returns to IDLE. */
+  const cancelDraft = useCallback(async () => {
+    const preview = latestPreview;
+    if (!preview || !preview.draftId) return;
+
+    try {
+      await bridge.taskClarificationCancel(preview.draftId, preview.revision);
+      setClarificationStatus("IDLE");
+      setHumanRequests([]);
+      setViewModel((prev) => ({
+        ...prev,
+        status: "idle",
+        messages: prev.messages.map((m) => {
+          const messagePreview = m.preview as ClarificationPreview | undefined;
+          if (m.kind === "intent-preview" && messagePreview?.draftId === preview.draftId) {
+            return { ...m, preview: { ...messagePreview, status: "IDLE" as ClarificationPreview["status"] } };
+          }
+          return m;
+        }),
+      }));
+    } catch (err) {
+      setClarificationStatus("FAILED");
+      throw err;
+    }
+  }, [latestPreview]);
+
+  /** Unified human reply dispatch with double-submit protection. */
+  const replyToHumanRequest = useCallback(async (requestId: string, reply: HumanReply) => {
+    if (settlingRequestRef.current === requestId) return;
+    settlingRequestRef.current = requestId;
+    setSettlingRequestId(requestId);
+    try {
+      await bridge.humanReply(requestId, reply);
+      appendClarificationReply(requestId, reply);
+      setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
+      setHumanPendingError(null);
+    } catch (err) {
+      const code = errorCode(err);
+      if (code === "stale_request" || code === "expired_request" || code === "duplicate_reply") {
+        try {
+          const { requests } = await bridge.humanPending();
+          setHumanRequests(requests);
+        } catch {
+          // Keep the existing request list; the typed reason below is still visible.
+        }
+        setHumanPendingError(`该问题已失效（${code}）：${errorMessage(err)}`);
+      } else {
+        setHumanPendingError(errorMessage(err));
+      }
+      throw err;
+    } finally {
+      settlingRequestRef.current = null;
+      setSettlingRequestId(null);
+    }
+  }, [appendClarificationReply]);
+
+  const answerHuman = useCallback((requestId: string, answer: string) => {
+    const text = answer.trim();
+    if (!text) return Promise.resolve();
+    return replyToHumanRequest(requestId, { kind: "text", text });
+  }, [replyToHumanRequest]);
+
+  const chooseHumanAnswer = useCallback((requestId: string, value: string) => {
+    return replyToHumanRequest(requestId, { kind: "choice", value });
+  }, [replyToHumanRequest]);
+
+  const skipHumanAnswer = useCallback((requestId: string) => {
+    return replyToHumanRequest(requestId, { kind: "skip" });
+  }, [replyToHumanRequest]);
 
   const sendPrompt = useCallback(async (msg: string) => {
     const content = msg.trim();
@@ -469,11 +929,6 @@ export function usePipeline(workspaceRoot?: string | null) {
       }
     }
 
-    setViewModel((prev) => ({
-      ...prev,
-      messages: [...prev.messages, { id: nextId("user"), role: "user", kind: "text", content }],
-    }));
-
     // 运行中/暂停中才把文本当 Supervisor 指导；status 首帧可能虚报，须以真实活动为准。
     const runInProgress =
       (viewModel.status === "running" || viewModel.status === "paused") &&
@@ -495,67 +950,14 @@ export function usePipeline(workspaceRoot?: string | null) {
           }));
         }
       } catch (err) {
-        const text = errorMessage(err);
-        setViewModel((prev) => ({
-          ...prev,
-          status: "error",
-          messages: [
-            ...prev.messages,
-            { id: nextId("error"), role: "athena", kind: "error", content: text },
-          ],
-        }));
+        appendError(errorMessage(err));
         throw err;
       }
       return;
     }
 
-    // Task understanding belongs to the backend Supervisor. The frontend only
-    // adds a placeholder preview card; the backend state event will fill it
-    // with the authoritative task_understanding once the Supervisor records it.
-    const previewId = nextId("preview");
-    const title = content.trim().slice(0, 40) || "新任务";
-    setViewModel((prev) => ({
-      ...prev,
-      messages: [
-        ...prev.messages,
-        {
-          id: previewId,
-          role: "athena",
-          kind: "intent-preview",
-          content: "任务理解中…",
-          preview: {
-            title: "",
-            dataset: "",
-            target: "",
-            task_type: "other",
-            primary_metric: "",
-            direction: "maximize",
-            evaluation_plan: "",
-            needs_configuration: true,
-          },
-          task: content,
-          started: true,
-        },
-      ],
-    }));
-    renameSession(currentSessionId, title);
-
-    try {
-      // 发送即启动：由后端 Supervisor 统一执行任务理解与 PREPARE。
-      await startRun(content, previewId);
-    } catch (err) {
-      const text = errorMessage(err);
-      setViewModel((prev) => ({
-        ...prev,
-        status: "error",
-        messages: [
-          ...prev.messages,
-          { id: nextId("error"), role: "athena", kind: "error", content: text },
-        ],
-      }));
-      throw err;
-    }
-  }, [currentSessionId, nextId, renameSession, startRun, viewModel]);
+    await startClarification(content);
+  }, [appendError, nextId, startClarification, viewModel]);
 
   const pauseRun = useCallback(async () => {
     await pauseSearch();
@@ -592,6 +994,7 @@ export function usePipeline(workspaceRoot?: string | null) {
     // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
     const id = `s-${Date.now()}`;
     runStarted.current = false;
+    setClarificationStatus("IDLE");
     saveTitle(titlesKey, id, "新会话");
     void sessionSwitch(id)
       .then((result) => applySessions(result.sessions))
@@ -612,23 +1015,13 @@ export function usePipeline(workspaceRoot?: string | null) {
       setCurrentSessionId(id);
       restoreRecords(records, true);
       applySessions(list);
+      setClarificationStatus("IDLE");
+      setHumanRequests([]);
     } catch (err) {
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
-      setViewModel((prev) => ({
-        ...prev,
-        status: "error",
-        messages: [
-          ...prev.messages,
-          {
-            id: nextId("error"),
-            role: "athena",
-            kind: "error",
-            content: `切换会话失败：${errorMessage(err)}`,
-          },
-        ],
-      }));
+      appendError(`切换会话失败：${errorMessage(err)}`);
     }
-  }, [applySessions, nextId, restoreRecords]);
+  }, [appendError, applySessions, restoreRecords]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
@@ -642,42 +1035,25 @@ export function usePipeline(workspaceRoot?: string | null) {
         await switchSession("default");
       }
     } catch (err) {
-      setViewModel((prev) => ({
-        ...prev,
-        status: "error",
-        messages: [
-          ...prev.messages,
-          {
-            id: nextId("error"),
-            role: "athena",
-            kind: "error",
-            content: `删除会话失败：${errorMessage(err)}`,
-          },
-        ],
-      }));
+      appendError(`删除会话失败：${errorMessage(err)}`);
     }
-  }, [applySessions, currentSessionId, nextId, switchSession, titlesKey]);
+  }, [appendError, applySessions, currentSessionId, switchSession, titlesKey]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);
   }, []);
 
-  const answerHuman = useCallback(async (requestId: string, answer: string) => {
-    const text = answer.trim();
-    if (!text) return;
-    await humanReply(requestId, text);
-    setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
-  }, []);
-
-  const chooseHumanAnswer = useCallback(async (requestId: string, value: string) => {
-    await humanChoice(requestId, value);
-    setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
-  }, []);
-
-  const skipHumanAnswer = useCallback(async (requestId: string) => {
-    await humanSkip(requestId);
-    setHumanRequests((prev) => prev.filter((r) => r.request_id !== requestId));
-  }, []);
+  /** Legacy compatibility alias: old callers that wanted a raw start instead get the gate. */
+  const startRun = useCallback(async (task?: string) => {
+    const preview = latestPreview;
+    if (preview?.draftId) {
+      await confirmDraft(false);
+      return;
+    }
+    if (task) {
+      await startClarification(task);
+    }
+  }, [confirmDraft, latestPreview, startClarification]);
 
   // 后端报上来的 running/paused 同样意味着"这次运行确实存在"。切换会话时
   // runStarted 被清空，而停在 PREPARE 的会话没有 plans/attempts/实验可作证据，
@@ -690,16 +1066,27 @@ export function usePipeline(workspaceRoot?: string | null) {
     viewModel.rightRail.searchAttempts > 0 ||
     viewModel.rightRail.latestExperimentId !== null;
 
+  const status = clarificationStatus;
+
   return useMemo(() => ({
     viewModel,
+    status,
     runActive,
     sessions,
     currentSessionId,
     humanRequests,
+    humanPendingError,
+    settlingRequestId,
     logs,
     clearLogs,
     sendPrompt,
     startRun,
+    startClarification,
+    confirmDraft,
+    reviseDraft,
+    retryDraft,
+    cancelDraft,
+    replyToHumanRequest,
     pauseRun,
     resumeRun,
     stopRun,
@@ -711,5 +1098,8 @@ export function usePipeline(workspaceRoot?: string | null) {
     answerHuman,
     chooseHumanAnswer,
     skipHumanAnswer,
-  }), [answerHuman, chooseHumanAnswer, skipHumanAnswer, clearLogs, currentSessionId, deleteSession, humanRequests, logs, pauseRun, resumeRun, runActive, sendPrompt, sessions, startRun, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
+  }), [answerHuman, cancelDraft, chooseHumanAnswer, clarificationStatus, clearLogs, confirmDraft, currentSessionId, deleteSession, humanPendingError, humanRequests, logs, pauseRun, replyToHumanRequest, resumeRun, retryDraft, reviseDraft, runActive, sendPrompt, sessions, settlingRequestId, skipHumanAnswer, startClarification, startRun, status, stopRun, switchSession, toggleMode, newSession, selectHypothesis, viewModel]);
 }
+
+// Re-export convenience wrappers used by tests and components.
+export const subscribeToPipelineEvents = bridge.subscribeToPipelineEvents;

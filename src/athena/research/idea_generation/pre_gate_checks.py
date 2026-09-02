@@ -28,9 +28,13 @@ def structural_check(package: HypothesisPackage) -> StructuralCheckReport:
     violations: list[str] = []
 
     premises = [
-        claim for claim in package.supported_premises if claim.role == ClaimRole.SUPPORTED_PREMISE
+        claim
+        for claim in package.supported_premises
+        if claim.role == ClaimRole.SUPPORTED_PREMISE
     ]
-    premise_evidence_ok = bool(premises) and all(claim.supporting_refs for claim in premises)
+    premise_evidence_ok = bool(premises) and all(
+        claim.supporting_refs for claim in premises
+    )
     if not premise_evidence_ok:
         violations.append("premise_missing_evidence")
 
@@ -48,7 +52,9 @@ def structural_check(package: HypothesisPackage) -> StructuralCheckReport:
     )
 
 
-def degraded_falsifiability_report(idea_id: str, error: Exception) -> FalsifiabilityReport:
+def degraded_falsifiability_report(
+    idea_id: str, error: Exception
+) -> FalsifiabilityReport:
     """falsifiability_check 失败时的降级报告：没有证据不能算通过，交给 gatekeeper 判
     REVISE，不静默放行。
 
@@ -58,14 +64,18 @@ def degraded_falsifiability_report(idea_id: str, error: Exception) -> Falsifiabi
         False
     """
     return FalsifiabilityReport(
-        idea_id=idea_id, testable_implication="",
+        idea_id=idea_id,
+        testable_implication="",
         unobservable_variables=[f"falsifiability check failed: {error}"],
         is_falsifiable=False,
     )
 
 
 async def falsifiability_check(
-    package: HypothesisPackage, *, model: str, artifacts: ArtifactStore,
+    package: HypothesisPackage,
+    *,
+    model: str,
+    artifacts: ArtifactStore,
 ) -> FalsifiabilityReport:
     """用一次单轮 LLM 调用判断核心变量是否可观测、是否存在可执行的可证伪测试。
 
@@ -74,18 +84,25 @@ async def falsifiability_check(
         >>> report.is_falsifiable
         True
     """
-    prompt = "\n\n".join([
-        FALSIFIABILITY_CHECK_SYSTEM_PROMPT,
-        FALSIFIABILITY_CHECK_USER_PROMPT_TEMPLATE.format(
-            novel_hypothesis=package.novel_hypothesis,
-            predicted_observations="\n".join(f"- {obs}" for obs in package.predicted_observations),
-            disconfirming_observations="\n".join(
-                f"- {obs}" for obs in package.disconfirming_observations
+    prompt = "\n\n".join(
+        [
+            FALSIFIABILITY_CHECK_SYSTEM_PROMPT,
+            FALSIFIABILITY_CHECK_USER_PROMPT_TEMPLATE.format(
+                novel_hypothesis=package.novel_hypothesis,
+                predicted_observations="\n".join(
+                    f"- {obs}" for obs in package.predicted_observations
+                ),
+                disconfirming_observations="\n".join(
+                    f"- {obs}" for obs in package.disconfirming_observations
+                ),
             ),
-        ),
-    ])
+        ]
+    )
     judgment = await single_turn_structured_chat(
-        prompt, FalsifiabilityJudgment, model=model, artifacts=artifacts,
+        prompt,
+        FalsifiabilityJudgment,
+        model=model,
+        artifacts=artifacts,
     )
     return FalsifiabilityReport(
         idea_id=package.idea_id,

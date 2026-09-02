@@ -20,6 +20,13 @@ def test_settings_defaults_when_env_unset(monkeypatch):
     assert settings.api_key() is None
 
 
+def test_default_context_window_and_max_tokens(monkeypatch):
+    monkeypatch.delenv("LLM_CONTEXT_WINDOW", raising=False)
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    assert settings.context_window() == 1_000_000
+    assert settings.max_tokens() == 384_000
+
+
 def test_settings_reads_env(monkeypatch):
     # ``settings`` 在导入时就 load_dotenv()，所以开发者本地的 .env 会参与解析。
     # 不清掉优先级更高的那个变量，这条用例就取决于谁的机器在跑。

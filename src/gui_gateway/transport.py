@@ -88,13 +88,25 @@ class WebSocketTransport:
                     await send(resp.model_dump_json())
                 except Exception as exc:
                     logger.exception("dispatch %s failed", method)
+                    error_data: dict[str, Any] = {
+                        "exception": type(exc).__name__,
+                        "method": method,
+                    }
+                    if hasattr(exc, "code"):
+                        error_data["code"] = str(getattr(exc, "code"))
+                    if hasattr(exc, "retryable"):
+                        error_data["retryable"] = bool(getattr(exc, "retryable"))
+                    if hasattr(exc, "current_revision"):
+                        error_data["current_revision"] = getattr(
+                            exc, "current_revision"
+                        )
                     err = ResponseEnvelope(
                         request_id=request_id,
                         result=None,
                         error=rpc_error(
                             map_exception_to_error_code(exc),
                             _error_message(exc),
-                            {"exception": type(exc).__name__, "method": method},
+                            error_data,
                         ),
                     )
                     await send(err.model_dump_json())

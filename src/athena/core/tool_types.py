@@ -6,14 +6,26 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
+
+from athena.core.human_request import HumanOutcome, HumanRequest
 
 EmitEvent = Callable[[str, str, dict[str, Any] | None], Awaitable[None]]
 """事件发射器: ``(kind: str, artifact_ref: str, data: dict | None) -> None``。"""
 
-AskUser = Callable[..., Awaitable[str | None]]
-"""用户输入请求回调；兼容旧 ``(prompt) -> 回答文本`` 和新扩展参数。
-``None`` 表示取消/超时。"""
+
+class AskUser(Protocol):
+    """用户输入请求回调。
+
+    权威调用形式是 ``ask(request: HumanRequest) -> Awaitable[HumanOutcome]``。
+    兼容旧回调（``(prompt) -> 回答文本``）仍可在工具适配器内使用；broker 的
+    typed 路径以 ``HumanOutcome`` 返回而不再把 broker 状态压平成字符串。
+    """
+
+    async def __call__(
+        self, request: HumanRequest, *args: Any, **kwargs: Any
+    ) -> HumanOutcome: ...
+
 
 TOOL_BEGIN = "tool/begin"
 TOOL_END = "tool/end"
@@ -75,3 +87,5 @@ class ToolContext:
     cancel: asyncio.Event
     ask_user: AskUser | None = None
     """交互式提问回调 — 由 Agent 从 AgentContext 透传，工具用它请求用户输入。"""
+    session_id: str = "default"
+    """当前会话 id，binding typed human requests to the real runtime session."""

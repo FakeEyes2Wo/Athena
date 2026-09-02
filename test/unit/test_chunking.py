@@ -2,10 +2,10 @@
 
 import unittest
 
-from athena.research.paper_markdown.chunking import build_chunks
-from athena.research.paper_markdown.document import ParsedElement
-from athena.research.paper_markdown.schemas import (
-    ChunkingConfig,
+from athena.research.literature.contracts import ChunkingConfig
+from athena.research.literature.paper_markdown.chunking import build_chunks
+from athena.research.literature.paper_markdown.document import ParsedElement
+from athena.research.literature.paper_markdown.schemas import (
     ElementKind,
     SourceLocator,
 )

@@ -144,6 +144,26 @@ def _read_output(output_path: Path, stdout: str) -> dict[str, object]:
         raise RuntimeError("bundle produced no parseable eval output") from None
 
 
+def _declared_file(root: Path, spec: dict[str, object], field: str) -> Path | None:
+    """Resolve one optional evaluator output while keeping it inside the run root."""
+    value = spec.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"metric.json field {field} must be a relative file path")
+    path = (root / value).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError:
+        # Evaluator metadata attempted to address a file outside its copied run root.
+        raise ValueError(
+            f"metric.json field {field} escapes evaluator directory"
+        ) from None
+    if not path.is_file():
+        raise FileNotFoundError(f"declared evaluator output missing: {value}")
+    return path
+
+
 class DataScriptRunner:
     """python-uv Bundle 的 DRAFT/FROZEN 生命周期与统一 CLI+JSON 执行。"""
 
@@ -351,6 +371,11 @@ class DataScriptRunner:
             payload = _read_output(output_path, stdout)
             if output_schema is not None:
                 _validate_schema(payload, output_schema)
+            metrics_path = _declared_file(run_dir, spec, "metrics_file")
+            if metrics_path is not None:
+                payload["metrics_ref"] = await self._store.put_bytes(
+                    metrics_path.read_bytes()
+                )
             result_ref = await self._store.put_text(
                 json.dumps(payload, ensure_ascii=False)
             )

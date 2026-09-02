@@ -29,7 +29,7 @@ from athena.research.supervisor.deps import (
 )
 from athena.research.supervisor.plans import PlanInput, PlanState
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import Scheduler
+from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor, _final_report_text
 

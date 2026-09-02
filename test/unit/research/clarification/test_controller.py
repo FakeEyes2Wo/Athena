@@ -20,8 +20,8 @@ from athena.research.clarification.models import (
     DraftUnderstanding,
     UnresolvedItem,
 )
+from athena.research.clarification.persistence import ClarificationStore
 from athena.research.clarification.state import new_draft, set_pending
-from athena.research.clarification.store import ClarificationStore
 
 
 class AutoBroker:

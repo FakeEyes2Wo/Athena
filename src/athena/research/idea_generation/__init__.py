@@ -6,6 +6,7 @@ Ported from feature/idea-generation-pre-gate onto this branch's Supervisor/Resea
 architecture. Orchestration is plain asyncio (gather/semaphores); no langgraph dependency.
 
 The production entry point is ``gate.run_light_pipeline``, called by
-``research/agent_turn_runner._finish_ideator_batch`` when ``--ideation ideageneration``
+``research.turns.ideator.IdeatorTurnMixin._finish_ideator_batch`` when
+``--ideation ideageneration``
 (the default). ``--ideation debate`` routes to the debate-based Ideator instead.
 """

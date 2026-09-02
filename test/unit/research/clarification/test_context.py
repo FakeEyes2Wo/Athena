@@ -11,7 +11,7 @@ from athena.research.clarification.context import (
     ConfirmedTaskContextError,
     ConfirmedTaskContextProvider,
 )
-from athena.research.runtime_clarification import recover_confirmation
+from athena.research.runtime.clarification import recover_confirmation
 from athena.research.supervisor.state import ResearchState
 
 

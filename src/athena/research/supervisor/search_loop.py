@@ -3,17 +3,48 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.core.research_tree import ExperimentStatus
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import decide_settlement
-from athena.research.supervisor.plan_lifecycle import CompletedPlanTurn, PlanLifecycle
+from athena.research.supervisor.plan_runtime import CompletedPlanTurn
 from athena.research.supervisor.plans import PlanFailure
 from athena.research.supervisor.run_state import SupervisorRunState
-from athena.research.supervisor.scheduler import ScheduleKind
+from athena.research.supervisor.scheduling import ScheduleKind
 
 logger = logging.getLogger(__name__)
+
+
+class PlanCallbacks(Protocol):
+    """Public Plan operations required by the SEARCH loop."""
+
+    def save_state(self) -> None:
+        """Persist durable state without publishing an event."""
+        ...
+
+    async def persist_state(self) -> None:
+        """Persist and publish durable state."""
+        ...
+
+    async def publish_state(self) -> None:
+        """Publish the current durable state."""
+        ...
+
+    async def start_plan(self, hypothesis_id: str) -> str:
+        """Create one Plan for a queued hypothesis."""
+        ...
+
+    async def settle_plan(
+        self, plan_id: str, best_ref: str | None, result: Any
+    ) -> None:
+        """Settle one completed Plan."""
+        ...
+
+    async def register_hypotheses(self, hypotheses: list) -> dict[str, object]:
+        """Register hypotheses produced by an Ideator."""
+        ...
 
 
 class SearchLoop:
@@ -24,7 +55,7 @@ class SearchLoop:
         owner: object,
         deps: SupervisorDeps,
         run: SupervisorRunState,
-        plans: PlanLifecycle,
+        plans: PlanCallbacks,
         *,
         run_turn: Callable[[str], Awaitable[CompletedPlanTurn]],
     ) -> None:

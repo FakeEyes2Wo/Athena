@@ -20,8 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import athena.research.prepare_evaluator as evaluator_module
-from athena.research.prepare_evaluator import assert_evaluator_splits_are_disjoint
+import athena.research.prepare.evaluator as evaluator_module
+from athena.research.prepare.evaluator import assert_evaluator_splits_are_disjoint
 
 
 async def _noop(*_args, **_kwargs) -> None:
@@ -87,6 +87,7 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
 ) -> None:
     """第二个 evaluator 必须拿到自己的 workspace，而不是继续用第一个的。"""
     bound: list[Path] = []
+    frozen: list[Path] = []
 
     class Registry:
         def __init__(self) -> None:
@@ -107,6 +108,7 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
         bound.append(Path(workspace))
 
     async def fake_plan(**kwargs):
+        frozen.append(Path(kwargs["evaluator_dir"]))
         return "sha256:" + "a" * 64
 
     monkeypatch.setattr(evaluator_module, "register_evaluator_agent", fake_register)
@@ -128,11 +130,8 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
         await evaluator_module.run_evaluator_agent(
             rt,
             evaluator_module.EvaluatorJob(
-                directory=directory,
-                agent_id=directory,
-                plan_id=directory,
+                name=directory,
                 task="build it",
-                event_label=directory,
             ),
         )
 
@@ -140,6 +139,7 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
         tmp_path / "workspaces" / "evaluator",
         tmp_path / "workspaces" / "final_evaluator",
     ]
+    assert frozen == [path / "evaluate" for path in bound]
 
 
 @pytest.mark.asyncio

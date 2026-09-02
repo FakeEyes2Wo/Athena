@@ -10,21 +10,24 @@ import fitz
 
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import TOOL_BEGIN, TOOL_END, ToolContext
-from athena.research.paper_markdown.document import ParsedElement, ParsedPaper
-from athena.research.paper_markdown.interfaces import (
+from athena.research.literature.paper_markdown.document import (
+    ParsedElement,
+    ParsedPaper,
+)
+from athena.research.literature.paper_markdown.interfaces import (
     StructureRepairResult,
     VisualInterpretation,
 )
-from athena.research.paper_markdown.processor import (
+from athena.research.literature.paper_markdown.processor import (
     PaperProcessor,
     VisualInterpretationRequiredError,
 )
-from athena.research.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.schemas import (
     PaperContent,
     PaperConversionRequest,
     SourceLocator,
 )
-from athena.research.paper_markdown.tool import PaperMarkdownTool
+from athena.research.literature.paper_markdown.tool import PaperMarkdownTool
 from athena.core.artifact_store import LocalArtifactStore
 
 PLAIN_TEX = rb"""\documentclass{article}
@@ -101,7 +104,9 @@ class ConcurrencyProbeInterpreter:
         self._barrier = asyncio.Barrier(parties)
 
     async def interpret(self, request):
-        from athena.research.paper_markdown.interfaces import VisualInterpretation
+        from athena.research.literature.paper_markdown.interfaces import (
+            VisualInterpretation,
+        )
 
         self.inflight += 1
         self.peak = max(self.peak, self.inflight)

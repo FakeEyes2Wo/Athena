@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from athena.kaggle.auth import KaggleCredentials
-from athena.research.paper_source.http import (
+from athena.research.literature.paper_source.http import (
     HostRateLimiter,
     HttpResponse,
     UrllibTransport,
@@ -167,7 +167,9 @@ class KaggleApiClient:
 
             try:
                 downloaded = kagglehub.competition_download(ref, output_dir=str(target))
-            except Exception as exc:  # noqa: BLE001 - kagglehub 异常类型不稳定，按状态码识别
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - kagglehub 异常类型不稳定，按状态码识别
                 text = str(exc)
                 if "403" in text:
                     raise KaggleApiError(

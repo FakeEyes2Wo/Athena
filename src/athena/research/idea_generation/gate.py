@@ -11,7 +11,7 @@ the debate Ideator.
 
 A candidate that ``light_hard_gate`` sends to REVISE/REJECT is dropped for this round,
 not retried inside the pipeline — the retry loop lives one level up in
-``agent_turn_runner``, which re-prompts the same Ideator with the recorded blocking reasons.
+``turns.ideator``, which re-prompts the same Ideator with the recorded blocking reasons.
 """
 
 import asyncio
@@ -31,9 +31,11 @@ from athena.research.idea_generation.pre_gate_checks import (
     falsifiability_check,
     structural_check,
 )
-from athena.research.idea_generation.review_board import REVIEW_PERSPECTIVES, review_or_degrade
+from athena.research.idea_generation.review_board import (
+    REVIEW_PERSPECTIVES,
+    review_or_degrade,
+)
 from athena.research.idea_generation.validation import match_verifier, plan_validation
-
 
 LLM_CONCURRENCY: int = 8
 """每个 Ideator lane 内部的并发上限；lane 本身已经在 count 层面很小（<=5 条草稿），
@@ -83,7 +85,9 @@ def _build_package(draft: IdeatorHypothesisDraft) -> HypothesisPackage:
     )
 
 
-def _to_core_hypothesis(draft: IdeatorHypothesisDraft, package: HypothesisPackage) -> Hypothesis:
+def _to_core_hypothesis(
+    draft: IdeatorHypothesisDraft, package: HypothesisPackage
+) -> Hypothesis:
     """HypothesisPackage carries the audit trail (premises/predictions/disconfirmers) but
     not intervention/expected_effect — those live on the original draft, so the final
     core.Hypothesis is built from both."""
@@ -91,28 +95,39 @@ def _to_core_hypothesis(draft: IdeatorHypothesisDraft, package: HypothesisPackag
         ref for premise in package.supported_premises for ref in premise.supporting_refs
     ]
     return Hypothesis(
-        statement=draft.statement, intervention=draft.intervention,
-        expected_effect=draft.expected_effect, evidence_refs=evidence_refs,
+        statement=draft.statement,
+        intervention=draft.intervention,
+        expected_effect=draft.expected_effect,
+        evidence_refs=evidence_refs,
         sources=package.sources,
     )
 
 
 async def _screen_and_review(
-    draft: IdeatorHypothesisDraft, *, model: str, artifacts: ArtifactStore,
-    llm_sem: asyncio.Semaphore, progress: ProgressFn, rejections: list[str],
+    draft: IdeatorHypothesisDraft,
+    *,
+    model: str,
+    artifacts: ArtifactStore,
+    llm_sem: asyncio.Semaphore,
+    progress: ProgressFn,
+    rejections: list[str],
 ) -> tuple[IdeatorHypothesisDraft, HypothesisPackage] | None:
     """Run one draft through pre_gate -> methodology/statistics review -> light_hard_gate.
 
     Returns None for REVISE/REJECT — dropped for this round; the retry loop is owned by
-    ``agent_turn_runner``, not by this pipeline.
+    ``turns.ideator``, not by this pipeline.
     """
     package = _build_package(draft)
     await progress(f"falsifiability check: {package.idea_id}")
     async with llm_sem:
         structural = structural_check(package)
         try:
-            falsifiability = await falsifiability_check(package, model=model, artifacts=artifacts)
-        except Exception as error:  # noqa: BLE001 - 与 pre_gate_checks 其余调用点同一条降级
+            falsifiability = await falsifiability_check(
+                package, model=model, artifacts=artifacts
+            )
+        except (
+            Exception
+        ) as error:  # noqa: BLE001 - 与 pre_gate_checks 其余调用点同一条降级
             falsifiability = degraded_falsifiability_report(package.idea_id, error)
 
     decision = pre_gate(structural, falsifiability)
@@ -129,17 +144,25 @@ async def _screen_and_review(
     await progress(
         f"review ({len(REVIEW_PERSPECTIVES)} perspectives): {package.idea_id}"
     )
-    reviews = await asyncio.gather(*[
-        review_or_degrade(
-            package, perspective, artifacts=artifacts, llm_sem=llm_sem, model=model,
-        )
-        for perspective in REVIEW_PERSPECTIVES
-    ])
+    reviews = await asyncio.gather(
+        *[
+            review_or_degrade(
+                package,
+                perspective,
+                artifacts=artifacts,
+                llm_sem=llm_sem,
+                model=model,
+            )
+            for perspective in REVIEW_PERSPECTIVES
+        ]
+    )
 
     verifier = match_verifier(package, LIGHT_VERIFIER_DOMAIN)
     validation_plan = await plan_validation(package, verifier, artifacts=artifacts)
 
-    decision = light_hard_gate(structural, falsifiability, list(reviews), validation_plan)
+    decision = light_hard_gate(
+        structural, falsifiability, list(reviews), validation_plan
+    )
     if decision.verdict not in (GateVerdict.PASS, GateVerdict.EXPLORATORY):
         await progress(
             f"gate {decision.verdict.value} {package.idea_id}: {decision.blocking_factor}"
@@ -154,8 +177,12 @@ async def _screen_and_review(
 
 
 async def run_light_pipeline(
-    drafts: list[IdeatorHypothesisDraft], *, model: str, artifacts: ArtifactStore,
-    progress: ProgressFn = _silent, rejections: list[str] | None = None,
+    drafts: list[IdeatorHypothesisDraft],
+    *,
+    model: str,
+    artifacts: ArtifactStore,
+    progress: ProgressFn = _silent,
+    rejections: list[str] | None = None,
 ) -> list[Hypothesis]:
     """Screen/review/gate every draft and return the survivors in submission order.
 
@@ -173,13 +200,20 @@ async def run_light_pipeline(
     llm_sem = asyncio.Semaphore(LLM_CONCURRENCY)
     # 调用方传入 list 即可收集逐条拒绝理由，用来反馈给生成侧重新提案。
     collected = rejections if rejections is not None else []
-    outcomes = await asyncio.gather(*[
-        _screen_and_review(
-            draft, model=model, artifacts=artifacts, llm_sem=llm_sem,
-            progress=progress, rejections=collected,
-        )
-        for draft in drafts
-    ], return_exceptions=True)
+    outcomes = await asyncio.gather(
+        *[
+            _screen_and_review(
+                draft,
+                model=model,
+                artifacts=artifacts,
+                llm_sem=llm_sem,
+                progress=progress,
+                rejections=collected,
+            )
+            for draft in drafts
+        ],
+        return_exceptions=True,
+    )
     survivors = [o for o in outcomes if isinstance(o, tuple)]
     await progress(f"gate kept {len(survivors)}/{len(drafts)} candidates")
     return [_to_core_hypothesis(draft, package) for draft, package in survivors]

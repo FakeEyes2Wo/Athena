@@ -4,14 +4,16 @@ import pytest
 from pydantic import ValidationError
 
 from athena.core.research_models import Hypothesis
-from athena.research.supervisor.plan_lifecycle import _status_for_outcome
+from athena.research.supervisor.settlement import (
+    status_for_outcome as _status_for_outcome,
+)
 from athena.research.supervisor.plans import (
     PlanBest,
     PlanDecision,
     PlanInput,
     PlanState,
 )
-from athena.research.supervisor.policy import Outcome
+from athena.research.supervisor.scheduling import Outcome
 
 _TRUSTED_REF = "sha256:" + "a" * 64
 _OTHER_TRUSTED_REF = "sha256:" + "c" * 64

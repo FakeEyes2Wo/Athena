@@ -29,7 +29,7 @@ from athena.research.supervisor.deps import (
 )
 from athena.research.supervisor.prompt_context import data_contract_block
 from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import Scheduler
+from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 
@@ -200,7 +200,7 @@ def _supervisor(tree, state, agents) -> Supervisor:
             search=SearchServices(Scheduler(), Recovery()),
         ),
     )
-    supervisor._plans.persist_state = _noop
+    supervisor._plans._runtime._persist_state = _noop
 
     async def plan_input(plan_id: str):
         return SimpleNamespace(
@@ -209,7 +209,7 @@ def _supervisor(tree, state, agents) -> Supervisor:
             eval_handoff=await _handoff(plan_id),
         )
 
-    supervisor._plans.plan_input = plan_input
+    supervisor._plans._runtime.plan_input = plan_input
     return supervisor
 
 

@@ -8,12 +8,14 @@ from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.research.contracts import ValidationResult
 from athena.research.script_runner import load_directory
 from athena.research.supervisor.validation import (
-    ValidationDiffReview,
-    ValidationInput,
     _execute_predictions,
     recovery_action,
     review_validation_diff,
     validation_key,
+)
+from athena.research.supervisor.validation_contracts import (
+    ValidationDiffReview,
+    ValidationInput,
 )
 
 

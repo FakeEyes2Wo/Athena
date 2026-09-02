@@ -25,18 +25,26 @@ def _make_runtime(
     project_root: str | None = None,
     state_root: Path | None = None,
     ask_user: Any = None,
+    session_id: str = "default",
+    broker: Any = None,
 ) -> ResearchRuntime:
     """按选定项目目录构造 research runtime；None 时沿用进程工作目录。
 
     ``auto_validate=True`` 使 SEARCH 结束后自动进入 VALIDATE 并发布最终报告
     （与 TUI/CLI/headless 入口一致），避免阶段机停在 WAITING 不再推进。
+    GUI 路径显式启用确认门并关闭自动确认：raw task 文本必须先经过
+    ``task_clarification_start`` 与 ``start_search(draft_id, revision)``。
     """
     return ResearchRuntime(
         project_root=project_root,
         state_root=state_root,
+        session_id=session_id,
         model=settings.model_name(),
         auto_validate=True,
+        task_confirmation_gate=True,
+        auto_confirm=False,
         ask_user=ask_user,
+        broker=broker,
     )
 
 
@@ -78,7 +86,16 @@ async def start_server(
     def factory(
         project_root: str | None = None, state_root: Path | None = None
     ) -> ResearchRuntime:
-        return make_runtime(project_root, state_root, ask_user=broker.ask)
+        session_id = state_root.name if state_root is not None else "default"
+        runtime = make_runtime(
+            project_root,
+            state_root,
+            ask_user=broker.ask,
+            session_id=session_id,
+            broker=broker,
+        )
+        broker.bind(session_id, "runtime", "runtime")
+        return runtime
 
     stored_root = validate_project_root(state_store.load().active_project_root)
     handler = GuiRequestHandler(

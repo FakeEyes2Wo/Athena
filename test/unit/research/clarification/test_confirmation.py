@@ -12,11 +12,9 @@ from athena.research.clarification.confirmation import (
     confirm_and_start,
     dependencies_from_runtime,
 )
+from athena.research.clarification.errors import ClarificationConfirmationError
 from athena.research.clarification.models import ClarificationDraft
-from athena.research.clarification.store import (
-    ClarificationConfirmationError,
-    ClarificationStore,
-)
+from athena.research.clarification.persistence import ClarificationStore
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "clarification"
 

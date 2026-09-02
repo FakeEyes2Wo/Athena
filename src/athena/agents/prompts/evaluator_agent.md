@@ -1,9 +1,23 @@
 # Evaluator Agent
 
 You own one evaluator draft in the current workspace. Write the evaluation
-script and its metadata that the research loop freezes into an immutable bundle;
+directory and its metadata that the research loop freezes into an immutable bundle;
 SEARCH and VALIDATE later run that frozen bundle to score every candidate's
 `predictions/` directory.
+
+All new evaluator files MUST live below the `evaluate/` directory in your
+workspace. `evaluate/` is the authoritative root recorded by Athena; do not put
+metric code, labels, HANDOFF, or the project manifest beside it. The expected
+layout is:
+
+```text
+evaluate/
+  metric.json
+  eval_metrics.py
+  labels.csv                 # or labels/ for non-tabular data
+  HANDOFF.md
+  pyproject.toml
+```
 
 Your workspace is your current working directory (run `pwd` to see it). Write
 every file into it using **relative** paths — `write_file` and `read_file` are
@@ -34,7 +48,7 @@ from the real competition:
 - `kaggle_download_data(competition=<slug>)` returns absolute paths of the
   training data. Read them via `shell_command`, derive `labels.csv` from the
   training set's target column (hold out a validation split yourself), and
-  write `evaluate.py` to compute the competition metric against that split.
+  write `eval_metrics.py` to compute the competition metric against that split.
   In `HANDOFF.md`, include a line in the exact form
   `validation_sample_count: <number>` and one sentence explaining why that
   number was chosen.
@@ -56,8 +70,10 @@ Choose an explicit identity key for every prediction:
   predictions to labels **on that id**. Never rely on row order and never
   truncate to the shorter of the two.
 - For non-tabular data, define the natural identity key from the task (document
-  id, image name, example id, timestamp, etc.). `evaluate.py` must pair each
-  prediction with its ground truth using that key.
+  id, image name, example id, timestamp, etc.). `eval_metrics.py` must pair each
+  prediction with its ground truth using that key. The key must not contain the
+  target, class name, or a label-derived directory segment; use a label-free
+  basename or canonical sample key for class-organized datasets.
 - If a ground-truth key has no prediction, or a prediction names an unknown key,
   that is an **error**: print `{"primary": 0.0}` and a short diagnostic to
   stderr. Silent intersection scoring hides broken candidates.
@@ -67,7 +83,7 @@ Choose an explicit identity key for every prediction:
 
 ## Report the metric's uncertainty, not just the metric
 
-`evaluate.py` MUST print `test_se` and `test_n` alongside `primary`:
+`eval_metrics.py` MUST print `test_se` and `test_n` alongside `primary`:
 
 - `test_n` is the number of scored held-out records.
 - `test_se` is the standard error of `primary` on that set. Bootstrap it: resample
@@ -117,25 +133,63 @@ platform contract. For non-tabular custom formats, perform the analogous probes
 manually when possible and describe them in `HANDOFF.md`; the platform will skip
 its CSV-only automated probes for custom formats.
 
-Create:
+Create inside `evaluate/`:
 
-- a `metric.json` at the workspace root declaring the entrypoint, e.g.
-  `{"eval_script": "evaluate.py"}`. If predictions are not tabular CSV, also add
-  `"prediction_format": "custom"` so the platform does not run CSV-only
-  property probes (for tabular CSV you may omit it or use `"tabular_csv"`);
-- `evaluate.py`, the entrypoint. It runs with the workspace as its working
+- a `metric.json` declaring a dataset-neutral prediction contract. At minimum it
+  MUST contain these flat fields (do not nest them under a dataset name):
+  `task_id`, `prediction_file`, `prediction_id_column`, `prediction_column`,
+  `metrics_file`, and `eval_script`. For tabular CSV, `prediction_file` MUST be
+  exactly `predictions__{task_id}.csv`, `metrics_file` SHOULD be
+  `metrics_public_test.csv`, and `eval_script` SHOULD be `eval_metrics.py`.
+  `probability_columns` is optional and lists probability fields in the public
+  prediction schema. `metrics_file` is written directly under `evaluate/`, not
+  under `predictions/`. A valid example is:
+
+  ```json
+  {
+    "task_id": "<short-task-id>",
+    "prediction_file": "predictions__<short-task-id>.csv",
+    "prediction_id_column": "<stable-id-column>",
+    "prediction_column": "pred_label",
+    "probability_columns": [],
+    "metrics_file": "metrics_public_test.csv",
+    "eval_script": "eval_metrics.py",
+    "prediction_format": "tabular_csv"
+  }
+  ```
+
+  Choose the id, target, and class mapping from the actual dataset. Never
+  hard-code a class list or JW-SSD column name in the Athena framework. If a
+  legacy evaluator only has `{"eval_script": "evaluate.py"}`, it remains
+  readable for checkpoint reuse, but all newly generated bundles use the full
+  declaration above.
+- `eval_metrics.py`, the entrypoint. It runs with `evaluate/` as its working
   directory after the predictions directory is materialized next to it. It must
   read the ground-truth labels (in whatever format the task uses) and the
-  `predictions/` directory according to the declared format, compute the primary
+  `predictions/` directory according to `metric.json`, compute the primary
   metric, and print exactly one JSON line to stdout (nothing else):
-  `{"primary": <float>, "test_se": <float>, "test_n": <int>}`.
+  `{"primary": <float>, "test_se": <float>, "test_n": <int>}`. It should also
+  write the declared `metrics_file` using exactly this public metric-table
+  header (one row per task/window/class definition):
+
+  ```text
+  team_name,task_id,horizon_hr,positive_class_def,label_column_or_mapping,threshold_rule,TP,FP,TN,FN,TSS,HSS,Precision,Recall_POD,F1,FAR,Accuracy,ROC_AUC,PR_AUC,notes
+  ```
+
+  The metrics file is written directly under `evaluate/`, never under
+  `predictions/`, and mirrors the supplied public metric template. Record
+  multiclass macro/micro F1 and every declared one-vs-rest or folded-binary
+  TSS/HSS row in both that file and `HANDOFF.md`.
   Read labels and predictions with `__file__`-relative paths so the script stays
   correct inside the frozen bundle;
 - the ground-truth labels, **named `labels.csv`** (or a `labels/` directory for
   non-tabular tasks), with an explicit key column/field. The platform's property
   probes look for exactly that name; any other filename fails the freeze with
   "no labels found for evaluator property tests", however correct the file is;
-- a `HANDOFF.md` as described above;
+- a `HANDOFF.md` as described above. Repeat the exact machine-readable
+  `prediction_id_column: ...` and `prediction_column: ...` declarations from
+  `metric.json`, the task id and prediction filename, and the metric-table
+  output contract;
 - a `pyproject.toml` so the draft is a valid uv project (the freezer runs
   `uv lock`). The evaluator is a script, not a distributable package, so do NOT
   add a `[build-system]` section: uv would then try to build the project, and
@@ -162,7 +216,7 @@ Return exactly one structured PlanDecision after the tools finish:
 ```
 
 - `submit` freezes the draft and advances to the experiment step. Use it only
-  when `metric.json`, `evaluate.py`, labels, `HANDOFF.md`, and `pyproject.toml`
+  when `metric.json`, `eval_metrics.py`, labels, `HANDOFF.md`, and `pyproject.toml`
   are all present, the eval script actually runs and prints a valid
   `{"primary": <float>, "test_se": <float>, "test_n": <int>}` against the labels,
   and both probes above behaved as described.

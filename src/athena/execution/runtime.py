@@ -4,6 +4,7 @@ import asyncio
 import codecs
 import hashlib
 import locale
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
 # 输出上限（字符）与头部占比：留头看命令回显，留尾看 traceback/最终指标。
 MAX_OUTPUT_CHARS = 60_000
 OUTPUT_HEAD_SHARE = 1 / 3
+POST_EXIT_DRAIN_TIMEOUT_S = 5.0
+COMPLETION_EMIT_TIMEOUT_S = 5.0
+logger = logging.getLogger(__name__)
 
 
 class BoundedOutput:
@@ -182,6 +186,7 @@ class CommandRequest:
     # Kept here so SSH can reject it via the request object instead of a
     # global mutable protocol method.
     predict_features: Path | None = None
+    evaluation_split: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +326,7 @@ class EnvironmentManager:
         workspace_root: Path | None = None,
         *,
         predict_features: str | Path | None = None,
+        evaluation_split: str | None = None,
     ) -> dict[str, str]:
         """构造子进程环境：白名单宿主变量 + 环境根/workspace venv 前置 PATH + UTF-8。
 
@@ -350,6 +356,8 @@ class EnvironmentManager:
             env["ATHENA_DATA_ROOT"] = str(self._data_root)
         if predict_features is not None:
             env["ATHENA_PREDICT_FEATURES"] = str(Path(predict_features))
+        if evaluation_split is not None:
+            env["ATHENA_EVALUATION_SPLIT"] = evaluation_split
         return env
 
     def tool_versions(self) -> dict[str, str]:
@@ -476,6 +484,17 @@ async def _dispatch(
     result = emit(kind, ref, data)
     if asyncio.iscoroutine(result):
         await result
+
+
+async def _wait_for_process_exit(proc, timeout_s: int) -> int:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while proc.returncode is None:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        await asyncio.sleep(min(0.05, remaining))
+    return proc.returncode
 
 
 def _stream_fallback_encoding() -> str:
@@ -663,7 +682,7 @@ class CommandExecutor:
             asyncio.create_task(pump(proc.stderr, "command/stderr", err)),
         ]
         try:
-            returncode = await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            returncode = await _wait_for_process_exit(proc, timeout_s)
         except asyncio.TimeoutError:
             self._terminate(proc)
             # drain 也要有界：孙进程可能脱离进程组仍霸占管道。
@@ -684,7 +703,12 @@ class CommandExecutor:
             self._terminate(proc)
             await asyncio.gather(*readers, return_exceptions=True)
             raise
-        await asyncio.gather(*readers)
+        # Windows 偶尔不向异步 pipe reader 交付 EOF；进程退出后只做有界 drain。
+        done, pending = await asyncio.wait(readers, timeout=POST_EXIT_DRAIN_TIMEOUT_S)
+        for reader in pending:
+            reader.cancel()
+        for reader in done:
+            reader.result()
 
         truncated = out.truncated or err.truncated
         if self._persist is not None and (returncode != 0 or truncated):
@@ -704,7 +728,14 @@ class CommandExecutor:
             truncated=truncated,
             output_ref=output_ref,
         )
-        await _dispatch(emit, "command/completed", "exec:run", result.to_dict())
+        try:
+            await asyncio.wait_for(
+                _dispatch(emit, "command/completed", "exec:run", result.to_dict()),
+                timeout=COMPLETION_EMIT_TIMEOUT_S,
+            )
+        except TimeoutError:
+            # completed 消费者阻塞 -> 命令结果仍是事实，告警后继续返回。
+            logger.warning("command/completed delivery timed out")
         return result
 
 

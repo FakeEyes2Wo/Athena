@@ -19,7 +19,7 @@ pub struct PythonBridge {
         >,
         Message,
     >>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResult<Value>>>>>,
     events: broadcast::Sender<EventNotification>,
 }
 
@@ -55,6 +55,7 @@ impl PythonBridge {
         } else {
             Command::new("uv")
                 .args(["run", "python", "-m", "gui_gateway"])
+                .env("ATHENA_GUI_PORT", "0")
                 .current_dir(&repo_root)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
@@ -65,14 +66,7 @@ impl PythonBridge {
         // 2. Read port from first line of stdout
         let stdout = child.stdout.take().ok_or("No stdout")?;
         let mut reader = std::io::BufReader::new(stdout);
-        let mut port_line = String::new();
-        reader
-            .read_line(&mut port_line)
-            .map_err(|e| format!("Failed to read port: {}", e))?;
-        let port: u16 = port_line
-            .trim()
-            .parse()
-            .map_err(|e| format!("Invalid port: {}", e))?;
+        let port = read_gateway_port(&mut reader)?;
 
         // Spawn a blocking task to keep draining stdout (subsequent lines are logs)
         tokio::task::spawn_blocking(move || {
@@ -98,7 +92,7 @@ impl PythonBridge {
         let events_clone = events_tx.clone();
 
         // 4. Spawn receive loop that dispatches responses and events
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResult<Value>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_recv = pending.clone();
         tokio::spawn(async move {
@@ -116,11 +110,7 @@ impl PythonBridge {
                                     p.remove(&rid)
                                 };
                                 if let Some(tx) = tx {
-                                    let _ = tx.send(
-                                        val.get("result")
-                                            .cloned()
-                                            .unwrap_or(Value::Null),
-                                    );
+                                    let _ = tx.send(decode_response(val));
                                 }
                             } else if val.get("kind").is_some() {
                                 // Event notification
@@ -148,7 +138,7 @@ impl PythonBridge {
     }
 
     /// Send an RPC call and await the response.
-    pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+    pub async fn call_rpc(&self, method: &str, params: Value) -> RpcResult<Value> {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let req = serde_json::json!({
             "request_id": id,
@@ -162,13 +152,37 @@ impl PythonBridge {
             .await
             .send(Message::Text(req.to_string()))
             .await
-            .map_err(|e| format!("WS send failed: {}", e))?;
-        rx.await.map_err(|_| "Request cancelled".to_string())
+            .map_err(|e| RpcError::transport(format!("WS send failed: {e}")))?;
+        match rx.await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(RpcError::transport("Request cancelled")),
+        }
+    }
+
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call_rpc(method, params).await.map_err(|error| error.to_string())
     }
 
     /// Subscribe to event notifications from the Python backend.
     pub fn subscribe(&self) -> broadcast::Receiver<EventNotification> {
         self.events.subscribe()
+    }
+}
+
+fn read_gateway_port(reader: &mut impl BufRead) -> Result<u16, String> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("Failed to read gateway port: {error}"))?;
+        if bytes == 0 {
+            return Err("Gateway exited before publishing its port".to_string());
+        }
+        if let Ok(port) = line.trim().parse() {
+            return Ok(port);
+        }
     }
 }
 
@@ -178,5 +192,27 @@ impl Drop for PythonBridge {
         if let Ok(mut child) = self.child.try_lock() {
             let _ = child.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn real_python_gateway_completes_a_native_rpc_round_trip() {
+        tauri::async_runtime::block_on(async {
+            let bridge = PythonBridge::start(None)
+                .await
+                .expect("start the production Python gateway");
+            let state = bridge
+                .call_rpc("state_get", json!({}))
+                .await
+                .expect("receive a structured state response");
+
+            assert!(state.get("status").is_some());
+            assert!(state.get("phase").is_some());
+        });
     }
 }

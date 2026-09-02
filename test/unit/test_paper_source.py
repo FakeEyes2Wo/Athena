@@ -9,23 +9,26 @@ import zipfile
 
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import TOOL_BEGIN, TOOL_END, ToolContext
-from athena.research.paper_markdown.schemas import PaperConversionRequest
-from athena.research.paper_source.arxiv import parse_atom_feed, parse_raw_record
-from athena.research.paper_source.fetcher import (
+from athena.research.literature.paper_markdown.schemas import PaperConversionRequest
+from athena.research.literature.paper_source.arxiv import (
+    parse_atom_feed,
+    parse_raw_record,
+)
+from athena.research.literature.paper_source.fetcher import (
     DEFAULT_FETCH_CONCURRENCY,
     LocatorCache,
     PaperSourceFetcher,
     sniff_payload,
     title_similarity,
 )
-from athena.research.paper_source.http import (
+from athena.research.literature.paper_source.http import (
     DEFAULT_BUCKET_INTERVALS,
     HostRateLimiter,
     HttpResponse,
     HttpTransportError,
     rate_limit_bucket,
 )
-from athena.research.paper_source.schemas import (
+from athena.research.literature.paper_source.schemas import (
     PaperIdentity,
     PaperRef,
     PaperSourcePolicy,
@@ -34,7 +37,7 @@ from athena.research.paper_source.schemas import (
     normalize_arxiv_id,
     normalize_doi,
 )
-from athena.research.paper_source.tool import PaperFetchTool
+from athena.research.literature.paper_source.tool import PaperFetchTool
 from athena.core.artifact_store import LocalArtifactStore
 
 ZERO_INTERVALS = {bucket: 0.0 for bucket in DEFAULT_BUCKET_INTERVALS}

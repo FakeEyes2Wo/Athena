@@ -20,35 +20,45 @@ from athena.execution.compute_config import (
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
 from athena.research.fork import ForkError, fork_project
-from athena.research.bench import (
+from athena.research.literature.bench import (
     DEFAULT_QUERY_SET,
     corpus_health,
     dump_report,
     load_query_set,
     run_known_item,
 )
-from athena.research.bench import available as bench_available
-from athena.research.bench import RELEVANT_THRESHOLD, delivery_overlap, evaluate_recall
-from athena.research.bench.query_sets import load_recall_set
-from athena.research.paper_scout.schemas import ScoutCorpus
-from athena.research.paper_rag.search import corpus_paper_ids
-from athena.research.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
-from athena.research.paper_scout.schemas import RETAIN_THRESHOLD
+from athena.research.literature.bench import available as bench_available
+from athena.research.literature.bench import (
+    RELEVANT_THRESHOLD,
+    delivery_overlap,
+    evaluate_recall,
+)
+from athena.research.literature.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
+from athena.research.literature.bench.query_sets import load_recall_set
+from athena.research.literature.paper_rag.search import corpus_paper_ids
+from athena.research.literature.paper_scout.schemas import RETAIN_THRESHOLD, ScoutCorpus
 from athena.research.runtime import DEFAULT_SURVEY_PAPERS
 from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
-from athena.research.survey import (
+from athena.research.literature.survey import (
     SurveyRequest,
     build_survey_stack,
     run_survey,
 )
-from athena.research.survey.report import print_check, print_report
+from athena.research.literature.survey.report import print_check, print_report
 
 
 def _runtime(project_root: str, **options: Any) -> ResearchRuntime:
-    """Build the public research composition root for one project."""
+    """Build the public research composition root for one project.
+
+    CLI is the non-interactive headless path. It explicitly uses the legacy
+    compatibility policy: confirmation gate off and auto-confirm on. No implicit
+    auto-confirm default exists at the library/runtime level.
+    """
     return ResearchRuntime(
         project_root=Path(project_root),
         model=settings.model_name(),
+        task_confirmation_gate=False,
+        auto_confirm=True,
         **options,
     )
 
@@ -115,6 +125,7 @@ def _dataset_path_for_prompt(data: str) -> str:
         pass
     return data
 
+
 @dataclass(frozen=True)
 class CliRunConfig:
     """Typed translation of ``run`` CLI arguments passed to ``ResearchRuntime``.
@@ -164,7 +175,6 @@ class CliRunConfig:
             "tolerance": self.tolerance,
             "data_root": self.data_root,
         }
-
 
 
 def _runtime_options(args: argparse.Namespace) -> dict[str, object]:

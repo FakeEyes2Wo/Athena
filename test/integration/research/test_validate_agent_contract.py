@@ -17,11 +17,13 @@ from athena.execution.runtime import ExecutionRuntime
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.supervisor.validation import (
     ValidationDeps,
+    run_validation_plan,
+    validation_key,
+)
+from athena.research.supervisor.validation_contracts import (
     ValidationDiffReview,
     ValidationInput,
     ValidationOptions,
-    run_validation_plan,
-    validation_key,
 )
 
 
@@ -124,7 +126,10 @@ class _Evaluator:
         self.directions.append(direction)
         self.evaluator_dirs.append(evaluator_dir)
         return CandidateEvaluation(
-            candidate_id=candidate_id, test_score=0.79, direction=direction
+            candidate_id=candidate_id,
+            test_score=0.79,
+            metrics_ref="sha256:" + "9" * 64,
+            direction=direction,
         )
 
 
@@ -504,6 +509,7 @@ async def test_normal_validation_computes_gap_from_frozen_sota_metric(tmp_path) 
 
     assert result.test_score == pytest.approx(0.82)
     assert result.final_test_score == pytest.approx(0.79)
+    assert result.metrics_ref == "sha256:" + "9" * 64
     assert result.generalization_gap == pytest.approx(0.03)
     assert result.generalization_warning is True
     assert len(harness.evaluator.evaluator_dirs) == 1
