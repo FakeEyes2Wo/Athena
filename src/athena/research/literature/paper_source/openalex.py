@@ -36,6 +36,9 @@ class OpenAlexWork(BaseModel):
     publication_year: int | None = Field(
         default=None, description="Publication year reported by OpenAlex."
     )
+    cited_by_count: int = Field(
+        default=0, ge=0, description="OpenAlex cited_by_count at fetch time."
+    )
     is_oa: bool = Field(default=False, description="Open-access flag, unverified.")
     oa_status: str = Field(default="", description="OpenAlex oa_status bucket.")
     pdf_url: str | None = Field(
@@ -80,11 +83,13 @@ def parse_work(payload: dict) -> OpenAlexWork:
     best = payload.get("best_oa_location") or {}
     access = payload.get("open_access") or {}
     year = payload.get("publication_year")
+    count = payload.get("cited_by_count")
     return OpenAlexWork(
         openalex_id=bare_openalex_id(str(payload.get("id") or "")),
         doi=normalize_doi(str(payload.get("doi") or "")) or None,
         title=str(payload.get("display_name") or payload.get("title") or ""),
         publication_year=year if isinstance(year, int) else None,
+        cited_by_count=count if isinstance(count, int) and count >= 0 else 0,
         is_oa=bool(access.get("is_oa")),
         oa_status=str(access.get("oa_status") or ""),
         pdf_url=str(best.get("pdf_url") or access.get("oa_url") or "") or None,

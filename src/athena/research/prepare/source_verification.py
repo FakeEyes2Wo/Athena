@@ -6,12 +6,31 @@ import os
 import re
 import subprocess
 import tempfile
+import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Awaitable, Mapping, Protocol, Sequence
+from typing import Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from .baseline_research import BaselineResearchError
+from athena.research.literature.paper_source.http import (
+    HostRateLimiter,
+    UrllibTransport,
+)
+from athena.research.literature.paper_source.openalex import (
+    OpenAlexClient,
+    OpenAlexWork,
+)
+
+from .baseline_research import (
+    AUTHORITY_CITATION_THRESHOLD,
+    BaselineArtifacts,
+    BaselineResearchError,
+    BaselineVerification,
+    VerificationAttempt,
+    research_sha256,
+)
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _SENSITIVE_VALUE_RE = re.compile(
@@ -79,6 +98,13 @@ class CommandRunner(Protocol):
         env: Mapping[str, str],
         timeout_s: float,
     ) -> Awaitable[subprocess.CompletedProcess[str]]: ...
+
+
+class OpenAlexLookup(Protocol):
+    """The free OpenAlex metadata lookup used by the authority exception."""
+
+    async def fetch_work(self, locator: str) -> OpenAlexWork | None:
+        """Resolve one DOI or OpenAlex work ID to its metadata."""
 
 
 async def run_command(
@@ -383,4 +409,168 @@ class GitCloneVerifier:
         )
 
 
-__all__ = ["CommandRunner", "GitCloneEvidence", "GitCloneVerifier", "run_command"]
+def titles_match(reported: str, resolved: str) -> bool:
+    """Compare titles after deterministic Unicode and punctuation normalization."""
+
+    normalized_reported = _normalize_title(reported)
+    normalized_resolved = _normalize_title(resolved)
+    if normalized_reported == normalized_resolved:
+        return True
+    if min(len(normalized_reported), len(normalized_resolved)) < 20:
+        return False
+    return (
+        SequenceMatcher(None, normalized_reported, normalized_resolved).ratio() >= 0.90
+    )
+
+
+def _normalize_title(value: str) -> str:
+    """Join Unicode-normalized alphanumeric title tokens."""
+
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value).casefold()
+        if character.isalnum()
+    )
+
+
+def joined_diagnostic(error: BaselineResearchError) -> str:
+    """Join the verifier's already bounded diagnostics into one attempt note."""
+
+    diagnostic = " ".join(error.diagnostics) or str(error)
+    return " ".join(diagnostic.split())[:4000]
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class BaselineSourceVerifier:
+    """Verify a selected source via public Git, then OpenAlex metadata if needed."""
+
+    def __init__(
+        self,
+        git: GitCloneVerifier,
+        openalex: OpenAlexLookup,
+        now: Callable[[], datetime] = _now,
+    ) -> None:
+        self.git = git
+        self.openalex = openalex
+        self.now = now
+
+    async def verify(self, artifacts: BaselineArtifacts) -> BaselineVerification:
+        """Return the first qualifying Git or authority-metadata proof."""
+
+        selected = artifacts.selected
+        attempts: list[VerificationAttempt] = []
+        if selected.repository_url is not None:
+            try:
+                evidence = await self.git.verify(str(selected.repository_url))
+                return BaselineVerification(
+                    research_sha256=research_sha256(artifacts.raw_research),
+                    selected_candidate_id=selected.candidate_id,
+                    route="git",
+                    verified_at=self.now(),
+                    repository_url=evidence.repository_url,
+                    commit=evidence.commit,
+                    attempts=[
+                        *attempts,
+                        VerificationAttempt(
+                            route="git", success=True, diagnostic="clone verified"
+                        ),
+                    ],
+                )
+            except BaselineResearchError as error:
+                attempts.append(
+                    VerificationAttempt(
+                        route="git", success=False, diagnostic=joined_diagnostic(error)
+                    )
+                )
+
+        if selected.paper_locator:
+            try:
+                work = await self.openalex.fetch_work(selected.paper_locator)
+            except Exception as error:
+                attempts.append(
+                    VerificationAttempt(
+                        route="openalex",
+                        success=False,
+                        diagnostic=(
+                            "OpenAlex lookup failed: "
+                            f"{' '.join(str(error).split())[:4000]}"
+                        ),
+                    )
+                )
+            else:
+                if work is None:
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic="OpenAlex did not resolve the paper locator",
+                        )
+                    )
+                elif not titles_match(selected.title, work.title):
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic="OpenAlex title does not match selected source",
+                        )
+                    )
+                elif work.cited_by_count < AUTHORITY_CITATION_THRESHOLD:
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic=(
+                                f"OpenAlex citation count {work.cited_by_count} is below "
+                                f"{AUTHORITY_CITATION_THRESHOLD}"
+                            ),
+                        )
+                    )
+                else:
+                    return BaselineVerification(
+                        research_sha256=research_sha256(artifacts.raw_research),
+                        selected_candidate_id=selected.candidate_id,
+                        route="openalex",
+                        verified_at=self.now(),
+                        openalex_id=work.openalex_id,
+                        title=work.title,
+                        publication_year=work.publication_year,
+                        cited_by_count=work.cited_by_count,
+                        attempts=[
+                            *attempts,
+                            VerificationAttempt(
+                                route="openalex",
+                                success=True,
+                                diagnostic="authority threshold verified",
+                            ),
+                        ],
+                    )
+
+        raise BaselineResearchError(
+            "selected candidate has no qualifying source",
+            diagnostics=[attempt.diagnostic for attempt in attempts],
+        )
+
+
+def build_default_source_verifier() -> BaselineSourceVerifier:
+    """Build the verifier with free OpenAlex metadata access only."""
+
+    return BaselineSourceVerifier(
+        git=GitCloneVerifier(),
+        openalex=OpenAlexClient(HostRateLimiter(UrllibTransport())),
+    )
+
+
+__all__ = [
+    "BaselineSourceVerifier",
+    "CommandRunner",
+    "GitCloneEvidence",
+    "GitCloneVerifier",
+    "OpenAlexLookup",
+    "build_default_source_verifier",
+    "joined_diagnostic",
+    "run_command",
+    "titles_match",
+]
