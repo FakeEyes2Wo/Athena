@@ -124,6 +124,7 @@ async def runtime(tmp_path: Path, monkeypatch):
 
     instance = ResearchRuntime(project_root=tmp_path, validation_phase=validate)
     instance.register_supervisor(provider=provider)
+    await _persist_confirmed_task_context(instance)
     base_commit = await instance.git.init()
     evaluator_ref = await instance.store.put_text('{"frozen":true}')
     evidence_ref = await instance.store.put_text("baseline evidence")
@@ -179,6 +180,32 @@ async def runtime(tmp_path: Path, monkeypatch):
         yield instance
     finally:
         await instance.aclose()
+
+
+async def _persist_confirmed_task_context(runtime: ResearchRuntime) -> None:
+    """Seed the same durable task contract that confirmation would create."""
+    handoff = (
+        "# TASK_CLARIFICATION\n\n"
+        "Original task: improve the held-out score.\n\n"
+        "Confirmed task contract for the human plan boundary."
+    )
+    runtime.state.task_text = "improve the held-out score"
+    runtime.state.task_understanding = {
+        "title": "Improve the held-out score",
+        "dataset": "controlled.csv",
+        "target": "score",
+        "task_type": "regression",
+        "primary_metric": "macro_f1",
+        "direction": "maximize",
+        "evaluation_plan": "frozen held-out evaluation",
+    }
+    runtime.handoffs_path.mkdir(parents=True, exist_ok=True)
+    runtime.state.handoff_refs["task_clarification"] = await runtime.store.put_text(
+        handoff
+    )
+    (runtime.handoffs_path / "TASK_CLARIFICATION.md").write_text(
+        handoff, encoding="utf-8"
+    )
 
 
 @pytest.mark.asyncio
