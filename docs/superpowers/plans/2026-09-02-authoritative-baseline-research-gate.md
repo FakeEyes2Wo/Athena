@@ -43,9 +43,20 @@
 
 ## Execution preflight
 
-- [ ] Record `git status --short` and `git diff --cached --name-status` before editing. Do not unstage, overwrite, or commit pre-existing changes.
-- [ ] Run `.venv\Scripts\python.exe -m pytest -q test/unit/research/test_prepare_modules.py test/unit/research/test_runtime_survey.py test/unit/test_paper_source.py test/unit/retrieval/test_web_search.py test/integration/research/test_prepare_agent_contract.py` and record the exact baseline pass/fail counts in the plan notes.
-- [ ] If execution is isolated, use the `using-git-worktrees` skill and ensure the worktree contains the currently staged research-layout moves before changing code; do not start from a revision that still uses the retired flat module paths.
+- [x] Record `git status --short` and `git diff --cached --name-status` before editing. Do not unstage, overwrite, or commit pre-existing changes.
+- [x] Run `.venv\Scripts\python.exe -m pytest -q test/unit/research/test_prepare_modules.py test/unit/research/test_runtime_survey.py test/unit/test_paper_source.py test/unit/retrieval/test_web_search.py test/integration/research/test_prepare_agent_contract.py` and record the exact baseline pass/fail counts in the plan notes.
+- [x] If execution is isolated, use the `using-git-worktrees` skill and ensure the worktree contains the currently staged research-layout moves before changing code; do not start from a revision that still uses the retired flat module paths.
+
+Preflight notes (2026-09-02):
+
+- The isolated worktree and index were clean before feature edits.
+- The focused PREPARE/source/web slice passed: 96 passed in 39.29s.
+- The research suite baseline was 735 passed and 6 known failures in 127.00s.
+- The repository baseline was 2183 passed, 8 known failures, 1 warning, and 50
+  subtests passed in 236.71s.
+- Human ruling: test prompt-driven requirements through consumer-observable behavior.
+  Do not add source-text or prompt-substring change detectors; task and final reviewers
+  inspect the prompt content directly.
 
 ---
 
@@ -583,7 +594,6 @@ Expected: all source-verification tests pass. Commit only Task 3 paths with
 - Modify: `src/athena/agents/prompts/baseline_ideator_agent.md`
 - Modify: `src/athena/agents/prompts/prepare_agent.md`
 - Create: `test/unit/research/prepare/test_baseline_research_tools.py`
-- Create: `test/unit/research/prepare/test_baseline_prompt_contract.py`
 - Modify: `test/unit/retrieval/test_web_search.py`
 
 **Interfaces:**
@@ -616,39 +626,33 @@ Add a merge case with fake Kaggle and corpus tools, asserting the baseline regis
 all names while the ordinary registry has no web names. Keep the existing General Agent
 test green to prove the refactor does not remove its web pair.
 
-- [ ] **Step 2: Write failing prompt assertions**
+- [ ] **Step 2: Add behavior-level prompt-consumer coverage**
 
-Load both prompts and assert exact requirements:
+Do not add prompt-substring or source-text change detectors. Prove the requirements at
+their deterministic consumer boundaries instead:
 
-```python
-def test_baseline_ideator_prompt_requires_research_and_policy_artifacts() -> None:
-    prompt = load_prompt("baseline_ideator")
-    for text in (
-        "web_search", "web_fetch", "BASELINE_RESEARCH.json", "BASELINE_DESIGN.md",
-        "Selected candidate:", "Training strategy:", "effective training units",
-        "frozen_pretrained", "partial_finetune", "train_from_scratch",
-    ):
-        assert text in prompt
-    assert "Do not execute" in prompt
+- Task 1 artifact tests reject missing or mismatched filenames, design markers,
+  candidate decisions, and training strategies.
+- This task's registry tests prove only the baseline ideator receives the shared web
+  tools and that ordinary ideators retain their prior registry.
+- Task 5 orchestration tests prove the ideator must produce both complete artifacts,
+  verification precedes PREPARE registration, and the prepare task receives the three
+  artifact filenames plus candidate, route, revision/authority, and strategy.
+- Task 6 integration tests prove the reports and handoff preserve verified provenance.
 
-
-def test_prepare_prompt_requires_platform_verification_provenance() -> None:
-    prompt = load_prompt("prepare")
-    assert "BASELINE_RESEARCH_VERIFICATION.json" in prompt
-    assert "validated source" in prompt
-    assert "RESEARCH_HANDOFF.md" in prompt
-    assert "training strategy" in prompt
-```
+The task reviewer must manually inspect both modified prompts against Step 5 and record
+the result in the review report.
 
 - [ ] **Step 3: Run focused tests and confirm missing factory/prompt clauses**
 
 Run:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q test/unit/retrieval/test_web_search.py test/unit/research/prepare/test_baseline_research_tools.py test/unit/research/prepare/test_baseline_prompt_contract.py test/unit/research/supervisor/test_prepare_prompt_contract.py
+.venv\Scripts\python.exe -m pytest -q test/unit/retrieval/test_web_search.py test/unit/research/prepare/test_baseline_research_tools.py test/unit/research/supervisor/test_prepare_prompt_contract.py
 ```
 
-Expected: imports and new string assertions fail.
+Expected: the missing factory and baseline-only provider assertions fail; existing
+prompt-consumer coverage remains green until the new orchestration tests are added.
 
 - [ ] **Step 4: Extract the reusable web pair and wire only the baseline ideator**
 
@@ -715,13 +719,13 @@ commit/OpenAlex evidence, and training strategy in the report and
 Run:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q test/unit/retrieval/test_web_search.py test/unit/research/prepare/test_baseline_research_tools.py test/unit/research/prepare/test_baseline_prompt_contract.py test/unit/research/supervisor/test_prepare_prompt_contract.py test/unit/research/test_runtime_survey.py
-.venv\Scripts\python.exe -m black src/athena/retrieval/web_search.py src/athena/research/turns/general.py src/athena/research/runtime/bootstrap.py src/athena/research/runtime/facade.py src/athena/agents/ideator_agent.py test/unit/retrieval/test_web_search.py test/unit/research/prepare/test_baseline_research_tools.py test/unit/research/prepare/test_baseline_prompt_contract.py
+.venv\Scripts\python.exe -m pytest -q test/unit/retrieval/test_web_search.py test/unit/research/prepare/test_baseline_research_tools.py test/unit/research/supervisor/test_prepare_prompt_contract.py test/unit/research/test_runtime_survey.py
+.venv\Scripts\python.exe -m black src/athena/retrieval/web_search.py src/athena/research/turns/general.py src/athena/research/runtime/bootstrap.py src/athena/research/runtime/facade.py src/athena/agents/ideator_agent.py test/unit/retrieval/test_web_search.py test/unit/research/prepare/test_baseline_research_tools.py
 git diff --check -- src/athena/retrieval/web_search.py src/athena/research/turns/general.py src/athena/research/runtime/bootstrap.py src/athena/research/runtime/facade.py src/athena/agents test/unit/retrieval/test_web_search.py test/unit/research/prepare
 ```
 
-Expected: tool isolation, prompt contracts, existing web behavior, and ordinary ideator
-tests pass. Commit only Task 4 paths with
+Expected: tool isolation, existing prompt-consumer behavior, existing web behavior,
+and ordinary ideator tests pass. Commit only Task 4 paths with
 `git commit -m "feat: add web research baseline prompts"`.
 
 ---
