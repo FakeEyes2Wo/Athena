@@ -72,7 +72,7 @@ Preflight notes (2026-09-02):
 - Produces: `load_baseline_artifacts(root: Path) -> BaselineArtifacts`, `research_sha256(raw: bytes) -> str`, `load_cached_verified_baseline(root: Path) -> VerifiedBaseline | None`, `assert_verified_files(root: Path, verified: VerifiedBaseline) -> None`, and `write_verification(root: Path, verification: BaselineVerification) -> Path`.
 - Consumes later: `BaselineSourceVerifier.verify(artifacts: BaselineArtifacts) -> BaselineVerification` from Task 3.
 
-- [ ] **Step 1: Write failing artifact-schema and cross-file tests**
+- [x] **Step 1: Write failing artifact-schema and cross-file tests**
 
 Create a concrete valid fixture and tests for duplicate IDs, selected-decision mismatch,
 one-candidate justification, exact design markers, URL credentials, and policy pairs:
@@ -162,12 +162,12 @@ Add an adequate scratch case that passes only when `evidence` contains both an
 support. Add a tabular/classical passing case to prove small tabular data is not forced
 into transfer learning.
 
-- [ ] **Step 2: Run the focused tests and confirm the missing-module failure**
+- [x] **Step 2: Run the focused tests and confirm the missing-module failure**
 
 Run `.venv\Scripts\python.exe -m pytest -q test/unit/research/prepare/test_baseline_research_contract.py`.
 Expected: collection fails because `athena.research.prepare.baseline_research` does not exist.
 
-- [ ] **Step 3: Implement strict models, markers, and artifact loading**
+- [x] **Step 3: Implement strict models, markers, and artifact loading**
 
 Use strict, extra-forbidding Pydantic models and exact anchored Markdown markers:
 
@@ -255,7 +255,7 @@ class VerifiedBaseline:
 Declare `TrainingStrategy` once as the `Literal` used by both `DatasetAssessment` and
 `BaselineDesignSelection`; do not duplicate a diverging string union.
 
-- [ ] **Step 4: Implement digest-bound verification cache I/O**
+- [x] **Step 4: Implement digest-bound verification cache I/O**
 
 Define the platform-owned record and atomic writer:
 
@@ -297,7 +297,7 @@ malformed, wrong-candidate, or wrong-digest verification file. It must still cal
 `assert_verified_files` reloads the artifacts and raises `BaselineResearchError` unless
 their digest, candidate, and strategy equal the supplied `VerifiedBaseline`.
 
-- [ ] **Step 5: Run, format, and commit Task 1**
+- [x] **Step 5: Run, format, and commit Task 1**
 
 Run:
 
