@@ -1,8 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
-import { screen, fireEvent } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { renderUi } from "../../test/render";
 import { AppShell } from "../shell/AppShell";
 import { createEmptyPipelineViewModel } from "../../types/ui";
+
+const bridgeMocks = vi.hoisted(() => ({
+  sessionsListFor: vi.fn(),
+}));
+
+vi.mock("../../lib/tauri-bridge", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/tauri-bridge")>()),
+  sessionsListFor: bridgeMocks.sessionsListFor,
+}));
 
 function makePipeline(overrides: Record<string, unknown> = {}) {
   return {
@@ -23,6 +32,12 @@ function makePipeline(overrides: Record<string, unknown> = {}) {
 }
 
 describe("AppShell", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    bridgeMocks.sessionsListFor.mockReset();
+    bridgeMocks.sessionsListFor.mockResolvedValue({ sessions: [] });
+  });
+
   it("renders brand, workspace, and the function-rail modules", () => {
     renderUi(
       <AppShell currentRoot="C:/projects/titanic" recentRoots={[]} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
@@ -108,5 +123,54 @@ describe("AppShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "删除会话 默认会话" }));
     expect(deleteSession).toHaveBeenCalledWith("default");
+  });
+
+  it("keeps workspace order stable and targets a session in another workspace", async () => {
+    const onSelectWorkspace = vi.fn();
+    bridgeMocks.sessionsListFor.mockImplementation(async (root: string) => ({
+      sessions: root === "C:/gamma" ? ["s-gamma"] : [],
+    }));
+    localStorage.setItem(
+      "athena-session-titles:C:/gamma",
+      JSON.stringify({ "s-gamma": "s-gamma" }),
+    );
+
+    renderUi(
+      <AppShell
+        currentRoot="C:/beta"
+        recentRoots={["C:/alpha", "C:/beta", "C:/gamma"]}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={onSelectWorkspace}
+        pipeline={makePipeline() as never}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "s-gamma" })).toBeInTheDocument());
+    const headings = screen
+      .getAllByRole("button")
+      .filter((button) => ["alpha", "beta", "gamma"].includes(button.textContent ?? ""));
+    expect(headings.map((heading) => heading.textContent)).toEqual(["alpha", "beta", "gamma"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "s-gamma" }));
+    expect(onSelectWorkspace).toHaveBeenCalledWith("C:/gamma", "s-gamma");
+  });
+
+  it("keeps the workspace switch action in a footer outside the scroll region", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/beta"
+        recentRoots={["C:/beta"]}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline() as never}
+      />,
+    );
+
+    const scrollRegion = screen.getByTestId("workspace-scroll");
+    const switchButton = screen.getByRole("button", { name: "切换工作区" });
+    const footer = switchButton.closest("footer");
+    expect(footer).not.toBeNull();
+    expect(scrollRegion).not.toContainElement(switchButton);
+    expect(within(footer as HTMLElement).getByRole("button", { name: "切换工作区" })).toBe(switchButton);
   });
 });

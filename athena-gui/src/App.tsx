@@ -7,13 +7,16 @@ type Workspace = ReturnType<typeof useWorkspace>;
 
 /** 一个工作区的完整会话；按 root 作为 key，切换工作区时整体重置状态。 */
 function WorkspaceSession({ workspace }: { workspace: Workspace }) {
-  const pipeline = usePipeline(workspace.currentRoot);
+  const pipeline = (usePipeline as (
+    workspaceRoot?: string | null,
+    requestedSessionId?: string | null,
+  ) => ReturnType<typeof usePipeline>)(workspace.currentRoot, workspace.requestedSessionId);
   return (
     <AppShell
       currentRoot={workspace.currentRoot}
       recentRoots={workspace.recentRoots}
       onSwitchWorkspace={workspace.openPicker}
-      onSelectWorkspace={(path) => void workspace.switchTo(path)}
+      onSelectWorkspace={(path, sessionId) => void workspace.switchTo(path, sessionId)}
       pipeline={pipeline}
     />
   );

@@ -3,11 +3,12 @@
 const RECENT_KEY = "athena.workspace.recent";
 const MAX_RECENT = 8;
 
-/** Add a root to the front of the recent list, de-duplicating and capping length. */
+/** Keep known roots in place; prepend a new root and cap the list length. */
 export function addRecentRoot(root: string, existing: readonly string[]): string[] {
   const trimmed = root.trim();
   if (!trimmed) return [...existing];
-  const next = [trimmed, ...existing.filter((item) => item !== trimmed)];
+  if (existing.includes(trimmed)) return [...existing].slice(0, MAX_RECENT);
+  const next = [trimmed, ...existing];
   return next.slice(0, MAX_RECENT);
 }
 

@@ -9,7 +9,29 @@
   padding: var(--space-md);
   border-right: 1px solid var(--border);
   background: var(--surface-elevated);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sessionContext {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.workspaceScroll {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--space-md);
   overflow-y: auto;
+}
+
+.sidebarFooter {
+  flex-shrink: 0;
 }
 
 .sectionLabel {

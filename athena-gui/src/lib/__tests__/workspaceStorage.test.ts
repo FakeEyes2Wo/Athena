@@ -10,9 +10,10 @@ describe("workspaceStorage", () => {
     localStorage.clear();
   });
 
-  it("addRecentRoot prepends and de-duplicates", () => {
+  it("addRecentRoot prepends new roots without promoting known roots", () => {
     expect(addRecentRoot("/b", ["/a", "/c"])).toEqual(["/b", "/a", "/c"]);
     expect(addRecentRoot("/b", ["/b", "/a"])).toEqual(["/b", "/a"]);
+    expect(addRecentRoot("/b", ["/a", "/b"])).toEqual(["/a", "/b"]);
   });
 
   it("addRecentRoot ignores blank and caps at 8 entries", () => {

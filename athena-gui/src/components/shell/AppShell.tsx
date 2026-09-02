@@ -23,7 +23,7 @@ interface AppShellProps {
   currentRoot: string | null;
   recentRoots: string[];
   onSwitchWorkspace(): void;
-  onSelectWorkspace(path: string): void;
+  onSelectWorkspace(path: string, sessionId?: string): void;
   pipeline: Pipeline;
 }
 
