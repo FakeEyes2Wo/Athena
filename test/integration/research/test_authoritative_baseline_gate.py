@@ -9,12 +9,14 @@ from types import SimpleNamespace
 import pytest
 
 from athena.research.prepare import baseline
+from athena.research.prepare import orchestrator
 from athena.research.prepare.baseline_research import (
     BaselineResearchError,
     BaselineVerification,
     VerificationAttempt,
     research_sha256,
 )
+from athena.research.supervisor.prepare import PrepareResult
 
 
 def _research_payload() -> dict:
@@ -253,3 +255,110 @@ async def test_repository_free_high_citation_route_is_accepted(gate_runtime) -> 
 
     assert result.verification.route == "openalex"
     assert result.verification.cited_by_count == 100
+
+
+@pytest.mark.asyncio
+async def test_prepare_phase_orders_gate_before_baseline(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The orchestrator passes the verified value into the trusted baseline."""
+    events: list[str] = []
+    verified = object()
+    workspace = SimpleNamespace(path=tmp_path)
+    runtime = SimpleNamespace(
+        prepare_phase=None,
+        provider=object(),
+        task_text="classify images",
+        task_confirmation_gate=False,
+    )
+
+    async def prepare_workspace(_runtime):
+        events.append("workspace")
+        return workspace
+
+    async def prepare_split(_runtime):
+        events.append("split")
+        return None
+
+    async def prepare_evaluators(_runtime, _task):
+        events.append("evaluator")
+        return SimpleNamespace(search_ref="search-evaluator", predict_features_csv=None)
+
+    async def prepare_eda(*_args):
+        events.append("eda")
+        return True
+
+    async def prepare_design(*_args):
+        events.append("research")
+        return verified
+
+    async def run_baseline(_runtime, _workspace, _evaluator, _task, _features, value):
+        events.append("baseline")
+        assert value is verified
+        return PrepareResult(
+            evaluator_ref="search-evaluator",
+            metric=1.0,
+            commit="c" * 40,
+            predictions_ref="predictions",
+            evidence_ref="evidence",
+            report_ref="report",
+        )
+
+    monkeypatch.setattr(orchestrator, "prepare_workspace", prepare_workspace)
+    monkeypatch.setattr(orchestrator, "prepare_platform_split", prepare_split)
+    monkeypatch.setattr(orchestrator, "prepare_evaluators", prepare_evaluators)
+    monkeypatch.setattr(orchestrator, "prepare_eda", prepare_eda)
+    monkeypatch.setattr(orchestrator, "prepare_baseline_design", prepare_design)
+    monkeypatch.setattr(orchestrator, "run_baseline", run_baseline)
+
+    result = await orchestrator.run_prepare_phase(runtime, lambda **_kwargs: "")
+
+    assert result.metric == 1.0
+    assert events == ["workspace", "split", "evaluator", "eda", "research", "baseline"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_phase_does_not_run_baseline_after_failed_verification(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A failed research gate stops orchestration before baseline execution."""
+    calls: list[str] = []
+    workspace = SimpleNamespace(path=tmp_path)
+    runtime = SimpleNamespace(
+        prepare_phase=None,
+        provider=object(),
+        task_text="classify images",
+        task_confirmation_gate=False,
+    )
+
+    async def ready(*_args):
+        return True
+
+    async def workspace_ready(_runtime):
+        return workspace
+
+    async def no_split(_runtime):
+        return None
+
+    async def evaluators_ready(*_args):
+        return SimpleNamespace(search_ref="search-evaluator")
+
+    async def research_failed(*_args):
+        calls.append("research")
+        raise BaselineResearchError("source rejected")
+
+    async def baseline_called(*_args):
+        calls.append("baseline")
+        raise AssertionError("run_baseline must not be called")
+
+    monkeypatch.setattr(orchestrator, "prepare_workspace", workspace_ready)
+    monkeypatch.setattr(orchestrator, "prepare_platform_split", no_split)
+    monkeypatch.setattr(orchestrator, "prepare_evaluators", evaluators_ready)
+    monkeypatch.setattr(orchestrator, "prepare_eda", ready)
+    monkeypatch.setattr(orchestrator, "prepare_baseline_design", research_failed)
+    monkeypatch.setattr(orchestrator, "run_baseline", baseline_called)
+
+    with pytest.raises(BaselineResearchError, match="source rejected"):
+        await orchestrator.run_prepare_phase(runtime, lambda **_kwargs: "")
+
+    assert calls == ["research"]
