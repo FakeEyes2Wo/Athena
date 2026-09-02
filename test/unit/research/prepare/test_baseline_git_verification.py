@@ -97,6 +97,15 @@ async def test_git_verifier_disables_non_https_protocols_and_hooks() -> None:
         "https://git.local/repo.git",
         "https://metadata.google.internal/repo.git",
         "https://intranet/repo.git",
+        "https://0177.0.0.1/repo.git",
+        "https://0x7f.0.0.1/repo.git",
+        "https://127.1/repo.git",
+        "https://2130706433/repo.git",
+        "https://017700000001/repo.git",
+        "https://0x7f000001/repo.git",
+        "https://127.0.1/repo.git",
+        "https://127.0.0.01/repo.git",
+        "https://0x7f.00.0.1/repo.git",
         "https://localhost/x.git",
         "https://api.localhost/x.git",
         "https://127.0.0.1/x.git",
@@ -154,6 +163,15 @@ async def test_git_verifier_normalizes_default_https_port_and_host_case() -> Non
     )
 
     assert evidence.repository_url == "https://example.com/repo.git"
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_accepts_canonical_global_ip_literal() -> None:
+    runner = FakeRunner()
+
+    evidence = await GitCloneVerifier(runner=runner).verify("https://8.8.8.8/repo.git")
+
+    assert evidence.repository_url == "https://8.8.8.8/repo.git"
 
 
 @pytest.mark.asyncio

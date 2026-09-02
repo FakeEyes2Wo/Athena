@@ -25,6 +25,7 @@ _URL_CANDIDATE_RE = re.compile(
     r"(?P<scheme>https?|ssh|git)://[^\s'\"<>]+", re.IGNORECASE
 )
 _STRUCTURAL_ESCAPE_RE = re.compile(r"%(?:23|25|2f|3a|3f|40|5c)", re.IGNORECASE)
+_NUMERIC_IPV4_COMPONENT_RE = re.compile(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)")
 _NON_PUBLIC_HOST_SUFFIXES = (
     ".invalid",
     ".example",
@@ -215,6 +216,8 @@ def _normalize_repository_url(repository_url: str) -> str:
         address = None
     if address is not None and not address.is_global:
         raise ValueError("repository IP address must be globally routable")
+    if address is None and _looks_like_numeric_ipv4(normalized_host):
+        raise ValueError("repository hostname uses a non-canonical numeric IPv4 form")
     if address is None:
         labels = normalized_host.split(".")
         if any(
@@ -233,6 +236,18 @@ def _normalize_repository_url(repository_url: str) -> str:
     if not normalized_path:
         raise ValueError("repository URL must include a repository path")
     return urlunsplit(("https", normalized_netloc, normalized_path, "", ""))
+
+
+def _looks_like_numeric_ipv4(hostname: str) -> bool:
+    """Detect libcurl's one-to-four component decimal/octal/hex IPv4 syntax."""
+
+    components = hostname.split(".")
+    return bool(
+        1 <= len(components) <= 4
+        and all(
+            _NUMERIC_IPV4_COMPONENT_RE.fullmatch(component) for component in components
+        )
+    )
 
 
 class GitCloneVerifier:
