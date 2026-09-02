@@ -29,8 +29,12 @@ Implementation commits:
   `e53f7bf4a375fc5d2bbde06538d896456da5bb70`
 - Task 7 — stale-fixture repair, with the production gate unchanged:
   `dba438c77541282dd03a8876a54e4b6c35b38bd5`
-- Task 7 — documentation closeout commit: reserved here and recorded by the
-  report-only bookkeeping commit after the closeout commit exists.
+- Task 7 — documentation closeout:
+  `36b3b6da3d65797e2a405e93293c0bdb205ed4e6`
+- Task 7 — report bookkeeping: the follow-up commit named
+  `docs: record authoritative baseline closeout hash` records the closeout hash above.
+  Its own hash is intentionally not embedded because a commit cannot contain its own
+  final hash.
 
 ## Delivered behavior
 
