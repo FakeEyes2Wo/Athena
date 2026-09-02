@@ -911,7 +911,7 @@ Expected: all focused and existing PREPARE tests pass. Commit only Task 5 paths 
 - Exercises: `run_prepare_phase(runtime, run_handoff_agent)` through research gate into the existing trusted prepare plan.
 - Verifies: no prepare agent before qualification, valid Git and OpenAlex routes, one repair, provenance output, and no network dependency.
 
-- [ ] **Step 1: Add a fake-provider integration harness**
+- [x] **Step 1: Add a fake-provider integration harness**
 
 Build on the existing `_Harness` patterns. Seed `EDA_HANDOFF.md`, script a baseline
 ideator provider to write both research files, inject fake Git/OpenAlex verifiers, and
@@ -925,7 +925,7 @@ read the enriched task and write provenance into its outputs:
 
 Do not replace trusted `run_prepare_plan` or `TrustedEvaluator` in the successful path.
 
-- [ ] **Step 2: Add the acceptance-path integration tests**
+- [x] **Step 2: Add the acceptance-path integration tests**
 
 Add tests with these explicit assertions:
 
@@ -954,7 +954,7 @@ Also cover a repository-free 100-citation paper, a 99-citation rejection, Git fa
 then OpenAlex exception, and invalid-first/valid-repair using the same logical
 `baseline_ideator` agent ID.
 
-- [ ] **Step 3: Run integration tests and fix only contract mismatches**
+- [x] **Step 3: Run integration tests and fix only contract mismatches**
 
 Run:
 
@@ -965,7 +965,7 @@ Run:
 Expected: all integration cases pass, trusted metric remains `1.0`, and no external
 network call occurs.
 
-- [ ] **Step 4: Run the complete affected test slice and commit Task 6**
+- [x] **Step 4: Run the complete affected test slice and commit Task 6**
 
 Run:
 
