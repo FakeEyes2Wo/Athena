@@ -744,7 +744,7 @@ and ordinary ideator tests pass. Commit only Task 4 paths with
 - Produces: `verified_baseline_task(task: str, verified: VerifiedBaseline) -> str`.
 - Consumes: `runtime.baseline_ideator_tools()`, `build_default_source_verifier()`, and the existing reusable handoff agent thread.
 
-- [ ] **Step 1: Write failing first-pass, repair, terminal-failure, and resume tests**
+- [x] **Step 1: Write failing first-pass, repair, terminal-failure, and resume tests**
 
 Use a fake handoff function that writes complete files for each scripted response and
 records `agent_id`, content, and `reap_after`. Use a fake verifier whose outcomes are
@@ -783,7 +783,7 @@ matching cache returning without an agent call, wrong digest causing revalidatio
 pre-existing unverified artifacts being verified before an agent call, invalid resumed
 artifacts receiving only one repair turn, and cleanup after exceptions.
 
-- [ ] **Step 2: Write failing prepare-registration ordering tests**
+- [x] **Step 2: Write failing prepare-registration ordering tests**
 
 Monkeypatch `_register_prepare_agent` and `run_prepare_plan` in `baseline.py`:
 
@@ -805,7 +805,7 @@ Add a passing case that captures the task passed to `run_prepare_plan` and asser
 contains all three filenames, candidate ID, route, commit/OpenAlex ID, and selected
 training strategy.
 
-- [ ] **Step 3: Run orchestration tests and confirm old fallback/signature failures**
+- [x] **Step 3: Run orchestration tests and confirm old fallback/signature failures**
 
 Run:
 
@@ -815,7 +815,7 @@ Run:
 
 Expected: new return values, hard gate, retry behavior, and function signatures fail.
 
-- [ ] **Step 4: Implement cache-first verification and one repair turn**
+- [x] **Step 4: Implement cache-first verification and one repair turn**
 
 In `prepare_baseline_design`:
 
@@ -854,7 +854,7 @@ def _repair_request(error: BaselineResearchError) -> str:
 to bounded `BaselineResearchError` diagnostics and publish a terminal PREPARE error
 before re-raising after the last allowed response.
 
-- [ ] **Step 5: Gate prepare registration and thread the verified value through orchestration**
+- [x] **Step 5: Gate prepare registration and thread the verified value through orchestration**
 
 `verified_baseline_task` appends a compact, deterministic block:
 
@@ -886,7 +886,7 @@ return await run_baseline(
 
 No `run_baseline` call may occur if research verification raises.
 
-- [ ] **Step 6: Run, format, and commit Task 5**
+- [x] **Step 6: Run, format, and commit Task 5**
 
 Run:
 
