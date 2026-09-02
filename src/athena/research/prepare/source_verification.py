@@ -26,6 +26,7 @@ _URL_CANDIDATE_RE = re.compile(
 )
 _STRUCTURAL_ESCAPE_RE = re.compile(r"%(?:23|25|2f|3a|3f|40|5c)", re.IGNORECASE)
 _NUMERIC_IPV4_COMPONENT_RE = re.compile(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)")
+_IPV4_COMPATIBLE_NETWORK = ipaddress.IPv6Network("::/96")
 _NON_PUBLIC_HOST_SUFFIXES = (
     ".invalid",
     ".example",
@@ -216,7 +217,7 @@ def _normalize_repository_url(repository_url: str) -> str:
         address = ipaddress.ip_address(normalized_host)
     except ValueError:
         address = None
-    if address is not None and not address.is_global:
+    if address is not None and not _routable_address(address).is_global:
         raise ValueError("repository IP address must be globally routable")
     if address is None and _looks_like_numeric_ipv4(normalized_host):
         raise ValueError("repository hostname uses a non-canonical numeric IPv4 form")
@@ -250,6 +251,19 @@ def _looks_like_numeric_ipv4(hostname: str) -> bool:
             _NUMERIC_IPV4_COMPONENT_RE.fullmatch(component) for component in components
         )
     )
+
+
+def _routable_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Return the address whose routability controls an IP literal."""
+
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return address.ipv4_mapped
+        if address in _IPV4_COMPATIBLE_NETWORK:
+            return ipaddress.IPv4Address(address.packed[-4:])
+    return address
 
 
 class GitCloneVerifier:

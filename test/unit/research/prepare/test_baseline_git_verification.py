@@ -119,6 +119,23 @@ async def test_git_verifier_disables_non_https_protocols_and_hooks() -> None:
         "https://[fe80::1]/x.git",
         "https://[::]/x.git",
         "https://[2001:db8::1]/x.git",
+        "https://[::127.0.0.1]/repo.git",
+        "https://[::7f00:1]/repo.git",
+        "https://[::10.0.0.1]/repo.git",
+        "https://[::a00:1]/repo.git",
+        "https://[::169.254.1.2]/repo.git",
+        "https://[::a9fe:102]/repo.git",
+        "https://[::192.0.2.1]/repo.git",
+        "https://[::c000:201]/repo.git",
+        "https://[::ffff:127.0.0.1]/repo.git",
+        "https://[::ffff:7f00:1]/repo.git",
+        "https://[::ffff:10.0.0.1]/repo.git",
+        "https://[::ffff:a00:1]/repo.git",
+        "https://[::ffff:169.254.1.2]/repo.git",
+        "https://[::ffff:a9fe:102]/repo.git",
+        "https://[::ffff:0.0.0.0]/repo.git",
+        "https://[::ffff:192.0.2.1]/repo.git",
+        "https://[::ffff:c000:201]/repo.git",
         "https://example.com/repo\x00.git",
         "https://example.com/repo%40.git",
         "https://example.com/repo%3A.git",
@@ -174,6 +191,27 @@ async def test_git_verifier_accepts_canonical_global_ip_literal() -> None:
     evidence = await GitCloneVerifier(runner=runner).verify("https://8.8.8.8/repo.git")
 
     assert evidence.repository_url == "https://8.8.8.8/repo.git"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "repository_url",
+    [
+        "https://[::8.8.8.8]/repo.git",
+        "https://[::808:808]/repo.git",
+        "https://[::ffff:8.8.8.8]/repo.git",
+        "https://[::ffff:808:808]/repo.git",
+    ],
+)
+async def test_git_verifier_accepts_embedded_global_ipv4_literal(
+    repository_url: str,
+) -> None:
+    runner = FakeRunner()
+
+    evidence = await GitCloneVerifier(runner=runner).verify(repository_url)
+
+    assert evidence.repository_url == repository_url
+    assert len(runner.calls) == 2
 
 
 @pytest.mark.asyncio
