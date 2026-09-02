@@ -10,18 +10,20 @@ from pydantic import ValidationError
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
-from athena.execution.runtime import CommandResult, ExecutionContext
+from athena.execution.runtime import CommandRequest, CommandResult, ExecutionContext
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.script_runner import load_directory
 from athena.research.supervisor.experiment import (
-    ExperimentManifest,
-    _diff_implements_intervention,
-    _manifest_validation_summary,
     PlanRunner,
     PlanTurnResult,
+    _diff_implements_intervention,
     apply_trusted_score,
     decide_settlement,
     load_best,
+)
+from athena.research.supervisor.manifest import (
+    ExperimentManifest,
+    _manifest_validation_summary,
 )
 from athena.research.supervisor.plans import (
     PlanBest,
@@ -73,23 +75,48 @@ class _FakeExecution:
         self.calls: list[list[str]] = []
         self.workdirs: list[str | None] = []
         self.emit_seen: list[object] = []
+        self.evaluation_splits: list[str | None] = []
 
     async def run(
         self,
         context: ExecutionContext,
-        command: str | None = None,
-        *,
-        argv: list[str] | None = None,
-        timeout_s: int = 120,
-        workdir: str | None = None,
-        emit=None,
+        request: CommandRequest,
     ) -> CommandResult:
-        self.calls.append(list(argv) if argv is not None else [])
-        self.workdirs.append(workdir)
-        if emit is not None:
-            emit("command/started", "exec:run", {"command": argv})
-            self.emit_seen.append(emit)
-        return self._results.pop(0)
+        del context
+        self.calls.append(list(request.argv or []))
+        self.workdirs.append(str(request.workdir) if request.workdir else None)
+        self.evaluation_splits.append(request.evaluation_split)
+        if request.emit is not None:
+            request.emit("command/started", "exec:run", {"command": request.argv})
+            self.emit_seen.append(request.emit)
+        result = self._results.pop(0)
+        if result.ok and request.workdir is not None:
+            self._produce_archived_outputs(Path(request.workdir))
+        return result
+
+    @staticmethod
+    def _produce_archived_outputs(workdir: Path) -> None:
+        """Simulate the successful command writing this turn's outputs."""
+        history = workdir.parent / f"{workdir.name}-output-history"
+        versions = sorted(path for path in history.iterdir() if path.is_dir())
+        if not versions:
+            return
+        manifest = json.loads((workdir / "experiment.json").read_text("utf-8"))
+        for relative in manifest["outputs"].values():
+            source = versions[-1] / relative
+            target = workdir / relative
+            if not source.exists():
+                continue
+            if source.is_dir():
+                shutil.copytree(source, target, dirs_exist_ok=True)
+                continue
+            if target.is_dir():
+                shutil.rmtree(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+    async def collect_outputs(self, _subdirs: tuple[str, ...]) -> None:
+        return None
 
 
 class _FakeWorkspace:
@@ -115,9 +142,17 @@ class _FakeWorkspace:
 class _FakeEvaluator:
     """Minimal TrustedEvaluator double returning a canned metric."""
 
-    def __init__(self, metric: float = 0.9, *, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        metric: float = 0.9,
+        *,
+        error: Exception | None = None,
+        metrics_ref: str | None = None,
+    ) -> None:
         self._metric = metric
         self._error = error
+        self._metrics_ref = metrics_ref
+        self.directions: list[str] = []
 
     async def score(
         self,
@@ -130,9 +165,11 @@ class _FakeEvaluator:
     ) -> CandidateEvaluation:
         if self._error is not None:
             raise self._error
+        self.directions.append(direction)
         return CandidateEvaluation(
             candidate_id=candidate_id,
             test_score=self._metric,
+            metrics_ref=self._metrics_ref,
             direction=direction,
         )
 
@@ -629,14 +666,19 @@ async def test_run_turn_executes_manifest_scores_and_commits(tmp_path) -> None:
     execution = _FakeExecution(
         [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
     )
+    metrics_ref = "sha256:" + "9" * 64
+    evaluator = _FakeEvaluator(metric=0.91, metrics_ref=metrics_ref)
     runner, plan_input, workspace, branch, store = await _runner_setup(
-        tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
+        tmp_path, execution=execution, evaluator=evaluator
     )
+    plan_input = plan_input.model_copy(update={"direction": "minimize"})
     _write_manifest(
         branch,
         commands=[[sys.executable, "-c", "print('train')"]],
         predictions="__athena_row_id,prediction\nrow_1,1\nrow_2,0\n",
     )
+    exploration = "# Exploration\n\nA scored candidate note."
+    (Path(branch.path) / "EXPLORATION.md").write_text(exploration, encoding="utf-8")
     state = PlanState(
         kind="SEARCH",
         context_ref=_REF,
@@ -657,13 +699,26 @@ async def test_run_turn_executes_manifest_scores_and_commits(tmp_path) -> None:
     assert best.commit == "c1"
     assert best.metric == 0.91
     assert workspace.messages == ["plan h1 trusted score 0.9100"]
+    assert len(workspace.diffs) == 2
+    assert evaluator.directions == ["minimize"]
     assert execution.calls == [[sys.executable, "-c", "print('train')"]]
+    assert execution.evaluation_splits == ["search"]
     assert execution.workdirs == [str(Path(branch.path))]
     assert result.predictions_ref is not None
     predictions_tree = await load_directory(store, result.predictions_ref)
     assert predictions_tree == {
         "predictions.csv": b"__athena_row_id,prediction\nrow_1,1\nrow_2,0\n"
     }
+    experiment_log = (Path(branch.path) / "EXPERIMENT_LOG.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## h1: scored" in experiment_log
+    assert "- Metric: `0.91`" in experiment_log
+    assert result.evidence_ref is not None
+    evidence = json.loads(await store.get_text(result.evidence_ref))
+    assert await store.get_text(evidence["exploration_ref"]) == exploration
+    assert result.metrics_ref == metrics_ref
+    assert evidence["metrics_ref"] == metrics_ref
 
 
 @pytest.mark.asyncio
@@ -704,10 +759,12 @@ async def test_run_turn_execution_failure_does_not_increment_stale(tmp_path) -> 
     execution = _FakeExecution(
         [CommandResult(ok=False, stdout="", stderr="boom", exit_code=1)]
     )
-    runner, plan_input, workspace, branch, _ = await _runner_setup(
+    runner, plan_input, workspace, branch, store = await _runner_setup(
         tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
     )
     _write_manifest(branch, commands=[[sys.executable, "train.py"]])
+    exploration = "# Exploration\n\nA failed candidate note."
+    (Path(branch.path) / "EXPLORATION.md").write_text(exploration, encoding="utf-8")
     state = PlanState(
         kind="SEARCH",
         context_ref=_REF,
@@ -723,6 +780,14 @@ async def test_run_turn_execution_failure_does_not_increment_stale(tmp_path) -> 
     assert result.next_state is None
     assert workspace.messages == []
     assert state.stale_rounds == 2
+    experiment_log = (Path(branch.path) / "EXPERIMENT_LOG.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## h1: execution_failed" in experiment_log
+    assert "- Error: command failed (exit 1): boom" in experiment_log
+    assert result.evidence_ref is not None
+    evidence = json.loads(await store.get_text(result.evidence_ref))
+    assert await store.get_text(evidence["exploration_ref"]) == exploration
 
 
 @pytest.mark.asyncio
@@ -961,7 +1026,7 @@ async def test_a_search_candidate_that_changed_nothing_is_not_an_experiment(
     execution = _FakeExecution(
         [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
     )
-    runner, plan_input, workspace, branch, store = await _runner_setup(
+    runner, plan_input, _, branch, _ = await _runner_setup(
         tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
     )
     runner._workspace = _UnchangedWorkspace(["c1"])
@@ -990,7 +1055,7 @@ async def test_prepare_baseline_may_legitimately_produce_an_empty_diff(
     execution = _FakeExecution(
         [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
     )
-    runner, plan_input, workspace, branch, store = await _runner_setup(
+    runner, plan_input, _, branch, _ = await _runner_setup(
         tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.88)
     )
     runner._workspace = _UnchangedWorkspace(["c1"])

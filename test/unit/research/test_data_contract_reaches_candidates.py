@@ -13,12 +13,23 @@ train/search/final，却只把这件事告诉了 evaluator。基线 agent 拿到
 约束必须持久化在 ``state.data_contract`` 上，再由 Supervisor 每一轮拼进 content。
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from athena.research.prepare_phase import DataContract
-from athena.research.supervisor.experiment import data_contract_block
+from athena.research.prepare_data import DataContract
+from athena.research.supervisor.deps import (
+    PhaseActions,
+    ResearchActions,
+    SearchServices,
+    SupervisorDeps,
+    SupervisorPaths,
+    SupervisorRuntime,
+)
+from athena.research.supervisor.prompt_context import data_contract_block
+from athena.research.supervisor.recovery import Recovery
+from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 
@@ -36,6 +47,7 @@ def test_the_block_names_the_training_file_and_the_reason() -> None:
 def test_an_absent_contract_adds_nothing() -> None:
     assert data_contract_block("") == ""
     assert data_contract_block("   \n ") == ""
+
 
 def test_data_contract_value_object_prompts_train_only_never_raw_and_predict_env(
     tmp_path,
@@ -69,7 +81,6 @@ def test_data_contract_value_object_prompts_train_only_never_raw_and_predict_env
     assert "Do NOT read" in candidate_text
     assert str(raw) in candidate_text
     assert "ATHENA_PREDICT_FEATURES" in candidate_text
-
 
 
 def test_the_state_carries_the_contract_across_a_save_load(tmp_path) -> None:
@@ -112,23 +123,18 @@ async def test_every_search_turn_carries_the_data_contract() -> None:
         state.model_copy = lambda update: state
         return state
 
-    supervisor = Supervisor.__new__(Supervisor)
-    supervisor.tree = SimpleNamespace(
+    tree = SimpleNamespace(
         get_hypothesis=lambda plan_id: SimpleNamespace(
             statement="s", intervention="i", expected_effect="e"
         )
     )
-    supervisor.state = SimpleNamespace(
+    state = SimpleNamespace(
         plans={"hyp_abc": plan_state()},
         data_contract="Train ONLY on /p/data_split/train.csv.",
     )
-    supervisor._agents = Agents()
-    supervisor._publish_agent_event = None
-    supervisor._persist_state = _noop
-    supervisor._plan_handoff = _handoff
-    supervisor._corpus_block = lambda plan_id: ""
+    supervisor = _supervisor(tree, state, Agents())
 
-    await supervisor._run_one_turn("hyp_abc")
+    await supervisor._plans.run_turn("hyp_abc")
 
     assert "/p/data_split/train.csv" in sent["content"]
 
@@ -157,20 +163,15 @@ async def test_no_contract_means_no_block_in_the_turn() -> None:
     )
     state.model_copy = lambda update: state
 
-    supervisor = Supervisor.__new__(Supervisor)
-    supervisor.tree = SimpleNamespace(
+    tree = SimpleNamespace(
         get_hypothesis=lambda plan_id: SimpleNamespace(
             statement="s", intervention="i", expected_effect="e"
         )
     )
-    supervisor.state = SimpleNamespace(plans={"hyp_abc": state}, data_contract=None)
-    supervisor._agents = Agents()
-    supervisor._publish_agent_event = None
-    supervisor._persist_state = _noop
-    supervisor._plan_handoff = _handoff
-    supervisor._corpus_block = lambda plan_id: ""
+    durable = SimpleNamespace(plans={"hyp_abc": state}, data_contract=None)
+    supervisor = _supervisor(tree, durable, Agents())
 
-    await supervisor._run_one_turn("hyp_abc")
+    await supervisor._plans.run_turn("hyp_abc")
 
     assert "Data contract" not in sent["content"]
 
@@ -182,3 +183,39 @@ async def _noop() -> None:
 async def _handoff(plan_id: str) -> str:
     """占位的评估契约。"""
     return "id column: row_id"
+
+
+def _supervisor(tree, state, agents) -> Supervisor:
+    async def publish(_kind, _payload):
+        return None
+
+    supervisor = Supervisor(
+        state=state,
+        tree=tree,
+        deps=SupervisorDeps(
+            paths=SupervisorPaths(Path("."), Path("state.json"), Path("tree.json")),
+            runtime=SupervisorRuntime(SimpleNamespace(), agents, SimpleNamespace()),
+            research=ResearchActions(_unused_plan, _unused_supervisor),
+            phases=PhaseActions(publish),
+            search=SearchServices(Scheduler(), Recovery()),
+        ),
+    )
+    supervisor._plans._persist_state = _noop
+
+    async def plan_input(plan_id: str):
+        return SimpleNamespace(
+            task_context="",
+            hypothesis=tree.get_hypothesis(plan_id),
+            eval_handoff=await _handoff(plan_id),
+        )
+
+    supervisor._plans.plan_input = plan_input
+    return supervisor
+
+
+async def _unused_plan(_plan_id, _state):
+    raise AssertionError("plan turn must not run")
+
+
+async def _unused_supervisor(_text):
+    raise AssertionError("supervisor turn must not run")

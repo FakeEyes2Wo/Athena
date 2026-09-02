@@ -10,15 +10,24 @@
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from athena.research.supervisor.run_state import SupervisorRunState
+from athena.research.supervisor.search_loop import SearchLoop
+from athena.research.supervisor.state import ResearchState
+
+
+def _run() -> SupervisorRunState:
+    return SupervisorRunState(
+        ResearchState(status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1)
+    )
 
 
 @pytest.mark.asyncio
 async def test_running_items_pairs_each_plan_with_its_task() -> None:
-    run = SupervisorRunState(None)
+    run = _run()
 
     async def work() -> str:
         return "done"
@@ -47,4 +56,44 @@ async def test_unpacking_a_finished_task_is_the_trap_this_guards() -> None:
 
 
 def test_running_items_is_empty_before_anything_starts() -> None:
-    assert SupervisorRunState(None).running_items == ()
+    assert _run().running_items == ()
+
+
+def test_run_status_and_kaggle_settings_come_from_research_state() -> None:
+    state = ResearchState(
+        status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1
+    )
+    run = SupervisorRunState(state)
+
+    state.status = "STOPPED"
+    state.kaggle_download = False
+
+    assert run.is_stopped() is True
+    assert run.kaggle_enabled is True
+    assert run.kaggle_download is False
+
+
+@pytest.mark.asyncio
+async def test_search_loop_dispatches_through_public_plan_turn_callback() -> None:
+    state = ResearchState(
+        status="RUNNING", phase="SEARCH", search_limit=1, concurrency=1
+    )
+    run = SupervisorRunState(state)
+    completed = SimpleNamespace(plan_id="hyp_callback")
+
+    async def run_turn(plan_id: str):
+        assert plan_id == "hyp_callback"
+        return completed
+
+    loop = SearchLoop(
+        owner=SimpleNamespace(state=state, tree=SimpleNamespace()),
+        deps=SimpleNamespace(),
+        run=run,
+        plans=SimpleNamespace(),
+        run_turn=run_turn,
+    )
+
+    loop._launch_turn("hyp_callback")
+    [task] = run.running_tasks
+
+    assert await task is completed

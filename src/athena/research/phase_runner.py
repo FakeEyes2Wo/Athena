@@ -25,6 +25,7 @@ from athena.research.supervisor.experiment import (
 )
 from athena.research.supervisor.plans import wait_run_events
 from athena.research.supervisor.prepare import PrepareResult
+from athena.research.task_context import confirmed_task_context_block
 from athena.research.supervisor.validation import (
     ValidationDeps,
     ValidationDiffReview,
@@ -67,7 +68,6 @@ class PhaseRunner:
                 experiment_id=plan_id,
                 predict_features=search_features if search_features.is_file() else None,
             ),
-            direction=plan_input.direction,
             timeout_s=rt.state.experiment_timeout_s,
             placement=lambda: rt.placement_for(plan_id),
         )
@@ -149,6 +149,7 @@ class PhaseRunner:
     ) -> ValidationResult:
         """Run the VALIDATE phase and return the validation result."""
         rt = self._runtime
+        task_context = await confirmed_task_context_block(rt)
         if rt.validation_phase is not None:
             return await rt.validation_phase(sota_commit, metric)
         if rt.provider is None:
@@ -198,6 +199,7 @@ class PhaseRunner:
                 sota_commit, metric, rt.direction, final_evaluator_ref
             ),
             sota_context=sota_context,
+            task_context=task_context,
         )
         result_ref = None
         if rt.state.validation is not None:

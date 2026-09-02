@@ -7,17 +7,13 @@
 """
 
 import json
-import os
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
     ConfigDict,
-    ValidationError,
-    field_validator,
     model_validator,
 )
 
@@ -30,8 +26,12 @@ from athena.execution.runtime import (
     ExecutionContext,
     ExecutionRuntime,
 )
-from athena.research.contracts import EvaluatorDescriptor
+from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.exploration_files import (
+    append_experiment_log,
+    read_exploration_note,
+)
 from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
@@ -39,21 +39,21 @@ from athena.research.output_freshness import (
 )
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
+from athena.research.supervisor.manifest import (
+    ExperimentManifest,
+    read_experiment_manifest,
+)
 from athena.research.supervisor.plans import (
     DEFAULT_EXPERIMENT_TIMEOUT_S,
     PlanBest,
     PlanDecision,
+    PlanFailure,
     PlanInput,
     PlanState,
 )
 
 Direction = Literal["maximize", "minimize"]
 
-# manifest 禁止声明的可执行文件（平台自有，agent 不得直接调用）。
-_FORBIDDEN_EXECUTABLES = frozenset({"git", "git.exe"})
-_MANIFEST_FIELDS = frozenset({"version", "commands", "outputs"})
-# 回给 agent 的多余键名上限，避免超长键把反馈挤爆。
-_MAX_FIELD_NAME_CHARS = 40
 # 只有改动真正的实现源文件才算“实验”；只改 manifest/输出/文档会被拒绝。
 _SEMANTIC_SOURCE_SUFFIXES = (".py", ".ipynb", ".sh", ".R", ".jl")
 _NON_IMPLEMENTATION_MARKERS = (
@@ -62,30 +62,6 @@ _NON_IMPLEMENTATION_MARKERS = (
     "experiment.json",
     ".md",
 )
-
-
-@dataclass(frozen=True)
-class PromptBlock:
-    """Small renderer for the repeated ``--- title --- ... --- end ---`` blocks.
-
-    All the prompt blocks in this module follow the same shape: a heading line,
-    the body, and an end marker. Keeping that shape in one helper avoids four
-    copies diverging in blank lines or missing end markers.
-    """
-
-    title: str
-    body: str
-    end_marker: str
-
-    def render(self) -> str:
-        body = self.body.strip()
-        if not body:
-            return ""
-        return (
-            f"\n\n--- {self.title} ---\n"
-            f"{body}\n"
-            f"{self.end_marker}"
-        )
 
 
 def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
@@ -114,255 +90,6 @@ def _diff_implements_intervention(paths: tuple[str, ...]) -> str | None:
             "in a source file (e.g. model.py, features.py, train.py)."
         )
     return None
-
-
-def handoff_block(handoff: str) -> str:
-    """把评估契约拼成一段可直接接在 prompt 后面的正文。
-
-    **必须走 content，不能走 context_refs。** ``base_runner`` 只把 trigger 的
-    ``content`` 当作 model 的 user prompt（``input_text = trigger.content``），
-    ``context_refs`` 里的 artifact 引用从来没有被解析回正文——它是一条死信道。
-    真机（2026-08-16 第 11 次）证据：ideator 的 prompt 里写着"The evaluator contract
-    is attached as context"，而同一次 turn 的完整 user prompt 只有 374 字符，契约一个
-    字都不在里面；PREPARE 那边同样，基线因此只能猜列名，交出 join 不上的预测判 0.0。
-    """
-    return PromptBlock(
-        title=(
-            "Evaluator contract (authoritative; your predictions must match it "
-            "exactly)"
-        ),
-        body=handoff,
-        end_marker="--- end of evaluator contract ---",
-    ).render()
-
-
-def hypothesis_block(statement: str, intervention: str, expected: str) -> str:
-    """把这条 Plan 要检验的假设拼进 prompt 正文。
-
-    与 ``handoff_block`` 是同一条教训的第二处落点：假设此前只经 ``PlanInput`` 走
-    ``context_refs``，而那是一条**死信道**——``base_runner`` 只把 trigger 的 ``content``
-    当作 model 的 user prompt，``context_refs`` 仅以 sha256 引用的形式出现在信封里，
-    通用工具集（``read_file``/``write_file``/``shell_command``）里也没有任何按 ref 取
-    正文的算子。于是 PlanAgent 从来没见过它要实现的那条假设。
-
-    真机（2026-08-18，为文献 A/B 跑的对照臂）证据，6 次实验无一实现分配给它的假设：
-
-    - 3 次直接 ``abandon``，理由逐字是 "The user message does not contain explicit
-      hypothesis text"；
-    - 另 3 次自行编了一个干预。假设写着"加交互特征"的那次，提交的代码实现的是"删掉
-      噪声列"，还自带一行 ``Hypothesis: Removing noise columns ...`` 的注释；写着
-      "用 IterativeImputer 替代中位数填充"的那次，代码里根本没有 IterativeImputer。
-    - 两条不同的假设因此产出**逐字节相同的预测**（AP 都是 0.304924）——它们都退化成了
-      同一个默认动作。
-
-    后果比"少一段上下文"严重得多：整条 SEARCH 检验的不是 Ideator 提的假设，而是
-    PlanAgent 临时想出来的东西。凡是想测"假设质量影响下游分数"的实验，在这条信道修好
-    之前都测不到自己以为在测的东西。
-    """
-    parts = [
-        ("Claim", statement),
-        ("Intervention to implement", intervention),
-        ("Expected effect", expected),
-    ]
-    body = "\n".join(
-        f"{label}: {value.strip()}" for label, value in parts if value and value.strip()
-    )
-    return PromptBlock(
-        title="Hypothesis under test (implement exactly this, nothing else)",
-        body=body,
-        end_marker="--- end of hypothesis ---",
-    ).render()
-
-
-def data_contract_block(contract: str) -> str:
-    """把"训练用哪份数据"这条约束拼进每一轮 SEARCH 的 prompt 正文。
-
-    与 ``handoff_block`` / ``hypothesis_block`` / ``failure_block`` 是同一条教训的
-    第四处落点。候选**看不到任务文本**：``PlanInput`` 只经 ``context_refs``，而那是
-    死信道；能到 model 面前的只有假设、评估器 HANDOFF、语料与失败反馈。
-
-    真机（2026-08-29）：平台切好了 train/search/final，却只告诉了 evaluator。基线
-    agent 拿着"Dataset path: <原始 csv>"去那个目录里自己找划分，用了旁边一套早先切
-    的文件。平台 search split 的 14703 行里有 11978 行（81.5%）落进它的训练集，
-    PR-AUC 报到 0.9736——而参考值是 0.891。评估器只比对 predictions 与 labels，
-    结构上无法察觉候选在被打分的行上训练过。
-    """
-    return PromptBlock(
-        title="Data contract (violating this invalidates your score)",
-        body=contract,
-        end_marker="--- end of data contract ---",
-    ).render()
-
-
-def failure_block(kind: str, error: str) -> str:
-    """把上一轮实验的失败原因拼进下一轮 prompt 正文。
-
-    与 ``handoff_block`` / ``hypothesis_block`` 是同一条教训的第三处落点。失败的
-    ``PlanTurnResult`` 一直带着 ``kind`` 与 ``error``（manifest 不合法、命令非零退出
-    并附 stderr 摘要、predictions 目录空、打分失败），但它们只进了 evidence artifact
-    和事件流——**没有任何一条回到写代码的那个 Agent 面前**。
-
-    于是失败轮的实际语义是"什么都没发生"：Agent 下一轮看到的仍然是
-    ``Continue Plan …; turns used: N``，既不知道上一轮跑没跑、也不知道为什么没跑成，
-    只能把同一份 manifest 原样再交一次，直到 turn 预算耗尽。同一个 ModuleNotFoundError
-    可以就这样烧掉一整条 Plan。
-    """
-    detail = " ".join(error.split())[:800]
-    body = ""
-    if detail:
-        body = (
-            f"Failure kind: {kind}\n"
-            f"Detail: {detail}\n"
-            "Do not resubmit the same experiment unchanged; diagnose this failure "
-            "first, then retry."
-        )
-    return PromptBlock(
-        title="Previous attempt failed (fix this before anything else)",
-        body=body,
-        end_marker="--- end of failure report ---",
-    ).render()
-
-
-async def read_eval_handoff(
-    store: ArtifactStore, evaluator_ref: ArtifactRef | None
-) -> str:
-    """Read the evaluator ``HANDOFF.md`` from a README-frozen directory.
-
-    评估器目录自带一份自述契约：预测该带哪个 id/key、该覆盖哪些行、怎么 join。
-    **写预测的那些 Agent 必须拿到它**——PREPARE 的基线与每个 SEARCH 候选都在写
-    ``predictions/``；如果读不到，后续 Agent 只能猜格式，评分会静默失真。
-    """
-    if evaluator_ref is None:
-        return ""
-    try:
-        descriptor = EvaluatorDescriptor.model_validate_json(
-            await store.get_text(evaluator_ref)
-        )
-    except (ValueError, OSError):
-        return ""
-    handoff_path = Path(descriptor.dir_path) / "HANDOFF.md"
-    try:
-        return handoff_path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-
-
-def _validate_relative_path(path: str, label: str) -> None:
-    """拒绝绝对路径、驱动器相对路径、空段与 ``..`` 逃逸的 workspace 相对路径。"""
-    if os.path.isabs(path):
-        raise ValueError(f"{label} path must be relative to the workspace")
-    # Windows 驱动器相对路径（如 "C:foo"）isabs 为 False，但会落到 C: 盘当前目录。
-    if os.path.splitdrive(path)[0]:
-        raise ValueError(f"{label} path must be relative to the workspace")
-    parts = path.replace("\\", "/").split("/")
-    if any(part in ("", ".", "..") for part in parts):
-        raise ValueError(f"{label} path escapes the workspace")
-
-
-def _safe_field_name(part: object) -> str:
-    """多余字段的键名，去掉不可打印字符并截断后才放进反馈。
-
-    只用于 ``extra_forbidden``：该错误的键名按定义就不在 ``_MANIFEST_FIELDS`` 里，
-    一律遮成 ``<field>`` 等于让 agent 永远不知道该删哪个键。键名是它自己写的、
-    长度有界，回给它不构成信息泄露；manifest 的**取值**仍由 ``include_input=False``
-    挡在外面。
-    """
-    printable = "".join(char for char in str(part) if char.isprintable())
-    return printable[:_MAX_FIELD_NAME_CHARS] or "<field>"
-
-
-def _manifest_validation_summary(error: ValidationError) -> str:
-    """Return actionable validation details without manifest input values.
-
-    真实跑测（2026-08-16）：agent 在 manifest 里多写了一个 ``metrics`` 块，收到的反馈是
-    ``<field>: Extra inputs are not permitted``——它连删哪个键都不知道，于是原样重交三
-    次直到 PREPARE 轮次预算耗尽。多余键的键名因此必须报出来。
-    """
-    summaries: list[str] = []
-    for detail in error.errors(
-        include_url=False,
-        include_context=False,
-        include_input=False,
-    ):
-        extra_key = detail["type"] == "extra_forbidden"
-        location = ".".join(
-            (
-                str(part)
-                if isinstance(part, int)
-                else (
-                    part
-                    if part in _MANIFEST_FIELDS
-                    else _safe_field_name(part) if extra_key else "<field>"
-                )
-            )
-            for part in detail["loc"]
-        )
-        message = " ".join(detail["msg"].split())
-        summaries.append(f"{location}: {message}" if location else message)
-    return "; ".join(summaries)[:1000]
-
-
-class ExperimentManifest(BaseModel):
-    """Workspace 根声明的一次实验：argv 命令与预测/报告输出路径。
-
-    命令必须是 argv 数组（绝不能是 shell 字符串），输出路径解析在指派
-    workspace 内。manifest 不能声明标签、分数、Git 命令或 workspace 路径。
-    """
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    version: int
-    commands: list[list[str]]
-    outputs: dict[str, str]
-
-    @field_validator("version")
-    @classmethod
-    def _validate_version(cls, value: int) -> int:
-        if value != 1:
-            raise ValueError("only manifest version 1 is supported")
-        return value
-
-    @field_validator("commands", mode="before")
-    @classmethod
-    def _coerce_single_command(cls, value: object) -> object:
-        # Agent 常把单条命令写成扁平数组 ["python", "x.py"]，兼容为 [["python", "x.py"]]。
-        if isinstance(value, list) and value and isinstance(value[0], str):
-            return [value]
-        return value
-
-    @field_validator("commands")
-    @classmethod
-    def _validate_commands(cls, value: list[list[str]]) -> list[list[str]]:
-        for argv in value:
-            if not argv or any(not part.strip() for part in argv):
-                raise ValueError("each command must be a non-empty argv array")
-            # 用 basename 判断，杜绝绝对路径绕过（如 /usr/bin/git、C:\\...\\git.exe）。
-            if (
-                os.path.basename(argv[0].replace("\\", "/")).lower()
-                in _FORBIDDEN_EXECUTABLES
-            ):
-                raise ValueError("manifest cannot run git commands")
-        return value
-
-    @field_validator("outputs")
-    @classmethod
-    def _validate_outputs(cls, value: dict[str, str]) -> dict[str, str]:
-        if "predictions" not in value:
-            raise ValueError("predictions output is mandatory")
-        for key, rel in value.items():
-            _validate_relative_path(rel, f"output {key}")
-        return value
-
-
-def read_experiment_manifest(root: Path) -> ExperimentManifest:
-    """解析并校验 workspace 根 experiment.json，返回带可行动错误摘要的 manifest。"""
-    path = root / "experiment.json"
-    if not path.is_file():
-        raise ValueError("experiment.json is missing")
-    try:
-        return ExperimentManifest.model_validate_json(path.read_text(encoding="utf-8"))
-    except ValidationError as exc:
-        raise ValueError(_manifest_validation_summary(exc)) from exc
 
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
@@ -418,6 +145,7 @@ class PlanTurnResult(BaseModel):
     commit: CommitHash | None = None
     next_state: PlanState | None = None
     predictions_ref: ArtifactRef | None = None
+    metrics_ref: ArtifactRef | None = None
     evidence_ref: ArtifactRef | None = None
     report_ref: ArtifactRef | None = None
     error: str | None = None
@@ -531,7 +259,6 @@ class PlanRunner:
         workspace: GitWorkspace,
         branch: GitWorkBranch,
         context: ExecutionContext,
-        direction: Direction = "maximize",
         timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
         placement: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
@@ -541,7 +268,6 @@ class PlanRunner:
         self._workspace = workspace
         self._branch = branch
         self._context = context
-        self._direction = direction
         self._timeout_s = timeout_s
         self._placement = placement
 
@@ -567,45 +293,16 @@ class PlanRunner:
             manifest = read_experiment_manifest(self.workdir)
         except ValueError as exc:
             return await self._failure(
-                plan_id, "manifest_invalid", " ".join(str(exc).split())[:1000]
-            )
-
-        version = f"{plan_id}-{state.turns_used}"
-        try:
-            archive_output_roots(self.workdir, manifest.outputs, version=version)
-        except Exception as exc:  # noqa: BLE001 - archive failure is an output failure
-            return await self._failure(
-                plan_id, "output_failed", f"failed to archive old outputs: {exc}"
-            )
-
-        for argv in manifest.commands:
-            result = await self._execution.run(
-                self._context,
-                CommandRequest(
-                    argv=argv,
-                    timeout_s=self._timeout_s,
-                    workdir=str(self.workdir),
-                    emit=emit,
+                plan_id,
+                PlanFailure(
+                    kind="manifest_invalid",
+                    detail=" ".join(str(exc).split())[:1000],
                 ),
             )
-            if not result.ok:
-                error = (
-                    f"command failed (exit {result.exit_code}): {result.stderr[:200]}"
-                )
-                if "ModuleNotFoundError" in result.stderr:
-                    error += (
-                        ' Run "uv sync --project $ATHENA_ENV_ROOT" to install the '
-                        "declared dependencies into the environment venv, then retry."
-                    )
-                return await self._failure(plan_id, "execution_failed", error)
 
-        required = {"predictions"}
-        if state.kind == "PREPARE":
-            required.add("report")
-        try:
-            assert_output_roots(self.workdir, manifest.outputs, required=required)
-        except OutputFreshnessError as exc:
-            return await self._failure(plan_id, "output_failed", str(exc))
+        failure = await self._execute_manifest(plan_id, state, manifest, emit)
+        if failure is not None:
+            return await self._failure(plan_id, failure)
 
         predictions_root = manifest.outputs["predictions"]
         predictions_dir = self.workdir / predictions_root
@@ -615,63 +312,36 @@ class PlanRunner:
         if state.kind == "PREPARE" and report_ref is None:
             return await self._failure(
                 plan_id,
-                "output_failed",
-                "PREPARE requires a declared, non-empty report output",
+                PlanFailure(
+                    kind="output_failed",
+                    detail="PREPARE requires a declared, non-empty report output",
+                ),
                 predictions_ref=predictions_ref,
             )
 
-        if state.kind == "SEARCH":
-            diff = await self._workspace.diff(self._branch)
-            if not diff.paths:
-                return await self._failure(
-                    plan_id,
-                    "no_change",
-                    "this candidate changed no file, so it re-ran the parent unchanged and "
-                    "cannot test anything. Implement the intervention described in the "
-                    "hypothesis — edit the solution sources, then rerun and submit.",
-                    predictions_ref=predictions_ref,
-                )
-            rejected = _diff_implements_intervention(diff.paths)
-            if rejected is not None:
-                return await self._failure(
-                    plan_id,
-                    "diff_rejected",
-                    rejected,
-                    predictions_ref=predictions_ref,
-                )
+        failure = await self._search_diff_failure(state)
+        if failure is not None:
+            return await self._failure(
+                plan_id, failure, predictions_ref=predictions_ref
+            )
 
-        evaluator_dir = await self._load_evaluator_dir(plan_input.evaluator_ref)
-        if evaluator_dir is None:
-            return await self._failure(
-                plan_id,
-                "scoring_failed",
-                "evaluator descriptor is invalid or its directory is missing",
-                predictions_ref=predictions_ref,
-            )
-        try:
-            evaluation = await self._evaluator.score(
-                evaluator_dir=evaluator_dir,
-                predictions=predictions,
-                candidate_id=plan_id,
-                direction=self._direction,
-                predictions_root=predictions_root,
-            )
-        except ValueError as exc:
-            # 候选输出导致评估失败 → 同 Plan 修复，不产生可信分数
-            return await self._failure(
-                plan_id,
-                "scoring_failed",
-                str(exc),
-                predictions_ref=predictions_ref,
-            )
-        except Exception as exc:
-            return await self._failure(
-                plan_id,
-                "evaluator_infrastructure_failed",
-                str(exc),
-                predictions_ref=predictions_ref,
-            )
+        score = await self._score_candidate(
+            plan_id, plan_input, predictions, predictions_root
+        )
+        if isinstance(score, PlanFailure):
+            return await self._failure(plan_id, score, predictions_ref=predictions_ref)
+        evaluation = score
         metric = evaluation.test_score
+        metrics_ref = evaluation.metrics_ref
+
+        append_experiment_log(
+            self.workdir,
+            f"## {plan_id}: scored\n\n- Metric: `{metric}`\n"
+            f"- Metrics table: `{metrics_ref or 'none'}`\n"
+            f"- Predictions: `{predictions_ref}`\n"
+            f"- Report: `{report_ref or 'none'}`",
+        )
+        exploration_ref = await self._store_exploration()
 
         diff = await self._workspace.diff(self._branch)
         commit = await self._workspace.commit(
@@ -684,7 +354,9 @@ class PlanRunner:
                     "metric": metric,
                     "commit": commit,
                     "predictions_ref": predictions_ref,
+                    "metrics_ref": metrics_ref,
                     "report_ref": report_ref,
+                    "exploration_ref": exploration_ref,
                     "outputs": manifest.outputs,
                     **(
                         {"placement": self._placement()}
@@ -703,7 +375,7 @@ class PlanRunner:
                 commit,
                 store=self._store,
                 evidence_ref=evidence_ref,
-                direction=self._direction,
+                direction=plan_input.direction,
                 std_error=evaluation.test_se,
                 n=evaluation.test_n,
             )
@@ -713,34 +385,129 @@ class PlanRunner:
             commit=commit,
             next_state=updated,
             predictions_ref=predictions_ref,
+            metrics_ref=metrics_ref,
             evidence_ref=evidence_ref,
             report_ref=report_ref,
         )
 
+    async def _execute_manifest(
+        self,
+        plan_id: str,
+        state: PlanState,
+        manifest: ExperimentManifest,
+        emit: EmitEvent | None,
+    ) -> PlanFailure | None:
+        """Archive old outputs, run commands, collect remote files, and check freshness."""
+        version = f"{plan_id}-{state.turns_used}"
+        try:
+            archive_output_roots(self.workdir, manifest.outputs, version=version)
+        except Exception as exc:  # noqa: BLE001 - archive failure is an output failure
+            return PlanFailure(
+                kind="output_failed", detail=f"failed to archive old outputs: {exc}"
+            )
+
+        for argv in manifest.commands:
+            result = await self._execution.run(
+                self._context,
+                CommandRequest(
+                    argv=argv,
+                    timeout_s=self._timeout_s,
+                    workdir=str(self.workdir),
+                    emit=emit,
+                    evaluation_split="search",
+                ),
+            )
+            if not result.ok:
+                error = (
+                    f"command failed (exit {result.exit_code}): {result.stderr[:200]}"
+                )
+                if "ModuleNotFoundError" in result.stderr:
+                    error += (
+                        ' Run "uv sync --project $ATHENA_ENV_ROOT" to install the '
+                        "declared dependencies into the environment venv, then retry."
+                    )
+                return PlanFailure(kind="execution_failed", detail=error)
+
+        await self._execution.collect_outputs(tuple(manifest.outputs.values()))
+        required = {"predictions"}
+        if state.kind == "PREPARE":
+            required.add("report")
+        try:
+            assert_output_roots(self.workdir, manifest.outputs, required=required)
+        except OutputFreshnessError as exc:
+            # 命令未产生声明输出 → 同 Plan 修正后重试
+            return PlanFailure(kind="output_failed", detail=str(exc))
+        return None
+
+    async def _search_diff_failure(self, state: PlanState) -> PlanFailure | None:
+        """Reject SEARCH turns that did not make an attributable source change."""
+        if state.kind != "SEARCH":
+            return None
+        diff = await self._workspace.diff(self._branch)
+        rejected = _diff_implements_intervention(diff.paths)
+        if rejected is None:
+            return None
+        kind = "no_change" if not diff.paths else "diff_rejected"
+        if kind == "no_change":
+            rejected = (
+                "this candidate changed no file, so it re-ran the parent unchanged and "
+                "cannot test anything. Implement the intervention described in the "
+                "hypothesis — edit the solution sources, then rerun and submit."
+            )
+        return PlanFailure(kind=kind, detail=rejected)
+
+    async def _score_candidate(
+        self,
+        plan_id: str,
+        plan_input: PlanInput,
+        predictions: dict[str, bytes],
+        predictions_root: str,
+    ) -> CandidateEvaluation | PlanFailure:
+        """Score collected predictions or map the evaluator failure to its domain kind."""
+        evaluator_dir = await self._load_evaluator_dir(plan_input.evaluator_ref)
+        if evaluator_dir is None:
+            return PlanFailure(
+                kind="scoring_failed",
+                detail="evaluator descriptor is invalid or its directory is missing",
+            )
+        try:
+            evaluation = await self._evaluator.score(
+                evaluator_dir=evaluator_dir,
+                predictions=predictions,
+                candidate_id=plan_id,
+                direction=plan_input.direction,
+                predictions_root=predictions_root,
+            )
+        except ValueError as exc:
+            # 候选输出不符合评估契约 → 同 Plan 修正后重试
+            return PlanFailure(kind="scoring_failed", detail=str(exc))
+        except Exception as exc:  # noqa: BLE001 - map evaluator infrastructure failure
+            # 评估基础设施异常 → 保留独立错误映射供上层终止
+            return PlanFailure(kind="evaluator_infrastructure_failed", detail=str(exc))
+        return evaluation
+
     async def _failure(
         self,
         plan_id: str,
-        kind: Literal[
-            "scoring_failed",
-            "evaluator_infrastructure_failed",
-            "output_failed",
-            "execution_failed",
-            "manifest_invalid",
-            "no_change",
-            "diff_rejected",
-        ],
-        error: str,
+        failure: PlanFailure,
         *,
         predictions_ref: ArtifactRef | None = None,
     ) -> PlanTurnResult:
-        cleaned = redact(" ".join(error.split()))[:1000]
+        """Persist a normalized Plan failure and return its non-scored result."""
+        cleaned = redact(" ".join(failure.detail.split()))[:1000]
+        append_experiment_log(
+            self.workdir,
+            f"## {plan_id}: {failure.kind}\n\n- Error: {cleaned}",
+        )
+        exploration_ref = await self._store_exploration()
         evidence_ref = await self._store.put_text(
             json.dumps(
                 {
                     "plan": plan_id,
-                    "kind": kind,
+                    "kind": failure.kind,
                     "error": cleaned,
                     "predictions_ref": predictions_ref,
+                    "exploration_ref": exploration_ref,
                     **(
                         {"placement": self._placement()}
                         if self._placement is not None
@@ -751,7 +518,7 @@ class PlanRunner:
             )
         )
         return PlanTurnResult(
-            kind=kind,
+            kind=failure.kind,
             predictions_ref=predictions_ref,
             evidence_ref=evidence_ref,
             error=cleaned,
@@ -761,7 +528,7 @@ class PlanRunner:
         """Load the README-only evaluator directory from its descriptor."""
         try:
             text = await self._store.get_text(evaluator_ref)
-        except Exception:
+        except (OSError, ValueError):
             return None
         try:
             descriptor = EvaluatorDescriptor.model_validate_json(text)
@@ -781,3 +548,8 @@ class PlanRunner:
         if not report_path.is_file() or not report_path.stat().st_size:
             return None
         return await self._store.put_text(report_path.read_text(encoding="utf-8"))
+
+    async def _store_exploration(self) -> ArtifactRef | None:
+        """Store the optional Agent-authored exploration note for this turn."""
+        content = read_exploration_note(self.workdir)
+        return await self._store.put_text(content) if content is not None else None

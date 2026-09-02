@@ -7,7 +7,10 @@ import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitWorkBranch
-from athena.research.supervisor.validation import _execute_predictions
+from athena.research.supervisor.validation import (
+    _assert_predictions_cover,
+    _execute_predictions,
+)
 
 ROW_ID = "__athena_row_id"
 
@@ -42,11 +45,15 @@ class _Execution:
     def __init__(self, produce_ids: range | None = None) -> None:
         self.produce_ids = produce_ids
         self.predict_features_seen: list[str | None] = []
+        self.evaluation_splits: list[str | None] = []
 
     async def run(self, context, command=None, *, argv=None, **kwargs):
         del context, argv, kwargs
         request = command
-        self.predict_features_seen.append(str(request.predict_features) if request.predict_features else None)
+        self.predict_features_seen.append(
+            str(request.predict_features) if request.predict_features else None
+        )
+        self.evaluation_splits.append(request.evaluation_split)
         if self.produce_ids is not None:
             workdir = Path(request.workdir)
             _predictions(workdir, self.produce_ids)
@@ -94,6 +101,7 @@ async def test_the_rerun_is_pointed_at_the_held_out_split(tmp_path: Path) -> Non
     )
 
     assert execution.predict_features_seen == [str(final)]
+    assert execution.evaluation_splits == ["final"]
 
 
 @pytest.mark.asyncio
@@ -134,3 +142,43 @@ async def test_full_coverage_passes(tmp_path: Path) -> None:
 
     assert run.predictions_path == "predictions"
     assert run.predictions_ref
+
+
+def test_prediction_coverage_uses_first_column_for_future_datasets(
+    tmp_path: Path,
+) -> None:
+    expected = tmp_path / "image_features.csv"
+    expected.write_text("image_filename,feature\na.png,1\nb.png,2\n", encoding="utf-8")
+    predictions = tmp_path / "predictions"
+    predictions.mkdir()
+    (predictions / "predictions__future_task.csv").write_text(
+        "image_filename,pred_label\nb.png,1\na.png,0\n", encoding="utf-8"
+    )
+
+    _assert_predictions_cover(predictions, expected)
+
+
+def test_prediction_coverage_rejects_duplicate_identity_values(tmp_path: Path) -> None:
+    expected = tmp_path / "features.csv"
+    expected.write_text("sample_id,feature\na,1\nb,2\n", encoding="utf-8")
+    predictions = tmp_path / "predictions"
+    predictions.mkdir()
+    (predictions / "part.csv").write_text(
+        "sample_id,prediction\na,0\na,1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="duplicate identity"):
+        _assert_predictions_cover(predictions, expected)
+
+
+def test_prediction_coverage_rejects_extra_identity_values(tmp_path: Path) -> None:
+    expected = tmp_path / "features.csv"
+    expected.write_text("sample_id,feature\na,1\n", encoding="utf-8")
+    predictions = tmp_path / "predictions"
+    predictions.mkdir()
+    (predictions / "part.csv").write_text(
+        "sample_id,prediction\na,0\nextra,1\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="absent from"):
+        _assert_predictions_cover(predictions, expected)

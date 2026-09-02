@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,10 +34,8 @@ from athena.research.output_freshness import (
 )
 from athena.research.script_runner import load_directory, pack_directory
 from athena.research.supervisor.events import redact
-from athena.research.supervisor.experiment import (
-    load_agent_result,
-    read_experiment_manifest,
-)
+from athena.research.supervisor.experiment import load_agent_result
+from athena.research.supervisor.manifest import read_experiment_manifest
 from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.validation import ValidationService
 
@@ -60,6 +59,9 @@ class ValidationInput(BaseModel):
     # 审阅 diff 时知晓被验证对象；绝不进入 validation_key（身份仍由
     # commit+metric+direction+evaluator 决定）。
     sota_context: dict[str, Any] | None = None
+    # Confirmed task contract block, rendered in the actual model-visible
+    # content. Default empty so older validation artifacts still deserialize.
+    task_context: str = ""
 
 
 class ValidationDiffReview(BaseModel):
@@ -283,9 +285,10 @@ async def _decode_repair(
     input: ValidationInput,
     feedback: str | None = None,
 ) -> ValidationRepair:
+    prefix = f"{input.task_context}\n\n" if input.task_context else ""
     task = {
-        "content": feedback
-        or "Run frozen-SOTA validation and repair runtime-only failures."
+        "content": prefix
+        + (feedback or "Run frozen-SOTA validation and repair runtime-only failures.")
     }
     if feedback is None and input.sota_context:
         task["content"] = (
@@ -353,6 +356,7 @@ async def _execute_predictions(
                     workdir=workdir,
                     emit=publish,
                     predict_features=predict_features,
+                    evaluation_split="final",
                 ),
             )
             if not result.ok:
@@ -371,15 +375,23 @@ async def _execute_predictions(
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
 
 
-ROW_ID_COLUMN = "__athena_row_id"
+def _row_ids(path: Path) -> tuple[list[str], set[str]]:
+    """Read the identity values from the first column of a CSV.
 
-
-def _row_ids(path: Path) -> set[str]:
+    The split writer currently places its canonical identity first, but its
+    name is deliberately not part of validation.  This keeps VALIDATE usable
+    for datasets whose public prediction contract calls that column
+    ``image_filename``, ``sample_id``, or another dataset-specific name.
+    """
     with path.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
-            return set()
-        return {row[ROW_ID_COLUMN].strip() for row in reader}
+        if not reader.fieldnames:
+            return [], set()
+        identity = reader.fieldnames[0]
+        values = [row.get(identity, "").strip() for row in reader]
+    values = [value for value in values if value]
+    duplicates = {value for value, count in Counter(values).items() if count > 1}
+    return values, duplicates
 
 
 def _assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None:
@@ -393,22 +405,46 @@ def _assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None
     scoring. Diagnosing that from the outside took a full manual replay; the
     information to say it outright was here all along.
     """
-    expected = _row_ids(expected_csv)
+    expected_values, expected_duplicates = _row_ids(expected_csv)
+    expected = set(expected_values)
     if not expected:
         return
-    produced: set[str] = set()
+    if expected_duplicates:
+        raise ValueError(
+            f"expected feature file {expected_csv.name} has duplicate identity "
+            f"values: {sorted(expected_duplicates)[:5]}"
+        )
+    produced_counts: Counter[str] = Counter()
     for path in sorted(predictions_dir.rglob("*.csv")):
-        produced |= _row_ids(path)
+        values, _duplicates = _row_ids(path)
+        produced_counts.update(values)
+    produced = set(produced_counts)
+    produced_duplicates = {
+        value for value, count in produced_counts.items() if count > 1
+    }
+    if produced_duplicates:
+        raise ValueError(
+            "predictions contain duplicate identity values: "
+            f"{sorted(produced_duplicates)[:5]}"
+        )
     if not produced:
         return
+    extra = produced - expected
     missing = expected - produced
     if not missing:
+        if extra:
+            raise ValueError(
+                f"predictions contain {len(extra)} identity values absent from "
+                f"{expected_csv.name}: {sorted(extra)[:5]}"
+            )
         return
     overlap = len(expected & produced)
     detail = (
         f"{len(missing)} of {len(expected)} rows in {expected_csv.name} have no "
         f"prediction (overlap {overlap})."
     )
+    if extra:
+        detail += f" Also found {len(extra)} unexpected identity values."
     if overlap == 0:
         detail += (
             " Zero overlap means the re-run predicted a different split "
@@ -429,6 +465,7 @@ async def _deterministic_preflight(
     """Run the deterministic policy before executing the proposed repair."""
 
     async def accept(_prompt: str) -> ValidationDiffReview:
+        """Accept after deterministic policy has already approved the diff."""
         return ValidationDiffReview(accepted=True, reason="deterministic preflight")
 
     return await review_validation_diff(
@@ -475,6 +512,7 @@ async def _score_result(
                 "validation_key": input.validation_key,
                 "sota_commit": input.sota_commit,
                 "predictions_ref": current.predictions_ref,
+                "metrics_ref": evaluation.metrics_ref,
                 "final_test_score": evaluation.test_score,
             },
             sort_keys=True,
@@ -484,6 +522,7 @@ async def _score_result(
         "status": "COMPLETED",
         "test_score": input.reference_metric,
         "final_test_score": evaluation.test_score,
+        "metrics_ref": evaluation.metrics_ref,
         "evidence_ref": evidence_ref,
     }
     service_result = ValidationService().build_result(
@@ -519,9 +558,7 @@ class ValidationSession:
         try:
             await self._verify_key()
             self.current = await _load_result(self.result_ref, self.deps.store)
-            action = await recovery_action(
-                self.result_ref, self.deps.store, self.input
-            )
+            action = await recovery_action(self.result_ref, self.deps.store, self.input)
             if (
                 action == "commit"
                 and self.current is not None
@@ -557,9 +594,7 @@ class ValidationSession:
             self.input.final_evaluator_ref,
         )
         if self.input.validation_key != expected_key:
-            raise ValueError(
-                "validation_key does not match frozen validation inputs"
-            )
+            raise ValueError("validation_key does not match frozen validation inputs")
 
     async def _run_phase(self) -> ValidationResult:
         """Repair, review, execute, and checkpoint the un-scored prediction run."""
@@ -677,9 +712,7 @@ class ValidationSession:
             raise RuntimeError("validation commit requires reviewed diff evidence")
         diff = await self.deps.git.diff(self.deps.workspace)
         if diff != reviewed_diff:
-            raise RuntimeError(
-                "validation workspace changed after independent review"
-            )
+            raise RuntimeError("validation workspace changed after independent review")
         commit = await self.deps.git.commit(
             self.deps.workspace,
             diff,

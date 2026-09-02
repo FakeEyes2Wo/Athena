@@ -1,87 +1,26 @@
-"""Thin facade for Athena's autonomous research Supervisor.
+"""Explicit facade for Athena's autonomous research Supervisor."""
 
-The Supervisor class intentionally keeps only a small set of collaborators.
-Most public API methods are delegated dynamically to those collaborators, so
-the class stays small while preserving the same callable surface.
-"""
-
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from athena.core.contracts import ArtifactRef, ArtifactStore
+from athena.core.contracts import ArtifactRef
+from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
-from athena.core.workspace import GitWorkspace
+from athena.core.workspace import GitWorkBranch
 from athena.research.supervisor.deps import (
     GeneralTurn,
     IdeatorTurn,
     PlanTurn,
-    PreparePhase,
     Publish,
-    PublishAgentEvent,
     SupervisorDeps,
     SupervisorTurn,
-    ValidationPhase,
-)
-from athena.research.supervisor.experiment import (
-    PlanTurnResult,
-    data_contract_block,
-    handoff_block,
-    load_agent_result,
 )
 from athena.research.supervisor.phases import PhaseMachine, _final_report_text
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
-from athena.research.supervisor.plans import PlanDecision, PlanFailure, wait_run_events
-from athena.research.supervisor.recovery import Recovery
+from athena.research.supervisor.plans import PlanInput
 from athena.research.supervisor.run_state import SupervisorRunState
-from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.search_loop import SearchLoop
 from athena.research.supervisor.state import ResearchState
-
-# Private-name compatibility mappings used by ``__setattr__`` so existing tests
-# and callers that mutate supervisor internals keep updating the collaborators.
-_DEPS_ATTRS = {
-    "_project_root": "project_root",
-    "_state_path": "state_path",
-    "_tree_path": "tree_path",
-    "_store": "store",
-    "_agents": "agents",
-    "_workspaces": "workspaces",
-    "_scheduler": "scheduler",
-    "_recovery": "recovery",
-    "_evaluator_ref": "evaluator_ref",
-    "_final_evaluator_ref": "final_evaluator_ref",
-    "_direction": "direction",
-    "_tolerance": "tolerance",
-    "_run_plan_turn": "run_plan_turn",
-    "_run_supervisor_turn": "run_supervisor_turn",
-    "_run_ideator_turn": "run_ideator_turn",
-    "_run_general_turn": "run_general_turn",
-    "_publish": "publish",
-    "_auto_validate": "auto_validate",
-    "_run_prepare_phase": "run_prepare_phase",
-    "_run_validation_phase": "run_validation_phase",
-    "_publish_agent_event": "publish_agent_event",
-}
-_RUN_ATTRS = {
-    "_branches": "_branches",
-    "_next_guidance": "_next_guidance",
-    "_persistent_guidance": "_persistent_guidance",
-    "_running": "_running",
-    "_next_hypothesis_id": "_next_hypothesis_id",
-    "_stopped": "_stopped",
-    "_kaggle_download": "_kaggle_download",
-    "_wake": "_wake",
-    "_search_task": "_search_task",
-}
-
-
-@dataclass(frozen=True)
-class _CompletedTurn:
-    plan_id: str
-    decision: PlanDecision | None
-    result: PlanTurnResult | None
 
 
 class Supervisor:
@@ -90,64 +29,15 @@ class Supervisor:
     def __init__(
         self,
         *,
-        project_root: Path,
-        state_root: Path | None = None,
         state: ResearchState,
         tree: ResearchTree,
-        store: ArtifactStore,
-        agents: object,
-        workspaces: GitWorkspace,
-        scheduler: Scheduler,
-        recovery: Recovery,
-        evaluator_ref: ArtifactRef | None,
-        run_plan_turn: PlanTurn,
-        run_supervisor_turn: SupervisorTurn,
-        publish: Publish,
-        auto_validate: bool = False,
-        run_ideator_turn: IdeatorTurn | None = None,
-        run_general_turn: GeneralTurn | None = None,
-        direction: Literal["maximize", "minimize"] = "maximize",
-        tolerance: float = 0.0,
-        run_prepare_phase: PreparePhase | None = None,
-        run_validation_phase: ValidationPhase | None = None,
-        publish_agent_event: PublishAgentEvent | None = None,
-        on_plan_settled: Callable[[str], Awaitable[None]] | None = None,
+        deps: SupervisorDeps,
     ) -> None:
         self.state = state
         self.tree = tree
-        project_root = Path(project_root)
-        _athena = (
-            Path(state_root) if state_root is not None else project_root / ".athena"
-        )
-        deps = SupervisorDeps(
-            project_root=project_root,
-            state_path=_athena / "state.json",
-            tree_path=_athena / "research_tree.json",
-            store=store,
-            agents=agents,
-            workspaces=workspaces,
-            scheduler=scheduler,
-            recovery=recovery,
-            evaluator_ref=(
-                evaluator_ref if evaluator_ref is not None else state.evaluator_ref
-            ),
-            final_evaluator_ref=state.final_evaluator_ref,
-            direction=direction,
-            tolerance=tolerance,
-            run_plan_turn=run_plan_turn,
-            run_supervisor_turn=run_supervisor_turn,
-            publish=publish,
-            auto_validate=auto_validate,
-            run_ideator_turn=run_ideator_turn,
-            run_general_turn=run_general_turn,
-            run_prepare_phase=run_prepare_phase,
-            run_validation_phase=run_validation_phase,
-            publish_agent_event=publish_agent_event,
-            on_plan_settled=on_plan_settled,
-        )
-        run = SupervisorRunState(state.kaggle_download)
+        run = SupervisorRunState(state)
         plans = PlanLifecycle(self, deps, run)
-        search = SearchLoop(self, deps, run, plans)
+        search = SearchLoop(self, deps, run, plans, run_turn=plans.run_turn)
         phases = PhaseMachine(self, deps, run, plans, search)
         self._deps = deps
         self._run = run
@@ -155,160 +45,196 @@ class Supervisor:
         self._search = search
         self._phases = phases
 
-    def __setattr__(self, name: str, value: object) -> None:
-        # Collaborator fields are real attributes; everything else is either a
-        # compatibility private alias or a plain test override.
-        if name in {
-            "state",
-            "tree",
-            "_deps",
-            "_run",
-            "_plans",
-            "_search",
-            "_phases",
-        }:
-            object.__setattr__(self, name, value)
-            return
-        try:
-            deps = object.__getattribute__(self, "_deps")
-        except AttributeError:
-            object.__setattr__(self, name, value)
-            return
-        if name in _DEPS_ATTRS:
-            setattr(deps, _DEPS_ATTRS[name], value)
-            return
-        try:
-            run = object.__getattribute__(self, "_run")
-        except AttributeError:
-            object.__setattr__(self, name, value)
-            return
-        if name in _RUN_ATTRS:
-            setattr(run, _RUN_ATTRS[name], value)
-            return
-        object.__setattr__(self, name, value)
+    @property
+    def evaluator_ref(self) -> ArtifactRef | None:
+        """Return the frozen evaluator used by PREPARE and SEARCH."""
+        return self.state.evaluator_ref
 
-    def __getattr__(self, name: str):
-        if name.startswith("__") and name.endswith("__"):
-            raise AttributeError(name)
-        try:
-            run = object.__getattribute__(self, "_run")
-            plans = object.__getattribute__(self, "_plans")
-            search = object.__getattribute__(self, "_search")
-            phases = object.__getattribute__(self, "_phases")
-            deps = object.__getattribute__(self, "_deps")
-        except AttributeError:
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}"
-            ) from None
-        for holder in (run, plans, search, phases):
-            try:
-                return getattr(holder, name)
-            except AttributeError:
-                pass
-        if name in _DEPS_ATTRS:
-            return getattr(deps, _DEPS_ATTRS[name])
-        if name in _RUN_ATTRS:
-            return getattr(run, _RUN_ATTRS[name])
-        try:
-            return getattr(deps, name)
-        except AttributeError:
-            raise AttributeError(
-                f"{type(self).__name__!r} object has no attribute {name!r}"
-            ) from None
+    @evaluator_ref.setter
+    def evaluator_ref(self, value: ArtifactRef | None) -> None:
+        """Replace the frozen evaluator used by PREPARE and SEARCH."""
+        self.state.evaluator_ref = value
 
-    @staticmethod
-    def _previous_failure_block(summary: str | None) -> str:
-        """Render the stored ``kind: error`` summary as a prompt block."""
-        failure = PlanFailure.from_summary(summary)
-        return failure.to_prompt_block() if failure is not None else ""
+    @property
+    def final_evaluator_ref(self) -> ArtifactRef | None:
+        """Return the evaluator reserved for final validation."""
+        return self.state.final_evaluator_ref
 
-    def _hypothesis_block(self, plan_id: str) -> str:
-        """本 Plan 要检验的那条假设，拼进 prompt 正文。
+    @final_evaluator_ref.setter
+    def final_evaluator_ref(self, value: ArtifactRef | None) -> None:
+        """Replace the evaluator reserved for final validation."""
+        self.state.final_evaluator_ref = value
 
-        ``plan_id`` 就是 ``hypothesis_id``（见 ``start_plan``）。树里取不到时返回空串
-        而不是抛异常：少一段上下文该降级，不该让整条 Plan 挂掉。
-        """
-        try:
-            hypothesis = self.tree.get_hypothesis(plan_id)
-        except KeyError:
-            return ""
-        from athena.research.supervisor.experiment import hypothesis_block
+    @property
+    def running_plan_ids(self) -> tuple[str, ...]:
+        """Return Plan IDs with a live local turn task."""
+        return self._run.running_plan_ids
 
-        return hypothesis_block(
-            hypothesis.statement, hypothesis.intervention, hypothesis.expected_effect
-        )
+    @property
+    def next_hypothesis_id(self) -> str | None:
+        """Return the pending one-shot manual Hypothesis selection."""
+        return self._run.next_hypothesis_id
 
-    async def _run_one_turn(self, plan_id: str) -> _CompletedTurn:
-        """Spend one turn durably, run the Agent, then execute trusted scoring."""
-        state = self.state.plans[plan_id]
-        # 消费上一轮的失败摘要并同时清空：反馈只该出现在紧接着的那一轮，否则
-        # 早已修好的错误会一直挂在 prompt 里误导后续所有轮次。
-        previous_failure = state.last_failure
-        state = state.model_copy(
-            update={"turns_used": state.turns_used + 1, "last_failure": None}
-        )
-        self.state.plans[plan_id] = state
-        await self._persist_state()
-        try:
-            run_id = await self._agents.followup(
-                plan_id,
-                {
-                    "content": (
-                        f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
-                        f"turn limit: {state.turn_limit}; patience: {state.patience}; "
-                        f"stale rounds: {state.stale_rounds}."
-                        # 假设、契约与失败反馈都必须走 content：context_refs 到不了
-                        # model（见 experiment.hypothesis_block / handoff_block /
-                        # failure_block）。
-                        + self._hypothesis_block(plan_id)
-                        + handoff_block(await self._plan_handoff(plan_id))
-                        + self._corpus_block(plan_id)
-                        + data_contract_block(self.state.data_contract or "")
-                        + self._previous_failure_block(previous_failure)
-                    ),
-                    "context_refs": [state.context_ref],
-                },
-            )
-            if self._publish_agent_event is None:
-                summary = await self._agents.wait_run(run_id)
-            else:
-                summary = await wait_run_events(
-                    self._agents,
-                    run_id,
-                    lambda kind, ref, data: self._publish_agent_event(
-                        plan_id, kind, ref, data
-                    ),
-                )
-            decision = await load_agent_result(summary, self._store, PlanDecision)
-            if decision is None:
-                return _CompletedTurn(plan_id, None, None)
-        except Exception:
-            return _CompletedTurn(plan_id, None, None)
-        if decision.decision == "abandon" and state.best_ref is None:
-            return _CompletedTurn(plan_id, decision, None)
-        result = await self._run_plan_turn(plan_id, state)
-        await self._record_turn_failure(plan_id, result)
-        return _CompletedTurn(plan_id, decision, result)
+    @property
+    def kaggle_enabled(self) -> bool:
+        """Report whether this run enables Kaggle integration."""
+        return self._run.kaggle_enabled
 
-    async def _record_turn_failure(self, plan_id: str, result) -> None:
-        """Persist a failed turn's reason so the next turn's prompt can carry it.
+    @property
+    def kaggle_download(self) -> bool:
+        """Report whether enabled Kaggle integration may download data."""
+        return self._run.kaggle_download
 
-        Failed results never bring a ``next_state`` (the contract forbids it), so
-        writing here cannot be clobbered by the settlement path that follows.
-        """
-        error = getattr(result, "error", None)
-        if not error:
-            return
-        current = self.state.plans.get(plan_id)
-        if current is None:
-            return
-        summary = (
-            PlanFailure(
-                kind=getattr(result, "kind", "failed"), detail=str(error)
-            ).to_summary()[:1200]
-        )
-        self.state.plans[plan_id] = current.model_copy(update={"last_failure": summary})
-        await self._persist_state()
+    def is_stopped(self) -> bool:
+        """Report whether the Human explicitly stopped the durable run."""
+        return self._run.is_stopped()
+
+    async def record_guidance(self, text: str, scope: str) -> dict[str, object]:
+        """Record Human guidance for one or all later Plan inputs."""
+        return await self._run.record_guidance(text, scope)
+
+    async def start_plan(self, hypothesis_id: str) -> str:
+        """Create the stable Plan identity for one Hypothesis."""
+        return await self._plans.start_plan(hypothesis_id)
+
+    async def plan_input(self, plan_id: str) -> PlanInput:
+        """Load the immutable input frozen for an active Plan."""
+        return await self._plans.plan_input(plan_id)
+
+    def workspace_path(self, plan_id: str) -> Path:
+        """Return the worktree path bound to an active Plan."""
+        return self._plans.workspace_path(plan_id)
+
+    def workspace(self, plan_id: str) -> GitWorkBranch:
+        """Return the Git worktree identity bound to an active Plan."""
+        return self._plans.workspace(plan_id)
+
+    def plan_identity(self, plan_id: str) -> dict[str, str]:
+        """Return stable Agent, workspace, and log identities for a Plan."""
+        return self._plans.plan_identity(plan_id)
+
+    async def recover(self, state: ResearchState | None = None) -> ResearchState:
+        """Reconcile durable Plans and live Agent threads after restart."""
+        return await self._plans.recover(state)
+
+    async def propose_hypothesis(self, **payload: object) -> dict[str, object]:
+        """Validate and register one Supervisor-proposed Hypothesis."""
+        return await self._plans.propose_hypothesis(**payload)
+
+    async def register_hypotheses(
+        self, hypotheses: list[Hypothesis]
+    ) -> dict[str, object]:
+        """Register a batch of Ideator Hypotheses under the current SOTA."""
+        return await self._plans.register_hypotheses(hypotheses)
+
+    async def checkpoint_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
+        """Persist the frozen evaluator produced by PREPARE."""
+        return await self._plans.checkpoint_evaluator(ref)
+
+    async def checkpoint_final_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
+        """Persist the evaluator reserved for final validation."""
+        return await self._plans.checkpoint_final_evaluator(ref)
+
+    async def dispatch_general(self, task: str) -> dict[str, object]:
+        """Dispatch or reuse a General Agent task checkpoint."""
+        return await self._plans.dispatch_general(task)
+
+    async def run_search(self) -> None:
+        """Run the rolling SEARCH scheduler until it parks or completes."""
+        await self._search.run_search()
+
+    async def select_next_hypothesis(self, hypothesis_id: str) -> dict[str, object]:
+        """Queue one validated Hypothesis for manual SEARCH."""
+        return await self._search.select_next_hypothesis(hypothesis_id)
+
+    async def configure_search(self, **payload: object) -> dict[str, object]:
+        """Apply SEARCH budget and concurrency settings."""
+        return await self._search.configure_search(**payload)
+
+    def configure_options(
+        self,
+        *,
+        direction: Literal["maximize", "minimize"] | None = None,
+        tolerance: float | None = None,
+        auto_validate: bool | None = None,
+    ) -> None:
+        """Update the three runtime research options owned by Supervisor."""
+        if direction is not None:
+            self._deps.search.direction = direction
+        if tolerance is not None:
+            self._deps.search.tolerance = tolerance
+        if auto_validate is not None:
+            self._deps.phases.auto_validate = auto_validate
+
+    async def update_waiting_plan_budget(self, **payload: object) -> dict[str, object]:
+        """Extend one exhausted Plan so SEARCH may resume it."""
+        return await self._search.update_waiting_plan_budget(**payload)
+
+    async def set_manual_mode(self, manual: bool) -> dict[str, object]:
+        """Toggle automatic or Human-selected SEARCH scheduling."""
+        return await self._search.set_manual_mode(manual)
+
+    async def start(self) -> None:
+        """Run the current research phase lifecycle."""
+        await self._phases.start()
+
+    async def continue_phase(self) -> None:
+        """Continue the durable phase after an interactive decision."""
+        await self._phases.continue_phase()
+
+    async def checkpoint_validation(self, result_ref: ArtifactRef) -> None:
+        """Persist one recoverable validation result."""
+        await self._phases.checkpoint_validation(result_ref)
+
+    async def set_phase_decision(self, decision: str) -> dict[str, object]:
+        """Apply a validated SEARCH or VALIDATE phase decision."""
+        return await self._phases.set_phase_decision(decision)
+
+    async def pause(self) -> str:
+        """Pause new Agent dispatch while retaining unfinished work."""
+        return await self._phases.pause()
+
+    async def resume(self, *, restarting: bool = False) -> str:
+        """Resume Agent dispatch after an explicit Human command."""
+        return await self._phases.resume(restarting=restarting)
+
+    async def suspend(self) -> str:
+        """Park a live run before its runtime is torn down."""
+        return await self._phases.suspend()
+
+    async def request_stop(self) -> str:
+        """Persist an explicit Human stop and interrupt active Plans."""
+        return await self._phases.request_stop()
+
+    async def stop(self) -> None:
+        """Park scheduling and interrupt active local Plan turns."""
+        await self._phases.stop()
+
+    async def message(self, text: str) -> str:
+        """Delegate ordinary Human text to the Supervisor Agent."""
+        return await self._phases.message(text)
+
+    async def set_kaggle_enabled(
+        self, enabled: bool, download: bool = True
+    ) -> dict[str, object]:
+        """Persist the Kaggle integration and download policy."""
+        return await self._phases.set_kaggle_enabled(enabled, download)
+
+    async def record_task_understanding(self, **payload: object) -> dict[str, object]:
+        """Persist the structured task understanding projection."""
+        return await self._phases.record_task_understanding(**payload)
+
+    async def read_hypotheses(self) -> dict[str, object]:
+        """Return pending Hypotheses, SOTA, and SEARCH attempt counts."""
+        return await self._phases.read_hypotheses()
+
+    async def read_state(self) -> dict[str, object]:
+        """Return the current research phase and configuration."""
+        return await self._phases.read_state()
+
+    async def read_plans(self) -> dict[str, object]:
+        """Return active Plan budgets and locally running IDs."""
+        return await self._phases.read_plans()
 
 
 __all__ = [

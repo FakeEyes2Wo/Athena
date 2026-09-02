@@ -22,6 +22,7 @@ from athena.agents.ideator_agent import HandoffResult
 from athena.agents.prepare_agent import EDA_WORKER_AGENT_TYPE, PREPARE_EDA_AGENT_ID
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactStore
+from athena.research.agent_turn_common import AGENT_TURN_TIMEOUT_SECONDS
 from athena.research.supervisor.experiment import load_agent_result
 from athena.research.supervisor.plans import wait_run_events
 
@@ -61,6 +62,16 @@ def _parse(lines: list[str]) -> list[tuple[bool, list[Todo]]]:
     return stages
 
 
+async def _reap_worker(agents: AgentRuntime, agent_id: str | None) -> None:
+    """Release one finished EDA worker without masking its task outcome."""
+    if agent_id is None:
+        return
+    try:
+        await agents.reap(agent_id)
+    except Exception:  # noqa: BLE001,S110 - GC must never mask task failure
+        pass
+
+
 async def _run_one(
     todo: Todo,
     *,
@@ -95,6 +106,10 @@ async def _run_one(
                 f"Assigned output file: {output_file}\n"
                 f"Todo: {text}\n"
                 f"Workspace: {workspace}\n\n"
+                "Finish quickly and use at most 8 tool calls. Use only installed "
+                "dependencies; do not install packages with pip, conda, or uv. "
+                "Keep the report focused and do not exhaustively enumerate the "
+                "dataset. "
                 "Do not write EDA_INDEX.md, EDA_HANDOFF.md, EDA_TODO.md, or any "
                 "file other than the assigned output file."
             )
@@ -129,12 +144,18 @@ async def _run_one(
                 if project_event is not None and agent_id is not None:
                     await project_event(agent_id, kind, ref, data)
 
-            summary = await wait_run_events(agents, run_id, publish)
+            summary = await asyncio.wait_for(
+                wait_run_events(agents, run_id, publish),
+                timeout=AGENT_TURN_TIMEOUT_SECONDS,
+            )
             if await load_agent_result(summary, store, HandoffResult) is None:
                 raise RuntimeError(f"{output_file} returned no result")
             if not (workspace / output_file).is_file():
                 raise RuntimeError(f"{output_file} was not written")
             return True
+        except TimeoutError:
+            # A hung worker consumes its whole turn budget; retrying repeats the hang.
+            return False
         except Exception:
             if attempt >= retries:
                 return False
@@ -142,11 +163,7 @@ async def _run_one(
         finally:
             # EDA workers are one-shot subagents: reap immediately so a long
             # PREPARE phase does not accumulate threads/rollout metadata.
-            if agent_id is not None:
-                try:
-                    await agents.reap(agent_id)
-                except Exception:  # noqa: BLE001,S110 - GC must never mask task failure
-                    pass
+            await _reap_worker(agents, agent_id)
     return False
 
 

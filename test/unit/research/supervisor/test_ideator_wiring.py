@@ -8,6 +8,14 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
+from athena.research.supervisor.deps import (
+    PhaseActions,
+    ResearchActions,
+    SearchServices,
+    SupervisorDeps,
+    SupervisorPaths,
+    SupervisorRuntime,
+)
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
@@ -63,19 +71,26 @@ async def _make_supervisor(tmp_path: Path, *, run_ideator_turn=None) -> Supervis
         return None
 
     return Supervisor(
-        project_root=tmp_path,
         state=state,
         tree=tree,
-        store=store,
-        agents=None,
-        workspaces=None,
-        scheduler=Scheduler(),
-        recovery=Recovery(),
-        evaluator_ref=evaluator_ref,
-        run_plan_turn=unused_plan_turn,
-        run_supervisor_turn=unused_supervisor_turn,
-        publish=publish,
-        run_ideator_turn=run_ideator_turn,
+        deps=SupervisorDeps(
+            paths=SupervisorPaths(
+                project_root=tmp_path,
+                state_path=tmp_path / ".athena" / "state.json",
+                tree_path=tmp_path / ".athena" / "research_tree.json",
+            ),
+            runtime=SupervisorRuntime(store=store, agents=None, workspaces=None),
+            research=ResearchActions(
+                plan=unused_plan_turn,
+                supervisor=unused_supervisor_turn,
+                ideator=run_ideator_turn,
+            ),
+            phases=PhaseActions(publish=publish),
+            search=SearchServices(
+                scheduler=Scheduler(),
+                recovery=Recovery(),
+            ),
+        ),
     )
 
 
@@ -156,7 +171,7 @@ async def test_generate_runs_ideator_turn_and_registers(tmp_path: Path) -> None:
 
     supervisor = await _make_supervisor(tmp_path, run_ideator_turn=fake_ideator)
 
-    generated = await supervisor._fill_slots()
+    generated = await supervisor._search._fill_slots()
 
     assert generated is True
     assert calls == [4]  # free_slots=4 → GENERATE(4)
@@ -176,7 +191,7 @@ async def test_generate_without_ideator_falls_back_to_supervisor(
 ) -> None:
     supervisor = await _make_supervisor(tmp_path)
     with pytest.raises(AssertionError, match="Supervisor turn must not run"):
-        await supervisor._fill_slots()
+        await supervisor._search._fill_slots()
 
 
 @pytest.mark.asyncio
@@ -205,7 +220,7 @@ async def test_a_ready_corpus_triggers_one_extra_ideation_round(tmp_path: Path) 
     supervisor.state.search_limit = 0
     supervisor.state.corpus_ref = "sha256:corpus"
 
-    generated = await supervisor._fill_slots()
+    generated = await supervisor._search._fill_slots()
 
     assert generated is True
     assert calls == [supervisor.state.hypotheses_per_ideator]
@@ -232,9 +247,9 @@ async def test_the_extra_ideation_round_happens_once_per_corpus_version(
     supervisor = await _make_supervisor(tmp_path, run_ideator_turn=fake_ideator)
     supervisor.state.corpus_ref = "sha256:corpus"
 
-    await supervisor._corpus_ideation()
-    await supervisor._corpus_ideation()
-    await supervisor._corpus_ideation()
+    await supervisor._search._corpus_ideation()
+    await supervisor._search._corpus_ideation()
+    await supervisor._search._corpus_ideation()
 
     assert calls == [supervisor.state.hypotheses_per_ideator]
 
@@ -246,7 +261,7 @@ async def test_no_corpus_means_no_extra_round(tmp_path: Path) -> None:
 
     supervisor = await _make_supervisor(tmp_path, run_ideator_turn=fake_ideator)
 
-    assert await supervisor._corpus_ideation() is False
+    assert await supervisor._search._corpus_ideation() is False
     assert supervisor.state.corpus_ideated_ref is None
 
 
@@ -261,12 +276,12 @@ async def test_an_extended_corpus_earns_another_round(tmp_path: Path) -> None:
 
     supervisor = await _make_supervisor(tmp_path, run_ideator_turn=fake_ideator)
     supervisor.state.corpus_ref = "sha256:first"
-    await supervisor._corpus_ideation()
-    await supervisor._corpus_ideation()
+    await supervisor._search._corpus_ideation()
+    await supervisor._search._corpus_ideation()
 
     supervisor.state.corpus_ref = "sha256:extended"
-    await supervisor._corpus_ideation()
-    await supervisor._corpus_ideation()
+    await supervisor._search._corpus_ideation()
+    await supervisor._search._corpus_ideation()
 
     assert calls == ["sha256:first", "sha256:extended"]
     assert supervisor.state.corpus_ideated_ref == "sha256:extended"

@@ -23,6 +23,80 @@ def _hypothesis(label: str) -> Hypothesis:
     )
 
 
+def _runtime(
+    tmp_path,
+    *,
+    eda_dir: str,
+    ideator_count: int = 3,
+    hypotheses_per_ideator: int = 2,
+) -> ResearchRuntime:
+    """Build a real runtime and set only the state exercised by these tests."""
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        ideator_count=ideator_count,
+        hypotheses_per_ideator=hypotheses_per_ideator,
+    )
+    runtime.session.lifecycle.provider = object()
+    runtime.state.eda_dir = eda_dir
+    return runtime
+
+
+class _LaneAgents:
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    async def create_root(self, _agent_type, request, *, name, agent_id=None):
+        self.requests.append(request)
+        return agent_id or name, f"run-{name}"
+
+    async def reap(self, _agent_id) -> None:
+        pass
+
+
+def _lane_runner(monkeypatch, batches: list[HypothesisBatch]):
+    agents = _LaneAgents()
+    runtime = SimpleNamespace(
+        agents=agents,
+        ideation="baseline",
+        store=object(),
+        supervisor=SimpleNamespace(evaluator_ref=None),
+        survey_corpus_ref=lambda: None,
+    )
+    pending = iter(batches)
+
+    async def no_task_context(_runtime):
+        return ""
+
+    async def no_eval_handoff(_store, _ref):
+        return ""
+
+    async def completed_run(*_args, **_kwargs):
+        return SimpleNamespace(error=None)
+
+    async def next_batch(_summary, _store, _schema):
+        return next(pending)
+
+    async def accept_batch(self, batch, *, rejections=None):
+        return batch
+
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner.confirmed_task_context_block",
+        no_task_context,
+    )
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner.read_eval_handoff", no_eval_handoff
+    )
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner._wait_run_with_heartbeat", completed_run
+    )
+    monkeypatch.setattr(
+        "athena.research.agent_turn_runner.load_agent_result", next_batch
+    )
+    runner = AgentTurnRunner(runtime)
+    runner._finish_ideator_batch = MethodType(accept_batch, runner)
+    return runner, agents
+
+
 @pytest.mark.parametrize(
     ("count", "lanes", "expected"),
     [
@@ -39,17 +113,68 @@ def test_ideator_allocations_cap_workers_at_lanes(count, lanes, expected) -> Non
 
 
 @pytest.mark.asyncio
+async def test_ideator_request_allows_writes_only_in_its_lane(
+    monkeypatch, tmp_path
+) -> None:
+    runner, agents = _lane_runner(
+        monkeypatch,
+        [HypothesisBatch(hypotheses=[_hypothesis("lane")])],
+    )
+
+    await runner._run_ideator_lane("ideator-2-1", 1, tmp_path)
+
+    content = agents.requests[0]["content"]
+    assert "diagnostic scripts, figures, and evidence notes" in content
+    assert "only under exploration/ideator-2-1/" in content
+    assert (
+        "keep every PREPARE, EDA, baseline, split, and evaluator file unchanged"
+        in content
+    )
+    assert (tmp_path / "exploration" / "ideator-2-1").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_accepted_ideator_batch_is_written_to_lane_result(
+    monkeypatch, tmp_path
+) -> None:
+    batch = HypothesisBatch(hypotheses=[_hypothesis("accepted")])
+    runner, _agents = _lane_runner(monkeypatch, [batch])
+
+    accepted = await runner._run_ideator_lane("ideator-3-2", 1, tmp_path)
+
+    result_path = tmp_path / "exploration" / "ideator-3-2" / "result.json"
+    saved = HypothesisBatch.model_validate_json(result_path.read_text(encoding="utf-8"))
+    assert saved.model_dump() == accepted.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_ideator_lane_results_do_not_overwrite_each_other(
+    monkeypatch, tmp_path
+) -> None:
+    first = HypothesisBatch(hypotheses=[_hypothesis("first")])
+    second = HypothesisBatch(hypotheses=[_hypothesis("second")])
+    runner, _agents = _lane_runner(monkeypatch, [first, second])
+
+    await runner._run_ideator_lane("ideator-4-1", 1, tmp_path)
+    await runner._run_ideator_lane("ideator-4-2", 1, tmp_path)
+
+    first_path = tmp_path / "exploration" / "ideator-4-1" / "result.json"
+    second_path = tmp_path / "exploration" / "ideator-4-2" / "result.json"
+    saved_first = HypothesisBatch.model_validate_json(
+        first_path.read_text(encoding="utf-8")
+    )
+    saved_second = HypothesisBatch.model_validate_json(
+        second_path.read_text(encoding="utf-8")
+    )
+    assert saved_first.hypotheses[0].intervention == "change first"
+    assert saved_second.hypotheses[0].intervention == "change second"
+
+
+@pytest.mark.asyncio
 async def test_ideator_turn_runs_actual_lane_count_concurrently_and_merges_in_order(
     tmp_path,
 ) -> None:
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._corpus_sessions = []
-    runtime._provider = object()
-    runtime._state = SimpleNamespace(
-        eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
-    )
-    runtime._supervisor = SimpleNamespace(state=runtime._state)
-    runtime._registry = SimpleNamespace(contains=lambda _name: True)
+    runtime = _runtime(tmp_path, eda_dir=str(tmp_path))
     started: list[tuple[str, int]] = []
     all_started = asyncio.Event()
 
@@ -126,14 +251,7 @@ async def test_ideator_event_forwarding_uses_stable_lane_label() -> None:
 async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
     tmp_path,
 ) -> None:
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._corpus_sessions = []
-    runtime._provider = object()
-    runtime._state = SimpleNamespace(
-        eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
-    )
-    runtime._supervisor = SimpleNamespace(state=runtime._state)
-    runtime._registry = SimpleNamespace(contains=lambda _name: True)
+    runtime = _runtime(tmp_path, eda_dir=str(tmp_path))
     errors: list[tuple[str, str]] = []
 
     async def run_lane(
@@ -172,14 +290,7 @@ async def test_ideator_turn_keeps_successful_peers_when_one_lane_fails(
 async def test_ideator_turn_keeps_every_generated_hypothesis_without_truncation(
     tmp_path,
 ) -> None:
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._corpus_sessions = []
-    runtime._provider = object()
-    runtime._state = SimpleNamespace(
-        eda_dir=str(tmp_path), ideator_count=3, hypotheses_per_ideator=2
-    )
-    runtime._supervisor = SimpleNamespace(state=runtime._state)
-    runtime._registry = SimpleNamespace(contains=lambda _name: True)
+    runtime = _runtime(tmp_path, eda_dir=str(tmp_path))
 
     async def run_lane(
         self, label: str, _target: int, _eda_dir, profile=None, handoff_texts=None
@@ -209,17 +320,9 @@ async def test_ideator_turn_keeps_every_generated_hypothesis_without_truncation(
 async def test_ideator_turn_resolves_relative_eda_dir_against_project_root(
     tmp_path,
 ) -> None:
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._corpus_sessions = []
-    runtime._provider = object()
-    runtime._root = tmp_path
     workspace = tmp_path / "workspaces" / "eda"
     workspace.mkdir(parents=True)
-    runtime._state = SimpleNamespace(
-        eda_dir="workspaces/eda", ideator_count=3, hypotheses_per_ideator=2
-    )
-    runtime._supervisor = SimpleNamespace(state=runtime._state)
-    runtime._registry = SimpleNamespace(contains=lambda _name: True)
+    runtime = _runtime(tmp_path, eda_dir="workspaces/eda")
     resolved: list[str] = []
 
     async def run_lane(
@@ -244,15 +347,12 @@ async def test_ideator_turn_resolves_relative_eda_dir_against_project_root(
 @pytest.mark.asyncio
 async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
     """任一 Ideator lane 请求补充 EDA 时，触发 Data Agent 写回 EDA 目录。"""
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._corpus_sessions = []
-    runtime._provider = object()
-    runtime._root = tmp_path
-    runtime._state = SimpleNamespace(
-        eda_dir=str(tmp_path), ideator_count=2, hypotheses_per_ideator=1
+    runtime = _runtime(
+        tmp_path,
+        eda_dir=str(tmp_path),
+        ideator_count=2,
+        hypotheses_per_ideator=1,
     )
-    runtime._supervisor = SimpleNamespace(state=runtime._state)
-    runtime._registry = SimpleNamespace(contains=lambda _name: True)
     requests: list[str] = []
 
     async def run_lane(
@@ -282,13 +382,9 @@ async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_gated_batch_preserves_eda_request(monkeypatch) -> None:
+async def test_gated_batch_preserves_eda_request(monkeypatch, tmp_path) -> None:
     """gated 模式的 IdeatorHypothesisBatch 也把 eda_request 传给动态 EDA。"""
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._ideation = "ideageneration"
-    runtime._model = "m"
-    runtime._store = object()
-    runtime._supervisor = SimpleNamespace(state=SimpleNamespace(corpus_ref=None))
+    runtime = ResearchRuntime(project_root=tmp_path, model="m")
 
     async def fake_pipeline(drafts, **kwargs):
         return [_hypothesis("kept")]

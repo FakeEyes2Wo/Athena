@@ -174,7 +174,7 @@ async def test_runtime_projects_agent_text_callback_to_output(tmp_path) -> None:
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "hyp_1",
         "agent/text_delta",
         "event:turn_1",
@@ -193,13 +193,13 @@ async def test_runtime_projects_llm_tool_llm_events_in_arrival_order(tmp_path) -
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare",
         "agent/function_call",
         "event:call-1",
         {"name": "shell_command", "arguments": {"command": "inspect data"}},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare",
         "command/completed",
         "event:tool-1",
@@ -211,7 +211,7 @@ async def test_runtime_projects_llm_tool_llm_events_in_arrival_order(tmp_path) -
             truncated=False,
         ).to_dict(),
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare",
         "agent/text_delta",
         "event:text-1",
@@ -232,13 +232,13 @@ async def test_runtime_does_not_invent_agent_text_before_a_tool(tmp_path) -> Non
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare",
         "agent/function_call",
         "event:call-1",
         {"name": "shell_command", "arguments": {"command": "inspect data"}},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare",
         "command/completed",
         "event:tool-1",
@@ -267,7 +267,7 @@ async def test_long_shell_command_is_middle_truncated_in_function_call(
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
     command = "python train.py " + "--very-long-argument " * 40
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "prepare",
         "agent/function_call",
         "event:call-1",
@@ -289,13 +289,13 @@ async def test_ideator_projects_only_llm_text_and_hides_tool_calls(tmp_path) -> 
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "ideator-1",
         "agent/function_call",
         "event:call-1",
         {"name": "read_file", "arguments": {"path": "eda.csv"}},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "ideator-1",
         "command/completed",
         "event:tool-1",
@@ -303,7 +303,7 @@ async def test_ideator_projects_only_llm_text_and_hides_tool_calls(tmp_path) -> 
             ok=True, stdout="tool result", stderr="", exit_code=0, truncated=False
         ).to_dict(),
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "ideator-1",
         "agent/text_delta",
         "event:text-1",
@@ -322,13 +322,13 @@ async def test_ideator_trailing_newline_is_stripped_from_text(tmp_path) -> None:
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "ideator-2",
         "agent/text_delta",
         "event:text-1",
         {"delta": "first token\n"},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "ideator-2",
         "agent/text_delta",
         "event:text-2",
@@ -345,31 +345,31 @@ async def test_streamed_agent_text_is_persisted_as_complete_messages(
 ) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "hyp_1",
         "agent/text_delta",
         "event:text-1",
         {"delta": "hello", "accumulated": "hello"},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "hyp_1",
         "agent/text_delta",
         "event:text-2",
         {"delta": " world", "accumulated": "hello world"},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "hyp_1",
         "agent/function_call",
         "event:call-1",
         {"name": "shell_command", "arguments": {"command": "ls"}},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "hyp_1",
         "agent/text_delta",
         "event:text-3",
         {"delta": "password=secret123 done", "accumulated": "password=secret123 done"},
     )
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "hyp_1",
         "turn_completed",
         "event:end",
@@ -394,9 +394,9 @@ async def test_streamed_agent_text_is_persisted_as_complete_messages(
 
 def test_state_projection_includes_announced_ideator_lane_count(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
-    runtime._events_bus.set_ideator_lanes(3)
+    runtime.events.set_ideator_lanes(3)
 
-    event = runtime._events_bus._state_event()
+    event = runtime.events._state_event()
 
     assert event.search["ideator_lanes"] == 3
 
@@ -443,7 +443,7 @@ async def test_supervisor_bare_output_is_projected_with_seq(tmp_path) -> None:
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
-    await runtime._events_bus.publish_from_supervisor(
+    await runtime.events.publish_from_supervisor(
         "output",
         {
             "source": "supervisor",
@@ -465,7 +465,7 @@ async def test_supervisor_bare_output_without_text_still_projects(tmp_path) -> N
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
-    await runtime._events_bus.publish_from_supervisor(
+    await runtime.events.publish_from_supervisor(
         "output", {"source": "supervisor", "channel": "text"}
     )
 
@@ -517,7 +517,7 @@ def test_state_projection_reads_successes_and_sota_from_research_tree(tmp_path) 
     )
     runtime.tree.set_sota("exp_1")
 
-    event = runtime._events_bus._state_event()
+    event = runtime.events._state_event()
 
     assert event.search["attempts"] == 1
     assert event.search["successes"] == 1
@@ -561,7 +561,7 @@ def test_state_attempts_are_settled_experiments_plus_active_plans(tmp_path) -> N
         patience=3,
     )
 
-    event = runtime._events_bus._state_event()
+    event = runtime.events._state_event()
 
     assert event.search["attempts"] == 1
     assert event.search["successes"] == 0
@@ -577,7 +577,7 @@ def test_state_waiting_projection_has_exact_plan_ids_and_reason(tmp_path) -> Non
         patience=3,
     )
 
-    event = runtime._events_bus._state_event()
+    event = runtime.events._state_event()
 
     assert event.waiting == {
         "plans": ["hyp_wait"],
@@ -592,9 +592,9 @@ async def test_completed_command_projects_one_safe_output_with_its_full_ref(
     runtime = ResearchRuntime(project_root=tmp_path)
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
-    output_ref = await runtime._store.put_text("complete redacted output")
+    output_ref = await runtime.store.put_text("complete redacted output")
 
-    await runtime._events_bus.project_agent_event(
+    await runtime.events.project_agent_event(
         "hyp_1",
         "command/completed",
         "exec:out",
@@ -625,7 +625,7 @@ async def test_completed_command_replaces_an_unsanitized_full_output_ref(
     runtime = ResearchRuntime(project_root=tmp_path)
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
-    unsafe_ref = await runtime._store.put_text("\x1b[32mcomplete\x1b[0m\r\nnext\x00�")
+    unsafe_ref = await runtime.store.put_text("\x1b[32mcomplete\x1b[0m\r\nnext\x00�")
 
     await runtime.project_command_result(
         CommandResult(
@@ -641,7 +641,7 @@ async def test_completed_command_replaces_an_unsanitized_full_output_ref(
     event = [payload for kind, payload in seen if kind == "output"][0]
     assert event["text"] == "complete\nnext"
     assert event["artifact_ref"] != unsafe_ref
-    assert await runtime._store.get_text(event["artifact_ref"]) == "complete\nnext"
+    assert await runtime.store.get_text(event["artifact_ref"]) == "complete\nnext"
 
 
 def _state_json(eda_dir: str | None) -> str:
@@ -667,7 +667,7 @@ def test_init_preserves_relative_eda_dir_within_project(tmp_path) -> None:
 
     runtime = ResearchRuntime(project_root=tmp_path)
 
-    assert runtime._state.eda_dir == "workspaces/eda"
+    assert runtime.state.eda_dir == "workspaces/eda"
 
 
 def test_init_nulls_stale_absolute_eda_dir_outside_project(tmp_path) -> None:
@@ -679,4 +679,4 @@ def test_init_nulls_stale_absolute_eda_dir_outside_project(tmp_path) -> None:
 
     runtime = ResearchRuntime(project_root=tmp_path)
 
-    assert runtime._state.eda_dir is None
+    assert runtime.state.eda_dir is None

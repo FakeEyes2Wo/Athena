@@ -1,8 +1,6 @@
 """Narrow one-Agent PREPARE phase execution."""
 
-import asyncio
 import json
-import logging
 import subprocess
 from pathlib import Path
 
@@ -18,6 +16,7 @@ from athena.core.workspace import (
 )
 from athena.execution.runtime import ExecutionContext, ExecutionRuntime
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.supervisor.evaluator_plan import _reap_agent, read_eval_handoff
 from athena.research.supervisor.experiment import PlanRunner, load_agent_result
 from athena.research.supervisor.plans import (
     PlanDecision,
@@ -25,13 +24,10 @@ from athena.research.supervisor.plans import (
     PlanState,
     wait_run_events,
 )
-from athena.research.supervisor.prompt_context import handoff_block, read_eval_handoff
-
-logger = logging.getLogger(__name__)
+from athena.research.supervisor.prompt_context import handoff_block
 
 PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
-_REAP_TIMEOUT_SECONDS = 5.0
 
 
 class PrepareResult(BaseModel):
@@ -45,32 +41,6 @@ class PrepareResult(BaseModel):
     predictions_ref: ArtifactRef
     evidence_ref: ArtifactRef
     report_ref: ArtifactRef
-
-
-def _consume_reap_result(task: "asyncio.Task[None]") -> None:
-    if not task.cancelled():
-        task.exception()
-
-
-async def _reap_agent(agents: AgentRuntime, agent_id: str) -> None:
-    """Bound one-shot PREPARE agent cleanup without masking its result."""
-    task = asyncio.create_task(agents.reap(agent_id))
-    done, _ = await asyncio.wait({task}, timeout=_REAP_TIMEOUT_SECONDS)
-    if task not in done:
-        task.add_done_callback(_consume_reap_result)
-        task.cancel()
-        logger.warning("timed out reaping PREPARE agent %s", agent_id)
-        return
-    if task.cancelled():
-        logger.warning("PREPARE agent reap was cancelled for %s", agent_id)
-        return
-    error = task.exception()
-    if error is not None:
-        logger.warning(
-            "failed to reap PREPARE agent %s",
-            agent_id,
-            exc_info=(type(error), error, error.__traceback__),
-        )
 
 
 async def _decision_from_summary(summary, store: ArtifactStore) -> PlanDecision:

@@ -8,10 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
+from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.runtime import ResearchRuntime
-from athena.research.agent_turn_runner import AgentTurnRunner
-from athena.research.supervisor.experiment import read_eval_handoff
+from athena.research.supervisor.evaluator_plan import read_eval_handoff
+from athena.research.supervisor.prompt_context import handoff_block
 
 _HANDOFF = "# Eval contract\n\npredictions/predictions.csv: header,id,target\n"
 
@@ -59,9 +60,9 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
     evaluator_ref = await _freeze_bundle(store, include_handoff=True)
 
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._store = store
-    runtime._supervisor = SimpleNamespace(
+    runtime = ResearchRuntime(project_root=tmp_path)
+    runtime.services.infrastructure.store = store
+    runtime.services.workflow.supervisor = SimpleNamespace(
         evaluator_ref=evaluator_ref, state=SimpleNamespace(corpus_ref=None)
     )
     runner = AgentTurnRunner(runtime)
@@ -72,10 +73,10 @@ async def test_ideator_lane_surfaces_eval_handoff_in_context(tmp_path) -> None:
         captured["request"] = request
         raise RuntimeError("stop after capture")
 
-    runtime._agents = SimpleNamespace(create_root=create_root)
+    runtime.services.infrastructure.agents = SimpleNamespace(create_root=create_root)
 
     with pytest.raises(RuntimeError, match="stop after capture"):
-        await runner._run_ideator_lane("ideator-1", 1, Path(tmp_path))
+        await runner._run_ideator_lane("ideator-1-1", 1, Path(tmp_path))
 
     request = captured["request"]
     # content 是唯一到得了 model 的信道；ref 仍然留着，供事后审计与重放。
@@ -149,8 +150,6 @@ async def test_a_search_candidate_carries_the_eval_contract_in_its_plan_input(
 
 
 def test_handoff_block_is_empty_when_there_is_no_contract() -> None:
-    from athena.research.supervisor.experiment import handoff_block
-
     assert handoff_block("") == ""
     assert handoff_block("   \n ") == ""
     assert "row_id" in handoff_block("id column: row_id")

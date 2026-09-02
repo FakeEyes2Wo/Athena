@@ -12,9 +12,20 @@
 """
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
-from athena.research.supervisor.experiment import hypothesis_block
+from athena.research.supervisor.deps import (
+    PhaseActions,
+    ResearchActions,
+    SearchServices,
+    SupervisorDeps,
+    SupervisorPaths,
+    SupervisorRuntime,
+)
+from athena.research.supervisor.prompt_context import hypothesis_block
+from athena.research.supervisor.recovery import Recovery
+from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.supervisor import Supervisor
 
 
@@ -47,36 +58,6 @@ class HypothesisBlockTest(unittest.TestCase):
         self.assertNotIn("Intervention to implement:", block)
 
 
-class SupervisorHypothesisBlockTest(unittest.TestCase):
-    """``_hypothesis_block`` 从树里取假设；取不到时降级为空串而不是让 Plan 挂掉。"""
-
-    @staticmethod
-    def _supervisor(tree) -> Supervisor:
-        supervisor = Supervisor.__new__(Supervisor)
-        supervisor.tree = tree
-        return supervisor
-
-    def test_it_renders_the_hypothesis_bound_to_this_plan(self) -> None:
-        hypothesis = SimpleNamespace(
-            statement="noise columns hurt",
-            intervention="drop noise_00..noise_09",
-            expected_effect="AP rises",
-        )
-        tree = SimpleNamespace(get_hypothesis=lambda plan_id: hypothesis)
-
-        block = self._supervisor(tree)._hypothesis_block("hyp_abc")
-
-        self.assertIn("drop noise_00..noise_09", block)
-
-    def test_an_unknown_plan_degrades_to_empty(self) -> None:
-        def missing(plan_id: str):
-            raise KeyError(plan_id)
-
-        tree = SimpleNamespace(get_hypothesis=missing)
-
-        self.assertEqual("", self._supervisor(tree)._hypothesis_block("hyp_gone"))
-
-
 class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
     """真正断掉的是集成点：发给 PlanAgent 的那条 message 里到底有没有假设。
 
@@ -96,24 +77,17 @@ class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
             async def wait_run(self, run_id):
                 return SimpleNamespace(result_ref=None)
 
-        supervisor = Supervisor.__new__(Supervisor)
-        supervisor.tree = SimpleNamespace(
+        tree = SimpleNamespace(
             get_hypothesis=lambda plan_id: SimpleNamespace(
                 statement="dropping noise columns reduces overfitting",
                 intervention="exclude noise_00 through noise_09",
                 expected_effect="average precision rises",
             )
         )
-        supervisor.state = SimpleNamespace(
-            plans={"hyp_abc": _plan_state()}, data_contract=None
-        )
-        supervisor._agents = Agents()
-        supervisor._publish_agent_event = None
-        supervisor._persist_state = _noop
-        supervisor._plan_handoff = _handoff
-        supervisor._corpus_block = lambda plan_id: ""
+        state = SimpleNamespace(plans={"hyp_abc": _plan_state()}, data_contract=None)
+        supervisor = _configured_supervisor(tree, state, Agents())
 
-        await supervisor._run_one_turn("hyp_abc")
+        await supervisor._plans.run_turn("hyp_abc")
 
         content = sent["content"]
         self.assertIn("exclude noise_00 through noise_09", content)
@@ -140,19 +114,13 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
             async def wait_run(self, run_id):
                 return SimpleNamespace(result_ref=None)
 
-        supervisor = Supervisor.__new__(Supervisor)
-        supervisor.tree = SimpleNamespace(
+        tree = SimpleNamespace(
             get_hypothesis=lambda plan_id: SimpleNamespace(
                 statement="s", intervention="i", expected_effect="e"
             )
         )
-        supervisor.state = SimpleNamespace(plans={"hyp_abc": state}, data_contract=None)
-        supervisor._agents = Agents()
-        supervisor._publish_agent_event = None
-        supervisor._persist_state = _noop
-        supervisor._plan_handoff = _handoff
-        supervisor._corpus_block = lambda plan_id: ""
-        return supervisor
+        durable = SimpleNamespace(plans={"hyp_abc": state}, data_contract=None)
+        return _configured_supervisor(tree, durable, Agents())
 
     async def test_the_previous_failure_reaches_the_next_prompt(self) -> None:
         sent: dict[str, object] = {}
@@ -161,7 +129,7 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
         )
         supervisor = self._supervisor(sent, state)
 
-        await supervisor._run_one_turn("hyp_abc")
+        await supervisor._plans.run_turn("hyp_abc")
 
         content = sent["content"]
         self.assertIn("ModuleNotFoundError: astropy", content)
@@ -175,7 +143,7 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
             sent, _plan_state(last_failure="output_failed: nope")
         )
 
-        await supervisor._run_one_turn("hyp_abc")
+        await supervisor._plans.run_turn("hyp_abc")
 
         self.assertIsNone(supervisor.state.plans["hyp_abc"].last_failure)
 
@@ -183,14 +151,14 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
         sent: dict[str, object] = {}
         supervisor = self._supervisor(sent, _plan_state())
 
-        await supervisor._run_one_turn("hyp_abc")
+        await supervisor._plans.run_turn("hyp_abc")
 
         self.assertNotIn("Previous attempt failed", sent["content"])
 
     async def test_a_failed_result_is_recorded_for_the_next_turn(self) -> None:
         supervisor = self._supervisor({}, _plan_state())
 
-        await supervisor._record_turn_failure(
+        await supervisor._plans._record_turn_failure(
             "hyp_abc",
             SimpleNamespace(kind="scoring_failed", error="primary score is not finite"),
         )
@@ -202,7 +170,7 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_scored_result_records_nothing(self) -> None:
         supervisor = self._supervisor({}, _plan_state())
 
-        await supervisor._record_turn_failure(
+        await supervisor._plans._record_turn_failure(
             "hyp_abc", SimpleNamespace(kind="scored", error=None)
         )
 
@@ -238,6 +206,46 @@ async def _noop() -> None:
 async def _handoff(plan_id: str) -> str:
     """占位的评估契约。"""
     return "id column: row_id"
+
+
+def _configured_supervisor(tree, state, agents) -> Supervisor:
+    async def publish(_kind, _payload):
+        return None
+
+    supervisor = Supervisor(
+        state=state,
+        tree=tree,
+        deps=SupervisorDeps(
+            paths=SupervisorPaths(Path("."), Path("state.json"), Path("tree.json")),
+            runtime=SupervisorRuntime(SimpleNamespace(), agents, SimpleNamespace()),
+            research=ResearchActions(_unused_plan, _unused_supervisor),
+            phases=PhaseActions(publish),
+            search=SearchServices(Scheduler(), Recovery()),
+        ),
+    )
+    supervisor._plans._persist_state = _noop
+
+    async def plan_input(plan_id: str):
+        try:
+            hypothesis = tree.get_hypothesis(plan_id)
+        except KeyError:
+            hypothesis = None
+        return SimpleNamespace(
+            task_context="",
+            hypothesis=hypothesis,
+            eval_handoff=await _handoff(plan_id),
+        )
+
+    supervisor._plans.plan_input = plan_input
+    return supervisor
+
+
+async def _unused_plan(_plan_id, _state):
+    raise AssertionError("plan turn must not run")
+
+
+async def _unused_supervisor(_text):
+    raise AssertionError("supervisor turn must not run")
 
 
 if __name__ == "__main__":

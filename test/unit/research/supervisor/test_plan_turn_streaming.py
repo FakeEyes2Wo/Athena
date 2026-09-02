@@ -1,6 +1,6 @@
 """SEARCH Plan turn 事件转发：text_delta 在 React 循环中实时露出。
 
-回归：`Supervisor._run_one_turn` 必须把 plan agent 的 journal 事件（至少
+回归：`PlanLifecycle.run_turn` 必须把 plan agent 的 journal 事件（至少
 ``agent/text_delta``）在 turn 进行中转发给 runtime 发布者，而不是等整段
 turn 结束后一次性输出。
 """
@@ -20,6 +20,15 @@ from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import ExecutionRuntime
+from athena.research.supervisor.deps import (
+    PhaseActions,
+    ResearchActions,
+    SearchServices,
+    SupervisorDeps,
+    SupervisorPaths,
+    SupervisorRuntime,
+)
+from athena.research.supervisor.experiment import PlanTurnResult
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
@@ -113,7 +122,14 @@ async def test_plan_turn_forwards_text_delta_to_runtime_publisher(
         phase="SEARCH",
         search_limit=10,
         concurrency=4,
+        task_text="Improve the held-out score.",
+        task_understanding={"goal": "Improve the held-out score."},
     )
+    task_handoff = "# Confirmed task\n\nImprove the held-out score.\n"
+    state.handoff_refs["task_clarification"] = await store.put_text(task_handoff)
+    handoff_dir = tmp_path / ".athena" / "handoffs"
+    handoff_dir.mkdir(parents=True)
+    (handoff_dir / "TASK_CLARIFICATION.md").write_text(task_handoff, encoding="utf-8")
 
     registry = AgentTypeRegistry()
     supervisor_holder: dict[str, object] = {}
@@ -135,7 +151,7 @@ async def test_plan_turn_forwards_text_delta_to_runtime_publisher(
     agents.start()
 
     async def stub_plan_turn(_plan_id, _state):
-        return None
+        return PlanTurnResult(kind="execution_failed")
 
     async def unused_supervisor_turn(_text):
         raise AssertionError("SupervisorAgent turn must not run")
@@ -149,24 +165,33 @@ async def test_plan_turn_forwards_text_delta_to_runtime_publisher(
         forwarded.append((plan_id, kind, data))
 
     supervisor = Supervisor(
-        project_root=tmp_path,
         state=state,
         tree=tree,
-        store=store,
-        agents=agents,
-        workspaces=workspaces,
-        scheduler=Scheduler(),
-        recovery=Recovery(),
-        evaluator_ref=evaluator_ref,
-        run_plan_turn=stub_plan_turn,
-        run_supervisor_turn=unused_supervisor_turn,
-        publish=publish,
-        publish_agent_event=publish_agent_event,
+        deps=SupervisorDeps(
+            paths=SupervisorPaths(
+                project_root=tmp_path,
+                state_path=tmp_path / ".athena" / "state.json",
+                tree_path=tmp_path / ".athena" / "research_tree.json",
+            ),
+            runtime=SupervisorRuntime(
+                store=store, agents=agents, workspaces=workspaces
+            ),
+            research=ResearchActions(
+                plan=stub_plan_turn, supervisor=unused_supervisor_turn
+            ),
+            phases=PhaseActions(
+                publish=publish, publish_agent_event=publish_agent_event
+            ),
+            search=SearchServices(
+                scheduler=Scheduler(),
+                recovery=Recovery(),
+            ),
+        ),
     )
     supervisor_holder["supervisor"] = supervisor
     await supervisor.start_plan("hyp_vit")
 
-    completed = await supervisor._run_one_turn("hyp_vit")
+    completed = await supervisor._plans.run_turn("hyp_vit")
 
     text_events = [event for event in forwarded if event[1] == "agent/text_delta"]
     assert text_events, "plan turn 必须把 agent text_delta 转发给 runtime 发布者"

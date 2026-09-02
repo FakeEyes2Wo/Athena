@@ -1,4 +1,4 @@
-"""Injected dependencies for the Supervisor facade."""
+"""Focused dependency groups for research supervision."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from athena.core.agent.agent_runtime import AgentRuntime
-from athena.core.contracts import ArtifactRef, ArtifactStore, CommitHash
+from athena.core.contracts import ArtifactStore, CommitHash
 from athena.core.research_models import Hypothesis
 from athena.core.workspace import GitWorkspace
 from athena.research.contracts import GeneralTurnOutcome
@@ -26,42 +26,80 @@ GeneralTurn = Callable[[str, str | None], Awaitable[GeneralTurnOutcome]]
 PublishAgentEvent = Callable[[str, str, str, dict | None], Awaitable[None] | None]
 
 
-@dataclass
-class SupervisorDeps:
-    """All injected collaborators and callbacks owned by a Supervisor."""
+@dataclass(frozen=True)
+class SupervisorPaths:
+    """Locate durable supervisor state and project workspaces."""
 
     project_root: Path
     state_path: Path
     tree_path: Path
+
+
+@dataclass(frozen=True)
+class SupervisorRuntime:
+    """Provide the artifact, Agent, and Git runtimes used by Plans."""
+
     store: ArtifactStore
     agents: AgentRuntime
     workspaces: GitWorkspace
-    scheduler: Scheduler
-    recovery: Recovery
-    evaluator_ref: ArtifactRef | None
-    direction: Literal["maximize", "minimize"]
-    tolerance: float
-    run_plan_turn: PlanTurn
-    run_supervisor_turn: SupervisorTurn
+
+
+@dataclass(frozen=True)
+class ResearchActions:
+    """Provide model-backed research turns without owning their results."""
+
+    plan: PlanTurn
+    supervisor: SupervisorTurn
+    ideator: IdeatorTurn | None = None
+    general: GeneralTurn | None = None
+
+
+@dataclass
+class PhaseActions:
+    """Provide phase entry points and outward event callbacks."""
+
     publish: Publish
-    final_evaluator_ref: ArtifactRef | None = None
-    auto_validate: bool = False
-    run_ideator_turn: IdeatorTurn | None = None
-    run_general_turn: GeneralTurn | None = None
-    run_prepare_phase: PreparePhase | None = None
-    run_validation_phase: ValidationPhase | None = None
+    prepare: PreparePhase | None = None
+    validation: ValidationPhase | None = None
     publish_agent_event: PublishAgentEvent | None = None
     on_plan_settled: Callable[[str], Awaitable[None]] | None = None
+    auto_validate: bool = False
+
+
+@dataclass
+class SearchServices:
+    """Own SEARCH scheduling and comparison policy services."""
+
+    scheduler: Scheduler
+    recovery: Recovery
+    direction: Literal["maximize", "minimize"] = "maximize"
+    tolerance: float = 0.0
+
+
+@dataclass
+class SupervisorDeps:
+    """Expose five focused dependency groups to supervisor collaborators."""
+
+    paths: SupervisorPaths
+    runtime: SupervisorRuntime
+    research: ResearchActions
+    phases: PhaseActions
+    search: SearchServices
 
 
 __all__ = [
     "GeneralTurn",
     "IdeatorTurn",
+    "PhaseActions",
     "PlanTurn",
     "PreparePhase",
     "Publish",
     "PublishAgentEvent",
+    "ResearchActions",
+    "SearchServices",
     "SupervisorDeps",
+    "SupervisorPaths",
+    "SupervisorRuntime",
     "SupervisorTurn",
     "ValidationPhase",
 ]

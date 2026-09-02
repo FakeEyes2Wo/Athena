@@ -15,8 +15,15 @@ from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
+from athena.research.supervisor.deps import (
+    PhaseActions,
+    ResearchActions,
+    SearchServices,
+    SupervisorDeps,
+    SupervisorPaths,
+    SupervisorRuntime,
+)
 from athena.research.supervisor.experiment import PlanTurnResult, apply_trusted_score
-from athena.research.supervisor.plans import PlanBest
 from athena.research.supervisor.policy import EloPolicy
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler, count_search_attempts
@@ -82,7 +89,22 @@ class _Harness:
         self.task: asyncio.Task[None] | None = None
         self.supervisor_turn = lambda _text: asyncio.sleep(0, result="ok")
 
+    async def _persist_confirmed_task_context(self) -> None:
+        """Create the real durable task context required by every SEARCH Plan."""
+        handoff = "# Confirmed task\n\nImprove the controlled held-out score.\n"
+        self.state.task_text = "Improve the controlled held-out score."
+        self.state.task_understanding = {
+            "goal": "Improve the controlled held-out score."
+        }
+        self.state.handoff_refs["task_clarification"] = await self.store.put_text(
+            handoff
+        )
+        handoff_dir = self.root / ".athena" / "handoffs"
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        (handoff_dir / "TASK_CLARIFICATION.md").write_text(handoff, encoding="utf-8")
+
     async def initialize(self) -> None:
+        await self._persist_confirmed_task_context()
         self.git = LocalGitWorkspace(
             self.root / "repo", self.root / "worktrees", self.store.put_bytes
         )
@@ -176,26 +198,32 @@ class _Harness:
         async def publish(kind, payload):
             self.events.append((kind, payload))
 
-        metric_options = {}
-        if self.direction != "maximize" or self.tolerance != 0.0:
-            metric_options = {
-                "direction": self.direction,
-                "tolerance": self.tolerance,
-            }
         self.supervisor = Supervisor(
-            project_root=self.root,
             state=self.state,
             tree=self.tree,
-            store=self.store,
-            agents=self.agents,
-            workspaces=self.git,
-            scheduler=Scheduler(self.policy),
-            recovery=Recovery(),
-            evaluator_ref=self.evaluator_ref,
-            run_plan_turn=run_plan_turn,
-            run_supervisor_turn=lambda text: self.supervisor_turn(text),
-            publish=publish,
-            **metric_options,
+            deps=SupervisorDeps(
+                paths=SupervisorPaths(
+                    project_root=self.root,
+                    state_path=self.root / ".athena" / "state.json",
+                    tree_path=self.root / ".athena" / "research_tree.json",
+                ),
+                runtime=SupervisorRuntime(
+                    store=self.store,
+                    agents=self.agents,
+                    workspaces=self.git,
+                ),
+                research=ResearchActions(
+                    plan=run_plan_turn,
+                    supervisor=lambda text: self.supervisor_turn(text),
+                ),
+                phases=PhaseActions(publish=publish),
+                search=SearchServices(
+                    scheduler=Scheduler(self.policy),
+                    recovery=Recovery(),
+                    direction=self.direction,
+                    tolerance=self.tolerance,
+                ),
+            ),
         )
 
     def add_hypothesis(self, plan_id: str, *, priority: float = 1000.0) -> None:
@@ -229,9 +257,11 @@ class _Harness:
         self.gates[plan_id].set()
 
     async def close(self) -> None:
-        await self.supervisor.stop()
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
         if self.task is not None:
             await asyncio.gather(self.task, return_exceptions=True)
+        await self.supervisor.stop()
         await self.agents.aclose()
 
 
@@ -303,16 +333,12 @@ async def test_stop_interrupts_active_plan_agent_runs(harness: _Harness):
     assert all(run_ids.values())
 
     await asyncio.wait_for(harness.supervisor.stop(), timeout=1)
-    summaries = [
-        harness.agents.run_summary(run_id)
+    assert all(
+        harness.agents.run_summary(run_id) is None
         for run_id in run_ids.values()
         if run_id is not None
-    ]
-
-    assert all(
-        summary is not None and summary.status.value == "interrupted"
-        for summary in summaries
     )
+    assert all(not harness.agents.has_agent(plan_id) for plan_id in run_ids)
 
 
 @pytest.mark.asyncio

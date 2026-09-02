@@ -16,32 +16,36 @@ from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel
 
-from athena.agents.task_agents import DATA_AGENT_ID, register_data_agent
 from athena.agents.ideator_agent import (
     SEARCH_IDEATOR_PROFILES,
     IdeatorProfile,
     register_ideator_agent,
 )
 from athena.agents.supervisor_agent import SUPERVISOR_AGENT_ID, SupervisorAnswer
+from athena.agents.task_agents import DATA_AGENT_ID, register_data_agent
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import EdaResult, Hypothesis, HypothesisBatch
 from athena.research.agent_turn_common import (
-    AGENT_TURN_TIMEOUT_SECONDS,
     regenerate_prompt as _regenerate_prompt,
+)
+from athena.research.agent_turn_common import (
     wait_run_with_heartbeat as _wait_run_with_heartbeat,
 )
 from athena.research.agent_turn_general import GeneralTurnMixin
 from athena.research.agent_turn_support import SupportVerificationMixin
+from athena.research.exploration_files import (
+    prepare_ideator_lane,
+    write_ideator_result,
+)
 from athena.research.idea_generation.gate import run_light_pipeline
 from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisBatch,
     IdeatorHypothesisDraft,
 )
-from athena.research.supervisor.experiment import (
-    handoff_block,
-    load_agent_result,
-    read_eval_handoff,
-)
+from athena.research.supervisor.evaluator_plan import read_eval_handoff
+from athena.research.supervisor.experiment import load_agent_result
+from athena.research.supervisor.prompt_context import handoff_block
+from athena.research.task_context import confirmed_task_context_block
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -142,11 +146,14 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
         rt = self._runtime
         if rt.provider is None:
             raise RuntimeError("Ideator requires a registered Agent provider")
+        task_context = await confirmed_task_context_block(rt)
         # 按 state.handoff_sources 收集启用的 handoff；失败来源只返回空文本，
         # 不影响本地 EDA-only 的 idea generation。
         handoff_texts = await self._collect_handoff_texts()
         if getattr(rt, "ideation", "ideageneration") == "debate":
-            return await self._run_debate_ideator_turn(count, handoff_texts)
+            return await self._run_debate_ideator_turn(
+                count, handoff_texts, task_context
+            )
         eda_dir = self._resolve_eda_dir(rt)
         ideation = getattr(rt, "ideation", "ideageneration")
         lane_profiles: Iterator[IdeatorProfile | None]
@@ -307,17 +314,16 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
             save(state_path)
 
     async def _collect_handoff_texts(self) -> list[str]:
-        """按 state.handoff_sources 收集已启用的 handoff 文本。"""
+        """按 state.handoff_sources 收集已启用的 handoff 文本。
+
+        Task clarification is deliberately not included here: it is delivered as
+        model-visible ``content`` through the confirmed-context preflight rather
+        than as a mailbox-only handoff.
+        """
         rt = self._runtime
         state = rt.state
         sources = getattr(state, "handoff_sources", None) or []
         texts: list[str] = []
-        clarification_ref = getattr(state, "handoff_refs", {}).get("task_clarification")
-        if clarification_ref:
-            try:
-                texts.append(await rt.store.get_text(clarification_ref))
-            except Exception:  # noqa: BLE001 - 澄清记录是增益而非前提
-                pass
         if "kaggle" in sources:
             text = await self._ensure_kaggle_handoff()
             if text:
@@ -335,9 +341,14 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
     ) -> HypothesisBatch:
         """Run one independent Ideator and return its structured batch."""
         rt = self._runtime
+        lane_dir = prepare_ideator_lane(eda_dir, label)
+        lane_path = lane_dir.relative_to(eda_dir.resolve()).as_posix()
         content = (
-            f"Inspect the EDA workspace at {eda_dir} without modifying any "
-            "files, then propose up to "
+            f"Inspect the EDA workspace at {eda_dir}. Read earlier "
+            "exploration/*/result.json files before repeating prior work. You may "
+            "write diagnostic scripts, figures, and evidence notes only under "
+            f"{lane_path}/; keep every PREPARE, EDA, baseline, split, and evaluator "
+            "file unchanged. Then propose up to "
             f"{target} falsifiable hypotheses that could improve the primary "
             "metric. Return the hypotheses as structured output."
         )
@@ -348,6 +359,9 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
                 "\n\nResearch handoff documents have been delivered to your "
                 "mailbox; use them as supporting evidence."
             )
+        task_context = await confirmed_task_context_block(rt)
+        if task_context:
+            content += f"\n\n{task_context}"
         context_refs: list[ArtifactRef] = []
         handoff = await read_eval_handoff(rt.store, rt.supervisor.evaluator_ref)
         if handoff:
@@ -415,6 +429,11 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
                                 f"{attempt + 1} attempt(s); this lane yields nothing"
                             ),
                         )
+                    write_ideator_result(
+                        eda_dir,
+                        label,
+                        kept.model_dump_json(indent=2),
+                    )
                     return kept
 
                 regenerate = _regenerate_prompt(rejections, target)
@@ -510,7 +529,10 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
         )
 
     async def _run_debate_ideator_turn(
-        self, count: int, handoff_texts: list[str] | None = None
+        self,
+        count: int,
+        handoff_texts: list[str] | None = None,
+        task_context_block: str | None = None,
     ) -> list[Hypothesis]:
         """Run the debate-based Ideator (proposal -> review -> revision -> judge).
 
@@ -539,6 +561,8 @@ class AgentTurnRunner(GeneralTurnMixin, SupportVerificationMixin):
             async def run(self, prompt, output_type=None, message_history=None):
                 """Run one structured generation and return an Ideator-compatible result."""
                 effective_prompt = prompt
+                if task_context_block:
+                    effective_prompt += "\n\n" + task_context_block
                 if handoff_texts:
                     effective_prompt += "\n\n" + "\n\n".join(handoff_texts)
                 if corpus_ref is not None:

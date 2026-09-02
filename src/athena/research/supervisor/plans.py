@@ -3,7 +3,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-
 from typing import Literal
 
 from pydantic import (
@@ -15,10 +14,11 @@ from pydantic import (
     model_validator,
 )
 
-from athena.core.artifact_store import digest_from_ref
 from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.artifact_store import digest_from_ref
 from athena.core.contracts import ArtifactRef, CommitHash
 from athena.core.research_models import Hypothesis
+from athena.research.supervisor.prompt_context import failure_block
 
 _TERMINAL_EVENT_KINDS = {"turn_completed", "turn_failed", "turn_interrupted"}
 
@@ -29,6 +29,7 @@ SequenceSink = Callable[[int], None]
 
 DEFAULT_EXPERIMENT_TIMEOUT_S = 3600
 """Default wall-clock budget for one experiment command (seconds)."""
+
 
 @dataclass(frozen=True)
 class PlanFailure:
@@ -44,6 +45,7 @@ class PlanFailure:
 
     @classmethod
     def from_summary(cls, summary: str | None) -> "PlanFailure | None":
+        """Parse the durable compact failure summary, if present."""
         if not summary:
             return None
         kind, sep, detail = summary.partition(": ")
@@ -52,13 +54,12 @@ class PlanFailure:
         return cls(kind=kind or "failed", detail=detail or summary)
 
     def to_summary(self) -> str:
+        """Render the compact value stored on durable Plan state."""
         return f"{self.kind}: {self.detail}"
 
     def to_prompt_block(self) -> str:
-        from athena.research.supervisor.experiment import failure_block
-
+        """Render the prior failure as model-visible repair context."""
         return failure_block(self.kind, self.detail)
-
 
 
 async def forward_run_events(
@@ -188,6 +189,9 @@ class PlanInput(BaseModel):
     # 就只能猜列名和行集合——真机上基线因此交出了完全 join 不上的预测，判 0.0。
     eval_handoff: str = ""
     human_context: str = ""
+    # Confirmed task contract block, rendered in the actual model-visible
+    # content. Default empty so older frozen Plan artifacts still deserialize.
+    task_context: str = ""
     initial_turn_limit: int | None = Field(default=None, ge=0)
     initial_patience: int | None = Field(default=None, ge=0)
 

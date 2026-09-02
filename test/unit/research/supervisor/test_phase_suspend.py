@@ -11,6 +11,14 @@ import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_tree import ResearchTree
+from athena.research.supervisor.deps import (
+    PhaseActions,
+    ResearchActions,
+    SearchServices,
+    SupervisorDeps,
+    SupervisorPaths,
+    SupervisorRuntime,
+)
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
@@ -29,21 +37,29 @@ def _supervisor(tmp_path: Path, *, status: str) -> Supervisor:
     async def publish(_kind, _payload):
         return None
 
+    state = ResearchState(
+        status=status, phase="PREPARE", search_limit=10, concurrency=4
+    )
     return Supervisor(
-        project_root=tmp_path,
-        state=ResearchState(
-            status=status, phase="PREPARE", search_limit=10, concurrency=4
-        ),
+        state=state,
         tree=ResearchTree(),
-        store=LocalArtifactStore(tmp_path / "artifacts"),
-        agents=None,
-        workspaces=None,
-        scheduler=Scheduler(),
-        recovery=Recovery(),
-        evaluator_ref=None,
-        run_plan_turn=unused_plan_turn,
-        run_supervisor_turn=unused_supervisor_turn,
-        publish=publish,
+        deps=SupervisorDeps(
+            paths=SupervisorPaths(
+                project_root=tmp_path,
+                state_path=tmp_path / ".athena" / "state.json",
+                tree_path=tmp_path / ".athena" / "research_tree.json",
+            ),
+            runtime=SupervisorRuntime(
+                store=LocalArtifactStore(tmp_path / "artifacts"),
+                agents=None,
+                workspaces=None,
+            ),
+            research=ResearchActions(
+                plan=unused_plan_turn, supervisor=unused_supervisor_turn
+            ),
+            phases=PhaseActions(publish=publish),
+            search=SearchServices(scheduler=Scheduler(), recovery=Recovery()),
+        ),
     )
 
 

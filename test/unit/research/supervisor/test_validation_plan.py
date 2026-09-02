@@ -41,6 +41,22 @@ def test_validation_input_rejects_extra_fields() -> None:
         )
 
 
+def test_validation_input_accepts_backward_compatible_task_context() -> None:
+    legacy = ValidationInput(
+        sota_commit="sota-a",
+        reference_metric=0.82,
+        direction="maximize",
+        final_evaluator_ref="final-eval-a",
+        validation_key="key-a",
+    )
+    assert legacy.task_context == ""
+
+    with_context = legacy.model_copy(
+        update={"task_context": "--- Confirmed task contract (authoritative) ---\nbody"}
+    )
+    assert "Confirmed task contract (authoritative)" in with_context.task_context
+
+
 @pytest.mark.asyncio
 async def test_complete_result_commits_without_rescoring(tmp_path) -> None:
     store = LocalArtifactStore(tmp_path / "artifacts")
@@ -398,14 +414,20 @@ async def test_validation_rejects_binary_diff_without_llm_review(tmp_path) -> No
 
 
 class _StubExecution:
-    def __init__(self, environment_root: Path, *, produce_predictions: bool = False) -> None:
+    def __init__(
+        self, environment_root: Path, *, produce_predictions: bool = False
+    ) -> None:
         self.environment_root = environment_root
         self.produce_predictions = produce_predictions
         self.timeouts: list[object] = []
 
     async def run(self, context, command=None, *, argv=None, **kwargs):
-        del command, argv
-        self.timeouts.append(kwargs.get("timeout_s"))
+        del argv
+        if command is not None:
+            timeout_s = getattr(command, "timeout_s", None)
+        else:
+            timeout_s = kwargs.get("timeout_s")
+        self.timeouts.append(timeout_s)
         if self.produce_predictions:
             out = Path(context.workspace_root) / "predictions" / "new.csv"
             out.parent.mkdir(parents=True, exist_ok=True)

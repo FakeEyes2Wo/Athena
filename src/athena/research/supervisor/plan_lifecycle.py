@@ -2,6 +2,7 @@
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from athena.core.contracts import ArtifactRef
@@ -12,14 +13,28 @@ from athena.core.research_models import (
     Hypothesis,
 )
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
-from athena.core.workspace import GitWorkBranch
+from athena.core.workspace import GitWorkBranch, GitWorkspaceError
+from athena.research.clarification.context import ConfirmedTaskContextProvider
 from athena.research.supervisor.deps import SupervisorDeps
+from athena.research.supervisor.evaluator_plan import read_eval_handoff
 from athena.research.supervisor.experiment import (
+    PlanTurnResult,
+    load_agent_result,
     load_best,
-    read_eval_handoff,
 )
-from athena.research.supervisor.plans import PlanInput, PlanState
+from athena.research.supervisor.plans import (
+    PlanDecision,
+    PlanFailure,
+    PlanInput,
+    PlanState,
+    wait_run_events,
+)
 from athena.research.supervisor.policy import Outcome
+from athena.research.supervisor.prompt_context import (
+    data_contract_block,
+    handoff_block,
+    hypothesis_block,
+)
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.statistics import (
@@ -31,17 +46,22 @@ from athena.research.supervisor.statistics import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class CompletedPlanTurn:
+    """One Agent decision and its optional trusted experiment result."""
+
+    plan_id: str
+    decision: PlanDecision | None
+    result: PlanTurnResult | None
+
+
 def _compare_metric(
     candidate: float,
     reference: float,
     direction: str,
     tolerance: float,
 ) -> Outcome:
-    delta = (
-        candidate - reference
-        if direction == "maximize"
-        else reference - candidate
-    )
+    delta = candidate - reference if direction == "maximize" else reference - candidate
     if delta > tolerance:
         return Outcome.WIN
     if delta < -tolerance:
@@ -81,10 +101,10 @@ class PlanLifecycle:
         return self._owner.tree
 
     def _save_state(self) -> None:
-        self._state.save(self._deps.state_path)
+        self._state.save(self._deps.paths.state_path)
 
     async def _publish_state(self) -> None:
-        await self._deps.publish(
+        await self._deps.phases.publish(
             "state", {"type": "state", **self._state.model_dump(mode="json")}
         )
 
@@ -93,13 +113,121 @@ class PlanLifecycle:
         self._save_state()
         await self._publish_state()
 
+    @staticmethod
+    def _previous_failure_block(summary: str | None) -> str:
+        failure = PlanFailure.from_summary(summary)
+        return failure.to_prompt_block() if failure is not None else ""
+
+    def _corpus_block(self, plan_input: PlanInput) -> str:
+        """Render corpus pointers named by the Plan's frozen hypothesis."""
+        corpus_ref = getattr(self._state, "corpus_ref", None)
+        hypothesis = plan_input.hypothesis
+        if corpus_ref is None or hypothesis is None or not hypothesis.sources:
+            return ""
+        return (
+            f"\n\nThe literature corpus for this task is available "
+            f"(corpus_ref={corpus_ref!r}). This hypothesis was formed from: "
+            f"{', '.join(hypothesis.sources)}. Use paper_search and "
+            "paper_chunk_read on those papers for the implementation details the "
+            "hypothesis leaves open — exact loss formulation, hyper-parameter "
+            "ranges, preprocessing. Follow what they report; do not invent "
+            "numbers they do not give."
+        )
+
+    def _turn_prompt(
+        self,
+        plan_id: str,
+        state: PlanState,
+        plan_input: PlanInput,
+        previous_failure: str | None,
+    ) -> str:
+        """Assemble the complete model-visible prompt for one Plan turn."""
+        hypothesis = plan_input.hypothesis
+        hypothesis_context = (
+            hypothesis_block(
+                hypothesis.statement,
+                hypothesis.intervention,
+                hypothesis.expected_effect,
+            )
+            if hypothesis is not None
+            else ""
+        )
+        return (
+            f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
+            f"turn limit: {state.turn_limit}; patience: {state.patience}; "
+            f"stale rounds: {state.stale_rounds}."
+            + plan_input.task_context
+            + hypothesis_context
+            + handoff_block(plan_input.eval_handoff)
+            + self._corpus_block(plan_input)
+            + data_contract_block(self._state.data_contract or "")
+            + self._previous_failure_block(previous_failure)
+        )
+
+    async def run_turn(self, plan_id: str) -> CompletedPlanTurn:
+        """Own one Plan Agent turn from prompt assembly through failure recording."""
+        state = self._state.plans[plan_id]
+        previous_failure = state.last_failure
+        state = state.model_copy(
+            update={"turns_used": state.turns_used + 1, "last_failure": None}
+        )
+        self._state.plans[plan_id] = state
+        await self._persist_state()
+        try:
+            plan_input = await self.plan_input(plan_id)
+            run_id = await self._deps.runtime.agents.followup(
+                plan_id,
+                {
+                    "content": self._turn_prompt(
+                        plan_id, state, plan_input, previous_failure
+                    ),
+                    "context_refs": [state.context_ref],
+                },
+            )
+            publish = self._deps.phases.publish_agent_event
+            if publish is None:
+                summary = await self._deps.runtime.agents.wait_run(run_id)
+            else:
+                summary = await wait_run_events(
+                    self._deps.runtime.agents,
+                    run_id,
+                    lambda kind, ref, data: publish(plan_id, kind, ref, data),
+                )
+            decision = await load_agent_result(
+                summary, self._deps.runtime.store, PlanDecision
+            )
+            if decision is None:
+                return CompletedPlanTurn(plan_id, None, None)
+        except Exception:  # noqa: BLE001 - normalize one external Agent turn boundary
+            return CompletedPlanTurn(plan_id, None, None)
+        if decision.decision == "abandon" and state.best_ref is None:
+            return CompletedPlanTurn(plan_id, decision, None)
+        result = await self._deps.research.plan(plan_id, state)
+        await self._record_turn_failure(plan_id, result)
+        return CompletedPlanTurn(plan_id, decision, result)
+
+    async def _record_turn_failure(self, plan_id: str, result: PlanTurnResult) -> None:
+        """Persist a failed turn's reason for the immediately following prompt."""
+        if not result.error:
+            return
+        current = self._state.plans.get(plan_id)
+        if current is None:
+            return
+        summary = PlanFailure(kind=result.kind, detail=result.error).to_summary()[:1200]
+        self._state.plans[plan_id] = current.model_copy(
+            update={"last_failure": summary}
+        )
+        await self._persist_state()
+
     async def start_plan(self, hypothesis_id: str) -> str:
         """Freeze one Hypothesis input and create its stable execution identity."""
-        if self._deps.evaluator_ref is None:
+        evaluator_ref = self._state.evaluator_ref
+        if evaluator_ref is None:
             baselines = self._tree.experiments(kind="baseline")
             if not baselines:
                 raise RuntimeError("SEARCH Plan requires a frozen evaluator")
-            self._deps.evaluator_ref = baselines[0].plan.run_config_ref
+            evaluator_ref = baselines[0].plan.run_config_ref
+            self._state.evaluator_ref = evaluator_ref
         if hypothesis_id in self._state.plans:
             if self._tree.experiment_for_hypothesis(hypothesis_id) is None:
                 raise RuntimeError(
@@ -123,36 +251,48 @@ class PlanLifecycle:
             raise ValueError("reference experiment requires a trusted metric")
         reference_hypothesis = self._tree.get_hypothesis(reference.hypothesis_id)
         active = self._tree.active_hypotheses(reference_id, hypothesis)[:-1]
-        tree_ref = await self._deps.store.put_text(
+        tree_ref = await self._deps.runtime.store.put_text(
             json.dumps(self._tree.to_dict(), ensure_ascii=False, sort_keys=True)
         )
         guidance = self._run.take_guidance()
+        task_context = (
+            await ConfirmedTaskContextProvider(
+                self._state,
+                self._deps.runtime.store,
+                self._deps.paths.state_path.parent,
+            ).load()
+        ).render_prompt_block()
         plan_input = PlanInput(
             hypothesis=hypothesis,
             active_ancestor_hypotheses=active,
             reference_experiment_id=reference_id,
             reference_metric=reference.eval.primary,
             reference_priority=reference_hypothesis.priority,
-            direction=self._deps.direction,
-            tolerance=self._deps.tolerance,
+            direction=self._deps.search.direction,
+            tolerance=self._deps.search.tolerance,
             # 判胜阈值必须随搜索预算变严。预算 N 意味着要在 N 个候选里挑最大值，
             # 而最大值本身会随 N 增长：纯噪声（σ≈0.0074）下 N=4 的冠军期望
             # +0.0076，N=16 是 +0.0131，N=64 是 +0.0174——最后这个数已经和本次
             # 真机冠军实际拿到的 +0.0180 一样大。不做校正，加预算买到的只是
             # 更好看的数字。
-            min_effect_size=self._deps.tolerance,
+            min_effect_size=self._deps.search.tolerance,
             family_size=max(1, self._state.search_limit),
-            evaluator_ref=self._deps.evaluator_ref,
+            evaluator_ref=evaluator_ref,
             tree_ref=tree_ref,
             eval_handoff=await read_eval_handoff(
-                self._deps.store, self._deps.evaluator_ref
+                self._deps.runtime.store, evaluator_ref
             ),
             human_context="\n".join(guidance),
+            task_context=task_context,
             initial_turn_limit=hypothesis.turn_limit,
             initial_patience=hypothesis.patience,
         )
-        context_ref = await self._deps.store.put_text(plan_input.model_dump_json())
-        branch = await self._deps.workspaces.create(reference.commit, hypothesis_id)
+        context_ref = await self._deps.runtime.store.put_text(
+            plan_input.model_dump_json()
+        )
+        branch = await self._deps.runtime.workspaces.create(
+            reference.commit, hypothesis_id
+        )
         self._run.add_branch(hypothesis_id, branch)
         experiment_id = f"exp_{hypothesis_id}"
         self._tree.add_experiment(
@@ -185,8 +325,8 @@ class PlanLifecycle:
         # 恢复时 state.plans 仍在但 tree 缺少 exp_{hypothesis_id}，最终在
         # settle_plan 中抛 unknown experiment id。先落 state、再落 tree，并让
         # recover() 具备“state 有 Plan、tree 缺实验”时的重建能力。
-        self._tree.save(self._deps.tree_path)
-        await self._deps.agents.resume_agent(
+        self._tree.save(self._deps.paths.tree_path)
+        await self._deps.runtime.agents.resume_agent(
             hypothesis_id, agent_type="plan", name=hypothesis_id
         )
         await self._publish_state()
@@ -195,7 +335,9 @@ class PlanLifecycle:
     async def plan_input(self, plan_id: str) -> PlanInput:
         """Load the immutable input frozen for one active Plan."""
         return PlanInput.model_validate_json(
-            await self._deps.store.get_text(self._state.plans[plan_id].context_ref)
+            await self._deps.runtime.store.get_text(
+                self._state.plans[plan_id].context_ref
+            )
         )
 
     def workspace_path(self, plan_id: str) -> Path:
@@ -218,14 +360,14 @@ class PlanLifecycle:
 
     async def recover(self, state: ResearchState | None = None) -> ResearchState:
         """Reconcile persisted Plans without inventing missing frozen resources."""
-        if self._deps.tree_path.is_file():
-            self._owner.tree = ResearchTree.load(self._deps.tree_path)
+        if self._deps.paths.tree_path.is_file():
+            self._owner.tree = ResearchTree.load(self._deps.paths.tree_path)
         candidate = state or self._state
         artifact_presence: dict[str, bool] = {}
         for plan in candidate.plans.values():
             try:
-                await self._deps.store.get_text(plan.context_ref)
-            except Exception:
+                await self._deps.runtime.store.get_text(plan.context_ref)
+            except (OSError, ValueError):
                 artifact_presence[plan.context_ref] = False
             else:
                 artifact_presence[plan.context_ref] = True
@@ -237,15 +379,17 @@ class PlanLifecycle:
                 continue
             try:
                 plan_input = PlanInput.model_validate_json(
-                    await self._deps.store.get_text(plan.context_ref)
+                    await self._deps.runtime.store.get_text(plan.context_ref)
                 )
                 if plan_input.reference_experiment_id is None:
                     raise ValueError("Plan input has no reference experiment")
                 reference = self._tree.get_experiment(
                     plan_input.reference_experiment_id
                 )
-                branch = await self._deps.workspaces.create(reference.commit, plan_id)
-            except Exception:
+                branch = await self._deps.runtime.workspaces.create(
+                    reference.commit, plan_id
+                )
+            except (GitWorkspaceError, KeyError, OSError, ValueError):
                 workspace_presence[plan_id] = False
             else:
                 self._run.add_branch(plan_id, branch)
@@ -259,8 +403,8 @@ class PlanLifecycle:
                 ):
                     repaired_experiments = True
         if repaired_experiments:
-            self._tree.save(self._deps.tree_path)
-        self._owner.state = self._deps.recovery.reconcile(
+            self._tree.save(self._deps.paths.tree_path)
+        self._owner.state = self._deps.search.recovery.reconcile(
             candidate,
             self._tree,
             workspace_exists=lambda plan_id: workspace_presence.get(plan_id, False),
@@ -268,7 +412,7 @@ class PlanLifecycle:
         )
         for plan_id in self._state.plans:
             if workspace_presence.get(plan_id):
-                await self._deps.agents.resume_agent(
+                await self._deps.runtime.agents.resume_agent(
                     plan_id, agent_type="plan", name=plan_id
                 )
         await self._persist_state()
@@ -338,7 +482,7 @@ class PlanLifecycle:
                 error="settled without a trusted result",
             )
         else:
-            best = await load_best(best_ref, self._deps.store)
+            best = await load_best(best_ref, self._deps.runtime.store)
             comparison: ComparisonVerdict | None = None
             reference = plan_input.reference_metric
             if reference is None:
@@ -359,7 +503,9 @@ class PlanLifecycle:
                 outcome = {
                     "SUPPORTED": Outcome.WIN,
                     "REFUTED": Outcome.LOSS,
-                }.get(verdict)  # INCONCLUSIVE -> None
+                }.get(
+                    verdict
+                )  # INCONCLUSIVE -> None
                 p_value = two_sided_p_value(best.metric, reference, best.std_error)
                 if p_value is not None:
                     comparison = ComparisonVerdict(
@@ -379,19 +525,32 @@ class PlanLifecycle:
             evidence_ref = best.evidence_ref
             artifacts = {"evidence": evidence_ref}
             try:
-                evidence = json.loads(await self._deps.store.get_text(evidence_ref))
+                evidence = json.loads(
+                    await self._deps.runtime.store.get_text(evidence_ref)
+                )
             except (json.JSONDecodeError, OSError, ValueError):
                 evidence = {}
-            for key in ("predictions_ref", "report_ref"):
+            for key in (
+                "predictions_ref",
+                "metrics_ref",
+                "report_ref",
+                "exploration_ref",
+            ):
                 ref = evidence.get(key) if isinstance(evidence, dict) else None
                 if isinstance(ref, str):
                     artifacts[key.removesuffix("_ref")] = ref
-            if "predictions" not in artifacts and result is not None:
-                if result.predictions_ref is not None:
-                    artifacts["predictions"] = result.predictions_ref
-            if "report" not in artifacts and result is not None:
-                if result.report_ref is not None:
-                    artifacts["report"] = result.report_ref
+            if (
+                "predictions" not in artifacts
+                and result is not None
+                and result.predictions_ref is not None
+            ):
+                artifacts["predictions"] = result.predictions_ref
+            if (
+                "report" not in artifacts
+                and result is not None
+                and result.report_ref is not None
+            ):
+                artifacts["report"] = result.report_ref
             primary = best.metric
             self._tree.complete_experiment(
                 experiment_id,
@@ -408,12 +567,10 @@ class PlanLifecycle:
             # 实验无有效证据：标记 INCONCLUSIVE，不按胜负更新评级。
             self._tree.update_hypothesis_status(plan_id, "INCONCLUSIVE")
         else:
-            hypothesis.priority = self._deps.scheduler.settle(
+            hypothesis.priority = self._deps.search.scheduler.settle(
                 plan_input.reference_priority, outcome
             )
-            self._tree.update_hypothesis_status(
-                plan_id, _status_for_outcome(outcome)
-            )
+            self._tree.update_hypothesis_status(plan_id, _status_for_outcome(outcome))
         if primary is not None:
             sota_id = self._tree.best_experiment_id()
             if sota_id is None:
@@ -452,17 +609,19 @@ class PlanLifecycle:
                             plan_input.family_size,
                         )
                     self._tree.set_sota(experiment_id)
-        self._tree.save(self._deps.tree_path)
+        self._tree.save(self._deps.paths.tree_path)
         self._state.plans.pop(plan_id)
         self._save_state()
-        if self._deps.on_plan_settled is not None:
-            await self._deps.on_plan_settled(plan_id)
+        if self._deps.phases.on_plan_settled is not None:
+            await self._deps.phases.on_plan_settled(plan_id)
         # A settled Plan owns a stable PlanAgent thread. Reap it now so finished
         # SEARCH plans do not accumulate for the rest of the process lifetime.
         try:
-            await self._deps.agents.reap(plan_id)
+            await self._deps.runtime.agents.reap(plan_id)
         except Exception:
-            logger.warning("failed to reap settled Plan agent %s", plan_id, exc_info=True)
+            logger.warning(
+                "failed to reap settled Plan agent %s", plan_id, exc_info=True
+            )
 
     def _sota_parent(self) -> tuple[str, Hypothesis]:
         """Return (sota_experiment_id, sota_hypothesis) for seeding hypotheses."""
@@ -473,16 +632,17 @@ class PlanLifecycle:
         return parent_id, self._tree.get_hypothesis(parent_experiment.hypothesis_id)
 
     async def propose_hypothesis(self, **payload: object) -> dict[str, object]:
+        """Register one hypothesis derived from the current SOTA experiment."""
         parent_id, parent_hypothesis = self._sota_parent()
         hypothesis = Hypothesis.model_validate(
             {
                 **payload,
                 "parent_id": parent_id,
-                "priority": self._deps.scheduler.seed(parent_hypothesis),
+                "priority": self._deps.search.scheduler.seed(parent_hypothesis),
             }
         )
         hypothesis_id = self._tree.add_hypothesis(hypothesis)
-        self._tree.save(self._deps.tree_path)
+        self._tree.save(self._deps.paths.tree_path)
         await self._publish_state()
         return {"hypothesis_id": hypothesis_id}
 
@@ -496,7 +656,7 @@ class PlanLifecycle:
         （见 ``Scheduler._queued``），不在入图时丢弃任何结构有效的假设。
         """
         parent_id, parent_hypothesis = self._sota_parent()
-        priority = self._deps.scheduler.seed(parent_hypothesis)
+        priority = self._deps.search.scheduler.seed(parent_hypothesis)
         hypothesis_ids = [
             self._tree.add_hypothesis(
                 hypothesis.model_copy(
@@ -510,22 +670,18 @@ class PlanLifecycle:
             )
             for hypothesis in hypotheses
         ]
-        self._tree.save(self._deps.tree_path)
+        self._tree.save(self._deps.paths.tree_path)
         await self._publish_state()
         return {"hypothesis_ids": hypothesis_ids}
 
     async def checkpoint_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
         """Persist one frozen evaluator bundle so PREPARE resumes past evaluator."""
-        self._deps.evaluator_ref = ref
         self._state.evaluator_ref = ref
         await self._persist_state()
         return {"evaluator_ref": ref}
 
-    async def checkpoint_final_evaluator(
-        self, ref: ArtifactRef
-    ) -> dict[str, object]:
+    async def checkpoint_final_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
         """Persist the hidden final-test evaluator used only by VALIDATE."""
-        self._deps.final_evaluator_ref = ref
         self._state.final_evaluator_ref = ref
         await self._persist_state()
         return {"final_evaluator_ref": ref}
@@ -537,7 +693,7 @@ class PlanLifecycle:
         缓存，避免续跑时重复派发 worker。不同任务不命中缓存，照常派发且不覆盖
         已保存的调研断点。
         """
-        if self._deps.run_general_turn is None:
+        if self._deps.research.general is None:
             raise RuntimeError("General Agent dispatch is not configured")
         task = task.strip()
         if not task:
@@ -546,7 +702,7 @@ class PlanLifecycle:
         ref = self._state.task_research_ref
         if ref is not None and owned:
             try:
-                cached = json.loads(await self._deps.store.get_text(ref))
+                cached = json.loads(await self._deps.runtime.store.get_text(ref))
             except (OSError, ValueError):
                 # artifact 缺失或内容损坏 → 清掉引用并落盘，避免重启后反复撞坏缓存
                 self._state.task_research_ref = None
@@ -560,15 +716,15 @@ class PlanLifecycle:
         prior_agent_id = (
             self._state.task_research_agent_id if ref is None and owned else None
         )
-        outcome = await self._deps.run_general_turn(task, prior_agent_id)
+        outcome = await self._deps.research.general(task, prior_agent_id)
         if ref is None and self._state.task_research_task in (None, task):
             self._state.task_research_task = task
             self._state.task_research_agent_id = outcome.agent_id
-            self._state.task_research_ref = await self._deps.store.put_text(
+            self._state.task_research_ref = await self._deps.runtime.store.put_text(
                 json.dumps(outcome.result, ensure_ascii=False)
             )
             await self._persist_state()
         return outcome.result
 
 
-__all__ = ["PlanLifecycle"]
+__all__ = ["CompletedPlanTurn", "PlanLifecycle"]

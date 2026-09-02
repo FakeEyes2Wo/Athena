@@ -3,7 +3,6 @@
 import asyncio
 import json
 import shutil
-from pathlib import Path
 
 import pytest
 
@@ -11,6 +10,14 @@ from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec, JsonCodec
 from athena.core.git_workspace import LocalGitWorkspace
+from athena.research.supervisor.deps import (
+    PhaseActions,
+    ResearchActions,
+    SearchServices,
+    SupervisorDeps,
+    SupervisorPaths,
+    SupervisorRuntime,
+)
 from athena.research.supervisor.experiment import load_best
 from athena.research.supervisor.policy import EloPolicy
 from athena.research.supervisor.recovery import Recovery
@@ -19,8 +26,8 @@ from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 from test.integration.research.test_rolling_search import (
     _ControlledRunner,
-    _Harness,
     _eventually,
+    _Harness,
     harness,
 )
 
@@ -36,8 +43,10 @@ async def _start_one(harness: _Harness, plan_id: str = "h1") -> None:
 
 async def _wait_next_turn(harness: _Harness, plan_id: str, turn: int) -> None:
     await _eventually(
-        lambda: harness.started_turns[plan_id] >= turn
-        and not harness.gates[plan_id].is_set()
+        lambda: (
+            harness.started_turns[plan_id] >= turn
+            and not harness.gates[plan_id].is_set()
+        )
     )
 
 
@@ -146,7 +155,7 @@ async def test_provider_failure_at_turn_limit_waits_without_consuming_patience(
     harness.state.search_limit = 1
     harness.state.concurrency = 1
     harness.task = asyncio.create_task(harness.supervisor.run_search())
-    await _eventually(lambda: harness.task.done())
+    await _eventually(lambda: harness.state.status == "WAITING")
 
     assert harness.state.status == "WAITING"
     assert harness.state.plans["h1"].stale_rounds == 0
@@ -215,19 +224,31 @@ async def test_restart_resumes_stable_agent_context_and_workspace(harness: _Harn
         harness.root / "repo", harness.root / "worktrees", harness.store.put_bytes
     )
     policy = EloPolicy()
+    state = ResearchState.load(harness.root / ".athena" / "state.json")
     restarted = Supervisor(
-        project_root=harness.root,
-        state=ResearchState.load(harness.root / ".athena" / "state.json"),
+        state=state,
         tree=harness.tree,
-        store=harness.store,
-        agents=agents,
-        workspaces=workspaces,
-        scheduler=Scheduler(policy),
-        recovery=Recovery(),
-        evaluator_ref=harness.evaluator_ref,
-        run_plan_turn=lambda _plan_id, _state: asyncio.sleep(0),
-        run_supervisor_turn=lambda _text: asyncio.sleep(0, result="ok"),
-        publish=lambda _kind, _payload: asyncio.sleep(0),
+        deps=SupervisorDeps(
+            paths=SupervisorPaths(
+                project_root=harness.root,
+                state_path=harness.root / ".athena" / "state.json",
+                tree_path=harness.root / ".athena" / "research_tree.json",
+            ),
+            runtime=SupervisorRuntime(
+                store=harness.store,
+                agents=agents,
+                workspaces=workspaces,
+            ),
+            research=ResearchActions(
+                plan=lambda _plan_id, _state: asyncio.sleep(0),
+                supervisor=lambda _text: asyncio.sleep(0, result="ok"),
+            ),
+            phases=PhaseActions(publish=lambda _kind, _payload: asyncio.sleep(0)),
+            search=SearchServices(
+                scheduler=Scheduler(policy),
+                recovery=Recovery(),
+            ),
+        ),
     )
     restart_task = asyncio.create_task(restarted.start())
     try:
@@ -259,9 +280,7 @@ async def test_recover_rebuilds_experiment_lost_before_tree_save(harness: _Harne
 
     assert "h1" in recovered.plans
     assert harness.supervisor.tree.experiment_for_hypothesis("h1") == "exp_h1"
-    assert (
-        harness.supervisor.tree.get_experiment("exp_h1").status.value == "RUNNING"
-    )
+    assert harness.supervisor.tree.get_experiment("exp_h1").status.value == "RUNNING"
     persisted = json.loads(tree_path.read_text(encoding="utf-8"))
     assert "exp_h1" in persisted["experiments"]
 

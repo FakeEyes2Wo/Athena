@@ -19,11 +19,17 @@ class Outcome(StrEnum):
 class HypothesisPolicy(Protocol):
     """Narrow policy used by the Supervisor scheduler."""
 
-    def seed(self, parent: Hypothesis | None) -> float: ...
+    def seed(self, parent: Hypothesis | None) -> float:
+        """Return the initial priority for a new child hypothesis."""
+        ...
 
-    def priority(self, hypothesis: Hypothesis, tree: ResearchTree) -> float: ...
+    def priority(self, hypothesis: Hypothesis, tree: ResearchTree) -> float:
+        """Return the scheduling priority for an existing hypothesis."""
+        ...
 
-    def settle(self, reference_priority: float, outcome: Outcome) -> float: ...
+    def settle(self, reference_priority: float, outcome: Outcome) -> float:
+        """Return a candidate priority after its trusted comparison."""
+        ...
 
 
 # TODO(search-policy): Replace EloPolicy with an evidence-aware scheduling
@@ -40,13 +46,16 @@ class EloPolicy:
         self._k = k
 
     def seed(self, parent: Hypothesis | None) -> float:
+        """Inherit a parent's priority or seed the root priority."""
         return self.ROOT_PRIORITY if parent is None else parent.priority
 
     def priority(self, hypothesis: Hypothesis, tree: ResearchTree) -> float:
+        """Use the durable hypothesis priority without derived state."""
         del tree
         return hypothesis.priority
 
     def settle(self, reference_priority: float, outcome: Outcome) -> float:
+        """Apply one fixed-expectation Elo update."""
         if not math.isfinite(reference_priority):
             raise ValueError("reference priority must be finite")
         score = {
