@@ -6,15 +6,132 @@ the sandbox denies named pipes used by real ``git`` subprocess capture.
 
 import asyncio
 import contextlib
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from athena.research.prepare import orchestrator
+from athena.research.prepare.baseline_research import (
+    BaselineVerification,
+    VerifiedBaseline,
+    load_baseline_artifacts,
+    research_sha256,
+    write_verification,
+)
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
 from athena.research.runtime.control import start as start_lifecycle
 from athena.research.supervisor.prepare import PrepareResult
+
+
+def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
+    """Seed one complete offline research/design/verification trio."""
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "dataset": {
+            "modality": "image",
+            "task_type": "classification",
+            "labeled_samples": 480,
+            "effective_training_units": 120,
+            "group_count": 120,
+            "class_count": 5,
+            "minority_class_samples": 32,
+            "input_scale": "paired 224x224 images",
+            "regime": "small",
+            "recommended_strategy": "partial_finetune",
+            "evidence": ["eda:EDA_HANDOFF.md: 480 labels across 120 groups"],
+            "rationale": "Grouped labels are limited relative to pretrained capacity.",
+        },
+        "candidates": [
+            {
+                "candidate_id": "resnet-transfer",
+                "title": "Deep Residual Learning for Image Recognition",
+                "method": "pretrained ResNet feature extractor",
+                "source_url": "https://arxiv.org/abs/1512.03385",
+                "source_kind": "paper",
+                "paper_locator": "doi:10.1109/CVPR.2016.90",
+                "repository_url": "https://github.com/pytorch/vision.git",
+                "publication_year": 2016,
+                "claimed_citation_count": 100000,
+                "relevance": "A standard transfer baseline for small image datasets.",
+            },
+            {
+                "candidate_id": "linear-probe",
+                "title": "PyTorch transfer learning tutorial",
+                "method": "frozen visual features with a linear head",
+                "source_url": (
+                    "https://docs.pytorch.org/tutorials/beginner/"
+                    "transfer_learning_tutorial.html"
+                ),
+                "source_kind": "technical_reference",
+                "paper_locator": None,
+                "repository_url": "https://github.com/pytorch/tutorials.git",
+                "publication_year": None,
+                "claimed_citation_count": None,
+                "relevance": "A conservative alternative for scarce labels.",
+            },
+        ],
+        "decisions": [
+            {
+                "candidate_id": "resnet-transfer",
+                "decision": "selected",
+                "reason": "best fit",
+            },
+            {
+                "candidate_id": "linear-probe",
+                "decision": "rejected",
+                "reason": "less adaptive",
+            },
+        ],
+        "selected_candidate_id": "resnet-transfer",
+        "search_queries": ["small image classification transfer baseline GitHub"],
+        "limitations": [],
+    }
+    (root / "BASELINE_RESEARCH.json").write_text(json.dumps(payload), encoding="utf-8")
+    (root / "BASELINE_DESIGN.md").write_text(
+        "# Baseline\n\nSelected candidate: `resnet-transfer`\n"
+        "Training strategy: `partial_finetune`\n",
+        encoding="utf-8",
+    )
+    artifacts = load_baseline_artifacts(root)
+    verification = BaselineVerification(
+        research_sha256=research_sha256(artifacts.raw_research),
+        selected_candidate_id=artifacts.selected.candidate_id,
+        route="git",
+        verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        repository_url=str(artifacts.selected.repository_url),
+        commit="a" * 40,
+        attempts=[{"route": "git", "success": True, "diagnostic": "verified"}],
+    )
+    write_verification(root, verification)
+    return VerifiedBaseline(artifacts=artifacts, verification=verification)
+
+
+def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def asserted_eda(_runtime, workspace, _handoff, _task) -> bool:
+        root = Path(workspace.path)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "EDA_HANDOFF.md").write_text(
+            "# EDA Handoff\n\n480 labels across 120 independent groups.\n",
+            encoding="utf-8",
+        )
+        assert (root / "EDA_HANDOFF.md").is_file()
+        return True
+
+    async def verified_design(
+        _runtime, workspace, _task, eda_ready, _handoff
+    ) -> VerifiedBaseline:
+        root = Path(workspace.path)
+        assert eda_ready is True
+        assert (root / "EDA_HANDOFF.md").is_file()
+        return _write_verified_baseline_fixture(root)
+
+    monkeypatch.setattr(orchestrator, "prepare_eda", asserted_eda)
+    monkeypatch.setattr(orchestrator, "prepare_baseline_design", verified_design)
 
 
 def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime:
@@ -173,6 +290,7 @@ async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> 
 async def test_run_prepare_phase_reuses_frozen_evaluator(
     tmp_path: Path, monkeypatch
 ) -> None:
+    captured: dict[str, object] = {}
 
     class FakeSupervisor:
         def __init__(self, frozen_ref: str) -> None:
@@ -258,6 +376,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         raise AssertionError("evaluator must be skipped when a checkpoint exists")
 
     async def run_prepare_plan(**kwargs):
+        captured.update(kwargs)
         return PrepareResult(
             evaluator_ref=kwargs["evaluator_ref"],
             metric=0.71,
@@ -286,11 +405,20 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         (Path(workspace) / output_file).write_text("stub\n", encoding="utf-8")
 
     monkeypatch.setattr(PhaseRunner, "_run_handoff_agent", fake_handoff)
+    _install_verified_prepare_gate(monkeypatch)
 
     result = await PhaseRunner(rt).run_prepare_phase()
 
     assert result.evaluator_ref == frozen_ref
     assert rt.supervisor.checked_refs == []
+    for filename in (
+        "BASELINE_RESEARCH.json",
+        "BASELINE_RESEARCH_VERIFICATION.json",
+        "BASELINE_DESIGN.md",
+    ):
+        assert filename in str(captured["task"])
+    assert "Selected candidate: resnet-transfer" in str(captured["task"])
+    assert "Training strategy: partial_finetune" in str(captured["task"])
 
 
 @pytest.mark.asyncio
