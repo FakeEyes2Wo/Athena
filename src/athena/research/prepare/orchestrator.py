@@ -42,10 +42,15 @@ async def run_prepare_phase(
     # Freeze evaluation before generating and scoring the baseline.
     evaluators = await prepare_evaluators(runtime, evaluator_task)
     eda_ready = await prepare_eda(runtime, workspace, run_handoff_agent, base_task)
-    await prepare_baseline_design(
+    verified = await prepare_baseline_design(
         runtime, workspace, candidate_task, eda_ready, run_handoff_agent
     )
     predict_features = contract.predict_features_csv if contract else None
     return await run_baseline(
-        runtime, workspace, evaluators.search_ref, candidate_task, predict_features
+        runtime,
+        workspace,
+        evaluators.search_ref,
+        candidate_task,
+        predict_features,
+        verified,
     )

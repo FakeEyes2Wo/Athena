@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from athena.research.prepare import orchestrator
 from athena.research.prepare.baseline import directory_candidate_task
+from athena.research.prepare.baseline_research import BaselineResearchError
 from athena.research.prepare.data import prepare_platform_split
 from athena.research.prepare.eda import usable_eda_reports, write_fallback_eda
 from athena.research.prepare.evaluator import evaluator_tasks
@@ -87,3 +89,92 @@ def test_directory_candidate_reads_the_runtime_split() -> None:
     assert "ATHENA_EVALUATION_SPLIT" in task
     assert "'search'" in task
     assert "'final'" in task
+
+
+@pytest.mark.asyncio
+async def test_prepare_phase_threads_verified_research_into_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = object()
+    captured: dict[str, object] = {}
+    workspace = SimpleNamespace(path=str(tmp_path))
+    runtime = SimpleNamespace(
+        prepare_phase=None,
+        provider=object(),
+        task_text="task",
+    )
+
+    async def fake_prepare_baseline_design(*_args, **_kwargs):
+        return verified
+
+    async def fake_run_baseline(*args):
+        captured["verified"] = args[-1]
+        return "prepared"
+
+    monkeypatch.setattr(
+        orchestrator, "confirmed_task_context_block", lambda _runtime: _async("")
+    )
+    monkeypatch.setattr(
+        orchestrator, "prepare_workspace", lambda _runtime: _async(workspace)
+    )
+    monkeypatch.setattr(
+        orchestrator, "prepare_platform_split", lambda _runtime: _async(None)
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "prepare_evaluators",
+        lambda *_args: _async(SimpleNamespace(search_ref="eval")),
+    )
+    monkeypatch.setattr(orchestrator, "prepare_eda", lambda *_args: _async(True))
+    monkeypatch.setattr(
+        orchestrator, "prepare_baseline_design", fake_prepare_baseline_design
+    )
+    monkeypatch.setattr(orchestrator, "run_baseline", fake_run_baseline)
+
+    result = await orchestrator.run_prepare_phase(runtime, object())
+
+    assert result == "prepared"
+    assert captured["verified"] is verified
+
+
+@pytest.mark.asyncio
+async def test_prepare_phase_never_runs_baseline_after_research_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = SimpleNamespace(path=str(tmp_path))
+    runtime = SimpleNamespace(
+        prepare_phase=None,
+        provider=object(),
+        task_text="task",
+    )
+
+    async def fail_research(*_args, **_kwargs):
+        raise BaselineResearchError("research rejected")
+
+    async def forbidden_baseline(*_args, **_kwargs):
+        raise AssertionError("run_baseline must not run after research failure")
+
+    monkeypatch.setattr(
+        orchestrator, "confirmed_task_context_block", lambda _runtime: _async("")
+    )
+    monkeypatch.setattr(
+        orchestrator, "prepare_workspace", lambda _runtime: _async(workspace)
+    )
+    monkeypatch.setattr(
+        orchestrator, "prepare_platform_split", lambda _runtime: _async(None)
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "prepare_evaluators",
+        lambda *_args: _async(SimpleNamespace(search_ref="eval")),
+    )
+    monkeypatch.setattr(orchestrator, "prepare_eda", lambda *_args: _async(True))
+    monkeypatch.setattr(orchestrator, "prepare_baseline_design", fail_research)
+    monkeypatch.setattr(orchestrator, "run_baseline", forbidden_baseline)
+
+    with pytest.raises(BaselineResearchError, match="research rejected"):
+        await orchestrator.run_prepare_phase(runtime, object())
+
+
+async def _async(value):
+    return value
