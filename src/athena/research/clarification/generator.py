@@ -136,29 +136,76 @@ def _apply_latest_revision(draft: ClarificationDraft) -> DraftUnderstanding:
         return draft.understanding
     instruction = draft.revisions[-1].instruction.casefold()
     payload = draft.understanding.model_dump()
-    for token, metric in (
-        ("accuracy", "accuracy"),
-        ("f1", "f1"),
-        ("roc-auc", "roc_auc"),
-        ("roc_auc", "roc_auc"),
-        ("precision", "precision"),
-        ("recall", "recall"),
-        ("rmse", "rmse"),
-        ("mae", "mae"),
-    ):
-        if token in instruction:
-            payload["primary_metric"] = metric
-    for direction in ("maximize", "minimize"):
-        if direction in instruction:
-            payload["direction"] = direction
-    for task_type in ("classification", "regression", "ranking"):
-        if task_type in instruction:
-            payload["task_type"] = task_type
-    if "cross-validation" in instruction or "cross validation" in instruction:
-        payload["evaluation_plan"] = "cross_validation"
-    elif "hold-out" in instruction or "holdout" in instruction:
-        payload["evaluation_plan"] = "holdout"
+    metric = _directed_value(
+        instruction,
+        (
+            ("accuracy", "accuracy"),
+            ("f1", "f1"),
+            ("roc-auc", "roc_auc"),
+            ("roc_auc", "roc_auc"),
+            ("precision", "precision"),
+            ("recall", "recall"),
+            ("rmse", "rmse"),
+            ("mae", "mae"),
+        ),
+    )
+    if metric is not None:
+        payload["primary_metric"] = metric
+    direction = _directed_value(
+        instruction,
+        (("maximize", "maximize"), ("minimize", "minimize")),
+    )
+    if direction is not None:
+        payload["direction"] = direction
+    task_type = _directed_value(
+        instruction,
+        (
+            ("classification", "classification"),
+            ("regression", "regression"),
+            ("ranking", "ranking"),
+        ),
+    )
+    if task_type is not None:
+        payload["task_type"] = task_type
+    evaluation_plan = _directed_value(
+        instruction,
+        (
+            ("cross-validation", "cross_validation"),
+            ("cross validation", "cross_validation"),
+            ("hold-out", "holdout"),
+            ("holdout", "holdout"),
+        ),
+    )
+    if evaluation_plan is not None:
+        payload["evaluation_plan"] = evaluation_plan
     return DraftUnderstanding.model_validate(payload)
+
+
+def _directed_value(
+    instruction: str,
+    choices: tuple[tuple[str, str], ...],
+) -> str | None:
+    """Select one existing value from an explicit, non-negated directive."""
+    hits = [
+        (instruction.index(token), value)
+        for token, value in choices
+        if token in instruction
+        and f"not {token}" not in instruction
+        and f"instead of {token}" not in instruction
+    ]
+    if not hits:
+        return None
+    directive_ends = [
+        index + len(prefix)
+        for prefix in ("use ", "keep ", "add ", "prefer ", "switch to ", "change to ")
+        if (index := instruction.find(prefix)) >= 0
+    ]
+    for start in sorted(directive_ends):
+        directed = [hit for hit in hits if hit[0] >= start]
+        if directed:
+            return min(directed)[1]
+    values = {value for _index, value in hits}
+    return values.pop() if len(values) == 1 else None
 
 
 async def generate_step(

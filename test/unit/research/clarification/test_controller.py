@@ -166,6 +166,42 @@ async def test_revision_instruction_changes_final_understanding(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_revision_negation_does_not_override_primary_metric(tmp_path) -> None:
+    _store, _broker, controller = _controller(
+        tmp_path, generator=DeterministicClarificationGenerator()
+    )
+    ready = await controller.start_or_resume("predict churn")
+    assert ready.understanding.primary_metric == "accuracy"
+
+    revised = await controller.revise(
+        ready.draft_id,
+        ready.revision,
+        "Keep accuracy, not recall",
+    )
+    updated = await controller.run(revised)
+
+    assert updated.understanding.primary_metric == "accuracy"
+
+
+@pytest.mark.asyncio
+async def test_revision_explicit_plan_beats_token_order(tmp_path) -> None:
+    _store, _broker, controller = _controller(
+        tmp_path, generator=DeterministicClarificationGenerator()
+    )
+    ready = await controller.start_or_resume("predict churn")
+    assert ready.understanding.evaluation_plan == "holdout"
+
+    revised = await controller.revise(
+        ready.draft_id,
+        ready.revision,
+        "Use holdout instead of cross-validation",
+    )
+    updated = await controller.run(revised)
+
+    assert updated.understanding.evaluation_plan == "holdout"
+
+
+@pytest.mark.asyncio
 async def test_cancel_sets_cancelled_and_settles_scope(tmp_path) -> None:
     _store, _broker, controller = _controller(tmp_path)
     ready = await controller.start_or_resume("predict churn")
