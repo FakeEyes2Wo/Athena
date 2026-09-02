@@ -240,5 +240,8 @@ count is unchanged from preflight.
   empty.
 - All pre-existing untracked `.task3*`, `.task4*`, `.task5*`, and concurrent `.task7*`
   pytest/review directories were left in place and were not staged or removed.
-- The Task 7 commits contain only the closeout paths enumerated by the implementation
-  plan; no code, test, or temporary-directory path is included.
+- The documentation closeout commits `36b3b6d` and `6801a8c` contain only the
+  plan-authorized closeout paths: the former contains the six documented closeout
+  paths, and the latter changes only this report. Neither documentation commit includes
+  code, tests, or temporary directories. The separately documented `dba438c` fixture
+  repair remains the authorized two-test change.
