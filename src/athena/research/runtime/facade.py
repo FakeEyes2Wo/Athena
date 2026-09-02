@@ -36,6 +36,9 @@ from athena.research.runtime.bootstrap import (
     ideator_tools as ideator_tools_impl,
 )
 from athena.research.runtime.bootstrap import (
+    baseline_ideator_tools as baseline_ideator_tools_impl,
+)
+from athena.research.runtime.bootstrap import (
     kaggle_stack as kaggle_stack_impl,
 )
 from athena.research.runtime.bootstrap import (
@@ -447,6 +450,10 @@ class ResearchRuntime:
         """
 
         return ideator_tools_impl(self)
+
+    def baseline_ideator_tools(self) -> Callable[[], ToolRegistry]:
+        """Return baseline-only tools, including the shared web research pair."""
+        return baseline_ideator_tools_impl(self)
 
     def corpus_tools(self, *, for_ideation: bool = False) -> ToolRegistry | None:
         """Return read-only paper operators for the active corpus, if any."""

@@ -9,6 +9,7 @@ from athena.retrieval.web_search import (
     WebFetchTool,
     WebSearchTool,
     WebSession,
+    build_web_tools,
     extract_page_text,
     find_in_page,
 )
@@ -149,3 +150,12 @@ def test_shared_session_resolves_search_refs() -> None:
     session.remember_url(refs[1], "https://example.com")
     assert session.url(refs[1]) == "https://example.com"
     assert session.page(refs[1]) is None
+
+
+def test_build_web_tools_shares_search_session() -> None:
+    tools = build_web_tools()
+
+    search = tools.resolve("web_search")
+    fetch = tools.resolve("web_fetch")
+
+    assert search.session is fetch.session

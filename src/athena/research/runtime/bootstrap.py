@@ -58,6 +58,7 @@ from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 from athena.research.turns.runner import AgentTurnRunner
+from athena.retrieval.web_search import build_web_tools
 
 
 def build_paths(
@@ -295,6 +296,22 @@ def ideator_tools(runtime: Any) -> Callable[[], ToolRegistry | None]:
     return build
 
 
+def baseline_ideator_tools(runtime: Any) -> Callable[[], ToolRegistry]:
+    """Return the baseline Ideator provider with isolated web research tools."""
+
+    def build() -> ToolRegistry:
+        """Build the baseline registry when the agent is registered."""
+        registry = _merged(
+            runtime.kaggle_tools("ideator"),
+            runtime.corpus_tools(for_ideation=True),
+            build_web_tools(),
+        )
+        assert registry is not None
+        return registry
+
+    return build
+
+
 def _merged(*registries: ToolRegistry | None) -> ToolRegistry | None:
     """Merge optional tool registries while preserving registration order."""
     present = [registry for registry in registries if registry is not None]
@@ -337,6 +354,7 @@ def _load_state(config: ResearchConfig) -> ResearchState:
 
 __all__ = [
     "build_services",
+    "baseline_ideator_tools",
     "ideator_tools",
     "kaggle_stack",
     "kaggle_tools",

@@ -17,6 +17,13 @@ lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
 
 ## Baseline design
 
+Before editing code, read `BASELINE_RESEARCH.json`,
+`BASELINE_RESEARCH_VERIFICATION.json`, and `BASELINE_DESIGN.md`. The platform
+has selected and verified the validated source; do not invent another method
+or bypass the selected training strategy. Include the candidate ID, verification
+route, commit or OpenAlex evidence, and training strategy in `REPORT.md` and
+`RESEARCH_HANDOFF.md`. Name the validated source and its provenance explicitly.
+
 If `BASELINE_DESIGN.md` exists in this workspace, read it **first** and
 implement its primary architecture exactly. Use its alternatives only when the
 primary architecture cannot be made to work. If the file is missing, design the
