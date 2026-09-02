@@ -443,7 +443,7 @@ Expected: all cases pass without a network request. Commit only Task 2 paths wit
 - Produces: `BaselineSourceVerifier.verify(artifacts: BaselineArtifacts) -> Awaitable[BaselineVerification]`.
 - Produces: `build_default_source_verifier() -> BaselineSourceVerifier` using the existing `HostRateLimiter`, `UrllibTransport`, and `OpenAlexClient`.
 
-- [ ] **Step 1: Write failing OpenAlex parse and qualification tests**
+- [x] **Step 1: Write failing OpenAlex parse and qualification tests**
 
 Add a parser assertion to `test_paper_source.py`:
 
@@ -496,7 +496,7 @@ Also test title mismatch, unresolved locator, OpenAlex outage, Git failure follo
 OpenAlex success, both routes failing with two bounded attempts, and agent-claimed
 citations being ignored.
 
-- [ ] **Step 2: Run the focused tests and confirm the new metadata/route failures**
+- [x] **Step 2: Run the focused tests and confirm the new metadata/route failures**
 
 Run:
 
@@ -506,7 +506,7 @@ Run:
 
 Expected: the citation field assertion and composed-verifier imports fail.
 
-- [ ] **Step 3: Parse citation metadata and implement deterministic title matching**
+- [x] **Step 3: Parse citation metadata and implement deterministic title matching**
 
 Add to `OpenAlexWork` and `parse_work`:
 
@@ -525,7 +525,7 @@ Normalize titles with Unicode NFKC, `casefold()`, and alphanumeric token joining
 `0.90` when both normalized titles have at least 20 characters. No fuzzy match is
 allowed for shorter titles.
 
-- [ ] **Step 4: Compose Git-first and OpenAlex-fallback verification**
+- [x] **Step 4: Compose Git-first and OpenAlex-fallback verification**
 
 Implement this exact precedence:
 
@@ -568,7 +568,7 @@ attempt. If neither route returns, raise `BaselineResearchError("selected candid
 `build_default_source_verifier` must construct only metadata access; it must not invoke
 the paid OpenAlex content endpoint or require an API key.
 
-- [ ] **Step 5: Run, format, and commit Task 3**
+- [x] **Step 5: Run, format, and commit Task 3**
 
 Run:
 
