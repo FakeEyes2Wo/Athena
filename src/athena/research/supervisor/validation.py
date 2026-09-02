@@ -306,6 +306,68 @@ async def _reviewed_diff_text(
     return text
 
 
+_ARTIFACT_SUFFIXES = (
+    ".md",
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".log",
+    ".json",
+    ".parquet",
+    ".png",
+    ".jpg",
+    ".svg",
+    ".pdf",
+    ".html",
+)
+
+
+def _changed_lines(raw: bytes, *, skip_artifacts: bool) -> str:
+    """The diff's added and removed lines, for marker scanning.
+
+    Two properties the whole-diff text does not have.
+
+    **Context lines are excluded.** Git carries three lines of context around
+    every hunk, so a marker sitting *near* an edit rejected the edit. A LightGBM
+    solution has ``learning_rate`` in its parameter dict; a pure path repair three
+    lines away was unfixable, because the marker was not in anything the Agent
+    had written.
+
+    **Artifacts are excluded** when ``skip_artifacts``. The semantic gate exists
+    to stop the Agent retuning the model. A generated ``REPORT.md`` that
+    *describes* the run, or a predictions CSV, is an output. On 2026-09-02 the
+    validate Agent ran the frozen command from inside ``solution/``, so its
+    report landed at ``solution/REPORT.md`` -- outside the declared outputs, so
+    ``drop_output_sections`` left it in -- and that report says ``learning_rate:``
+    twice. All 16 repair attempts were rejected with the same sentence, and none
+    of them could have removed it.
+
+    Leakage keeps scanning artifacts: a predictions file that suddenly carries a
+    final-label column is worth stopping.
+    """
+    kept: list[str] = []
+    matches = list(_DIFF_HEADER.finditer(raw))
+    if not matches:
+        return raw.decode("utf-8", "replace")
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        path = match.group("b").decode("utf-8", "replace")
+        if skip_artifacts and path.lower().endswith(_ARTIFACT_SUFFIXES):
+            continue
+        section = raw[match.start() : end].decode("utf-8", "replace")
+        kept.extend(
+            line
+            for line in section.splitlines()
+            if (line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+        )
+    return "\n".join(kept)
+
+
+def _marker_hit(text: str, markers: tuple[str, ...]) -> str | None:
+    lowered = text.lower()
+    return next((marker for marker in markers if marker in lowered), None)
+
+
 async def review_validation_diff(
     *,
     workspace: GitWorkBranch,
@@ -333,7 +395,10 @@ async def review_validation_diff(
     if semantic_paths:
         return ValidationDiffReview(
             accepted=False,
-            reason="validation cannot change model or training semantics",
+            reason=(
+                "validation cannot change model or training semantics: it edits "
+                + ", ".join(sorted(semantic_paths))
+            ),
         )
     changed_text = await _reviewed_diff_text(diff, store, outputs=outputs)
     if changed_text is None:
@@ -341,16 +406,29 @@ async def review_validation_diff(
             accepted=False,
             reason="validation diff is binary or cannot be reviewed safely",
         )
-    lowered = changed_text.lower()
-    if any(marker in lowered for marker in _LEAKAGE_MARKERS):
+    scanned = drop_output_sections(await store.get_bytes(diff.ref), outputs)
+    leak = _marker_hit(_changed_lines(scanned, skip_artifacts=False), _LEAKAGE_MARKERS)
+    if leak is not None:
         return ValidationDiffReview(
             accepted=False,
-            reason="validation repair may not access final labels",
+            reason=(
+                "validation repair may not access final labels: a changed line "
+                f"contains {leak!r}"
+            ),
         )
-    if any(marker in lowered for marker in _SEMANTIC_MARKERS):
+    semantic = _marker_hit(
+        _changed_lines(scanned, skip_artifacts=True), _SEMANTIC_MARKERS
+    )
+    if semantic is not None:
+        # 说清楚是哪个词命中的。只回一句“不能改模型语义”时，Agent 连续 16 次
+        # 交出同一个修复——它没有任何线索知道要改什么（2026-09-02）。
         return ValidationDiffReview(
             accepted=False,
-            reason="validation cannot change model or training semantics",
+            reason=(
+                "validation cannot change model or training semantics: a changed "
+                f"line contains {semantic!r}. Remove that edit; VALIDATE re-runs "
+                "the frozen command and must not retune it."
+            ),
         )
     payload: dict[str, Any] = {
         "policy": "Accept runtime-only repairs; reject semantic tuning or label access.",

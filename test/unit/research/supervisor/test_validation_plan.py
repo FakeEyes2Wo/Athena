@@ -383,6 +383,154 @@ async def test_editing_the_manifest_forfeits_the_output_exclusion(tmp_path) -> N
     assert reviewer_called is False
 
 
+@pytest.mark.asyncio
+async def test_a_generated_report_mentioning_a_marker_is_not_a_semantic_change(
+    tmp_path,
+) -> None:
+    """The 2026-09-02 VALIDATE, in miniature.
+
+    The validate Agent ran the frozen command from inside ``solution/``, so its
+    report landed at ``solution/REPORT.md`` -- outside the declared outputs, and
+    that report *describes* the model it ran: "learning_rate: 0.05". The gate
+    scanned the whole diff text, matched the marker, and answered "validation
+    cannot change model or training semantics" 16 times in a row. Nothing the
+    Agent could write would have removed a word from a report the frozen command
+    regenerates.
+    """
+    workspace_dir = tmp_path / "validate"
+    _write_manifest_for_review(workspace_dir)
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    raw = (
+        _diff_section("solution/REPORT.md", "+- learning_rate: 0.05\n+- num_leaves: 31")
+        + _diff_section("solution/train_model.py", "+PREDICTIONS_DIR = 'predictions'")
+    ).encode()
+    diff = GitDiff(
+        ref=await store.put_bytes(raw),
+        paths=("solution/REPORT.md", "solution/train_model.py"),
+    )
+    reviewed = False
+
+    async def reviewer(_prompt: str) -> ValidationDiffReview:
+        nonlocal reviewed
+        reviewed = True
+        return ValidationDiffReview(accepted=True, reason="runtime-only")
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="point the output directory at this workspace",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    assert result.accepted is True
+    assert reviewed is True
+
+
+@pytest.mark.asyncio
+async def test_a_marker_in_context_no_longer_rejects_the_edit(tmp_path) -> None:
+    """Git carries three lines of context; a marker in them is not the edit.
+
+    A LightGBM solution has ``learning_rate`` in its parameter dict, so a pure
+    path repair a few lines away was unfixable — the marker was in code the Agent
+    never touched.
+    """
+    workspace_dir = tmp_path / "validate"
+    _write_manifest_for_review(workspace_dir)
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    body = (
+        " params = {\n"
+        "     'learning_rate': 0.05,\n"
+        "-PREDICTIONS_DIR = '/other/workspace/predictions'\n"
+        "+PREDICTIONS_DIR = 'predictions'\n"
+        " }"
+    )
+    diff = GitDiff(
+        ref=await store.put_bytes(_diff_section("solution/run.py", body).encode()),
+        paths=("solution/run.py",),
+    )
+
+    async def reviewer(_prompt: str) -> ValidationDiffReview:
+        return ValidationDiffReview(accepted=True, reason="runtime-only")
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="point the output directory at this workspace",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    assert result.accepted is True
+
+
+@pytest.mark.asyncio
+async def test_retuning_a_hyperparameter_is_still_rejected_and_named(tmp_path) -> None:
+    """The gate must still do its job, and now say what tripped it."""
+    workspace_dir = tmp_path / "validate"
+    _write_manifest_for_review(workspace_dir)
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    body = "-    'learning_rate': 0.05,\n+    'learning_rate': 0.2,"
+    diff = GitDiff(
+        ref=await store.put_bytes(_diff_section("solution/run.py", body).encode()),
+        paths=("solution/run.py",),
+    )
+    reviewer_called = False
+
+    async def reviewer(_prompt: str) -> ValidationDiffReview:
+        nonlocal reviewer_called
+        reviewer_called = True
+        return ValidationDiffReview(accepted=True, reason="looks fine")
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="tune the model",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    assert result.accepted is False
+    assert reviewer_called is False
+    # 必须点名，否则 Agent 只能原样再交一次（真机上连交了 16 次）。
+    assert "learning_rate" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_final_label_access_is_still_rejected_even_in_an_artifact(
+    tmp_path,
+) -> None:
+    """Leakage keeps scanning artifacts; only the semantic gate skips them."""
+    workspace_dir = tmp_path / "validate"
+    _write_manifest_for_review(workspace_dir)
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    diff = GitDiff(
+        ref=await store.put_bytes(
+            _diff_section("solution/scores.csv", "+id,final_label\n+1,1").encode()
+        ),
+        paths=("solution/scores.csv",),
+    )
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="write scores",
+        independent_review=None,  # 不该走到评审
+        store=store,
+    )
+
+    assert result.accepted is False
+    assert "final_label" in result.reason
+
+
 def test_dropping_output_sections_leaves_a_diff_without_outputs_alone() -> None:
     raw = _diff_section("solution/a.py", "+x = 1").encode()
 
