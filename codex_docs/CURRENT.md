@@ -1,16 +1,18 @@
 # Current Athena Work
 
 Active implementation plan:
-- None. The previous plan is frozen because its architecture and acceptance evidence are
-  stale. A replacement plan will be written after review of the revised design spec.
+- None. The authoritative-baseline design is awaiting written-spec review before an
+  implementation plan is created.
 
 Design spec:
+- `docs/superpowers/specs/2026-09-02-authoritative-baseline-research-design.md`
+
+Paused implementation plan:
+- `docs/superpowers/plans/2026-09-02-jw-ssd-tui-run.md` (not started; superseded in
+  priority by the approved authoritative-baseline workflow)
+
+Supporting design spec:
 - `docs/superpowers/specs/2026-09-01-task-clarification-confirmation-gate-design.md`
 
-Frozen plan retained for defect audit:
-- `codex_docs/2026-08-18-task-understanding-clarification-plan.md`
-
 Most recent completed work:
-- `codex_docs/2026-08-16-breakpoint-resume-completion-report.md`
-  (breakpoint resume for task understanding / general research / PREPARE,
-  commits `281bca7` and `3c0e052`).
+- `codex_docs/2026-09-02-research-layout-simplification-completion-report.md`
