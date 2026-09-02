@@ -338,6 +338,15 @@ def _load_state(config: ResearchConfig) -> ResearchState:
             hypotheses_per_ideator=config.search.hypotheses_per_ideator,
         )
     )
+    # ``ResearchRuntime`` uses the default value when no CLI option is given,
+    # so preserve a persisted budget for that case.  A non-default value is an
+    # explicit override and becomes the new durable budget for this project.
+    if (
+        state.search_limit != config.search.search_limit
+        and config.search.search_limit != SearchLimits().search_limit
+    ):
+        state.search_limit = config.search.search_limit
+        state.save(paths.state)
     if state.eda_dir is not None:
         eda_path = Path(state.eda_dir)
         if not eda_path.is_absolute():

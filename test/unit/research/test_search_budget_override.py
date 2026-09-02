@@ -26,6 +26,7 @@ def test_an_explicit_budget_replaces_the_persisted_one(tmp_path: Path) -> None:
     runtime = ResearchRuntime(project_root=project, search_limit=16)
 
     assert runtime.state.search_limit == 16
+    assert ResearchState.load(project / ".athena" / "state.json").search_limit == 16
 
 
 def test_omitting_the_flag_keeps_the_persisted_budget(tmp_path: Path) -> None:
