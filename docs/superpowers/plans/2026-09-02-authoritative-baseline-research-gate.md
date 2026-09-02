@@ -602,7 +602,7 @@ Expected: all source-verification tests pass. Commit only Task 3 paths with
 - Produces: `ResearchRuntime.baseline_ideator_tools() -> Callable[[], ToolRegistry]`.
 - Preserves: `ResearchRuntime.ideator_tools()` without web tools.
 
-- [ ] **Step 1: Write failing tool-isolation and shared-session tests**
+- [x] **Step 1: Write failing tool-isolation and shared-session tests**
 
 ```python
 def test_build_web_tools_shares_search_session() -> None:
@@ -626,7 +626,7 @@ Add a merge case with fake Kaggle and corpus tools, asserting the baseline regis
 all names while the ordinary registry has no web names. Keep the existing General Agent
 test green to prove the refactor does not remove its web pair.
 
-- [ ] **Step 2: Add behavior-level prompt-consumer coverage**
+- [x] **Step 2: Add behavior-level prompt-consumer coverage**
 
 Do not add prompt-substring or source-text change detectors. Prove the requirements at
 their deterministic consumer boundaries instead:
@@ -643,7 +643,7 @@ their deterministic consumer boundaries instead:
 The task reviewer must manually inspect both modified prompts against Step 5 and record
 the result in the review report.
 
-- [ ] **Step 3: Run focused tests and confirm missing factory/prompt clauses**
+- [x] **Step 3: Run focused tests and confirm missing factory/prompt clauses**
 
 Run:
 
@@ -654,7 +654,7 @@ Run:
 Expected: the missing factory and baseline-only provider assertions fail; existing
 prompt-consumer coverage remains green until the new orchestration tests are added.
 
-- [ ] **Step 4: Extract the reusable web pair and wire only the baseline ideator**
+- [x] **Step 4: Extract the reusable web pair and wire only the baseline ideator**
 
 Add to `web_search.py`:
 
@@ -688,7 +688,7 @@ ideators. Add the matching facade import, method, and `__all__` export.
 Change `_register_ideator` in Task 5 to consume `runtime.baseline_ideator_tools()`;
 ordinary ideator registration continues to consume `runtime.ideator_tools()`.
 
-- [ ] **Step 5: Replace the baseline ideator prompt with the approved contract**
+- [x] **Step 5: Replace the baseline ideator prompt with the approved contract**
 
 The prompt must require reading the task/data contract and `EDA_HANDOFF.md`, at least
 two distinct search queries, primary/official sources, two candidates unless the
@@ -714,7 +714,7 @@ editing code; refuse to invent another method; include candidate ID, verificatio
 commit/OpenAlex evidence, and training strategy in the report and
 `RESEARCH_HANDOFF.md`; and retain all existing environment/evaluator constraints.
 
-- [ ] **Step 6: Run, format, and commit Task 4**
+- [x] **Step 6: Run, format, and commit Task 4**
 
 Run:
 
