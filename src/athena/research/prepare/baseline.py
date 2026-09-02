@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from athena.agents.ideator_agent import (
     BASELINE_IDEATOR_PROFILE,
     register_ideator_agent,
@@ -18,6 +20,7 @@ from athena.research.prepare.baseline_research import (
     RESEARCH_FILENAME,
     VERIFICATION_FILENAME,
     BaselineResearchError,
+    BaselineVerification,
     VerifiedBaseline,
     assert_verified_files,
     load_baseline_artifacts,
@@ -36,6 +39,7 @@ logger = logging.getLogger(__name__)
 HandoffFn = Callable[..., Awaitable[str]]
 _IDEATOR_REAP_TIMEOUT_SECONDS = 5.0
 _DIAGNOSTIC_LIMIT = 4000
+_PENDING_IDEATOR_REAPS: set[asyncio.Task[None]] = set()
 
 
 def directory_candidate_task(task: str) -> str:
@@ -163,11 +167,37 @@ async def _run_ideator_turn(
         return _repairable(error)
 
 
+def _observe_ideator_reap(task: asyncio.Task[None]) -> None:
+    """Retain and consume delayed reap results without replacing primary work."""
+    if task not in _PENDING_IDEATOR_REAPS:
+        return
+    _PENDING_IDEATOR_REAPS.remove(task)
+    if task.cancelled():
+        logger.warning("baseline ideator reap was cancelled")
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning(
+            "failed to reap baseline ideator",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
 async def _reap_ideator(runtime: Any) -> None:
-    """Release the reusable ideator thread within the PREPARE cleanup budget."""
+    """Bound the caller's wait while retaining the reusable-thread cleanup."""
+    try:
+        task = asyncio.create_task(
+            runtime.agents.reap(BASELINE_IDEATOR_PROFILE.agent_type)
+        )
+    except Exception:
+        logger.warning("failed to start baseline ideator reap", exc_info=True)
+        return
+
+    _PENDING_IDEATOR_REAPS.add(task)
+    task.add_done_callback(_observe_ideator_reap)
     try:
         await asyncio.wait_for(
-            runtime.agents.reap(BASELINE_IDEATOR_PROFILE.agent_type),
+            asyncio.shield(task),
             timeout=_IDEATOR_REAP_TIMEOUT_SECONDS,
         )
     except TimeoutError:
@@ -176,7 +206,9 @@ async def _reap_ideator(runtime: Any) -> None:
             _IDEATOR_REAP_TIMEOUT_SECONDS,
         )
     except Exception:
-        logger.warning("failed to reap baseline ideator", exc_info=True)
+        _observe_ideator_reap(task)
+    else:
+        _observe_ideator_reap(task)
 
 
 async def _publish_terminal_research_error(
@@ -207,7 +239,6 @@ async def prepare_baseline_design(
         raise error
 
     root = Path(workspace.path)
-    source_verifier = verifier or build_default_source_verifier()
     complete_artifacts = all(
         (root / filename).is_file() for filename in (RESEARCH_FILENAME, DESIGN_FILENAME)
     )
@@ -223,6 +254,7 @@ async def prepare_baseline_design(
                 return cached
             cache_error = None
 
+        source_verifier = verifier or build_default_source_verifier()
         _remove_verification(root)
         if complete_artifacts:
             try:
@@ -303,7 +335,7 @@ def verified_baseline_task(task: str, verified: VerifiedBaseline) -> str:
 
 
 def _assert_prepare_evidence(root: Path, verified: VerifiedBaseline) -> None:
-    """Preserve the digest-first PREPARE error while running the full assertion."""
+    """Reload and match all three platform-verified PREPARE artifacts."""
     try:
         assert_verified_files(root, verified)
     except BaselineResearchError as error:
@@ -319,6 +351,26 @@ def _assert_prepare_evidence(root: Path, verified: VerifiedBaseline) -> None:
             ) from error
         raise
 
+    verification_path = root / VERIFICATION_FILENAME
+    try:
+        raw_verification = verification_path.read_bytes()
+    except OSError as error:
+        raise BaselineResearchError(
+            f"unable to read verification artifact {VERIFICATION_FILENAME}",
+            (_bounded_diagnostic(error),),
+        ) from error
+    try:
+        on_disk = BaselineVerification.model_validate_json(raw_verification)
+    except (ValidationError, ValueError) as error:
+        raise BaselineResearchError(
+            f"invalid verification artifact {VERIFICATION_FILENAME}",
+            (_bounded_diagnostic(error),),
+        ) from error
+    if on_disk != verified.verification:
+        raise BaselineResearchError(
+            "verification artifact does not match verified evidence"
+        )
+
 
 async def run_baseline(
     runtime: Any,
@@ -329,12 +381,12 @@ async def run_baseline(
     verified: VerifiedBaseline,
 ) -> PrepareResult:
     """Implement and score the trusted baseline through the frozen evaluator."""
-    # Register the implementation agent and freeze the current research tree.
+    root = Path(workspace.path)
+    _assert_prepare_evidence(root, verified)
     await runtime.publish_output(
         source="supervisor", channel="text", text="PREPARE: implementing baseline."
     )
-    root = Path(workspace.path)
-    _assert_prepare_evidence(root, verified)
+    # Register the implementation agent and freeze the current research tree.
     _register_prepare_agent(runtime, root)
     tree_ref = await runtime.store.put_text(
         json.dumps(runtime.tree.to_dict(), ensure_ascii=False, sort_keys=True)

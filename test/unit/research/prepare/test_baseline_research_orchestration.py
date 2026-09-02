@@ -322,6 +322,45 @@ async def test_matching_cache_returns_without_verifier_or_agent(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_matching_cache_returns_before_default_verifier_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    write_artifacts(tmp_path)
+    write_forged_verification(tmp_path)
+
+    class ForbiddenAgents(FakeAgents):
+        async def reap(self, agent_id: str) -> None:
+            raise AssertionError(f"cache hit must not reap {agent_id}")
+
+    runtime = FakeRuntime()
+    runtime.agents = ForbiddenAgents()
+
+    async def forbidden_handoff(**_kwargs: Any) -> str:
+        raise AssertionError("cache hit must not call the ideator")
+
+    monkeypatch.setattr(
+        baseline,
+        "build_default_source_verifier",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("cache hit must not construct a verifier")
+        ),
+    )
+    monkeypatch.setattr(
+        baseline,
+        "_register_ideator",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("cache hit must not register the ideator")
+        ),
+    )
+
+    result = await prepare_baseline_design(
+        runtime, workspace(tmp_path), "task", True, forbidden_handoff
+    )
+
+    assert result.verification.commit == "a" * 40
+
+
+@pytest.mark.asyncio
 async def test_wrong_digest_cache_is_removed_and_revalidated(tmp_path: Path) -> None:
     write_artifacts(tmp_path)
     stale = valid_verification(load_baseline_artifacts(tmp_path)).model_copy(
@@ -430,21 +469,30 @@ async def test_cancellation_is_not_converted_or_swallowed(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_reap_timeout_does_not_hide_success(
+async def test_reap_timeout_preserves_success_and_eventually_forgets_agent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    removed = asyncio.Event()
 
-    class HangingAgents(FakeAgents):
+    class StatefulAgents(FakeAgents):
+        def __init__(self) -> None:
+            super().__init__()
+            self.live = {"baseline_ideator"}
+            self.cancelled = False
+
         async def reap(self, agent_id: str) -> None:
             self.reaped.append(agent_id)
             try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
+                await release.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            self.live.remove(agent_id)
+            removed.set()
 
     runtime = FakeRuntime()
-    runtime.agents = HangingAgents()
+    runtime.agents = StatefulAgents()
     handoff = ScriptedHandoff(tmp_path, [writes_valid])
     verifier = QueuedVerifier(tmp_path, ["valid"])
     monkeypatch.setattr(baseline, "_IDEATOR_REAP_TIMEOUT_SECONDS", 0.01)
@@ -455,7 +503,83 @@ async def test_reap_timeout_does_not_hide_success(
 
     assert result.verification.route == "git"
     assert runtime.agents.reaped == ["baseline_ideator"]
-    assert cancelled.is_set()
+    assert runtime.agents.live == {"baseline_ideator"}
+    assert runtime.agents.cancelled is False
+
+    release.set()
+    await asyncio.wait_for(removed.wait(), timeout=1.0)
+    assert runtime.agents.live == set()
+
+
+@pytest.mark.asyncio
+async def test_reap_timeout_preserves_terminal_error_and_eventually_forgets_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    release = asyncio.Event()
+    removed = asyncio.Event()
+
+    class StatefulAgents(FakeAgents):
+        def __init__(self) -> None:
+            super().__init__()
+            self.live = {"baseline_ideator"}
+
+        async def reap(self, agent_id: str) -> None:
+            self.reaped.append(agent_id)
+            await release.wait()
+            self.live.remove(agent_id)
+            removed.set()
+
+    runtime = FakeRuntime()
+    runtime.agents = StatefulAgents()
+    handoff = ScriptedHandoff(tmp_path, [writes_valid, writes_valid])
+    verifier = QueuedVerifier(
+        tmp_path,
+        [
+            BaselineResearchError("bad source", ["clone failed"]),
+            BaselineResearchError("still bad", ["OpenAlex unresolved"]),
+        ],
+    )
+    monkeypatch.setattr(baseline, "_IDEATOR_REAP_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(BaselineResearchError, match="still bad"):
+        await prepare_baseline_design(
+            runtime, workspace(tmp_path), "task", True, handoff, verifier=verifier
+        )
+
+    assert runtime.agents.live == {"baseline_ideator"}
+    release.set()
+    await asyncio.wait_for(removed.wait(), timeout=1.0)
+    assert runtime.agents.live == set()
+
+
+@pytest.mark.asyncio
+async def test_reap_error_is_observed_without_replacing_success(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    class RecoverableErrorAgents(FakeAgents):
+        def __init__(self) -> None:
+            super().__init__()
+            self.live = {"baseline_ideator"}
+
+        async def reap(self, agent_id: str) -> None:
+            self.reaped.append(agent_id)
+            self.live.remove(agent_id)
+            raise RuntimeError("facade close bookkeeping warning")
+
+    runtime = FakeRuntime()
+    runtime.agents = RecoverableErrorAgents()
+    handoff = ScriptedHandoff(tmp_path, [writes_valid])
+    verifier = QueuedVerifier(tmp_path, ["valid"])
+
+    with caplog.at_level("WARNING", logger=baseline.__name__):
+        result = await prepare_baseline_design(
+            runtime, workspace(tmp_path), "task", True, handoff, verifier=verifier
+        )
+        await asyncio.sleep(0)
+
+    assert result.verification.route == "git"
+    assert runtime.agents.live == set()
+    assert "facade close bookkeeping warning" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -527,10 +651,30 @@ def test_register_ideator_uses_baseline_only_tools(
     assert captured["extra_tools"] is tools
 
 
-def verified_fixture(root: Path) -> VerifiedBaseline:
+def verified_fixture(root: Path, route: str = "git") -> VerifiedBaseline:
     write_artifacts(root)
     artifacts = load_baseline_artifacts(root)
-    verification = valid_verification(artifacts)
+    if route == "git":
+        verification = valid_verification(artifacts)
+    else:
+        assert route == "openalex"
+        verification = BaselineVerification(
+            research_sha256=research_sha256(artifacts.raw_research),
+            selected_candidate_id=artifacts.selected.candidate_id,
+            route="openalex",
+            verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+            openalex_id="https://openalex.org/W2741809807",
+            title="Deep Residual Learning for Image Recognition",
+            publication_year=2016,
+            cited_by_count=100000,
+            attempts=[
+                {
+                    "route": "openalex",
+                    "success": True,
+                    "diagnostic": "authority verified",
+                }
+            ],
+        )
     write_verification(root, verification)
     return VerifiedBaseline(artifacts=artifacts, verification=verification)
 
@@ -547,40 +691,141 @@ class PrepareRuntime:
         self.git = object()
         self.events = SimpleNamespace(project_agent_event=lambda *args: None)
         self.outputs: list[dict[str, Any]] = []
+        self.snapshots: list[str] = []
 
-    async def _put_text(self, _text: str) -> str:
+    async def _put_text(self, text: str) -> str:
+        self.snapshots.append(text)
         return "tree-ref"
 
     async def publish_output(self, **kwargs: Any) -> None:
         self.outputs.append(kwargs)
 
 
-@pytest.mark.asyncio
-async def test_run_baseline_rejects_changed_research_before_registering_prepare(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+async def assert_rejected_without_prepare_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    verified: VerifiedBaseline,
+    *,
+    match: str,
 ) -> None:
-    verified = verified_fixture(tmp_path)
-    (tmp_path / "BASELINE_RESEARCH.json").write_text("{}", encoding="utf-8")
+    runtime = PrepareRuntime()
     registered: list[str] = []
+    plan_calls: list[dict[str, Any]] = []
+
+    async def fake_run_prepare_plan(**kwargs: Any) -> str:
+        plan_calls.append(kwargs)
+        return "forbidden"
+
     monkeypatch.setattr(
         baseline,
         "_register_prepare_agent",
         lambda *_args: registered.append("prepare"),
     )
+    monkeypatch.setattr(baseline, "run_prepare_plan", fake_run_prepare_plan)
 
-    with pytest.raises(BaselineResearchError, match="digest"):
-        await run_baseline(
-            PrepareRuntime(), workspace(tmp_path), "eval", "task", None, verified
-        )
+    with pytest.raises(BaselineResearchError, match=match):
+        await run_baseline(runtime, workspace(root), "eval", "task", None, verified)
 
+    assert runtime.outputs == []
+    assert runtime.snapshots == []
     assert registered == []
+    assert plan_calls == []
+
+
+def write_different_verification(
+    root: Path, verified: VerifiedBaseline, difference: str
+) -> None:
+    values = verified.verification.model_dump(mode="json")
+    if difference == "route":
+        values.update(
+            route="openalex",
+            repository_url=None,
+            commit=None,
+            openalex_id="https://openalex.org/W2741809807",
+            title="Deep Residual Learning for Image Recognition",
+            publication_year=2016,
+            cited_by_count=100000,
+            attempts=[
+                {
+                    "route": "openalex",
+                    "success": True,
+                    "diagnostic": "authority verified",
+                }
+            ],
+        )
+    elif difference == "revision":
+        values["commit"] = "b" * 40
+    else:
+        assert difference == "attempt"
+        values["attempts"] = [
+            {"route": "git", "success": True, "diagnostic": "different evidence"}
+        ]
+    write_verification(root, BaselineVerification.model_validate(values))
 
 
 @pytest.mark.asyncio
-async def test_run_baseline_registers_only_after_check_and_enriches_task(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("filename", "replacement", "message"),
+    [
+        ("BASELINE_RESEARCH.json", "{}", "digest"),
+        (
+            "BASELINE_DESIGN.md",
+            "Selected candidate: `resnet-transfer`\nTraining strategy: `classical`\n",
+            "strategy",
+        ),
+    ],
+)
+async def test_run_baseline_rejects_changed_artifacts_without_prepare_side_effects(
+    filename: str,
+    replacement: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     verified = verified_fixture(tmp_path)
+    (tmp_path / filename).write_text(replacement, encoding="utf-8")
+
+    await assert_rejected_without_prepare_side_effects(
+        monkeypatch, tmp_path, verified, match=message
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "difference", ["missing", "malformed", "route", "revision", "attempt"]
+)
+async def test_run_baseline_rejects_changed_verification_without_prepare_side_effects(
+    difference: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = verified_fixture(tmp_path)
+    verification_path = tmp_path / "BASELINE_RESEARCH_VERIFICATION.json"
+    if difference == "missing":
+        verification_path.unlink()
+    elif difference == "malformed":
+        verification_path.write_text("{}", encoding="utf-8")
+    else:
+        write_different_verification(tmp_path, verified, difference)
+
+    await assert_rejected_without_prepare_side_effects(
+        monkeypatch, tmp_path, verified, match="verification"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "revision"),
+    [
+        ("git", "a" * 40),
+        ("openalex", "https://openalex.org/W2741809807"),
+    ],
+)
+async def test_run_baseline_registers_only_after_check_and_enriches_task(
+    route: str,
+    revision: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verified = verified_fixture(tmp_path, route)
     order: list[str] = []
     captured: dict[str, Any] = {}
     original_assert = baseline.assert_verified_files
@@ -615,5 +860,5 @@ async def test_run_baseline_registers_only_after_check_and_enriches_task(
         assert filename in captured["task"]
     assert "Selected candidate: resnet-transfer" in captured["task"]
     assert "Training strategy: partial_finetune" in captured["task"]
-    assert "Verification route: git" in captured["task"]
-    assert f"Verified revision: {'a' * 40}" in captured["task"]
+    assert f"Verification route: {route}" in captured["task"]
+    assert f"Verified revision: {revision}" in captured["task"]
