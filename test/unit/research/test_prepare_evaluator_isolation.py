@@ -16,10 +16,30 @@ evaluator 的目录。
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from athena.research.prepare_phase import _assert_evaluator_splits_are_disjoint
+import athena.research.prepare_evaluator as evaluator_module
+from athena.research.prepare_evaluator import assert_evaluator_splits_are_disjoint
+
+
+async def _noop(*_args, **_kwargs) -> None:
+    pass
+
+
+def _runtime(tmp_path: Path) -> SimpleNamespace:
+    supervisor = SimpleNamespace(
+        evaluator_ref=None,
+        final_evaluator_ref=None,
+        checkpoint_evaluator=_noop,
+        checkpoint_final_evaluator=_noop,
+    )
+    return SimpleNamespace(
+        workspaces_root=tmp_path / "workspaces",
+        supervisor=supervisor,
+        publish_output=_noop,
+    )
 
 
 def _labels(path: Path, row_ids: range) -> Path:
@@ -31,10 +51,10 @@ def _labels(path: Path, row_ids: range) -> Path:
 
 
 def test_disjoint_evaluator_splits_are_accepted(tmp_path: Path) -> None:
-    search = _labels(tmp_path / "evaluator" / "labels.csv", range(0, 100))
+    search = _labels(tmp_path / "evaluator" / "labels.csv", range(100))
     final = _labels(tmp_path / "final_evaluator" / "labels.csv", range(100, 200))
 
-    _assert_evaluator_splits_are_disjoint(search, final)
+    assert_evaluator_splits_are_disjoint(search, final)
 
 
 def test_the_held_out_split_leaking_into_search_is_caught(tmp_path: Path) -> None:
@@ -43,22 +63,22 @@ def test_the_held_out_split_leaking_into_search_is_caught(tmp_path: Path) -> Non
     final = _labels(tmp_path / "final_evaluator" / "labels.csv", range(100, 200))
 
     with pytest.raises(RuntimeError, match="not held out"):
-        _assert_evaluator_splits_are_disjoint(search, final)
+        assert_evaluator_splits_are_disjoint(search, final)
 
 
 def test_partial_overlap_is_also_caught(tmp_path: Path) -> None:
-    search = _labels(tmp_path / "evaluator" / "labels.csv", range(0, 120))
+    search = _labels(tmp_path / "evaluator" / "labels.csv", range(120))
     final = _labels(tmp_path / "final_evaluator" / "labels.csv", range(100, 200))
 
     with pytest.raises(RuntimeError, match="overlapping rows"):
-        _assert_evaluator_splits_are_disjoint(search, final)
+        assert_evaluator_splits_are_disjoint(search, final)
 
 
 def test_a_missing_labels_file_is_left_to_the_freeze_step(tmp_path: Path) -> None:
     """标签文件缺失是冻结步骤的问题；别把它变成一条让人误解的隔离错误。"""
-    search = _labels(tmp_path / "evaluator" / "labels.csv", range(0, 100))
+    search = _labels(tmp_path / "evaluator" / "labels.csv", range(100))
 
-    _assert_evaluator_splits_are_disjoint(search, tmp_path / "nope" / "labels.csv")
+    assert_evaluator_splits_are_disjoint(search, tmp_path / "nope" / "labels.csv")
 
 
 @pytest.mark.asyncio
@@ -66,10 +86,6 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
     tmp_path: Path, monkeypatch
 ) -> None:
     """第二个 evaluator 必须拿到自己的 workspace，而不是继续用第一个的。"""
-    from types import SimpleNamespace
-
-    import athena.research.prepare_phase as phase
-
     bound: list[Path] = []
 
     class Registry:
@@ -93,8 +109,8 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
     async def fake_plan(**kwargs):
         return "sha256:" + "a" * 64
 
-    monkeypatch.setattr(phase, "register_evaluator_agent", fake_register)
-    monkeypatch.setattr(phase, "run_evaluator_plan", fake_plan)
+    monkeypatch.setattr(evaluator_module, "register_evaluator_agent", fake_register)
+    monkeypatch.setattr(evaluator_module, "run_evaluator_plan", fake_plan)
 
     rt = SimpleNamespace(
         workspaces_root=tmp_path / "workspaces",
@@ -109,16 +125,73 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
     )
 
     for directory in ("evaluator", "final_evaluator"):
-        await phase._run_evaluator_agent(
+        await evaluator_module.run_evaluator_agent(
             rt,
-            directory_name=directory,
-            agent_id=directory,
-            plan_id=directory,
-            task="build it",
-            label=directory,
+            evaluator_module.EvaluatorJob(
+                directory=directory,
+                agent_id=directory,
+                plan_id=directory,
+                task="build it",
+                event_label=directory,
+            ),
         )
 
     assert bound == [
         tmp_path / "workspaces" / "evaluator",
         tmp_path / "workspaces" / "final_evaluator",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform_split", [False, True])
+async def test_evaluator_prompts_match_the_data_source(
+    tmp_path: Path, monkeypatch, platform_split: bool
+) -> None:
+    """Give evaluator agents the contract matching the available data source."""
+    # Arrange either the platform-owned CSV split or the directory-data path.
+    runtime = _runtime(tmp_path)
+    if platform_split:
+        labels = runtime.workspaces_root / "data_split" / "final_labels.csv"
+        labels.parent.mkdir(parents=True)
+        labels.write_text("__athena_row_id,label\n1,a\n", encoding="utf-8")
+    tasks: list[str] = []
+    checked: list[tuple[Path, Path]] = []
+
+    # Capture agent prompts and the isolation check without running an LLM.
+    async def fake_evaluator(_runtime, job):
+        tasks.append(job.task)
+        return f"ref-{len(tasks)}"
+
+    def check_disjoint(search: Path, final: Path) -> None:
+        checked.append((search, final))
+
+    monkeypatch.setattr(evaluator_module, "run_evaluator_agent", fake_evaluator)
+    monkeypatch.setattr(
+        evaluator_module, "assert_evaluator_splits_are_disjoint", check_disjoint
+    )
+
+    bundle = await evaluator_module.prepare_evaluators(runtime, "build evaluator")
+
+    # Both paths must freeze two evaluators and retain the disjointness check.
+    assert len(tasks) == 2
+    assert bundle.search_ref == "ref-1"
+    assert bundle.final_ref == "ref-2"
+    assert checked == [
+        (
+            runtime.workspaces_root / "evaluator" / "labels.csv",
+            runtime.workspaces_root / "final_evaluator" / "labels.csv",
+        )
+    ]
+    if platform_split:
+        assert tasks[0] == "build evaluator"
+        assert "Take the final labels from final_labels.csv" in tasks[1]
+        assert "no platform CSV split" not in tasks[1]
+        return
+    assert "SEARCH partition" in tasks[0]
+    assert "FINAL partition" in tasks[1]
+    for task in tasks:
+        assert "SHA-256" in task
+        assert "group-disjoint" in task
+        assert "__athena_row_id,label" in task
+        assert "missing, duplicate, or unexpected ids" in task
+        assert "final_labels.csv in the platform" not in task

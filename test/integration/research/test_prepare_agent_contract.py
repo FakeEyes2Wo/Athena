@@ -12,11 +12,17 @@ from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
-from athena.execution.runtime import CommandResult, ExecutionRuntime
+from athena.execution.runtime import (
+    CommandRequest,
+    CommandResult,
+    ExecutionContext,
+    ExecutionRuntime,
+)
 from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.script_runner import DataScriptRunner
-from athena.research.supervisor.prepare import run_evaluator_plan, run_prepare_plan
+from athena.research.supervisor.evaluator_plan import run_evaluator_plan
+from athena.research.supervisor.prepare import run_prepare_plan
 
 _EVALUATE_SCRIPT = (
     "import csv, json\n"
@@ -49,15 +55,19 @@ class _EvaluatorProvider:
             ("metric.json", '{"eval_script": "evaluate.py"}'),
             (
                 "pyproject.toml",
-                "[project]\nname = 'eval'\nversion = '0.1.0'\n"
-                "requires-python = '>=3.11'\ndependencies = []\n",
+                (
+                    "[project]\nname = 'eval'\nversion = '0.1.0'\n"
+                    "requires-python = '>=3.11'\ndependencies = []\n"
+                ),
             ),
             ("evaluate.py", _EVALUATE_SCRIPT),
             ("labels.csv", "__athena_row_id,label\nr1,0\nr2,1\n"),
             (
                 "HANDOFF.md",
-                "# Eval contract\npredictions/predictions.csv (id,prediction); "
-                "accuracy over aligned ids\n",
+                (
+                    "# Eval contract\npredictions/predictions.csv (id,prediction); "
+                    "accuracy over aligned ids\n"
+                ),
             ),
             None,
         ]
@@ -179,10 +189,16 @@ class _ManifestExecution:
         """Stub：测试不涉及真实共享环境初始化。"""
         return
 
-    async def run(self, context, command=None, *, argv=None, emit=None, **_kwargs):
-        assert command is None
-        assert argv is not None
-        self.argv_calls.append(argv)
+    async def collect_outputs(self, _subdirs: tuple[str, ...]) -> None:
+        """Keep locally written fixture outputs in place for validation."""
+
+    async def run(
+        self, context: ExecutionContext, request: CommandRequest
+    ) -> CommandResult:
+        assert request.command is None
+        assert request.argv is not None
+        assert request.evaluation_split == "search"
+        self.argv_calls.append(request.argv)
         root = context.workspace_root
         assert (root / "solution" / "features.py").is_file()
         assert (root / "solution" / "model.py").is_file()
@@ -193,8 +209,8 @@ class _ManifestExecution:
             )
         (root / "report.md").write_text("# PREPARE baseline\n", encoding="utf-8")
         result = CommandResult(ok=True, stdout="", stderr="", exit_code=0)
-        if emit is not None:
-            await emit("command/completed", "exec:prepare", result.to_dict())
+        if request.emit is not None:
+            await request.emit("command/completed", "exec:prepare", result.to_dict())
         return result
 
 

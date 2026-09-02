@@ -1,19 +1,54 @@
 """Deterministic PREPARE phase boundary tests."""
 
+import asyncio
 import json
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
-from athena.execution.runtime import CommandResult
+from athena.execution.runtime import CommandRequest, CommandResult
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
-from athena.research.supervisor.prepare import (
+from athena.research.supervisor import prepare
+from athena.research.supervisor.evaluator_plan import (
     _validate_frozen_evaluator,
     run_evaluator_plan,
-    run_prepare_plan,
 )
+from athena.research.supervisor.prepare import run_prepare_plan
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_reap_is_bounded(monkeypatch) -> None:
+    """Cleanup returns even when reap ignores cancellation after its timeout."""
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def ignores_cancellation(_agent_id: str) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Timeout cancellation is intentionally ignored to model the real hang.
+            cancelled.set()
+            await release.wait()
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(prepare, "_REAP_TIMEOUT_SECONDS", 0.01)
+
+    started = asyncio.get_running_loop().time()
+    await asyncio.wait_for(
+        prepare._reap_agent(SimpleNamespace(reap=ignores_cancellation), "prepare"),
+        timeout=0.2,
+    )
+    assert asyncio.get_running_loop().time() - started < 0.1
+    await asyncio.wait_for(cancelled.wait(), timeout=0.1)
+
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=0.1)
 
 
 class _AgentRuntime:
@@ -75,9 +110,28 @@ class _Execution:
     def ensure_environment(self) -> None:
         pass
 
-    async def run(self, context, command=None, *, argv=None, **kwargs):
-        del context, command, argv, kwargs
+    async def run(self, context, request: CommandRequest):
+        del context
+        workdir = Path(request.workdir)
+        history = workdir.parent / f"{workdir.name}-output-history"
+        versions = sorted(path for path in history.iterdir() if path.is_dir())
+        manifest = json.loads((workdir / "experiment.json").read_text("utf-8"))
+        for relative in manifest["outputs"].values():
+            source = versions[-1] / relative
+            target = workdir / relative
+            if not source.exists():
+                continue
+            if source.is_dir():
+                shutil.copytree(source, target, dirs_exist_ok=True)
+                continue
+            if target.is_dir():
+                shutil.rmtree(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
         return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
+
+    async def collect_outputs(self, _subdirs: tuple[str, ...]) -> None:
+        return None
 
 
 class _Evaluator:
@@ -172,8 +226,14 @@ async def _frozen_evaluator_ref(store, dir_path: Path) -> str:
 @pytest.mark.parametrize(
     ("missing", "expected_error"),
     [
-        ("report", "PREPARE requires a declared, non-empty report output"),
-        ("predictions", "missing predictions directory: outputs/predictions"),
+        (
+            "report",
+            "report output produced no new artifact",
+        ),
+        (
+            "predictions",
+            "predictions output produced no new artifact",
+        ),
         ("evidence", "trusted evidence is missing"),
         ("commit", "trusted commit is missing"),
     ],
@@ -205,7 +265,8 @@ async def test_prepare_result_requires_every_trusted_artifact(
         )
 
     assert agents.created == ["prepare"]
-    assert agents.feedback == [expected_error]
+    assert len(agents.feedback) == 1
+    assert agents.feedback[0].startswith(expected_error)
 
 
 @pytest.mark.asyncio

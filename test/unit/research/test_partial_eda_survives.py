@@ -13,10 +13,10 @@
 
 from pathlib import Path
 
-from athena.research.prepare_phase import (
-    _PLACEHOLDER_MARK,
-    _usable_eda_reports,
-    _write_missing_report_placeholders,
+from athena.research.prepare_eda import (
+    PLACEHOLDER_MARK,
+    usable_eda_reports,
+    write_missing_report_placeholders,
 )
 
 TODO = """# EDA TODO
@@ -37,16 +37,20 @@ def _workspace(tmp_path: Path) -> Path:
 
 def test_placeholder_is_not_counted_as_a_usable_report(tmp_path):
     ws = _workspace(tmp_path)
-    (ws / "EDA_REPORT_00_OVERVIEW.md").write_text("# Overview\n\n真内容\n", encoding="utf-8")
-    (ws / "EDA_REPORT_05_LEAKS_DRIFT.md").write_text("# Leaks\n\n真内容\n", encoding="utf-8")
+    (ws / "EDA_REPORT_00_OVERVIEW.md").write_text(
+        "# Overview\n\n真内容\n", encoding="utf-8"
+    )
+    (ws / "EDA_REPORT_05_LEAKS_DRIFT.md").write_text(
+        "# Leaks\n\n真内容\n", encoding="utf-8"
+    )
 
     # 04 写失败 → 补占位符
-    _write_missing_report_placeholders(ws)
-    assert _PLACEHOLDER_MARK in (ws / "EDA_REPORT_04_RELATIONSHIPS.md").read_text(
+    write_missing_report_placeholders(ws)
+    assert PLACEHOLDER_MARK in (ws / "EDA_REPORT_04_RELATIONSHIPS.md").read_text(
         encoding="utf-8"
     )
 
-    usable = [p.name for p in _usable_eda_reports(ws)]
+    usable = [p.name for p in usable_eda_reports(ws)]
     assert usable == ["EDA_REPORT_00_OVERVIEW.md", "EDA_REPORT_05_LEAKS_DRIFT.md"]
     # 这就是修复的要点：还有两份真报告，不该判定整个 EDA 失败。
     assert usable, "有真报告时不得降级"
@@ -55,13 +59,13 @@ def test_placeholder_is_not_counted_as_a_usable_report(tmp_path):
 def test_all_placeholders_means_no_usable_reports(tmp_path):
     """一份都没写成时，降级仍然是对的行为。"""
     ws = _workspace(tmp_path)
-    _write_missing_report_placeholders(ws)
-    assert _usable_eda_reports(ws) == []
+    write_missing_report_placeholders(ws)
+    assert usable_eda_reports(ws) == []
 
 
 def test_existing_reports_are_never_overwritten_by_placeholders(tmp_path):
     ws = _workspace(tmp_path)
     real = ws / "EDA_REPORT_00_OVERVIEW.md"
     real.write_text("# Overview\n\n不能被覆盖\n", encoding="utf-8")
-    _write_missing_report_placeholders(ws)
+    write_missing_report_placeholders(ws)
     assert "不能被覆盖" in real.read_text(encoding="utf-8")
