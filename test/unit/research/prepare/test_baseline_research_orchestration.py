@@ -583,6 +583,62 @@ async def test_reap_error_is_observed_without_replacing_success(
 
 
 @pytest.mark.asyncio
+async def test_reap_cancellation_is_observed_without_replacing_success(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    class CancelledReapAgents(FakeAgents):
+        async def reap(self, agent_id: str) -> None:
+            self.reaped.append(agent_id)
+            raise asyncio.CancelledError()
+
+    runtime = FakeRuntime()
+    runtime.agents = CancelledReapAgents()
+    handoff = ScriptedHandoff(tmp_path, [writes_valid])
+    verifier = QueuedVerifier(tmp_path, ["valid"])
+
+    with caplog.at_level("WARNING", logger=baseline.__name__):
+        result = await prepare_baseline_design(
+            runtime, workspace(tmp_path), "task", True, handoff, verifier=verifier
+        )
+        await asyncio.sleep(0)
+
+    assert result.verification.route == "git"
+    assert runtime.agents.reaped == ["baseline_ideator"]
+    assert "baseline ideator reap was cancelled" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reap_cancellation_does_not_replace_terminal_research_error(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    class CancelledReapAgents(FakeAgents):
+        async def reap(self, agent_id: str) -> None:
+            self.reaped.append(agent_id)
+            raise asyncio.CancelledError()
+
+    runtime = FakeRuntime()
+    runtime.agents = CancelledReapAgents()
+    handoff = ScriptedHandoff(tmp_path, [writes_valid, writes_valid])
+    verifier = QueuedVerifier(
+        tmp_path,
+        [
+            BaselineResearchError("bad source", ["clone failed"]),
+            BaselineResearchError("still bad", ["OpenAlex unresolved"]),
+        ],
+    )
+
+    with caplog.at_level("WARNING", logger=baseline.__name__):
+        with pytest.raises(BaselineResearchError, match="still bad"):
+            await prepare_baseline_design(
+                runtime, workspace(tmp_path), "task", True, handoff, verifier=verifier
+            )
+        await asyncio.sleep(0)
+
+    assert runtime.agents.reaped == ["baseline_ideator"]
+    assert "baseline ideator reap was cancelled" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_terminal_agent_forgery_is_removed_and_restart_revalidates(
     tmp_path: Path,
 ) -> None:

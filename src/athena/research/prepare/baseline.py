@@ -205,6 +205,14 @@ async def _reap_ideator(runtime: Any) -> None:
             "timed out reaping baseline ideator after %.1f seconds",
             _IDEATOR_REAP_TIMEOUT_SECONDS,
         )
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is None or current.cancelling():
+            raise
+        if task.cancelled():
+            _observe_ideator_reap(task)
+            return
+        raise
     except Exception:
         _observe_ideator_reap(task)
     else:
