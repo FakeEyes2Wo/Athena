@@ -1,6 +1,7 @@
 """Restricted, non-interactive verification of public Git repositories."""
 
 import asyncio
+import ipaddress
 import os
 import re
 import subprocess
@@ -13,13 +14,48 @@ from urllib.parse import urlsplit, urlunsplit
 from .baseline_research import BaselineResearchError
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
-_CREDENTIAL_URL_RE = re.compile(
-    r"(?P<scheme>https?|ssh|git)://[^\s/@]+(?::[^\s/@]*)?@",
-    re.IGNORECASE,
-)
 _SENSITIVE_VALUE_RE = re.compile(
     r"(?i)\b(password|passwd|token|secret|authorization|bearer)(?:\s*=|\s*:)\s*[^\s,;]+"
 )
+_CREDENTIAL_HEADER_RE = re.compile(
+    r"(?im)\b(?P<name>authorization|proxy-authorization)\s*:\s*[^\r\n]*"
+)
+_AUTHORIZATION_SCHEME_RE = re.compile(r"(?i)\b(?P<scheme>Bearer|Basic)\s+[^\s\r\n]+")
+_URL_CANDIDATE_RE = re.compile(
+    r"(?P<scheme>https?|ssh|git)://[^\s'\"<>]+", re.IGNORECASE
+)
+_STRUCTURAL_ESCAPE_RE = re.compile(r"%(?:23|25|2f|3a|3f|40|5c)", re.IGNORECASE)
+
+_UNTRUSTED_ENV_NAMES = {
+    "ALL_PROXY",
+    "GIT_ALLOW_PROTOCOL",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_ASKPASS",
+    "GIT_DIR",
+    "GIT_EDITOR",
+    "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_EXT_SERVICE",
+    "GIT_EXT_SERVICE_NOP",
+    "GIT_HTTP_PROXY",
+    "GIT_HTTPS_PROXY",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PROXY_COMMAND",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT",
+    "GIT_WORK_TREE",
+    "GIT_PAGER",
+    "GIT_PROTOCOL",
+    "GIT_SSL_CIPHER_LIST",
+    "GIT_SSL_NO_VERIFY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "SSH_ASKPASS",
+}
 
 
 class CommandRunner(Protocol):
@@ -69,11 +105,50 @@ def _bounded_diagnostic(value: object) -> str:
     """Collapse and redact command diagnostics before exposing them."""
 
     text = str(value)
-    text = _CREDENTIAL_URL_RE.sub(
-        lambda match: f"{match.group('scheme')}://[REDACTED]@", text
+    text = _CREDENTIAL_HEADER_RE.sub(
+        lambda match: f"{match.group('name')}=[REDACTED]", text
+    )
+    text = _URL_CANDIDATE_RE.sub(_redact_url_candidate, text)
+    text = _AUTHORIZATION_SCHEME_RE.sub(
+        lambda match: f"{match.group('scheme')} [REDACTED]", text
     )
     text = _SENSITIVE_VALUE_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
     return " ".join(text.split())[:4000]
+
+
+def _redact_url_candidate(match: re.Match[str]) -> str:
+    """Redact an entire URL when its authority can contain userinfo."""
+
+    candidate = match.group(0)
+    authority = candidate.split("://", 1)[1].split("/", 1)[0]
+    if "@" in authority or "%" in authority:
+        return f"{match.group('scheme')}://[REDACTED]"
+    return candidate
+
+
+def _clean_environment() -> dict[str, str]:
+    """Copy only a safe process environment for Git's two commands."""
+
+    environment = dict(os.environ)
+    untrusted_casefolded = {name.casefold() for name in _UNTRUSTED_ENV_NAMES}
+    for key in list(environment):
+        if (
+            key.casefold() == "git_config"
+            or key.casefold().startswith("git_config_")
+            or key.casefold() in untrusted_casefolded
+            or key.casefold().startswith("git_trace")
+        ):
+            environment.pop(key, None)
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "Never",
+        }
+    )
+    return environment
 
 
 def _normalize_repository_url(repository_url: str) -> str:
@@ -85,10 +160,16 @@ def _normalize_repository_url(repository_url: str) -> str:
         character.isspace() for character in repository_url
     ):
         raise ValueError("repository URL must not contain whitespace")
+    if any(
+        ord(character) <= 0x1F or ord(character) == 0x7F for character in repository_url
+    ):
+        raise ValueError("repository URL must not contain control characters")
     if "?" in repository_url or "#" in repository_url:
         raise ValueError("repository URL must not contain a query or fragment")
     if "\\" in repository_url:
         raise ValueError("repository URL must use URL path separators")
+    if _STRUCTURAL_ESCAPE_RE.search(repository_url):
+        raise ValueError("repository URL must not encode structural delimiters")
 
     try:
         parsed = urlsplit(repository_url)
@@ -101,18 +182,41 @@ def _normalize_repository_url(repository_url: str) -> str:
         raise ValueError("repository URL must use HTTPS")
     if not hostname or parsed.username is not None or parsed.password is not None:
         raise ValueError("repository URL must not contain credentials")
+    if "%" in parsed.netloc:
+        raise ValueError("repository authority must not be percent-encoded")
+    if port is not None and port != 443:
+        raise ValueError("repository URL must use HTTPS port 443")
     if parsed.netloc != parsed.netloc.strip() or not parsed.netloc:
         raise ValueError("repository URL must include a host")
     if parsed.path in ("", "/"):
         raise ValueError("repository URL must include a repository path")
 
+    try:
+        normalized_host = hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("repository hostname is not valid IDNA") from exc
+    if normalized_host.endswith("."):
+        normalized_host = normalized_host[:-1]
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        raise ValueError("repository hostname must not be localhost")
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise ValueError("repository IP address must be globally routable")
+    if address is None:
+        labels = normalized_host.split(".")
+        if any(
+            not label or label.startswith("-") or label.endswith("-")
+            for label in labels
+        ) or not re.fullmatch(r"[a-z0-9.-]+", normalized_host):
+            raise ValueError("repository hostname is malformed")
+
     # Lower-case the host and omit the default HTTPS port for stable evidence.
-    normalized_host = hostname.lower()
     if ":" in normalized_host and not normalized_host.startswith("["):
         normalized_host = f"[{normalized_host}]"
     normalized_netloc = normalized_host
-    if port is not None and port != 443:
-        normalized_netloc += f":{port}"
     normalized_path = parsed.path.rstrip("/")
     if not normalized_path:
         raise ValueError("repository URL must include a repository path")
@@ -134,8 +238,7 @@ class GitCloneVerifier:
         except ValueError as exc:
             self._raise_failure(str(exc))
 
-        environment = dict(os.environ)
-        environment.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"})
+        environment = _clean_environment()
 
         with tempfile.TemporaryDirectory(prefix="athena-git-verify-") as temporary:
             temporary_root = Path(temporary)
@@ -148,6 +251,8 @@ class GitCloneVerifier:
                 "-c",
                 f"core.hooksPath={hooks_dir}",
                 "-c",
+                "protocol.allow=never",
+                "-c",
                 "protocol.file.allow=never",
                 "-c",
                 "protocol.ext.allow=never",
@@ -159,6 +264,8 @@ class GitCloneVerifier:
                 "protocol.http.allow=never",
                 "-c",
                 "protocol.https.allow=always",
+                "-c",
+                "credential.helper=",
             ]
             clone_argv = [
                 "git",
@@ -184,7 +291,14 @@ class GitCloneVerifier:
                     f"{clone_result.stderr or clone_result.stdout or 'no diagnostic'}"
                 )
 
-            head_argv = ["git", "-C", str(clone_dir), "rev-parse", "HEAD"]
+            head_argv = [
+                "git",
+                *git_config,
+                "-C",
+                str(clone_dir),
+                "rev-parse",
+                "HEAD",
+            ]
             head_result = await self._run(
                 head_argv,
                 cwd=temporary_root,
@@ -215,7 +329,7 @@ class GitCloneVerifier:
             self._raise_failure(
                 f"git {operation} timed out after {self._timeout_s:g} seconds: {exc}"
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self._raise_failure(f"git {operation} could not be started: {exc}")
 
     @staticmethod

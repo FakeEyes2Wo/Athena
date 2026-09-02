@@ -92,6 +92,29 @@ async def test_git_verifier_disables_non_https_protocols_and_hooks() -> None:
         "https://example.com/x.git?token=secret",
         "https://example.com/x.git#fragment",
         "https://example.com",
+        "https://example.com:8443/x.git",
+        "https://bad..example/x.git",
+        "https://%65xample.com/x.git",
+        "https://localhost/x.git",
+        "https://api.localhost/x.git",
+        "https://127.0.0.1/x.git",
+        "https://10.0.0.5/x.git",
+        "https://169.254.1.2/x.git",
+        "https://0.0.0.0/x.git",
+        "https://[::1]/x.git",
+        "https://[fd00::1]/x.git",
+        "https://[fe80::1]/x.git",
+        "https://[::]/x.git",
+        "https://[2001:db8::1]/x.git",
+        "https://example.com/repo\x00.git",
+        "https://example.com/repo%40.git",
+        "https://example.com/repo%3A.git",
+        "https://example.com/repo%2F.git",
+        "https://example.com/repo%3F.git",
+        "https://example.com/repo%23.git",
+        "https://example.com/repo%5C.git",
+        "https://example.com/repo%25.git",
+        "https://user%40example.com/repo.git",
     ],
 )
 async def test_git_verifier_rejects_non_public_https_urls(repository_url: str) -> None:
@@ -107,11 +130,51 @@ async def test_git_verifier_rejects_non_public_https_urls(repository_url: str) -
 
 
 @pytest.mark.asyncio
+async def test_git_verifier_idna_normalizes_global_domain() -> None:
+    runner = FakeRunner()
+
+    evidence = await GitCloneVerifier(runner=runner).verify(
+        "https://例え.テスト/repo.git"
+    )
+
+    assert evidence.repository_url == "https://xn--r8jz45g.xn--zckzah/repo.git"
+    assert runner.calls[0][0][runner.calls[0][0].index("--") + 1] == (
+        "https://xn--r8jz45g.xn--zckzah/repo.git"
+    )
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_normalizes_default_https_port_and_host_case() -> None:
+    runner = FakeRunner()
+
+    evidence = await GitCloneVerifier(runner=runner).verify(
+        "https://EXAMPLE.com:443/repo.git/"
+    )
+
+    assert evidence.repository_url == "https://example.com/repo.git"
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_rejects_control_characters_without_running_commands() -> (
+    None
+):
+    runner = FakeRunner()
+
+    with pytest.raises(BaselineResearchError) as caught:
+        await GitCloneVerifier(runner=runner).verify("https://example.com/repo\x00.git")
+
+    assert str(caught.value) == "Git source verification failed"
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
 async def test_git_verifier_reports_bounded_redacted_clone_failure() -> None:
     secret = "super-secret-token"
+    bearer_secret = "actual-bearer-secret"
     stderr = (
         "fatal: could not read Password for "
-        f"'https://alice:{secret}@example.com/x.git': " + (" noisy\noutput\t" * 5000)
+        f"'https://alice:{secret}@example.com/x.git': "
+        f"Authorization: Bearer {bearer_secret}; " + (" noisy\noutput\t" * 5000)
     )
     runner = FakeRunner(clone_code=128, stderr=stderr)
 
@@ -121,9 +184,80 @@ async def test_git_verifier_reports_bounded_redacted_clone_failure() -> None:
     diagnostic = " ".join(caught.value.diagnostics)
     assert len(diagnostic) <= 4000
     assert secret not in diagnostic
+    assert bearer_secret not in diagnostic
     assert "alice" not in diagnostic
     assert "  " not in diagnostic
     assert len(runner.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "credential_diagnostic",
+    [
+        "Authorization: Bearer bearer-token-value",
+        "authorization: Basic basic-credential-value",
+        "fatal: https://alice%3Aescaped-secret%40example.com/repo.git",
+    ],
+)
+async def test_git_verifier_redacts_complete_authorization_and_escaped_url_credentials(
+    credential_diagnostic: str,
+) -> None:
+    runner = FakeRunner(clone_code=128, stderr=credential_diagnostic)
+
+    with pytest.raises(BaselineResearchError) as caught:
+        await GitCloneVerifier(runner=runner).verify("https://example.com/x.git")
+
+    diagnostic = " ".join(caught.value.diagnostics)
+    assert "bearer-token-value" not in diagnostic
+    assert "basic-credential-value" not in diagnostic
+    assert "escaped-secret" not in diagnostic
+    assert "alice" not in diagnostic
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_isolates_git_environment_and_config_for_both_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inherited = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "url.https://evil.example/.insteadOf",
+        "GIT_CONFIG_VALUE_0": "https://example.com/",
+        "GIT_SSH_COMMAND": "malicious-helper --proxy evil",
+        "GIT_PROXY_COMMAND": "malicious-proxy",
+        "GIT_ASKPASS": "malicious-askpass",
+        "SSH_ASKPASS": "malicious-askpass",
+        "GIT_EXEC_PATH": "C:\\malicious",
+        "GIT_ALLOW_PROTOCOL": "file:ssh",
+        "HTTP_PROXY": "http://proxy.invalid",
+        "HTTPS_PROXY": "http://proxy.invalid",
+        "ALL_PROXY": "http://proxy.invalid",
+    }
+    for key, value in inherited.items():
+        monkeypatch.setenv(key, value)
+    runner = FakeRunner()
+
+    await GitCloneVerifier(runner=runner).verify("https://example.com/x.git")
+
+    assert len(runner.calls) == 2
+    for argv, _, environment, _ in runner.calls:
+        assert "GIT_CONFIG_COUNT" not in environment
+        assert "GIT_CONFIG_KEY_0" not in environment
+        assert "GIT_CONFIG_VALUE_0" not in environment
+        assert "GIT_SSH_COMMAND" not in environment
+        assert "GIT_PROXY_COMMAND" not in environment
+        assert "GIT_ASKPASS" not in environment
+        assert "SSH_ASKPASS" not in environment
+        assert "GIT_EXEC_PATH" not in environment
+        assert "GIT_ALLOW_PROTOCOL" not in environment
+        assert "HTTP_PROXY" not in environment
+        assert "HTTPS_PROXY" not in environment
+        assert "ALL_PROXY" not in environment
+        assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert environment["GIT_CONFIG_GLOBAL"]
+        assert environment["GIT_CONFIG_SYSTEM"]
+        assert "protocol.allow=never" in argv
+        assert "protocol.https.allow=always" in argv
+        assert "credential.helper=" in argv
 
 
 class TimeoutRunner:
