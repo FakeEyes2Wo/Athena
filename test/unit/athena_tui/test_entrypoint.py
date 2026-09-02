@@ -8,6 +8,19 @@ from athena_tui import entrypoint
 def test_parse_default_project() -> None:
     args = entrypoint._parse([])
     assert args.project == ".athena/tui-run"
+    assert args.search_limit == 10
+    assert args.validate is False
+
+
+def test_parse_explicit_search_and_validation_options() -> None:
+    args = entrypoint._parse(["--search-limit", "3", "--validate"])
+    assert args.search_limit == 3
+    assert args.validate is True
+
+
+def test_parse_rejects_non_positive_search_limit() -> None:
+    with pytest.raises(SystemExit):
+        entrypoint._parse(["--search-limit", "0"])
 
 
 def test_parse_custom_project() -> None:
@@ -76,12 +89,13 @@ async def test_run_does_not_auto_start_and_enables_task_seeding(monkeypatch) -> 
 
     monkeypatch.setattr(entrypoint, "ResearchRuntime", Runtime)
     monkeypatch.setattr(entrypoint, "AthenaApp", App)
-    args = entrypoint._parse(["--project", "p"])
+    args = entrypoint._parse(["--project", "p", "--search-limit", "3"])
 
     assert await entrypoint._run(args) == 7
     assert calls == ["app"]
     assert seen.get("auto_seed_task") is True
-    assert seen.get("auto_validate") is True
+    assert seen.get("search_limit") == 3
+    assert seen.get("auto_validate") is False
 
 
 @pytest.mark.asyncio

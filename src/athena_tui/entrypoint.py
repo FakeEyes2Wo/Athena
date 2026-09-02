@@ -15,9 +15,18 @@ _AUTOMATION_HINT = (
 )
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("search limit must be at least 1")
+    return parsed
+
+
 def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="Athena-tui")
     parser.add_argument("--project", default=".athena/tui-run", help="项目根目录")
+    parser.add_argument("--search-limit", type=_positive_int, default=10)
+    parser.add_argument("--validate", action="store_true", default=False)
     return parser.parse_args(argv)
 
 
@@ -31,7 +40,8 @@ async def _run(args: argparse.Namespace) -> int:
         project_root=Path(args.project),
         model=settings.model_name(),
         auto_seed_task=True,
-        auto_validate=True,
+        search_limit=args.search_limit,
+        auto_validate=args.validate,
         task_confirmation_gate=False,
         auto_confirm=True,
     )
