@@ -201,6 +201,7 @@ def fork_project(source: str | Path, target: str | Path) -> ForkResult:
         # 带不过来就把字段清掉，让 runtime 走"EDA 未捕获"那条明确的路，而不是指着
         # 一个不存在的目录让每个 lane 各抛一次异常。
         state["eda_dir"] = None
+    state["evaluator_ref"] = evaluator_ref
     state.update(RESET_STATE_FIELDS)
     (target_athena / "state.json").write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
