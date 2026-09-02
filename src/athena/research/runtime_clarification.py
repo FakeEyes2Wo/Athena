@@ -9,6 +9,7 @@ from athena.research.clarification.confirmation import (
     recover_confirmation_transaction,
 )
 from athena.research.clarification.errors import ClarificationConfirmationError
+from athena.research.clarification.handoff import atomic_write_text
 from athena.research.clarification.models import ClarificationDraft
 from athena.research.clarification.requirements import (
     initial_task_understanding,
@@ -68,17 +69,37 @@ async def recover_confirmation(runtime: Any) -> None:
     journal_path = clarification_store(runtime).root / "clarification-confirmation.json"
     interrupted = journal_path.is_file()
     await recover_confirmation_transaction(runtime)
-    if not interrupted:
+    if interrupted:
+        if runtime.state_path.is_file():
+            durable = ResearchState.load(runtime.state_path)
+            runtime.state.task_understanding = durable.task_understanding
+            runtime.state.task_text = durable.task_text
+            runtime.state.handoff_refs = dict(durable.handoff_refs)
+        else:
+            runtime.state.task_understanding = None
+            runtime.state.task_text = None
+            runtime.state.handoff_refs = {}
+    await _restore_legacy_named_handoff(runtime)
+
+
+async def _restore_legacy_named_handoff(runtime: Any) -> None:
+    """Materialize the named file omitted by legacy confirmed checkpoints."""
+    store = clarification_store(runtime)
+    if store.handoff_path.is_file() or not runtime.state.task_understanding:
         return
-    if runtime.state_path.is_file():
-        durable = ResearchState.load(runtime.state_path)
-        runtime.state.task_understanding = durable.task_understanding
-        runtime.state.task_text = durable.task_text
-        runtime.state.handoff_refs = dict(durable.handoff_refs)
+    handoff_ref = (runtime.state.handoff_refs or {}).get("task_clarification")
+    if not handoff_ref:
         return
-    runtime.state.task_understanding = None
-    runtime.state.task_text = None
-    runtime.state.handoff_refs = {}
+    try:
+        handoff = await runtime.store.get_text(handoff_ref)
+        if not handoff.strip():
+            raise ValueError("task clarification handoff artifact is empty")
+        atomic_write_text(store.handoff_path, handoff)
+    except Exception as error:
+        raise ClarificationConfirmationError(
+            "confirmation_recovery_failed",
+            f"could not restore legacy task clarification handoff: {error}",
+        ) from error
 
 
 async def confirm_pending_task(runtime: Any) -> None:

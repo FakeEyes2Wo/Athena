@@ -125,9 +125,40 @@ class DeterministicClarificationGenerator:
             )
         return ClarificationFinalStep(
             kind="final",
-            understanding=draft.understanding,
+            understanding=_apply_latest_revision(draft),
             unresolved=draft.unresolved,
         )
+
+
+def _apply_latest_revision(draft: ClarificationDraft) -> DraftUnderstanding:
+    """Apply safe structured directives from the latest revision instruction."""
+    if not draft.revisions:
+        return draft.understanding
+    instruction = draft.revisions[-1].instruction.casefold()
+    payload = draft.understanding.model_dump()
+    for token, metric in (
+        ("accuracy", "accuracy"),
+        ("f1", "f1"),
+        ("roc-auc", "roc_auc"),
+        ("roc_auc", "roc_auc"),
+        ("precision", "precision"),
+        ("recall", "recall"),
+        ("rmse", "rmse"),
+        ("mae", "mae"),
+    ):
+        if token in instruction:
+            payload["primary_metric"] = metric
+    for direction in ("maximize", "minimize"):
+        if direction in instruction:
+            payload["direction"] = direction
+    for task_type in ("classification", "regression", "ranking"):
+        if task_type in instruction:
+            payload["task_type"] = task_type
+    if "cross-validation" in instruction or "cross validation" in instruction:
+        payload["evaluation_plan"] = "cross_validation"
+    elif "hold-out" in instruction or "holdout" in instruction:
+        payload["evaluation_plan"] = "holdout"
+    return DraftUnderstanding.model_validate(payload)
 
 
 async def generate_step(

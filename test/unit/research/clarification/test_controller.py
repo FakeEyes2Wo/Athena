@@ -11,6 +11,9 @@ from athena.research.clarification.controller import (
     ClarificationFinalStep,
     ClarificationQuestionStep,
 )
+from athena.research.clarification.generator import (
+    DeterministicClarificationGenerator,
+)
 from athena.research.clarification.models import (
     ClarificationAnswer,
     ClarificationDraft,
@@ -141,6 +144,25 @@ async def test_revise_preserves_answers_and_returns_to_clarifying(tmp_path) -> N
 
     resumed = await controller.run(revised)
     assert resumed.status == "READY_FOR_CONFIRMATION"
+
+
+@pytest.mark.asyncio
+async def test_revision_instruction_changes_final_understanding(tmp_path) -> None:
+    _store, _broker, controller = _controller(
+        tmp_path, generator=DeterministicClarificationGenerator()
+    )
+    ready = await controller.start_or_resume("predict churn")
+    assert ready.understanding.primary_metric == "accuracy"
+
+    revised = await controller.revise(
+        ready.draft_id,
+        ready.revision,
+        "Use recall as the primary metric",
+    )
+    updated = await controller.run(revised)
+
+    assert updated.status == "READY_FOR_CONFIRMATION"
+    assert updated.understanding.primary_metric == "recall"
 
 
 @pytest.mark.asyncio

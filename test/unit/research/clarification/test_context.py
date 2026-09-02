@@ -1,5 +1,6 @@
 """Tests for the centralized confirmed task context provider."""
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,8 @@ from athena.research.clarification.context import (
     ConfirmedTaskContextError,
     ConfirmedTaskContextProvider,
 )
+from athena.research.runtime_clarification import recover_confirmation
+from athena.research.supervisor.state import ResearchState
 
 
 def _state(tmp_path: Path, *, draft: bool = True):
@@ -153,4 +156,47 @@ async def test_legacy_checkpoint_without_draft_metadata_loads(tmp_path: Path) ->
 
     assert context.draft_id is None
     assert context.revision is None
+    assert context.handoff_text == handoff
+
+
+@pytest.mark.asyncio
+async def test_recovery_materializes_named_handoff_for_legacy_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    handoff = "# legacy handoff\n\nConfirmed before named handoffs existed."
+    ref = await store.put_text(handoff)
+    state = ResearchState(
+        status="IDLE",
+        phase="PREPARE",
+        search_limit=10,
+        concurrency=1,
+    )
+    state.task_text = "predict churn"
+    state.task_understanding = _state(tmp_path, draft=False).task_understanding
+    state.handoff_refs = {"task_clarification": ref}
+    state_path = tmp_path / "state.json"
+    state.save(state_path)
+
+    async def start() -> None:
+        return None
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(paths=SimpleNamespace(athena=tmp_path)),
+        state=state,
+        state_path=state_path,
+        store=store,
+        session_id="legacy-session",
+        session=SimpleNamespace(
+            lifecycle=SimpleNamespace(confirmation_lock=asyncio.Lock())
+        ),
+        start=start,
+    )
+    handoff_path = tmp_path / "handoffs" / "TASK_CLARIFICATION.md"
+    assert not handoff_path.exists()
+
+    await recover_confirmation(runtime)
+    context = await ConfirmedTaskContextProvider.from_runtime(runtime).load()
+
+    assert handoff_path.read_text(encoding="utf-8") == handoff
     assert context.handoff_text == handoff
