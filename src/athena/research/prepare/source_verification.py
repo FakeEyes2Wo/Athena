@@ -25,6 +25,14 @@ _URL_CANDIDATE_RE = re.compile(
     r"(?P<scheme>https?|ssh|git)://[^\s'\"<>]+", re.IGNORECASE
 )
 _STRUCTURAL_ESCAPE_RE = re.compile(r"%(?:23|25|2f|3a|3f|40|5c)", re.IGNORECASE)
+_NON_PUBLIC_HOST_SUFFIXES = (
+    ".invalid",
+    ".example",
+    ".internal",
+    ".local",
+    ".localhost",
+    ".test",
+)
 
 _UNTRUSTED_ENV_NAMES = {
     "ALL_PROXY",
@@ -184,8 +192,6 @@ def _normalize_repository_url(repository_url: str) -> str:
         raise ValueError("repository URL must not contain credentials")
     if "%" in parsed.netloc:
         raise ValueError("repository authority must not be percent-encoded")
-    if port is not None and port != 443:
-        raise ValueError("repository URL must use HTTPS port 443")
     if parsed.netloc != parsed.netloc.strip() or not parsed.netloc:
         raise ValueError("repository URL must include a host")
     if parsed.path in ("", "/"):
@@ -197,8 +203,12 @@ def _normalize_repository_url(repository_url: str) -> str:
         raise ValueError("repository hostname is not valid IDNA") from exc
     if normalized_host.endswith("."):
         normalized_host = normalized_host[:-1]
-    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
-        raise ValueError("repository hostname must not be localhost")
+    if "." not in normalized_host and ":" not in normalized_host:
+        raise ValueError("repository hostname must be a public DNS name")
+    if normalized_host == "localhost" or normalized_host.endswith(
+        _NON_PUBLIC_HOST_SUFFIXES
+    ):
+        raise ValueError("repository hostname must not use a local or reserved suffix")
     try:
         address = ipaddress.ip_address(normalized_host)
     except ValueError:
@@ -217,6 +227,8 @@ def _normalize_repository_url(repository_url: str) -> str:
     if ":" in normalized_host and not normalized_host.startswith("["):
         normalized_host = f"[{normalized_host}]"
     normalized_netloc = normalized_host
+    if port is not None and port != 443:
+        normalized_netloc += f":{port}"
     normalized_path = parsed.path.rstrip("/")
     if not normalized_path:
         raise ValueError("repository URL must include a repository path")
