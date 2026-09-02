@@ -1,10 +1,11 @@
-# Athena 研究核心机制整理：ResearchTree / SEARCH / IdeaGenerator / Hypothesis 排序 / 动态 EDA
+# Athena 研究核心机制整理：ResearchTree / PREPARE / SEARCH / IdeaGenerator / Hypothesis 排序 / 动态 EDA
 
 > 状态：current
 > 覆盖范围：`src/athena/core/research_tree.py`、`src/athena/core/research_models.py`、
 > `src/athena/research/supervisor/`、`src/athena/research/idea_generation/`、
 > `src/athena/research/turns/`、`src/athena/research/runtime/phase_runner.py`、
-> `src/athena/research/runtime/facade.py`、`src/athena/agents/ideator_agent.py`、`src/athena/agents/task_agents.py`。
+> `src/athena/research/runtime/facade.py`、`src/athena/research/prepare/`、
+> `src/athena/agents/ideator_agent.py`、`src/athena/agents/task_agents.py`。
 > 本文整理的是当前 `main` 分支的真实实现，不描述已删除或未接线的历史代码。
 
 ---
@@ -17,7 +18,8 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
   │            ├─ 动态 EDA：Ideator 提出 eda_request → Data Agent 补分析写回 EDA 目录
   │            └─ IdeaGenerator（Ideator Agent）产生 Hypothesis → 门禁过滤 → 入 ResearchTree → 排序调度
   │
-  └─ 在固定名称 worktree（name="eda"）里做 EDA，冻结 evaluator，产出 baseline 并写入 ResearchTree 作为 SOTA
+  └─ 在固定名称 worktree（name="eda"）里做 EDA，冻结 evaluator，经来源研究/独立验证门禁后
+     由 Prepare Agent 实现 baseline，可信评分后写入 ResearchTree 作为 SOTA
 ```
 
 - 组合根：`src/athena/research/runtime/facade.py` 的 `ResearchRuntime`。
@@ -301,7 +303,7 @@ ResearchTree 后，统一由 `supervisor/scheduling.py` 去重、排序和按实
 
 ---
 
-## 5. 动态 EDA 机制
+## 5. PREPARE 证据门禁与动态 EDA 机制
 
 ### 5.1 PREPARE 固定 EDA 工作区
 
@@ -309,16 +311,39 @@ ResearchTree 后，统一由 `supervisor/scheduling.py` 去重、排序和按实
 
 1. PREPARE 开始时，`LocalGitWorkspace.create(base_commit, "athena/prepare", name="eda")` 创建**固定名称** `eda` worktree。
 2. `run_prepare_phase` 把 EDA 目录相对项目根的路径写入 `rt._state.eda_dir`（例如 `workspaces/eda`），随 `state.json` 持久化。
-3. Evaluator Agent 在 `workspaces/evaluator/` 写评估器并冻结；Prepare Agent 在 EDA worktree 写 EDA 报告、baseline、`RESEARCH_HANDOFF.md`，并产出可信 baseline 分数。
-4. `Supervisor._run_prepare` 将 baseline 写入 ResearchTree 并置为 SOTA。
+3. Evaluator Agent 在 `workspaces/evaluator/` 写评估器并冻结；EDA 完成后，baseline Ideator 先做 Web/论文研究，写入 `BASELINE_RESEARCH.json` 与 `BASELINE_DESIGN.md`。
+4. 平台独立执行 Git-first 来源验证：优先校验公开 HTTPS Git；无合格仓库时，只接受标题匹配且 OpenAlex `cited_by_count >= 100` 的论文例外。通过后写入 `BASELINE_RESEARCH_VERIFICATION.json`。
+5. Prepare Agent 只在验证通过后注册，它读取三份 baseline 产物，实现已验证的方法，写 baseline 与 `RESEARCH_HANDOFF.md`，再由可信 evaluator 评分。
+6. `Supervisor._run_prepare` 将 baseline 写入 ResearchTree 并置为 SOTA。
 
-### 5.2 断点续传保护
+### 5.2 Baseline 研究与来源验证门禁
+
+文件：`src/athena/research/prepare/baseline_research.py`、
+`src/athena/research/prepare/source_verification.py`、
+`src/athena/research/prepare/baseline.py`、`src/athena/research/prepare/orchestrator.py`
+
+```text
+EDA_HANDOFF.md
+  -> baseline Web/论文研究
+  -> BASELINE_RESEARCH.json + BASELINE_DESIGN.md
+  -> 平台 Git/OpenAlex 验证
+  -> BASELINE_RESEARCH_VERIFICATION.json
+  -> Prepare Agent 实现
+  -> 可信评分
+```
+
+- `BASELINE_RESEARCH.json` 记录搜索、候选取舍、数据模态/任务及训练策略证据；`BASELINE_DESIGN.md` 保留人可读的选型与本地适配边界。数据充足性是模态相关判断，不使用全局固定样本数阈值；`unknown` 不允许从零训练，从零训练还必须同时有本地 EDA/计算和可比规模来源证据。
+- 验证顺序是 Git-first，OpenAlex 100 引用是无合格仓库时的独立例外。Git 路线仅允许无凭据的公开 HTTPS URL，在临时目录使用 `--no-checkout` 浅克隆并锁定 `HEAD`。“可克隆”只证明当时可公开获取，不证明仓库安全；资格校验不 checkout、导入、安装、复制或执行任何第三方代码。
+- 第一次产物失败时，同一 `baseline_ideator` 收到一次结构化修复机会，必须重写两份完整产物；第二次仍失败则以 `BaselineResearchError` 终止 PREPARE，Prepare Agent 不会注册。
+- 三份 durable 产物位于 EDA worktree 根目录。断点恢复时，只有当验证文件的 schema、候选 ID 和 `BASELINE_RESEARCH.json` 的 SHA-256 digest 都匹配时才复用；否则重新校验/验证。
+
+### 5.3 断点续传保护
 
 文件：`src/athena/research/runtime/facade.py`（构造期）
 
 - 恢复 `state.json` 时，如果 `eda_dir` 指向项目根之外（例如跨目录拷贝的旧 state），强制置空，让 PREPARE 重建。
 
-### 5.3 Ideator 发起动态 EDA 请求
+### 5.4 Ideator 发起动态 EDA 请求
 
 文件：`src/athena/core/research_models.py`（`HypothesisBatch.eda_request`）、
 `src/athena/research/idea_generation/idea_schemas.py`（`IdeatorHypothesisBatch.eda_request`）、
@@ -331,7 +356,7 @@ ResearchTree 后，统一由 `supervisor/scheduling.py` 去重、排序和按实
 3. `AgentTurnRunner.run_ideator_turn` 汇总各 lane 的 `eda_request`，合并成一个多行请求。
 4. 若存在请求，调用 `run_data_turn`。
 
-### 5.4 Data Agent 执行补充分析
+### 5.5 Data Agent 执行补充分析
 
 文件：`src/athena/agents/task_agents.py`、`src/athena/agents/prompts/data_agent.md`、
 `turns/runner.py::AgentTurnRunner.run_data_turn`
@@ -346,7 +371,7 @@ ResearchTree 后，统一由 `supervisor/scheduling.py` 去重、排序和按实
 3. 输出 `EdaResult`（一句话 summary），通过 `publish_output` 发布“补充 EDA 完成”。
 4. 后续 Ideator 回合再次读取 EDA 目录时，会看到追加后的报告和图片，从而在更丰富证据上提出假设。
 
-### 5.5 动态 EDA 的闭环
+### 5.6 动态 EDA 的闭环
 
 ```
 SEARCH 空槽 → Ideator 探索 EDA 目录 → 输出假设 + eda_request
@@ -377,6 +402,12 @@ SEARCH 空槽 → Ideator 探索 EDA 目录 → 输出假设 + eda_request
 | Data Agent 注册 | `src/athena/agents/task_agents.py` |
 | Agent turn 编排 | `src/athena/research/turns/runner.py`、`turns/ideator.py` |
 | PREPARE/EDA 目录创建 | `src/athena/research/prepare/eda.py` |
+| Baseline 研究产物与 digest 恢复 | `src/athena/research/prepare/baseline_research.py` |
+| Git/OpenAlex 来源验证 | `src/athena/research/prepare/source_verification.py` |
+| Baseline 两回合门禁与 Prepare Agent 注册 | `src/athena/research/prepare/baseline.py` |
+| PREPARE 阶段顺序 | `src/athena/research/prepare/orchestrator.py` |
+| OpenAlex 引用数元数据 | `src/athena/research/literature/paper_source/openalex.py` |
+| Baseline-only Web 工具组合 | `src/athena/research/runtime/bootstrap.py`、`src/athena/research/runtime/facade.py` |
 | 组合根 | `src/athena/research/runtime/facade.py` |
 | GUI 图算法 | `src/athena/gui/graph.py` |
 | Ideator 提示词 | `src/athena/agents/prompts/ideator_agent.md`、`src/athena/agents/prompts/ideator_gated_agent.md` |
@@ -399,7 +430,9 @@ SEARCH 空槽 → Ideator 探索 EDA 目录 → 输出假设 + eda_request
 | `prepare/__init__.py` | PREPARE 功能包边界，不转发内部实现 |
 | `prepare/orchestrator.py` | PREPARE 阶段顺序，不承载各步骤实现 |
 | `prepare/data.py` | 数据切分与平台数据合同 |
-| `prepare/baseline.py` | baseline 设计与可信执行 |
+| `prepare/baseline_research.py` | 版本化研究/验证模型、跨文件合同、digest 绑定恢复 |
+| `prepare/source_verification.py` | 受限 Git 可获取性校验、OpenAlex 100 引用例外与诊断 |
+| `prepare/baseline.py` | baseline 研究的单次修复/终止门禁、Prepare Agent 注册与可信执行 |
 | `prepare/eda.py` | EDA 工作区、TODO 解析与执行 |
 | `prepare/evaluator.py` | SEARCH/FINAL evaluator 冻结与准备 |
 | `evaluation/__init__.py` | 仅公开稳定的 `TrustedEvaluator` 入口 |
