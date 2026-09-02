@@ -25,7 +25,7 @@ from athena.research.turns.common import (
 )
 from athena.research.contracts import GeneralTurnOutcome
 from athena.research.supervisor.experiment import load_agent_result
-from athena.retrieval.web_search import WebFetchTool, WebSearchTool, WebSession
+from athena.retrieval.web_search import build_web_tools
 
 
 class GeneralTurnMixin:
@@ -37,16 +37,11 @@ class GeneralTurnMixin:
 
     def _tools_with_kaggle(self, kind: str) -> ToolRegistry:
         """Kaggle（若接入）+ 共享会话的网页搜索/抓取。"""
-        registry = ToolRegistry()
+        registry = build_web_tools()
         kaggle = self._runtime.kaggle_tools(kind)
         if kaggle is not None:
             for spec in kaggle.specs:
                 registry.register(kaggle.resolve(spec.name))
-        # web_search 与 web_fetch 共享同一会话，使搜索结果 ref_id 可被
-        # web_fetch 直接打开/查找（对齐 Codex web.run 的 open/find）。
-        web_session = WebSession()
-        registry.register(WebSearchTool(session=web_session))
-        registry.register(WebFetchTool(session=web_session))
         return registry
 
     def _general_tools(self) -> ToolRegistry:

@@ -27,6 +27,7 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_rag.schemas import PaperSummary
 from athena.research.literature.survey import SurveyStack
 from athena.research.runtime.bootstrap import (
+    baseline_ideator_tools as baseline_ideator_tools_impl,
     build_config,
     build_paths,
     build_services,
@@ -447,6 +448,10 @@ class ResearchRuntime:
         """
 
         return ideator_tools_impl(self)
+
+    def baseline_ideator_tools(self) -> Callable[[], ToolRegistry]:
+        """Return a lazy web-enabled provider for the baseline ideator only."""
+        return baseline_ideator_tools_impl(self)
 
     def corpus_tools(self, *, for_ideation: bool = False) -> ToolRegistry | None:
         """Return read-only paper operators for the active corpus, if any."""

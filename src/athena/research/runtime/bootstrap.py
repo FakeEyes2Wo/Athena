@@ -44,6 +44,7 @@ from athena.research.runtime.services import (
     RuntimeOptions,
 )
 from athena.research.script_runner import DataScriptRunner
+from athena.retrieval.web_search import build_web_tools
 from athena.research.supervisor.deps import (
     PhaseActions,
     ResearchActions,
@@ -295,6 +296,21 @@ def ideator_tools(runtime: Any) -> Callable[[], ToolRegistry | None]:
     return build
 
 
+def baseline_ideator_tools(runtime: Any) -> Callable[[], ToolRegistry]:
+    """Return a lazy web-enabled provider for the baseline ideator only."""
+
+    def build() -> ToolRegistry:
+        registry = _merged(
+            runtime.kaggle_tools("ideator"),
+            runtime.corpus_tools(for_ideation=True),
+            build_web_tools(),
+        )
+        assert registry is not None
+        return registry
+
+    return build
+
+
 def _merged(*registries: ToolRegistry | None) -> ToolRegistry | None:
     """Merge optional tool registries while preserving registration order."""
     present = [registry for registry in registries if registry is not None]
@@ -336,6 +352,7 @@ def _load_state(config: ResearchConfig) -> ResearchState:
 
 
 __all__ = [
+    "baseline_ideator_tools",
     "build_services",
     "ideator_tools",
     "kaggle_stack",

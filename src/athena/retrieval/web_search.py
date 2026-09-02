@@ -8,7 +8,7 @@ import html
 import re
 import urllib.parse
 
-from athena.core.tool import BaseTool
+from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.research.literature.paper_source.http import (
     HostRateLimiter,
@@ -372,3 +372,12 @@ class WebFetchTool(_WebTool):
             page["ref_id"] = self.session.fetch_ref()
             self.session.remember_page(page["ref_id"], page)
         return ToolResult(data=self._matches(page, pattern) if pattern else page)
+
+
+def build_web_tools() -> ToolRegistry:
+    """Build web search and fetch tools that share one reference session."""
+    session = WebSession()
+    registry = ToolRegistry()
+    registry.register(WebSearchTool(session=session))
+    registry.register(WebFetchTool(session=session))
+    return registry

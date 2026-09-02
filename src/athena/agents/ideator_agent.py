@@ -52,9 +52,8 @@ BASELINE_IDEATOR_PROFILE = IdeatorProfile(
     prompt_agent_type="baseline_ideator",
     output_type=HandoffResult,
     task_hint=(
-        "Design the strongest baseline architecture from the EDA handoff and "
-        "your boldest prior knowledge. Do NOT propose hypotheses; write "
-        "BASELINE_DESIGN.md."
+        "Research and design the strongest baseline from the EDA handoff. Do NOT "
+        "propose hypotheses; write BASELINE_RESEARCH.json and BASELINE_DESIGN.md."
     ),
 )
 
