@@ -324,7 +324,7 @@ paths with `git commit -m "feat: define baseline research contract"`.
 - Produces: `GitCloneVerifier.verify(repository_url: str) -> Awaitable[GitCloneEvidence]`.
 - Produces: injectable `CommandRunner(argv, *, cwd, env, timeout_s) -> Awaitable[CompletedProcess[str]]`.
 
-- [ ] **Step 1: Write failing safe-clone tests with an async fake runner**
+- [x] **Step 1: Write failing safe-clone tests with an async fake runner**
 
 Use a fake that returns a 40-character commit for `rev-parse`, records every argument,
 and never touches the network:
@@ -361,12 +361,12 @@ Parametrize rejection of `http://example.com/x.git`, `ssh://host/x.git`,
 fragment. Add clone non-zero, `asyncio.TimeoutError`, invalid HEAD, 20,000-character
 stderr capping/redaction, and temporary-directory removal cases.
 
-- [ ] **Step 2: Run the Git tests and confirm missing symbols**
+- [x] **Step 2: Run the Git tests and confirm missing symbols**
 
 Run `.venv\Scripts\python.exe -m pytest -q test/unit/research/prepare/test_baseline_git_verification.py`.
 Expected: import failure for `GitCloneVerifier` and `GitCloneEvidence`.
 
-- [ ] **Step 3: Implement URL validation, the async runner, and two Git commands**
+- [x] **Step 3: Implement URL validation, the async runner, and two Git commands**
 
 The production runner must call `subprocess.run` through `asyncio.to_thread` with a list
 argument and `shell=False` behavior:
@@ -413,7 +413,7 @@ collapse whitespace, and cap every diagnostic at 4,000 characters. Raise
 `BaselineResearchError("Git source verification failed", diagnostics=[message])` for
 all rejected paths.
 
-- [ ] **Step 4: Run, format, and commit Task 2**
+- [x] **Step 4: Run, format, and commit Task 2**
 
 Run:
 
