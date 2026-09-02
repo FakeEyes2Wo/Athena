@@ -75,7 +75,7 @@ class PlanTurnMessageTest(unittest.IsolatedAsyncioTestCase):
                 return "run-1"
 
             async def wait_run(self, run_id):
-                return SimpleNamespace(result_ref=None)
+                return SimpleNamespace(status="completed", response_ref=None)
 
         tree = SimpleNamespace(
             get_hypothesis=lambda plan_id: SimpleNamespace(
@@ -112,7 +112,7 @@ class PlanTurnFailureFeedbackTest(unittest.IsolatedAsyncioTestCase):
                 return "run-1"
 
             async def wait_run(self, run_id):
-                return SimpleNamespace(result_ref=None)
+                return SimpleNamespace(status="completed", response_ref=None)
 
         tree = SimpleNamespace(
             get_hypothesis=lambda plan_id: SimpleNamespace(
@@ -223,7 +223,7 @@ def _configured_supervisor(tree, state, agents) -> Supervisor:
             search=SearchServices(Scheduler(), Recovery()),
         ),
     )
-    supervisor._plans._persist_state = _noop
+    supervisor._plans.persist_state = _noop
 
     async def plan_input(plan_id: str):
         try:

@@ -14,7 +14,10 @@ from athena.core.research_models import (
 )
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch, GitWorkspaceError
-from athena.research.clarification.context import ConfirmedTaskContextProvider
+from athena.research.clarification.context import (
+    ConfirmedTaskContextError,
+    ConfirmedTaskContextProvider,
+)
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.evaluator_plan import read_eval_handoff
 from athena.research.supervisor.experiment import (
@@ -53,6 +56,7 @@ class CompletedPlanTurn:
     plan_id: str
     decision: PlanDecision | None
     result: PlanTurnResult | None
+    failure: PlanFailure | None = None
 
 
 def _compare_metric(
@@ -100,18 +104,20 @@ class PlanLifecycle:
     def _tree(self):
         return self._owner.tree
 
-    def _save_state(self) -> None:
+    def save_state(self) -> None:
+        """Save the current durable state checkpoint."""
         self._state.save(self._deps.paths.state_path)
 
-    async def _publish_state(self) -> None:
+    async def publish_state(self) -> None:
+        """Publish the current durable state snapshot."""
         await self._deps.phases.publish(
             "state", {"type": "state", **self._state.model_dump(mode="json")}
         )
 
-    async def _persist_state(self) -> None:
+    async def persist_state(self) -> None:
         """Save durable state and publish one snapshot to subscribers."""
-        self._save_state()
-        await self._publish_state()
+        self.save_state()
+        await self.publish_state()
 
     @staticmethod
     def _previous_failure_block(summary: str | None) -> str:
@@ -156,13 +162,23 @@ class PlanLifecycle:
             f"Continue Plan {plan_id}. Turns used: {state.turns_used}; "
             f"turn limit: {state.turn_limit}; patience: {state.patience}; "
             f"stale rounds: {state.stale_rounds}."
-            + plan_input.task_context
+            + (f"\n\n{plan_input.task_context}" if plan_input.task_context else "")
             + hypothesis_context
             + handoff_block(plan_input.eval_handoff)
             + self._corpus_block(plan_input)
             + data_contract_block(self._state.data_contract or "")
             + self._previous_failure_block(previous_failure)
         )
+
+    async def _confirmed_task_context(self, state: ResearchState | None = None) -> str:
+        """Load the authoritative task snapshot for a new or legacy Plan."""
+        return (
+            await ConfirmedTaskContextProvider(
+                state or self._state,
+                self._deps.runtime.store,
+                self._deps.paths.state_path.parent,
+            ).load()
+        ).render_prompt_block()
 
     async def run_turn(self, plan_id: str) -> CompletedPlanTurn:
         """Own one Plan Agent turn from prompt assembly through failure recording."""
@@ -172,7 +188,7 @@ class PlanLifecycle:
             update={"turns_used": state.turns_used + 1, "last_failure": None}
         )
         self._state.plans[plan_id] = state
-        await self._persist_state()
+        await self.persist_state()
         try:
             plan_input = await self.plan_input(plan_id)
             run_id = await self._deps.runtime.agents.followup(
@@ -198,8 +214,13 @@ class PlanLifecycle:
             )
             if decision is None:
                 return CompletedPlanTurn(plan_id, None, None)
-        except Exception:  # noqa: BLE001 - normalize one external Agent turn boundary
-            return CompletedPlanTurn(plan_id, None, None)
+        except Exception as exc:  # noqa: BLE001 - normalize external turn boundary
+            failure = PlanFailure(
+                kind="turn_infrastructure_failed",
+                detail=f"{type(exc).__name__}: {' '.join(str(exc).split())}",
+            )
+            await self._record_failure(plan_id, failure)
+            return CompletedPlanTurn(plan_id, None, None, failure)
         if decision.decision == "abandon" and state.best_ref is None:
             return CompletedPlanTurn(plan_id, decision, None)
         result = await self._deps.research.plan(plan_id, state)
@@ -210,14 +231,21 @@ class PlanLifecycle:
         """Persist a failed turn's reason for the immediately following prompt."""
         if not result.error:
             return
+        await self._record_failure(
+            plan_id,
+            PlanFailure(kind=result.kind, detail=result.error),
+        )
+
+    async def _record_failure(self, plan_id: str, failure: PlanFailure) -> None:
+        """Persist one normalized Plan failure diagnostic."""
         current = self._state.plans.get(plan_id)
         if current is None:
             return
-        summary = PlanFailure(kind=result.kind, detail=result.error).to_summary()[:1200]
+        summary = failure.to_summary()[:1200]
         self._state.plans[plan_id] = current.model_copy(
             update={"last_failure": summary}
         )
-        await self._persist_state()
+        await self.persist_state()
 
     async def start_plan(self, hypothesis_id: str) -> str:
         """Freeze one Hypothesis input and create its stable execution identity."""
@@ -255,13 +283,7 @@ class PlanLifecycle:
             json.dumps(self._tree.to_dict(), ensure_ascii=False, sort_keys=True)
         )
         guidance = self._run.take_guidance()
-        task_context = (
-            await ConfirmedTaskContextProvider(
-                self._state,
-                self._deps.runtime.store,
-                self._deps.paths.state_path.parent,
-            ).load()
-        ).render_prompt_block()
+        task_context = await self._confirmed_task_context()
         plan_input = PlanInput(
             hypothesis=hypothesis,
             active_ancestor_hypotheses=active,
@@ -319,7 +341,7 @@ class PlanLifecycle:
             turn_limit=hypothesis.turn_limit,
             patience=hypothesis.patience,
         )
-        self._save_state()
+        self.save_state()
         # start_plan 与 settle_plan 之间可能隔很多个 turn/很久；若这里只保存
         # state.json 而不保存 research_tree.json，进程一旦在这段窗口内崩溃，
         # 恢复时 state.plans 仍在但 tree 缺少 exp_{hypothesis_id}，最终在
@@ -329,7 +351,7 @@ class PlanLifecycle:
         await self._deps.runtime.agents.resume_agent(
             hypothesis_id, agent_type="plan", name=hypothesis_id
         )
-        await self._publish_state()
+        await self.publish_state()
         return hypothesis_id
 
     async def plan_input(self, plan_id: str) -> PlanInput:
@@ -364,23 +386,39 @@ class PlanLifecycle:
             self._owner.tree = ResearchTree.load(self._deps.paths.tree_path)
         candidate = state or self._state
         artifact_presence: dict[str, bool] = {}
-        for plan in candidate.plans.values():
+        workspace_presence: dict[str, bool] = {}
+        tree_changed = False
+        for plan_id, original_plan in list(candidate.plans.items()):
+            plan = original_plan
             try:
-                await self._deps.runtime.store.get_text(plan.context_ref)
+                context_json = await self._deps.runtime.store.get_text(plan.context_ref)
             except (OSError, ValueError):
                 artifact_presence[plan.context_ref] = False
-            else:
-                artifact_presence[plan.context_ref] = True
-        workspace_presence: dict[str, bool] = {}
-        repaired_experiments = False
-        for plan_id, plan in candidate.plans.items():
-            if not artifact_presence[plan.context_ref]:
                 workspace_presence[plan_id] = False
                 continue
+            artifact_presence[plan.context_ref] = True
             try:
-                plan_input = PlanInput.model_validate_json(
-                    await self._deps.runtime.store.get_text(plan.context_ref)
-                )
+                plan_input = PlanInput.model_validate_json(context_json)
+                if plan.kind == "SEARCH" and not plan_input.task_context.strip():
+                    task_context = await self._confirmed_task_context(candidate)
+                    migrated_ref = await self._deps.runtime.store.put_text(
+                        plan_input.model_copy(
+                            update={"task_context": task_context}
+                        ).model_dump_json()
+                    )
+                    plan = plan.model_copy(update={"context_ref": migrated_ref})
+                    candidate.plans[plan_id] = plan
+                    artifact_presence[migrated_ref] = True
+                    plan_input = PlanInput.model_validate_json(
+                        await self._deps.runtime.store.get_text(migrated_ref)
+                    )
+                    experiment_id = self._tree.experiment_for_hypothesis(plan_id)
+                    if experiment_id is not None:
+                        experiment = self._tree.get_experiment(experiment_id)
+                        experiment.plan = experiment.plan.model_copy(
+                            update={"run_config_ref": migrated_ref}
+                        )
+                        tree_changed = True
                 if plan_input.reference_experiment_id is None:
                     raise ValueError("Plan input has no reference experiment")
                 reference = self._tree.get_experiment(
@@ -389,6 +427,13 @@ class PlanLifecycle:
                 branch = await self._deps.runtime.workspaces.create(
                     reference.commit, plan_id
                 )
+            except ConfirmedTaskContextError as exc:
+                logger.warning(
+                    "parking legacy Plan %s without confirmed task context: %s",
+                    plan_id,
+                    exc,
+                )
+                workspace_presence[plan_id] = False
             except (GitWorkspaceError, KeyError, OSError, ValueError):
                 workspace_presence[plan_id] = False
             else:
@@ -401,8 +446,8 @@ class PlanLifecycle:
                         plan_id, plan.context_ref, plan_input, branch
                     )
                 ):
-                    repaired_experiments = True
-        if repaired_experiments:
+                    tree_changed = True
+        if tree_changed:
             self._tree.save(self._deps.paths.tree_path)
         self._owner.state = self._deps.search.recovery.reconcile(
             candidate,
@@ -415,7 +460,7 @@ class PlanLifecycle:
                 await self._deps.runtime.agents.resume_agent(
                     plan_id, agent_type="plan", name=plan_id
                 )
-        await self._persist_state()
+        await self.persist_state()
         return self._state
 
     def _repair_missing_experiment(
@@ -463,7 +508,7 @@ class PlanLifecycle:
             return False
         return True
 
-    async def _settle_plan(
+    async def settle_plan(
         self,
         plan_id: str,
         best_ref: ArtifactRef | None,
@@ -611,7 +656,7 @@ class PlanLifecycle:
                     self._tree.set_sota(experiment_id)
         self._tree.save(self._deps.paths.tree_path)
         self._state.plans.pop(plan_id)
-        self._save_state()
+        self.save_state()
         if self._deps.phases.on_plan_settled is not None:
             await self._deps.phases.on_plan_settled(plan_id)
         # A settled Plan owns a stable PlanAgent thread. Reap it now so finished
@@ -643,7 +688,7 @@ class PlanLifecycle:
         )
         hypothesis_id = self._tree.add_hypothesis(hypothesis)
         self._tree.save(self._deps.paths.tree_path)
-        await self._publish_state()
+        await self.publish_state()
         return {"hypothesis_id": hypothesis_id}
 
     async def register_hypotheses(
@@ -671,19 +716,19 @@ class PlanLifecycle:
             for hypothesis in hypotheses
         ]
         self._tree.save(self._deps.paths.tree_path)
-        await self._publish_state()
+        await self.publish_state()
         return {"hypothesis_ids": hypothesis_ids}
 
     async def checkpoint_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
         """Persist one frozen evaluator bundle so PREPARE resumes past evaluator."""
         self._state.evaluator_ref = ref
-        await self._persist_state()
+        await self.persist_state()
         return {"evaluator_ref": ref}
 
     async def checkpoint_final_evaluator(self, ref: ArtifactRef) -> dict[str, object]:
         """Persist the hidden final-test evaluator used only by VALIDATE."""
         self._state.final_evaluator_ref = ref
-        await self._persist_state()
+        await self.persist_state()
         return {"final_evaluator_ref": ref}
 
     async def dispatch_general(self, task: str) -> dict[str, object]:
@@ -707,7 +752,7 @@ class PlanLifecycle:
                 # artifact 缺失或内容损坏 → 清掉引用并落盘，避免重启后反复撞坏缓存
                 self._state.task_research_ref = None
                 ref = None
-                await self._persist_state()
+                await self.persist_state()
                 cached = None
             if isinstance(cached, dict) and cached:
                 return {"cached": True, **cached}
@@ -723,7 +768,7 @@ class PlanLifecycle:
             self._state.task_research_ref = await self._deps.runtime.store.put_text(
                 json.dumps(outcome.result, ensure_ascii=False)
             )
-            await self._persist_state()
+            await self.persist_state()
         return outcome.result
 
 

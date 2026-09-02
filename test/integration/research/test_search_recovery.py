@@ -19,6 +19,7 @@ from athena.research.supervisor.deps import (
     SupervisorRuntime,
 )
 from athena.research.supervisor.experiment import load_best
+from athena.research.supervisor.plans import PlanInput
 from athena.research.supervisor.policy import EloPolicy
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
@@ -283,6 +284,34 @@ async def test_recover_rebuilds_experiment_lost_before_tree_save(harness: _Harne
     assert harness.supervisor.tree.get_experiment("exp_h1").status.value == "RUNNING"
     persisted = json.loads(tree_path.read_text(encoding="utf-8"))
     assert "exp_h1" in persisted["experiments"]
+
+
+@pytest.mark.asyncio
+async def test_recover_migrates_legacy_empty_task_context(harness: _Harness):
+    await harness.supervisor.start_plan("h1")
+    current = harness.supervisor.state.plans["h1"]
+    frozen = await harness.supervisor.plan_input("h1")
+    legacy_ref = await harness.store.put_text(
+        frozen.model_copy(update={"task_context": ""}).model_dump_json()
+    )
+    harness.supervisor.state.plans["h1"] = current.model_copy(
+        update={"context_ref": legacy_ref}
+    )
+    state_path = harness.root / ".athena" / "state.json"
+    harness.supervisor.state.save(state_path)
+
+    recovered = await harness.supervisor.recover(ResearchState.load(state_path))
+
+    migrated_ref = recovered.plans["h1"].context_ref
+    migrated = PlanInput.model_validate_json(await harness.store.get_text(migrated_ref))
+    assert migrated_ref != legacy_ref
+    assert migrated.task_context == (
+        "--- Confirmed task contract (authoritative) ---\n"
+        "# Confirmed task\n\nImprove the controlled held-out score.\n"
+        "--- end of confirmed task contract ---"
+    )
+    persisted = ResearchState.load(state_path)
+    assert persisted.plans["h1"].context_ref == migrated_ref
 
 
 @pytest.mark.asyncio

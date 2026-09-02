@@ -1,7 +1,7 @@
 """Mutable, non-durable runtime state for one Supervisor process."""
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from athena.core.workspace import GitWorkBranch
 from athena.research.supervisor.state import ResearchState
@@ -15,8 +15,8 @@ class SupervisorRunState:
     and settings stay in ``ResearchState``.
     """
 
-    def __init__(self, state: ResearchState) -> None:
-        self._state = state
+    def __init__(self, current_state: Callable[[], ResearchState]) -> None:
+        self._current_state = current_state
         self._branches: dict[str, GitWorkBranch] = {}
         self._next_guidance: str | None = None
         self._persistent_guidance: list[str] = []
@@ -24,6 +24,10 @@ class SupervisorRunState:
         self._next_hypothesis_id: str | None = None
         # 手动模式下等待人工选定假设时，唤醒 run_search 循环的信号。
         self._wake = asyncio.Event()
+
+    @property
+    def _state(self) -> ResearchState:
+        return self._current_state()
 
     @property
     def running_plan_ids(self) -> tuple[str, ...]:

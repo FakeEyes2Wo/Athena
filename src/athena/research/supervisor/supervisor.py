@@ -35,7 +35,7 @@ class Supervisor:
     ) -> None:
         self.state = state
         self.tree = tree
-        run = SupervisorRunState(state)
+        run = SupervisorRunState(lambda: self.state)
         plans = PlanLifecycle(self, deps, run)
         search = SearchLoop(self, deps, run, plans, run_turn=plans.run_turn)
         phases = PhaseMachine(self, deps, run, plans, search)

@@ -27,7 +27,7 @@ from athena.research.supervisor.deps import (
     SupervisorPaths,
     SupervisorRuntime,
 )
-from athena.research.supervisor.plans import PlanState
+from athena.research.supervisor.plans import PlanInput, PlanState
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
@@ -235,6 +235,7 @@ def _checkpoint_supervisor(
     run_general_turn=None,
     run_prepare_phase=None,
     publish_callback=None,
+    runtime_agents=None,
 ) -> Supervisor:
     """Build a lightweight Supervisor for checkpoint-related unit tests."""
     state_path = tmp_path / ".athena" / "state.json"
@@ -268,7 +269,7 @@ def _checkpoint_supervisor(
             ),
             runtime=SupervisorRuntime(
                 store=LocalArtifactStore(tmp_path / "artifacts"),
-                agents=SimpleNamespace(),
+                agents=runtime_agents or SimpleNamespace(),
                 workspaces=SimpleNamespace(),
             ),
             research=ResearchActions(
@@ -288,6 +289,51 @@ def _checkpoint_supervisor(
     )
 
 
+async def _supervisor_with_frozen_plan(
+    tmp_path: Path,
+    agents: object,
+    *,
+    task_context: str = "confirmed context",
+) -> Supervisor:
+    supervisor = _checkpoint_supervisor(tmp_path, runtime_agents=agents)
+    store = supervisor._deps.runtime.store
+    evaluator_ref = await store.put_text("evaluator")
+    tree_ref = await store.put_text("tree")
+    context_ref = await store.put_text(
+        PlanInput(
+            evaluator_ref=evaluator_ref,
+            tree_ref=tree_ref,
+            task_context=task_context,
+        ).model_dump_json()
+    )
+    supervisor.state.phase = "SEARCH"
+    supervisor.state.plans["hyp_failure"] = PlanState(
+        kind="SEARCH",
+        context_ref=context_ref,
+        turns_used=0,
+        turn_limit=4,
+        patience=2,
+    )
+    return supervisor
+
+
+class _InfrastructureFailureAgents:
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        self.task: dict[str, object] | None = None
+
+    async def followup(self, _plan_id: str, task: dict[str, object]) -> str:
+        self.task = task
+        if self.stage == "followup":
+            raise RuntimeError("followup unavailable")
+        return "run-1"
+
+    async def wait_run(self, _run_id: str):
+        if self.stage == "wait_run":
+            raise RuntimeError("wait unavailable")
+        return SimpleNamespace(status="completed", response_ref="{not-json")
+
+
 def test_configure_options_updates_focused_dependencies(tmp_path: Path) -> None:
     supervisor = _checkpoint_supervisor(tmp_path)
 
@@ -298,6 +344,56 @@ def test_configure_options_updates_focused_dependencies(tmp_path: Path) -> None:
     assert supervisor._deps.search.direction == "minimize"
     assert supervisor._deps.search.tolerance == 0.05
     assert supervisor._deps.phases.auto_validate is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "diagnostic"),
+    [
+        ("followup", "RuntimeError: followup unavailable"),
+        ("wait_run", "RuntimeError: wait unavailable"),
+        ("parse", "JSONDecodeError:"),
+    ],
+)
+async def test_plan_turn_infrastructure_failure_is_durable(
+    tmp_path: Path,
+    stage: str,
+    diagnostic: str,
+) -> None:
+    agents = _InfrastructureFailureAgents(stage)
+    supervisor = await _supervisor_with_frozen_plan(tmp_path, agents)
+
+    completed = await supervisor._plans.run_turn("hyp_failure")
+
+    assert completed.decision is None
+    assert completed.result is None
+    assert completed.failure is not None
+    assert completed.failure.kind == "turn_infrastructure_failed"
+    assert diagnostic in completed.failure.detail
+    persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
+    failure = persisted.plans["hyp_failure"].last_failure
+    assert failure is not None
+    assert failure.startswith("turn_infrastructure_failed: ")
+    assert diagnostic in failure
+
+
+@pytest.mark.asyncio
+async def test_plan_turn_separates_confirmed_context_from_turn_header(
+    tmp_path: Path,
+) -> None:
+    agents = _InfrastructureFailureAgents("followup")
+    supervisor = await _supervisor_with_frozen_plan(
+        tmp_path,
+        agents,
+        task_context="--- Confirmed task contract (authoritative) ---\nbody",
+    )
+
+    await supervisor._plans.run_turn("hyp_failure")
+
+    assert agents.task is not None
+    assert "stale rounds: 0.\n\n--- Confirmed task contract (authoritative) ---" in str(
+        agents.task["content"]
+    )
 
 
 @pytest.mark.asyncio
@@ -406,6 +502,28 @@ def test_evaluator_properties_share_research_state_as_canonical_owner(
     supervisor.state.final_evaluator_ref = None
     assert supervisor.evaluator_ref is None
     assert supervisor.final_evaluator_ref is None
+
+
+@pytest.mark.asyncio
+async def test_recover_rebinds_transient_reads_to_distinct_state(
+    tmp_path: Path,
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    recovered_state = ResearchState(
+        status="STOPPED",
+        phase="SEARCH",
+        search_limit=3,
+        concurrency=1,
+        kaggle_download=False,
+    )
+
+    recovered = await supervisor.recover(recovered_state)
+
+    assert recovered is supervisor.state
+    assert recovered is not recovered_state
+    assert supervisor.is_stopped() is True
+    assert supervisor.kaggle_enabled is True
+    assert supervisor.kaggle_download is False
 
 
 @pytest.mark.asyncio

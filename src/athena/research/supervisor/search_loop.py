@@ -71,7 +71,7 @@ class SearchLoop:
             # A crashed scheduler must not leave the UI permanently RUNNING.
             self._state.status = "FAILED"
             try:
-                asyncio.create_task(self._plans._persist_state())
+                asyncio.create_task(self._plans.persist_state())
             except Exception:
                 logger.warning(
                     "failed to persist FAILED state after SEARCH crash",
@@ -132,7 +132,7 @@ class SearchLoop:
                         update={"last_failure": failure}
                     )
                 self._state.status = "WAITING"
-                await self._plans._persist_state()
+                await self._plans.persist_state()
                 await self._deps.phases.publish(
                     "output",
                     {
@@ -168,48 +168,10 @@ class SearchLoop:
         if not self._tree.pending_hypotheses():
             return False
         self._state.status = "WAITING"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         self._run.clear_wake()
         await self._run.wait_wake()
         return not self._run.is_stopped()
-
-    def _corpus_block(self, plan_id: str) -> str:
-        """告诉这个候选：它的假设引了哪几篇论文，以及怎么去读。
-
-        引用一直只停在假设的 ``sources`` 字段里，而真正要用到细节的是**实现**那一步：
-        损失函数怎么写、gamma 取多少、要不要配合重采样。一条写着"用 focal loss"的假设，
-        答案就在被引的那几篇里，而 PlanAgent 此前既拿不到检索算子，也不知道自己该读谁。
-
-        点名 ``paper_id`` 而不是把正文整段拼进来：正文在 chunk 里可能有几千字，而
-        ``paper_chunk_read`` 本来就是渐进披露的接口——候选自己决定读多少。
-        """
-        corpus_ref = self._state.corpus_ref
-        if corpus_ref is None:
-            return ""
-        try:
-            hypothesis = self._tree.get_hypothesis(plan_id)
-        except KeyError:
-            # PREPARE and VALIDATE IDs do not name SEARCH hypotheses.
-            # PREPARE / VALIDATE 的 plan_id 不是假设 id——它们本来就没有引用
-            return ""
-        sources = list(hypothesis.sources or [])
-        if not sources:
-            return ""
-        return (
-            f"\n\nThe literature corpus for this task is available "
-            f"(corpus_ref={corpus_ref!r}). This hypothesis was formed from: "
-            f"{', '.join(sources)}. Use paper_search and paper_chunk_read on those "
-            "papers for the implementation details the hypothesis leaves open — "
-            "exact loss formulation, hyper-parameter ranges, preprocessing. Follow "
-            "what they report; do not invent numbers they do not give."
-        )
-
-    async def _plan_handoff(self, plan_id: str) -> str:
-        """取该 Plan 冻结时记下的评估契约；取不到就返回空串，不影响这一轮。"""
-        try:
-            return (await self._plans.plan_input(plan_id)).eval_handoff
-        except (KeyError, OSError, ValueError):
-            return ""
 
     async def _corpus_ideation(self) -> bool:
         """语料落地（或扩充）之后补一轮 ideation，让调研的产出真的被读到。
@@ -230,11 +192,11 @@ class SearchLoop:
         if self._deps.research.ideator is None:
             # 没有 Ideator 就没有"读语料的那一步"，记下版本避免每轮重试。
             self._state.corpus_ideated_ref = corpus_ref
-            await self._plans._persist_state()
+            await self._plans.persist_state()
             return False
         # 先落状态再跑：重入时不会为同一份语料补第二轮。
         self._state.corpus_ideated_ref = corpus_ref
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         hypotheses = await self._deps.research.ideator(
             self._state.hypotheses_per_ideator
         )
@@ -306,16 +268,16 @@ class SearchLoop:
         if completed.result is not None and completed.result.kind == "diff_rejected":
             # A diff that does not implement the intervention is not a trusted
             # experiment; do not settle it. Let the PlanAgent repair and retry.
-            await self._plans._persist_state()
+            await self._plans.persist_state()
             return
         if completed.decision is None:
             if state.turn_limit is not None and state.turns_used >= state.turn_limit:
                 self._state.status = "WAITING"
-            await self._plans._persist_state()
+            await self._plans.persist_state()
             return
         if completed.decision.decision == "abandon" and state.best_ref is None:
-            await self._plans._settle_plan(plan_id, None, completed.result)
-            await self._plans._publish_state()
+            await self._plans.settle_plan(plan_id, None, completed.result)
+            await self._plans.publish_state()
             return
         settlement = decide_settlement(
             state,
@@ -323,22 +285,20 @@ class SearchLoop:
             report_ref=completed.result.report_ref if completed.result else None,
         )
         if settlement.action == "continue":
-            self._plans._save_state()
+            self._plans.save_state()
         elif settlement.action == "wait":
             if self._deps.phases.auto_validate:
                 # auto 模式无人补充缺失的 report / 延长预算 → 用历史 best 结算，
                 # 释放并发槽让调度器继续 GENERATE，搜索得以收敛（否则死锁）。
-                await self._plans._settle_plan(
-                    plan_id, state.best_ref, completed.result
-                )
+                await self._plans.settle_plan(plan_id, state.best_ref, completed.result)
             else:
                 self._state.status = "WAITING"
-                self._plans._save_state()
+                self._plans.save_state()
         else:
-            await self._plans._settle_plan(
+            await self._plans.settle_plan(
                 plan_id, settlement.best_ref, completed.result
             )
-        await self._plans._publish_state()
+        await self._plans.publish_state()
 
     async def select_next_hypothesis(self, hypothesis_id: str) -> dict[str, object]:
         """Queue one validated Hypothesis for the next manual SEARCH slot."""
@@ -352,7 +312,7 @@ class SearchLoop:
         self._run.set_next_hypothesis_id(hypothesis_id)
         if self._state.status == "WAITING":
             self._state.status = "RUNNING"
-            self._plans._save_state()
+            self._plans.save_state()
         self._run.wake()
         return {"selected": hypothesis_id}
 
@@ -373,7 +333,7 @@ class SearchLoop:
         # 交互模式下预算用尽停在 WAITING：追加预算即恢复 SEARCH。
         if self._state.phase == "SEARCH" and self._state.status == "WAITING":
             self._state.status = "RUNNING"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         self._spawn_search()
         return {
             "search_limit": self._state.search_limit,
@@ -417,7 +377,7 @@ class SearchLoop:
             raise ValueError("at least one Plan budget must be provided")
         self._state.plans[plan_id] = plan.model_copy(update=updates)
         self._state.status = "RUNNING"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         self._spawn_search()
         return {"plan_id": plan_id, **updates}
 
@@ -430,7 +390,7 @@ class SearchLoop:
         self._state.manual_mode = bool(manual)
         if self._state.status == "WAITING":
             self._state.status = "RUNNING"
-        await self._plans._persist_state()
+        await self._plans.persist_state()
         self._run.wake()
         return {"manual_mode": self._state.manual_mode}
 

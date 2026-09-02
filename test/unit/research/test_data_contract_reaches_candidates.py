@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from athena.research.prepare_data import DataContract
+from athena.research.prepare.data import DataContract
 from athena.research.supervisor.deps import (
     PhaseActions,
     ResearchActions,
@@ -108,7 +108,7 @@ async def test_every_search_turn_carries_the_data_contract() -> None:
             return "run-1"
 
         async def wait_run(self, run_id):
-            return SimpleNamespace(result_ref=None)
+            return SimpleNamespace(status="completed", response_ref=None)
 
     def plan_state():
         state = SimpleNamespace(
@@ -150,7 +150,7 @@ async def test_no_contract_means_no_block_in_the_turn() -> None:
             return "run-1"
 
         async def wait_run(self, run_id):
-            return SimpleNamespace(result_ref=None)
+            return SimpleNamespace(status="completed", response_ref=None)
 
     state = SimpleNamespace(
         turns_used=0,
@@ -200,7 +200,7 @@ def _supervisor(tree, state, agents) -> Supervisor:
             search=SearchServices(Scheduler(), Recovery()),
         ),
     )
-    supervisor._plans._persist_state = _noop
+    supervisor._plans.persist_state = _noop
 
     async def plan_input(plan_id: str):
         return SimpleNamespace(
