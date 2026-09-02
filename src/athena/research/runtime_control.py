@@ -1,51 +1,11 @@
-"""Lifecycle and control helpers for ``ResearchRuntime``.
-
-Keeps start/stop/resume and task-understanding orchestration out of the
-composition root. The runtime keeps thin delegating methods so its public
-interface and existing tests remain unchanged.
-"""
+"""Lifecycle and command handling for ``ResearchRuntime``."""
 
 import asyncio
-import json
-import logging
-from pathlib import Path
-import traceback
 from typing import Any
-
-from athena.research.runtime_events import recent_user_texts
-
-logger = logging.getLogger(__name__)
-
-
-def recent_user_texts_from(runtime: Any, limit: int = 6) -> list[str]:
-    """Return recent Human messages from the persisted session transcript."""
-    try:
-        records = runtime.replay_output_events()
-    except Exception:
-        logger.warning("failed to replay session transcript", exc_info=True)
-        return []
-    return recent_user_texts(records, limit)
-
-
-def task_context_text(task_text: str, prior: list[str]) -> str:
-    """Build the supervisor task-understanding prompt from task + history."""
-    if not prior:
-        return task_text
-    return (
-        "Previous conversation:\n"
-        + "\n".join(f"- {text}" for text in prior)
-        + "\n\nCurrent task text:\n"
-        + task_text
-    )
 
 
 def resume_task_text(runtime: Any, fallback: str) -> str:
-    """Reconstruct the effective task text from persisted resume state.
-
-    Prefer the first persisted full task text; fall back to a description
-    built from structured task understanding so a bare "continue" is never fed
-    to survey/PREPARE prompts.
-    """
+    """Recover the original task instead of treating a resume command as work."""
     if runtime.state.task_text:
         return runtime.state.task_text
     understanding = runtime.state.task_understanding or {}
@@ -57,149 +17,39 @@ def resume_task_text(runtime: Any, fallback: str) -> str:
     return " ".join(parts) if parts else fallback
 
 
-def render_task_clarification(
-    task_text: str,
-    qa_pairs: list[tuple[str, str]],
-    understanding: dict[str, object],
-) -> str:
-    """Render the minimal TASK_CLARIFICATION.md produced by the Supervisor flow."""
-    lines = [
-        "# TASK_CLARIFICATION",
-        "",
-        "## Original task",
-        task_text or "",
-        "",
-        "## Clarification Q&A",
-    ]
-    if qa_pairs:
-        for index, (question, answer) in enumerate(qa_pairs, start=1):
-            lines.append(f"{index}. Q: {question}")
-            lines.append(f"   A: {answer}")
-    else:
-        lines.append("(no clarification questions were needed)")
-    lines.extend(
-        [
-            "",
-            "## Final understanding",
-            json.dumps(understanding or {}, ensure_ascii=False, indent=2),
-        ]
-    )
-    return "\n".join(lines)
-
-
-async def persist_task_clarification(runtime: Any) -> None:
-    """Persist the Supervisor-owned task-understanding Q&A as a handoff."""
-    session = getattr(runtime, "_session", None)
-    qa_pairs = list(getattr(session, "clarification_qa", []) or [])
-    understanding = getattr(runtime.state, "task_understanding", None) or {}
-    if not qa_pairs and not understanding:
-        return
-    try:
-        markdown = render_task_clarification(
-            runtime._task_text or "", qa_pairs, understanding
-        )
-        ref = await runtime.store.put_text(markdown)
-        runtime.state.handoff_refs["task_clarification"] = ref
-        runtime.state.save(runtime.state_path)
-    except Exception:
-        logger.warning(
-            "failed to persist task clarification handoff", exc_info=True
-        )
-
-
-async def maybe_run_task_understanding(runtime: Any) -> None:
-    """Run PREPARE task understanding unless a checkpoint already exists.
-
-    Failures only degrade to Kaggle tools staying off; they never block start.
-    """
-    if runtime._provider is None or runtime.state.phase != "PREPARE":
-        return
-    if runtime.state.task_understanding is not None:
-        await runtime.publish_output(
-            source="supervisor",
-            channel="text",
-            text="断点续传：复用已持久化的任务理解，跳过任务理解回合。",
-        )
-        await persist_task_clarification(runtime)
-        return
-    if not runtime._task_text.strip():
-        return
-    context = task_context_text(runtime._task_text, recent_user_texts_from(runtime))
-    await runtime.publish_output(
-        source="supervisor",
-        channel="text",
-        text="任务理解中：阅读任务并决定是否接入 Kaggle 工具…",
-    )
-    try:
-        await runtime._agent_turns.run_supervisor_turn(context)
-        await persist_task_clarification(runtime)
-        await runtime.publish_output(
-            source="supervisor", channel="text", text="任务理解完成。"
-        )
-    except Exception as error:
-        logger.warning(
-            "supervisor task-understanding turn failed; Kaggle tools stay off",
-            exc_info=True,
-        )
-        await runtime.publish_output(
-            source="supervisor",
-            channel="error",
-            text=f"任务理解失败（已降级继续）：{error}\n\n{traceback.format_exc()}",
-        )
-
-
 async def start(runtime: Any) -> asyncio.Task[None]:
-    """Start infrastructure and the single Supervisor loop once.
+    """Start infrastructure and return the single Supervisor lifecycle task."""
+    lifecycle = runtime.session.lifecycle
+    if lifecycle.task is not None and not lifecycle.task.done():
+        return lifecycle.task
 
-    Returns the Supervisor lifecycle task; callers may await it to block
-    until PREPARE/SEARCH/VALIDATE reaches a terminal state.
-    """
-    if runtime._task is not None and not runtime._task.done():
-        return runtime._task
-    await runtime._git.init(initial_file=".gitignore", initial_content=".venv/\n")
-    runtime._agents.start()
-    # Run the survey in parallel with PREPARE: it is slow, and PREPARE does not
-    # depend on it.
-    runtime._start_survey()
-    # Resume path: a direct start() also restores the first task text.
-    runtime._task_text = resume_task_text(runtime, runtime._task_text)
+    lifecycle.task_text = resume_task_text(runtime, runtime.task_text)
+    await runtime.git.init(initial_file=".gitignore", initial_content=".venv/\n")
+    runtime.agents.start()
+    runtime.start_survey()
     if runtime.state.status == "IDLE":
         runtime.state.status = "RUNNING"
-        runtime.state.save(runtime._state_path)
-    runtime._started = True
-
-    async def _run_lifecycle() -> None:
-        # Task understanding also lives in a cancellable background task so
-        # start_search RPC does not block pause/stop, and the task is
-        # cancellable before it is assigned to runtime._task.
-        await maybe_run_task_understanding(runtime)
-        await runtime._supervisor.start()
-
-    runtime._task = asyncio.create_task(_run_lifecycle())
-    return runtime._task
+        runtime.state.save(runtime.state_path)
+    lifecycle.started = True
+    lifecycle.task = asyncio.create_task(runtime.supervisor.start())
+    return lifecycle.task
 
 
 def rearm_if_terminal(runtime: Any) -> None:
-    """Clear the done supervisor task so a terminal run can be restarted."""
-    if runtime._started and runtime._task is not None and runtime._task.done():
-        if runtime.state.status in {"FAILED", "STOPPED", "COMPLETED"}:
-            runtime._task = None
+    """Clear a completed lifecycle task so the durable run can resume."""
+    lifecycle = runtime.session.lifecycle
+    if lifecycle.task is None or not lifecycle.task.done():
+        return
+    if runtime.state.status in {"FAILED", "STOPPED", "COMPLETED"}:
+        lifecycle.task = None
 
 
 async def start_task(runtime: Any, task: str) -> str:
-    """Seed the research task and start PREPARE -> SEARCH -> VALIDATE.
-
-    Fresh runs begin at PREPARE so a trusted baseline/SOTA is established
-    before any SEARCH hypothesis can be proposed. Existing ``state.json``
-    (resume) keeps its phase and starts via ``recover()``. A terminal run is
-    re-armed in place; ``eda_dir`` and workspaces are left untouched.
-    """
-    if runtime.state.task_text is None and runtime.state.task_understanding is None:
-        runtime.state.task_text = task
-        runtime.state.save(runtime._state_path)
-    runtime._task_text = resume_task_text(runtime, task)
+    """Seed or resume a confirmed task and launch the phase machine."""
+    runtime.session.lifecycle.task_text = resume_task_text(runtime, task)
     rearm_if_terminal(runtime)
-    if not runtime._started or runtime._task is None:
+    lifecycle = runtime.session.lifecycle
+    if not lifecycle.started or lifecycle.task is None:
         if (
             runtime.tree.best_experiment_id() is None
             and runtime.state.phase != "PREPARE"
@@ -210,101 +60,103 @@ async def start_task(runtime: Any, task: str) -> str:
 
 
 async def start_validation(runtime: Any) -> str:
-    """Run the frozen-SOTA VALIDATE phase and publish the final report.
-
-    Wires the GUI ``start_validation`` control to the supervisor phase
-    machine. In the interactive path (``auto_validate=False``) SEARCH parks
-    at ``WAITING`` after its budget; this transitions into VALIDATE and runs
-    it. Idempotent once validation has already completed.
-    """
+    """Enter VALIDATE from SEARCH or resume an interrupted validation."""
     if runtime.state.phase == "COMPLETED":
         return runtime.state.status
     await ensure_started(runtime)
-    phase = runtime.state.phase
-    if phase == "SEARCH":
-        await runtime._supervisor.set_phase_decision("VALIDATE")
-    elif phase == "VALIDATE":
-        await runtime._supervisor.continue_phase()
+    if runtime.state.phase == "SEARCH":
+        await runtime.supervisor.set_phase_decision("VALIDATE")
+    elif runtime.state.phase == "VALIDATE":
+        await runtime.supervisor.continue_phase()
     else:
-        raise ValueError(f"cannot VALIDATE from phase {phase}; run SEARCH first")
+        raise ValueError(
+            f"cannot VALIDATE from phase {runtime.state.phase}; run SEARCH first"
+        )
     return runtime.state.status
 
 
 async def message(runtime: Any, text: str) -> str:
-    """Apply exact control commands or delegate ordinary prose unchanged.
+    """Apply control commands or send ordinary text to Supervisor."""
+    command_result = await _control_command(runtime, text.strip())
+    if command_result is not None:
+        return command_result
+    if runtime.config.auto_seed_task and not runtime.session.lifecycle.started:
+        return await start_task(runtime, text.strip())
+    answer = await runtime.supervisor.message(text)
+    if runtime.state.phase == "VALIDATE" and (
+        runtime.session.lifecycle.task is None or runtime.session.lifecycle.task.done()
+    ):
+        await runtime.supervisor.continue_phase()
+    return answer
 
-    With ``auto_seed_task`` (TUI entry), the first ordinary message before
-    ``start()`` seeds the research task and starts PREPARE, so a trusted
-    baseline/SOTA exists before SEARCH proposes hypotheses.
-    """
-    command = text.strip()
+
+async def _control_command(runtime: Any, command: str) -> str | None:
     if command == "/stop":
-        status = await runtime._supervisor.request_stop()
+        status = await runtime.supervisor.request_stop()
         await cancel_supervisor_task(runtime)
         return status
     if command == "/pause":
-        status = await runtime._supervisor.pause()
-        # PREPARE/VALIDATE have no scheduler loop checkpoint; cancel the phase
-        # task and let /resume re-enter the phase machine.
+        status = await runtime.supervisor.pause()
         if runtime.state.phase in {"PREPARE", "VALIDATE"}:
             await cancel_supervisor_task(runtime)
         return status
     if command == "/resume":
-        if runtime._supervisor.is_stopped():
-            return runtime.state.status
-        # ``_started`` 只认得"这个 runtime 实例跑过"。GUI 切走会话时 supervisor 被
-        # suspend + aclose，切回来是一个全新的 runtime：``_started`` 为 False，却
-        # 确确实实是一次续跑。落过盘的 state.json 才是"这次运行开始过"的判据——
-        # 少了它，PREPARE 会掉进 ensure_started（无 baseline 即不启动），停在
-        # "status=RUNNING 但没有任何协程在跑"的悬空态。
-        resumable = runtime._started or Path(runtime._state_path).is_file()
-        if (runtime._task is None or runtime._task.done()) and resumable:
-            await runtime._supervisor.resume(restarting=True)
-            await runtime.start()
-        else:
-            await ensure_started(runtime)
-            await runtime._supervisor.resume()
-        return runtime.state.status
-    if command == "/manual":
+        return await _resume(runtime)
+    if command in {"/manual", "/auto"}:
         await ensure_started(runtime)
-        await runtime._supervisor.set_manual_mode(True)
-        return "manual mode on"
-    if command == "/auto":
-        await ensure_started(runtime)
-        await runtime._supervisor.set_manual_mode(False)
-        return "manual mode off"
+        manual = command == "/manual"
+        await runtime.supervisor.set_manual_mode(manual)
+        return f"manual mode {'on' if manual else 'off'}"
     if command.startswith("/select "):
         await ensure_started(runtime)
-        hypothesis_id = command[len("/select ") :].strip()
+        hypothesis_id = command.removeprefix("/select ").strip()
         if not hypothesis_id:
             return "usage: /select <hypothesis_id>"
-        await runtime._supervisor.select_next_hypothesis(hypothesis_id)
+        await runtime.supervisor.select_next_hypothesis(hypothesis_id)
         return f"selected {hypothesis_id}"
-    if runtime._auto_seed_task and not runtime._started:
-        return await start_task(runtime, command)
-    answer = await runtime._supervisor.message(text)
-    # Interactive resume: a SupervisorAgent turn may transition an idle run
-    # into VALIDATE. Re-enter the phase machine to actually execute it; the
-    # live start() task (or auto_validate) handles the running case.
-    if runtime.state.phase == "VALIDATE" and (
-        runtime._task is None or runtime._task.done()
-    ):
-        await runtime._supervisor.continue_phase()
-    return answer
+    return None
+
+
+async def _resume(runtime: Any) -> str:
+    if runtime.supervisor.is_stopped():
+        return runtime.state.status
+    lifecycle = runtime.session.lifecycle
+    resumable = lifecycle.started or runtime.state_path.is_file()
+    task = lifecycle.task
+    if (task is None or task.done()) and resumable:
+        await runtime.supervisor.resume(restarting=True)
+        await runtime.start()
+    else:
+        await ensure_started(runtime)
+        await runtime.supervisor.resume()
+    return runtime.state.status
 
 
 async def ensure_started(runtime: Any) -> None:
-    """Start (and recover) the Supervisor loop once a trusted baseline exists.
-
-    No-op for a fresh project (no SOTA yet) so control commands never jump
-    straight into SEARCH without PREPARE.
-    """
-    if not runtime._started and runtime.tree.best_experiment_id() is not None:
+    """Start the Supervisor only when a trusted baseline already exists."""
+    if (
+        not runtime.session.lifecycle.started
+        and runtime.tree.best_experiment_id() is not None
+    ):
         await runtime.start()
 
 
 async def cancel_supervisor_task(runtime: Any) -> None:
-    """Cancel the current Supervisor lifecycle task (pause/stop interrupt)."""
-    if runtime._task is not None and not runtime._task.done():
-        runtime._task.cancel()
-        await asyncio.gather(runtime._task, return_exceptions=True)
+    """Cancel and join the current Supervisor lifecycle task."""
+    task = runtime.session.lifecycle.task
+    if task is None or task.done():
+        return
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+__all__ = [
+    "cancel_supervisor_task",
+    "ensure_started",
+    "message",
+    "rearm_if_terminal",
+    "resume_task_text",
+    "start",
+    "start_task",
+    "start_validation",
+]

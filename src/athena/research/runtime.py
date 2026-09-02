@@ -4,10 +4,8 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
-from athena.agents.supervisor_agent import register_supervisor_agent
-from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import ResponsesProvider
 from athena.core.agent.registry import AgentTypeRegistry
@@ -18,15 +16,11 @@ from athena.core.research_tree import ResearchTree
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import AskUser
 from athena.execution.compute_config import ComputeConfig, load_compute_config
-from athena.execution.pool import GpuPool
 from athena.execution.runtime import CommandResult, ExecutionRuntime
-from athena.kaggle import (
-    AGENT_KAGGLE_TOOLS,
-    KaggleStack,
-    build_kaggle_stack,
-    build_kaggle_tools,
+from athena.kaggle import KaggleStack
+from athena.research.clarification.confirmation import (
+    confirm_and_start as confirm_and_start_impl,
 )
-from athena.research.agent_turn_runner import AgentTurnRunner
 from athena.research.config import (
     ResearchConfig,
     ResearchPaths,
@@ -36,48 +30,84 @@ from athena.research.config import (
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.paper_rag.schemas import PaperSummary
-from athena.research.phase_runner import PhaseRunner
+from athena.research.runtime_bootstrap import (
+    build_services,
+    wire_workflow,
+)
+from athena.research.runtime_bootstrap import (
+    ideator_tools as ideator_tools_impl,
+)
+from athena.research.runtime_bootstrap import (
+    kaggle_stack as kaggle_stack_impl,
+)
+from athena.research.runtime_bootstrap import (
+    kaggle_tools as kaggle_tools_impl,
+)
+from athena.research.runtime_bootstrap import (
+    plan_tools as plan_tools_impl,
+)
+from athena.research.runtime_bootstrap import (
+    register_supervisor as register_supervisor_impl,
+)
+from athena.research.runtime_clarification import (
+    confirm_pending_task,
+    recover_confirmation,
+    seed_unconfirmed_task,
+)
 from athena.research.runtime_control import (
-    cancel_supervisor_task as cancel_supervisor_task_impl,
-    ensure_started as ensure_started_impl,
-    maybe_run_task_understanding as maybe_run_task_understanding_impl,
     message as message_impl,
-    rearm_if_terminal as rearm_if_terminal_impl,
-    recent_user_texts_from as recent_user_texts_from_impl,
-    resume_task_text as resume_task_text_impl,
+)
+from athena.research.runtime_control import (
     start as start_impl,
+)
+from athena.research.runtime_control import (
     start_task as start_task_impl,
+)
+from athena.research.runtime_control import (
     start_validation as start_validation_impl,
-    task_context_text as task_context_text_impl,
 )
 from athena.research.runtime_corpus import (
     corpus_paper_ids as corpus_paper_ids_impl,
+)
+from athena.research.runtime_corpus import (
     corpus_papers_read as corpus_papers_read_impl,
+)
+from athena.research.runtime_corpus import (
     corpus_passages_read as corpus_passages_read_impl,
+)
+from athena.research.runtime_corpus import (
     corpus_summaries as corpus_summaries_impl,
+)
+from athena.research.runtime_corpus import (
     corpus_tools as corpus_tools_impl,
+)
+from athena.research.runtime_corpus import (
     start_corpus_round as start_corpus_round_impl,
 )
 from athena.research.runtime_events import RuntimeEvents
 from athena.research.runtime_settings import SettingsController
 from athena.research.runtime_survey import (
     ensure_survey_stack as ensure_survey_stack_impl,
+)
+from athena.research.runtime_survey import (
     project_survey_event as project_survey_event_impl,
+)
+from athena.research.runtime_survey import (
     run_survey as run_survey_impl,
+)
+from athena.research.runtime_survey import (
     start_survey as start_survey_impl,
+)
+from athena.research.runtime_survey import (
     survey_topic as survey_topic_impl,
 )
 from athena.research.script_runner import DataScriptRunner
-from athena.research.survey import SurveyStack
-from athena.research.services import ResearchServices, ResearchSession
-from athena.research.supervisor.events import EventProjector
-from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.supervisor.experiment import PlanTurnResult
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.supervisor.prepare import PrepareResult
-from athena.research.supervisor.recovery import Recovery
-from athena.research.supervisor.scheduler import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
+from athena.research.survey import SurveyStack
 
 logger = logging.getLogger(__name__)
 
@@ -89,19 +119,35 @@ ValidationPhase = Callable[[str, float], Awaitable[ValidationResult]]
 PlanTurn = Callable[[str, ResearchState], Awaitable[PlanTurnResult]]
 
 
-def _merged(*registries: ToolRegistry | None) -> ToolRegistry | None:
-    """合并若干可选工具表；全为空时返回 ``None``。
+def _build_paths(
+    project_root: str | Path | None,
+    state_root: str | Path | None,
+) -> ResearchPaths:
+    """Resolve the durable and workspace paths for one runtime."""
+    root = Path(project_root or ".").resolve()
+    athena = Path(state_root).resolve() if state_root is not None else root / ".athena"
+    workspaces = root / "workspaces" if state_root is None else athena / "workspaces"
+    return ResearchPaths(
+        root=root,
+        athena=athena,
+        workspaces=workspaces,
+        state=athena / "state.json",
+        tree=athena / "research_tree.json",
+        sessions=athena / "logs" / "sessions",
+        clarification=athena / "clarification.json",
+        clarification_confirmation=athena / "clarification-confirmation.json",
+        handoffs=athena / "handoffs",
+    )
 
-    ``ToolRegistry`` 不支持批量 merge，只能逐个 resolve/register。
-    """
-    present = [registry for registry in registries if registry is not None]
-    if not present:
-        return None
-    merged = ToolRegistry()
-    for registry in present:
-        for spec in registry.specs:
-            merged.register(registry.resolve(spec.name))
-    return merged
+
+def _build_config(
+    paths: ResearchPaths,
+    search: SearchLimits,
+    survey: SurveyConfig,
+    fields: dict[str, Any],
+) -> ResearchConfig:
+    """Assemble immutable runtime configuration from functional groups."""
+    return ResearchConfig(paths=paths, search=search, survey=survey, **fields)
 
 
 class ResearchRuntime:
@@ -112,6 +158,7 @@ class ResearchRuntime:
         *,
         project_root: str | Path | None = None,
         state_root: str | Path | None = None,
+        session_id: str = "default",
         model: str | None = None,
         client: Any = None,
         task: str = "",
@@ -121,6 +168,8 @@ class ResearchRuntime:
         ideator_count: int = 3,
         hypotheses_per_ideator: int = 2,
         auto_validate: bool = False,
+        task_confirmation_gate: bool = False,
+        auto_confirm: bool = False,
         direction: Literal["maximize", "minimize"] = "maximize",
         tolerance: float = 0.0,
         ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration",
@@ -135,352 +184,151 @@ class ResearchRuntime:
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
         ask_user: AskUser | None = None,
+        broker: Any | None = None,
         survey: bool = False,
         survey_query: str = "",
         survey_max_papers: int = DEFAULT_SURVEY_PAPERS,
         survey_search_top_k: int = 0,
         survey_max_seconds: float = 0.0,
     ) -> None:
-        root = Path(project_root or ".").resolve()
-        athena = (
-            Path(state_root).resolve() if state_root is not None else root / ".athena"
+        paths = _build_paths(project_root, state_root)
+        search = SearchLimits(
+            search_limit=10 if search_limit is None else search_limit,
+            concurrency=concurrency,
+            ideator_count=ideator_count,
+            hypotheses_per_ideator=hypotheses_per_ideator,
         )
-        workspaces = (
-            root / "workspaces" if state_root is None else athena / "workspaces"
+        survey_config = SurveyConfig(
+            enabled=survey,
+            query=survey_query,
+            max_papers=survey_max_papers,
+            search_top_k=survey_search_top_k,
+            max_seconds=survey_max_seconds,
         )
-        paths = ResearchPaths(
-            root=root,
-            athena=athena,
-            workspaces=workspaces,
-            state=athena / "state.json",
-            tree=athena / "research_tree.json",
-            sessions=athena / "logs" / "sessions",
-        )
-        config = ResearchConfig(
-            paths=paths,
-            model=model,
-            client=client,
-            task=task,
-            auto_seed_task=auto_seed_task,
-            search=SearchLimits(
-                search_limit=10 if search_limit is None else search_limit,
-                concurrency=concurrency,
-                ideator_count=ideator_count,
-                hypotheses_per_ideator=hypotheses_per_ideator,
-            ),
-            survey=SurveyConfig(
-                enabled=survey,
-                query=survey_query,
-                max_papers=survey_max_papers,
-                search_top_k=survey_search_top_k,
-                max_seconds=survey_max_seconds,
-            ),
-            auto_validate=auto_validate,
-            direction=direction,
-            tolerance=tolerance,
-            ideation=ideation,
-            dataset_path=Path(dataset_path).resolve() if dataset_path else None,
-            target_column=target_column,
-            split_seed=split_seed,
-            group_column=group_column,
-            data_root=Path(data_root).resolve() if data_root else None,
-            experiment_timeout_s=experiment_timeout_s,
-            compute=compute if compute is not None else load_compute_config(),
-            prepare_phase=prepare_phase,
-            validation_phase=validation_phase,
-            plan_turn=plan_turn,
-            ask_user=ask_user,
+        config = _build_config(
+            paths,
+            search,
+            survey_config,
+            {
+                "session_id": session_id,
+                "model": model,
+                "client": client,
+                "task": task,
+                "auto_seed_task": auto_seed_task,
+                "task_confirmation_gate": task_confirmation_gate,
+                "auto_confirm": auto_confirm,
+                "auto_validate": auto_validate,
+                "direction": direction,
+                "tolerance": tolerance,
+                "ideation": ideation,
+                "dataset_path": Path(dataset_path).resolve() if dataset_path else None,
+                "target_column": target_column,
+                "split_seed": split_seed,
+                "group_column": group_column,
+                "data_root": Path(data_root).resolve() if data_root else None,
+                "experiment_timeout_s": experiment_timeout_s,
+                "compute": compute if compute is not None else load_compute_config(),
+                "prepare_phase": prepare_phase,
+                "validation_phase": validation_phase,
+                "plan_turn": plan_turn,
+                "ask_user": ask_user,
+            },
         )
 
-        store = LocalArtifactStore(paths.athena / "artifacts")
-        registry = AgentTypeRegistry()
-        agents = AgentRuntime(
-            type_registry=registry,
-            project_root=root,
-            rollout_dir=paths.athena / "logs" / "agents",
-        )
-        execution = ExecutionRuntime(
-            project_root=root,
-            environment_root=root,
-            data_root=config.data_root,
-            store=store,
-        )
-        scripts = DataScriptRunner(
-            store=store,
-            workdir=paths.athena / "runs",
-        )
-        evaluator = TrustedEvaluator(scripts)
-        git = LocalGitWorkspace(
-            paths.athena / "repo",
-            workspaces,
-            store.put_bytes,
-        )
-        tree = ResearchTree.load(paths.tree) if paths.tree.is_file() else ResearchTree()
-        state = (
-            ResearchState.load(paths.state)
-            if paths.state.is_file()
-            else ResearchState(
-                status="IDLE",
-                phase="PREPARE",
-                search_limit=10 if search_limit is None else search_limit,
-                concurrency=concurrency,
-                ideator_count=ideator_count,
-                hypotheses_per_ideator=hypotheses_per_ideator,
-            )
-        )
-        # 断点续传保护：跨目录拷贝来的 state 会携带旧项目的 eda_dir，使 PREPARE
-        # 工作区/EDA 目录落到别的项目。强制校验其属于当前 project_root，否则置空
-        # 让 PREPARE 按本项目重建——本项目只保留自身信息，唯一允许跨目录的是数据集源。
-        # eda_dir 存的是相对项目根的路径（见 _run_prepare_phase），先解析成绝对再校验。
-        eda_dir = state.eda_dir
-        if eda_dir is not None:
-            eda_path = Path(eda_dir)
-            if not eda_path.is_absolute():
-                eda_path = (root / eda_dir).resolve()
-            if not eda_path.is_relative_to(root):
-                state.eda_dir = None
-        # 一次失败的运行必须还能续跑。``subscribe`` 会把当前状态立刻回放给订阅者，
-        # 而 CLI 把 ``FAILED`` 当作本次运行的终态——于是崩过一次的项目再也起不来：
-        # 状态在 ``start()`` 之前就被回放，进程当场退出，什么都没做。
-        #
-        # 真机（2026-08-29）：SEARCH 崩掉后每一次 `Athena-cli run` 都只打印
-        # ``phase=SEARCH status=FAILED`` 然后退出。新开一次运行本就应当取代上一次
-        # 的失败结论。
-        if state.status == "FAILED":
-            state.status = "IDLE"
-        # 显式给的搜索预算要覆盖持久化的旧值。既有项目的 state.json 是整份原样加载
-        # 的，于是 ``--max-search-experiments`` 在续跑时**静默失效**——想加预算的人
-        # 看不出它没生效，只会看到搜索照旧在老上限停下。
-        if search_limit is not None:
-            state.search_limit = search_limit
-        state.experiment_timeout_s = experiment_timeout_s
-        if config.data_root is not None and state.data_root is None:
-            state.data_root = str(config.data_root)
-
-        events_projector = EventProjector(store)
-        events_bus = RuntimeEvents(
-            events=events_projector,
-            store=store,
-            sessions_dir=paths.sessions,
-        )
-        # 断点续传：恢复历史输出序列号，避免重启后新事件与重放历史 seq 冲突
-        # 而被 TUI 去重丢弃。seq 全局单调，跨所有会话恢复到最大 seq。
-        events_bus.resume_sequence()
-
-        services = ResearchServices(
-            store=store,
-            registry=registry,
-            agents=agents,
-            execution=execution,
-            git=git,
-            events=events_bus,
-            scripts=scripts,
-            evaluator=evaluator,
-            tree=tree,
-            state=state,
-        )
-        session = ResearchSession(task_text=task)
-        session.data_root = config.data_root
-        session.compute = config.compute
-        if session.compute is not None and session.compute.remote:
-            session.pool = GpuPool(
-                list(session.compute.hosts),
-                placement=session.compute.placement,
-                store=store,
-                dataset_root=config.data_root,
-            )
+        services, session = build_services(config, broker)
         self._config = config
         self._services = services
         self._session = session
         self._settings = SettingsController(self)
-
-        agent_turns = AgentTurnRunner(self)
-        phase_runner = PhaseRunner(self)
-        supervisor = Supervisor(
-            project_root=root,
-            state_root=athena,
-            state=state,
-            tree=tree,
-            store=store,
-            agents=agents,
-            workspaces=git,
-            scheduler=Scheduler(),
-            recovery=Recovery(),
-            evaluator_ref=self._baseline_evaluator_ref(),
-            run_plan_turn=phase_runner.run_plan_turn,
-            run_supervisor_turn=agent_turns.run_supervisor_turn,
-            run_ideator_turn=agent_turns.run_ideator_turn,
-            run_general_turn=agent_turns.run_general_turn,
-            publish=events_bus.publish_from_supervisor,
-            auto_validate=auto_validate,
-            direction=direction,
-            tolerance=tolerance,
-            run_prepare_phase=phase_runner.run_prepare_phase,
-            run_validation_phase=phase_runner.run_validation_phase,
-            publish_agent_event=events_bus.project_agent_event,
-            on_plan_settled=self.release_lease,
-        )
-        services.supervisor = supervisor
-        services.agent_turns = agent_turns
-        services.phase_runner = phase_runner
-        events_bus.attach_supervisor(supervisor)
+        wire_workflow(self)
         if model is not None:
             self.register_supervisor(provider=ResponsesProvider(model, client=client))
-
-    # ── Compatibility accessors: keep existing method bodies small while the
-    # runtime now stores only _config/_services/_session. Tests that construct
-    # ResearchRuntime.__new__ may still assign private names directly; those
-    # assignments land in __dict__ and shadow the derived values below.
-
-    _SESSION_FIELDS: ClassVar[dict[str, str]] = {
-        "_provider": "provider",
-        "_task": "task",
-        "_started": "started",
-        "_task_text": "task_text",
-        "_survey_stack": "survey_stack",
-        "_survey_task": "survey_task",
-        "_corpus_sessions": "corpus_sessions",
-        "_kaggle_stack": "kaggle_stack",
-    }
-
-    _CONFIG_FIELDS: ClassVar[dict[str, str | tuple[str, str]]] = {
-        "_model": "model",
-        "_client": "client",
-        "_direction": "direction",
-        "_tolerance": "tolerance",
-        "_auto_validate": "auto_validate",
-        "_prepare_phase": "prepare_phase",
-        "_validation_phase": "validation_phase",
-        "_ask_user": "ask_user",
-        "_ideation": "ideation",
-        "_survey_enabled": ("survey", "enabled"),
-        "_survey_query": ("survey", "query"),
-        "_survey_max_papers": ("survey", "max_papers"),
-        "_survey_search_top_k": ("survey", "search_top_k"),
-        "_survey_max_seconds": ("survey", "max_seconds"),
-    }
-
-    _PATH_FIELDS: ClassVar[dict[str, str]] = {
-        "_root": "root",
-        "_athena": "athena",
-        "_workspaces_root": "workspaces",
-        "_state_path": "state",
-        "_tree_path": "tree",
-        "_sessions_dir": "sessions",
-    }
-
-    _SERVICE_FIELDS: ClassVar[dict[str, str]] = {
-        "_store": "store",
-        "_events_bus": "events",
-        "_registry": "registry",
-        "_agents": "agents",
-        "_execution": "execution",
-        "_scripts": "scripts",
-        "_evaluator": "evaluator",
-        "_git": "git",
-        "_tree": "tree",
-        "_state": "state",
-        "_supervisor": "supervisor",
-        "_agent_turns": "agent_turns",
-        "_phase_runner": "phase_runner",
-    }
-
-    def __getattr__(self, name: str):
-        if name in self._SESSION_FIELDS:
-            if "_session" in self.__dict__:
-                return getattr(self.__dict__["_session"], self._SESSION_FIELDS[name])
-            raise AttributeError(name)
-        if name in self._CONFIG_FIELDS:
-            if "_config" in self.__dict__:
-                field = self._CONFIG_FIELDS[name]
-                if isinstance(field, tuple):
-                    return getattr(
-                        getattr(self.__dict__["_config"], field[0]), field[1]
-                    )
-                return getattr(self.__dict__["_config"], field)
-            raise AttributeError(name)
-        if name in self._PATH_FIELDS:
-            if "_config" in self.__dict__:
-                return getattr(self.__dict__["_config"].paths, self._PATH_FIELDS[name])
-            raise AttributeError(name)
-        if name in self._SERVICE_FIELDS:
-            if "_services" in self.__dict__:
-                value = getattr(self.__dict__["_services"], self._SERVICE_FIELDS[name])
-                if name == "_supervisor" and value is None:
-                    raise AttributeError(name)
-                return value
-            raise AttributeError(name)
-        if name == "_settings":
-            controller = SettingsController(self)
-            self.__dict__["_settings"] = controller
-            return controller
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )
-
-    def __setattr__(self, name: str, value) -> None:
-        if name in self._SESSION_FIELDS and "_session" in self.__dict__:
-            setattr(self.__dict__["_session"], self._SESSION_FIELDS[name], value)
-            return
-        object.__setattr__(self, name, value)
 
     @property
     def state(self) -> ResearchState:
         """Return the Supervisor-owned durable state."""
-        return self._supervisor.state
+        return self._services.durable.state
 
     @property
     def tree(self) -> ResearchTree:
         """Return the Supervisor-owned research history."""
-        return self._supervisor.tree
+        return self._services.durable.tree
 
     @property
     def supervisor(self) -> Supervisor:
-        return self._supervisor
+        """Return the lifecycle coordinator."""
+        supervisor = self._services.workflow.supervisor
+        if supervisor is None:
+            raise RuntimeError("Supervisor workflow is not wired")
+        return supervisor
 
     @property
     def supervisor_provider(self) -> object | None:
-        return self._provider
+        """Return the provider registered for Supervisor turns."""
+        return self._session.lifecycle.provider
 
     @property
     def root(self) -> Path:
-        return self._root
+        """Return the research project root."""
+        return self._config.paths.root
+
+    @property
+    def session_id(self) -> str:
+        """Return the identity shared by runtime and human requests."""
+        return self._config.session_id
 
     @property
     def workspaces_root(self) -> Path:
-        return self._workspaces_root
+        """Return the directory that contains isolated plan workspaces."""
+        return self._config.paths.workspaces
 
     @property
     def state_path(self) -> Path:
-        return self._state_path
+        """Return the durable lifecycle checkpoint path."""
+        return self._config.paths.state
+
+    @property
+    def clarification_path(self) -> Path:
+        """Return the canonical clarification draft path."""
+        return self._config.paths.clarification
+
+    @property
+    def handoffs_path(self) -> Path:
+        """Return the directory containing named task handoffs."""
+        return self._config.paths.handoffs
 
     @property
     def store(self) -> LocalArtifactStore:
-        return self._store
+        """Return the content-addressed artifact store."""
+        return self._services.infrastructure.store
 
     @property
     def events(self) -> RuntimeEvents:
-        return self._events_bus
+        """Return the runtime event publisher and transcript store."""
+        return self._services.infrastructure.events
 
     @property
     def registry(self) -> AgentTypeRegistry:
-        return self._registry
+        """Return the registered agent type catalog."""
+        return self._services.infrastructure.registry
 
     @property
     def agents(self) -> AgentRuntime:
-        return self._agents
+        """Return the shared agent process runtime."""
+        return self._services.infrastructure.agents
 
     @property
     def execution(self) -> ExecutionRuntime:
-        return self._execution
+        """Return the default local execution runtime."""
+        return self._services.infrastructure.execution
 
     async def execution_for(self, plan_id: str, workspace: Path) -> ExecutionRuntime:
         """给一个 Plan 拿到它该用的执行运行时（本地共享或远程租约）。"""
-        pool = self._session.pool
+        pool = self._session.compute.pool
         if pool is None:
-            return self._execution
-        lease = self._session.leases.get(plan_id)
-        compute = self._session.compute
+            return self.execution
+        lease = self._session.compute.leases.get(plan_id)
+        compute = self._session.compute.config
         if lease is None:
             if not pool.cards():
                 await pool.preflight()
@@ -490,7 +338,7 @@ class ResearchRuntime:
                 gpus=compute.gpus_per_experiment if compute else 1,
                 timeout_s=compute.queue_timeout_s if compute else None,
             )
-            self._session.leases[plan_id] = lease
+            self._session.compute.leases[plan_id] = lease
             logger.info(
                 "plan %s leased %s gpu %s",
                 plan_id,
@@ -498,115 +346,104 @@ class ResearchRuntime:
                 list(lease.gpu_ids),
             )
         return ExecutionRuntime(
-            project_root=self._root,
-            environment_root=self._root,
-            data_root=self._session.data_root,
-            store=self._store,
+            project_root=self.root,
+            environment_root=self.root,
+            data_root=self._session.compute.data_root,
+            store=self.store,
             backend=lease.backend,
         )
 
     def placement_for(self, plan_id: str) -> dict[str, Any] | None:
         """这个 Plan 跑在哪台机器、哪几张卡上；本地算力时为 None。"""
-        lease = self._session.leases.get(plan_id)
+        lease = self._session.compute.leases.get(plan_id)
         return None if lease is None else lease.placement()
 
     async def release_lease(self, plan_id: str) -> None:
         """归还一个 Plan 的租约（关通道 → 远端清场 → 卡回池子）。"""
-        pool = self._session.pool
-        if pool is None or plan_id not in self._session.leases:
+        pool = self._session.compute.pool
+        if pool is None or plan_id not in self._session.compute.leases:
             return
-        self._session.leases.pop(plan_id, None)
+        self._session.compute.leases.pop(plan_id, None)
         await pool.release(plan_id)
 
     @property
     def scripts(self) -> DataScriptRunner:
-        return self._scripts
+        """Return the trusted data-script runner."""
+        return self._services.infrastructure.scripts
 
     @property
     def evaluator(self) -> TrustedEvaluator:
-        return self._evaluator
+        """Return the trusted metric evaluator."""
+        return self._services.infrastructure.evaluator
 
     @property
     def git(self) -> LocalGitWorkspace:
-        return self._git
+        """Return the workspace version-control service."""
+        return self._services.infrastructure.git
 
     @property
     def provider(self) -> object | None:
-        return self._provider
+        """Return the registered model provider."""
+        return self._session.lifecycle.provider
 
     @property
     def task_text(self) -> str:
-        return self._task_text
+        """Return the effective original task text."""
+        return self._session.lifecycle.task_text
 
     @property
     def model(self) -> str | None:
-        return self._model
+        """Return the configured model identifier."""
+        return self._config.model
 
     @property
     def client(self) -> Any:
-        return self._client
+        """Return the optional provider client override."""
+        return self._config.client
 
     @property
     def direction(self) -> Literal["maximize", "minimize"]:
-        return self._direction
+        """Return the configured metric optimization direction."""
+        return self._session.options.direction
 
     @property
     def ideation(self):
-        return self._ideation
+        """Return the configured hypothesis-generation strategy."""
+        return self._session.options.ideation
 
     @property
     def prepare_phase(self):
-        return self._prepare_phase
+        """Return the optional PREPARE phase override."""
+        return self._config.prepare_phase
 
     @property
     def validation_phase(self):
-        return self._validation_phase
+        """Return the optional VALIDATE phase override."""
+        return self._config.validation_phase
 
     @property
     def config(self):
+        """Return the immutable runtime configuration."""
         return self._config
 
     @property
+    def services(self):
+        """Return the long-lived infrastructure container."""
+        return self._services
+
+    @property
+    def session(self):
+        """Return mutable state owned by this process."""
+        return self._session
+
+    @property
     def plan_turn(self):
+        """Return the optional plan-turn override."""
         return self._config.plan_turn
 
     def register_supervisor(self, *, provider: object) -> None:
         """Register the long-lived SupervisorAgent once."""
-        if self._provider is not None:
-            raise ValueError("SupervisorAgent provider is already registered")
-        self._provider = provider
-        # 只读 stack 供 Supervisor 的 kaggle_get_competition 查主指标（不缓存，
-        # 避免提前固化 download 标志）。
-        supervisor_kaggle = build_kaggle_stack(
-            download_root=self._root, artifacts=self._store, download=True
-        )
-        ask_user = self._ask_user
-        if ask_user is not None:
-            def ask_user_recorder(prompt, *args, **kwargs):
-                answer = ask_user(prompt, *args, **kwargs)
-                if answer is not None:
-                    self._session.clarification_qa.append((prompt, str(answer)))
-                return answer
-            ask_user_factory = lambda _thread, _turn: ask_user_recorder
-        else:
-            ask_user_factory = None
-        register_supervisor_agent(
-            self._registry,
-            provider=provider,
-            artifacts=self._store,
-            actions=self._supervisor,
-            ask_user=ask_user_factory,
-            kaggle_stack=supervisor_kaggle,
-        )
-        register_plan_agent(
-            self._registry,
-            provider=provider,
-            artifacts=self._store,
-            workspace_for=self._supervisor.workspace_path,
-            execution=self._execution,
-            # plan agent 在构造期即注册，早于 Supervisor 任务理解，故惰性求值。
-            extra_tools=self.plan_tools,
-        )
+        register_supervisor_impl(self, provider)
 
     def plan_tools(self) -> ToolRegistry | None:
         """写代码那一步的额外工具：Kaggle（若接入）+ 文献语料的只读检索算子。
@@ -619,7 +456,7 @@ class ResearchRuntime:
         与 Ideator 用各自独立的会话：已读账本按 Agent 独立，而引用核验只看 ideation
         那一轮的账本，PlanAgent 读了什么不该算进去。
         """
-        return _merged(self.kaggle_tools("plan"), self.corpus_tools())
+        return plan_tools_impl(self)
 
     def kaggle_stack(self) -> KaggleStack:
         """Lazily build the shared Kaggle stack rooted at the project root.
@@ -628,23 +465,11 @@ class ResearchRuntime:
         项目根下的 ``<slug>/`` 目录，EDA/SOTA 引用进共享 artifact 存储。这样
         PREPARE 下载的数据 SEARCH 也能经 ``shell_command`` 绝对路径读取。
         """
-        if self._kaggle_stack is None:
-            self._kaggle_stack = build_kaggle_stack(
-                download_root=self._root,
-                artifacts=self._store,
-                download=self._supervisor.kaggle_download,
-            )
-        return self._kaggle_stack
+        return kaggle_stack_impl(self)
 
     def kaggle_tools(self, agent_type: str) -> ToolRegistry | None:
         """Return the minimal Kaggle tool set for ``agent_type``; None when off/unconfigured."""
-        names = AGENT_KAGGLE_TOOLS.get(agent_type)
-        if not names or not self._supervisor.kaggle_enabled:
-            return None
-        stack = self.kaggle_stack()
-        if not stack.client.configured:
-            return None
-        return build_kaggle_tools(stack, names=names)
+        return kaggle_tools_impl(self, agent_type)
 
     def ideator_tools(self) -> Callable[[], ToolRegistry | None]:
         """Return a lazy provider for Ideator lane extra tools.
@@ -655,15 +480,7 @@ class ResearchRuntime:
         that finishes after PREPARE is picked up by the next Ideator lane.
         """
 
-        def build() -> ToolRegistry | None:
-            return _merged(
-                self.kaggle_tools("ideator"),
-                self.corpus_tools(for_ideation=True),
-            )
-
-        return build
-
-    # ── 文献语料：一次性构建，Ideator 只读 ──────────────────────────────
+        return ideator_tools_impl(self)
 
     def corpus_tools(self, *, for_ideation: bool = False) -> ToolRegistry | None:
         """Return read-only paper operators for the active corpus, if any."""
@@ -689,24 +506,18 @@ class ResearchRuntime:
         """Paper ids that actually exist in the active corpus."""
         return await corpus_paper_ids_impl(self)
 
-    # ── GUI 门面扩展：树持久化与运行设置（供 gui_gateway 只读/控制）────────
-
     @property
     def tree_path(self) -> Path:
         """Return the on-disk research tree path."""
-        return self._tree_path
+        return self._config.paths.tree
 
     def save_tree(self) -> Path:
         """Persist the current research tree to disk and return the path."""
-        return self.tree.save(self._tree_path)
+        return self.tree.save(self.tree_path)
 
     def load_tree(self) -> ResearchTree:
         """Reload the research tree from disk (a fresh read-only snapshot)."""
-        return ResearchTree.load(self._tree_path)
-
-    def _compute_settings(self) -> dict[str, Any]:
-        """Serialize the active compute configuration for the GUI."""
-        return self._settings._compute_settings()
+        return ResearchTree.load(self.tree_path)
 
     def settings(self) -> dict[str, Any]:
         """Return a GUI-facing snapshot of runtime settings."""
@@ -716,32 +527,17 @@ class ResearchRuntime:
         """Apply a whitelisted settings patch and persist durable fields."""
         return await self._settings.apply(patch)
 
-    def _recent_user_texts(self, limit: int = 6) -> list[str]:
-        """Return recent Human messages from the persisted session transcript."""
-        return recent_user_texts_from_impl(self, limit)
-
-    @staticmethod
-    def _task_context_text(task_text: str, prior: list[str]) -> str:
-        """Build the supervisor task-understanding prompt from task + history."""
-        return task_context_text_impl(task_text, prior)
-
-    def _resume_task_text(self, fallback: str) -> str:
-        """Reconstruct the effective task text from persisted resume state."""
-        return resume_task_text_impl(self, fallback)
-
-    async def _maybe_run_task_understanding(self) -> None:
-        """Run PREPARE task understanding unless a checkpoint already exists."""
-        await maybe_run_task_understanding_impl(self)
-
     async def start(self) -> asyncio.Task[None]:
         """Start infrastructure and the single Supervisor loop once.
 
         Returns the Supervisor lifecycle task; callers may await it to block
         until PREPARE/SEARCH/VALIDATE reaches a terminal state.
         """
+        await recover_confirmation(self)
+        await confirm_pending_task(self)
         return await start_impl(self)
 
-    def _start_survey(self) -> None:
+    def start_survey(self) -> None:
         """Start the background survey once, unless a corpus already exists."""
         start_survey_impl(self)
 
@@ -749,31 +545,78 @@ class ResearchRuntime:
         """Return the currently available corpus reference, if any."""
         return self.state.corpus_ref
 
-    async def _survey_topic(self) -> str:
+    async def survey_topic(self) -> str:
         """Return the survey query: explicit setting first, task-derived otherwise."""
         return await survey_topic_impl(self)
 
-    async def _run_survey(self) -> None:
+    async def run_survey(self) -> None:
         """Run one full survey and record the resulting corpus reference."""
         await run_survey_impl(self)
 
-    def _ensure_survey_stack(self) -> SurveyStack:
+    def ensure_survey_stack(self) -> SurveyStack:
         """Build and cache the survey dependency stack on this runtime's store."""
         return ensure_survey_stack_impl(self)
 
-    async def _project_survey_event(
+    async def project_survey_event(
         self, kind: str, _ref: str, data: dict[str, Any] | None = None
     ) -> None:
         """Project a survey progress event into a human-readable output line."""
         await project_survey_event_impl(self, kind, _ref, data)
 
-    def _rearm_if_terminal(self) -> None:
-        """Clear the done supervisor task so a terminal run can be restarted."""
-        rearm_if_terminal_impl(self)
-
     async def start_task(self, task: str) -> str:
         """Seed the research task and start PREPARE -> SEARCH -> VALIDATE."""
+        if self.state.task_understanding is None:
+            await seed_unconfirmed_task(self, task)
         return await start_task_impl(self, task)
+
+    def _clarification_controller_or_raise(self):
+        controller = self._services.workflow.clarification
+        if controller is None:
+            raise ValueError("clarification controller is not configured")
+        return controller
+
+    async def task_clarification_start(self, task: str) -> object:
+        """Start or resume clarification for the active session."""
+        return await self._clarification_controller_or_raise().start_or_resume(task)
+
+    async def task_clarification_get(self, draft_id: str) -> object:
+        """Return the authoritative latest clarification draft."""
+        return await self._clarification_controller_or_raise().get(draft_id)
+
+    async def task_clarification_retry(self, draft_id: str, revision: int) -> object:
+        """Retry a retryable FAILED draft."""
+        return await self._clarification_controller_or_raise().retry(draft_id, revision)
+
+    async def task_clarification_revise(
+        self, draft_id: str, revision: int, instruction: str
+    ) -> object:
+        """Revise a ready draft and return it to CLARIFYING."""
+        return await self._clarification_controller_or_raise().revise(
+            draft_id, revision, instruction
+        )
+
+    async def task_clarification_cancel(self, draft_id: str, revision: int) -> object:
+        """Cancel the active clarification draft and return the session to IDLE."""
+        return await self._clarification_controller_or_raise().cancel(
+            draft_id, revision
+        )
+
+    async def confirm_and_start(
+        self,
+        draft_id: str,
+        revision: int,
+        acknowledge_unresolved: bool,
+        *,
+        start_after: bool = True,
+    ) -> object:
+        """Confirm the latest clarification revision and start PREPARE atomically."""
+        return await confirm_and_start_impl(
+            self,
+            draft_id,
+            revision,
+            acknowledge_unresolved,
+            start_after=start_after,
+        )
 
     async def start_validation(self) -> str:
         """Run the frozen-SOTA VALIDATE phase and publish the final report."""
@@ -783,22 +626,13 @@ class ResearchRuntime:
         """Apply exact control commands or delegate ordinary prose unchanged."""
         return await message_impl(self, text)
 
-    async def _ensure_started(self) -> None:
-        """Start the Supervisor loop once a trusted baseline exists."""
-        await ensure_started_impl(self)
-
-    async def _cancel_supervisor_task(self) -> None:
-        """Cancel the current Supervisor lifecycle task (pause/stop interrupt)."""
-        await cancel_supervisor_task_impl(self)
-
-    # ── 事件/订阅/持久化（委托 RuntimeEvents）────────────────────────
-
     def subscribe(self, emit: EmitFn) -> str:
         """Subscribe and immediately receive one complete state snapshot."""
-        return self._events_bus.subscribe(emit)
+        return self.events.subscribe(emit)
 
     def unsubscribe(self, subscription_id: str) -> None:
-        self._events_bus.unsubscribe(subscription_id)
+        """Remove one runtime event subscription."""
+        self.events.unsubscribe(subscription_id)
 
     async def publish_output(
         self,
@@ -810,7 +644,8 @@ class ResearchRuntime:
         tool: str | None = None,
         artifact_ref: ArtifactRef | None = None,
     ) -> None:
-        await self._events_bus.publish_output(
+        """Publish one human-readable runtime output event."""
+        await self.events.publish_output(
             source=source,
             channel=channel,
             text=text,
@@ -826,16 +661,20 @@ class ResearchRuntime:
         plan: str | None = None,
         tool: str = "shell_command",
     ) -> None:
-        await self._events_bus.project_command_result(result, plan=plan, tool=tool)
+        """Project command output into the runtime event stream."""
+        await self.events.project_command_result(result, plan=plan, tool=tool)
 
     def persist_user_message(self, text: str) -> None:
-        self._events_bus.persist_user_message(text)
+        """Append one human message to the durable transcript."""
+        self.events.persist_user_message(text)
 
     def replay_output_events(self) -> list[dict[str, object]]:
-        return self._events_bus.replay_output_events()
+        """Return output events recovered from the durable transcript."""
+        return self.events.replay_output_events()
 
-    def _baseline_evaluator_ref(self) -> ArtifactRef | None:
-        baselines = self._tree.experiments(kind="baseline")
+    def baseline_evaluator_ref(self) -> ArtifactRef | None:
+        """Return the baseline evaluator reference, if one is recorded."""
+        baselines = self.tree.experiments(kind="baseline")
         return baselines[0].plan.run_config_ref if baselines else None
 
     async def suspend(self) -> str:
@@ -846,25 +685,27 @@ class ResearchRuntime:
         ``SearchLoop.run_search`` keep scheduling, so only the owner of a
         session's lifecycle (the GUI gateway) may downgrade it.
         """
-        return await self._supervisor.suspend()
+        return await self.supervisor.suspend()
 
     async def aclose(self) -> None:
+        """Release remote, event, survey, Supervisor, and agent resources."""
         # 先还租约：通道一关远端才杀进程组，漏掉会一直占着显存。
-        session = getattr(self, "_session", None)
-        if session is not None and session.pool is not None:
-            await session.pool.aclose()
-            session.leases.clear()
-        await self._events_bus.aclose()
+        if self._session.compute.pool is not None:
+            await self._session.compute.pool.aclose()
+            self._session.compute.leases.clear()
+        await self.events.aclose()
         # 后台调研不属于任何 Plan，Supervisor.stop 管不到它；不在这里取消就会在
         # runtime 关掉之后继续下载、继续调模型，还会往已清空的订阅者发布。
-        if self._survey_task is not None and not self._survey_task.done():
-            self._survey_task.cancel()
-            await asyncio.gather(self._survey_task, return_exceptions=True)
-        await self._supervisor.stop()
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-        await self._agents.aclose()
+        survey_task = self._session.survey.task
+        if survey_task is not None and not survey_task.done():
+            survey_task.cancel()
+            await asyncio.gather(survey_task, return_exceptions=True)
+        await self.supervisor.stop()
+        task = self._session.lifecycle.task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await self.agents.aclose()
 
 
 __all__ = ["ResearchRuntime"]

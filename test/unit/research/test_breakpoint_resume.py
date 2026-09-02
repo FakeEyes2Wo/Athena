@@ -13,27 +13,23 @@ import pytest
 
 from athena.research.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
+from athena.research.runtime_control import start as start_lifecycle
 from athena.research.supervisor.prepare import PrepareResult
 
 
 def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime:
-    runtime = ResearchRuntime.__new__(ResearchRuntime)
-    runtime._root = tmp_path
-    runtime._state_path = tmp_path / ".athena" / "state.json"
-    runtime._provider = object()
-    runtime._task_text = "predict titanic survival"
-    runtime._started = False
-    runtime._task = None
-    runtime._survey_enabled = False
-    runtime._survey_task = None
-    runtime._state = SimpleNamespace(
-        phase="PREPARE",
-        status="RUNNING",
-        task_understanding=task_understanding,
-        task_text="predict titanic survival" if task_understanding else None,
-        save=lambda path: None,
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        auto_confirm=True,
+        task_confirmation_gate=False,
     )
-    runtime._supervisor = SimpleNamespace(state=runtime._state)
+    runtime.session.lifecycle.provider = object()
+    runtime.session.lifecycle.task_text = "predict titanic survival"
+    runtime.state.phase = "PREPARE"
+    runtime.state.status = "RUNNING"
+    runtime.state.task_understanding = task_understanding
+    runtime.state.task_text = "predict titanic survival" if task_understanding else None
+    runtime.state.handoff_refs = {}
 
     class FakeGit:
         async def init(self, *args, **kwargs):
@@ -43,9 +39,52 @@ def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime
         def start(self):
             return None
 
-    runtime._git = FakeGit()
-    runtime._agents = FakeAgents()
+    runtime.services.infrastructure.git = FakeGit()
+    runtime.services.infrastructure.agents = FakeAgents()
     return runtime
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_start_does_not_require_clarification_services() -> None:
+    class FakeGit:
+        async def init(self, *args, **kwargs) -> None:
+            return None
+
+    class FakeAgents:
+        def start(self) -> None:
+            return None
+
+    class FakeSupervisor:
+        async def start(self) -> None:
+            return None
+
+    state = SimpleNamespace(
+        status="IDLE",
+        task_text="confirmed task",
+        task_understanding={"title": "confirmed task"},
+        save=lambda _path: None,
+    )
+    lifecycle = SimpleNamespace(
+        task=None,
+        task_text="confirmed task",
+        started=False,
+    )
+    runtime = SimpleNamespace(
+        session=SimpleNamespace(lifecycle=lifecycle),
+        task_text="confirmed task",
+        state=state,
+        state_path=Path("state.json"),
+        git=FakeGit(),
+        agents=FakeAgents(),
+        supervisor=FakeSupervisor(),
+        start_survey=lambda: None,
+    )
+
+    task = await start_lifecycle(runtime)
+    await task
+
+    assert lifecycle.started is True
+    assert state.status == "RUNNING"
 
 
 @pytest.mark.asyncio
@@ -53,29 +92,22 @@ async def test_start_task_persists_first_task_text_and_reuses_it(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path)
-    saves: list[str] = []
-
-    def save(path) -> None:
-        saves.append(str(path))
-
-    runtime._state.save = save
-    runtime._started = True
-    runtime._task = SimpleNamespace(done=lambda: False)
+    runtime.session.lifecycle.started = True
+    runtime.session.lifecycle.task = SimpleNamespace(done=lambda: False)
 
     status = await runtime.start_task("predict titanic survival")
 
     assert status == "RUNNING"
-    assert runtime._task_text == "predict titanic survival"
-    assert runtime._state.task_text == "predict titanic survival"
-    assert saves == [str(runtime._state_path)]
+    assert runtime.task_text == "predict titanic survival"
+    assert runtime.state.task_text == "predict titanic survival"
+    assert runtime.state_path.is_file()
+    assert runtime.state.task_understanding is not None
 
-    saves.clear()
-    runtime._state.task_understanding = {"title": "titanic"}
+    runtime.state.task_understanding = {"title": "titanic"}
     await runtime.start_task("continue")
 
-    assert runtime._task_text == "predict titanic survival"
-    assert runtime._state.task_text == "predict titanic survival"
-    assert saves == []
+    assert runtime.task_text == "predict titanic survival"
+    assert runtime.state.task_text == "predict titanic survival"
 
 
 @pytest.mark.asyncio
@@ -83,25 +115,19 @@ async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path)
-    saves: list[str] = []
-
-    def save(path) -> None:
-        saves.append(str(path))
-
-    runtime._state.save = save
-    runtime._state.task_text = "https://www.kaggle.com/competitions/kaggriculture"
-    runtime._state.task_understanding = None
-    runtime._started = True
-    runtime._task = SimpleNamespace(done=lambda: False)
+    runtime.state.task_text = "https://www.kaggle.com/competitions/kaggriculture"
+    runtime.state.task_understanding = None
+    runtime.session.lifecycle.started = True
+    runtime.session.lifecycle.task = SimpleNamespace(done=lambda: False)
 
     status = await runtime.start_task("continue")
 
     assert status == "RUNNING"
-    assert runtime._task_text == "https://www.kaggle.com/competitions/kaggriculture"
+    assert runtime.task_text == "https://www.kaggle.com/competitions/kaggriculture"
     assert (
-        runtime._state.task_text == "https://www.kaggle.com/competitions/kaggriculture"
+        runtime.state.task_text == "https://www.kaggle.com/competitions/kaggriculture"
     )
-    assert saves == []
+    assert runtime.state_path.is_file()
 
 
 @pytest.mark.asyncio
@@ -115,13 +141,13 @@ async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> 
         outputs.append(kwargs)
 
     runtime.publish_output = publish_output  # type: ignore[method-assign]
-    runtime._start_survey = lambda: None  # type: ignore[method-assign]
+    runtime.start_survey = lambda: None  # type: ignore[method-assign]
 
     class FakeAgentTurns:
         async def run_supervisor_turn(self, text):
             raise AssertionError("task understanding must be skipped")
 
-    runtime._agent_turns = FakeAgentTurns()
+    runtime.services.workflow.agent_turns = FakeAgentTurns()
 
     class FakeSupervisor:
         def __init__(self, state) -> None:
@@ -130,34 +156,23 @@ async def test_start_skips_task_understanding_when_persisted(tmp_path: Path) -> 
         async def start(self):
             return None
 
-    runtime._supervisor = FakeSupervisor(runtime._state)
+    runtime.services.workflow.supervisor = FakeSupervisor(runtime.state)
 
     await runtime.start()
 
-    assert runtime._started is True
-    assert runtime._task is not None
-    for _ in range(50):
-        if any(
-            "断点续传：复用已持久化的任务理解" in str(output.get("text"))
-            for output in outputs
-        ):
-            break
-        await asyncio.sleep(0.01)
-    assert any(
-        "断点续传：复用已持久化的任务理解" in str(output.get("text"))
-        for output in outputs
-    )
+    assert runtime.session.lifecycle.started is True
+    assert runtime.session.lifecycle.task is not None
+    # The inline task-understanding turn is gone; confirmed state is immutable.
     assert not any("任务理解中" in str(output.get("text")) for output in outputs)
-    runtime._task.cancel()
+    runtime.session.lifecycle.task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await runtime._task
+        await runtime.session.lifecycle.task
 
 
 @pytest.mark.asyncio
 async def test_run_prepare_phase_reuses_frozen_evaluator(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from athena.research.phase_runner import PhaseRunner
 
     class FakeSupervisor:
         def __init__(self, frozen_ref: str) -> None:
@@ -201,10 +216,8 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
                 base_commit=commit,
             )
 
-    outputs: list[dict[str, object]] = []
-
-    async def publish_output(**kwargs) -> None:
-        outputs.append(kwargs)
+    async def publish_output(**_kwargs) -> None:
+        return None
 
     frozen_ref = "sha256:" + "f" * 64
     state = SimpleNamespace(
@@ -212,31 +225,22 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     )
     supervisor = FakeSupervisor(frozen_ref)
     rt = SimpleNamespace(
-        _root=tmp_path,
-        _state_path=tmp_path / ".athena" / "state.json",
-        _workspaces_root=tmp_path / "workspaces",
-        _prepare_phase=None,
         prepare_phase=None,
-        _provider=object(),
         provider=object(),
-        _task_text="predict survival",
-        _agents=SimpleNamespace(reap=lambda agent_id: None),
-        _evaluator=object(),
-        _execution=object(),
-        _state=state,
         state=state,
-        _supervisor=supervisor,
         supervisor=supervisor,
-        _store=FakeStore(),
-        _git=FakeGit(),
-        _registry=SimpleNamespace(contains=lambda name: True),
-        _events_bus=FakeBus(),
-        tree=SimpleNamespace(to_dict=lambda: {}),
+        tree=SimpleNamespace(to_dict=dict),
         publish_output=publish_output,
         root=tmp_path,
         state_path=tmp_path / ".athena" / "state.json",
         workspaces_root=tmp_path / "workspaces",
-        config=SimpleNamespace(dataset_path=None, target_column=None, split_seed=0),
+        config=SimpleNamespace(
+            dataset_path=None,
+            target_column=None,
+            split_seed=0,
+            paths=SimpleNamespace(athena=tmp_path / ".athena"),
+        ),
+        task_confirmation_gate=False,
         git=FakeGit(),
         store=FakeStore(),
         events=FakeBus(),
@@ -264,12 +268,12 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         )
 
     monkeypatch.setattr(
-        "athena.research.prepare_phase.run_evaluator_plan",
+        "athena.research.prepare_evaluator.run_evaluator_plan",
         run_evaluator_plan,
         raising=False,
     )
     monkeypatch.setattr(
-        "athena.research.prepare_phase.run_prepare_plan",
+        "athena.research.prepare_baseline.run_prepare_plan",
         run_prepare_plan,
         raising=False,
     )
@@ -283,18 +287,10 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
 
     monkeypatch.setattr(PhaseRunner, "_run_handoff_agent", fake_handoff)
 
-    async def fake_eda_todos(*args, **kwargs):
-        return []
-
-    monkeypatch.setattr("athena.research.prepare_phase.run_eda_todos", fake_eda_todos)
-
     result = await PhaseRunner(rt).run_prepare_phase()
 
     assert result.evaluator_ref == frozen_ref
-    assert any(
-        "复用已冻结的评估器断点" in str(output.get("text")) for output in outputs
-    )
-    assert rt._supervisor.checked_refs == []
+    assert rt.supervisor.checked_refs == []
 
 
 @pytest.mark.asyncio
@@ -320,21 +316,12 @@ async def test_run_general_turn_persists_agent_id_before_wait(
             return "general-worker", "run-1"
 
     rt = SimpleNamespace(
-        _root=tmp_path,
-        _state_path=tmp_path / ".athena" / "state.json",
-        _state=state,
         state=state,
-        _provider=object(),
         provider=object(),
-        _registry=SimpleNamespace(contains=lambda name: True),
         registry=SimpleNamespace(contains=lambda name: True),
-        _store=object(),
         store=object(),
-        _execution=object(),
         execution=object(),
-        _agents=FakeAgents(),
         agents=FakeAgents(),
-        _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         events=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         root=tmp_path,
         state_path=tmp_path / ".athena" / "state.json",
@@ -367,7 +354,7 @@ async def test_run_general_turn_persists_agent_id_before_wait(
     assert outcome.result == {"result": "done", "files": ["summary.md"]}
     assert state.task_research_task == "inspect competition"
     assert state.task_research_agent_id == "general-worker"
-    assert saves == [str(rt._state_path)]
+    assert saves == [str(rt.state_path)]
 
 
 @pytest.mark.asyncio
@@ -395,21 +382,12 @@ async def test_run_general_turn_interrupts_worker_on_timeout(
             interrupted.append((agent_id, reason))
 
     rt = SimpleNamespace(
-        _root=tmp_path,
-        _state_path=tmp_path / ".athena" / "state.json",
-        _state=state,
         state=state,
-        _provider=object(),
         provider=object(),
-        _registry=SimpleNamespace(contains=lambda name: True),
         registry=SimpleNamespace(contains=lambda name: True),
-        _store=object(),
         store=object(),
-        _execution=object(),
         execution=object(),
-        _agents=FakeAgents(),
         agents=FakeAgents(),
-        _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         events=SimpleNamespace(project_agent_event=lambda *a, **k: None),
         root=tmp_path,
         state_path=tmp_path / ".athena" / "state.json",
@@ -440,22 +418,22 @@ async def test_start_task_reconstructs_task_text_from_legacy_understanding(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path)
-    runtime._state.task_text = None
-    runtime._state.task_understanding = {
+    runtime.state.task_text = None
+    runtime.state.task_understanding = {
         "title": "Kaggriculture farming simulation",
         "dataset": "kaggriculture environment",
         "target": "maximize income",
     }
-    runtime._started = True
-    runtime._task = SimpleNamespace(done=lambda: False)
+    runtime.session.lifecycle.started = True
+    runtime.session.lifecycle.task = SimpleNamespace(done=lambda: False)
 
     status = await runtime.start_task("continue")
 
     assert status == "RUNNING"
-    assert runtime._task_text == (
+    assert runtime.task_text == (
         "Kaggriculture farming simulation kaggriculture environment maximize income"
     )
-    assert runtime._state.task_text is None
+    assert runtime.state.task_text is None
 
 
 @pytest.mark.asyncio
@@ -470,12 +448,11 @@ async def test_resume_restarts_a_rebuilt_runtime_for_a_persisted_prepare_run(
     "status=RUNNING 但没有任何协程在跑"的悬空态——正是用户点"继续"没反应的原因。
     """
     runtime = _stub_runtime(tmp_path)
-    runtime._state.phase = "PREPARE"
-    runtime._state.status = "WAITING"
-    runtime._state_path.parent.mkdir(parents=True, exist_ok=True)
-    runtime._state_path.write_text("{}", encoding="utf-8")
-    runtime._started = False
-    runtime._task = None
+    runtime.state.phase = "PREPARE"
+    runtime.state.status = "WAITING"
+    runtime.state.save(runtime.state_path)
+    runtime.session.lifecycle.started = False
+    runtime.session.lifecycle.task = None
     started: list[bool] = []
     resumed: list[bool] = []
 
@@ -496,7 +473,7 @@ async def test_resume_restarts_a_rebuilt_runtime_for_a_persisted_prepare_run(
             self.state.status = "RUNNING"
             return self.state.status
 
-    runtime._supervisor = FakeSupervisor(runtime._state)
+    runtime.services.workflow.supervisor = FakeSupervisor(runtime.state)
 
     async def start():
         started.append(True)
@@ -514,9 +491,9 @@ async def test_resume_does_not_start_a_project_without_durable_state(
 ) -> None:
     """全新项目还没落过盘：``/resume`` 不得凭空把它推进阶段机。"""
     runtime = _stub_runtime(tmp_path)
-    runtime._state.status = "WAITING"
-    runtime._started = False
-    runtime._task = None
+    runtime.state.status = "WAITING"
+    runtime.session.lifecycle.started = False
+    runtime.session.lifecycle.task = None
     started: list[bool] = []
 
     class FakeTree:
@@ -535,7 +512,7 @@ async def test_resume_does_not_start_a_project_without_durable_state(
             self.state.status = "RUNNING"
             return self.state.status
 
-    runtime._supervisor = FakeSupervisor(runtime._state)
+    runtime.services.workflow.supervisor = FakeSupervisor(runtime.state)
 
     async def start():
         started.append(True)

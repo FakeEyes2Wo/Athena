@@ -77,19 +77,20 @@ class SettingsController:
         self._runtime = runtime
 
     def snapshot(self) -> dict[str, Any]:
+        """Return the current GUI-facing settings projection."""
         rt = self._runtime
         return {
-            "project_root": str(rt._root),
-            "model": rt._model,
+            "project_root": str(rt.root),
+            "model": rt.model,
             "concurrency": rt.state.concurrency,
             "search_limit": rt.state.search_limit,
-            "ideation": rt._ideation,
+            "ideation": rt.ideation,
             "ideator_count": rt.state.ideator_count,
             "hypotheses_per_ideator": rt.state.hypotheses_per_ideator,
             "handoff_sources": rt.state.handoff_sources,
-            "direction": rt._direction,
-            "tolerance": rt._tolerance,
-            "auto_validate": rt._auto_validate,
+            "direction": rt.direction,
+            "tolerance": rt.session.options.tolerance,
+            "auto_validate": rt.session.options.auto_validate,
             "manual_mode": rt.state.manual_mode,
             "phase": rt.state.phase,
             "status": rt.state.status,
@@ -109,8 +110,7 @@ class SettingsController:
         }
 
     def _compute_settings(self) -> dict[str, Any]:
-        session = getattr(self._runtime, "_session", None)
-        compute = session.compute if session is not None else None
+        compute = self._runtime.session.compute.config
         if compute is None:
             return {
                 "mode": "local",
@@ -137,12 +137,9 @@ class SettingsController:
             ],
         }
 
-    async def apply(self, patch: dict[str, Any]) -> dict[str, Any]:
+    def _apply_research_settings(self, patch: dict[str, Any]) -> None:
+        """Apply search shape, ideation, handoff, and timeout settings."""
         rt = self._runtime
-        allowed = SETTINGS_WHITELIST
-        unknown = set(patch) - allowed
-        if unknown:
-            raise ValueError(f"unsupported settings fields: {sorted(unknown)}")
         if "concurrency" in patch:
             concurrency = patch["concurrency"]
             if not isinstance(concurrency, int) or concurrency < 1:
@@ -159,9 +156,9 @@ class SettingsController:
                 raise ValueError(
                     "ideation must be 'ideageneration', 'baseline', or 'debate'"
                 )
-            if ideation != rt._ideation:
-                rt._ideation = ideation
-                rt._registry.unregister("ideator")
+            if ideation != rt.ideation:
+                rt.session.options.ideation = ideation
+                rt.registry.unregister("ideator")
         if "ideator_count" in patch:
             value = patch["ideator_count"]
             if not isinstance(value, int) or value < 1 or value > 8:
@@ -184,6 +181,15 @@ class SettingsController:
                     "'kaggle' and 'literature'"
                 )
             rt.state.handoff_sources = value
+        if "experiment_timeout_s" in patch:
+            value = patch["experiment_timeout_s"]
+            if not isinstance(value, int) or value < 1:
+                raise ValueError("experiment_timeout_s must be an integer >= 1")
+            rt.state.experiment_timeout_s = value
+
+    async def _apply_policy_settings(self, patch: dict[str, Any]) -> None:
+        """Apply manual control and Supervisor search policy settings."""
+        rt = self._runtime
         if "manual_mode" in patch:
             manual = patch["manual_mode"]
             if not isinstance(manual, bool):
@@ -194,73 +200,90 @@ class SettingsController:
             direction = patch["direction"]
             if direction not in {"maximize", "minimize"}:
                 raise ValueError("direction must be 'maximize' or 'minimize'")
-            rt._direction = direction
+            rt.session.options.direction = direction
+            rt.supervisor.configure_options(direction=direction)
         if "tolerance" in patch:
             tolerance = patch["tolerance"]
             if not isinstance(tolerance, (int, float)) or tolerance < 0:
                 raise ValueError("tolerance must be a number >= 0")
-            rt._tolerance = float(tolerance)
+            rt.session.options.tolerance = float(tolerance)
+            rt.supervisor.configure_options(tolerance=float(tolerance))
         if "auto_validate" in patch:
             auto_validate = patch["auto_validate"]
             if not isinstance(auto_validate, bool):
                 raise ValueError("auto_validate must be a bool")
-            rt._auto_validate = auto_validate
-        if "experiment_timeout_s" in patch:
-            value = patch["experiment_timeout_s"]
-            if not isinstance(value, int) or value < 1:
-                raise ValueError("experiment_timeout_s must be an integer >= 1")
-            rt.state.experiment_timeout_s = value
+            rt.session.options.auto_validate = auto_validate
+            rt.supervisor.configure_options(auto_validate=auto_validate)
+
+    async def _apply_compute_settings(self, patch: dict[str, Any]) -> None:
+        """Apply data-root and local/remote compute settings."""
+        rt = self._runtime
         if "data_root" in patch:
             raw = patch["data_root"]
             if raw in (None, ""):
-                rt._session.data_root = None
+                rt.session.compute.data_root = None
                 rt.state.data_root = None
             else:
                 path = Path(str(raw)).resolve()
                 if not path.is_dir():
                     raise ValueError(f"data_root does not exist: {path}")
-                rt._session.data_root = path
+                rt.session.compute.data_root = path
                 rt.state.data_root = str(path)
         if "compute" in patch:
             raw = patch["compute"]
             if not isinstance(raw, dict):
                 raise ValueError("compute must be an object")
             new_compute = parse_compute_config(raw)
-            rt._session.compute = new_compute
+            rt.session.compute.config = new_compute
             if new_compute.remote:
-                if rt._session.pool is None:
-                    rt._session.pool = GpuPool(
+                if rt.session.compute.pool is None:
+                    rt.session.compute.pool = GpuPool(
                         list(new_compute.hosts),
                         placement=new_compute.placement,
-                        store=rt._store,
-                        dataset_root=rt._session.data_root,
+                        store=rt.store,
+                        dataset_root=rt.session.compute.data_root,
                     )
-            elif rt._session.pool is not None:
-                await rt._session.pool.aclose()
-                rt._session.pool = None
-                rt._session.leases.clear()
-        if "model_connection" in patch:
-            raw = patch["model_connection"]
-            if not isinstance(raw, dict):
-                raise ValueError("model_connection must be an object")
-            updates: dict[str, str] = {}
-            for field, env_key in MODEL_CONNECTION_ENV_VARS.items():
-                value = raw.get(field)
-                if value is None:
-                    continue
-                if not isinstance(value, str):
-                    raise ValueError(f"{field} must be a string")
-                value = value.strip()
-                if field == "provider":
-                    if value and value not in ALLOWED_MODEL_PROVIDERS:
-                        raise ValueError(
-                            f"provider must be one of {', '.join(ALLOWED_MODEL_PROVIDERS)}"
-                        )
-                if value:
-                    updates[env_key] = value
-            if updates:
-                _upsert_dotenv(Path(".env"), updates)
-                os.environ.update(updates)
+            elif rt.session.compute.pool is not None:
+                await rt.session.compute.pool.aclose()
+                rt.session.compute.pool = None
+                rt.session.compute.leases.clear()
+
+    def _apply_model_connection(self, patch: dict[str, Any]) -> None:
+        """Validate and persist model connection environment settings."""
+        if "model_connection" not in patch:
+            return
+        raw = patch["model_connection"]
+        if not isinstance(raw, dict):
+            raise ValueError("model_connection must be an object")  # noqa: TRY004
+        updates: dict[str, str] = {}
+        for field, env_key in MODEL_CONNECTION_ENV_VARS.items():
+            value = raw.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"{field} must be a string")  # noqa: TRY004
+            value = value.strip()
+            if field == "provider" and value and value not in ALLOWED_MODEL_PROVIDERS:
+                raise ValueError(
+                    f"provider must be one of {', '.join(ALLOWED_MODEL_PROVIDERS)}"
+                )
+            if value:
+                updates[env_key] = value
+        if updates:
+            _upsert_dotenv(Path(".env"), updates)
+            os.environ.update(updates)
+
+    async def apply(self, patch: dict[str, Any]) -> dict[str, Any]:
+        """Validate and apply the supported runtime settings fields."""
+        unknown = set(patch) - SETTINGS_WHITELIST
+        if unknown:
+            raise ValueError(f"unsupported settings fields: {sorted(unknown)}")
+
+        # Apply independent setting domains before one durable state write.
+        self._apply_research_settings(patch)
+        await self._apply_policy_settings(patch)
+        await self._apply_compute_settings(patch)
+        self._apply_model_connection(patch)
         if any(
             field in patch
             for field in (
@@ -273,5 +296,5 @@ class SettingsController:
                 "data_root",
             )
         ):
-            rt.state.save(rt._state_path)
+            self._runtime.state.save(self._runtime.state_path)
         return self.snapshot()

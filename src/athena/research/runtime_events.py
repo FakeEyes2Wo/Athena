@@ -42,19 +42,6 @@ _AGENT_TEXT_BOUNDARY_KINDS = {
 }
 
 
-def recent_user_texts(records: list[dict[str, object]], limit: int = 6) -> list[str]:
-    """Return the last ``limit`` non-empty Human message texts from a transcript."""
-    texts = [
-        record.get("text")
-        for record in records
-        if isinstance(record, dict)
-        and record.get("type") == "user"
-        and isinstance(record.get("text"), str)
-        and record.get("text", "").strip()
-    ]
-    return texts[-limit:]
-
-
 class RuntimeEvents:
     """Project, publish, and persist the runtime's output/state stream."""
 
@@ -97,6 +84,7 @@ class RuntimeEvents:
         return subscription_id
 
     def unsubscribe(self, subscription_id: str) -> None:
+        """Remove one runtime event subscriber and cancel its pending snapshot."""
         self._subscribers.pop(subscription_id, None)
         ready = self._subscriber_ready.pop(subscription_id, None)
         if ready is not None and not ready.done():
@@ -114,6 +102,7 @@ class RuntimeEvents:
         persist: bool = True,
         message_id: str | None = None,
     ) -> None:
+        """Project and publish one human-readable runtime output record."""
         event = self._events.output(
             source=source,
             channel=channel,
@@ -124,6 +113,46 @@ class RuntimeEvents:
             message_id=message_id,
         )
         await self._publish("output", event.model_dump(mode="json"), log=persist)
+
+    async def publish_clarification(self, session_id: str, draft: object) -> None:
+        """Publish one authoritative clarification draft snapshot."""
+        payload = (
+            draft.model_dump(mode="json") if hasattr(draft, "model_dump") else draft
+        )
+        await self._publish(
+            "clarification",
+            {"session_id": session_id, "draft": payload},
+            log=False,
+        )
+
+    async def publish_human_request(
+        self,
+        session_id: str,
+        action: str,
+        request: object | None,
+        outcome: object | None = None,
+    ) -> None:
+        """Publish a created/settled human request event."""
+        request_payload = (
+            request.model_dump(mode="json")
+            if hasattr(request, "model_dump")
+            else request
+        )
+        outcome_payload = (
+            outcome.model_dump(mode="json")
+            if hasattr(outcome, "model_dump")
+            else outcome
+        )
+        await self._publish(
+            "human_request",
+            {
+                "session_id": session_id,
+                "action": action,
+                "request": request_payload,
+                "outcome": outcome_payload,
+            },
+            log=False,
+        )
 
     async def project_command_result(
         self,
@@ -186,66 +215,70 @@ class RuntimeEvents:
             return
         await self._publish("state", self._state_event().model_dump(mode="json"))
 
-    async def project_agent_event(
+    async def _project_agent_text(
+        self,
+        plan: str,
+        payload: dict[str, Any],
+        *,
+        ideator: bool,
+    ) -> None:
+        """Stream one Agent text delta and retain its complete message buffer."""
+        raw = str(payload.get("delta") or payload.get("accumulated") or "")
+        if not raw:
+            return
+        text = raw.rstrip("\n\r") if ideator else raw
+        key = plan or ""
+        previous = self._agent_buffers.get(key)
+        message_id = previous["message_id"] if previous else new_id("msg")
+
+        # Suppress leading whitespace-only display items without dropping spaces
+        # that arrive as standalone deltas after the message body has started.
+        has_content = bool(previous and str(previous["text"]).strip())
+        if text.strip() or has_content:
+            await self.publish_output(
+                source="agent",
+                channel="text",
+                text=text,
+                plan=plan,
+                persist=False,
+                message_id=message_id,
+            )
+        full_text = str(payload.get("accumulated") or "")
+        if not full_text:
+            full_text = (previous["text"] + raw) if previous else raw
+        self._agent_buffers[key] = {
+            "text": full_text,
+            "plan": plan,
+            "message_id": message_id,
+        }
+
+    async def _project_agent_tool(
         self,
         plan: str,
         kind: str,
-        _event_ref: str,
-        data: dict[str, Any] | None = None,
+        payload: dict[str, Any],
+        *,
+        ideator: bool,
     ) -> None:
-        """Project one Agent journal event into a display output record."""
-        assert self._supervisor is not None
-        payload = data or {}
-        ideator = self._is_ideator_plan(plan)
-        if kind in _AGENT_TEXT_BOUNDARY_KINDS:
-            self._flush_agent_text(plan)
-        if kind == "agent/text_delta":
-            raw = str(payload.get("delta") or payload.get("accumulated") or "")
-            if not raw:
-                return
-            text = raw
-            if ideator:
-                # Ideator 的流式 delta 常以换行结尾，逐 token 刷屏；去掉末尾换行。
-                text = text.rstrip("\n\r")
-            key = plan or ""
-            previous = self._agent_buffers.get(key)
-            # 一条 agent 消息在缓冲建立时拿到 message_id，之后每条 delta 与最终 flush
-            # 落盘记录都带着它；边界事件 pop 掉缓冲，下一条消息因此拿到新的 id。
-            message_id = previous["message_id"] if previous else new_id("msg")
-            # 只跳过空串，不跳过纯空白：词与词之间的空格常常自成一个 delta，
-            # 丢了它实时视图里两个词就粘在一起（落盘的整条文本仍是对的）。
-            if text:
-                await self.publish_output(
-                    source="agent",
-                    channel="text",
-                    text=text,
-                    plan=plan,
-                    persist=False,
-                    message_id=message_id,
-                )
-            full_text = str(payload.get("accumulated") or "")
-            if not full_text:
-                full_text = (previous["text"] + raw) if previous else raw
-            self._agent_buffers[key] = {
-                "text": full_text,
-                "plan": plan,
-                "message_id": message_id,
-            }
-        elif kind == "agent/function_call":
-            # Ideator 只展示 LLM 话语，工具调用不进入显示流，便于阅读。
-            if ideator:
-                return
+        """Project Agent tool calls, command results, and file effects."""
+        if ideator:
+            return
+        if kind == "agent/function_call":
             name = str(payload.get("name") or "tool")
             args = payload.get("arguments")
             if args:
-                # 超长 shell 命令居中截断，保留首尾。
                 if (
                     name == "shell_command"
                     and isinstance(args, dict)
                     and isinstance(args.get("command"), str)
                 ):
-                    command = truncate_middle(args["command"], _MAX_COMMAND_CHARS)
-                    args = {**args, "command": command}
+                    args = {
+                        **args,
+                        "command": truncate_middle(
+                            args["command"],
+                            _MAX_COMMAND_CHARS,
+                        ),
+                    }
                 try:
                     args_text = json.dumps(args, ensure_ascii=False)
                 except (TypeError, ValueError):
@@ -260,41 +293,60 @@ class RuntimeEvents:
                 plan=plan,
                 tool=name,
             )
-        elif kind == "command/completed":
-            if ideator:
-                return
+            return
+        if kind == "command/completed":
             await self.project_command_result(CommandResult(**payload), plan=plan)
-        elif kind == "tool/end":
-            tool = str(payload.get("tool") or "")
-            path = payload.get("path")
-            if tool not in {"read_file", "write_file"} or not isinstance(path, str):
-                return
-            plan_state = self._supervisor.state.plans.get(plan)
-            if plan_state is None or plan_state.kind != "SEARCH":
-                return
-            try:
-                worktree = self._supervisor.workspace_path(plan)
-            except KeyError:
-                return
-            text = f"{path}\nworktree: {worktree}"
-            if tool == "write_file":
-                root = worktree.resolve()
-                written = (root / path).resolve()
-                if written.is_relative_to(root) and written.is_file():
-                    content = await asyncio.to_thread(
-                        written.read_text, encoding="utf-8"
-                    )
-                    text = f"{text}\n\n{content}"
-            event = await self._events.tool_output(
-                stdout=text,
-                plan=plan,
-                tool=tool,
-            )
-            await self._publish("output", event.model_dump(mode="json"))
+            return
+        if kind != "tool/end":
+            return
+
+        tool = str(payload.get("tool") or "")
+        path = payload.get("path")
+        if tool not in {"read_file", "write_file"} or not isinstance(path, str):
+            return
+        assert self._supervisor is not None
+        plan_state = self._supervisor.state.plans.get(plan)
+        if plan_state is None or plan_state.kind != "SEARCH":
+            return
+        try:
+            worktree = self._supervisor.workspace_path(plan)
+        except KeyError:
+            return
+        text = f"{path}\nworktree: {worktree}"
+        if tool == "write_file":
+            root = worktree.resolve()
+            written = (root / path).resolve()
+            if written.is_relative_to(root) and written.is_file():
+                content = await asyncio.to_thread(
+                    written.read_text,
+                    encoding="utf-8",
+                )
+                text = f"{text}\n\n{content}"
+        event = await self._events.tool_output(stdout=text, plan=plan, tool=tool)
+        await self._publish("output", event.model_dump(mode="json"))
+
+    async def project_agent_event(
+        self,
+        plan: str,
+        kind: str,
+        _event_ref: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Project one Agent journal event into a display output record."""
+        assert self._supervisor is not None
+        payload = data or {}
+        ideator = self._is_ideator_plan(plan)
+        if kind in _AGENT_TEXT_BOUNDARY_KINDS:
+            self._flush_agent_text(plan)
+        if kind == "agent/text_delta":
+            await self._project_agent_text(plan, payload, ideator=ideator)
+            return
+        await self._project_agent_tool(plan, kind, payload, ideator=ideator)
 
     async def publish_from_supervisor(
         self, kind: Literal["output", "state"], payload: dict[str, object]
     ) -> None:
+        """Normalize and publish one Supervisor output or state projection."""
         if kind == "state":
             payload = self._state_event().model_dump(mode="json")
         elif kind == "output":
@@ -317,8 +369,10 @@ class RuntimeEvents:
         *,
         log: bool = True,
     ) -> None:
-        if kind not in {"output", "state"}:
-            raise ValueError("runtime events must be output or state")
+        if kind not in {"output", "state", "clarification", "human_request"}:
+            raise ValueError(
+                "runtime events must be output, state, clarification, or human_request"
+            )
         if kind == "output" and log:
             self._append_log(payload)
 

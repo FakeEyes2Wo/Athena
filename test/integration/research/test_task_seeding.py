@@ -22,11 +22,13 @@ def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRu
         model="fake",
         client=object(),
         auto_seed_task=auto_seed_task,
+        task_confirmation_gate=False,
+        auto_confirm=True,
     )
 
 
 async def _close(runtime: ResearchRuntime) -> None:
-    task = runtime._task
+    task = runtime.session.lifecycle.task
     if task is not None:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, RuntimeError):
@@ -40,7 +42,7 @@ async def test_fresh_runtime_starts_idle_in_prepare_phase(tmp_path: Path) -> Non
     try:
         assert runtime.state.phase == "PREPARE"
         assert runtime.state.status == "IDLE"
-        assert runtime._started is False
+        assert runtime.session.lifecycle.started is False
     finally:
         await _close(runtime)
 
@@ -51,8 +53,8 @@ async def test_start_task_explicit_seeds_prepare_and_starts(tmp_path: Path) -> N
     try:
         status = await runtime.start_task("predict titanic survival")
         assert status == "RUNNING"
-        assert runtime._task_text == "predict titanic survival"
-        assert runtime._started is True
+        assert runtime.task_text == "predict titanic survival"
+        assert runtime.session.lifecycle.started is True
         assert runtime.state.phase == "PREPARE"
     finally:
         await _close(runtime)
@@ -66,8 +68,8 @@ async def test_auto_seed_task_first_message_starts_prepare(
     try:
         status = await runtime.message("predict titanic survival")
         assert status == "RUNNING"
-        assert runtime._task_text == "predict titanic survival"
-        assert runtime._started is True
+        assert runtime.task_text == "predict titanic survival"
+        assert runtime.session.lifecycle.started is True
         assert runtime.state.phase == "PREPARE"
     finally:
         await _close(runtime)
@@ -85,7 +87,7 @@ async def test_auto_seed_runtime_reports_prepare_before_first_message(
         assert runtime.state.phase == "PREPARE"
         assert seen[0][0] == "state"
         assert seen[0][1]["phase"] == "PREPARE"
-        assert runtime._started is False
+        assert runtime.session.lifecycle.started is False
     finally:
         await _close(runtime)
 
@@ -96,8 +98,8 @@ async def test_auto_seed_task_skips_control_commands(tmp_path: Path) -> None:
     try:
         status = await runtime.message("/pause")
         assert status == "WAITING"
-        assert runtime._task_text == ""
-        assert runtime._started is False
+        assert runtime.task_text == ""
+        assert runtime.session.lifecycle.started is False
     finally:
         await _close(runtime)
 
@@ -108,8 +110,8 @@ async def test_message_default_does_not_seed(tmp_path: Path) -> None:
     try:
         status = await runtime.message("/pause")
         assert status == "WAITING"
-        assert runtime._task_text == ""
-        assert runtime._started is False
+        assert runtime.task_text == ""
+        assert runtime.session.lifecycle.started is False
     finally:
         await _close(runtime)
 
@@ -128,28 +130,18 @@ async def test_start_task_reuses_persisted_task_understanding(
             runs.append(text)
             return "should not run"
 
-        runtime._agent_turns.run_supervisor_turn = fake_supervisor_turn  # type: ignore[method-assign]
+        agent_turns = runtime.services.workflow.agent_turns
+        agent_turns.run_supervisor_turn = fake_supervisor_turn  # type: ignore[method-assign]
         events: list[tuple[str, dict[str, object]]] = []
         runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
 
         status = await runtime.start_task("continue")
 
         assert status == "RUNNING"
-        assert runtime._task_text == "predict titanic survival"
+        assert runtime.task_text == "predict titanic survival"
         assert runs == []
-        for _ in range(50):
-            if any(
-                kind == "output"
-                and "断点续传：复用已持久化的任务理解" in str(payload.get("text"))
-                for kind, payload in events
-            ):
-                break
-            await asyncio.sleep(0.01)
-        assert any(
-            kind == "output"
-            and "断点续传：复用已持久化的任务理解" in str(payload.get("text"))
-            for kind, payload in events
-        )
+        # The inline task-understanding turn is gone; confirmed state is treated
+        # as immutable during resume.
         assert not any(
             kind == "output" and "任务理解中" in str(payload.get("text"))
             for kind, payload in events
@@ -174,14 +166,17 @@ async def test_pause_cancels_running_prepare_and_resume_restarts(
     runtime = ResearchRuntime(
         project_root=tmp_path,
         prepare_phase=prepare_phase,
+        task_confirmation_gate=False,
+        auto_confirm=True,
     )
     try:
         await runtime.start_task("pause during prepare")
         await asyncio.wait_for(started.wait(), timeout=1)
-        assert runtime._task is not None and not runtime._task.done()
+        assert runtime.session.lifecycle.task is not None
+        assert not runtime.session.lifecycle.task.done()
 
         assert await runtime.message("/pause") == "WAITING"
-        assert runtime._task.done()
+        assert runtime.session.lifecycle.task.done()
 
         started.clear()
         assert await runtime.message("/resume") == "RUNNING"
@@ -202,13 +197,16 @@ async def test_stop_cancels_running_prepare(tmp_path: Path) -> None:
     runtime = ResearchRuntime(
         project_root=tmp_path,
         prepare_phase=prepare_phase,
+        task_confirmation_gate=False,
+        auto_confirm=True,
     )
     try:
         await runtime.start_task("stop during prepare")
         await asyncio.wait_for(started.wait(), timeout=1)
-        assert runtime._task is not None and not runtime._task.done()
+        assert runtime.session.lifecycle.task is not None
+        assert not runtime.session.lifecycle.task.done()
 
         assert await runtime.message("/stop") == "STOPPED"
-        assert runtime._task.done()
+        assert runtime.session.lifecycle.task.done()
     finally:
         await _close(runtime)
