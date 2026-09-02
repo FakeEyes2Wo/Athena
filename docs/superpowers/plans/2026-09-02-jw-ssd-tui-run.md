@@ -32,7 +32,7 @@
 - Consumes: `ResearchRuntime(project_root=..., search_limit: int | None, auto_validate: bool, ...)`
 - Produces: `_parse(argv)` fields `search_limit: int` and `validate: bool`.
 
-- [ ] **Step 1: Add failing parser and wiring tests**
+- [x] **Step 1: Add failing parser and wiring tests**
 
 Extend the default parser test and add explicit option coverage:
 
@@ -62,12 +62,12 @@ assert seen.get("search_limit") == 3
 assert seen.get("auto_validate") is False
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run `.venv\Scripts\python.exe -m pytest -q test/unit/athena_tui/test_entrypoint.py`.
 Expected: missing parsed fields and auto-validation still enabled.
 
-- [ ] **Step 3: Implement direct argparse forwarding**
+- [x] **Step 3: Implement direct argparse forwarding**
 
 Add:
 
@@ -93,12 +93,12 @@ search_limit=args.search_limit,
 auto_validate=args.validate,
 ```
 
-- [ ] **Step 4: Run focused and integration tests**
+- [x] **Step 4: Run focused and integration tests**
 
 Run `.venv\Scripts\python.exe -m pytest -q test/unit/athena_tui/test_entrypoint.py test/integration/test_tui_protocol.py`.
 Expected: all pass.
 
-- [ ] **Step 5: Format and commit only Task 1 files**
+- [x] **Step 5: Format and commit only Task 1 files**
 
 Run Black on the two files, run `git diff --check` on them, then commit only those two paths with message `feat: expose TUI search and validation options`.
 
