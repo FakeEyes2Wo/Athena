@@ -100,7 +100,9 @@ def verification_for(root: Path, **changes: object) -> BaselineVerification:
         "selected_candidate_id": artifacts.selected.candidate_id,
         "route": "git",
         "verified_at": datetime.now(timezone.utc),
-        "attempts": [],
+        "repository_url": str(artifacts.selected.repository_url),
+        "commit": "a" * 40,
+        "attempts": [{"route": "git", "success": True, "diagnostic": "clone verified"}],
     }
     values.update(changes)
     return BaselineVerification.model_validate(values)
@@ -144,6 +146,28 @@ def test_accepts_scratch_only_with_local_and_comparable_source_evidence() -> Non
         BaselineResearch.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        ["eda:", "source:resnet-transfer: comparable scale"],
+        ["calculation:   ", "source:resnet-transfer: comparable scale"],
+        ["eda: substantive local data", "source:resnet-transfer:"],
+        ["eda: substantive local data", "source:resnet-transfer:   "],
+    ],
+)
+def test_rejects_non_substantive_scratch_evidence(evidence: list[str]) -> None:
+    payload = valid_payload()
+    payload["dataset"].update(
+        {
+            "regime": "adequate",
+            "recommended_strategy": "train_from_scratch",
+            "evidence": evidence,
+        }
+    )
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
 def test_accepts_classical_strategy_for_small_tabular_data() -> None:
     payload = valid_payload()
     payload["dataset"].update(
@@ -158,6 +182,33 @@ def test_accepts_classical_strategy_for_small_tabular_data() -> None:
         BaselineResearch.model_validate(payload).dataset.recommended_strategy
         == "classical"
     )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p["dataset"].update(evidence=["eda: labels", "   "]),
+        lambda p: p.update(search_queries=["", "another query"]),
+        lambda p: p.update(
+            candidates=p["candidates"][:1],
+            decisions=p["decisions"][:1],
+            search_queries=["Query", " query "],
+            limitations=["only one applicable source found"],
+        ),
+        lambda p: p["dataset"].update(evidence=["web: unsupported numeric claim"]),
+    ],
+)
+def test_rejects_blank_or_untraceable_research_provenance(mutate) -> None:
+    payload = valid_payload()
+    mutate(payload)
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+def test_numeric_facts_accept_data_contract_provenance() -> None:
+    payload = valid_payload()
+    payload["dataset"]["evidence"] = ["data_contract: labeled_samples=480, groups=120"]
+    assert BaselineResearch.model_validate(payload).dataset.labeled_samples == 480
 
 
 @pytest.mark.parametrize(
@@ -231,6 +282,23 @@ def test_verification_cache_is_digest_and_candidate_bound(tmp_path: Path) -> Non
     assert load_cached_verified_baseline(tmp_path) is None
     with pytest.raises(BaselineResearchError):
         assert_verified_files(tmp_path, cached)
+
+
+@pytest.mark.parametrize("route", ["git", "openalex"])
+def test_rejects_incomplete_matching_digest_cache(tmp_path: Path, route: str) -> None:
+    write_artifacts(tmp_path)
+    artifacts = load_baseline_artifacts(tmp_path)
+    forged = {
+        "research_sha256": research_sha256(artifacts.raw_research),
+        "selected_candidate_id": artifacts.selected.candidate_id,
+        "route": route,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "attempts": [],
+    }
+    (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").write_text(
+        json.dumps(forged), encoding="utf-8"
+    )
+    assert load_cached_verified_baseline(tmp_path) is None
 
 
 @pytest.mark.parametrize(

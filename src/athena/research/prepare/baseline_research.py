@@ -38,6 +38,11 @@ _STRATEGY_RE = re.compile(
 )
 
 
+def _has_substantive_suffix(value: str, prefix: str) -> bool:
+    """Return whether a prefixed provenance entry contains useful content."""
+    return value.startswith(prefix) and bool(value[len(prefix) :].strip())
+
+
 class BaselineResearchError(RuntimeError):
     """A deterministic artifact or verification contract failure."""
 
@@ -76,13 +81,36 @@ class DatasetAssessment(BaseModel):
     @model_validator(mode="after")
     def reject_unsafe_scratch(self) -> "DatasetAssessment":
         """Require an adequate regime before allowing scratch training."""
-
         if (
             self.recommended_strategy == "train_from_scratch"
             and self.regime != "adequate"
         ):
             raise ValueError("train_from_scratch requires an adequate data regime")
+        numeric_facts = (
+            self.labeled_samples,
+            self.effective_training_units,
+            self.group_count,
+            self.class_count,
+            self.minority_class_samples,
+        )
+        provenance_prefixes = ("eda:", "data_contract:", "calculation:")
+        if any(value is not None for value in numeric_facts) and not any(
+            _has_substantive_suffix(item, prefix)
+            for item in self.evidence
+            for prefix in provenance_prefixes
+        ):
+            raise ValueError(
+                "numeric dataset facts require EDA, data-contract, or calculation evidence"
+            )
         return self
+
+    @field_validator("evidence")
+    @classmethod
+    def reject_blank_evidence(cls, value: list[str]) -> list[str]:
+        """Require every dataset evidence entry to contain substantive text."""
+        if any(not item.strip() for item in value):
+            raise ValueError("evidence entries must not be blank")
+        return value
 
 
 class BaselineSource(BaseModel):
@@ -136,6 +164,14 @@ class BaselineResearch(BaseModel):
     search_queries: list[str] = Field(min_length=1)
     limitations: list[str]
 
+    @field_validator("search_queries")
+    @classmethod
+    def reject_blank_queries(cls, value: list[str]) -> list[str]:
+        """Require every recorded search query to contain substantive text."""
+        if any(not query.strip() for query in value):
+            raise ValueError("search queries must not be blank")
+        return value
+
     @model_validator(mode="after")
     def validate_candidate_contract(self) -> "BaselineResearch":
         """Enforce complete, unique, and internally consistent decisions."""
@@ -160,8 +196,9 @@ class BaselineResearch(BaseModel):
         if selected[0] != self.selected_candidate_id:
             raise ValueError("selected_candidate_id must match the selected decision")
 
+        normalized_queries = {query.strip().casefold() for query in self.search_queries}
         if len(self.candidates) == 1 and (
-            len(set(self.search_queries)) < 2 or not self.limitations
+            len(normalized_queries) < 2 or not self.limitations
         ):
             raise ValueError(
                 "one-candidate research requires two distinct queries and a limitation"
@@ -170,14 +207,17 @@ class BaselineResearch(BaseModel):
         if self.dataset.recommended_strategy == "train_from_scratch":
             local_prefixes = ("eda:", "calculation:")
             if not any(
-                item.startswith(local_prefixes) for item in self.dataset.evidence
+                item.startswith(prefix) and item[len(prefix) :].strip()
+                for item in self.dataset.evidence
+                for prefix in local_prefixes
             ):
                 raise ValueError(
                     "train_from_scratch requires EDA or calculation evidence"
                 )
             source_prefix = f"source:{self.selected_candidate_id}:"
             if not any(
-                item.startswith(source_prefix) for item in self.dataset.evidence
+                item.startswith(source_prefix) and item[len(source_prefix) :].strip()
+                for item in self.dataset.evidence
             ):
                 raise ValueError(
                     "train_from_scratch requires comparable selected-source evidence"
@@ -232,7 +272,36 @@ class BaselineVerification(BaseModel):
     title: str | None = None
     publication_year: int | None = None
     cited_by_count: int | None = Field(default=None, ge=0)
-    attempts: list[VerificationAttempt]
+    attempts: list[VerificationAttempt] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_route_proof(self) -> "BaselineVerification":
+        """Require route-specific proof and a successful matching attempt."""
+        if not any(
+            attempt.route == self.route and attempt.success for attempt in self.attempts
+        ):
+            raise ValueError("verification needs a successful attempt for its route")
+
+        if self.route == "git":
+            if not _is_public_https_repository(self.repository_url):
+                raise ValueError(
+                    "git verification requires a normalized public HTTPS repository URL"
+                )
+            if self.commit is None:
+                raise ValueError("git verification requires a resolved commit")
+        else:
+            if not self.openalex_id or not self.openalex_id.strip():
+                raise ValueError("OpenAlex verification requires a work ID")
+            if not self.title or not self.title.strip():
+                raise ValueError("OpenAlex verification requires a title")
+            if (
+                self.cited_by_count is None
+                or self.cited_by_count < AUTHORITY_CITATION_THRESHOLD
+            ):
+                raise ValueError(
+                    "OpenAlex verification requires the authority citation threshold"
+                )
+        return self
 
 
 @dataclass(frozen=True)
@@ -241,6 +310,26 @@ class VerifiedBaseline:
 
     artifacts: BaselineArtifacts
     verification: BaselineVerification
+
+
+def _is_public_https_repository(value: str | None) -> bool:
+    """Return whether a cache repository proof has a normalized HTTPS URL."""
+    if not value or value != value.strip() or value.endswith("/"):
+        return False
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "https"
+        and hostname
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.path not in ("", "/")
+    )
 
 
 def _parse_marker(text: str, pattern: re.Pattern[str], label: str) -> str:
