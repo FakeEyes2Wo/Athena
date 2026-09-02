@@ -1,7 +1,7 @@
 # Authoritative Baseline Research Gate Design
 
 Date: 2026-09-02
-Status: draft for written-spec review; product direction approved
+Status: approved for implementation
 
 ## 1. Problem summary
 

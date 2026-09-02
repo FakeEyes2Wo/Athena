@@ -1,8 +1,7 @@
 # Current Athena Work
 
 Active implementation plan:
-- None. The authoritative-baseline design is awaiting written-spec review before an
-  implementation plan is created.
+- `docs/superpowers/plans/2026-09-02-authoritative-baseline-research-gate.md`
 
 Design spec:
 - `docs/superpowers/specs/2026-09-02-authoritative-baseline-research-design.md`
