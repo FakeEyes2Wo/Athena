@@ -97,6 +97,8 @@ async def test_git_verifier_disables_non_https_protocols_and_hooks() -> None:
         "https://git.local/repo.git",
         "https://metadata.google.internal/repo.git",
         "https://intranet/repo.git",
+        "https://example.com:0/repo.git",
+        "https://example.com:0000/repo.git",
         "https://0177.0.0.1/repo.git",
         "https://0x7f.0.0.1/repo.git",
         "https://127.1/repo.git",

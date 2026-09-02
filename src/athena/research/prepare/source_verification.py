@@ -189,6 +189,8 @@ def _normalize_repository_url(repository_url: str) -> str:
 
     if parsed.scheme.casefold() != "https":
         raise ValueError("repository URL must use HTTPS")
+    if port == 0:
+        raise ValueError("repository URL port must be between 1 and 65535")
     if not hostname or parsed.username is not None or parsed.password is not None:
         raise ValueError("repository URL must not contain credentials")
     if "%" in parsed.netloc:
