@@ -239,6 +239,61 @@ async def test_openalex_outage_is_a_bounded_failed_attempt(
 
 
 @pytest.mark.asyncio
+async def test_openalex_outage_redacts_and_bounds_the_complete_diagnostic(
+    valid_artifacts: BaselineArtifacts,
+) -> None:
+    valid_artifacts.research.candidates[0].repository_url = None
+    secret = "not-for-diagnostic-output"
+    error = OSError(
+        f"Bearer {secret} https://user:{secret}@example.com/private " + "x" * 20000
+    )
+
+    with pytest.raises(BaselineResearchError, match="no qualifying source") as caught:
+        await BaselineSourceVerifier(
+            git=FakeGit(), openalex=FakeOpenAlex(error=error)
+        ).verify(valid_artifacts)
+
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.startswith("OpenAlex lookup failed: ")
+    assert len(diagnostic) <= 4000
+    assert secret not in diagnostic
+    assert "[REDACTED]" in diagnostic
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "work",
+    [
+        OpenAlexWork(
+            openalex_id="",
+            title="Deep Residual Learning for Image Recognition",
+            publication_year=2016,
+            cited_by_count=100,
+        ),
+        OpenAlexWork(
+            openalex_id="W123",
+            title=" -- !!! ",
+            publication_year=2016,
+            cited_by_count=100,
+        ),
+    ],
+)
+async def test_openalex_rejects_an_incomplete_work_identity_as_one_attempt(
+    valid_artifacts: BaselineArtifacts, work: OpenAlexWork
+) -> None:
+    valid_artifacts.research.candidates[0].repository_url = None
+    openalex = FakeOpenAlex(work=work)
+
+    with pytest.raises(BaselineResearchError, match="no qualifying source") as caught:
+        await BaselineSourceVerifier(git=FakeGit(), openalex=openalex).verify(
+            valid_artifacts
+        )
+
+    assert caught.value.diagnostics == ("OpenAlex returned incomplete work identity",)
+    assert openalex.locators == ["doi:10.1109/CVPR.2016.90"]
+
+
+@pytest.mark.asyncio
 async def test_git_failure_falls_back_to_qualifying_openalex(
     valid_artifacts: BaselineArtifacts,
 ) -> None:

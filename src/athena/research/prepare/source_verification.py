@@ -433,6 +433,14 @@ def _normalize_title(value: str) -> str:
     )
 
 
+def _has_substantive_openalex_proof(work: OpenAlexWork) -> bool:
+    """Require meaningful work and title identities before recording authority proof."""
+
+    return bool(_normalize_title(work.openalex_id)) and bool(
+        _normalize_title(work.title)
+    )
+
+
 def joined_diagnostic(error: BaselineResearchError) -> str:
     """Join the verifier's already bounded diagnostics into one attempt note."""
 
@@ -494,9 +502,8 @@ class BaselineSourceVerifier:
                     VerificationAttempt(
                         route="openalex",
                         success=False,
-                        diagnostic=(
-                            "OpenAlex lookup failed: "
-                            f"{' '.join(str(error).split())[:4000]}"
+                        diagnostic=_bounded_diagnostic(
+                            f"OpenAlex lookup failed: {error}"
                         ),
                     )
                 )
@@ -507,6 +514,14 @@ class BaselineSourceVerifier:
                             route="openalex",
                             success=False,
                             diagnostic="OpenAlex did not resolve the paper locator",
+                        )
+                    )
+                elif not _has_substantive_openalex_proof(work):
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic="OpenAlex returned incomplete work identity",
                         )
                     )
                 elif not titles_match(selected.title, work.title):
