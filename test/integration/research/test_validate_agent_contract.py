@@ -531,13 +531,13 @@ async def test_run_failure_is_returned_to_the_validate_agent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_repair_budget_exhaustion_names_the_last_run_failure(
+async def test_repeated_run_failure_names_the_failure_without_exhausting_budget(
     tmp_path, monkeypatch
 ) -> None:
-    """Exhaustion must carry the cause, not just the count.
+    """An unchanged failed repair must carry the cause and stop early.
 
-    A bare "budget exhausted after N attempts" sends the operator back to the
-    logs to find the traceback that repeated N times.
+    Waiting for generic budget exhaustion spends more Agent turns without adding
+    evidence; the no-progress guard names both the stage and repeated traceback.
     """
     monkeypatch.setattr(validation_module, "_MAX_VALIDATION_REPAIR_ATTEMPTS", 2)
     harness = _Harness(tmp_path)
@@ -548,7 +548,8 @@ async def test_repair_budget_exhaustion_names_the_last_run_failure(
     with pytest.raises(RuntimeError) as excinfo:
         await harness.run()
 
-    assert "budget exhausted after 2 attempts" in str(excinfo.value)
+    assert "validation repair made no progress" in str(excinfo.value)
+    assert "stage=execution" in str(excinfo.value)
     assert "inconsistent numbers of samples" in str(excinfo.value)
     assert isinstance(excinfo.value.__cause__, ValidationRunFailed)
     assert harness.execution.calls == 2

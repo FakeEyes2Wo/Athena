@@ -297,6 +297,20 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     assert rt._supervisor.checked_refs == []
 
 
+def test_validation_data_csv_falls_back_to_persisted_task_understanding(
+    tmp_path: Path,
+) -> None:
+    from athena.research.phase_runner import _validation_data_csv
+
+    dataset = tmp_path / "model_input.csv"
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(dataset_path=None),
+        state=SimpleNamespace(task_understanding={"dataset": str(dataset)}),
+    )
+
+    assert _validation_data_csv(runtime) == dataset
+
+
 @pytest.mark.asyncio
 async def test_run_general_turn_persists_agent_id_before_wait(
     tmp_path: Path, monkeypatch

@@ -52,6 +52,36 @@ _MAX_STRUCTURED_RETRIES = 3
 _unfenced = unfence_json
 
 
+def _parse_structured_output(output_type: type[BaseModel], text: str) -> BaseModel:
+    """Validate an exact response, then recover one unambiguous JSON object."""
+    try:
+        return output_type.model_validate_json(_unfenced(text))
+    except ValidationError as strict_error:
+        decoder = json.JSONDecoder()
+        valid: list[BaseModel] = []
+        position = 0
+        while position < len(text):
+            start = text.find("{", position)
+            if start < 0:
+                break
+            try:
+                _value, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError:
+                position = start + 1
+                continue
+            try:
+                valid.append(output_type.model_validate_json(text[start:end]))
+            except ValidationError:
+                pass
+            position = end
+
+        if len(valid) == 1:
+            return valid[0]
+        if len(valid) > 1:
+            raise ValueError("multiple schema-valid JSON objects in response")
+        raise strict_error
+
+
 # LLM 响应流断线最多重连次数（supervisor_design §6.1）+ 退避基准秒数。
 _MAX_STREAM_RETRIES = 5
 _RETRY_BASE_DELAY = 1.0
@@ -137,22 +167,36 @@ class Agent(BaseAgent):
             if outcome.kind == "done":
                 if self._output_type is not None:
                     try:
-                        instance = self._output_type.model_validate_json(
-                            _unfenced(outcome.text)
+                        instance = _parse_structured_output(
+                            self._output_type, outcome.text
                         )
-                    except ValidationError as exc:
+                    except (ValidationError, ValueError) as exc:
                         if retries >= _MAX_STRUCTURED_RETRIES:
+                            diagnostic = ""
+                            if self._artifacts is not None:
+                                raw_ref = await self._artifacts.put_text(outcome.text)
+                                diagnostic = f"; raw_response_ref={raw_ref}"
                             raise RuntimeError(
-                                f"structured output invalid after retries: {exc}"
+                                "structured output invalid after retries: "
+                                f"{exc}{diagnostic}"
                             ) from exc
                         retries += 1
+                        schema = json.dumps(
+                            self._output_type.model_json_schema(),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
                         mem.append(
                             ModelRequest(
                                 parts=[
                                     UserPromptPart(
                                         content=(
                                             "Previous JSON output was invalid: "
-                                            f"{exc}\nReturn JSON matching the schema."
+                                            f"{exc}\nReturn ONLY one raw JSON object "
+                                            f"matching this schema: {schema}\n"
+                                            "Do not include reasoning, prose, or Markdown "
+                                            "fences. The first non-whitespace character "
+                                            "must be { and the last must be }."
                                         )
                                     )
                                 ]

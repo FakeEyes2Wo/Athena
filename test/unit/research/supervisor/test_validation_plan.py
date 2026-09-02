@@ -7,6 +7,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.research.contracts import ValidationResult
 from athena.research.script_runner import load_directory
+from athena.research.supervisor import validation as validation_module
 from athena.research.supervisor.validation import (
     PredictionsRejected,
     ValidationDiffReview,
@@ -20,6 +21,27 @@ from athena.research.supervisor.validation import (
     review_validation_diff,
     validation_key,
 )
+
+
+def test_validation_stops_when_the_same_rejection_makes_no_progress() -> None:
+    signature = ("preflight", "sha256:diff-a", "policy rejection")
+
+    previous = validation_module._record_validation_rejection(None, signature)
+
+    with pytest.raises(RuntimeError, match="validation repair made no progress"):
+        validation_module._record_validation_rejection(previous, signature)
+
+
+def test_validation_allows_a_changed_diff_after_rejection() -> None:
+    previous = validation_module._record_validation_rejection(
+        None, ("execution", "sha256:diff-a", "candidate failed")
+    )
+
+    current = validation_module._record_validation_rejection(
+        previous, ("execution", "sha256:diff-b", "candidate failed")
+    )
+
+    assert current == ("execution", "sha256:diff-b", "candidate failed")
 
 
 def test_run_failure_feedback_keeps_the_end_of_a_long_traceback() -> None:

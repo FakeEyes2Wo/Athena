@@ -97,7 +97,9 @@ class LocalBackend:
             shell, shell_args = self._environment.shell_parts()
         executor = CommandExecutor(
             env=self._environment.build_env(
-                workspace_root, predict_features=request.predict_features
+                workspace_root,
+                predict_features=request.predict_features,
+                data_csv=request.data_csv,
             ),
             persist=self._store.put_text if self._store is not None else None,
         )

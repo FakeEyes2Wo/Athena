@@ -118,6 +118,7 @@ class ValidationOptions:
 
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
     predict_features: Path | None = None
+    data_csv: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,22 @@ _SEMANTIC_MARKERS = (
     "features.append",
     "normalize(",
 )
+
+_ValidationRejectionSignature = tuple[str, ArtifactRef, str]
+
+
+def _record_validation_rejection(
+    previous: _ValidationRejectionSignature | None,
+    current: _ValidationRejectionSignature,
+) -> _ValidationRejectionSignature:
+    """Stop when an unchanged repair reaches the same rejection stage twice."""
+    if previous is not None and previous[:2] == current[:2]:
+        stage, diff_ref, reason = current
+        raise RuntimeError(
+            "validation repair made no progress: same diff and rejection repeated; "
+            f"stage={stage}; diff_ref={diff_ref}; reason={reason}"
+        )
+    return current
 
 
 _DIFF_HEADER = re.compile(rb"^diff --git a/(?P<a>.*?) b/(?P<b>.*?)$", re.MULTILINE)
@@ -511,6 +528,7 @@ async def _execute_predictions(
     publish: EmitEvent | None,
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     predict_features: Path | None = None,
+    data_csv: Path | None = None,
     version: str | None = None,
 ) -> PredictionRun:
     """Re-run the frozen SOTA experiment and pack its predictions.
@@ -533,6 +551,7 @@ async def _execute_predictions(
         workspace_root=workdir,
         environment_root=getattr(execution, "environment_root", workdir),
         predict_features=predict_features,
+        data_csv=data_csv,
     )
     version = version or "validate"
     try:
@@ -546,6 +565,7 @@ async def _execute_predictions(
                     workdir=workdir,
                     emit=publish,
                     predict_features=predict_features,
+                    data_csv=data_csv,
                 ),
             )
             if not result.ok:
@@ -762,6 +782,7 @@ class ValidationSession:
         options = self.options
         repair = await _decode_repair(deps.agents, deps.store, input=input)
         last_failure: Exception | None = None
+        previous_rejection: _ValidationRejectionSignature | None = None
         for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
             diff = await deps.git.diff(deps.workspace)
             preflight = await _deterministic_preflight(
@@ -771,6 +792,10 @@ class ValidationSession:
                 store=deps.store,
             )
             if not preflight.accepted:
+                previous_rejection = _record_validation_rejection(
+                    previous_rejection,
+                    ("preflight", diff.ref, preflight.reason),
+                )
                 repair = await _decode_repair(
                     deps.agents,
                     deps.store,
@@ -786,6 +811,10 @@ class ValidationSession:
                 store=deps.store,
             )
             if not review.accepted:
+                previous_rejection = _record_validation_rejection(
+                    previous_rejection,
+                    ("independent_review", diff.ref, review.reason),
+                )
                 repair = await _decode_repair(
                     deps.agents,
                     deps.store,
@@ -803,10 +832,18 @@ class ValidationSession:
                     publish=deps.publish,
                     timeout_s=options.timeout_s,
                     predict_features=options.predict_features,
+                    data_csv=options.data_csv,
                     version=f"validate-{input.validation_key}",
                 )
             except (ValidationRunFailed, PredictionsRejected) as exc:
                 last_failure = exc
+                try:
+                    previous_rejection = _record_validation_rejection(
+                        previous_rejection,
+                        ("execution", diff.ref, str(exc)),
+                    )
+                except RuntimeError as no_progress:
+                    raise no_progress from exc
                 repair = await _decode_repair(
                     deps.agents,
                     deps.store,
@@ -814,7 +851,16 @@ class ValidationSession:
                     feedback=_run_failure_feedback(exc, options.predict_features),
                 )
                 continue
-            if await deps.git.diff(deps.workspace) != reviewed_diff:
+            post_review_diff = await deps.git.diff(deps.workspace)
+            if post_review_diff != reviewed_diff:
+                previous_rejection = _record_validation_rejection(
+                    previous_rejection,
+                    (
+                        "post_review",
+                        post_review_diff.ref,
+                        "validation workspace changed after independent review",
+                    ),
+                )
                 repair = await _decode_repair(
                     deps.agents,
                     deps.store,
