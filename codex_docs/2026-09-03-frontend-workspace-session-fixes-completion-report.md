@@ -131,6 +131,13 @@ Critical or Important findings.
 
 ## Integration
 
-The user selected a local merge into `main`. The merge and post-merge verification
-are the next workflow step; the feature worktree is retained until the merged
-result is verified.
+The feature branch was merged locally into `main` by merge commit `b802820`.
+Immediately before the merge, the 33 feature paths had no overlap with the
+primary worktree's uncommitted files and `git merge-tree` reported no conflict
+markers. No stash, reset, or overwrite was used.
+
+Post-merge verification on `main` passed:
+
+- `npm test -- --run` — exit 0; 17 test files and 115 tests passed.
+- `npm run build` — exit 0; 2761 modules transformed.
+- `cargo check` — exit 0; only the same six pre-existing dead-code warnings.
