@@ -189,6 +189,94 @@ describe("usePipeline message identity", () => {
     expect(result.current.logs).toEqual([]);
   });
 
+  it("clears live output flushed by another event before hydration completes", async () => {
+    const release = deferHistory([
+      {
+        type: "output",
+        seq: 2,
+        source: "agent",
+        channel: "text",
+        text: "replayed output",
+        message_id: "replayed-message",
+      },
+    ]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "pre-hydration live output",
+          message_id: "live-message",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "SEARCH", status: "RUNNING" },
+      });
+    });
+    expect(result.current.logs.map((entry) => entry.text)).toContain(
+      "pre-hydration live output",
+    );
+
+    release();
+    await flush();
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual([
+      "replayed output",
+    ]);
+    expect(result.current.logs).toEqual([]);
+  });
+
+  it("rolls back the full initial view when hydration projection fails", async () => {
+    let release = () => {};
+    vi.mocked(sessionsList).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ sessions: ["hydrated"], active: "hydrated" });
+        }),
+    );
+    vi.mocked(sessionSwitch).mockResolvedValue({
+      records: null as never,
+      sessions: ["hydrated"],
+    });
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "preserved live output",
+          message_id: "preserved-message",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "SEARCH", status: "RUNNING" },
+      });
+    });
+    const messagesBeforeHydration = result.current.viewModel.messages;
+    const logsBeforeHydration = result.current.logs;
+
+    release();
+    await flush();
+
+    expect(result.current.currentSessionId).toBe("default");
+    expect(result.current.sessions).toEqual([]);
+    expect(result.current.viewModel.messages).toEqual(messagesBeforeHydration);
+    expect(result.current.logs).toEqual(logsBeforeHydration);
+  });
+
   it("discards queued output and logs when starting a new session", async () => {
     const release = deferHistory([]);
     const { result } = renderHook(() => usePipeline());

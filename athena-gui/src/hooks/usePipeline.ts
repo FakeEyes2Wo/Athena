@@ -194,6 +194,11 @@ interface PendingOutputEvent {
 interface SessionViewSnapshot {
   activeSessionId: string;
   currentSessionId: string;
+  sessions: SessionSummary[];
+  authoritativeSessions: {
+    root: string;
+    sessions: SessionSummary[];
+  };
   viewModel: PipelineViewModel;
   clarificationStatus: ClarificationStatus;
   humanRequests: HumanRequest[];
@@ -205,6 +210,8 @@ interface SessionViewSnapshot {
   scopeId: string | null;
   revision: number;
   pendingOutputEvents: PendingOutputEvent[];
+  messageCounter: number;
+  logCounter: number;
 }
 
 type OutputScope =
@@ -582,6 +589,11 @@ export function usePipeline(
     (): SessionViewSnapshot => ({
       activeSessionId: activeSessionIdRef.current,
       currentSessionId,
+      sessions: [...sessions],
+      authoritativeSessions: {
+        root: authoritativeSessionsRef.current.root,
+        sessions: [...authoritativeSessionsRef.current.sessions],
+      },
       viewModel,
       clarificationStatus,
       humanRequests,
@@ -593,6 +605,8 @@ export function usePipeline(
       scopeId: optimisticScopeIdRef.current,
       revision: currentRevisionRef.current,
       pendingOutputEvents: [...pendingOutputEventsRef.current],
+      messageCounter: counter.current,
+      logCounter: logCounter.current,
     }),
     [
       clarificationStatus,
@@ -600,17 +614,31 @@ export function usePipeline(
       humanPendingError,
       humanRequests,
       logs,
+      sessions,
       settlingRequestId,
       viewModel,
     ],
   );
 
   const restoreSessionView = useCallback(
-    (snapshot: SessionViewSnapshot) => {
+    (snapshot: SessionViewSnapshot, options: { sessions?: boolean } = {}) => {
       discardPendingOutput();
       activeSessionIdRef.current = snapshot.activeSessionId;
       setClarificationIdentity(snapshot.draftId, snapshot.revision, snapshot.scopeId);
       runStarted.current = snapshot.runStarted;
+      counter.current = snapshot.messageCounter;
+      logCounter.current = snapshot.logCounter;
+      if (options.sessions !== false) {
+        authoritativeSessionsRef.current = {
+          root: snapshot.authoritativeSessions.root,
+          sessions: [...snapshot.authoritativeSessions.sessions],
+        };
+        persistWorkspaceSessions(
+          snapshot.authoritativeSessions.root,
+          snapshot.authoritativeSessions.sessions,
+        );
+        setSessions(snapshot.sessions);
+      }
       setCurrentSessionId(snapshot.currentSessionId);
       setViewModel(snapshot.viewModel);
       setClarificationStatus(snapshot.clarificationStatus);
@@ -624,6 +652,11 @@ export function usePipeline(
     },
     [discardPendingOutput, scheduleOutputDrain, setClarificationIdentity],
   );
+
+  const captureSessionViewRef = useRef(captureSessionView);
+  const restoreSessionViewRef = useRef(restoreSessionView);
+  captureSessionViewRef.current = captureSessionView;
+  restoreSessionViewRef.current = restoreSessionView;
 
   const queueOutputEvent = useCallback((event: bridge.PipelineEvent) => {
     const outputScope = outputScopeOf(event.data);
@@ -834,7 +867,6 @@ export function usePipeline(
     let mounted = true;
     let unlisteners: Array<() => void> = [];
     const hydrationEpoch = ++sessionRequestEpochRef.current;
-    const previousSessionId = activeSessionIdRef.current;
 
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
@@ -941,15 +973,17 @@ export function usePipeline(
       .then((hydration) => {
         if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
         const { target, list, result } = hydration;
+        const previous = captureSessionViewRef.current();
         try {
           discardPendingOutput();
           activeSessionIdRef.current = target;
           setClarificationIdentity(null);
           applySessions(result.sessions ?? list);
           setCurrentSessionId(target);
+          setLogs([]);
           restoreRecords(result.records, true, target);
         } catch (error) {
-          activeSessionIdRef.current = previousSessionId;
+          restoreSessionViewRef.current(previous);
           throw error;
         }
       })
@@ -1391,7 +1425,7 @@ export function usePipeline(
           pendingCreationsRef.current.delete(id);
         }
         if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
-        restoreSessionView(previous);
+        restoreSessionView(previous, { sessions: false });
         appendError(errorMessage(error));
       },
     );
