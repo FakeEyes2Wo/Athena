@@ -67,12 +67,13 @@ class ClarificationModelOutput(BaseModel):
 Question and final DTOs are not duplicated.
 
 The same `PublicProgress` validation is used for both the progress tool and the
-final envelope. Before length validation, its summary is normalized with NFKC,
-characters in Unicode control/surrogate categories (`Cc`, `Cf`, `Cs`) are
-removed, whitespace is collapsed to single spaces, and surrounding whitespace
-is stripped. Empty or over-600-character content is invalid; it is not silently
-truncated. This is a public decision/conclusion summary, never a request for or
-representation of hidden reasoning.
+final envelope. Before length validation, its summary is normalized with NFKC;
+whitespace (including control whitespace) is converted and collapsed to single
+spaces; remaining Unicode control/surrogate characters (`Cc`, `Cf`, `Cs`) are
+removed; and surrounding whitespace is stripped. Empty or over-600-character
+content is invalid; it is not silently truncated. This is a public
+decision/conclusion summary, never a request for or representation of hidden
+reasoning.
 
 The existing generator protocol remains source-compatible. A small internal
 `ClarificationTurnResult(step, public_update=None)` value and invocation helper
@@ -135,9 +136,11 @@ one genuine model-authored public update for every successful `next_step` call.
 ### Progress sink and commit ordering
 
 `PublicProgressSink` is a tiny clarification-layer protocol, not a new event
-service, ledger, or channel. It accepts a validated progress value plus
-`session_id`, generic `scope_id`, source, persistence choice, and optional
-message identity. The composition root adapts it to the existing
+service, ledger, or channel. It accepts a normalized summary, a stage
+(`ProgressStage` or the controller-only `failure` stage), `session_id`, generic
+`scope_id`, source, and persistence choice. Model-authored calls always supply
+values taken from a validated `PublicProgress`; only the controller may supply
+the fixed failure notice. The composition root adapts it to the existing
 `RuntimeEvents.publish_output` path.
 
 Commit ordering is part of the domain contract:
@@ -187,7 +190,10 @@ The feature does not add an event type, WebSocket channel, database/table, or
 frontend DTO. Durable events remain ordered in the existing session transcript;
 live tool progress uses the same subscription path without being logged. The
 normal event projector continues to redact known secret forms before display or
-storage. Each publication uses the projector's existing unique `message_id`.
+storage. Here, "durable" means `persist=True` through the existing best-effort
+transcript writer: if the filesystem rejects that secondary record, the saved
+clarification draft remains canonical and the existing logger records the
+failure. Each publication uses the projector's existing unique `message_id`.
 
 ### Composition root
 
