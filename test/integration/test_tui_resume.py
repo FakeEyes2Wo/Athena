@@ -49,6 +49,69 @@ async def test_restart_replays_history_and_resumes_sequence(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_scoped_output_is_live_but_only_durable_output_replays(
+    tmp_path: Path,
+) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path, session_id="session-1")
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    metadata = {
+        "session_id": "session-1",
+        "scope": "task_understanding",
+        "scope_id": "draft-1",
+    }
+    await runtime.publish_output(
+        source="tool",
+        channel="text",
+        text="ephemeral progress",
+        persist=False,
+        **metadata,
+    )
+    await runtime.publish_output(
+        source="agent",
+        channel="text",
+        text="durable summary",
+        persist=True,
+        **metadata,
+    )
+
+    outputs = [payload for kind, payload in seen if kind == "output"]
+    assert [event["text"] for event in outputs] == [
+        "ephemeral progress",
+        "durable summary",
+    ]
+    assert all(
+        (event["session_id"], event["scope"], event["scope_id"])
+        == ("session-1", "task_understanding", "draft-1")
+        for event in outputs
+    )
+    await runtime.aclose()
+
+    restarted = ResearchRuntime(project_root=tmp_path, session_id="session-1")
+    replayed = restarted.replay_output_events()
+    assert [record["text"] for record in replayed] == ["durable summary"]
+    assert (
+        replayed[0]["session_id"],
+        replayed[0]["scope"],
+        replayed[0]["scope_id"],
+    ) == ("session-1", "task_understanding", "draft-1")
+    await restarted.publish_output(
+        source="agent",
+        channel="text",
+        text="after restart",
+        **metadata,
+    )
+    after_restart = [
+        record
+        for record in restarted.replay_output_events()
+        if record["type"] == "output"
+    ]
+    assert [record["seq"] for record in after_restart] == [2, 3]
+    await restarted.aclose()
+
+
+@pytest.mark.asyncio
 async def test_fresh_project_has_empty_replay(tmp_path: Path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
     assert runtime.replay_output_events() == []

@@ -5,7 +5,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.contracts import ArtifactRef, new_id
@@ -49,6 +49,9 @@ class OutputEvent(BaseModel):
     # id，订阅方据此 upsert，而不是靠"上一条是不是同 plan"猜测该不该合并。升级前
     # 写下的 transcript 没有这个字段，回放时为 None，消费方按 seq 兜底。
     message_id: str | None = None
+    session_id: str | None = None
+    scope: str | None = None
+    scope_id: str | None = None
     source: Literal["supervisor", "agent", "tool"]
     channel: Literal["text", "stdout", "stderr", "error"]
     text: str
@@ -56,6 +59,16 @@ class OutputEvent(BaseModel):
     tool: str | None = None
     artifact_ref: ArtifactRef | None = None
     truncated: bool = False
+
+    @model_validator(mode="after")
+    def validate_scope_metadata(self) -> "OutputEvent":
+        values = (self.session_id, self.scope, self.scope_id)
+        if not (
+            all(value is None for value in values)
+            or all(isinstance(value, str) and value.strip() for value in values)
+        ):
+            raise ValueError("output scope metadata must be all present or all absent")
+        return self
 
 
 class StateEvent(BaseModel):
@@ -151,6 +164,9 @@ class EventProjector:
         artifact_ref: ArtifactRef | None = None,
         truncated: bool = False,
         message_id: str | None = None,
+        session_id: str | None = None,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> OutputEvent:
         """Project one already classified display record.
 
@@ -160,6 +176,9 @@ class EventProjector:
         return OutputEvent(
             seq=self._next_sequence(),
             message_id=message_id or new_id("msg"),
+            session_id=session_id,
+            scope=scope,
+            scope_id=scope_id,
             source=source,
             channel=channel,
             text=redact(text),

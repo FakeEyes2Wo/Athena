@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
@@ -136,6 +137,40 @@ def test_output_sequence_is_process_local_and_monotonic(tmp_path) -> None:
     second = projector.output(source="supervisor", channel="text", text="two")
 
     assert (first.seq, second.seq) == (1, 2)
+    assert (first.session_id, first.scope, first.scope_id) == (None, None, None)
+
+
+def test_output_scope_metadata_is_atomic_and_redacted(tmp_path) -> None:
+    projector = EventProjector(LocalArtifactStore(tmp_path / "artifacts"))
+    event = projector.output(
+        source="agent",
+        channel="text",
+        text="api_key=secret-value",
+        session_id="session-1",
+        scope="task_understanding",
+        scope_id="draft-1",
+    )
+
+    assert (event.session_id, event.scope, event.scope_id) == (
+        "session-1",
+        "task_understanding",
+        "draft-1",
+    )
+    assert "secret-value" not in event.text
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"session_id": "session-1"},
+        {"scope": "task_understanding", "scope_id": "draft-1"},
+        {"session_id": "session-1", "scope": "", "scope_id": "draft-1"},
+    ],
+)
+def test_output_rejects_partial_scope_metadata(tmp_path, metadata) -> None:
+    projector = EventProjector(LocalArtifactStore(tmp_path / "artifacts"))
+    with pytest.raises(ValidationError):
+        projector.output(source="agent", channel="text", text="safe", **metadata)
 
 
 def test_state_event_is_a_complete_replaceable_snapshot() -> None:

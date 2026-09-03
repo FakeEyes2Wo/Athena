@@ -105,6 +105,9 @@ class RuntimeEvents:
         artifact_ref: ArtifactRef | None = None,
         persist: bool = True,
         message_id: str | None = None,
+        session_id: str | None = None,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> None:
         """Project and publish one human-readable runtime output record."""
         event = self._events.output(
@@ -115,6 +118,9 @@ class RuntimeEvents:
             tool=tool,
             artifact_ref=artifact_ref,
             message_id=message_id,
+            session_id=session_id,
+            scope=scope,
+            scope_id=scope_id,
         )
         await self._publish("output", event.model_dump(mode="json"), log=persist)
 
