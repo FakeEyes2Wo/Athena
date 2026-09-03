@@ -204,47 +204,20 @@ def test_rejects_duplicate_numeric_fact_names(field: str) -> None:
         BaselineResearch.model_validate(payload)
 
 
-def test_rejects_numeric_fact_evidence_for_a_different_value() -> None:
-    payload = valid_payload()
-    payload["dataset"]["facts"][0]["value"] = 481
-
-    with pytest.raises(ValidationError):
-        BaselineResearch.model_validate(payload)
-
-
-@pytest.mark.parametrize(
-    "claim",
-    [
-        "The measured value is -480.",
-        "The measured value is 480.5.",
-        "The measured value is 480e3.",
-        "The measured value is 4.80e2.",
-        "The measured value is 480.e3.",
-        "The measured value is 480,000.",
-    ],
-)
-def test_numeric_fact_requires_an_exact_integer_token(claim: str) -> None:
-    payload = valid_payload()
-    payload["dataset"]["facts"][0]["evidence"]["claim"] = claim
-
-    with pytest.raises(ValidationError):
-        BaselineResearch.model_validate(payload)
-
-
-@pytest.mark.parametrize(
-    ("kind", "claim"),
-    [
-        ("eda", "The measured value is 480."),
-        ("calculation", "240 + 240 = 480."),
-    ],
-)
-def test_exact_integer_may_be_followed_by_sentence_punctuation(
-    kind: str, claim: str
+@pytest.mark.parametrize("kind", ["eda", "data_contract"])
+def test_non_calculation_fact_is_structurally_bound_without_repeating_value(
+    kind: str,
 ) -> None:
     payload = valid_payload()
-    payload["dataset"]["facts"][0]["evidence"].update(kind=kind, claim=claim)
+    payload["dataset"]["facts"][0]["evidence"].update(
+        kind=kind,
+        reference="EDA_HANDOFF.md#training-split",
+        claim="Counted after applying the documented leakage-safe split.",
+    )
 
-    assert BaselineResearch.model_validate(payload).dataset.facts[0].value == 480
+    assert (
+        BaselineResearch.model_validate(payload).dataset.facts[0].evidence.kind == kind
+    )
 
 
 @pytest.mark.parametrize(
@@ -255,7 +228,10 @@ def test_exact_integer_may_be_followed_by_sentence_punctuation(
         "400 / 0 = 480 labeled images.",
         "400 / 3 = 480 labeled images.",
         "-240 + 240 = 480 labeled images.",
+        "- 240 + 240 = 480",
         "240 + 240 = 480,000 labeled images.",
+        "٢٤٠ + ٢٤٠ = ٤٨٠",
+        "Derived as 240 + 240 = 480",
     ],
 )
 def test_calculation_evidence_requires_a_true_integer_expression(claim: str) -> None:
@@ -281,7 +257,7 @@ def test_calculation_expression_may_be_in_reference_or_claim(
         reference="EDA_HANDOFF.md#dataset-size",
         claim="Derived from two leakage-safe folds.",
     )
-    evidence[location] = f"{expression} labeled images"
+    evidence[location] = f"  {expression}  "
 
     assert BaselineResearch.model_validate(payload).dataset.facts[0].value == 480
 
@@ -420,6 +396,42 @@ def test_accepts_scratch_only_with_selected_source_scale_comparison() -> None:
     research = BaselineResearch.model_validate(payload)
 
     assert research.training.scratch_scale.local_value == 480
+
+
+@pytest.mark.parametrize(
+    ("selected_url", "comparison_locator"),
+    [
+        ("https://example.org", "https://example.org"),
+        ("https://example.org/model", "https://EXAMPLE.ORG/model"),
+    ],
+)
+def test_scratch_source_accepts_equivalent_http_locator(
+    selected_url: str, comparison_locator: str
+) -> None:
+    payload = valid_payload()
+    payload["dataset"]["regime"] = "adequate"
+    payload["training"]["strategy"] = "train_from_scratch"
+    payload["training"]["scratch_scale"] = scratch_scale()
+    payload["candidates"][0]["source_url"] = selected_url
+    payload["training"]["scratch_scale"]["source_locator"] = comparison_locator
+
+    research = BaselineResearch.model_validate(payload)
+
+    assert research.training.scratch_scale.source_locator == comparison_locator
+
+
+def test_scratch_source_rejects_a_different_http_locator() -> None:
+    payload = valid_payload()
+    payload["dataset"]["regime"] = "adequate"
+    payload["training"]["strategy"] = "train_from_scratch"
+    payload["training"]["scratch_scale"] = scratch_scale()
+    payload["candidates"][0]["source_url"] = "https://example.org/model"
+    payload["training"]["scratch_scale"][
+        "source_locator"
+    ] = "https://other.example.org/model"
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
 
 
 def test_rejects_adequate_scratch_without_scale_comparison() -> None:

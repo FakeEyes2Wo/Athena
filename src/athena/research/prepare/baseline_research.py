@@ -36,15 +36,9 @@ _STRATEGY_RE = re.compile(
     r"(?mi)^Training strategy:\s*`(classical|frozen_pretrained|partial_finetune|"
     r"full_finetune|train_from_scratch)`\s*$"
 )
-_NUMERIC_TOKEN_START = r"(?<![\w.,+-])"
-_NUMERIC_TOKEN_END = r"(?!\w|,\d|\.\w)"
-_INTEGER_TOKEN_RE = re.compile(
-    rf"{_NUMERIC_TOKEN_START}(?P<value>[+-]?\d+){_NUMERIC_TOKEN_END}"
-)
 _CALCULATION_RE = re.compile(
-    rf"{_NUMERIC_TOKEN_START}(?P<left>\d+)\s*"
-    rf"(?P<operator>[+*/-])\s*(?P<right>\d+)\s*=\s*"
-    rf"(?P<result>\d+){_NUMERIC_TOKEN_END}"
+    r"(?P<left>[0-9]+)[ \t]*(?P<operator>[+*/-])[ \t]*"
+    r"(?P<right>[0-9]+)[ \t]*=[ \t]*(?P<result>[0-9]+)"
 )
 
 
@@ -56,36 +50,35 @@ def _substantive(value: str) -> str:
     return normalized
 
 
-def _contains_exact_integer(text: str, expected: int) -> bool:
-    """Return whether text contains an integer token equal to ``expected``."""
-    return any(
-        int(match["value"]) == expected for match in _INTEGER_TOKEN_RE.finditer(text)
-    )
-
-
 def _contains_matching_calculation(text: str, expected: int) -> bool:
-    """Accept one true nonnegative-integer binary expression with the expected result."""
-    for match in _CALCULATION_RE.finditer(text):
-        left = int(match["left"])
-        right = int(match["right"])
-        result = int(match["result"])
-        if result != expected:
-            continue
-        operator = match["operator"]
-        if operator == "+" and left + right == result:
-            return True
-        if operator == "-" and left - right == result:
-            return True
-        if operator == "*" and left * right == result:
-            return True
-        if (
-            operator == "/"
-            and right != 0
-            and left % right == 0
-            and left // right == result
-        ):
-            return True
-    return False
+    """Accept one full-field ASCII integer expression with the expected result."""
+    match = _CALCULATION_RE.fullmatch(text.strip())
+    if match is None:
+        return False
+    left = int(match["left"])
+    right = int(match["right"])
+    result = int(match["result"])
+    if result != expected:
+        return False
+    operator = match["operator"]
+    if operator == "+":
+        return left + right == result
+    if operator == "-":
+        return left - right == result
+    if operator == "*":
+        return left * right == result
+    return right != 0 and left % right == 0 and left // right == result
+
+
+def _source_locator_key(value: str, *, http: bool) -> tuple[str, str] | None:
+    """Return the field-appropriate comparison key for one source locator."""
+    normalized = value.strip()
+    if not http:
+        return ("identifier", normalized)
+    try:
+        return ("http", str(HttpUrl(normalized)))
+    except ValidationError:
+        return None
 
 
 class BaselineResearchError(RuntimeError):
@@ -144,15 +137,12 @@ class DatasetFact(BaseModel):
     def bind_local_evidence(self) -> "DatasetFact":
         if self.evidence.kind == "source":
             raise ValueError("dataset facts require local evidence")
-        evidence_text = f"{self.evidence.reference} {self.evidence.claim}"
-        if not _contains_exact_integer(evidence_text, self.value):
-            raise ValueError("dataset fact evidence must name its supplied value")
         if self.evidence.kind == "calculation" and not any(
             _contains_matching_calculation(text, self.value)
             for text in (self.evidence.reference, self.evidence.claim)
         ):
             raise ValueError(
-                "calculation evidence requires a true integer expression ending in the supplied value"
+                "calculation evidence requires a true full-field ASCII integer expression equal to the supplied value"
             )
         return self
 
@@ -473,16 +463,20 @@ def validate_training_policy(
             raise ValueError("train_from_scratch requires a source scale comparison")
         if comparison.selected_candidate_id != selected.candidate_id:
             raise ValueError("scratch comparison must name the selected candidate")
-        source_locators = {
-            value
-            for value in (
-                str(selected.source_url),
+        source_locators = (
+            (str(selected.source_url), True),
+            (
                 str(selected.repository_url) if selected.repository_url else None,
-                selected.paper_locator,
-            )
-            if value is not None
-        }
-        if comparison.source_locator not in source_locators:
+                True,
+            ),
+            (selected.paper_locator, False),
+        )
+        if not any(
+            locator is not None
+            and _source_locator_key(comparison.source_locator, http=http)
+            == _source_locator_key(locator, http=http)
+            for locator, http in source_locators
+        ):
             raise ValueError("scratch comparison must use a selected-source locator")
         local_fact = next(
             (fact for fact in dataset.facts if fact.field == comparison.local_fact),
