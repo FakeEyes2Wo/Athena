@@ -478,6 +478,174 @@ describe("usePipeline", () => {
     expect(result.current.sessions.some((session) => session.id === newId)).toBe(false);
   });
 
+  it("does not let an older delete response replace a newer switched session list", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let resolveCreation: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    let resolveDelete: ((value: { deleted: boolean; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
+      if (id === "newer") {
+        return Promise.resolve({ records: [], sessions: ["newer"] });
+      }
+      return new Promise((resolve) => {
+        resolveCreation = resolve;
+      });
+    });
+    bridgeMocks.sessionDelete.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveDelete = resolve;
+      }),
+    );
+
+    act(() => result.current.newSession());
+    const deletingId = result.current.currentSessionId;
+    let deletion: Promise<void>;
+    act(() => {
+      deletion = result.current.deleteSession(deletingId);
+    });
+    await act(async () => {
+      resolveCreation?.({ records: [], sessions: ["default", deletingId] });
+    });
+    await waitFor(() => expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith(deletingId));
+
+    await act(async () => {
+      await result.current.switchSession("newer");
+    });
+    await act(async () => {
+      resolveDelete?.({ deleted: true, sessions: ["default"] });
+      await deletion!;
+    });
+
+    expect(result.current.currentSessionId).toBe("newer");
+    expect(result.current.sessions.map((session) => session.id)).toEqual(["newer"]);
+  });
+
+  it("does not append an older delete failure after switching sessions", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let rejectDelete: ((reason: Error) => void) | undefined;
+    bridgeMocks.sessionDelete.mockImplementation(
+      () => new Promise((_, reject) => {
+        rejectDelete = reject;
+      }),
+    );
+    let deletion: Promise<void>;
+    act(() => {
+      deletion = result.current.deleteSession("default");
+    });
+    await waitFor(() => expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith("default"));
+
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["newer"] });
+    await act(async () => {
+      await result.current.switchSession("newer");
+    });
+    await act(async () => {
+      rejectDelete?.(new Error("old delete failed"));
+      await deletion!;
+    });
+
+    expect(result.current.currentSessionId).toBe("newer");
+    expect(result.current.viewModel.messages).toEqual([]);
+    expect(result.current.viewModel.status).toBe("idle");
+  });
+
+  it("ignores a mount snapshot that resolves after a session switch", async () => {
+    let resolveSnapshot: ((value: Record<string, unknown>) => void) | undefined;
+    bridgeMocks.stateGet.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveSnapshot = resolve;
+      }),
+    );
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["newer"] });
+    await act(async () => {
+      await result.current.switchSession("newer");
+    });
+    act(() => {
+      pipelineEventHandler?.({
+        kind: "state",
+        data: {
+          phase: "NEW_PHASE",
+          status: "STOPPED",
+          plans: [{ id: "new-plan" }],
+          pending: [{ id: "new-pending", statement: "new pending" }],
+        },
+      });
+    });
+
+    await act(async () => {
+      resolveSnapshot?.({
+        phase: "OLD_PHASE",
+        status: "RUNNING",
+        plans: [{ id: "old-plan" }],
+        pending: [{ id: "old-pending", statement: "old pending" }],
+      });
+    });
+
+    expect(result.current.viewModel).toMatchObject({
+      phase: "NEW_PHASE",
+      status: "completed",
+      plans: [{ id: "new-plan" }],
+      pending: [{ id: "new-pending", statement: "new pending" }],
+    });
+  });
+
+  it("does not apply a pending creation response after unmount", async () => {
+    const { result, unmount } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let resolveCreation: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveCreation = resolve;
+      }),
+    );
+    const storageRead = vi.spyOn(Storage.prototype, "getItem");
+    act(() => result.current.newSession());
+    const newId = result.current.currentSessionId;
+    unmount();
+    storageRead.mockClear();
+
+    await act(async () => {
+      resolveCreation?.({ records: [], sessions: [newId] });
+    });
+
+    expect(storageRead).not.toHaveBeenCalled();
+    storageRead.mockRestore();
+  });
+
+  it("keeps an optimistic row when creation fails before deletion", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let rejectCreation: ((reason: Error) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementation(
+      () => new Promise((_, reject) => {
+        rejectCreation = reject;
+      }),
+    );
+    act(() => result.current.newSession());
+    const newId = result.current.currentSessionId;
+    let deletion: Promise<void>;
+    act(() => {
+      deletion = result.current.deleteSession(newId);
+    });
+
+    await act(async () => {
+      rejectCreation?.(new Error("creation failed"));
+      await deletion!;
+    });
+
+    expect(bridgeMocks.sessionDelete).not.toHaveBeenCalled();
+    expect(result.current.sessions.some((session) => session.id === newId)).toBe(true);
+    const messages = result.current.viewModel.messages;
+    expect(messages[messages.length - 1]?.content).toContain("creation failed");
+  });
+
   it("deletes the default session instead of silently ignoring it", async () => {
     const { result } = renderHook(() => usePipeline());
 

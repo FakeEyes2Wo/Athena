@@ -356,6 +356,7 @@ export function usePipeline(
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
   const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
+  const mountedRef = useRef(true);
   const currentDraftIdRef = useRef<string | null>(null);
   const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
@@ -518,6 +519,15 @@ export function usePipeline(
     activeSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      sessionRequestEpochRef.current += 1;
+      pendingCreationsRef.current.clear();
+    };
+  }, []);
+
   // Subscribe to backend pipeline events on mount.
   useEffect(() => {
     let mounted = true;
@@ -598,7 +608,7 @@ export function usePipeline(
     // waiting for the next streamed event.
     stateGet()
       .then((snapshot) => {
-        if (!mounted) return;
+        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
         setViewModel((prev) => applyPipelineEvent(prev, { kind: "state", data: snapshot }));
       })
       .catch(() => {
@@ -1020,7 +1030,7 @@ export function usePipeline(
     const requestEpoch = ++sessionRequestEpochRef.current;
     const creation = sessionSwitch(id).then((result) => {
       pendingCreationsRef.current.delete(id);
-      if (requestEpoch === sessionRequestEpochRef.current) {
+      if (mountedRef.current && requestEpoch === sessionRequestEpochRef.current) {
         applySessions(result.sessions);
       }
       return result;
@@ -1060,18 +1070,23 @@ export function usePipeline(
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
+    const requestEpoch = ++sessionRequestEpochRef.current;
     try {
       const pendingCreation = pendingCreationsRef.current.get(id);
       if (pendingCreation) await pendingCreation;
       const { sessions: list } = await sessionDelete(id);
+      if (!mountedRef.current) return;
       const titles = loadTitles(titlesKey);
       delete titles[id];
       localStorage.setItem(titlesKey, JSON.stringify(titles));
+      setSessions((current) => current.filter((session) => session.id !== id));
+      if (requestEpoch !== sessionRequestEpochRef.current) return;
       applySessions(list);
       if (id === activeSessionIdRef.current) {
         await switchSession("default");
       }
     } catch (err) {
+      if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
       appendError(`删除会话失败：${errorMessage(err)}`);
     }
   }, [appendError, applySessions, switchSession, titlesKey]);
