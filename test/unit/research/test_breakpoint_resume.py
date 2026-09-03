@@ -1148,6 +1148,52 @@ async def test_start_task_preserves_reconstructed_task_text_from_legacy_understa
 
 
 @pytest.mark.asyncio
+async def test_failed_legacy_understanding_reconstructs_task_text_for_replacement(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path)
+    runtime.state.status = "FAILED"
+    runtime.state.task_text = None
+    runtime.state.task_understanding = {
+        "title": "Kaggriculture farming simulation",
+        "dataset": "kaggriculture environment",
+        "target": "maximize income",
+    }
+    runtime.session.lifecycle.task_text = "stale process-local text"
+    runtime.session.lifecycle.started = True
+    runtime.session.lifecycle.task = None
+    replacement_hold = asyncio.Event()
+    replacements: list[asyncio.Task[None]] = []
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            assert restarting is True
+            runtime.state.status = "RUNNING"
+            return "RUNNING"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def fake_start() -> asyncio.Task[None]:
+        replacement = asyncio.create_task(replacement_hold.wait())
+        replacements.append(replacement)
+        runtime.session.lifecycle.task = replacement
+        return replacement
+
+    runtime.start = fake_start  # type: ignore[method-assign]
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        assert runtime.session.lifecycle.task_text == (
+            "Kaggriculture farming simulation kaggriculture environment maximize income"
+        )
+        assert runtime.state.task_text is None
+        assert len(replacements) == 1
+        assert runtime.session.lifecycle.task is replacements[0]
+    finally:
+        replacement_hold.set()
+        await asyncio.gather(*replacements, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_resume_restarts_a_rebuilt_runtime_for_a_persisted_prepare_run(
     tmp_path: Path,
 ) -> None:
