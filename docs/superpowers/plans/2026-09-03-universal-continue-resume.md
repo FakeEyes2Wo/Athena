@@ -76,6 +76,16 @@ reproduction: confirmed PREPARE failed with `baseline authority unavailable`; su
 exact `continue` entered task understanding, called
 `task_clarification_start("continue")`, and raised `different_task`.
 
+Latest-main rebuild note (2026-09-04): while this plan was in progress,
+`origin/main` advanced to `d029da7` with the LLM task-understanding integration. The
+implementation was replayed into a new clean worktree rooted at that commit. The clean
+tree exposed two pre-existing merge omissions from `ae922b9`: tracked Python code
+imports `athena.research.exp_docs` and tracked Tauri code declares/registers
+`commands::dialog`, but neither source file exists in the commit. Python therefore
+failed collection in 11 files and Tauri failed with E0583/E0433. Two independent AI
+audits approved the narrow prerequisite restoration below; unrelated stash contents
+remain excluded.
+
 ---
 
 ### Task 1: Pure resume command and capability contract
@@ -752,6 +762,47 @@ whose clarification boundary fails fast and whose confirmed artifacts remain byt
 identical. The planned focused suite passed 87 tests; the lifecycle regression also
 passed three consecutive runs. Black, task-owned diff checks, independent AI
 specification review, and independent AI quality review all passed.
+
+---
+
+### Task 5A: Restore latest-main source files omitted by the upstream merge
+
+**Files:**
+- Create: `src/athena/research/exp_docs.py`
+- Create: `test/unit/research/test_exp_docs.py`
+- Create: `athena-gui/src-tauri/src/commands/dialog.rs`
+
+**Interfaces:**
+- Restores: the three `exp_docs` APIs already imported by tracked Supervisor code.
+- Restores: the native-only directory resolver already declared and registered by
+  tracked Tauri code.
+
+- [x] **Step 1: Reproduce both clean-tree failures**
+
+On the rebuilt `origin/main@d029da7` branch, the planned Python selection failed during
+collection with 11 `ModuleNotFoundError: athena.research.exp_docs` errors. A clean
+`cargo check --manifest-path athena-gui/src-tauri/Cargo.toml` failed with E0583 and
+E0433 because `commands/dialog.rs` was absent.
+
+- [x] **Step 2: Audit the preserved sources and reject obsolete stash content**
+
+Two independent AI reviewers traced both references to merge commit `ae922b9` and the
+missing implementations to immutable stash `72b6938^3`. Restore only the exact
+`exp_docs.py`, its direct tests, and `dialog.rs`. Do not restore the unused
+`prepare/baseline_gate.py`, which targets an obsolete API and has no tracked caller;
+do not restore unrelated workspace tests, generated HTML, or `uv.lock`.
+
+- [ ] **Step 3: Restore and verify the Python module**
+
+Run its three direct tests, the tracked Supervisor report assertions, the universal
+continue Python selection, Black, and scoped diff checks. Commit only the module and
+its direct test as `fix: restore experiment document module`.
+
+- [ ] **Step 4: Restore and verify the native dialog module**
+
+Run the embedded Rust tests, `cargo check`, the frontend workspace-dialog test, and
+scoped diff checks. Commit only `dialog.rs` as
+`fix(gui): restore native workspace dialog command`.
 
 ---
 
