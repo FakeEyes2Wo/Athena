@@ -29,6 +29,12 @@ export interface LogEntry {
 }
 
 const MAX_LOG_ENTRIES = 500;
+let optimisticSessionCounter = 0;
+
+function nextOptimisticSessionId(): string {
+  optimisticSessionCounter += 1;
+  return `s-${Date.now()}-${optimisticSessionCounter}`;
+}
 
 /** Maps the backend runtime status to the frontend pipeline status. */
 const RUNTIME_STATUS_MAP: Record<string, PipelineViewModel["status"]> = {
@@ -1023,24 +1029,27 @@ export function usePipeline(
   const newSession = useCallback(() => {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
-    const id = `s-${Date.now()}`;
+    const id = nextOptimisticSessionId();
     runStarted.current = false;
     setClarificationStatus("IDLE");
     saveTitle(titlesKey, id, "新会话");
     const requestEpoch = ++sessionRequestEpochRef.current;
-    const creation = sessionSwitch(id).then((result) => {
-      pendingCreationsRef.current.delete(id);
-      if (mountedRef.current && requestEpoch === sessionRequestEpochRef.current) {
-        applySessions(result.sessions);
-      }
-      return result;
-    });
+    const creation = sessionSwitch(id);
     pendingCreationsRef.current.set(id, creation);
     void creation.then(
-      () => undefined,
+      (result) => {
+        if (pendingCreationsRef.current.get(id) === creation) {
+          pendingCreationsRef.current.delete(id);
+        }
+        if (mountedRef.current && requestEpoch === sessionRequestEpochRef.current) {
+          applySessions(result.sessions);
+        }
+      },
       () => {
         // Keep the optimistic row on failure so the user can retry or delete it.
-        pendingCreationsRef.current.delete(id);
+        if (pendingCreationsRef.current.get(id) === creation) {
+          pendingCreationsRef.current.delete(id);
+        }
       },
     );
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);

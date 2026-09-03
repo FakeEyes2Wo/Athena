@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let pipelineEventHandler:
   | ((event: { kind: string; data: Record<string, unknown> }) => void)
@@ -83,6 +83,10 @@ const clarifyingDraft = {
 };
 
 describe("usePipeline", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     for (const key of Object.keys(bridgeMocks) as Array<keyof typeof bridgeMocks>) {
       bridgeMocks[key].mockReset();
@@ -476,6 +480,53 @@ describe("usePipeline", () => {
 
     expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith(newId);
     expect(result.current.sessions.some((session) => session.id === newId)).toBe(false);
+  });
+
+  it("keeps same-millisecond new sessions unique with independent pending deletions", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+    bridgeMocks.sessionSwitch.mockClear();
+
+    const creationResolvers: Array<(
+      value: { records: never[]; sessions: string[] },
+    ) => void> = [];
+    bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
+      if (id === "default") return Promise.resolve({ records: [], sessions: ["default"] });
+      return new Promise((resolve) => {
+        creationResolvers.push(resolve);
+      });
+    });
+    bridgeMocks.sessionDelete.mockResolvedValue({ deleted: true, sessions: [] });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1234567890);
+
+    act(() => {
+      result.current.newSession();
+      result.current.newSession();
+    });
+    const [firstId, secondId] = bridgeMocks.sessionSwitch.mock.calls.map(([id]) => id as string);
+    expect(firstId).not.toBe(secondId);
+
+    let firstDeletion: Promise<void>;
+    let secondDeletion: Promise<void>;
+    act(() => {
+      firstDeletion = result.current.deleteSession(firstId);
+      secondDeletion = result.current.deleteSession(secondId);
+    });
+    expect(bridgeMocks.sessionDelete).not.toHaveBeenCalled();
+
+    await act(async () => {
+      creationResolvers[0]?.({ records: [], sessions: [firstId, secondId] });
+      await firstDeletion!;
+    });
+    expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith(firstId);
+    expect(bridgeMocks.sessionDelete).not.toHaveBeenCalledWith(secondId);
+
+    await act(async () => {
+      creationResolvers[1]?.({ records: [], sessions: [firstId, secondId] });
+      await secondDeletion!;
+    });
+    expect(bridgeMocks.sessionDelete.mock.calls.map(([id]) => id)).toEqual([firstId, secondId]);
+    now.mockRestore();
   });
 
   it("does not let an older delete response replace a newer switched session list", async () => {
