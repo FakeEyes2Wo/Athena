@@ -8,6 +8,10 @@ import {
 import { errorMessage } from "../lib/errors";
 import * as bridge from "../lib/tauri-bridge";
 import {
+  persistWorkspaceSessions,
+  type SessionSummary,
+} from "../lib/workspaceStorage";
+import {
   createEmptyPipelineViewModel,
   type ClarificationDraftDto,
   type ClarificationPreview,
@@ -15,6 +19,7 @@ import {
   type HumanReply,
   type HumanRequest,
   type PipelineViewModel,
+  type UIMessage,
 } from "../types/ui";
 
 export interface LogEntry {
@@ -175,26 +180,115 @@ function titleFromTask(preview: { title?: string; task_type?: string; primary_me
   return parts.length ? parts.join(" · ") : "新会话";
 }
 
-/** Rebuilds the conversation from persisted records by replaying each output
-  * record through the same reducer the live stream uses (TUI-style resume). */
+interface OutputBatch {
+  messages: UIMessage[];
+  messageIndex: Map<string, number>;
+  deltas: Map<string, string>;
+}
+
+function createOutputBatch(messages: UIMessage[]): OutputBatch {
+  return {
+    messages: [...messages],
+    messageIndex: new Map(messages.map((message, index) => [message.id, index])),
+    deltas: new Map(),
+  };
+}
+
+function applyOutputEventToBatch(
+  batch: OutputBatch,
+  event: bridge.PipelineEvent,
+  replay: boolean,
+): void {
+  const { data } = event;
+  const text = typeof data.text === "string" ? data.text : "";
+  if (!text) return;
+  const source = typeof data.source === "string" ? data.source : undefined;
+  const tool = typeof data.tool === "string" ? data.tool : undefined;
+  const channel = typeof data.channel === "string" ? data.channel : undefined;
+  const plan = typeof data.plan === "string" ? data.plan : undefined;
+  const id =
+    typeof data.message_id === "string" && data.message_id
+      ? data.message_id
+      : `out-${typeof data.seq === "number" ? data.seq : 0}`;
+  const target = batch.messageIndex.get(id);
+
+  if (target !== undefined) {
+    const existing = batch.messages[target];
+    if (replay) {
+      batch.messages[target] = { ...existing, content: text };
+    } else {
+      batch.deltas.set(id, `${batch.deltas.get(id) ?? ""}${text}`);
+    }
+    return;
+  }
+
+  if (!text.trim()) return;
+
+  let message: UIMessage;
+  const content = replay ? text : "";
+  if (channel === "error") {
+    message = { id, role: "athena", kind: "error", content };
+  } else if (source === "tool" || channel === "stdout" || channel === "stderr") {
+    message = { id, role: "athena", kind: "text", content, source: "tool", tool, channel, plan };
+  } else if (tool) {
+    message = { id, role: "athena", kind: "text", content, source, tool, plan };
+  } else {
+    message = { id, role: "athena", kind: "text", content, source, plan };
+  }
+  batch.messageIndex.set(id, batch.messages.length);
+  batch.messages.push(message);
+  if (!replay) batch.deltas.set(id, text);
+}
+
+function finishOutputBatch(batch: OutputBatch): UIMessage[] {
+  for (const [id, delta] of batch.deltas) {
+    const target = batch.messageIndex.get(id);
+    if (target === undefined) continue;
+    const existing = batch.messages[target];
+    batch.messages[target] = { ...existing, content: existing.content + delta };
+  }
+  return batch.messages;
+}
+
+/** Applies output events with one messages copy and indexed message lookup. */
+export function applyOutputEvents(
+  current: PipelineViewModel,
+  events: bridge.PipelineEvent[],
+  replay = false,
+): PipelineViewModel {
+  const batch = createOutputBatch(current.messages);
+  events.forEach((event) => applyOutputEventToBatch(batch, event, replay));
+  return {
+    ...current,
+    rightRail: { ...current.rightRail },
+    messages: finishOutputBatch(batch),
+  };
+}
+
+/** Rebuilds the conversation from persisted records through the output batch reducer. */
 function applyHistoryRecords(current: PipelineViewModel, records: bridge.SessionRecord[]): PipelineViewModel {
-  let next = current;
+  const batch = createOutputBatch(current.messages);
   for (const record of records) {
     if (record.type === "user") {
       const text = typeof record.text === "string" ? record.text : "";
       if (!text.trim()) continue;
-      next = {
-        ...next,
-        messages: [
-          ...next.messages,
-          { id: `user-${record.seq}`, role: "user", kind: "text", content: text },
-        ],
+      const message: UIMessage = {
+        id: `user-${record.seq}`,
+        role: "user",
+        kind: "text",
+        content: text,
       };
+      batch.messageIndex.set(message.id, batch.messages.length);
+      batch.messages.push(message);
     } else {
-      next = applyPipelineEvent(next, { kind: "output", data: record as unknown as Record<string, unknown> }, true);
+      applyOutputEventToBatch(
+        batch,
+        { kind: "output", data: record as unknown as Record<string, unknown> },
+        true,
+      );
     }
   }
-  return next;
+  return { ...current, messages: finishOutputBatch(batch) };
 }
 
 /**
@@ -208,6 +302,7 @@ function applyPipelineEvent(
   event: bridge.PipelineEvent,
   replay = false,
 ): PipelineViewModel {
+  if (event.kind === "output") return applyOutputEvents(current, [event], replay);
   const next: PipelineViewModel = { ...current, rightRail: { ...current.rightRail } };
   const { data } = event;
 
@@ -273,51 +368,6 @@ function applyPipelineEvent(
     return next;
   }
 
-  if (event.kind === "output") {
-    const text = typeof data.text === "string" ? data.text : "";
-    if (!text) return next;
-    const source = typeof data.source === "string" ? data.source : undefined;
-    const tool = typeof data.tool === "string" ? data.tool : undefined;
-    const channel = typeof data.channel === "string" ? data.channel : undefined;
-    const plan = typeof data.plan === "string" ? data.plan : undefined;
-    // 消息身份来自后端的 message_id（同一条消息的所有 delta 与落盘记录共用它）；
-    // 升级前写下的 transcript 没有该字段，退回按 seq 兜底，每条记录自成一条消息。
-    const id =
-      typeof data.message_id === "string" && data.message_id
-        ? data.message_id
-        : `out-${typeof data.seq === "number" ? data.seq : 0}`;
-    const messages = [...current.messages];
-
-    let target = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].id === id) { target = i; break; }
-    }
-    if (target >= 0) {
-      // 同一条消息再次到达：实时 delta 是增量所以追加，落盘回放是整条所以替换。
-      // 这一步同时让「挂载回放叠加在 live 之上」自然去重，不再产生重复 React key。
-      const existing = messages[target];
-      messages[target] = { ...existing, content: replay ? text : existing.content + text };
-      next.messages = messages;
-      return next;
-    }
-
-    // 纯空白只用于把已有消息的两个词分开，不足以独立成一条消息。
-    if (!text.trim()) return next;
-
-    if (channel === "error") {
-      messages.push({ id, role: "athena", kind: "error", content: text });
-    } else if (source === "tool" || channel === "stdout" || channel === "stderr") {
-      // 工具输出（命令结果 / 文件读写），先于 tool 调用判定。
-      messages.push({ id, role: "athena", kind: "text", content: text, source: "tool", tool, channel, plan });
-    } else if (tool) {
-      // 工具调用（agent function_call）。
-      messages.push({ id, role: "athena", kind: "text", content: text, source, tool, plan });
-    } else {
-      messages.push({ id, role: "athena", kind: "text", content: text, source, plan });
-    }
-    next.messages = messages;
-    return next;
-  }
 
   return next;
 }
@@ -359,9 +409,19 @@ export function usePipeline(
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
   const logCounter = useRef(0);
+  const pendingOutputEventsRef = useRef<Array<{
+    event: bridge.PipelineEvent;
+    logEntry: LogEntry;
+  }>>([]);
+  const outputFrameRef = useRef<number | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
   const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
+  const workspaceCacheRoot = workspaceRoot ?? "default";
+  const authoritativeSessionsRef = useRef<{
+    root: string;
+    sessions: SessionSummary[];
+  }>({ root: workspaceCacheRoot, sessions: [] });
   const mountedRef = useRef(true);
   const currentDraftIdRef = useRef<string | null>(null);
   const currentRevisionRef = useRef(-1);
@@ -377,10 +437,10 @@ export function usePipeline(
     return `${prefix}-${counter.current}`;
   }, []);
 
-  const appendLog = useCallback((event: bridge.PipelineEvent) => {
+  const createLogEntry = useCallback((event: bridge.PipelineEvent): LogEntry => {
     const data = event.data as Record<string, unknown> | undefined;
     logCounter.current += 1;
-    const entry: LogEntry = {
+    return {
       id: `log-${logCounter.current}`,
       at: Date.now(),
       kind: event.kind,
@@ -390,8 +450,58 @@ export function usePipeline(
       tool: typeof data?.tool === "string" ? data.tool : undefined,
       text: typeof data?.text === "string" ? data.text : "",
     };
-    setLogs((prev) => [...prev.slice(-(MAX_LOG_ENTRIES - 1)), entry]);
   }, []);
+
+  const appendLogEntries = useCallback((entries: LogEntry[]) => {
+    if (!entries.length) return;
+    setLogs((prev) => {
+      if (entries.length >= MAX_LOG_ENTRIES) return entries.slice(-MAX_LOG_ENTRIES);
+      return [...prev.slice(-(MAX_LOG_ENTRIES - entries.length)), ...entries];
+    });
+  }, []);
+
+  const appendLog = useCallback((event: bridge.PipelineEvent) => {
+    appendLogEntries([createLogEntry(event)]);
+  }, [appendLogEntries, createLogEntry]);
+
+  const drainOutputEvents = useCallback(() => {
+    const pending = pendingOutputEventsRef.current;
+    if (!pending.length) return;
+    pendingOutputEventsRef.current = [];
+    setViewModel((prev) => applyOutputEvents(prev, pending.map(({ event }) => event)));
+    appendLogEntries(pending.map(({ logEntry }) => logEntry));
+  }, [appendLogEntries]);
+
+  const discardPendingOutput = useCallback(() => {
+    if (outputFrameRef.current !== null) {
+      cancelAnimationFrame(outputFrameRef.current);
+      outputFrameRef.current = null;
+    }
+    pendingOutputEventsRef.current = [];
+  }, []);
+
+  const flushPendingOutput = useCallback(() => {
+    if (outputFrameRef.current !== null) {
+      cancelAnimationFrame(outputFrameRef.current);
+      outputFrameRef.current = null;
+    }
+    drainOutputEvents();
+  }, [drainOutputEvents]);
+
+  const queueOutputEvent = useCallback((event: bridge.PipelineEvent) => {
+    pendingOutputEventsRef.current.push({ event, logEntry: createLogEntry(event) });
+    if (outputFrameRef.current !== null) return;
+    const frameId = requestAnimationFrame(() => {
+      if (outputFrameRef.current !== frameId) return;
+      outputFrameRef.current = null;
+      if (!mountedRef.current) {
+        pendingOutputEventsRef.current = [];
+        return;
+      }
+      drainOutputEvents();
+    });
+    outputFrameRef.current = frameId;
+  }, [createLogEntry, drainOutputEvents]);
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
@@ -411,8 +521,10 @@ export function usePipeline(
     (ids: string[] | undefined) => {
       if (!ids) return;
       const titles = loadTitles(titlesKey);
+      const authoritative = ids.map((id) => ({ id, title: titles[id] ?? "新会话" }));
+      authoritativeSessionsRef.current = { root: workspaceCacheRoot, sessions: authoritative };
+      persistWorkspaceSessions(workspaceCacheRoot, authoritative);
       setSessions((current) => {
-        const authoritative = ids.map((id) => ({ id, title: titles[id] ?? "新会话" }));
         const authoritativeIds = new Set(ids);
         const pending = current.filter(
           (session) =>
@@ -422,12 +534,13 @@ export function usePipeline(
         return [...pending, ...authoritative];
       });
     },
-    [titlesKey],
+    [titlesKey, workspaceCacheRoot],
   );
 
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
   const restoreRecords = useCallback(
     (records: bridge.SessionRecord[], resetMessages: boolean) => {
+      flushPendingOutput();
       if (records.length) {
         counter.current = Math.max(counter.current, ...records.map((r) => r.seq));
       }
@@ -435,14 +548,24 @@ export function usePipeline(
         applyHistoryRecords(resetMessages ? { ...prev, messages: [] } : prev, records),
       );
     },
-    [],
+    [flushPendingOutput],
   );
 
   // 更新会话标题（state + localStorage）。
   const renameSession = useCallback((id: string, title: string) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
     saveTitle(titlesKey, id, title);
-  }, [titlesKey]);
+    const authoritativeState = authoritativeSessionsRef.current;
+    if (
+      authoritativeState.root !== workspaceCacheRoot ||
+      !authoritativeState.sessions.some((session) => session.id === id)
+    ) return;
+    const authoritative = authoritativeState.sessions.map((session) =>
+      session.id === id ? { ...session, title } : session,
+    );
+    authoritativeSessionsRef.current = { root: workspaceCacheRoot, sessions: authoritative };
+    persistWorkspaceSessions(workspaceCacheRoot, authoritative);
+  }, [titlesKey, workspaceCacheRoot]);
 
   // The latest clarification preview stored on any intent-preview message.
   const latestPreview = useMemo(() => {
@@ -529,6 +652,11 @@ export function usePipeline(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (outputFrameRef.current !== null) {
+        cancelAnimationFrame(outputFrameRef.current);
+        outputFrameRef.current = null;
+      }
+      pendingOutputEventsRef.current = [];
       sessionRequestEpochRef.current += 1;
       pendingCreationsRef.current.clear();
     };
@@ -542,6 +670,13 @@ export function usePipeline(
 
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
+
+      if (event.kind === "output") {
+        queueOutputEvent(event);
+        return;
+      }
+
+      flushPendingOutput();
 
       if (event.kind === "clarification") {
         const payload = event.data as { session_id?: string; draft?: ClarificationDraftDto };
@@ -644,7 +779,7 @@ export function usePipeline(
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, requestedSessionId, restoreRecords]);
+  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords]);
 
   // Poll for outstanding human questions. Pre-run states use a low-frequency
   // fallback (10s); once RUNNING we keep the existing 1.5s recovery poll.
@@ -791,8 +926,15 @@ export function usePipeline(
           return m;
         }),
       }));
+      const sessionRefreshEpoch = sessionRequestEpochRef.current;
       void sessionsList()
-        .then(({ sessions: list }) => applySessions(list))
+        .then(({ sessions: list }) => {
+          if (
+            !mountedRef.current ||
+            sessionRefreshEpoch !== sessionRequestEpochRef.current
+          ) return;
+          applySessions(list);
+        })
         .catch(() => {});
     } catch (err) {
       const code = errorCode(err);
@@ -1029,6 +1171,7 @@ export function usePipeline(
   const newSession = useCallback(() => {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
+    discardPendingOutput();
     const id = nextOptimisticSessionId();
     runStarted.current = false;
     setClarificationStatus("IDLE");
@@ -1055,7 +1198,7 @@ export function usePipeline(
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
-  }, [applySessions, titlesKey]);
+  }, [applySessions, discardPendingOutput, titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
@@ -1064,6 +1207,7 @@ export function usePipeline(
       const { records, sessions: list } = await sessionSwitch(id);
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       // 换会话即换 runtime，运行标记不能带过去。
+      discardPendingOutput();
       runStarted.current = false;
       setCurrentSessionId(id);
       restoreRecords(records, true);
@@ -1075,7 +1219,7 @@ export function usePipeline(
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, restoreRecords]);
+  }, [appendError, applySessions, discardPendingOutput, restoreRecords]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
@@ -1088,6 +1232,12 @@ export function usePipeline(
       const titles = loadTitles(titlesKey);
       delete titles[id];
       localStorage.setItem(titlesKey, JSON.stringify(titles));
+      const authoritativeState = authoritativeSessionsRef.current;
+      if (authoritativeState.root === workspaceCacheRoot) {
+        const authoritative = authoritativeState.sessions.filter((session) => session.id !== id);
+        authoritativeSessionsRef.current = { root: workspaceCacheRoot, sessions: authoritative };
+        persistWorkspaceSessions(workspaceCacheRoot, authoritative);
+      }
       setSessions((current) => current.filter((session) => session.id !== id));
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       applySessions(list);
@@ -1098,7 +1248,7 @@ export function usePipeline(
       if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
       appendError(`删除会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, switchSession, titlesKey]);
+  }, [appendError, applySessions, switchSession, titlesKey, workspaceCacheRoot]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);

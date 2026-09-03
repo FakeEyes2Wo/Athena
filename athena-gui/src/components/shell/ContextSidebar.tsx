@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import type { ContextPanelKey, ModuleKey } from "../../types/ui";
 import { Icon } from "../common/Icon";
 import { RELATED_PANELS } from "./navigation";
 import { basename } from "../../lib/path";
-import { sessionsListFor } from "../../lib/tauri-bridge";
-import { loadSessionTitles } from "../../hooks/usePipeline";
+import { loadWorkspaceSessions } from "../../lib/workspaceStorage";
 import styles from "./ContextSidebar.module.css";
 
 export interface SessionItem {
@@ -39,7 +38,6 @@ export function ContextSidebar({
   module,
   currentRoot,
   recentRoots,
-  switching,
   sessions,
   currentSessionId,
   onSwitchWorkspace,
@@ -57,7 +55,6 @@ export function ContextSidebar({
         <SessionContext
           currentRoot={currentRoot}
           recentRoots={recentRoots}
-          switching={switching}
           sessions={sessions}
           currentSessionId={currentSessionId}
           onSwitchWorkspace={onSwitchWorkspace}
@@ -94,7 +91,6 @@ export function ContextSidebar({
 function SessionContext({
   currentRoot,
   recentRoots,
-  switching,
   sessions,
   currentSessionId,
   onSwitchWorkspace,
@@ -105,7 +101,6 @@ function SessionContext({
 }: {
   currentRoot: string | null;
   recentRoots: string[];
-  switching: boolean;
   sessions: SessionItem[];
   currentSessionId: string;
   onSwitchWorkspace(): void;
@@ -114,38 +109,17 @@ function SessionContext({
   onNewSession(): void;
   onDeleteSession(id: string): void;
 }) {
-  const [otherGroups, setOtherGroups] = useState<WorkspaceGroup[]>([]);
-
-  // 拉取其它工作区的会话（当前工作区的会话由 usePipeline 提供），按工作区分组展示。
-  useEffect(() => {
-    let cancelled = false;
-    const others = recentRoots.filter((root) => root !== currentRoot);
-    if (others.length === 0) {
-      setOtherGroups([]);
-      return;
-    }
-    Promise.all(
-      others.map(async (root) => {
-        try {
-          const { sessions: ids } = await sessionsListFor(root);
-          const titles = loadSessionTitles(root);
-          return {
-            root,
-            name: basename(root),
-            isCurrent: false,
-            sessions: ids.map((id) => ({ id, title: titles[id] ?? "新会话" })),
-          };
-        } catch {
-          return { root, name: basename(root), isCurrent: false, sessions: [] };
-        }
-      }),
-    ).then((groups) => {
-      if (!cancelled) setOtherGroups(groups);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [recentRoots, currentRoot]);
+  const otherGroups = useMemo(
+    () => recentRoots
+      .filter((root) => root !== currentRoot)
+      .map((root): WorkspaceGroup => ({
+        root,
+        name: basename(root),
+        isCurrent: false,
+        sessions: loadWorkspaceSessions(root),
+      })),
+    [currentRoot, recentRoots],
+  );
 
   const orderedRoots = currentRoot && !recentRoots.includes(currentRoot)
     ? [...recentRoots, currentRoot]
@@ -174,7 +148,7 @@ function SessionContext({
               onClick={() => {
                 if (!group.isCurrent) onSelectWorkspace(group.root);
               }}
-              disabled={group.isCurrent || switching}
+              disabled={group.isCurrent}
               title={group.isCurrent ? "当前工作区" : `切换到 ${group.root}`}
             >
               <Icon name="folder" size={14} />
@@ -190,7 +164,6 @@ function SessionContext({
                     onClick={() =>
                       group.isCurrent ? onSelectSession(session.id) : onSelectWorkspace(group.root, session.id)
                     }
-                    disabled={!group.isCurrent && switching}
                     aria-current={group.isCurrent && session.id === currentSessionId ? "page" : undefined}
                     title={`${group.name} · ${session.title}`}
                   >
@@ -214,7 +187,7 @@ function SessionContext({
         ))}
       </div>
       <footer className={styles.sidebarFooter}>
-        <button className={styles.switchWorkspace} onClick={onSwitchWorkspace} disabled={switching}>
+        <button className={styles.switchWorkspace} onClick={onSwitchWorkspace}>
           切换工作区
         </button>
       </footer>

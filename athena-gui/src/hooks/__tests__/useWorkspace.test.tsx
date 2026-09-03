@@ -75,76 +75,125 @@ describe("useWorkspace", () => {
     expect(result.current.recentRoots).toEqual(["/a", "/b"]);
   });
 
-  it("keeps the latest root and requested session when an older switch succeeds last", async () => {
+  it("runs one root change at a time and coalesces queued intent to the latest switch", async () => {
     localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a"]));
     bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
-    const older = deferred<ReturnType<typeof settings>>();
+    const active = deferred<ReturnType<typeof settings>>();
     const latest = deferred<ReturnType<typeof settings>>();
-    bridgeMocks.setProjectRoot.mockImplementation((root: string) =>
-      root === "/b" ? older.promise : latest.promise,
-    );
+    bridgeMocks.setProjectRoot.mockImplementation((root: string) => {
+      if (root === "/b") return active.promise;
+      if (root === "/d") return latest.promise;
+      throw new Error(`unexpected workspace switch: ${root}`);
+    });
     const { result } = renderHook(() => useWorkspace());
     await waitFor(() => expect(result.current.ready).toBe(true));
 
-    let olderSwitch!: Promise<void>;
+    let activeSwitch!: Promise<void>;
+    let supersededSwitch!: Promise<void>;
     let latestSwitch!: Promise<void>;
     act(() => {
-      olderSwitch = result.current.switchTo("/b", "s-b");
-      latestSwitch = result.current.switchTo("/c", "s-c");
+      activeSwitch = result.current.switchTo("/b", "s-b");
+      supersededSwitch = result.current.switchTo("/c", "s-c");
+      latestSwitch = result.current.switchTo("/d", "s-d");
     });
 
+    expect(bridgeMocks.setProjectRoot).toHaveBeenCalledTimes(1);
+    expect(bridgeMocks.setProjectRoot).toHaveBeenNthCalledWith(1, "/b");
+
     await act(async () => {
-      latest.resolve(settings("/c"));
-      await latestSwitch;
+      active.resolve(settings("/b"));
     });
+    await waitFor(() => expect(bridgeMocks.setProjectRoot).toHaveBeenCalledTimes(2));
+    expect(bridgeMocks.setProjectRoot).toHaveBeenNthCalledWith(2, "/d");
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalledWith("/c");
+    expect(result.current.currentRoot).toBe("/a");
+    expect(result.current.requestedSessionId).toBeNull();
+
     await act(async () => {
-      older.resolve(settings("/b"));
-      await olderSwitch;
+      latest.resolve(settings("/d"));
+      await Promise.all([activeSwitch, supersededSwitch, latestSwitch]);
     });
 
-    expect(result.current.currentRoot).toBe("/c");
-    expect(result.current.requestedSessionId).toBe("s-c");
-    expect(result.current.recentRoots).toEqual(["/c", "/a"]);
+    expect(result.current.currentRoot).toBe("/d");
+    expect(result.current.requestedSessionId).toBe("s-d");
+    expect(result.current.recentRoots).toEqual(["/d", "/a"]);
     expect(result.current.pickerOpen).toBe(false);
     expect(result.current.switching).toBe(false);
     expect(result.current.error).toBeNull();
   });
 
-  it("ignores an older switch failure while the latest switch is pending", async () => {
+  it("ignores a superseded failure and continues with the latest queued switch", async () => {
     localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a"]));
     bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
-    const older = deferred<ReturnType<typeof settings>>();
+    const active = deferred<ReturnType<typeof settings>>();
     const latest = deferred<ReturnType<typeof settings>>();
-    bridgeMocks.setProjectRoot.mockImplementation((root: string) =>
-      root === "/b" ? older.promise : latest.promise,
-    );
+    bridgeMocks.setProjectRoot.mockImplementation((root: string) => {
+      if (root === "/b") return active.promise;
+      if (root === "/d") return latest.promise;
+      throw new Error(`unexpected workspace switch: ${root}`);
+    });
     const { result } = renderHook(() => useWorkspace());
     await waitFor(() => expect(result.current.ready).toBe(true));
 
-    let olderSwitch!: Promise<void>;
+    let activeSwitch!: Promise<void>;
     let latestSwitch!: Promise<void>;
     act(() => {
-      olderSwitch = result.current.switchTo("/b", "s-b");
-      latestSwitch = result.current.switchTo("/c", "s-c");
+      activeSwitch = result.current.switchTo("/b", "s-b");
+      result.current.switchTo("/c", "s-c");
+      latestSwitch = result.current.switchTo("/d", "s-d");
     });
     await waitFor(() => expect(result.current.switching).toBe(true));
+    expect(bridgeMocks.setProjectRoot).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      older.reject(new Error("stale failure"));
-      await olderSwitch;
+      active.reject(new Error("stale failure"));
     });
+    await waitFor(() => expect(bridgeMocks.setProjectRoot).toHaveBeenCalledTimes(2));
 
     expect(result.current.currentRoot).toBe("/a");
     expect(result.current.requestedSessionId).toBeNull();
     expect(result.current.switching).toBe(true);
     expect(result.current.error).toBeNull();
+    expect(result.current.pickerOpen).toBe(false);
+    expect(bridgeMocks.setProjectRoot).toHaveBeenNthCalledWith(2, "/d");
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalledWith("/c");
 
     await act(async () => {
-      latest.resolve(settings("/c"));
-      await latestSwitch;
+      latest.resolve(settings("/d"));
+      await Promise.all([activeSwitch, latestSwitch]);
     });
-    expect(result.current.currentRoot).toBe("/c");
-    expect(result.current.requestedSessionId).toBe("s-c");
+    expect(result.current.currentRoot).toBe("/d");
+    expect(result.current.requestedSessionId).toBe("s-d");
+    expect(result.current.switching).toBe(false);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("clears switching after a final rejection so a later switch can retry", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    const failed = deferred<ReturnType<typeof settings>>();
+    bridgeMocks.setProjectRoot.mockReturnValueOnce(failed.promise);
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let failedSwitch!: Promise<void>;
+    act(() => {
+      failedSwitch = result.current.switchTo("/b", "s-b");
+    });
+    await act(async () => {
+      failed.reject(new Error("root unavailable"));
+      await failedSwitch;
+    });
+
+    expect(result.current.currentRoot).toBe("/a");
+    expect(result.current.switching).toBe(false);
+    expect(result.current.error).toBe("root unavailable");
+
+    bridgeMocks.setProjectRoot.mockResolvedValueOnce(settings("/retry"));
+    await act(async () => result.current.switchTo("/retry", "s-retry"));
+
+    expect(bridgeMocks.setProjectRoot).toHaveBeenLastCalledWith("/retry");
+    expect(result.current.currentRoot).toBe("/retry");
+    expect(result.current.requestedSessionId).toBe("s-retry");
     expect(result.current.switching).toBe(false);
     expect(result.current.error).toBeNull();
   });
@@ -233,5 +282,77 @@ describe("useWorkspace", () => {
       await firstBrowse;
     });
     expect(result.current.browsing).toBe(false);
+  });
+
+  it("opens the native browser while switching and queues its selected workspace", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    bridgeMocks.selectWorkspaceDirectory.mockResolvedValue("/d");
+    const active = deferred<ReturnType<typeof settings>>();
+    const selected = deferred<ReturnType<typeof settings>>();
+    bridgeMocks.setProjectRoot.mockImplementation((root: string) =>
+      root === "/b" ? active.promise : selected.promise,
+    );
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let activeSwitch!: Promise<void>;
+    let browse!: Promise<void>;
+    act(() => {
+      activeSwitch = result.current.switchTo("/b");
+    });
+    await waitFor(() => expect(result.current.switching).toBe(true));
+    act(() => {
+      browse = result.current.browse();
+    });
+
+    await waitFor(() => expect(bridgeMocks.selectWorkspaceDirectory).toHaveBeenCalledWith("/a"));
+    expect(bridgeMocks.setProjectRoot).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      active.resolve(settings("/b"));
+    });
+    await waitFor(() => expect(bridgeMocks.setProjectRoot).toHaveBeenNthCalledWith(2, "/d"));
+    await act(async () => {
+      selected.resolve(settings("/d"));
+      await Promise.all([activeSwitch, browse]);
+    });
+
+    expect(result.current.currentRoot).toBe("/d");
+    expect(result.current.browsing).toBe(false);
+  });
+
+  it("ignores a native directory selection that resolves after unmount", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    const selection = deferred<string | null>();
+    bridgeMocks.selectWorkspaceDirectory.mockReturnValue(selection.promise);
+    bridgeMocks.setProjectRoot.mockResolvedValue(settings("/stale"));
+    const { result, unmount } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let browse!: Promise<void>;
+    act(() => {
+      browse = result.current.browse();
+    });
+    await waitFor(() => expect(result.current.browsing).toBe(true));
+
+    unmount();
+    await act(async () => {
+      selection.resolve("/stale");
+      await browse;
+    });
+
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
+  });
+
+  it("ignores a direct workspace switch after unmount", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    bridgeMocks.setProjectRoot.mockResolvedValue(settings("/stale"));
+    const { result, unmount } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    unmount();
+    await act(async () => result.current.switchTo("/stale"));
+
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
   });
 });

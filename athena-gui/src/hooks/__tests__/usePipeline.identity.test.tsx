@@ -1,7 +1,18 @@
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const eventHandlers: Array<(event: { kind: string; data: Record<string, unknown> }) => void> = [];
+let nextAnimationFrameId = 1;
+let animationFrames = new Map<number, FrameRequestCallback>();
+
+function runNextAnimationFrame(): void {
+  const next = animationFrames.entries().next().value as
+    | [number, FrameRequestCallback]
+    | undefined;
+  if (!next) throw new Error("No animation frame was scheduled");
+  animationFrames.delete(next[0]);
+  next[1](16);
+}
 
 vi.mock("../../lib/tauri-bridge", () => ({
   sendMessage: vi.fn().mockResolvedValue({}),
@@ -87,9 +98,24 @@ async function flush(): Promise<void> {
 
 describe("usePipeline message identity", () => {
   beforeEach(() => {
+    nextAnimationFrameId = 1;
+    animationFrames = new Map();
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      const id = nextAnimationFrameId;
+      nextAnimationFrameId += 1;
+      animationFrames.set(id, callback);
+      return id;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn((id: number) => {
+      animationFrames.delete(id);
+    }));
     eventHandlers.length = 0;
     vi.mocked(sessionsList).mockReset();
     vi.mocked(sessionSwitch).mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("merges live deltas and the replayed record into one message per message_id", async () => {
@@ -100,6 +126,8 @@ describe("usePipeline message identity", () => {
     await act(async () => {
       for (const event of LIVE_EVENTS) eventHandlers[0]?.({ kind: "output", data: event });
     });
+    expect(result.current.viewModel.messages).toEqual([]);
+    act(() => runNextAnimationFrame());
     release();
     await flush();
 
@@ -117,12 +145,172 @@ describe("usePipeline message identity", () => {
     expect(messages.some((m) => m.content.includes("Found train.csv.Let me"))).toBe(false);
   });
 
+  it("lets authoritative hydration replace a queued live delta before the stale frame runs", async () => {
+    const release = deferHistory([
+      {
+        type: "output",
+        seq: 2,
+        source: "agent",
+        channel: "text",
+        text: "A",
+        message_id: "same-message",
+      },
+    ]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "A",
+          message_id: "same-message",
+        },
+      });
+    });
+    const staleFrame = animationFrames.get(1);
+    expect(staleFrame).toBeDefined();
+    expect(result.current.viewModel.messages).toEqual([]);
+
+    release();
+    await flush();
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["A"]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["A"]);
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+
+    act(() => staleFrame?.(16));
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["A"]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["A"]);
+  });
+
+  it("discards queued output and logs when starting a new session", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "old session",
+          message_id: "old-session-message",
+        },
+      });
+    });
+    const staleFrame = animationFrames.get(1);
+    expect(staleFrame).toBeDefined();
+
+    vi.mocked(sessionSwitch).mockImplementation(() => new Promise(() => {}));
+    act(() => result.current.newSession());
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 2,
+          source: "agent",
+          channel: "text",
+          text: "new session",
+          message_id: "new-session-message",
+        },
+      });
+      staleFrame?.(16);
+    });
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(result.current.viewModel.messages).toEqual([]);
+    expect(result.current.logs).toEqual([]);
+
+    act(() => runNextAnimationFrame());
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual([
+      "new session",
+    ]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["new session"]);
+  });
+
+  it("discards queued prior-session output and logs after a successful switch", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "old session",
+          message_id: "old-session-message",
+        },
+      });
+    });
+    const staleFrame = animationFrames.get(1);
+    expect(staleFrame).toBeDefined();
+    vi.mocked(sessionSwitch).mockResolvedValue({
+      records: [
+        {
+          type: "output",
+          seq: 2,
+          source: "agent",
+          channel: "text",
+          text: "new session",
+          message_id: "new-session-message",
+        },
+      ] as never,
+      sessions: ["new-session"],
+    });
+
+    await act(async () => {
+      await result.current.switchSession("new-session");
+    });
+    act(() => staleFrame?.(16));
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual([
+      "new session",
+    ]);
+    expect(result.current.logs).toEqual([]);
+  });
+
   it("keeps a whitespace-only delta that separates two words", async () => {
     const release = deferHistory([]);
     const { result } = renderHook(() => usePipeline());
     await flush();
     release();
     await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 0,
+          source: "supervisor",
+          channel: "text",
+          text: "stable",
+          message_id: "stable-message",
+        },
+      });
+    });
+    act(() => runNextAnimationFrame());
+    const stableMessage = result.current.viewModel.messages[0];
 
     const parts = ["The workspace is empty", " ", "and the data is at `D:\\tmp\\data`."];
     await act(async () => {
@@ -133,7 +321,16 @@ describe("usePipeline message identity", () => {
         }),
       );
     });
-    expect(result.current.viewModel.messages.map((m) => m.content)).toEqual([parts.join("")]);
+    expect(result.current.viewModel.messages.map((m) => m.content)).toEqual(["stable"]);
+    expect(result.current.viewModel.messages[0]).toBe(stableMessage);
+
+    act(() => runNextAnimationFrame());
+
+    expect(result.current.viewModel.messages.map((m) => m.content)).toEqual([
+      "stable",
+      parts.join(""),
+    ]);
+    expect(result.current.viewModel.messages[0]).toBe(stableMessage);
   });
 
   it("keeps legacy records without message_id as separate messages", async () => {

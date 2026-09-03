@@ -51,7 +51,7 @@ export function AppShell({ currentRoot, recentRoots, switching, onSwitchWorkspac
     ) {
       void pipeline.switchSession(pipeline.currentSessionId);
     }
-  }, [module, pipeline]);
+  }, [module, pipeline.currentSessionId, pipeline.viewModel.status, pipeline.switchSession]);
 
   return (
     <div className={styles.shell}>

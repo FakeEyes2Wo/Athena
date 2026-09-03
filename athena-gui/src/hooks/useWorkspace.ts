@@ -35,6 +35,11 @@ export interface WorkspaceActions {
   closePicker(): void;
 }
 
+interface WorkspaceIntent {
+  path: string;
+  sessionId: string | null;
+}
+
 /**
  * Manages the active project directory (workspace) for the GUI.
  *
@@ -49,18 +54,21 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   const [ready, setReady] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(true);
   const [switching, setSwitching] = useState(false);
-  const switchEpochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const activeSwitchRef = useRef<Promise<void> | null>(null);
+  const queuedIntentRef = useRef<WorkspaceIntent | null>(null);
   const [browsing, setBrowsing] = useState(false);
   const browsingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
+    mountedRef.current = true;
     const rememberedRoots = loadRecentRoots();
     setRecentRoots(rememberedRoots);
     settingsGet()
       .then((settings) => {
-        if (!mounted) return;
+        if (!mounted || !mountedRef.current) return;
         const root = settings.project_root || null;
         setCurrentRoot(root);
         // 后端已恢复上次项目目录时直接进入主界面，不再弹选择页。
@@ -68,58 +76,80 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
         setReady(true);
       })
       .catch((err: unknown) => {
-        if (!mounted) return;
+        if (!mounted || !mountedRef.current) return;
         setError(errorMessage(err));
         setReady(true);
       });
     return () => {
       mounted = false;
+      mountedRef.current = false;
+      queuedIntentRef.current = null;
     };
   }, []);
 
-  const switchTo = useCallback(async (path: string, sessionId?: string) => {
+  const switchTo = useCallback((path: string, sessionId?: string): Promise<void> => {
+    if (!mountedRef.current) return Promise.resolve();
     const trimmed = path.trim();
-    if (!trimmed) return;
-    const switchEpoch = ++switchEpochRef.current;
+    if (!trimmed) return Promise.resolve();
+    queuedIntentRef.current = { path: trimmed, sessionId: sessionId ?? null };
     setSwitching(true);
     setError(null);
-    try {
-      const settings = await setProjectRoot(trimmed);
-      if (switchEpoch !== switchEpochRef.current) return;
-      setCurrentRoot(settings.project_root || trimmed);
-      setRequestedSessionId(sessionId ?? null);
-      setRecentRoots((prev) => {
-        const next = addRecentRoot(settings.project_root || trimmed, prev);
-        persistRecentRoots(next);
-        return next;
-      });
-      setPickerOpen(false);
-    } catch (err) {
-      if (switchEpoch === switchEpochRef.current) {
-        setError(errorMessage(err));
+
+    if (activeSwitchRef.current) return activeSwitchRef.current;
+
+    const processSwitches = async () => {
+      try {
+        while (queuedIntentRef.current) {
+          const intent = queuedIntentRef.current;
+          queuedIntentRef.current = null;
+          try {
+            const settings = await setProjectRoot(intent.path);
+            if (!mountedRef.current) return;
+            if (queuedIntentRef.current) continue;
+            const resolvedRoot = settings.project_root || intent.path;
+            setCurrentRoot(resolvedRoot);
+            setRequestedSessionId(intent.sessionId);
+            setRecentRoots((prev) => {
+              const next = addRecentRoot(resolvedRoot, prev);
+              persistRecentRoots(next);
+              return next;
+            });
+            setPickerOpen(false);
+          } catch (err) {
+            if (!mountedRef.current) return;
+            if (!queuedIntentRef.current) {
+              setError(errorMessage(err));
+              setPickerOpen(true);
+            }
+          }
+        }
+      } finally {
+        activeSwitchRef.current = null;
+        if (mountedRef.current) setSwitching(false);
       }
-    } finally {
-      if (switchEpoch === switchEpochRef.current) {
-        setSwitching(false);
-      }
-    }
+    };
+
+    const activeSwitch = processSwitches();
+    activeSwitchRef.current = activeSwitch;
+    return activeSwitch;
   }, []);
 
   const browse = useCallback(async () => {
-    if (browsingRef.current || switching) return;
+    if (!mountedRef.current || browsingRef.current) return;
     browsingRef.current = true;
     setBrowsing(true);
     setError(null);
     try {
       const selected = await selectWorkspaceDirectory(currentRoot);
+      if (!mountedRef.current) return;
       if (selected) await switchTo(selected);
     } catch (err) {
-      setError(errorMessage(err));
+      if (mountedRef.current) setError(errorMessage(err));
     } finally {
       browsingRef.current = false;
-      setBrowsing(false);
+      if (mountedRef.current) setBrowsing(false);
     }
-  }, [currentRoot, switching, switchTo]);
+  }, [currentRoot, switchTo]);
 
   const openPicker = useCallback(() => setPickerOpen(true), []);
   const closePicker = useCallback(() => setPickerOpen(false), []);

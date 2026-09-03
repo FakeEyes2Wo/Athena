@@ -51,6 +51,7 @@ vi.mock("../../lib/tauri-bridge", () => ({
 }));
 
 import { usePipeline } from "../usePipeline";
+import { loadWorkspaceSessions } from "../../lib/workspaceStorage";
 
 const readyDraft = {
   schema_version: 1 as const,
@@ -88,6 +89,7 @@ describe("usePipeline", () => {
   });
 
   beforeEach(() => {
+    localStorage.clear();
     for (const key of Object.keys(bridgeMocks) as Array<keyof typeof bridgeMocks>) {
       bridgeMocks[key].mockReset();
     }
@@ -308,6 +310,92 @@ describe("usePipeline", () => {
     ]);
   });
 
+  it("replays a large mixed transcript with the same ordered message semantics as live deltas", async () => {
+    const records: Array<Record<string, unknown>> = [
+      { type: "user", seq: 1, text: "run the analysis" },
+    ];
+    let agentContent = "";
+    let supervisorContent = "";
+    let seq = 2;
+
+    for (let index = 0; index < 100; index += 1) {
+      agentContent += `${index}|`;
+      records.push({
+        type: "output",
+        seq,
+        message_id: "agent-stream",
+        source: "agent",
+        channel: "text",
+        text: agentContent,
+      });
+      seq += 1;
+
+      if (index < 50) {
+        supervisorContent += `${index};`;
+        records.push({
+          type: "output",
+          seq,
+          message_id: "supervisor-stream",
+          source: "supervisor",
+          channel: "text",
+          text: supervisorContent,
+        });
+        seq += 1;
+      }
+
+      if (index % 10 === 0) {
+        records.push({
+          type: "output",
+          seq,
+          message_id: `tool-${index}`,
+          source: "tool",
+          channel: "stdout",
+          tool: "inspect_dataset",
+          text: `chunk-${index}`,
+        });
+        seq += 1;
+      }
+    }
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records, sessions: ["default"] });
+
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => expect(result.current.viewModel.messages).toHaveLength(13));
+    expect(result.current.viewModel.messages.map((message) => message.id)).toEqual([
+      "user-1",
+      "agent-stream",
+      "supervisor-stream",
+      "tool-0",
+      "tool-10",
+      "tool-20",
+      "tool-30",
+      "tool-40",
+      "tool-50",
+      "tool-60",
+      "tool-70",
+      "tool-80",
+      "tool-90",
+    ]);
+    expect(result.current.viewModel.messages[1]?.content).toBe(
+      Array.from({ length: 100 }, (_, index) => `${index}|`).join(""),
+    );
+    expect(result.current.viewModel.messages[2]?.content).toBe(
+      Array.from({ length: 50 }, (_, index) => `${index};`).join(""),
+    );
+    expect(result.current.viewModel.messages.slice(3).map((message) => message.content)).toEqual([
+      "chunk-0",
+      "chunk-10",
+      "chunk-20",
+      "chunk-30",
+      "chunk-40",
+      "chunk-50",
+      "chunk-60",
+      "chunk-70",
+      "chunk-80",
+      "chunk-90",
+    ]);
+  });
+
   it("clears the conversation view on new session without clearing the transcript", async () => {
     bridgeMocks.sessionSwitch.mockResolvedValue({
       records: [
@@ -393,6 +481,8 @@ describe("usePipeline", () => {
         kind: "output",
         data: { seq: 1, message_id: "live-1", source: "agent", channel: "text", text: "live message" },
       });
+      // A non-output event synchronously flushes queued output before it applies.
+      pipelineEventHandler?.({ kind: "state", data: { phase: "PREPARE" } });
     });
     expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["live message"]);
 
@@ -450,6 +540,49 @@ describe("usePipeline", () => {
 
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalled());
     expect(bridgeMocks.sessionSwitch.mock.calls[0]).toEqual(["s-2"]);
+  });
+
+  it("clears stale cached summaries after authoritative empty hydration", async () => {
+    const cacheKey = "athena.workspace.sessions:C:/workspace";
+    localStorage.setItem(cacheKey, JSON.stringify([{ id: "stale", title: "Stale" }]));
+
+    renderHook(() => usePipeline("C:/workspace"));
+
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+    await waitFor(() => expect(localStorage.getItem(cacheKey)).toBeNull());
+  });
+
+  it("persists understanding title changes for authoritative sessions", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+
+    await act(async () => {
+      await result.current.sendPrompt("draft task title");
+    });
+
+    await waitFor(() => expect(loadWorkspaceSessions("C:/workspace")).toEqual([
+      { id: "default", title: "Predict churn" },
+    ]));
+  });
+
+  it("does not persist title changes for optimistic-only sessions", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+
+    bridgeMocks.sessionSwitch.mockImplementation(() => new Promise(() => {}));
+    act(() => result.current.newSession());
+    const optimisticId = result.current.currentSessionId;
+    await act(async () => {
+      await result.current.sendPrompt("Optimistic title");
+    });
+
+    expect(result.current.sessions).toContainEqual({ id: optimisticId, title: "Optimistic title" });
+    expect(loadWorkspaceSessions("C:/workspace")).toEqual([{ id: "default", title: "新会话" }]);
   });
 
   it("waits for new-session creation before deleting it", async () => {
@@ -529,7 +662,7 @@ describe("usePipeline", () => {
     now.mockRestore();
   });
 
-  it("does not let an older delete response replace a newer switched session list", async () => {
+  it("removes a pending new session from React state and cache when its delete is superseded by a switch", async () => {
     const { result } = renderHook(() => usePipeline());
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
 
@@ -537,7 +670,7 @@ describe("usePipeline", () => {
     let resolveDelete: ((value: { deleted: boolean; sessions: string[] }) => void) | undefined;
     bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
       if (id === "newer") {
-        return Promise.resolve({ records: [], sessions: ["newer"] });
+        return Promise.resolve({ records: [], sessions: ["newer", deletingId] });
       }
       return new Promise((resolve) => {
         resolveCreation = resolve;
@@ -570,6 +703,7 @@ describe("usePipeline", () => {
 
     expect(result.current.currentSessionId).toBe("newer");
     expect(result.current.sessions.map((session) => session.id)).toEqual(["newer"]);
+    expect(loadWorkspaceSessions("default").map((session) => session.id)).toEqual(["newer"]);
   });
 
   it("does not append an older delete failure after switching sessions", async () => {
@@ -669,8 +803,68 @@ describe("usePipeline", () => {
     storageRead.mockRestore();
   });
 
-  it("keeps an optimistic row when creation fails before deletion", async () => {
-    const { result } = renderHook(() => usePipeline());
+  it("does not apply a deferred post-confirm session refresh after unmount", async () => {
+    let resolveRefresh: ((value: { sessions: string[]; active: null }) => void) | undefined;
+    bridgeMocks.sessionsList
+      .mockResolvedValueOnce({ sessions: ["default"], active: "default" })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }));
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    const { result, unmount } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+      await result.current.confirmDraft(false);
+    });
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalledTimes(2));
+
+    const storageWrite = vi.spyOn(Storage.prototype, "setItem");
+    unmount();
+    storageWrite.mockClear();
+    await act(async () => {
+      resolveRefresh?.({ sessions: ["stale"], active: null });
+      await Promise.resolve();
+    });
+
+    expect(storageWrite).not.toHaveBeenCalled();
+    expect(loadWorkspaceSessions("C:/workspace")).toEqual([{ id: "default", title: "Predict churn" }]);
+  });
+
+  it("does not apply a post-confirm session refresh superseded by session navigation", async () => {
+    let resolveRefresh: ((value: { sessions: string[]; active: null }) => void) | undefined;
+    bridgeMocks.sessionsList
+      .mockResolvedValueOnce({ sessions: ["default"], active: "default" })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }));
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+      await result.current.confirmDraft(false);
+    });
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalledTimes(2));
+
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["newer"] });
+    await act(async () => {
+      await result.current.switchSession("newer");
+    });
+    await act(async () => {
+      resolveRefresh?.({ sessions: ["stale"], active: null });
+      await Promise.resolve();
+    });
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(["newer"]);
+    expect(loadWorkspaceSessions("C:/workspace")).toEqual([{ id: "newer", title: "新会话" }]);
+  });
+
+  it("keeps a failed optimistic row in React state without persisting it", async () => {
+    const cacheKey = "athena.workspace.sessions:C:/workspace";
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
 
     let rejectCreation: ((reason: Error) => void) | undefined;
@@ -681,6 +875,7 @@ describe("usePipeline", () => {
     );
     act(() => result.current.newSession());
     const newId = result.current.currentSessionId;
+    expect(localStorage.getItem(cacheKey)).toBeNull();
     let deletion: Promise<void>;
     act(() => {
       deletion = result.current.deleteSession(newId);
@@ -693,6 +888,7 @@ describe("usePipeline", () => {
 
     expect(bridgeMocks.sessionDelete).not.toHaveBeenCalled();
     expect(result.current.sessions.some((session) => session.id === newId)).toBe(true);
+    expect(localStorage.getItem(cacheKey)).toBeNull();
     const messages = result.current.viewModel.messages;
     expect(messages[messages.length - 1]?.content).toContain("creation failed");
   });
