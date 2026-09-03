@@ -108,6 +108,12 @@ Independent review of `4a04052..c1a9884` concluded `APPROVED`, with no blocker,
 warning, or nit. The reviewed diff changes only the App test and planning
 metadata; production behavior remains unchanged.
 
+The proof branch was merged into `main` by `283cdb5`. Fresh post-merge checks
+passed: the focused App suite passed 2 tests, the full frontend suite passed 141
+tests across 18 files, and the production build transformed 2,761 modules.
+`cargo check` completed with only the same six pre-existing warnings;
+`git diff --check HEAD^ HEAD` returned clean.
+
 ## Integration
 
 The feature branch was merged locally into `main` by merge commit `6b89e9e`.
