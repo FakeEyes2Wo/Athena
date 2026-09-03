@@ -1,6 +1,9 @@
 # Current Athena Work
 
-Active implementation plan:
+Active design spec:
+- `docs/superpowers/specs/2026-09-03-llm-task-understanding-output-design.md`
+
+Parallel implementation plan:
 - `docs/superpowers/plans/2026-09-02-authoritative-baseline-research-gate.md`
 
 Supporting design spec:
