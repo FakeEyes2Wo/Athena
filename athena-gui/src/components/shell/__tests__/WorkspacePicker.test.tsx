@@ -28,13 +28,39 @@ describe("WorkspacePicker", () => {
     expect(props.onBrowse).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    { browsing: true, switching: false, label: "浏览中…" },
-    { browsing: false, switching: true, label: "浏览目录…" },
-  ])("disables native browsing while work is in flight", ({ label, ...state }) => {
-    renderPicker(state);
+  it("disables native browsing only while the directory dialog is open", () => {
+    renderPicker({ browsing: true });
 
-    expect(screen.getByRole("button", { name: label })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "浏览中…" })).toBeDisabled();
+  });
+
+  it("keeps switch targets usable while switching and disables only Continue", () => {
+    const { props } = renderPicker({
+      recentRoots: ["C:/recent"],
+      switching: true,
+    });
+
+    const recentRoot = screen.getByRole("button", { name: "C:/recent" });
+    const browse = screen.getByRole("button", { name: "浏览目录…" });
+    const input = screen.getByRole("textbox");
+    const continueButton = screen.getByRole("button", { name: "继续使用当前" });
+
+    expect(recentRoot).not.toBeDisabled();
+    expect(browse).not.toBeDisabled();
+    expect(input).not.toBeDisabled();
+    expect(continueButton).toBeDisabled();
+
+    fireEvent.click(recentRoot);
+    fireEvent.click(browse);
+    fireEvent.change(input, { target: { value: "D:/queued" } });
+    const open = screen.getByRole("button", { name: "打开" });
+    expect(open).not.toBeDisabled();
+    fireEvent.click(open);
+
+    expect(props.onSelect).toHaveBeenNthCalledWith(1, "C:/recent");
+    expect(props.onSelect).toHaveBeenNthCalledWith(2, "D:/queued");
+    expect(props.onBrowse).toHaveBeenCalledOnce();
+    expect(props.onContinue).not.toHaveBeenCalled();
   });
 
   it("keeps a manually entered path while native browsing is cancelled", async () => {

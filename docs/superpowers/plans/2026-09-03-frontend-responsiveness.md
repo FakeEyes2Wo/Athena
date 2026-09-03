@@ -63,7 +63,7 @@
 - Consumes: `setProjectRoot(path)` and `switchTo(path, sessionId?)`.
 - Produces: one active switch Promise plus one replaceable queued `WorkspaceIntent`.
 
-- [ ] **Step 1: Add failing coordinator tests**
+- [x] **Step 1: Add failing coordinator tests**
 
   Add a `WorkspaceIntent` scenario to `useWorkspace.test.tsx` using deferred
   `setProjectRoot` Promises. Start `/a -> /b`, then request `/c` and `/d` before
@@ -75,14 +75,14 @@
   the queued `/d` still starts. Add a final rejection/retry variant proving
   `switching` clears and another call can run.
 
-- [ ] **Step 2: Add failing interaction tests**
+- [x] **Step 2: Add failing interaction tests**
 
   Change the `app-shell.test.tsx` switching-state expectation so the footer and
   other workspace/session buttons remain enabled and call their handlers.
   Change `WorkspacePicker.test.tsx` so recent roots, browse, manual path input,
   and Open remain usable while `switching`; only Continue remains disabled.
 
-- [ ] **Step 3: Run the focused tests and verify RED**
+- [x] **Step 3: Run the focused tests and verify RED**
 
   Run:
 
@@ -92,7 +92,7 @@
 
   Expected: failures show concurrent `setProjectRoot` calls and disabled controls.
 
-- [ ] **Step 4: Implement the latest-intent coordinator**
+- [x] **Step 4: Implement the latest-intent coordinator**
 
   In `useWorkspace.ts`, add:
 
@@ -108,18 +108,18 @@
   ignores superseded failures, and clears `switching`/the active ref in `finally`.
   Guard state writes after unmount.
 
-- [ ] **Step 5: Keep navigation inputs interactive**
+- [x] **Step 5: Keep navigation inputs interactive**
 
   Remove `switching` from disabled conditions on the sidebar footer,
   other-workspace headers/session rows, picker recent roots, Browse, manual input,
   and Open. Keep Browse protected only by `browsing`; keep Continue disabled while
   switching.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
   Run the command from Step 3 and require PASS.
 
-- [ ] **Step 7: Commit the switch fix**
+- [x] **Step 7: Commit the switch fix**
 
   Stage only the six task files and commit as
   `fix(gui): keep workspace switching responsive`.

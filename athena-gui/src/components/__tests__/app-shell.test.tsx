@@ -159,7 +159,7 @@ describe("AppShell", () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith("C:/gamma", "s-gamma");
   });
 
-  it("disables cross-workspace actions while keeping current-session switching available", async () => {
+  it("keeps workspace and session navigation interactive while switching", async () => {
     const onSwitchWorkspace = vi.fn();
     const onSelectWorkspace = vi.fn();
     const switchSession = vi.fn().mockResolvedValue(undefined);
@@ -185,16 +185,24 @@ describe("AppShell", () => {
     );
 
     await waitFor(() => expect(screen.getByRole("button", { name: "s-gamma" })).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "gamma" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "s-gamma" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "切换工作区" })).toBeDisabled();
+    const otherWorkspace = screen.getByRole("button", { name: "gamma" });
+    const otherSession = screen.getByRole("button", { name: "s-gamma" });
+    const workspacePicker = screen.getByRole("button", { name: "切换工作区" });
+    expect(otherWorkspace).not.toBeDisabled();
+    expect(otherSession).not.toBeDisabled();
+    expect(workspacePicker).not.toBeDisabled();
+
+    fireEvent.click(otherWorkspace);
+    fireEvent.click(otherSession);
+    fireEvent.click(workspacePicker);
+    expect(onSelectWorkspace).toHaveBeenNthCalledWith(1, "C:/gamma");
+    expect(onSelectWorkspace).toHaveBeenNthCalledWith(2, "C:/gamma", "s-gamma");
+    expect(onSwitchWorkspace).toHaveBeenCalledOnce();
 
     const currentSession = screen.getByRole("button", { name: "s-current" });
     expect(currentSession).not.toBeDisabled();
     fireEvent.click(currentSession);
     expect(switchSession).toHaveBeenCalledWith("s-current");
-    expect(onSelectWorkspace).not.toHaveBeenCalled();
-    expect(onSwitchWorkspace).not.toHaveBeenCalled();
   });
 
   it("keeps the workspace switch action in a footer outside the scroll region", () => {

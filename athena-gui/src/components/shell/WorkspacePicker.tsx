@@ -29,7 +29,7 @@ export function WorkspacePicker({
   const [draft, setDraft] = useState("");
 
   const canContinue = currentRoot != null && !switching;
-  const canSelect = draft.trim() !== "" && !switching;
+  const canSelect = draft.trim() !== "";
 
   function submit() {
     if (draft.trim()) onSelect(draft);
@@ -73,7 +73,6 @@ export function WorkspacePicker({
                   <button
                     className={styles.item}
                     onClick={() => onSelect(root)}
-                    disabled={switching}
                     title={root}
                   >
                     <Icon name="folder" size={15} />
@@ -90,7 +89,7 @@ export function WorkspacePicker({
           <button
             className="btn btn--subtle"
             onClick={onBrowse}
-            disabled={browsing || switching}
+            disabled={browsing}
           >
             {browsing ? "浏览中…" : "浏览目录…"}
           </button>
@@ -104,14 +103,13 @@ export function WorkspacePicker({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && draft.trim()) submit();
               }}
-              disabled={switching}
             />
             <button
               className="btn btn--subtle"
               onClick={submit}
               disabled={!canSelect}
             >
-              {switching ? "切换中…" : "打开"}
+              打开
             </button>
           </div>
         </div>
