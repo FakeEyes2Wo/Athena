@@ -536,7 +536,7 @@ Task 3 changed neither side of that contract.
 - Consumes: state fields `resume_available`, `resume_reason`, and existing bridge method `resumeSearch()`.
 - Produces: `PipelineViewModel.resumeAvailable`, `PipelineViewModel.resumeReason`, and one shared `continueCurrentRun()` action used by composer and button.
 
-- [ ] **Step 1: Add failing composer-routing tests**
+- [x] **Step 1: Add failing composer-routing tests**
 
 In `usePipeline.test.tsx`, hydrate a failed PREPARE snapshot with
 `resume_available: true`, then assert:
@@ -557,7 +557,7 @@ Repeat through the WebSocket fallback and native invoke bridge mocks. Add negati
 for `continue research` and `continue three more attempts`. Those phrases must follow
 the existing new-task or guidance branch according to current run state.
 
-- [ ] **Step 2: Add failing restored-session and control-state tests**
+- [x] **Step 2: Add failing restored-session and control-state tests**
 
 Project `resume_available` and `resume_reason` in event tests. Verify:
 
@@ -570,7 +570,7 @@ Project `resume_available` and `resume_reason` in event tests. Verify:
 - two rapid continuation submissions share the existing in-flight guard or backend
   lifecycle guard and do not create two clarification previews.
 
-- [ ] **Step 3: Run frontend tests and observe current clarification call**
+- [x] **Step 3: Run frontend tests and observe current clarification call**
 
 Run:
 
@@ -581,7 +581,7 @@ npm --prefix athena-gui test -- --run src/hooks/__tests__/usePipeline.test.tsx s
 Expected: `resume_available` is ignored, failed runs are inactive, and exact `continue`
 calls `taskClarificationStart`.
 
-- [ ] **Step 4: Implement frontend projection and shared continuation action**
+- [x] **Step 4: Implement frontend projection and shared continuation action**
 
 Add these defaults to `PipelineViewModel`:
 
@@ -632,7 +632,7 @@ Add a sequential regression that applies a resumable state followed by a legacy/
 payload omitting both fields and asserts `resumeAvailable === false`,
 `resumeReason === null`, and a disabled Continue control.
 
-- [ ] **Step 5: Verify frontend tests/build and commit Task 4**
+- [x] **Step 5: Verify frontend tests/build and commit Task 4**
 
 Run:
 
@@ -648,6 +648,14 @@ Expected: focused tests and TypeScript/Vite build pass. Commit only Task 4 paths
 git add athena-gui/src/types/ui.ts athena-gui/src/hooks/usePipeline.ts athena-gui/src/hooks/__tests__/usePipeline.test.tsx athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx athena-gui/src/components/conversation/RunControls.tsx athena-gui/src/components/__tests__/conversation-pane.test.tsx athena-gui/src/lib/__tests__/tauri-bridge.test.ts
 git commit -m "fix(gui): continue interrupted research runs"
 ```
+
+Task 4 evidence (2026-09-04): commits `8818a74`, `6e956c7`, and `3c42534`
+project authoritative resume state, route exact continuation through the shared bridge,
+cover browser and native adapters, preserve error history, and key in-flight resume
+requests by session plus hydration epoch. Mutation testing confirmed the immediate
+session-identity assignments are required. A clean detached snapshot passed all four
+focused files (`75 passed`), the TypeScript/Vite production build, scoped diff checks,
+and independent AI specification and quality reviews.
 
 ---
 
