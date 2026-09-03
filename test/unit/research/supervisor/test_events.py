@@ -511,6 +511,51 @@ async def test_supervisor_bare_output_without_text_still_projects(tmp_path) -> N
     assert event.text == ""
 
 
+@pytest.mark.asyncio
+async def test_supervisor_output_preserves_generic_scope_and_identity(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+
+    await runtime.events.publish_from_supervisor(
+        "output",
+        {
+            "source": "agent",
+            "channel": "text",
+            "text": "api_key=secret-value",
+            "message_id": "message-1",
+            "session_id": "session-1",
+            "scope": "task_understanding",
+            "scope_id": "draft-1",
+        },
+    )
+
+    event = next(payload for kind, payload in seen if kind == "output")
+    assert event["message_id"] == "message-1"
+    assert (
+        event["session_id"],
+        event["scope"],
+        event["scope_id"],
+    ) == ("session-1", "task_understanding", "draft-1")
+    assert "secret-value" not in event["text"]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_output_rejects_partial_scope_metadata(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    with pytest.raises(ValidationError):
+        await runtime.events.publish_from_supervisor(
+            "output",
+            {
+                "source": "agent",
+                "channel": "text",
+                "text": "safe",
+                "session_id": "session-1",
+            },
+        )
+
+
 def test_state_projection_reads_successes_and_sota_from_research_tree(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
     hypothesis_id = runtime.tree.add_hypothesis(
