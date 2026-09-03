@@ -1,7 +1,6 @@
 """Restricted, non-interactive verification of public Git repositories."""
 
 import asyncio
-import ipaddress
 import os
 import re
 import subprocess
@@ -12,7 +11,6 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol, Sequence
-from urllib.parse import urlsplit, urlunsplit
 
 from athena.research.literature.paper_source.http import (
     HostRateLimiter,
@@ -29,8 +27,11 @@ from .baseline_research import (
     BaselineResearchError,
     BaselineVerification,
     VerificationAttempt,
+    assert_verification_matches_artifacts,
+    design_sha256,
     research_sha256,
 )
+from .repository_url import normalize_public_https_repository_url
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _SENSITIVE_VALUE_RE = re.compile(
@@ -43,18 +44,6 @@ _AUTHORIZATION_SCHEME_RE = re.compile(r"(?i)\b(?P<scheme>Bearer|Basic)\s+[^\s\r\
 _URL_CANDIDATE_RE = re.compile(
     r"(?P<scheme>https?|ssh|git)://[^\s'\"<>]+", re.IGNORECASE
 )
-_STRUCTURAL_ESCAPE_RE = re.compile(r"%(?:23|25|2f|3a|3f|40|5c)", re.IGNORECASE)
-_NUMERIC_IPV4_COMPONENT_RE = re.compile(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)")
-_IPV4_COMPATIBLE_NETWORK = ipaddress.IPv6Network("::/96")
-_NON_PUBLIC_HOST_SUFFIXES = (
-    ".invalid",
-    ".example",
-    ".internal",
-    ".local",
-    ".localhost",
-    ".test",
-)
-
 _UNTRUSTED_ENV_NAMES = {
     "ALL_PROXY",
     "GIT_ALLOW_PROTOCOL",
@@ -187,111 +176,6 @@ def _clean_environment() -> dict[str, str]:
     return environment
 
 
-def _normalize_repository_url(repository_url: str) -> str:
-    """Accept only a public HTTPS URL and return its canonical form."""
-
-    if not isinstance(repository_url, str) or not repository_url:
-        raise ValueError("repository URL must be a non-empty HTTPS URL")
-    if repository_url != repository_url.strip() or any(
-        character.isspace() for character in repository_url
-    ):
-        raise ValueError("repository URL must not contain whitespace")
-    if any(
-        ord(character) <= 0x1F or ord(character) == 0x7F for character in repository_url
-    ):
-        raise ValueError("repository URL must not contain control characters")
-    if "?" in repository_url or "#" in repository_url:
-        raise ValueError("repository URL must not contain a query or fragment")
-    if "\\" in repository_url:
-        raise ValueError("repository URL must use URL path separators")
-    if _STRUCTURAL_ESCAPE_RE.search(repository_url):
-        raise ValueError("repository URL must not encode structural delimiters")
-
-    try:
-        parsed = urlsplit(repository_url)
-        port = parsed.port
-        hostname = parsed.hostname
-    except ValueError as exc:
-        raise ValueError("repository URL is malformed") from exc
-
-    if parsed.scheme.casefold() != "https":
-        raise ValueError("repository URL must use HTTPS")
-    if port == 0:
-        raise ValueError("repository URL port must be between 1 and 65535")
-    if not hostname or parsed.username is not None or parsed.password is not None:
-        raise ValueError("repository URL must not contain credentials")
-    if "%" in parsed.netloc:
-        raise ValueError("repository authority must not be percent-encoded")
-    if parsed.netloc != parsed.netloc.strip() or not parsed.netloc:
-        raise ValueError("repository URL must include a host")
-    if parsed.path in ("", "/"):
-        raise ValueError("repository URL must include a repository path")
-
-    try:
-        normalized_host = hostname.encode("idna").decode("ascii").lower()
-    except UnicodeError as exc:
-        raise ValueError("repository hostname is not valid IDNA") from exc
-    if normalized_host.endswith("."):
-        normalized_host = normalized_host[:-1]
-    if "." not in normalized_host and ":" not in normalized_host:
-        raise ValueError("repository hostname must be a public DNS name")
-    if normalized_host == "localhost" or normalized_host.endswith(
-        _NON_PUBLIC_HOST_SUFFIXES
-    ):
-        raise ValueError("repository hostname must not use a local or reserved suffix")
-    try:
-        address = ipaddress.ip_address(normalized_host)
-    except ValueError:
-        address = None
-    if address is not None and not _routable_address(address).is_global:
-        raise ValueError("repository IP address must be globally routable")
-    if address is None and _looks_like_numeric_ipv4(normalized_host):
-        raise ValueError("repository hostname uses a non-canonical numeric IPv4 form")
-    if address is None:
-        labels = normalized_host.split(".")
-        if any(
-            not label or label.startswith("-") or label.endswith("-")
-            for label in labels
-        ) or not re.fullmatch(r"[a-z0-9.-]+", normalized_host):
-            raise ValueError("repository hostname is malformed")
-
-    # Lower-case the host and omit the default HTTPS port for stable evidence.
-    if ":" in normalized_host and not normalized_host.startswith("["):
-        normalized_host = f"[{normalized_host}]"
-    normalized_netloc = normalized_host
-    if port is not None and port != 443:
-        normalized_netloc += f":{port}"
-    normalized_path = parsed.path.rstrip("/")
-    if not normalized_path:
-        raise ValueError("repository URL must include a repository path")
-    return urlunsplit(("https", normalized_netloc, normalized_path, "", ""))
-
-
-def _looks_like_numeric_ipv4(hostname: str) -> bool:
-    """Detect libcurl's one-to-four component decimal/octal/hex IPv4 syntax."""
-
-    components = hostname.split(".")
-    return bool(
-        1 <= len(components) <= 4
-        and all(
-            _NUMERIC_IPV4_COMPONENT_RE.fullmatch(component) for component in components
-        )
-    )
-
-
-def _routable_address(
-    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
-) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
-    """Return the address whose routability controls an IP literal."""
-
-    if isinstance(address, ipaddress.IPv6Address):
-        if address.ipv4_mapped is not None:
-            return address.ipv4_mapped
-        if address in _IPV4_COMPATIBLE_NETWORK:
-            return ipaddress.IPv4Address(address.packed[-4:])
-    return address
-
-
 class GitCloneVerifier:
     """Prove that a public repository is reachable without reading its files."""
 
@@ -303,7 +187,7 @@ class GitCloneVerifier:
         """Clone a repository shallowly and return its resolved HEAD commit."""
 
         try:
-            normalized_url = _normalize_repository_url(repository_url)
+            normalized_url = normalize_public_https_repository_url(repository_url)
         except ValueError as exc:
             self._raise_failure(str(exc))
 
@@ -473,8 +357,10 @@ class BaselineSourceVerifier:
         if selected.repository_url is not None:
             try:
                 evidence = await self.git.verify(str(selected.repository_url))
-                return BaselineVerification(
+                verification = BaselineVerification(
+                    schema_version=2,
                     research_sha256=research_sha256(artifacts.raw_research),
+                    design_sha256=design_sha256(artifacts.raw_design),
                     selected_candidate_id=selected.candidate_id,
                     route="git",
                     verified_at=self.now(),
@@ -487,6 +373,8 @@ class BaselineSourceVerifier:
                         ),
                     ],
                 )
+                assert_verification_matches_artifacts(artifacts, verification)
+                return verification
             except BaselineResearchError as error:
                 attempts.append(
                     VerificationAttempt(
@@ -544,8 +432,10 @@ class BaselineSourceVerifier:
                         )
                     )
                 else:
-                    return BaselineVerification(
+                    verification = BaselineVerification(
+                        schema_version=2,
                         research_sha256=research_sha256(artifacts.raw_research),
+                        design_sha256=design_sha256(artifacts.raw_design),
                         selected_candidate_id=selected.candidate_id,
                         route="openalex",
                         verified_at=self.now(),
@@ -562,6 +452,8 @@ class BaselineSourceVerifier:
                             ),
                         ],
                     )
+                    assert_verification_matches_artifacts(artifacts, verification)
+                    return verification
 
         raise BaselineResearchError(
             "selected candidate has no qualifying source",

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from athena.research.prepare import baseline_research as baseline_contract
 from athena.research.prepare.baseline_research import (
     BaselineResearch,
     BaselineResearchError,
@@ -117,7 +118,9 @@ def write_artifacts(
 def verification_for(root: Path, **changes: object) -> BaselineVerification:
     artifacts = load_baseline_artifacts(root)
     values: dict[str, object] = {
+        "schema_version": 2,
         "research_sha256": research_sha256(artifacts.raw_research),
+        "design_sha256": baseline_contract.design_sha256(artifacts.raw_design),
         "selected_candidate_id": artifacts.selected.candidate_id,
         "route": "git",
         "verified_at": datetime.now(timezone.utc),
@@ -135,6 +138,30 @@ def test_loads_matching_research_and_design(tmp_path: Path) -> None:
     assert artifacts.selected.candidate_id == "resnet-transfer"
     assert artifacts.design.training_strategy == "partial_finetune"
     assert artifacts.research.training.strategy == "partial_finetune"
+
+
+def test_load_retains_exact_design_bytes(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    raw_design = (tmp_path / "BASELINE_DESIGN.md").read_bytes()
+
+    artifacts = load_baseline_artifacts(tmp_path)
+
+    assert artifacts.raw_design == raw_design
+
+
+def test_design_digest_distinguishes_lf_from_crlf() -> None:
+    lf = b"Selected candidate: `resnet-transfer`\n"
+    crlf = b"Selected candidate: `resnet-transfer`\r\n"
+
+    assert baseline_contract.design_sha256(lf) != baseline_contract.design_sha256(crlf)
+
+
+def test_rejects_design_that_is_not_strict_utf8(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    (tmp_path / "BASELINE_DESIGN.md").write_bytes(b"\xff\xfe")
+
+    with pytest.raises(BaselineResearchError, match="unable to read BASELINE_DESIGN"):
+        load_baseline_artifacts(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -581,6 +608,67 @@ def test_verification_cache_is_digest_and_candidate_bound(tmp_path: Path) -> Non
     assert load_cached_verified_baseline(tmp_path) is None
     with pytest.raises(BaselineResearchError):
         assert_verified_files(tmp_path, cached)
+
+
+def test_same_markers_with_different_design_body_do_not_match_verification(
+    tmp_path: Path,
+) -> None:
+    original = (
+        "# Baseline\n\nSelected candidate: `resnet-transfer`\n"
+        "Training strategy: `partial_finetune`\n\nOriginal adaptation.\n"
+    )
+    write_artifacts(tmp_path, design=original)
+    verification = verification_for(tmp_path)
+
+    changed = original.replace("Original adaptation.", "Different adaptation.")
+    write_artifacts(tmp_path, design=changed)
+    artifacts = load_baseline_artifacts(tmp_path)
+
+    with pytest.raises(BaselineResearchError, match="design artifact digest"):
+        baseline_contract.assert_verification_matches_artifacts(artifacts, verification)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "10.0.0.1", "[::1]"])
+def test_rejects_non_public_repository_in_cached_proof(
+    tmp_path: Path, host: str
+) -> None:
+    write_artifacts(tmp_path)
+
+    with pytest.raises(ValidationError):
+        verification_for(tmp_path, repository_url=f"https://{host}/repo.git")
+
+
+def test_rejects_safe_repository_proof_for_a_non_selected_candidate(
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    artifacts = load_baseline_artifacts(tmp_path)
+    verification = verification_for(
+        tmp_path, repository_url="https://github.com/pytorch/tutorials.git"
+    )
+
+    with pytest.raises(BaselineResearchError, match="selected repository"):
+        baseline_contract.assert_verification_matches_artifacts(artifacts, verification)
+
+
+def test_verification_serialization_is_canonical_and_newline_terminated(
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    verification = verification_for(tmp_path)
+
+    assert baseline_contract.verification_bytes(verification) == (
+        verification.model_dump_json(indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def test_verification_schema_version_is_explicit(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    values = verification_for(tmp_path).model_dump()
+    del values["schema_version"]
+
+    with pytest.raises(ValidationError):
+        BaselineVerification.model_validate(values)
 
 
 @pytest.mark.parametrize("route", ["git", "openalex"])

@@ -18,6 +18,8 @@ from pydantic import (
     model_validator,
 )
 
+from .repository_url import normalize_public_https_repository_url
+
 RESEARCH_FILENAME = "BASELINE_RESEARCH.json"
 DESIGN_FILENAME = "BASELINE_DESIGN.md"
 VERIFICATION_FILENAME = "BASELINE_RESEARCH_VERIFICATION.json"
@@ -499,10 +501,11 @@ class BaselineDesignSelection(BaseModel):
 
 @dataclass(frozen=True)
 class BaselineArtifacts:
-    """Validated research/design pair, retaining the exact research bytes."""
+    """Validated research/design pair, retaining both exact byte sequences."""
 
     root: Path
     raw_research: bytes
+    raw_design: bytes
     research: BaselineResearch
     design_text: str
     design: BaselineDesignSelection
@@ -524,8 +527,9 @@ class BaselineVerification(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2]
     research_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    design_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     selected_candidate_id: str = Field(min_length=1)
     route: Literal["git", "openalex"]
     verified_at: datetime
@@ -546,7 +550,19 @@ class BaselineVerification(BaseModel):
             raise ValueError("verification needs a successful attempt for its route")
 
         if self.route == "git":
-            if not _is_public_https_repository(self.repository_url):
+            if self.repository_url is None:
+                raise ValueError(
+                    "git verification requires a normalized public HTTPS repository URL"
+                )
+            try:
+                normalized_repository = normalize_public_https_repository_url(
+                    self.repository_url
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "git verification requires a normalized public HTTPS repository URL"
+                ) from exc
+            if normalized_repository != self.repository_url:
                 raise ValueError(
                     "git verification requires a normalized public HTTPS repository URL"
                 )
@@ -573,26 +589,6 @@ class VerifiedBaseline:
 
     artifacts: BaselineArtifacts
     verification: BaselineVerification
-
-
-def _is_public_https_repository(value: str | None) -> bool:
-    """Return whether a cache repository proof has a normalized HTTPS URL."""
-    if not value or value != value.strip() or value.endswith("/"):
-        return False
-    try:
-        parsed = urlsplit(value)
-        hostname = parsed.hostname
-    except ValueError:
-        return False
-    return bool(
-        parsed.scheme == "https"
-        and hostname
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.query
-        and not parsed.fragment
-        and parsed.path not in ("", "/")
-    )
 
 
 def _parse_marker(text: str, pattern: re.Pattern[str], label: str) -> str:
@@ -625,8 +621,9 @@ def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
             f"invalid {RESEARCH_FILENAME}", (str(exc),)
         ) from exc
     try:
-        design_text = design_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        raw_design = design_path.read_bytes()
+        design_text = raw_design.decode("utf-8", errors="strict")
+    except (OSError, UnicodeError, ValueError) as exc:
         raise BaselineResearchError(
             f"unable to read {DESIGN_FILENAME}", (str(exc),)
         ) from exc
@@ -664,6 +661,7 @@ def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
     return BaselineArtifacts(
         root=root,
         raw_research=raw_research,
+        raw_design=raw_design,
         research=research,
         design_text=design_text,
         design=design,
@@ -676,11 +674,72 @@ def research_sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def design_sha256(raw: bytes) -> str:
+    """Return the digest of the exact design bytes that were validated."""
+    return hashlib.sha256(raw).hexdigest()
+
+
+def verification_bytes(verification: BaselineVerification) -> bytes:
+    """Serialize one verification record to its canonical audit representation."""
+    return (verification.model_dump_json(indent=2) + "\n").encode("utf-8")
+
+
+def assert_verification_matches_artifacts(
+    artifacts: BaselineArtifacts,
+    verification: BaselineVerification,
+) -> None:
+    """Reject any verification proof that does not bind the complete artifacts."""
+    actual_research_digest = research_sha256(artifacts.raw_research)
+    if verification.research_sha256 != actual_research_digest:
+        raise BaselineResearchError(
+            "research artifact digest does not match verification",
+            (
+                f"expected={verification.research_sha256}",
+                f"actual={actual_research_digest}",
+            ),
+        )
+
+    actual_design_digest = design_sha256(artifacts.raw_design)
+    if verification.design_sha256 != actual_design_digest:
+        raise BaselineResearchError(
+            "design artifact digest does not match verification",
+            (
+                f"expected={verification.design_sha256}",
+                f"actual={actual_design_digest}",
+            ),
+        )
+
+    if verification.selected_candidate_id != artifacts.selected.candidate_id:
+        raise BaselineResearchError("selected candidate does not match verification")
+
+    if verification.route == "git":
+        if artifacts.selected.repository_url is None:
+            raise BaselineResearchError(
+                "Git verification requires a selected repository"
+            )
+        try:
+            selected_repository = normalize_public_https_repository_url(
+                str(artifacts.selected.repository_url)
+            )
+        except ValueError as exc:
+            raise BaselineResearchError(
+                "selected repository is not a public HTTPS repository", (str(exc),)
+            ) from exc
+        if verification.repository_url != selected_repository:
+            raise BaselineResearchError(
+                "Git verification proof does not match the selected repository"
+            )
+    elif not artifacts.selected.paper_locator:
+        raise BaselineResearchError(
+            "OpenAlex verification requires the selected paper locator"
+        )
+
+
 def write_verification(root: Path, verification: BaselineVerification) -> Path:
     """Persist platform verification atomically beside the research artifact."""
     target = root / VERIFICATION_FILENAME
     temporary = target.with_suffix(".json.tmp")
-    temporary.write_text(verification.model_dump_json(indent=2), encoding="utf-8")
+    temporary.write_bytes(verification_bytes(verification))
     temporary.replace(target)
     return target
 
@@ -693,34 +752,18 @@ def load_cached_verified_baseline(root: Path) -> VerifiedBaseline | None:
         verification = BaselineVerification.model_validate_json(cache_path.read_bytes())
     except (OSError, UnicodeError, ValidationError, ValueError):
         return None
-    if verification.research_sha256 != research_sha256(artifacts.raw_research):
-        return None
-    if verification.selected_candidate_id != artifacts.selected.candidate_id:
+    try:
+        assert_verification_matches_artifacts(artifacts, verification)
+    except BaselineResearchError:
         return None
     return VerifiedBaseline(artifacts=artifacts, verification=verification)
 
 
 def assert_verified_files(root: Path, verified: VerifiedBaseline) -> None:
     """Ensure a verified carrier still describes the files at ``root``."""
-    artifacts = load_baseline_artifacts(root)
-    expected_candidate = verified.artifacts.selected.candidate_id
-    expected_strategy = verified.artifacts.design.training_strategy
-    actual_digest = research_sha256(artifacts.raw_research)
-    if actual_digest != verified.verification.research_sha256:
-        raise BaselineResearchError(
-            "research artifact digest does not match verification",
-            (
-                f"expected={verified.verification.research_sha256}",
-                f"actual={actual_digest}",
-            ),
-        )
-    if (
-        artifacts.selected.candidate_id != expected_candidate
-        or verified.verification.selected_candidate_id != expected_candidate
-    ):
-        raise BaselineResearchError("selected candidate does not match verification")
-    if artifacts.design.training_strategy != expected_strategy:
-        raise BaselineResearchError("training strategy does not match verification")
+    assert_verification_matches_artifacts(
+        load_baseline_artifacts(root), verified.verification
+    )
 
 
 __all__ = [
@@ -747,10 +790,13 @@ __all__ = [
     "VerificationAttempt",
     "VERIFICATION_FILENAME",
     "VerifiedBaseline",
+    "assert_verification_matches_artifacts",
     "assert_verified_files",
+    "design_sha256",
     "load_baseline_artifacts",
     "load_cached_verified_baseline",
     "research_sha256",
     "validate_training_policy",
+    "verification_bytes",
     "write_verification",
 ]

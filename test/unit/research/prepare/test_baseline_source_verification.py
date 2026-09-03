@@ -1,4 +1,5 @@
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,20 +60,38 @@ class FakeOpenAlex:
 
 def _valid_payload() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": {
             "modality": "image",
             "task_type": "classification",
-            "labeled_samples": 480,
-            "effective_training_units": 120,
-            "group_count": 120,
-            "class_count": 5,
-            "minority_class_samples": 32,
             "input_scale": "paired 224x224 images",
             "regime": "small",
-            "recommended_strategy": "partial_finetune",
-            "evidence": ["eda:EDA_REPORT_LABELS.md: 480 labels across 120 groups"],
+            "facts": [
+                {
+                    "field": "labeled_samples",
+                    "value": 480,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_REPORT_LABELS.md#labels",
+                        "claim": "480 labels across 120 groups",
+                    },
+                }
+            ],
             "rationale": "Grouped labels are limited relative to pretrained vision capacity.",
+        },
+        "training": {
+            "strategy": "partial_finetune",
+            "pretrained": {
+                "status": "available",
+                "representation": "ImageNet encoder",
+                "evidence": {
+                    "kind": "source",
+                    "reference": "https://arxiv.org/abs/1512.03385",
+                    "claim": "The selected method provides pretrained weights.",
+                },
+            },
+            "safeguards": None,
+            "scratch_scale": None,
         },
         "candidates": [
             {
@@ -113,7 +132,13 @@ def _valid_payload() -> dict:
             },
         ],
         "selected_candidate_id": "resnet-transfer",
-        "search_queries": ["small image classification transfer baseline GitHub"],
+        "search": {
+            "queries": [
+                "small image classification transfer baseline GitHub",
+                "pretrained image classification official repository",
+            ],
+            "one_candidate": None,
+        },
         "limitations": [],
     }
 
@@ -144,7 +169,7 @@ def _work(artifacts: BaselineArtifacts, citations: int = 100) -> OpenAlexWork:
 async def test_repository_success_does_not_require_openalex(
     valid_artifacts: BaselineArtifacts,
 ) -> None:
-    git = FakeGit(GitCloneEvidence("https://github.com/org/repo.git", "b" * 40))
+    git = FakeGit(GitCloneEvidence("https://github.com/pytorch/vision.git", "b" * 40))
     openalex = FakeOpenAlex(error=AssertionError("OpenAlex must not be called"))
     verified_at = datetime(2026, 9, 2, tzinfo=timezone.utc)
 
@@ -153,7 +178,11 @@ async def test_repository_success_does_not_require_openalex(
     ).verify(valid_artifacts)
 
     assert result.route == "git"
-    assert result.repository_url == "https://github.com/org/repo.git"
+    assert result.schema_version == 2
+    assert (
+        result.design_sha256 == hashlib.sha256(valid_artifacts.raw_design).hexdigest()
+    )
+    assert result.repository_url == "https://github.com/pytorch/vision.git"
     assert result.commit == "b" * 40
     assert result.openalex_id is None
     assert result.title is None
@@ -161,6 +190,24 @@ async def test_repository_success_does_not_require_openalex(
     assert result.cited_by_count is None
     assert result.verified_at == verified_at
     assert openalex.locators == []
+
+
+@pytest.mark.asyncio
+async def test_repository_proof_must_match_the_selected_repository(
+    valid_artifacts: BaselineArtifacts,
+) -> None:
+    git = FakeGit(GitCloneEvidence("https://github.com/org/other.git", "b" * 40))
+    valid_artifacts.selected.paper_locator = None
+
+    with pytest.raises(BaselineResearchError, match="no qualifying source") as caught:
+        await BaselineSourceVerifier(
+            git=git,
+            openalex=FakeOpenAlex(error=AssertionError("must not fall back")),
+        ).verify(valid_artifacts)
+
+    assert caught.value.diagnostics == (
+        "Git verification proof does not match the selected repository",
+    )
 
 
 @pytest.mark.asyncio
