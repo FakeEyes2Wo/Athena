@@ -396,7 +396,7 @@ Expected: the real Agent loop runs entirely against fakes and all tests pass. Co
 - Produces: `CLARIFICATION_FAILURE_NOTICE = "Task understanding failed. Retry to continue."`.
 - Preserves: controller public RPC methods and deterministic behavior.
 
-- [ ] **Step 1: Write failing question/final ordering tests**
+- [x] **Step 1: Write failing question/final ordering tests**
 
 Use a generator that returns `ClarificationModelOutput` and a sink that loads the store at call time. For a question, assert the observed store has a matching `pending_request` before the persist-requested `public_update`; for a final, assert the observed store is already `READY_FOR_CONFIRMATION`. In both cases assert `source="agent"`, `persist=True`, `session_id` equals the draft session, and `scope_id` equals the draft id.
 
@@ -408,7 +408,7 @@ step calls no broker and saves the existing `best_final` projection. In both
 cases any model update is attempted only after the ready draft save. A generator
 failure at the cap must enter `FAILED`, not silently use deterministic output.
 
-- [ ] **Step 2: Write failing error and cancellation tests**
+- [x] **Step 2: Write failing error and cancellation tests**
 
 Add four assertions:
 
@@ -428,7 +428,7 @@ assert "sk-secret-value" not in repr(published)
 
 Also prove a raising non-cancellation sink error does not change the saved READY/FAILED result and a store save failure publishes nothing. Add the exact cancellation matrix: (1) cancellation during generation propagates and leaves the original `CLARIFYING` draft; (2) cancellation publishing a question update propagates and leaves `CLARIFYING` with the saved `pending_request`; (3) cancellation publishing a final update propagates and leaves the saved `READY_FOR_CONFIRMATION` draft; (4) cancellation publishing the fixed failure notice propagates and leaves the saved `FAILED` draft. None of the four rolls back canonical state. This test is not a claim about cancellation propagation inside arbitrary generic-Agent subtool tasks.
 
-- [ ] **Step 3: Run the controller tests and confirm ordering failures**
+- [x] **Step 3: Run the controller tests and confirm ordering failures**
 
 Run:
 
@@ -438,7 +438,7 @@ uv run pytest -q test/unit/research/clarification/test_controller.py
 
 Expected: FAIL because the controller currently consumes only a raw step and has no progress sink.
 
-- [ ] **Step 4: Implement commit ordering with small private helpers**
+- [x] **Step 4: Implement commit ordering with small private helpers**
 
 Replace the generation call with `turn = await generate_turn(...)` before the
 question-cap decision. For a final, compute and save `finalize(...)` before
@@ -449,7 +449,7 @@ Do not publish when `turn.public_update is None`.
 
 Keep provider/schema/artifact handling in the existing `except Exception` block. Save `fail(...)` first, then call `publish_public_progress` exactly once with the fixed notice and `stage="failure"`. Because `CancelledError` inherits `BaseException`, cancellation from the awaited provider/generator/controller boundary and the direct publication helper remains outside this handler. The persisted state is never rolled back: generation leaves the original `CLARIFYING` draft; question publication leaves `CLARIFYING` plus `pending_request`; final publication leaves `READY_FOR_CONFIRMATION`; and failure-notice publication leaves `FAILED`. Keep broker failure semantics unchanged; do not alter generic Agent-runtime task cancellation semantics.
 
-- [ ] **Step 5: Run the complete controller/state slice and commit Task 4**
+- [x] **Step 5: Run the complete controller/state slice and commit Task 4**
 
 Run:
 
