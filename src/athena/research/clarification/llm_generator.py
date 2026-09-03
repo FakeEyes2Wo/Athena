@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
@@ -58,10 +59,21 @@ Choose the next truthful clarification action from that evidence."""
 def _safe_json(value: object) -> str:
     """Serialize compact JSON while preventing data from closing prompt delimiters."""
     return (
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"))
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
     )
+
+
+def _normalize_free_text(value: str) -> str:
+    """Normalize user-controlled prose before prompt projection and budgeting."""
+    normalized = unicodedata.normalize("NFKC", value)
+    printable = "".join(
+        " " if char.isspace() else char
+        for char in normalized
+        if char.isspace() or unicodedata.category(char) not in {"Cc", "Cf", "Cs"}
+    )
+    return " ".join(printable.split())
 
 
 def _canonical_state(draft: ClarificationDraft) -> dict[str, object]:
@@ -69,25 +81,59 @@ def _canonical_state(draft: ClarificationDraft) -> dict[str, object]:
     unresolved = [item for item in draft.unresolved if item.critical] + [
         item for item in draft.unresolved if not item.critical
     ]
+    understanding = draft.understanding
     return {
-        "original_task": draft.original_task,
-        "understanding": draft.understanding.model_dump(mode="json"),
+        "original_task": _normalize_free_text(draft.original_task),
+        "understanding": {
+            "title": _normalize_free_text(understanding.title),
+            "dataset": (
+                _normalize_free_text(understanding.dataset)
+                if understanding.dataset is not None
+                else None
+            ),
+            "target": (
+                _normalize_free_text(understanding.target)
+                if understanding.target is not None
+                else None
+            ),
+            "task_type": understanding.task_type,
+            "primary_metric": (
+                _normalize_free_text(understanding.primary_metric)
+                if understanding.primary_metric is not None
+                else None
+            ),
+            "direction": understanding.direction,
+            "evaluation_plan": (
+                _normalize_free_text(understanding.evaluation_plan)
+                if understanding.evaluation_plan is not None
+                else None
+            ),
+        },
         "answers": [
             {
-                "question": answer.question,
+                "question": _normalize_free_text(answer.question),
                 "outcome": answer.outcome,
-                "value": answer.value,
-                "choice_label": answer.choice_label,
+                "value": (
+                    _normalize_free_text(answer.value)
+                    if answer.value is not None
+                    else None
+                ),
+                "choice_label": (
+                    _normalize_free_text(answer.choice_label)
+                    if answer.choice_label is not None
+                    else None
+                ),
             }
             for answer in draft.answers
         ],
         "revisions": [
-            {"instruction": revision.instruction} for revision in draft.revisions
+            {"instruction": _normalize_free_text(revision.instruction)}
+            for revision in draft.revisions
         ],
         "unresolved": [
             {
                 "field": item.field,
-                "reason": item.reason,
+                "reason": _normalize_free_text(item.reason),
                 "critical": item.critical,
             }
             for item in unresolved
@@ -156,13 +202,15 @@ def _compact_original_task(original_task: str) -> str:
     return _shorten_text(original_task, lambda value: len(_safe_json(value)) <= budget)
 
 
-def _fit_answer(
-    answer: dict[str, object],
+def _fit_record(
+    record: dict[str, object],
     retained: list[tuple[int, dict[str, object]]],
     index: int,
+    *,
+    budget: int,
+    shorten_fields: tuple[str, ...],
 ) -> dict[str, object] | None:
-    projected = dict(answer)
-    budget = _SECTION_BUDGETS["answers"]
+    projected = dict(record)
 
     def fits(candidate: dict[str, object]) -> bool:
         records = [*retained, (index, candidate)]
@@ -170,61 +218,52 @@ def _fit_answer(
         return len(_safe_json(ordered)) <= budget
 
     if not fits(projected):
-        for field in ("question", "value", "choice_label"):
+        for field in shorten_fields:
             _shorten_mapping_field(projected, field, fits)
             if fits(projected):
                 break
     return projected if fits(projected) else None
 
 
-def _compact_answers(answers: list[dict[str, object]]) -> list[dict[str, object]]:
-    if not answers:
+def _compact_ordered_records(
+    records: list[dict[str, object]],
+    *,
+    budget: int,
+    shorten_fields: tuple[str, ...],
+) -> list[dict[str, object]]:
+    if not records:
         return []
     retained: list[tuple[int, dict[str, object]]] = []
-    latest_index = len(answers) - 1
-    latest = _fit_answer(answers[latest_index], retained, latest_index)
-    if latest is not None:
-        retained.append((latest_index, latest))
-    for index in range(latest_index - 1, -1, -1):
-        candidate = _fit_answer(answers[index], retained, index)
+    latest_index = len(records) - 1
+    for index in (latest_index, *range(latest_index - 1, -1, -1)):
+        candidate = _fit_record(
+            records[index],
+            retained,
+            index,
+            budget=budget,
+            shorten_fields=shorten_fields,
+        )
         if candidate is not None:
             retained.append((index, candidate))
     return [value for _index, value in sorted(retained)]
 
 
-def _fit_revision(
-    revision: dict[str, object],
-    retained: list[tuple[int, dict[str, object]]],
-    index: int,
-) -> dict[str, object] | None:
-    projected = dict(revision)
-    budget = _SECTION_BUDGETS["revisions"]
-
-    def fits(candidate: dict[str, object]) -> bool:
-        records = [*retained, (index, candidate)]
-        ordered = [value for _index, value in sorted(records)]
-        return len(_safe_json(ordered)) <= budget
-
-    if not fits(projected):
-        _shorten_mapping_field(projected, "instruction", fits)
-    return projected if fits(projected) else None
+def _compact_answers(answers: list[dict[str, object]]) -> list[dict[str, object]]:
+    return _compact_ordered_records(
+        answers,
+        budget=_SECTION_BUDGETS["answers"],
+        shorten_fields=("question", "value", "choice_label"),
+    )
 
 
 def _compact_revisions(
     revisions: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    if not revisions:
-        return []
-    retained: list[tuple[int, dict[str, object]]] = []
-    latest_index = len(revisions) - 1
-    latest = _fit_revision(revisions[latest_index], retained, latest_index)
-    if latest is not None:
-        retained.append((latest_index, latest))
-    for index in range(latest_index - 1, -1, -1):
-        candidate = _fit_revision(revisions[index], retained, index)
-        if candidate is not None:
-            retained.append((index, candidate))
-    return [value for _index, value in sorted(retained)]
+    return _compact_ordered_records(
+        revisions,
+        budget=_SECTION_BUDGETS["revisions"],
+        shorten_fields=("instruction",),
+    )
 
 
 def _compact_unresolved(
@@ -232,10 +271,7 @@ def _compact_unresolved(
 ) -> list[dict[str, object]]:
     retained: list[dict[str, object]] = []
     budget = _SECTION_BUDGETS["unresolved"]
-    prioritized = [item for item in unresolved if item["critical"]] + [
-        item for item in unresolved if not item["critical"]
-    ]
-    for item in prioritized:
+    for item in unresolved:
         projected = dict(item)
 
         def fits(candidate: dict[str, object]) -> bool:

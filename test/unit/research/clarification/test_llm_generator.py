@@ -50,7 +50,7 @@ SECTION_BUDGETS = {
 
 def _safe_json(value: object) -> str:
     return (
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"))
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
     )
@@ -145,6 +145,104 @@ def test_prompt_instructions_define_the_public_and_unknown_data_boundaries() -> 
     assert "ClarificationModelOutput" in prompt
 
 
+def test_prompt_normalizes_only_listed_free_text_fields() -> None:
+    compatibility_text = "  ＡＢＣ\u200b\x00\n ﬀ ①  "
+    draft = _draft(
+        original_task=compatibility_text,
+        understanding=DraftUnderstanding(
+            title=compatibility_text,
+            dataset=compatibility_text,
+            target=compatibility_text,
+            task_type="classification",
+            primary_metric=compatibility_text,
+            direction="maximize",
+            evaluation_plan=compatibility_text,
+        ),
+        answers=[
+            ClarificationAnswer(
+                request_id="audit-id",
+                question=compatibility_text,
+                outcome="choice",
+                value=compatibility_text,
+                choice_label=compatibility_text,
+                answered_at=NOW,
+            )
+        ],
+        revisions=[_revision(1, compatibility_text)],
+        unresolved=[
+            UnresolvedItem(
+                field="ＦIELD-①",
+                reason=compatibility_text,
+                critical=True,
+            )
+        ],
+        questions_asked=1,
+    )
+
+    state = _state(build_clarification_prompt(draft))
+
+    assert state["original_task"] == "ABC ff 1"
+    for field in (
+        "title",
+        "dataset",
+        "target",
+        "primary_metric",
+        "evaluation_plan",
+    ):
+        assert state["understanding"][field] == "ABC ff 1"
+    assert state["understanding"]["task_type"] == "classification"
+    assert state["understanding"]["direction"] == "maximize"
+    assert state["answers"] == [
+        {
+            "question": "ABC ff 1",
+            "outcome": "choice",
+            "value": "ABC ff 1",
+            "choice_label": "ABC ff 1",
+        }
+    ]
+    assert state["revisions"] == [{"instruction": "ABC ff 1"}]
+    assert state["unresolved"] == [
+        {"field": "ＦIELD-①", "reason": "ABC ff 1", "critical": True}
+    ]
+    assert state["questions_asked"] == 1
+
+
+def test_prompt_is_utf8_transport_safe_for_free_and_identifier_surrogates() -> None:
+    draft = _draft(
+        original_task="task\ud800 text",
+        understanding=DraftUnderstanding(
+            title="title\ud801",
+            dataset=None,
+            target=None,
+            task_type="other",
+            primary_metric=None,
+            direction=None,
+            evaluation_plan=None,
+        ),
+        unresolved=[
+            UnresolvedItem(
+                field="exact-field\udfff",
+                reason="reason\ud802",
+                critical=True,
+            )
+        ],
+    )
+
+    prompt = build_clarification_prompt(draft)
+    state_source = _state_source(prompt)
+    state = json.loads(state_source)
+
+    assert prompt.encode("utf-8")
+    assert state["original_task"] == "task text"
+    assert state["understanding"]["title"] == "title"
+    assert state["unresolved"][0] == {
+        "field": "exact-field\udfff",
+        "reason": "reason",
+        "critical": True,
+    }
+    assert "\\udfff" in state_source
+
+
 def test_unresolved_projection_is_critical_first_even_without_compaction() -> None:
     draft = _draft(
         unresolved=[
@@ -233,6 +331,37 @@ def test_compact_revisions_keep_latest_instruction_in_chronological_order() -> N
     assert retained_numbers == sorted(retained_numbers)
     assert all(list(item) == ["instruction"] for item in projected)
     assert len(_safe_json(projected)) <= SECTION_BUDGETS["revisions"]
+
+
+def test_compact_answers_and_revisions_keep_oversized_latest_records() -> None:
+    huge = "latest-" + "<>" * 5_000
+    draft = _draft(
+        original_task="x" * 13_000,
+        answers=[
+            _answer(1),
+            ClarificationAnswer(
+                request_id="latest-answer-audit",
+                question=huge,
+                outcome="text",
+                value=huge,
+                choice_label=huge,
+                answered_at=NOW,
+            ),
+        ],
+        revisions=[_revision(1), _revision(2, huge)],
+    )
+
+    state = _state(build_clarification_prompt(draft))
+
+    assert state["answers"][-1]["outcome"] == "text"
+    assert any(
+        isinstance(state["answers"][-1][field], str)
+        and state["answers"][-1][field].endswith("…[truncated]")
+        for field in ("question", "value", "choice_label")
+    )
+    assert state["revisions"][-1]["instruction"].endswith("…[truncated]")
+    assert len(_safe_json(state["answers"])) <= SECTION_BUDGETS["answers"]
+    assert len(_safe_json(state["revisions"])) <= SECTION_BUDGETS["revisions"]
 
 
 def test_compact_unresolved_is_critical_first_and_skips_unfit_exact_field() -> None:
