@@ -64,6 +64,51 @@ describe("App workspace switching", () => {
     pipelineMocks.usePipeline.mockReturnValue(pipeline());
   });
 
+  it("coalesces rapid sidebar workspace switches without committing the superseded root", async () => {
+    localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a", "/b", "/c"]));
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    const firstSwitch = deferred<ReturnType<typeof settings>>();
+    const finalSwitch = deferred<ReturnType<typeof settings>>();
+    bridgeMocks.setProjectRoot
+      .mockReturnValueOnce(firstSwitch.promise)
+      .mockReturnValueOnce(finalSwitch.promise);
+
+    render(<App />);
+
+    const workspaceB = await screen.findByRole("button", { name: "b" });
+    const workspaceC = screen.getByRole("button", { name: "c" });
+    expect(workspaceB).toBeEnabled();
+    expect(workspaceC).toBeEnabled();
+
+    fireEvent.click(workspaceB);
+    fireEvent.click(workspaceC);
+
+    expect(bridgeMocks.setProjectRoot).toHaveBeenCalledTimes(1);
+    expect(bridgeMocks.setProjectRoot).toHaveBeenLastCalledWith("/b");
+    expect(workspaceB).toBeEnabled();
+    expect(workspaceC).toBeEnabled();
+
+    await act(async () => {
+      firstSwitch.resolve(settings("/b"));
+      await firstSwitch.promise;
+    });
+
+    await waitFor(() => {
+      expect(bridgeMocks.setProjectRoot).toHaveBeenCalledTimes(2);
+      expect(bridgeMocks.setProjectRoot).toHaveBeenLastCalledWith("/c");
+    });
+    expect(pipelineMocks.usePipeline.mock.calls.map(([root]) => root)).not.toContain("/b");
+
+    await act(async () => {
+      finalSwitch.resolve(settings("/c"));
+      await finalSwitch.promise;
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "c" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "b" })).toBeEnabled();
+    expect(pipelineMocks.usePipeline).toHaveBeenLastCalledWith("/c", null);
+  });
+
   it("keeps the picker dismissible and usable through repeated final sidebar switch failures", async () => {
     localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a", "/b"]));
     localStorage.setItem(

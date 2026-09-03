@@ -88,6 +88,26 @@ Every implementation task received independent review and re-review after findin
 The final whole-branch re-review concluded: spec PASS, code quality APPROVED, merge
 readiness READY, with no remaining findings.
 
+## Additional App-level integration proof
+
+The follow-up test-only branch adds a real `App` integration scenario for rapid
+sidebar switching. With `/b` still awaiting `setProjectRoot`, `/c` remains
+clickable and replaces the queued intent. The test proves that only one RPC runs
+at a time, `/b` never reaches `usePipeline`, and `/c` becomes the final committed
+workspace.
+
+Fresh pre-merge verification from the isolated
+`test/frontend-switch-integration` worktree passed:
+
+- `npm test -- --run src/__tests__/App.test.tsx` — exit 0; 2 tests passed.
+- `npm test -- --run` — exit 0; 18 test files and 141 tests passed.
+- `npm run build` — exit 0; 2,761 modules transformed.
+- `git diff --check` — exit 0.
+
+Independent review of `4a04052..c1a9884` concluded `APPROVED`, with no blocker,
+warning, or nit. The reviewed diff changes only the App test and planning
+metadata; production behavior remains unchanged.
+
 ## Integration
 
 The feature branch was merged locally into `main` by merge commit `6b89e9e`.
