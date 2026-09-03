@@ -397,6 +397,9 @@ async def test_git_verifier_pins_all_addresses_and_disables_redirects(
     for argv, _, _, _ in runner.calls:
         assert expected_resolve in argv
         assert "http.followRedirects=false" in argv
+        assert "http.emptyAuth=false" in argv
+        assert "http.proactiveAuth=none" in argv
+        assert "http.delegation=none" in argv
 
 
 @pytest.mark.asyncio
@@ -520,6 +523,9 @@ async def test_git_verifier_isolates_git_environment_and_config_for_both_command
         assert "protocol.https.allow=always" in argv
         assert "credential.helper=" in argv
         assert "http.followRedirects=false" in argv
+        assert "http.emptyAuth=false" in argv
+        assert "http.proactiveAuth=none" in argv
+        assert "http.delegation=none" in argv
         assert "http.cookieFile=" in argv
         assert "http.saveCookies=false" in argv
         assert "http.extraHeader=" in argv
