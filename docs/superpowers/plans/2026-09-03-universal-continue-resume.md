@@ -828,7 +828,7 @@ minimal restorations; no obsolete or generated stash content was restored.
 - Exercises: confirmed task -> phase failure -> exact continuation -> same phase and task contract.
 - Verifies: direct runtime, GUI message RPC, GUI resume RPC, TUI, restored session, WebSocket frontend, and native bridge share the contract.
 
-- [ ] **Step 1: Build a hermetic phase-failure harness**
+- [x] **Step 1: Build a hermetic phase-failure harness**
 
 The harness must accept phase `PREPARE`, `SEARCH`, or `VALIDATE`, fail the first phase
 entry, block on the second, and record lifecycle task identities. It must create a real
@@ -836,7 +836,7 @@ confirmed clarification handoff before the first phase starts and make no networ
 Patch the narrow phase entry points on a real `ResearchRuntime`; do not rebuild the
 Task 2 concurrency or baseline-authority harnesses in this adapter-matrix file.
 
-- [ ] **Step 2: Add parameterized cross-surface success tests**
+- [x] **Step 2: Add parameterized cross-surface success tests**
 
 For every phase, assert:
 
@@ -854,7 +854,7 @@ Exercise `runtime.message("continue")`, `runtime.start_task("continue")`,
 The matrix proves entry-point convergence; lifecycle serialization, terminal-state
 classification, and authority retry semantics remain owned by the focused Task 2 tests.
 
-- [ ] **Step 3: Add end-to-end WebSocket and native bridge assertions**
+- [x] **Step 3: Add end-to-end WebSocket and native bridge assertions**
 
 Extend gateway E2E to submit a `message` request containing `continue` through a real
 WebSocket server after a failed state and observe `RUNNING` plus unchanged draft ID and
@@ -870,7 +870,7 @@ command, assert it is disjoint from `SUPPORTED_METHODS`, and compare registered 
 commands against proxied commands plus that native-only set. This is a test-model fix;
 do not add the directory helper to Python RPC methods.
 
-- [ ] **Step 4: Add negative and concurrency acceptance tests**
+- [x] **Step 4: Add negative and concurrency acceptance tests**
 
 Add only cross-surface gaps here: a genuinely new task still receives `different_task`,
 and a second phase failure is surfaced normally without creating a third lifecycle.
@@ -879,7 +879,7 @@ STOPPED, COMPLETED, multiword guidance, deterministic concurrent resume, stop/re
 and both recovered and persistent baseline-authority outage/mismatch. Their fresh
 results are part of Task 6 evidence.
 
-- [ ] **Step 5: Run cross-surface and compatibility suites**
+- [x] **Step 5: Run cross-surface and compatibility suites**
 
 Run:
 
@@ -904,6 +904,20 @@ hook tests mock the bridge and therefore cannot prove transport selection, while
 already supplies the deterministic lifecycle/authority semantics. The refined task
 places browser/native assertions at the real bridge boundary and keeps the new runtime
 file focused on phase and caller convergence.
+
+Task 6 evidence (2026-09-04): commits `98d98bf` and `2a1ec4d` add the real
+PREPARE/SEARCH/VALIDATE failure harness, cover all four Python-owned entry points, send
+an exact `continue` through a real WebSocket server, preserve the confirmed task and
+clarification artifacts byte-for-byte, and model the directory picker as a native-only
+Tauri command. The harness exposed a real recovery defect: `PlanRuntime.recover()`
+replaced the Supervisor state object and left `ResearchRuntime.state` stale. The scoped
+fix synchronizes reconciled fields into the original shared `ResearchState` object so
+all callers continue to observe one durable snapshot without bypassing recovery.
+Independent specification review passed and independent quality review approved with no
+findings. Fresh verification passed: Python `121 passed`, isolated WebSocket `1 passed`,
+React `63 passed`, Rust protocol `43 passed`, and TypeScript compatibility `6 passed`;
+Black and scoped diff checks were clean. The combined Python gateway run emitted one
+known Windows asyncio subprocess-finalizer warning while exiting successfully.
 
 ---
 
