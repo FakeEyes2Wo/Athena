@@ -113,8 +113,9 @@ The implementation must classify state deterministically:
 
 Task evidence is the persisted original task or confirmed understanding:
 `state.task_text` or `state.task_understanding`. Legacy confirmed checkpoints that lack
-`task_text` remain resumable through their structured understanding. A process-local
-running lifecycle is also sufficient for the idempotent `already_running` result.
+`task_text` remain resumable through their structured understanding. Process-local
+lifecycle identity is not an input to the pure capability projection; the mutating
+runtime checks it under the resume lock for idempotent `already_running` handling.
 
 Expose one public runtime method:
 
@@ -126,6 +127,26 @@ async def ResearchRuntime.resume_current_task(self) -> str:
 Both `/resume` and plain `continue` call this method. `start_task("continue")` detects
 the alias before `seed_unconfirmed_task`, then calls the same method. This ordering is
 the key invariant that prevents a resume word from reaching task clarification.
+
+Every runtime owns a process-local `asyncio.Lock` in its lifecycle session. The public
+resume method holds that lock across capability classification, terminal-task rearming,
+`Supervisor.resume(...)`, and lifecycle start. A FAILED state whose old lifecycle task
+is still unwinding waits with `asyncio.gather(..., return_exceptions=True)` before
+rearming; the old phase exception is observed but not re-raised from the resume request,
+and the task is not mistaken for a live RUNNING task. Concurrent GUI, TUI, CLI, or
+Python resume requests therefore observe or create one lifecycle task, never two. The
+lock is not persisted and requires no migration.
+
+A PREPARE failure caused by baseline authority outage, generation conflict, or
+attestation/evidence mismatch is eligible for an explicit resume attempt. Resume
+re-enters the same authoritative PREPARE gate at the same durable phase. It never
+regenerates, rewrites, or trusts a local baseline as a substitute for authority. If the
+authority condition has recovered, PREPARE continues; if not, the original typed
+authority failure is surfaced again. Neither outcome enters clarification or changes
+the confirmed task artifacts. Resume itself returns `RUNNING` after starting the
+lifecycle; a persistent authority error is observed asynchronously through the
+replacement lifecycle task and the normal state/error event, not synchronously from the
+resume RPC.
 
 Unavailable resume attempts raise a stable domain error:
 
@@ -153,7 +174,11 @@ flag once these fields are available.
 
 The state event remains authoritative after session switches and workspace remounts.
 Older event producers that omit the fields remain compatible because clients default to
-`false` and `null`.
+`false` and `null`. Every complete state snapshot resets omitted resume fields to those
+defaults; a new or legacy session cannot inherit resumability from the previous session.
+Initial hydration applies state only after the target session is selected (or rejects a
+stale snapshot with a session-aware epoch). The gateway restore path uses the public
+`state_path` property rather than a fake-only `_state_path` attribute.
 
 ## 7. UI behavior
 
@@ -174,6 +199,12 @@ No new screen or layout is required. The only visible change is that an error or
 interrupted run offers an enabled Continue action and submitting `continue` no longer
 creates a second task-understanding card.
 
+`task_clarification_start` itself remains an explicit low-level clarification RPC; it
+does not become a polymorphic resume endpoint. All official free-text entrypoints route
+the exact alias before calling it. Direct callers that intentionally invoke the
+clarification RPC retain the existing `different_task` protection, while genuine new
+task text continues to use that same protection.
+
 ### TUI
 
 The TUI remains a thin forwarder. Runtime parsing supplies the behavior, while TUI help
@@ -193,10 +224,14 @@ The existing `resume` spelling and output format remain valid.
   `handoff_refs["task_clarification"]`, the clarification draft ID, or its revision.
 - Repeated `continue` while already running is idempotent and does not spawn a second
   Supervisor lifecycle task.
+- Concurrent resume requests are serialized by the runtime lifecycle resume lock.
+- Authority-related PREPARE failures may be retried only through the existing
+  authoritative gate; an unchanged outage or mismatch fails again without local
+  baseline regeneration.
 - A fresh session cannot turn `continue` into a research title.
 - An explicit STOP or completed phase cannot be bypassed with the alias.
 - `different_task` remains unchanged and continues to protect real new task submissions.
-- The existing lifecycle single-task guard remains the concurrency boundary for two
+- The explicit lifecycle resume lock is the concurrency boundary for two
   near-simultaneous resume requests.
 
 ## 9. Testing strategy
@@ -206,7 +241,8 @@ alone. Required layers are:
 
 1. Pure contract tests for exact matching and every capability reason.
 2. Runtime tests proving failed PREPARE, SEARCH, and VALIDATE resume without task
-   reseeding, and proving repeated resume is idempotent.
+   reseeding, proving repeated/concurrent resume is idempotent, and proving baseline
+   authority recovery or repeated failure never bypasses the authoritative gate.
 3. Clarification integration tests proving the draft and named handoff are byte-for-byte
    unchanged across resume.
 4. Gateway tests for `message`, `resume`, and `start_task` convergence and typed errors.

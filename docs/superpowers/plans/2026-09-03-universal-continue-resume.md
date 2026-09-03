@@ -18,6 +18,13 @@
 - Resume must preserve `task_text`, `task_understanding`, the clarification draft and revision, `TASK_CLARIFICATION.md`, and `handoff_refs["task_clarification"]`.
 - STOPPED and COMPLETED are terminal. A fresh taskless session is not resumable.
 - Repeated or concurrent resume requests must create at most one live Supervisor lifecycle task.
+- A runtime-scoped `LifecycleSession.resume_lock` must serialize capability checks,
+  lifecycle rearming, Supervisor resume, and lifecycle start for every resume request.
+- A PREPARE failure caused by unavailable or mismatched baseline authority remains
+  resumable. Resume re-enters the same authoritative PREPARE gate; it never rebuilds
+  or trusts a local baseline to bypass authority. If authority is still unavailable,
+  the original typed authority failure is surfaced again without clarification or
+  checkpoint-schema mutation.
 - Browser WebSocket and native Tauri must use the same `resume` RPC; do not add transport-specific state machines.
 - State-event additions must be backward compatible and require no checkpoint migration.
 - The independent TypeScript AutoResearch/DSH state machines receive compatibility verification only; do not redesign their persistence in this plan.
@@ -29,32 +36,43 @@
 - Create `test/unit/research/test_resume_contract.py`: pure matching and state-matrix tests.
 - Modify `src/athena/research/runtime/control.py`: one authoritative resume operation and message routing.
 - Modify `src/athena/research/runtime/facade.py`: public `resume_current_task()` and early `start_task("continue")` routing.
+- Modify `src/athena/research/runtime/services.py`: runtime-scoped resume serialization lock.
 - Modify `src/athena/research/supervisor/events.py`: additive resume fields on `StateEvent`.
 - Modify `src/athena/research/runtime/event_projection.py`: project the pure capability.
 - Modify `test/unit/research/test_breakpoint_resume.py`, `test/integration/research/test_task_seeding.py`, and `test/integration/research/test_task_confirmation_gate.py`: runtime and clarification invariants.
 - Modify `src/athena/gui/service.py`, `tests/test_gui_gateway_handler.py`, `tests/test_gui_gateway_transport.py`, and `tests/test_gui_protocol_contract.py`: RPC convergence and transport error/state contracts.
+- Modify `src/gui_gateway/handler.py`: restored-session detection uses the public runtime state path.
 - Modify `athena-gui/src/types/ui.ts`: frontend resume projection.
 - Modify `athena-gui/src/hooks/usePipeline.ts`: exact alias routing and authoritative resume state.
 - Modify `athena-gui/src/hooks/__tests__/usePipeline.test.tsx` and `athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx`: hook routing and restored-session tests.
 - Modify `athena-gui/src/components/conversation/RunControls.tsx` and its component tests: enable Continue for resumable error/interrupted states.
-- Modify `src/athena_tui/render.py`, `test/unit/athena_tui/test_app.py`, and `test/integration/test_tui_protocol.py`: TUI help and end-to-end alias behavior.
+- Modify `src/athena_tui/render.py`, `test/unit/athena_tui/test_render.py`, `test/unit/athena_tui/test_app.py`, and `test/integration/test_tui_protocol.py`: TUI help and end-to-end alias behavior.
 - Modify `src/athena/cli.py` and `test/unit/test_cli.py`: `continue` CLI alias.
 - Modify `README.md`, `docs/athena-guide/README.md`, `docs/athena-guide/06-workflow.md`, and `docs/athena-gui-design.md`: user and protocol documentation.
 - Create `codex_docs/2026-09-03-universal-continue-resume-completion-report.md` during closeout.
 
 ## Execution preflight
 
-- [ ] Record `git status --short`, `git diff --cached --name-status`, and `git diff --name-only` before editing.
-- [ ] Confirm `codex_docs/CURRENT.md` points to this plan. If it points elsewhere, stop implementation without changing code.
-- [ ] Record overlap between current dirty files and the file map above. Preserve every pre-existing diff and do not stage it unless the active task explicitly owns the path.
-- [ ] Run the current focused baseline and record exact counts in plan notes:
+- [x] Record `git status --short`, `git diff --cached --name-status`, and `git diff --name-only` before editing.
+- [x] Confirm `codex_docs/CURRENT.md` points to this plan. If it points elsewhere, stop implementation without changing code.
+- [x] Record overlap between current dirty files and the file map above. Preserve every pre-existing diff and do not stage it unless the active task explicitly owns the path.
+- [x] Run the current focused baseline and record exact counts in plan notes:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py test/unit/test_cli.py
 npm --prefix athena-gui test -- --run src/hooks/__tests__/usePipeline.test.tsx src/hooks/__tests__/usePipeline.events.test.tsx src/components/__tests__/conversation-pane.test.tsx src/lib/__tests__/tauri-bridge.test.ts
 ```
 
-- [ ] Save the observed reproduction: a failed confirmed run followed by React composer input `continue` calls `task_clarification_start("continue")` and returns `different_task`.
+- [x] Save the observed reproduction: a failed confirmed run followed by React composer input `continue` calls `task_clarification_start("continue")` and returns `different_task`.
+
+Preflight evidence (2026-09-04, latest `origin/main` `2713f53`): Python baseline
+`145 passed in 15.35s`; React baseline `4 files / 62 tests passed in 3.28s`.
+There were no tracked or staged implementation diffs. Six restored untracked paths
+(`dialog.rs`, `docs/plans/`, `exp_docs.py`, `baseline_gate.py`, and their two tests)
+do not overlap this plan's owned implementation paths and remain unstaged. Observed
+reproduction: confirmed PREPARE failed with `baseline authority unavailable`; submitting
+exact `continue` entered task understanding, called
+`task_clarification_start("continue")`, and raised `different_task`.
 
 ---
 
@@ -102,10 +120,15 @@ Use `ResearchState` instances and assert these exact results:
         ("RUNNING", "SEARCH", True, False, "already_running"),
         ("WAITING", "PREPARE", True, True, "paused"),
         ("FAILED", "SEARCH", True, True, "failed"),
+        ("FAILED", "SEARCH", False, False, "no_task"),
+        ("IDLE", "PREPARE", True, True, "interrupted"),
+        ("IDLE", "SEARCH", True, True, "interrupted"),
         ("IDLE", "VALIDATE", True, True, "interrupted"),
         ("IDLE", "PREPARE", False, False, "no_task"),
+        ("RUNNING", "SEARCH", False, False, "no_task"),
         ("STOPPED", "SEARCH", True, False, "stopped"),
         ("COMPLETED", "COMPLETED", True, False, "completed"),
+        ("RUNNING", "COMPLETED", True, False, "completed"),
     ],
 )
 def test_resume_capability_matrix(
@@ -115,7 +138,12 @@ def test_resume_capability_matrix(
     available: bool,
     reason: str,
 ) -> None:
-    state = ResearchState(status=status, phase=phase)
+    state = ResearchState(
+        status=status,
+        phase=phase,
+        search_limit=3,
+        concurrency=1,
+    )
     if has_task:
         state.task_text = "original task"
     assert resume_capability(state) == ResumeCapability(available, reason)
@@ -171,9 +199,10 @@ def is_continue_command(text: str) -> bool:
     return text.strip().casefold() == "continue"
 ```
 
-`resume_capability` must check terminal states first, then task evidence, then map
-WAITING/FAILED/IDLE. A RUNNING task returns `already_running` and is handled
-idempotently by the mutating runtime layer.
+`resume_capability` must check terminal states first, then durable task evidence, then
+map WAITING/FAILED/IDLE. A RUNNING state with task evidence returns `already_running`;
+process-local lifecycle identity is deliberately handled only by the mutating runtime
+layer and is not an input to this pure projection.
 
 - [ ] **Step 5: Verify, format, and commit Task 1**
 
@@ -199,6 +228,7 @@ git commit -m "feat: define durable task resume contract"
 **Files:**
 - Modify: `src/athena/research/runtime/control.py`
 - Modify: `src/athena/research/runtime/facade.py`
+- Modify: `src/athena/research/runtime/services.py`
 - Modify: `test/unit/research/test_breakpoint_resume.py`
 - Modify: `test/integration/research/test_task_seeding.py`
 - Modify: `test/integration/research/test_task_confirmation_gate.py`
@@ -233,6 +263,10 @@ Add tests proving:
   primitive;
 - a reloaded `IDLE`/PREPARE checkpoint with task evidence starts the lifecycle;
 - repeated `continue` while the restarted task is live is idempotent;
+- two resume coroutines synchronized with a barrier create at most one new lifecycle
+  task and both observe `RUNNING`;
+- FAILED while the old lifecycle is still unwinding an actual exception waits for that
+  task with `asyncio.gather(..., return_exceptions=True)`, then starts one replacement;
 - STOPPED, COMPLETED, and taskless IDLE raise `ResearchControlError` with code
   `resume_unavailable` and do not start a lifecycle;
 - `continue research` and `continue three more attempts` still reach
@@ -264,6 +298,15 @@ assert runtime.handoffs_path.joinpath("TASK_CLARIFICATION.md").read_bytes() == b
 Also instrument the clarification controller so any call to `start_or_resume` fails the
 test. This proves the success is not merely compatible output from a regenerated draft.
 
+Add an authoritative-baseline regression: fail confirmed PREPARE with
+`BaselineAuthorityError`, then resume once after making authority available and once
+while it remains unavailable. The successful attempt must re-enter PREPARE without
+rebuilding the existing baseline; the persistent failure must surface the same typed
+authority error. In both cases, task/draft/handoff bytes stay unchanged and
+clarification is never invoked. `resume_current_task()` remains fire-and-forget and
+returns `RUNNING`; the test awaits the replacement lifecycle task to assert
+`BaselineAuthorityError`, while GUI tests assert the later state/error event.
+
 - [ ] **Step 3: Run focused tests and observe the current misrouting**
 
 Run:
@@ -280,14 +323,23 @@ typed, and the new public method is absent.
 In `control.py`:
 
 1. Export `resume_current_task` instead of keeping the operation private.
-2. Return `RUNNING` without mutation when a lifecycle task is already live.
-3. Reject unavailable terminal/taskless states before touching Supervisor, agents, Git,
+2. Acquire `runtime.session.lifecycle.resume_lock` before capability classification and
+   hold it through any rearm, `supervisor.resume(...)`, and `runtime.start()` call.
+3. Return `RUNNING` without mutation only when durable status is RUNNING and a lifecycle
+   task is live. If status is FAILED but the old task has not finished unwinding, await
+   its completion under the lock with
+   `await asyncio.gather(old_task, return_exceptions=True)`, verify it is done, and then
+   rearm. Do not directly await and re-raise the old phase exception.
+4. Reject unavailable terminal/taskless states before touching Supervisor, agents, Git,
    or survey infrastructure.
-4. For a done or absent lifecycle task, call `supervisor.resume(restarting=True)` and
+5. For a done or absent lifecycle task, call `supervisor.resume(restarting=True)` and
    `runtime.start()` exactly once.
-5. For a live paused lifecycle, call `supervisor.resume()` without spawning another
+6. For a live paused lifecycle, call `supervisor.resume()` without spawning another
    phase task.
-6. Recognize plain `continue` in `_control_command` alongside canonical `/resume`.
+7. Recognize plain `continue` in `_control_command` alongside canonical `/resume`.
+
+Add `resume_lock: asyncio.Lock = field(default_factory=asyncio.Lock)` to
+`LifecycleSession`. The lock is process-local and requires no persisted-state migration.
 
 The control branch must precede auto-seeding:
 
@@ -321,8 +373,8 @@ Run:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/test_resume_contract.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py test/integration/research/test_human_plan_boundary.py
-.venv\Scripts\python.exe -m black src/athena/research/runtime/control.py src/athena/research/runtime/facade.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py
-git diff --check -- src/athena/research/runtime/control.py src/athena/research/runtime/facade.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py
+.venv\Scripts\python.exe -m black src/athena/research/runtime/control.py src/athena/research/runtime/facade.py src/athena/research/runtime/services.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py
+git diff --check -- src/athena/research/runtime/control.py src/athena/research/runtime/facade.py src/athena/research/runtime/services.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py
 ```
 
 Expected: exact continuation cases pass and existing multiword guidance tests remain
@@ -330,7 +382,7 @@ green. Review the live diff carefully because `control.py` and `facade.py` may c
 pre-existing active-plan edits. Stage only Task 2 hunks, then commit:
 
 ```powershell
-git add src/athena/research/runtime/control.py src/athena/research/runtime/facade.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py
+git add src/athena/research/runtime/control.py src/athena/research/runtime/facade.py src/athena/research/runtime/services.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py
 git commit -m "fix: resume current task from continue input"
 ```
 
@@ -342,6 +394,7 @@ git commit -m "fix: resume current task from continue input"
 - Modify: `src/athena/research/supervisor/events.py`
 - Modify: `src/athena/research/runtime/event_projection.py`
 - Modify: `src/athena/gui/service.py`
+- Modify: `src/gui_gateway/handler.py`
 - Modify: `test/unit/research/supervisor/test_events.py`
 - Modify: `tests/test_gui_gateway_handler.py`
 - Modify: `tests/test_gui_gateway_transport.py`
@@ -369,6 +422,10 @@ Also cover WAITING, FAILED, RUNNING, STOPPED, COMPLETED, and a legacy understand
 checkpoint. Verify `StateEvent.model_validate` accepts an older payload that omits both
 new fields and defaults them to `False`/`None`.
 
+Add a handler restore test whose runtime exposes only the public `state_path` property.
+It must resume the selected persisted session without depending on a fake-only
+`_state_path` attribute.
+
 - [ ] **Step 2: Add failing RPC convergence tests**
 
 Extend gateway tests so:
@@ -384,6 +441,11 @@ Both calls must record the same runtime resume operation. Add a transport test w
 `ResearchControlError("resume_unavailable", ...)` becomes RPC error data containing
 `{"code": "resume_unavailable", "retryable": False}`. Keep the canonical protocol
 method set unchanged.
+
+`task_clarification_start` remains an explicit low-level clarification endpoint, not a
+plain-text continuation entrypoint. Its genuine `different_task` behavior is unchanged.
+Tests must prove every official free-text entrypoint intercepts exact `continue` before
+that endpoint and that a real different task still reaches the protection.
 
 - [ ] **Step 3: Run focused tests and confirm missing event fields/public operation**
 
@@ -411,21 +473,24 @@ the event annotation string-based and lock allowed values with tests; importing 
 runtime contract type from `supervisor/events.py` would invert the package dependency
 and risk a circular import during `ResearchRuntime` composition.
 
+Change the gateway restore check to use `runtime.state_path`. Do not add a compatibility
+fallback to the nonexistent private `_state_path`; tests must represent the real facade.
+
 - [ ] **Step 5: Verify native/WebSocket protocol parity and commit Task 3**
 
 Run:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_protocol_contract.py tests/test_gui_gateway_e2e.py
-.venv\Scripts\python.exe -m black src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py
-git diff --check -- src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_protocol_contract.py
+.venv\Scripts\python.exe -m black src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py src/gui_gateway/handler.py test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py
+git diff --check -- src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py src/gui_gateway/handler.py test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_protocol_contract.py
 ```
 
 Expected: old and new state payloads validate, and both transports retain the same
 `resume` method. Commit only listed paths with:
 
 ```powershell
-git add src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_protocol_contract.py
+git add src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py src/gui_gateway/handler.py test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_protocol_contract.py
 git commit -m "feat: project durable resume availability"
 ```
 
@@ -500,12 +565,10 @@ resumeAvailable: false,
 resumeReason: null,
 ```
 
-Map state data without local inference:
+Map every complete state snapshot without local inference or inherited values:
 
 ```typescript
-if (typeof data.resume_available === "boolean") {
-  next.resumeAvailable = data.resume_available;
-}
+next.resumeAvailable = data.resume_available === true;
 next.resumeReason = typeof data.resume_reason === "string" ? data.resume_reason : null;
 ```
 
@@ -513,7 +576,7 @@ Create a local exact matcher mirroring the backend and a shared action:
 
 ```typescript
 function isContinueCommand(text: string): boolean {
-  return text.trim().toLocaleLowerCase() === "continue";
+  return text.trim().toLowerCase() === "continue";
 }
 
 const continueCurrentRun = useCallback(async () => {
@@ -532,6 +595,17 @@ Call `continueCurrentRun` before slash-command and run/new-task classification. 
 from `resumeRun` as well. Include `resumeAvailable` in `runActive`; update RunControls so
 Continue is enabled for `paused` or `resumeAvailable`, while Pause and Stop retain their
 existing safety conditions.
+
+Add an uppercase regression to lock locale-independent matching; do not use
+`toLocaleLowerCase()` because UI locale must not change the command contract. Every
+complete state snapshot must normalize missing resume fields to `false`/`null` so a
+legacy or fresh session cannot inherit another session's resumability. Serialize initial
+session selection before applying its state snapshot, or guard it with a session-aware
+epoch, so a late default-session response cannot overwrite the selected session.
+
+Add a sequential regression that applies a resumable state followed by a legacy/fresh
+payload omitting both fields and asserts `resumeAvailable === false`,
+`resumeReason === null`, and a disabled Continue control.
 
 - [ ] **Step 5: Verify frontend tests/build and commit Task 4**
 
@@ -556,6 +630,7 @@ git commit -m "fix(gui): continue interrupted research runs"
 
 **Files:**
 - Modify: `src/athena_tui/render.py`
+- Modify: `test/unit/athena_tui/test_render.py`
 - Modify: `test/unit/athena_tui/test_app.py`
 - Modify: `test/integration/test_tui_protocol.py`
 - Modify: `src/athena/cli.py`
@@ -596,7 +671,7 @@ commands exist.
 Run:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py test/unit/test_cli.py
+.venv\Scripts\python.exe -m pytest -q test/unit/athena_tui/test_render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py test/unit/test_cli.py
 ```
 
 Expected: runtime-level TUI continuation passes only after Task 2, while CLI parsing
@@ -626,15 +701,15 @@ async def _cmd_control(args: argparse.Namespace) -> int:
 Run:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py test/integration/test_tui_resume.py test/unit/test_cli.py
+.venv\Scripts\python.exe -m pytest -q test/unit/athena_tui/test_render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py test/integration/test_tui_resume.py test/unit/test_cli.py
 .venv\Scripts\python.exe -m black src/athena/cli.py test/unit/test_cli.py test/integration/test_tui_protocol.py
-git diff --check -- src/athena_tui/render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py src/athena/cli.py test/unit/test_cli.py
+git diff --check -- src/athena_tui/render.py test/unit/athena_tui/test_render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py src/athena/cli.py test/unit/test_cli.py
 ```
 
 Expected: TUI and both CLI spellings pass. Commit only Task 5 paths:
 
 ```powershell
-git add src/athena_tui/render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py src/athena/cli.py test/unit/test_cli.py
+git add src/athena_tui/render.py test/unit/athena_tui/test_render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py src/athena/cli.py test/unit/test_cli.py
 git commit -m "feat: expose continue resume aliases"
 ```
 
@@ -690,6 +765,13 @@ Cover:
 - two concurrent `continue` requests return one live lifecycle task;
 - a second phase failure is surfaced normally and is not automatically retried.
 
+Use a barrier inside the old check-to-create window so the concurrency test would
+deterministically create two tasks without `resume_lock`; do not rely only on final
+state. Add in-process FAILED and reloaded FAILED-to-IDLE PREPARE cases for baseline
+authority outage and mismatch. They must retry only the authoritative gate, preserve
+the existing baseline tree and clarification bytes, and either succeed when authority
+recovers or surface the original authority failure again.
+
 - [ ] **Step 5: Run cross-surface and compatibility suites**
 
 Run:
@@ -742,14 +824,15 @@ CLI compatibility: Athena-cli resume --project <path>
 Explain exact matching, task preservation, terminal rejection, and that multiword
 guidance is not treated as a command. Add `resume_available` and `resume_reason` to the
 GUI state-event contract. Mark TypeScript AutoResearch/DSH as an independent runtime
-with its existing explicit resume APIs.
+with its existing explicit resume APIs. Update the README command synopsis itself from
+`status|pause|resume|stop` to `status|pause|resume|continue|stop`, not only its examples.
 
 - [ ] **Step 2: Run formatting, static, and build checks**
 
 Run:
 
 ```powershell
-.venv\Scripts\python.exe -m black --check src/athena/research/runtime/resume_contract.py src/athena/research/runtime/control.py src/athena/research/runtime/facade.py src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py test/unit/research/test_resume_contract.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_continue_resume_surfaces.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py test/integration/test_tui_protocol.py src/athena/cli.py test/unit/test_cli.py
+.venv\Scripts\python.exe -m black --check src/athena/research/runtime/resume_contract.py src/athena/research/runtime/control.py src/athena/research/runtime/facade.py src/athena/research/runtime/services.py src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py src/gui_gateway/handler.py test/unit/research/test_resume_contract.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_continue_resume_surfaces.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py test/unit/athena_tui/test_render.py test/integration/test_tui_protocol.py src/athena/cli.py test/unit/test_cli.py
 .venv\Scripts\python.exe -m compileall -q src/athena src/athena_tui src/gui_gateway
 npm --prefix athena-gui run build
 cargo check --manifest-path athena-gui/src-tauri/Cargo.toml
@@ -764,7 +847,7 @@ against every task-owned path explicitly. Do not claim the global tree is clean.
 Run in this order:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q test/unit/research/test_resume_contract.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_continue_resume_surfaces.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_gateway_e2e.py tests/test_gui_protocol_contract.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py test/integration/test_tui_resume.py test/unit/test_cli.py
+.venv\Scripts\python.exe -m pytest -q test/unit/research/test_resume_contract.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_continue_resume_surfaces.py test/integration/research/test_task_seeding.py test/integration/research/test_task_confirmation_gate.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_gateway_e2e.py tests/test_gui_protocol_contract.py test/unit/athena_tui/test_render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py test/integration/test_tui_resume.py test/unit/test_cli.py
 npm --prefix athena-gui test -- --run
 cargo test --manifest-path athena-rust/Cargo.toml -p athena-protocol
 npm --prefix athena_ts test -- --run packages/athena-dsh/test/index.test.ts packages/athena-autoresearch/test/runtime.test.ts
