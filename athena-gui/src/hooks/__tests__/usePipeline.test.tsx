@@ -88,6 +88,7 @@ describe("usePipeline", () => {
   });
 
   beforeEach(() => {
+    localStorage.clear();
     for (const key of Object.keys(bridgeMocks) as Array<keyof typeof bridgeMocks>) {
       bridgeMocks[key].mockReset();
     }
@@ -452,6 +453,16 @@ describe("usePipeline", () => {
     expect(bridgeMocks.sessionSwitch.mock.calls[0]).toEqual(["s-2"]);
   });
 
+  it("clears stale cached summaries after authoritative empty hydration", async () => {
+    const cacheKey = "athena.workspace.sessions:C:/workspace";
+    localStorage.setItem(cacheKey, JSON.stringify([{ id: "stale", title: "Stale" }]));
+
+    renderHook(() => usePipeline("C:/workspace"));
+
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+    await waitFor(() => expect(localStorage.getItem(cacheKey)).toBeNull());
+  });
+
   it("waits for new-session creation before deleting it", async () => {
     const { result } = renderHook(() => usePipeline());
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
@@ -669,8 +680,9 @@ describe("usePipeline", () => {
     storageRead.mockRestore();
   });
 
-  it("keeps an optimistic row when creation fails before deletion", async () => {
-    const { result } = renderHook(() => usePipeline());
+  it("keeps a failed optimistic row in React state without persisting it", async () => {
+    const cacheKey = "athena.workspace.sessions:C:/workspace";
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
 
     let rejectCreation: ((reason: Error) => void) | undefined;
@@ -681,6 +693,7 @@ describe("usePipeline", () => {
     );
     act(() => result.current.newSession());
     const newId = result.current.currentSessionId;
+    expect(localStorage.getItem(cacheKey)).toBeNull();
     let deletion: Promise<void>;
     act(() => {
       deletion = result.current.deleteSession(newId);
@@ -693,6 +706,7 @@ describe("usePipeline", () => {
 
     expect(bridgeMocks.sessionDelete).not.toHaveBeenCalled();
     expect(result.current.sessions.some((session) => session.id === newId)).toBe(true);
+    expect(localStorage.getItem(cacheKey)).toBeNull();
     const messages = result.current.viewModel.messages;
     expect(messages[messages.length - 1]?.content).toContain("creation failed");
   });

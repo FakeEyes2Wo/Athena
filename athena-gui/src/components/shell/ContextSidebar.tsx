@@ -1,10 +1,8 @@
-import { useEffect, useState } from "react";
 import type { ContextPanelKey, ModuleKey } from "../../types/ui";
 import { Icon } from "../common/Icon";
 import { RELATED_PANELS } from "./navigation";
 import { basename } from "../../lib/path";
-import { sessionsListFor } from "../../lib/tauri-bridge";
-import { loadSessionTitles } from "../../hooks/usePipeline";
+import { loadWorkspaceSessions } from "../../lib/workspaceStorage";
 import styles from "./ContextSidebar.module.css";
 
 export interface SessionItem {
@@ -110,38 +108,14 @@ function SessionContext({
   onNewSession(): void;
   onDeleteSession(id: string): void;
 }) {
-  const [otherGroups, setOtherGroups] = useState<WorkspaceGroup[]>([]);
-
-  // 拉取其它工作区的会话（当前工作区的会话由 usePipeline 提供），按工作区分组展示。
-  useEffect(() => {
-    let cancelled = false;
-    const others = recentRoots.filter((root) => root !== currentRoot);
-    if (others.length === 0) {
-      setOtherGroups([]);
-      return;
-    }
-    Promise.all(
-      others.map(async (root) => {
-        try {
-          const { sessions: ids } = await sessionsListFor(root);
-          const titles = loadSessionTitles(root);
-          return {
-            root,
-            name: basename(root),
-            isCurrent: false,
-            sessions: ids.map((id) => ({ id, title: titles[id] ?? "新会话" })),
-          };
-        } catch {
-          return { root, name: basename(root), isCurrent: false, sessions: [] };
-        }
-      }),
-    ).then((groups) => {
-      if (!cancelled) setOtherGroups(groups);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [recentRoots, currentRoot]);
+  const otherGroups = recentRoots
+    .filter((root) => root !== currentRoot)
+    .map((root): WorkspaceGroup => ({
+      root,
+      name: basename(root),
+      isCurrent: false,
+      sessions: loadWorkspaceSessions(root),
+    }));
 
   const orderedRoots = currentRoot && !recentRoots.includes(currentRoot)
     ? [...recentRoots, currentRoot]

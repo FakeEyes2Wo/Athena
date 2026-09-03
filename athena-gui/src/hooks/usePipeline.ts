@@ -7,6 +7,7 @@ import {
 } from "../lib/clarification-conversation";
 import { errorMessage } from "../lib/errors";
 import * as bridge from "../lib/tauri-bridge";
+import { persistWorkspaceSessions } from "../lib/workspaceStorage";
 import {
   createEmptyPipelineViewModel,
   type ClarificationDraftDto,
@@ -411,8 +412,9 @@ export function usePipeline(
     (ids: string[] | undefined) => {
       if (!ids) return;
       const titles = loadTitles(titlesKey);
+      const authoritative = ids.map((id) => ({ id, title: titles[id] ?? "新会话" }));
+      persistWorkspaceSessions(workspaceRoot ?? "default", authoritative);
       setSessions((current) => {
-        const authoritative = ids.map((id) => ({ id, title: titles[id] ?? "新会话" }));
         const authoritativeIds = new Set(ids);
         const pending = current.filter(
           (session) =>
@@ -422,7 +424,7 @@ export function usePipeline(
         return [...pending, ...authoritative];
       });
     },
-    [titlesKey],
+    [titlesKey, workspaceRoot],
   );
 
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。

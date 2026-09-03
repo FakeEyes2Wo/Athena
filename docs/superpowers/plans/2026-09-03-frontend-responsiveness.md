@@ -140,7 +140,7 @@
   `{ id: string; title: string }`.
 - Consumes: authoritative session arrays built by `usePipeline.applySessions`.
 
-- [ ] **Step 1: Add failing cache tests**
+- [x] **Step 1: Add failing cache tests**
 
   In `workspaceStorage.test.ts`, assert cache keys are workspace-namespaced,
   malformed data returns `[]`, duplicate IDs are normalized, and persisting `[]`
@@ -153,7 +153,7 @@
   In `usePipeline.test.tsx`, hydrate with an empty authoritative list after a stale
   summary exists and assert storage becomes empty.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   Run:
 
@@ -163,30 +163,30 @@
 
   Expected: missing cache API and eager `sessionsListFor` calls fail assertions.
 
-- [ ] **Step 3: Implement session-summary storage**
+- [x] **Step 3: Implement session-summary storage**
 
   Add the typed load/persist helpers to `workspaceStorage.ts`. Normalize non-empty
   string IDs/titles, deduplicate by ID, cap storage to a conservative 200 sessions,
   and catch localStorage errors.
 
-- [ ] **Step 4: Populate cache from authoritative state**
+- [x] **Step 4: Populate cache from authoritative state**
 
   In `usePipeline.applySessions`, build the resolved authoritative summaries once,
   persist them for `workspaceRoot`, and then merge pending optimistic sessions for
   React state. Persist only authoritative rows so failed optimistic creations are
   not advertised in other workspaces.
 
-- [ ] **Step 5: Make the sidebar synchronous**
+- [x] **Step 5: Make the sidebar synchronous**
 
   Remove `useEffect`, `useState`, and `sessionsListFor` from `ContextSidebar`.
   Build other workspace groups from `loadWorkspaceSessions(root)` during render.
   Preserve recent-root order and current-workspace authoritative sessions.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
   Run the command from Step 2 and require PASS.
 
-- [ ] **Step 7: Commit the RPC removal**
+- [x] **Step 7: Commit the RPC removal**
 
   Stage only the six task files and commit as
   `perf(gui): cache workspace session summaries`.

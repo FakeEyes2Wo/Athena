@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { screen, fireEvent, within } from "@testing-library/react";
 import { renderUi } from "../../test/render";
 import { AppShell } from "../shell/AppShell";
 import { createEmptyPipelineViewModel } from "../../types/ui";
@@ -128,14 +128,11 @@ describe("AppShell", () => {
     expect(deleteSession).toHaveBeenCalledWith("default");
   });
 
-  it("keeps workspace order stable and targets a session in another workspace", async () => {
+  it("renders cached sessions synchronously in stable workspace order without an RPC", () => {
     const onSelectWorkspace = vi.fn();
-    bridgeMocks.sessionsListFor.mockImplementation(async (root: string) => ({
-      sessions: root === "C:/gamma" ? ["s-gamma"] : [],
-    }));
     localStorage.setItem(
-      "athena-session-titles:C:/gamma",
-      JSON.stringify({ "s-gamma": "s-gamma" }),
+      "athena.workspace.sessions:C:/gamma",
+      JSON.stringify([{ id: "s-gamma", title: "Cached Gamma" }]),
     );
 
     renderUi(
@@ -149,24 +146,45 @@ describe("AppShell", () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "s-gamma" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Cached Gamma" })).toBeInTheDocument();
     const headings = screen
       .getAllByRole("button")
       .filter((button) => ["alpha", "beta", "gamma"].includes(button.textContent ?? ""));
     expect(headings.map((heading) => heading.textContent)).toEqual(["alpha", "beta", "gamma"]);
 
-    fireEvent.click(screen.getByRole("button", { name: "s-gamma" }));
+    expect(bridgeMocks.sessionsListFor).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cached Gamma" }));
     expect(onSelectWorkspace).toHaveBeenCalledWith("C:/gamma", "s-gamma");
   });
 
-  it("keeps workspace and session navigation interactive while switching", async () => {
+  it("renders an empty state synchronously for an uncached workspace without an RPC", () => {
+    renderUi(
+      <AppShell
+        currentRoot="C:/beta"
+        recentRoots={["C:/beta", "C:/gamma"]}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          sessions: [{ id: "s-current", title: "Current" }],
+          currentSessionId: "s-current",
+        }) as never}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "gamma" })).toBeInTheDocument();
+    expect(screen.getByText("暂无会话")).toBeInTheDocument();
+    expect(bridgeMocks.sessionsListFor).not.toHaveBeenCalled();
+  });
+
+  it("keeps workspace and session navigation interactive while switching", () => {
     const onSwitchWorkspace = vi.fn();
     const onSelectWorkspace = vi.fn();
     const switchSession = vi.fn().mockResolvedValue(undefined);
-    bridgeMocks.sessionsListFor.mockResolvedValue({ sessions: ["s-gamma"] });
     localStorage.setItem(
-      "athena-session-titles:C:/gamma",
-      JSON.stringify({ "s-gamma": "s-gamma" }),
+      "athena.workspace.sessions:C:/gamma",
+      JSON.stringify([{ id: "s-gamma", title: "s-gamma" }]),
     );
 
     renderUi(
@@ -184,7 +202,7 @@ describe("AppShell", () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "s-gamma" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "s-gamma" })).toBeInTheDocument();
     const otherWorkspace = screen.getByRole("button", { name: "gamma" });
     const otherSession = screen.getByRole("button", { name: "s-gamma" });
     const workspacePicker = screen.getByRole("button", { name: "切换工作区" });
