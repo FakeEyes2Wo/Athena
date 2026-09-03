@@ -392,8 +392,10 @@ async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path)
-    runtime.state.task_text = "https://www.kaggle.com/competitions/kaggriculture"
+    original_task = "https://www.kaggle.com/competitions/kaggriculture"
+    runtime.state.task_text = original_task
     runtime.state.task_understanding = None
+    runtime.session.lifecycle.task_text = original_task
     runtime.session.lifecycle.started = True
     runtime.session.lifecycle.task = SimpleNamespace(done=lambda: False)
     runtime.state.save(runtime.state_path)
@@ -401,10 +403,8 @@ async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
     status = await runtime.start_task("continue")
 
     assert status == "RUNNING"
-    assert runtime.task_text == "https://www.kaggle.com/competitions/kaggriculture"
-    assert (
-        runtime.state.task_text == "https://www.kaggle.com/competitions/kaggriculture"
-    )
+    assert runtime.task_text == original_task
+    assert runtime.state.task_text == original_task
     assert runtime.state_path.is_file()
 
 
@@ -1123,7 +1123,7 @@ async def test_run_general_turn_interrupts_worker_on_timeout(
 
 
 @pytest.mark.asyncio
-async def test_start_task_reconstructs_task_text_from_legacy_understanding(
+async def test_start_task_preserves_reconstructed_task_text_from_legacy_understanding(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path)
@@ -1133,15 +1133,17 @@ async def test_start_task_reconstructs_task_text_from_legacy_understanding(
         "dataset": "kaggriculture environment",
         "target": "maximize income",
     }
+    reconstructed = (
+        "Kaggriculture farming simulation kaggriculture environment maximize income"
+    )
+    runtime.session.lifecycle.task_text = reconstructed
     runtime.session.lifecycle.started = True
     runtime.session.lifecycle.task = SimpleNamespace(done=lambda: False)
 
     status = await runtime.start_task("continue")
 
     assert status == "RUNNING"
-    assert runtime.task_text == (
-        "Kaggriculture farming simulation kaggriculture environment maximize income"
-    )
+    assert runtime.task_text == reconstructed
     assert runtime.state.task_text is None
 
 
@@ -1297,8 +1299,11 @@ async def test_repeated_continue_is_idempotent_while_restarted_task_is_live(
         assert await runtime.message("continue") == "RUNNING"
         await asyncio.wait_for(restarted.wait(), timeout=1)
         replacement = runtime.session.lifecycle.task
+        runtime.session.lifecycle.task_text = "preserve process-local task text"
+        task_text_before = runtime.session.lifecycle.task_text
 
         assert await runtime.message("continue") == "RUNNING"
+        assert runtime.session.lifecycle.task_text == task_text_before
         assert runtime.session.lifecycle.task is replacement
         assert replacement is not None
         assert not replacement.done()

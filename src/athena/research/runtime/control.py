@@ -138,7 +138,6 @@ async def resume_current_task(runtime: Any) -> str:
         live_task = task is not None and not task.done()
 
         if capability.reason == "already_running" and live_task:
-            lifecycle.task_text = resume_task_text(runtime, lifecycle.task_text)
             return runtime.state.status
         if not capability.available and capability.reason != "already_running":
             raise ResearchControlError(
