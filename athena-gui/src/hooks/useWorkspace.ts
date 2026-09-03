@@ -88,6 +88,7 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   }, []);
 
   const switchTo = useCallback((path: string, sessionId?: string): Promise<void> => {
+    if (!mountedRef.current) return Promise.resolve();
     const trimmed = path.trim();
     if (!trimmed) return Promise.resolve();
     queuedIntentRef.current = { path: trimmed, sessionId: sessionId ?? null };
@@ -131,18 +132,19 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   }, []);
 
   const browse = useCallback(async () => {
-    if (browsingRef.current) return;
+    if (!mountedRef.current || browsingRef.current) return;
     browsingRef.current = true;
     setBrowsing(true);
     setError(null);
     try {
       const selected = await selectWorkspaceDirectory(currentRoot);
+      if (!mountedRef.current) return;
       if (selected) await switchTo(selected);
     } catch (err) {
-      setError(errorMessage(err));
+      if (mountedRef.current) setError(errorMessage(err));
     } finally {
       browsingRef.current = false;
-      setBrowsing(false);
+      if (mountedRef.current) setBrowsing(false);
     }
   }, [currentRoot, switchTo]);
 

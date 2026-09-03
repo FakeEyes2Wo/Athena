@@ -319,4 +319,39 @@ describe("useWorkspace", () => {
     expect(result.current.currentRoot).toBe("/d");
     expect(result.current.browsing).toBe(false);
   });
+
+  it("ignores a native directory selection that resolves after unmount", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    const selection = deferred<string | null>();
+    bridgeMocks.selectWorkspaceDirectory.mockReturnValue(selection.promise);
+    bridgeMocks.setProjectRoot.mockResolvedValue(settings("/stale"));
+    const { result, unmount } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let browse!: Promise<void>;
+    act(() => {
+      browse = result.current.browse();
+    });
+    await waitFor(() => expect(result.current.browsing).toBe(true));
+
+    unmount();
+    await act(async () => {
+      selection.resolve("/stale");
+      await browse;
+    });
+
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
+  });
+
+  it("ignores a direct workspace switch after unmount", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    bridgeMocks.setProjectRoot.mockResolvedValue(settings("/stale"));
+    const { result, unmount } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    unmount();
+    await act(async () => result.current.switchTo("/stale"));
+
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
+  });
 });
