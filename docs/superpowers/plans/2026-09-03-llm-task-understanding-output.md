@@ -678,7 +678,7 @@ Expected: focused frontend tests and TypeScript production build pass. Commit on
 - Produces internally: `belongsToTaskUnderstanding(msg, preview) -> boolean`.
 - Preserves: current ideator lanes, tool renderer, user-message boundaries, stable segment keys, and legacy positional grouping.
 
-- [ ] **Step 1: Write the failing behavior-matrix tests**
+- [x] **Step 1: Write the failing behavior-matrix tests**
 
 Add DOM tests for all six cases:
 
@@ -691,7 +691,7 @@ Add DOM tests for all six cases:
 
 Also retain the existing READY/RUNNING non-grouping and interleaved-user tests unchanged.
 
-- [ ] **Step 2: Run the component test and confirm current positional over-grouping**
+- [x] **Step 2: Run the component test and confirm current positional over-grouping**
 
 Run:
 
@@ -701,7 +701,7 @@ npm --prefix athena-gui test -- src/components/__tests__/conversation-pane.test.
 
 Expected: FAIL because the current segmenter groups every non-user message after an active preview, including a mismatched scope id.
 
-- [ ] **Step 3: Implement the minimal grouping predicate**
+- [x] **Step 3: Implement the minimal grouping predicate**
 
 Return both index and preview from the active-preview lookup. Use the synchronously maintained optimistic latch from Task 6 (not an unconstrained empty-id wildcard):
 
@@ -722,7 +722,7 @@ function belongsToTaskUnderstanding(
 
 Apply it only after the existing checks for active status, position after the preview, non-user role, and non-preview kind. Any other scoped workflow remains ordinary. Do not change rendering markup or CSS.
 
-- [ ] **Step 4: Run the frontend suite/build and commit Task 7**
+- [x] **Step 4: Run the frontend suite/build and commit Task 7**
 
 Run:
 

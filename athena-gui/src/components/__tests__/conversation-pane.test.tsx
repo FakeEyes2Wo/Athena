@@ -8,7 +8,12 @@ import {
   type UIMessage,
 } from "../../types/ui";
 
-function clarificationPreview(status: ClarificationStatus, id: string): UIMessage {
+function clarificationPreview(
+  status: ClarificationStatus,
+  id: string,
+  draftId = id,
+  optimisticScopeId?: string,
+): UIMessage {
   return {
     id,
     role: "athena",
@@ -16,7 +21,8 @@ function clarificationPreview(status: ClarificationStatus, id: string): UIMessag
     content: status === "CLARIFYING" ? "任务理解中…" : "任务理解完成",
     started: status === "RUNNING",
     preview: {
-      draftId: id,
+      draftId,
+      optimisticScopeId,
       revision: 1,
       status,
       understanding: {
@@ -32,6 +38,25 @@ function clarificationPreview(status: ClarificationStatus, id: string): UIMessag
       unresolved: [],
       failure: null,
     },
+  };
+}
+
+function taskUnderstandingOutput(
+  id: string,
+  content: string,
+  scopeId: string,
+  overrides: Partial<Pick<UIMessage, "source" | "tool" | "channel">> = {},
+): UIMessage {
+  return {
+    id,
+    role: "athena",
+    kind: "text",
+    content,
+    source: "agent",
+    sessionId: "default",
+    scope: "task_understanding",
+    scopeId,
+    ...overrides,
   };
 }
 
@@ -279,6 +304,117 @@ describe("ConversationPane", () => {
     expect(within(activity).getByText("validation failed")).toBeInTheDocument();
     expect(screen.getByText("任务理解中…")).toBeInTheDocument();
     expect(screen.getAllByText("正在分析数据结构")).toHaveLength(1);
+  });
+
+  it("groups canonical task-understanding output by draft scope", () => {
+    const preview = clarificationPreview("CLARIFYING", "preview-canonical", "draft-1");
+    const matching = taskUnderstandingOutput(
+      "canonical-output",
+      "canonical scoped output",
+      "draft-1",
+    );
+
+    renderUi(<ConversationPane pipeline={pipelineWithMessages([preview, matching])} />);
+
+    expect(
+      within(screen.getByRole("log", { name: "任务理解过程" })).getByText(
+        "canonical scoped output",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("groups only the latched scope while the preview is optimistic", () => {
+    const preview = clarificationPreview(
+      "CLARIFYING",
+      "preview-optimistic",
+      "",
+      "draft-a",
+    );
+    const accepted = taskUnderstandingOutput("optimistic-a", "latched output", "draft-a");
+    const rejected = taskUnderstandingOutput("optimistic-b", "other draft output", "draft-b");
+
+    renderUi(
+      <ConversationPane pipeline={pipelineWithMessages([preview, accepted, rejected])} />,
+    );
+
+    const activity = screen.getByRole("log", { name: "任务理解过程" });
+    expect(within(activity).getByText("latched output")).toBeInTheDocument();
+    expect(within(activity).queryByText("other draft output")).not.toBeInTheDocument();
+    expect(screen.getByText("other draft output")).toBeInTheDocument();
+  });
+
+  it("uses the canonical draft instead of stale or unrelated scope ids", () => {
+    const preview = clarificationPreview(
+      "CLARIFYING",
+      "preview-strict",
+      "draft-1",
+      "draft-stale",
+    );
+    const matching = taskUnderstandingOutput("strict-match", "current draft", "draft-1");
+    const stale = taskUnderstandingOutput("strict-stale", "stale latch", "draft-stale");
+    const unrelated = taskUnderstandingOutput("strict-other", "unrelated draft", "draft-other");
+
+    renderUi(
+      <ConversationPane
+        pipeline={pipelineWithMessages([preview, matching, stale, unrelated])}
+      />,
+    );
+
+    const activity = screen.getByRole("log", { name: "任务理解过程" });
+    expect(within(activity).getByText("current draft")).toBeInTheDocument();
+    expect(within(activity).queryByText("stale latch")).not.toBeInTheDocument();
+    expect(within(activity).queryByText("unrelated draft")).not.toBeInTheDocument();
+    expect(screen.getByText("stale latch")).toBeInTheDocument();
+    expect(screen.getByText("unrelated draft")).toBeInTheDocument();
+  });
+
+  it("keeps scoped history ordinary when no clarification preview is active", () => {
+    const history = taskUnderstandingOutput(
+      "scoped-history",
+      "restored scoped history",
+      "draft-history",
+    );
+
+    renderUi(<ConversationPane pipeline={pipelineWithMessages([history])} />);
+
+    expect(screen.queryByRole("log", { name: "任务理解过程" })).not.toBeInTheDocument();
+    expect(screen.getByText("restored scoped history")).toBeInTheDocument();
+  });
+
+  it("retains positional grouping for legacy unscoped output", () => {
+    const preview = clarificationPreview("CLARIFYING", "preview-legacy", "draft-legacy");
+    const legacy: UIMessage = {
+      id: "legacy-output",
+      role: "athena",
+      kind: "text",
+      content: "legacy task output",
+      source: "agent",
+    };
+
+    renderUi(<ConversationPane pipeline={pipelineWithMessages([preview, legacy])} />);
+
+    expect(
+      within(screen.getByRole("log", { name: "任务理解过程" })).getByText(
+        "legacy task output",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders matching task-understanding tool output inside the activity details", () => {
+    const preview = clarificationPreview("CONFIRMING", "preview-tool", "draft-tool");
+    const toolOutput = taskUnderstandingOutput(
+      "tool-output",
+      "tool understanding result",
+      "draft-tool",
+      { source: "tool", tool: "report_task_understanding", channel: "stdout" },
+    );
+
+    renderUi(<ConversationPane pipeline={pipelineWithMessages([preview, toolOutput])} />);
+
+    const activity = screen.getByRole("log", { name: "任务理解过程" });
+    const content = within(activity).getByText("tool understanding result");
+    expect(content.closest("details")).toBeInTheDocument();
+    expect(within(activity).getByText(/report_task_understanding/)).toBeInTheDocument();
   });
 
   it("preserves the live activity region when a user message is inserted before it", () => {
