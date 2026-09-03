@@ -723,6 +723,20 @@ def test_verification_serialization_is_canonical_and_newline_terminated(
     ).encode("utf-8")
 
 
+def test_verification_write_preserves_an_existing_temporary_file(
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    verification = verification_for(tmp_path)
+    existing_temporary = tmp_path / "BASELINE_RESEARCH_VERIFICATION.json.tmp"
+    existing_temporary.write_bytes(b"owned by another writer")
+
+    written = baseline_contract.write_verification(tmp_path, verification)
+
+    assert written.read_bytes() == baseline_contract.verification_bytes(verification)
+    assert existing_temporary.read_bytes() == b"owned by another writer"
+
+
 def test_verification_schema_version_is_explicit(tmp_path: Path) -> None:
     write_artifacts(tmp_path)
     values = verification_for(tmp_path).model_dump()

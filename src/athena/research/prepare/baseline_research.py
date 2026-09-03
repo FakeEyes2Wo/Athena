@@ -1,7 +1,9 @@
 """Versioned baseline research artifacts and their deterministic contract."""
 
 import hashlib
+import os
 import re
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -821,12 +823,23 @@ def assert_verification_matches_artifacts(
 def _write_verification_bytes(root: Path, raw: bytes) -> Path:
     """Atomically replace the untrusted audit mirror with canonical bytes."""
     target = root / VERIFICATION_FILENAME
-    temporary = target.with_suffix(".json.tmp")
+    temporary: Path | None = None
     try:
-        temporary.write_bytes(raw)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
         temporary.replace(target)
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target
 
 

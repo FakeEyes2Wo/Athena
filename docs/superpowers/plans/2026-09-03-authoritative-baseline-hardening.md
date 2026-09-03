@@ -288,6 +288,7 @@ git commit -m "feat: inject baseline authority capability"
 - Modify: `src/athena/research/supervisor/prepare.py`
 - Test: `test/unit/research/prepare/test_baseline_research_contract.py`
 - Test: `test/unit/research/prepare/test_baseline_research_orchestration.py`
+- Test: `test/unit/research/test_runtime_eval_handoff.py`
 - Test: `test/unit/research/supervisor/test_prepare_plan.py`
 - Test: `test/integration/research/test_authoritative_baseline_gate.py`
 
@@ -334,7 +335,7 @@ lets the agent rewrite canonical inputs.
 
 ```powershell
 .venv\Scripts\python.exe -m black --check src/athena/research/prepare/baseline_research.py src/athena/research/prepare/baseline.py src/athena/research/supervisor/prepare.py test/unit/research/prepare/test_baseline_research_orchestration.py test/unit/research/supervisor/test_prepare_plan.py test/integration/research/test_authoritative_baseline_gate.py
-.venv\Scripts\python.exe -m pytest -q test/unit/research/prepare test/unit/research/supervisor/test_prepare_plan.py test/integration/research/test_authoritative_baseline_gate.py
+.venv\Scripts\python.exe -m pytest -q test/unit/research/prepare test/unit/research/test_runtime_eval_handoff.py test/unit/research/supervisor/test_prepare_plan.py test/integration/research/test_authoritative_baseline_gate.py
 ```
 
 Expected: all tests pass, including existing one-repair and cancellation/reap behavior.
