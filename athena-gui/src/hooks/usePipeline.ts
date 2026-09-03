@@ -218,6 +218,12 @@ interface SessionViewSnapshot {
   logCounter: number;
 }
 
+interface SessionTransition {
+  epoch: number;
+  targetSessionId: string | null;
+  promise: Promise<boolean>;
+}
+
 type OutputScope =
   | { kind: "legacy" }
   | { kind: "invalid" }
@@ -494,11 +500,7 @@ export function usePipeline(
   const outputFrameRef = useRef<number | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
-  const sessionTransitionRef = useRef<{
-    epoch: number;
-    targetSessionId: string;
-    promise: Promise<boolean>;
-  } | null>(null);
+  const sessionTransitionRef = useRef<SessionTransition | null>(null);
   const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
   const workspaceCacheRoot = workspaceRoot ?? "default";
   const authoritativeSessionsRef = useRef<{
@@ -522,6 +524,30 @@ export function usePipeline(
   const titlesKey = sessionTitlesKey(workspaceRoot);
   const settlingRequestRef = useRef<string | null>(null);
   const humanPollFailures = useRef(0);
+
+  const beginSessionTransition = useCallback(
+    (epoch: number, targetSessionId: string | null = null) => {
+      let settle!: (succeeded: boolean) => void;
+      let settled = false;
+      const promise = new Promise<boolean>((resolve) => {
+        settle = resolve;
+      });
+      const transition: SessionTransition = { epoch, targetSessionId, promise };
+      sessionTransitionRef.current = transition;
+      return {
+        transition,
+        finish: (succeeded: boolean) => {
+          if (settled) return;
+          settled = true;
+          settle(succeeded);
+          if (sessionTransitionRef.current?.promise === promise) {
+            sessionTransitionRef.current = null;
+          }
+        },
+      };
+    },
+    [],
+  );
 
   const setClarificationIdentity = useCallback(
     (draftId: string | null, revision = -1, scopeId = draftId || null) => {
@@ -885,6 +911,7 @@ export function usePipeline(
     let mounted = true;
     let unlisteners: Array<() => void> = [];
     const hydrationEpoch = ++sessionRequestEpochRef.current;
+    const { transition, finish } = beginSessionTransition(hydrationEpoch);
     const applyHydrationSnapshot = () => {
       const resumeGeneration = resumeGenerationRef.current;
       void stateGet()
@@ -985,16 +1012,23 @@ export function usePipeline(
     // 断点续传：列出会话 → 切到本工作区上次用的会话 → 重放其 transcript。
     sessionsList()
       .then(({ sessions: list, active }) => {
-        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return null;
+        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) {
+          finish(false);
+          return null;
+        }
         // active 由后端按工作区记住；从没用过的工作区列表为空，落在 default 上，
         // 它同样要等到真跑起来才会出现在侧栏里。
         const target = requestedSessionId && list.includes(requestedSessionId)
           ? requestedSessionId
           : active ?? "default";
+        transition.targetSessionId = target;
         return sessionSwitch(target).then((result) => ({ target, list, result }));
       })
       .then((hydration) => {
-        if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
+        if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) {
+          finish(false);
+          return;
+        }
         const { target, list, result } = hydration;
         const previous = captureSessionViewRef.current();
         try {
@@ -1010,19 +1044,26 @@ export function usePipeline(
           // The backend already switched, but local hydration failed. Keep the
           // captured UI intact instead of applying a target-session snapshot to
           // the restored previous-session view through the outer fallback.
+          finish(false);
           return;
         }
         // The runtime is switched before state_get runs, so the snapshot belongs
         // to the selected session rather than the mount-time default session.
+        finish(true);
         applyHydrationSnapshot();
       })
       .catch(() => {
+        finish(false);
         applyHydrationSnapshot();
         // 非致命：无历史或后端不支持时保持空白会话。
       });
 
-    return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, discardPendingOutput, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords, setClarificationIdentity]);
+    return () => {
+      mounted = false;
+      finish(false);
+      unlisteners.forEach((fn) => fn());
+    };
+  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, beginSessionTransition, discardPendingOutput, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords, setClarificationIdentity]);
 
   // Poll for outstanding human questions. Pre-run states use a low-frequency
   // fallback (10s); once RUNNING we keep the existing 1.5s recovery poll.
@@ -1092,7 +1133,8 @@ export function usePipeline(
       if (
         !switched ||
         sessionRequestEpochRef.current !== transition.epoch ||
-        activeSessionIdRef.current !== transition.targetSessionId
+        (transition.targetSessionId !== null &&
+          activeSessionIdRef.current !== transition.targetSessionId)
       ) return;
     }
     const epoch = sessionRequestEpochRef.current;
@@ -1514,15 +1556,7 @@ export function usePipeline(
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
     const previous = captureSessionView();
     const requestEpoch = ++sessionRequestEpochRef.current;
-    let settleTransition!: (succeeded: boolean) => void;
-    const transition = new Promise<boolean>((resolve) => {
-      settleTransition = resolve;
-    });
-    sessionTransitionRef.current = {
-      epoch: requestEpoch,
-      targetSessionId: id,
-      promise: transition,
-    };
+    const { finish } = beginSessionTransition(requestEpoch, id);
     let switchStarted = false;
     let switchSucceeded = false;
     try {
@@ -1564,12 +1598,9 @@ export function usePipeline(
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
     } finally {
-      settleTransition(switchSucceeded);
-      if (sessionTransitionRef.current?.promise === transition) {
-        sessionTransitionRef.current = null;
-      }
+      finish(switchSucceeded);
     }
-  }, [appendError, applySessions, captureSessionView, discardPendingOutput, restoreRecords, restoreSessionView, setClarificationIdentity]);
+  }, [appendError, applySessions, beginSessionTransition, captureSessionView, discardPendingOutput, restoreRecords, restoreSessionView, setClarificationIdentity]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。

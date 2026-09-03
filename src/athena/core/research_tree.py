@@ -394,6 +394,23 @@ class ResearchTree:
         """返回当前 SOTA 实验 id；尚无则为 None。"""
         return self._sota_id
 
+    def replace_with(self, other: "ResearchTree") -> None:
+        """Replace this tree's contents while preserving its object identity."""
+        if self is other:
+            return
+        self._hypotheses.clear()
+        self._hypotheses.update(other._hypotheses)
+        self._experiments.clear()
+        self._experiments.update(other._experiments)
+        self._children_index.clear()
+        self._children_index.update(
+            {
+                experiment_id: list(children)
+                for experiment_id, children in other._children_index.items()
+            }
+        )
+        self._sota_id = other._sota_id
+
     def to_dict(self) -> dict[str, Any]:
         """导出为带版本的 JSON 兼容 dict。"""
         return {

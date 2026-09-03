@@ -11,6 +11,9 @@ from typing import Literal
 import pytest
 
 from athena.gui.service import GuiService
+from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
+from athena.core.workspace import GitWorkBranch
 from athena.research import ResearchRuntime
 from athena.research.clarification.errors import ClarificationControllerError
 from athena.research.runtime.clarification import auto_confirm
@@ -234,5 +237,72 @@ async def test_genuinely_new_gui_task_keeps_different_task_protection(
 
         assert caught.value.code == "different_task"
         assert_confirmed_contract_unchanged(harness)
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["SEARCH", "VALIDATE"])
+async def test_saved_tree_recovery_keeps_runtime_and_supervisor_identity(
+    phase: Phase,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = await build_phase_failure_harness(tmp_path, monkeypatch, phase)
+    try:
+        runtime = harness.runtime
+        saved_tree = ResearchTree()
+        saved_tree.add_hypothesis(
+            Hypothesis(
+                id="baseline",
+                statement="saved baseline",
+                intervention="restore saved history",
+                expected_effect="preserve the trusted history",
+            )
+        )
+        saved_tree.add_experiment(
+            "exp_baseline",
+            Experiment(
+                hypothesis_id="baseline",
+                commit="a" * 40,
+                plan=ExperimentPlan(
+                    kind="baseline",
+                    change="restore saved baseline",
+                    run_config_ref="artifact://baseline/config",
+                    budget={},
+                    acceptance_rule="saved history remains available",
+                ),
+                gitwork=GitWorkBranch(
+                    path=str(tmp_path), branch="main", base_commit="a" * 40
+                ),
+                status=ExperimentStatus.SUCCEEDED,
+                eval=EvalResult(
+                    experiment_id="exp_baseline",
+                    primary=0.8,
+                    per_sample="artifact://baseline/samples",
+                ),
+            ),
+        )
+        saved_tree.set_sota("exp_baseline")
+        saved_tree.save(runtime.tree_path)
+        runtime.state.phase = phase
+        runtime.state.status = "IDLE"
+        runtime.state.save(runtime.state_path)
+
+        shared_tree = runtime.tree
+        await runtime.supervisor.recover()
+
+        assert runtime.tree is shared_tree
+        assert runtime.tree is runtime.supervisor.tree
+        service = GuiService(runtime)
+        assert service.tree_get()["tree"] == saved_tree.to_dict()
+
+        runtime.supervisor.tree.update_hypothesis_status("baseline", "SUPPORTED")
+        assert (
+            service.tree_get()["tree"]["hypotheses"]["baseline"]["status"]
+            == "SUPPORTED"
+        )
+        runtime.save_tree()
+        assert ResearchTree.load(runtime.tree_path).to_dict() == runtime.tree.to_dict()
     finally:
         await harness.close()

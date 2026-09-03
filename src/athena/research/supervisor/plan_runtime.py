@@ -321,7 +321,7 @@ class PlanRuntime:
     async def recover(self, state: ResearchState | None = None) -> ResearchState:
         """Reconcile persisted Plans without inventing missing frozen resources."""
         if self._deps.paths.tree_path.is_file():
-            self._owner.tree = ResearchTree.load(self._deps.paths.tree_path)
+            self._owner.tree.replace_with(ResearchTree.load(self._deps.paths.tree_path))
         candidate = state or self._state
         artifact_presence: dict[str, bool] = {}
         workspace_presence: dict[str, bool] = {}

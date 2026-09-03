@@ -290,6 +290,7 @@ describe("usePipeline", () => {
         () => new Promise<void>((resolve) => { resolveNewResume = resolve; }),
       );
     const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
 
     let oldResume: Promise<void>;
     let newResume: Promise<void>;
@@ -330,6 +331,7 @@ describe("usePipeline", () => {
         () => new Promise<void>((resolve) => { resolveNewResume = resolve; }),
       );
     const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
 
     let oldResume: Promise<void>;
     let newResume: Promise<void>;
@@ -1021,6 +1023,68 @@ describe("usePipeline", () => {
 
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalled());
     expect(bridgeMocks.sessionSwitch.mock.calls[0]).toEqual(["s-2"]);
+  });
+
+  it("waits for initial session selection before continuing the target session", async () => {
+    let resolveSessions: ((value: { sessions: string[]; active: string | null }) => void) | undefined;
+    let resolveSwitch: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionsList.mockImplementation(
+      () => new Promise((resolve) => { resolveSessions = resolve; }),
+    );
+    bridgeMocks.sessionSwitch.mockImplementation(
+      () => new Promise((resolve) => { resolveSwitch = resolve; }),
+    );
+
+    const { result } = renderHook(() => usePipeline(undefined, "s-2"));
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalledTimes(1));
+
+    let continuation: Promise<void>;
+    act(() => {
+      continuation = result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+    expect(bridgeMocks.sessionSwitch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSessions?.({ sessions: ["default", "s-2"], active: "default" });
+    });
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("s-2"));
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSwitch?.({ records: [], sessions: ["default", "s-2"] });
+      await continuation!;
+    });
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not continue an abandoned default session when initial selection rejects", async () => {
+    let resolveSessions: ((value: { sessions: string[]; active: string | null }) => void) | undefined;
+    let rejectSwitch: ((reason?: unknown) => void) | undefined;
+    bridgeMocks.sessionsList.mockImplementation(
+      () => new Promise((resolve) => { resolveSessions = resolve; }),
+    );
+    bridgeMocks.sessionSwitch.mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectSwitch = reject; }),
+    );
+
+    const { result } = renderHook(() => usePipeline(undefined, "s-2"));
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalledTimes(1));
+
+    let continuation: Promise<void>;
+    act(() => {
+      continuation = result.current.sendPrompt("continue");
+    });
+    await act(async () => {
+      resolveSessions?.({ sessions: ["default", "s-2"], active: "default" });
+    });
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("s-2"));
+
+    await act(async () => {
+      rejectSwitch?.(new Error("target unavailable"));
+      await continuation!;
+    });
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
   });
 
   it("clears stale cached summaries after authoritative empty hydration", async () => {
