@@ -32,6 +32,7 @@ from athena.research.config import (
     SurveyConfig,
 )
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.prepare.authority import BaselineAuthorityStore
 from athena.research.runtime.events import RuntimeEvents
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime.services import (
@@ -95,6 +96,7 @@ def build_config(
 def build_services(
     config: ResearchConfig,
     broker: object | None,
+    baseline_authority: BaselineAuthorityStore | None = None,
 ) -> tuple[ResearchServices, ResearchSession]:
     """Build durable infrastructure and transient process state."""
     paths = config.paths
@@ -137,6 +139,7 @@ def build_services(
             events=events,
             scripts=scripts,
             evaluator=evaluator,
+            baseline_authority=baseline_authority,
         ),
         durable=DurableResearch(tree=tree, state=state),
     )
@@ -300,6 +303,7 @@ def baseline_ideator_tools(runtime: Any) -> Callable[[], ToolRegistry]:
     """Return a lazy web-enabled provider for the baseline ideator only."""
 
     def build() -> ToolRegistry:
+        """Build the baseline ideator registry when the provider is requested."""
         registry = _merged(
             runtime.kaggle_tools("ideator"),
             runtime.corpus_tools(for_ideation=True),

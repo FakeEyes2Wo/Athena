@@ -26,6 +26,7 @@ from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_rag.schemas import PaperSummary
 from athena.research.literature.survey import SurveyStack
+from athena.research.prepare.authority import BaselineAuthorityStore
 from athena.research.runtime.bootstrap import (
     baseline_ideator_tools as baseline_ideator_tools_impl,
     build_config,
@@ -152,6 +153,7 @@ class ResearchRuntime:
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
         ask_user: AskUser | None = None,
         broker: Any | None = None,
+        baseline_authority: BaselineAuthorityStore | None = None,
         survey: bool = False,
         survey_query: str = "",
         survey_max_papers: int = DEFAULT_SURVEY_PAPERS,
@@ -202,7 +204,7 @@ class ResearchRuntime:
             },
         )
 
-        services, session = build_services(config, broker)
+        services, session = build_services(config, broker, baseline_authority)
         self._config = config
         self._services = services
         self._session = session
@@ -342,6 +344,11 @@ class ResearchRuntime:
     def evaluator(self) -> TrustedEvaluator:
         """Return the trusted metric evaluator."""
         return self._services.infrastructure.evaluator
+
+    @property
+    def baseline_authority(self) -> BaselineAuthorityStore | None:
+        """Return the controller-bound external baseline authority capability."""
+        return self._services.infrastructure.baseline_authority
 
     @property
     def git(self) -> LocalGitWorkspace:
