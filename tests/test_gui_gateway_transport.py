@@ -74,9 +74,16 @@ async def test_invalid_json_returns_error() -> None:
 class _FakeRuntime:
     """Minimal runtime double with subscribe/unsubscribe + snapshot emission."""
 
-    def __init__(self, root: str, state_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: str,
+        state_root: Path | None = None,
+        *,
+        output_payload: dict[str, Any] | None = None,
+    ) -> None:
         self.root = root
         self.state_root = state_root
+        self.output_payload = output_payload
         self.tree_path = Path(root) / ".athena" / "research_tree.json"
         self._subscribers: dict[int, Any] = {}
         self._next = 0
@@ -90,6 +97,8 @@ class _FakeRuntime:
                 "state", {"phase": "idle", "status": "idle", "project_root": self.root}
             )
         )
+        if self.output_payload is not None:
+            asyncio.get_running_loop().create_task(emit("output", self.output_payload))
         return self._next
 
     def unsubscribe(self, subscription_id: int) -> None:
@@ -124,6 +133,37 @@ class _FakeWS:
             return next(self._iter)
         except StopIteration:
             raise StopAsyncIteration
+
+
+async def test_transport_preserves_generic_scoped_output_payload() -> None:
+    """Generic scope metadata crosses the WebSocket boundary unchanged."""
+    from gui_gateway.handler import GuiRequestHandler
+    from gui_gateway.transport import WebSocketTransport
+
+    payload = {
+        "type": "output",
+        "seq": 1,
+        "message_id": "msg-1",
+        "source": "agent",
+        "channel": "text",
+        "text": "public update",
+        "session_id": "session-1",
+        "scope": "task_understanding",
+        "scope_id": "draft-1",
+    }
+    runtime = _FakeRuntime("/root", output_payload=payload)
+    transport = WebSocketTransport(GuiRequestHandler(runtime))
+    ws = _FakeWS([json.dumps({"request_id": 1, "method": "ping", "params": {}})])
+
+    await transport.handle(ws)
+    await asyncio.sleep(0)
+
+    output_frames = [
+        decoded
+        for message in ws.sent
+        if (decoded := json.loads(message)).get("kind") == "output"
+    ]
+    assert [frame["data"] for frame in output_frames] == [payload]
 
 
 async def test_transport_resubscribes_after_project_switch() -> None:
