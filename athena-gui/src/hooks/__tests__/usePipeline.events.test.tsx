@@ -1,7 +1,18 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const eventHandlers: Array<(event: { kind: string; data: Record<string, unknown> }) => void> = [];
+let nextAnimationFrameId = 1;
+let animationFrames = new Map<number, FrameRequestCallback>();
+
+function runNextAnimationFrame(): void {
+  const next = animationFrames.entries().next().value as
+    | [number, FrameRequestCallback]
+    | undefined;
+  if (!next) throw new Error("No animation frame was scheduled");
+  animationFrames.delete(next[0]);
+  next[1](16);
+}
 
 vi.mock("../../lib/tauri-bridge", () => ({
   sendControl: vi.fn().mockResolvedValue({ ok: true }),
@@ -53,6 +64,17 @@ async function renderHydratedPipeline() {
 
 describe("usePipeline event mapping", () => {
   beforeEach(() => {
+    nextAnimationFrameId = 1;
+    animationFrames = new Map();
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      const id = nextAnimationFrameId;
+      nextAnimationFrameId += 1;
+      animationFrames.set(id, callback);
+      return id;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn((id: number) => {
+      animationFrames.delete(id);
+    }));
     eventHandlers.length = 0;
     vi.mocked(sendControl).mockClear();
     vi.mocked(sessionSwitch).mockClear();
@@ -63,6 +85,10 @@ describe("usePipeline event mapping", () => {
       revision: 1,
       status: "CLARIFYING",
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("maps a state event to phase, status, budget, and SOTA", async () => {
@@ -308,11 +334,127 @@ describe("usePipeline event mapping", () => {
       });
     });
 
+    act(() => runNextAnimationFrame());
+
     expect(result.current.viewModel.messages.map((m) => m.kind)).toEqual(["text"]);
     expect(result.current.viewModel.messages[0]).toMatchObject({
       role: "athena",
       content: "开始准备",
     });
+  });
+
+  it("batches a burst into one frame while preserving every ordered log entry", async () => {
+    const { result } = await renderHydratedPipeline();
+    const beforeBurst = result.current.viewModel;
+
+    act(() => {
+      for (let index = 0; index < 100; index += 1) {
+        eventHandlers[0]?.({
+          kind: "output",
+          data: {
+            seq: index + 1,
+            source: "agent",
+            channel: "text",
+            text: `${index}|`,
+            message_id: "burst-message",
+          },
+        });
+      }
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 101,
+          source: "agent",
+          channel: "tool_call",
+          text: '{"path":"train.csv"}',
+          message_id: "burst-tool-call",
+          tool: "inspect_dataset",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 102,
+          source: "tool",
+          channel: "stdout",
+          text: "rows=891",
+          message_id: "burst-tool-output",
+          tool: "inspect_dataset",
+        },
+      });
+    });
+
+    expect(result.current.viewModel).toBe(beforeBurst);
+    expect(result.current.logs).toEqual([]);
+    expect(requestAnimationFrame).toHaveBeenCalledTimes(1);
+
+    act(() => runNextAnimationFrame());
+
+    expect(result.current.viewModel.messages).toEqual([
+      expect.objectContaining({
+        id: "burst-message",
+        content: Array.from({ length: 100 }, (_, index) => `${index}|`).join(""),
+        source: "agent",
+      }),
+      expect.objectContaining({
+        id: "burst-tool-call",
+        content: '{"path":"train.csv"}',
+        tool: "inspect_dataset",
+      }),
+      expect.objectContaining({
+        id: "burst-tool-output",
+        content: "rows=891",
+        source: "tool",
+        channel: "stdout",
+      }),
+    ]);
+    expect(result.current.logs).toHaveLength(102);
+    expect(result.current.logs.slice(0, 100).map((entry) => entry.text)).toEqual(
+      Array.from({ length: 100 }, (_, index) => `${index}|`),
+    );
+    expect(result.current.logs.slice(-2)).toMatchObject([
+      {
+        id: "log-101",
+        kind: "output",
+        source: "agent",
+        channel: "tool_call",
+        tool: "inspect_dataset",
+        text: '{"path":"train.csv"}',
+      },
+      {
+        id: "log-102",
+        kind: "output",
+        source: "tool",
+        channel: "stdout",
+        tool: "inspect_dataset",
+        text: "rows=891",
+      },
+    ]);
+    expect(animationFrames.size).toBe(0);
+  });
+
+  it("cancels and discards a queued output frame on unmount", async () => {
+    const { result, unmount } = await renderHydratedPipeline();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "discard me",
+          message_id: "pending-output",
+        },
+      });
+    });
+
+    expect(result.current.viewModel.messages).toEqual([]);
+    expect(animationFrames.size).toBe(1);
+    unmount();
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(animationFrames.size).toBe(0);
   });
 
   it("coalesces clarification output deltas and preserves backend tool activity", async () => {
@@ -321,6 +463,7 @@ describe("usePipeline event mapping", () => {
     await act(async () => {
       await result.current.sendPrompt("analyze train.csv");
     });
+    const existingMessages = result.current.viewModel.messages;
 
     await act(async () => {
       // 同一条消息的 delta 带同一个 message_id（后端在建立文本缓冲时分配）。
@@ -367,7 +510,11 @@ describe("usePipeline event mapping", () => {
       });
     });
 
+    act(() => runNextAnimationFrame());
+
     expect(result.current.viewModel.messages).toHaveLength(6);
+    expect(result.current.viewModel.messages[0]).toBe(existingMessages[0]);
+    expect(result.current.viewModel.messages[1]).toBe(existingMessages[1]);
     expect(result.current.viewModel.messages[2]).toMatchObject({
       id: "msg-1",
       content: "正在生成假设",

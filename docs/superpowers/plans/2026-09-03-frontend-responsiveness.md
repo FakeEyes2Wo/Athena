@@ -196,6 +196,7 @@
 **Files:**
 - Modify: `athena-gui/src/hooks/usePipeline.ts`
 - Modify: `athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx`
+- Modify: `athena-gui/src/hooks/__tests__/usePipeline.identity.test.tsx`
 - Modify: `athena-gui/src/hooks/__tests__/usePipeline.test.tsx`
 - Modify: `athena-gui/src/components/conversation/MessageList.tsx`
 - Modify: `athena-gui/src/components/shell/AppShell.tsx`
@@ -205,7 +206,7 @@
   animation-frame queue owned by `usePipeline`.
 - Consumes: existing `PipelineEvent`, `UIMessage`, and `LogEntry` shapes.
 
-- [ ] **Step 1: Add failing burst and lifecycle tests**
+- [x] **Step 1: Add failing burst and lifecycle tests**
 
   In `usePipeline.events.test.tsx`, stub `requestAnimationFrame`, emit 100 deltas
   for one `message_id` plus ordered tool/stdout events, assert the visible state is
@@ -216,7 +217,7 @@
   In `usePipeline.test.tsx`, replay a large mixed transcript with repeated message
   IDs and assert content/order equals live reducer semantics.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   Run:
 
@@ -227,14 +228,14 @@
   Expected: current output state updates immediately for every event and no frame
   cancellation occurs.
 
-- [ ] **Step 3: Implement indexed output batches**
+- [x] **Step 3: Implement indexed output batches**
 
   Extract output classification into a helper that mutates a single copied
   messages array and uses `Map<string, number>` for ID lookup. Accumulate delta
   strings per message within the batch before assigning the final content. Reuse
   this primitive from history replay so it copies the base array once.
 
-- [ ] **Step 4: Implement animation-frame flushing**
+- [x] **Step 4: Implement animation-frame flushing**
 
   Queue live `output` events in refs. Schedule at most one animation frame. On
   flush, atomically drain the queue, call one `setViewModel`, and append the batch's
@@ -242,20 +243,20 @@
   handling a non-output event to preserve ordering. Cancel the frame and discard
   the queue on unmount.
 
-- [ ] **Step 5: Reduce component work**
+- [x] **Step 5: Reduce component work**
 
   Wrap `TrajectoryItem` with `memo` and keep unchanged `UIMessage` object identities.
   Narrow `AppShell`'s session-refresh effect dependencies to `module`,
   `pipeline.currentSessionId`, `pipeline.viewModel.status`, and
   `pipeline.switchSession`.
 
-- [ ] **Step 6: Run focused tests and verify GREEN**
+- [x] **Step 6: Run focused tests and verify GREEN**
 
   Run the command from Step 2 and require PASS.
 
-- [ ] **Step 7: Commit the streaming fix**
+- [x] **Step 7: Commit the streaming fix**
 
-  Stage only the five task files and commit as
+  Stage only the six task files and commit as
   `perf(gui): batch streamed conversation output`.
 
 ### Task 5: Full Verification and Integration

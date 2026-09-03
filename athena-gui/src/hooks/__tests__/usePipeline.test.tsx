@@ -310,6 +310,92 @@ describe("usePipeline", () => {
     ]);
   });
 
+  it("replays a large mixed transcript with the same ordered message semantics as live deltas", async () => {
+    const records: Array<Record<string, unknown>> = [
+      { type: "user", seq: 1, text: "run the analysis" },
+    ];
+    let agentContent = "";
+    let supervisorContent = "";
+    let seq = 2;
+
+    for (let index = 0; index < 100; index += 1) {
+      agentContent += `${index}|`;
+      records.push({
+        type: "output",
+        seq,
+        message_id: "agent-stream",
+        source: "agent",
+        channel: "text",
+        text: agentContent,
+      });
+      seq += 1;
+
+      if (index < 50) {
+        supervisorContent += `${index};`;
+        records.push({
+          type: "output",
+          seq,
+          message_id: "supervisor-stream",
+          source: "supervisor",
+          channel: "text",
+          text: supervisorContent,
+        });
+        seq += 1;
+      }
+
+      if (index % 10 === 0) {
+        records.push({
+          type: "output",
+          seq,
+          message_id: `tool-${index}`,
+          source: "tool",
+          channel: "stdout",
+          tool: "inspect_dataset",
+          text: `chunk-${index}`,
+        });
+        seq += 1;
+      }
+    }
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records, sessions: ["default"] });
+
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => expect(result.current.viewModel.messages).toHaveLength(13));
+    expect(result.current.viewModel.messages.map((message) => message.id)).toEqual([
+      "user-1",
+      "agent-stream",
+      "supervisor-stream",
+      "tool-0",
+      "tool-10",
+      "tool-20",
+      "tool-30",
+      "tool-40",
+      "tool-50",
+      "tool-60",
+      "tool-70",
+      "tool-80",
+      "tool-90",
+    ]);
+    expect(result.current.viewModel.messages[1]?.content).toBe(
+      Array.from({ length: 100 }, (_, index) => `${index}|`).join(""),
+    );
+    expect(result.current.viewModel.messages[2]?.content).toBe(
+      Array.from({ length: 50 }, (_, index) => `${index};`).join(""),
+    );
+    expect(result.current.viewModel.messages.slice(3).map((message) => message.content)).toEqual([
+      "chunk-0",
+      "chunk-10",
+      "chunk-20",
+      "chunk-30",
+      "chunk-40",
+      "chunk-50",
+      "chunk-60",
+      "chunk-70",
+      "chunk-80",
+      "chunk-90",
+    ]);
+  });
+
   it("clears the conversation view on new session without clearing the transcript", async () => {
     bridgeMocks.sessionSwitch.mockResolvedValue({
       records: [
@@ -395,6 +481,8 @@ describe("usePipeline", () => {
         kind: "output",
         data: { seq: 1, message_id: "live-1", source: "agent", channel: "text", text: "live message" },
       });
+      // A non-output event synchronously flushes queued output before it applies.
+      pipelineEventHandler?.({ kind: "state", data: { phase: "PREPARE" } });
     });
     expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["live message"]);
 

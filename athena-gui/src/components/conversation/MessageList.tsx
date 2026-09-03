@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { ClarificationPreview, UIMessage, UIMessagePreview } from "../../types/ui";
 import { IntentPreviewCard } from "../cards/IntentPreviewCard";
 import { ErrorCard } from "../cards/ErrorCard";
@@ -110,14 +110,16 @@ function toClarificationPreview(
   };
 }
 
-/** A single trajectory record (user / supervisor / agent / tool / error). */
-function TrajectoryItem({ msg, onConfirmPreview, onRevisePreview, onRetryPreview, onCancelPreview }: {
+interface TrajectoryItemProps {
   msg: UIMessage;
   onConfirmPreview: MessageListProps["onConfirmPreview"];
   onRevisePreview: MessageListProps["onRevisePreview"];
   onRetryPreview: MessageListProps["onRetryPreview"];
   onCancelPreview: MessageListProps["onCancelPreview"];
-}) {
+}
+
+/** A single trajectory record (user / supervisor / agent / tool / error). */
+const TrajectoryItem = memo(function TrajectoryItem({ msg, onConfirmPreview, onRevisePreview, onRetryPreview, onCancelPreview }: TrajectoryItemProps) {
   if (msg.kind === "intent-preview" && msg.preview) {
     const preview = toClarificationPreview(msg.preview, msg.started === true);
     // While the authoritative draft is still being built, keep the chat focused
@@ -186,7 +188,14 @@ function TrajectoryItem({ msg, onConfirmPreview, onRevisePreview, onRetryPreview
       {msg.content}
     </article>
   );
-}
+}, (previous, next) => {
+  if (previous.msg !== next.msg) return false;
+  if (next.msg.kind !== "intent-preview") return true;
+  return previous.onConfirmPreview === next.onConfirmPreview
+    && previous.onRevisePreview === next.onRevisePreview
+    && previous.onRetryPreview === next.onRetryPreview
+    && previous.onCancelPreview === next.onCancelPreview;
+});
 
 /** Renders chat messages, intent preview cards, and the trajectory (agent/tool/supervisor/ideator). */
 export function MessageList({
