@@ -254,7 +254,15 @@ async def test_evaluator_prompts_match_the_data_source(
         )
     ]
     if platform_split:
-        assert tasks[0] == "build evaluator"
+        # The SEARCH agent must be told its role and which partition file to
+        # read; an exact-equality assertion here used to pin the bare task and
+        # so pinned the 2026-09-03 leak, where the agent picked final labels.
+        assert tasks[0].startswith("build evaluator")
+        assert "SEARCH evaluator" in tasks[0]
+        assert "search_labels.csv" in tasks[0]
+        assert "final_labels.csv" not in tasks[0]
+        # ...without dragging in the directory-data contract.
+        assert "SHA-256" not in tasks[0]
         assert "Take the final labels from final_labels.csv" in tasks[1]
         assert "no platform CSV split" not in tasks[1]
         return

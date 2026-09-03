@@ -71,6 +71,31 @@ def test_directory_evaluators_declare_flexible_prediction_schema(
         assert "do not assume JW-SSD labels or class names" in task
 
 
+def test_platform_split_search_evaluator_is_told_which_partition_it_serves(
+    tmp_path: Path,
+) -> None:
+    """The platform-split path must name the SEARCH role, like the directory path.
+
+    Regression for the 2026-09-03 TESS run: this branch returned the bare task,
+    so the SEARCH evaluator agent was never told which role it filled. It saw
+    search_labels.csv and final_labels.csv side by side in data_split, built its
+    evaluator on the final labels, and PREPARE died on the disjointness guard.
+    """
+    split = tmp_path / "data_split"
+    split.mkdir()
+    (split / "final_labels.csv").write_text(
+        "__athena_row_id,label\n0,0\n", encoding="utf-8"
+    )
+    runtime = SimpleNamespace(workspaces_root=tmp_path)
+
+    search, final = evaluator_tasks(runtime, "score flare windows")
+
+    assert "SEARCH evaluator" in search
+    assert "search_labels.csv" in search
+    assert "final_labels.csv" not in search
+    assert "final_labels.csv" in final
+
+
 def test_eda_fallback_preserves_existing_handoff(tmp_path: Path) -> None:
     """Fallback creation must not overwrite a useful EDA handoff."""
     handoff = tmp_path / "EDA_HANDOFF.md"
