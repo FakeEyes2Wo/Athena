@@ -221,7 +221,8 @@ Create inside `evaluate/`:
   ```
 
 Install every third-party dependency into the shared environment root, not into
-a workspace-local venv: run `uv add --project "$ATHENA_ENV_ROOT" <package>` for
+a workspace-local venv: run the `uv add --project ... <package>` command exactly as the Runtime
+block spells it for
 each dependency and then `uv sync`. Keep `evaluate.py` dependency-light and
 deterministic.
 

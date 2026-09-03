@@ -440,8 +440,16 @@ class EnvironmentManager:
         except RuntimeError as exc:
             return f"Runtime:\n- environment needs repair: {exc}"
         shell_line = f"- Shell: {shell_name}"
-        if shell_name == "powershell.exe":
-            shell_line += ' (chain with ";" not "&&")'
+        if "powershell" in shell_name.lower() or "pwsh" in shell_name.lower():
+            # 只写文件名不够：Agent 会照惯性写 POSIX。2026-09-03 的 TESS 轮里
+            # `ls -la` / `%VAR%` / `$VAR` 换来 17 次报错，基线明明训成了
+            # （PR-AUC 0.7973）却在提交前耗尽 PREPARE 轮次预算。
+            shell_line += (
+                " — PowerShell, not POSIX: env vars are $env:NAME, chain with"
+                ' ";" not "&&", and POSIX flags/commands (ls -la, head, grep)'
+                " are unavailable; use Get-ChildItem/Get-Content/Select-String"
+                " or python -c instead."
+            )
         env_root = self.env_ref("ATHENA_ENV_ROOT")
         lines = [
             "Runtime:",
