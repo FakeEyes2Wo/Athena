@@ -25,6 +25,7 @@ export function RunControls({ viewModel, active, onPause, onResume, onStop, onTo
   const { phase, status, manual, rightRail } = viewModel;
   const running = status === "running" && active;
   const paused = status === "paused" && active;
+  const resumable = paused || viewModel.resumeAvailable;
   const terminal = status === "idle" || status === "completed" || status === "error" || !active;
   const best = rightRail.bestPrimary != null ? rightRail.bestPrimary.toFixed(4) : "--";
 
@@ -53,7 +54,7 @@ export function RunControls({ viewModel, active, onPause, onResume, onStop, onTo
         <button className="btn btn--sm" onClick={onPause} disabled={!running} title="暂停搜索">
           暂停
         </button>
-        <button className="btn btn--sm" onClick={onResume} disabled={!paused} title="继续搜索">
+        <button className="btn btn--sm" onClick={onResume} disabled={!resumable} title="继续搜索">
           继续
         </button>
         <button className="btn btn--sm btn--ghost" onClick={onStop} disabled={terminal} title="停止研究">

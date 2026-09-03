@@ -142,6 +142,10 @@ export interface PipelineViewModel {
   pending: Array<{ id: string; statement: string }>;
   /** True when the runtime is in manual hypothesis-selection mode. */
   manual: boolean;
+  /** Whether the latest authoritative state permits resuming this durable task. */
+  resumeAvailable: boolean;
+  /** The backend's durable resume classification, when supplied. */
+  resumeReason: string | null;
 }
 
 /** Returns a default PipelineViewModel with idle state and empty messages. */
@@ -162,5 +166,7 @@ export function createEmptyPipelineViewModel(): PipelineViewModel {
     plans: [],
     pending: [],
     manual: false,
+    resumeAvailable: false,
+    resumeReason: null,
   };
 }

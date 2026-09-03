@@ -19,6 +19,7 @@ import {
   EMPTY_RESEARCH_TREE,
   PIPELINE_EVENT_NAMES,
   humanReply,
+  resumeSearch,
   startSearch,
   subscribeToPipelineEvents,
   taskClarificationCancel,
@@ -86,6 +87,11 @@ describe("clarification RPC normalization", () => {
       revision: 4,
       acknowledgeUnresolved: true,
     });
+  });
+
+  it("uses the shared native resume command", () => {
+    resumeSearch();
+    expect(invokeMock).toHaveBeenCalledWith("resume_search", undefined);
   });
 
   it("clarification methods normalize draft_id to draftId", () => {

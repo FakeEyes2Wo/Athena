@@ -113,6 +113,55 @@ describe("usePipeline event mapping", () => {
     expect(result.current.viewModel.rightRail.latestExperimentId).toBe("exp-1");
   });
 
+  it("projects resume capability and clears omitted fields on the next complete snapshot", async () => {
+    const { result } = await renderHydratedPipeline();
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: {
+          phase: "PREPARE",
+          status: "FAILED",
+          resume_available: true,
+          resume_reason: "failed",
+        },
+      });
+    });
+    expect(result.current.viewModel.resumeAvailable).toBe(true);
+    expect(result.current.viewModel.resumeReason).toBe("failed");
+    expect(result.current.runActive).toBe(true);
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "IDLE" },
+      });
+    });
+    expect(result.current.viewModel.resumeAvailable).toBe(false);
+    expect(result.current.viewModel.resumeReason).toBeNull();
+    expect(result.current.runActive).toBe(false);
+  });
+
+  it("keeps an interrupted restored PREPARE session actionable", async () => {
+    const { result } = await renderHydratedPipeline();
+
+    await act(async () => {
+      eventHandlers[0]?.({
+        kind: "state",
+        data: {
+          phase: "PREPARE",
+          status: "IDLE",
+          resume_available: true,
+          resume_reason: "interrupted",
+        },
+      });
+    });
+
+    expect(result.current.viewModel.status).toBe("idle");
+    expect(result.current.viewModel.resumeAvailable).toBe(true);
+    expect(result.current.runActive).toBe(true);
+  });
+
   it("does not treat a stale RUNNING status as an active run", async () => {
     const { result } = await renderHydratedPipeline();
 

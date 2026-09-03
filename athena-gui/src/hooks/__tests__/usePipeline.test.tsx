@@ -201,6 +201,96 @@ describe("usePipeline", () => {
     expect(bridgeMocks.sendControl).toHaveBeenCalledWith("/select hyp-7");
   });
 
+  it("routes exact locale-independent continue to the shared resume action", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(pipelineEventHandler).not.toBeNull());
+
+    act(() => {
+      pipelineEventHandler?.({
+        kind: "state",
+        data: {
+          phase: "PREPARE",
+          status: "FAILED",
+          resume_available: true,
+          resume_reason: "failed",
+        },
+      });
+    });
+
+    await act(async () => {
+      await result.current.sendPrompt("  CONTINUE  ");
+    });
+
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+    expect(bridgeMocks.taskClarificationStart).not.toHaveBeenCalled();
+    expect(result.current.viewModel.messages.filter((message) => message.kind === "intent-preview")).toHaveLength(0);
+    expect(result.current.viewModel.status).toBe("running");
+  });
+
+  it("keeps multiword continue prose on its existing task path", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.sendPrompt("continue research");
+    });
+
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith("continue research");
+  });
+
+  it("shares one in-flight resume request across rapid continuation submissions", async () => {
+    let resolveResume: (() => void) | undefined;
+    bridgeMocks.resumeSearch.mockImplementation(
+      () => new Promise<void>((resolve) => { resolveResume = resolve; }),
+    );
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(pipelineEventHandler).not.toBeNull());
+    act(() => {
+      pipelineEventHandler?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "IDLE", resume_available: true },
+      });
+    });
+
+    let first: Promise<void>;
+    let second: Promise<void>;
+    act(() => {
+      first = result.current.sendPrompt("continue");
+      second = result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveResume?.();
+      await Promise.all([first!, second!]);
+    });
+  });
+
+  it("keeps existing history when a resumable run rejects continuation", async () => {
+    bridgeMocks.resumeSearch.mockRejectedValue(new Error("nothing to resume"));
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(pipelineEventHandler).not.toBeNull());
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+    });
+    const history = result.current.viewModel.messages;
+    act(() => {
+      pipelineEventHandler?.({
+        kind: "state",
+        data: { phase: "PREPARE", status: "FAILED", resume_available: true },
+      });
+    });
+
+    await act(async () => {
+      await result.current.sendPrompt("continue").catch(() => undefined);
+    });
+
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+    expect(result.current.viewModel.messages.slice(0, history.length)).toEqual(history);
+    expect(result.current.viewModel.messages[result.current.viewModel.messages.length - 1]).toMatchObject({ kind: "error", content: "nothing to resume" });
+    expect(result.current.viewModel.status).toBe("error");
+  });
+
   it("routes prose to the supervisor while a run is active", async () => {
     bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
     bridgeMocks.sendControl.mockResolvedValue({ response: "收到，已调整计划。" });
@@ -776,6 +866,27 @@ describe("usePipeline", () => {
       status: "completed",
       plans: [{ id: "new-plan" }],
       pending: [{ id: "new-pending", statement: "new pending" }],
+    });
+  });
+
+  it("seeds the current session when initial session hydration fails", async () => {
+    bridgeMocks.sessionsList.mockRejectedValue(new Error("session list unavailable"));
+    bridgeMocks.stateGet.mockResolvedValue({
+      phase: "PREPARE",
+      status: "FAILED",
+      resume_available: true,
+      resume_reason: "failed",
+    });
+
+    const { result } = renderHook(() => usePipeline());
+
+    await waitFor(() => expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1));
+    expect(result.current.currentSessionId).toBe("default");
+    expect(result.current.viewModel).toMatchObject({
+      phase: "PREPARE",
+      status: "error",
+      resumeAvailable: true,
+      resumeReason: "failed",
     });
   });
 

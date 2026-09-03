@@ -51,6 +51,10 @@ const RUNTIME_STATUS_MAP: Record<string, PipelineViewModel["status"]> = {
   FAILED: "error",
 };
 
+function isContinueCommand(text: string): boolean {
+  return text.trim().toLowerCase() === "continue";
+}
+
 /** Slash-command help shown by ``/help`` (mirrors the TUI overlay text). */
 const HELP_TEXT = "可用命令：/pause /resume /stop /manual /auto /select <id> /help";
 
@@ -388,6 +392,9 @@ function applyPipelineEvent(
   }
 
   if (event.kind === "state") {
+    next.resumeAvailable = data.resume_available === true;
+    next.resumeReason =
+      typeof data.resume_reason === "string" ? data.resume_reason : null;
     if (typeof data.phase === "string" && data.phase.trim()) {
       next.phase = data.phase;
     }
@@ -500,6 +507,7 @@ export function usePipeline(
   const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
   const runStarted = useRef(false);
+  const resumeInFlightRef = useRef<Promise<void> | null>(null);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
   const settlingRequestRef = useRef<string | null>(null);
@@ -867,6 +875,18 @@ export function usePipeline(
     let mounted = true;
     let unlisteners: Array<() => void> = [];
     const hydrationEpoch = ++sessionRequestEpochRef.current;
+    const applyHydrationSnapshot = () => {
+      void stateGet()
+        .then((snapshot) => {
+          if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
+          setViewModel((prev) =>
+            applyPipelineEvent(prev, { kind: "state", data: snapshot }),
+          );
+        })
+        .catch(() => {
+          // Non-fatal: the live subscription above will still drive updates.
+        });
+    };
 
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
@@ -947,18 +967,6 @@ export function usePipeline(
       unlisteners = fns;
     });
 
-    // Seed the view model from the current projected state so a fresh session
-    // (including after a workspace switch remount) never starts blank while
-    // waiting for the next streamed event.
-    stateGet()
-      .then((snapshot) => {
-        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
-        setViewModel((prev) => applyPipelineEvent(prev, { kind: "state", data: snapshot }));
-      })
-      .catch(() => {
-        // Non-fatal: the live subscription above will still drive updates.
-      });
-
     // 断点续传：列出会话 → 切到本工作区上次用的会话 → 重放其 transcript。
     sessionsList()
       .then(({ sessions: list, active }) => {
@@ -982,12 +990,19 @@ export function usePipeline(
           setCurrentSessionId(target);
           setLogs([]);
           restoreRecords(result.records, true, target);
-        } catch (error) {
+        } catch {
           restoreSessionViewRef.current(previous);
-          throw error;
+          // The backend already switched, but local hydration failed. Keep the
+          // captured UI intact instead of applying a target-session snapshot to
+          // the restored previous-session view through the outer fallback.
+          return;
         }
+        // The runtime is switched before state_get runs, so the snapshot belongs
+        // to the selected session rather than the mount-time default session.
+        applyHydrationSnapshot();
       })
       .catch(() => {
+        applyHydrationSnapshot();
         // 非致命：无历史或后端不支持时保持空白会话。
       });
 
@@ -1054,6 +1069,29 @@ export function usePipeline(
   }, [currentSessionId, latestUnderstanding, renameSession]);
 
   // User actions.
+
+  const continueCurrentRun = useCallback((): Promise<void> => {
+    if (resumeInFlightRef.current) return resumeInFlightRef.current;
+    const request = (async () => {
+      try {
+        await resumeSearch();
+        runStarted.current = true;
+        setViewModel((prev) => ({
+          ...prev,
+          status: "running",
+          resumeAvailable: false,
+          resumeReason: null,
+        }));
+      } catch (err) {
+        appendError(errorMessage(err));
+        throw err;
+      } finally {
+        resumeInFlightRef.current = null;
+      }
+    })();
+    resumeInFlightRef.current = request;
+    return request;
+  }, [appendError]);
 
   /** Start (or resume) clarification for a task. This never starts research. */
   const startClarification = useCallback(async (task: string) => {
@@ -1280,6 +1318,11 @@ export function usePipeline(
     const content = msg.trim();
     if (!content) return;
 
+    if (isContinueCommand(content)) {
+      await continueCurrentRun();
+      return;
+    }
+
     // Slash command surface (mirrors the TUI command surface).
     if (content.startsWith("/")) {
       const [cmd, ...rest] = content.split(/\s+/);
@@ -1290,8 +1333,7 @@ export function usePipeline(
           setViewModel((prev) => ({ ...prev, status: "paused" }));
           return;
         case "/resume":
-          await resumeSearch();
-          setViewModel((prev) => ({ ...prev, status: "running" }));
+          await continueCurrentRun();
           return;
         case "/stop":
           if (!confirmStop()) return;
@@ -1352,7 +1394,7 @@ export function usePipeline(
     }
 
     await startClarification(content);
-  }, [appendError, nextId, startClarification, viewModel]);
+  }, [appendError, continueCurrentRun, nextId, startClarification, viewModel]);
 
   const pauseRun = useCallback(async () => {
     await pauseSearch();
@@ -1363,12 +1405,8 @@ export function usePipeline(
   }, []);
 
   const resumeRun = useCallback(async () => {
-    await resumeSearch();
-    setViewModel((prev) => ({
-      ...prev,
-      status: "running",
-    }));
-  }, []);
+    await continueCurrentRun();
+  }, [continueCurrentRun]);
 
   const stopRun = useCallback(async () => {
     await stopSearch();
@@ -1510,6 +1548,7 @@ export function usePipeline(
     runStarted.current ||
     viewModel.status === "running" ||
     viewModel.status === "paused" ||
+    viewModel.resumeAvailable ||
     viewModel.plans.length > 0 ||
     viewModel.rightRail.searchAttempts > 0 ||
     viewModel.rightRail.latestExperimentId !== null;
