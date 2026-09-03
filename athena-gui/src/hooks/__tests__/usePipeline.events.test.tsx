@@ -343,6 +343,227 @@ describe("usePipeline event mapping", () => {
     });
   });
 
+  it("accepts only atomic current-session output and preserves scope metadata", async () => {
+    const { result } = await renderHydratedPipeline();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "Understanding the task",
+          message_id: "scoped-agent",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-1",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 2,
+          source: "tool",
+          channel: "stdout",
+          text: "Reported progress",
+          message_id: "scoped-tool",
+          tool: "report_task_understanding",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-1",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 7,
+          source: "agent",
+          channel: "text",
+          text: " wrong scope",
+          message_id: "scoped-agent",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-other",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 3,
+          source: "agent",
+          channel: "text",
+          text: "wrong session",
+          message_id: "wrong-session",
+          session_id: "other-session",
+          scope: "task_understanding",
+          scope_id: "draft-1",
+        },
+      });
+      for (const metadata of [
+        { session_id: "default" },
+        { scope: "task_understanding" },
+        { scope_id: "draft-1" },
+        { session_id: "default", scope: "task_understanding" },
+        { session_id: "default", scope_id: "draft-1" },
+        { scope: "task_understanding", scope_id: "draft-1" },
+      ]) {
+        eventHandlers[0]?.({
+          kind: "output",
+          data: {
+            seq: 4,
+            source: "agent",
+            channel: "text",
+            text: "partial scope",
+            message_id: `partial-${Object.keys(metadata).join("-")}`,
+            ...metadata,
+          },
+        });
+      }
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 5,
+          source: "agent",
+          channel: "text",
+          text: "legacy output",
+          message_id: "legacy-output",
+          session_id: null,
+          scope: null,
+          scope_id: null,
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 6,
+          source: "agent",
+          channel: "text",
+          text: " first",
+          message_id: "scoped-agent",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-1",
+        },
+      });
+    });
+
+    act(() => runNextAnimationFrame());
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual([
+      "Understanding the task first",
+      "Reported progress",
+      "legacy output",
+    ]);
+    expect(result.current.viewModel.messages.slice(0, 2)).toEqual([
+      expect.objectContaining({
+        sessionId: "default",
+        scope: "task_understanding",
+        scopeId: "draft-1",
+      }),
+      expect.objectContaining({
+        sessionId: "default",
+        scope: "task_understanding",
+        scopeId: "draft-1",
+      }),
+    ]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual([
+      "Understanding the task",
+      "Reported progress",
+      " wrong scope",
+      "legacy output",
+      " first",
+    ]);
+  });
+
+  it("latches the first optimistic task-understanding scope until the canonical draft", async () => {
+    let releaseStart = () => {};
+    vi.mocked(taskClarificationStart).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseStart = () =>
+            resolve({ draft_id: "draft-canonical", revision: 1, status: "CLARIFYING" });
+        }),
+    );
+    const { result } = await renderHydratedPipeline();
+    let start!: Promise<void>;
+
+    act(() => {
+      start = result.current.sendPrompt("predict churn");
+    });
+    await act(async () => undefined);
+    act(() => {
+      for (const [seq, scopeId] of ["draft-a", "draft-b"].entries()) {
+        eventHandlers[0]?.({
+          kind: "output",
+          data: {
+            seq: seq + 1,
+            source: "agent",
+            channel: "text",
+            text: scopeId,
+            message_id: `message-${scopeId}`,
+            session_id: "default",
+            scope: "task_understanding",
+            scope_id: scopeId,
+          },
+        });
+      }
+    });
+    act(() => runNextAnimationFrame());
+
+    const optimistic = result.current.viewModel.messages.find(
+      (message) => message.kind === "intent-preview",
+    )?.preview;
+    expect(optimistic).toMatchObject({ draftId: "", optimisticScopeId: "draft-a" });
+    expect(
+      result.current.viewModel.messages
+        .filter((message) => message.scope === "task_understanding")
+        .map((message) => message.scopeId),
+    ).toEqual(["draft-a", "draft-b"]);
+
+    await act(async () => {
+      releaseStart();
+      await start;
+    });
+
+    const canonical = result.current.viewModel.messages.find(
+      (message) => message.kind === "intent-preview",
+    )?.preview;
+    expect(canonical).toMatchObject({ draftId: "draft-canonical" });
+    expect(canonical).toMatchObject({ optimisticScopeId: undefined });
+  });
+
+  it("does not latch task-understanding output after optimistic start fails", async () => {
+    vi.mocked(taskClarificationStart).mockRejectedValueOnce(new Error("start failed"));
+    const { result } = await renderHydratedPipeline();
+
+    await act(async () => {
+      await result.current.sendPrompt("predict churn").catch(() => undefined);
+    });
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "late output",
+          message_id: "late-output",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-late",
+        },
+      });
+    });
+    act(() => runNextAnimationFrame());
+
+    const preview = result.current.viewModel.messages.find(
+      (message) => message.kind === "intent-preview",
+    )?.preview;
+    expect(preview).toMatchObject({ draftId: "" });
+    expect(preview).not.toHaveProperty("optimisticScopeId");
+  });
+
   it("batches a burst into one frame while preserving every ordered log entry", async () => {
     const { result } = await renderHydratedPipeline();
     const beforeBurst = result.current.viewModel;

@@ -26,7 +26,8 @@ ProgressSource = Literal["agent", "tool"]
 def normalize_public_summary(value: object) -> str:
     """Normalize text that is explicitly allowed to cross the public boundary."""
     if not isinstance(value, str):
-        raise ValueError("public summary must be a string")
+        # Pydantic turns ValueError into a field ValidationError; TypeError escapes.
+        raise ValueError("public summary must be a string")  # noqa: TRY004
     normalized = unicodedata.normalize("NFKC", value)
     printable = "".join(
         " " if char.isspace() else char
@@ -359,13 +360,13 @@ __all__ = [
     "ClarificationStep",
     "ClarificationTurnResult",
     "DeterministicClarificationGenerator",
-    "generate_step",
-    "generate_turn",
-    "normalize_public_summary",
     "ProgressSinkStage",
     "ProgressSource",
     "ProgressStage",
     "PublicProgress",
     "PublicProgressSink",
+    "generate_step",
+    "generate_turn",
+    "normalize_public_summary",
     "publish_public_progress",
 ]

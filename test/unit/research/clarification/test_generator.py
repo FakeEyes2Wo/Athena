@@ -10,10 +10,10 @@ from athena.research.clarification.generator import (
     ClarificationFinalStep,
     ClarificationModelOutput,
     ClarificationQuestionStep,
-    PublicProgress,
     DeterministicClarificationGenerator,
-    generate_turn,
+    PublicProgress,
     generate_step,
+    generate_turn,
     publish_public_progress,
 )
 from athena.research.clarification.state import new_draft
@@ -49,6 +49,11 @@ def test_public_progress_rejects_extra_fields() -> None:
         PublicProgress.model_validate(
             {"stage": "analysis", "summary": "safe", "reasoning": "private"}
         )
+
+
+def test_public_progress_reports_non_string_input_as_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        PublicProgress.model_validate({"stage": "analysis", "summary": 1})
 
 
 def test_clarification_model_output_accepts_both_step_variants_and_is_strict() -> None:
