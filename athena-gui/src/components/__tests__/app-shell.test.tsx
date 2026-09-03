@@ -8,10 +8,23 @@ const bridgeMocks = vi.hoisted(() => ({
   sessionsListFor: vi.fn(),
 }));
 
+const storageMocks = vi.hoisted(() => ({
+  loadWorkspaceSessions: vi.fn(),
+}));
+
 vi.mock("../../lib/tauri-bridge", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/tauri-bridge")>()),
   sessionsListFor: bridgeMocks.sessionsListFor,
 }));
+
+vi.mock("../../lib/workspaceStorage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/workspaceStorage")>();
+  storageMocks.loadWorkspaceSessions.mockImplementation(actual.loadWorkspaceSessions);
+  return {
+    ...actual,
+    loadWorkspaceSessions: storageMocks.loadWorkspaceSessions,
+  };
+});
 
 function makePipeline(overrides: Record<string, unknown> = {}) {
   return {
@@ -36,6 +49,7 @@ describe("AppShell", () => {
     localStorage.clear();
     bridgeMocks.sessionsListFor.mockReset();
     bridgeMocks.sessionsListFor.mockResolvedValue({ sessions: [] });
+    storageMocks.loadWorkspaceSessions.mockClear();
   });
 
   it("renders brand, workspace, and the function-rail modules", () => {
@@ -176,6 +190,47 @@ describe("AppShell", () => {
     expect(screen.getByRole("button", { name: "gamma" })).toBeInTheDocument();
     expect(screen.getByText("暂无会话")).toBeInTheDocument();
     expect(bridgeMocks.sessionsListFor).not.toHaveBeenCalled();
+  });
+
+  it("does not reload cached workspace summaries for an unrelated streamed rerender", () => {
+    const recentRoots = ["C:/beta", "C:/gamma"];
+    localStorage.setItem(
+      "athena.workspace.sessions:C:/gamma",
+      JSON.stringify([{ id: "s-gamma", title: "Cached Gamma" }]),
+    );
+    const { rerender } = renderUi(
+      <AppShell
+        currentRoot="C:/beta"
+        recentRoots={recentRoots}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline() as never}
+      />,
+    );
+
+    expect(storageMocks.loadWorkspaceSessions).toHaveBeenCalledOnce();
+    expect(storageMocks.loadWorkspaceSessions).toHaveBeenCalledWith("C:/gamma");
+
+    rerender(
+      <AppShell
+        currentRoot="C:/beta"
+        recentRoots={recentRoots}
+        switching={false}
+        onSwitchWorkspace={vi.fn()}
+        onSelectWorkspace={vi.fn()}
+        pipeline={makePipeline({
+          viewModel: {
+            ...createEmptyPipelineViewModel(),
+            phase: "SEARCH",
+            status: "running",
+          },
+        }) as never}
+      />,
+    );
+
+    expect(document.querySelector('[data-status="running"]')).toBeInTheDocument();
+    expect(storageMocks.loadWorkspaceSessions).toHaveBeenCalledOnce();
   });
 
   it("keeps workspace and session navigation interactive while switching", () => {

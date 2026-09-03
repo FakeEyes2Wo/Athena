@@ -262,6 +262,12 @@
 ### Task 5: Full Verification and Integration
 
 **Files:**
+- Modify: `athena-gui/src/hooks/usePipeline.ts`
+- Modify: `athena-gui/src/hooks/__tests__/usePipeline.test.tsx`
+- Modify: `athena-gui/src/App.tsx`
+- Create: `athena-gui/src/__tests__/App.test.tsx`
+- Modify: `athena-gui/src/components/shell/ContextSidebar.tsx`
+- Modify: `athena-gui/src/components/__tests__/app-shell.test.tsx`
 - Create: `codex_docs/2026-09-03-frontend-responsiveness-completion-report.md`
 - Modify: `codex_docs/CURRENT.md`
 - Delete: `docs/superpowers/plans/2026-09-03-frontend-responsiveness.md`
@@ -269,6 +275,14 @@
 **Interfaces:**
 - Consumes: Tasks 2-4 and the original frontend completion report.
 - Produces: verified merge on `main` with completion evidence.
+
+Final-review remediation is included in this task's verification scope: successful
+stale-epoch deletes must still remove their session from the authoritative workspace
+summary cache; final sidebar workspace-switch failures must open the existing visible
+error UI and permit repeated retries; and unchanged workspace roots must not reload
+cached summaries during streamed or otherwise unrelated AppShell rerenders. Targeted
+RED/GREEN evidence is recorded separately before the full Task 5 gates. Task 5 remains
+open until every integration and closeout step below is complete.
 
 - [ ] **Step 1: Run all frontend tests and build**
 

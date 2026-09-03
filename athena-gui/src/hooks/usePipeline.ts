@@ -1232,6 +1232,12 @@ export function usePipeline(
       const titles = loadTitles(titlesKey);
       delete titles[id];
       localStorage.setItem(titlesKey, JSON.stringify(titles));
+      const authoritativeState = authoritativeSessionsRef.current;
+      if (authoritativeState.root === workspaceCacheRoot) {
+        const authoritative = authoritativeState.sessions.filter((session) => session.id !== id);
+        authoritativeSessionsRef.current = { root: workspaceCacheRoot, sessions: authoritative };
+        persistWorkspaceSessions(workspaceCacheRoot, authoritative);
+      }
       setSessions((current) => current.filter((session) => session.id !== id));
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       applySessions(list);
@@ -1242,7 +1248,7 @@ export function usePipeline(
       if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
       appendError(`删除会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, switchSession, titlesKey]);
+  }, [appendError, applySessions, switchSession, titlesKey, workspaceCacheRoot]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);

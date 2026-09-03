@@ -662,7 +662,7 @@ describe("usePipeline", () => {
     now.mockRestore();
   });
 
-  it("does not let an older delete response replace a newer switched session list", async () => {
+  it("removes a pending new session from React state and cache when its delete is superseded by a switch", async () => {
     const { result } = renderHook(() => usePipeline());
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
 
@@ -670,7 +670,7 @@ describe("usePipeline", () => {
     let resolveDelete: ((value: { deleted: boolean; sessions: string[] }) => void) | undefined;
     bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
       if (id === "newer") {
-        return Promise.resolve({ records: [], sessions: ["newer"] });
+        return Promise.resolve({ records: [], sessions: ["newer", deletingId] });
       }
       return new Promise((resolve) => {
         resolveCreation = resolve;
@@ -703,6 +703,7 @@ describe("usePipeline", () => {
 
     expect(result.current.currentSessionId).toBe("newer");
     expect(result.current.sessions.map((session) => session.id)).toEqual(["newer"]);
+    expect(loadWorkspaceSessions("default").map((session) => session.id)).toEqual(["newer"]);
   });
 
   it("does not append an older delete failure after switching sessions", async () => {

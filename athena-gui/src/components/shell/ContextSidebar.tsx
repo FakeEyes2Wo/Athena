@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { ContextPanelKey, ModuleKey } from "../../types/ui";
 import { Icon } from "../common/Icon";
 import { RELATED_PANELS } from "./navigation";
@@ -108,14 +109,17 @@ function SessionContext({
   onNewSession(): void;
   onDeleteSession(id: string): void;
 }) {
-  const otherGroups = recentRoots
-    .filter((root) => root !== currentRoot)
-    .map((root): WorkspaceGroup => ({
-      root,
-      name: basename(root),
-      isCurrent: false,
-      sessions: loadWorkspaceSessions(root),
-    }));
+  const otherGroups = useMemo(
+    () => recentRoots
+      .filter((root) => root !== currentRoot)
+      .map((root): WorkspaceGroup => ({
+        root,
+        name: basename(root),
+        isCurrent: false,
+        sessions: loadWorkspaceSessions(root),
+      })),
+    [currentRoot, recentRoots],
+  );
 
   const orderedRoots = currentRoot && !recentRoots.includes(currentRoot)
     ? [...recentRoots, currentRoot]
