@@ -366,14 +366,14 @@ git commit -m "fix: trust only external baseline authority"
 - Changes: `PhaseActions` receives one internal `prepare_resume_is_attested` callback.
 - Consumes: Task 3 `PrepareAttestation`; no new public runtime parameter is added.
 
-- [ ] **Step 1: Write failing completion and forged-tree tests**
+- [x] **Step 1: Write failing completion and forged-tree tests**
 
 Test that successful trusted evaluation attests commit, evaluator ref, evidence ref,
 and both baseline digests. Test that a fresh runtime skips PREPARE only when the local
 baseline experiment matches that attestation. A forged/mutated tree, missing authority,
 wrong generation, or authority outage must not transition to SEARCH.
 
-- [ ] **Step 2: Run the focused restart tests and confirm red behavior**
+- [x] **Step 2: Run the focused restart tests and confirm red behavior**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/supervisor/test_supervisor.py test/unit/research/test_breakpoint_resume.py test/unit/research/prepare/test_baseline_research_orchestration.py
@@ -381,14 +381,14 @@ wrong generation, or authority outage must not transition to SEARCH.
 
 Expected: old supervisor skips solely because `best_experiment_id()` is non-null.
 
-- [ ] **Step 3: Attest only a fully scored baseline**
+- [x] **Step 3: Attest only a fully scored baseline**
 
 After `run_prepare_plan` returns a complete `PrepareResult`, call
 `authority.attest_prepare` with the in-memory verified generation. Validate that the
 service returns the same bundle plus the new attestation. If attestation fails, return
 no resumably complete PREPARE result.
 
-- [ ] **Step 4: Gate supervisor skip through a narrow callback**
+- [x] **Step 4: Gate supervisor skip through a narrow callback**
 
 When a local SOTA exists in PREPARE, load authority and compare its attestation against
 the exact baseline experiment commit, run-config/evaluator ref, and evidence ref. Only
@@ -396,7 +396,7 @@ then publish the resume message and transition to SEARCH. A mismatch raises a ty
 failure and leaves the phase in PREPARE; it must not silently delete or bless the local
 tree.
 
-- [ ] **Step 5: Run Task 5 and affected phase tests**
+- [x] **Step 5: Run Task 5 and affected phase tests**
 
 ```powershell
 .venv\Scripts\python.exe -m black --check src/athena/research/prepare/baseline.py src/athena/research/runtime/phase_runner.py src/athena/research/runtime/bootstrap.py src/athena/research/supervisor/deps.py src/athena/research/supervisor/phases.py test/unit/research/supervisor/test_supervisor.py test/unit/research/test_breakpoint_resume.py
@@ -405,7 +405,7 @@ tree.
 
 Expected: all affected supervisor/restart tests pass.
 
-- [ ] **Step 6: Commit Task 5**
+- [x] **Step 6: Commit Task 5**
 
 ```powershell
 git add -- src/athena/research/prepare/baseline.py src/athena/research/runtime/phase_runner.py src/athena/research/runtime/bootstrap.py src/athena/research/supervisor/deps.py src/athena/research/supervisor/phases.py test/unit/research/prepare/test_baseline_research_orchestration.py test/unit/research/supervisor/test_supervisor.py test/unit/research/test_breakpoint_resume.py
