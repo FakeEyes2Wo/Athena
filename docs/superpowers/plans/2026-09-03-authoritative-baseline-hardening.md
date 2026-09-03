@@ -286,6 +286,7 @@ git commit -m "feat: inject baseline authority capability"
 - Modify: `src/athena/research/prepare/baseline_research.py`
 - Modify: `src/athena/research/prepare/baseline.py`
 - Modify: `src/athena/research/supervisor/prepare.py`
+- Test: `test/unit/research/prepare/test_baseline_research_contract.py`
 - Test: `test/unit/research/prepare/test_baseline_research_orchestration.py`
 - Test: `test/unit/research/supervisor/test_prepare_plan.py`
 - Test: `test/integration/research/test_authoritative_baseline_gate.py`
