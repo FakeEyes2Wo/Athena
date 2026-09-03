@@ -40,7 +40,7 @@ describe("AppShell", () => {
 
   it("renders brand, workspace, and the function-rail modules", () => {
     renderUi(
-      <AppShell currentRoot="C:/projects/titanic" recentRoots={[]} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
+      <AppShell currentRoot="C:/projects/titanic" recentRoots={[]} switching={false} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
     );
 
     expect(screen.getAllByText("Athena").length).toBeGreaterThan(0);
@@ -52,7 +52,7 @@ describe("AppShell", () => {
 
   it("toggles the context sidebar via the top-bar control", () => {
     renderUi(
-      <AppShell currentRoot={null} recentRoots={[]} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
+      <AppShell currentRoot={null} recentRoots={[]} switching={false} onSwitchWorkspace={vi.fn()} onSelectWorkspace={vi.fn()} pipeline={makePipeline() as never} />,
     );
 
     expect(screen.getByText("新会话")).toBeInTheDocument();
@@ -71,6 +71,7 @@ describe("AppShell", () => {
       <AppShell
         currentRoot="C:/projects/titanic"
         recentRoots={[]}
+        switching={false}
         onSwitchWorkspace={vi.fn()}
         onSelectWorkspace={vi.fn()}
         pipeline={makePipeline({
@@ -93,6 +94,7 @@ describe("AppShell", () => {
       <AppShell
         currentRoot="C:/projects/titanic"
         recentRoots={[]}
+        switching={false}
         onSwitchWorkspace={vi.fn()}
         onSelectWorkspace={vi.fn()}
         pipeline={makePipeline({ sessions: [] }) as never}
@@ -111,6 +113,7 @@ describe("AppShell", () => {
       <AppShell
         currentRoot="C:/projects/titanic"
         recentRoots={[]}
+        switching={false}
         onSwitchWorkspace={vi.fn()}
         onSelectWorkspace={vi.fn()}
         pipeline={makePipeline({
@@ -139,6 +142,7 @@ describe("AppShell", () => {
       <AppShell
         currentRoot="C:/beta"
         recentRoots={["C:/alpha", "C:/beta", "C:/gamma"]}
+        switching={false}
         onSwitchWorkspace={vi.fn()}
         onSelectWorkspace={onSelectWorkspace}
         pipeline={makePipeline() as never}
@@ -155,11 +159,50 @@ describe("AppShell", () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith("C:/gamma", "s-gamma");
   });
 
+  it("disables cross-workspace actions while keeping current-session switching available", async () => {
+    const onSwitchWorkspace = vi.fn();
+    const onSelectWorkspace = vi.fn();
+    const switchSession = vi.fn().mockResolvedValue(undefined);
+    bridgeMocks.sessionsListFor.mockResolvedValue({ sessions: ["s-gamma"] });
+    localStorage.setItem(
+      "athena-session-titles:C:/gamma",
+      JSON.stringify({ "s-gamma": "s-gamma" }),
+    );
+
+    renderUi(
+      <AppShell
+        currentRoot="C:/beta"
+        recentRoots={["C:/beta", "C:/gamma"]}
+        switching
+        onSwitchWorkspace={onSwitchWorkspace}
+        onSelectWorkspace={onSelectWorkspace}
+        pipeline={makePipeline({
+          sessions: [{ id: "s-current", title: "s-current" }],
+          currentSessionId: "s-current",
+          switchSession,
+        }) as never}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "s-gamma" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "gamma" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "s-gamma" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "切换工作区" })).toBeDisabled();
+
+    const currentSession = screen.getByRole("button", { name: "s-current" });
+    expect(currentSession).not.toBeDisabled();
+    fireEvent.click(currentSession);
+    expect(switchSession).toHaveBeenCalledWith("s-current");
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+    expect(onSwitchWorkspace).not.toHaveBeenCalled();
+  });
+
   it("keeps the workspace switch action in a footer outside the scroll region", () => {
     renderUi(
       <AppShell
         currentRoot="C:/beta"
         recentRoots={["C:/beta"]}
+        switching={false}
         onSwitchWorkspace={vi.fn()}
         onSelectWorkspace={vi.fn()}
         pipeline={makePipeline() as never}

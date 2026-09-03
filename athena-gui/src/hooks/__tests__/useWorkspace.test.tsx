@@ -23,6 +23,16 @@ function settings(projectRoot: string) {
   return { ...DEFAULT_GUI_SETTINGS, project_root: projectRoot };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("useWorkspace", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -63,6 +73,80 @@ describe("useWorkspace", () => {
 
     expect(result.current.requestedSessionId).toBe("s-2");
     expect(result.current.recentRoots).toEqual(["/a", "/b"]);
+  });
+
+  it("keeps the latest root and requested session when an older switch succeeds last", async () => {
+    localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a"]));
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    const older = deferred<ReturnType<typeof settings>>();
+    const latest = deferred<ReturnType<typeof settings>>();
+    bridgeMocks.setProjectRoot.mockImplementation((root: string) =>
+      root === "/b" ? older.promise : latest.promise,
+    );
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let olderSwitch!: Promise<void>;
+    let latestSwitch!: Promise<void>;
+    act(() => {
+      olderSwitch = result.current.switchTo("/b", "s-b");
+      latestSwitch = result.current.switchTo("/c", "s-c");
+    });
+
+    await act(async () => {
+      latest.resolve(settings("/c"));
+      await latestSwitch;
+    });
+    await act(async () => {
+      older.resolve(settings("/b"));
+      await olderSwitch;
+    });
+
+    expect(result.current.currentRoot).toBe("/c");
+    expect(result.current.requestedSessionId).toBe("s-c");
+    expect(result.current.recentRoots).toEqual(["/c", "/a"]);
+    expect(result.current.pickerOpen).toBe(false);
+    expect(result.current.switching).toBe(false);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("ignores an older switch failure while the latest switch is pending", async () => {
+    localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a"]));
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    const older = deferred<ReturnType<typeof settings>>();
+    const latest = deferred<ReturnType<typeof settings>>();
+    bridgeMocks.setProjectRoot.mockImplementation((root: string) =>
+      root === "/b" ? older.promise : latest.promise,
+    );
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let olderSwitch!: Promise<void>;
+    let latestSwitch!: Promise<void>;
+    act(() => {
+      olderSwitch = result.current.switchTo("/b", "s-b");
+      latestSwitch = result.current.switchTo("/c", "s-c");
+    });
+    await waitFor(() => expect(result.current.switching).toBe(true));
+
+    await act(async () => {
+      older.reject(new Error("stale failure"));
+      await olderSwitch;
+    });
+
+    expect(result.current.currentRoot).toBe("/a");
+    expect(result.current.requestedSessionId).toBeNull();
+    expect(result.current.switching).toBe(true);
+    expect(result.current.error).toBeNull();
+
+    await act(async () => {
+      latest.resolve(settings("/c"));
+      await latestSwitch;
+    });
+    expect(result.current.currentRoot).toBe("/c");
+    expect(result.current.requestedSessionId).toBe("s-c");
+    expect(result.current.switching).toBe(false);
+    expect(result.current.error).toBeNull();
   });
 
   it("switches to a directory selected by the native dialog", async () => {

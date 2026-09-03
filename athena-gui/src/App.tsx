@@ -12,6 +12,7 @@ function WorkspaceSession({ workspace }: { workspace: Workspace }) {
     <AppShell
       currentRoot={workspace.currentRoot}
       recentRoots={workspace.recentRoots}
+      switching={workspace.switching}
       onSwitchWorkspace={workspace.openPicker}
       onSelectWorkspace={(path, sessionId) => void workspace.switchTo(path, sessionId)}
       pipeline={pipeline}

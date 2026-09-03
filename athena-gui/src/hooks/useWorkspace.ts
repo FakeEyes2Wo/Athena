@@ -49,6 +49,7 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   const [ready, setReady] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(true);
   const [switching, setSwitching] = useState(false);
+  const switchEpochRef = useRef(0);
   const [browsing, setBrowsing] = useState(false);
   const browsingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,10 +80,12 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   const switchTo = useCallback(async (path: string, sessionId?: string) => {
     const trimmed = path.trim();
     if (!trimmed) return;
+    const switchEpoch = ++switchEpochRef.current;
     setSwitching(true);
     setError(null);
     try {
       const settings = await setProjectRoot(trimmed);
+      if (switchEpoch !== switchEpochRef.current) return;
       setCurrentRoot(settings.project_root || trimmed);
       setRequestedSessionId(sessionId ?? null);
       setRecentRoots((prev) => {
@@ -92,9 +95,13 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
       });
       setPickerOpen(false);
     } catch (err) {
-      setError(errorMessage(err));
+      if (switchEpoch === switchEpochRef.current) {
+        setError(errorMessage(err));
+      }
     } finally {
-      setSwitching(false);
+      if (switchEpoch === switchEpochRef.current) {
+        setSwitching(false);
+      }
     }
   }, []);
 

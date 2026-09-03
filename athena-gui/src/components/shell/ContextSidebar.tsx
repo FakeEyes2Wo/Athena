@@ -23,6 +23,7 @@ export interface ContextSidebarProps {
   module: ModuleKey;
   currentRoot: string | null;
   recentRoots: string[];
+  switching: boolean;
   sessions: SessionItem[];
   currentSessionId: string;
   onSwitchWorkspace(): void;
@@ -38,6 +39,7 @@ export function ContextSidebar({
   module,
   currentRoot,
   recentRoots,
+  switching,
   sessions,
   currentSessionId,
   onSwitchWorkspace,
@@ -55,6 +57,7 @@ export function ContextSidebar({
         <SessionContext
           currentRoot={currentRoot}
           recentRoots={recentRoots}
+          switching={switching}
           sessions={sessions}
           currentSessionId={currentSessionId}
           onSwitchWorkspace={onSwitchWorkspace}
@@ -91,6 +94,7 @@ export function ContextSidebar({
 function SessionContext({
   currentRoot,
   recentRoots,
+  switching,
   sessions,
   currentSessionId,
   onSwitchWorkspace,
@@ -101,6 +105,7 @@ function SessionContext({
 }: {
   currentRoot: string | null;
   recentRoots: string[];
+  switching: boolean;
   sessions: SessionItem[];
   currentSessionId: string;
   onSwitchWorkspace(): void;
@@ -169,7 +174,7 @@ function SessionContext({
               onClick={() => {
                 if (!group.isCurrent) onSelectWorkspace(group.root);
               }}
-              disabled={group.isCurrent}
+              disabled={group.isCurrent || switching}
               title={group.isCurrent ? "当前工作区" : `切换到 ${group.root}`}
             >
               <Icon name="folder" size={14} />
@@ -185,6 +190,7 @@ function SessionContext({
                     onClick={() =>
                       group.isCurrent ? onSelectSession(session.id) : onSelectWorkspace(group.root, session.id)
                     }
+                    disabled={!group.isCurrent && switching}
                     aria-current={group.isCurrent && session.id === currentSessionId ? "page" : undefined}
                     title={`${group.name} · ${session.title}`}
                   >
@@ -208,7 +214,7 @@ function SessionContext({
         ))}
       </div>
       <footer className={styles.sidebarFooter}>
-        <button className={styles.switchWorkspace} onClick={onSwitchWorkspace}>
+        <button className={styles.switchWorkspace} onClick={onSwitchWorkspace} disabled={switching}>
           切换工作区
         </button>
       </footer>
