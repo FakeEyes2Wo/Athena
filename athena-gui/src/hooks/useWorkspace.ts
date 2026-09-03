@@ -117,7 +117,10 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
             setPickerOpen(false);
           } catch (err) {
             if (!mountedRef.current) return;
-            if (!queuedIntentRef.current) setError(errorMessage(err));
+            if (!queuedIntentRef.current) {
+              setError(errorMessage(err));
+              setPickerOpen(true);
+            }
           }
         }
       } finally {

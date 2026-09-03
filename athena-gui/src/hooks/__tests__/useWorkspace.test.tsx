@@ -154,6 +154,7 @@ describe("useWorkspace", () => {
     expect(result.current.requestedSessionId).toBeNull();
     expect(result.current.switching).toBe(true);
     expect(result.current.error).toBeNull();
+    expect(result.current.pickerOpen).toBe(false);
     expect(bridgeMocks.setProjectRoot).toHaveBeenNthCalledWith(2, "/d");
     expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalledWith("/c");
 

@@ -28,7 +28,7 @@ function App() {
     return <div className="app-loading">加载中…</div>;
   }
 
-  if (workspace.pickerOpen || workspace.error !== null) {
+  if (workspace.pickerOpen) {
     return (
       <WorkspacePicker
         currentRoot={workspace.currentRoot}

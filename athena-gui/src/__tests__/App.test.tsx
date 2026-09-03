@@ -64,7 +64,7 @@ describe("App workspace switching", () => {
     pipelineMocks.usePipeline.mockReturnValue(pipeline());
   });
 
-  it("shows repeated final sidebar switch failures after settling and permits retry", async () => {
+  it("keeps the picker dismissible and usable through repeated final sidebar switch failures", async () => {
     localStorage.setItem("athena.workspace.recent", JSON.stringify(["/a", "/b"]));
     localStorage.setItem(
       "athena.workspace.sessions:/b",
@@ -90,9 +90,23 @@ describe("App workspace switching", () => {
     expect(await screen.findByText("root unavailable")).toBeVisible();
     expect(screen.getByRole("button", { name: "继续使用当前" })).toBeEnabled();
 
+    fireEvent.click(screen.getByRole("button", { name: "继续使用当前" }));
+    expect(await screen.findByRole("button", { name: "Current Session" })).toBeVisible();
+    expect(screen.queryByText("root unavailable")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "切换工作区" }));
+    expect(screen.getByText("root unavailable")).toBeVisible();
     fireEvent.click(screen.getByTitle("/b"));
     expect(bridgeMocks.setProjectRoot).toHaveBeenNthCalledWith(2, "/b");
     expect(screen.queryByText("root unavailable")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "/a" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "/b" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "浏览目录…" })).toBeEnabled();
+    const manualPath = screen.getByPlaceholderText("输入项目目录的绝对路径…");
+    expect(manualPath).toBeEnabled();
+    fireEvent.change(manualPath, { target: { value: "/c" } });
+    expect(screen.getByRole("button", { name: "打开" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "继续使用当前" })).toBeDisabled();
 
     await act(async () => {
       retrySwitch.reject(new Error("root unavailable"));
