@@ -486,6 +486,15 @@ git commit -m "test: cover trusted baseline restart boundary"
 - Create: `codex_docs/2026-09-03-authoritative-baseline-hardening-completion-report.md`
 - Modify: `codex_docs/CURRENT.md`
 - Modify: `codex_docs/2026-09-02-authoritative-baseline-research-completion-report.md`
+- Final-review fix: `src/athena/research/prepare/repository_url.py`
+- Final-review fix: `src/athena/research/prepare/source_verification.py`
+- Final-review fix: `src/athena/research/prepare/baseline.py`
+- Final-review fix: `src/athena/research/supervisor/deps.py`
+- Final-review fix: `src/athena/research/supervisor/phases.py`
+- Final-review test: `test/unit/research/prepare/test_baseline_git_verification.py`
+- Final-review test: `test/unit/research/prepare/test_baseline_source_verification.py`
+- Final-review test: `test/unit/research/prepare/test_baseline_research_orchestration.py`
+- Final-review test: `test/unit/research/supervisor/test_supervisor.py`
 - Delete after all evidence passes: `docs/superpowers/plans/2026-09-03-authoritative-baseline-hardening.md`
 
 **Interfaces:**
