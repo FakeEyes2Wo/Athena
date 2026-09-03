@@ -86,7 +86,7 @@ exact `continue` entered task understanding, called
 - Produces: `ResumeReason`, `ResumeCapability`, `ResearchControlError`, `is_continue_command(text: str) -> bool`, and `resume_capability(state: object) -> ResumeCapability`.
 - Consumed by: runtime control, state-event projection, and focused tests in later tasks.
 
-- [ ] **Step 1: Write failing exact-match tests**
+- [x] **Step 1: Write failing exact-match tests**
 
 Add this table-driven test:
 
@@ -109,7 +109,7 @@ def test_non_exact_continue_text_keeps_its_existing_meaning(text: str) -> None:
     assert is_continue_command(text) is False
 ```
 
-- [ ] **Step 2: Write failing durable-state matrix tests**
+- [x] **Step 2: Write failing durable-state matrix tests**
 
 Use `ResearchState` instances and assert these exact results:
 
@@ -152,7 +152,7 @@ def test_resume_capability_matrix(
 Add a separate legacy test where `task_text=None` and
 `task_understanding={"title": "legacy task"}` remains resumable.
 
-- [ ] **Step 3: Run the tests and confirm the missing-module failure**
+- [x] **Step 3: Run the tests and confirm the missing-module failure**
 
 Run:
 
@@ -163,7 +163,7 @@ Run:
 Expected: collection fails because `athena.research.runtime.resume_contract` does not
 exist. Fix only accidental import or syntax errors until this is the failure.
 
-- [ ] **Step 4: Implement the minimal pure contract**
+- [x] **Step 4: Implement the minimal pure contract**
 
 Implement immutable types and stable error metadata:
 
@@ -204,7 +204,7 @@ map WAITING/FAILED/IDLE. A RUNNING state with task evidence returns `already_run
 process-local lifecycle identity is deliberately handled only by the mutating runtime
 layer and is not an input to this pure projection.
 
-- [ ] **Step 5: Verify, format, and commit Task 1**
+- [x] **Step 5: Verify, format, and commit Task 1**
 
 Run:
 
