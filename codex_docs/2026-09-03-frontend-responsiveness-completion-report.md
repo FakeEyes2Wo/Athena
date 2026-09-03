@@ -90,5 +90,13 @@ readiness READY, with no remaining findings.
 
 ## Integration
 
-Pending the local merge into `main` and post-merge verification. This section will
-be updated on `main` with the merge commit and fresh merged-tree evidence.
+The feature branch was merged locally into `main` by merge commit `6b89e9e`.
+Immediately before the merge, the 18 feature paths had zero overlap with the 55
+uncommitted main-worktree paths, and `git merge-tree` reported zero conflict
+markers. No stash, reset, or overwrite was used.
+
+Fresh post-merge verification on `main` passed:
+
+- `npm test -- --run` — exit 0; 18 test files and 140 tests passed.
+- `npm run build` — exit 0; 2,761 modules transformed.
+- `cargo check` — exit 0; only the same six pre-existing dead-code warnings.
