@@ -221,14 +221,14 @@ git commit -m "feat: bind complete baseline artifacts"
 - Changes: `ResearchRuntime(..., baseline_authority: BaselineAuthorityStore | None = None)`; this is the only new public runtime parameter.
 - Changes: `ResearchInfrastructure.baseline_authority` holds the injected capability without exposing transport details.
 
-- [ ] **Step 1: Write authority contract and runtime-injection tests**
+- [x] **Step 1: Write authority contract and runtime-injection tests**
 
 Implement a test-only `MemoryBaselineAuthorityStore` that preserves state across two
 fresh runtime instances when the same fake external service object is injected. Test
 generation 0 creation, compare-and-exchange conflict, immutable returned values,
 attestation generation advance, and that `None` remains `None` without a local fallback.
 
-- [ ] **Step 2: Run tests and confirm missing-interface failures**
+- [x] **Step 2: Run tests and confirm missing-interface failures**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/prepare/test_baseline_authority.py test/unit/research/test_runtime_survey.py
@@ -237,7 +237,7 @@ attestation generation advance, and that `None` remains `None` without a local f
 Expected: the new module/types/constructor parameter are missing; existing runtime
 composition tests otherwise collect normally.
 
-- [ ] **Step 3: Implement the minimal authority values and protocol**
+- [x] **Step 3: Implement the minimal authority values and protocol**
 
 Use frozen dataclasses with defensive byte copies and no transport fields:
 
@@ -256,13 +256,13 @@ class BaselineAuthorityStore(Protocol):
 Add typed `BaselineAuthorityError` and `BaselineAuthorityConflict`. Do not add a local
 filesystem implementation to production code.
 
-- [ ] **Step 4: Thread one capability through the composition root**
+- [x] **Step 4: Thread one capability through the composition root**
 
 Pass the constructor value directly to `build_services`; do not add it to persisted
 `ResearchConfig`, settings RPCs, prompts, logs, or shell environments. Expose it only
 through a read-only runtime property used by PREPARE and supervisor resume checks.
 
-- [ ] **Step 5: Run Task 3 verification**
+- [x] **Step 5: Run Task 3 verification**
 
 ```powershell
 .venv\Scripts\python.exe -m black --check src/athena/research/prepare/authority.py src/athena/research/runtime/services.py src/athena/research/runtime/bootstrap.py src/athena/research/runtime/facade.py test/unit/research/prepare/test_baseline_authority.py
@@ -271,7 +271,7 @@ through a read-only runtime property used by PREPARE and supervisor resume check
 
 Expected: authority and composition tests pass.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```powershell
 git add -- src/athena/research/prepare/authority.py src/athena/research/runtime/services.py src/athena/research/runtime/bootstrap.py src/athena/research/runtime/facade.py test/unit/research/prepare/test_baseline_authority.py test/unit/research/test_runtime_survey.py
