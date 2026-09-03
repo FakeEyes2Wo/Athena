@@ -495,6 +495,7 @@ git commit -m "test: cover trusted baseline restart boundary"
 - Final-review test: `test/unit/research/prepare/test_baseline_source_verification.py`
 - Final-review test: `test/unit/research/prepare/test_baseline_research_orchestration.py`
 - Final-review test: `test/unit/research/supervisor/test_supervisor.py`
+- Final-review test: `test/unit/research/test_breakpoint_resume.py`
 - Delete after all evidence passes: `docs/superpowers/plans/2026-09-03-authoritative-baseline-hardening.md`
 
 **Interfaces:**
