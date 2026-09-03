@@ -665,14 +665,14 @@ git commit -m "fix(gui): continue interrupted research runs"
 - Consumes: runtime plain-text alias and public `resume_current_task()` from Task 2.
 - Produces: documented TUI alias and CLI subcommand `continue` mapped to canonical `resume`.
 
-- [ ] **Step 1: Add failing real-runtime TUI test**
+- [x] **Step 1: Add failing real-runtime TUI test**
 
 Create a failed PREPARE runtime fixture, submit `continue` through
 `TuiController.send_message`, and assert the second PREPARE attempt starts. Capture
 runtime events and assert no output contains `任务理解中` and no clarification draft
 revision changes. Keep the existing UI echo and composer-clear assertions.
 
-- [ ] **Step 2: Add failing CLI alias tests**
+- [x] **Step 2: Add failing CLI alias tests**
 
 Extend parser and dispatch tests:
 
@@ -691,7 +691,7 @@ async def test_continue_cli_alias_uses_resume_control(monkeypatch, capsys) -> No
 Retain the existing `resume` test unchanged. Add a parser inventory assertion that both
 commands exist.
 
-- [ ] **Step 3: Run tests and confirm the missing CLI alias**
+- [x] **Step 3: Run tests and confirm the missing CLI alias**
 
 Run:
 
@@ -702,7 +702,7 @@ Run:
 Expected: runtime-level TUI continuation passes only after Task 2, while CLI parsing
 fails because `continue` is not registered.
 
-- [ ] **Step 4: Implement thin UI/caller adapters**
+- [x] **Step 4: Implement thin UI/caller adapters**
 
 Update the TUI help overlay to list `continue` as the plain-text synonym for `/resume`.
 Do not add TUI-local resume state logic.
@@ -721,7 +721,7 @@ async def _cmd_control(args: argparse.Namespace) -> int:
         await runtime.aclose()
 ```
 
-- [ ] **Step 5: Verify TUI/CLI and commit Task 5**
+- [x] **Step 5: Verify TUI/CLI and commit Task 5**
 
 Run:
 
@@ -737,6 +737,13 @@ Expected: TUI and both CLI spellings pass. Commit only Task 5 paths:
 git add src/athena_tui/render.py test/unit/athena_tui/test_render.py test/unit/athena_tui/test_app.py test/integration/test_tui_protocol.py src/athena/cli.py test/unit/test_cli.py
 git commit -m "feat: expose continue resume aliases"
 ```
+
+Task 5 evidence (2026-09-04): commit `ec36d087` exposes the CLI alias only at
+dispatch, documents the TUI synonym, and adds a real FAILED-PREPARE continuation test
+whose clarification boundary fails fast and whose confirmed artifacts remain byte
+identical. The planned focused suite passed 87 tests; the lifecycle regression also
+passed three consecutive runs. Black, task-owned diff checks, independent AI
+specification review, and independent AI quality review all passed.
 
 ---
 
