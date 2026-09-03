@@ -387,12 +387,18 @@ class PlanRuntime:
                     tree_changed = True
         if tree_changed:
             self._tree.save(self._deps.paths.tree_path)
-        self._owner.state = self._deps.search.recovery.reconcile(
+        recovered = self._deps.search.recovery.reconcile(
             candidate,
             self._tree,
             workspace_exists=lambda plan_id: workspace_presence.get(plan_id, False),
             artifact_exists=lambda ref: artifact_presence.get(ref, False),
         )
+        # ResearchRuntime and Supervisor begin with the same durable state object.
+        # Keep that identity across recovery so public callers, event projection,
+        # and phase mutation continue to observe one authoritative snapshot.
+        current = self._state
+        for field_name in ResearchState.model_fields:
+            setattr(current, field_name, getattr(recovered, field_name))
         for plan_id in self._state.plans:
             if workspace_presence.get(plan_id):
                 await self._deps.runtime.agents.resume_agent(
