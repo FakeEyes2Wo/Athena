@@ -51,6 +51,7 @@ vi.mock("../../lib/tauri-bridge", () => ({
 }));
 
 import { usePipeline } from "../usePipeline";
+import { loadWorkspaceSessions } from "../../lib/workspaceStorage";
 
 const readyDraft = {
   schema_version: 1 as const,
@@ -463,6 +464,39 @@ describe("usePipeline", () => {
     await waitFor(() => expect(localStorage.getItem(cacheKey)).toBeNull());
   });
 
+  it("persists understanding title changes for authoritative sessions", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+
+    await act(async () => {
+      await result.current.sendPrompt("draft task title");
+    });
+
+    await waitFor(() => expect(loadWorkspaceSessions("C:/workspace")).toEqual([
+      { id: "default", title: "Predict churn" },
+    ]));
+  });
+
+  it("does not persist title changes for optimistic-only sessions", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({ sessions: ["default"], active: "default" });
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+
+    bridgeMocks.sessionSwitch.mockImplementation(() => new Promise(() => {}));
+    act(() => result.current.newSession());
+    const optimisticId = result.current.currentSessionId;
+    await act(async () => {
+      await result.current.sendPrompt("Optimistic title");
+    });
+
+    expect(result.current.sessions).toContainEqual({ id: optimisticId, title: "Optimistic title" });
+    expect(loadWorkspaceSessions("C:/workspace")).toEqual([{ id: "default", title: "新会话" }]);
+  });
+
   it("waits for new-session creation before deleting it", async () => {
     const { result } = renderHook(() => usePipeline());
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
@@ -678,6 +712,65 @@ describe("usePipeline", () => {
 
     expect(storageRead).not.toHaveBeenCalled();
     storageRead.mockRestore();
+  });
+
+  it("does not apply a deferred post-confirm session refresh after unmount", async () => {
+    let resolveRefresh: ((value: { sessions: string[]; active: null }) => void) | undefined;
+    bridgeMocks.sessionsList
+      .mockResolvedValueOnce({ sessions: ["default"], active: "default" })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }));
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    const { result, unmount } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+      await result.current.confirmDraft(false);
+    });
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalledTimes(2));
+
+    const storageWrite = vi.spyOn(Storage.prototype, "setItem");
+    unmount();
+    storageWrite.mockClear();
+    await act(async () => {
+      resolveRefresh?.({ sessions: ["stale"], active: null });
+      await Promise.resolve();
+    });
+
+    expect(storageWrite).not.toHaveBeenCalled();
+    expect(loadWorkspaceSessions("C:/workspace")).toEqual([{ id: "default", title: "Predict churn" }]);
+  });
+
+  it("does not apply a post-confirm session refresh superseded by session navigation", async () => {
+    let resolveRefresh: ((value: { sessions: string[]; active: null }) => void) | undefined;
+    bridgeMocks.sessionsList
+      .mockResolvedValueOnce({ sessions: ["default"], active: "default" })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }));
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+    bridgeMocks.taskClarificationStart.mockResolvedValue(readyDraft);
+    const { result } = renderHook(() => usePipeline("C:/workspace"));
+    await waitFor(() => expect(result.current.sessions.map((session) => session.id)).toEqual(["default"]));
+    await act(async () => {
+      await result.current.sendPrompt("predict churn");
+      await result.current.confirmDraft(false);
+    });
+    await waitFor(() => expect(bridgeMocks.sessionsList).toHaveBeenCalledTimes(2));
+
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["newer"] });
+    await act(async () => {
+      await result.current.switchSession("newer");
+    });
+    await act(async () => {
+      resolveRefresh?.({ sessions: ["stale"], active: null });
+      await Promise.resolve();
+    });
+
+    expect(result.current.sessions.map((session) => session.id)).toEqual(["newer"]);
+    expect(loadWorkspaceSessions("C:/workspace")).toEqual([{ id: "newer", title: "新会话" }]);
   });
 
   it("keeps a failed optimistic row in React state without persisting it", async () => {

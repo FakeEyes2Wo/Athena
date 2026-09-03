@@ -84,7 +84,7 @@ describe("workspaceStorage", () => {
     expect(loadWorkspaceSessions("/alpha")).toEqual([{ id: "s-1", title: "First" }]);
   });
 
-  it("caps cached summaries at 200 rows", () => {
+  it("stores exactly the first 200 normalized summaries", () => {
     const sessions = Array.from({ length: 205 }, (_, index) => ({
       id: `s-${index}`,
       title: `Session ${index}`,
@@ -92,9 +92,24 @@ describe("workspaceStorage", () => {
 
     persistWorkspaceSessions("/alpha", sessions);
 
-    expect(loadWorkspaceSessions("/alpha")).toHaveLength(200);
+    const stored = JSON.parse(localStorage.getItem("athena.workspace.sessions:/alpha") ?? "null");
+    expect(stored).toHaveLength(200);
+    expect(stored[0]).toEqual({ id: "s-0", title: "Session 0" });
+    expect(stored[199]).toEqual({ id: "s-199", title: "Session 199" });
+  });
+
+  it("loads at most the first 200 normalized summaries", () => {
+    const sessions = Array.from({ length: 205 }, (_, index) => ({
+      id: `s-${index}`,
+      title: `Session ${index}`,
+    }));
+    localStorage.setItem("athena.workspace.sessions:/alpha", JSON.stringify(sessions));
+
     const cached = loadWorkspaceSessions("/alpha");
-    expect(cached[cached.length - 1]).toEqual({ id: "s-199", title: "Session 199" });
+
+    expect(cached).toHaveLength(200);
+    expect(cached[0]).toEqual({ id: "s-0", title: "Session 0" });
+    expect(cached[199]).toEqual({ id: "s-199", title: "Session 199" });
   });
 
   it("removes stale cached summaries when persisting an empty list", () => {

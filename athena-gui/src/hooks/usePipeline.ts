@@ -7,7 +7,10 @@ import {
 } from "../lib/clarification-conversation";
 import { errorMessage } from "../lib/errors";
 import * as bridge from "../lib/tauri-bridge";
-import { persistWorkspaceSessions } from "../lib/workspaceStorage";
+import {
+  persistWorkspaceSessions,
+  type SessionSummary,
+} from "../lib/workspaceStorage";
 import {
   createEmptyPipelineViewModel,
   type ClarificationDraftDto,
@@ -363,6 +366,11 @@ export function usePipeline(
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
   const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
+  const workspaceCacheRoot = workspaceRoot ?? "default";
+  const authoritativeSessionsRef = useRef<{
+    root: string;
+    sessions: SessionSummary[];
+  }>({ root: workspaceCacheRoot, sessions: [] });
   const mountedRef = useRef(true);
   const currentDraftIdRef = useRef<string | null>(null);
   const currentRevisionRef = useRef(-1);
@@ -413,7 +421,8 @@ export function usePipeline(
       if (!ids) return;
       const titles = loadTitles(titlesKey);
       const authoritative = ids.map((id) => ({ id, title: titles[id] ?? "新会话" }));
-      persistWorkspaceSessions(workspaceRoot ?? "default", authoritative);
+      authoritativeSessionsRef.current = { root: workspaceCacheRoot, sessions: authoritative };
+      persistWorkspaceSessions(workspaceCacheRoot, authoritative);
       setSessions((current) => {
         const authoritativeIds = new Set(ids);
         const pending = current.filter(
@@ -424,7 +433,7 @@ export function usePipeline(
         return [...pending, ...authoritative];
       });
     },
-    [titlesKey, workspaceRoot],
+    [titlesKey, workspaceCacheRoot],
   );
 
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
@@ -444,7 +453,17 @@ export function usePipeline(
   const renameSession = useCallback((id: string, title: string) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
     saveTitle(titlesKey, id, title);
-  }, [titlesKey]);
+    const authoritativeState = authoritativeSessionsRef.current;
+    if (
+      authoritativeState.root !== workspaceCacheRoot ||
+      !authoritativeState.sessions.some((session) => session.id === id)
+    ) return;
+    const authoritative = authoritativeState.sessions.map((session) =>
+      session.id === id ? { ...session, title } : session,
+    );
+    authoritativeSessionsRef.current = { root: workspaceCacheRoot, sessions: authoritative };
+    persistWorkspaceSessions(workspaceCacheRoot, authoritative);
+  }, [titlesKey, workspaceCacheRoot]);
 
   // The latest clarification preview stored on any intent-preview message.
   const latestPreview = useMemo(() => {
@@ -793,8 +812,15 @@ export function usePipeline(
           return m;
         }),
       }));
+      const sessionRefreshEpoch = sessionRequestEpochRef.current;
       void sessionsList()
-        .then(({ sessions: list }) => applySessions(list))
+        .then(({ sessions: list }) => {
+          if (
+            !mountedRef.current ||
+            sessionRefreshEpoch !== sessionRequestEpochRef.current
+          ) return;
+          applySessions(list);
+        })
         .catch(() => {});
     } catch (err) {
       const code = errorCode(err);
