@@ -465,10 +465,33 @@ class PlanLifecycle:
             logger.warning("failed to reap settled Plan agent %s", plan_id, exc_info=True)
 
     def _sota_parent(self) -> tuple[str, Hypothesis]:
-        """Return (sota_experiment_id, sota_hypothesis) for seeding hypotheses."""
+        """Return (sota_experiment_id, sota_hypothesis) for seeding hypotheses.
+
+        The refusal has to say *who* establishes the SOTA, not just that one is
+        missing. On 2026-09-02 the Supervisor hit the old one-line message during
+        the task-understanding turn, concluded it had to fix the problem itself,
+        and dispatched a General Agent to "build and validate a SOTA baseline".
+        That agent's shell is not sandboxed: it walked to a *different* project's
+        directory, trained on its 43,051-row split instead of this task's 507,789
+        rows, and reported PR-AUC 0.8668. The Supervisor believed it, and the run
+        went to SEARCH with no platform split, no frozen evaluator and no EDA.
+
+        PREPARE owns the baseline precisely so that it is built against the
+        frozen evaluator and the platform's own split. Anything built beside that
+        is not comparable to what SEARCH will score.
+        """
         parent_id = self._tree.best_experiment_id()
         if parent_id is None:
-            raise ValueError("cannot propose SEARCH hypotheses without a SOTA")
+            raise ValueError(
+                "cannot propose SEARCH hypotheses without a SOTA. The PREPARE "
+                "phase establishes it automatically, against the frozen "
+                "evaluator and the platform's own train/search/final split -- "
+                "it has not finished yet. Do NOT build a baseline yourself and "
+                "do NOT dispatch an agent to build one: a model trained on any "
+                "other data or scored by any other evaluator is not comparable "
+                "to what SEARCH measures. End this turn; propose hypotheses "
+                "once PREPARE reports its trusted metric."
+            )
         parent_experiment = self._tree.get_experiment(parent_id)
         return parent_id, self._tree.get_hypothesis(parent_experiment.hypothesis_id)
 

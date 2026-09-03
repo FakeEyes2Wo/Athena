@@ -288,6 +288,7 @@ async def test_gated_batch_preserves_eda_request(monkeypatch) -> None:
     runtime._ideation = "ideageneration"
     runtime._model = "m"
     runtime._store = object()
+    runtime._client = object()
     runtime._supervisor = SimpleNamespace(state=SimpleNamespace(corpus_ref=None))
 
     async def fake_pipeline(drafts, **kwargs):

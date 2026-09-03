@@ -25,6 +25,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from athena.research.supervisor.state import _core_digest
+
 FORKED_DIRECTORIES = ("artifacts", "repo")
 """分叉要整份带走的目录。
 
@@ -35,6 +37,29 @@ FORKED_DIRECTORIES = ("artifacts", "repo")
 ``runs`` / ``logs`` 刻意不带：那是上一次运行的临时产物，复制过来只会让新臂从一个半旧
 的工作区起步。``workspaces`` 整体也不带，但其中的 **EDA 工作区是例外**，见
 ``_carry_eda_workspace``。
+"""
+
+CARRIED_RESUME_FIELDS = (
+    "task_text",
+    "data_contract",
+    "evaluator_ref",
+    "final_evaluator_ref",
+    "kaggle_download",
+)
+"""PREPARE 的产物里存在 ``resume.json`` 而非 ``state.json`` 的那几项。
+
+分叉曾经只复制 ``state.json``，而 ``ResearchState.save`` 把这些字段写进兄弟文件
+``resume.json``。于是新臂开跑时它们全是 ``None``，两处静默出错：
+
+- ``data_contract`` 为空 → SEARCH 候选拿不到数据契约（候选看不到任务文本，契约是
+  它们唯一的来源），于是自己去数据目录里找划分，在被打分的那些行上训练。这正是
+  ``data_contract_block`` 存在的理由，而分叉把它丢了。
+- ``final_evaluator_ref`` 为空 → ``phase_runner`` 退回搜索 evaluator 并只记一条
+  warning，新臂的 VALIDATE 于是拿 search 标签当留出集打分。
+
+两者都只在分数上表现出来，而且是**更好看**的方向——A/B 里这一臂看起来赢了。
+
+``task_research_*`` 刻意不带：与 ``corpus_ref`` 同类，属于要被比较的那个变量。
 """
 
 RESET_STATE_FIELDS = {
@@ -157,6 +182,42 @@ def _carry_eda_workspace(
     return relative.as_posix()
 
 
+def _carry_resume_fields(
+    source_athena: Path, target_athena: Path, target_core: dict
+) -> None:
+    """Copy the source's PREPARE resume fields under the target's own digest.
+
+    ``resume.json`` is guarded by a digest of the core state, so it cannot be
+    copied verbatim: the fork rewrites ``state.json``, the digest stops matching,
+    and ``_merge_resume`` drops the whole file with a warning nobody reads.
+    """
+    source_resume = source_athena / "resume.json"
+    if not source_resume.is_file():
+        return
+    try:
+        payload = json.loads(source_resume.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    carried = {
+        key: payload[key]
+        for key in CARRIED_RESUME_FIELDS
+        if payload.get(key) is not None
+    }
+    if not carried:
+        return
+    (target_athena / "resume.json").write_text(
+        json.dumps(
+            {"state_digest": _core_digest(target_core), **carried},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def fork_project(source: str | Path, target: str | Path) -> ForkResult:
     """把 ``source`` 的 PREPARE 产物复制成一条新的实验臂。
 
@@ -205,6 +266,7 @@ def fork_project(source: str | Path, target: str | Path) -> ForkResult:
     (target_athena / "state.json").write_text(
         json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    _carry_resume_fields(source_athena, target_athena, state)
     return ForkResult(
         source=source_root,
         target=target_root,

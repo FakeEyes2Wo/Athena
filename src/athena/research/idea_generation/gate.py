@@ -17,6 +17,7 @@ not retried inside the pipeline — the retry loop lives one level up in
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from athena.core.contracts import ArtifactStore
 from athena.core.research_models import Hypothesis
@@ -99,7 +100,7 @@ def _to_core_hypothesis(draft: IdeatorHypothesisDraft, package: HypothesisPackag
 
 async def _screen_and_review(
     draft: IdeatorHypothesisDraft, *, model: str, artifacts: ArtifactStore,
-    llm_sem: asyncio.Semaphore, progress: ProgressFn, rejections: list[str],
+    client: Any, llm_sem: asyncio.Semaphore, progress: ProgressFn, rejections: list[str],
 ) -> tuple[IdeatorHypothesisDraft, HypothesisPackage] | None:
     """Run one draft through pre_gate -> methodology/statistics review -> light_hard_gate.
 
@@ -111,7 +112,9 @@ async def _screen_and_review(
     async with llm_sem:
         structural = structural_check(package)
         try:
-            falsifiability = await falsifiability_check(package, model=model, artifacts=artifacts)
+            falsifiability = await falsifiability_check(
+                package, model=model, artifacts=artifacts, client=client
+            )
         except Exception as error:  # noqa: BLE001 - 与 pre_gate_checks 其余调用点同一条降级
             falsifiability = degraded_falsifiability_report(package.idea_id, error)
 
@@ -132,6 +135,7 @@ async def _screen_and_review(
     reviews = await asyncio.gather(*[
         review_or_degrade(
             package, perspective, artifacts=artifacts, llm_sem=llm_sem, model=model,
+            client=client,
         )
         for perspective in REVIEW_PERSPECTIVES
     ])
@@ -155,7 +159,8 @@ async def _screen_and_review(
 
 async def run_light_pipeline(
     drafts: list[IdeatorHypothesisDraft], *, model: str, artifacts: ArtifactStore,
-    progress: ProgressFn = _silent, rejections: list[str] | None = None,
+    client: Any = None, progress: ProgressFn = _silent,
+    rejections: list[str] | None = None,
 ) -> list[Hypothesis]:
     """Screen/review/gate every draft and return the survivors in submission order.
 
@@ -175,7 +180,7 @@ async def run_light_pipeline(
     collected = rejections if rejections is not None else []
     outcomes = await asyncio.gather(*[
         _screen_and_review(
-            draft, model=model, artifacts=artifacts, llm_sem=llm_sem,
+            draft, model=model, artifacts=artifacts, client=client, llm_sem=llm_sem,
             progress=progress, rejections=collected,
         )
         for draft in drafts
