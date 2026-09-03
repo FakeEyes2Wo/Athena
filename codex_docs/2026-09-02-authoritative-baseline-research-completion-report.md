@@ -1,17 +1,18 @@
 # Authoritative Baseline Research Gate Completion Report
 
 Date: 2026-09-02
-Status: reopened by final whole-branch review; not complete until hardening Task 7 evidence exists
+Status: **SUPERSEDED** by the completed 2026-09-03 hardening report
 
 Hardening notice (2026-09-03): this is a historical completion report for the original
-authoritative baseline gate. Final branch review reopened completion because the
-workspace-local cache and version-one schema guarantees were superseded by
-`docs/superpowers/specs/2026-09-03-authoritative-baseline-hardening-design.md`. The
-commands, results, regression history, and known-failure data below are intentionally
-preserved, but they are not closeout evidence for the hardening work. References to
-"Task 7" below name the original 2026-09-02 implementation plan; the reopened status
-remains in force until the 2026-09-03 hardening plan's Task 7 produces fresh final
-evidence.
+authoritative baseline gate. Its workspace-local cache and version-one schema
+guarantees were superseded by
+`docs/superpowers/specs/2026-09-03-authoritative-baseline-hardening-design.md`.
+The completed implementation, final security review, and fresh verification evidence
+are recorded in
+`codex_docs/2026-09-03-authoritative-baseline-hardening-completion-report.md`.
+The commands, regression history, and known-failure data below remain preserved for
+audit history but are not the current behavior contract. References to "Task 7" below
+name the original 2026-09-02 implementation plan.
 
 Implementation commits:
 
