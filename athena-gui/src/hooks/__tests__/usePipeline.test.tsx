@@ -389,6 +389,43 @@ describe("usePipeline", () => {
     expect(result.current.viewModel.status).toBe("running");
   });
 
+  it("settles continuation when a pending switch is superseded", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let resolveOldSwitch: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
+      if (id === "old") {
+        return new Promise((resolve) => { resolveOldSwitch = resolve; });
+      }
+      return Promise.resolve({ records: [], sessions: [id] });
+    });
+
+    let oldSwitch: Promise<void>;
+    let oldContinuation: Promise<void>;
+    act(() => {
+      oldSwitch = result.current.switchSession("old");
+      oldContinuation = result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.switchSession("new");
+      await oldContinuation!;
+    });
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveOldSwitch?.({ records: [], sessions: ["old"] });
+      await oldSwitch!;
+    });
+  });
+
   it("ignores a switched-session snapshot that resolves after queued continuation", async () => {
     const { result } = renderHook(() => usePipeline());
     await waitFor(() => expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1));
