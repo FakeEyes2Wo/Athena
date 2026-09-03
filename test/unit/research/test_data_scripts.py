@@ -252,6 +252,26 @@ def test_a_failed_command_carries_its_stderr_into_the_message() -> None:
     assert isinstance(caught.value, subprocess.CalledProcessError)
 
 
+def test_stderr_detail_keeps_the_tail_when_a_tool_floods_the_head() -> None:
+    """噪音在前、错误在后时，反馈必须保住错误那一端。
+
+    ``uv run`` 先往 stderr 写进度：VIRTUAL_ENV 不匹配警告、Using CPython、
+    Creating virtual environment、hardlink 回退警告、Installed N packages。
+    实测这段前缀就有 500-800 字符，真正的 traceback 排在它后面。只取头部时
+    Agent 收到的反馈正好停在 "Installed"，一个字的错误也看不到——2026-09-03
+    的 TESS 轮里评估器因此连拒 10 次，每次都在盲改，直到轮次预算耗尽。
+    """
+    from athena.research.script_runner import ScriptCommandError
+
+    noise = "warning: Failed to hardlink files; falling back to full copy. " * 12
+    stderr = noise + "ValueError: 4800 prediction ids not in labels"
+    assert len(noise) > 600
+
+    message = str(ScriptCommandError(1, ["uv", "run", "x.py"], "", stderr))
+
+    assert "4800 prediction ids not in labels" in message
+
+
 def test_a_successful_command_still_returns_its_output() -> None:
     import pathlib
     import sys
