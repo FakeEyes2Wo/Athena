@@ -1517,49 +1517,56 @@ async def test_failed_resume_waits_for_old_exception_to_finish_unwinding(
 
 
 @pytest.mark.asyncio
-async def test_stop_waits_for_failed_resume_then_cancels_its_replacement(
+async def test_stop_preempts_failed_resume_join_without_replacement(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
     runtime.state.status = "FAILED"
     runtime.session.lifecycle.started = True
-    unwinding = asyncio.Event()
-    release_unwind = asyncio.Event()
-    stop_requested = asyncio.Event()
-    replacement_started = asyncio.Event()
-    replacement_cancelled = asyncio.Event()
+    old_task_started = asyncio.Event()
+    old_task_cancelled = asyncio.Event()
+    resume_lock_acquired = asyncio.Event()
+    resume_calls: list[bool] = []
     replacements: list[asyncio.Task[None]] = []
 
     async def failing_lifecycle() -> None:
+        old_task_started.set()
         try:
-            raise RuntimeError("old PREPARE failure")
+            await asyncio.Event().wait()
         finally:
-            unwinding.set()
-            await release_unwind.wait()
+            old_task_cancelled.set()
 
     old_task = asyncio.create_task(failing_lifecycle())
     runtime.session.lifecycle.task = old_task
-    await unwinding.wait()
+    await old_task_started.wait()
+
+    class ObservedLock:
+        def __init__(self) -> None:
+            self._lock = asyncio.Lock()
+
+        async def __aenter__(self) -> None:
+            await self._lock.acquire()
+            resume_lock_acquired.set()
+
+        async def __aexit__(self, *_args: object) -> None:
+            self._lock.release()
+
+    runtime.session.lifecycle.resume_lock = ObservedLock()
 
     class FakeSupervisor:
         async def resume(self, *, restarting: bool = False) -> str:
-            assert restarting is True
+            resume_calls.append(restarting)
             runtime.state.status = "RUNNING"
             return "RUNNING"
 
         async def request_stop(self) -> str:
-            stop_requested.set()
             runtime.state.status = "STOPPED"
             return "STOPPED"
 
     runtime.services.workflow.supervisor = FakeSupervisor()
 
     async def replacement_lifecycle() -> None:
-        replacement_started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            replacement_cancelled.set()
+        await asyncio.Event().wait()
 
     async def fake_start() -> asyncio.Task[None]:
         replacement = asyncio.create_task(replacement_lifecycle())
@@ -1568,41 +1575,29 @@ async def test_stop_waits_for_failed_resume_then_cancels_its_replacement(
         return replacement
 
     runtime.start = fake_start  # type: ignore[method-assign]
-    resume_entered = asyncio.Event()
-
-    async def resume_call() -> str:
-        resume_entered.set()
-        return await runtime.resume_current_task()
-
-    resumed = asyncio.create_task(resume_call())
-    await resume_entered.wait()
-    stop_entered = asyncio.Event()
-
-    async def stop_call() -> str:
-        stop_entered.set()
-        return await runtime.message("/stop")
-
-    stopped = asyncio.create_task(stop_call())
-    await stop_entered.wait()
+    resumed = asyncio.create_task(runtime.resume_current_task())
+    await resume_lock_acquired.wait()
+    stopped = asyncio.create_task(runtime.message("/stop"))
     try:
-        assert stop_requested.is_set() is False
-        assert stopped.done() is False
+        assert await asyncio.wait_for(stopped, timeout=1) == "STOPPED"
+        with pytest.raises(ResearchControlError) as caught:
+            await asyncio.wait_for(resumed, timeout=1)
 
-        release_unwind.set()
-        assert await asyncio.gather(resumed, stopped) == ["RUNNING", "STOPPED"]
-        await replacement_cancelled.wait()
-
-        assert replacement_started.is_set()
+        assert caught.value.code == "resume_unavailable"
+        assert old_task_cancelled.is_set()
+        assert old_task.done()
+        assert resume_calls == []
+        assert replacements == []
         assert runtime.state.status == "STOPPED"
         task = runtime.session.lifecycle.task
         assert task is None or task.done()
     finally:
-        release_unwind.set()
-        await asyncio.gather(resumed, stopped, return_exceptions=True)
-        for replacement in replacements:
-            if not replacement.done():
-                replacement.cancel()
-        await asyncio.gather(old_task, *replacements, return_exceptions=True)
+        for task in (resumed, stopped, old_task, *replacements):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(
+            resumed, stopped, old_task, *replacements, return_exceptions=True
+        )
 
 
 @pytest.mark.asyncio

@@ -133,50 +133,54 @@ async def _control_command(runtime: Any, command: str) -> str | None:
 async def resume_current_task(runtime: Any) -> str:
     """Resume the current durable task without changing its confirmed contract."""
     lifecycle = runtime.session.lifecycle
-    async with lifecycle.resume_lock:
-        original_status = runtime.state.status
-        original_started = lifecycle.started
-        capability = resume_capability(runtime.state)
-        task = lifecycle.task
-        live_task = task is not None and not task.done()
+    while True:
+        old_task: asyncio.Task | None = None
+        async with lifecycle.resume_lock:
+            capability = resume_capability(runtime.state)
+            task = lifecycle.task
+            live_task = task is not None and not task.done()
 
-        if capability.reason == "already_running" and live_task:
-            return runtime.state.status
-        if not capability.available and capability.reason != "already_running":
-            raise ResearchControlError(
-                "resume_unavailable", "there is no interrupted task to continue"
-            )
-
-        lifecycle.task_text = resume_task_text(runtime, lifecycle.task_text)
-        if runtime.state.status == "FAILED" and live_task:
-            old_task = task
-            await asyncio.gather(old_task, return_exceptions=True)
-            if not old_task.done():
-                raise RuntimeError("failed lifecycle task did not finish unwinding")
-
-        task = lifecycle.task
-        if task is None or task.done():
-            rearm_if_terminal(runtime)
-            try:
-                await runtime.supervisor.resume(restarting=True)
-                await runtime.start()
-            except BaseException as error:
-                task = lifecycle.task
+            if capability.reason == "already_running" and live_task:
+                return runtime.state.status
+            if not capability.available and capability.reason != "already_running":
+                raise ResearchControlError(
+                    "resume_unavailable", "there is no interrupted task to continue"
+                )
+            if runtime.state.status == "FAILED" and live_task:
+                old_task = task
+            else:
+                original_status = runtime.state.status
+                original_started = lifecycle.started
+                lifecycle.task_text = resume_task_text(runtime, lifecycle.task_text)
                 if task is None or task.done():
-                    lifecycle.started = original_started
-                    runtime.state.status = (
-                        "FAILED" if original_status == "RUNNING" else original_status
-                    )
+                    rearm_if_terminal(runtime)
                     try:
-                        runtime.state.save(runtime.state_path)
-                    except BaseException as rollback_error:
-                        error.add_note(
-                            f"resume rollback persistence failed: {rollback_error}"
-                        )
-                raise
-        else:
-            await runtime.supervisor.resume()
-        return runtime.state.status
+                        await runtime.supervisor.resume(restarting=True)
+                        await runtime.start()
+                    except BaseException as error:
+                        task = lifecycle.task
+                        if task is None or task.done():
+                            lifecycle.started = original_started
+                            runtime.state.status = (
+                                "FAILED"
+                                if original_status == "RUNNING"
+                                else original_status
+                            )
+                            try:
+                                runtime.state.save(runtime.state_path)
+                            except BaseException as rollback_error:
+                                error.add_note(
+                                    "resume rollback persistence failed: "
+                                    f"{rollback_error}"
+                                )
+                        raise
+                else:
+                    await runtime.supervisor.resume()
+                return runtime.state.status
+
+        await asyncio.gather(old_task, return_exceptions=True)
+        if not old_task.done():
+            raise RuntimeError("failed lifecycle task did not finish unwinding")
 
 
 async def ensure_started(runtime: Any) -> None:
