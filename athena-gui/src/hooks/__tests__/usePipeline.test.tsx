@@ -1,6 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+let pipelineEventHandler:
+  | ((event: { kind: string; data: Record<string, unknown> }) => void)
+  | null = null;
+
 const bridgeMocks = vi.hoisted(() => ({
   startSearch: vi.fn(),
   pauseSearch: vi.fn(),
@@ -95,7 +99,11 @@ describe("usePipeline", () => {
     bridgeMocks.sessionsList.mockResolvedValue({ sessions: [], active: null });
     bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: [] });
     bridgeMocks.sessionDelete.mockResolvedValue({ deleted: true, sessions: [] });
-    bridgeMocks.subscribeToPipelineEvents.mockResolvedValue([]);
+    pipelineEventHandler = null;
+    bridgeMocks.subscribeToPipelineEvents.mockImplementation(async (handler) => {
+      pipelineEventHandler = handler;
+      return [];
+    });
     bridgeMocks.taskClarificationStart.mockResolvedValue({
       draft_id: "draft-1",
       revision: 0,
@@ -363,6 +371,111 @@ describe("usePipeline", () => {
       expect(result.current.currentSessionId).toBe("s-2");
     });
     expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("s-2");
+  });
+
+  it("replaces live messages when initial session hydration is empty", async () => {
+    let resolveSessions: ((value: { sessions: string[]; active: string | null }) => void) | undefined;
+    bridgeMocks.sessionsList.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveSessions = resolve;
+      }),
+    );
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default"] });
+
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(pipelineEventHandler).not.toBeNull());
+    act(() => {
+      pipelineEventHandler?.({
+        kind: "output",
+        data: { seq: 1, message_id: "live-1", source: "agent", channel: "text", text: "live message" },
+      });
+    });
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["live message"]);
+
+    await act(async () => {
+      resolveSessions?.({ sessions: ["default"], active: "default" });
+    });
+
+    await waitFor(() => expect(result.current.viewModel.messages).toEqual([]));
+  });
+
+  it("ignores an older session switch that resolves after a newer one", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let resolveOlder: ((value: { records: Array<Record<string, unknown>>; sessions: string[] }) => void) | undefined;
+    let resolveNewer: ((value: { records: Array<Record<string, unknown>>; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementation((id: string) => new Promise((resolve) => {
+      if (id === "older") resolveOlder = resolve;
+      if (id === "newer") resolveNewer = resolve;
+    }));
+
+    let olderSwitch: Promise<void>;
+    let newerSwitch: Promise<void>;
+    act(() => {
+      olderSwitch = result.current.switchSession("older");
+      newerSwitch = result.current.switchSession("newer");
+    });
+    await act(async () => {
+      resolveNewer?.({
+        records: [{ type: "output", seq: 2, message_id: "newer", text: "newer transcript" }],
+        sessions: ["older", "newer"],
+      });
+      await newerSwitch!;
+    });
+    await act(async () => {
+      resolveOlder?.({
+        records: [{ type: "output", seq: 1, message_id: "older", text: "older transcript" }],
+        sessions: ["older", "newer"],
+      });
+      await olderSwitch!;
+    });
+
+    expect(result.current.currentSessionId).toBe("newer");
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["newer transcript"]);
+  });
+
+  it("prefers an available requested session during initial restore", async () => {
+    bridgeMocks.sessionsList.mockResolvedValue({
+      sessions: ["default", "s-2"],
+      active: "default",
+    });
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["default", "s-2"] });
+
+    renderHook(() => usePipeline("C:/workspace", "s-2"));
+
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalled());
+    expect(bridgeMocks.sessionSwitch.mock.calls[0]).toEqual(["s-2"]);
+  });
+
+  it("waits for new-session creation before deleting it", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let resolveCreation: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementation((id: string) => {
+      if (id === "default") return Promise.resolve({ records: [], sessions: ["default"] });
+      return new Promise((resolve) => {
+        resolveCreation = resolve;
+      });
+    });
+    bridgeMocks.sessionDelete.mockResolvedValue({ deleted: true, sessions: ["default"] });
+
+    act(() => result.current.newSession());
+    const newId = result.current.currentSessionId;
+    let deletion: Promise<void>;
+    act(() => {
+      deletion = result.current.deleteSession(newId);
+    });
+    expect(bridgeMocks.sessionDelete).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveCreation?.({ records: [], sessions: ["default", newId] });
+      await deletion!;
+    });
+
+    expect(bridgeMocks.sessionDelete).toHaveBeenCalledWith(newId);
+    expect(result.current.sessions.some((session) => session.id === newId)).toBe(false);
   });
 
   it("deletes the default session instead of silently ignoring it", async () => {

@@ -121,6 +121,8 @@ describe("usePipeline message identity", () => {
     const release = deferHistory([]);
     const { result } = renderHook(() => usePipeline());
     await flush();
+    release();
+    await flush();
 
     const parts = ["The workspace is empty", " ", "and the data is at `D:\\tmp\\data`."];
     await act(async () => {
@@ -131,9 +133,6 @@ describe("usePipeline message identity", () => {
         }),
       );
     });
-    release();
-    await flush();
-
     expect(result.current.viewModel.messages.map((m) => m.content)).toEqual([parts.join("")]);
   });
 
