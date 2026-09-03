@@ -419,7 +419,7 @@ git commit -m "fix: resume current task from continue input"
 - Consumes: `resume_capability(state)` and `ResearchRuntime.resume_current_task()`.
 - Produces: `StateEvent.resume_available: bool`, `StateEvent.resume_reason: str | None`, and unchanged GUI method name `resume`.
 
-- [ ] **Step 1: Add failing state-projection tests**
+- [x] **Step 1: Add failing state-projection tests**
 
 Add tests for these snapshots:
 
@@ -441,7 +441,7 @@ Add a handler restore test whose runtime exposes only the public `state_path` pr
 It must resume the selected persisted session without depending on a fake-only
 `_state_path` attribute.
 
-- [ ] **Step 2: Add failing RPC convergence tests**
+- [x] **Step 2: Add failing RPC convergence tests**
 
 Extend gateway tests so:
 
@@ -462,7 +462,7 @@ plain-text continuation entrypoint. Its genuine `different_task` behavior is unc
 Tests must prove every official free-text entrypoint intercepts exact `continue` before
 that endpoint and that a real different task still reaches the protection.
 
-- [ ] **Step 3: Run focused tests and confirm missing event fields/public operation**
+- [x] **Step 3: Run focused tests and confirm missing event fields/public operation**
 
 Run:
 
@@ -472,7 +472,7 @@ Run:
 
 Expected: state field assertions and direct public resume calls fail.
 
-- [ ] **Step 4: Implement additive projection and service routing**
+- [x] **Step 4: Implement additive projection and service routing**
 
 Add defaulted fields to `StateEvent`:
 
@@ -491,7 +491,7 @@ and risk a circular import during `ResearchRuntime` composition.
 Change the gateway restore check to use `runtime.state_path`. Do not add a compatibility
 fallback to the nonexistent private `_state_path`; tests must represent the real facade.
 
-- [ ] **Step 5: Verify native/WebSocket protocol parity and commit Task 3**
+- [x] **Step 5: Verify native/WebSocket protocol parity and commit Task 3**
 
 Run:
 
@@ -508,6 +508,16 @@ Expected: old and new state payloads validate, and both transports retain the sa
 git add src/athena/research/supervisor/events.py src/athena/research/runtime/event_projection.py src/athena/gui/service.py src/gui_gateway/handler.py test/unit/research/supervisor/test_events.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py tests/test_gui_protocol_contract.py
 git commit -m "feat: project durable resume availability"
 ```
+
+Task 3 evidence (2026-09-04): the RED run produced 13 expected failures for the
+missing projection, public resume routing, and state-path contract. Commit `a02fa3d`
+then passed the Task 3 plus gateway E2E selection (`95 passed`), Black, and all
+task-owned diff checks. Independent AI specification and quality reviews both passed.
+The Python canonical/dispatch contract passes (`2 passed`). The remaining third
+protocol assertion is a pre-existing `origin/main` defect: commit `ae922b9` registered
+the local-only Rust command `workspace_dialog_start_directory` without updating the
+old Rust/Python mapping test, and a detached clean checkout of `a02fa3d` reproduces it;
+Task 3 changed neither side of that contract.
 
 ---
 
