@@ -153,14 +153,14 @@ git commit -m "feat: enforce baseline research schema v2"
 - Changes: `BaselineArtifacts.raw_design: bytes` and `BaselineVerification.schema_version: Literal[2]` with required `design_sha256`.
 - Consumes: Task 1's `BaselineResearch.training.strategy`.
 
-- [ ] **Step 1: Write failing exact-binding and canonicalization tests**
+- [x] **Step 1: Write failing exact-binding and canonicalization tests**
 
 Add tests proving that a same-marker/different-body design is rejected, CRLF and LF
 produce different design digests, invalid UTF-8 is rejected after raw bytes are read,
 a loopback/private repository proof is rejected, and a safe but non-selected repository
 proof is rejected. Preserve every existing Git subprocess-hardening test.
 
-- [ ] **Step 2: Run the focused tests and confirm behavior failures**
+- [x] **Step 2: Run the focused tests and confirm behavior failures**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/prepare/test_baseline_research_contract.py test/unit/research/prepare/test_baseline_source_verification.py
@@ -169,13 +169,13 @@ proof is rejected. Preserve every existing Git subprocess-hardening test.
 Expected: new tests fail because design bytes/schema-v2 verification/shared matching do
 not exist; legacy Git security tests remain green.
 
-- [ ] **Step 3: Extract the dependency-leaf repository canonicalizer**
+- [x] **Step 3: Extract the dependency-leaf repository canonicalizer**
 
 Move the existing URL/host/IP logic unchanged from `source_verification.py` into
 `repository_url.py`. Import it from both source verification and artifact matching.
 Do not leave a second weaker URL predicate in `baseline_research.py`.
 
-- [ ] **Step 4: Bind raw research, raw design, route identity, and canonical bytes**
+- [x] **Step 4: Bind raw research, raw design, route identity, and canonical bytes**
 
 Read Markdown with `read_bytes()` then strict UTF-8 decode. Add the design digest to all
 Git/OpenAlex success constructors. Canonicalize verification JSON exactly once:
@@ -187,7 +187,7 @@ def verification_bytes(value: BaselineVerification) -> bytes:
 
 Use one matcher in all direct checks; remove duplicate digest/candidate checks.
 
-- [ ] **Step 5: Run Task 2 verification**
+- [x] **Step 5: Run Task 2 verification**
 
 ```powershell
 .venv\Scripts\python.exe -m black --check src/athena/research/prepare/repository_url.py src/athena/research/prepare/baseline_research.py src/athena/research/prepare/source_verification.py test/unit/research/prepare/test_baseline_research_contract.py test/unit/research/prepare/test_baseline_source_verification.py
@@ -196,7 +196,7 @@ Use one matcher in all direct checks; remove duplicate digest/candidate checks.
 
 Expected: formatting and focused tests pass, including existing restricted Git cases.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```powershell
 git add -- src/athena/research/prepare/repository_url.py src/athena/research/prepare/baseline_research.py src/athena/research/prepare/source_verification.py test/unit/research/prepare/test_baseline_research_contract.py test/unit/research/prepare/test_baseline_source_verification.py
