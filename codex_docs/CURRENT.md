@@ -12,6 +12,7 @@ Paused implementation plan:
 
 Additional supporting design spec:
 - `docs/superpowers/specs/2026-09-01-task-clarification-confirmation-gate-design.md`
+- `docs/superpowers/specs/2026-09-03-native-directory-dialog-recovery-design.md`
 
 Most recent completed work:
 - `codex_docs/2026-09-03-frontend-responsiveness-completion-report.md`
