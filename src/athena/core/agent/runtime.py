@@ -49,6 +49,7 @@ _MAX_STRUCTURED_RETRIES = 3
 
 # ```json … ``` — 模型在带工具的对话里习惯把最终 JSON 包进 markdown 代码块。
 _FENCED_JSON = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.DOTALL)
+_EMBEDDED_JSON = re.compile(r"```json\s*(.+?)\s*```", re.DOTALL)
 
 
 def _unfenced(text: str) -> str:
@@ -61,6 +62,20 @@ def _unfenced(text: str) -> str:
     """
     stripped = text.strip()
     if not stripped.startswith("```"):
+        match = _EMBEDDED_JSON.search(stripped)
+        if match:
+            return match.group(1)
+        decoder = json.JSONDecoder()
+        for start, char in enumerate(stripped):
+            if char != "{":
+                continue
+            try:
+                _, end = decoder.raw_decode(stripped[start:])
+            except json.JSONDecodeError:
+                # A prose brace or incomplete object precedes the structured result.
+                continue
+            if not stripped[start + end :].strip():
+                return stripped[start : start + end]
         return text
     match = _FENCED_JSON.search(stripped)
     return match.group(1) if match else text

@@ -1059,6 +1059,36 @@ async def test_prose_around_the_fence_still_counts_as_invalid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prose_before_an_explicit_json_fence_is_accepted() -> None:
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider(
+        'Evaluator ready.\n```json\n{"answer":"hi"}\n```'
+    )
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert outcome.result_ref
+    assert agent.model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_prose_before_a_terminal_json_object_is_accepted() -> None:
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider('Evaluator ready.\n{"answer":"hi"}')
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert outcome.result_ref
+    assert agent.model.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_agent_structured_output_raises_after_max_retries() -> None:
     """无效 JSON 重试耗尽 → RuntimeError，而非回退未校验的虚拟 ref。"""
     tools = ToolRegistry()
