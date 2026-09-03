@@ -16,6 +16,7 @@ from athena.agents.supervisor_agent import MAX_PLAN_TURNS
 from athena.research.prepare.authority import (
     BaselineAuthorityError,
     BaselineAuthorityStore,
+    PrepareAttestation,
     SealedBaseline,
     VerifiedBaselineBundle,
 )
@@ -153,10 +154,10 @@ def _assert_mirror_matches(root: Path, filename: str, expected: bytes) -> None:
         )
 
 
-async def load_authoritative_baseline(
+async def _load_authoritative_baseline_record(
     root: Path, authority: BaselineAuthorityStore
-) -> VerifiedBaseline | None:
-    """Load only externally sealed evidence and validate every present mirror."""
+) -> tuple[VerifiedBaseline, SealedBaseline] | None:
+    """Load one external record and validate its exact workspace mirrors."""
     try:
         sealed = await authority.load()
     except BaselineAuthorityError:
@@ -190,19 +191,22 @@ async def load_authoritative_baseline(
             raise BaselineResearchError(
                 f"workspace mirror {VERIFICATION_FILENAME} does not match external authority"
             )
-    return verified
+    return verified, sealed
+
+
+async def load_authoritative_baseline(
+    root: Path, authority: BaselineAuthorityStore
+) -> VerifiedBaseline | None:
+    """Load only externally sealed evidence and validate every present mirror."""
+    loaded = await _load_authoritative_baseline_record(root, authority)
+    return None if loaded is None else loaded[0]
 
 
 async def seal_verified_baseline(
     authority: BaselineAuthorityStore, verified: VerifiedBaseline
 ) -> VerifiedBaseline:
     """Seal freshly verified exact bytes with initial compare-and-exchange."""
-    bundle = VerifiedBaselineBundle(
-        research_bytes=verified.artifacts.raw_research,
-        design_bytes=verified.artifacts.raw_design,
-        verification_bytes=verified.verification_bytes,
-        verification=verified.verification,
-    )
+    bundle = _verified_bundle(verified)
     try:
         sealed = await authority.seal(bundle, expected_generation=None)
     except BaselineAuthorityError:
@@ -219,6 +223,51 @@ async def seal_verified_baseline(
             "baseline authority returned unexpected sealed evidence"
         )
     return accepted
+
+
+def _verified_bundle(verified: VerifiedBaseline) -> VerifiedBaselineBundle:
+    """Return the exact authority payload carried by one verified baseline."""
+    return VerifiedBaselineBundle(
+        research_bytes=verified.artifacts.raw_research,
+        design_bytes=verified.artifacts.raw_design,
+        verification_bytes=verified.verification_bytes,
+        verification=verified.verification,
+    )
+
+
+async def _attest_prepare_completion(
+    authority: BaselineAuthorityStore,
+    verified: VerifiedBaseline,
+    result: PrepareResult,
+) -> None:
+    """Attach exact trusted scoring evidence to the in-memory generation."""
+    evidence = PrepareAttestation(
+        research_sha256=verified.verification.research_sha256,
+        design_sha256=verified.verification.design_sha256,
+        baseline_commit=result.commit,
+        evaluator_ref=result.evaluator_ref,
+        evidence_ref=result.evidence_ref,
+    )
+    try:
+        sealed = await authority.attest_prepare(
+            evidence,
+            expected_generation=verified.authority_generation,
+        )
+    except BaselineAuthorityError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError(
+            "baseline authority completion attestation failed"
+        ) from exc
+    if (
+        type(sealed) is not SealedBaseline
+        or sealed.generation != verified.authority_generation + 1
+        or sealed.bundle != _verified_bundle(verified)
+        or sealed.attestation != evidence
+    ):
+        raise BaselineAuthorityError(
+            "baseline authority returned an unexpected completion attestation"
+        )
 
 
 async def _verify_current_artifacts(
@@ -515,7 +564,7 @@ async def run_baseline(
         json.dumps(runtime.tree.to_dict(), ensure_ascii=False, sort_keys=True)
     )
     # Delegate execution and trusted scoring to the supervisor plan.
-    return await run_prepare_plan(
+    result = await run_prepare_plan(
         agents=runtime.agents,
         evaluator=runtime.evaluator,
         git=runtime.git,
@@ -532,3 +581,6 @@ async def run_baseline(
         predict_features=predict_features,
         assert_baseline=assert_baseline,
     )
+    await assert_baseline()
+    await _attest_prepare_completion(authority, verified, result)
+    return result

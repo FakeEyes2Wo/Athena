@@ -19,6 +19,7 @@ from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import ExecutionRuntime
 from athena.research.contracts import GeneralTurnOutcome
+from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.supervisor.deps import (
     PhaseActions,
     ResearchActions,
@@ -234,6 +235,7 @@ def _checkpoint_supervisor(
     tmp_path: Path,
     run_general_turn=None,
     run_prepare_phase=None,
+    prepare_resume_is_attested=None,
     publish_callback=None,
     runtime_agents=None,
 ) -> Supervisor:
@@ -280,6 +282,7 @@ def _checkpoint_supervisor(
             phases=PhaseActions(
                 publish=publish_callback,
                 prepare=run_prepare_phase,
+                prepare_resume_is_attested=prepare_resume_is_attested,
             ),
             search=SearchServices(
                 scheduler=Scheduler(),
@@ -541,22 +544,60 @@ async def test_run_prepare_skips_when_trusted_baseline_exists(
     async def publish(kind, payload):
         captured.append((kind, payload))
 
+    async def attested() -> bool:
+        calls.append("attested")
+        return True
+
     supervisor = _checkpoint_supervisor(
         tmp_path,
         run_prepare_phase=raise_prepare,
+        prepare_resume_is_attested=attested,
         publish_callback=publish,
     )
     monkeypatch.setattr(supervisor.tree, "best_experiment_id", lambda: "exp_baseline")
 
     await supervisor._phases._run_prepare()
 
-    assert calls == []
+    assert calls == ["attested"]
     assert supervisor.state.phase == "SEARCH"
     assert supervisor.state.status == "RUNNING"
     assert any(
         kind == "output" and "跳过 PREPARE" in str(payload.get("text"))
         for kind, payload in captured
     )
+
+
+@pytest.mark.asyncio
+async def test_run_prepare_rejects_unattested_local_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare_calls: list[str] = []
+    published: list[tuple[str, dict[str, object]]] = []
+
+    async def forbidden_prepare():
+        prepare_calls.append("prepare")
+        raise AssertionError("unattested local baseline must not rerun or skip PREPARE")
+
+    async def unattested() -> bool:
+        return False
+
+    async def publish(kind, payload):
+        published.append((kind, payload))
+
+    supervisor = _checkpoint_supervisor(
+        tmp_path,
+        run_prepare_phase=forbidden_prepare,
+        prepare_resume_is_attested=unattested,
+        publish_callback=publish,
+    )
+    monkeypatch.setattr(supervisor.tree, "best_experiment_id", lambda: "exp_baseline")
+
+    with pytest.raises(BaselineAuthorityError, match="not attested"):
+        await supervisor._phases._run_prepare()
+
+    assert supervisor.state.phase == "PREPARE"
+    assert prepare_calls == []
+    assert published == []
 
 
 @pytest.mark.asyncio

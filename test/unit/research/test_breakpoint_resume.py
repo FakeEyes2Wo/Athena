@@ -13,12 +13,25 @@ from types import SimpleNamespace
 
 import pytest
 
+from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_tree import Experiment, ExperimentStatus
+from athena.core.workspace import GitWorkBranch
 from athena.research.prepare import orchestrator
+from athena.research.prepare.authority import (
+    BaselineAuthorityConflict,
+    BaselineAuthorityError,
+    PrepareAttestation,
+    SealedBaseline,
+    VerifiedBaselineBundle,
+)
 from athena.research.prepare.baseline_research import (
+    BaselineResearchError,
     BaselineVerification,
     VerifiedBaseline,
+    design_sha256,
     load_baseline_artifacts,
     research_sha256,
+    verification_bytes,
     write_verification,
 )
 from athena.research.runtime.phase_runner import PhaseRunner
@@ -31,20 +44,47 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
     """Seed one complete offline research/design/verification trio."""
     root.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": {
             "modality": "image",
             "task_type": "classification",
-            "labeled_samples": 480,
-            "effective_training_units": 120,
-            "group_count": 120,
-            "class_count": 5,
-            "minority_class_samples": 32,
             "input_scale": "paired 224x224 images",
             "regime": "small",
-            "recommended_strategy": "partial_finetune",
-            "evidence": ["eda:EDA_HANDOFF.md: 480 labels across 120 groups"],
+            "facts": [
+                {
+                    "field": "labeled_samples",
+                    "value": 480,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_HANDOFF.md#dataset-size",
+                        "claim": "480 labeled training images",
+                    },
+                },
+                {
+                    "field": "group_count",
+                    "value": 120,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_HANDOFF.md#groups",
+                        "claim": "120 independent groups",
+                    },
+                },
+            ],
             "rationale": "Grouped labels are limited relative to pretrained capacity.",
+        },
+        "training": {
+            "strategy": "partial_finetune",
+            "pretrained": {
+                "status": "available",
+                "representation": "ImageNet encoder",
+                "evidence": {
+                    "kind": "source",
+                    "reference": "https://arxiv.org/abs/1512.03385",
+                    "claim": "The selected method provides pretrained weights.",
+                },
+            },
+            "safeguards": None,
+            "scratch_scale": None,
         },
         "candidates": [
             {
@@ -88,8 +128,14 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
             },
         ],
         "selected_candidate_id": "resnet-transfer",
-        "search_queries": ["small image classification transfer baseline GitHub"],
-        "limitations": [],
+        "search": {
+            "queries": [
+                "small image classification transfer baseline GitHub",
+                "authoritative pretrained image baseline paper",
+            ],
+            "one_candidate": None,
+        },
+        "limitations": ["The source data distribution differs from local data."],
     }
     (root / "BASELINE_RESEARCH.json").write_text(json.dumps(payload), encoding="utf-8")
     (root / "BASELINE_DESIGN.md").write_text(
@@ -99,7 +145,9 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
     )
     artifacts = load_baseline_artifacts(root)
     verification = BaselineVerification(
+        schema_version=2,
         research_sha256=research_sha256(artifacts.raw_research),
+        design_sha256=design_sha256(artifacts.raw_design),
         selected_candidate_id=artifacts.selected.candidate_id,
         route="git",
         verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
@@ -108,7 +156,67 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
         attempts=[{"route": "git", "success": True, "diagnostic": "verified"}],
     )
     write_verification(root, verification)
-    return VerifiedBaseline(artifacts=artifacts, verification=verification)
+    return VerifiedBaseline(
+        artifacts=artifacts,
+        verification=verification,
+        verification_bytes=verification_bytes(verification),
+        authority_generation=0,
+    )
+
+
+def _bundle_for_verified(verified: VerifiedBaseline) -> VerifiedBaselineBundle:
+    return VerifiedBaselineBundle(
+        research_bytes=verified.artifacts.raw_research,
+        design_bytes=verified.artifacts.raw_design,
+        verification_bytes=verified.verification_bytes,
+        verification=verified.verification,
+    )
+
+
+class _MemoryBaselineAuthorityStore:
+    def __init__(
+        self,
+        sealed: SealedBaseline | None = None,
+        *,
+        load_error: Exception | None = None,
+    ) -> None:
+        self.sealed = sealed
+        self.load_error = load_error
+
+    async def load(self) -> SealedBaseline | None:
+        if self.load_error is not None:
+            raise self.load_error
+        return self.sealed
+
+    async def seal(
+        self,
+        bundle: VerifiedBaselineBundle,
+        *,
+        expected_generation: int | None,
+    ) -> SealedBaseline:
+        current = None if self.sealed is None else self.sealed.generation
+        if current != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=0 if current is None else current + 1,
+            bundle=bundle,
+        )
+        return self.sealed
+
+    async def attest_prepare(
+        self,
+        evidence: PrepareAttestation,
+        *,
+        expected_generation: int,
+    ) -> SealedBaseline:
+        if self.sealed is None or self.sealed.generation != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=expected_generation + 1,
+            bundle=self.sealed.bundle,
+            attestation=evidence,
+        )
+        return self.sealed
 
 
 def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,12 +231,17 @@ def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     async def verified_design(
-        _runtime, workspace, _task, eda_ready, _handoff
+        runtime, workspace, _task, eda_ready, _handoff
     ) -> VerifiedBaseline:
         root = Path(workspace.path)
         assert eda_ready is True
         assert (root / "EDA_HANDOFF.md").is_file()
-        return _write_verified_baseline_fixture(root)
+        verified = _write_verified_baseline_fixture(root)
+        runtime.baseline_authority.sealed = SealedBaseline(
+            generation=verified.authority_generation,
+            bundle=_bundle_for_verified(verified),
+        )
+        return verified
 
     monkeypatch.setattr(orchestrator, "prepare_eda", asserted_eda)
     monkeypatch.setattr(orchestrator, "prepare_baseline_design", verified_design)
@@ -338,6 +451,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         return None
 
     frozen_ref = "sha256:" + "f" * 64
+    authority = _MemoryBaselineAuthorityStore()
     state = SimpleNamespace(
         phase="PREPARE", status="RUNNING", eda_dir=None, save=lambda path: None
     )
@@ -366,6 +480,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         agents=SimpleNamespace(reap=lambda agent_id: None),
         execution=object(),
         evaluator=object(),
+        baseline_authority=authority,
         task_text="predict survival",
         kaggle_tools=lambda agent_type: None,
         ideator_tools=lambda: None,
@@ -419,6 +534,187 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         assert filename in str(captured["task"])
     assert "Selected candidate: resnet-transfer" in str(captured["task"])
     assert "Training strategy: partial_finetune" in str(captured["task"])
+
+
+def _seed_attested_prepare_checkpoint(
+    tmp_path: Path,
+    authority: _MemoryBaselineAuthorityStore,
+) -> None:
+    workspace_root = tmp_path / "workspaces" / "eda"
+    verified = _write_verified_baseline_fixture(workspace_root)
+    attestation = PrepareAttestation(
+        research_sha256=verified.verification.research_sha256,
+        design_sha256=verified.verification.design_sha256,
+        baseline_commit="b" * 40,
+        evaluator_ref="sha256:" + "e" * 64,
+        evidence_ref="sha256:" + "d" * 64,
+    )
+    authority.sealed = SealedBaseline(
+        generation=1,
+        bundle=_bundle_for_verified(verified),
+        attestation=attestation,
+    )
+
+    runtime = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    runtime.state.phase = "PREPARE"
+    runtime.state.status = "RUNNING"
+    runtime.state.eda_dir = "workspaces/eda"
+    runtime.tree.add_hypothesis(
+        Hypothesis(
+            id="baseline",
+            statement="trusted PREPARE baseline",
+            intervention="establish the baseline implementation",
+            expected_effect="provide the SEARCH reference metric",
+        )
+    )
+    runtime.tree.add_experiment(
+        "exp_baseline",
+        Experiment(
+            hypothesis_id="baseline",
+            commit="b" * 40,
+            plan=ExperimentPlan(
+                kind="baseline",
+                change="prepare trusted baseline",
+                run_config_ref="sha256:" + "e" * 64,
+                budget={},
+                acceptance_rule="trusted evaluator score",
+            ),
+            gitwork=GitWorkBranch(
+                path=str(tmp_path),
+                branch="main",
+                base_commit="b" * 40,
+            ),
+            status=ExperimentStatus.SUCCEEDED,
+            eval=EvalResult(
+                experiment_id="exp_baseline",
+                primary=0.71,
+                per_sample="sha256:" + "d" * 64,
+            ),
+        ),
+    )
+    runtime.tree.set_sota("exp_baseline")
+    runtime.tree.save(runtime.config.paths.tree)
+    runtime.state.save(runtime.state_path)
+
+
+@pytest.mark.asyncio
+async def test_fresh_runtime_skips_prepare_for_exact_external_attestation(
+    tmp_path: Path,
+) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+
+    await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "SEARCH"
+    assert restarted.state.status == "RUNNING"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("difference", ["commit", "evaluator_ref", "evidence_ref"])
+async def test_fresh_runtime_rejects_attestation_mismatching_local_tree(
+    difference: str,
+    tmp_path: Path,
+) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    experiment = restarted.tree.get_experiment("exp_baseline")
+    if difference == "commit":
+        experiment.commit = "c" * 40
+    elif difference == "evaluator_ref":
+        experiment.plan.run_config_ref = "sha256:" + "c" * 64
+    else:
+        assert difference == "evidence_ref"
+        assert experiment.eval is not None
+        experiment.eval.per_sample = "sha256:" + "c" * 64
+
+    assert await PhaseRunner(restarted).baseline_resume_is_attested() is False
+
+    with pytest.raises(BaselineAuthorityError, match="not attested"):
+        await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "PREPARE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "authority_state",
+    ["missing_capability", "missing_record", "missing_attestation", "wrong_generation"],
+)
+async def test_fresh_runtime_rejects_missing_or_wrong_authority_state(
+    authority_state: str,
+    tmp_path: Path,
+) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    assert authority.sealed is not None
+    if authority_state == "missing_capability":
+        restarted = ResearchRuntime(project_root=tmp_path)
+    else:
+        if authority_state == "missing_record":
+            authority.sealed = None
+        elif authority_state == "missing_attestation":
+            authority.sealed = SealedBaseline(
+                generation=0,
+                bundle=authority.sealed.bundle,
+            )
+        else:
+            assert authority_state == "wrong_generation"
+            authority.sealed = SealedBaseline(
+                generation=2,
+                bundle=authority.sealed.bundle,
+                attestation=authority.sealed.attestation,
+            )
+        restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+
+    runner = PhaseRunner(restarted)
+    if authority_state == "missing_capability":
+        with pytest.raises(BaselineAuthorityError, match="requires"):
+            await runner.baseline_resume_is_attested()
+    else:
+        assert await runner.baseline_resume_is_attested() is False
+
+    with pytest.raises(BaselineAuthorityError):
+        await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "PREPARE"
+
+
+@pytest.mark.asyncio
+async def test_fresh_runtime_rejects_authority_outage(tmp_path: Path) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    authority.load_error = OSError("authority offline")
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+
+    with pytest.raises(BaselineAuthorityError, match="load failed"):
+        await PhaseRunner(restarted).baseline_resume_is_attested()
+
+    with pytest.raises(BaselineAuthorityError, match="load failed"):
+        await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "PREPARE"
+
+
+@pytest.mark.asyncio
+async def test_fresh_runtime_rejects_mutated_baseline_artifact(tmp_path: Path) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    (tmp_path / "workspaces" / "eda" / "BASELINE_DESIGN.md").write_text(
+        "Selected candidate: `resnet-transfer`\nTraining strategy: `classical`\n",
+        encoding="utf-8",
+    )
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+
+    with pytest.raises(BaselineResearchError, match="BASELINE_DESIGN.md"):
+        await PhaseRunner(restarted).baseline_resume_is_attested()
+
+    with pytest.raises(BaselineResearchError, match="BASELINE_DESIGN.md"):
+        await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "PREPARE"
 
 
 @pytest.mark.asyncio

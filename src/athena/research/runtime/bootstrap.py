@@ -199,6 +199,7 @@ def wire_workflow(runtime: Any) -> None:
         phases=PhaseActions(
             publish=services.infrastructure.events.publish_from_supervisor,
             prepare=phases.run_prepare_phase,
+            prepare_resume_is_attested=phases.baseline_resume_is_attested,
             validation=phases.run_validation_phase,
             publish_agent_event=services.infrastructure.events.project_agent_event,
             on_plan_settled=runtime.release_lease,

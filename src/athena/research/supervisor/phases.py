@@ -9,6 +9,7 @@ from athena.core.contracts import ArtifactRef
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
+from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.report import build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
@@ -150,6 +151,11 @@ class PhaseMachine:
         if self._deps.phases.prepare is None:
             raise RuntimeError("PREPARE phase adapter is not configured")
         if self._tree.best_experiment_id() is not None:
+            resume_is_attested = self._deps.phases.prepare_resume_is_attested
+            if resume_is_attested is None or not await resume_is_attested():
+                raise BaselineAuthorityError(
+                    "local PREPARE baseline is not attested by external authority"
+                )
             # 断点续传：tree 已含可信 SOTA baseline（崩溃窗口为 tree 已写、phase 未转），
             # 跳过重跑 PREPARE，直接进入 SEARCH。
             await self._deps.phases.publish(

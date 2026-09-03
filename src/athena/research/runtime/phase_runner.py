@@ -17,6 +17,8 @@ from athena.agents.task_agents import register_validate_agent
 from athena.execution.runtime import ExecutionContext
 from athena.research.clarification.context import confirmed_task_context_block
 from athena.research.contracts import ValidationResult
+from athena.research.prepare.authority import BaselineAuthorityError
+from athena.research.prepare.baseline import _load_authoritative_baseline_record
 from athena.research.prepare.orchestrator import run_prepare_phase
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import (
@@ -144,6 +146,48 @@ class PhaseRunner:
     async def run_prepare_phase(self) -> PrepareResult:
         """Run the PREPARE phase and return the trusted baseline result."""
         return await run_prepare_phase(self._runtime, self._run_handoff_agent)
+
+    async def baseline_resume_is_attested(self) -> bool:
+        """Authorize PREPARE resume only from exact external completion evidence."""
+        rt = self._runtime
+        authority = rt.baseline_authority
+        if authority is None:
+            raise BaselineAuthorityError(
+                "PREPARE resume requires an external baseline authority capability"
+            )
+        eda_dir = rt.state.eda_dir
+        if not isinstance(eda_dir, str) or not eda_dir.strip():
+            raise BaselineAuthorityError(
+                "PREPARE resume has no durable baseline workspace"
+            )
+        workspace = Path(eda_dir)
+        if not workspace.is_absolute():
+            workspace = rt.root / workspace
+        workspace = workspace.resolve()
+        if not workspace.is_relative_to(rt.root.resolve()):
+            raise BaselineAuthorityError(
+                "PREPARE resume baseline workspace escapes the project root"
+            )
+
+        loaded = await _load_authoritative_baseline_record(workspace, authority)
+        if loaded is None:
+            return False
+        _verified, sealed = loaded
+        attestation = sealed.attestation
+        if sealed.generation != 1 or attestation is None:
+            return False
+
+        sota_id = rt.tree.best_experiment_id()
+        if sota_id is None:
+            return False
+        experiment = rt.tree.get_experiment(sota_id)
+        if experiment.eval is None or experiment.plan.kind != "baseline":
+            return False
+        return (
+            experiment.commit == attestation.baseline_commit
+            and experiment.plan.run_config_ref == attestation.evaluator_ref
+            and experiment.eval.per_sample == attestation.evidence_ref
+        )
 
     async def run_validation_phase(
         self, sota_commit: str, metric: float

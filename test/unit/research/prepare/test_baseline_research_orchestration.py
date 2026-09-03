@@ -14,6 +14,7 @@ from athena.research.prepare.baseline import prepare_baseline_design, run_baseli
 from athena.research.prepare.authority import (
     BaselineAuthorityConflict,
     BaselineAuthorityError,
+    PrepareAttestation,
     SealedBaseline,
     VerifiedBaselineBundle,
 )
@@ -29,6 +30,7 @@ from athena.research.prepare.baseline_research import (
     verification_bytes,
     write_verification,
 )
+from athena.research.supervisor.prepare import PrepareResult
 
 
 def valid_payload() -> dict[str, Any]:
@@ -204,6 +206,7 @@ class MemoryBaselineAuthorityStore:
         self.seal_error = seal_error
         self.loads = 0
         self.seals = 0
+        self.attestations: list[tuple[PrepareAttestation, int]] = []
 
     async def load(self) -> SealedBaseline | None:
         self.loads += 1
@@ -227,9 +230,21 @@ class MemoryBaselineAuthorityStore:
         self.sealed = SealedBaseline(generation=generation, bundle=bundle)
         return self.sealed
 
-    async def attest_prepare(self, evidence, *, expected_generation: int):
-        del evidence, expected_generation
-        raise AssertionError("Task 4 does not attest PREPARE completion")
+    async def attest_prepare(
+        self,
+        evidence: PrepareAttestation,
+        *,
+        expected_generation: int,
+    ) -> SealedBaseline:
+        self.attestations.append((evidence, expected_generation))
+        if self.sealed is None or self.sealed.generation != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=expected_generation + 1,
+            bundle=self.sealed.bundle,
+            attestation=evidence,
+        )
+        return self.sealed
 
 
 def authority_bundle(root: Path) -> VerifiedBaselineBundle:
@@ -1059,6 +1074,18 @@ def authority_for_verified(verified: VerifiedBaseline) -> MemoryBaselineAuthorit
     )
 
 
+def completed_prepare_result() -> PrepareResult:
+    """Return one complete trusted-scoring result with literal evidence refs."""
+    return PrepareResult(
+        evaluator_ref="sha256:" + "e" * 64,
+        metric=0.71,
+        commit="b" * 40,
+        predictions_ref="sha256:" + "1" * 64,
+        evidence_ref="sha256:" + "d" * 64,
+        report_ref="sha256:" + "2" * 64,
+    )
+
+
 def test_verified_carrier_rejects_mismatched_canonical_verification_bytes(
     tmp_path: Path,
 ) -> None:
@@ -1222,21 +1249,22 @@ async def test_run_baseline_restores_missing_verification_before_side_effects(
         "_register_prepare_agent",
         lambda *_args: registered.append("prepare"),
     )
+    expected = completed_prepare_result()
 
-    async def prepared(**_kwargs: Any) -> str:
-        return "prepared"
+    async def prepared(**_kwargs: Any) -> PrepareResult:
+        return expected
 
     monkeypatch.setattr(baseline, "run_prepare_plan", prepared)
     result = await run_baseline(
         PrepareRuntime(authority_for_verified(verified)),
         workspace(tmp_path),
-        "eval",
+        expected.evaluator_ref,
         "task",
         None,
         verified,
     )
 
-    assert result == "prepared"
+    assert result == expected
     assert registered == ["prepare"]
     assert (
         tmp_path / "BASELINE_RESEARCH_VERIFICATION.json"
@@ -1269,9 +1297,11 @@ async def test_run_baseline_registers_only_after_check_and_enriches_task(
     def registered(*_args: Any) -> None:
         order.append("registered")
 
-    async def fake_run_prepare_plan(**kwargs: Any) -> str:
+    expected = completed_prepare_result()
+
+    async def fake_run_prepare_plan(**kwargs: Any) -> PrepareResult:
         captured.update(kwargs)
-        return "prepared"
+        return expected
 
     monkeypatch.setattr(baseline, "_register_prepare_agent", registered)
     monkeypatch.setattr(baseline, "run_prepare_plan", fake_run_prepare_plan)
@@ -1279,14 +1309,14 @@ async def test_run_baseline_registers_only_after_check_and_enriches_task(
     result = await run_baseline(
         PrepareRuntime(RecordingAuthority(authority_for_verified(verified).sealed)),
         workspace(tmp_path),
-        "eval",
+        expected.evaluator_ref,
         "task",
         None,
         verified,
     )
 
-    assert result == "prepared"
-    assert order == ["checked", "registered"]
+    assert result == expected
+    assert order == ["checked", "registered", "checked"]
     assert callable(captured["assert_baseline"])
     assert captured["task"].startswith("task\n\nPlatform-verified baseline artifacts:")
     for filename in (
@@ -1299,3 +1329,185 @@ async def test_run_baseline_registers_only_after_check_and_enriches_task(
     assert "Training strategy: partial_finetune" in captured["task"]
     assert f"Verification route: {route}" in captured["task"]
     assert f"Verified revision: {revision}" in captured["task"]
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_attests_only_the_complete_trusted_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = verified_fixture(tmp_path)
+    authority = authority_for_verified(verified)
+    expected = completed_prepare_result()
+
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def scored(**_kwargs: Any) -> PrepareResult:
+        return expected
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", scored)
+
+    result = await run_baseline(
+        PrepareRuntime(authority),
+        workspace(tmp_path),
+        expected.evaluator_ref,
+        "task",
+        None,
+        verified,
+    )
+
+    expected_attestation = PrepareAttestation(
+        research_sha256=verified.verification.research_sha256,
+        design_sha256=verified.verification.design_sha256,
+        baseline_commit="b" * 40,
+        evaluator_ref="sha256:" + "e" * 64,
+        evidence_ref="sha256:" + "d" * 64,
+    )
+    assert result == expected
+    assert authority.attestations == [(expected_attestation, 0)]
+    assert authority.sealed == SealedBaseline(
+        generation=1,
+        bundle=authority_bundle(tmp_path),
+        attestation=expected_attestation,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_rechecks_artifacts_after_scoring_before_attestation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = verified_fixture(tmp_path)
+    authority = authority_for_verified(verified)
+
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def scored_then_mutated(**_kwargs: Any) -> PrepareResult:
+        (tmp_path / "BASELINE_DESIGN.md").write_text(
+            "Selected candidate: `resnet-transfer`\n"
+            "Training strategy: `classical`\n",
+            encoding="utf-8",
+        )
+        return completed_prepare_result()
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", scored_then_mutated)
+
+    with pytest.raises(BaselineResearchError, match="BASELINE_DESIGN.md"):
+        await run_baseline(
+            PrepareRuntime(authority),
+            workspace(tmp_path),
+            completed_prepare_result().evaluator_ref,
+            "task",
+            None,
+            verified,
+        )
+
+    assert authority.attestations == []
+
+
+class InvalidAttestationAuthority(MemoryBaselineAuthorityStore):
+    def __init__(self, sealed: SealedBaseline, difference: str) -> None:
+        super().__init__(sealed)
+        self.difference = difference
+
+    async def attest_prepare(
+        self,
+        evidence: PrepareAttestation,
+        *,
+        expected_generation: int,
+    ) -> SealedBaseline:
+        self.attestations.append((evidence, expected_generation))
+        assert self.sealed is not None
+        if self.difference == "generation":
+            return SealedBaseline(
+                generation=expected_generation,
+                bundle=self.sealed.bundle,
+                attestation=evidence,
+            )
+        if self.difference == "bundle":
+            different_verification = self.sealed.bundle.verification.model_copy(
+                update={"commit": "c" * 40}
+            )
+            different_bundle = VerifiedBaselineBundle(
+                research_bytes=self.sealed.bundle.research_bytes,
+                design_bytes=self.sealed.bundle.design_bytes,
+                verification_bytes=verification_bytes(different_verification),
+                verification=different_verification,
+            )
+            return SealedBaseline(
+                generation=expected_generation + 1,
+                bundle=different_bundle,
+                attestation=evidence,
+            )
+        assert self.difference == "attestation"
+        different_attestation = PrepareAttestation(
+            research_sha256=evidence.research_sha256,
+            design_sha256=evidence.design_sha256,
+            baseline_commit="c" * 40,
+            evaluator_ref=evidence.evaluator_ref,
+            evidence_ref=evidence.evidence_ref,
+        )
+        return SealedBaseline(
+            generation=expected_generation + 1,
+            bundle=self.sealed.bundle,
+            attestation=different_attestation,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("difference", ["generation", "bundle", "attestation"])
+async def test_run_baseline_rejects_inexact_completion_attestation(
+    difference: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verified = verified_fixture(tmp_path)
+    sealed = authority_for_verified(verified).sealed
+    assert sealed is not None
+    authority = InvalidAttestationAuthority(sealed, difference)
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def scored(**_kwargs: Any) -> PrepareResult:
+        return completed_prepare_result()
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", scored)
+
+    with pytest.raises(BaselineAuthorityError, match="completion attestation"):
+        await run_baseline(
+            PrepareRuntime(authority),
+            workspace(tmp_path),
+            completed_prepare_result().evaluator_ref,
+            "task",
+            None,
+            verified,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_wraps_completion_attestation_outage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = verified_fixture(tmp_path)
+
+    class OutageAuthority(MemoryBaselineAuthorityStore):
+        async def attest_prepare(self, evidence, *, expected_generation: int):
+            del evidence, expected_generation
+            raise OSError("authority offline")
+
+    sealed = authority_for_verified(verified).sealed
+    assert sealed is not None
+    authority = OutageAuthority(sealed)
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def scored(**_kwargs: Any) -> PrepareResult:
+        return completed_prepare_result()
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", scored)
+
+    with pytest.raises(BaselineAuthorityError, match="attestation failed"):
+        await run_baseline(
+            PrepareRuntime(authority),
+            workspace(tmp_path),
+            completed_prepare_result().evaluator_ref,
+            "task",
+            None,
+            verified,
+        )
