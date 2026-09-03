@@ -144,15 +144,15 @@ def openalex_verification_for(root: Path, **changes: object) -> BaselineVerifica
         "title": artifacts.selected.title,
         "publication_year": 2016,
         "cited_by_count": 100,
-        "attempts": [
+        "attempts": (
             base.attempts[0].model_copy(
                 update={
                     "route": "openalex",
                     "success": True,
                     "diagnostic": "authority threshold verified",
                 }
-            )
-        ],
+            ),
+        ),
     }
     values.update(changes)
     return base.model_copy(update=values)

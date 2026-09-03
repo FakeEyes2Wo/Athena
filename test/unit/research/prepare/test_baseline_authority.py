@@ -1,10 +1,12 @@
 """Contract tests for the controller-owned baseline authority capability."""
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from athena.research.prepare.authority import (
     BaselineAuthorityConflict,
@@ -99,6 +101,24 @@ def _attestation() -> PrepareAttestation:
     )
 
 
+def _rewrite_verification(sealed: SealedBaseline) -> None:
+    sealed.bundle.verification.selected_candidate_id = "forged-paper"
+
+
+def _rewrite_attempt(sealed: SealedBaseline) -> None:
+    sealed.bundle.verification.attempts[0].diagnostic = "forged proof"
+
+
+def _clear_attempts(sealed: SealedBaseline) -> None:
+    sealed.bundle.verification.attempts.clear()
+
+
+def _append_attempt(sealed: SealedBaseline) -> None:
+    sealed.bundle.verification.attempts.append(
+        VerificationAttempt(route="openalex", success=False, diagnostic="forged")
+    )
+
+
 @pytest.mark.asyncio
 async def test_one_external_capability_survives_two_fresh_runtimes(
     tmp_path: Path,
@@ -118,6 +138,41 @@ async def test_one_external_capability_survives_two_fresh_runtimes(
     assert second.baseline_authority is authority
     assert second.services.infrastructure.baseline_authority is authority
     assert await second.baseline_authority.load() == created
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutate", "error_type"),
+    [
+        (_rewrite_verification, ValidationError),
+        (_rewrite_attempt, ValidationError),
+        (_clear_attempts, AttributeError),
+        (_append_attempt, AttributeError),
+    ],
+)
+async def test_sealed_verification_is_deeply_immutable_across_fresh_runtimes(
+    tmp_path: Path,
+    mutate: Callable[[SealedBaseline], None],
+    error_type: type[Exception],
+) -> None:
+    authority = MemoryBaselineAuthorityStore()
+    first = ResearchRuntime(
+        project_root=tmp_path / "workspace", baseline_authority=authority
+    )
+    await first.baseline_authority.seal(_bundle(), expected_generation=None)
+    loaded = await first.baseline_authority.load()
+    assert loaded is not None
+    original = verification_bytes(loaded.bundle.verification)
+
+    with pytest.raises(error_type):
+        mutate(loaded)
+
+    second = ResearchRuntime(
+        project_root=tmp_path / "workspace", baseline_authority=authority
+    )
+    reloaded = await second.baseline_authority.load()
+    assert reloaded is not None
+    assert verification_bytes(reloaded.bundle.verification) == original
 
 
 @pytest.mark.asyncio
@@ -168,6 +223,83 @@ def test_non_integer_generation_raises_the_typed_boundary_error() -> None:
 def test_malformed_attestation_raises_the_typed_boundary_error() -> None:
     with pytest.raises(BaselineAuthorityError, match="research_sha256"):
         replace(_attestation(), research_sha256=None)
+
+
+def test_authority_values_reject_corrupt_nested_values_with_typed_errors() -> None:
+    invalid_builders = [
+        (
+            "verification",
+            lambda: replace(_bundle(), verification=object()),
+        ),
+        (
+            "bundle",
+            lambda: SealedBaseline(generation=0, bundle=object()),
+        ),
+        (
+            "attestation",
+            lambda: SealedBaseline(
+                generation=0,
+                bundle=_bundle(),
+                attestation=object(),
+            ),
+        ),
+    ]
+
+    for field, build in invalid_builders:
+        with pytest.raises(BaselineAuthorityError, match=field):
+            build()
+
+
+def test_authority_values_require_exact_nested_types() -> None:
+    class DerivedVerification(BaselineVerification):
+        pass
+
+    class DerivedBundle(VerifiedBaselineBundle):
+        pass
+
+    class DerivedAttestation(PrepareAttestation):
+        pass
+
+    derived_verification = DerivedVerification.model_validate(
+        _verification().model_dump()
+    )
+    base_bundle = _bundle()
+    derived_bundle = DerivedBundle(
+        research_bytes=base_bundle.research_bytes,
+        design_bytes=base_bundle.design_bytes,
+        verification_bytes=base_bundle.verification_bytes,
+        verification=base_bundle.verification,
+    )
+    base_attestation = _attestation()
+    derived_attestation = DerivedAttestation(
+        research_sha256=base_attestation.research_sha256,
+        design_sha256=base_attestation.design_sha256,
+        baseline_commit=base_attestation.baseline_commit,
+        evaluator_ref=base_attestation.evaluator_ref,
+        evidence_ref=base_attestation.evidence_ref,
+    )
+    invalid_builders = [
+        (
+            "verification",
+            lambda: replace(_bundle(), verification=derived_verification),
+        ),
+        (
+            "bundle",
+            lambda: SealedBaseline(generation=0, bundle=derived_bundle),
+        ),
+        (
+            "attestation",
+            lambda: SealedBaseline(
+                generation=0,
+                bundle=_bundle(),
+                attestation=derived_attestation,
+            ),
+        ),
+    ]
+
+    for field, build in invalid_builders:
+        with pytest.raises(BaselineAuthorityError, match=field):
+            build()
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,9 @@
 """Controller-owned capability for durable baseline verification authority."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-if TYPE_CHECKING:
-    from athena.research.prepare.baseline_research import BaselineVerification
+from athena.research.prepare.baseline_research import BaselineVerification
 
 
 class BaselineAuthorityError(RuntimeError):
@@ -54,6 +53,10 @@ class VerifiedBaselineBundle:
     verification: "BaselineVerification"
 
     def __post_init__(self) -> None:
+        if type(self.verification) is not BaselineVerification:
+            raise BaselineAuthorityError(
+                "verification must be exactly BaselineVerification"
+            )
         object.__setattr__(
             self,
             "research_bytes",
@@ -104,8 +107,16 @@ class SealedBaseline:
             or self.generation < 0
         ):
             raise BaselineAuthorityError("generation must be a non-negative integer")
+        if type(self.bundle) is not VerifiedBaselineBundle:
+            raise BaselineAuthorityError(
+                "bundle must be exactly VerifiedBaselineBundle"
+            )
         if self.attestation is None:
             return
+        if type(self.attestation) is not PrepareAttestation:
+            raise BaselineAuthorityError(
+                "attestation must be exactly PrepareAttestation"
+            )
         if (
             self.attestation.research_sha256 != self.bundle.verification.research_sha256
             or self.attestation.design_sha256 != self.bundle.verification.design_sha256

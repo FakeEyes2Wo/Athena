@@ -517,7 +517,7 @@ class BaselineArtifacts:
 class VerificationAttempt(BaseModel):
     """Record one platform source-verification route attempt."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     route: Literal["git", "openalex"]
     success: bool
@@ -527,7 +527,7 @@ class VerificationAttempt(BaseModel):
 class BaselineVerification(BaseModel):
     """Platform-owned digest-bound verification record."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[2]
     research_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -542,7 +542,7 @@ class BaselineVerification(BaseModel):
     title: str | None = None
     publication_year: int | None = None
     cited_by_count: int | None = Field(default=None, ge=0)
-    attempts: list[VerificationAttempt] = Field(min_length=1)
+    attempts: tuple[VerificationAttempt, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_route_proof(self) -> "BaselineVerification":
