@@ -364,6 +364,23 @@ capability and binds exact research, design, and canonical verification bytes.
 
 ## 13. Testing strategy
 
+### Named-session workspace boundary
+
+GUI named sessions keep trusted runtime state, logs, artifacts, and the internal Git
+repository under ``.athena/conversations/<session-id>``. Agent-authored Git worktrees
+must not share that protected subtree: their root is
+``workspaces/conversations/<session-id>``. The default session remains at the existing
+``workspaces/`` root.
+
+This split preserves per-session isolation while allowing the generic file tools to
+write their assigned outputs without weakening the global ``.athena`` write guard.
+When an older session still has a worktree registered below its state root,
+``LocalGitWorkspace.create`` treats it as outside the new workspace root and recreates
+the branch worktree in the new location on the next PREPARE attempt. Persisted EDA
+paths remain readable for later-phase resume until PREPARE writes the replacement
+path. Named-session deletion and blank-session cleanup remove both the protected state
+root and the external worktree root.
+
 ### Unit tests
 
 - Accept and reject version-one research artifacts, duplicate IDs, missing selections,

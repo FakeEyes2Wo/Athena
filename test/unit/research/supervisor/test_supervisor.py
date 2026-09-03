@@ -28,6 +28,7 @@ from athena.research.supervisor.deps import (
     SupervisorPaths,
     SupervisorRuntime,
 )
+from athena.research.supervisor.experiment import PlanTurnResult
 from athena.research.supervisor.plans import PlanInput, PlanState
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
@@ -663,6 +664,11 @@ async def test_prepare_failure_is_observable_and_retry_enters_running(
         await supervisor.start()
     assert statuses == ["RUNNING", "RUNNING"]
     assert supervisor.state.status == "FAILED"
+    failure_doc = tmp_path / ".athena" / "exp_docs" / "baseline.json"
+    failure = json.loads(failure_doc.read_text(encoding="utf-8"))
+    assert failure["status"] == "FAILED"
+    assert failure["reason"]["kind"] == "phase_failed"
+    assert "prepare attempt 2 failed" in failure["reason"]["summary"]
 
 
 @pytest.mark.asyncio
@@ -769,3 +775,66 @@ async def test_stop_parks_an_active_run_without_a_second_stop_flag(
 
     assert supervisor.state.status == "WAITING"
     assert ResearchState.load(tmp_path / ".athena" / "state.json").status == "WAITING"
+
+
+@pytest.mark.asyncio
+async def test_failed_settlement_keeps_the_original_reason_and_artifacts(
+    tmp_path: Path,
+) -> None:
+    """A failed SEARCH run remains diagnosable after its Plan state is removed."""
+    supervisor = _checkpoint_supervisor(tmp_path)
+    store = supervisor._deps.runtime.store
+    evaluator_ref = await store.put_text("evaluator")
+    tree_ref = await store.put_text("tree")
+    context_ref = await store.put_text(
+        PlanInput(evaluator_ref=evaluator_ref, tree_ref=tree_ref).model_dump_json()
+    )
+    evidence_ref = await store.put_text('{"error":"missing dependency"}')
+    supervisor.tree.add_hypothesis(
+        Hypothesis(
+            id="h_failed",
+            statement="try a candidate",
+            intervention="change the model",
+            expected_effect="improve score",
+        )
+    )
+    supervisor.tree.add_experiment(
+        "exp_h_failed",
+        Experiment(
+            hypothesis_id="h_failed",
+            commit="c0",
+            plan=ExperimentPlan(
+                kind="search",
+                change="change the model",
+                run_config_ref=evaluator_ref,
+                budget={},
+                acceptance_rule="trusted score",
+            ),
+            gitwork=GitWorkBranch(path=str(tmp_path), branch="main", base_commit="c0"),
+            status=ExperimentStatus.RUNNING,
+        ),
+    )
+    supervisor.state.phase = "SEARCH"
+    supervisor.state.plans["h_failed"] = PlanState(
+        kind="SEARCH",
+        context_ref=context_ref,
+        turns_used=1,
+        turn_limit=1,
+        patience=1,
+    )
+
+    await supervisor._plans.settle_plan(
+        "h_failed",
+        None,
+        PlanTurnResult(
+            kind="execution_failed",
+            error="command failed: missing dependency",
+            evidence_ref=evidence_ref,
+        ),
+    )
+
+    experiment = supervisor.tree.get_experiment("exp_h_failed")
+    assert experiment.status is ExperimentStatus.FAILED
+    assert experiment.error == "execution_failed: command failed: missing dependency"
+    assert experiment.artifacts["evidence"] == evidence_ref
+    assert "h_failed" not in supervisor.state.plans

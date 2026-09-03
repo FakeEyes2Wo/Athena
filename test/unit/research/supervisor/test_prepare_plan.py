@@ -99,6 +99,15 @@ class _AgentRuntime:
         del agent_id
 
 
+class _InvalidFirstDecisionRuntime(_AgentRuntime):
+    async def _response(self, run_id: str) -> None:
+        if self._next == 1:
+            decision_ref = await self.store.put_text("not-json")
+            self._responses[run_id] = json.dumps({"result_ref": decision_ref})
+            return
+        await super()._response(run_id)
+
+
 class _Scripts:
     """Script runner stub: no freeze or run_dir, so property tests are skipped."""
 
@@ -699,6 +708,39 @@ async def test_evaluator_plan_writes_readme_and_descriptor_on_submit(
     )
     assert descriptor.dir_path == str(evaluator_dir.resolve())
     assert descriptor.entrypoint == "evaluate.py"
+
+
+@pytest.mark.asyncio
+async def test_invalid_evaluator_decision_requests_compact_json(tmp_path: Path) -> None:
+    evaluator_dir = tmp_path / "evaluator"
+    evaluator_dir.mkdir(parents=True)
+    (evaluator_dir / "evaluate.py").write_text("pass\n", encoding="utf-8")
+    (evaluator_dir / "labels.csv").write_text(
+        "__athena_row_id,label\n1,0\n2,1\n", encoding="utf-8"
+    )
+    (evaluator_dir / "pyproject.toml").write_text(
+        "[project]\nname='eval'\nversion='0.1.0'\n", encoding="utf-8"
+    )
+    (evaluator_dir / "HANDOFF.md").write_text(
+        "prediction column: prediction\n", encoding="utf-8"
+    )
+    (evaluator_dir / "metric.json").write_text(
+        json.dumps({"eval_script": "evaluate.py"}), encoding="utf-8"
+    )
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    agents = _InvalidFirstDecisionRuntime(store, agent_id="evaluator")
+
+    assert await run_evaluator_plan(
+        agents=agents,
+        scripts=_Scripts(),
+        store=store,
+        evaluator_dir=evaluator_dir,
+        execution=_Execution(tmp_path),
+        task="write the evaluator",
+        max_turns=2,
+    )
+    assert "Do not run tools again" in agents.feedback[0]
+    assert "reason under 120 characters" in agents.feedback[0]
 
 
 @pytest.mark.asyncio

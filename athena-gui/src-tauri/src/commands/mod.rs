@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod clarification;
+pub mod dialog;
 pub mod experiments;
 pub mod graph;
 pub mod research;

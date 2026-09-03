@@ -30,6 +30,7 @@ pub fn run() {
             commands::clarification::task_clarification_retry,
             commands::clarification::task_clarification_revise,
             commands::clarification::task_clarification_cancel,
+            commands::dialog::workspace_dialog_start_directory,
             commands::search::start_search,
             commands::search::pause_search,
             commands::search::resume_search,

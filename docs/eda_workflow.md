@@ -62,9 +62,65 @@ The three baseline files are durable workspace artifacts. On resume, Athena reus
 verification only when its schema, selected candidate, and SHA-256 digest still match
 the current research file; otherwise it validates and verifies the artifacts again.
 
+| `.athena/exp_docs/runs/*.json` | Athena platform | one durable record for each baseline, SEARCH, or FINAL run |
+| `.athena/exp_docs/FINAL_REPORT.md` | Athena platform | current scores and deterministic result causes |
+| `.athena/exp_docs/OPTIMIZATION.md` | Athena platform | direction-aware optimization guidance |
+
 ## Finding files
 
 All EDA files are written under the EDA worktree. The absolute path is printed
 in the PREPARE logs as `EDA report: <absolute path>`. If you cannot find a file,
 check the log output for the resolved absolute path rather than guessing from
 `workspaces/eda`.
+
+## Baseline evidence gate
+
+The baseline ideator must write both research artifacts before implementation:
+
+- `BASELINE_RESEARCH.json` records the dataset modality and regime, effective
+  training units, at least two candidate methods when possible, search queries,
+  decisions, and limitations. The recommended training strategy is assessed
+  against the data regime; small image data normally uses a pretrained model
+  with frozen or partially fine-tuned layers.
+- `BASELINE_DESIGN.md` explains the selected architecture and repeats the
+  selected candidate ID and training strategy in exact markers.
+
+Athena independently verifies the selected source. A repository route uses a
+public HTTPS shallow clone with no checkout. This establishes that the source
+can be reached at a revision; it does not establish that the repository is
+safe, authoritative, or suitable to execute. Repository code is never checked
+out, imported, installed, copied, or run by the verifier. If no repository is
+available, the fallback is a matching OpenAlex work with at least 100 citations;
+the citation count claimed by the agent is not trusted. A completed Kaggle
+winner write-up is useful supporting evidence, but must be paired with a
+qualifying paper or public Git source when it is selected.
+
+The platform writes `BASELINE_RESEARCH_VERIFICATION.json` only after this
+independent check. It binds the result to the exact SHA-256 digest of
+`BASELINE_RESEARCH.json` and the selected candidate, so a matching run can
+resume without another ideator turn. A missing or stale digest requires
+revalidation.
+
+There is one repair turn for missing, malformed, or rejected research. If the
+repaired response still fails validation, PREPARE stops with a terminal error;
+it does not silently fall back to task-only baseline design. Only after the
+gate succeeds is the prepare agent registered and trusted scoring started.
+
+## Evaluator contract v2 and stage records
+
+SEARCH and FINAL evaluators use the same contract v2: `task_type`,
+`primary_metric`, and the complete ordered `class_labels` are declared in each
+`metric.json` and must match between the two evaluators. Classification metrics
+score the full declared class list; a class absent from one partition contributes
+zero rather than being removed from the metric. The evaluators also share the
+same label-free identity algorithm and reject missing, duplicate, or unexpected
+prediction IDs.
+
+TUI validation is optional and defaults to off. Use `--validate` to continue
+automatically into VALIDATE; without it, the run can remain after SEARCH for
+manual review or an explicit resume/validate command.
+
+Every baseline, SEARCH, and FINAL settlement writes a JSON stage record under
+`.athena/exp_docs/runs/`. The platform refreshes `.athena/exp_docs/FINAL_REPORT.md`
+and `.athena/exp_docs/OPTIMIZATION.md` after each stage, so a resumed run has a
+small auditable record of its latest scores, artifacts, and failure causes.

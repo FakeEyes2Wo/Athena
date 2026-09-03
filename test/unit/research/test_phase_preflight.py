@@ -56,6 +56,34 @@ async def test_prepare_preflight_runs_before_custom_phase(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_override_is_rejected_for_registered_provider(
+    monkeypatch,
+) -> None:
+    """A registered provider cannot replace the authoritative PREPARE gate."""
+    monkeypatch.setattr(
+        prepare_phase, "confirmed_task_context_block", lambda _runtime: _empty_context()
+    )
+
+    async def _empty_context() -> str:
+        return ""
+
+    called = False
+
+    async def custom_phase():
+        nonlocal called
+        called = True
+
+    runtime = SimpleNamespace(
+        prepare_phase=custom_phase,
+        provider=object(),
+        task_confirmation_gate=False,
+    )
+    with pytest.raises(RuntimeError, match="authoritative PREPARE gate"):
+        await prepare_phase.run_prepare_phase(runtime, None)
+    assert called is False
+
+
+@pytest.mark.asyncio
 async def test_validation_preflight_runs_before_custom_phase(monkeypatch) -> None:
     called = False
 

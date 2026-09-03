@@ -7,10 +7,10 @@ from collections.abc import Awaitable, Callable
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import ComparisonVerdict, EvalResult
 from athena.core.research_tree import ExperimentStatus
+from athena.research.exp_docs import task_metric_name, write_reports, write_stage_doc
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import PlanTurnResult, load_best
 from athena.research.supervisor.plans import PlanInput
-from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.scheduling import Outcome
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.statistics import (
@@ -56,14 +56,12 @@ class PlanSettlement:
         self,
         owner: object,
         deps: SupervisorDeps,
-        run: SupervisorRunState,
         *,
         plan_input: LoadPlanInput,
         save_state: SaveState,
     ) -> None:
         self._owner = owner
         self._deps = deps
-        self._run = run
         self._plan_input = plan_input
         self._save_state = save_state
 
@@ -88,11 +86,23 @@ class PlanSettlement:
         primary: float | None = None
         outcome: Outcome | None = None
         if best_ref is None:
+            error = "settled without a trusted result"
+            if result is not None and result.error:
+                error = f"{result.kind}: {result.error}"
             self._tree.transition_experiment(
                 experiment_id,
                 ExperimentStatus.FAILED,
-                error="settled without a trusted result",
+                error=error,
             )
+            if result is not None:
+                for kind, ref in {
+                    "predictions": result.predictions_ref,
+                    "metrics": result.metrics_ref,
+                    "evidence": result.evidence_ref,
+                    "report": result.report_ref,
+                }.items():
+                    if ref is not None:
+                        self._tree.attach_artifact(experiment_id, kind, ref)
         else:
             best = await load_best(best_ref, self._deps.runtime.store)
             comparison: ComparisonVerdict | None = None
@@ -210,6 +220,54 @@ class PlanSettlement:
                             plan_input.family_size,
                         )
                     self._tree.set_sota(experiment_id)
+        experiment = self._tree.get_experiment(experiment_id)
+        if experiment.status is ExperimentStatus.SUCCEEDED:
+            reason_kind = "trusted_score"
+            reason_summary = (
+                f"Trusted score settled as {outcome.value}."
+                if outcome is not None
+                else "Trusted score recorded without a reference comparison."
+            )
+        else:
+            reason_kind = result.kind if result is not None else "no_trusted_result"
+            reason_summary = experiment.error or "No trusted score was produced."
+        write_stage_doc(
+            self._deps.paths.project_root,
+            {
+                "run_id": experiment_id,
+                "stage": "search",
+                "status": experiment.status.value,
+                "metric": {
+                    "name": task_metric_name(
+                        self._deps.paths.project_root,
+                        self._state.task_understanding,
+                    ),
+                    "direction": plan_input.direction,
+                    "primary": primary,
+                    "reference": plan_input.reference_metric,
+                    "secondary": (
+                        experiment.eval.secondary if experiment.eval is not None else {}
+                    ),
+                },
+                "artifacts": experiment.artifacts,
+                "reason": {"kind": reason_kind, "summary": reason_summary},
+                "provenance": {
+                    "experiment_id": experiment_id,
+                    "hypothesis_id": hypothesis.id,
+                    "commit": experiment.commit,
+                },
+            },
+        )
+        write_reports(
+            self._deps.paths.project_root,
+            self._tree,
+            self._state.validation,
+            metric_name=task_metric_name(
+                self._deps.paths.project_root,
+                self._state.task_understanding,
+            ),
+            direction=plan_input.direction,
+        )
         self._tree.save(self._deps.paths.tree_path)
         self._state.plans.pop(plan_id)
         self._save_state()

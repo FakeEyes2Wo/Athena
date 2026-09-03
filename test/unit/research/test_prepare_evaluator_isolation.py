@@ -22,6 +22,8 @@ import pytest
 
 import athena.research.prepare.evaluator as evaluator_module
 from athena.research.prepare.evaluator import assert_evaluator_splits_are_disjoint
+from athena.research.prepare.evaluator import reusable_ref
+from athena.research.contracts import EvaluatorDescriptor
 
 
 async def _noop(*_args, **_kwargs) -> None:
@@ -48,6 +50,24 @@ def _labels(path: Path, row_ids: range) -> Path:
     lines += [f"{i},{i % 2}" for i in row_ids]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _frozen_evaluator(root: Path) -> None:
+    root.mkdir(parents=True)
+    (root / "README.md").write_text("# frozen\n", encoding="utf-8")
+    (root / "evaluate.py").write_text("# evaluator\n", encoding="utf-8")
+    (root / "metric.json").write_text(
+        '{"contract_version":2,"task_id":"task",'
+        '"task_type":"classification","primary_metric":"macro_f1",'
+        '"class_labels":["negative","positive"],'
+        '"prediction_file":"predictions__task.csv",'
+        '"prediction_id_column":"__athena_row_id",'
+        '"prediction_column":"prediction"}',
+        encoding="utf-8",
+    )
+    (root / "HANDOFF.md").write_text("# handoff\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text("[project]\nname='eval'\n", encoding="utf-8")
+    _labels(root / "labels.csv", range(2))
 
 
 def test_disjoint_evaluator_splits_are_accepted(tmp_path: Path) -> None:
@@ -143,6 +163,57 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
 
 
 @pytest.mark.asyncio
+async def test_reusable_ref_requires_a_valid_descriptor_and_bundle(
+    tmp_path: Path,
+) -> None:
+    """A checkpoint is reusable only while its descriptor and files are intact."""
+    root = tmp_path / "evaluate"
+    _frozen_evaluator(root)
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(root),
+        readme_ref="sha256:" + "a" * 64,
+        entrypoint="evaluate.py",
+    ).model_dump_json()
+
+    class Store:
+        async def get_text(self, _ref: str) -> str:
+            return descriptor
+
+    runtime = SimpleNamespace(store=Store())
+    assert await reusable_ref(runtime, "sha256:" + "b" * 64) == ("sha256:" + "b" * 64)
+
+
+@pytest.mark.asyncio
+async def test_reusable_ref_rejects_missing_frozen_bundle_file(tmp_path: Path) -> None:
+    """A readable checkpoint is rebuilt when a required evaluator file is gone."""
+    root = tmp_path / "evaluate"
+    _frozen_evaluator(root)
+    (root / "HANDOFF.md").unlink()
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(root),
+        readme_ref="sha256:" + "a" * 64,
+        entrypoint="evaluate.py",
+    ).model_dump_json()
+
+    class Store:
+        async def get_text(self, _ref: str) -> str:
+            return descriptor
+
+    assert await reusable_ref(SimpleNamespace(store=Store()), "ref") is None
+
+
+def test_directory_contract_uses_one_platform_neutral_id_column() -> None:
+    """Directory evaluator prompts must not let roles invent different id fields."""
+    runtime = SimpleNamespace(workspaces_root=Path("/tmp/no-data"))
+    search, final = evaluator_module.evaluator_tasks(runtime, "build evaluator")
+
+    assert "prediction_id_column must be exactly __athena_row_id" in search
+    assert "prediction_id_column must be exactly __athena_row_id" in final
+    assert "complete class_labels" in search
+    assert "never infer or shrink the label universe" in final
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("platform_split", [False, True])
 async def test_evaluator_prompts_match_the_data_source(
     tmp_path: Path, monkeypatch, platform_split: bool
@@ -193,5 +264,36 @@ async def test_evaluator_prompts_match_the_data_source(
         assert "SHA-256" in task
         assert "group-disjoint" in task
         assert "__athena_row_id,label" in task
+        assert "contract_version=2" in task
+        assert "complete class_labels" in task
         assert "missing, duplicate, or unexpected ids" in task
         assert "final_labels.csv in the platform" not in task
+
+
+@pytest.mark.asyncio
+async def test_final_prompt_carries_the_frozen_search_metric(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    tasks: list[str] = []
+
+    async def fake_evaluator(_runtime, job):
+        tasks.append(job.task)
+        if job.name == "evaluator":
+            evaluate = runtime.workspaces_root / "evaluator" / "evaluate"
+            _frozen_evaluator(evaluate)
+        else:
+            evaluate = runtime.workspaces_root / "final_evaluator" / "evaluate"
+            _frozen_evaluator(evaluate)
+            (evaluate / "labels.csv").write_text(
+                "__athena_row_id,label\nfinal-1,negative\n", encoding="utf-8"
+            )
+        return f"ref-{len(tasks)}"
+
+    monkeypatch.setattr(evaluator_module, "run_evaluator_agent", fake_evaluator)
+
+    await evaluator_module.prepare_evaluators(runtime, "build evaluator")
+
+    assert "task_type=classification" in tasks[1]
+    assert "primary_metric=macro_f1" in tasks[1]
+    assert 'class_labels=["negative", "positive"]' in tasks[1]

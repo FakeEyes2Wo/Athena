@@ -320,6 +320,22 @@ def test_new_runtime_output_does_not_replace_existing_composer_draft() -> None:
     assert app.state.history[-1].text == "new output"
 
 
+def test_following_output_skips_scroll_measurement(monkeypatch) -> None:
+    app = AthenaApp(FakeRuntime(), Path("/tmp"))
+    calls = 0
+
+    def count_lines(_width=None):
+        nonlocal calls
+        calls += 1
+        return 0
+
+    monkeypatch.setattr(app, "_history_line_count", count_lines)
+
+    app._on_event(OutputEvent(seq=1, source="agent", channel="text", text="delta"))
+
+    assert calls == 0
+
+
 @pytest.mark.asyncio
 async def test_pageup_holds_visual_view_and_end_clears_unseen_output() -> None:
     runtime = FakeRuntime()

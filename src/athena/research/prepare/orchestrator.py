@@ -24,6 +24,11 @@ async def run_prepare_phase(
     """Orchestrate data, evaluators, EDA, and the trusted baseline."""
     task_context = await confirmed_task_context_block(runtime)
     if runtime.prepare_phase is not None:
+        if runtime.provider is not None:
+            raise RuntimeError(
+                "prepare_phase override is only available for provider-less test "
+                "adapters; registered providers must use the authoritative PREPARE gate"
+            )
         return await runtime.prepare_phase()
     if runtime.provider is None:
         raise RuntimeError("PREPARE requires a registered Agent provider")

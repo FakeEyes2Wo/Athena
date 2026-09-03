@@ -199,13 +199,17 @@ class AthenaApp:
             self.state = apply_output(self.state, event)
 
     def _on_event(self, event: OutputEvent | StateEvent) -> None:
-        width = self._history_content_width()
-        before = self._history_line_count(width)
         was_following = self.state.history_follow_tail
+        width = self._history_content_width()
+        before = (
+            self._history_line_count(width)
+            if isinstance(event, OutputEvent) and not was_following
+            else 0
+        )
         self.state = apply_event(self.state, event, width)
-        after = self._history_line_count(width)
 
         if isinstance(event, OutputEvent) and not was_following:
+            after = self._history_line_count(width)
             self._history_scroll += max(0, after - before)
             self._clamp_history_scroll()
 

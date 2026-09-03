@@ -47,12 +47,15 @@ class DataContract:
             f"{self.train_csv.parent.resolve()}. {self.grouping}\n"
             "Do NOT create another split. Build the complete evaluator under "
             "evaluate/ with metric.json, eval_metrics.py, labels.csv (or labels/), "
-            "HANDOFF.md, and pyproject.toml. Declare task_id, "
+            "HANDOFF.md, and pyproject.toml. Declare contract_version=2, task_id, "
+            "task_type, primary_metric, the complete class_labels for classification, "
             "prediction_file=predictions__{task_id}.csv, "
             "prediction_id_column, prediction_column, optional probability_columns, "
             "metrics_file=metrics_public_test.csv, and eval_script in metric.json. "
             "Use the actual dataset identity/target columns rather than assuming "
-            "a fixed class list. Keep final labels hidden from SEARCH."
+            "a fixed framework class list. SEARCH and FINAL must use the same complete "
+            "class_labels; macro-F1 must not drop classes absent from one split. Keep "
+            "final labels hidden from SEARCH."
         )
 
     def contract_text(self) -> str:

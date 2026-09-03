@@ -14,9 +14,15 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
-from athena.core.human_request import ChoiceReply, SkipReply, TextReply
+from athena.core.human_request import (
+    ChoiceReply,
+    SkipReply,
+    TextReply,
+    parse_human_reply,
+)
 from athena.gui.service import GuiService
 from athena.research import ResearchRuntime
+from athena.research.runtime.bootstrap import build_paths
 from gui_gateway.human import HumanRequestBroker
 from gui_gateway.state_store import GuiState, GuiStateStore
 
@@ -106,6 +112,26 @@ def _session_state_root(project_root: Path, session_id: str) -> Path | None:
     ):
         raise ValueError("invalid session_id")
     return project_root / ".athena" / "conversations" / session_id
+
+
+def _session_workspace_root(project_root: Path, session_id: str) -> Path | None:
+    """Return the external agent-worktree root for one named session."""
+    state_root = _session_state_root(project_root, session_id)
+    if state_root is None:
+        return None
+    return build_paths(project_root, state_root).workspaces
+
+
+async def _delete_named_session_storage(project_root: Path, session_id: str) -> None:
+    """Remove a named session's agent worktrees and protected runtime state."""
+    state_root = _session_state_root(project_root, session_id)
+    workspace_root = _session_workspace_root(project_root, session_id)
+    # Delete the external worktree first.  If Windows still has a handle open,
+    # retaining the state directory keeps the session visible and retryable.
+    if workspace_root is not None and workspace_root.is_dir():
+        await _rmtree_when_released(workspace_root)
+    if state_root is not None and state_root.is_dir():
+        await _rmtree_when_released(state_root)
 
 
 def _session_activity(state_root: Path) -> tuple[bool, float]:
@@ -289,7 +315,7 @@ class GuiRequestHandler:
         if has_content:
             return
         try:
-            await _rmtree_when_released(state_root)
+            await _delete_named_session_storage(self._project_root, session_id)
         except OSError:
             # 句柄未释放 / 无写权限 → 保留该会话，只记一条日志。
             logger.warning(
@@ -355,8 +381,8 @@ class GuiRequestHandler:
         if session_id == self._current_session_id and self._make_runtime is not None:
             await self._swap_runtime(str(self._project_root), None)
             self._current_session_id = "default"
-        if state_root is not None and state_root.is_dir():
-            await _rmtree_when_released(state_root)
+        if state_root is not None:
+            await _delete_named_session_storage(self._project_root, session_id)
         return {"deleted": True, "sessions": self._session_ids()}
 
     async def _reset_default_session(self) -> None:
@@ -387,6 +413,7 @@ class GuiRequestHandler:
         self._current_session_id = "default"
 
     async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, object]:
+        """Dispatch one canonical GUI RPC method to its service/handler implementation."""
         service = self._service
         if method == "ping":
             return await service.ping()
@@ -522,8 +549,6 @@ class GuiRequestHandler:
             if reply_payload is None and not legacy_present:
                 raise ValueError("human_reply requires reply or answer")
             if reply_payload is not None:
-                from athena.core.human_request import parse_human_reply
-
                 reply = parse_human_reply(reply_payload)
             elif skip:
                 reply = SkipReply(kind="skip")

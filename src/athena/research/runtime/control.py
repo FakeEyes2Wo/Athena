@@ -4,6 +4,11 @@ import asyncio
 from typing import Any
 
 
+def _consume_lifecycle_result(task: asyncio.Task[None]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
 def resume_task_text(runtime: Any, fallback: str) -> str:
     """Recover the original task instead of treating a resume command as work."""
     if runtime.state.task_text:
@@ -32,6 +37,7 @@ async def start(runtime: Any) -> asyncio.Task[None]:
         runtime.state.save(runtime.state_path)
     lifecycle.started = True
     lifecycle.task = asyncio.create_task(runtime.supervisor.start())
+    lifecycle.task.add_done_callback(_consume_lifecycle_result)
     return lifecycle.task
 
 

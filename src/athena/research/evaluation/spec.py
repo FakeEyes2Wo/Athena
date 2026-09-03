@@ -9,7 +9,7 @@ continue to be accepted by callers using :func:`load_evaluator_spec`.
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,7 +30,11 @@ class EvaluatorSpec(BaseModel):
 
     model_config = ConfigDict(extra="allow", strict=True)
 
+    contract_version: Literal[2]
     task_id: str = Field(min_length=1)
+    task_type: str = Field(min_length=1)
+    primary_metric: str = Field(min_length=1)
+    class_labels: list[str] = Field(default_factory=list)
     prediction_file: str = Field(min_length=1)
     prediction_id_column: str = Field(min_length=1)
     prediction_column: str = Field(min_length=1)
@@ -71,6 +75,19 @@ class EvaluatorSpec(BaseModel):
             raise ValueError("probability_columns must be unique")
         return names
 
+    @field_validator("class_labels", mode="before")
+    @classmethod
+    def _class_names(cls, value: object) -> list[str]:
+        """Normalize the complete classification label universe."""
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("class_labels must be a list")
+        labels = [str(label).strip() for label in value]
+        if any(not label for label in labels) or len(labels) != len(set(labels)):
+            raise ValueError("class_labels must contain unique non-empty values")
+        return labels
+
     @model_validator(mode="after")
     def _validate_contract(self) -> "EvaluatorSpec":
         """Ensure the task-specific prediction filename is deterministic."""
@@ -93,6 +110,10 @@ class EvaluatorSpec(BaseModel):
             raise ValueError(
                 "prediction_id_column, prediction_column, and probability_columns "
                 "must be distinct"
+            )
+        if self.task_type.endswith("classification") and len(self.class_labels) < 2:
+            raise ValueError(
+                "classification evaluators require the complete class_labels list"
             )
         return self
 

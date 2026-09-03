@@ -117,6 +117,11 @@ default is how a search ends up optimising noise.
 - exactly which records/ids a candidate is expected to predict (the held-out
   split, not the whole dataset);
 - how the primary metric is computed and what counts as correct vs. incorrect.
+- the complete metric universe shared by SEARCH and FINAL. For classification,
+  list every task class even when the current partition contains zero examples
+  of a class. Macro-F1 must pass that complete class list to the metric with
+  zero contribution for absent classes; never average only classes observed in
+  one partition.
 
 Sanity-check the evaluator yourself before submitting, using probes adapted to
 the actual prediction format:
@@ -137,8 +142,13 @@ Create inside `evaluate/`:
 
 - a `metric.json` declaring a dataset-neutral prediction contract. At minimum it
   MUST contain these flat fields (do not nest them under a dataset name):
-  `task_id`, `prediction_file`, `prediction_id_column`, `prediction_column`,
-  `metrics_file`, and `eval_script`. For tabular CSV, `prediction_file` MUST be
+  `contract_version=2`, `task_id`, `task_type`, `primary_metric`,
+  `class_labels`, `prediction_file`, `prediction_id_column`,
+  `prediction_column`, `metrics_file`, and `eval_script`. Use a concise
+  dataset-neutral `task_type` such as `classification`,
+  `multiclass_classification`, `regression`, or `other`; every task type ending
+  in `classification` requires the full label universe in `class_labels`. For
+  tabular CSV, `prediction_file` MUST be
   exactly `predictions__{task_id}.csv`, `metrics_file` SHOULD be
   `metrics_public_test.csv`, and `eval_script` SHOULD be `eval_metrics.py`.
   `probability_columns` is optional and lists probability fields in the public
@@ -147,7 +157,11 @@ Create inside `evaluate/`:
 
   ```json
   {
+    "contract_version": 2,
     "task_id": "<short-task-id>",
+    "task_type": "classification",
+    "primary_metric": "macro_f1",
+    "class_labels": ["<class-a>", "<class-b>"],
     "prediction_file": "predictions__<short-task-id>.csv",
     "prediction_id_column": "<stable-id-column>",
     "prediction_column": "pred_label",
@@ -209,7 +223,9 @@ a workspace-local venv: run `uv add --project "$ATHENA_ENV_ROOT" <package>` for
 each dependency and then `uv sync`. Keep `evaluate.py` dependency-light and
 deterministic.
 
-Return exactly one structured PlanDecision after the tools finish:
+After the tools finish, return only one compact PlanDecision JSON object. Do not
+repeat checks, file lists, metrics, or explanations in the final response. Keep
+`reason` under 120 characters and `suggestions` empty when submitting:
 
 ```json
 {"decision":"continue|submit|abandon","reason":"...","suggestions":[]}

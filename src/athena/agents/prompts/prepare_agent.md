@@ -30,7 +30,9 @@ The baseline report and `RESEARCH_HANDOFF.md` must record the selected candidate
 verification route, and the route-specific proof (the verified Git commit, or the
 OpenAlex work ID, title/year, and citation evidence), plus the selected training
 strategy. Treat these files as authoritative provenance, not as an invitation to clone,
-install, import, or execute third-party repository content.
+install, import, or execute third-party repository content. If any of the three
+baseline files is missing or unreadable, do not invent a baseline: return
+`continue` with the exact missing file and stop implementation.
 
 ## Kaggle competitions
 

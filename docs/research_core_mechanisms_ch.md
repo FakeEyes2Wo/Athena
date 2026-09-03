@@ -18,8 +18,8 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
   │            ├─ 动态 EDA：Ideator 提出 eda_request → Data Agent 补分析写回 EDA 目录
   │            └─ IdeaGenerator（Ideator Agent）产生 Hypothesis → 门禁过滤 → 入 ResearchTree → 排序调度
   │
-  └─ 在固定名称 worktree（name="eda"）里做 EDA，冻结 evaluator，经来源研究/独立验证门禁后
-     由 Prepare Agent 实现 baseline，可信评分后写入 ResearchTree 作为 SOTA
+  └─ 在固定名称 worktree（name="eda"）里做 EDA，冻结 evaluator，完成 baseline 研究与来源验证，
+     经来源研究/独立验证门禁后由 Prepare Agent 实现 baseline，可信评分后写入 ResearchTree 作为 SOTA
 ```
 
 - 组合根：`src/athena/research/runtime/facade.py` 的 `ResearchRuntime`。
@@ -316,6 +316,8 @@ ResearchTree 后，统一由 `supervisor/scheduling.py` 去重、排序和按实
 5. Prepare Agent 只在验证通过后注册，它读取三份 baseline 产物，实现已验证的方法，写 baseline 与 `RESEARCH_HANDOFF.md`，再由可信 evaluator 评分。
 6. `Supervisor._run_prepare` 将 baseline 写入 ResearchTree 并置为 SOTA。
 
+来源验证只证明仓库可访问到某个 revision，不代表仓库安全或适合执行。验证器使用浅层、无 checkout 的 clone，绝不 checkout、导入、安装、复制或运行第三方仓库代码。
+
 ### 5.2 Baseline 研究与来源验证门禁
 
 文件：`src/athena/research/prepare/baseline_research.py`、
@@ -379,7 +381,55 @@ SEARCH 空槽 → Ideator 探索 EDA 目录 → 输出假设 + eda_request
     → 下一轮 Ideator 读取更新后的 EDA → 提出更可靠的假设
 ```
 
+### 5.6 Baseline 研究与来源验证门禁
+
+Baseline 是 PREPARE 的独立证据链，不与 SEARCH 的假设生成混用：
+
+1. `baseline_ideator` 先读取 `EDA_HANDOFF.md`、数据与 evaluator 合同，并用
+   网页/论文工具检索至少两个查询。候选可以来自论文、官方实现或相关已完赛
+   Kaggle 方案，但 Kaggle write-up 只是辅助证据；选中项仍需绑定可验证的公开
+   Git 仓库或论文定位符。
+2. `BASELINE_RESEARCH.json` 保存数据模态、有效训练单元、数据规模判断、候选与
+   决策；`BASELINE_DESIGN.md` 保存可实现的主方案，并用精确 marker 重复候选 ID
+   与训练策略。数据规模判断是 modality-aware 的，不使用全局样本数阈值；
+   未知或不足的数据 regime 不得选择从零训练。
+3. 平台先尝试公开 HTTPS Git。验证只使用 `--depth 1 --filter=blob:none
+   --no-checkout`，关闭交互凭据并禁止非 HTTPS 协议；失败后才尝试 OpenAlex。
+   OpenAlex 必须返回标题匹配且 `cited_by_count >= 100` 的 work，Agent 自报的
+   引用数不作为依据。
+4. 成功后写入 `BASELINE_RESEARCH_VERIFICATION.json`，其中绑定 research 文件的
+   SHA-256、候选 ID、验证路线和 revision/authority 元数据。恢复时仅复用 digest
+   与候选一致的验证结果，研究文件变化则重新验证。
+5. 缺文件、格式错误或来源不合格允许一次 repair turn。第二次仍失败时，PREPARE
+   终止并报告诊断，不使用 task-only fallback，也不提前注册 Prepare Agent。
+
+三个持久化文件的职责如下：
+
+| 文件 | 责任 | 内容 |
+|---|---|---|
+| `BASELINE_RESEARCH.json` | baseline_ideator | 候选来源、数据评估、搜索记录和选择决策 |
+| `BASELINE_DESIGN.md` | baseline_ideator | 与 JSON 一致的架构、训练策略和实现说明 |
+| `BASELINE_RESEARCH_VERIFICATION.json` | 平台 | digest 绑定的 Git/OpenAlex 独立验证证据 |
+
 ---
+
+## Evaluator contract v2, validation, and durable run documents
+
+SEARCH and FINAL are frozen with evaluator contract v2. Each `metric.json`
+declares the same `task_type`, `primary_metric`, and complete ordered
+`class_labels`; classification scoring keeps that full label universe, including
+classes absent from a particular partition. Both evaluators use the same
+label-free identity algorithm and reject missing, duplicate, or unexpected IDs.
+
+VALIDATE is optional in the TUI and is disabled by default. Passing `--validate`
+enables automatic continuation after SEARCH; otherwise the run can stop for
+manual review or an explicit VALIDATE command.
+
+Each baseline, SEARCH, and FINAL settlement writes one JSON record below
+`.athena/exp_docs/runs/`. The platform also refreshes
+`.athena/exp_docs/FINAL_REPORT.md` and `.athena/exp_docs/OPTIMIZATION.md` after
+each stage. These documents are the durable audit trail for scores, artifacts,
+provenance, and deterministic failure causes, and are reused when a run resumes.
 
 ## 6. 关键文件索引
 

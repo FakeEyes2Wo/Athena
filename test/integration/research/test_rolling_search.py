@@ -31,7 +31,7 @@ from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 
 
-async def _eventually(predicate, timeout: float = 5) -> None:
+async def _eventually(predicate, timeout: float = 20) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0.01)

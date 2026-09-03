@@ -3,12 +3,14 @@
 import asyncio
 import logging
 import traceback
+from typing import Any
 
 from athena.core.agent.types import AgentCommandError, ErrorCode
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
+from athena.research.exp_docs import task_metric_name, write_reports, write_stage_doc
 from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.report import build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
@@ -67,6 +69,12 @@ class PhaseMachine:
     def _tree(self):
         return self._owner.tree
 
+    @property
+    def _metric_name(self) -> str:
+        return task_metric_name(
+            self._deps.paths.project_root, self._state.task_understanding
+        )
+
     async def start(self) -> None:
         """Start the Supervisor lifecycle."""
         if self._state.phase == "PREPARE" and self._state.status in {
@@ -94,6 +102,8 @@ class PhaseMachine:
             failed_phase = self._state.phase
             self._state.status = "FAILED"
             self._plans.save_state()
+            self._record_phase_failure(failed_phase, exc)
+            tb = traceback.format_exc()
             logger.exception("research phase failed")
             if isinstance(exc, BaselineAuthorityError):
                 published_error = "research failed: baseline authority unavailable"
@@ -219,6 +229,7 @@ class PhaseMachine:
             )
             self._tree.set_sota(experiment_id)
             self._tree.save(self._deps.paths.tree_path)
+        self._record_baseline(result)
         self._state.evaluator_ref = result.evaluator_ref
         await self._deps.phases.publish(
             "output",
@@ -254,6 +265,7 @@ class PhaseMachine:
         self._state.validation = validation
         self._state.phase = "COMPLETED"
         self._state.status = "COMPLETED"
+        self._record_final(sota_id, sota, validation)
         self._plans.save_state()
         await self._deps.phases.publish(
             "output",
@@ -273,6 +285,112 @@ class PhaseMachine:
                 )
             except Exception:
                 logger.warning("post-COMPLETED supervisor turn failed", exc_info=True)
+
+    def _record_phase_failure(self, phase: str, error: Exception) -> None:
+        """Persist one terminal phase failure with its direct cause."""
+        stage = {"PREPARE": "baseline", "SEARCH": "search", "VALIDATE": "final"}.get(
+            phase
+        )
+        if stage is None:
+            return
+        write_stage_doc(
+            self._deps.paths.project_root,
+            {
+                "run_id": f"{stage}-phase-failure",
+                "stage": stage,
+                "status": "FAILED",
+                "metric": {
+                    "name": self._metric_name,
+                    "direction": self._deps.search.direction,
+                    "primary": None,
+                },
+                "reason": {
+                    "kind": "phase_failed",
+                    "summary": " ".join(str(error).split())[:1000],
+                },
+                "provenance": {"phase": phase},
+            },
+        )
+        self._write_reports(self._state.validation)
+
+    def _record_baseline(self, result: Any) -> None:
+        """Persist the trusted PREPARE baseline and refresh derived reports."""
+        experiment = self._tree.get_experiment("exp_baseline")
+        write_stage_doc(
+            self._deps.paths.project_root,
+            {
+                "run_id": "exp_baseline",
+                "stage": "baseline",
+                "status": experiment.status.value,
+                "metric": {
+                    "name": self._metric_name,
+                    "direction": self._deps.search.direction,
+                    "primary": result.metric,
+                },
+                "artifacts": experiment.artifacts,
+                "reason": {
+                    "kind": "trusted_score",
+                    "summary": (
+                        "The authoritative baseline passed the frozen SEARCH evaluator."
+                    ),
+                },
+                "provenance": {
+                    "experiment_id": "exp_baseline",
+                    "hypothesis_id": "baseline",
+                    "commit": result.commit,
+                },
+            },
+        )
+        self._write_reports()
+
+    def _record_final(self, sota_id: str, sota: Experiment, validation: dict) -> None:
+        """Persist independent FINAL evaluation and its generalization cause."""
+        artifacts = {
+            key.removesuffix("_ref"): value
+            for key, value in validation.items()
+            if key.endswith("_ref") and isinstance(value, str)
+        }
+        warning = bool(validation.get("generalization_warning"))
+        write_stage_doc(
+            self._deps.paths.project_root,
+            {
+                "run_id": str(validation.get("result_id") or "final"),
+                "stage": "final",
+                "status": str(validation.get("status") or "COMPLETED"),
+                "metric": {
+                    "name": self._metric_name,
+                    "direction": self._deps.search.direction,
+                    "primary": validation.get("final_test_score"),
+                    "reference": validation.get("test_score"),
+                    "generalization_gap": validation.get("generalization_gap"),
+                },
+                "artifacts": artifacts,
+                "reason": {
+                    "kind": "generalization_warning" if warning else "final_score",
+                    "summary": (
+                        "FINAL score is worse than SEARCH beyond tolerance."
+                        if warning
+                        else "The frozen SOTA completed independent FINAL evaluation."
+                    ),
+                },
+                "provenance": {
+                    "sota_experiment_id": sota_id,
+                    "sota_commit": validation.get("sota_commit") or sota.commit,
+                    "validation_commit": validation.get("validation_commit"),
+                },
+            },
+        )
+        self._write_reports(validation)
+
+    def _write_reports(self, validation: dict | None = None) -> None:
+        """Refresh final and optimization reports from durable domain state."""
+        write_reports(
+            self._deps.paths.project_root,
+            self._tree,
+            validation,
+            metric_name=self._metric_name,
+            direction=self._deps.search.direction,
+        )
 
     async def _transition_phase(self, phase: str) -> None:
         self._state.phase = phase

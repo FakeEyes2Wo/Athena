@@ -69,7 +69,14 @@ def build_paths(
     """Resolve durable and workspace paths for one runtime."""
     root = Path(project_root or ".").resolve()
     athena = Path(state_root).resolve() if state_root is not None else root / ".athena"
-    workspaces = root / "workspaces" if state_root is None else athena / "workspaces"
+    # Named GUI sessions keep trusted state below ``.athena/conversations`` but
+    # agent file tools deliberately reject writes anywhere below ``.athena``.
+    # Namespace their Git worktrees in the public workspace tree instead of
+    # weakening that protection.  ``athena.name`` is the validated session id
+    # for GUI-created state roots.
+    workspaces = root / "workspaces"
+    if state_root is not None:
+        workspaces = workspaces / "conversations" / athena.name
     return ResearchPaths(
         root=root,
         athena=athena,

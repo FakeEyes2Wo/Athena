@@ -113,7 +113,7 @@ Run Black on the two files, run `git diff --check` on them, then commit only tho
 - Consumes: `../task3/JW-SSD_Dataset`, competition metric and prediction-format documents.
 - Produces: one complete Human task message suitable for TUI paste and repeated runs.
 
-- [ ] **Step 1: Write the task prompt**
+- [x] **Step 1: Write the task prompt**
 
 The file must name the absolute dataset path; paired continuum/magnetogram PNG inputs;
 the five labels; HARPNUM-grouped train/SEARCH/FINAL isolation; five-class macro-F1;
@@ -122,7 +122,7 @@ fold and TSS/HSS metrics; `evaluate/predictions__JWSSD_MW5.csv` with class proba
 columns; `evaluate/metrics_public_test.csv`; transfer learning instead of a toy CNN;
 and persistent files for data manifests, EDA, papers, experiments, metrics, and errors.
 
-- [ ] **Step 2: Verify the prompt contract**
+- [x] **Step 2: Verify the prompt contract**
 
 Run:
 

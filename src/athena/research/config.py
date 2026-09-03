@@ -74,6 +74,8 @@ class ResearchConfig:
     data_root: Path | None = None
     experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
     compute: ComputeConfig | None = None
+    # Provider-less test adapter; registered production providers use the
+    # authoritative PREPARE orchestrator.
     prepare_phase: Any = None
     validation_phase: Any = None
     plan_turn: Any = None

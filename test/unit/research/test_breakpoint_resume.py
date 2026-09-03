@@ -36,7 +36,11 @@ from athena.research.prepare.baseline_research import (
 )
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
-from athena.research.runtime.control import start as start_lifecycle
+from athena.research.contracts import EvaluatorDescriptor
+from athena.research.runtime.control import (
+    _consume_lifecycle_result,
+    start as start_lifecycle,
+)
 from athena.research.supervisor.prepare import PrepareResult
 
 
@@ -274,6 +278,18 @@ def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime
     return runtime
 
 
+def test_lifecycle_done_callback_observes_background_failure() -> None:
+    observed: list[bool] = []
+    task = SimpleNamespace(
+        cancelled=lambda: False,
+        exception=lambda: observed.append(True),
+    )
+
+    _consume_lifecycle_result(task)
+
+    assert observed == [True]
+
+
 @pytest.mark.asyncio
 async def test_lifecycle_start_does_not_require_clarification_services() -> None:
     class FakeGit:
@@ -404,6 +420,35 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     tmp_path: Path, monkeypatch
 ) -> None:
     captured: dict[str, object] = {}
+    roots = [
+        tmp_path / "workspaces" / "evaluator" / "evaluate",
+        tmp_path / "workspaces" / "final_evaluator" / "evaluate",
+    ]
+    for index, root in enumerate(roots):
+        root.mkdir(parents=True)
+        (root / "README.md").write_text("# frozen\n", encoding="utf-8")
+        (root / "evaluate.py").write_text("# evaluator\n", encoding="utf-8")
+        (root / "HANDOFF.md").write_text("# handoff\n", encoding="utf-8")
+        (root / "pyproject.toml").write_text(
+            "[project]\nname='eval'\n", encoding="utf-8"
+        )
+        (root / "labels.csv").write_text(
+            f"__athena_row_id,label\n{index},negative\n", encoding="utf-8"
+        )
+        (root / "metric.json").write_text(
+            '{"contract_version":2,"task_id":"task",'
+            '"task_type":"classification","primary_metric":"macro_f1",'
+            '"class_labels":["negative","positive"],'
+            '"prediction_file":"predictions__task.csv",'
+            '"prediction_id_column":"__athena_row_id",'
+            '"prediction_column":"prediction"}',
+            encoding="utf-8",
+        )
+    descriptor = EvaluatorDescriptor(
+        dir_path=str(roots[0]),
+        readme_ref="sha256:" + "a" * 64,
+        entrypoint="evaluate.py",
+    ).model_dump_json()
 
     class FakeSupervisor:
         def __init__(self, frozen_ref: str) -> None:
@@ -428,7 +473,7 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
 
     class FakeStore:
         async def get_text(self, ref):
-            return '{"frozen": true}'
+            return descriptor
 
         async def put_text(self, text):
             return "tree-ref"

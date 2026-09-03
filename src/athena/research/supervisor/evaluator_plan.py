@@ -342,7 +342,9 @@ async def run_evaluator_plan(
                 # Invalid Agent output becomes bounded repair feedback.
                 feedback = (
                     "previous evaluator turn did not produce a valid decision: "
-                    f"{' '.join(str(exc).split())[:1000]}"
+                    f"{' '.join(str(exc).split())[:700]}. "
+                    "Do not run tools again. Reply only with compact PlanDecision "
+                    "JSON; keep reason under 120 characters."
                 )
                 continue
             if decision.decision == "abandon":

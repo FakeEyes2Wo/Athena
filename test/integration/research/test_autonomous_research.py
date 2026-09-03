@@ -12,7 +12,11 @@ from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
-from athena.research.contracts import DataScriptBundle, ValidationResult
+from athena.research.contracts import (
+    DataScriptBundle,
+    EvaluatorDescriptor,
+    ValidationResult,
+)
 from athena.research.prepare import orchestrator
 from athena.research.prepare.authority import (
     BaselineAuthorityConflict,
@@ -308,6 +312,14 @@ async def test_all_phases_share_one_durable_state(tmp_path: Path) -> None:
     assert runtime.state is runtime.services.durable.state
     assert runtime.supervisor.state is runtime.state
     assert set(kind for kind, _payload in events) == {"output", "state"}
+    exp_docs = tmp_path / ".athena" / "exp_docs"
+    assert (exp_docs / "runs" / "exp_baseline.json").is_file()
+    assert (exp_docs / "runs" / "validation-key.json").is_file()
+    assert json.loads((exp_docs / "final.json").read_text(encoding="utf-8"))["metric"][
+        "primary"
+    ] == pytest.approx(0.70)
+    assert (exp_docs / "FINAL_REPORT.md").is_file()
+    assert (exp_docs / "OPTIMIZATION.md").is_file()
     await runtime.aclose()
 
 
@@ -432,9 +444,15 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
     runtime.agents.start()
+    frozen_dir = tmp_path / "frozen-evaluator"
+    frozen_dir.mkdir()
+    (frozen_dir / "README.md").write_text("# frozen\n", encoding="utf-8")
+    (frozen_dir / "evaluate.py").write_text("# evaluator\n", encoding="utf-8")
     frozen_ref = await runtime.store.put_text(
-        DataScriptBundle(
-            bundle_id="prepare-evaluator", entrypoint="evaluate.py"
+        EvaluatorDescriptor(
+            dir_path=str(frozen_dir),
+            readme_ref=await runtime.store.put_text("# frozen\n"),
+            entrypoint="evaluate.py",
         ).model_dump_json()
     )
     runtime.state.evaluator_ref = frozen_ref

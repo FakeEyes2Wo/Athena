@@ -151,6 +151,8 @@ class ResearchRuntime:
         data_root: str | Path | None = None,
         experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
         compute: ComputeConfig | None = None,
+        # Kept for provider-less test adapters; production providers must use
+        # the authoritative PREPARE orchestrator.
         prepare_phase: PreparePhase | None = None,
         validation_phase: ValidationPhase | None = None,
         plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,

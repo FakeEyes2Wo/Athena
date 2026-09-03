@@ -335,12 +335,15 @@ async def test_handler_session_delete_removes_named_session(tmp_path) -> None:
     handler = _handler_at(tmp_path)
     for sid in ("s-1", "s-2"):
         (tmp_path / ".athena" / "conversations" / sid).mkdir(parents=True)
+        _touch(tmp_path / "workspaces" / "conversations" / sid / "REPORT.md")
 
     result = await handler.dispatch("session_delete", {"session_id": "s-1"})
 
     assert result["deleted"] is True
     assert set(result["sessions"]) == {"s-2"}
     assert not (tmp_path / ".athena" / "conversations" / "s-1").exists()
+    assert not (tmp_path / "workspaces" / "conversations" / "s-1").exists()
+    assert (tmp_path / "workspaces" / "conversations" / "s-2").is_dir()
 
 
 @pytest.mark.asyncio
@@ -517,9 +520,11 @@ async def test_handler_session_switch_discards_the_blank_session_it_leaves(
     handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
 
     await handler.dispatch("session_switch", {"session_id": "s-1"})
+    _touch(tmp_path / "workspaces" / "conversations" / "s-1" / "placeholder")
     result = await handler.dispatch("session_switch", {"session_id": "s-2"})
 
     assert not (tmp_path / ".athena" / "conversations" / "s-1").exists()
+    assert not (tmp_path / "workspaces" / "conversations" / "s-1").exists()
     assert result["sessions"] == ["s-2"]
 
 

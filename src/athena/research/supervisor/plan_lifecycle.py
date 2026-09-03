@@ -33,7 +33,6 @@ class PlanLifecycle:
         self._settlement = PlanSettlement(
             owner,
             deps,
-            run,
             plan_input=self.plan_input,
             save_state=self.save_state,
         )

@@ -1,6 +1,7 @@
 """SEARCH and FINAL evaluator preparation."""
 
 import csv
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from athena.core.artifact_store import (
     ArtifactNotFoundError,
     InvalidArtifactRefError,
 )
+from athena.research.contracts import EvaluatorDescriptor
 from athena.research.evaluation.spec import load_evaluator_spec
 from athena.research.supervisor.evaluator_plan import (
     EVALUATOR_PLAN_ID,
@@ -42,12 +44,19 @@ DIRECTORY_EVALUATOR_CONTRACT = (
     "SHA-256 digest, set cut = max(1, group_count // 5), assign the first cut "
     "groups to FINAL and the next cut groups to SEARCH. Never place one group in "
     "both partitions. Choose an opaque, stable task_id and declare the complete "
-    "prediction contract in metric.json: task_id, prediction_file="
+    "prediction contract in metric.json: contract_version=2, task_id, task_type, "
+    "primary_metric, class_labels, prediction_file="
     "predictions__{task_id}.csv, prediction_id_column, prediction_column, "
     "optional probability_columns, metrics_file=metrics_public_test.csv, and "
     "eval_script=eval_metrics.py. Use the dataset's actual identity and target "
-    "fields; do not assume JW-SSD labels or class names. The SEARCH and FINAL "
-    "evaluators must derive ids with exactly the same algorithm, independent of "
+    "fields; do not assume JW-SSD labels or class names. For directory data, "
+    "prediction_id_column must be exactly __athena_row_id in both evaluators; "
+    "derive its values from the same label-free sample identity. "
+    "The two evaluators must declare the same task_type, primary_metric, and "
+    "complete class_labels. For classification macro-F1, always score across the "
+    "full declared class_labels with zero for an absent class; never infer or "
+    "shrink the label universe from one partition. Evaluators must derive ids "
+    "with exactly the same algorithm, independent of "
     "partition membership and labels. Identity values must not contain target "
     "names, class names, or label-derived directory segments; directory datasets "
     "should use a label-free basename or canonical sample key. A binary CSV may use "
@@ -105,17 +114,40 @@ def assert_evaluator_splits_are_disjoint(
 
 
 async def reusable_ref(runtime: Any, ref: Any) -> Any:
-    """Return a readable frozen artifact reference, or ``None``."""
+    """Return a frozen reference only when its descriptor and files are valid."""
     if ref is None:
         return None
     try:
-        await runtime.store.get_text(ref)
+        descriptor = EvaluatorDescriptor.model_validate_json(
+            await runtime.store.get_text(ref)
+        )
+        root = Path(descriptor.dir_path)
+        entrypoint = Path(descriptor.entrypoint)
+        if (
+            not root.is_dir()
+            or entrypoint.is_absolute()
+            or ".." in entrypoint.parts
+            or not (root / entrypoint).is_file()
+            or not (root / "README.md").is_file()
+        ):
+            return None
+        if (root / "metric.json").is_file():
+            load_evaluator_spec(root, legacy_ok=False)
+            if not all(
+                (root / name).is_file() for name in ("HANDOFF.md", "pyproject.toml")
+            ):
+                return None
+            if not (root / "labels.csv").is_file() and not (root / "labels").is_dir():
+                return None
     except (
         ArtifactNotFoundError,
         ArtifactIntegrityError,
         InvalidArtifactRefError,
+        TypeError,
+        ValueError,
+        OSError,
     ):
-        # A stale checkpoint must be rebuilt by the evaluator agent.
+        # A stale or malformed checkpoint must be rebuilt by the evaluator agent.
         return None
     return ref
 
@@ -240,7 +272,11 @@ async def _final_evaluator(
             task=task,
         ),
     )
-    # Prove row isolation before making the FINAL bundle durable.
+    return ref
+
+
+def _validate_evaluator_pair(runtime: Any) -> None:
+    """Validate the frozen SEARCH and FINAL id contracts and row isolation."""
     roots = runtime.workspaces_root
     search_root = roots / "evaluator" / "evaluate"
     if not search_root.is_dir():
@@ -260,6 +296,29 @@ async def _final_evaluator(
         if (final_root / "metric.json").is_file()
         else None
     )
+    platform_split = (roots / "data_split" / "final_labels.csv").is_file()
+    if not platform_split:
+        for spec in (search_spec, final_spec):
+            if spec is not None and spec.prediction_id_column != "__athena_row_id":
+                raise RuntimeError(
+                    "directory evaluators must use prediction id column "
+                    "__athena_row_id"
+                )
+    if search_spec is not None and final_spec is not None:
+        search_metric = (
+            search_spec.task_type,
+            search_spec.primary_metric,
+            search_spec.class_labels,
+        )
+        final_metric = (
+            final_spec.task_type,
+            final_spec.primary_metric,
+            final_spec.class_labels,
+        )
+        if search_metric != final_metric:
+            raise RuntimeError(
+                "SEARCH and FINAL evaluators declare different metric contracts"
+            )
     id_column = "__athena_row_id"
     if search_spec is not None:
         id_column = search_spec.prediction_id_column
@@ -274,8 +333,6 @@ async def _final_evaluator(
         assert_evaluator_splits_are_disjoint(
             search_labels, final_labels, id_column=id_column
         )
-    await runtime.supervisor.checkpoint_final_evaluator(ref)
-    return ref
 
 
 async def prepare_evaluators(
@@ -286,8 +343,21 @@ async def prepare_evaluators(
     # Build matching role prompts from one data-source contract.
     search_task, final_rule = evaluator_tasks(runtime, task)
     search_ref = await _search_evaluator(runtime, search_task)
+    search_root = runtime.workspaces_root / "evaluator" / "evaluate"
+    if not search_root.is_dir():
+        search_root = runtime.workspaces_root / "evaluator"
     final_dir = runtime.workspaces_root / "final_evaluator" / "evaluate"
     final_task = final_evaluator_task(task, final_dir, final_rule)
+    if (search_root / "metric.json").is_file():
+        search_spec = load_evaluator_spec(search_root, legacy_ok=False)
+        final_task += (
+            "\nMatch the frozen SEARCH metric exactly: "
+            f"task_type={search_spec.task_type}, "
+            f"primary_metric={search_spec.primary_metric}, class_labels="
+            f"{json.dumps(search_spec.class_labels, ensure_ascii=False)}."
+        )
     # Freeze FINAL only after SEARCH so overlap can be checked immediately.
     final_ref = await _final_evaluator(runtime, final_task)
+    _validate_evaluator_pair(runtime)
+    await runtime.supervisor.checkpoint_final_evaluator(final_ref)
     return EvaluatorBundle(search_ref=search_ref, final_ref=final_ref)

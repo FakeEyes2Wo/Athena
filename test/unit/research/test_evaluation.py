@@ -98,7 +98,11 @@ async def test_score_adapts_single_legacy_csv_to_declared_filename(tmp_path) -> 
     (tmp_path / "metric.json").write_text(
         json.dumps(
             {
+                "contract_version": 2,
                 "task_id": "future-task",
+                "task_type": "classification",
+                "primary_metric": "macro_f1",
+                "class_labels": ["negative", "positive"],
                 "prediction_file": "predictions__future-task.csv",
                 "prediction_id_column": "sample_id",
                 "prediction_column": "pred_label",
