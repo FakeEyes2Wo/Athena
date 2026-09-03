@@ -431,7 +431,7 @@ git commit -m "fix: attest resumable baseline completion"
 - Consumes: Tasks 1-5 final schemas, authority fake, lifecycle callbacks, and prompt text.
 - Produces: v2-only deterministic test fixtures and corrected user-facing status.
 
-- [ ] **Step 1: Migrate every baseline fixture producer to v2 and injected authority**
+- [x] **Step 1: Migrate every baseline fixture producer to v2 and injected authority**
 
 Search with:
 
@@ -443,27 +443,27 @@ Update only baseline-research fixtures. Each supplied numeric fact gets matching
 evidence; each relevant modality gets pretrained evidence; all verification builders
 include both exact digests; runtime fixtures inject a shared external-memory fake.
 
-- [ ] **Step 2: Strengthen PREPARE prompt contract tests**
+- [x] **Step 2: Strengthen PREPARE prompt contract tests**
 
 Require the prompt/task to call the three local files read-only mirrors, name the
 external authority generation without exposing credentials, and prohibit rewriting
 research/design/verification. Assert that v1 field names are not presented as the
 current output contract.
 
-- [ ] **Step 3: Exercise real Git and OpenAlex flows through trusted scoring**
+- [x] **Step 3: Exercise real Git and OpenAlex flows through trusted scoring**
 
 Keep external Git/OpenAlex/authority boundaries fake, but use the real phase runner,
 PREPARE agent contract, `TrustedEvaluator`, and `DataScriptRunner`. Prove both routes
 seal exact bytes, survive a fresh runtime, reject a forged local trio, and write a
 matching completion attestation after scoring.
 
-- [ ] **Step 4: Correct superseded documentation claims**
+- [x] **Step 4: Correct superseded documentation claims**
 
 Mark the 2026-09-02 design as implemented but superseded for cache/schema guarantees by
 the hardening design. Mark the old completion report as reopened by final branch review
 until Task 7 evidence exists. Do not delete historical commands or known-failure data.
 
-- [ ] **Step 5: Run the complete affected slice**
+- [x] **Step 5: Run the complete affected slice**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/prepare test/unit/research/test_prepare_modules.py test/unit/research/test_runtime_survey.py test/unit/research/test_breakpoint_resume.py test/unit/research/supervisor/test_prepare_plan.py test/unit/research/supervisor/test_prepare_prompt_contract.py test/unit/research/supervisor/test_supervisor.py test/unit/retrieval/test_web_search.py test/unit/test_paper_source.py test/integration/research/test_authoritative_baseline_gate.py test/integration/research/test_prepare_agent_contract.py test/integration/research/test_autonomous_research.py
@@ -471,7 +471,7 @@ until Task 7 evidence exists. Do not delete historical commands or known-failure
 
 Expected: complete affected slice passes with no new warning.
 
-- [ ] **Step 6: Commit Task 6**
+- [x] **Step 6: Commit Task 6**
 
 ```powershell
 git add -- src/athena/agents/prompts/prepare_agent.md test/integration/research/test_authoritative_baseline_gate.py test/integration/research/test_prepare_agent_contract.py test/integration/research/test_autonomous_research.py test/unit/research/test_breakpoint_resume.py test/unit/research/test_prepare_modules.py test/unit/research/supervisor/test_prepare_prompt_contract.py docs/superpowers/specs/2026-09-02-authoritative-baseline-research-design.md codex_docs/2026-09-02-authoritative-baseline-research-completion-report.md
