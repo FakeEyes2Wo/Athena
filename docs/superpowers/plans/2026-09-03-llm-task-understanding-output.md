@@ -481,7 +481,7 @@ Expected: all tests pass, including the existing eight-question and revision tes
 - Preserves: `build_services(config, broker)` compatibility when `config.model is None`.
 - Guarantees: one provider instance is shared by clarification and Supervisor registration.
 
-- [ ] **Step 1: Write failing composition tests**
+- [x] **Step 1: Write failing composition tests**
 
 Monkeypatch `athena.research.runtime.facade.ResponsesProvider` with a scripted `BaseProvider` factory that records constructed instances. Instantiate `ResearchRuntime(model="fake", broker=StubBroker(), task_confirmation_gate=True)` and assert:
 
@@ -495,7 +495,7 @@ assert controller._generator._provider is created[0]
 
 Add a provider-less runtime assertion for `DeterministicClarificationGenerator`. Directly call `build_services` with `config.model` non-null and no provider and assert a clear composition `ValueError`, proving there is no silent fallback. Confirm a schema-version-1 draft created in provider-less mode remains readable after constructing provider-backed services; no `generation_mode` field is added.
 
-- [ ] **Step 2: Write a failing real-runtime success/failure event test**
+- [x] **Step 2: Write a failing real-runtime success/failure event test**
 
 Use a scripted provider that calls the progress tool once and then returns a final envelope. Subscribe before `task_clarification_start` and assert:
 
@@ -506,7 +506,7 @@ Use a scripted provider that calls the progress tool once and then returns a fin
 
 Make the valid envelope `public_update.summary` and/or progress-tool summary contain a known form such as `api_key=sk-secret-value`; assert live output and successful replay contain the redacted form, never the raw secret. This proves accepted `PublicProgress.summary` flows through the existing redactor rather than claiming arbitrary-text detection. Use a second provider that exposes `sk-secret-value` in its error. Assert the result is retryable `FAILED`, replay contains one fixed failure notice, no secret/error detail, and no deterministic question was asked.
 
-- [ ] **Step 3: Write the generic WebSocket pass-through contract test**
+- [x] **Step 3: Write the generic WebSocket pass-through contract test**
 
 Extend the existing fake runtime in `tests/test_gui_gateway_transport.py` to emit:
 
@@ -526,7 +526,7 @@ Extend the existing fake runtime in `tests/test_gui_gateway_transport.py` to emi
 
 Assert the WebSocket `data` object is byte-for-byte equivalent after JSON decoding. Production transport code should require no change.
 
-- [ ] **Step 4: Run the focused tests and confirm deterministic selection remains**
+- [x] **Step 4: Run the focused tests and confirm deterministic selection remains**
 
 Run:
 
@@ -539,7 +539,7 @@ uv run pytest -q `
 
 Expected: FAIL because `build_services` does not accept/inject a provider and scoped clarification output is absent.
 
-- [ ] **Step 5: Implement the composition adapter**
+- [x] **Step 5: Implement the composition adapter**
 
 In `ResearchRuntime.__init__`, construct before `build_services`:
 
@@ -550,7 +550,7 @@ services, session = build_services(config, broker, provider=provider)
 
 Register that same non-null provider with the Supervisor. In `build_services`, reject `config.model is not None and provider is None`. After constructing `store` and `events`, define one sink closure that maps `stage="failure"` to `channel="error"`, all other stages to `channel="text"`, tool source to `tool=REPORT_TASK_UNDERSTANDING_TOOL`, and always supplies the three scope fields. Pass the same closure to `LLMClarificationGenerator` and `ClarificationController`. Select deterministic only when provider is `None`.
 
-- [ ] **Step 6: Run, format, and commit Task 5**
+- [x] **Step 6: Run, format, and commit Task 5**
 
 Run:
 
