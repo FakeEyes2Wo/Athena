@@ -180,13 +180,13 @@ describe("usePipeline message identity", () => {
     await flush();
 
     expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["A"]);
-    expect(result.current.logs.map((entry) => entry.text)).toEqual(["A"]);
+    expect(result.current.logs).toEqual([]);
     expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
 
     act(() => staleFrame?.(16));
 
     expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["A"]);
-    expect(result.current.logs.map((entry) => entry.text)).toEqual(["A"]);
+    expect(result.current.logs).toEqual([]);
   });
 
   it("discards queued output and logs when starting a new session", async () => {
@@ -507,6 +507,51 @@ describe("usePipeline message identity", () => {
       expect.objectContaining({ id: "current-output", content: "still current" }),
     );
     expect(result.current.logs.map((entry) => entry.text)).toEqual(["still current"]);
+  });
+
+  it("rolls back the full session view when post-switch projection fails", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "pending current output",
+          message_id: "pending-current",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-current",
+        },
+      });
+    });
+    vi.mocked(sessionSwitch).mockResolvedValue({
+      records: null as never,
+      sessions: ["broken"],
+    });
+
+    await act(async () => {
+      await result.current.switchSession("broken");
+    });
+
+    expect(result.current.currentSessionId).toBe("default");
+    expect(animationFrames.size).toBe(1);
+    act(() => runNextAnimationFrame());
+    expect(result.current.viewModel.messages).toContainEqual(
+      expect.objectContaining({ id: "pending-current", content: "pending current output" }),
+    );
+    expect(result.current.viewModel.messages).toContainEqual(
+      expect.objectContaining({ kind: "error" }),
+    );
+    expect(result.current.logs.map((entry) => entry.text)).toEqual([
+      "pending current output",
+    ]);
   });
 
   it("restores the former conversation when optimistic session creation fails", async () => {

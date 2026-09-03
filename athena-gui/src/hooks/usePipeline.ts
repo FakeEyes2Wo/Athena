@@ -186,6 +186,27 @@ interface OutputBatch {
   deltas: Map<string, string>;
 }
 
+interface PendingOutputEvent {
+  event: bridge.PipelineEvent;
+  logEntry: LogEntry;
+}
+
+interface SessionViewSnapshot {
+  activeSessionId: string;
+  currentSessionId: string;
+  viewModel: PipelineViewModel;
+  clarificationStatus: ClarificationStatus;
+  humanRequests: HumanRequest[];
+  humanPendingError: string | null;
+  settlingRequestId: string | null;
+  logs: LogEntry[];
+  runStarted: boolean;
+  draftId: string | null;
+  scopeId: string | null;
+  revision: number;
+  pendingOutputEvents: PendingOutputEvent[];
+}
+
 type OutputScope =
   | { kind: "legacy" }
   | { kind: "invalid" }
@@ -235,7 +256,18 @@ function applyOutputEventToBatch(
 
   if (target !== undefined) {
     const existing = batch.messages[target];
-    const scopedExisting = outputScope.kind === "scoped"
+    const hasCanonicalScope =
+      existing.sessionId !== undefined &&
+      existing.scope !== undefined &&
+      existing.scopeId !== undefined;
+    if (
+      outputScope.kind === "scoped" &&
+      hasCanonicalScope &&
+      (existing.sessionId !== outputScope.sessionId ||
+        existing.scope !== outputScope.scope ||
+        existing.scopeId !== outputScope.scopeId)
+    ) return;
+    const scopedExisting = outputScope.kind === "scoped" && !hasCanonicalScope
       ? {
           ...existing,
           sessionId: outputScope.sessionId,
@@ -444,10 +476,7 @@ export function usePipeline(
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const counter = useRef(0);
   const logCounter = useRef(0);
-  const pendingOutputEventsRef = useRef<Array<{
-    event: bridge.PipelineEvent;
-    logEntry: LogEntry;
-  }>>([]);
+  const pendingOutputEventsRef = useRef<PendingOutputEvent[]>([]);
   const outputFrameRef = useRef<number | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
@@ -460,6 +489,7 @@ export function usePipeline(
   const mountedRef = useRef(true);
   const currentDraftIdRef = useRef<string | null>(null);
   const optimisticScopeIdRef = useRef<string | null>(null);
+  const optimisticPreviewActiveRef = useRef(false);
   const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
   const runStarted = useRef(false);
@@ -469,9 +499,10 @@ export function usePipeline(
   const humanPollFailures = useRef(0);
 
   const setClarificationIdentity = useCallback(
-    (draftId: string | null, revision = -1) => {
+    (draftId: string | null, revision = -1, scopeId = draftId || null) => {
       currentDraftIdRef.current = draftId;
-      optimisticScopeIdRef.current = draftId || null;
+      optimisticScopeIdRef.current = scopeId;
+      optimisticPreviewActiveRef.current = draftId === "";
       currentRevisionRef.current = revision;
     },
     [],
@@ -533,6 +564,67 @@ export function usePipeline(
     drainOutputEvents();
   }, [drainOutputEvents]);
 
+  const scheduleOutputDrain = useCallback(() => {
+    if (outputFrameRef.current !== null || !pendingOutputEventsRef.current.length) return;
+    const frameId = requestAnimationFrame(() => {
+      if (outputFrameRef.current !== frameId) return;
+      outputFrameRef.current = null;
+      if (!mountedRef.current) {
+        pendingOutputEventsRef.current = [];
+        return;
+      }
+      drainOutputEvents();
+    });
+    outputFrameRef.current = frameId;
+  }, [drainOutputEvents]);
+
+  const captureSessionView = useCallback(
+    (): SessionViewSnapshot => ({
+      activeSessionId: activeSessionIdRef.current,
+      currentSessionId,
+      viewModel,
+      clarificationStatus,
+      humanRequests,
+      humanPendingError,
+      settlingRequestId,
+      logs,
+      runStarted: runStarted.current,
+      draftId: currentDraftIdRef.current,
+      scopeId: optimisticScopeIdRef.current,
+      revision: currentRevisionRef.current,
+      pendingOutputEvents: [...pendingOutputEventsRef.current],
+    }),
+    [
+      clarificationStatus,
+      currentSessionId,
+      humanPendingError,
+      humanRequests,
+      logs,
+      settlingRequestId,
+      viewModel,
+    ],
+  );
+
+  const restoreSessionView = useCallback(
+    (snapshot: SessionViewSnapshot) => {
+      discardPendingOutput();
+      activeSessionIdRef.current = snapshot.activeSessionId;
+      setClarificationIdentity(snapshot.draftId, snapshot.revision, snapshot.scopeId);
+      runStarted.current = snapshot.runStarted;
+      setCurrentSessionId(snapshot.currentSessionId);
+      setViewModel(snapshot.viewModel);
+      setClarificationStatus(snapshot.clarificationStatus);
+      setHumanRequests(snapshot.humanRequests);
+      setHumanPendingError(snapshot.humanPendingError);
+      setSettlingRequestId(snapshot.settlingRequestId);
+      settlingRequestRef.current = snapshot.settlingRequestId;
+      setLogs(snapshot.logs);
+      pendingOutputEventsRef.current = [...snapshot.pendingOutputEvents];
+      scheduleOutputDrain();
+    },
+    [discardPendingOutput, scheduleOutputDrain, setClarificationIdentity],
+  );
+
   const queueOutputEvent = useCallback((event: bridge.PipelineEvent) => {
     const outputScope = outputScopeOf(event.data);
     if (outputScope.kind === "invalid") return;
@@ -544,7 +636,7 @@ export function usePipeline(
     if (
       outputScope.kind === "scoped" &&
       outputScope.scope === "task_understanding" &&
-      currentDraftIdRef.current === "" &&
+      optimisticPreviewActiveRef.current &&
       optimisticScopeIdRef.current === null
     ) {
       optimisticScopeIdRef.current = outputScope.scopeId;
@@ -558,18 +650,8 @@ export function usePipeline(
     }
 
     pendingOutputEventsRef.current.push({ event, logEntry: createLogEntry(event) });
-    if (outputFrameRef.current !== null) return;
-    const frameId = requestAnimationFrame(() => {
-      if (outputFrameRef.current !== frameId) return;
-      outputFrameRef.current = null;
-      if (!mountedRef.current) {
-        pendingOutputEventsRef.current = [];
-        return;
-      }
-      drainOutputEvents();
-    });
-    outputFrameRef.current = frameId;
-  }, [createLogEntry, drainOutputEvents]);
+    scheduleOutputDrain();
+  }, [createLogEntry, scheduleOutputDrain]);
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
@@ -860,11 +942,7 @@ export function usePipeline(
         if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
         const { target, list, result } = hydration;
         try {
-          if (target === previousSessionId) {
-            flushPendingOutput();
-          } else {
-            discardPendingOutput();
-          }
+          discardPendingOutput();
           activeSessionIdRef.current = target;
           setClarificationIdentity(null);
           applySessions(result.sessions ?? list);
@@ -997,6 +1075,7 @@ export function usePipeline(
         normalizeClarificationStatus(result.status) ?? "CLARIFYING",
       );
     } catch (err) {
+      setClarificationIdentity(null);
       setClarificationStatus("FAILED");
       appendError(errorMessage(err));
       throw err;
@@ -1275,20 +1354,7 @@ export function usePipeline(
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
     const id = nextOptimisticSessionId();
-    const previous = {
-      activeSessionId: activeSessionIdRef.current,
-      currentSessionId,
-      viewModel,
-      clarificationStatus,
-      humanRequests,
-      humanPendingError,
-      settlingRequestId,
-      logs,
-      runStarted: runStarted.current,
-      draftId: currentDraftIdRef.current,
-      scopeId: optimisticScopeIdRef.current,
-      revision: currentRevisionRef.current,
-    };
+    const previous = captureSessionView();
     discardPendingOutput();
     activeSessionIdRef.current = id;
     setClarificationIdentity(null);
@@ -1325,32 +1391,22 @@ export function usePipeline(
           pendingCreationsRef.current.delete(id);
         }
         if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
-        discardPendingOutput();
-        activeSessionIdRef.current = previous.activeSessionId;
-        setClarificationIdentity(previous.draftId, previous.revision);
-        optimisticScopeIdRef.current = previous.scopeId;
-        runStarted.current = previous.runStarted;
-        setCurrentSessionId(previous.currentSessionId);
-        setViewModel(previous.viewModel);
-        setClarificationStatus(previous.clarificationStatus);
-        setHumanRequests(previous.humanRequests);
-        setHumanPendingError(previous.humanPendingError);
-        setSettlingRequestId(previous.settlingRequestId);
-        settlingRequestRef.current = previous.settlingRequestId;
-        setLogs(previous.logs);
+        restoreSessionView(previous);
         appendError(errorMessage(error));
       },
     );
-  }, [appendError, applySessions, clarificationStatus, currentSessionId, discardPendingOutput, humanPendingError, humanRequests, logs, setClarificationIdentity, settlingRequestId, titlesKey, viewModel]);
+  }, [appendError, applySessions, captureSessionView, discardPendingOutput, restoreSessionView, setClarificationIdentity, titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
-    const previousSessionId = activeSessionIdRef.current;
+    const previous = captureSessionView();
     const requestEpoch = ++sessionRequestEpochRef.current;
+    let switchStarted = false;
     try {
       const { records, sessions: list } = await sessionSwitch(id);
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       // 换会话即换 runtime，运行标记不能带过去。
+      switchStarted = true;
       discardPendingOutput();
       activeSessionIdRef.current = id;
       setClarificationIdentity(null);
@@ -1362,11 +1418,11 @@ export function usePipeline(
       setHumanRequests([]);
     } catch (err) {
       if (requestEpoch !== sessionRequestEpochRef.current) return;
-      activeSessionIdRef.current = previousSessionId;
+      if (switchStarted) restoreSessionView(previous);
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, discardPendingOutput, restoreRecords, setClarificationIdentity]);
+  }, [appendError, applySessions, captureSessionView, discardPendingOutput, restoreRecords, restoreSessionView, setClarificationIdentity]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。

@@ -377,6 +377,19 @@ describe("usePipeline event mapping", () => {
       eventHandlers[0]?.({
         kind: "output",
         data: {
+          seq: 7,
+          source: "agent",
+          channel: "text",
+          text: " wrong scope",
+          message_id: "scoped-agent",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-other",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
           seq: 3,
           source: "agent",
           channel: "text",
@@ -457,6 +470,7 @@ describe("usePipeline event mapping", () => {
     expect(result.current.logs.map((entry) => entry.text)).toEqual([
       "Understanding the task",
       "Reported progress",
+      " wrong scope",
       "legacy output",
       " first",
     ]);
@@ -517,6 +531,37 @@ describe("usePipeline event mapping", () => {
     )?.preview;
     expect(canonical).toMatchObject({ draftId: "draft-canonical" });
     expect(canonical).toMatchObject({ optimisticScopeId: undefined });
+  });
+
+  it("does not latch task-understanding output after optimistic start fails", async () => {
+    vi.mocked(taskClarificationStart).mockRejectedValueOnce(new Error("start failed"));
+    const { result } = await renderHydratedPipeline();
+
+    await act(async () => {
+      await result.current.sendPrompt("predict churn").catch(() => undefined);
+    });
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "late output",
+          message_id: "late-output",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-late",
+        },
+      });
+    });
+    act(() => runNextAnimationFrame());
+
+    const preview = result.current.viewModel.messages.find(
+      (message) => message.kind === "intent-preview",
+    )?.preview;
+    expect(preview).toMatchObject({ draftId: "" });
+    expect(preview).not.toHaveProperty("optimisticScopeId");
   });
 
   it("batches a burst into one frame while preserving every ordered log entry", async () => {
