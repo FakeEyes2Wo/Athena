@@ -212,6 +212,76 @@ def test_rejects_numeric_fact_evidence_for_a_different_value() -> None:
         BaselineResearch.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The measured value is -480.",
+        "The measured value is 480.5.",
+        "The measured value is 480e3.",
+        "The measured value is 4.80e2.",
+    ],
+)
+def test_numeric_fact_requires_an_exact_integer_token(claim: str) -> None:
+    payload = valid_payload()
+    payload["dataset"]["facts"][0]["evidence"]["claim"] = claim
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("kind", "claim"),
+    [
+        ("eda", "The measured value is 480."),
+        ("calculation", "240 + 240 = 480."),
+    ],
+)
+def test_exact_integer_may_be_followed_by_sentence_punctuation(
+    kind: str, claim: str
+) -> None:
+    payload = valid_payload()
+    payload["dataset"]["facts"][0]["evidence"].update(kind=kind, claim=claim)
+
+    assert BaselineResearch.model_validate(payload).dataset.facts[0].value == 480
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "There are 480 labeled images.",
+        "480 + 0 = 481 labeled images.",
+        "400 / 0 = 480 labeled images.",
+        "400 / 3 = 480 labeled images.",
+    ],
+)
+def test_calculation_evidence_requires_a_true_integer_expression(claim: str) -> None:
+    payload = valid_payload()
+    payload["dataset"]["facts"][0]["evidence"].update(kind="calculation", claim=claim)
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+@pytest.mark.parametrize("location", ["reference", "claim"])
+@pytest.mark.parametrize(
+    "expression",
+    ["240 + 240 = 480", "500 - 20 = 480", "24 * 20 = 480", "960 / 2 = 480"],
+)
+def test_calculation_expression_may_be_in_reference_or_claim(
+    location: str, expression: str
+) -> None:
+    payload = valid_payload()
+    evidence = payload["dataset"]["facts"][0]["evidence"]
+    evidence.update(
+        kind="calculation",
+        reference="EDA_HANDOFF.md#dataset-size",
+        claim="Derived from two leakage-safe folds.",
+    )
+    evidence[location] = f"{expression} labeled images"
+
+    assert BaselineResearch.model_validate(payload).dataset.facts[0].value == 480
+
+
 def scratch_scale() -> dict:
     return {
         "selected_candidate_id": "resnet-transfer",

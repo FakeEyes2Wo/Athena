@@ -36,6 +36,11 @@ _STRATEGY_RE = re.compile(
     r"(?mi)^Training strategy:\s*`(classical|frozen_pretrained|partial_finetune|"
     r"full_finetune|train_from_scratch)`\s*$"
 )
+_INTEGER_TOKEN_RE = re.compile(r"(?<![\w.])(?P<value>[+-]?\d+)(?!\w|\.\d)")
+_CALCULATION_RE = re.compile(
+    r"(?<![\w.])(?P<left>\d+)\s*(?P<operator>[+*/-])\s*"
+    r"(?P<right>\d+)\s*=\s*(?P<result>\d+)(?!\w|\.\d)"
+)
 
 
 def _substantive(value: str) -> str:
@@ -44,6 +49,38 @@ def _substantive(value: str) -> str:
     if not normalized:
         raise ValueError("value must contain substantive text")
     return normalized
+
+
+def _contains_exact_integer(text: str, expected: int) -> bool:
+    """Return whether text contains an integer token equal to ``expected``."""
+    return any(
+        int(match["value"]) == expected for match in _INTEGER_TOKEN_RE.finditer(text)
+    )
+
+
+def _contains_matching_calculation(text: str, expected: int) -> bool:
+    """Accept one true nonnegative-integer binary expression with the expected result."""
+    for match in _CALCULATION_RE.finditer(text):
+        left = int(match["left"])
+        right = int(match["right"])
+        result = int(match["result"])
+        if result != expected:
+            continue
+        operator = match["operator"]
+        if operator == "+" and left + right == result:
+            return True
+        if operator == "-" and left - right == result:
+            return True
+        if operator == "*" and left * right == result:
+            return True
+        if (
+            operator == "/"
+            and right != 0
+            and left % right == 0
+            and left // right == result
+        ):
+            return True
+    return False
 
 
 class BaselineResearchError(RuntimeError):
@@ -103,8 +140,15 @@ class DatasetFact(BaseModel):
         if self.evidence.kind == "source":
             raise ValueError("dataset facts require local evidence")
         evidence_text = f"{self.evidence.reference} {self.evidence.claim}"
-        if re.search(rf"(?<!\d){self.value}(?!\d)", evidence_text) is None:
+        if not _contains_exact_integer(evidence_text, self.value):
             raise ValueError("dataset fact evidence must name its supplied value")
+        if self.evidence.kind == "calculation" and not any(
+            _contains_matching_calculation(text, self.value)
+            for text in (self.evidence.reference, self.evidence.claim)
+        ):
+            raise ValueError(
+                "calculation evidence requires a true integer expression ending in the supplied value"
+            )
         return self
 
 
