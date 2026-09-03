@@ -16,6 +16,11 @@ from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_source.http import UrllibTransport
 from athena.research.literature.paper_source.openalex import OpenAlexWork
 from athena.research.prepare import baseline, orchestrator
+from athena.research.prepare.authority import (
+    BaselineAuthorityConflict,
+    SealedBaseline,
+    VerifiedBaselineBundle,
+)
 from athena.research.prepare.baseline_research import (
     BaselineResearchError,
     BaselineVerification,
@@ -35,20 +40,47 @@ from test.integration.research.test_prepare_agent_contract import (
 def _research_payload(*, repository_url: str | None) -> dict[str, Any]:
     """Return one complete research record with hand-checked expected values."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": {
             "modality": "image",
             "task_type": "classification",
-            "labeled_samples": 480,
-            "effective_training_units": 120,
-            "group_count": 120,
-            "class_count": 5,
-            "minority_class_samples": 32,
             "input_scale": "paired 224x224 images",
             "regime": "small",
-            "recommended_strategy": "partial_finetune",
-            "evidence": ["eda:EDA_HANDOFF.md: 480 labels across 120 groups"],
+            "facts": [
+                {
+                    "field": "labeled_samples",
+                    "value": 480,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_HANDOFF.md#dataset-size",
+                        "claim": "480 labeled training images",
+                    },
+                },
+                {
+                    "field": "group_count",
+                    "value": 120,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_HANDOFF.md#groups",
+                        "claim": "120 independent groups",
+                    },
+                },
+            ],
             "rationale": "Grouped labels are limited relative to pretrained capacity.",
+        },
+        "training": {
+            "strategy": "partial_finetune",
+            "pretrained": {
+                "status": "available",
+                "representation": "ImageNet encoder",
+                "evidence": {
+                    "kind": "source",
+                    "reference": "https://arxiv.org/abs/1512.03385",
+                    "claim": "The selected method provides pretrained weights.",
+                },
+            },
+            "safeguards": None,
+            "scratch_scale": None,
         },
         "candidates": [
             {
@@ -92,9 +124,42 @@ def _research_payload(*, repository_url: str | None) -> dict[str, Any]:
             },
         ],
         "selected_candidate_id": "resnet-transfer",
-        "search_queries": ["small image classification transfer baseline GitHub"],
-        "limitations": [],
+        "search": {
+            "queries": [
+                "small image classification transfer baseline GitHub",
+                "authoritative pretrained image baseline paper",
+            ],
+            "one_candidate": None,
+        },
+        "limitations": ["The source data distribution differs from local data."],
     }
+
+
+class _MemoryBaselineAuthorityStore:
+    """Test-only external service retaining one sealed generation."""
+
+    def __init__(self) -> None:
+        self.sealed: SealedBaseline | None = None
+
+    async def load(self) -> SealedBaseline | None:
+        return self.sealed
+
+    async def seal(
+        self,
+        bundle: VerifiedBaselineBundle,
+        *,
+        expected_generation: int | None,
+    ) -> SealedBaseline:
+        current = None if self.sealed is None else self.sealed.generation
+        if current != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        generation = 0 if current is None else current + 1
+        self.sealed = SealedBaseline(generation=generation, bundle=bundle)
+        return self.sealed
+
+    async def attest_prepare(self, evidence, *, expected_generation: int):
+        del evidence, expected_generation
+        raise AssertionError("Task 4 does not attest PREPARE completion")
 
 
 class _BaselineIdeatorProvider:
@@ -257,6 +322,7 @@ class _GateHarness(_PrepareHarness):
         self.monkeypatch = monkeypatch
         self.external_network_calls: list[str] = []
         self.handoff_calls: list[dict[str, Any]] = []
+        self.authority = _MemoryBaselineAuthorityStore()
 
     async def start(self) -> None:
         await super().start()
@@ -328,6 +394,7 @@ class _GateHarness(_PrepareHarness):
             execution=self.execution,
             git=self.git,
             evaluator=TrustedEvaluator(self.scripts),
+            baseline_authority=self.authority,
             tree=SimpleNamespace(to_dict=lambda: {"experiments": []}),
             events=self.events,
             task_confirmation_gate=False,
@@ -500,3 +567,41 @@ async def test_prepare_receives_and_writes_verified_provenance(harness) -> None:
         assert evidence in report
         assert evidence in handoff
     assert harness.external_network_calls == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_artifact_mutation_prevents_trusted_scoring(
+    harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Path(harness.branch.path)
+    provider = harness.prepare_provider
+    original_stream = provider.stream
+    original_score = TrustedEvaluator.score
+    score_calls = 0
+
+    async def tampering_stream(*args, **kwargs):
+        submitted = False
+        async for event in original_stream(*args, **kwargs):
+            if event.kind == "text_delta" and '"decision": "submit"' in str(event.data):
+                submitted = True
+            if submitted and event.kind == "response_completed":
+                (root / "BASELINE_DESIGN.md").write_text(
+                    "# Forged after PREPARE\n\n"
+                    "Selected candidate: `resnet-transfer`\n"
+                    "Training strategy: `partial_finetune`\n",
+                    encoding="utf-8",
+                )
+            yield event
+
+    async def recording_score(self, **kwargs):
+        nonlocal score_calls
+        score_calls += 1
+        return await original_score(self, **kwargs)
+
+    monkeypatch.setattr(provider, "stream", tampering_stream)
+    monkeypatch.setattr(TrustedEvaluator, "score", recording_score)
+
+    with pytest.raises(BaselineResearchError, match="BASELINE_DESIGN.md"):
+        await harness.run(git_commit="f" * 40)
+
+    assert score_calls == 0

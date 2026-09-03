@@ -7,26 +7,30 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from athena.agents.ideator_agent import (
     BASELINE_IDEATOR_PROFILE,
     register_ideator_agent,
 )
 from athena.agents.prepare_agent import register_prepare_agent
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
+from athena.research.prepare.authority import (
+    BaselineAuthorityError,
+    BaselineAuthorityStore,
+    SealedBaseline,
+    VerifiedBaselineBundle,
+)
 from athena.research.prepare.baseline_research import (
     DESIGN_FILENAME,
     RESEARCH_FILENAME,
     VERIFICATION_FILENAME,
     BaselineResearchError,
-    BaselineVerification,
     VerifiedBaseline,
-    assert_verified_files,
+    _parse_baseline_artifacts,
+    _parse_canonical_verification,
+    _write_verification_bytes,
+    assert_verification_matches_artifacts,
     load_baseline_artifacts,
-    load_cached_verified_baseline,
-    research_sha256,
-    write_verification,
+    verification_bytes,
 )
 from athena.research.prepare.source_verification import (
     BaselineSourceVerifier,
@@ -110,21 +114,143 @@ def _repairable(error: BaselineResearchError) -> BaselineResearchError:
     return BaselineResearchError(str(error), (str(error), *error.diagnostics))
 
 
+def _validated_sealed_baseline(root: Path, sealed: SealedBaseline) -> VerifiedBaseline:
+    """Validate an external authority response without consulting local mirrors."""
+    if type(sealed) is not SealedBaseline:
+        raise BaselineAuthorityError("authority returned an invalid sealed baseline")
+    bundle = sealed.bundle
+    try:
+        canonical, parsed_verification = _parse_canonical_verification(
+            bundle.verification_bytes, bundle.verification
+        )
+        artifacts = _parse_baseline_artifacts(
+            root, bundle.research_bytes, bundle.design_bytes
+        )
+        assert_verification_matches_artifacts(artifacts, parsed_verification)
+    except BaselineResearchError as exc:
+        raise BaselineAuthorityError(
+            "authority returned baseline bytes that do not match verification"
+        ) from exc
+    return VerifiedBaseline(
+        artifacts=artifacts,
+        verification=parsed_verification,
+        verification_bytes=canonical,
+        authority_generation=sealed.generation,
+    )
+
+
+def _read_required_mirror(root: Path, filename: str) -> bytes:
+    try:
+        return (root / filename).read_bytes()
+    except OSError as exc:
+        raise BaselineResearchError(f"unable to read {filename}", (str(exc),)) from exc
+
+
+def _assert_mirror_matches(root: Path, filename: str, expected: bytes) -> None:
+    if _read_required_mirror(root, filename) != expected:
+        raise BaselineResearchError(
+            f"workspace mirror {filename} does not match external authority"
+        )
+
+
+async def load_authoritative_baseline(
+    root: Path, authority: BaselineAuthorityStore
+) -> VerifiedBaseline | None:
+    """Load only externally sealed evidence and validate every present mirror."""
+    try:
+        sealed = await authority.load()
+    except BaselineAuthorityError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError("baseline authority load failed") from exc
+    if sealed is None:
+        return None
+
+    verified = _validated_sealed_baseline(root, sealed)
+    bundle = sealed.bundle
+    _assert_mirror_matches(root, RESEARCH_FILENAME, bundle.research_bytes)
+    _assert_mirror_matches(root, DESIGN_FILENAME, bundle.design_bytes)
+
+    mirror = root / VERIFICATION_FILENAME
+    try:
+        local_verification = mirror.read_bytes()
+    except FileNotFoundError:
+        try:
+            _write_verification_bytes(root, bundle.verification_bytes)
+        except OSError as exc:
+            raise BaselineResearchError(
+                f"unable to restore {VERIFICATION_FILENAME}", (str(exc),)
+            ) from exc
+    except OSError as exc:
+        raise BaselineResearchError(
+            f"unable to read {VERIFICATION_FILENAME}", (str(exc),)
+        ) from exc
+    else:
+        if local_verification != bundle.verification_bytes:
+            raise BaselineResearchError(
+                f"workspace mirror {VERIFICATION_FILENAME} does not match external authority"
+            )
+    return verified
+
+
+async def seal_verified_baseline(
+    authority: BaselineAuthorityStore, verified: VerifiedBaseline
+) -> VerifiedBaseline:
+    """Seal freshly verified exact bytes with initial compare-and-exchange."""
+    bundle = VerifiedBaselineBundle(
+        research_bytes=verified.artifacts.raw_research,
+        design_bytes=verified.artifacts.raw_design,
+        verification_bytes=verified.verification_bytes,
+        verification=verified.verification,
+    )
+    try:
+        sealed = await authority.seal(bundle, expected_generation=None)
+    except BaselineAuthorityError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError("baseline authority seal failed") from exc
+    accepted = _validated_sealed_baseline(verified.artifacts.root, sealed)
+    if (
+        sealed.generation != 0
+        or sealed.bundle != bundle
+        or sealed.attestation is not None
+    ):
+        raise BaselineAuthorityError(
+            "baseline authority returned unexpected sealed evidence"
+        )
+    return accepted
+
+
 async def _verify_current_artifacts(
-    root: Path, verifier: BaselineSourceVerifier
+    root: Path,
+    verifier: BaselineSourceVerifier,
+    authority: BaselineAuthorityStore,
 ) -> VerifiedBaseline:
     artifacts = load_baseline_artifacts(root)
     verification = await verifier.verify(artifacts)
-    verified = VerifiedBaseline(artifacts=artifacts, verification=verification)
-    assert_verified_files(root, verified)
-    try:
-        write_verification(root, verification)
-    except OSError as error:
+    current = load_baseline_artifacts(root)
+    if current.raw_research != artifacts.raw_research:
         raise BaselineResearchError(
-            f"unable to write {VERIFICATION_FILENAME}",
-            (_bounded_diagnostic(error),),
+            f"{RESEARCH_FILENAME} changed during source verification"
+        )
+    if current.raw_design != artifacts.raw_design:
+        raise BaselineResearchError(
+            f"{DESIGN_FILENAME} changed during source verification"
+        )
+    assert_verification_matches_artifacts(current, verification)
+    verified = VerifiedBaseline(
+        artifacts=current,
+        verification=verification,
+        verification_bytes=verification_bytes(verification),
+    )
+    sealed = await seal_verified_baseline(authority, verified)
+    try:
+        _write_verification_bytes(root, sealed.verification_bytes)
+    except OSError as error:
+        raise BaselineAuthorityError(
+            f"unable to write authoritative mirror {VERIFICATION_FILENAME}"
         ) from error
-    return verified
+    return sealed
 
 
 async def _run_ideator_turn(
@@ -133,6 +259,7 @@ async def _run_ideator_turn(
     root: Path,
     content: str,
     verifier: BaselineSourceVerifier,
+    authority: BaselineAuthorityStore,
 ) -> VerifiedBaseline | BaselineResearchError:
     """Run one logical-thread turn, then independently parse and verify its files."""
     _remove_verification(root)
@@ -162,7 +289,7 @@ async def _run_ideator_turn(
 
     _remove_verification(root)
     try:
-        return await _verify_current_artifacts(root, verifier)
+        return await _verify_current_artifacts(root, verifier, authority)
     except BaselineResearchError as error:
         return _repairable(error)
 
@@ -239,6 +366,11 @@ async def prepare_baseline_design(
     verifier: BaselineSourceVerifier | None = None,
 ) -> VerifiedBaseline:
     """Return independently verified research, allowing at most one repair turn."""
+    authority = getattr(runtime, "baseline_authority", None)
+    if authority is None:
+        raise BaselineAuthorityError(
+            "PREPARE requires an external baseline authority capability"
+        )
     if not eda_ready:
         error = BaselineResearchError(
             "EDA is unavailable; baseline research cannot be verified"
@@ -247,30 +379,26 @@ async def prepare_baseline_design(
         raise error
 
     root = Path(workspace.path)
-    complete_artifacts = all(
-        (root / filename).is_file() for filename in (RESEARCH_FILENAME, DESIGN_FILENAME)
-    )
     ideator_active = False
 
     try:
-        try:
-            cached = load_cached_verified_baseline(root)
-        except BaselineResearchError as error:
-            cache_error = _repairable(error)
-        else:
-            if cached is not None:
-                return cached
-            cache_error = None
+        cached = await load_authoritative_baseline(root, authority)
+        if cached is not None:
+            return cached
 
         source_verifier = verifier or build_default_source_verifier()
         _remove_verification(root)
+        complete_artifacts = all(
+            (root / filename).is_file()
+            for filename in (RESEARCH_FILENAME, DESIGN_FILENAME)
+        )
         if complete_artifacts:
             try:
-                return await _verify_current_artifacts(root, source_verifier)
+                return await _verify_current_artifacts(root, source_verifier, authority)
             except BaselineResearchError as error:
                 first_error = _repairable(error)
         else:
-            first_error = cache_error
+            first_error = None
 
         _register_ideator(runtime, root)
         ideator_active = True
@@ -284,6 +412,7 @@ async def prepare_baseline_design(
             root=root,
             content=request,
             verifier=source_verifier,
+            authority=authority,
         )
         if isinstance(first_result, VerifiedBaseline):
             return first_result
@@ -296,6 +425,7 @@ async def prepare_baseline_design(
                 root=root,
                 content=_repair_request(first_result),
                 verifier=source_verifier,
+                authority=authority,
             )
             if isinstance(second_result, VerifiedBaseline):
                 return second_result
@@ -342,44 +472,6 @@ def verified_baseline_task(task: str, verified: VerifiedBaseline) -> str:
     )
 
 
-def _assert_prepare_evidence(root: Path, verified: VerifiedBaseline) -> None:
-    """Reload and match all three platform-verified PREPARE artifacts."""
-    try:
-        assert_verified_files(root, verified)
-    except BaselineResearchError as error:
-        try:
-            actual_digest = research_sha256((root / RESEARCH_FILENAME).read_bytes())
-        except OSError:
-            raise error
-        expected_digest = verified.verification.research_sha256
-        if actual_digest != expected_digest:
-            raise BaselineResearchError(
-                "research artifact digest does not match verification",
-                (f"expected={expected_digest}", f"actual={actual_digest}"),
-            ) from error
-        raise
-
-    verification_path = root / VERIFICATION_FILENAME
-    try:
-        raw_verification = verification_path.read_bytes()
-    except OSError as error:
-        raise BaselineResearchError(
-            f"unable to read verification artifact {VERIFICATION_FILENAME}",
-            (_bounded_diagnostic(error),),
-        ) from error
-    try:
-        on_disk = BaselineVerification.model_validate_json(raw_verification)
-    except (ValidationError, ValueError) as error:
-        raise BaselineResearchError(
-            f"invalid verification artifact {VERIFICATION_FILENAME}",
-            (_bounded_diagnostic(error),),
-        ) from error
-    if on_disk != verified.verification:
-        raise BaselineResearchError(
-            "verification artifact does not match verified evidence"
-        )
-
-
 async def run_baseline(
     runtime: Any,
     workspace: Any,
@@ -390,7 +482,30 @@ async def run_baseline(
 ) -> PrepareResult:
     """Implement and score the trusted baseline through the frozen evaluator."""
     root = Path(workspace.path)
-    _assert_prepare_evidence(root, verified)
+    authority = getattr(runtime, "baseline_authority", None)
+    if authority is None:
+        raise BaselineAuthorityError(
+            "PREPARE requires an external baseline authority capability"
+        )
+
+    async def assert_baseline() -> None:
+        """Reject authority or mirror drift from the in-memory generation."""
+        current = await load_authoritative_baseline(root, authority)
+        if current is None:
+            raise BaselineAuthorityError(
+                "external baseline authority has no sealed baseline"
+            )
+        if (
+            current.authority_generation != verified.authority_generation
+            or current.artifacts.raw_research != verified.artifacts.raw_research
+            or current.artifacts.raw_design != verified.artifacts.raw_design
+            or current.verification_bytes != verified.verification_bytes
+        ):
+            raise BaselineAuthorityError(
+                "external baseline authority changed during PREPARE"
+            )
+
+    await assert_baseline()
     await runtime.publish_output(
         source="supervisor", channel="text", text="PREPARE: implementing baseline."
     )
@@ -415,4 +530,5 @@ async def run_baseline(
             "prepare", kind, ref, data
         ),
         predict_features=predict_features,
+        assert_baseline=assert_baseline,
     )

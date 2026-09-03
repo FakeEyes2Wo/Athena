@@ -592,10 +592,26 @@ class BaselineVerification(BaseModel):
 
 @dataclass(frozen=True)
 class VerifiedBaseline:
-    """Immutable pair of validated artifacts and platform verification."""
+    """Validated artifacts carried with canonical external-authority evidence."""
 
     artifacts: BaselineArtifacts
     verification: BaselineVerification
+    verification_bytes: bytes
+    authority_generation: int | None = None
+
+    def __post_init__(self) -> None:
+        raw, _ = _parse_canonical_verification(
+            self.verification_bytes, self.verification
+        )
+        if self.authority_generation is not None and (
+            not isinstance(self.authority_generation, int)
+            or isinstance(self.authority_generation, bool)
+            or self.authority_generation < 0
+        ):
+            raise BaselineResearchError(
+                "authority generation must be a non-negative integer"
+            )
+        object.__setattr__(self, "verification_bytes", raw)
 
 
 def _parse_marker(text: str, pattern: re.Pattern[str], label: str) -> str:
@@ -611,16 +627,10 @@ def _parse_marker(text: str, pattern: re.Pattern[str], label: str) -> str:
     return matches[0]
 
 
-def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
-    """Read and validate the research and matching design artifacts."""
-    research_path = root / RESEARCH_FILENAME
-    design_path = root / DESIGN_FILENAME
-    try:
-        raw_research = research_path.read_bytes()
-    except (OSError, ValueError) as exc:
-        raise BaselineResearchError(
-            f"unable to read {RESEARCH_FILENAME}", (str(exc),)
-        ) from exc
+def _parse_baseline_artifacts(
+    root: Path, raw_research: bytes, raw_design: bytes
+) -> BaselineArtifacts:
+    """Validate one exact research/design byte pair for ``root``."""
     try:
         research = BaselineResearch.model_validate_json(raw_research)
     except (ValidationError, ValueError) as exc:
@@ -628,9 +638,8 @@ def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
             f"invalid {RESEARCH_FILENAME}", (str(exc),)
         ) from exc
     try:
-        raw_design = design_path.read_bytes()
         design_text = raw_design.decode("utf-8", errors="strict")
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError) as exc:
         raise BaselineResearchError(
             f"unable to read {DESIGN_FILENAME}", (str(exc),)
         ) from exc
@@ -676,6 +685,23 @@ def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
     )
 
 
+def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
+    """Read and validate the research and matching design artifacts."""
+    try:
+        raw_research = (root / RESEARCH_FILENAME).read_bytes()
+    except (OSError, ValueError) as exc:
+        raise BaselineResearchError(
+            f"unable to read {RESEARCH_FILENAME}", (str(exc),)
+        ) from exc
+    try:
+        raw_design = (root / DESIGN_FILENAME).read_bytes()
+    except (OSError, ValueError) as exc:
+        raise BaselineResearchError(
+            f"unable to read {DESIGN_FILENAME}", (str(exc),)
+        ) from exc
+    return _parse_baseline_artifacts(root, raw_research, raw_design)
+
+
 def research_sha256(raw: bytes) -> str:
     """Return the digest of the exact research bytes that were validated."""
     return hashlib.sha256(raw).hexdigest()
@@ -713,6 +739,25 @@ def _normalize_title(value: str) -> str:
 def verification_bytes(verification: BaselineVerification) -> bytes:
     """Serialize one verification record to its canonical audit representation."""
     return (verification.model_dump_json(indent=2) + "\n").encode("utf-8")
+
+
+def _parse_canonical_verification(
+    raw: bytes | bytearray | memoryview,
+    expected: BaselineVerification,
+) -> tuple[bytes, BaselineVerification]:
+    """Validate one canonical byte representation against its parsed value."""
+    if not isinstance(raw, (bytes, bytearray, memoryview)):
+        raise BaselineResearchError("verification bytes must be bytes-like")
+    try:
+        copied = bytes(raw)
+        parsed = BaselineVerification.model_validate_json(copied)
+    except (TypeError, ValueError) as exc:
+        raise BaselineResearchError("verification bytes are invalid") from exc
+    if copied != verification_bytes(parsed) or parsed != expected:
+        raise BaselineResearchError(
+            "verification bytes do not match the parsed verification"
+        )
+    return copied, parsed
 
 
 def assert_verification_matches_artifacts(
@@ -773,35 +818,21 @@ def assert_verification_matches_artifacts(
             )
 
 
-def write_verification(root: Path, verification: BaselineVerification) -> Path:
-    """Persist platform verification atomically beside the research artifact."""
+def _write_verification_bytes(root: Path, raw: bytes) -> Path:
+    """Atomically replace the untrusted audit mirror with canonical bytes."""
     target = root / VERIFICATION_FILENAME
     temporary = target.with_suffix(".json.tmp")
-    temporary.write_bytes(verification_bytes(verification))
-    temporary.replace(target)
+    try:
+        temporary.write_bytes(raw)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return target
 
 
-def load_cached_verified_baseline(root: Path) -> VerifiedBaseline | None:
-    """Load cache only when it still names and digests the current artifacts."""
-    artifacts = load_baseline_artifacts(root)
-    cache_path = root / VERIFICATION_FILENAME
-    try:
-        verification = BaselineVerification.model_validate_json(cache_path.read_bytes())
-    except (OSError, UnicodeError, ValidationError, ValueError):
-        return None
-    try:
-        assert_verification_matches_artifacts(artifacts, verification)
-    except BaselineResearchError:
-        return None
-    return VerifiedBaseline(artifacts=artifacts, verification=verification)
-
-
-def assert_verified_files(root: Path, verified: VerifiedBaseline) -> None:
-    """Ensure a verified carrier still describes the files at ``root``."""
-    assert_verification_matches_artifacts(
-        load_baseline_artifacts(root), verified.verification
-    )
+def write_verification(root: Path, verification: BaselineVerification) -> Path:
+    """Persist canonical platform verification as an untrusted audit mirror."""
+    return _write_verification_bytes(root, verification_bytes(verification))
 
 
 __all__ = [
@@ -829,10 +860,8 @@ __all__ = [
     "VERIFICATION_FILENAME",
     "VerifiedBaseline",
     "assert_verification_matches_artifacts",
-    "assert_verified_files",
     "design_sha256",
     "load_baseline_artifacts",
-    "load_cached_verified_baseline",
     "research_sha256",
     "titles_match",
     "validate_training_policy",

@@ -12,6 +12,7 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
 from athena.execution.runtime import CommandRequest, CommandResult
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
+from athena.research.prepare.baseline_research import BaselineResearchError
 from athena.research.supervisor import prepare
 from athena.research.supervisor.evaluator_plan import (
     _validate_frozen_evaluator,
@@ -142,6 +143,10 @@ class _Evaluator:
         )
 
 
+async def _passing_baseline_guard() -> None:
+    return None
+
+
 class _FailingEvaluator:
     async def score(self, **kwargs):
         del kwargs
@@ -222,6 +227,156 @@ async def _frozen_evaluator_ref(store, dir_path: Path) -> str:
     return await store.put_text(descriptor.model_dump_json())
 
 
+class _RecordingEvaluator(_Evaluator):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def score(self, **kwargs):
+        self.calls += 1
+        return await super().score(**kwargs)
+
+
+class _MutatingAgentRuntime(_AgentRuntime):
+    def __init__(self, store: LocalArtifactStore, marker: Path) -> None:
+        super().__init__(store)
+        self.marker = marker
+
+    async def wait_run(self, run_id, *, timeout=None):
+        summary = await super().wait_run(run_id, timeout=timeout)
+        self.marker.write_text("tampered", encoding="utf-8")
+        return summary
+
+
+class _MutatingExecution(_Execution):
+    def __init__(self, root: Path, marker: Path) -> None:
+        super().__init__(root)
+        self.marker = marker
+
+    async def run(self, context, request: CommandRequest):
+        result = await super().run(context, request)
+        self.marker.write_text("tampered", encoding="utf-8")
+        return result
+
+
+def _matching_guard(marker: Path):
+    async def assert_baseline() -> None:
+        if marker.read_text(encoding="utf-8") != "sealed":
+            raise BaselineResearchError("baseline evidence was tampered")
+
+    return assert_baseline
+
+
+@pytest.mark.asyncio
+async def test_agent_turn_mutation_is_terminal_before_plan_or_evaluator(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "eda"
+    _write_eda_workspace(workspace_path, missing=None)
+    marker = workspace_path / "baseline.marker"
+    marker.write_text("sealed", encoding="utf-8")
+    store = _Store(tmp_path / "artifacts")
+    agents = _MutatingAgentRuntime(store.inner, marker)
+    evaluator = _RecordingEvaluator()
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
+    tree_ref = await store.put_text('{"experiments": []}')
+
+    with pytest.raises(BaselineResearchError, match="tampered"):
+        await run_prepare_plan(
+            agents=agents,
+            evaluator=evaluator,
+            git=_Git(),
+            workspace=GitWorkBranch(
+                path=str(workspace_path), branch="prepare", base_commit="base"
+            ),
+            execution=_Execution(tmp_path),
+            store=store,
+            evaluator_ref=evaluator_ref,
+            tree_ref=tree_ref,
+            task="build baseline",
+            max_turns=2,
+            assert_baseline=_matching_guard(marker),
+        )
+
+    assert evaluator.calls == 0
+    assert agents.feedback == []
+
+
+@pytest.mark.asyncio
+async def test_execution_mutation_is_terminal_immediately_before_evaluator(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "eda"
+    _write_eda_workspace(workspace_path, missing=None)
+    marker = workspace_path / "baseline.marker"
+    marker.write_text("sealed", encoding="utf-8")
+    store = _Store(tmp_path / "artifacts")
+    agents = _AgentRuntime(store.inner)
+    evaluator = _RecordingEvaluator()
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
+    tree_ref = await store.put_text('{"experiments": []}')
+
+    with pytest.raises(BaselineResearchError, match="tampered"):
+        await run_prepare_plan(
+            agents=agents,
+            evaluator=evaluator,
+            git=_Git(),
+            workspace=GitWorkBranch(
+                path=str(workspace_path), branch="prepare", base_commit="base"
+            ),
+            execution=_MutatingExecution(tmp_path, marker),
+            store=store,
+            evaluator_ref=evaluator_ref,
+            tree_ref=tree_ref,
+            task="build baseline",
+            max_turns=2,
+            assert_baseline=_matching_guard(marker),
+        )
+
+    assert evaluator.calls == 0
+    assert agents.feedback == []
+
+
+@pytest.mark.asyncio
+async def test_plain_guard_error_before_evaluator_is_terminal_not_feedback(
+    tmp_path: Path,
+) -> None:
+    workspace_path = tmp_path / "eda"
+    _write_eda_workspace(workspace_path, missing=None)
+    store = _Store(tmp_path / "artifacts")
+    agents = _AgentRuntime(store.inner)
+    evaluator = _RecordingEvaluator()
+    evaluator_ref = await _frozen_evaluator_ref(store, tmp_path / "evaluator")
+    tree_ref = await store.put_text('{"experiments": []}')
+    checks = 0
+
+    async def fail_at_scoring_boundary() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise ValueError("baseline guard unavailable")
+
+    with pytest.raises(RuntimeError, match="baseline evidence guard failed"):
+        await run_prepare_plan(
+            agents=agents,
+            evaluator=evaluator,
+            git=_Git(),
+            workspace=GitWorkBranch(
+                path=str(workspace_path), branch="prepare", base_commit="base"
+            ),
+            execution=_Execution(tmp_path),
+            store=store,
+            evaluator_ref=evaluator_ref,
+            tree_ref=tree_ref,
+            task="build baseline",
+            max_turns=2,
+            assert_baseline=fail_at_scoring_boundary,
+        )
+
+    assert checks == 2
+    assert evaluator.calls == 0
+    assert agents.feedback == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("missing", "expected_error"),
@@ -262,6 +417,7 @@ async def test_prepare_result_requires_every_trusted_artifact(
             tree_ref=tree_ref,
             task="build baseline",
             max_turns=2,
+            assert_baseline=_passing_baseline_guard,
         )
 
     assert agents.created == ["prepare"]
@@ -291,6 +447,7 @@ async def test_prepare_returns_result_on_trusted_baseline(tmp_path: Path) -> Non
         tree_ref=tree_ref,
         task="build baseline",
         max_turns=2,
+        assert_baseline=_passing_baseline_guard,
     )
 
     assert result.metric == 0.75
@@ -325,6 +482,7 @@ async def test_prepare_scoring_failure_retries_without_agent_repair(
             tree_ref=tree_ref,
             task="build baseline",
             max_turns=2,
+            assert_baseline=_passing_baseline_guard,
         )
 
     assert agents.created == ["prepare"]

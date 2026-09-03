@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import subprocess
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +33,7 @@ PREPARE_AGENT_ID = "prepare"
 PREPARE_PLAN_ID = "prepare"
 _REAP_TIMEOUT_SECONDS = 5.0
 logger = logging.getLogger(__name__)
+_BaselineGuard = Callable[[], Awaitable[None]]
 
 
 class PrepareResult(BaseModel):
@@ -45,6 +47,34 @@ class PrepareResult(BaseModel):
     predictions_ref: ArtifactRef
     evidence_ref: ArtifactRef
     report_ref: ArtifactRef
+
+
+class _BaselineGuardAbort(BaseException):
+    """Carry a typed guard failure through PlanRunner's evaluator mapping."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+class _GuardedEvaluator:
+    """Check baseline evidence at the last boundary before trusted scoring."""
+
+    __slots__ = ("_assert_baseline", "_evaluator")
+
+    def __init__(
+        self, evaluator: TrustedEvaluator, assert_baseline: _BaselineGuard
+    ) -> None:
+        self._evaluator = evaluator
+        self._assert_baseline = assert_baseline
+
+    async def score(self, **kwargs):
+        """Check authority evidence at the final trusted-scoring boundary."""
+        try:
+            await self._assert_baseline()
+        except Exception as error:
+            raise _BaselineGuardAbort(error) from error
+        return await self._evaluator.score(**kwargs)
 
 
 async def _reap_agent(agents: AgentRuntime, agent_id: str) -> None:
@@ -107,6 +137,7 @@ async def run_prepare_plan(
     tree_ref: ArtifactRef,
     task: str,
     max_turns: int,
+    assert_baseline: _BaselineGuard,
     publish: EmitEvent | None = None,
     predict_features: Path | None = None,
 ) -> PrepareResult:
@@ -158,6 +189,7 @@ async def run_prepare_plan(
                     {"content": feedback, "context_refs": []},
                 )
             summary = await wait_run_events(agents, run_id, publish)
+            await assert_baseline()
             try:
                 decision = await _decision_from_summary(summary, store)
             except (OSError, RuntimeError, ValueError) as exc:
@@ -174,7 +206,7 @@ async def run_prepare_plan(
                 runner = PlanRunner(
                     execution=execution,
                     store=store,
-                    evaluator=evaluator,
+                    evaluator=_GuardedEvaluator(evaluator, assert_baseline),
                     workspace=git,
                     branch=workspace,
                     context=ExecutionContext(
@@ -185,21 +217,28 @@ async def run_prepare_plan(
                         predict_features=predict_features,
                     ),
                 )
-                outcome = await runner.run_turn(
-                    PREPARE_PLAN_ID,
-                    PlanState(
-                        kind="PREPARE",
-                        context_ref=context_ref,
-                        turns_used=turn,
-                        turn_limit=max_turns,
-                    ),
-                    PlanInput(
-                        evaluator_ref=evaluator_ref,
-                        tree_ref=tree_ref,
-                        initial_turn_limit=max_turns,
-                    ),
-                    emit=publish,
-                )
+                try:
+                    outcome = await runner.run_turn(
+                        PREPARE_PLAN_ID,
+                        PlanState(
+                            kind="PREPARE",
+                            context_ref=context_ref,
+                            turns_used=turn,
+                            turn_limit=max_turns,
+                        ),
+                        PlanInput(
+                            evaluator_ref=evaluator_ref,
+                            tree_ref=tree_ref,
+                            initial_turn_limit=max_turns,
+                        ),
+                        emit=publish,
+                    )
+                except _BaselineGuardAbort as error:
+                    if isinstance(error.error, RuntimeError):
+                        raise error.error
+                    raise RuntimeError(
+                        "baseline evidence guard failed"
+                    ) from error.error
                 if outcome.kind == "evaluator_infrastructure_failed":
                     raise RuntimeError(outcome.error or "evaluator unavailable")
                 if outcome.kind != "scored":

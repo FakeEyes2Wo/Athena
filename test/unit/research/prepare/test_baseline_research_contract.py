@@ -10,12 +10,8 @@ from athena.research.prepare.baseline_research import (
     BaselineResearch,
     BaselineResearchError,
     BaselineVerification,
-    VerifiedBaseline,
-    assert_verified_files,
     load_baseline_artifacts,
-    load_cached_verified_baseline,
     research_sha256,
-    write_verification,
 )
 
 
@@ -614,28 +610,6 @@ def test_rejects_url_credentials() -> None:
         BaselineResearch.model_validate(payload)
 
 
-def test_verification_cache_is_digest_and_candidate_bound(tmp_path: Path) -> None:
-    write_artifacts(tmp_path)
-    verification = verification_for(tmp_path)
-    assert (
-        write_verification(tmp_path, verification).name
-        == "BASELINE_RESEARCH_VERIFICATION.json"
-    )
-    cached = load_cached_verified_baseline(tmp_path)
-    assert isinstance(cached, VerifiedBaseline)
-    assert cached.verification.research_sha256 == research_sha256(
-        cached.artifacts.raw_research
-    )
-    assert_verified_files(tmp_path, cached)
-
-    (tmp_path / "BASELINE_RESEARCH.json").write_text(
-        json.dumps({**valid_payload(), "limitations": ["changed"]}), encoding="utf-8"
-    )
-    assert load_cached_verified_baseline(tmp_path) is None
-    with pytest.raises(BaselineResearchError):
-        assert_verified_files(tmp_path, cached)
-
-
 def test_same_markers_with_different_design_body_do_not_match_verification(
     tmp_path: Path,
 ) -> None:
@@ -756,39 +730,3 @@ def test_verification_schema_version_is_explicit(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError):
         BaselineVerification.model_validate(values)
-
-
-@pytest.mark.parametrize("route", ["git", "openalex"])
-def test_rejects_incomplete_matching_digest_cache(tmp_path: Path, route: str) -> None:
-    write_artifacts(tmp_path)
-    artifacts = load_baseline_artifacts(tmp_path)
-    forged = {
-        "research_sha256": research_sha256(artifacts.raw_research),
-        "selected_candidate_id": artifacts.selected.candidate_id,
-        "route": route,
-        "verified_at": datetime.now(timezone.utc).isoformat(),
-        "attempts": [],
-    }
-    (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").write_text(
-        json.dumps(forged), encoding="utf-8"
-    )
-    assert load_cached_verified_baseline(tmp_path) is None
-
-
-@pytest.mark.parametrize(
-    "cache_mutation",
-    [
-        lambda data: data.update(selected_candidate_id="linear-probe"),
-        lambda data: data.update(research_sha256="0" * 64),
-        lambda data: data.update(route="not-a-route"),
-    ],
-)
-def test_ignores_missing_or_invalid_cache(tmp_path: Path, cache_mutation) -> None:
-    write_artifacts(tmp_path)
-    assert load_cached_verified_baseline(tmp_path) is None
-    verification = verification_for(tmp_path).model_dump(mode="json")
-    cache_mutation(verification)
-    (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").write_text(
-        json.dumps(verification), encoding="utf-8"
-    )
-    assert load_cached_verified_baseline(tmp_path) is None

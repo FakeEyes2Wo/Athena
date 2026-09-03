@@ -11,13 +11,22 @@ import pytest
 
 from athena.research.prepare import baseline
 from athena.research.prepare.baseline import prepare_baseline_design, run_baseline
+from athena.research.prepare.authority import (
+    BaselineAuthorityConflict,
+    BaselineAuthorityError,
+    SealedBaseline,
+    VerifiedBaselineBundle,
+)
 from athena.research.prepare.baseline_research import (
     BaselineArtifacts,
     BaselineResearchError,
     BaselineVerification,
+    VerificationAttempt,
     VerifiedBaseline,
+    design_sha256,
     load_baseline_artifacts,
     research_sha256,
+    verification_bytes,
     write_verification,
 )
 
@@ -25,20 +34,47 @@ from athena.research.prepare.baseline_research import (
 def valid_payload() -> dict[str, Any]:
     """Return one complete, hand-checked research artifact."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": {
             "modality": "image",
             "task_type": "classification",
-            "labeled_samples": 480,
-            "effective_training_units": 120,
-            "group_count": 120,
-            "class_count": 5,
-            "minority_class_samples": 32,
             "input_scale": "paired 224x224 images",
             "regime": "small",
-            "recommended_strategy": "partial_finetune",
-            "evidence": ["eda:EDA_REPORT_LABELS.md: 480 labels across 120 groups"],
+            "facts": [
+                {
+                    "field": "labeled_samples",
+                    "value": 480,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_HANDOFF.md#dataset-size",
+                        "claim": "480 labeled training images",
+                    },
+                },
+                {
+                    "field": "group_count",
+                    "value": 120,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_HANDOFF.md#groups",
+                        "claim": "120 independent groups",
+                    },
+                },
+            ],
             "rationale": "Grouped labels are limited relative to pretrained capacity.",
+        },
+        "training": {
+            "strategy": "partial_finetune",
+            "pretrained": {
+                "status": "available",
+                "representation": "ImageNet encoder",
+                "evidence": {
+                    "kind": "source",
+                    "reference": "https://arxiv.org/abs/1512.03385",
+                    "claim": "The selected method provides pretrained weights.",
+                },
+            },
+            "safeguards": None,
+            "scratch_scale": None,
         },
         "candidates": [
             {
@@ -82,8 +118,14 @@ def valid_payload() -> dict[str, Any]:
             },
         ],
         "selected_candidate_id": "resnet-transfer",
-        "search_queries": ["small image classification transfer baseline GitHub"],
-        "limitations": [],
+        "search": {
+            "queries": [
+                "small image classification transfer baseline GitHub",
+                "authoritative pretrained image baseline paper",
+            ],
+            "one_candidate": None,
+        },
+        "limitations": ["The source data distribution differs from local data."],
     }
 
 
@@ -103,7 +145,9 @@ def write_artifacts(root: Path, *, changed: bool = False) -> None:
 def valid_verification(artifacts: BaselineArtifacts) -> BaselineVerification:
     """Build deterministic valid Git evidence for the supplied bytes."""
     return BaselineVerification(
+        schema_version=2,
         research_sha256=research_sha256(artifacts.raw_research),
+        design_sha256=design_sha256(artifacts.raw_design),
         selected_candidate_id=artifacts.selected.candidate_id,
         route="git",
         verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
@@ -127,19 +171,77 @@ class FakeAgents:
 
 
 class FakeRuntime:
-    def __init__(self) -> None:
+    def __init__(self, authority: Any = ...) -> None:
         self.agents = FakeAgents()
         self.outputs: list[dict[str, Any]] = []
         self.registry = SimpleNamespace(contains=lambda _agent_type: True)
         self.provider = object()
         self.store = object()
         self.execution = object()
+        self.baseline_authority = (
+            MemoryBaselineAuthorityStore() if authority is ... else authority
+        )
 
     def baseline_ideator_tools(self) -> object:
         return object()
 
     async def publish_output(self, **kwargs: Any) -> None:
         self.outputs.append(kwargs)
+
+
+class MemoryBaselineAuthorityStore:
+    """Test-only external authority with compare-and-exchange semantics."""
+
+    def __init__(
+        self,
+        sealed: SealedBaseline | None = None,
+        *,
+        load_error: Exception | None = None,
+        seal_error: Exception | None = None,
+    ) -> None:
+        self.sealed = sealed
+        self.load_error = load_error
+        self.seal_error = seal_error
+        self.loads = 0
+        self.seals = 0
+
+    async def load(self) -> SealedBaseline | None:
+        self.loads += 1
+        if self.load_error is not None:
+            raise self.load_error
+        return self.sealed
+
+    async def seal(
+        self,
+        bundle: VerifiedBaselineBundle,
+        *,
+        expected_generation: int | None,
+    ) -> SealedBaseline:
+        self.seals += 1
+        if self.seal_error is not None:
+            raise self.seal_error
+        current = None if self.sealed is None else self.sealed.generation
+        if current != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        generation = 0 if current is None else current + 1
+        self.sealed = SealedBaseline(generation=generation, bundle=bundle)
+        return self.sealed
+
+    async def attest_prepare(self, evidence, *, expected_generation: int):
+        del evidence, expected_generation
+        raise AssertionError("Task 4 does not attest PREPARE completion")
+
+
+def authority_bundle(root: Path) -> VerifiedBaselineBundle:
+    """Build exact authority bytes from one valid local artifact pair."""
+    artifacts = load_baseline_artifacts(root)
+    verification = valid_verification(artifacts)
+    return VerifiedBaselineBundle(
+        research_bytes=artifacts.raw_research,
+        design_bytes=artifacts.raw_design,
+        verification_bytes=verification_bytes(verification),
+        verification=verification,
+    )
 
 
 Writer = Callable[[Path], None]
@@ -285,6 +387,24 @@ async def test_eda_unavailable_is_a_hard_failure(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_authority_fails_before_baseline_agent_side_effects(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntime(None)
+    handoff = ScriptedHandoff(tmp_path, [writes_valid])
+    verifier = QueuedVerifier(tmp_path, ["valid"])
+
+    with pytest.raises(BaselineAuthorityError, match="authority"):
+        await prepare_baseline_design(
+            runtime, workspace(tmp_path), "task", True, handoff, verifier=verifier
+        )
+
+    assert handoff.calls == []
+    assert verifier.calls == []
+    assert runtime.agents.reaped == []
+
+
+@pytest.mark.asyncio
 async def test_missing_research_file_receives_repair_instead_of_fallback(
     tmp_path: Path,
 ) -> None:
@@ -304,35 +424,46 @@ async def test_missing_research_file_receives_repair_instead_of_fallback(
 
 
 @pytest.mark.asyncio
-async def test_matching_cache_returns_without_verifier_or_agent(tmp_path: Path) -> None:
+async def test_forged_workspace_trio_with_empty_authority_is_live_verified(
+    tmp_path: Path,
+) -> None:
     write_artifacts(tmp_path)
     write_forged_verification(tmp_path)
-    runtime = FakeRuntime()
+    authority = MemoryBaselineAuthorityStore()
+    runtime = FakeRuntime(authority)
     handoff = ScriptedHandoff(tmp_path, [])
-    verifier = QueuedVerifier(tmp_path, [])
+    verifier = QueuedVerifier(tmp_path, ["valid"])
 
     result = await prepare_baseline_design(
         runtime, workspace(tmp_path), "task", True, handoff, verifier=verifier
     )
 
     assert result.verification.commit == "a" * 40
-    assert verifier.calls == []
+    assert len(verifier.calls) == 1
+    assert authority.loads == 1
+    assert authority.seals == 1
     assert handoff.calls == []
     assert runtime.agents.reaped == []
 
 
 @pytest.mark.asyncio
-async def test_matching_cache_returns_before_default_verifier_construction(
+async def test_exact_authority_restart_returns_before_default_verifier_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     write_artifacts(tmp_path)
-    write_forged_verification(tmp_path)
+    bundle = authority_bundle(tmp_path)
+    (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").write_bytes(
+        bundle.verification_bytes
+    )
+    authority = MemoryBaselineAuthorityStore(
+        SealedBaseline(generation=7, bundle=bundle)
+    )
 
     class ForbiddenAgents(FakeAgents):
         async def reap(self, agent_id: str) -> None:
             raise AssertionError(f"cache hit must not reap {agent_id}")
 
-    runtime = FakeRuntime()
+    runtime = FakeRuntime(authority)
     runtime.agents = ForbiddenAgents()
 
     async def forbidden_handoff(**_kwargs: Any) -> str:
@@ -358,6 +489,10 @@ async def test_matching_cache_returns_before_default_verifier_construction(
     )
 
     assert result.verification.commit == "a" * 40
+    assert result.authority_generation == 7
+    assert result.verification_bytes == bundle.verification_bytes
+    assert authority.loads == 1
+    assert authority.seals == 0
 
 
 @pytest.mark.asyncio
@@ -379,6 +514,174 @@ async def test_wrong_digest_cache_is_removed_and_revalidated(tmp_path: Path) -> 
     assert verifier.verification_file_seen == [False]
     assert result.verification.research_sha256 != "0" * 64
     assert handoff.calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_verification_mirror_is_restored_exactly_from_authority(
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    bundle = authority_bundle(tmp_path)
+    authority = MemoryBaselineAuthorityStore(
+        SealedBaseline(generation=3, bundle=bundle)
+    )
+
+    result = await prepare_baseline_design(
+        FakeRuntime(authority),
+        workspace(tmp_path),
+        "task",
+        True,
+        ScriptedHandoff(tmp_path, []),
+        verifier=QueuedVerifier(tmp_path, []),
+    )
+
+    assert result.authority_generation == 3
+    assert (
+        tmp_path / "BASELINE_RESEARCH_VERIFICATION.json"
+    ).read_bytes() == bundle.verification_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "mutate"),
+    [
+        (
+            "BASELINE_RESEARCH.json",
+            lambda root: write_artifacts(root, changed=True),
+        ),
+        (
+            "BASELINE_DESIGN.md",
+            lambda root: (root / "BASELINE_DESIGN.md").write_text(
+                "# Rewritten body\n\nSelected candidate: `resnet-transfer`\n"
+                "Training strategy: `partial_finetune`\n",
+                encoding="utf-8",
+            ),
+        ),
+        (
+            "BASELINE_RESEARCH_VERIFICATION.json",
+            lambda root: (root / "BASELINE_RESEARCH_VERIFICATION.json").write_bytes(
+                verification_bytes(
+                    valid_verification(load_baseline_artifacts(root)).model_copy(
+                        update={
+                            "attempts": (
+                                VerificationAttempt(
+                                    route="git",
+                                    success=True,
+                                    diagnostic="rewritten mirror",
+                                ),
+                            )
+                        }
+                    )
+                )
+            ),
+        ),
+    ],
+)
+async def test_authority_mirror_mutation_stops_before_prepare_or_live_verification(
+    filename: str,
+    mutate: Callable[[Path], Any],
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    bundle = authority_bundle(tmp_path)
+    (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").write_bytes(
+        bundle.verification_bytes
+    )
+    authority = MemoryBaselineAuthorityStore(
+        SealedBaseline(generation=2, bundle=bundle)
+    )
+    mutate(tmp_path)
+    verifier = QueuedVerifier(tmp_path, [])
+    handoff = ScriptedHandoff(tmp_path, [])
+
+    with pytest.raises(BaselineResearchError, match=filename):
+        await prepare_baseline_design(
+            FakeRuntime(authority),
+            workspace(tmp_path),
+            "task",
+            True,
+            handoff,
+            verifier=verifier,
+        )
+
+    assert verifier.calls == []
+    assert handoff.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v1_workspace_mirror_is_ignored_and_live_verified(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "research_sha256": research_sha256(
+                    (tmp_path / "BASELINE_RESEARCH.json").read_bytes()
+                ),
+                "selected_candidate_id": "resnet-transfer",
+                "route": "git",
+            }
+        ),
+        encoding="utf-8",
+    )
+    verifier = QueuedVerifier(tmp_path, ["valid"])
+    authority = MemoryBaselineAuthorityStore()
+
+    result = await prepare_baseline_design(
+        FakeRuntime(authority),
+        workspace(tmp_path),
+        "task",
+        True,
+        ScriptedHandoff(tmp_path, []),
+        verifier=verifier,
+    )
+
+    assert result.verification.schema_version == 2
+    assert len(verifier.calls) == 1
+    assert authority.seals == 1
+
+
+@pytest.mark.asyncio
+async def test_authority_outage_never_falls_back_to_matching_workspace(
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    write_forged_verification(tmp_path)
+    authority = MemoryBaselineAuthorityStore(load_error=OSError("authority offline"))
+    verifier = QueuedVerifier(tmp_path, [])
+    handoff = ScriptedHandoff(tmp_path, [])
+
+    with pytest.raises(BaselineAuthorityError, match="authority"):
+        await prepare_baseline_design(
+            FakeRuntime(authority),
+            workspace(tmp_path),
+            "task",
+            True,
+            handoff,
+            verifier=verifier,
+        )
+
+    assert verifier.calls == []
+    assert handoff.calls == []
+
+
+@pytest.mark.asyncio
+async def test_seal_failure_leaves_no_verification_mirror(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    write_forged_verification(tmp_path)
+    authority = MemoryBaselineAuthorityStore(seal_error=OSError("authority offline"))
+
+    with pytest.raises(BaselineAuthorityError, match="authority"):
+        await prepare_baseline_design(
+            FakeRuntime(authority),
+            workspace(tmp_path),
+            "task",
+            True,
+            ScriptedHandoff(tmp_path, []),
+            verifier=QueuedVerifier(tmp_path, ["valid"]),
+        )
+
+    assert not (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").exists()
 
 
 @pytest.mark.asyncio
@@ -715,11 +1018,14 @@ def verified_fixture(root: Path, route: str = "git") -> VerifiedBaseline:
     else:
         assert route == "openalex"
         verification = BaselineVerification(
+            schema_version=2,
             research_sha256=research_sha256(artifacts.raw_research),
+            design_sha256=design_sha256(artifacts.raw_design),
             selected_candidate_id=artifacts.selected.candidate_id,
             route="openalex",
             verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
-            openalex_id="https://openalex.org/W2741809807",
+            paper_locator=artifacts.selected.paper_locator,
+            openalex_id="W2741809807",
             title="Deep Residual Learning for Image Recognition",
             publication_year=2016,
             cited_by_count=100000,
@@ -731,12 +1037,47 @@ def verified_fixture(root: Path, route: str = "git") -> VerifiedBaseline:
                 }
             ],
         )
-    write_verification(root, verification)
-    return VerifiedBaseline(artifacts=artifacts, verification=verification)
+    canonical = verification_bytes(verification)
+    (root / "BASELINE_RESEARCH_VERIFICATION.json").write_bytes(canonical)
+    return VerifiedBaseline(
+        artifacts=artifacts,
+        verification=verification,
+        verification_bytes=canonical,
+        authority_generation=0,
+    )
+
+
+def authority_for_verified(verified: VerifiedBaseline) -> MemoryBaselineAuthorityStore:
+    bundle = VerifiedBaselineBundle(
+        research_bytes=verified.artifacts.raw_research,
+        design_bytes=verified.artifacts.raw_design,
+        verification_bytes=verified.verification_bytes,
+        verification=verified.verification,
+    )
+    return MemoryBaselineAuthorityStore(
+        SealedBaseline(generation=verified.authority_generation, bundle=bundle)
+    )
+
+
+def test_verified_carrier_rejects_mismatched_canonical_verification_bytes(
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    artifacts = load_baseline_artifacts(tmp_path)
+    verification = valid_verification(artifacts)
+    different = verification.model_copy(update={"commit": "b" * 40})
+
+    with pytest.raises(BaselineResearchError, match="verification bytes"):
+        VerifiedBaseline(
+            artifacts=artifacts,
+            verification=verification,
+            verification_bytes=verification_bytes(different),
+            authority_generation=0,
+        )
 
 
 class PrepareRuntime:
-    def __init__(self) -> None:
+    def __init__(self, authority: Any) -> None:
         self.registry = SimpleNamespace(contains=lambda _agent_type: True)
         self.provider = object()
         self.store = SimpleNamespace(put_text=self._put_text)
@@ -745,6 +1086,7 @@ class PrepareRuntime:
         self.agents = object()
         self.evaluator = object()
         self.git = object()
+        self.baseline_authority = authority
         self.events = SimpleNamespace(project_agent_event=lambda *args: None)
         self.outputs: list[dict[str, Any]] = []
         self.snapshots: list[str] = []
@@ -764,7 +1106,7 @@ async def assert_rejected_without_prepare_side_effects(
     *,
     match: str,
 ) -> None:
-    runtime = PrepareRuntime()
+    runtime = PrepareRuntime(authority_for_verified(verified))
     registered: list[str] = []
     plan_calls: list[dict[str, Any]] = []
 
@@ -797,7 +1139,8 @@ def write_different_verification(
             route="openalex",
             repository_url=None,
             commit=None,
-            openalex_id="https://openalex.org/W2741809807",
+            paper_locator=verified.artifacts.selected.paper_locator,
+            openalex_id="W2741809807",
             title="Deep Residual Learning for Image Recognition",
             publication_year=2016,
             cited_by_count=100000,
@@ -823,11 +1166,11 @@ def write_different_verification(
 @pytest.mark.parametrize(
     ("filename", "replacement", "message"),
     [
-        ("BASELINE_RESEARCH.json", "{}", "digest"),
+        ("BASELINE_RESEARCH.json", "{}", "BASELINE_RESEARCH.json"),
         (
             "BASELINE_DESIGN.md",
             "Selected candidate: `resnet-transfer`\nTraining strategy: `classical`\n",
-            "strategy",
+            "BASELINE_DESIGN.md",
         ),
     ],
 )
@@ -847,24 +1190,57 @@ async def test_run_baseline_rejects_changed_artifacts_without_prepare_side_effec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "difference", ["missing", "malformed", "route", "revision", "attempt"]
-)
+@pytest.mark.parametrize("difference", ["malformed", "route", "revision", "attempt"])
 async def test_run_baseline_rejects_changed_verification_without_prepare_side_effects(
     difference: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     verified = verified_fixture(tmp_path)
     verification_path = tmp_path / "BASELINE_RESEARCH_VERIFICATION.json"
-    if difference == "missing":
-        verification_path.unlink()
-    elif difference == "malformed":
+    if difference == "malformed":
         verification_path.write_text("{}", encoding="utf-8")
     else:
         write_different_verification(tmp_path, verified, difference)
 
     await assert_rejected_without_prepare_side_effects(
-        monkeypatch, tmp_path, verified, match="verification"
+        monkeypatch,
+        tmp_path,
+        verified,
+        match="BASELINE_RESEARCH_VERIFICATION.json",
     )
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_restores_missing_verification_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = verified_fixture(tmp_path)
+    (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").unlink()
+    registered: list[str] = []
+
+    monkeypatch.setattr(
+        baseline,
+        "_register_prepare_agent",
+        lambda *_args: registered.append("prepare"),
+    )
+
+    async def prepared(**_kwargs: Any) -> str:
+        return "prepared"
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", prepared)
+    result = await run_baseline(
+        PrepareRuntime(authority_for_verified(verified)),
+        workspace(tmp_path),
+        "eval",
+        "task",
+        None,
+        verified,
+    )
+
+    assert result == "prepared"
+    assert registered == ["prepare"]
+    assert (
+        tmp_path / "BASELINE_RESEARCH_VERIFICATION.json"
+    ).read_bytes() == verified.verification_bytes
 
 
 @pytest.mark.asyncio
@@ -872,7 +1248,7 @@ async def test_run_baseline_rejects_changed_verification_without_prepare_side_ef
     ("route", "revision"),
     [
         ("git", "a" * 40),
-        ("openalex", "https://openalex.org/W2741809807"),
+        ("openalex", "W2741809807"),
     ],
 )
 async def test_run_baseline_registers_only_after_check_and_enriches_task(
@@ -884,11 +1260,11 @@ async def test_run_baseline_registers_only_after_check_and_enriches_task(
     verified = verified_fixture(tmp_path, route)
     order: list[str] = []
     captured: dict[str, Any] = {}
-    original_assert = baseline.assert_verified_files
 
-    def checked(root: Path, value: VerifiedBaseline) -> None:
-        original_assert(root, value)
-        order.append("checked")
+    class RecordingAuthority(MemoryBaselineAuthorityStore):
+        async def load(self) -> SealedBaseline | None:
+            order.append("checked")
+            return await super().load()
 
     def registered(*_args: Any) -> None:
         order.append("registered")
@@ -897,16 +1273,21 @@ async def test_run_baseline_registers_only_after_check_and_enriches_task(
         captured.update(kwargs)
         return "prepared"
 
-    monkeypatch.setattr(baseline, "assert_verified_files", checked)
     monkeypatch.setattr(baseline, "_register_prepare_agent", registered)
     monkeypatch.setattr(baseline, "run_prepare_plan", fake_run_prepare_plan)
 
     result = await run_baseline(
-        PrepareRuntime(), workspace(tmp_path), "eval", "task", None, verified
+        PrepareRuntime(RecordingAuthority(authority_for_verified(verified).sealed)),
+        workspace(tmp_path),
+        "eval",
+        "task",
+        None,
+        verified,
     )
 
     assert result == "prepared"
     assert order == ["checked", "registered"]
+    assert callable(captured["assert_baseline"])
     assert captured["task"].startswith("task\n\nPlatform-verified baseline artifacts:")
     for filename in (
         "BASELINE_RESEARCH.json",
