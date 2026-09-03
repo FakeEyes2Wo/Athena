@@ -1,7 +1,7 @@
 # Authoritative Baseline Research Gate Design
 
 Date: 2026-09-02
-Status: implemented and verified
+Status: implemented; cache/schema hardening active under the 2026-09-03 amendment
 
 ## 1. Problem summary
 

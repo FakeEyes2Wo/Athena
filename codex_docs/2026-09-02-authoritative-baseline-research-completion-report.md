@@ -1,7 +1,7 @@
 # Authoritative Baseline Research Gate Completion Report
 
 Date: 2026-09-02
-Status: implemented and verified
+Status: reopened for cache/schema hardening after final whole-branch review
 
 Implementation commits:
 
