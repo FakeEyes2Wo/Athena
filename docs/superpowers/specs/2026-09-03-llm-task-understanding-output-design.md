@@ -136,16 +136,22 @@ encoded state budget of 12,000 characters. The builder does not use a runtime
 `assert` and does not replace the state with a three-key `truncated`/`head`/`tail`
 object.
 
-The builder constructs the six-key object in the order above and uses
-`model_dump(mode="json")` only for its nested Pydantic values. It serializes with
-`json.dumps(..., ensure_ascii=False, separators=(",", ":"))`, then replaces every
+The builder constructs the six-key object in the order above. Before projection,
+each explicitly designated free-text value is normalized with NFKC; Unicode
+whitespace (including control-category whitespace) is collapsed to single ASCII
+spaces and trimmed, and remaining `Cc`, `Cf`, and `Cs` code points are removed.
+Enums, booleans, integers, identifiers, and `null` are not normalized or
+coerced. It serializes with
+`json.dumps(..., ensure_ascii=True, separators=(",", ":"))`, then replaces every
 literal `<` and `>` in that JSON source with `\u003c` and `\u003e` respectively
 before inserting it between `<clarification_state>` and
-`</clarification_state>`. `json.loads` therefore restores the original
-user-controlled value, but a value such as `</clarification_state>` cannot close
-the delimiter in the prompt source. Fixed instructions refer to the "delimited
-JSON block" rather than spelling the closing delimiter, so the finished prompt
-contains exactly one literal `</clarification_state>` marker.
+`</clarification_state>`. ASCII JSON escaping keeps the complete prompt UTF-8
+encodable even when an exact non-free identifier contains an isolated surrogate;
+`json.loads` still restores that identifier. A value such as
+`</clarification_state>` cannot close the delimiter in the prompt source. Fixed
+instructions refer to the "delimited JSON block" rather than spelling the
+closing delimiter, so the finished prompt contains exactly one literal
+`</clarification_state>` marker.
 
 All budget accounting uses the length after that safe encoding. First build the
 complete normalized six-key state. If it is over the 12,000-character budget,
@@ -484,6 +490,8 @@ Backend tests prove:
   event kinds have no direct output projection;
 - the returned question/final step is schema-validated;
 - the pure bounded prompt contains only the enumerated canonical draft evidence,
+  applies NFKC/whitespace/control normalization only to designated free text,
+  uses `ensure_ascii=True` so isolated surrogates remain UTF-8 transport-safe,
   safely encodes `<`/`>`, rejects delimiter closure, retains the fixed six-key
   schema under deterministic compaction, stays within 20,000 characters, and is
   the exact `AgentContext.input_text` observed by the scripted provider;
