@@ -750,7 +750,7 @@ Expected: the full Vitest suite and production build pass. Commit only Task 7 pa
 - Produces: acceptance evidence and a clean `CURRENT.md` pointer state.
 - Integrates: `feat/llm-task-understanding-output` into `main` without stashing or overwriting unrelated main-worktree changes.
 
-- [ ] **Step 1: Update the user-facing boundary guide**
+- [x] **Step 1: Update the user-facing boundary guide**
 
 Add sections with these exact rules:
 
@@ -765,7 +765,7 @@ Add sections with these exact rules:
 
 Keep the guide's existing Q&A identity, stale reply, confirmation, retry, and card-placement rules.
 
-- [ ] **Step 2: Run backend formatting/static checks**
+- [x] **Step 2: Run backend formatting/static checks**
 
 Run:
 
@@ -802,7 +802,7 @@ git diff --check
 
 Expected: zero exit status. If the global diff check names an unrelated pre-existing file, record it and rerun `git diff --check` with every task-owned path explicitly; do not repair unrelated content.
 
-- [ ] **Step 3: Run focused and repository-wide Python verification**
+- [x] **Step 3: Run focused and repository-wide Python verification**
 
 Run in order:
 
@@ -821,7 +821,22 @@ uv run pytest -q
 
 Expected: no new failure. Record each command, timestamp, pass/fail/skip counts, duration, and warning text. Do not call a suite green if it exits non-zero.
 
-- [ ] **Step 4: Run complete frontend and Rust verification**
+Recorded 2026-09-04 (+08:00): the focused command exited zero with `184 passed,
+2 warnings` in 33.63s. The research command completed with `1179 passed,
+2 failed, 2 warnings` in 27m09s: the baseline-prompt contract is also
+independently reproducible on the main-line prompt, while the rolling-search
+timeout passed alone once in 26.65s and remains resource-sensitive. The complete
+repository command completed with `2636 passed, 5 failed, 4 warnings, 53 subtests
+passed` in 44m28s. Its five non-green results were the same rolling-search timeout,
+the existing baseline-prompt mismatch, two host-environment assertions requiring
+PowerShell 7 when only Windows PowerShell 5.1 is installed, and the existing
+`workspace_dialog_start_directory` Rust/Python protocol-inventory mismatch. None
+of those paths is changed by this feature. The two asyncio warning families are
+unclosed Windows proactor pipe/subprocess transports during teardown. These
+non-zero suites are recorded as non-green; focused task-owned verification remains
+green and no new feature regression was found.
+
+- [x] **Step 4: Run complete frontend and Rust verification**
 
 Run:
 
@@ -834,7 +849,13 @@ cargo check --manifest-path athena-gui/src-tauri/Cargo.toml
 
 Expected: all commands exit zero. Record Vitest file/test counts, build module count, Rust test count, and any pre-existing warning separately.
 
-- [ ] **Step 5: Audit scope, safety, and dead-code boundaries**
+Recorded 2026-09-04 (+08:00): Vitest exited zero with `18 files / 158 tests`;
+the production build exited zero after transforming 2761 modules; Cargo tests
+exited zero with 10 Rust tests; and `cargo check` exited zero. Cargo reported six
+pre-existing `dead_code` warnings in the clarification command adapter, and one
+WebSocket peer-closed message appeared during successful test teardown.
+
+- [x] **Step 5: Audit scope, safety, and dead-code boundaries**
 
 Run:
 
@@ -854,9 +875,20 @@ git diff --name-status main...HEAD
 
 Required evidence: no broad tool/lifecycle authority in the LLM module; the LLM adapter has no direct forwarding path from raw Agent/provider event fields to output and tests cover raw-event suppression plus known-secret summary redaction; all new task-understanding publications carry the atomic metadata; changed-file Ruff reports no unused imports or static violations, call-site inspection finds no obsolete task-owned helper, and only planned files changed.
 
-- [ ] **Step 6: Finish feature-branch guide, implementation checkboxes, and feature verification**
+Recorded 2026-09-04 (+08:00): the forbidden-authority/raw-event search returned no
+matches; the scoped-publication search confirmed the atomic session/scope/scope-id
+path and live-only/final-persist call sites; changed-file Ruff, Black, compileall,
+and diff checks passed. Branch name/status inspection contains only planned feature,
+test, guide, and plan paths. Independent frontend reviews found no blocker after
+the hydration rollback and scoped-session fixes; no obsolete task-owned helper or
+new direct raw Agent/provider forwarding path remains.
+
+- [x] **Step 6: Finish feature-branch guide, implementation checkboxes, and feature verification**
 
 After Steps 2-5 have fresh successful evidence, stage only the guide, this plan's completed implementation checkboxes, and any supporting-design changes made by this implementation. Confirm the supporting design's latest contract is committed and an ancestor of `HEAD`. Commit with `git commit -m "docs: document LLM task clarification output"`. This completes feature-branch verification; do not create the completion report or delete the plan yet.
+
+The latest supporting-design commit is `4a17db4` and is an ancestor of the verified
+feature head. No supporting-design amendment was needed during this final pass.
 
 - [ ] **Step 7: Integrate the verified feature branch into `main`**
 
