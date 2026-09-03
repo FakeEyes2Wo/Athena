@@ -95,6 +95,35 @@ describe("useWorkspace", () => {
     expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
   });
 
+  it("leaves the workspace unchanged when native browsing is cancelled", async () => {
+    bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
+    let cancelBrowse!: () => void;
+    bridgeMocks.selectWorkspaceDirectory.mockImplementation(
+      () => new Promise<null>((resolve) => {
+        cancelBrowse = () => resolve(null);
+      }),
+    );
+    const { result } = renderHook(() => useWorkspace());
+    await waitFor(() => expect(result.current.ready).toBe(true));
+
+    let browsing!: Promise<void>;
+    act(() => {
+      browsing = result.current.browse();
+    });
+    await waitFor(() => expect(result.current.browsing).toBe(true));
+    expect(result.current.currentRoot).toBe("/a");
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
+
+    await act(async () => {
+      cancelBrowse();
+      await browsing;
+    });
+
+    expect(result.current.browsing).toBe(false);
+    expect(result.current.currentRoot).toBe("/a");
+    expect(bridgeMocks.setProjectRoot).not.toHaveBeenCalled();
+  });
+
   it("prevents duplicate native dialogs while browsing", async () => {
     bridgeMocks.settingsGet.mockResolvedValue(settings("/a"));
     let finishBrowse!: (value: string | null) => void;

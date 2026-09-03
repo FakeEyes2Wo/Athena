@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { WorkspacePicker } from "../WorkspacePicker";
 
@@ -37,12 +37,26 @@ describe("WorkspacePicker", () => {
     expect(screen.getByRole("button", { name: label })).toBeDisabled();
   });
 
-  it("keeps a manually entered path when native browsing is cancelled", () => {
-    renderPicker({ onBrowse: vi.fn().mockResolvedValue(undefined) });
+  it("keeps a manually entered path while native browsing is cancelled", async () => {
+    let cancelBrowse!: () => void;
+    const onBrowse = vi.fn(
+      () => new Promise<null>((resolve) => {
+        cancelBrowse = () => resolve(null);
+      }),
+    );
+    const view = renderPicker({ onBrowse });
     const input = screen.getByRole("textbox");
     fireEvent.change(input, { target: { value: "D:/manual" } });
 
     fireEvent.click(screen.getByRole("button", { name: "浏览目录…" }));
+    view.rerender(<WorkspacePicker {...view.props} browsing />);
+
+    expect(onBrowse).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "浏览中…" })).toBeDisabled();
+    expect(input).toHaveValue("D:/manual");
+
+    await act(async () => cancelBrowse());
+    view.rerender(<WorkspacePicker {...view.props} browsing={false} />);
 
     expect(input).toHaveValue("D:/manual");
   });
