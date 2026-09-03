@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorMessage } from "../lib/errors";
 import { setProjectRoot, settingsGet } from "../lib/tauri-bridge";
+import { selectWorkspaceDirectory } from "../lib/workspaceDialog";
 import {
   addRecentRoot,
   loadRecentRoots,
@@ -21,12 +22,15 @@ export interface WorkspaceState {
   pickerOpen: boolean;
   /** True while a project switch is in flight. */
   switching: boolean;
+  /** True while the native directory picker is open. */
+  browsing: boolean;
   /** Last switch/load error message, if any. */
   error: string | null;
 }
 
 export interface WorkspaceActions {
   switchTo(path: string, sessionId?: string): Promise<void>;
+  browse(): Promise<void>;
   openPicker(): void;
   closePicker(): void;
 }
@@ -45,6 +49,8 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
   const [ready, setReady] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(true);
   const [switching, setSwitching] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
+  const browsingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -92,6 +98,22 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
     }
   }, []);
 
+  const browse = useCallback(async () => {
+    if (browsingRef.current || switching) return;
+    browsingRef.current = true;
+    setBrowsing(true);
+    setError(null);
+    try {
+      const selected = await selectWorkspaceDirectory(currentRoot);
+      if (selected) await switchTo(selected);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      browsingRef.current = false;
+      setBrowsing(false);
+    }
+  }, [currentRoot, switching, switchTo]);
+
   const openPicker = useCallback(() => setPickerOpen(true), []);
   const closePicker = useCallback(() => setPickerOpen(false), []);
 
@@ -103,11 +125,13 @@ export function useWorkspace(): WorkspaceState & WorkspaceActions {
       ready,
       pickerOpen,
       switching,
+      browsing,
       error,
       switchTo,
+      browse,
       openPicker,
       closePicker,
     }),
-    [currentRoot, recentRoots, requestedSessionId, ready, pickerOpen, switching, error, switchTo, openPicker, closePicker],
+    [currentRoot, recentRoots, requestedSessionId, ready, pickerOpen, switching, browsing, error, switchTo, browse, openPicker, closePicker],
   );
 }

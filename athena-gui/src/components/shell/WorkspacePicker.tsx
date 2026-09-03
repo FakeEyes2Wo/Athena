@@ -9,7 +9,9 @@ interface WorkspacePickerProps {
   recentRoots: string[];
   error: string | null;
   switching: boolean;
+  browsing: boolean;
   onSelect(path: string): void;
+  onBrowse(): void;
   onContinue(): void;
 }
 
@@ -19,7 +21,9 @@ export function WorkspacePicker({
   recentRoots,
   error,
   switching,
+  browsing,
   onSelect,
+  onBrowse,
   onContinue,
 }: WorkspacePickerProps) {
   const [draft, setDraft] = useState("");
@@ -83,6 +87,13 @@ export function WorkspacePicker({
 
         <div className={styles.section}>
           <span className={styles.label}>打开其他目录</span>
+          <button
+            className="btn btn--subtle"
+            onClick={onBrowse}
+            disabled={browsing || switching}
+          >
+            {browsing ? "浏览中…" : "浏览目录…"}
+          </button>
           <div className={styles.row}>
             <input
               className="input"

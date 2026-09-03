@@ -20,6 +20,7 @@
     "@fontsource/geist-mono": "^5.3.0",
     "@monaco-editor/react": "^4.7.0",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-shell": "^2",
     "d3-dag": "^1.2.2",
     "lucide-react": "^1.31.0",

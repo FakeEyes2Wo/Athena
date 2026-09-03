@@ -37,7 +37,9 @@ function App() {
         recentRoots={workspace.recentRoots}
         error={workspace.error}
         switching={workspace.switching}
+        browsing={workspace.browsing}
         onSelect={(path) => void workspace.switchTo(path)}
+        onBrowse={() => void workspace.browse()}
         onContinue={workspace.closePicker}
       />
     );
