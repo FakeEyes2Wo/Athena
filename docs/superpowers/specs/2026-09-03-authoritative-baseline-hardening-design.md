@@ -71,27 +71,27 @@ The interface has three operations:
 
 ```python
 class BaselineAuthorityStore(Protocol):
-    async def load(self, key: BaselineAuthorityKey) -> SealedBaseline | None: ...
+    async def load(self) -> SealedBaseline | None: ...
     async def seal(
         self,
-        key: BaselineAuthorityKey,
         bundle: VerifiedBaselineBundle,
         *,
         expected_generation: int | None,
     ) -> SealedBaseline: ...
     async def attest_prepare(
         self,
-        key: BaselineAuthorityKey,
         evidence: PrepareAttestation,
         *,
         expected_generation: int,
     ) -> SealedBaseline: ...
 ```
 
-`BaselineAuthorityKey` contains a stable controller-issued workspace identity, not
-task text or a user-provided path. `VerifiedBaselineBundle` contains the exact bytes of
-the research JSON, design Markdown, canonical verification JSON, and their parsed
-verification. `SealedBaseline` adds a monotonic generation and optional matching
+The injected capability is already bound by the controller to one stable workspace
+identity. PREPARE never receives or constructs an authority key. This removes a public
+parameter and prevents task text or an agent-controlled path from becoming an identity.
+`VerifiedBaselineBundle` contains the exact bytes of the research JSON, design
+Markdown, canonical verification JSON, and their parsed verification.
+`SealedBaseline` adds a monotonic generation and optional matching
 `PrepareAttestation`. `PrepareAttestation` binds the verified research/design digests
 to the accepted baseline commit and trusted evaluation reference.
 
@@ -140,7 +140,7 @@ after sealing can reconstruct a missing mirror from authority.
 
 ### Restart
 
-1. Derive the controller-issued authority key and load only from authority.
+1. Load only from the controller-bound authority capability.
 2. Validate the sealed record, both hashes, route proof, and generation.
 3. If the workspace verification mirror is missing, reconstruct it from the canonical
    bytes. If any present research, design, or verification file differs, emit a
