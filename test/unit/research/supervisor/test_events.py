@@ -516,6 +516,7 @@ async def test_supervisor_output_preserves_generic_scope_and_identity(tmp_path) 
     runtime = ResearchRuntime(project_root=tmp_path)
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+    artifact_ref = await runtime.store.put_text("artifact payload")
 
     await runtime.events.publish_from_supervisor(
         "output",
@@ -524,6 +525,10 @@ async def test_supervisor_output_preserves_generic_scope_and_identity(tmp_path) 
             "channel": "text",
             "text": "api_key=secret-value",
             "message_id": "message-1",
+            "plan": "plan-1",
+            "tool": "report_task_understanding",
+            "artifact_ref": artifact_ref,
+            "truncated": True,
             "session_id": "session-1",
             "scope": "task_understanding",
             "scope_id": "draft-1",
@@ -532,12 +537,16 @@ async def test_supervisor_output_preserves_generic_scope_and_identity(tmp_path) 
 
     event = next(payload for kind, payload in seen if kind == "output")
     assert event["message_id"] == "message-1"
+    assert event["plan"] == "plan-1"
+    assert event["tool"] == "report_task_understanding"
+    assert event["artifact_ref"] == artifact_ref
+    assert event["truncated"] is True
     assert (
         event["session_id"],
         event["scope"],
         event["scope_id"],
     ) == ("session-1", "task_understanding", "draft-1")
-    assert "secret-value" not in event["text"]
+    assert event["text"] == "api_key=[REDACTED]"
 
 
 @pytest.mark.asyncio
