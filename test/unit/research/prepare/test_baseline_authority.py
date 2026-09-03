@@ -341,6 +341,40 @@ def test_authority_values_require_exact_nested_types() -> None:
             build()
 
 
+def test_bundle_revalidates_and_copies_list_backed_verification_attempts() -> None:
+    source = _verification()
+    mutable_attempts = list(source.attempts)
+    unvalidated = source.model_copy(update={"attempts": mutable_attempts})
+
+    bundle = replace(_bundle(), verification=unvalidated)
+    mutable_attempts.append(
+        VerificationAttempt(route="openalex", success=False, diagnostic="tampered")
+    )
+
+    assert isinstance(bundle.verification.attempts, tuple)
+    assert len(bundle.verification.attempts) == 1
+
+
+@pytest.mark.parametrize(
+    "attempts",
+    [
+        (),
+        (
+            VerificationAttempt(
+                route="openalex", success=False, diagnostic="not qualified"
+            ),
+        ),
+    ],
+)
+def test_bundle_rejects_unvalidated_invalid_verification_attempts(
+    attempts: tuple[VerificationAttempt, ...],
+) -> None:
+    unvalidated = _verification().model_copy(update={"attempts": attempts})
+
+    with pytest.raises(BaselineAuthorityError, match="verification"):
+        replace(_bundle(), verification=unvalidated)
+
+
 @pytest.mark.asyncio
 async def test_prepare_attestation_advances_the_sealed_generation() -> None:
     authority = MemoryBaselineAuthorityStore()

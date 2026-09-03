@@ -59,6 +59,15 @@ class VerifiedBaselineBundle:
             raise BaselineAuthorityError(
                 "verification must be exactly BaselineVerification"
             )
+        try:
+            verification = BaselineVerification.model_validate(
+                self.verification.model_dump(mode="python", warnings=False)
+            )
+        except Exception as exc:  # noqa: BLE001 - external trust boundary
+            raise BaselineAuthorityError(
+                "verification must satisfy the baseline verification contract"
+            ) from exc
+        object.__setattr__(self, "verification", verification)
         object.__setattr__(
             self,
             "research_bytes",
