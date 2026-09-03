@@ -16,8 +16,11 @@ from athena.research.clarification.generator import (
     ClarificationGenerator,
     ClarificationQuestionStep,
     ClarificationStep,
+    ClarificationTurnResult,
     DeterministicClarificationGenerator,
-    generate_step,
+    PublicProgressSink,
+    generate_turn,
+    publish_public_progress,
 )
 from athena.research.clarification.models import ClarificationDraft
 from athena.research.clarification.persistence import ClarificationStore
@@ -56,6 +59,9 @@ class HumanBroker(Protocol):
         ...
 
 
+CLARIFICATION_FAILURE_NOTICE = "Task understanding failed. Retry to continue."
+
+
 @dataclass(frozen=True)
 class _ControllerOptions:
     session_id: str
@@ -75,11 +81,13 @@ class ClarificationController:
         session_id: str = "default",
         id_factory: Callable[[str], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        progress_sink: PublicProgressSink | None = None,
     ) -> None:
         """Bind the three workflow ports and stable identity policy."""
         self._store = store
         self._broker = broker
         self._generator = generator
+        self._progress_sink = progress_sink
         self._options = _ControllerOptions(
             session_id,
             id_factory or (lambda prefix: f"{prefix}_{uuid4().hex[:12]}"),
@@ -114,17 +122,31 @@ class ClarificationController:
         if draft.pending_request is not None:
             draft = await self._recover_pending(draft)
         while draft.status == "CLARIFYING":
-            if draft.questions_asked >= MAX_QUESTIONS:
-                return self._save(best_final(draft, self._options.clock()))
             try:
-                step = await generate_step(self._generator, draft)
+                turn = await generate_turn(self._generator, draft)
             except Exception:  # noqa: BLE001
                 # Injected generators cross the model/provider boundary; any
                 # provider failure becomes a durable, retryable FAILED draft.
-                return self._save(fail(draft, self._options.clock()))
-            if isinstance(step, ClarificationFinalStep):
-                return self._save(finalize(draft, step, self._options.clock()))
-            draft = await self._ask(draft, step)
+                failed = self._save(fail(draft, self._options.clock()))
+                await publish_public_progress(
+                    self._progress_sink,
+                    summary=CLARIFICATION_FAILURE_NOTICE,
+                    stage="failure",
+                    session_id=failed.session_id,
+                    scope_id=failed.draft_id,
+                    source="agent",
+                    persist=True,
+                )
+                return failed
+            if isinstance(turn.step, ClarificationFinalStep):
+                ready = self._save(finalize(draft, turn.step, self._options.clock()))
+                await self._publish_update(ready, turn)
+                return ready
+            if draft.questions_asked >= MAX_QUESTIONS:
+                ready = self._save(best_final(draft, self._options.clock()))
+                await self._publish_update(ready, turn)
+                return ready
+            draft = await self._ask(draft, turn.step, turn)
         return draft
 
     async def get(self, draft_id: str) -> ClarificationDraft:
@@ -180,10 +202,14 @@ class ClarificationController:
         return self._save(cancel_draft(draft, self._options.clock()))
 
     async def _ask(
-        self, draft: ClarificationDraft, step: ClarificationQuestionStep
+        self,
+        draft: ClarificationDraft,
+        step: ClarificationQuestionStep,
+        turn: ClarificationTurnResult,
     ) -> ClarificationDraft:
         request = self._request(draft, step)
         draft = self._save(set_pending(draft, request, self._options.clock()))
+        await self._publish_update(draft, turn)
         try:
             outcome = await self._broker.ask(request)
         except Exception:  # noqa: BLE001
@@ -202,6 +228,23 @@ class ClarificationController:
             settle_answer(
                 draft, request, outcome, self._options.clock(), field=step.field
             )
+        )
+
+    async def _publish_update(
+        self, draft: ClarificationDraft, turn: ClarificationTurnResult
+    ) -> None:
+        """Publish a model summary after its matching draft transition is saved."""
+        update = turn.public_update
+        if update is None:
+            return
+        await publish_public_progress(
+            self._progress_sink,
+            summary=update.summary,
+            stage=update.stage,
+            session_id=draft.session_id,
+            scope_id=draft.draft_id,
+            source="agent",
+            persist=True,
         )
 
     async def _recover_pending(self, draft: ClarificationDraft) -> ClarificationDraft:
@@ -265,6 +308,7 @@ def _matching_outcome(
 
 
 __all__ = [
+    "CLARIFICATION_FAILURE_NOTICE",
     "MAX_QUESTIONS",
     "ClarificationController",
     "ClarificationControllerError",

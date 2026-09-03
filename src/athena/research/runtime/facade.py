@@ -626,6 +626,11 @@ class ResearchRuntime:
         plan: str | None = None,
         tool: str | None = None,
         artifact_ref: ArtifactRef | None = None,
+        persist: bool = True,
+        message_id: str | None = None,
+        session_id: str | None = None,
+        scope: str | None = None,
+        scope_id: str | None = None,
     ) -> None:
         """Publish one human-readable runtime output event."""
         await self.events.publish_output(
@@ -635,6 +640,11 @@ class ResearchRuntime:
             plan=plan,
             tool=tool,
             artifact_ref=artifact_ref,
+            persist=persist,
+            message_id=message_id,
+            session_id=session_id,
+            scope=scope,
+            scope_id=scope_id,
         )
 
     async def project_command_result(

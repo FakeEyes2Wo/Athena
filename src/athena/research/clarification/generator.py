@@ -1,10 +1,12 @@
 """Clarification generation contract and deterministic production policy."""
 
 import inspect
+import logging
+import unicodedata
 from collections.abc import Awaitable
 from typing import Annotated, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from athena.core.human_request import HumanChoice, validate_choices
 from athena.research.clarification.models import (
@@ -13,6 +15,39 @@ from athena.research.clarification.models import (
     UnresolvedItem,
 )
 from athena.research.clarification.requirements import required_critical_fields
+
+logger = logging.getLogger(__name__)
+
+ProgressStage = Literal["analysis", "question", "synthesis"]
+ProgressSinkStage = ProgressStage | Literal["failure"]
+ProgressSource = Literal["agent", "tool"]
+
+
+def normalize_public_summary(value: object) -> str:
+    """Normalize text that is explicitly allowed to cross the public boundary."""
+    if not isinstance(value, str):
+        raise ValueError("public summary must be a string")
+    normalized = unicodedata.normalize("NFKC", value)
+    printable = "".join(
+        " " if char.isspace() else char
+        for char in normalized
+        if char.isspace() or unicodedata.category(char) not in {"Cc", "Cf", "Cs"}
+    )
+    return " ".join(printable.split())
+
+
+class PublicProgress(BaseModel):
+    """A short, explicitly public clarification progress update."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    stage: ProgressStage
+    summary: Annotated[str, Field(min_length=1, max_length=600)]
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _normalize_summary(cls, value: object) -> str:
+        return normalize_public_summary(value)
 
 
 class ClarificationQuestionStep(BaseModel):
@@ -56,12 +91,47 @@ ClarificationStep = Annotated[
 ]
 
 
+class ClarificationModelOutput(BaseModel):
+    """Strict model envelope returned by an LLM clarification generator."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    public_update: PublicProgress
+    step: ClarificationStep
+
+
+class ClarificationTurnResult(BaseModel):
+    """Normalized result consumed by the clarification controller."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    step: ClarificationStep
+    public_update: PublicProgress | None = None
+
+
+class PublicProgressSink(Protocol):
+    async def __call__(
+        self,
+        *,
+        summary: str,
+        stage: ProgressSinkStage,
+        session_id: str,
+        scope_id: str,
+        source: ProgressSource,
+        persist: bool,
+    ) -> None: ...
+
+
 class ClarificationGenerator(Protocol):
     """Produce one validated question or final synthesis from a draft."""
 
     def next_step(
         self, draft: ClarificationDraft
-    ) -> Awaitable[ClarificationStep] | ClarificationStep:
+    ) -> (
+        Awaitable[ClarificationStep | ClarificationModelOutput]
+        | ClarificationStep
+        | ClarificationModelOutput
+    ):
         """Return the next policy decision for the current evidence."""
         ...
 
@@ -212,24 +282,90 @@ async def generate_step(
     generator: ClarificationGenerator | Any, draft: ClarificationDraft
 ) -> ClarificationStep:
     """Invoke and validate one generator step at the policy boundary."""
+    return (await generate_turn(generator, draft)).step
+
+
+async def generate_turn(
+    generator: ClarificationGenerator | Any, draft: ClarificationDraft
+) -> ClarificationTurnResult:
+    """Invoke a generator and normalize legacy and model-envelope results."""
     method = getattr(generator, "next_step", generator)
     result = method(draft)
     if inspect.isawaitable(result):
         result = await result
-    if isinstance(result, (ClarificationQuestionStep, ClarificationFinalStep)):
+    if isinstance(result, ClarificationTurnResult):
         return result
+    if isinstance(result, ClarificationModelOutput):
+        return ClarificationTurnResult(
+            step=result.step, public_update=result.public_update
+        )
+    if isinstance(result, dict) and {
+        "public_update",
+        "step",
+    }.issubset(result):
+        output = ClarificationModelOutput.model_validate(result)
+        return ClarificationTurnResult(
+            step=output.step, public_update=output.public_update
+        )
+    if isinstance(result, (ClarificationQuestionStep, ClarificationFinalStep)):
+        return ClarificationTurnResult(step=result)
     if isinstance(result, dict) and result.get("kind") == "question":
-        return ClarificationQuestionStep.model_validate(result)
+        return ClarificationTurnResult(
+            step=ClarificationQuestionStep.model_validate(result)
+        )
     if isinstance(result, dict) and result.get("kind") == "final":
-        return ClarificationFinalStep.model_validate(result)
+        return ClarificationTurnResult(
+            step=ClarificationFinalStep.model_validate(result)
+        )
+    if isinstance(result, dict):
+        # Validate unknown/malformed step kinds through the strict discriminated union.
+        ClarificationModelOutput.model_validate(
+            {"public_update": {"stage": "analysis", "summary": "safe"}, "step": result}
+        )
     raise TypeError(f"generator returned {type(result).__name__}")
+
+
+async def publish_public_progress(
+    sink: PublicProgressSink | None,
+    *,
+    summary: str,
+    stage: ProgressSinkStage,
+    session_id: str,
+    scope_id: str,
+    source: ProgressSource,
+    persist: bool,
+) -> None:
+    """Best-effort display publication that never mutates canonical state."""
+    if sink is None:
+        return
+    try:
+        await sink(
+            summary=summary,
+            stage=stage,
+            session_id=session_id,
+            scope_id=scope_id,
+            source=source,
+            persist=persist,
+        )
+    except Exception:
+        logger.exception("public progress sink failed")
 
 
 __all__ = [
     "ClarificationFinalStep",
     "ClarificationGenerator",
+    "ClarificationModelOutput",
     "ClarificationQuestionStep",
     "ClarificationStep",
+    "ClarificationTurnResult",
     "DeterministicClarificationGenerator",
     "generate_step",
+    "generate_turn",
+    "normalize_public_summary",
+    "ProgressSinkStage",
+    "ProgressSource",
+    "ProgressStage",
+    "PublicProgress",
+    "PublicProgressSink",
+    "publish_public_progress",
 ]

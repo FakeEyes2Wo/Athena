@@ -16,6 +16,12 @@ def supervisor_output(
         text=str(payload.get("text", "")),
         plan=payload.get("plan"),
         tool=payload.get("tool"),
+        artifact_ref=payload.get("artifact_ref"),
+        truncated=payload.get("truncated", False),
+        message_id=payload.get("message_id"),
+        session_id=payload.get("session_id"),
+        scope=payload.get("scope"),
+        scope_id=payload.get("scope_id"),
     )
     return event.model_dump(mode="json")
 

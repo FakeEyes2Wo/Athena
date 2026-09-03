@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
@@ -136,6 +137,40 @@ def test_output_sequence_is_process_local_and_monotonic(tmp_path) -> None:
     second = projector.output(source="supervisor", channel="text", text="two")
 
     assert (first.seq, second.seq) == (1, 2)
+    assert (first.session_id, first.scope, first.scope_id) == (None, None, None)
+
+
+def test_output_scope_metadata_is_atomic_and_redacted(tmp_path) -> None:
+    projector = EventProjector(LocalArtifactStore(tmp_path / "artifacts"))
+    event = projector.output(
+        source="agent",
+        channel="text",
+        text="api_key=secret-value",
+        session_id="session-1",
+        scope="task_understanding",
+        scope_id="draft-1",
+    )
+
+    assert (event.session_id, event.scope, event.scope_id) == (
+        "session-1",
+        "task_understanding",
+        "draft-1",
+    )
+    assert "secret-value" not in event.text
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"session_id": "session-1"},
+        {"scope": "task_understanding", "scope_id": "draft-1"},
+        {"session_id": "session-1", "scope": "", "scope_id": "draft-1"},
+    ],
+)
+def test_output_rejects_partial_scope_metadata(tmp_path, metadata) -> None:
+    projector = EventProjector(LocalArtifactStore(tmp_path / "artifacts"))
+    with pytest.raises(ValidationError):
+        projector.output(source="agent", channel="text", text="safe", **metadata)
 
 
 def test_state_event_is_a_complete_replaceable_snapshot() -> None:
@@ -474,6 +509,60 @@ async def test_supervisor_bare_output_without_text_still_projects(tmp_path) -> N
     assert len(outputs) == 1
     event = OutputEvent.model_validate(outputs[0])
     assert event.text == ""
+
+
+@pytest.mark.asyncio
+async def test_supervisor_output_preserves_generic_scope_and_identity(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    seen: list[tuple[str, dict]] = []
+    runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
+    artifact_ref = await runtime.store.put_text("artifact payload")
+
+    await runtime.events.publish_from_supervisor(
+        "output",
+        {
+            "source": "agent",
+            "channel": "text",
+            "text": "api_key=secret-value",
+            "message_id": "message-1",
+            "plan": "plan-1",
+            "tool": "report_task_understanding",
+            "artifact_ref": artifact_ref,
+            "truncated": True,
+            "session_id": "session-1",
+            "scope": "task_understanding",
+            "scope_id": "draft-1",
+        },
+    )
+
+    event = next(payload for kind, payload in seen if kind == "output")
+    assert event["message_id"] == "message-1"
+    assert event["plan"] == "plan-1"
+    assert event["tool"] == "report_task_understanding"
+    assert event["artifact_ref"] == artifact_ref
+    assert event["truncated"] is True
+    assert (
+        event["session_id"],
+        event["scope"],
+        event["scope_id"],
+    ) == ("session-1", "task_understanding", "draft-1")
+    assert event["text"] == "api_key=[REDACTED]"
+
+
+@pytest.mark.asyncio
+async def test_supervisor_output_rejects_partial_scope_metadata(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    with pytest.raises(ValidationError):
+        await runtime.events.publish_from_supervisor(
+            "output",
+            {
+                "source": "agent",
+                "channel": "text",
+                "text": "safe",
+                "session_id": "session-1",
+            },
+        )
 
 
 def test_state_projection_reads_successes_and_sota_from_research_tree(tmp_path) -> None:
