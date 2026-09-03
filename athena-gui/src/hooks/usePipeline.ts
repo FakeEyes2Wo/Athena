@@ -507,7 +507,11 @@ export function usePipeline(
   const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
   const runStarted = useRef(false);
-  const resumeInFlightRef = useRef<Promise<void> | null>(null);
+  const resumeInFlightRef = useRef<{
+    epoch: number;
+    sessionId: string;
+    promise: Promise<void>;
+  } | null>(null);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
   const settlingRequestRef = useRef<string | null>(null);
@@ -1071,10 +1075,24 @@ export function usePipeline(
   // User actions.
 
   const continueCurrentRun = useCallback((): Promise<void> => {
-    if (resumeInFlightRef.current) return resumeInFlightRef.current;
-    const request = (async () => {
-      try {
-        await resumeSearch();
+    const epoch = sessionRequestEpochRef.current;
+    const sessionId = activeSessionIdRef.current;
+    const inFlight = resumeInFlightRef.current;
+    if (inFlight?.epoch === epoch && inFlight.sessionId === sessionId) {
+      return inFlight.promise;
+    }
+    const isCurrentSession = () =>
+      sessionRequestEpochRef.current === epoch && activeSessionIdRef.current === sessionId;
+    let operation: Promise<unknown>;
+    try {
+      operation = resumeSearch();
+    } catch (err) {
+      if (isCurrentSession()) appendError(errorMessage(err));
+      return Promise.reject(err);
+    }
+    const request = operation
+      .then(() => {
+        if (!isCurrentSession()) return;
         runStarted.current = true;
         setViewModel((prev) => ({
           ...prev,
@@ -1082,14 +1100,16 @@ export function usePipeline(
           resumeAvailable: false,
           resumeReason: null,
         }));
-      } catch (err) {
-        appendError(errorMessage(err));
+      }, (err) => {
+        if (isCurrentSession()) appendError(errorMessage(err));
         throw err;
-      } finally {
-        resumeInFlightRef.current = null;
-      }
-    })();
-    resumeInFlightRef.current = request;
+      })
+      .finally(() => {
+        if (resumeInFlightRef.current?.promise === request) {
+          resumeInFlightRef.current = null;
+        }
+      });
+    resumeInFlightRef.current = { epoch, sessionId, promise: request };
     return request;
   }, [appendError]);
 

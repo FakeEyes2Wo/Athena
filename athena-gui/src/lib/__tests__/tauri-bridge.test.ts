@@ -94,6 +94,30 @@ describe("clarification RPC normalization", () => {
     expect(invokeMock).toHaveBeenCalledWith("resume_search", undefined);
   });
 
+  it("uses the WebSocket resume RPC outside the native shell", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(window, "__TAURI_INTERNALS__");
+    const call = vi.fn().mockResolvedValue({});
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: undefined,
+    });
+    delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    vi.resetModules();
+    vi.doMock("../ws-backend", () => ({ wsBackend: { call } }));
+
+    try {
+      const browserBridge = await import("../tauri-bridge");
+      await browserBridge.resumeSearch();
+
+      expect(call).toHaveBeenCalledWith("resume", {});
+      expect(invokeMock).not.toHaveBeenCalled();
+    } finally {
+      if (descriptor) Object.defineProperty(window, "__TAURI_INTERNALS__", descriptor);
+      vi.doUnmock("../ws-backend");
+      vi.resetModules();
+    }
+  });
+
   it("clarification methods normalize draft_id to draftId", () => {
     taskClarificationStart("predict churn");
     expect(invokeMock).toHaveBeenCalledWith("task_clarification_start", { task: "predict churn" });

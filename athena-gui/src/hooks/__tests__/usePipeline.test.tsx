@@ -238,6 +238,19 @@ describe("usePipeline", () => {
     expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith("continue research");
   });
 
+  it("does not treat continue three more attempts as the resume command", async () => {
+    const { result } = renderHook(() => usePipeline());
+
+    await act(async () => {
+      await result.current.sendPrompt("continue three more attempts");
+    });
+
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+    expect(bridgeMocks.taskClarificationStart).toHaveBeenCalledWith(
+      "continue three more attempts",
+    );
+  });
+
   it("shares one in-flight resume request across rapid continuation submissions", async () => {
     let resolveResume: (() => void) | undefined;
     bridgeMocks.resumeSearch.mockImplementation(
@@ -266,6 +279,84 @@ describe("usePipeline", () => {
     });
   });
 
+  it("does not let an earlier session's completed resume change a new session", async () => {
+    let resolveOldResume: (() => void) | undefined;
+    let resolveNewResume: (() => void) | undefined;
+    bridgeMocks.resumeSearch
+      .mockImplementationOnce(
+        () => new Promise<void>((resolve) => { resolveOldResume = resolve; }),
+      )
+      .mockImplementationOnce(
+        () => new Promise<void>((resolve) => { resolveNewResume = resolve; }),
+      );
+    const { result } = renderHook(() => usePipeline());
+
+    let oldResume: Promise<void>;
+    act(() => {
+      oldResume = result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      result.current.newSession();
+      await Promise.resolve();
+    });
+    const newSessionId = result.current.currentSessionId;
+    let newResume: Promise<void>;
+    act(() => {
+      newResume = result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveOldResume?.();
+      await oldResume!;
+    });
+    expect(result.current.currentSessionId).toBe(newSessionId);
+    expect(result.current.viewModel.status).toBe("idle");
+    expect(result.current.viewModel.resumeAvailable).toBe(false);
+
+    await act(async () => {
+      resolveNewResume?.();
+      await newResume!;
+    });
+    expect(result.current.viewModel.status).toBe("running");
+  });
+
+  it("does not let an earlier session's rejected resume poison a switched session", async () => {
+    let rejectOldResume: ((reason?: unknown) => void) | undefined;
+    bridgeMocks.resumeSearch
+      .mockImplementationOnce(
+        () => new Promise<void>((_resolve, reject) => { rejectOldResume = reject; }),
+      )
+      .mockResolvedValueOnce({ ok: true });
+    const { result } = renderHook(() => usePipeline());
+
+    let oldResume: Promise<void>;
+    act(() => {
+      oldResume = result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.switchSession("fresh");
+    });
+    expect(result.current.currentSessionId).toBe("fresh");
+
+    await act(async () => {
+      rejectOldResume?.(new Error("old session failed"));
+      await oldResume!.catch(() => undefined);
+    });
+    expect(result.current.viewModel.status).toBe("idle");
+    expect(result.current.viewModel.messages.filter((message) => message.kind === "error")).toHaveLength(0);
+
+    await act(async () => {
+      await result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(2);
+    expect(result.current.viewModel.status).toBe("running");
+  });
+
   it("keeps existing history when a resumable run rejects continuation", async () => {
     bridgeMocks.resumeSearch.mockRejectedValue(new Error("nothing to resume"));
     const { result } = renderHook(() => usePipeline());
@@ -286,7 +377,9 @@ describe("usePipeline", () => {
     });
 
     expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+    expect(result.current.viewModel.messages).toHaveLength(history.length + 1);
     expect(result.current.viewModel.messages.slice(0, history.length)).toEqual(history);
+    expect(result.current.viewModel.messages.filter((message) => message.kind === "error")).toHaveLength(1);
     expect(result.current.viewModel.messages[result.current.viewModel.messages.length - 1]).toMatchObject({ kind: "error", content: "nothing to resume" });
     expect(result.current.viewModel.status).toBe("error");
   });

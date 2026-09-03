@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const eventHandlers: Array<(event: { kind: string; data: Record<string, unknown> }) => void> = [];
@@ -54,6 +54,7 @@ vi.mock("../../lib/tauri-bridge", () => ({
 
 import { sendControl, sessionSwitch, startSearch, taskClarificationStart } from "../../lib/tauri-bridge";
 import { usePipeline } from "../usePipeline";
+import { RunControls } from "../../components/conversation/RunControls";
 
 async function renderHydratedPipeline() {
   const hook = renderHook(() => usePipeline());
@@ -140,6 +141,18 @@ describe("usePipeline event mapping", () => {
     expect(result.current.viewModel.resumeAvailable).toBe(false);
     expect(result.current.viewModel.resumeReason).toBeNull();
     expect(result.current.runActive).toBe(false);
+
+    render(
+      <RunControls
+        viewModel={result.current.viewModel}
+        active={result.current.runActive}
+        onPause={() => {}}
+        onResume={() => {}}
+        onStop={() => {}}
+        onToggleMode={() => {}}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "继续" })).toBeDisabled();
   });
 
   it("keeps an interrupted restored PREPARE session actionable", async () => {
