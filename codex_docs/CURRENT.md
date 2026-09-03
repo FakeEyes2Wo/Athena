@@ -1,9 +1,12 @@
 # Current Athena Work
 
 Active implementation plan:
+- `docs/superpowers/plans/2026-09-03-frontend-switch-integration-proof.md`
+
+Parallel implementation plan:
 - `docs/superpowers/plans/2026-09-02-authoritative-baseline-research-gate.md`
 
-Design spec:
+Parallel design spec:
 - `docs/superpowers/specs/2026-09-02-authoritative-baseline-research-design.md`
 
 Paused implementation plan:
