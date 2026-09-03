@@ -36,6 +36,25 @@ function activeClarificationPreviewIndex(messages: UIMessage[]): number {
   return -1;
 }
 
+function clarificationSegmentKey(segment: Extract<MessageSegment, { kind: "clarification" }>): string {
+  const first = segment.items[0];
+  const id = first?.id?.trim();
+  if (id) return `clarification-${id}`;
+
+  // UIMessage.id is required, but retain a deterministic, index-free fallback
+  // for malformed restored records so nearby inserts do not remount this log.
+  const fingerprint = [
+    first?.role,
+    first?.kind,
+    first?.source,
+    first?.channel,
+    first?.tool,
+    first?.plan,
+    first?.content,
+  ];
+  return `clarification-fallback-${JSON.stringify(fingerprint)}`;
+}
+
 /** Group ideator lanes and backend output emitted during active task understanding. */
 function segmentMessages(messages: UIMessage[]): MessageSegment[] {
   const segments: MessageSegment[] = [];
@@ -222,7 +241,7 @@ export function MessageList({
         if (segment.kind === "clarification") {
           return (
             <section
-              key={`clarification-${index}`}
+              key={clarificationSegmentKey(segment)}
               className={styles["clarification-activity"]}
               role="log"
               aria-label="任务理解过程"

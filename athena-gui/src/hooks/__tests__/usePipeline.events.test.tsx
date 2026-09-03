@@ -354,9 +354,20 @@ describe("usePipeline event mapping", () => {
           tool: "inspect_dataset",
         },
       });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 5,
+          source: "tool",
+          channel: "stderr",
+          text: "validation failed",
+          message_id: "tool-error-1",
+          tool: "inspect_dataset",
+        },
+      });
     });
 
-    expect(result.current.viewModel.messages).toHaveLength(5);
+    expect(result.current.viewModel.messages).toHaveLength(6);
     expect(result.current.viewModel.messages[2]).toMatchObject({
       id: "msg-1",
       content: "正在生成假设",
@@ -374,6 +385,13 @@ describe("usePipeline event mapping", () => {
       source: "tool",
       tool: "inspect_dataset",
       channel: "stdout",
+    });
+    expect(result.current.viewModel.messages[5]).toMatchObject({
+      id: "tool-error-1",
+      content: "validation failed",
+      source: "tool",
+      tool: "inspect_dataset",
+      channel: "stderr",
     });
   });
 
