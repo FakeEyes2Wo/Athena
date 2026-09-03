@@ -1517,6 +1517,145 @@ async def test_failed_resume_waits_for_old_exception_to_finish_unwinding(
 
 
 @pytest.mark.asyncio
+async def test_stop_waits_for_failed_resume_then_cancels_its_replacement(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    runtime.state.status = "FAILED"
+    runtime.session.lifecycle.started = True
+    unwinding = asyncio.Event()
+    release_unwind = asyncio.Event()
+    stop_requested = asyncio.Event()
+    replacement_started = asyncio.Event()
+    replacement_cancelled = asyncio.Event()
+    replacements: list[asyncio.Task[None]] = []
+
+    async def failing_lifecycle() -> None:
+        try:
+            raise RuntimeError("old PREPARE failure")
+        finally:
+            unwinding.set()
+            await release_unwind.wait()
+
+    old_task = asyncio.create_task(failing_lifecycle())
+    runtime.session.lifecycle.task = old_task
+    await unwinding.wait()
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            assert restarting is True
+            runtime.state.status = "RUNNING"
+            return "RUNNING"
+
+        async def request_stop(self) -> str:
+            stop_requested.set()
+            runtime.state.status = "STOPPED"
+            return "STOPPED"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def replacement_lifecycle() -> None:
+        replacement_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            replacement_cancelled.set()
+
+    async def fake_start() -> asyncio.Task[None]:
+        replacement = asyncio.create_task(replacement_lifecycle())
+        replacements.append(replacement)
+        runtime.session.lifecycle.task = replacement
+        return replacement
+
+    runtime.start = fake_start  # type: ignore[method-assign]
+    resume_entered = asyncio.Event()
+
+    async def resume_call() -> str:
+        resume_entered.set()
+        return await runtime.resume_current_task()
+
+    resumed = asyncio.create_task(resume_call())
+    await resume_entered.wait()
+    stop_entered = asyncio.Event()
+
+    async def stop_call() -> str:
+        stop_entered.set()
+        return await runtime.message("/stop")
+
+    stopped = asyncio.create_task(stop_call())
+    await stop_entered.wait()
+    try:
+        assert stop_requested.is_set() is False
+        assert stopped.done() is False
+
+        release_unwind.set()
+        assert await asyncio.gather(resumed, stopped) == ["RUNNING", "STOPPED"]
+        await replacement_cancelled.wait()
+
+        assert replacement_started.is_set()
+        assert runtime.state.status == "STOPPED"
+        task = runtime.session.lifecycle.task
+        assert task is None or task.done()
+    finally:
+        release_unwind.set()
+        await asyncio.gather(resumed, stopped, return_exceptions=True)
+        for replacement in replacements:
+            if not replacement.done():
+                replacement.cancel()
+        await asyncio.gather(old_task, *replacements, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("original_status", "original_started", "expected_status", "failure_type"),
+    [
+        ("FAILED", True, "FAILED", RuntimeError),
+        ("WAITING", False, "WAITING", asyncio.CancelledError),
+        ("IDLE", False, "IDLE", RuntimeError),
+        ("RUNNING", False, "FAILED", RuntimeError),
+    ],
+)
+async def test_resume_startup_failure_restores_resumable_checkpoint(
+    original_status: str,
+    original_started: bool,
+    expected_status: str,
+    failure_type: type[BaseException],
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    runtime.state.status = original_status
+    runtime.state.save(runtime.state_path)
+    runtime.session.lifecycle.started = original_started
+    runtime.session.lifecycle.task = None
+    startup_error = failure_type("lifecycle startup failed")
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            assert restarting is True
+            runtime.state.status = "RUNNING"
+            runtime.state.save(runtime.state_path)
+            return "RUNNING"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def failing_start() -> asyncio.Task[None]:
+        runtime.session.lifecycle.started = True
+        raise startup_error
+
+    runtime.start = failing_start  # type: ignore[method-assign]
+
+    with pytest.raises(failure_type) as caught:
+        await runtime.resume_current_task()
+
+    assert caught.value is startup_error
+    task = runtime.session.lifecycle.task
+    assert task is None or task.done()
+    assert runtime.session.lifecycle.started is original_started
+    assert runtime.state.status == expected_status
+    assert type(runtime.state).load(runtime.state_path).status == expected_status
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "phase", "has_task"),
     [

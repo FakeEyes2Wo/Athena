@@ -104,9 +104,10 @@ async def message(runtime: Any, text: str) -> str:
 
 async def _control_command(runtime: Any, command: str) -> str | None:
     if command == "/stop":
-        status = await runtime.supervisor.request_stop()
-        await cancel_supervisor_task(runtime)
-        return status
+        async with runtime.session.lifecycle.resume_lock:
+            status = await runtime.supervisor.request_stop()
+            await cancel_supervisor_task(runtime)
+            return status
     if command == "/pause":
         status = await runtime.supervisor.pause()
         if runtime.state.phase in {"PREPARE", "VALIDATE"}:
@@ -133,6 +134,8 @@ async def resume_current_task(runtime: Any) -> str:
     """Resume the current durable task without changing its confirmed contract."""
     lifecycle = runtime.session.lifecycle
     async with lifecycle.resume_lock:
+        original_status = runtime.state.status
+        original_started = lifecycle.started
         capability = resume_capability(runtime.state)
         task = lifecycle.task
         live_task = task is not None and not task.done()
@@ -154,8 +157,23 @@ async def resume_current_task(runtime: Any) -> str:
         task = lifecycle.task
         if task is None or task.done():
             rearm_if_terminal(runtime)
-            await runtime.supervisor.resume(restarting=True)
-            await runtime.start()
+            try:
+                await runtime.supervisor.resume(restarting=True)
+                await runtime.start()
+            except BaseException as error:
+                task = lifecycle.task
+                if task is None or task.done():
+                    lifecycle.started = original_started
+                    runtime.state.status = (
+                        "FAILED" if original_status == "RUNNING" else original_status
+                    )
+                    try:
+                        runtime.state.save(runtime.state_path)
+                    except BaseException as rollback_error:
+                        error.add_note(
+                            f"resume rollback persistence failed: {rollback_error}"
+                        )
+                raise
         else:
             await runtime.supervisor.resume()
         return runtime.state.status
