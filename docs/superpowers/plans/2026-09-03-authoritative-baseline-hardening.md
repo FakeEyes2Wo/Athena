@@ -34,7 +34,7 @@
 - Produces: `BaselineResearch.training.strategy` as the sole downstream strategy accessor.
 - Consumes: existing `BaselineSource`, `CandidateDecision`, `TrainingStrategy`, and design markers.
 
-- [ ] **Step 1: Replace permissive fixture coverage with behavior-first v2 tests**
+- [x] **Step 1: Replace permissive fixture coverage with behavior-first v2 tests**
 
 Create a `valid_payload()` whose focused shape is:
 
@@ -83,7 +83,7 @@ failures for blank scope/limitation, duplicate/out-of-range query indices, and a
 redundant exception with two candidates. Add scratch selected-source/local-value
 mismatch cases and policy-matrix cases for tiny/small/adequate/unknown regimes.
 
-- [ ] **Step 2: Run the focused contract tests and capture the expected red state**
+- [x] **Step 2: Run the focused contract tests and capture the expected red state**
 
 Run:
 
@@ -94,7 +94,7 @@ Run:
 Expected: failures show that schema version 2 and structured policy fields are not yet
 implemented; no failure may come from test collection or an unrelated fixture error.
 
-- [ ] **Step 3: Implement small v2 value objects and validators**
+- [x] **Step 3: Implement small v2 value objects and validators**
 
 Use focused models rather than extending `DatasetAssessment`. Normalize every string
 through one private substantive-string validator. Make `DatasetFact.field` unique and
@@ -113,14 +113,14 @@ Require pretrained evidence for relevant modalities, all three safeguards for fu
 fine-tuning, and selected-source scale proof for scratch. Reject unused safeguards or
 scratch proof. Keep the no-global-cutoff rule explicit.
 
-- [ ] **Step 4: Update the ideator prompt to emit only the v2 contract**
+- [x] **Step 4: Update the ideator prompt to emit only the v2 contract**
 
 Name every v2 object and state that each numeric fact carries its own evidence. Explain
 the single-candidate and scratch structures, the full-finetune safeguards, the unknown
 regime rules, and the absence of a universal sample threshold. Keep the prohibition on
 writing the verification mirror.
 
-- [ ] **Step 5: Run Task 1 tests and formatting**
+- [x] **Step 5: Run Task 1 tests and formatting**
 
 ```powershell
 .venv\Scripts\python.exe -m black --check src/athena/research/prepare/baseline_research.py test/unit/research/prepare/test_baseline_research_contract.py test/unit/research/prepare/test_baseline_research_tools.py
@@ -129,7 +129,7 @@ writing the verification mirror.
 
 Expected: Black exits 0 and all focused tests pass.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```powershell
 git add -- src/athena/research/prepare/baseline_research.py src/athena/agents/prompts/baseline_ideator_agent.md test/unit/research/prepare/test_baseline_research_contract.py test/unit/research/prepare/test_baseline_research_tools.py
