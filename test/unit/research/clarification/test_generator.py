@@ -110,6 +110,45 @@ async def test_generate_turn_wraps_raw_step_and_preserves_public_update() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "step",
+    [
+        {
+            "kind": "question",
+            "field": "dataset",
+            "prompt": "Which dataset?",
+            "choices": [
+                {"label": "Provided", "value": "provided"},
+                {"label": "Later", "value": "later"},
+            ],
+            "allow_custom": True,
+            "allow_skip": True,
+        },
+        {
+            "kind": "final",
+            "understanding": {"title": "Task", "task_type": "other"},
+            "unresolved": [],
+        },
+    ],
+)
+async def test_generate_turn_validates_dict_envelopes(
+    step: dict[str, object],
+) -> None:
+    draft = new_draft(
+        "predict churn", "s-1", "draft-1", datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    result = await generate_turn(
+        lambda _draft: {
+            "public_update": {"stage": "synthesis", "summary": "safe"},
+            "step": step,
+        },
+        draft,
+    )
+    assert result.public_update == PublicProgress(stage="synthesis", summary="safe")
+    assert result.step.kind == step["kind"]
+
+
+@pytest.mark.asyncio
 async def test_publish_public_progress_isolates_ordinary_sink_failure() -> None:
     calls: list[str] = []
 

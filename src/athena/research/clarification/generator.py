@@ -127,7 +127,11 @@ class ClarificationGenerator(Protocol):
 
     def next_step(
         self, draft: ClarificationDraft
-    ) -> Awaitable[ClarificationStep] | ClarificationStep:
+    ) -> (
+        Awaitable[ClarificationStep | ClarificationModelOutput]
+        | ClarificationStep
+        | ClarificationModelOutput
+    ):
         """Return the next policy decision for the current evidence."""
         ...
 
@@ -294,6 +298,14 @@ async def generate_turn(
     if isinstance(result, ClarificationModelOutput):
         return ClarificationTurnResult(
             step=result.step, public_update=result.public_update
+        )
+    if isinstance(result, dict) and {
+        "public_update",
+        "step",
+    }.issubset(result):
+        output = ClarificationModelOutput.model_validate(result)
+        return ClarificationTurnResult(
+            step=output.step, public_update=output.public_update
         )
     if isinstance(result, (ClarificationQuestionStep, ClarificationFinalStep)):
         return ClarificationTurnResult(step=result)
