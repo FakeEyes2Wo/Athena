@@ -42,7 +42,7 @@
 - `WorkspaceState.requestedSessionId: string | null` is passed to `usePipeline` after the keyed workspace remount.
 - `ContextSidebarProps.onSelectWorkspace(path: string, sessionId?: string): void` carries the clicked cross-workspace session.
 
-- [ ] **Step 1: Write failing storage and hook tests**
+- [x] **Step 1: Write failing storage and hook tests**
 
 Change the existing storage expectation and add hook coverage equivalent to:
 
@@ -57,11 +57,11 @@ expect(result.current.recentRoots).toEqual(["/a", "/b"]);
 
 Mock `settingsGet`, `setProjectRoot`, and local storage. Assert that a first-run backend cwd not present in recent roots leaves `pickerOpen === true`, while a remembered root closes it.
 
-- [ ] **Step 2: Write failing sidebar structure and order tests**
+- [x] **Step 2: Write failing sidebar structure and order tests**
 
 Render roots `C:/alpha`, `C:/beta`, `C:/gamma` with `beta` current. Assert their headings remain alpha/beta/gamma, clicking session `s-gamma` calls `onSelectWorkspace("C:/gamma", "s-gamma")`, and `切换工作区` is contained by a footer outside the element marked as the scroll region.
 
-- [ ] **Step 3: Run the focused RED tests**
+- [x] **Step 3: Run the focused RED tests**
 
 Run:
 
@@ -71,7 +71,7 @@ npm test -- --run src/lib/__tests__/workspaceStorage.test.ts src/hooks/__tests__
 
 Expected: failures show existing-root promotion, missing requested-session state, current-root prepending, and absent fixed/scrolling structure.
 
-- [ ] **Step 4: Implement stable order and three-region sidebar**
+- [x] **Step 4: Implement stable order and three-region sidebar**
 
 Make `addRecentRoot` return the existing order when the trimmed root already exists. In `SessionContext`, derive ordered roots from `recentRoots`, append `currentRoot` only when absent, place loaded groups into that order, and render:
 
@@ -87,7 +87,7 @@ Make `addRecentRoot` return the existing order when the trimmed root already exi
 
 Use `min-height: 0` and `overflow-y: auto` only on `workspaceScroll`; the outer sidebar and footer do not scroll. Carry `sessionId` through `AppShell`, `App`, and `useWorkspace`.
 
-- [ ] **Step 5: Run GREEN tests and commit Task 1**
+- [x] **Step 5: Run GREEN tests and commit Task 1**
 
 Run the Step 3 command and `npm run build`. Commit only Task 1 paths:
 
