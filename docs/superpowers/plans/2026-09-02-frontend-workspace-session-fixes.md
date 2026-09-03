@@ -119,7 +119,7 @@ git commit -m "fix(gui): stabilize workspace sidebar"
 - `WorkspaceActions.browse(): Promise<void>` opens the dialog and reuses `switchTo` for a chosen path.
 - `WorkspaceState.browsing: boolean` prevents duplicate dialog opens.
 
-- [ ] **Step 1: Write failing dialog-boundary tests**
+- [x] **Step 1: Write failing dialog-boundary tests**
 
 Mock `@tauri-apps/plugin-dialog` and Tauri detection. Assert:
 
@@ -134,11 +134,11 @@ expect(open).toHaveBeenCalledWith({
 
 Also assert cancellation returns `null`, browser mode does not invoke `open`, a selected path reaches `setProjectRoot`, and a thrown dialog error appears in workspace state.
 
-- [ ] **Step 2: Write failing picker component tests**
+- [x] **Step 2: Write failing picker component tests**
 
 Assert `浏览目录…` invokes `onBrowse`, is disabled while browsing/switching, cancellation leaves manual input intact, and manual path submission still calls `onSelect`.
 
-- [ ] **Step 3: Run focused RED tests**
+- [x] **Step 3: Run focused RED tests**
 
 Run:
 
@@ -148,13 +148,13 @@ npm test -- --run src/lib/__tests__/workspaceDialog.test.ts src/hooks/__tests__/
 
 Expected: missing module, prop, action, and dependency failures.
 
-- [ ] **Step 4: Install and register the Tauri dialog plugin**
+- [x] **Step 4: Install and register the Tauri dialog plugin**
 
 Run `npm run tauri add dialog` from `athena-gui`. Confirm it adds the JS/Rust dependencies, `.plugin(tauri_plugin_dialog::init())`, and the narrow dialog-open permission in `capabilities/default.json`. Do not add filesystem read/write permissions.
 
 Implement the dialog boundary and `browse`; keep the manual input visible in all modes. Pass `browsing` and `onBrowse` through `App.tsx` to `WorkspacePicker`.
 
-- [ ] **Step 5: Run GREEN tests, desktop checks, and commit Task 2**
+- [x] **Step 5: Run GREEN tests, desktop checks, and commit Task 2**
 
 Run the Step 3 command, `npm run build`, and from `athena-gui/src-tauri` run `cargo check`. Commit only Task 2 paths with:
 
@@ -176,17 +176,17 @@ git commit -m "fix(gui): open native workspace dialog"
 - `usePipeline(workspaceRoot?: string | null, requestedSessionId?: string | null)` uses the requested ID during initial restore when available.
 - Session mutations use a monotonically increasing request epoch plus a map of in-flight creation promises.
 
-- [ ] **Step 1: Write failing replacement and stale-result tests**
+- [x] **Step 1: Write failing replacement and stale-result tests**
 
 Seed a non-empty transcript, resolve a later session switch with `records: []`, and assert `viewModel.messages` becomes empty. Resolve an older switch after a newer switch and assert the older records never replace the newer transcript.
 
 Mount with `requestedSessionId="s-2"`, return it in `sessionsList`, and assert the first `sessionSwitch` targets `s-2` rather than the remembered active ID.
 
-- [ ] **Step 2: Write failing immediate-delete test**
+- [x] **Step 2: Write failing immediate-delete test**
 
 Hold the new session's `sessionSwitch` promise unresolved, call `newSession()`, then call `deleteSession(newId)`. Assert the delete RPC waits; resolve creation and assert `sessionDelete(newId)` is called and the row disappears.
 
-- [ ] **Step 3: Run focused RED tests**
+- [x] **Step 3: Run focused RED tests**
 
 Run:
 
@@ -196,13 +196,13 @@ npm test -- --run src/hooks/__tests__/usePipeline.test.tsx src/hooks/__tests__/u
 
 Expected: empty restore preserves old messages, stale completion wins, requested ID is ignored, and immediate deletion races creation.
 
-- [ ] **Step 4: Implement request epochs and serialized mutation**
+- [x] **Step 4: Implement request epochs and serialized mutation**
 
 Initial hydration and every explicit switch capture a new epoch. Apply records/list/current ID only if the epoch is still current. Always call `restoreRecords(records, true)` for a completed session hydration, including empty records.
 
 Track each new session's creation promise in a ref map. Keep its optimistic row until the authoritative response arrives or creation fails. `deleteSession` awaits a matching creation promise before deleting. Remove its title and optimistic marker only after successful deletion.
 
-- [ ] **Step 5: Run GREEN tests and commit Task 3**
+- [x] **Step 5: Run GREEN tests and commit Task 3**
 
 Run the Step 3 command and `npm run build`. Commit:
 
@@ -225,13 +225,13 @@ git commit -m "fix(gui): serialize session lifecycle"
 - `segmentMessages` recognizes the messages following the active `CLARIFYING`/`CONFIRMING` preview as a task-understanding activity segment.
 - The activity segment renders as `role="log"`, `aria-label="任务理解过程"`, and reuses `TrajectoryItem` for agent, supervisor, tool-call, stdout, and stderr presentation.
 
-- [ ] **Step 1: Write failing live-output component tests**
+- [x] **Step 1: Write failing live-output component tests**
 
 Render a clarifying preview followed by two deltas sharing `message_id`, an agent tool call, and tool stdout. Assert the reducer merges the deltas and the component shows their resulting text/tool output inside the `任务理解过程` live region while the placeholder remains visible.
 
 Also assert a ready/running preview does not relabel later research output as task understanding.
 
-- [ ] **Step 2: Run focused RED tests**
+- [x] **Step 2: Run focused RED tests**
 
 Run:
 
@@ -241,11 +241,11 @@ npm test -- --run src/hooks/__tests__/usePipeline.events.test.tsx src/components
 
 Expected: no task-understanding activity region exists.
 
-- [ ] **Step 3: Implement clarification activity grouping**
+- [x] **Step 3: Implement clarification activity grouping**
 
 Extend message segmentation with a `kind: "ordinary" | "ideator" | "clarification"` discriminator. When the latest intent-preview is `CLARIFYING` or `CONFIRMING`, group subsequent non-user output messages into one labeled live section. Render every item through the existing `TrajectoryItem`; do not duplicate message content and do not add polling or synthetic text.
 
-- [ ] **Step 4: Run GREEN tests and commit Task 4**
+- [x] **Step 4: Run GREEN tests and commit Task 4**
 
 Run the Step 2 command and the complete GUI suite. Commit:
 
