@@ -275,6 +275,17 @@ class _ManifestExecution:
         return result
 
 
+class _MemoryBaselineGuard:
+    """Test-only external generation checked at each trusted boundary."""
+
+    def __init__(self) -> None:
+        self.generation = 0
+
+    async def assert_current(self) -> None:
+        if self.generation != 0:
+            raise RuntimeError("external baseline generation changed")
+
+
 class _Harness:
     def __init__(
         self,
@@ -292,6 +303,7 @@ class _Harness:
             invalid_first=invalid_first, missing=missing
         )
         self.evaluator_provider = _EvaluatorProvider(missing=evaluator_missing)
+        self.baseline_guard = _MemoryBaselineGuard()
         self.missing = missing
 
     def _git(self, *args: str) -> str:
@@ -386,6 +398,7 @@ class _Harness:
             tree_ref=self.tree_ref,
             task="inspect data and build a trusted baseline",
             max_turns=max_turns,
+            assert_baseline=self.baseline_guard.assert_current,
             publish=publish,
         )
 
@@ -482,6 +495,28 @@ async def test_prepare_accepts_an_arbitrary_multifile_solution(tmp_path: Path) -
         result = await harness.run()
         assert result.metric == 1.0
         assert harness.execution.argv_calls == [["python", "solution/model.py"]]
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_registered_prepare_agent_observes_read_only_authority_mirrors(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path)
+    await harness.start()
+    try:
+        await harness.run()
+        observed_contract = harness.prepare_provider.task_seen
+        for filename in (
+            "BASELINE_RESEARCH.json",
+            "BASELINE_RESEARCH_VERIFICATION.json",
+            "BASELINE_DESIGN.md",
+        ):
+            assert filename in observed_contract
+        assert "read-only local audit mirrors" in observed_contract
+        assert "external baseline authority generation" in observed_contract
+        assert "Never create, rewrite, overwrite, or delete" in observed_contract
     finally:
         await harness.close()
 

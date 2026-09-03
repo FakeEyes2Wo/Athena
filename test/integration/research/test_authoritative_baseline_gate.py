@@ -18,19 +18,25 @@ from athena.research.literature.paper_source.openalex import OpenAlexWork
 from athena.research.prepare import baseline, orchestrator
 from athena.research.prepare.authority import (
     BaselineAuthorityConflict,
+    PrepareAttestation,
     SealedBaseline,
     VerifiedBaselineBundle,
 )
 from athena.research.prepare.baseline_research import (
     BaselineResearchError,
     BaselineVerification,
+    assert_verification_matches_artifacts,
+    design_sha256,
+    load_baseline_artifacts,
+    research_sha256,
+    verification_bytes,
 )
-from athena.research.prepare.orchestrator import run_prepare_phase
 from athena.research.prepare.source_verification import (
     BaselineSourceVerifier,
     GitCloneEvidence,
     GitCloneVerifier,
 )
+from athena.research.runtime import ResearchRuntime
 from athena.research.runtime.phase_runner import PhaseRunner
 from test.integration.research.test_prepare_agent_contract import (
     _Harness as _PrepareHarness,
@@ -157,9 +163,20 @@ class _MemoryBaselineAuthorityStore:
         self.sealed = SealedBaseline(generation=generation, bundle=bundle)
         return self.sealed
 
-    async def attest_prepare(self, evidence, *, expected_generation: int):
-        del evidence, expected_generation
-        raise AssertionError("Task 4 does not attest PREPARE completion")
+    async def attest_prepare(
+        self,
+        evidence: PrepareAttestation,
+        *,
+        expected_generation: int,
+    ) -> SealedBaseline:
+        if self.sealed is None or self.sealed.generation != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=expected_generation + 1,
+            bundle=self.sealed.bundle,
+            attestation=evidence,
+        )
+        return self.sealed
 
 
 class _BaselineIdeatorProvider:
@@ -405,7 +422,8 @@ class _GateHarness(_PrepareHarness):
         self.runtime_facade = runtime
         self.outputs = outputs
         self.agents.start()
-        handoff = PhaseRunner(runtime)._run_handoff_agent
+        runner = PhaseRunner(runtime)
+        handoff = runner._run_handoff_agent
 
         async def recording_handoff(**kwargs: Any) -> str:
             self.handoff_calls.append(dict(kwargs))
@@ -435,7 +453,119 @@ class _GateHarness(_PrepareHarness):
         )
         self.monkeypatch.setattr(orchestrator, "prepare_evaluators", frozen_evaluators)
         self.monkeypatch.setattr(orchestrator, "prepare_eda", seeded_eda)
-        return await run_prepare_phase(runtime, recording_handoff)
+        runner._run_handoff_agent = recording_handoff
+        return await runner.run_prepare_phase()
+
+
+async def _assert_exact_scored_authority(harness: _GateHarness, result: Any) -> None:
+    sealed = harness.authority.sealed
+    assert sealed is not None
+    assert sealed.generation == 1
+    assert sealed.attestation is not None
+    root = Path(harness.branch.path)
+    assert (
+        sealed.bundle.research_bytes == (root / "BASELINE_RESEARCH.json").read_bytes()
+    )
+    assert sealed.bundle.design_bytes == (root / "BASELINE_DESIGN.md").read_bytes()
+    assert (
+        sealed.bundle.verification_bytes
+        == (root / "BASELINE_RESEARCH_VERIFICATION.json").read_bytes()
+    )
+    assert sealed.attestation.research_sha256 == (
+        sealed.bundle.verification.research_sha256
+    )
+    assert sealed.attestation.design_sha256 == sealed.bundle.verification.design_sha256
+    assert sealed.attestation.baseline_commit == result.commit
+    assert sealed.attestation.evaluator_ref == result.evaluator_ref
+    assert sealed.attestation.evidence_ref == result.evidence_ref
+    score_evidence = json.loads(await harness.store.get_text(result.evidence_ref))
+    assert score_evidence["plan"] == "prepare"
+    assert score_evidence["metric"] == result.metric
+    assert score_evidence["commit"] == result.commit
+
+
+async def _assert_fresh_runtime_reuses_external_authority(
+    harness: _GateHarness,
+) -> None:
+    fresh = ResearchRuntime(
+        project_root=harness.tmp_path,
+        baseline_authority=harness.authority,
+    )
+
+    async def forbidden_handoff(**_kwargs: Any) -> str:
+        raise AssertionError("fresh authority reuse must not run an agent")
+
+    class ForbiddenVerifier:
+        async def verify(self, _artifacts):
+            raise AssertionError("fresh authority reuse must not call Git or OpenAlex")
+
+    try:
+        verified = await baseline.prepare_baseline_design(
+            fresh,
+            harness.branch,
+            "reuse the trusted baseline",
+            True,
+            forbidden_handoff,
+            verifier=ForbiddenVerifier(),
+        )
+        assert verified.authority_generation == 1
+        assert (
+            verified.verification_bytes
+            == harness.authority.sealed.bundle.verification_bytes
+        )
+    finally:
+        await fresh.aclose()
+
+
+async def _assert_fresh_runtime_rejects_forged_local_trio(
+    harness: _GateHarness,
+) -> None:
+    sealed = harness.authority.sealed
+    assert sealed is not None
+    root = Path(harness.branch.path)
+    research_payload = json.loads(sealed.bundle.research_bytes)
+    research_payload["limitations"].append("forged local replacement")
+    forged_research = json.dumps(research_payload).encode("utf-8")
+    forged_design = sealed.bundle.design_bytes + b"\nForged local replacement.\n"
+    forged_verification = sealed.bundle.verification.model_copy(
+        update={
+            "research_sha256": research_sha256(forged_research),
+            "design_sha256": design_sha256(forged_design),
+        }
+    )
+    forged_verification_bytes = verification_bytes(forged_verification)
+    (root / "BASELINE_RESEARCH.json").write_bytes(forged_research)
+    (root / "BASELINE_DESIGN.md").write_bytes(forged_design)
+    (root / "BASELINE_RESEARCH_VERIFICATION.json").write_bytes(
+        forged_verification_bytes
+    )
+    forged_artifacts = load_baseline_artifacts(root)
+    assert_verification_matches_artifacts(forged_artifacts, forged_verification)
+
+    fresh = ResearchRuntime(
+        project_root=harness.tmp_path,
+        baseline_authority=harness.authority,
+    )
+
+    async def forbidden_handoff(**_kwargs: Any) -> str:
+        raise AssertionError("a forged local trio must not start an agent")
+
+    try:
+        with pytest.raises(BaselineResearchError, match="BASELINE_RESEARCH.json"):
+            await baseline.prepare_baseline_design(
+                fresh,
+                harness.branch,
+                "reject the forged local baseline",
+                True,
+                forbidden_handoff,
+            )
+    finally:
+        await fresh.aclose()
+        (root / "BASELINE_RESEARCH.json").write_bytes(sealed.bundle.research_bytes)
+        (root / "BASELINE_DESIGN.md").write_bytes(sealed.bundle.design_bytes)
+        (root / "BASELINE_RESEARCH_VERIFICATION.json").write_bytes(
+            sealed.bundle.verification_bytes
+        )
 
 
 @pytest_asyncio.fixture
@@ -463,6 +593,9 @@ async def test_git_qualified_research_reaches_trusted_baseline(harness) -> None:
     )
     assert harness.registry.prepare_registration_verified == [True]
     assert harness.external_network_calls == []
+    await _assert_exact_scored_authority(harness, result)
+    await _assert_fresh_runtime_reuses_external_authority(harness)
+    await _assert_fresh_runtime_rejects_forged_local_trio(harness)
 
 
 @pytest.mark.asyncio
@@ -481,6 +614,9 @@ async def test_repository_free_openalex_threshold_is_inclusive(
         assert verification.route == "openalex"
         assert verification.cited_by_count == 100
         assert harness.registry.prepare_registration_verified == [True]
+        await _assert_exact_scored_authority(harness, result)
+        await _assert_fresh_runtime_reuses_external_authority(harness)
+        await _assert_fresh_runtime_rejects_forged_local_trio(harness)
     else:
         with pytest.raises(BaselineResearchError, match="no qualifying source"):
             await harness.run(

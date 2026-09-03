@@ -14,11 +14,19 @@ from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import DataScriptBundle, ValidationResult
 from athena.research.prepare import orchestrator
+from athena.research.prepare.authority import (
+    BaselineAuthorityConflict,
+    PrepareAttestation,
+    SealedBaseline,
+    VerifiedBaselineBundle,
+)
 from athena.research.prepare.baseline_research import (
     BaselineVerification,
     VerifiedBaseline,
+    design_sha256,
     load_baseline_artifacts,
     research_sha256,
+    verification_bytes,
     write_verification,
 )
 from athena.research.runtime import ResearchRuntime
@@ -29,20 +37,45 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
     """Seed one complete offline research/design/verification trio."""
     root.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": {
             "modality": "image",
             "task_type": "classification",
-            "labeled_samples": 480,
-            "effective_training_units": 120,
-            "group_count": 120,
-            "class_count": 5,
-            "minority_class_samples": 32,
             "input_scale": "paired 224x224 images",
             "regime": "small",
-            "recommended_strategy": "partial_finetune",
-            "evidence": ["eda:EDA_HANDOFF.md: 480 labels across 120 groups"],
+            "facts": [
+                {
+                    "field": field,
+                    "value": value,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": f"EDA_HANDOFF.md#{field}",
+                        "claim": claim,
+                    },
+                }
+                for field, value, claim in (
+                    ("labeled_samples", 480, "480 labeled images"),
+                    ("effective_training_units", 120, "120 independent units"),
+                    ("group_count", 120, "120 independent groups"),
+                    ("class_count", 5, "5 target classes"),
+                    ("minority_class_samples", 32, "32 minority-class samples"),
+                )
+            ],
             "rationale": "Grouped labels are limited relative to pretrained capacity.",
+        },
+        "training": {
+            "strategy": "partial_finetune",
+            "pretrained": {
+                "status": "available",
+                "representation": "ImageNet encoder",
+                "evidence": {
+                    "kind": "source",
+                    "reference": "https://arxiv.org/abs/1512.03385",
+                    "claim": "The selected method provides pretrained weights.",
+                },
+            },
+            "safeguards": None,
+            "scratch_scale": None,
         },
         "candidates": [
             {
@@ -86,7 +119,13 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
             },
         ],
         "selected_candidate_id": "resnet-transfer",
-        "search_queries": ["small image classification transfer baseline GitHub"],
+        "search": {
+            "queries": [
+                "small image classification transfer baseline GitHub",
+                "authoritative pretrained image baseline paper",
+            ],
+            "one_candidate": None,
+        },
         "limitations": [],
     }
     (root / "BASELINE_RESEARCH.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -97,7 +136,9 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
     )
     artifacts = load_baseline_artifacts(root)
     verification = BaselineVerification(
+        schema_version=2,
         research_sha256=research_sha256(artifacts.raw_research),
+        design_sha256=design_sha256(artifacts.raw_design),
         selected_candidate_id=artifacts.selected.candidate_id,
         route="git",
         verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
@@ -106,7 +147,61 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
         attempts=[{"route": "git", "success": True, "diagnostic": "verified"}],
     )
     write_verification(root, verification)
-    return VerifiedBaseline(artifacts=artifacts, verification=verification)
+    return VerifiedBaseline(
+        artifacts=artifacts,
+        verification=verification,
+        verification_bytes=verification_bytes(verification),
+        authority_generation=0,
+    )
+
+
+def _bundle_for_verified(verified: VerifiedBaseline) -> VerifiedBaselineBundle:
+    return VerifiedBaselineBundle(
+        research_bytes=verified.artifacts.raw_research,
+        design_bytes=verified.artifacts.raw_design,
+        verification_bytes=verified.verification_bytes,
+        verification=verified.verification,
+    )
+
+
+class _MemoryBaselineAuthorityStore:
+    """Test-only external memory shared across one runtime lifecycle."""
+
+    def __init__(self) -> None:
+        self.sealed: SealedBaseline | None = None
+
+    async def load(self) -> SealedBaseline | None:
+        return self.sealed
+
+    async def seal(
+        self,
+        bundle: VerifiedBaselineBundle,
+        *,
+        expected_generation: int | None,
+    ) -> SealedBaseline:
+        current = None if self.sealed is None else self.sealed.generation
+        if current != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=0 if current is None else current + 1,
+            bundle=bundle,
+        )
+        return self.sealed
+
+    async def attest_prepare(
+        self,
+        evidence: PrepareAttestation,
+        *,
+        expected_generation: int,
+    ) -> SealedBaseline:
+        if self.sealed is None or self.sealed.generation != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=expected_generation + 1,
+            bundle=self.sealed.bundle,
+            attestation=evidence,
+        )
+        return self.sealed
 
 
 def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,12 +216,17 @@ def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     async def verified_design(
-        _runtime, workspace, _task, eda_ready, _handoff
+        runtime, workspace, _task, eda_ready, _handoff
     ) -> VerifiedBaseline:
         root = Path(workspace.path)
         assert eda_ready is True
         assert (root / "EDA_HANDOFF.md").is_file()
-        return _write_verified_baseline_fixture(root)
+        verified = _write_verified_baseline_fixture(root)
+        sealed = await runtime.baseline_authority.seal(
+            _bundle_for_verified(verified), expected_generation=None
+        )
+        assert sealed.generation == verified.authority_generation
+        return verified
 
     monkeypatch.setattr(orchestrator, "prepare_eda", asserted_eda)
     monkeypatch.setattr(orchestrator, "prepare_baseline_design", verified_design)
@@ -249,7 +349,12 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
         run_prepare_plan,
         raising=False,
     )
-    runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
+    authority = _MemoryBaselineAuthorityStore()
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="predict survival",
+        baseline_authority=authority,
+    )
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
     runtime.agents.start()
@@ -318,7 +423,12 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
         run_prepare_plan,
         raising=False,
     )
-    runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
+    authority = _MemoryBaselineAuthorityStore()
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="predict survival",
+        baseline_authority=authority,
+    )
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
     runtime.agents.start()

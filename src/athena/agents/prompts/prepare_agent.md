@@ -19,11 +19,12 @@ lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
 
 Before editing code, read all three validated baseline artifacts in this workspace:
 `BASELINE_RESEARCH.json`, `BASELINE_RESEARCH_VERIFICATION.json`, and
-`BASELINE_DESIGN.md`. The verification artifact is platform-owned evidence. Implement
-the validated selected method and its documented Athena-specific adaptation; do not
-invent, substitute, or silently broaden another method. Use design alternatives only
-when the primary architecture cannot be made to work and only within the same validated
-method family.
+`BASELINE_DESIGN.md`. They are read-only local audit mirrors of one controller-owned
+external baseline authority generation. Never create, rewrite, overwrite, or delete
+any of the three files. Implement the validated selected method and its documented
+Athena-specific adaptation; do not invent, substitute, or silently broaden another
+method. Use design alternatives only when the primary architecture cannot be made to
+work and only within the same validated method family.
 
 The baseline report and `RESEARCH_HANDOFF.md` must record the selected candidate ID,
 verification route, and the route-specific proof (the verified Git commit, or the
