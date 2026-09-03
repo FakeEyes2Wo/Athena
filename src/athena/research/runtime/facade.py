@@ -60,6 +60,9 @@ from athena.research.runtime.control import (
     message as message_impl,
 )
 from athena.research.runtime.control import (
+    resume_current_task as resume_current_task_impl,
+)
+from athena.research.runtime.control import (
     start as start_impl,
 )
 from athena.research.runtime.control import (
@@ -87,6 +90,7 @@ from athena.research.runtime.corpus import (
     start_corpus_round as start_corpus_round_impl,
 )
 from athena.research.runtime.events import RuntimeEvents
+from athena.research.runtime.resume_contract import is_continue_command
 from athena.research.runtime.settings import SettingsController
 from athena.research.runtime.survey import (
     ensure_survey_stack as ensure_survey_stack_impl,
@@ -555,9 +559,15 @@ class ResearchRuntime:
 
     async def start_task(self, task: str) -> str:
         """Seed the research task and start PREPARE -> SEARCH -> VALIDATE."""
+        if is_continue_command(task):
+            return await self.resume_current_task()
         if self.state.task_understanding is None:
             await seed_unconfirmed_task(self, task)
         return await start_task_impl(self, task)
+
+    async def resume_current_task(self) -> str:
+        """Resume the current durable task without changing its confirmed contract."""
+        return await resume_current_task_impl(self)
 
     def _clarification_controller_or_raise(self):
         controller = self._services.workflow.clarification

@@ -3,6 +3,12 @@
 import asyncio
 from typing import Any
 
+from athena.research.runtime.resume_contract import (
+    ResearchControlError,
+    is_continue_command,
+    resume_capability,
+)
+
 
 def _consume_lifecycle_result(task: asyncio.Task[None]) -> None:
     if not task.cancelled():
@@ -106,8 +112,8 @@ async def _control_command(runtime: Any, command: str) -> str | None:
         if runtime.state.phase in {"PREPARE", "VALIDATE"}:
             await cancel_supervisor_task(runtime)
         return status
-    if command == "/resume":
-        return await _resume(runtime)
+    if command == "/resume" or is_continue_command(command):
+        return await runtime.resume_current_task()
     if command in {"/manual", "/auto"}:
         await ensure_started(runtime)
         manual = command == "/manual"
@@ -123,19 +129,37 @@ async def _control_command(runtime: Any, command: str) -> str | None:
     return None
 
 
-async def _resume(runtime: Any) -> str:
-    if runtime.supervisor.is_stopped():
-        return runtime.state.status
+async def resume_current_task(runtime: Any) -> str:
+    """Resume the current durable task without changing its confirmed contract."""
     lifecycle = runtime.session.lifecycle
-    resumable = lifecycle.started or runtime.state_path.is_file()
-    task = lifecycle.task
-    if (task is None or task.done()) and resumable:
-        await runtime.supervisor.resume(restarting=True)
-        await runtime.start()
-    else:
-        await ensure_started(runtime)
-        await runtime.supervisor.resume()
-    return runtime.state.status
+    async with lifecycle.resume_lock:
+        capability = resume_capability(runtime.state)
+        task = lifecycle.task
+        live_task = task is not None and not task.done()
+
+        if capability.reason == "already_running" and live_task:
+            lifecycle.task_text = resume_task_text(runtime, lifecycle.task_text)
+            return runtime.state.status
+        if not capability.available and capability.reason != "already_running":
+            raise ResearchControlError(
+                "resume_unavailable", "there is no interrupted task to continue"
+            )
+
+        lifecycle.task_text = resume_task_text(runtime, lifecycle.task_text)
+        if runtime.state.status == "FAILED" and live_task:
+            old_task = task
+            await asyncio.gather(old_task, return_exceptions=True)
+            if not old_task.done():
+                raise RuntimeError("failed lifecycle task did not finish unwinding")
+
+        task = lifecycle.task
+        if task is None or task.done():
+            rearm_if_terminal(runtime)
+            await runtime.supervisor.resume(restarting=True)
+            await runtime.start()
+        else:
+            await runtime.supervisor.resume()
+        return runtime.state.status
 
 
 async def ensure_started(runtime: Any) -> None:
@@ -161,6 +185,7 @@ __all__ = [
     "ensure_started",
     "message",
     "rearm_if_terminal",
+    "resume_current_task",
     "resume_task_text",
     "start",
     "start_task",

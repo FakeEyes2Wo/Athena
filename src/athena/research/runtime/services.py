@@ -79,6 +79,7 @@ class LifecycleSession:
     task: asyncio.Task | None = None
     started: bool = False
     confirmation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    resume_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass

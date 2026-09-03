@@ -108,12 +108,36 @@ async def test_failed_lifecycle_task_can_be_started_again(tmp_path: Path) -> Non
             await first
         assert runtime.state.status == "FAILED"
 
-        await runtime.start_task("continue")
+        before = {
+            "task_text": runtime.state.task_text,
+            "understanding": dict(runtime.state.task_understanding or {}),
+            "handoff_refs": dict(runtime.state.handoff_refs),
+            "draft": runtime.clarification_path.read_bytes(),
+            "handoff": runtime.handoffs_path.joinpath(
+                "TASK_CLARIFICATION.md"
+            ).read_bytes(),
+        }
+
+        class ExplodingClarification:
+            async def start_or_resume(self, _task: str) -> object:
+                raise AssertionError("resume must not enter clarification")
+
+        runtime.services.workflow.clarification = ExplodingClarification()
+
+        assert await runtime.message("continue") == "RUNNING"
         await asyncio.wait_for(restarted.wait(), timeout=1)
 
         assert runtime.session.lifecycle.task is not first
         assert runtime.state.status == "RUNNING"
         assert calls == 2
+        assert runtime.state.task_text == before["task_text"]
+        assert runtime.state.task_understanding == before["understanding"]
+        assert runtime.state.handoff_refs == before["handoff_refs"]
+        assert runtime.clarification_path.read_bytes() == before["draft"]
+        assert (
+            runtime.handoffs_path.joinpath("TASK_CLARIFICATION.md").read_bytes()
+            == before["handoff"]
+        )
     finally:
         await _close(runtime)
 
