@@ -298,7 +298,7 @@ git commit -m "feat: inject baseline authority capability"
 - Changes: `run_prepare_plan(..., assert_baseline: Callable[[], Awaitable[None]])` invokes the guard after every agent turn and before evaluator execution.
 - Consumes: Tasks 2 and 3 exact matcher, canonical bytes, and authority capability.
 
-- [ ] **Step 1: Replace forged-cache acceptance with failing security tests**
+- [x] **Step 1: Replace forged-cache acceptance with failing security tests**
 
 Add separate cases for: forged workspace trio with empty authority calls the live
 verifier; exact authority restart skips network; research mutation, same-marker design
@@ -306,7 +306,7 @@ mutation, and verification-mirror mutation each stop PREPARE; missing verificati
 mirror is restored exactly; v1/workspace-only cache revalidates; authority outage does
 not fall back; and an agent-turn mutation prevents evaluator execution.
 
-- [ ] **Step 2: Run the new orchestration slice and capture red evidence**
+- [x] **Step 2: Run the new orchestration slice and capture red evidence**
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q test/unit/research/prepare/test_baseline_research_orchestration.py test/unit/research/supervisor/test_prepare_plan.py test/integration/research/test_authoritative_baseline_gate.py
@@ -315,7 +315,7 @@ not fall back; and an agent-turn mutation prevents evaluator execution.
 Expected: the pre-entry forgery and same-marker rewrite are accepted by old code, and
 post-turn guard tests fail because the callback is absent.
 
-- [ ] **Step 3: Implement authority-only load and seal order**
+- [x] **Step 3: Implement authority-only load and seal order**
 
 Delete the workspace-authorizing `load_cached_verified_baseline`. Load authority first,
 validate its exact bytes with the shared matcher, and compare all present mirrors.
@@ -323,7 +323,7 @@ Restore only a missing verification mirror. During fresh verification, re-read f
 seal externally, validate the returned generation/bundle, then atomically write the
 canonical verification mirror. Never write a mirror if sealing fails.
 
-- [ ] **Step 4: Add no-side-effect guards around PREPARE**
+- [x] **Step 4: Add no-side-effect guards around PREPARE**
 
 Require authority before baseline ideation starts. Check authority/mirrors before the
 publish/register/tree snapshot sequence. Pass an async guard to `run_prepare_plan` and
@@ -331,7 +331,7 @@ invoke it immediately after each agent result is loaded and immediately before t
 evaluation. Guard failures are terminal authority/evidence failures, not feedback that
 lets the agent rewrite canonical inputs.
 
-- [ ] **Step 5: Run Task 4 tests and the full prepare unit directory**
+- [x] **Step 5: Run Task 4 tests and the full prepare unit directory**
 
 ```powershell
 .venv\Scripts\python.exe -m black --check src/athena/research/prepare/baseline_research.py src/athena/research/prepare/baseline.py src/athena/research/supervisor/prepare.py test/unit/research/prepare/test_baseline_research_orchestration.py test/unit/research/supervisor/test_prepare_plan.py test/integration/research/test_authoritative_baseline_gate.py
@@ -340,7 +340,7 @@ lets the agent rewrite canonical inputs.
 
 Expected: all tests pass, including existing one-repair and cancellation/reap behavior.
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```powershell
 git add -- src/athena/research/prepare/baseline_research.py src/athena/research/prepare/baseline.py src/athena/research/supervisor/prepare.py test/unit/research/prepare/test_baseline_research_orchestration.py test/unit/research/supervisor/test_prepare_plan.py test/integration/research/test_authoritative_baseline_gate.py
