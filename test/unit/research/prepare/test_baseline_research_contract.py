@@ -219,6 +219,8 @@ def test_rejects_numeric_fact_evidence_for_a_different_value() -> None:
         "The measured value is 480.5.",
         "The measured value is 480e3.",
         "The measured value is 4.80e2.",
+        "The measured value is 480.e3.",
+        "The measured value is 480,000.",
     ],
 )
 def test_numeric_fact_requires_an_exact_integer_token(claim: str) -> None:
@@ -252,6 +254,8 @@ def test_exact_integer_may_be_followed_by_sentence_punctuation(
         "480 + 0 = 481 labeled images.",
         "400 / 0 = 480 labeled images.",
         "400 / 3 = 480 labeled images.",
+        "-240 + 240 = 480 labeled images.",
+        "240 + 240 = 480,000 labeled images.",
     ],
 )
 def test_calculation_evidence_requires_a_true_integer_expression(claim: str) -> None:

@@ -36,10 +36,15 @@ _STRATEGY_RE = re.compile(
     r"(?mi)^Training strategy:\s*`(classical|frozen_pretrained|partial_finetune|"
     r"full_finetune|train_from_scratch)`\s*$"
 )
-_INTEGER_TOKEN_RE = re.compile(r"(?<![\w.])(?P<value>[+-]?\d+)(?!\w|\.\d)")
+_NUMERIC_TOKEN_START = r"(?<![\w.,+-])"
+_NUMERIC_TOKEN_END = r"(?!\w|,\d|\.\w)"
+_INTEGER_TOKEN_RE = re.compile(
+    rf"{_NUMERIC_TOKEN_START}(?P<value>[+-]?\d+){_NUMERIC_TOKEN_END}"
+)
 _CALCULATION_RE = re.compile(
-    r"(?<![\w.])(?P<left>\d+)\s*(?P<operator>[+*/-])\s*"
-    r"(?P<right>\d+)\s*=\s*(?P<result>\d+)(?!\w|\.\d)"
+    rf"{_NUMERIC_TOKEN_START}(?P<left>\d+)\s*"
+    rf"(?P<operator>[+*/-])\s*(?P<right>\d+)\s*=\s*"
+    rf"(?P<result>\d+){_NUMERIC_TOKEN_END}"
 )
 
 

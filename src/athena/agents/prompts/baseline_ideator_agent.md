@@ -52,11 +52,11 @@ Write **both** complete files at the workspace root:
      `minority_class_samples`), its nonnegative integer `value`, and its own
      `EvidenceRef`. The evidence `kind` must be `eda`, `data_contract`, or
      `calculation`; its nonblank `reference` or `claim` must state that exact value.
-     Do not use a signed opposite, decimal, or scientific-notation substring as the
-     value. For `calculation`, `reference` or `claim` must also contain one true
-     nonnegative-integer expression in the exact form `<a> <+|-|*|/> <b> = <value>`;
-     division must be nonzero and exact. Do not reuse generic or source-only evidence
-     to authorize multiple numbers.
+     Do not use a signed opposite, decimal, scientific-notation, or digit-grouped
+     substring as the value. For `calculation`, `reference` or `claim` must also
+     contain one true expression with unsigned nonnegative-integer operands in the
+     exact form `<a> <+|-|*|/> <b> = <value>`; division must be nonzero and exact. Do
+     not reuse generic or source-only evidence to authorize multiple numbers.
    - `TrainingPolicy` (`training`): `strategy` (`classical`, `frozen_pretrained`,
      `partial_finetune`, `full_finetune`, or `train_from_scratch`), plus
      `pretrained`, `safeguards`, and `scratch_scale` records or `null` as required
