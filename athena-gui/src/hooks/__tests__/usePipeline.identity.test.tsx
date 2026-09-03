@@ -145,6 +145,150 @@ describe("usePipeline message identity", () => {
     expect(messages.some((m) => m.content.includes("Found train.csv.Let me"))).toBe(false);
   });
 
+  it("lets authoritative hydration replace a queued live delta before the stale frame runs", async () => {
+    const release = deferHistory([
+      {
+        type: "output",
+        seq: 2,
+        source: "agent",
+        channel: "text",
+        text: "A",
+        message_id: "same-message",
+      },
+    ]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "A",
+          message_id: "same-message",
+        },
+      });
+    });
+    const staleFrame = animationFrames.get(1);
+    expect(staleFrame).toBeDefined();
+    expect(result.current.viewModel.messages).toEqual([]);
+
+    release();
+    await flush();
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["A"]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["A"]);
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+
+    act(() => staleFrame?.(16));
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual(["A"]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["A"]);
+  });
+
+  it("discards queued output and logs when starting a new session", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "old session",
+          message_id: "old-session-message",
+        },
+      });
+    });
+    const staleFrame = animationFrames.get(1);
+    expect(staleFrame).toBeDefined();
+
+    vi.mocked(sessionSwitch).mockImplementation(() => new Promise(() => {}));
+    act(() => result.current.newSession());
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 2,
+          source: "agent",
+          channel: "text",
+          text: "new session",
+          message_id: "new-session-message",
+        },
+      });
+      staleFrame?.(16);
+    });
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(result.current.viewModel.messages).toEqual([]);
+    expect(result.current.logs).toEqual([]);
+
+    act(() => runNextAnimationFrame());
+
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual([
+      "new session",
+    ]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["new session"]);
+  });
+
+  it("discards queued prior-session output and logs after a successful switch", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "old session",
+          message_id: "old-session-message",
+        },
+      });
+    });
+    const staleFrame = animationFrames.get(1);
+    expect(staleFrame).toBeDefined();
+    vi.mocked(sessionSwitch).mockResolvedValue({
+      records: [
+        {
+          type: "output",
+          seq: 2,
+          source: "agent",
+          channel: "text",
+          text: "new session",
+          message_id: "new-session-message",
+        },
+      ] as never,
+      sessions: ["new-session"],
+    });
+
+    await act(async () => {
+      await result.current.switchSession("new-session");
+    });
+    act(() => staleFrame?.(16));
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(1);
+    expect(result.current.viewModel.messages.map((message) => message.content)).toEqual([
+      "new session",
+    ]);
+    expect(result.current.logs).toEqual([]);
+  });
+
   it("keeps a whitespace-only delta that separates two words", async () => {
     const release = deferHistory([]);
     const { result } = renderHook(() => usePipeline());

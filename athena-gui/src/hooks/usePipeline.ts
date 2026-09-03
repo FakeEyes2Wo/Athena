@@ -472,6 +472,14 @@ export function usePipeline(
     appendLogEntries(pending.map(({ logEntry }) => logEntry));
   }, [appendLogEntries]);
 
+  const discardPendingOutput = useCallback(() => {
+    if (outputFrameRef.current !== null) {
+      cancelAnimationFrame(outputFrameRef.current);
+      outputFrameRef.current = null;
+    }
+    pendingOutputEventsRef.current = [];
+  }, []);
+
   const flushPendingOutput = useCallback(() => {
     if (outputFrameRef.current !== null) {
       cancelAnimationFrame(outputFrameRef.current);
@@ -483,7 +491,8 @@ export function usePipeline(
   const queueOutputEvent = useCallback((event: bridge.PipelineEvent) => {
     pendingOutputEventsRef.current.push({ event, logEntry: createLogEntry(event) });
     if (outputFrameRef.current !== null) return;
-    outputFrameRef.current = requestAnimationFrame(() => {
+    const frameId = requestAnimationFrame(() => {
+      if (outputFrameRef.current !== frameId) return;
       outputFrameRef.current = null;
       if (!mountedRef.current) {
         pendingOutputEventsRef.current = [];
@@ -491,6 +500,7 @@ export function usePipeline(
       }
       drainOutputEvents();
     });
+    outputFrameRef.current = frameId;
   }, [createLogEntry, drainOutputEvents]);
 
   const clearLogs = useCallback(() => setLogs([]), []);
@@ -530,6 +540,7 @@ export function usePipeline(
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
   const restoreRecords = useCallback(
     (records: bridge.SessionRecord[], resetMessages: boolean) => {
+      flushPendingOutput();
       if (records.length) {
         counter.current = Math.max(counter.current, ...records.map((r) => r.seq));
       }
@@ -537,7 +548,7 @@ export function usePipeline(
         applyHistoryRecords(resetMessages ? { ...prev, messages: [] } : prev, records),
       );
     },
-    [],
+    [flushPendingOutput],
   );
 
   // 更新会话标题（state + localStorage）。
@@ -1160,6 +1171,7 @@ export function usePipeline(
   const newSession = useCallback(() => {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
+    discardPendingOutput();
     const id = nextOptimisticSessionId();
     runStarted.current = false;
     setClarificationStatus("IDLE");
@@ -1186,7 +1198,7 @@ export function usePipeline(
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
-  }, [applySessions, titlesKey]);
+  }, [applySessions, discardPendingOutput, titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
@@ -1195,6 +1207,7 @@ export function usePipeline(
       const { records, sessions: list } = await sessionSwitch(id);
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       // 换会话即换 runtime，运行标记不能带过去。
+      discardPendingOutput();
       runStarted.current = false;
       setCurrentSessionId(id);
       restoreRecords(records, true);
@@ -1206,7 +1219,7 @@ export function usePipeline(
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, restoreRecords]);
+  }, [appendError, applySessions, discardPendingOutput, restoreRecords]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
