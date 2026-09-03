@@ -26,6 +26,7 @@ class RecordingRuntime:
     def __init__(self) -> None:
         self.started = False
         self.messages: list[str] = []
+        self.resume_calls = 0
         self.tree_path = Path("/tmp/athena-runtime")
         self.project_root = "/tmp"
         # 拆卸顺序断言用：suspend 必须发生在 aclose 之前。
@@ -37,7 +38,13 @@ class RecordingRuntime:
 
     async def message(self, text: str) -> str:
         self.messages.append(text)
+        if text == "continue":
+            return await self.resume_current_task()
         return "accepted"
+
+    async def resume_current_task(self) -> str:
+        self.resume_calls += 1
+        return "RUNNING"
 
     async def suspend(self) -> str:
         """替身版 ``ResearchRuntime.suspend``：真实落盘，状态守卫由真 Supervisor 负责。"""
@@ -48,7 +55,7 @@ class RecordingRuntime:
         if state is None or state.status != "RUNNING":
             return getattr(state, "status", "IDLE")
         state.status = "WAITING"
-        state.save(self._state_path)
+        state.save(self.state_path)
         return state.status
 
     async def aclose(self) -> None:
@@ -100,14 +107,30 @@ async def test_handler_exposes_only_start_and_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handler_maps_exact_controls_to_messages() -> None:
+async def test_handler_routes_resume_to_the_public_runtime_operation() -> None:
     runtime = RecordingRuntime()
     handler = GuiRequestHandler(runtime)
 
-    for method in ("pause", "resume", "stop"):
+    for method in ("pause", "stop"):
         assert await handler.dispatch(method, {}) == {"status": "accepted"}
 
-    assert runtime.messages == ["/pause", "/resume", "/stop"]
+    assert await handler.dispatch("resume", {}) == {"status": "RUNNING"}
+
+    assert runtime.messages == ["/pause", "/stop"]
+    assert runtime.resume_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_handler_keeps_exact_continue_on_the_runtime_message_path() -> None:
+    """Free text uses runtime parsing, so it can intercept continue before clarification."""
+    runtime = RecordingRuntime()
+    handler = GuiRequestHandler(runtime)
+
+    assert await handler.dispatch("message", {"text": "continue"}) == {
+        "response": "RUNNING"
+    }
+    assert runtime.messages == ["continue"]
+    assert runtime.resume_calls == 1
 
 
 @pytest.mark.asyncio
@@ -180,7 +203,7 @@ async def test_handler_session_switch_resumes_running_search(tmp_path) -> None:
         state_path = tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text("{}", encoding="utf-8")
-        runtime._state_path = state_path
+        runtime.state_path = state_path
         runtime.state = SimpleNamespace(phase="SEARCH", status="RUNNING")
         created.append(runtime)
         return runtime
@@ -241,7 +264,7 @@ async def test_handler_session_switch_suspends_running_runtime_before_close(
     outgoing.project_root = str(tmp_path)
     state_path = tmp_path / ".athena" / "state.json"
     outgoing.state = _running_state()
-    outgoing._state_path = state_path
+    outgoing.state_path = state_path
     outgoing.state.save(state_path)
 
     handler = GuiRequestHandler(outgoing, lambda root, state_root: RecordingRuntime())
@@ -265,7 +288,7 @@ async def test_handler_session_switch_downgrades_unresumed_prepare_to_waiting(
         state = _running_state(phase="PREPARE")
         state.save(state_path)
         runtime.state = state
-        runtime._state_path = state_path
+        runtime.state_path = state_path
         created.append(runtime)
         return runtime
 
@@ -288,7 +311,7 @@ async def test_handler_session_switch_does_not_suspend_a_fresh_session(
     def factory(root: str, state_root: Path | None) -> RecordingRuntime:
         runtime = RecordingRuntime()
         runtime.state = _running_state()
-        runtime._state_path = (
+        runtime.state_path = (
             tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
         )
         created.append(runtime)

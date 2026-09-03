@@ -90,6 +90,8 @@ class StateEvent(BaseModel):
     eda_dir: str | None = None
     # Supervisor 结构化任务理解（GUI 意图预览据此更新）。
     task_understanding: dict[str, Any] | None = None
+    resume_available: bool = False
+    resume_reason: str | None = None
 
 
 def redact(text: str) -> str:

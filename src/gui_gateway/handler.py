@@ -243,7 +243,7 @@ class GuiRequestHandler:
         """
         try:
             state = getattr(self._runtime, "state", None)
-            state_path = getattr(self._runtime, "_state_path", None)
+            state_path = getattr(self._runtime, "state_path", None)
             # 只有从磁盘恢复出的状态才可能是“进行中”；全新会话的内存默认状态
             # （IDLE/PREPARE）既不该被误判成需要续跑，也不该被降级。
             persisted = state_path is not None and Path(state_path).is_file()

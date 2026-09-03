@@ -46,7 +46,7 @@ class GuiService:
         return {"status": await self._runtime.message("/pause")}
 
     async def resume(self) -> dict[str, Any]:
-        return {"status": await self._runtime.message("/resume")}
+        return {"status": await self._runtime.resume_current_task()}
 
     async def stop(self) -> dict[str, Any]:
         return {"status": await self._runtime.message("/stop")}

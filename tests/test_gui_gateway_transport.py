@@ -283,3 +283,18 @@ async def test_dispatch_error_preserves_domain_error_metadata() -> None:
     assert err["data"]["code"] == "stale_revision"
     assert err["data"]["retryable"] is True
     assert err["data"]["current_revision"] == 7
+
+
+async def test_dispatch_error_preserves_resume_unavailable_metadata() -> None:
+    """A rejected resume remains a typed, non-retryable RPC domain error."""
+    from athena.research.runtime.resume_contract import ResearchControlError
+
+    err = await _dispatch_error(
+        ResearchControlError(
+            "resume_unavailable", "there is no interrupted task to continue"
+        ),
+        method="resume",
+    )
+
+    assert err["data"]["code"] == "resume_unavailable"
+    assert err["data"]["retryable"] is False
