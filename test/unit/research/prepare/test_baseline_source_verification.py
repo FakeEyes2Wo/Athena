@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from athena.research.literature.paper_source.openalex import (
     OpenAlexClient,
@@ -12,6 +13,7 @@ from athena.research.literature.paper_source.openalex import (
 from athena.research.prepare.baseline_research import (
     BaselineArtifacts,
     BaselineResearchError,
+    BaselineVerification,
     load_baseline_artifacts,
 )
 from athena.research.prepare.source_verification import (
@@ -163,6 +165,34 @@ def _work(artifacts: BaselineArtifacts, citations: int = 100) -> OpenAlexWork:
         publication_year=2016,
         cited_by_count=citations,
     )
+
+
+@pytest.mark.parametrize(
+    "repository_url",
+    [
+        "https://224.0.0.1/repo.git",
+        "https://[ff0e::1]/repo.git",
+        "https://[::ffff:224.0.0.1]/repo.git",
+        "https://[::224.0.0.1]/repo.git",
+    ],
+)
+def test_cached_git_proof_rejects_multicast_repository_forms(
+    repository_url: str,
+) -> None:
+    payload = {
+        "schema_version": 2,
+        "research_sha256": "1" * 64,
+        "design_sha256": "2" * 64,
+        "selected_candidate_id": "resnet-transfer",
+        "route": "git",
+        "verified_at": "2026-09-03T00:00:00Z",
+        "repository_url": repository_url,
+        "commit": "a" * 40,
+        "attempts": [{"route": "git", "success": True, "diagnostic": "clone verified"}],
+    }
+
+    with pytest.raises(ValidationError):
+        BaselineVerification.model_validate(payload)
 
 
 @pytest.mark.asyncio

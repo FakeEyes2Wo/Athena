@@ -69,7 +69,7 @@ def normalize_public_https_repository_url(value: str) -> str:
         address = ipaddress.ip_address(normalized_host)
     except ValueError:
         address = None
-    if address is not None and not _routable_address(address).is_global:
+    if address is not None and not _is_public_repository_address(address):
         raise ValueError("repository IP address must be globally routable")
     if address is None and _looks_like_numeric_ipv4(normalized_host):
         raise ValueError("repository hostname uses a non-canonical numeric IPv4 form")
@@ -115,6 +115,21 @@ def _routable_address(
         if address in _IPV4_COMPATIBLE_NETWORK:
             return ipaddress.IPv4Address(address.packed[-4:])
     return address
+
+
+def _is_public_repository_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """Classify literals and embedded IPv4 forms without trusting is_global alone."""
+
+    routed = _routable_address(address)
+    return bool(
+        routed.is_global
+        and not address.is_multicast
+        and not routed.is_multicast
+        and not getattr(address, "is_site_local", False)
+        and not getattr(routed, "is_site_local", False)
+    )
 
 
 __all__ = ["normalize_public_https_repository_url"]

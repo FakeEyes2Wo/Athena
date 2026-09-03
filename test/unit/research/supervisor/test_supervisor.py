@@ -35,6 +35,47 @@ from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor, _final_report_text
 
 
+def test_prepare_resume_callback_type_alias_is_module_private() -> None:
+    deps_module = import_module("athena.research.supervisor.deps")
+
+    assert not hasattr(deps_module, "PrepareResumeIsAttested")
+    assert "PrepareResumeIsAttested" not in deps_module.__all__
+
+
+def test_phase_actions_preserves_historical_positional_argument_order() -> None:
+    async def publish(_kind, _payload):
+        return None
+
+    async def prepare():
+        raise AssertionError("not called")
+
+    async def validation(_commit, _metric):
+        raise AssertionError("not called")
+
+    async def publish_agent_event(_agent_id, _kind, _ref, _data):
+        return None
+
+    async def on_plan_settled(_plan_id):
+        return None
+
+    actions = PhaseActions(
+        publish,
+        prepare,
+        validation,
+        publish_agent_event,
+        on_plan_settled,
+        True,
+    )
+
+    assert actions.publish is publish
+    assert actions.prepare is prepare
+    assert actions.validation is validation
+    assert actions.publish_agent_event is publish_agent_event
+    assert actions.on_plan_settled is on_plan_settled
+    assert actions.auto_validate is True
+    assert actions.prepare_resume_is_attested is None
+
+
 class _SubmitProvider:
     model_name = "plan-submit-test"
 
@@ -621,6 +662,39 @@ async def test_prepare_failure_is_observable_and_retry_enters_running(
     with pytest.raises(RuntimeError, match="prepare attempt 2 failed"):
         await supervisor.start()
     assert statuses == ["RUNNING", "RUNNING"]
+    assert supervisor.state.status == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_prepare_authority_failure_does_not_publish_cause_traceback(
+    tmp_path: Path,
+) -> None:
+    secret = "authority-session-token-secret"
+    published: list[tuple[str, dict[str, object]]] = []
+
+    async def fail_prepare():
+        try:
+            raise OSError(secret)
+        except OSError as cause:
+            raise BaselineAuthorityError("baseline authority load failed") from cause
+
+    async def publish(kind, payload):
+        published.append((kind, payload))
+
+    supervisor = _checkpoint_supervisor(
+        tmp_path,
+        run_prepare_phase=fail_prepare,
+        publish_callback=publish,
+    )
+
+    with pytest.raises(BaselineAuthorityError, match="authority load failed"):
+        await supervisor.start()
+
+    session_projection = json.dumps(published, ensure_ascii=False)
+    persisted_state = (tmp_path / ".athena" / "state.json").read_text(encoding="utf-8")
+    assert secret not in session_projection
+    assert secret not in persisted_state
+    assert "Traceback" not in session_projection
     assert supervisor.state.status == "FAILED"
 
 

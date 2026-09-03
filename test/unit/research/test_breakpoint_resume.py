@@ -877,8 +877,11 @@ async def test_fresh_runtime_rejects_missing_or_wrong_authority_state(
         restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
 
     runner = PhaseRunner(restarted)
-    if authority_state == "missing_capability":
-        with pytest.raises(BaselineAuthorityError, match="requires"):
+    if authority_state in {"missing_capability", "wrong_generation"}:
+        expected_message = (
+            "requires" if authority_state == "missing_capability" else "lifecycle"
+        )
+        with pytest.raises(BaselineAuthorityError, match=expected_message):
             await runner.baseline_resume_is_attested()
     else:
         assert await runner.baseline_resume_is_attested() is False

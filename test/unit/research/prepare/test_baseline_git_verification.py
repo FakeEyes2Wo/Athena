@@ -1,15 +1,36 @@
 import asyncio
+import os
+import shutil
+import socket
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from athena.research.prepare import source_verification
 from athena.research.prepare.baseline_research import BaselineResearchError
 from athena.research.prepare.source_verification import (
     GitCloneEvidence,
     GitCloneVerifier,
     run_command,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stable_repository_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    def getaddrinfo(host, port, *, family, type, proto):
+        del host, family
+        return [
+            (
+                socket.AF_INET,
+                type,
+                proto,
+                "",
+                ("93.184.216.34", port),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
 class FakeRunner:
@@ -37,7 +58,7 @@ async def test_git_verifier_uses_restricted_shallow_no_checkout_clone() -> None:
     assert isinstance(evidence, GitCloneEvidence)
     assert evidence.repository_url == "https://github.com/pytorch/vision.git"
     assert evidence.commit == "a" * 40
-    assert clone_argv[:1] == ["git"]
+    assert Path(clone_argv[0]).is_absolute()
     assert "clone" in clone_argv
     assert "--no-checkout" in clone_argv
     assert "--filter=blob:none" in clone_argv
@@ -53,6 +74,7 @@ async def test_git_verifier_uses_restricted_shallow_no_checkout_clone() -> None:
     assert clone_env["GIT_TERMINAL_PROMPT"] == "0"
     assert clone_env["GCM_INTERACTIVE"] == "Never"
     assert len(runner.calls) == 2
+    assert runner.calls[1][0][0] == clone_argv[0]
 
 
 @pytest.mark.asyncio
@@ -114,9 +136,12 @@ async def test_git_verifier_disables_non_https_protocols_and_hooks() -> None:
         "https://10.0.0.5/x.git",
         "https://169.254.1.2/x.git",
         "https://0.0.0.0/x.git",
+        "https://224.0.0.1/x.git",
         "https://[::1]/x.git",
         "https://[fd00::1]/x.git",
         "https://[fe80::1]/x.git",
+        "https://[fec0::1]/x.git",
+        "https://[ff0e::1]/x.git",
         "https://[::]/x.git",
         "https://[2001:db8::1]/x.git",
         "https://[::127.0.0.1]/repo.git",
@@ -136,6 +161,10 @@ async def test_git_verifier_disables_non_https_protocols_and_hooks() -> None:
         "https://[::ffff:0.0.0.0]/repo.git",
         "https://[::ffff:192.0.2.1]/repo.git",
         "https://[::ffff:c000:201]/repo.git",
+        "https://[::ffff:224.0.0.1]/repo.git",
+        "https://[::ffff:e000:1]/repo.git",
+        "https://[::224.0.0.1]/repo.git",
+        "https://[::e000:1]/repo.git",
         "https://example.com/repo\x00.git",
         "https://example.com/repo%40.git",
         "https://example.com/repo%3A.git",
@@ -228,6 +257,148 @@ async def test_git_verifier_preserves_valid_alternate_https_port() -> None:
     )
 
 
+def test_repository_dns_resolver_collects_all_a_and_aaaa_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int, int, int, int]] = []
+
+    def getaddrinfo(host, port, *, family, type, proto):
+        calls.append((host, port, family, type, proto))
+        return [
+            (socket.AF_INET6, type, proto, "", ("2606:4700:4700::1111", port, 0, 0)),
+            (socket.AF_INET, type, proto, "", ("8.8.8.8", port)),
+            (socket.AF_INET, type, proto, "", ("8.8.8.8", port)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    resolver = getattr(source_verification, "_resolve_public_host_addresses", None)
+
+    assert callable(resolver)
+    assert resolver("example.com", 8443) == (
+        "8.8.8.8",
+        "2606:4700:4700::1111",
+    )
+    assert calls == [
+        (
+            "example.com",
+            8443,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+            socket.IPPROTO_TCP,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_rejects_mixed_public_private_dns_before_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def getaddrinfo(_host, port, *, family, type, proto):
+        del family
+        return [
+            (socket.AF_INET, type, proto, "", ("8.8.8.8", port)),
+            (socket.AF_INET, type, proto, "", ("127.0.0.1", port)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    runner = FakeRunner()
+
+    with pytest.raises(BaselineResearchError, match="Git source verification failed"):
+        await GitCloneVerifier(runner=runner).verify("https://example.com/repo.git")
+
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resolved_family", "address"),
+    [
+        (socket.AF_INET, "224.0.0.1"),
+        (socket.AF_INET6, "ff0e::1"),
+        (socket.AF_INET6, "::ffff:224.0.0.1"),
+        (socket.AF_INET6, "::224.0.0.1"),
+    ],
+)
+async def test_git_verifier_rejects_multicast_dns_forms_before_git(
+    resolved_family: int,
+    address: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def getaddrinfo(_host, port, *, family, type, proto):
+        del family
+        sockaddr = (address, port) if ":" not in address else (address, port, 0, 0)
+        return [(resolved_family, type, proto, "", sockaddr)]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    runner = FakeRunner()
+
+    with pytest.raises(BaselineResearchError, match="Git source verification failed"):
+        await GitCloneVerifier(runner=runner).verify("https://example.com/repo.git")
+
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_rejects_dns_failure_before_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def getaddrinfo(_host, _port, *, family, type, proto):
+        del family, type, proto
+        raise socket.gaierror("controlled resolver failure")
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    runner = FakeRunner()
+
+    with pytest.raises(BaselineResearchError, match="Git source verification failed"):
+        await GitCloneVerifier(runner=runner).verify("https://example.com/repo.git")
+
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_rejects_changed_dns_snapshot_before_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers = iter(["8.8.8.8", "1.1.1.1"])
+
+    def getaddrinfo(_host, port, *, family, type, proto):
+        del family
+        return [(socket.AF_INET, type, proto, "", (next(answers), port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    runner = FakeRunner()
+
+    with pytest.raises(BaselineResearchError, match="Git source verification failed"):
+        await GitCloneVerifier(runner=runner).verify("https://example.com/repo.git")
+
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_pins_all_addresses_and_disables_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def getaddrinfo(_host, port, *, family, type, proto):
+        del family
+        return [
+            (socket.AF_INET6, type, proto, "", ("2606:4700:4700::1111", port, 0, 0)),
+            (socket.AF_INET, type, proto, "", ("8.8.8.8", port)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    runner = FakeRunner()
+
+    await GitCloneVerifier(runner=runner).verify("https://EXAMPLE.com:8443/repo.git")
+
+    expected_resolve = (
+        "http.curloptResolve=example.com:8443:" "8.8.8.8,[2606:4700:4700::1111]"
+    )
+    assert len(runner.calls) == 2
+    for argv, _, _, _ in runner.calls:
+        assert expected_resolve in argv
+        assert "http.followRedirects=false" in argv
+
+
 @pytest.mark.asyncio
 async def test_git_verifier_rejects_control_characters_without_running_commands() -> (
     None
@@ -305,6 +476,21 @@ async def test_git_verifier_isolates_git_environment_and_config_for_both_command
         "HTTP_PROXY": "http://proxy.invalid",
         "HTTPS_PROXY": "http://proxy.invalid",
         "ALL_PROXY": "http://proxy.invalid",
+        "http_proxy": "http://proxy.invalid",
+        "https_proxy": "http://proxy.invalid",
+        "no_proxy": "example.com",
+        "GIT_SSL_CERT": "client-cert-secret.pem",
+        "GIT_SSL_KEY": "client-key-secret.pem",
+        "GIT_SSL_CAINFO": "private-ca-secret.pem",
+        "GIT_SSL_CAPATH": "private-ca-directory-secret",
+        "GIT_SSL_VERSION": "tlsv1.0-secret",
+        "GIT_PROXY_SSL_CERT": "proxy-client-cert-secret.pem",
+        "GIT_PROXY_SSL_KEY": "proxy-client-key-secret.pem",
+        "CURL_CA_BUNDLE": "curl-ca-secret.pem",
+        "SSL_CERT_FILE": "tls-ca-secret.pem",
+        "SSL_CERT_DIR": "tls-ca-directory-secret",
+        "GIT_TRACE_CURL": "trace-secret.log",
+        "ATHENA_GIT_ENV_SECRET": "arbitrary-environment-secret",
     }
     for key, value in inherited.items():
         monkeypatch.setenv(key, value)
@@ -314,24 +500,108 @@ async def test_git_verifier_isolates_git_environment_and_config_for_both_command
 
     assert len(runner.calls) == 2
     for argv, _, environment, _ in runner.calls:
-        assert "GIT_CONFIG_COUNT" not in environment
-        assert "GIT_CONFIG_KEY_0" not in environment
-        assert "GIT_CONFIG_VALUE_0" not in environment
-        assert "GIT_SSH_COMMAND" not in environment
-        assert "GIT_PROXY_COMMAND" not in environment
-        assert "GIT_ASKPASS" not in environment
-        assert "SSH_ASKPASS" not in environment
-        assert "GIT_EXEC_PATH" not in environment
-        assert "GIT_ALLOW_PROTOCOL" not in environment
-        assert "HTTP_PROXY" not in environment
-        assert "HTTPS_PROXY" not in environment
-        assert "ALL_PROXY" not in environment
+        assert inherited.keys().isdisjoint(environment)
+        assert "PATH" not in environment
         assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
         assert environment["GIT_CONFIG_GLOBAL"]
         assert environment["GIT_CONFIG_SYSTEM"]
+        assert {key.casefold() for key in environment} <= {
+            "gcm_interactive",
+            "git_config_global",
+            "git_config_nosystem",
+            "git_config_system",
+            "git_terminal_prompt",
+            "lang",
+            "lc_all",
+            "systemroot",
+            "windir",
+        }
         assert "protocol.allow=never" in argv
         assert "protocol.https.allow=always" in argv
         assert "credential.helper=" in argv
+        assert "http.followRedirects=false" in argv
+        assert "http.cookieFile=" in argv
+        assert "http.saveCookies=false" in argv
+        assert "http.extraHeader=" in argv
+        assert "http.sslCert=" in argv
+        assert "http.sslKey=" in argv
+        assert "http.sslCertPasswordProtected=false" in argv
+        assert "http.proxy=" in argv
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_does_not_expose_tls_environment_in_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "tls-environment-marker-must-not-leak"
+    for name in (
+        "GIT_SSL_CERT",
+        "GIT_SSL_KEY",
+        "GIT_SSL_CAINFO",
+        "GIT_PROXY_SSL_CERT",
+        "CURL_CA_BUNDLE",
+        "SSL_CERT_FILE",
+    ):
+        monkeypatch.setenv(name, secret)
+
+    class EchoEnvironmentRunner(FakeRunner):
+        async def __call__(self, argv, *, cwd, env, timeout_s):
+            self.calls.append((list(argv), cwd, dict(env), timeout_s))
+            return subprocess.CompletedProcess(argv, 128, "", repr(dict(env)))
+
+    runner = EchoEnvironmentRunner()
+    with pytest.raises(BaselineResearchError) as caught:
+        await GitCloneVerifier(runner=runner).verify("https://example.com/repo.git")
+
+    assert secret not in " ".join(caught.value.diagnostics)
+    assert secret not in repr(runner.calls[0][2])
+
+
+@pytest.mark.asyncio
+async def test_git_verifier_ignores_runtime_path_git_shim_with_real_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / ("git.exe" if os.name == "nt" else "git")
+    launcher = Path(os.environ["COMSPEC"]) if os.name == "nt" else Path("/bin/sh")
+    shutil.copy2(launcher, fake_git)
+    fake_git.chmod(0o755)
+    sentinel = tmp_path / "fake-git-ran"
+    if os.name == "nt":
+        probe_script = tmp_path / "probe_git_shim.cmd"
+        probe_script.write_text('@echo executed>"%~1"\n', encoding="utf-8")
+        probe_arguments = ["/d", "/c", str(probe_script), str(sentinel)]
+    else:
+        probe_script = tmp_path / "probe_git_shim.sh"
+        probe_script.write_text('printf executed > "$1"\n', encoding="utf-8")
+        probe_arguments = [str(probe_script), str(sentinel)]
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.chdir(fake_bin)
+
+    class SubprocessProbeRunner(FakeRunner):
+        async def __call__(self, argv, *, cwd, env, timeout_s):
+            await run_command(
+                [argv[0], *probe_arguments],
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+            )
+            return await super().__call__(
+                argv,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+            )
+
+    runner = SubprocessProbeRunner()
+    await GitCloneVerifier(runner=runner).verify("https://example.com/repo.git")
+
+    assert not sentinel.exists()
+    assert len(runner.calls) == 2
+    assert Path(runner.calls[0][0][0]).is_absolute()
+    assert runner.calls[1][0][0] == runner.calls[0][0][0]
 
 
 class TimeoutRunner:

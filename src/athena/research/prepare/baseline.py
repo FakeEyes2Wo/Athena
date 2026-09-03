@@ -140,6 +140,24 @@ def _validated_sealed_baseline(root: Path, sealed: SealedBaseline) -> VerifiedBa
     )
 
 
+def _assert_valid_authority_lifecycle(sealed: SealedBaseline) -> None:
+    """Accept only the two baseline generations defined by the authority protocol."""
+
+    if type(sealed) is not SealedBaseline:
+        raise BaselineAuthorityError("authority returned an invalid sealed baseline")
+    attestation = sealed.attestation
+    if sealed.generation == 0 and attestation is None:
+        return
+    if (
+        sealed.generation == 1
+        and type(attestation) is PrepareAttestation
+        and attestation.research_sha256 == sealed.bundle.verification.research_sha256
+        and attestation.design_sha256 == sealed.bundle.verification.design_sha256
+    ):
+        return
+    raise BaselineAuthorityError("baseline authority lifecycle is invalid")
+
+
 def _read_required_mirror(root: Path, filename: str) -> bytes:
     try:
         return (root / filename).read_bytes()
@@ -160,13 +178,14 @@ async def _load_authoritative_baseline_record(
     """Load one external record and validate its exact workspace mirrors."""
     try:
         sealed = await authority.load()
-    except BaselineAuthorityError:
+    except asyncio.CancelledError:
         raise
-    except Exception as exc:  # noqa: BLE001 - external capability boundary
-        raise BaselineAuthorityError("baseline authority load failed") from exc
+    except Exception:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError("baseline authority load failed") from None
     if sealed is None:
         return None
 
+    _assert_valid_authority_lifecycle(sealed)
     verified = _validated_sealed_baseline(root, sealed)
     bundle = sealed.bundle
     _assert_mirror_matches(root, RESEARCH_FILENAME, bundle.research_bytes)
@@ -209,10 +228,10 @@ async def seal_verified_baseline(
     bundle = _verified_bundle(verified)
     try:
         sealed = await authority.seal(bundle, expected_generation=None)
-    except BaselineAuthorityError:
+    except asyncio.CancelledError:
         raise
-    except Exception as exc:  # noqa: BLE001 - external capability boundary
-        raise BaselineAuthorityError("baseline authority seal failed") from exc
+    except Exception:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError("baseline authority seal failed") from None
     accepted = _validated_sealed_baseline(verified.artifacts.root, sealed)
     if (
         sealed.generation != 0
@@ -271,12 +290,12 @@ async def _attest_prepare_completion(
             evidence,
             expected_generation=0,
         )
-    except BaselineAuthorityError:
+    except asyncio.CancelledError:
         raise
-    except Exception as exc:  # noqa: BLE001 - external capability boundary
+    except Exception:  # noqa: BLE001 - external capability boundary
         raise BaselineAuthorityError(
             "baseline authority completion attestation failed"
-        ) from exc
+        ) from None
     if (
         type(sealed) is not SealedBaseline
         or sealed.generation != verified.authority_generation + 1

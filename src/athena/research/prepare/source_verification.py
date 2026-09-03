@@ -1,14 +1,19 @@
 """Restricted, non-interactive verification of public Git repositories."""
 
 import asyncio
+import ipaddress
 import os
 import re
+import shutil
+import socket
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping, Protocol, Sequence
+from types import MappingProxyType
+from typing import Awaitable, Callable, Final, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
@@ -32,7 +37,10 @@ from .baseline_research import (
     research_sha256,
     titles_match,
 )
-from .repository_url import normalize_public_https_repository_url
+from .repository_url import (
+    _is_public_repository_address,
+    normalize_public_https_repository_url,
+)
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _SENSITIVE_VALUE_RE = re.compile(
@@ -45,36 +53,33 @@ _AUTHORIZATION_SCHEME_RE = re.compile(r"(?i)\b(?P<scheme>Bearer|Basic)\s+[^\s\r\
 _URL_CANDIDATE_RE = re.compile(
     r"(?P<scheme>https?|ssh|git)://[^\s'\"<>]+", re.IGNORECASE
 )
-_UNTRUSTED_ENV_NAMES = {
-    "ALL_PROXY",
-    "GIT_ALLOW_PROTOCOL",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_ASKPASS",
-    "GIT_DIR",
-    "GIT_EDITOR",
-    "GIT_EXEC_PATH",
-    "GIT_EXTERNAL_DIFF",
-    "GIT_EXT_SERVICE",
-    "GIT_EXT_SERVICE_NOP",
-    "GIT_HTTP_PROXY",
-    "GIT_HTTPS_PROXY",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_PROXY_COMMAND",
-    "GIT_SEQUENCE_EDITOR",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
-    "GIT_SSH_VARIANT",
-    "GIT_WORK_TREE",
-    "GIT_PAGER",
-    "GIT_PROTOCOL",
-    "GIT_SSL_CIPHER_LIST",
-    "GIT_SSL_NO_VERIFY",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "SSH_ASKPASS",
-}
+
+
+def _capture_git_executable() -> str | None:
+    """Resolve Git once, before any research Agent can influence later lookups."""
+
+    candidate = shutil.which("git")
+    if candidate is None:
+        return None
+    try:
+        resolved = Path(candidate).resolve(strict=True)
+    except OSError:
+        return None
+    return str(resolved) if resolved.is_file() and resolved.is_absolute() else None
+
+
+def _capture_platform_environment() -> Mapping[str, str]:
+    """Retain only Windows process roots needed by native subprocesses."""
+
+    captured: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key.casefold() in {"systemroot", "windir"} and value:
+            captured[key] = value
+    return MappingProxyType(captured)
+
+
+_GIT_EXECUTABLE: Final[str | None] = _capture_git_executable()
+_PLATFORM_ENVIRONMENT: Final[Mapping[str, str]] = _capture_platform_environment()
 
 
 class CommandRunner(Protocol):
@@ -153,18 +158,9 @@ def _redact_url_candidate(match: re.Match[str]) -> str:
 
 
 def _clean_environment() -> dict[str, str]:
-    """Copy only a safe process environment for Git's two commands."""
+    """Build Git's environment from a fixed allowlist, never ambient runtime state."""
 
-    environment = dict(os.environ)
-    untrusted_casefolded = {name.casefold() for name in _UNTRUSTED_ENV_NAMES}
-    for key in list(environment):
-        if (
-            key.casefold() == "git_config"
-            or key.casefold().startswith("git_config_")
-            or key.casefold() in untrusted_casefolded
-            or key.casefold().startswith("git_trace")
-        ):
-            environment.pop(key, None)
+    environment = dict(_PLATFORM_ENVIRONMENT)
     environment.update(
         {
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -172,9 +168,64 @@ def _clean_environment() -> dict[str, str]:
             "GIT_CONFIG_SYSTEM": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
             "GCM_INTERACTIVE": "Never",
+            "LANG": "C",
+            "LC_ALL": "C",
         }
     )
     return environment
+
+
+def _resolve_public_host_addresses(host: str, port: int) -> tuple[str, ...]:
+    """Resolve every A/AAAA address and reject the complete set on any unsafe entry."""
+
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not _is_public_repository_address(literal):
+            raise ValueError("repository hostname resolved to a non-public address")
+        return (str(literal),)
+
+    try:
+        records = socket.getaddrinfo(
+            host,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+    except OSError:
+        raise ValueError("repository hostname resolution failed") from None
+
+    addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    for family, _socket_type, _protocol, _canonical_name, sockaddr in records:
+        if family not in {socket.AF_INET, socket.AF_INET6} or not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            raise ValueError("repository hostname resolution was invalid") from None
+        if (family == socket.AF_INET) != isinstance(address, ipaddress.IPv4Address):
+            raise ValueError("repository hostname resolution was invalid")
+        if not _is_public_repository_address(address):
+            raise ValueError("repository hostname resolved to a non-public address")
+        addresses.add(address)
+    if not addresses:
+        raise ValueError("repository hostname did not resolve to an A or AAAA address")
+    return tuple(
+        str(address)
+        for address in sorted(addresses, key=lambda item: (item.version, item.packed))
+    )
+
+
+def _curlopt_resolve_value(host: str, port: int, addresses: Sequence[str]) -> str:
+    """Render one permanent libcurl DNS-cache entry, bracketing IPv6 addresses."""
+
+    rendered = ",".join(
+        f"[{address}]" if ":" in address else address for address in addresses
+    )
+    return f"http.curloptResolve={host}:{port}:{rendered}"
 
 
 class GitCloneVerifier:
@@ -187,9 +238,38 @@ class GitCloneVerifier:
     async def verify(self, repository_url: str) -> GitCloneEvidence:
         """Clone a repository shallowly and return its resolved HEAD commit."""
 
+        if _GIT_EXECUTABLE is None:
+            self._raise_failure("trusted Git executable is unavailable")
         try:
             normalized_url = normalize_public_https_repository_url(repository_url)
         except ValueError as exc:
+            self._raise_failure(str(exc))
+        parsed_url = urlsplit(normalized_url)
+        host = parsed_url.hostname
+        if host is None:
+            self._raise_failure("repository URL must include a host")
+        port = parsed_url.port or 443
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            host_is_literal = False
+        else:
+            host_is_literal = True
+        try:
+            addresses = await asyncio.to_thread(
+                _resolve_public_host_addresses,
+                host,
+                port,
+            )
+            if not host_is_literal:
+                repeated_addresses = await asyncio.to_thread(
+                    _resolve_public_host_addresses,
+                    host,
+                    port,
+                )
+                if repeated_addresses != addresses:
+                    raise ValueError("repository hostname resolution changed")
+        except (OSError, ValueError) as exc:
             self._raise_failure(str(exc))
 
         environment = _clean_environment()
@@ -220,9 +300,33 @@ class GitCloneVerifier:
                 "protocol.https.allow=always",
                 "-c",
                 "credential.helper=",
+                "-c",
+                "http.followRedirects=false",
+                "-c",
+                "http.cookieFile=",
+                "-c",
+                "http.saveCookies=false",
+                "-c",
+                "http.extraHeader=",
+                "-c",
+                "http.sslCert=",
+                "-c",
+                "http.sslKey=",
+                "-c",
+                "http.sslCertPasswordProtected=false",
+                "-c",
+                "http.proxy=",
+                "-c",
+                "http.proxySSLCert=",
+                "-c",
+                "http.proxySSLKey=",
+                "-c",
+                "http.sslVerify=true",
             ]
+            if not host_is_literal:
+                git_config.extend(["-c", _curlopt_resolve_value(host, port, addresses)])
             clone_argv = [
-                "git",
+                _GIT_EXECUTABLE,
                 *git_config,
                 "clone",
                 "--depth",
@@ -246,7 +350,7 @@ class GitCloneVerifier:
                 )
 
             head_argv = [
-                "git",
+                _GIT_EXECUTABLE,
                 *git_config,
                 "-C",
                 str(clone_dir),

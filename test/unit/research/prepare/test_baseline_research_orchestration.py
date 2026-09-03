@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -471,7 +472,7 @@ async def test_exact_authority_restart_returns_before_default_verifier_construct
         bundle.verification_bytes
     )
     authority = MemoryBaselineAuthorityStore(
-        SealedBaseline(generation=7, bundle=bundle)
+        SealedBaseline(generation=0, bundle=bundle)
     )
 
     class ForbiddenAgents(FakeAgents):
@@ -504,7 +505,7 @@ async def test_exact_authority_restart_returns_before_default_verifier_construct
     )
 
     assert result.verification.commit == "a" * 40
-    assert result.authority_generation == 7
+    assert result.authority_generation == 0
     assert result.verification_bytes == bundle.verification_bytes
     assert authority.loads == 1
     assert authority.seals == 0
@@ -538,7 +539,7 @@ async def test_missing_verification_mirror_is_restored_exactly_from_authority(
     write_artifacts(tmp_path)
     bundle = authority_bundle(tmp_path)
     authority = MemoryBaselineAuthorityStore(
-        SealedBaseline(generation=3, bundle=bundle)
+        SealedBaseline(generation=0, bundle=bundle)
     )
 
     result = await prepare_baseline_design(
@@ -550,7 +551,7 @@ async def test_missing_verification_mirror_is_restored_exactly_from_authority(
         verifier=QueuedVerifier(tmp_path, []),
     )
 
-    assert result.authority_generation == 3
+    assert result.authority_generation == 0
     assert (
         tmp_path / "BASELINE_RESEARCH_VERIFICATION.json"
     ).read_bytes() == bundle.verification_bytes
@@ -603,7 +604,7 @@ async def test_authority_mirror_mutation_stops_before_prepare_or_live_verificati
         bundle.verification_bytes
     )
     authority = MemoryBaselineAuthorityStore(
-        SealedBaseline(generation=2, bundle=bundle)
+        SealedBaseline(generation=0, bundle=bundle)
     )
     mutate(tmp_path)
     verifier = QueuedVerifier(tmp_path, [])
@@ -681,6 +682,33 @@ async def test_authority_outage_never_falls_back_to_matching_workspace(
 
 
 @pytest.mark.asyncio
+async def test_authority_load_error_is_stable_and_suppresses_adapter_details(
+    tmp_path: Path,
+) -> None:
+    secret = "authority-load-endpoint-token-secret"
+    authority = MemoryBaselineAuthorityStore(load_error=BaselineAuthorityError(secret))
+
+    with pytest.raises(BaselineAuthorityError) as caught:
+        await prepare_baseline_design(
+            FakeRuntime(authority),
+            workspace(tmp_path),
+            "task",
+            True,
+            ScriptedHandoff(tmp_path, []),
+            verifier=QueuedVerifier(tmp_path, []),
+        )
+
+    assert str(caught.value) == "baseline authority load failed"
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert secret not in "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+
+
+@pytest.mark.asyncio
 async def test_seal_failure_leaves_no_verification_mirror(tmp_path: Path) -> None:
     write_artifacts(tmp_path)
     write_forged_verification(tmp_path)
@@ -696,6 +724,99 @@ async def test_seal_failure_leaves_no_verification_mirror(tmp_path: Path) -> Non
             verifier=QueuedVerifier(tmp_path, ["valid"]),
         )
 
+    assert not (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_authority_seal_error_is_stable_and_suppresses_adapter_details(
+    tmp_path: Path,
+) -> None:
+    secret = "authority-seal-client-key-path-secret"
+    write_artifacts(tmp_path)
+    authority = MemoryBaselineAuthorityStore(seal_error=BaselineAuthorityError(secret))
+
+    with pytest.raises(BaselineAuthorityError) as caught:
+        await prepare_baseline_design(
+            FakeRuntime(authority),
+            workspace(tmp_path),
+            "task",
+            True,
+            ScriptedHandoff(tmp_path, []),
+            verifier=QueuedVerifier(tmp_path, ["valid"]),
+        )
+
+    assert str(caught.value) == "baseline authority seal failed"
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert secret not in "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_authority_load_cancellation_is_not_translated(tmp_path: Path) -> None:
+    authority = MemoryBaselineAuthorityStore(load_error=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await prepare_baseline_design(
+            FakeRuntime(authority),
+            workspace(tmp_path),
+            "task",
+            True,
+            ScriptedHandoff(tmp_path, []),
+            verifier=QueuedVerifier(tmp_path, []),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("generation", "has_attestation"),
+    [(0, True), (1, False), (2, True)],
+)
+async def test_invalid_authority_lifecycle_fails_before_verifier_or_agent(
+    generation: int,
+    has_attestation: bool,
+    tmp_path: Path,
+) -> None:
+    write_artifacts(tmp_path)
+    bundle = authority_bundle(tmp_path)
+    attestation = (
+        PrepareAttestation(
+            research_sha256=bundle.verification.research_sha256,
+            design_sha256=bundle.verification.design_sha256,
+            baseline_commit="b" * 40,
+            evaluator_ref="sha256:" + "e" * 64,
+            evidence_ref="sha256:" + "d" * 64,
+        )
+        if has_attestation
+        else None
+    )
+    authority = MemoryBaselineAuthorityStore(
+        SealedBaseline(
+            generation=generation,
+            bundle=bundle,
+            attestation=attestation,
+        )
+    )
+    handoff = ScriptedHandoff(tmp_path, [])
+    verifier = QueuedVerifier(tmp_path, [])
+
+    with pytest.raises(BaselineAuthorityError, match="lifecycle"):
+        await prepare_baseline_design(
+            FakeRuntime(authority),
+            workspace(tmp_path),
+            "task",
+            True,
+            handoff,
+            verifier=verifier,
+        )
+
+    assert authority.loads == 1
+    assert authority.seals == 0
+    assert verifier.calls == []
+    assert handoff.calls == []
     assert not (tmp_path / "BASELINE_RESEARCH_VERIFICATION.json").exists()
 
 
@@ -1486,11 +1607,12 @@ async def test_run_baseline_wraps_completion_attestation_outage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     verified = verified_fixture(tmp_path)
+    secret = "authority-attestation-token-secret"
 
     class OutageAuthority(MemoryBaselineAuthorityStore):
         async def attest_prepare(self, evidence, *, expected_generation: int):
             del evidence, expected_generation
-            raise OSError("authority offline")
+            raise BaselineAuthorityError(secret)
 
     sealed = authority_for_verified(verified).sealed
     assert sealed is not None
@@ -1502,7 +1624,48 @@ async def test_run_baseline_wraps_completion_attestation_outage(
 
     monkeypatch.setattr(baseline, "run_prepare_plan", scored)
 
-    with pytest.raises(BaselineAuthorityError, match="attestation failed"):
+    with pytest.raises(BaselineAuthorityError) as caught:
+        await run_baseline(
+            PrepareRuntime(authority),
+            workspace(tmp_path),
+            completed_prepare_result().evaluator_ref,
+            "task",
+            None,
+            verified,
+        )
+
+    assert str(caught.value) == "baseline authority completion attestation failed"
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert secret not in "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_authority_attestation_cancellation_is_not_translated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = verified_fixture(tmp_path)
+
+    class CancelledAuthority(MemoryBaselineAuthorityStore):
+        async def attest_prepare(self, evidence, *, expected_generation: int):
+            del evidence, expected_generation
+            raise asyncio.CancelledError()
+
+    sealed = authority_for_verified(verified).sealed
+    assert sealed is not None
+    authority = CancelledAuthority(sealed)
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def scored(**_kwargs: Any) -> PrepareResult:
+        return completed_prepare_result()
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", scored)
+
+    with pytest.raises(asyncio.CancelledError):
         await run_baseline(
             PrepareRuntime(authority),
             workspace(tmp_path),
@@ -1624,15 +1787,18 @@ async def test_run_baseline_rejects_completion_generation_above_one(
     )
     authority = MemoryBaselineAuthorityStore(sealed)
     monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+    plan_calls: list[str] = []
 
     async def rescored(**_kwargs: Any) -> PrepareResult:
+        plan_calls.append("scored")
         return expected
 
     monkeypatch.setattr(baseline, "run_prepare_plan", rescored)
 
-    with pytest.raises(BaselineAuthorityError, match="generation"):
+    runtime = PrepareRuntime(authority)
+    with pytest.raises(BaselineAuthorityError, match="lifecycle"):
         await run_baseline(
-            PrepareRuntime(authority),
+            runtime,
             workspace(tmp_path),
             expected.evaluator_ref,
             "task",
@@ -1642,3 +1808,6 @@ async def test_run_baseline_rejects_completion_generation_above_one(
 
     assert authority.attestations == []
     assert authority.sealed == sealed
+    assert runtime.outputs == []
+    assert runtime.snapshots == []
+    assert plan_calls == []

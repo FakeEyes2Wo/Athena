@@ -94,14 +94,17 @@ class PhaseMachine:
             failed_phase = self._state.phase
             self._state.status = "FAILED"
             self._plans.save_state()
-            tb = traceback.format_exc()
             logger.exception("research phase failed")
+            if isinstance(exc, BaselineAuthorityError):
+                published_error = "research failed: baseline authority unavailable"
+            else:
+                published_error = f"research failed: {exc}\n\n{traceback.format_exc()}"
             await self._deps.phases.publish(
                 "output",
                 {
                     "source": "supervisor",
                     "channel": "error",
-                    "text": f"research failed: {exc}\n\n{tb}",
+                    "text": published_error,
                 },
             )
             await self._plans.publish_state()
