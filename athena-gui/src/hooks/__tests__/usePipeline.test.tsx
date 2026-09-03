@@ -359,6 +359,302 @@ describe("usePipeline", () => {
     expect(result.current.viewModel.status).toBe("running");
   });
 
+  it("waits for a pending session switch before continuing the target runtime", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    let resolveSwitch: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveSwitch = resolve; }),
+    );
+
+    let switching: Promise<void>;
+    let continuation: Promise<void>;
+    act(() => {
+      switching = result.current.switchSession("target");
+      continuation = result.current.sendPrompt("  Continue  ");
+    });
+
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSwitch?.({ records: [], sessions: ["target"] });
+      await Promise.all([switching!, continuation!]);
+    });
+
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+    expect(result.current.currentSessionId).toBe("target");
+    expect(result.current.viewModel.status).toBe("running");
+  });
+
+  it("ignores a switched-session snapshot that resolves after queued continuation", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1));
+
+    let resolveSwitch: ((value: { records: never[]; sessions: string[] }) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveSwitch = resolve; }),
+    );
+    bridgeMocks.stateGet.mockClear();
+    let resolveTargetState: ((value: Record<string, unknown>) => void) | undefined;
+    bridgeMocks.stateGet.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveTargetState = resolve; }),
+    );
+    let resolveResume: (() => void) | undefined;
+    bridgeMocks.resumeSearch.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveResume = resolve; }),
+    );
+
+    let switching: Promise<void>;
+    let continuation: Promise<void>;
+    act(() => {
+      switching = result.current.switchSession("target");
+      continuation = result.current.sendPrompt("continue");
+    });
+
+    await act(async () => {
+      resolveSwitch?.({ records: [], sessions: ["target"] });
+      await switching!;
+      await Promise.resolve();
+    });
+    expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1);
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveResume?.();
+      await continuation!;
+    });
+    expect(result.current.viewModel).toMatchObject({
+      status: "running",
+      resumeAvailable: false,
+      resumeReason: null,
+    });
+
+    await act(async () => {
+      resolveTargetState?.({
+        phase: "PREPARE",
+        status: "FAILED",
+        resume_available: true,
+        resume_reason: "failed",
+      });
+      await Promise.resolve();
+    });
+    expect(result.current.viewModel).toMatchObject({
+      status: "running",
+      resumeAvailable: false,
+      resumeReason: null,
+    });
+  });
+
+  it.each(["synchronous throw", "async rejection"] as const)(
+    "applies late target state and permits retry after resume %s",
+    async (failureMode) => {
+      const { result } = renderHook(() => usePipeline());
+      await waitFor(() => expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1));
+
+      bridgeMocks.sessionSwitch.mockResolvedValueOnce({ records: [], sessions: ["target"] });
+      bridgeMocks.stateGet.mockClear();
+      let resolveTargetState: ((value: Record<string, unknown>) => void) | undefined;
+      bridgeMocks.stateGet.mockImplementationOnce(
+        () => new Promise((resolve) => { resolveTargetState = resolve; }),
+      );
+      if (failureMode === "synchronous throw") {
+        bridgeMocks.resumeSearch.mockImplementationOnce(() => {
+          throw new Error("resume failed");
+        });
+      } else {
+        bridgeMocks.resumeSearch.mockRejectedValueOnce(new Error("resume failed"));
+      }
+
+      await act(async () => {
+        await result.current.switchSession("target");
+      });
+      await act(async () => {
+        await result.current.sendPrompt("continue").catch(() => undefined);
+      });
+
+      expect(result.current.viewModel.messages.filter((message) => message.kind === "error"))
+        .toHaveLength(1);
+
+      await act(async () => {
+        resolveTargetState?.({
+          phase: "PREPARE",
+          status: "FAILED",
+          resume_available: true,
+          resume_reason: "failed",
+        });
+        await Promise.resolve();
+      });
+
+      expect(result.current.viewModel).toMatchObject({
+        phase: "PREPARE",
+        status: "error",
+        resumeAvailable: true,
+        resumeReason: "failed",
+      });
+      expect(result.current.runActive).toBe(true);
+      expect(result.current.viewModel.messages.filter((message) => message.kind === "error"))
+        .toHaveLength(1);
+
+      await act(async () => {
+        await result.current.sendPrompt("continue");
+      });
+      expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(2);
+      expect(result.current.viewModel.resumeAvailable).toBe(false);
+      expect(result.current.viewModel.messages.filter((message) => message.kind === "error"))
+        .toHaveLength(1);
+    },
+  );
+
+  it("does not continue the old runtime when a pending session switch rejects", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
+
+    await act(async () => {
+      await result.current.sendPrompt("/help");
+    });
+
+    act(() => {
+      pipelineEventHandler?.({
+        kind: "state",
+        data: {
+          phase: "SEARCH",
+          status: "FAILED",
+          resume_available: true,
+          resume_reason: "failed",
+        },
+      });
+    });
+    const previousMessages = result.current.viewModel.messages;
+
+    let rejectSwitch: ((reason: Error) => void) | undefined;
+    bridgeMocks.sessionSwitch.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectSwitch = reject; }),
+    );
+
+    let switching: Promise<void>;
+    let continuation: Promise<void>;
+    act(() => {
+      switching = result.current.switchSession("unavailable");
+      continuation = result.current.sendPrompt("continue");
+    });
+
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      rejectSwitch?.(new Error("switch unavailable"));
+      await Promise.all([switching!, continuation!]);
+    });
+
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+    expect(result.current.currentSessionId).toBe("default");
+    expect(result.current.viewModel).toMatchObject({
+      phase: "SEARCH",
+      status: "error",
+      resumeAvailable: true,
+      resumeReason: "failed",
+    });
+    expect(result.current.viewModel.messages.slice(0, previousMessages.length)).toEqual(previousMessages);
+    expect(result.current.viewModel.messages.filter((message) => message.kind === "error")).toHaveLength(1);
+    expect(
+      result.current.viewModel.messages[result.current.viewModel.messages.length - 1]?.content,
+    ).toBe(
+      "切换会话失败：switch unavailable",
+    );
+  });
+
+  it("projects the switched session's authoritative resume state", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1));
+
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["resumable"] });
+    bridgeMocks.stateGet.mockClear();
+    bridgeMocks.stateGet.mockResolvedValueOnce({
+      phase: "PREPARE",
+      status: "FAILED",
+      resume_available: true,
+      resume_reason: "failed",
+    });
+
+    await act(async () => {
+      await result.current.switchSession("resumable");
+    });
+
+    await waitFor(() => expect(result.current.viewModel.resumeAvailable).toBe(true));
+    expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1);
+    expect(result.current.viewModel).toMatchObject({
+      phase: "PREPARE",
+      status: "error",
+      resumeAvailable: true,
+      resumeReason: "failed",
+    });
+  });
+
+  it("keeps switched-session controls neutral while state is pending or unavailable", async () => {
+    const { result } = renderHook(() => usePipeline());
+    await waitFor(() => expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      pipelineEventHandler?.({
+        kind: "state",
+        data: {
+          phase: "SEARCH",
+          status: "WAITING",
+          search: { attempts: 2, limit: 5, successes: 1, concurrency: 3 },
+          sota: { experiment: "exp-old", metric: 0.83 },
+          plans: [{ id: "plan-old" }],
+          pending: [{ id: "hyp-old", statement: "old hypothesis" }],
+          manual: true,
+          resume_available: true,
+          resume_reason: "paused",
+        },
+      });
+    });
+
+    bridgeMocks.sessionSwitch.mockResolvedValue({ records: [], sessions: ["fresh"] });
+    bridgeMocks.stateGet.mockClear();
+    let rejectFreshState: ((reason: Error) => void) | undefined;
+    bridgeMocks.stateGet.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectFreshState = reject; }),
+    );
+
+    await act(async () => {
+      await result.current.switchSession("fresh");
+    });
+
+    expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(1);
+    expect(result.current.currentSessionId).toBe("fresh");
+    expect(result.current.viewModel).toMatchObject({
+      phase: "idle",
+      status: "idle",
+      rightRail: {
+        budgetRemaining: 0,
+        searchAttempts: 0,
+        searchLimit: 0,
+        successes: 0,
+        workers: 0,
+        bestPrimary: null,
+        latestExperimentId: null,
+      },
+      plans: [],
+      pending: [],
+      manual: false,
+      resumeAvailable: false,
+      resumeReason: null,
+    });
+
+    await act(async () => {
+      rejectFreshState?.(new Error("state unavailable"));
+      await Promise.resolve();
+    });
+    expect(result.current.viewModel).toMatchObject({
+      phase: "idle",
+      status: "idle",
+      resumeAvailable: false,
+      resumeReason: null,
+    });
+  });
+
   it("keeps existing history when a resumable run rejects continuation", async () => {
     bridgeMocks.resumeSearch.mockRejectedValue(new Error("nothing to resume"));
     const { result } = renderHook(() => usePipeline());
@@ -922,12 +1218,19 @@ describe("usePipeline", () => {
   });
 
   it("ignores a mount snapshot that resolves after a session switch", async () => {
-    let resolveSnapshot: ((value: Record<string, unknown>) => void) | undefined;
-    bridgeMocks.stateGet.mockImplementation(
-      () => new Promise((resolve) => {
-        resolveSnapshot = resolve;
-      }),
-    );
+    let resolveMountSnapshot: ((value: Record<string, unknown>) => void) | undefined;
+    let resolveSwitchedSnapshot: ((value: Record<string, unknown>) => void) | undefined;
+    bridgeMocks.stateGet
+      .mockImplementationOnce(
+        () => new Promise((resolve) => {
+          resolveMountSnapshot = resolve;
+        }),
+      )
+      .mockImplementationOnce(
+        () => new Promise((resolve) => {
+          resolveSwitchedSnapshot = resolve;
+        }),
+      );
     const { result } = renderHook(() => usePipeline());
     await waitFor(() => expect(bridgeMocks.sessionSwitch).toHaveBeenCalledWith("default"));
 
@@ -935,20 +1238,10 @@ describe("usePipeline", () => {
     await act(async () => {
       await result.current.switchSession("newer");
     });
-    act(() => {
-      pipelineEventHandler?.({
-        kind: "state",
-        data: {
-          phase: "NEW_PHASE",
-          status: "STOPPED",
-          plans: [{ id: "new-plan" }],
-          pending: [{ id: "new-pending", statement: "new pending" }],
-        },
-      });
-    });
+    expect(bridgeMocks.stateGet).toHaveBeenCalledTimes(2);
 
     await act(async () => {
-      resolveSnapshot?.({
+      resolveMountSnapshot?.({
         phase: "OLD_PHASE",
         status: "RUNNING",
         plans: [{ id: "old-plan" }],
@@ -956,11 +1249,26 @@ describe("usePipeline", () => {
       });
     });
 
+    expect(result.current.viewModel.phase).not.toBe("OLD_PHASE");
+
+    await act(async () => {
+      resolveSwitchedSnapshot?.({
+        phase: "NEW_PHASE",
+        status: "FAILED",
+        plans: [{ id: "new-plan" }],
+        pending: [{ id: "new-pending", statement: "new pending" }],
+        resume_available: true,
+        resume_reason: "failed",
+      });
+    });
+
     expect(result.current.viewModel).toMatchObject({
       phase: "NEW_PHASE",
-      status: "completed",
+      status: "error",
       plans: [{ id: "new-plan" }],
       pending: [{ id: "new-pending", statement: "new pending" }],
+      resumeAvailable: true,
+      resumeReason: "failed",
     });
   });
 

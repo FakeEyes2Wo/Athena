@@ -494,6 +494,11 @@ export function usePipeline(
   const outputFrameRef = useRef<number | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
+  const sessionTransitionRef = useRef<{
+    epoch: number;
+    targetSessionId: string;
+    promise: Promise<boolean>;
+  } | null>(null);
   const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
   const workspaceCacheRoot = workspaceRoot ?? "default";
   const authoritativeSessionsRef = useRef<{
@@ -512,6 +517,7 @@ export function usePipeline(
     sessionId: string;
     promise: Promise<void>;
   } | null>(null);
+  const resumeGenerationRef = useRef(0);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
   const settlingRequestRef = useRef<string | null>(null);
@@ -880,9 +886,14 @@ export function usePipeline(
     let unlisteners: Array<() => void> = [];
     const hydrationEpoch = ++sessionRequestEpochRef.current;
     const applyHydrationSnapshot = () => {
+      const resumeGeneration = resumeGenerationRef.current;
       void stateGet()
         .then((snapshot) => {
-          if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
+          if (
+            !mounted ||
+            hydrationEpoch !== sessionRequestEpochRef.current ||
+            resumeGeneration !== resumeGenerationRef.current
+          ) return;
           setViewModel((prev) =>
             applyPipelineEvent(prev, { kind: "state", data: snapshot }),
           );
@@ -1074,7 +1085,16 @@ export function usePipeline(
 
   // User actions.
 
-  const continueCurrentRun = useCallback((): Promise<void> => {
+  const continueCurrentRun = useCallback(async (): Promise<void> => {
+    const transition = sessionTransitionRef.current;
+    if (transition?.epoch === sessionRequestEpochRef.current) {
+      const switched = await transition.promise;
+      if (
+        !switched ||
+        sessionRequestEpochRef.current !== transition.epoch ||
+        activeSessionIdRef.current !== transition.targetSessionId
+      ) return;
+    }
     const epoch = sessionRequestEpochRef.current;
     const sessionId = activeSessionIdRef.current;
     const inFlight = resumeInFlightRef.current;
@@ -1093,6 +1113,7 @@ export function usePipeline(
     const request = operation
       .then(() => {
         if (!isCurrentSession()) return;
+        resumeGenerationRef.current += 1;
         runStarted.current = true;
         setViewModel((prev) => ({
           ...prev,
@@ -1493,7 +1514,17 @@ export function usePipeline(
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
     const previous = captureSessionView();
     const requestEpoch = ++sessionRequestEpochRef.current;
+    let settleTransition!: (succeeded: boolean) => void;
+    const transition = new Promise<boolean>((resolve) => {
+      settleTransition = resolve;
+    });
+    sessionTransitionRef.current = {
+      epoch: requestEpoch,
+      targetSessionId: id,
+      promise: transition,
+    };
     let switchStarted = false;
+    let switchSucceeded = false;
     try {
       const { records, sessions: list } = await sessionSwitch(id);
       if (requestEpoch !== sessionRequestEpochRef.current) return;
@@ -1504,15 +1535,39 @@ export function usePipeline(
       setClarificationIdentity(null);
       runStarted.current = false;
       setCurrentSessionId(id);
+      // Pipeline controls are scoped to the selected runtime. Keep them
+      // neutral until that session's authoritative state has been fetched.
+      setViewModel(createEmptyPipelineViewModel());
       restoreRecords(records, true, id);
       applySessions(list);
       setClarificationStatus("IDLE");
       setHumanRequests([]);
+      const resumeGeneration = resumeGenerationRef.current;
+      void stateGet()
+        .then((snapshot) => {
+          if (
+            !mountedRef.current ||
+            requestEpoch !== sessionRequestEpochRef.current ||
+            resumeGeneration !== resumeGenerationRef.current
+          ) return;
+          setViewModel((prev) =>
+            applyPipelineEvent(prev, { kind: "state", data: snapshot }),
+          );
+        })
+        .catch(() => {
+          // Keep the selected session's neutral controls when state is unavailable.
+        });
+      switchSucceeded = true;
     } catch (err) {
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       if (switchStarted) restoreSessionView(previous);
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
+    } finally {
+      settleTransition(switchSucceeded);
+      if (sessionTransitionRef.current?.promise === transition) {
+        sessionTransitionRef.current = null;
+      }
     }
   }, [appendError, applySessions, captureSessionView, discardPendingOutput, restoreRecords, restoreSessionView, setClarificationIdentity]);
 
