@@ -178,7 +178,9 @@ Create inside `evaluate/`:
   readable for checkpoint reuse, but all newly generated bundles use the full
   declaration above.
 - `eval_metrics.py`, the entrypoint. It runs with `evaluate/` as its working
-  directory after the predictions directory is materialized next to it. It must
+  directory after the `predictions/` directory is materialized inside it.
+  Resolve predictions relative to your own directory — `./predictions/`, or
+  `Path(__file__).resolve().parent / "predictions"` — never one level up. It must
   read the ground-truth labels (in whatever format the task uses) and the
   `predictions/` directory according to `metric.json`, compute the primary
   metric, and print exactly one JSON line to stdout (nothing else):
