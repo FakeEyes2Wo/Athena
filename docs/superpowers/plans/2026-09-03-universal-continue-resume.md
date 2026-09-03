@@ -67,7 +67,7 @@ npm --prefix athena-gui test -- --run src/hooks/__tests__/usePipeline.test.tsx s
 
 - [x] Save the observed reproduction: a failed confirmed run followed by React composer input `continue` calls `task_clarification_start("continue")` and returns `different_task`.
 
-Preflight evidence (2026-09-04, latest `origin/main` `2713f53`): Python baseline
+Initial preflight evidence (2026-09-04, then-current `origin/main` `2713f53`): Python baseline
 `145 passed in 15.35s`; React baseline `4 files / 62 tests passed in 3.28s`.
 There were no tracked or staged implementation diffs. Six restored untracked paths
 (`dialog.rs`, `docs/plans/`, `exp_docs.py`, `baseline_gate.py`, and their two tests)
@@ -77,8 +77,9 @@ exact `continue` entered task understanding, called
 `task_clarification_start("continue")`, and raised `different_task`.
 
 Latest-main rebuild note (2026-09-04): while this plan was in progress,
-`origin/main` advanced to `d029da7` with the LLM task-understanding integration. The
-implementation was replayed into a new clean worktree rooted at that commit. The clean
+`origin/main` first advanced to `d029da7` with the LLM task-understanding integration
+and then to `db2555f`. The implementation was replayed into a new clean worktree and
+rebased onto final verified `origin/main@db2555f`; the ancestry check passes. The clean
 tree exposed two pre-existing merge omissions from `ae922b9`: tracked Python code
 imports `athena.research.exp_docs` and tracked Tauri code declares/registers
 `commands::dialog`, but neither source file exists in the commit. Python therefore
@@ -520,13 +521,13 @@ git commit -m "feat: project durable resume availability"
 ```
 
 Task 3 evidence (2026-09-04): the RED run produced 13 expected failures for the
-missing projection, public resume routing, and state-path contract. Commit `a02fa3d`
+missing projection, public resume routing, and state-path contract. Commit `ce3b633`
 then passed the Task 3 plus gateway E2E selection (`95 passed`), Black, and all
 task-owned diff checks. Independent AI specification and quality reviews both passed.
 The Python canonical/dispatch contract passes (`2 passed`). The remaining third
 protocol assertion is a pre-existing `origin/main` defect: commit `ae922b9` registered
 the local-only Rust command `workspace_dialog_start_directory` without updating the
-old Rust/Python mapping test, and a detached clean checkout of `a02fa3d` reproduces it;
+old Rust/Python mapping test, and a detached clean checkout of `ce3b633` reproduces it;
 Task 3 changed neither side of that contract.
 
 ---
@@ -659,7 +660,7 @@ git add athena-gui/src/types/ui.ts athena-gui/src/hooks/usePipeline.ts athena-gu
 git commit -m "fix(gui): continue interrupted research runs"
 ```
 
-Task 4 evidence (2026-09-04): commits `8818a74`, `6e956c7`, and `3c42534`
+Task 4 evidence (2026-09-04): commits `2f7072c`, `850feab`, and `42e3cb2`
 project authoritative resume state, route exact continuation through the shared bridge,
 cover browser and native adapters, preserve error history, and key in-flight resume
 requests by session plus hydration epoch. Mutation testing confirmed the immediate
@@ -756,7 +757,7 @@ git add src/athena_tui/render.py test/unit/athena_tui/test_render.py test/unit/a
 git commit -m "feat: expose continue resume aliases"
 ```
 
-Task 5 evidence (2026-09-04): commit `ec36d087` exposes the CLI alias only at
+Task 5 evidence (2026-09-04): commit `711f539` exposes the CLI alias only at
 dispatch, documents the TUI synonym, and adds a real FAILED-PREPARE continuation test
 whose clarification boundary fails fast and whose confirmed artifacts remain byte
 identical. The planned focused suite passed 87 tests; the lifecycle regression also
@@ -779,7 +780,7 @@ specification review, and independent AI quality review all passed.
 
 - [x] **Step 1: Reproduce both clean-tree failures**
 
-On the rebuilt `origin/main@d029da7` branch, the planned Python selection failed during
+On the rebuilt `origin/main@db2555f` branch, the planned Python selection failed during
 collection with 11 `ModuleNotFoundError: athena.research.exp_docs` errors. A clean
 `cargo check --manifest-path athena-gui/src-tauri/Cargo.toml` failed with E0583 and
 E0433 because `commands/dialog.rs` was absent.
@@ -792,17 +793,25 @@ missing implementations to immutable stash `72b6938^3`. Restore only the exact
 `prepare/baseline_gate.py`, which targets an obsolete API and has no tracked caller;
 do not restore unrelated workspace tests, generated HTML, or `uv.lock`.
 
-- [ ] **Step 3: Restore and verify the Python module**
+- [x] **Step 3: Restore and verify the Python module**
 
 Run its three direct tests, the tracked Supervisor report assertions, the universal
 continue Python selection, Black, and scoped diff checks. Commit only the module and
 its direct test as `fix: restore experiment document module`.
 
-- [ ] **Step 4: Restore and verify the native dialog module**
+- [x] **Step 4: Restore and verify the native dialog module**
 
 Run the embedded Rust tests, `cargo check`, the frontend workspace-dialog test, and
 scoped diff checks. Commit only `dialog.rs` as
 `fix(gui): restore native workspace dialog command`.
+
+Task 5A evidence (2026-09-04): commit `42d4e43` restores only `exp_docs.py` and
+its direct tests; the direct plus Supervisor/autonomous selection passed 32 tests, and
+the complete planned Python/TUI/RPC selection passed 269 tests. Commit `0089397`
+restores only `commands/dialog.rs`; all 10 Rust tests, `cargo check`, four frontend
+workspace-dialog tests, and the file-scoped rustfmt check passed. Black and scoped
+diff checks passed. Independent AI specification and quality reviews approved both
+minimal restorations; no obsolete or generated stash content was restored.
 
 ---
 
