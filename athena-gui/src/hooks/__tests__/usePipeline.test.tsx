@@ -1085,6 +1085,11 @@ describe("usePipeline", () => {
       await continuation!;
     });
     expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.sendPrompt("continue");
+    });
+    expect(bridgeMocks.resumeSearch).not.toHaveBeenCalled();
   });
 
   it("clears stale cached summaries after authoritative empty hydration", async () => {

@@ -540,7 +540,7 @@ export function usePipeline(
           if (settled) return;
           settled = true;
           settle(succeeded);
-          if (sessionTransitionRef.current?.promise === promise) {
+          if (succeeded && sessionTransitionRef.current?.promise === promise) {
             sessionTransitionRef.current = null;
           }
         },
