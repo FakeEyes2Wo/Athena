@@ -13,45 +13,235 @@ from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.research.contracts import DataScriptBundle, ValidationResult
+from athena.research.prepare import orchestrator
+from athena.research.prepare.authority import (
+    BaselineAuthorityConflict,
+    PrepareAttestation,
+    SealedBaseline,
+    VerifiedBaselineBundle,
+)
 from athena.research.prepare.baseline_research import (
     BaselineVerification,
     VerifiedBaseline,
+    design_sha256,
     load_baseline_artifacts,
     research_sha256,
+    verification_bytes,
+    write_verification,
 )
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.prepare import PrepareResult
 
-from test.unit.research.prepare.test_baseline_research_contract import write_artifacts
 
-
-def _verified_baseline(root: Path) -> VerifiedBaseline:
-    """Build a verified fixture while this test focuses on phase wiring."""
+def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
+    """Seed one complete offline research/design/verification trio."""
     root.mkdir(parents=True, exist_ok=True)
-    write_artifacts(root)
+    payload = {
+        "schema_version": 2,
+        "dataset": {
+            "modality": "image",
+            "task_type": "classification",
+            "input_scale": "paired 224x224 images",
+            "regime": "small",
+            "facts": [
+                {
+                    "field": field,
+                    "value": value,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": f"EDA_HANDOFF.md#{field}",
+                        "claim": claim,
+                    },
+                }
+                for field, value, claim in (
+                    ("labeled_samples", 480, "480 labeled images"),
+                    ("effective_training_units", 120, "120 independent units"),
+                    ("group_count", 120, "120 independent groups"),
+                    ("class_count", 5, "5 target classes"),
+                    ("minority_class_samples", 32, "32 minority-class samples"),
+                )
+            ],
+            "rationale": "Grouped labels are limited relative to pretrained capacity.",
+        },
+        "training": {
+            "strategy": "partial_finetune",
+            "pretrained": {
+                "status": "available",
+                "representation": "ImageNet encoder",
+                "evidence": {
+                    "kind": "source",
+                    "reference": "https://arxiv.org/abs/1512.03385",
+                    "claim": "The selected method provides pretrained weights.",
+                },
+            },
+            "safeguards": None,
+            "scratch_scale": None,
+        },
+        "candidates": [
+            {
+                "candidate_id": "resnet-transfer",
+                "title": "Deep Residual Learning for Image Recognition",
+                "method": "pretrained ResNet feature extractor",
+                "source_url": "https://arxiv.org/abs/1512.03385",
+                "source_kind": "paper",
+                "paper_locator": "doi:10.1109/CVPR.2016.90",
+                "repository_url": "https://github.com/pytorch/vision.git",
+                "publication_year": 2016,
+                "claimed_citation_count": 100000,
+                "relevance": "A standard transfer baseline for small image datasets.",
+            },
+            {
+                "candidate_id": "linear-probe",
+                "title": "PyTorch transfer learning tutorial",
+                "method": "frozen visual features with a linear head",
+                "source_url": (
+                    "https://docs.pytorch.org/tutorials/beginner/"
+                    "transfer_learning_tutorial.html"
+                ),
+                "source_kind": "technical_reference",
+                "paper_locator": None,
+                "repository_url": "https://github.com/pytorch/tutorials.git",
+                "publication_year": None,
+                "claimed_citation_count": None,
+                "relevance": "A conservative alternative for scarce labels.",
+            },
+        ],
+        "decisions": [
+            {
+                "candidate_id": "resnet-transfer",
+                "decision": "selected",
+                "reason": "best fit",
+            },
+            {
+                "candidate_id": "linear-probe",
+                "decision": "rejected",
+                "reason": "less adaptive",
+            },
+        ],
+        "selected_candidate_id": "resnet-transfer",
+        "search": {
+            "queries": [
+                "small image classification transfer baseline GitHub",
+                "authoritative pretrained image baseline paper",
+            ],
+            "one_candidate": None,
+        },
+        "limitations": [],
+    }
+    (root / "BASELINE_RESEARCH.json").write_text(json.dumps(payload), encoding="utf-8")
+    (root / "BASELINE_DESIGN.md").write_text(
+        "# Baseline\n\nSelected candidate: `resnet-transfer`\n"
+        "Training strategy: `partial_finetune`\n",
+        encoding="utf-8",
+    )
     artifacts = load_baseline_artifacts(root)
     verification = BaselineVerification(
+        schema_version=2,
         research_sha256=research_sha256(artifacts.raw_research),
+        design_sha256=design_sha256(artifacts.raw_design),
         selected_candidate_id=artifacts.selected.candidate_id,
         route="git",
-        verified_at=datetime.now(timezone.utc),
-        repository_url="https://github.com/pytorch/vision.git",
+        verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        repository_url=str(artifacts.selected.repository_url),
         commit="a" * 40,
-        attempts=[{"route": "git", "success": True, "diagnostic": "test"}],
+        attempts=[{"route": "git", "success": True, "diagnostic": "verified"}],
     )
-    return VerifiedBaseline(artifacts, verification)
+    write_verification(root, verification)
+    return VerifiedBaseline(
+        artifacts=artifacts,
+        verification=verification,
+        verification_bytes=verification_bytes(verification),
+        authority_generation=0,
+    )
 
 
-async def _fake_prepare_baseline_design(
-    _runtime, workspace, *_args, **_kwargs
-) -> VerifiedBaseline:
-    """Isolate phase/evaluator tests from the separately tested research gate."""
-    return _verified_baseline(Path(workspace.path))
+def _bundle_for_verified(verified: VerifiedBaseline) -> VerifiedBaselineBundle:
+    return VerifiedBaselineBundle(
+        research_bytes=verified.artifacts.raw_research,
+        design_bytes=verified.artifacts.raw_design,
+        verification_bytes=verified.verification_bytes,
+        verification=verified.verification,
+    )
 
 
-async def _ready_eda(*_args, **_kwargs) -> bool:
-    """Provide the completed EDA prerequisite for phase adapter tests."""
-    return True
+class _MemoryBaselineAuthorityStore:
+    """Test-only external memory shared across one runtime lifecycle."""
+
+    def __init__(self) -> None:
+        self.sealed: SealedBaseline | None = None
+
+    async def load(self) -> SealedBaseline | None:
+        return self.sealed
+
+    async def seal(
+        self,
+        bundle: VerifiedBaselineBundle,
+        *,
+        expected_generation: int | None,
+    ) -> SealedBaseline:
+        current = None if self.sealed is None else self.sealed.generation
+        if current != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=0 if current is None else current + 1,
+            bundle=bundle,
+        )
+        return self.sealed
+
+    async def attest_prepare(
+        self,
+        evidence: PrepareAttestation,
+        *,
+        expected_generation: int,
+    ) -> SealedBaseline:
+        if self.sealed is None or self.sealed.generation != expected_generation:
+            raise BaselineAuthorityConflict("baseline generation changed")
+        self.sealed = SealedBaseline(
+            generation=expected_generation + 1,
+            bundle=self.sealed.bundle,
+            attestation=evidence,
+        )
+        return self.sealed
+
+
+def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def asserted_eda(_runtime, workspace, _handoff, _task) -> bool:
+        root = Path(workspace.path)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "EDA_HANDOFF.md").write_text(
+            "# EDA Handoff\n\n480 labels across 120 independent groups.\n",
+            encoding="utf-8",
+        )
+        assert (root / "EDA_HANDOFF.md").is_file()
+        return True
+
+    async def verified_design(
+        runtime, workspace, _task, eda_ready, _handoff
+    ) -> VerifiedBaseline:
+        root = Path(workspace.path)
+        assert eda_ready is True
+        assert (root / "EDA_HANDOFF.md").is_file()
+        verified = _write_verified_baseline_fixture(root)
+        sealed = await runtime.baseline_authority.seal(
+            _bundle_for_verified(verified), expected_generation=None
+        )
+        assert sealed.generation == verified.authority_generation
+        return verified
+
+    monkeypatch.setattr(orchestrator, "prepare_eda", asserted_eda)
+    monkeypatch.setattr(orchestrator, "prepare_baseline_design", verified_design)
+
+
+def _assert_verified_prepare_task(task: object) -> None:
+    rendered = str(task)
+    for filename in (
+        "BASELINE_RESEARCH.json",
+        "BASELINE_RESEARCH_VERIFICATION.json",
+        "BASELINE_DESIGN.md",
+    ):
+        assert filename in rendered
+    assert "Selected candidate: resnet-transfer" in rendered
+    assert "Training strategy: partial_finetune" in rendered
 
 
 async def _eventually(predicate, timeout: float = 5) -> None:
@@ -159,15 +349,16 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
         run_prepare_plan,
         raising=False,
     )
-    monkeypatch.setattr("athena.research.prepare.orchestrator.prepare_eda", _ready_eda)
-    monkeypatch.setattr(
-        "athena.research.prepare.orchestrator.prepare_baseline_design",
-        _fake_prepare_baseline_design,
+    authority = _MemoryBaselineAuthorityStore()
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="predict survival",
+        baseline_authority=authority,
     )
-    runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
     runtime.agents.start()
+    _install_verified_prepare_gate(monkeypatch)
 
     result = await runtime.services.workflow.phases.run_prepare_phase()
 
@@ -194,6 +385,7 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     assert captured["task"].startswith("predict survival")
     assert captured["workspace"].branch == "athena/prepare"
     assert captured["evaluator_ref"] == frozen_ref["evaluator"]
+    _assert_verified_prepare_task(captured["task"])
     assert json.loads(await runtime.store.get_text(captured["tree_ref"])) == (
         runtime.tree.to_dict()
     )
@@ -204,11 +396,14 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
 async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
     tmp_path: Path, monkeypatch
 ) -> None:
+    captured = {}
+
     async def run_evaluator_plan(**kwargs):
         del kwargs
         raise AssertionError("evaluator must be skipped when a checkpoint exists")
 
     async def run_prepare_plan(**kwargs):
+        captured.update(kwargs)
         return PrepareResult(
             evaluator_ref=kwargs["evaluator_ref"],
             metric=0.71,
@@ -228,12 +423,12 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
         run_prepare_plan,
         raising=False,
     )
-    monkeypatch.setattr("athena.research.prepare.orchestrator.prepare_eda", _ready_eda)
-    monkeypatch.setattr(
-        "athena.research.prepare.orchestrator.prepare_baseline_design",
-        _fake_prepare_baseline_design,
+    authority = _MemoryBaselineAuthorityStore()
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="predict survival",
+        baseline_authority=authority,
     )
-    runtime = ResearchRuntime(project_root=tmp_path, task="predict survival")
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
     runtime.agents.start()
@@ -248,6 +443,7 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
     runtime.supervisor.final_evaluator_ref = frozen_ref
     events: list[tuple[str, dict[str, object]]] = []
     runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
+    _install_verified_prepare_gate(monkeypatch)
 
     result = await runtime.services.workflow.phases.run_prepare_phase()
 
@@ -257,6 +453,7 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
         for kind, payload in events
     )
     assert runtime.state.evaluator_ref == frozen_ref
+    _assert_verified_prepare_task(captured["task"])
     await runtime.aclose()
 
 

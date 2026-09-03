@@ -1,7 +1,15 @@
 # Authoritative Baseline Research Gate Design
 
 Date: 2026-09-02
-Status: approved for implementation
+Status: implemented; superseded for cache/schema guarantees by the 2026-09-03 hardening design
+
+Supersession notice: this document remains the historical design for source
+qualification and the Git/OpenAlex evidence gate. The normative schema-v2,
+exact-research/design-byte binding, external-authority cache, mirror, scoring-guard,
+and completion-attestation guarantees are defined by
+`2026-09-03-authoritative-baseline-hardening-design.md`. Version-one and
+workspace-local cache language below records the original implementation only and must
+not be used as the current security or restart contract.
 
 ## 1. Problem summary
 
@@ -68,8 +76,10 @@ The baseline ideator writes two workspace-root files.
 
 ### 5.1 `BASELINE_RESEARCH.json`
 
-This machine-readable file is the gate input. Its version-one contract is represented
-by Pydantic models in `src/athena/research/prepare/baseline_research.py`.
+This machine-readable file is the gate input. The following version-one contract is a
+historical record of the original implementation. New verification, repair success,
+cache reuse, and PREPARE entry require the version-two contract in the hardening
+design.
 
 ```python
 class DatasetAssessment(BaseModel):
@@ -313,10 +323,11 @@ network access. OpenAlex verification uses the existing client behind an injecta
 interface. Configuration does not expose the citation threshold in version one; the
 schema version and constant change together if policy changes later.
 
-No persisted `ResearchState` schema change is required. The three baseline files live
-in the durable research workspace and are included in normal workspace/checkpoint
-recovery. On resume, an existing verification artifact is trusted only if its schema is
-valid and its research-file digest still matches; otherwise Athena verifies again.
+The original implementation required no persisted `ResearchState` schema change and
+placed the three baseline files in the durable research workspace. Its workspace-local
+verification reuse rule is superseded: local files are now read-only audit mirrors and
+cannot authorize reuse. Resume authority comes only from the injected external
+capability and binds exact research, design, and canonical verification bytes.
 
 ## 11. Failure and recovery behavior
 
@@ -332,8 +343,10 @@ valid and its research-file digest still matches; otherwise Athena verifies agai
   platform-generated verification artifact after revalidation.
 - Process interruption after research but before verification: resume from artifacts,
   verify them, and do not rerun the agent unless validation supplies repair feedback.
-- Process interruption after verification: reuse the verification only when its digest
-  matches the current research artifact.
+- Process interruption after verification: the original design reused matching local
+  verification. The hardening design instead requires a matching external authority
+  generation, exact local mirrors, and, for PREPARE completion, a matching trusted
+  completion attestation.
 
 ## 12. Security and provenance
 

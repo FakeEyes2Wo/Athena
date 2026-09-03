@@ -1,19 +1,20 @@
-"""Verify public baseline sources without executing third-party code."""
+"""Restricted, non-interactive verification of public Git repositories."""
 
 import asyncio
 import ipaddress
 import os
 import re
+import socket
 import subprocess
 import tempfile
-import urllib.parse
-from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Protocol
-from unicodedata import normalize
+from types import MappingProxyType
+from typing import Awaitable, Callable, Final, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
+
+from pydantic import ValidationError
 
 from athena.research.literature.paper_source.http import (
     HostRateLimiter,
@@ -23,46 +24,117 @@ from athena.research.literature.paper_source.openalex import (
     OpenAlexClient,
     OpenAlexWork,
 )
-from athena.research.prepare.baseline_research import (
+
+from .baseline_research import (
+    AUTHORITY_CITATION_THRESHOLD,
     BaselineArtifacts,
     BaselineResearchError,
     BaselineVerification,
     VerificationAttempt,
+    assert_verification_matches_artifacts,
+    design_sha256,
     research_sha256,
+    titles_match,
+)
+from .repository_url import (
+    _is_public_repository_address,
+    normalize_public_https_repository_url,
 )
 
-MAX_DIAGNOSTIC = 4_000
-COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
-URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
+_SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)\b(password|passwd|token|secret|authorization|bearer)(?:\s*=|\s*:)\s*[^\s,;]+"
+)
+_CREDENTIAL_HEADER_RE = re.compile(
+    r"(?im)\b(?P<name>authorization|proxy-authorization)\s*:\s*[^\r\n]*"
+)
+_AUTHORIZATION_SCHEME_RE = re.compile(r"(?i)\b(?P<scheme>Bearer|Basic)\s+[^\s\r\n]+")
+_URL_CANDIDATE_RE = re.compile(
+    r"(?P<scheme>https?|ssh|git)://[^\s'\"<>]+", re.IGNORECASE
+)
+
+
+def _trusted_git_candidates() -> tuple[tuple[Path, Path], ...]:
+    """Return fixed installation candidates outside Agent-controlled search paths."""
+
+    if os.name != "nt":
+        return (
+            (Path("/usr/bin"), Path("/usr/bin/git")),
+            (Path("/bin"), Path("/bin/git")),
+        )
+
+    candidates: list[tuple[Path, Path]] = []
+    seen_roots: set[Path] = set()
+    for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        value = os.environ.get(variable)
+        if not value:
+            continue
+        try:
+            root = Path(value).resolve(strict=True)
+        except OSError:
+            continue
+        if not root.is_dir() or root in seen_roots:
+            continue
+        seen_roots.add(root)
+        candidates.extend(
+            (
+                (root, root / "Git" / "cmd" / "git.exe"),
+                (root, root / "Git" / "bin" / "git.exe"),
+            )
+        )
+    return tuple(candidates)
+
+
+def _capture_git_executable() -> str | None:
+    """Capture Git only from fixed, controller-owned installation directories."""
+
+    for trusted_root, candidate in _trusted_git_candidates():
+        try:
+            resolved_root = trusted_root.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if (
+            resolved.is_file()
+            and resolved.is_absolute()
+            and resolved.is_relative_to(resolved_root)
+        ):
+            return str(resolved)
+    return None
+
+
+def _capture_platform_environment() -> Mapping[str, str]:
+    """Retain only Windows process roots needed by native subprocesses."""
+
+    captured: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key.casefold() in {"systemroot", "windir"} and value:
+            captured[key] = value
+    return MappingProxyType(captured)
+
+
+_GIT_EXECUTABLE: Final[str | None] = _capture_git_executable()
+_PLATFORM_ENVIRONMENT: Final[Mapping[str, str]] = _capture_platform_environment()
 
 
 class CommandRunner(Protocol):
-    """Async command boundary used by the Git verifier and its tests."""
+    """Async adapter for the narrowly scoped subprocess invocation."""
 
-    async def __call__(
+    def __call__(
         self,
         argv: Sequence[str],
         *,
         cwd: Path | None,
         env: Mapping[str, str],
         timeout_s: float,
-    ) -> subprocess.CompletedProcess[str]:
-        """Run a command with an explicit working directory and environment."""
-
-
-@dataclass(frozen=True)
-class GitCloneEvidence:
-    """Evidence returned after a shallow public repository clone."""
-
-    repository_url: str
-    commit: str
+    ) -> Awaitable[subprocess.CompletedProcess[str]]: ...
 
 
 class OpenAlexLookup(Protocol):
-    """Metadata lookup needed by the citation-based source exception."""
+    """The free OpenAlex metadata lookup used by the authority exception."""
 
     async def fetch_work(self, locator: str) -> OpenAlexWork | None:
-        """Resolve a paper locator to OpenAlex metadata."""
+        """Resolve one DOI or OpenAlex work ID to its metadata."""
 
 
 async def run_command(
@@ -72,7 +144,8 @@ async def run_command(
     env: Mapping[str, str],
     timeout_s: float,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one non-shell command in a worker thread."""
+    """Run one command without a shell, blocking the worker thread only."""
+
     return await asyncio.to_thread(
         subprocess.run,
         list(argv),
@@ -86,87 +159,168 @@ async def run_command(
     )
 
 
-def _diagnostic(value: object) -> str:
-    text = re.sub(r"\s+", " ", str(value)).strip()
-    text = URL_RE.sub(lambda match: _redact_url(match.group(0)), text)
-    return text[:MAX_DIAGNOSTIC]
+@dataclass(frozen=True)
+class GitCloneEvidence:
+    """The normalized repository URL and commit resolved by Git."""
+
+    repository_url: str
+    commit: str
 
 
-def _redact_url(value: str) -> str:
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.username is None and parsed.password is None:
-        return value
-    host = parsed.hostname or ""
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, host, parsed.path, parsed.query, parsed.fragment)
+def _bounded_diagnostic(value: object) -> str:
+    """Collapse and redact command diagnostics before exposing them."""
+
+    text = str(value)
+    text = _CREDENTIAL_HEADER_RE.sub(
+        lambda match: f"{match.group('name')}=[REDACTED]", text
     )
+    text = _URL_CANDIDATE_RE.sub(_redact_url_candidate, text)
+    text = _AUTHORIZATION_SCHEME_RE.sub(
+        lambda match: f"{match.group('scheme')} [REDACTED]", text
+    )
+    text = _SENSITIVE_VALUE_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
+    return " ".join(text.split())[:4000]
 
 
-def _validate_repository_url(value: str) -> str:
-    if not isinstance(value, str) or any(char.isspace() for char in value):
-        raise BaselineResearchError(
-            "Git source verification failed", ["repository URL is not public HTTPS"]
-        )
-    parsed = urllib.parse.urlsplit(value)
-    if (
-        parsed.scheme.lower() != "https"
-        or not parsed.hostname
-        or "?" in value
-        or "#" in value
-        or parsed.username is not None
-        or parsed.password is not None
-        or not parsed.path
-        or _is_local_host(parsed.hostname)
-    ):
-        raise BaselineResearchError(
-            "Git source verification failed", ["repository URL is not public HTTPS"]
-        )
-    return value
+def _redact_url_candidate(match: re.Match[str]) -> str:
+    """Redact an entire URL when its authority can contain userinfo."""
+
+    candidate = match.group(0)
+    authority = candidate.split("://", 1)[1].split("/", 1)[0]
+    if "@" in authority or "%" in authority:
+        return f"{match.group('scheme')}://[REDACTED]"
+    return candidate
 
 
-def _is_local_host(hostname: str) -> bool:
-    normalized = hostname.rstrip(".").casefold()
-    if normalized in {"localhost", "localhost.localdomain"}:
-        return True
+def _clean_environment() -> dict[str, str]:
+    """Build Git's environment from a fixed allowlist, never ambient runtime state."""
+
+    environment = dict(_PLATFORM_ENVIRONMENT)
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "Never",
+            "LANG": "C",
+            "LC_ALL": "C",
+        }
+    )
+    return environment
+
+
+def _resolve_public_host_addresses(host: str, port: int) -> tuple[str, ...]:
+    """Resolve every A/AAAA address and reject the complete set on any unsafe entry."""
+
     try:
-        address = ipaddress.ip_address(normalized)
+        literal = ipaddress.ip_address(host)
     except ValueError:
-        # hostname 不是 IP 字面量 → 按普通公网域名继续。
-        return False
-    return any(
-        (
-            address.is_loopback,
-            address.is_private,
-            address.is_link_local,
-            address.is_reserved,
+        literal = None
+    if literal is not None:
+        if not _is_public_repository_address(literal):
+            raise ValueError("repository hostname resolved to a non-public address")
+        return (str(literal),)
+
+    try:
+        records = socket.getaddrinfo(
+            host,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
         )
+    except OSError:
+        raise ValueError("repository hostname resolution failed") from None
+
+    addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+    for family, _socket_type, _protocol, _canonical_name, sockaddr in records:
+        if family not in {socket.AF_INET, socket.AF_INET6} or not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            raise ValueError("repository hostname resolution was invalid") from None
+        if (family == socket.AF_INET) != isinstance(address, ipaddress.IPv4Address):
+            raise ValueError("repository hostname resolution was invalid")
+        if not _is_public_repository_address(address):
+            raise ValueError("repository hostname resolved to a non-public address")
+        addresses.add(address)
+    if not addresses:
+        raise ValueError("repository hostname did not resolve to an A or AAAA address")
+    return tuple(
+        str(address)
+        for address in sorted(addresses, key=lambda item: (item.version, item.packed))
     )
+
+
+def _curlopt_resolve_value(host: str, port: int, addresses: Sequence[str]) -> str:
+    """Render one permanent libcurl DNS-cache entry, bracketing IPv6 addresses."""
+
+    rendered = ",".join(
+        f"[{address}]" if ":" in address else address for address in addresses
+    )
+    return f"http.curloptResolve={host}:{port}:{rendered}"
 
 
 class GitCloneVerifier:
-    """Qualify a public repository using a shallow, no-checkout clone."""
+    """Prove that a public repository is reachable without reading its files."""
 
-    def __init__(
-        self,
-        runner: CommandRunner | None = None,
-        timeout_s: float = 120.0,
-    ) -> None:
-        self._runner = runner or run_command
+    def __init__(self, runner: CommandRunner = run_command, timeout_s: float = 60.0):
+        self._runner = runner
         self._timeout_s = timeout_s
 
     async def verify(self, repository_url: str) -> GitCloneEvidence:
-        """Clone a public HTTPS repository and return its resolved HEAD."""
-        url = _validate_repository_url(repository_url)
-        environment = os.environ.copy()
-        environment.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"})
-        with tempfile.TemporaryDirectory(prefix="athena-baseline-") as temporary:
-            root = Path(temporary)
-            hooks = root / "hooks"
-            hooks.mkdir()
-            clone_dir = root / "repo"
+        """Clone a repository shallowly and return its resolved HEAD commit."""
+
+        if _GIT_EXECUTABLE is None:
+            self._raise_failure("trusted Git executable is unavailable")
+        try:
+            normalized_url = normalize_public_https_repository_url(repository_url)
+        except ValueError as exc:
+            self._raise_failure(str(exc))
+        parsed_url = urlsplit(normalized_url)
+        host = parsed_url.hostname
+        if host is None:
+            self._raise_failure("repository URL must include a host")
+        port = parsed_url.port or 443
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            host_is_literal = False
+        else:
+            host_is_literal = True
+        try:
+            addresses = await asyncio.to_thread(
+                _resolve_public_host_addresses,
+                host,
+                port,
+            )
+            if not host_is_literal:
+                repeated_addresses = await asyncio.to_thread(
+                    _resolve_public_host_addresses,
+                    host,
+                    port,
+                )
+                if repeated_addresses != addresses:
+                    raise ValueError("repository hostname resolution changed")
+        except (OSError, ValueError) as exc:
+            self._raise_failure(str(exc))
+
+        environment = _clean_environment()
+
+        with tempfile.TemporaryDirectory(prefix="athena-git-verify-") as temporary:
+            temporary_root = Path(temporary)
+            hooks_dir = temporary_root / "hooks"
+            hooks_dir.mkdir()
+            clone_dir = temporary_root / "clone"
+            clone_dir.mkdir()
+
             git_config = [
                 "-c",
-                f"core.hooksPath={hooks}",
+                f"core.hooksPath={hooks_dir}",
+                "-c",
+                "protocol.allow=never",
                 "-c",
                 "protocol.file.allow=never",
                 "-c",
@@ -179,9 +333,41 @@ class GitCloneVerifier:
                 "protocol.http.allow=never",
                 "-c",
                 "protocol.https.allow=always",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "http.followRedirects=false",
+                "-c",
+                "http.emptyAuth=false",
+                "-c",
+                "http.proactiveAuth=none",
+                "-c",
+                "http.delegation=none",
+                "-c",
+                "http.cookieFile=",
+                "-c",
+                "http.saveCookies=false",
+                "-c",
+                "http.extraHeader=",
+                "-c",
+                "http.sslCert=",
+                "-c",
+                "http.sslKey=",
+                "-c",
+                "http.sslCertPasswordProtected=false",
+                "-c",
+                "http.proxy=",
+                "-c",
+                "http.proxySSLCert=",
+                "-c",
+                "http.proxySSLKey=",
+                "-c",
+                "http.sslVerify=true",
             ]
+            if not host_is_literal:
+                git_config.extend(["-c", _curlopt_resolve_value(host, port, addresses)])
             clone_argv = [
-                "git",
+                _GIT_EXECUTABLE,
                 *git_config,
                 "clone",
                 "--depth",
@@ -189,149 +375,239 @@ class GitCloneVerifier:
                 "--filter=blob:none",
                 "--no-checkout",
                 "--",
-                url,
+                normalized_url,
                 str(clone_dir),
             ]
-            try:
-                clone = await self._runner(
-                    clone_argv, cwd=None, env=environment, timeout_s=self._timeout_s
+            clone_result = await self._run(
+                clone_argv,
+                cwd=temporary_root,
+                env=environment,
+                operation="clone",
+            )
+            if clone_result.returncode != 0:
+                self._raise_failure(
+                    f"git clone exited with status {clone_result.returncode}: "
+                    f"{clone_result.stderr or clone_result.stdout or 'no diagnostic'}"
                 )
-            except (TimeoutError, subprocess.TimeoutExpired) as error:
-                # Git clone 超时 → 将网络故障转换为来源校验诊断
-                raise BaselineResearchError(
-                    "Git source verification failed", [_diagnostic("clone timed out")]
-                ) from error
-            if clone.returncode != 0:
-                message = (
-                    clone.stderr
-                    or clone.stdout
-                    or f"clone exited with {clone.returncode}"
+
+            head_argv = [
+                _GIT_EXECUTABLE,
+                *git_config,
+                "-C",
+                str(clone_dir),
+                "rev-parse",
+                "HEAD",
+            ]
+            head_result = await self._run(
+                head_argv,
+                cwd=temporary_root,
+                env=environment,
+                operation="rev-parse",
+            )
+            if head_result.returncode != 0:
+                self._raise_failure(
+                    f"git rev-parse exited with status {head_result.returncode}: "
+                    f"{head_result.stderr or head_result.stdout or 'no diagnostic'}"
                 )
-                raise BaselineResearchError(
-                    "Git source verification failed", [_diagnostic(message)]
-                )
-            head_argv = ["git", "-C", str(clone_dir), "rev-parse", "HEAD"]
-            try:
-                head = await self._runner(
-                    head_argv, cwd=None, env=environment, timeout_s=self._timeout_s
-                )
-            except (TimeoutError, subprocess.TimeoutExpired) as error:
-                # HEAD 查询超时 → 保持来源未验证并返回有限诊断
-                raise BaselineResearchError(
-                    "Git source verification failed",
-                    [_diagnostic("HEAD lookup timed out")],
-                ) from error
-            commit = (head.stdout or "").strip()
-            if head.returncode != 0 or not COMMIT_RE.fullmatch(commit):
-                message = head.stderr or head.stdout or "invalid repository HEAD"
-                raise BaselineResearchError(
-                    "Git source verification failed", [_diagnostic(message)]
-                )
-            return GitCloneEvidence(url, commit.lower())
+            commit = (head_result.stdout or "").strip()
+            if not _COMMIT_RE.fullmatch(commit):
+                self._raise_failure("git rev-parse returned an invalid commit")
+            return GitCloneEvidence(repository_url=normalized_url, commit=commit)
+
+    async def _run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        operation: str,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return await self._runner(argv, cwd=cwd, env=env, timeout_s=self._timeout_s)
+        except (asyncio.TimeoutError, subprocess.TimeoutExpired) as exc:
+            self._raise_failure(
+                f"git {operation} timed out after {self._timeout_s:g} seconds: {exc}"
+            )
+        except (OSError, ValueError) as exc:
+            self._raise_failure(f"git {operation} could not be started: {exc}")
+
+    @staticmethod
+    def _raise_failure(diagnostic: str) -> None:
+        raise BaselineResearchError(
+            "Git source verification failed",
+            diagnostics=[_bounded_diagnostic(diagnostic)],
+        )
 
 
-def _title_tokens(value: str) -> str:
-    text = normalize("NFKC", value).casefold()
-    return "".join(char for char in text if char.isalnum())
+def _has_substantive_openalex_proof(work: OpenAlexWork) -> bool:
+    """Require meaningful work and title identities before recording authority proof."""
+    return bool(work.openalex_id.strip()) and titles_match(work.title, work.title)
 
 
-def titles_match(reported: str, resolved: str) -> bool:
-    """Compare titles with exact normalized matching and a long-title fuzzy fallback."""
-    left = _title_tokens(reported)
-    right = _title_tokens(resolved)
-    if left == right:
-        return True
-    if min(len(left), len(right)) < 20:
-        return False
-    return SequenceMatcher(None, left, right).ratio() >= 0.90
+def joined_diagnostic(error: BaselineResearchError) -> str:
+    """Join the verifier's already bounded diagnostics into one attempt note."""
+
+    diagnostic = " ".join(error.diagnostics) or str(error)
+    return " ".join(diagnostic.split())[:4000]
 
 
-def _attempt(route: str, success: bool, diagnostic: str) -> VerificationAttempt:
-    return VerificationAttempt(
-        route=route, success=success, diagnostic=_diagnostic(diagnostic)
-    )
-
-
-def _error_diagnostics(error: BaselineResearchError) -> str:
-    return "; ".join(error.diagnostics) or str(error)
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class BaselineSourceVerifier:
-    """Verify the selected candidate through Git first, then OpenAlex metadata."""
+    """Verify a selected source via public Git, then OpenAlex metadata if needed."""
 
     def __init__(
         self,
         git: GitCloneVerifier,
         openalex: OpenAlexLookup,
-        now: Callable[[], datetime] | None = None,
+        now: Callable[[], datetime] = _now,
     ) -> None:
-        self._git = git
-        self._openalex = openalex
-        self._now = now or (lambda: datetime.now(timezone.utc))
+        self.git = git
+        self.openalex = openalex
+        self.now = now
 
     async def verify(self, artifacts: BaselineArtifacts) -> BaselineVerification:
-        """Return platform-owned evidence for the selected baseline source."""
+        """Return the first qualifying Git or authority-metadata proof."""
+
         selected = artifacts.selected
         attempts: list[VerificationAttempt] = []
         if selected.repository_url is not None:
             try:
-                evidence = await self._git.verify(str(selected.repository_url))
-            except BaselineResearchError as error:
-                # Git rejection → retain the bounded diagnostic before OpenAlex fallback
-                attempts.append(_attempt("git", False, _error_diagnostics(error)))
-            else:
-                attempts.append(_attempt("git", True, "clone verified"))
-                return BaselineVerification(
+                evidence = await self.git.verify(str(selected.repository_url))
+                verification = BaselineVerification(
+                    schema_version=2,
                     research_sha256=research_sha256(artifacts.raw_research),
+                    design_sha256=design_sha256(artifacts.raw_design),
                     selected_candidate_id=selected.candidate_id,
                     route="git",
-                    verified_at=self._now(),
+                    verified_at=self.now(),
                     repository_url=evidence.repository_url,
                     commit=evidence.commit,
-                    attempts=attempts,
+                    attempts=[
+                        *attempts,
+                        VerificationAttempt(
+                            route="git", success=True, diagnostic="clone verified"
+                        ),
+                    ],
                 )
+                assert_verification_matches_artifacts(artifacts, verification)
+                return verification
+            except BaselineResearchError as error:
+                attempts.append(
+                    VerificationAttempt(
+                        route="git", success=False, diagnostic=joined_diagnostic(error)
+                    )
+                )
+
         if selected.paper_locator:
             try:
-                work = await self._openalex.fetch_work(selected.paper_locator)
+                work = await self.openalex.fetch_work(selected.paper_locator)
             except Exception as error:
-                # OpenAlex 网络或解析故障 → 记录后让来源校验统一失败
-                attempts.append(_attempt("openalex", False, _diagnostic(error)))
-            else:
-                if (
-                    work is not None
-                    and bool(work.openalex_id)
-                    and titles_match(selected.title, work.title)
-                    and work.cited_by_count >= 100
-                ):
-                    attempts.append(
-                        _attempt("openalex", True, "authority threshold verified")
-                    )
-                    return BaselineVerification(
-                        research_sha256=research_sha256(artifacts.raw_research),
-                        selected_candidate_id=selected.candidate_id,
+                attempts.append(
+                    VerificationAttempt(
                         route="openalex",
-                        verified_at=self._now(),
-                        openalex_id=work.openalex_id,
-                        title=work.title,
-                        publication_year=work.publication_year,
-                        cited_by_count=work.cited_by_count,
-                        attempts=attempts,
+                        success=False,
+                        diagnostic=_bounded_diagnostic(
+                            f"OpenAlex lookup failed: {error}"
+                        ),
                     )
-                reason = "work not found"
-                if work is not None:
-                    reason = (
-                        "title mismatch"
-                        if not titles_match(selected.title, work.title)
-                        else "citation threshold below 100"
+                )
+            else:
+                if work is None:
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic="OpenAlex did not resolve the paper locator",
+                        )
                     )
-                attempts.append(_attempt("openalex", False, reason))
+                elif not _has_substantive_openalex_proof(work):
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic="OpenAlex returned incomplete work identity",
+                        )
+                    )
+                elif not titles_match(selected.title, work.title):
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic="OpenAlex title does not match selected source",
+                        )
+                    )
+                elif work.cited_by_count < AUTHORITY_CITATION_THRESHOLD:
+                    attempts.append(
+                        VerificationAttempt(
+                            route="openalex",
+                            success=False,
+                            diagnostic=(
+                                f"OpenAlex citation count {work.cited_by_count} is below "
+                                f"{AUTHORITY_CITATION_THRESHOLD}"
+                            ),
+                        )
+                    )
+                else:
+                    try:
+                        verification = BaselineVerification(
+                            schema_version=2,
+                            research_sha256=research_sha256(artifacts.raw_research),
+                            design_sha256=design_sha256(artifacts.raw_design),
+                            selected_candidate_id=selected.candidate_id,
+                            route="openalex",
+                            verified_at=self.now(),
+                            paper_locator=selected.paper_locator,
+                            openalex_id=work.openalex_id,
+                            title=work.title,
+                            publication_year=work.publication_year,
+                            cited_by_count=work.cited_by_count,
+                            attempts=[
+                                *attempts,
+                                VerificationAttempt(
+                                    route="openalex",
+                                    success=True,
+                                    diagnostic="authority threshold verified",
+                                ),
+                            ],
+                        )
+                    except ValidationError:
+                        attempts.append(
+                            VerificationAttempt(
+                                route="openalex",
+                                success=False,
+                                diagnostic="OpenAlex returned incomplete work identity",
+                            )
+                        )
+                    else:
+                        assert_verification_matches_artifacts(artifacts, verification)
+                        return verification
+
         raise BaselineResearchError(
             "selected candidate has no qualifying source",
-            [attempt.diagnostic for attempt in attempts],
+            diagnostics=[attempt.diagnostic for attempt in attempts],
         )
 
 
 def build_default_source_verifier() -> BaselineSourceVerifier:
-    """Build a verifier backed by free Git and OpenAlex metadata access."""
-    limiter = HostRateLimiter(transport=UrllibTransport())
-    return BaselineSourceVerifier(GitCloneVerifier(), OpenAlexClient(limiter))
+    """Build the verifier with free OpenAlex metadata access only."""
+
+    return BaselineSourceVerifier(
+        git=GitCloneVerifier(),
+        openalex=OpenAlexClient(HostRateLimiter(UrllibTransport())),
+    )
+
+
+__all__ = [
+    "BaselineSourceVerifier",
+    "CommandRunner",
+    "GitCloneEvidence",
+    "GitCloneVerifier",
+    "OpenAlexLookup",
+    "build_default_source_verifier",
+    "joined_diagnostic",
+    "run_command",
+    "titles_match",
+]

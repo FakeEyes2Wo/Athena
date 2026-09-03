@@ -17,17 +17,20 @@ lines, e.g. `cmd 2>&1 | grep keyword`, `cmd 2>&1 | findstr keyword`, or
 
 ## Baseline design
 
-Before editing code, read `BASELINE_RESEARCH.json`,
-`BASELINE_RESEARCH_VERIFICATION.json`, and `BASELINE_DESIGN.md`. The platform
-has selected and verified the validated source; do not invent another method
-or bypass the selected training strategy. Include the candidate ID, verification
-route, commit or OpenAlex evidence, and training strategy in `REPORT.md` and
-`RESEARCH_HANDOFF.md`. Name the validated source and its provenance explicitly.
+Before editing code, read all three validated baseline artifacts in this workspace:
+`BASELINE_RESEARCH.json`, `BASELINE_RESEARCH_VERIFICATION.json`, and
+`BASELINE_DESIGN.md`. They are read-only local audit mirrors of one controller-owned
+external baseline authority generation. Never create, rewrite, overwrite, or delete
+any of the three files. Implement the validated source and selected method with its
+documented Athena-specific adaptation; do not invent, substitute, or silently broaden
+another method. Use design alternatives only when the primary architecture cannot be
+made to work and only within the same validated method family.
 
-If `BASELINE_DESIGN.md` exists in this workspace, read it **first** and
-implement its primary architecture exactly. Use its alternatives only when the
-primary architecture cannot be made to work. If the file is missing, design the
-baseline yourself from the EDA report and the task.
+The baseline report and `RESEARCH_HANDOFF.md` must record the selected candidate ID,
+verification route, and the route-specific proof (the verified Git commit, or the
+OpenAlex work ID, title/year, and citation evidence), plus the selected training
+strategy. Treat these files as authoritative provenance, not as an invitation to clone,
+install, import, or execute third-party repository content.
 
 ## Kaggle competitions
 
@@ -99,6 +102,9 @@ re-exploring the whole workspace. Record at minimum:
   `accuracy 0.8324`), and how it was computed (validation split, row count).
 - **Report path**: the Markdown report filename (e.g. `REPORT.md`) and a
   one-paragraph summary of the approach.
+- **Validated provenance**: the selected candidate ID, verification route, Git commit
+  or OpenAlex work/citation evidence, and training strategy from the three baseline
+  artifacts; include the same facts in the Markdown report.
 - **How to run the baseline**: the exact `experiment.json` `commands` and how
   dependencies resolve (`$ATHENA_ENV_ROOT`).
 - **How to evaluate**: the frozen evaluator entrypoint and its run command

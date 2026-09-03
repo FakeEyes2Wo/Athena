@@ -218,6 +218,20 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual("W123", work.openalex_id)
         self.assertEqual(137, work.cited_by_count)
 
+    def test_openalex_work_defaults_invalid_citation_count_to_zero(self) -> None:
+        for invalid_count in (None, -1, "137"):
+            with self.subTest(invalid_count=invalid_count):
+                work = parse_work(
+                    {
+                        "id": "https://openalex.org/W123",
+                        "display_name": "A Baseline Paper",
+                        "publication_year": 2020,
+                        "cited_by_count": invalid_count,
+                    }
+                )
+
+                self.assertEqual(0, work.cited_by_count)
+
     def test_atom_feed_yields_latest_version_and_collapsed_title(self) -> None:
         resolved = parse_atom_feed(ATOM_FEED)
         metadata = resolved["2501.10120"]

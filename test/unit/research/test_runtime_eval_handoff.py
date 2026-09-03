@@ -105,6 +105,9 @@ async def test_the_prepare_baseline_is_handed_the_eval_contract(tmp_path) -> Non
             seen["request"] = request
             raise RuntimeError("stop after the first dispatch")
 
+    async def assert_baseline() -> None:
+        pass
+
     with pytest.raises(RuntimeError, match="stop after the first dispatch"):
         await prepare_module.run_prepare_plan(
             agents=_Agents(),
@@ -117,6 +120,7 @@ async def test_the_prepare_baseline_is_handed_the_eval_contract(tmp_path) -> Non
             tree_ref=await store.put_text("{}"),
             task="build a baseline",
             max_turns=1,
+            assert_baseline=assert_baseline,
         )
 
     # 必须在 content 里。base_runner 只把 trigger 的 content 当作 model 的 user

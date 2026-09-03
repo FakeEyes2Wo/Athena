@@ -15,6 +15,7 @@ from athena.kaggle import KaggleStack
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_rag.search import RetrievalSession
 from athena.research.literature.survey import SurveyStack
+from athena.research.prepare.authority import BaselineAuthorityStore
 from athena.research.runtime.events import RuntimeEvents
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.state import ResearchState
@@ -39,6 +40,7 @@ class ResearchInfrastructure:
     events: RuntimeEvents
     scripts: DataScriptRunner
     evaluator: TrustedEvaluator
+    baseline_authority: BaselineAuthorityStore | None = None
 
 
 @dataclass

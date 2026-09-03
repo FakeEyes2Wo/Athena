@@ -1,6 +1,7 @@
 """Two-step PREPARE integration contract (evaluator freeze + experiment baseline)."""
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -111,13 +112,33 @@ class _PrepareProvider:
         self.calls = 0
         self.turn = 0
         self.feedback_seen = ""
+        self.task_seen = ""
+        self.provenance_report = ""
+        self.provenance_handoff = ""
         self._actions: list[tuple[str, str] | None] = []
 
     def _valid_actions(self) -> list[tuple[str, str] | None]:
         outputs = {"predictions": "predictions", "report": "report.md"}
         if self.missing == "report":
             outputs.pop("report")
-        return [
+        candidate = self._provenance_value("Selected candidate", "resnet-transfer")
+        route = self._provenance_value("Verification route", "git")
+        revision = self._provenance_value("Verified revision", "unavailable")
+        strategy = self._provenance_value("Training strategy", "partial_finetune")
+        self.provenance_report = (
+            "# PREPARE baseline\n"
+            f"Candidate: {candidate}\n"
+            f"Route: {route}\n"
+            f"Revision: {revision}\n"
+            f"Strategy: {strategy}\n"
+        )
+        self.provenance_handoff = (
+            f"candidate={candidate}\n"
+            f"route={route}\n"
+            f"revision={revision}\n"
+            f"strategy={strategy}\n"
+        )
+        actions: list[tuple[str, str] | None] = [
             ("solution/features.py", "def feature(value):\n    return int(value)\n"),
             (
                 "solution/model.py",
@@ -133,8 +154,28 @@ class _PrepareProvider:
                     }
                 ),
             ),
-            None,
         ]
+        if self.missing != "report":
+            actions.append(
+                (
+                    "report.md",
+                    self.provenance_report,
+                )
+            )
+        actions.extend(
+            [
+                (
+                    "RESEARCH_HANDOFF.md",
+                    self.provenance_handoff,
+                ),
+                None,
+            ]
+        )
+        return actions
+
+    def _provenance_value(self, label: str, default: str) -> str:
+        match = re.search(rf"(?m)^{re.escape(label)}:\s*(.+?)\s*$", self.task_seen)
+        return match.group(1) if match is not None else default
 
     @staticmethod
     def _message_text(messages) -> str:
@@ -147,6 +188,7 @@ class _PrepareProvider:
     async def stream(self, _config, _tools, messages, _cancel, **_kwargs):
         self.calls += 1
         text = self._message_text(messages)
+        self.task_seen = text
         for marker in ("experiment.json", "report output"):
             if marker in text:
                 self.feedback_seen = text
@@ -179,11 +221,23 @@ class _PrepareProvider:
 
 
 class _ManifestExecution:
-    def __init__(self, root: Path, *, missing_predictions: bool = False) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        agent_runtime: ExecutionRuntime | None = None,
+        missing_predictions: bool = False,
+    ) -> None:
         self.project_root = root
         self.environment_root = root
+        self.agent_runtime = agent_runtime
         self.missing_predictions = missing_predictions
         self.argv_calls: list[list[str]] = []
+
+    def shell_command_tool(self, root: Path):
+        """Keep real agent tool registration while faking manifest execution."""
+        assert self.agent_runtime is not None
+        return self.agent_runtime.shell_command_tool(root)
 
     def ensure_environment(self) -> None:
         """Stub：测试不涉及真实共享环境初始化。"""
@@ -207,11 +261,29 @@ class _ManifestExecution:
             (root / "predictions" / "predictions.csv").write_text(
                 "id,prediction\nr1,0\nr2,1\n", encoding="utf-8"
             )
-        (root / "report.md").write_text("# PREPARE baseline\n", encoding="utf-8")
+        report = root / "report.md"
+        history = root.parent / f"{root.name}-output-history"
+        archived_reports = sorted(
+            history.glob("prepare-*/report.md"),
+            key=lambda path: path.stat().st_mtime_ns,
+        )
+        if archived_reports:
+            archived_reports[-1].replace(report)
         result = CommandResult(ok=True, stdout="", stderr="", exit_code=0)
         if request.emit is not None:
             await request.emit("command/completed", "exec:prepare", result.to_dict())
         return result
+
+
+class _MemoryBaselineGuard:
+    """Test-only external generation checked at each trusted boundary."""
+
+    def __init__(self) -> None:
+        self.generation = 0
+
+    async def assert_current(self) -> None:
+        if self.generation != 0:
+            raise RuntimeError("external baseline generation changed")
 
 
 class _Harness:
@@ -231,6 +303,7 @@ class _Harness:
             invalid_first=invalid_first, missing=missing
         )
         self.evaluator_provider = _EvaluatorProvider(missing=evaluator_missing)
+        self.baseline_guard = _MemoryBaselineGuard()
         self.missing = missing
 
     def _git(self, *args: str) -> str:
@@ -262,7 +335,9 @@ class _Harness:
             store=self.store, workdir=self.tmp_path / ".athena" / "script-runs"
         )
         self.execution = _ManifestExecution(
-            workspace, missing_predictions=self.missing == "predictions"
+            workspace,
+            agent_runtime=self.runtime,
+            missing_predictions=self.missing == "predictions",
         )
         self.tree_ref = await self.store.put_text('{"experiments": []}')
 
@@ -323,6 +398,7 @@ class _Harness:
             tree_ref=self.tree_ref,
             task="inspect data and build a trusted baseline",
             max_turns=max_turns,
+            assert_baseline=self.baseline_guard.assert_current,
             publish=publish,
         )
 
@@ -419,6 +495,28 @@ async def test_prepare_accepts_an_arbitrary_multifile_solution(tmp_path: Path) -
         result = await harness.run()
         assert result.metric == 1.0
         assert harness.execution.argv_calls == [["python", "solution/model.py"]]
+    finally:
+        await harness.close()
+
+
+@pytest.mark.asyncio
+async def test_registered_prepare_agent_observes_read_only_authority_mirrors(
+    tmp_path: Path,
+) -> None:
+    harness = _Harness(tmp_path)
+    await harness.start()
+    try:
+        await harness.run()
+        observed_contract = harness.prepare_provider.task_seen
+        for filename in (
+            "BASELINE_RESEARCH.json",
+            "BASELINE_RESEARCH_VERIFICATION.json",
+            "BASELINE_DESIGN.md",
+        ):
+            assert filename in observed_contract
+        assert "read-only local audit mirrors" in observed_contract
+        assert "external baseline authority generation" in observed_contract
+        assert "Never create, rewrite, overwrite, or delete" in observed_contract
     finally:
         await harness.close()
 

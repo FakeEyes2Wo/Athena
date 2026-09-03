@@ -1,4 +1,4 @@
-"""Research-gated baseline design and trusted PREPARE execution."""
+"""Baseline design and trusted PREPARE execution."""
 
 import asyncio
 import json
@@ -13,22 +13,38 @@ from athena.agents.ideator_agent import (
 )
 from athena.agents.prepare_agent import register_prepare_agent
 from athena.agents.supervisor_agent import MAX_PLAN_TURNS
+from athena.research.prepare.authority import (
+    BaselineAuthorityError,
+    BaselineAuthorityStore,
+    PrepareAttestation,
+    SealedBaseline,
+    VerifiedBaselineBundle,
+)
 from athena.research.prepare.baseline_research import (
-    BaselineArtifacts,
+    DESIGN_FILENAME,
+    RESEARCH_FILENAME,
+    VERIFICATION_FILENAME,
     BaselineResearchError,
     VerifiedBaseline,
-    assert_verified_files,
+    _parse_baseline_artifacts,
+    _parse_canonical_verification,
+    _write_verification_bytes,
+    assert_verification_matches_artifacts,
     load_baseline_artifacts,
-    load_cached_verified_baseline,
-    research_sha256,
-    write_verification,
+    verification_bytes,
 )
-from athena.research.prepare.source_verification import build_default_source_verifier
+from athena.research.prepare.source_verification import (
+    BaselineSourceVerifier,
+    build_default_source_verifier,
+)
 from athena.research.supervisor.prepare import PrepareResult, run_prepare_plan
 
 logger = logging.getLogger(__name__)
 
 HandoffFn = Callable[..., Awaitable[str]]
+_IDEATOR_REAP_TIMEOUT_SECONDS = 5.0
+_DIAGNOSTIC_LIMIT = 4000
+_PENDING_IDEATOR_REAPS: set[asyncio.Task[None]] = set()
 
 
 def directory_candidate_task(task: str) -> str:
@@ -59,70 +75,371 @@ def _register_ideator(runtime: Any, workspace: Path) -> None:
 
 
 def _initial_research_request(task: str) -> str:
-    """Build the first baseline evidence request."""
     return (
         f"{task}\n\nRead the task/data contract and EDA_HANDOFF.md. Use web and "
         "paper tools, then write complete BASELINE_RESEARCH.json and "
-        "BASELINE_DESIGN.md. Do not write BASELINE_RESEARCH_VERIFICATION.json."
+        "BASELINE_DESIGN.md."
     )
 
 
 def _repair_request(error: BaselineResearchError) -> str:
-    """Build one bounded repair request from deterministic gate diagnostics."""
-    diagnostics = "\n".join(f"- {item}" for item in error.diagnostics)
+    diagnostics = error.diagnostics or (str(error),)
+    rendered = "\n".join(f"- {item}" for item in diagnostics)
     return (
         "The deterministic baseline evidence gate rejected the artifacts.\n"
-        f"{diagnostics}\n"
+        f"{rendered}\n"
         "Correct the source or locator and rewrite both complete artifacts. "
         "Do not write BASELINE_RESEARCH_VERIFICATION.json."
     )
 
 
-def verified_baseline_task(task: str, verified: VerifiedBaseline) -> str:
-    """Append compact source provenance to the prepare-agent task."""
-    evidence = verified.verification
-    revision = evidence.commit or evidence.openalex_id or "unavailable"
-    return (
-        f"{task}\n\nPlatform-verified baseline artifacts:\n"
-        "- BASELINE_RESEARCH.json\n"
-        "- BASELINE_RESEARCH_VERIFICATION.json\n"
-        "- BASELINE_DESIGN.md\n"
-        f"Selected candidate: {verified.artifacts.selected.candidate_id}\n"
-        f"Training strategy: {verified.artifacts.design.training_strategy}\n"
-        f"Verification route: {evidence.route}\n"
-        f"Verified revision: {revision}\n"
+def _bounded_diagnostic(error: Exception) -> str:
+    return " ".join(str(error).split())[:_DIAGNOSTIC_LIMIT] or type(error).__name__
+
+
+def _remove_verification(root: Path) -> None:
+    """Remove any non-authoritative verification before independent checks."""
+    try:
+        (root / VERIFICATION_FILENAME).unlink(missing_ok=True)
+    except OSError as error:
+        raise BaselineResearchError(
+            f"unable to remove {VERIFICATION_FILENAME}",
+            (_bounded_diagnostic(error),),
+        ) from error
+
+
+def _repairable(error: BaselineResearchError) -> BaselineResearchError:
+    """Ensure the repair prompt includes the gate's high-level failure."""
+    if str(error) in error.diagnostics:
+        return error
+    return BaselineResearchError(str(error), (str(error), *error.diagnostics))
+
+
+def _validated_sealed_baseline(root: Path, sealed: SealedBaseline) -> VerifiedBaseline:
+    """Validate an external authority response without consulting local mirrors."""
+    if type(sealed) is not SealedBaseline:
+        raise BaselineAuthorityError("authority returned an invalid sealed baseline")
+    bundle = sealed.bundle
+    try:
+        canonical, parsed_verification = _parse_canonical_verification(
+            bundle.verification_bytes, bundle.verification
+        )
+        artifacts = _parse_baseline_artifacts(
+            root, bundle.research_bytes, bundle.design_bytes
+        )
+        assert_verification_matches_artifacts(artifacts, parsed_verification)
+    except BaselineResearchError as exc:
+        raise BaselineAuthorityError(
+            "authority returned baseline bytes that do not match verification"
+        ) from exc
+    return VerifiedBaseline(
+        artifacts=artifacts,
+        verification=parsed_verification,
+        verification_bytes=canonical,
+        authority_generation=sealed.generation,
     )
 
 
-def _research_error(error: Exception, fallback: str) -> BaselineResearchError:
-    """Convert an agent/provider error into a bounded gate diagnostic."""
-    if isinstance(error, BaselineResearchError):
-        raw = error.diagnostics or (str(error),)
-        diagnostics = tuple(str(item)[:1000] for item in raw[:4])
-        return BaselineResearchError(str(error)[:500], diagnostics)
-    return BaselineResearchError(fallback, (str(error)[:4000],))
+def _assert_valid_authority_lifecycle(sealed: SealedBaseline) -> None:
+    """Accept only the two baseline generations defined by the authority protocol."""
+
+    if type(sealed) is not SealedBaseline:
+        raise BaselineAuthorityError("authority returned an invalid sealed baseline")
+    attestation = sealed.attestation
+    if sealed.generation == 0 and attestation is None:
+        return
+    if (
+        sealed.generation == 1
+        and type(attestation) is PrepareAttestation
+        and attestation.research_sha256 == sealed.bundle.verification.research_sha256
+        and attestation.design_sha256 == sealed.bundle.verification.design_sha256
+    ):
+        return
+    raise BaselineAuthorityError("baseline authority lifecycle is invalid")
 
 
-async def _verify(verifier: Any, artifacts: BaselineArtifacts) -> VerifiedBaseline:
-    """Verify artifacts and persist only evidence bound to their current bytes."""
+def _read_required_mirror(root: Path, filename: str) -> bytes:
+    try:
+        return (root / filename).read_bytes()
+    except OSError as exc:
+        raise BaselineResearchError(f"unable to read {filename}", (str(exc),)) from exc
+
+
+def _assert_mirror_matches(root: Path, filename: str, expected: bytes) -> None:
+    if _read_required_mirror(root, filename) != expected:
+        raise BaselineResearchError(
+            f"workspace mirror {filename} does not match external authority"
+        )
+
+
+async def _load_authoritative_baseline_record(
+    root: Path, authority: BaselineAuthorityStore
+) -> tuple[VerifiedBaseline, SealedBaseline] | None:
+    """Load one external record and validate its exact workspace mirrors."""
+    try:
+        sealed = await authority.load()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError("baseline authority load failed") from None
+    if sealed is None:
+        return None
+
+    _assert_valid_authority_lifecycle(sealed)
+    verified = _validated_sealed_baseline(root, sealed)
+    bundle = sealed.bundle
+    _assert_mirror_matches(root, RESEARCH_FILENAME, bundle.research_bytes)
+    _assert_mirror_matches(root, DESIGN_FILENAME, bundle.design_bytes)
+
+    mirror = root / VERIFICATION_FILENAME
+    try:
+        local_verification = mirror.read_bytes()
+    except FileNotFoundError:
+        try:
+            _write_verification_bytes(root, bundle.verification_bytes)
+        except OSError as exc:
+            raise BaselineResearchError(
+                f"unable to restore {VERIFICATION_FILENAME}", (str(exc),)
+            ) from exc
+    except OSError as exc:
+        raise BaselineResearchError(
+            f"unable to read {VERIFICATION_FILENAME}", (str(exc),)
+        ) from exc
+    else:
+        if local_verification != bundle.verification_bytes:
+            raise BaselineResearchError(
+                f"workspace mirror {VERIFICATION_FILENAME} does not match external authority"
+            )
+    return verified, sealed
+
+
+async def load_authoritative_baseline(
+    root: Path, authority: BaselineAuthorityStore
+) -> VerifiedBaseline | None:
+    """Load only externally sealed evidence and validate every present mirror."""
+    loaded = await _load_authoritative_baseline_record(root, authority)
+    return None if loaded is None else loaded[0]
+
+
+async def seal_verified_baseline(
+    authority: BaselineAuthorityStore, verified: VerifiedBaseline
+) -> VerifiedBaseline:
+    """Seal freshly verified exact bytes with initial compare-and-exchange."""
+    bundle = _verified_bundle(verified)
+    try:
+        sealed = await authority.seal(bundle, expected_generation=None)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError("baseline authority seal failed") from None
+    accepted = _validated_sealed_baseline(verified.artifacts.root, sealed)
+    if (
+        sealed.generation != 0
+        or sealed.bundle != bundle
+        or sealed.attestation is not None
+    ):
+        raise BaselineAuthorityError(
+            "baseline authority returned unexpected sealed evidence"
+        )
+    return accepted
+
+
+def _verified_bundle(verified: VerifiedBaseline) -> VerifiedBaselineBundle:
+    """Return the exact authority payload carried by one verified baseline."""
+    return VerifiedBaselineBundle(
+        research_bytes=verified.artifacts.raw_research,
+        design_bytes=verified.artifacts.raw_design,
+        verification_bytes=verified.verification_bytes,
+        verification=verified.verification,
+    )
+
+
+async def _attest_prepare_completion(
+    authority: BaselineAuthorityStore,
+    verified: VerifiedBaseline,
+    result: PrepareResult,
+    current: SealedBaseline,
+) -> None:
+    """Attach exact trusted scoring evidence to the in-memory generation."""
+    evidence = PrepareAttestation(
+        research_sha256=verified.verification.research_sha256,
+        design_sha256=verified.verification.design_sha256,
+        baseline_commit=result.commit,
+        evaluator_ref=result.evaluator_ref,
+        evidence_ref=result.evidence_ref,
+    )
+    if (
+        current.generation != verified.authority_generation
+        or current.bundle != _verified_bundle(verified)
+    ):
+        raise BaselineAuthorityError(
+            "external baseline authority changed during PREPARE"
+        )
+    if current.generation == 1:
+        if current.attestation == evidence:
+            return
+        raise BaselineAuthorityError(
+            "existing completion attestation does not match trusted PREPARE result"
+        )
+    if current.generation != 0 or current.attestation is not None:
+        raise BaselineAuthorityError(
+            "baseline authority completion generation is invalid"
+        )
+    try:
+        sealed = await authority.attest_prepare(
+            evidence,
+            expected_generation=0,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - external capability boundary
+        raise BaselineAuthorityError(
+            "baseline authority completion attestation failed"
+        ) from None
+    if (
+        type(sealed) is not SealedBaseline
+        or sealed.generation != verified.authority_generation + 1
+        or sealed.bundle != _verified_bundle(verified)
+        or sealed.attestation != evidence
+    ):
+        raise BaselineAuthorityError(
+            "baseline authority returned an unexpected completion attestation"
+        )
+
+
+async def _verify_current_artifacts(
+    root: Path,
+    verifier: BaselineSourceVerifier,
+    authority: BaselineAuthorityStore,
+) -> VerifiedBaseline:
+    artifacts = load_baseline_artifacts(root)
     verification = await verifier.verify(artifacts)
-    if verification.research_sha256 != research_sha256(artifacts.raw_research):
-        raise BaselineResearchError("verification digest does not match research")
-    if verification.selected_candidate_id != artifacts.selected.candidate_id:
-        raise BaselineResearchError("verification candidate does not match research")
-    write_verification(artifacts.root, verification)
-    return VerifiedBaseline(artifacts, verification)
+    current = load_baseline_artifacts(root)
+    if current.raw_research != artifacts.raw_research:
+        raise BaselineResearchError(
+            f"{RESEARCH_FILENAME} changed during source verification"
+        )
+    if current.raw_design != artifacts.raw_design:
+        raise BaselineResearchError(
+            f"{DESIGN_FILENAME} changed during source verification"
+        )
+    assert_verification_matches_artifacts(current, verification)
+    verified = VerifiedBaseline(
+        artifacts=current,
+        verification=verification,
+        verification_bytes=verification_bytes(verification),
+    )
+    sealed = await seal_verified_baseline(authority, verified)
+    try:
+        _write_verification_bytes(root, sealed.verification_bytes)
+    except OSError as error:
+        raise BaselineAuthorityError(
+            f"unable to write authoritative mirror {VERIFICATION_FILENAME}"
+        ) from error
+    return sealed
+
+
+async def _run_ideator_turn(
+    *,
+    handoff_agent: HandoffFn,
+    root: Path,
+    content: str,
+    verifier: BaselineSourceVerifier,
+    authority: BaselineAuthorityStore,
+) -> VerifiedBaseline | BaselineResearchError:
+    """Run one logical-thread turn, then independently parse and verify its files."""
+    _remove_verification(root)
+    try:
+        await handoff_agent(
+            agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
+            agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
+            workspace=str(root),
+            output_file=DESIGN_FILENAME,
+            content=content,
+            reap_after=False,
+        )
+    except Exception as error:
+        _remove_verification(root)
+        return BaselineResearchError(
+            "baseline ideator response failed", (_bounded_diagnostic(error),)
+        )
+    except BaseException:
+        try:
+            _remove_verification(root)
+        except Exception:
+            logger.warning(
+                "failed to remove baseline verification during interruption",
+                exc_info=True,
+            )
+        raise
+
+    _remove_verification(root)
+    try:
+        return await _verify_current_artifacts(root, verifier, authority)
+    except BaselineResearchError as error:
+        return _repairable(error)
+
+
+def _observe_ideator_reap(task: asyncio.Task[None]) -> None:
+    """Retain and consume delayed reap results without replacing primary work."""
+    if task not in _PENDING_IDEATOR_REAPS:
+        return
+    _PENDING_IDEATOR_REAPS.remove(task)
+    if task.cancelled():
+        logger.warning("baseline ideator reap was cancelled")
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning(
+            "failed to reap baseline ideator",
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
 
 async def _reap_ideator(runtime: Any) -> None:
-    """Release the one-shot baseline ideator without masking gate errors."""
+    """Bound the caller's wait while retaining the reusable-thread cleanup."""
     try:
-        await asyncio.wait_for(
-            runtime.agents.reap(BASELINE_IDEATOR_PROFILE.agent_type), 5.0
+        task = asyncio.create_task(
+            runtime.agents.reap(BASELINE_IDEATOR_PROFILE.agent_type)
         )
     except Exception:
-        # Agent cleanup failure → preserve the research gate result.
-        logger.warning("failed to reap baseline ideator", exc_info=True)
+        logger.warning("failed to start baseline ideator reap", exc_info=True)
+        return
+
+    _PENDING_IDEATOR_REAPS.add(task)
+    task.add_done_callback(_observe_ideator_reap)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=_IDEATOR_REAP_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(
+            "timed out reaping baseline ideator after %.1f seconds",
+            _IDEATOR_REAP_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is None or current.cancelling():
+            raise
+        if task.cancelled():
+            _observe_ideator_reap(task)
+            return
+        raise
+    except Exception:
+        _observe_ideator_reap(task)
+    else:
+        _observe_ideator_reap(task)
+
+
+async def _publish_terminal_research_error(
+    runtime: Any, error: BaselineResearchError
+) -> None:
+    await runtime.publish_output(
+        source="supervisor",
+        channel="error",
+        text=f"PREPARE: baseline research failed ({error}).",
+    )
 
 
 async def prepare_baseline_design(
@@ -132,84 +449,80 @@ async def prepare_baseline_design(
     eda_ready: bool,
     handoff_agent: HandoffFn,
     *,
-    verifier: Any | None = None,
+    verifier: BaselineSourceVerifier | None = None,
 ) -> VerifiedBaseline:
-    """Research, verify, and return the baseline before PREPARE implementation."""
-    root = Path(workspace.path)
+    """Return independently verified research, allowing at most one repair turn."""
+    authority = getattr(runtime, "baseline_authority", None)
+    if authority is None:
+        raise BaselineAuthorityError(
+            "PREPARE requires an external baseline authority capability"
+        )
     if not eda_ready:
         error = BaselineResearchError(
-            "PREPARE requires a completed EDA handoff before baseline research",
-            ("EDA_HANDOFF.md is unavailable",),
+            "EDA is unavailable; baseline research cannot be verified"
         )
-        await runtime.publish_output(
-            source="supervisor", channel="error", text=str(error)
-        )
+        await _publish_terminal_research_error(runtime, error)
         raise error
-    verifier = verifier or build_default_source_verifier()
+
+    root = Path(workspace.path)
+    ideator_active = False
 
     try:
-        cached = load_cached_verified_baseline(root)
-    except BaselineResearchError:
-        # Stale or malformed cache → continue with artifact verification or repair.
-        cached = None
-    if cached is not None:
-        return cached
+        cached = await load_authoritative_baseline(root, authority)
+        if cached is not None:
+            return cached
 
-    research_path = root / "BASELINE_RESEARCH.json"
-    design_path = root / "BASELINE_DESIGN.md"
-    complete_artifacts = research_path.is_file() and design_path.is_file()
-    first_error: BaselineResearchError | None = None
-    if not complete_artifacts and (research_path.exists() or design_path.exists()):
-        first_error = BaselineResearchError(
-            "baseline artifacts are incomplete",
-            ("BASELINE_RESEARCH.json and BASELINE_DESIGN.md are both required",),
+        source_verifier = verifier or build_default_source_verifier()
+        _remove_verification(root)
+        complete_artifacts = all(
+            (root / filename).is_file()
+            for filename in (RESEARCH_FILENAME, DESIGN_FILENAME)
         )
-    if complete_artifacts:
-        try:
-            artifacts = load_baseline_artifacts(root)
-            return await _verify(verifier, artifacts)
-        except Exception as error:
-            # Existing artifacts failed parsing or verification → one repair turn.
-            first_error = _research_error(
-                error, "baseline artifacts failed verification"
-            )
-
-    resumed = first_error is not None
-    try:
-        _register_ideator(runtime, root)
-        turn_limit = 1 if resumed else 2
-        for turn in range(turn_limit):
-            (root / "BASELINE_RESEARCH_VERIFICATION.json").unlink(missing_ok=True)
-            content = (
-                _repair_request(first_error)
-                if first_error
-                else _initial_research_request(task)
-            )
+        if complete_artifacts:
             try:
-                await handoff_agent(
-                    agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
-                    agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
-                    workspace=str(root),
-                    output_file="BASELINE_DESIGN.md",
-                    content=content,
-                    reap_after=False,
-                )
-                artifacts = load_baseline_artifacts(root)
-                return await _verify(verifier, artifacts)
-            except Exception as error:
-                # Agent, parse, or verifier failure → retain only bounded diagnostics.
-                first_error = _research_error(error, "baseline research was rejected")
-                if turn == turn_limit - 1:
-                    await runtime.publish_output(
-                        source="supervisor",
-                        channel="error",
-                        text=f"PREPARE baseline research failed: {first_error}",
-                    )
-                    raise first_error from error
-    finally:
-        await _reap_ideator(runtime)
+                return await _verify_current_artifacts(root, source_verifier, authority)
+            except BaselineResearchError as error:
+                first_error = _repairable(error)
+        else:
+            first_error = None
 
-    raise BaselineResearchError("baseline research failed without a result")
+        _register_ideator(runtime, root)
+        ideator_active = True
+        if complete_artifacts:
+            request = _repair_request(first_error)
+        else:
+            request = _initial_research_request(task)
+
+        first_result = await _run_ideator_turn(
+            handoff_agent=handoff_agent,
+            root=root,
+            content=request,
+            verifier=source_verifier,
+            authority=authority,
+        )
+        if isinstance(first_result, VerifiedBaseline):
+            return first_result
+
+        if complete_artifacts:
+            terminal_error = first_result
+        else:
+            second_result = await _run_ideator_turn(
+                handoff_agent=handoff_agent,
+                root=root,
+                content=_repair_request(first_result),
+                verifier=source_verifier,
+                authority=authority,
+            )
+            if isinstance(second_result, VerifiedBaseline):
+                return second_result
+            terminal_error = second_result
+
+        _remove_verification(root)
+        await _publish_terminal_research_error(runtime, terminal_error)
+        raise terminal_error
+    finally:
+        if ideator_active:
+            await _reap_ideator(runtime)
 
 
 def _register_prepare_agent(runtime: Any, workspace: Path) -> None:
@@ -226,6 +539,25 @@ def _register_prepare_agent(runtime: Any, workspace: Path) -> None:
     )
 
 
+def verified_baseline_task(task: str, verified: VerifiedBaseline) -> str:
+    """Append deterministic platform provenance for the PREPARE agent."""
+    verification = verified.verification
+    revision = (
+        verification.commit if verification.route == "git" else verification.openalex_id
+    )
+    return (
+        f"{task}\n\nPlatform-verified baseline artifacts:\n"
+        f"- {RESEARCH_FILENAME}\n"
+        f"- {VERIFICATION_FILENAME}\n"
+        f"- {DESIGN_FILENAME}\n"
+        f"Selected candidate: {verified.artifacts.selected.candidate_id}\n"
+        "Training strategy: "
+        f"{verified.artifacts.design.training_strategy}\n"
+        f"Verification route: {verification.route}\n"
+        f"Verified revision: {revision}"
+    )
+
+
 async def run_baseline(
     runtime: Any,
     workspace: Any,
@@ -234,17 +566,48 @@ async def run_baseline(
     predict_features: Path | None,
     verified: VerifiedBaseline,
 ) -> PrepareResult:
-    """Implement and score only a currently verified baseline design."""
+    """Implement and score the trusted baseline through the frozen evaluator."""
     root = Path(workspace.path)
-    assert_verified_files(root, verified)
+    authority = getattr(runtime, "baseline_authority", None)
+    if authority is None:
+        raise BaselineAuthorityError(
+            "PREPARE requires an external baseline authority capability"
+        )
+
+    async def assert_baseline() -> None:
+        """Reject authority or mirror drift from the in-memory generation."""
+        await current_sealed_baseline()
+
+    async def current_sealed_baseline() -> SealedBaseline:
+        """Return the still-matching sealed authority record."""
+        loaded = await _load_authoritative_baseline_record(root, authority)
+        if loaded is None:
+            raise BaselineAuthorityError(
+                "external baseline authority has no sealed baseline"
+            )
+        current, sealed = loaded
+        if (
+            current.authority_generation != verified.authority_generation
+            or current.artifacts.raw_research != verified.artifacts.raw_research
+            or current.artifacts.raw_design != verified.artifacts.raw_design
+            or current.verification_bytes != verified.verification_bytes
+        ):
+            raise BaselineAuthorityError(
+                "external baseline authority changed during PREPARE"
+            )
+        return sealed
+
+    await assert_baseline()
     await runtime.publish_output(
         source="supervisor", channel="text", text="PREPARE: implementing baseline."
     )
+    # Register the implementation agent and freeze the current research tree.
     _register_prepare_agent(runtime, root)
     tree_ref = await runtime.store.put_text(
         json.dumps(runtime.tree.to_dict(), ensure_ascii=False, sort_keys=True)
     )
-    return await run_prepare_plan(
+    # Delegate execution and trusted scoring to the supervisor plan.
+    result = await run_prepare_plan(
         agents=runtime.agents,
         evaluator=runtime.evaluator,
         git=runtime.git,
@@ -259,4 +622,8 @@ async def run_baseline(
             "prepare", kind, ref, data
         ),
         predict_features=predict_features,
+        assert_baseline=assert_baseline,
     )
+    current = await current_sealed_baseline()
+    await _attest_prepare_completion(authority, verified, result, current)
+    return result

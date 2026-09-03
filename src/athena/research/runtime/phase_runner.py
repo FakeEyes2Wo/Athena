@@ -6,7 +6,9 @@ run_validation_phase / review_validation_diff）集中到一个组合单元。�
 可变字段。
 """
 
+import json
 import logging
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +19,8 @@ from athena.agents.task_agents import register_validate_agent
 from athena.execution.runtime import ExecutionContext
 from athena.research.clarification.context import confirmed_task_context_block
 from athena.research.contracts import ValidationResult
+from athena.research.prepare.authority import BaselineAuthorityError
+from athena.research.prepare.baseline import _load_authoritative_baseline_record
 from athena.research.prepare.orchestrator import run_prepare_phase
 from athena.research.supervisor.events import wait_run_events
 from athena.research.supervisor.experiment import (
@@ -39,6 +43,31 @@ from athena.utils.single_turn_chat import single_turn_chat
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+
+async def _load_trusted_prepare_score(
+    store: Any, evidence_ref: str
+) -> tuple[float, str]:
+    """Load the trusted PlanRunner score from its content-addressed evidence."""
+    try:
+        evidence = json.loads(await store.get_text(evidence_ref))
+        if not isinstance(evidence, dict) or evidence.get("plan") != "prepare":
+            raise ValueError("evidence is not a PREPARE score")
+        metric = evidence["metric"]
+        commit = evidence["commit"]
+        if (
+            isinstance(metric, bool)
+            or not isinstance(metric, (int, float))
+            or not math.isfinite(metric)
+        ):
+            raise ValueError("evidence metric is not finite")
+        if not isinstance(commit, str) or not commit.strip():
+            raise ValueError("evidence commit is blank")
+    except Exception as exc:  # noqa: BLE001 - artifact store trust boundary
+        raise BaselineAuthorityError(
+            "trusted PREPARE evidence is missing, corrupt, or invalid"
+        ) from exc
+    return float(metric), commit
 
 
 class PhaseRunner:
@@ -144,6 +173,60 @@ class PhaseRunner:
     async def run_prepare_phase(self) -> PrepareResult:
         """Run the PREPARE phase and return the trusted baseline result."""
         return await run_prepare_phase(self._runtime, self._run_handoff_agent)
+
+    async def baseline_resume_is_attested(self) -> bool:
+        """Authorize PREPARE resume only from exact external completion evidence."""
+        rt = self._runtime
+        authority = rt.baseline_authority
+        if authority is None:
+            raise BaselineAuthorityError(
+                "PREPARE resume requires an external baseline authority capability"
+            )
+        eda_dir = rt.state.eda_dir
+        if not isinstance(eda_dir, str) or not eda_dir.strip():
+            raise BaselineAuthorityError(
+                "PREPARE resume has no durable baseline workspace"
+            )
+        workspace = Path(eda_dir)
+        if not workspace.is_absolute():
+            workspace = rt.root / workspace
+        workspace = workspace.resolve()
+        if not workspace.is_relative_to(rt.root.resolve()):
+            raise BaselineAuthorityError(
+                "PREPARE resume baseline workspace escapes the project root"
+            )
+
+        loaded = await _load_authoritative_baseline_record(workspace, authority)
+        if loaded is None:
+            return False
+        _verified, sealed = loaded
+        attestation = sealed.attestation
+        if sealed.generation != 1 or attestation is None:
+            return False
+
+        sota_id = rt.tree.best_experiment_id()
+        if sota_id is None:
+            return False
+        experiment = rt.tree.get_experiment(sota_id)
+        if experiment.eval is None or experiment.plan.kind != "baseline":
+            return False
+        matches_attestation = (
+            experiment.commit == attestation.baseline_commit
+            and experiment.plan.run_config_ref == attestation.evaluator_ref
+            and experiment.eval.per_sample == attestation.evidence_ref
+        )
+        if not matches_attestation:
+            return False
+        evidence_metric, evidence_commit = await _load_trusted_prepare_score(
+            rt.store, attestation.evidence_ref
+        )
+        if (
+            evidence_metric != experiment.eval.primary
+            or evidence_commit != experiment.commit
+        ):
+            return False
+        rt.state.evaluator_ref = experiment.plan.run_config_ref
+        return True
 
     async def run_validation_phase(
         self, sota_commit: str, metric: float

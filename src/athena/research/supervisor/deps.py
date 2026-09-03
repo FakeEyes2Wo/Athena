@@ -21,6 +21,7 @@ PlanTurn = Callable[[str, "PlanState"], Awaitable["PlanTurnResult"]]
 SupervisorTurn = Callable[[str], Awaitable[str]]
 Publish = Callable[[Literal["output", "state"], dict[str, object]], Awaitable[None]]
 PreparePhase = Callable[[], Awaitable["PrepareResult"]]
+_PrepareResumeIsAttested = Callable[[], Awaitable[bool]]
 ValidationPhase = Callable[["CommitHash", float], Awaitable[object]]
 IdeatorTurn = Callable[[int], Awaitable[list["Hypothesis"]]]
 GeneralTurn = Callable[[str, str | None], Awaitable["GeneralTurnOutcome"]]
@@ -65,6 +66,7 @@ class PhaseActions:
     publish_agent_event: PublishAgentEvent | None = None
     on_plan_settled: Callable[[str], Awaitable[None]] | None = None
     auto_validate: bool = False
+    prepare_resume_is_attested: _PrepareResumeIsAttested | None = None
 
 
 @dataclass

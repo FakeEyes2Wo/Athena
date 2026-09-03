@@ -1,1 +1,1 @@
-"""Unit tests for PREPARE artifacts."""
+"""Tests for PREPARE research contracts."""

@@ -27,3 +27,37 @@ def test_prepare_prompt_requires_bare_python_manifest_command() -> None:
     # The manifest command must resolve through the environment-root venv.
     assert '"python"' in prompt
     assert "$ATHENA_ENV_ROOT/.venv" in prompt
+
+
+def test_prepare_prompt_treats_baseline_files_as_read_only_authority_mirrors() -> None:
+    prompt = load_prompt("prepare")
+
+    for filename in (
+        "BASELINE_RESEARCH.json",
+        "BASELINE_RESEARCH_VERIFICATION.json",
+        "BASELINE_DESIGN.md",
+    ):
+        assert filename in prompt
+    assert "read-only local audit mirrors" in prompt
+    assert "external baseline authority generation" in prompt
+    assert "Never create, rewrite, overwrite, or delete" in prompt
+
+
+def test_prepare_prompt_does_not_present_v1_research_fields_as_current_contract() -> (
+    None
+):
+    prompt = load_prompt("prepare")
+
+    for retired_field in (
+        "recommended_strategy",
+        "search_queries",
+    ):
+        assert retired_field not in prompt
+    for forbidden_authority_detail in (
+        "BASELINE_AUTHORITY_URL",
+        "BASELINE_AUTHORITY_TOKEN",
+        "expected_generation",
+        "authority storage path",
+        "citation threshold parameter",
+    ):
+        assert forbidden_authority_detail not in prompt

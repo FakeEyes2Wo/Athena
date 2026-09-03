@@ -19,6 +19,7 @@ from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import ExecutionRuntime
 from athena.research.contracts import GeneralTurnOutcome
+from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.supervisor.deps import (
     PhaseActions,
     ResearchActions,
@@ -32,6 +33,47 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor, _final_report_text
+
+
+def test_prepare_resume_callback_type_alias_is_module_private() -> None:
+    deps_module = import_module("athena.research.supervisor.deps")
+
+    assert not hasattr(deps_module, "PrepareResumeIsAttested")
+    assert "PrepareResumeIsAttested" not in deps_module.__all__
+
+
+def test_phase_actions_preserves_historical_positional_argument_order() -> None:
+    async def publish(_kind, _payload):
+        return None
+
+    async def prepare():
+        raise AssertionError("not called")
+
+    async def validation(_commit, _metric):
+        raise AssertionError("not called")
+
+    async def publish_agent_event(_agent_id, _kind, _ref, _data):
+        return None
+
+    async def on_plan_settled(_plan_id):
+        return None
+
+    actions = PhaseActions(
+        publish,
+        prepare,
+        validation,
+        publish_agent_event,
+        on_plan_settled,
+        True,
+    )
+
+    assert actions.publish is publish
+    assert actions.prepare is prepare
+    assert actions.validation is validation
+    assert actions.publish_agent_event is publish_agent_event
+    assert actions.on_plan_settled is on_plan_settled
+    assert actions.auto_validate is True
+    assert actions.prepare_resume_is_attested is None
 
 
 class _SubmitProvider:
@@ -234,6 +276,7 @@ def _checkpoint_supervisor(
     tmp_path: Path,
     run_general_turn=None,
     run_prepare_phase=None,
+    prepare_resume_is_attested=None,
     publish_callback=None,
     runtime_agents=None,
 ) -> Supervisor:
@@ -280,6 +323,7 @@ def _checkpoint_supervisor(
             phases=PhaseActions(
                 publish=publish_callback,
                 prepare=run_prepare_phase,
+                prepare_resume_is_attested=prepare_resume_is_attested,
             ),
             search=SearchServices(
                 scheduler=Scheduler(),
@@ -541,22 +585,60 @@ async def test_run_prepare_skips_when_trusted_baseline_exists(
     async def publish(kind, payload):
         captured.append((kind, payload))
 
+    async def attested() -> bool:
+        calls.append("attested")
+        return True
+
     supervisor = _checkpoint_supervisor(
         tmp_path,
         run_prepare_phase=raise_prepare,
+        prepare_resume_is_attested=attested,
         publish_callback=publish,
     )
     monkeypatch.setattr(supervisor.tree, "best_experiment_id", lambda: "exp_baseline")
 
     await supervisor._phases._run_prepare()
 
-    assert calls == []
+    assert calls == ["attested"]
     assert supervisor.state.phase == "SEARCH"
     assert supervisor.state.status == "RUNNING"
     assert any(
         kind == "output" and "跳过 PREPARE" in str(payload.get("text"))
         for kind, payload in captured
     )
+
+
+@pytest.mark.asyncio
+async def test_run_prepare_rejects_unattested_local_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepare_calls: list[str] = []
+    published: list[tuple[str, dict[str, object]]] = []
+
+    async def forbidden_prepare():
+        prepare_calls.append("prepare")
+        raise AssertionError("unattested local baseline must not rerun or skip PREPARE")
+
+    async def unattested() -> bool:
+        return False
+
+    async def publish(kind, payload):
+        published.append((kind, payload))
+
+    supervisor = _checkpoint_supervisor(
+        tmp_path,
+        run_prepare_phase=forbidden_prepare,
+        prepare_resume_is_attested=unattested,
+        publish_callback=publish,
+    )
+    monkeypatch.setattr(supervisor.tree, "best_experiment_id", lambda: "exp_baseline")
+
+    with pytest.raises(BaselineAuthorityError, match="not attested"):
+        await supervisor._phases._run_prepare()
+
+    assert supervisor.state.phase == "PREPARE"
+    assert prepare_calls == []
+    assert published == []
 
 
 @pytest.mark.asyncio
@@ -580,6 +662,39 @@ async def test_prepare_failure_is_observable_and_retry_enters_running(
     with pytest.raises(RuntimeError, match="prepare attempt 2 failed"):
         await supervisor.start()
     assert statuses == ["RUNNING", "RUNNING"]
+    assert supervisor.state.status == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_prepare_authority_failure_does_not_publish_cause_traceback(
+    tmp_path: Path,
+) -> None:
+    secret = "authority-session-token-secret"
+    published: list[tuple[str, dict[str, object]]] = []
+
+    async def fail_prepare():
+        try:
+            raise OSError(secret)
+        except OSError as cause:
+            raise BaselineAuthorityError("baseline authority load failed") from cause
+
+    async def publish(kind, payload):
+        published.append((kind, payload))
+
+    supervisor = _checkpoint_supervisor(
+        tmp_path,
+        run_prepare_phase=fail_prepare,
+        publish_callback=publish,
+    )
+
+    with pytest.raises(BaselineAuthorityError, match="authority load failed"):
+        await supervisor.start()
+
+    session_projection = json.dumps(published, ensure_ascii=False)
+    persisted_state = (tmp_path / ".athena" / "state.json").read_text(encoding="utf-8")
+    assert secret not in session_projection
+    assert secret not in persisted_state
+    assert "Traceback" not in session_projection
     assert supervisor.state.status == "FAILED"
 
 

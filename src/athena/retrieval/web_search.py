@@ -378,7 +378,7 @@ class WebFetchTool(_WebTool):
 
 
 def build_web_tools() -> ToolRegistry:
-    """构造共享一个会话的网页搜索与抓取工具。"""
+    """Build web search and fetch tools that share one reference session."""
     session = WebSession()
     registry = ToolRegistry()
     registry.register(WebSearchTool(session=session))
