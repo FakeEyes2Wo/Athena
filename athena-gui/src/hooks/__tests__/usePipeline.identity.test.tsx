@@ -354,4 +354,210 @@ describe("usePipeline message identity", () => {
     const ids = messages.map((m) => m.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
+
+  it("restores only legacy and selected-session scoped records with metadata", async () => {
+    const release = deferHistory([
+      {
+        type: "output",
+        seq: 1,
+        source: "agent",
+        channel: "text",
+        text: "selected scoped",
+        message_id: "selected-scoped",
+        session_id: "default",
+        scope: "task_understanding",
+        scope_id: "draft-1",
+      },
+      {
+        type: "output",
+        seq: 2,
+        source: "agent",
+        channel: "text",
+        text: "other scoped",
+        message_id: "other-scoped",
+        session_id: "other-session",
+        scope: "task_understanding",
+        scope_id: "draft-1",
+      },
+      {
+        type: "output",
+        seq: 3,
+        source: "agent",
+        channel: "text",
+        text: "partial scoped",
+        message_id: "partial-scoped",
+        session_id: "default",
+        scope: "task_understanding",
+      },
+      {
+        type: "output",
+        seq: 4,
+        source: "agent",
+        channel: "text",
+        text: "legacy transcript",
+        message_id: "legacy-transcript",
+      },
+    ]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+
+    expect(result.current.viewModel.messages).toEqual([
+      expect.objectContaining({
+        id: "selected-scoped",
+        content: "selected scoped",
+        sessionId: "default",
+        scope: "task_understanding",
+        scopeId: "draft-1",
+      }),
+      expect.objectContaining({ id: "legacy-transcript", content: "legacy transcript" }),
+    ]);
+  });
+
+  it("gates old scoped output synchronously after a successful session switch", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+    vi.mocked(sessionSwitch).mockResolvedValue({ records: [], sessions: ["next"] });
+
+    await act(async () => {
+      await result.current.switchSession("next");
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "stale output",
+          message_id: "stale-output",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-old",
+        },
+      });
+    });
+
+    expect(animationFrames.size).toBe(0);
+    expect(result.current.currentSessionId).toBe("next");
+    expect(result.current.viewModel.messages).toEqual([]);
+    expect(result.current.logs).toEqual([]);
+  });
+
+  it("leaves the current session and queued output intact when switches are superseded or fail", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "still current",
+          message_id: "current-output",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-current",
+        },
+      });
+    });
+
+    let resolveFirst = (_value: { records: never[]; sessions: string[] }) => {};
+    let rejectSecond = (_error: Error) => {};
+    vi.mocked(sessionSwitch)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) => {
+            rejectSecond = reject;
+          }),
+      );
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.switchSession("first");
+      second = result.current.switchSession("second");
+    });
+    await act(async () => {
+      resolveFirst({ records: [], sessions: ["first"] });
+      await first;
+    });
+    await act(async () => {
+      rejectSecond(new Error("switch failed"));
+      await second;
+    });
+
+    expect(result.current.currentSessionId).toBe("default");
+    expect(animationFrames.size).toBe(1);
+    act(() => runNextAnimationFrame());
+    expect(result.current.viewModel.messages).toContainEqual(
+      expect.objectContaining({ id: "current-output", content: "still current" }),
+    );
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["still current"]);
+  });
+
+  it("restores the former conversation when optimistic session creation fails", async () => {
+    const release = deferHistory([]);
+    const { result } = renderHook(() => usePipeline());
+    await flush();
+    release();
+    await flush();
+    act(() => {
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 1,
+          source: "agent",
+          channel: "text",
+          text: "former conversation",
+          message_id: "former-message",
+        },
+      });
+    });
+    act(() => runNextAnimationFrame());
+    vi.mocked(sessionSwitch).mockRejectedValueOnce(new Error("creation failed"));
+
+    act(() => {
+      result.current.newSession();
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          type: "output",
+          seq: 2,
+          source: "agent",
+          channel: "text",
+          text: "old runtime after optimistic switch",
+          message_id: "late-old-output",
+          session_id: "default",
+          scope: "task_understanding",
+          scope_id: "draft-old",
+        },
+      });
+    });
+    const optimisticId = result.current.currentSessionId;
+    await flush();
+
+    expect(result.current.currentSessionId).toBe("default");
+    expect(result.current.sessions.some((session) => session.id === optimisticId)).toBe(true);
+    expect(result.current.viewModel.messages).toEqual([
+      expect.objectContaining({ id: "former-message", content: "former conversation" }),
+      expect.objectContaining({ kind: "error", content: "creation failed" }),
+    ]);
+    expect(result.current.logs.map((entry) => entry.text)).toEqual(["former conversation"]);
+    expect(animationFrames.size).toBe(0);
+  });
 });

@@ -231,7 +231,7 @@ export function treeLoad(): Promise<{ loaded: boolean; tree: ResearchTreeData }>
   return rpc<{ loaded: boolean; tree: ResearchTreeData }>("tree_load");
 }
 
-/** One persisted session record from the backend resume log (``.athena/logs/output.jsonl``).
+/** One persisted session record from the runtime session log (``sessions/default.jsonl``).
 
   ``type === "user"`` marks a user message; anything else is an ``OutputEvent``
   (supervisor/agent/tool text). ``seq`` is the global monotonic order used to
@@ -247,6 +247,9 @@ export interface SessionRecord {
   channel?: string;
   plan?: string | null;
   tool?: string | null;
+  session_id?: string | null;
+  scope?: string | null;
+  scope_id?: string | null;
   [key: string]: unknown;
 }
 

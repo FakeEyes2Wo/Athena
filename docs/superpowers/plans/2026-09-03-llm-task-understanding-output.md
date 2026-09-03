@@ -586,7 +586,7 @@ Expected: the affected backend/gateway slice passes without network access. Comm
 - Changes: `restoreRecords(records, resetMessages, sessionId)` filters scoped replay before projection.
 - Changes: optimistic `newSession` clears batches and synchronously gates output with its new session ref before React effects run; its rejected creation restores the prior ref and captured session state.
 
-- [ ] **Step 1: Write failing live projection/filter tests**
+- [x] **Step 1: Write failing live projection/filter tests**
 
 In `usePipeline.events.test.tsx`, deliver matching scoped agent and tool output and assert their projected messages retain exactly:
 
@@ -600,11 +600,11 @@ In `usePipeline.events.test.tsx`, deliver matching scoped agent and tool output 
 
 Deliver another-session event and each partial combination; after flushing animation frames, assert neither messages nor the visible log list changed. Partial metadata is rejected/discarded only—there is no dedicated "logged" event and no legacy fallback. Deliver an all-null/absent legacy event and assert it still renders. Reuse one `message_id` for two matching scoped deltas and assert batching still produces one ordered message. With an empty-id optimistic preview, deliver `scope_id="draft-a"` then `scope_id="draft-b"`: assert the first latches and joins the activity, while the second never joins that preview; after the canonical draft arrives, only its exact `scope_id` may join.
 
-- [ ] **Step 2: Write failing replay and switch-race tests**
+- [x] **Step 2: Write failing replay and switch-race tests**
 
 In `usePipeline.identity.test.tsx`, return mixed replay records for the selected session and assert only matching scoped plus legacy records restore. Test two distinct scope IDs around the optimistic-to-canonical transition: the first matching-session scope id is latched; an event from the other scope id is excluded from the preview; once the canonical `draftId` is known, even the latched value is accepted only if it equals that id. After a successful session switch, queue an old-runtime scoped output in a microtask between the synchronous switch success handling and React's `useEffect`; assert it never enters messages/logs, proving the ref gate does not wait for the effect. Repeat that microtask case immediately after optimistic `newSession` starts: an old-session scoped output is rejected before the effect, and a rejected creation restores the old ref, former current session, and captured visible conversation while retaining the existing failed optimistic row in the session list. Also assert failed or superseded explicit switch RPCs leave the old ref, batches, messages, and session state intact. Matching scoped replay must retain `message_id` ordering and canonical metadata.
 
-- [ ] **Step 3: Run focused Vitest and confirm metadata/filter failures**
+- [x] **Step 3: Run focused Vitest and confirm metadata/filter failures**
 
 Run:
 
@@ -616,7 +616,7 @@ npm --prefix athena-gui test -- `
 
 Expected: FAIL because output events are currently queued without session validation and `UIMessage` drops scope metadata.
 
-- [ ] **Step 4: Implement one exact wire parser and use it everywhere**
+- [x] **Step 4: Implement one exact wire parser and use it everywhere**
 
 Use exact output wire names only; do not alias human-request `scope_kind` or a task-specific `draft_id`:
 
@@ -649,7 +649,7 @@ Pass `target` during mount hydration and `id` during explicit session switch int
 
 `newSession` uses the same gate at the optimistic start, not only after its RPC settles: capture the prior ref and visible session state; clear the batch; set `activeSessionIdRef.current` to the new id synchronously; then install the optimistic current-session/view state and begin creation. If that creation rejects while current, restore the captured ref, previous current session, and visible conversation before reporting the error, while preserving the existing failed optimistic row in the session list. When projecting a valid scoped record, copy the three canonical camelCase fields onto every new `UIMessage`; preserve them on same-id delta updates.
 
-- [ ] **Step 5: Run, typecheck, and commit Task 6**
+- [x] **Step 5: Run, typecheck, and commit Task 6**
 
 Run:
 

@@ -186,6 +186,25 @@ interface OutputBatch {
   deltas: Map<string, string>;
 }
 
+type OutputScope =
+  | { kind: "legacy" }
+  | { kind: "invalid" }
+  | { kind: "scoped"; sessionId: string; scope: string; scopeId: string };
+
+function outputScopeOf(data: Record<string, unknown>): OutputScope {
+  const raw = [data.session_id, data.scope, data.scope_id];
+  if (raw.every((value) => value == null)) return { kind: "legacy" };
+  if (raw.every((value) => typeof value === "string" && value.trim())) {
+    return {
+      kind: "scoped",
+      sessionId: raw[0] as string,
+      scope: raw[1] as string,
+      scopeId: raw[2] as string,
+    };
+  }
+  return { kind: "invalid" };
+}
+
 function createOutputBatch(messages: UIMessage[]): OutputBatch {
   return {
     messages: [...messages],
@@ -200,6 +219,8 @@ function applyOutputEventToBatch(
   replay: boolean,
 ): void {
   const { data } = event;
+  const outputScope = outputScopeOf(data);
+  if (outputScope.kind === "invalid") return;
   const text = typeof data.text === "string" ? data.text : "";
   if (!text) return;
   const source = typeof data.source === "string" ? data.source : undefined;
@@ -214,9 +235,18 @@ function applyOutputEventToBatch(
 
   if (target !== undefined) {
     const existing = batch.messages[target];
+    const scopedExisting = outputScope.kind === "scoped"
+      ? {
+          ...existing,
+          sessionId: outputScope.sessionId,
+          scope: outputScope.scope,
+          scopeId: outputScope.scopeId,
+        }
+      : existing;
     if (replay) {
-      batch.messages[target] = { ...existing, content: text };
+      batch.messages[target] = { ...scopedExisting, content: text };
     } else {
+      batch.messages[target] = scopedExisting;
       batch.deltas.set(id, `${batch.deltas.get(id) ?? ""}${text}`);
     }
     return;
@@ -234,6 +264,11 @@ function applyOutputEventToBatch(
     message = { id, role: "athena", kind: "text", content, source, tool, plan };
   } else {
     message = { id, role: "athena", kind: "text", content, source, plan };
+  }
+  if (outputScope.kind === "scoped") {
+    message.sessionId = outputScope.sessionId;
+    message.scope = outputScope.scope;
+    message.scopeId = outputScope.scopeId;
   }
   batch.messageIndex.set(id, batch.messages.length);
   batch.messages.push(message);
@@ -424,6 +459,7 @@ export function usePipeline(
   }>({ root: workspaceCacheRoot, sessions: [] });
   const mountedRef = useRef(true);
   const currentDraftIdRef = useRef<string | null>(null);
+  const optimisticScopeIdRef = useRef<string | null>(null);
   const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
   const runStarted = useRef(false);
@@ -431,6 +467,15 @@ export function usePipeline(
   const titlesKey = sessionTitlesKey(workspaceRoot);
   const settlingRequestRef = useRef<string | null>(null);
   const humanPollFailures = useRef(0);
+
+  const setClarificationIdentity = useCallback(
+    (draftId: string | null, revision = -1) => {
+      currentDraftIdRef.current = draftId;
+      optimisticScopeIdRef.current = draftId || null;
+      currentRevisionRef.current = revision;
+    },
+    [],
+  );
 
   const nextId = useCallback((prefix: string) => {
     counter.current += 1;
@@ -489,6 +534,29 @@ export function usePipeline(
   }, [drainOutputEvents]);
 
   const queueOutputEvent = useCallback((event: bridge.PipelineEvent) => {
+    const outputScope = outputScopeOf(event.data);
+    if (outputScope.kind === "invalid") return;
+    if (
+      outputScope.kind === "scoped" &&
+      outputScope.sessionId !== activeSessionIdRef.current
+    ) return;
+
+    if (
+      outputScope.kind === "scoped" &&
+      outputScope.scope === "task_understanding" &&
+      currentDraftIdRef.current === "" &&
+      optimisticScopeIdRef.current === null
+    ) {
+      optimisticScopeIdRef.current = outputScope.scopeId;
+      setViewModel((prev) =>
+        replacePreview(prev, undefined, (preview) =>
+          preview.draftId
+            ? preview
+            : { ...preview, optimisticScopeId: outputScope.scopeId },
+        ),
+      );
+    }
+
     pendingOutputEventsRef.current.push({ event, logEntry: createLogEntry(event) });
     if (outputFrameRef.current !== null) return;
     const frameId = requestAnimationFrame(() => {
@@ -539,16 +607,29 @@ export function usePipeline(
 
   // 重放会话记录：续接消息序列号并重建消息列表；可选清空现有消息。
   const restoreRecords = useCallback(
-    (records: bridge.SessionRecord[], resetMessages: boolean) => {
-      flushPendingOutput();
-      if (records.length) {
-        counter.current = Math.max(counter.current, ...records.map((r) => r.seq));
+    (records: bridge.SessionRecord[], resetMessages: boolean, sessionId: string) => {
+      discardPendingOutput();
+      const visibleRecords = records.filter((record) => {
+        if (record.type === "user") return true;
+        const outputScope = outputScopeOf(record);
+        return outputScope.kind === "legacy" || (
+          outputScope.kind === "scoped" && outputScope.sessionId === sessionId
+        );
+      });
+      if (visibleRecords.length) {
+        counter.current = Math.max(
+          counter.current,
+          ...visibleRecords.map((record) => record.seq),
+        );
       }
       setViewModel((prev) =>
-        applyHistoryRecords(resetMessages ? { ...prev, messages: [] } : prev, records),
+        applyHistoryRecords(
+          resetMessages ? { ...prev, messages: [] } : prev,
+          visibleRecords,
+        ),
       );
     },
-    [flushPendingOutput],
+    [discardPendingOutput],
   );
 
   // 更新会话标题（state + localStorage）。
@@ -587,8 +668,11 @@ export function usePipeline(
     if (!draft) return;
     const targetDraftId = draftId ?? draftIdOf(draft);
     const incomingRevision = (draft as { revision?: number }).revision ?? -1;
-    if (targetDraftId) currentDraftIdRef.current = targetDraftId;
-    if (incomingRevision >= 0) currentRevisionRef.current = incomingRevision;
+    if (targetDraftId) {
+      setClarificationIdentity(targetDraftId, incomingRevision);
+    } else if (incomingRevision >= 0) {
+      currentRevisionRef.current = incomingRevision;
+    }
     setViewModel((prev) => {
       const patch = (current: ClarificationPreview): ClarificationPreview => {
         if (isFullDraft(draft)) {
@@ -597,6 +681,7 @@ export function usePipeline(
         return {
           ...current,
           draftId: targetDraftId || current.draftId,
+          optimisticScopeId: targetDraftId ? undefined : current.optimisticScopeId,
           revision: incomingRevision,
           status: normalizeClarificationStatus((draft as { status?: string }).status) ?? current.status,
         };
@@ -613,7 +698,7 @@ export function usePipeline(
       }
       return next;
     });
-  }, []);
+  }, [setClarificationIdentity]);
 
   /** Show one clarification question in the chat as part of the task-understanding flow. */
   const appendClarificationQuestion = useCallback((request: HumanRequest) => {
@@ -667,6 +752,7 @@ export function usePipeline(
     let mounted = true;
     let unlisteners: Array<() => void> = [];
     const hydrationEpoch = ++sessionRequestEpochRef.current;
+    const previousSessionId = activeSessionIdRef.current;
 
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
@@ -689,6 +775,9 @@ export function usePipeline(
           const incomingDraftId = draftIdOf(draft);
           const currentRevision =
             currentDraftIdRef.current === incomingDraftId ? currentRevisionRef.current : -1;
+          if (incomingDraftId && currentRevision <= draft.revision) {
+            setClarificationIdentity(incomingDraftId, draft.revision);
+          }
           setViewModel((prev) => {
             const currentSoon = prev.messages.find((m) => {
               const p = m.preview as ClarificationPreview | undefined;
@@ -770,16 +859,28 @@ export function usePipeline(
       .then((hydration) => {
         if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
         const { target, list, result } = hydration;
-        applySessions(result.sessions ?? list);
-        setCurrentSessionId(target);
-        restoreRecords(result.records, true);
+        try {
+          if (target === previousSessionId) {
+            flushPendingOutput();
+          } else {
+            discardPendingOutput();
+          }
+          activeSessionIdRef.current = target;
+          setClarificationIdentity(null);
+          applySessions(result.sessions ?? list);
+          setCurrentSessionId(target);
+          restoreRecords(result.records, true, target);
+        } catch (error) {
+          activeSessionIdRef.current = previousSessionId;
+          throw error;
+        }
       })
       .catch(() => {
         // 非致命：无历史或后端不支持时保持空白会话。
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords]);
+  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, discardPendingOutput, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords, setClarificationIdentity]);
 
   // Poll for outstanding human questions. Pre-run states use a low-frequency
   // fallback (10s); once RUNNING we keep the existing 1.5s recovery poll.
@@ -848,6 +949,7 @@ export function usePipeline(
     if (!content) return;
     // User input supersedes any mount-time transcript hydration still in flight.
     sessionRequestEpochRef.current += 1;
+    setClarificationIdentity("", 0);
 
     const previewId = nextId("preview");
     const title = content.slice(0, 40) || "新任务";
@@ -899,7 +1001,7 @@ export function usePipeline(
       appendError(errorMessage(err));
       throw err;
     }
-  }, [appendError, applyDraftToPreview, currentSessionId, nextId, renameSession]);
+  }, [appendError, applyDraftToPreview, currentSessionId, nextId, renameSession, setClarificationIdentity]);
 
   /** Confirm the latest draft and start research only after the gated RPC succeeds. */
   const confirmDraft = useCallback(async (acknowledgeUnresolved: boolean) => {
@@ -997,6 +1099,7 @@ export function usePipeline(
 
     try {
       await bridge.taskClarificationCancel(preview.draftId, preview.revision);
+      setClarificationIdentity(null);
       setClarificationStatus("IDLE");
       setHumanRequests([]);
       setViewModel((prev) => ({
@@ -1014,7 +1117,7 @@ export function usePipeline(
       setClarificationStatus("FAILED");
       throw err;
     }
-  }, [latestPreview]);
+  }, [latestPreview, setClarificationIdentity]);
 
   /** Unified human reply dispatch with double-submit protection. */
   const replyToHumanRequest = useCallback(async (requestId: string, reply: HumanReply) => {
@@ -1171,13 +1274,41 @@ export function usePipeline(
   const newSession = useCallback(() => {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
-    discardPendingOutput();
     const id = nextOptimisticSessionId();
+    const previous = {
+      activeSessionId: activeSessionIdRef.current,
+      currentSessionId,
+      viewModel,
+      clarificationStatus,
+      humanRequests,
+      humanPendingError,
+      settlingRequestId,
+      logs,
+      runStarted: runStarted.current,
+      draftId: currentDraftIdRef.current,
+      scopeId: optimisticScopeIdRef.current,
+      revision: currentRevisionRef.current,
+    };
+    discardPendingOutput();
+    activeSessionIdRef.current = id;
+    setClarificationIdentity(null);
     runStarted.current = false;
     setClarificationStatus("IDLE");
+    setHumanRequests([]);
+    setHumanPendingError(null);
+    setSettlingRequestId(null);
+    settlingRequestRef.current = null;
     saveTitle(titlesKey, id, "新会话");
     const requestEpoch = ++sessionRequestEpochRef.current;
-    const creation = sessionSwitch(id);
+    setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
+    setCurrentSessionId(id);
+    setViewModel(createEmptyPipelineViewModel());
+    let creation: ReturnType<typeof sessionSwitch>;
+    try {
+      creation = sessionSwitch(id);
+    } catch (error) {
+      creation = Promise.reject(error);
+    }
     pendingCreationsRef.current.set(id, creation);
     void creation.then(
       (result) => {
@@ -1188,38 +1319,54 @@ export function usePipeline(
           applySessions(result.sessions);
         }
       },
-      () => {
+      (error) => {
         // Keep the optimistic row on failure so the user can retry or delete it.
         if (pendingCreationsRef.current.get(id) === creation) {
           pendingCreationsRef.current.delete(id);
         }
+        if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
+        discardPendingOutput();
+        activeSessionIdRef.current = previous.activeSessionId;
+        setClarificationIdentity(previous.draftId, previous.revision);
+        optimisticScopeIdRef.current = previous.scopeId;
+        runStarted.current = previous.runStarted;
+        setCurrentSessionId(previous.currentSessionId);
+        setViewModel(previous.viewModel);
+        setClarificationStatus(previous.clarificationStatus);
+        setHumanRequests(previous.humanRequests);
+        setHumanPendingError(previous.humanPendingError);
+        setSettlingRequestId(previous.settlingRequestId);
+        settlingRequestRef.current = previous.settlingRequestId;
+        setLogs(previous.logs);
+        appendError(errorMessage(error));
       },
     );
-    setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
-    setCurrentSessionId(id);
-    setViewModel(createEmptyPipelineViewModel());
-  }, [applySessions, discardPendingOutput, titlesKey]);
+  }, [appendError, applySessions, clarificationStatus, currentSessionId, discardPendingOutput, humanPendingError, humanRequests, logs, setClarificationIdentity, settlingRequestId, titlesKey, viewModel]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
+    const previousSessionId = activeSessionIdRef.current;
     const requestEpoch = ++sessionRequestEpochRef.current;
     try {
       const { records, sessions: list } = await sessionSwitch(id);
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       // 换会话即换 runtime，运行标记不能带过去。
       discardPendingOutput();
+      activeSessionIdRef.current = id;
+      setClarificationIdentity(null);
       runStarted.current = false;
       setCurrentSessionId(id);
-      restoreRecords(records, true);
+      restoreRecords(records, true, id);
       applySessions(list);
       setClarificationStatus("IDLE");
       setHumanRequests([]);
     } catch (err) {
       if (requestEpoch !== sessionRequestEpochRef.current) return;
+      activeSessionIdRef.current = previousSessionId;
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, discardPendingOutput, restoreRecords]);
+  }, [appendError, applySessions, discardPendingOutput, restoreRecords, setClarificationIdentity]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
