@@ -36,7 +36,10 @@ Prefer candidates in this order when they are similarly relevant:
 
 Use credentials-free HTTPS URLs. For a paper that may need the authority exception,
 record a DOI or OpenAlex work ID in `paper_locator`; a title or claimed citation count
-alone cannot qualify. Record every source-license constraint or uncertainty in the
+alone cannot qualify. The exception depends on independently verified OpenAlex identity
+and citation evidence produced later by the platform. For classical tabular candidates,
+prefer primary technical sources such as official scikit-learn documentation over
+third-party summaries. Record every source-license constraint or uncertainty in the
 Markdown design so later implementation can respect it.
 
 ## Required artifacts
@@ -44,8 +47,9 @@ Markdown design so later implementation can respect it.
 Write **both** complete files at the workspace root:
 
 1. `BASELINE_RESEARCH.json`, valid JSON with `schema_version: 2` and these focused
-   records. The top-level `BaselineResearch` contains `dataset`, `training`,
-   `candidates`, `decisions`, `selected_candidate_id`, `search`, and `limitations`:
+   records. The top-level `BaselineResearch` contains the exact JSON keys `"dataset"`,
+   `"training"`, `"candidates"`, `"decisions"`, `"selected_candidate_id"`, `"search"`,
+   and `"limitations"`:
 
    - `DatasetProfile` (`dataset`): `modality`, `task_type`, `input_scale`, `regime`
      (`tiny`, `small`, `adequate`, or `unknown`), `facts`, and `rationale`.
@@ -76,8 +80,8 @@ Write **both** complete files at the workspace root:
      `relationship` (`comparable` or `local_at_least_source`), and `rationale`.
      Supply it only for `train_from_scratch`.
    - Each `BaselineSource` in `candidates`: record `candidate_id`, `title`, `method`,
-     `source_url`, `source_kind` (`paper`, `official_implementation`, or
-     `technical_reference`), `paper_locator` (or `null`), `repository_url` (or
+     `source_url`, `"source_kind"` (`paper`, `official_implementation`, or
+     `technical_reference`), `paper_locator` (or `null`), `"repository_url"` (or
      `null`), `publication_year` (or `null`), `claimed_citation_count` (or `null`),
      and `relevance`.
    - Each `CandidateDecision` in `decisions`: record exactly one `selected` decision
