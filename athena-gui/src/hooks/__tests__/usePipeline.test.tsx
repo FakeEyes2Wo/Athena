@@ -279,7 +279,7 @@ describe("usePipeline", () => {
     });
   });
 
-  it("does not let an earlier session's completed resume change a new session", async () => {
+  it("uses the new session identity for an immediate resume after creation", async () => {
     let resolveOldResume: (() => void) | undefined;
     let resolveNewResume: (() => void) | undefined;
     bridgeMocks.resumeSearch
@@ -292,19 +292,15 @@ describe("usePipeline", () => {
     const { result } = renderHook(() => usePipeline());
 
     let oldResume: Promise<void>;
-    act(() => {
-      oldResume = result.current.sendPrompt("continue");
-    });
-    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      result.current.newSession();
-      await Promise.resolve();
-    });
-    const newSessionId = result.current.currentSessionId;
     let newResume: Promise<void>;
-    act(() => {
+    let newSessionId = "";
+    await act(async () => {
+      oldResume = result.current.sendPrompt("continue");
+      result.current.newSession();
+      const switchCalls = bridgeMocks.sessionSwitch.mock.calls;
+      newSessionId = switchCalls[switchCalls.length - 1]?.[0] as string;
       newResume = result.current.sendPrompt("continue");
+      await Promise.resolve();
     });
     expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(2);
 
@@ -323,16 +319,20 @@ describe("usePipeline", () => {
     expect(result.current.viewModel.status).toBe("running");
   });
 
-  it("does not let an earlier session's rejected resume poison a switched session", async () => {
+  it("uses the switched session identity for an immediate resume after switching", async () => {
     let rejectOldResume: ((reason?: unknown) => void) | undefined;
+    let resolveNewResume: (() => void) | undefined;
     bridgeMocks.resumeSearch
       .mockImplementationOnce(
         () => new Promise<void>((_resolve, reject) => { rejectOldResume = reject; }),
       )
-      .mockResolvedValueOnce({ ok: true });
+      .mockImplementationOnce(
+        () => new Promise<void>((resolve) => { resolveNewResume = resolve; }),
+      );
     const { result } = renderHook(() => usePipeline());
 
     let oldResume: Promise<void>;
+    let newResume: Promise<void>;
     act(() => {
       oldResume = result.current.sendPrompt("continue");
     });
@@ -340,8 +340,10 @@ describe("usePipeline", () => {
 
     await act(async () => {
       await result.current.switchSession("fresh");
+      newResume = result.current.sendPrompt("continue");
     });
     expect(result.current.currentSessionId).toBe("fresh");
+    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(2);
 
     await act(async () => {
       rejectOldResume?.(new Error("old session failed"));
@@ -351,9 +353,9 @@ describe("usePipeline", () => {
     expect(result.current.viewModel.messages.filter((message) => message.kind === "error")).toHaveLength(0);
 
     await act(async () => {
-      await result.current.sendPrompt("continue");
+      resolveNewResume?.();
+      await newResume!;
     });
-    expect(bridgeMocks.resumeSearch).toHaveBeenCalledTimes(2);
     expect(result.current.viewModel.status).toBe("running");
   });
 
