@@ -131,11 +131,18 @@ the key invariant that prevents a resume word from reaching task clarification.
 Every runtime owns a process-local `asyncio.Lock` in its lifecycle session. The public
 resume method holds that lock across capability classification, terminal-task rearming,
 `Supervisor.resume(...)`, and lifecycle start. A FAILED state whose old lifecycle task
-is still unwinding waits with `asyncio.gather(..., return_exceptions=True)` before
-rearming; the old phase exception is observed but not re-raised from the resume request,
-and the task is not mistaken for a live RUNNING task. Concurrent GUI, TUI, CLI, or
-Python resume requests therefore observe or create one lifecycle task, never two. The
-lock is not persisted and requires no migration.
+is still unwinding captures that task under the lock, releases the lock while waiting
+with `asyncio.gather(..., return_exceptions=True)`, then reacquires the lock and
+reclassifies durable state before rearming. The old phase exception is observed but not
+re-raised from the resume request, and stop remains able to cancel the old task.
+Concurrent GUI, TUI, CLI, or Python resume requests therefore observe or create one
+lifecycle task, never two. The lock is not persisted and requires no migration.
+
+Explicit stop uses the same lifecycle lock. If stop arrives while resume is joining an
+old FAILED task outside the lock, stop persists STOPPED and cancels that task. Resume
+then reacquires the lock, reclassifies the terminal state, and creates no replacement;
+resume can never overwrite a completed stop transition or deadlock waiting for a task
+that only cancellation can finish.
 
 A PREPARE failure caused by baseline authority outage, generation conflict, or
 attestation/evidence mismatch is eligible for an explicit resume attempt. Resume
@@ -225,6 +232,11 @@ The existing `resume` spelling and output format remain valid.
 - Repeated `continue` while already running is idempotent and does not spawn a second
   Supervisor lifecycle task.
 - Concurrent resume requests are serialized by the runtime lifecycle resume lock.
+- Stop and resume are serialized by the same lock, with STOPPED remaining terminal.
+- If lifecycle startup fails after Supervisor resume has persisted RUNNING but before a
+  live task exists, runtime restores a resumable status (`FAILED` for an orphaned prior
+  RUNNING state), persists it, and re-raises the startup error. The UI never receives a
+  durable fake-running state with no way to continue.
 - Authority-related PREPARE failures may be retried only through the existing
   authoritative gate; an unchanged outage or mismatch fails again without local
   baseline regeneration.

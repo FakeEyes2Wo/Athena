@@ -20,6 +20,8 @@
 - Repeated or concurrent resume requests must create at most one live Supervisor lifecycle task.
 - A runtime-scoped `LifecycleSession.resume_lock` must serialize capability checks,
   lifecycle rearming, Supervisor resume, and lifecycle start for every resume request.
+- Explicit stop shares that lifecycle lock so a resume waiting for a failed task cannot
+  resurrect a task after STOPPED has been requested.
 - A PREPARE failure caused by unavailable or mismatched baseline authority remains
   resumable. Resume re-enters the same authoritative PREPARE gate; it never rebuilds
   or trusts a local baseline to bypass authority. If authority is still unavailable,
@@ -238,7 +240,7 @@ git commit -m "feat: define durable task resume contract"
 - Produces: `resume_current_task(runtime: Any) -> Awaitable[str]` and `ResearchRuntime.resume_current_task() -> Awaitable[str]`.
 - Preserves: public `message`, `start_task`, and `/resume` return values on successful control operations.
 
-- [ ] **Step 1: Add failing runtime alias tests**
+- [x] **Step 1: Add failing runtime alias tests**
 
 In `test_breakpoint_resume.py`, add a real lifecycle regression that fails its first
 PREPARE attempt, then submits plain text:
@@ -267,12 +269,16 @@ Add tests proving:
   task and both observe `RUNNING`;
 - FAILED while the old lifecycle is still unwinding an actual exception waits for that
   task with `asyncio.gather(..., return_exceptions=True)`, then starts one replacement;
+- a concurrent `/stop` can cancel a FAILED task that resume is joining; resume then
+  reacquires the lock, reclassifies STOPPED, and creates no replacement;
+- a synchronous `runtime.start()` failure after Supervisor resume restores a resumable
+  durable status and leaves no live lifecycle task;
 - STOPPED, COMPLETED, and taskless IDLE raise `ResearchControlError` with code
   `resume_unavailable` and do not start a lifecycle;
 - `continue research` and `continue three more attempts` still reach
   `supervisor.message` unchanged.
 
-- [ ] **Step 2: Add failing confirmed-contract immutability test**
+- [x] **Step 2: Add failing confirmed-contract immutability test**
 
 In `test_task_confirmation_gate.py`, snapshot all confirmation-owned values before
 resume:
@@ -307,7 +313,7 @@ clarification is never invoked. `resume_current_task()` remains fire-and-forget 
 returns `RUNNING`; the test awaits the replacement lifecycle task to assert
 `BaselineAuthorityError`, while GUI tests assert the later state/error event.
 
-- [ ] **Step 3: Run focused tests and observe the current misrouting**
+- [x] **Step 3: Run focused tests and observe the current misrouting**
 
 Run:
 
@@ -318,18 +324,21 @@ Run:
 Expected: plain `continue` is forwarded as prose or reseeded, unavailable states are not
 typed, and the new public method is absent.
 
-- [ ] **Step 4: Implement the authoritative operation**
+- [x] **Step 4: Implement the authoritative operation**
 
 In `control.py`:
 
 1. Export `resume_current_task` instead of keeping the operation private.
 2. Acquire `runtime.session.lifecycle.resume_lock` before capability classification and
    hold it through any rearm, `supervisor.resume(...)`, and `runtime.start()` call.
+   If a FAILED task is still unwinding, capture it under the lock, release the lock while
+   joining it with `gather`, then reacquire and reclassify before any mutation.
 3. Return `RUNNING` without mutation only when durable status is RUNNING and a lifecycle
    task is live. If status is FAILED but the old task has not finished unwinding, await
-   its completion under the lock with
-   `await asyncio.gather(old_task, return_exceptions=True)`, verify it is done, and then
-   rearm. Do not directly await and re-raise the old phase exception.
+   its completion outside the lock with
+   `await asyncio.gather(old_task, return_exceptions=True)`, verify it is done, then loop
+   back through locked capability classification. Do not directly await and re-raise the
+   old phase exception.
 4. Reject unavailable terminal/taskless states before touching Supervisor, agents, Git,
    or survey infrastructure.
 5. For a done or absent lifecycle task, call `supervisor.resume(restarting=True)` and
@@ -337,6 +346,12 @@ In `control.py`:
 6. For a live paused lifecycle, call `supervisor.resume()` without spawning another
    phase task.
 7. Recognize plain `continue` in `_control_command` alongside canonical `/resume`.
+8. Route `/stop` through the same lock, including `request_stop()` and lifecycle-task
+   cancellation, so stop can cancel an old FAILED task while resume is joining it and
+   the resumed caller must observe STOPPED on reclassification.
+9. Snapshot the pre-resume status. If Supervisor resume succeeds but `runtime.start()`
+   raises before a live task exists, restore and persist the prior resumable status
+   (`RUNNING` without a live task becomes `FAILED`) and re-raise the startup error.
 
 Add `resume_lock: asyncio.Lock = field(default_factory=asyncio.Lock)` to
 `LifecycleSession`. The lock is process-local and requires no persisted-state migration.
@@ -367,7 +382,7 @@ async def resume_current_task(self) -> str:
     return await resume_current_task_impl(self)
 ```
 
-- [ ] **Step 5: Verify all runtime cases and commit Task 2**
+- [x] **Step 5: Verify all runtime cases and commit Task 2**
 
 Run:
 
