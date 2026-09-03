@@ -50,7 +50,7 @@
   Run `npm test -- --run` and `npm run build` from `athena-gui`.
   Expected: all tests and the production build pass.
 
-- [ ] **Step 5: Commit the test**
+- [x] **Step 5: Commit the test**
 
   Stage only `athena-gui/src/__tests__/App.test.tsx` and this plan; commit as
   `test(gui): prove pending workspace switch coalescing`.
@@ -66,7 +66,7 @@
 - Consumes: Task 1 and the existing frontend completion report.
 - Produces: independently reviewed evidence merged into `main`.
 
-- [ ] **Step 1: Obtain independent code review**
+- [x] **Step 1: Obtain independent code review**
 
   Review the exact `4a04052..HEAD` diff for behavioral value, mock boundaries,
   deterministic concurrency assertions, and scope. Require APPROVED.
