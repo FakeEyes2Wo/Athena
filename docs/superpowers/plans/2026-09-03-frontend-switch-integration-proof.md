@@ -31,7 +31,7 @@
   Run `npm test -- --run src/__tests__/App.test.tsx`.
   Expected: 1 test passes before the new coverage is added.
 
-- [ ] **Step 2: Add the missing integration scenario**
+- [x] **Step 2: Add the missing integration scenario**
 
   Preload recent roots `/a`, `/b`, `/c`; resolve `settingsGet` with `/a`; defer
   `setProjectRoot('/b')`; render the real `App`; click workspace `/b`, then click
@@ -40,12 +40,12 @@
   resolving `/c` leaves `/c` as the only committed root. Keep picker/sidebar
   controls observable during the pending interval.
 
-- [ ] **Step 3: Run the focused test**
+- [x] **Step 3: Run the focused test**
 
   Run `npm test -- --run src/__tests__/App.test.tsx`.
   Expected: both App integration tests pass.
 
-- [ ] **Step 4: Run the full frontend suite and build**
+- [x] **Step 4: Run the full frontend suite and build**
 
   Run `npm test -- --run` and `npm run build` from `athena-gui`.
   Expected: all tests and the production build pass.
