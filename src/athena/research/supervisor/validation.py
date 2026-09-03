@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,10 @@ from athena.execution.runtime import (
 )
 from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.predictions_cover import (
+    PredictionsCoverageError,
+    assert_predictions_cover,
+)
 from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
@@ -44,6 +49,27 @@ CheckpointValidation = Callable[[ArtifactRef], Awaitable[None]]
 _MAX_REVIEW_DIFF_CHARS = 12_000
 # 校验修复循环的迭代上限，防止 preflight/review/工作区变化互相拉锯造成无限烧 token。
 _MAX_VALIDATION_REPAIR_ATTEMPTS = 16
+# 回灌给 validate Agent 的失败正文上限。候选脚本的 traceback 可以有几十 KB，
+# 而有用的部分（异常类型与最后几帧）在末尾，所以超长时保留尾部。
+_MAX_FAILURE_FEEDBACK_CHARS = 4_000
+
+
+class ValidationRunFailed(RuntimeError):
+    """The frozen command ran and failed — a candidate defect, not a bug here.
+
+    Subclasses ``RuntimeError`` because that is what this raised before the
+    repair loop learned to feed failures back, and callers outside the loop
+    still catch the broad type.
+    """
+
+
+class PredictionsRejected(ValueError):
+    """The command exited 0 but its predictions cannot be scored.
+
+    A missing/empty declared output, or rows that do not answer the file
+    VALIDATE asked about. Same repairability as ``ValidationRunFailed``;
+    subclasses ``ValueError`` for the same backward-compatibility reason.
+    """
 
 
 class ValidationInput(BaseModel):
@@ -92,6 +118,7 @@ class ValidationOptions:
 
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
     predict_features: Path | None = None
+    data_csv: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -185,11 +212,109 @@ _SEMANTIC_MARKERS = (
     "normalize(",
 )
 
+_ValidationRejectionSignature = tuple[str, ArtifactRef, str]
 
-async def _reviewed_diff_text(diff: GitDiff, store: ArtifactStore) -> str | None:
-    """Load, redact, and bound the exact diff artifact approved for commit."""
 
-    raw = await store.get_bytes(diff.ref)
+def _record_validation_rejection(
+    previous: _ValidationRejectionSignature | None,
+    current: _ValidationRejectionSignature,
+) -> _ValidationRejectionSignature:
+    """Stop when an unchanged repair reaches the same rejection stage twice."""
+    if previous is not None and previous[:2] == current[:2]:
+        stage, diff_ref, reason = current
+        raise RuntimeError(
+            "validation repair made no progress: same diff and rejection repeated; "
+            f"stage={stage}; diff_ref={diff_ref}; reason={reason}"
+        )
+    return current
+
+
+_DIFF_HEADER = re.compile(rb"^diff --git a/(?P<a>.*?) b/(?P<b>.*?)$", re.MULTILINE)
+
+
+def _under(path: str, root: str) -> bool:
+    """True when ``path`` is ``root`` or lives inside it (either slash)."""
+    norm = path.replace("\\", "/").strip("/")
+    base = root.replace("\\", "/").strip("/")
+    return bool(base) and (norm == base or norm.startswith(base + "/"))
+
+
+MANIFEST_NAME = "experiment.json"
+_SOURCE_SUFFIXES = frozenset({".py", ".ipynb", ".sh", ".r", ".jl"})
+
+
+def declared_output_paths(
+    workspace: GitWorkBranch, changed: tuple[str, ...] = ()
+) -> tuple[str, ...]:
+    """The manifest's declared outputs, or none if they cannot be trusted.
+
+    The manifest read here is the one in the worktree, which the Agent can edit.
+    That would otherwise be a way to hide a source change from review: declare
+    ``solution`` an output and its diff disappears. So if this repair touched
+    the manifest at all, nothing is excluded and the reviewer sees everything —
+    hiding then costs the very edit that makes it visible.
+
+    An output root that contains changed source code is likewise not trusted;
+    generated artifacts may be omitted, but executable repairs must stay visible.
+    """
+    if any(Path(path).name == MANIFEST_NAME for path in changed):
+        return ()
+    try:
+        manifest = read_experiment_manifest(Path(workspace.path))
+    except (OSError, ValueError):
+        # A broken manifest is the Agent's to repair; the review still runs.
+        return ()
+    return tuple(
+        output
+        for output in manifest.outputs.values()
+        if not any(
+            _under(path, output) and Path(path).suffix.lower() in _SOURCE_SUFFIXES
+            for path in changed
+        )
+    )
+
+
+def drop_output_sections(raw: bytes, outputs: tuple[str, ...]) -> bytes:
+    """Remove the declared outputs' file sections from a unified diff.
+
+    The validate Agent is told to repair the frozen command, which means running
+    it — and running it writes exactly the paths the manifest declares. Those
+    land in the worktree diff, where they do two kinds of damage.
+
+    The reviewer sees a rewritten predictions file and reads it as tampering
+    with the scored artifact. On 2026-09-02 it rejected a correct repair for
+    precisely that: "replacing the entire prediction file implies a change in
+    the model's inference results". And a 169,965-row predictions.csv is far
+    past ``_MAX_REVIEW_DIFF_CHARS``; ``predictions/`` sorts before ``solution/``,
+    so truncation cut the source change out of the prompt entirely. The reviewer
+    was rejecting a repair it could not see.
+
+    Dropping them is safe *because* of the freshness guard: ``_execute_predictions``
+    archives every declared output before the command runs, so whatever the Agent
+    left there is moved aside and the scored artifact can only be the command's
+    own. Outputs are not review material — the review judges the repair.
+    """
+    if not outputs:
+        return raw
+    matches = list(_DIFF_HEADER.finditer(raw))
+    if not matches:
+        return raw
+    kept = [raw[: matches[0].start()]]
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        path = match.group("b").decode("utf-8", "replace")
+        if not any(_under(path, out) for out in outputs):
+            kept.append(raw[match.start() : end])
+    return b"".join(kept)
+
+
+def _reviewed_diff_text(raw: bytes) -> str | None:
+    """Decode, redact, and bound the filtered repair being reviewed.
+
+    The binary and NUL checks run on what *remains*: a binary declared output
+    (a pickled model beside the predictions) used to fail the whole review as
+    unreviewable, even though the repair itself was plain text.
+    """
     if b"\x00" in raw or b"GIT binary patch" in raw:
         return None
     try:
@@ -200,6 +325,68 @@ async def _reviewed_diff_text(diff: GitDiff, store: ArtifactStore) -> str | None
     if len(text) > _MAX_REVIEW_DIFF_CHARS:
         text = text[:_MAX_REVIEW_DIFF_CHARS] + "\n[DIFF TRUNCATED]"
     return text
+
+
+_ARTIFACT_SUFFIXES = (
+    ".md",
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".log",
+    ".json",
+    ".parquet",
+    ".png",
+    ".jpg",
+    ".svg",
+    ".pdf",
+    ".html",
+)
+
+
+def _changed_lines(raw: bytes, *, skip_artifacts: bool) -> str:
+    """The diff's added and removed lines, for marker scanning.
+
+    Two properties the whole-diff text does not have.
+
+    **Context lines are excluded.** Git carries three lines of context around
+    every hunk, so a marker sitting *near* an edit rejected the edit. A LightGBM
+    solution has ``learning_rate`` in its parameter dict; a pure path repair three
+    lines away was unfixable, because the marker was not in anything the Agent
+    had written.
+
+    **Artifacts are excluded** when ``skip_artifacts``. The semantic gate exists
+    to stop the Agent retuning the model. A generated ``REPORT.md`` that
+    *describes* the run, or a predictions CSV, is an output. On 2026-09-02 the
+    validate Agent ran the frozen command from inside ``solution/``, so its
+    report landed at ``solution/REPORT.md`` -- outside the declared outputs, so
+    ``drop_output_sections`` left it in -- and that report says ``learning_rate:``
+    twice. All 16 repair attempts were rejected with the same sentence, and none
+    of them could have removed it.
+
+    Leakage keeps scanning artifacts: a predictions file that suddenly carries a
+    final-label column is worth stopping.
+    """
+    kept: list[str] = []
+    matches = list(_DIFF_HEADER.finditer(raw))
+    if not matches:
+        return raw.decode("utf-8", "replace")
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        path = match.group("b").decode("utf-8", "replace")
+        if skip_artifacts and path.lower().endswith(_ARTIFACT_SUFFIXES):
+            continue
+        section = raw[match.start() : end].decode("utf-8", "replace")
+        kept.extend(
+            line
+            for line in section.splitlines()
+            if (line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+        )
+    return "\n".join(kept)
+
+
+def _marker_hit(text: str, markers: tuple[str, ...]) -> str | None:
+    lowered = text.lower()
+    return next((marker for marker in markers if marker in lowered), None)
 
 
 async def review_validation_diff(
@@ -217,42 +404,67 @@ async def review_validation_diff(
             accepted=False,
             reason="validation repair requires an agent explanation",
         )
+    outputs = declared_output_paths(workspace, diff.paths)
+    source_paths = [
+        path for path in diff.paths if not any(_under(path, out) for out in outputs)
+    ]
     semantic_paths = [
-        path for path in diff.paths if Path(path).name.lower() in _SEMANTIC_FILENAMES
+        path for path in source_paths if Path(path).name.lower() in _SEMANTIC_FILENAMES
     ]
     if semantic_paths:
         return ValidationDiffReview(
             accepted=False,
-            reason="validation cannot change model or training semantics",
+            reason=(
+                "validation cannot change model or training semantics: it edits "
+                + ", ".join(sorted(semantic_paths))
+            ),
         )
-    del workspace
-    changed_text = await _reviewed_diff_text(diff, store)
+    scanned = drop_output_sections(await store.get_bytes(diff.ref), outputs)
+    changed_text = _reviewed_diff_text(scanned)
     if changed_text is None:
         return ValidationDiffReview(
             accepted=False,
             reason="validation diff is binary or cannot be reviewed safely",
         )
-    lowered = changed_text.lower()
-    if any(marker in lowered for marker in _LEAKAGE_MARKERS):
+    leak = _marker_hit(_changed_lines(scanned, skip_artifacts=False), _LEAKAGE_MARKERS)
+    if leak is not None:
         return ValidationDiffReview(
             accepted=False,
-            reason="validation repair may not access final labels",
+            reason=(
+                "validation repair may not access final labels: a changed line "
+                f"contains {leak!r}"
+            ),
         )
-    if any(marker in lowered for marker in _SEMANTIC_MARKERS):
-        return ValidationDiffReview(
-            accepted=False,
-            reason="validation cannot change model or training semantics",
-        )
-    prompt = json.dumps(
-        {
-            "policy": "Accept runtime-only repairs; reject semantic tuning or label access.",
-            "paths": list(diff.paths),
-            "explanation": explanation.strip(),
-            "changed_text": changed_text,
-        },
-        sort_keys=True,
+    semantic = _marker_hit(
+        _changed_lines(scanned, skip_artifacts=True), _SEMANTIC_MARKERS
     )
-    return await independent_review(prompt)
+    if semantic is not None:
+        # 说清楚是哪个词命中的。只回一句“不能改模型语义”时，Agent 连续 16 次
+        # 交出同一个修复——它没有任何线索知道要改什么（2026-09-02）。
+        return ValidationDiffReview(
+            accepted=False,
+            reason=(
+                "validation cannot change model or training semantics: a changed "
+                f"line contains {semantic!r}. Remove that edit; VALIDATE re-runs "
+                "the frozen command and must not retune it."
+            ),
+        )
+    payload: dict[str, Any] = {
+        "policy": "Accept runtime-only repairs; reject semantic tuning or label access.",
+        "paths": source_paths,
+        "explanation": explanation.strip(),
+        "changed_text": changed_text,
+    }
+    if len(source_paths) != len(diff.paths):
+        # 不说明的话，评审会以为候选偷偷不改代码就改了产物。
+        payload["excluded_outputs"] = (
+            "Declared experiment outputs are excluded from this diff. The Agent "
+            "runs the command to test its repair, which rewrites them; they are "
+            "archived and regenerated by the frozen command before scoring, so "
+            "their contents are not evidence about the repair. Judge the source "
+            "change only."
+        )
+    return await independent_review(json.dumps(payload, sort_keys=True))
 
 
 async def _load_result(
@@ -318,6 +530,7 @@ async def _execute_predictions(
     publish: EmitEvent | None,
     timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
     predict_features: Path | None = None,
+    data_csv: Path | None = None,
     version: str | None = None,
 ) -> PredictionRun:
     """Re-run the frozen SOTA experiment and pack its predictions.
@@ -340,6 +553,7 @@ async def _execute_predictions(
         workspace_root=workdir,
         environment_root=getattr(execution, "environment_root", workdir),
         predict_features=predict_features,
+        data_csv=data_csv,
     )
     version = version or "validate"
     try:
@@ -353,70 +567,70 @@ async def _execute_predictions(
                     workdir=workdir,
                     emit=publish,
                     predict_features=predict_features,
+                    data_csv=data_csv,
                 ),
             )
             if not result.ok:
-                raise RuntimeError(result.stderr or "validation command failed")
+                raise ValidationRunFailed(result.stderr or "validation command failed")
         try:
             assert_output_roots(workdir, manifest.outputs, required={"predictions"})
         except OutputFreshnessError as exc:
-            raise ValueError(str(exc)) from exc
+            raise PredictionsRejected(str(exc)) from exc
         rel_path = manifest.outputs["predictions"]
         predictions_dir = workdir / rel_path
         if predict_features is not None:
-            _assert_predictions_cover(predictions_dir, predict_features)
+            try:
+                assert_predictions_cover(predictions_dir, predict_features)
+            except PredictionsCoverageError as exc:
+                # 与产物新鲜度一样，这是候选可以自己修的失败，不是编排器的 bug。
+                raise PredictionsRejected(str(exc)) from exc
         ref = await pack_directory(store, predictions_dir)
         return PredictionRun(predictions_ref=ref, predictions_path=rel_path)
     finally:
         await git.restore_paths(workspace, tuple(manifest.outputs.values()))
 
 
-ROW_ID_COLUMN = "__athena_row_id"
+def _run_failure_feedback(
+    exc: ValidationRunFailed | PredictionsRejected,
+    predict_features: Path | None,
+) -> str:
+    """Turn a failed re-run into the task text the validate Agent can act on.
 
+    The Agent is created to "repair runtime-only failures", but until this
+    existed the repair loop never told it about one: the first crash of the
+    frozen command propagated straight out of ``_run_phase``. On 2026-08-31 that
+    threw away a five-hour run whose eight SEARCH experiments had all finished,
+    over a candidate that hardcoded the SEARCH *label* path while correctly
+    reading ``ATHENA_PREDICT_FEATURES`` for the features -- so VALIDATE fed it
+    169965 feature rows to score against 169725 search labels.
 
-def _row_ids(path: Path) -> set[str]:
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
-            return set()
-        return {row[ROW_ID_COLUMN].strip() for row in reader}
-
-
-def _assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None:
-    """Fail with the real cause when the re-run predicted the wrong rows.
-
-    Without this the symptom is the final evaluator returning
-    ``{"primary": 0.0}`` next to ``14539 ground truth rows have no prediction``
-    -- which reads like a broken evaluator or a broken model, and is neither.
-    The actual cause is a candidate that hardcoded the SEARCH feature path, so
-    re-running its frozen argv produced predictions for rows VALIDATE is not
-    scoring. Diagnosing that from the outside took a full manual replay; the
-    information to say it outright was here all along.
+    Long tracebacks are truncated from the *front*: the exception type and the
+    frame that raised it are at the end.
     """
-    expected = _row_ids(expected_csv)
-    if not expected:
-        return
-    produced: set[str] = set()
-    for path in sorted(predictions_dir.rglob("*.csv")):
-        produced |= _row_ids(path)
-    if not produced:
-        return
-    missing = expected - produced
-    if not missing:
-        return
-    overlap = len(expected & produced)
-    detail = (
-        f"{len(missing)} of {len(expected)} rows in {expected_csv.name} have no "
-        f"prediction (overlap {overlap})."
+    body = str(exc).strip() or exc.__class__.__name__
+    if len(body) > _MAX_FAILURE_FEEDBACK_CHARS:
+        body = "[EARLIER FRAMES TRUNCATED]\n" + body[-_MAX_FAILURE_FEEDBACK_CHARS:]
+    kind = (
+        "The frozen SOTA command failed when re-run"
+        if isinstance(exc, ValidationRunFailed)
+        else "The frozen SOTA command exited 0 but its predictions were rejected"
     )
-    if overlap == 0:
-        detail += (
-            " Zero overlap means the re-run predicted a different split "
-            "entirely: the candidate hardcoded its feature path instead of "
-            "reading ATHENA_PREDICT_FEATURES, so its frozen command cannot be "
-            "pointed at the held-out rows."
-        )
-    raise ValueError(detail)
+    target = (
+        f"\n\nATHENA_PREDICT_FEATURES pointed at {predict_features} for this "
+        "re-run. That file is the held-out split: it has a different row count "
+        "and different row ids than the SEARCH split the candidate was "
+        "developed against. Any label file, row count, or index the code holds "
+        "fixed alongside it will disagree with it."
+        if predict_features is not None
+        else ""
+    )
+    return (
+        f"{kind}:\n\n{body}{target}\n\n"
+        "Repair the runtime failure only. Do not change the modelling: no new "
+        "features, no retuned hyperparameters, no different algorithm, and "
+        "nothing that reads held-out labels. The scored artifact must remain "
+        "predictions for exactly the rows in ATHENA_PREDICT_FEATURES."
+    )
 
 
 async def _deterministic_preflight(
@@ -519,9 +733,7 @@ class ValidationSession:
         try:
             await self._verify_key()
             self.current = await _load_result(self.result_ref, self.deps.store)
-            action = await recovery_action(
-                self.result_ref, self.deps.store, self.input
-            )
+            action = await recovery_action(self.result_ref, self.deps.store, self.input)
             if (
                 action == "commit"
                 and self.current is not None
@@ -557,9 +769,7 @@ class ValidationSession:
             self.input.final_evaluator_ref,
         )
         if self.input.validation_key != expected_key:
-            raise ValueError(
-                "validation_key does not match frozen validation inputs"
-            )
+            raise ValueError("validation_key does not match frozen validation inputs")
 
     async def _run_phase(self) -> ValidationResult:
         """Repair, review, execute, and checkpoint the un-scored prediction run."""
@@ -567,6 +777,8 @@ class ValidationSession:
         input = self.input
         options = self.options
         repair = await _decode_repair(deps.agents, deps.store, input=input)
+        last_failure: Exception | None = None
+        previous_rejection: _ValidationRejectionSignature | None = None
         for _ in range(_MAX_VALIDATION_REPAIR_ATTEMPTS):
             diff = await deps.git.diff(deps.workspace)
             preflight = await _deterministic_preflight(
@@ -576,6 +788,10 @@ class ValidationSession:
                 store=deps.store,
             )
             if not preflight.accepted:
+                previous_rejection = _record_validation_rejection(
+                    previous_rejection,
+                    ("preflight", diff.ref, preflight.reason),
+                )
                 repair = await _decode_repair(
                     deps.agents,
                     deps.store,
@@ -591,6 +807,10 @@ class ValidationSession:
                 store=deps.store,
             )
             if not review.accepted:
+                previous_rejection = _record_validation_rejection(
+                    previous_rejection,
+                    ("independent_review", diff.ref, review.reason),
+                )
                 repair = await _decode_repair(
                     deps.agents,
                     deps.store,
@@ -599,17 +819,44 @@ class ValidationSession:
                 )
                 continue
             reviewed_diff = diff
-            prediction_run = await _execute_predictions(
-                execution=deps.execution,
-                git=deps.git,
-                workspace=deps.workspace,
-                store=deps.store,
-                publish=deps.publish,
-                timeout_s=options.timeout_s,
-                predict_features=options.predict_features,
-                version=f"validate-{input.validation_key}",
-            )
-            if await deps.git.diff(deps.workspace) != reviewed_diff:
+            try:
+                prediction_run = await _execute_predictions(
+                    execution=deps.execution,
+                    git=deps.git,
+                    workspace=deps.workspace,
+                    store=deps.store,
+                    publish=deps.publish,
+                    timeout_s=options.timeout_s,
+                    predict_features=options.predict_features,
+                    data_csv=options.data_csv,
+                    version=f"validate-{input.validation_key}",
+                )
+            except (ValidationRunFailed, PredictionsRejected) as exc:
+                last_failure = exc
+                try:
+                    previous_rejection = _record_validation_rejection(
+                        previous_rejection,
+                        ("execution", diff.ref, str(exc)),
+                    )
+                except RuntimeError as no_progress:
+                    raise no_progress from exc
+                repair = await _decode_repair(
+                    deps.agents,
+                    deps.store,
+                    input=input,
+                    feedback=_run_failure_feedback(exc, options.predict_features),
+                )
+                continue
+            post_review_diff = await deps.git.diff(deps.workspace)
+            if post_review_diff != reviewed_diff:
+                previous_rejection = _record_validation_rejection(
+                    previous_rejection,
+                    (
+                        "post_review",
+                        post_review_diff.ref,
+                        "validation workspace changed after independent review",
+                    ),
+                )
                 repair = await _decode_repair(
                     deps.agents,
                     deps.store,
@@ -619,10 +866,15 @@ class ValidationSession:
                 continue
             break
         else:
-            raise RuntimeError(
+            detail = (
                 "validation repair budget exhausted after "
                 f"{_MAX_VALIDATION_REPAIR_ATTEMPTS} attempts"
             )
+            if last_failure is not None:
+                # 不这样做，操作者只会看到「预算耗尽」，而真正的原因——候选脚本
+                # 每一次都以同一个 traceback 挂掉——被丢在日志之外。
+                detail += f"; last run failure: {last_failure}"
+            raise RuntimeError(detail) from last_failure
         review_evidence_ref = await deps.store.put_text(
             json.dumps(
                 {
@@ -677,9 +929,7 @@ class ValidationSession:
             raise RuntimeError("validation commit requires reviewed diff evidence")
         diff = await self.deps.git.diff(self.deps.workspace)
         if diff != reviewed_diff:
-            raise RuntimeError(
-                "validation workspace changed after independent review"
-            )
+            raise RuntimeError("validation workspace changed after independent review")
         commit = await self.deps.git.commit(
             self.deps.workspace,
             diff,
@@ -720,10 +970,12 @@ async def run_validation_plan(
 __all__ = [
     "CheckpointValidation",
     "PredictionRun",
+    "PredictionsRejected",
     "ValidationDeps",
     "ValidationDiffReview",
     "ValidationInput",
     "ValidationOptions",
+    "ValidationRunFailed",
     "ValidationSession",
     "recovery_action",
     "review_validation_diff",

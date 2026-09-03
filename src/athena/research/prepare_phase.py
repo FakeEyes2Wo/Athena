@@ -105,6 +105,30 @@ class DataContract:
             "spans two splits."
         )
 
+    @property
+    def moving_target(self) -> str:
+        """The rule candidates break by pairing the predict file with a fixed one.
+
+        Reading ``ATHENA_PREDICT_FEATURES`` is necessary but not sufficient. On
+        2026-08-31 a candidate did read it for its features and then scored those
+        predictions against a hardcoded ``search_labels.csv``; under VALIDATE the
+        features became the held-out split and the labels did not, so it died on
+        ``inconsistent numbers of samples: [169725, 169965]`` and took a
+        five-hour run with it. Tuning on the search split is legitimate -- what
+        is not is assuming the rows you are asked to predict *are* that split.
+        """
+        return (
+            "That variable is the only thing that moves between SEARCH and "
+            "VALIDATE. Every other path you read stays exactly where it is, so "
+            "never pair the two: do not score, index, align, or concatenate "
+            "predictions made from ATHENA_PREDICT_FEATURES against any fixed "
+            "label file, row count, or saved index. If you want a metric or a "
+            "decision threshold from the search split, load that split's "
+            "features under their own name and predict them separately -- the "
+            "row counts differ, and a script that conflates them raises "
+            "'inconsistent numbers of samples' the moment VALIDATE re-runs it."
+        )
+
     def candidate_task(self, task: str) -> str:
         """Render the task text handed to baseline/model-writing agents."""
         return (
@@ -121,7 +145,8 @@ class DataContract:
             "environment variable ATHENA_PREDICT_FEATURES (os.environ) rather "
             "than hardcoding it: VALIDATE re-runs your unchanged command with "
             "the variable pointing at the held-out split, and a hardcoded path "
-            "makes your result unscoreable there."
+            "makes your result unscoreable there.\n"
+            f"{self.moving_target}"
         )
 
     def evaluator_task(self, task: str) -> str:
@@ -149,7 +174,8 @@ class DataContract:
             "from os.environ, do not hardcode it -- VALIDATE re-runs this very "
             "command with the variable pointing at the held-out split, and a "
             "hardcoded path silently produces predictions for rows nobody asked "
-            "for."
+            "for.\n"
+            f"{self.moving_target}"
         )
 
     def prompt_block(self) -> str:

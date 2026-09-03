@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import random
-import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import aclosing
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
+from athena.core.fenced_json import unfence_json
 from athena.core.retry import is_transient_error
 
 from pydantic_ai.messages import (
@@ -47,23 +47,39 @@ logger = logging.getLogger(__name__)
 
 _MAX_STRUCTURED_RETRIES = 3
 
-# ```json … ``` — 模型在带工具的对话里习惯把最终 JSON 包进 markdown 代码块。
-_FENCED_JSON = re.compile(r"```(?:json)?\s*(.+?)\s*```", re.DOTALL)
+# 围栏剥离搬到了 ``athena.utils.fenced_json``：2026-08-31 的 VALIDATE 崩溃说明
+# 这件事不只发生在 agent 这条路径上，私有副本挡不住别的调用点。
+_unfenced = unfence_json
 
 
-def _unfenced(text: str) -> str:
-    """剥掉结构化输出外面的 markdown 代码块围栏。
+def _parse_structured_output(output_type: type[BaseModel], text: str) -> BaseModel:
+    """Validate an exact response, then recover one unambiguous JSON object."""
+    try:
+        return output_type.model_validate_json(_unfenced(text))
+    except ValidationError as strict_error:
+        decoder = json.JSONDecoder()
+        valid: list[BaseModel] = []
+        position = 0
+        while position < len(text):
+            start = text.find("{", position)
+            if start < 0:
+                break
+            try:
+                _value, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError:
+                position = start + 1
+                continue
+            try:
+                valid.append(output_type.model_validate_json(text[start:end]))
+            except ValidationError:
+                pass
+            position = end
 
-    带工具时不能再发 ``response_format``（见 ``provider.stream``），模型于是自由地
-    把终态 JSON 包进 ```json 围栏。真机上这一条足以打死整个 SEARCH：Ideator 连着三次
-    返回围栏 JSON，重试预算耗尽后抛 ``structured output invalid after retries``。
-    围栏是格式噪声不是内容错误，直接剥掉，把重试预算留给真正的 schema 不匹配。
-    """
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return text
-    match = _FENCED_JSON.search(stripped)
-    return match.group(1) if match else text
+        if len(valid) == 1:
+            return valid[0]
+        if len(valid) > 1:
+            raise ValueError("multiple schema-valid JSON objects in response")
+        raise strict_error
 
 
 # LLM 响应流断线最多重连次数（supervisor_design §6.1）+ 退避基准秒数。
@@ -151,22 +167,36 @@ class Agent(BaseAgent):
             if outcome.kind == "done":
                 if self._output_type is not None:
                     try:
-                        instance = self._output_type.model_validate_json(
-                            _unfenced(outcome.text)
+                        instance = _parse_structured_output(
+                            self._output_type, outcome.text
                         )
-                    except ValidationError as exc:
+                    except (ValidationError, ValueError) as exc:
                         if retries >= _MAX_STRUCTURED_RETRIES:
+                            diagnostic = ""
+                            if self._artifacts is not None:
+                                raw_ref = await self._artifacts.put_text(outcome.text)
+                                diagnostic = f"; raw_response_ref={raw_ref}"
                             raise RuntimeError(
-                                f"structured output invalid after retries: {exc}"
+                                "structured output invalid after retries: "
+                                f"{exc}{diagnostic}"
                             ) from exc
                         retries += 1
+                        schema = json.dumps(
+                            self._output_type.model_json_schema(),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
                         mem.append(
                             ModelRequest(
                                 parts=[
                                     UserPromptPart(
                                         content=(
                                             "Previous JSON output was invalid: "
-                                            f"{exc}\nReturn JSON matching the schema."
+                                            f"{exc}\nReturn ONLY one raw JSON object "
+                                            f"matching this schema: {schema}\n"
+                                            "Do not include reasoning, prose, or Markdown "
+                                            "fences. The first non-whitespace character "
+                                            "must be { and the last must be }."
                                         )
                                     )
                                 ]

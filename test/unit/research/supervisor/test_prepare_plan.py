@@ -75,9 +75,33 @@ class _Execution:
     def ensure_environment(self) -> None:
         pass
 
-    async def run(self, context, command=None, *, argv=None, **kwargs):
-        del context, command, argv, kwargs
+    async def run(self, context, request):
+        del context
+        _produce_declared_outputs(request.workdir)
         return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
+
+
+# 声明产物在命令跑之前会被新鲜度守卫归档走（42748ff）。真实命令会把它们写回来，
+# 所以这个替身也必须写——否则每个用例都退化成"命令什么也没产出"。要写什么由
+# fixture 记在 sidecar 里；sidecar 放在声明产物之外，归档带不走它。
+_PRODUCES = "_produces.json"
+
+
+def _record_produces(workdir: Path, files: dict[str, str]) -> None:
+    (workdir / _PRODUCES).write_text(json.dumps(files), encoding="utf-8")
+
+
+def _produce_declared_outputs(workdir: str | None) -> None:
+    if workdir is None:
+        return
+    sidecar = Path(workdir) / _PRODUCES
+    if not sidecar.is_file():
+        return
+    for rel, content in json.loads(sidecar.read_text(encoding="utf-8")).items():
+        target = Path(workdir) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # 逐字节写：文本模式在 Windows 上会改写换行，而断言比的是字节。
+        target.write_bytes(content.encode("utf-8"))
 
 
 class _Evaluator:
@@ -153,6 +177,14 @@ def _write_eda_workspace(workspace_path: Path, *, missing: str | None) -> None:
         ),
         encoding="utf-8",
     )
+    # ``missing`` 的含义是"命令产不出这一项"，所以它不进 sidecar——守卫归档之后
+    # 那一项始终缺席，正是这些用例要验的。
+    produces: dict[str, str] = {}
+    if missing != "predictions":
+        produces["outputs/predictions/predictions.csv"] = "id,prediction\n1,0\n"
+    if missing != "report":
+        produces["outputs/report.md"] = "# Baseline\n"
+    _record_produces(workspace_path, produces)
 
 
 async def _frozen_evaluator_ref(store, dir_path: Path) -> str:
@@ -172,8 +204,10 @@ async def _frozen_evaluator_ref(store, dir_path: Path) -> str:
 @pytest.mark.parametrize(
     ("missing", "expected_error"),
     [
-        ("report", "PREPARE requires a declared, non-empty report output"),
-        ("predictions", "missing predictions directory: outputs/predictions"),
+        # report / predictions 现在由新鲜度守卫先拦下（42748ff）：它报的是"命令
+        # 跑完了但什么也没产出"，比原来那句"缺少某某输出"更准确地说明了发生什么。
+        ("report", "report output produced no new artifact"),
+        ("predictions", "predictions output produced no new artifact"),
         ("evidence", "trusted evidence is missing"),
         ("commit", "trusted commit is missing"),
     ],
@@ -205,7 +239,9 @@ async def test_prepare_result_requires_every_trusted_artifact(
         )
 
     assert agents.created == ["prepare"]
-    assert agents.feedback == [expected_error]
+    # 子串而非相等：守卫的信息里带工作区绝对路径，写死比不了。
+    assert len(agents.feedback) == 1
+    assert expected_error in agents.feedback[0], agents.feedback[0]
 
 
 @pytest.mark.asyncio

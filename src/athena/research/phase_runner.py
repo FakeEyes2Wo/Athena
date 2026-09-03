@@ -10,9 +10,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-logger = logging.getLogger(__name__)
-
 from athena.agents.ideator_agent import HandoffResult
+from athena.core.fenced_json import unfence_json
 from athena.agents.prepare_agent import PREPARE_EDA_AGENT_ID, PREPARE_EDA_AGENT_TYPE
 from athena.agents.task_agents import register_validate_agent
 from athena.execution.runtime import ExecutionContext
@@ -34,6 +33,20 @@ from athena.research.supervisor.validation import (
     validation_key,
 )
 from athena.utils.single_turn_chat import single_turn_chat
+
+logger = logging.getLogger(__name__)
+
+
+def _validation_data_csv(runtime: Any) -> Path | None:
+    """Resolve the original dataset for validation command execution."""
+    configured = getattr(runtime.config, "dataset_path", None)
+    if configured is not None:
+        return Path(configured)
+    understanding = getattr(runtime.state, "task_understanding", None) or {}
+    persisted = understanding.get("dataset")
+    if isinstance(persisted, str) and persisted.strip():
+        return Path(persisted)
+    return None
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -224,6 +237,7 @@ class PhaseRunner:
         options = ValidationOptions(
             timeout_s=rt.state.experiment_timeout_s,
             predict_features=final_features if final_features.is_file() else None,
+            data_csv=_validation_data_csv(rt),
         )
         return await run_validation_plan(
             input=frozen,
@@ -249,4 +263,6 @@ class PhaseRunner:
             ),
             max_turns=200,
         )
-        return ValidationDiffReview.model_validate_json(answer)
+        # 模型会把 JSON 裹进 ```json 围栏；不剥掉就是 2026-08-31 那次
+        # VALIDATE 崩溃——内容本身是 {"accepted": true, ...}。
+        return ValidationDiffReview.model_validate_json(unfence_json(answer))

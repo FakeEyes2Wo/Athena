@@ -10,7 +10,11 @@ from pydantic import ValidationError
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitDiff, GitWorkBranch
-from athena.execution.runtime import CommandResult, ExecutionContext
+from athena.execution.runtime import (
+    CommandRequest,
+    CommandResult,
+    ExecutionContext,
+)
 from athena.research.contracts import CandidateEvaluation, EvaluatorDescriptor
 from athena.research.script_runner import load_directory
 from athena.research.supervisor.experiment import (
@@ -75,21 +79,38 @@ class _FakeExecution:
         self.emit_seen: list[object] = []
 
     async def run(
-        self,
-        context: ExecutionContext,
-        command: str | None = None,
-        *,
-        argv: list[str] | None = None,
-        timeout_s: int = 120,
-        workdir: str | None = None,
-        emit=None,
+        self, context: ExecutionContext, request: CommandRequest
     ) -> CommandResult:
-        self.calls.append(list(argv) if argv is not None else [])
-        self.workdirs.append(workdir)
-        if emit is not None:
-            emit("command/started", "exec:run", {"command": argv})
-            self.emit_seen.append(emit)
+        self.calls.append(list(request.argv) if request.argv is not None else [])
+        self.workdirs.append(request.workdir)
+        if request.emit is not None:
+            request.emit("command/started", "exec:run", {"command": request.argv})
+            self.emit_seen.append(request.emit)
+        _produce_declared_outputs(request.workdir)
         return self._results.pop(0)
+
+
+# 声明产物在命令跑之前会被新鲜度守卫归档走（42748ff）。真实命令会把它们写回来，
+# 所以这个替身也必须写——否则每个用例都退化成"命令什么也没产出"。要写什么由
+# fixture 记在 sidecar 里；sidecar 放在声明产物之外，归档带不走它。
+_PRODUCES = "_produces.json"
+
+
+def _record_produces(workdir: Path, files: dict[str, str]) -> None:
+    (workdir / _PRODUCES).write_text(json.dumps(files), encoding="utf-8")
+
+
+def _produce_declared_outputs(workdir: str | None) -> None:
+    if workdir is None:
+        return
+    sidecar = Path(workdir) / _PRODUCES
+    if not sidecar.is_file():
+        return
+    for rel, content in json.loads(sidecar.read_text(encoding="utf-8")).items():
+        target = Path(workdir) / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # 逐字节写：文本模式在 Windows 上会改写换行，而断言比的是字节。
+        target.write_bytes(content.encode("utf-8"))
 
 
 class _FakeWorkspace:
@@ -154,7 +175,11 @@ async def _scored_plan(
 
 
 async def _runner_setup(
-    tmp_path: Path, *, execution: _FakeExecution, evaluator: _FakeEvaluator
+    tmp_path: Path,
+    *,
+    execution: _FakeExecution,
+    evaluator: _FakeEvaluator,
+    predict_features: Path | None = None,
 ):
     store = LocalArtifactStore(tmp_path / "artifacts")
     evaluator_dir = tmp_path / "eval"
@@ -184,6 +209,7 @@ async def _runner_setup(
             project_root=tmp_path,
             workspace_root=Path(branch.path),
             environment_root=tmp_path,
+            predict_features=predict_features,
         ),
     )
     return runner, plan_input, workspace, branch, store
@@ -195,6 +221,7 @@ def _write_manifest(
     commands: list[list[str]],
     outputs: dict[str, str] | None = None,
     predictions: str = "id,pred\n",
+    produces_predictions: bool = True,
 ) -> None:
     workdir = Path(branch.path)
     outputs = outputs or {
@@ -209,6 +236,10 @@ def _write_manifest(
     predictions_dir.mkdir(parents=True, exist_ok=True)
     (predictions_dir / "predictions.csv").write_bytes(predictions.encode("utf-8"))
     (workdir / "report.md").write_text("# report\n", encoding="utf-8")
+    produces = {"report.md": "# report\n"}
+    if produces_predictions:
+        produces[f"{outputs['predictions']}/predictions.csv"] = predictions
+    _record_produces(workdir, produces)
 
 
 def test_manifest_rejects_shell_strings_and_path_escape() -> None:
@@ -666,6 +697,81 @@ async def test_run_turn_executes_manifest_scores_and_commits(tmp_path) -> None:
     }
 
 
+def _features(tmp_path: Path, ids) -> Path:
+    path = tmp_path / "search_features.csv"
+    rows = "\n".join(f"{row_id},0.5" for row_id in ids)
+    path.write_text(f"__athena_row_id,x\n{rows}\n", encoding="utf-8")
+    return path
+
+
+@pytest.mark.asyncio
+async def test_predictions_for_the_wrong_rows_never_become_a_score(tmp_path) -> None:
+    """A wrong answer looks exactly like a right one until you check the ids.
+
+    VALIDATE has checked this since 2026-08-30; PREPARE and SEARCH did not. On
+    2026-09-02 a baseline wrote positional indices as row ids -- ``0, 1, 2, ...``
+    against labels spanning ``304 … 846890``. The evaluator joined 36,674 of
+    169,725 rows, each pairing a label with some other window's prediction, and
+    returned 0.016331. That became the trusted reference metric for the run.
+
+    A bad reference does not fail a run, it re-scales it: every later candidate
+    is measured against 0.0163, so the first one to merely write correct ids
+    looks like a breakthrough.
+    """
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, _ = await _runner_setup(
+        tmp_path,
+        execution=execution,
+        evaluator=_FakeEvaluator(metric=0.0163),
+        predict_features=_features(tmp_path, range(65220, 65240)),
+    )
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "-c", "print('train')"]],
+        predictions="__athena_row_id,prediction\n"
+        + "".join(f"{i},0.5\n" for i in range(20)),
+    )
+    state = PlanState(kind="PREPARE", context_ref=_REF, turns_used=1, turn_limit=12)
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "output_failed"
+    assert result.metric is None
+    assert "have no prediction" in (result.error or "")
+    # 不能提交：这一轮没有可信分数。
+    assert workspace.messages == []
+
+
+@pytest.mark.asyncio
+async def test_predictions_covering_the_asked_rows_still_score(tmp_path) -> None:
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, _ = await _runner_setup(
+        tmp_path,
+        execution=execution,
+        evaluator=_FakeEvaluator(metric=0.91),
+        predict_features=_features(tmp_path, range(65220, 65240)),
+    )
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "-c", "print('train')"]],
+        predictions="__athena_row_id,prediction\n"
+        + "".join(f"{i},0.5\n" for i in range(65220, 65240)),
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "scored"
+    assert result.metric == 0.91
+    assert workspace.messages == ["plan h1 trusted score 0.9100"]
+
+
 @pytest.mark.asyncio
 async def test_run_turn_forwards_emit_callbacks(tmp_path) -> None:
     execution = _FakeExecution(
@@ -735,8 +841,12 @@ async def test_run_turn_missing_predictions_returns_evidence_without_scoring(
     runner, plan_input, workspace, branch, store = await _runner_setup(
         tmp_path, execution=execution, evaluator=_FakeEvaluator(metric=0.91)
     )
-    _write_manifest(branch, commands=[[sys.executable, "predict.py"]])
-    # remove the predictions directory the manifest promises to produce
+    # the manifest promises predictions; the command does not produce them
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "predict.py"]],
+        produces_predictions=False,
+    )
     shutil.rmtree(Path(branch.path) / "outputs" / "predictions")
     state = PlanState(
         kind="SEARCH",
