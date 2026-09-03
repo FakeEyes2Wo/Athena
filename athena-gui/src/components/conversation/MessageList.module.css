@@ -166,6 +166,25 @@
   padding: 4px 0 0;
 }
 
+.clarification-activity {
+  margin-bottom: var(--space-md);
+  border: 1px solid var(--warning);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-bubble);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--warning-subtle);
+  box-shadow: var(--shadow-xs);
+}
+
+.clarification-activity__title {
+  margin-bottom: var(--space-sm);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .ideator-lane {
   margin-bottom: var(--space-md);
   border: 1px solid var(--border);

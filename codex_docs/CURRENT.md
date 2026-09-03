@@ -14,4 +14,4 @@ Supporting design spec:
 - `docs/superpowers/specs/2026-09-01-task-clarification-confirmation-gate-design.md`
 
 Most recent completed work:
-- `codex_docs/2026-09-02-research-layout-simplification-completion-report.md`
+- `codex_docs/2026-09-03-frontend-workspace-session-fixes-completion-report.md`

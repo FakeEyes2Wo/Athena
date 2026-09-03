@@ -29,6 +29,12 @@ export interface LogEntry {
 }
 
 const MAX_LOG_ENTRIES = 500;
+let optimisticSessionCounter = 0;
+
+function nextOptimisticSessionId(): string {
+  optimisticSessionCounter += 1;
+  return `s-${Date.now()}-${optimisticSessionCounter}`;
+}
 
 /** Maps the backend runtime status to the frontend pipeline status. */
 const RUNTIME_STATUS_MAP: Record<string, PipelineViewModel["status"]> = {
@@ -339,7 +345,10 @@ function errorCode(err: unknown): string | undefined {
  * Manages the view model, subscribes to backend events, and exposes all user actions
  * (send prompt, clarify/confirm/revise/retry/cancel, pause/resume/stop, etc).
  */
-export function usePipeline(workspaceRoot?: string | null) {
+export function usePipeline(
+  workspaceRoot?: string | null,
+  requestedSessionId?: string | null,
+) {
   const [viewModel, setViewModel] = useState<PipelineViewModel>(createEmptyPipelineViewModel);
   const [clarificationStatus, setClarificationStatus] = useState<ClarificationStatus>("IDLE");
   const [sessions, setSessions] = useState<Array<{ id: string; title: string }>>([]);
@@ -351,6 +360,9 @@ export function usePipeline(workspaceRoot?: string | null) {
   const counter = useRef(0);
   const logCounter = useRef(0);
   const activeSessionIdRef = useRef(currentSessionId);
+  const sessionRequestEpochRef = useRef(0);
+  const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
+  const mountedRef = useRef(true);
   const currentDraftIdRef = useRef<string | null>(null);
   const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
@@ -399,7 +411,16 @@ export function usePipeline(workspaceRoot?: string | null) {
     (ids: string[] | undefined) => {
       if (!ids) return;
       const titles = loadTitles(titlesKey);
-      setSessions(ids.map((id) => ({ id, title: titles[id] ?? "新会话" })));
+      setSessions((current) => {
+        const authoritative = ids.map((id) => ({ id, title: titles[id] ?? "新会话" }));
+        const authoritativeIds = new Set(ids);
+        const pending = current.filter(
+          (session) =>
+            pendingCreationsRef.current.has(session.id) &&
+            !authoritativeIds.has(session.id),
+        );
+        return [...pending, ...authoritative];
+      });
     },
     [titlesKey],
   );
@@ -504,10 +525,20 @@ export function usePipeline(workspaceRoot?: string | null) {
     activeSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      sessionRequestEpochRef.current += 1;
+      pendingCreationsRef.current.clear();
+    };
+  }, []);
+
   // Subscribe to backend pipeline events on mount.
   useEffect(() => {
     let mounted = true;
     let unlisteners: Array<() => void> = [];
+    const hydrationEpoch = ++sessionRequestEpochRef.current;
 
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
@@ -583,7 +614,7 @@ export function usePipeline(workspaceRoot?: string | null) {
     // waiting for the next streamed event.
     stateGet()
       .then((snapshot) => {
-        if (!mounted) return;
+        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
         setViewModel((prev) => applyPipelineEvent(prev, { kind: "state", data: snapshot }));
       })
       .catch(() => {
@@ -593,23 +624,27 @@ export function usePipeline(workspaceRoot?: string | null) {
     // 断点续传：列出会话 → 切到本工作区上次用的会话 → 重放其 transcript。
     sessionsList()
       .then(({ sessions: list, active }) => {
+        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return null;
         // active 由后端按工作区记住；从没用过的工作区列表为空，落在 default 上，
         // 它同样要等到真跑起来才会出现在侧栏里。
-        const target = active ?? "default";
+        const target = requestedSessionId && list.includes(requestedSessionId)
+          ? requestedSessionId
+          : active ?? "default";
         return sessionSwitch(target).then((result) => ({ target, list, result }));
       })
-      .then(({ target, list, result }) => {
-        if (!mounted) return;
+      .then((hydration) => {
+        if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
+        const { target, list, result } = hydration;
         applySessions(result.sessions ?? list);
         setCurrentSessionId(target);
-        restoreRecords(result.records, false);
+        restoreRecords(result.records, true);
       })
       .catch(() => {
         // 非致命：无历史或后端不支持时保持空白会话。
       });
 
     return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, restoreRecords]);
+  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, requestedSessionId, restoreRecords]);
 
   // Poll for outstanding human questions. Pre-run states use a low-frequency
   // fallback (10s); once RUNNING we keep the existing 1.5s recovery poll.
@@ -676,6 +711,8 @@ export function usePipeline(workspaceRoot?: string | null) {
   const startClarification = useCallback(async (task: string) => {
     const content = task.trim();
     if (!content) return;
+    // User input supersedes any mount-time transcript hydration still in flight.
+    sessionRequestEpochRef.current += 1;
 
     const previewId = nextId("preview");
     const title = content.slice(0, 40) || "新任务";
@@ -992,15 +1029,29 @@ export function usePipeline(workspaceRoot?: string | null) {
   const newSession = useCallback(() => {
     // 新建一个独立会话（后端 transcript 按 session_id 分文件），并清空视图。
     // 旧会话若是空白的，由后端在切换时回收，前端不做判定。
-    const id = `s-${Date.now()}`;
+    const id = nextOptimisticSessionId();
     runStarted.current = false;
     setClarificationStatus("IDLE");
     saveTitle(titlesKey, id, "新会话");
-    void sessionSwitch(id)
-      .then((result) => applySessions(result.sessions))
-      .catch(() => {
-        // 非致命：切换失败时保留乐观插入的这一行，用户可以再点一次。
-      });
+    const requestEpoch = ++sessionRequestEpochRef.current;
+    const creation = sessionSwitch(id);
+    pendingCreationsRef.current.set(id, creation);
+    void creation.then(
+      (result) => {
+        if (pendingCreationsRef.current.get(id) === creation) {
+          pendingCreationsRef.current.delete(id);
+        }
+        if (mountedRef.current && requestEpoch === sessionRequestEpochRef.current) {
+          applySessions(result.sessions);
+        }
+      },
+      () => {
+        // Keep the optimistic row on failure so the user can retry or delete it.
+        if (pendingCreationsRef.current.get(id) === creation) {
+          pendingCreationsRef.current.delete(id);
+        }
+      },
+    );
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
@@ -1008,8 +1059,10 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
+    const requestEpoch = ++sessionRequestEpochRef.current;
     try {
       const { records, sessions: list } = await sessionSwitch(id);
+      if (requestEpoch !== sessionRequestEpochRef.current) return;
       // 换会话即换 runtime，运行标记不能带过去。
       runStarted.current = false;
       setCurrentSessionId(id);
@@ -1018,6 +1071,7 @@ export function usePipeline(workspaceRoot?: string | null) {
       setClarificationStatus("IDLE");
       setHumanRequests([]);
     } catch (err) {
+      if (requestEpoch !== sessionRequestEpochRef.current) return;
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
     }
@@ -1025,19 +1079,26 @@ export function usePipeline(workspaceRoot?: string | null) {
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
+    const requestEpoch = ++sessionRequestEpochRef.current;
     try {
+      const pendingCreation = pendingCreationsRef.current.get(id);
+      if (pendingCreation) await pendingCreation;
       const { sessions: list } = await sessionDelete(id);
+      if (!mountedRef.current) return;
       const titles = loadTitles(titlesKey);
       delete titles[id];
       localStorage.setItem(titlesKey, JSON.stringify(titles));
+      setSessions((current) => current.filter((session) => session.id !== id));
+      if (requestEpoch !== sessionRequestEpochRef.current) return;
       applySessions(list);
-      if (id === currentSessionId) {
+      if (id === activeSessionIdRef.current) {
         await switchSession("default");
       }
     } catch (err) {
+      if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
       appendError(`删除会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, currentSessionId, switchSession, titlesKey]);
+  }, [appendError, applySessions, switchSession, titlesKey]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);

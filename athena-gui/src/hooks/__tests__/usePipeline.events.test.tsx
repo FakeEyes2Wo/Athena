@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const eventHandlers: Array<(event: { kind: string; data: Record<string, unknown> }) => void> = [];
@@ -41,13 +41,21 @@ vi.mock("../../lib/tauri-bridge", () => ({
   PIPELINE_EVENT_NAMES: ["state", "output", "clarification", "human_request"],
 }));
 
-import { sendControl, startSearch, taskClarificationStart } from "../../lib/tauri-bridge";
+import { sendControl, sessionSwitch, startSearch, taskClarificationStart } from "../../lib/tauri-bridge";
 import { usePipeline } from "../usePipeline";
+
+async function renderHydratedPipeline() {
+  const hook = renderHook(() => usePipeline());
+  await waitFor(() => expect(sessionSwitch).toHaveBeenCalledWith("default"));
+  await act(async () => undefined);
+  return hook;
+}
 
 describe("usePipeline event mapping", () => {
   beforeEach(() => {
     eventHandlers.length = 0;
     vi.mocked(sendControl).mockClear();
+    vi.mocked(sessionSwitch).mockClear();
     vi.mocked(startSearch).mockClear();
     vi.mocked(taskClarificationStart).mockClear();
     vi.mocked(taskClarificationStart).mockResolvedValue({
@@ -58,7 +66,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("maps a state event to phase, status, budget, and SOTA", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       eventHandlers[0]?.({
@@ -80,7 +88,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("does not treat a stale RUNNING status as an active run", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       eventHandlers[0]?.({
@@ -100,7 +108,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("updates the intent preview card from the supervisor task understanding", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       await result.current.sendPrompt("analyze this CSV");
@@ -135,7 +143,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("applies clarification events to the authoritative preview", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       await result.current.sendPrompt("predict churn");
@@ -181,7 +189,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("shows clarification questions and user replies in the conversation flow", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       await result.current.sendPrompt("predict churn");
@@ -232,7 +240,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("ignores human requests from another session", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       await result.current.sendPrompt("predict churn");
@@ -267,7 +275,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("records server-generated timeout as a clarification note", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       await result.current.sendPrompt("predict churn");
@@ -291,7 +299,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("appends output events as athena messages", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       eventHandlers[0]?.({
@@ -307,7 +315,12 @@ describe("usePipeline event mapping", () => {
     });
   });
 
-  it("coalesces streaming agent text deltas into one message", async () => {    const { result } = renderHook(() => usePipeline());
+  it("coalesces clarification output deltas and preserves backend tool activity", async () => {
+    const { result } = await renderHydratedPipeline();
+
+    await act(async () => {
+      await result.current.sendPrompt("analyze train.csv");
+    });
 
     await act(async () => {
       // 同一条消息的 delta 带同一个 message_id（后端在建立文本缓冲时分配）。
@@ -319,14 +332,71 @@ describe("usePipeline event mapping", () => {
         kind: "output",
         data: { seq: 2, source: "agent", channel: "text", text: "生成假设", message_id: "msg-1" },
       });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 3,
+          source: "agent",
+          channel: "tool_call",
+          text: '{"path":"train.csv"}',
+          message_id: "tool-call-1",
+          tool: "inspect_dataset",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 4,
+          source: "tool",
+          channel: "stdout",
+          text: "rows=891",
+          message_id: "tool-output-1",
+          tool: "inspect_dataset",
+        },
+      });
+      eventHandlers[0]?.({
+        kind: "output",
+        data: {
+          seq: 5,
+          source: "tool",
+          channel: "stderr",
+          text: "validation failed",
+          message_id: "tool-error-1",
+          tool: "inspect_dataset",
+        },
+      });
     });
 
-    expect(result.current.viewModel.messages).toHaveLength(1);
-    expect(result.current.viewModel.messages[0].content).toBe("正在生成假设");
+    expect(result.current.viewModel.messages).toHaveLength(6);
+    expect(result.current.viewModel.messages[2]).toMatchObject({
+      id: "msg-1",
+      content: "正在生成假设",
+      source: "agent",
+    });
+    expect(result.current.viewModel.messages[3]).toMatchObject({
+      id: "tool-call-1",
+      content: '{"path":"train.csv"}',
+      source: "agent",
+      tool: "inspect_dataset",
+    });
+    expect(result.current.viewModel.messages[4]).toMatchObject({
+      id: "tool-output-1",
+      content: "rows=891",
+      source: "tool",
+      tool: "inspect_dataset",
+      channel: "stdout",
+    });
+    expect(result.current.viewModel.messages[5]).toMatchObject({
+      id: "tool-error-1",
+      content: "validation failed",
+      source: "tool",
+      tool: "inspect_dataset",
+      channel: "stderr",
+    });
   });
 
   it("keeps the run controls live for a session restored as paused in PREPARE", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       eventHandlers[0]?.({
@@ -342,7 +412,7 @@ describe("usePipeline event mapping", () => {
   });
 
   it("leaves the run controls dead for a brand-new idle session", async () => {
-    const { result } = renderHook(() => usePipeline());
+    const { result } = await renderHydratedPipeline();
 
     await act(async () => {
       eventHandlers[0]?.({
