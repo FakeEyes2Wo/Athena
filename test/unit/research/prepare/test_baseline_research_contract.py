@@ -132,6 +132,32 @@ def verification_for(root: Path, **changes: object) -> BaselineVerification:
     return BaselineVerification.model_validate(values)
 
 
+def openalex_verification_for(root: Path, **changes: object) -> BaselineVerification:
+    artifacts = load_baseline_artifacts(root)
+    base = verification_for(root)
+    values: dict[str, object] = {
+        "route": "openalex",
+        "repository_url": None,
+        "commit": None,
+        "paper_locator": artifacts.selected.paper_locator,
+        "openalex_id": "W123",
+        "title": artifacts.selected.title,
+        "publication_year": 2016,
+        "cited_by_count": 100,
+        "attempts": [
+            base.attempts[0].model_copy(
+                update={
+                    "route": "openalex",
+                    "success": True,
+                    "diagnostic": "authority threshold verified",
+                }
+            )
+        ],
+    }
+    values.update(changes)
+    return base.model_copy(update=values)
+
+
 def test_loads_matching_research_and_design(tmp_path: Path) -> None:
     write_artifacts(tmp_path)
     artifacts = load_baseline_artifacts(tmp_path)
@@ -649,6 +675,67 @@ def test_rejects_safe_repository_proof_for_a_non_selected_candidate(
 
     with pytest.raises(BaselineResearchError, match="selected repository"):
         baseline_contract.assert_verification_matches_artifacts(artifacts, verification)
+
+
+def test_rejects_arbitrary_high_citation_openalex_proof(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    artifacts = load_baseline_artifacts(tmp_path)
+    verification = openalex_verification_for(
+        tmp_path,
+        paper_locator="doi:10.0000/unrelated",
+        openalex_id="W999999",
+        title="An unrelated highly cited work",
+        cited_by_count=1_000_000,
+    )
+
+    with pytest.raises(BaselineResearchError):
+        baseline_contract.assert_verification_matches_artifacts(artifacts, verification)
+
+
+def test_rejects_openalex_proof_for_a_different_paper_locator(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    artifacts = load_baseline_artifacts(tmp_path)
+    verification = openalex_verification_for(
+        tmp_path, paper_locator="doi:10.0000/other"
+    )
+
+    with pytest.raises(BaselineResearchError, match="paper locator"):
+        baseline_contract.assert_verification_matches_artifacts(artifacts, verification)
+
+
+def test_rejects_openalex_proof_with_a_mismatched_title(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    artifacts = load_baseline_artifacts(tmp_path)
+    verification = openalex_verification_for(
+        tmp_path, title="An unrelated paper about another subject entirely"
+    )
+
+    with pytest.raises(BaselineResearchError, match="title"):
+        baseline_contract.assert_verification_matches_artifacts(artifacts, verification)
+
+
+@pytest.mark.parametrize(
+    "openalex_id", ["", "W0", "W01", "w123", "https://openalex.org/W123"]
+)
+def test_rejects_noncanonical_openalex_work_id(
+    tmp_path: Path, openalex_id: str
+) -> None:
+    write_artifacts(tmp_path)
+    values = openalex_verification_for(tmp_path).model_dump()
+    values["openalex_id"] = openalex_id
+
+    with pytest.raises(ValidationError):
+        BaselineVerification.model_validate(values)
+
+
+def test_git_proof_rejects_a_paper_locator(tmp_path: Path) -> None:
+    write_artifacts(tmp_path)
+    verification = verification_for(tmp_path).model_copy(
+        update={"paper_locator": "doi:10.1109/CVPR.2016.90"}
+    )
+
+    with pytest.raises(ValidationError):
+        BaselineVerification.model_validate(verification.model_dump())
 
 
 def test_verification_serialization_is_canonical_and_newline_terminated(

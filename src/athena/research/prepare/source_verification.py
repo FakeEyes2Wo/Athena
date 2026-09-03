@@ -5,12 +5,12 @@ import os
 import re
 import subprocess
 import tempfile
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol, Sequence
+
+from pydantic import ValidationError
 
 from athena.research.literature.paper_source.http import (
     HostRateLimiter,
@@ -30,6 +30,7 @@ from .baseline_research import (
     assert_verification_matches_artifacts,
     design_sha256,
     research_sha256,
+    titles_match,
 )
 from .repository_url import normalize_public_https_repository_url
 
@@ -293,36 +294,9 @@ class GitCloneVerifier:
         )
 
 
-def titles_match(reported: str, resolved: str) -> bool:
-    """Compare titles after deterministic Unicode and punctuation normalization."""
-
-    normalized_reported = _normalize_title(reported)
-    normalized_resolved = _normalize_title(resolved)
-    if normalized_reported == normalized_resolved:
-        return True
-    if min(len(normalized_reported), len(normalized_resolved)) < 20:
-        return False
-    return (
-        SequenceMatcher(None, normalized_reported, normalized_resolved).ratio() >= 0.90
-    )
-
-
-def _normalize_title(value: str) -> str:
-    """Join Unicode-normalized alphanumeric title tokens."""
-
-    return "".join(
-        character
-        for character in unicodedata.normalize("NFKC", value).casefold()
-        if character.isalnum()
-    )
-
-
 def _has_substantive_openalex_proof(work: OpenAlexWork) -> bool:
     """Require meaningful work and title identities before recording authority proof."""
-
-    return bool(_normalize_title(work.openalex_id)) and bool(
-        _normalize_title(work.title)
-    )
+    return bool(work.openalex_id.strip()) and titles_match(work.title, work.title)
 
 
 def joined_diagnostic(error: BaselineResearchError) -> str:
@@ -432,28 +406,39 @@ class BaselineSourceVerifier:
                         )
                     )
                 else:
-                    verification = BaselineVerification(
-                        schema_version=2,
-                        research_sha256=research_sha256(artifacts.raw_research),
-                        design_sha256=design_sha256(artifacts.raw_design),
-                        selected_candidate_id=selected.candidate_id,
-                        route="openalex",
-                        verified_at=self.now(),
-                        openalex_id=work.openalex_id,
-                        title=work.title,
-                        publication_year=work.publication_year,
-                        cited_by_count=work.cited_by_count,
-                        attempts=[
-                            *attempts,
+                    try:
+                        verification = BaselineVerification(
+                            schema_version=2,
+                            research_sha256=research_sha256(artifacts.raw_research),
+                            design_sha256=design_sha256(artifacts.raw_design),
+                            selected_candidate_id=selected.candidate_id,
+                            route="openalex",
+                            verified_at=self.now(),
+                            paper_locator=selected.paper_locator,
+                            openalex_id=work.openalex_id,
+                            title=work.title,
+                            publication_year=work.publication_year,
+                            cited_by_count=work.cited_by_count,
+                            attempts=[
+                                *attempts,
+                                VerificationAttempt(
+                                    route="openalex",
+                                    success=True,
+                                    diagnostic="authority threshold verified",
+                                ),
+                            ],
+                        )
+                    except ValidationError:
+                        attempts.append(
                             VerificationAttempt(
                                 route="openalex",
-                                success=True,
-                                diagnostic="authority threshold verified",
-                            ),
-                        ],
-                    )
-                    assert_verification_matches_artifacts(artifacts, verification)
-                    return verification
+                                success=False,
+                                diagnostic="OpenAlex returned incomplete work identity",
+                            )
+                        )
+                    else:
+                        assert_verification_matches_artifacts(artifacts, verification)
+                        return verification
 
         raise BaselineResearchError(
             "selected candidate has no qualifying source",

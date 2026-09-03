@@ -2,8 +2,10 @@
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Literal, Sequence
 from urllib.parse import urlsplit
@@ -535,7 +537,8 @@ class BaselineVerification(BaseModel):
     verified_at: datetime
     repository_url: str | None = None
     commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{40,64}$")
-    openalex_id: str | None = None
+    paper_locator: str | None = None
+    openalex_id: str | None = Field(default=None, pattern=r"^W[1-9][0-9]*$")
     title: str | None = None
     publication_year: int | None = None
     cited_by_count: int | None = Field(default=None, ge=0)
@@ -550,6 +553,8 @@ class BaselineVerification(BaseModel):
             raise ValueError("verification needs a successful attempt for its route")
 
         if self.route == "git":
+            if self.paper_locator is not None:
+                raise ValueError("Git verification must not contain a paper locator")
             if self.repository_url is None:
                 raise ValueError(
                     "git verification requires a normalized public HTTPS repository URL"
@@ -569,7 +574,9 @@ class BaselineVerification(BaseModel):
             if self.commit is None:
                 raise ValueError("git verification requires a resolved commit")
         else:
-            if not self.openalex_id or not self.openalex_id.strip():
+            if not self.paper_locator or not self.paper_locator.strip():
+                raise ValueError("OpenAlex verification requires a paper locator")
+            if self.openalex_id is None:
                 raise ValueError("OpenAlex verification requires a work ID")
             if not self.title or not self.title.strip():
                 raise ValueError("OpenAlex verification requires a title")
@@ -679,6 +686,30 @@ def design_sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def titles_match(reported: str, resolved: str) -> bool:
+    """Compare titles after deterministic Unicode and punctuation normalization."""
+    normalized_reported = _normalize_title(reported)
+    normalized_resolved = _normalize_title(resolved)
+    if not normalized_reported or not normalized_resolved:
+        return False
+    if normalized_reported == normalized_resolved:
+        return True
+    if min(len(normalized_reported), len(normalized_resolved)) < 20:
+        return False
+    return (
+        SequenceMatcher(None, normalized_reported, normalized_resolved).ratio() >= 0.90
+    )
+
+
+def _normalize_title(value: str) -> str:
+    """Join Unicode-normalized alphanumeric title tokens."""
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value).casefold()
+        if character.isalnum()
+    )
+
+
 def verification_bytes(verification: BaselineVerification) -> bytes:
     """Serialize one verification record to its canonical audit representation."""
     return (verification.model_dump_json(indent=2) + "\n").encode("utf-8")
@@ -729,10 +760,17 @@ def assert_verification_matches_artifacts(
             raise BaselineResearchError(
                 "Git verification proof does not match the selected repository"
             )
-    elif not artifacts.selected.paper_locator:
-        raise BaselineResearchError(
-            "OpenAlex verification requires the selected paper locator"
-        )
+    else:
+        if verification.paper_locator != artifacts.selected.paper_locator:
+            raise BaselineResearchError(
+                "OpenAlex verification proof does not match the selected paper locator"
+            )
+        if verification.title is None or not titles_match(
+            artifacts.selected.title, verification.title
+        ):
+            raise BaselineResearchError(
+                "OpenAlex verification title does not match the selected source"
+            )
 
 
 def write_verification(root: Path, verification: BaselineVerification) -> Path:
@@ -796,6 +834,7 @@ __all__ = [
     "load_baseline_artifacts",
     "load_cached_verified_baseline",
     "research_sha256",
+    "titles_match",
     "validate_training_policy",
     "verification_bytes",
     "write_verification",

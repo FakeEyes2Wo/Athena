@@ -222,6 +222,7 @@ async def test_openalex_threshold_is_inclusive(
     if passes:
         result = await verifier.verify(valid_artifacts)
         assert result.route == "openalex"
+        assert result.paper_locator == "doi:10.1109/CVPR.2016.90"
         assert result.openalex_id == "W123"
         assert result.title == valid_artifacts.selected.title
         assert result.publication_year == 2016
@@ -320,6 +321,12 @@ async def test_openalex_outage_redacts_and_bounds_the_complete_diagnostic(
         OpenAlexWork(
             openalex_id="W123",
             title=" -- !!! ",
+            publication_year=2016,
+            cited_by_count=100,
+        ),
+        OpenAlexWork(
+            openalex_id="W0",
+            title="Deep Residual Learning for Image Recognition",
             publication_year=2016,
             cited_by_count=100,
         ),
