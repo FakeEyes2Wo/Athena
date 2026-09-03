@@ -7,6 +7,7 @@ import pytest
 
 from athena.core.agent.provider import StreamEvent
 from athena.research.runtime import ResearchRuntime
+from athena.research.supervisor.events import OutputEvent
 from athena_tui.controller import TuiController
 
 
@@ -81,6 +82,71 @@ async def test_runtime_message_publishes_final_supervisor_answer(tmp_path) -> No
         if kind == "output"
     ] == [("supervisor", "text", "ack")]
     await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tui_continue_restarts_failed_prepare_without_clarification(
+    tmp_path,
+) -> None:
+    attempts = 0
+    restarted = asyncio.Event()
+
+    async def prepare() -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("first PREPARE failed")
+        restarted.set()
+        await asyncio.Event().wait()
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        prepare_phase=prepare,
+        task_confirmation_gate=False,
+        auto_confirm=True,
+    )
+    emitted: list[object] = []
+    controller = TuiController(runtime, emit=emitted.append)
+    try:
+        await runtime.start_task("predict churn")
+        failed_task = runtime.session.lifecycle.task
+        assert failed_task is not None
+        with pytest.raises(RuntimeError, match="first PREPARE failed"):
+            await failed_task
+
+        before = {
+            "task_text": runtime.state.task_text,
+            "understanding": dict(runtime.state.task_understanding or {}),
+            "draft": runtime.clarification_path.read_bytes(),
+            "handoff": runtime.handoffs_path.joinpath(
+                "TASK_CLARIFICATION.md"
+            ).read_bytes(),
+        }
+
+        class ExplodingClarification:
+            async def start_or_resume(self, _task: str) -> object:
+                raise AssertionError("continue must not enter clarification")
+
+        runtime.services.workflow.clarification = ExplodingClarification()
+        assert await controller.send_message(" Continue ") == "RUNNING"
+        await asyncio.wait_for(restarted.wait(), timeout=1)
+
+        assert attempts == 2
+        assert runtime.session.lifecycle.task is not failed_task
+        assert runtime.state.task_text == before["task_text"]
+        assert runtime.state.task_understanding == before["understanding"]
+        assert runtime.clarification_path.read_bytes() == before["draft"]
+        assert (
+            runtime.handoffs_path.joinpath("TASK_CLARIFICATION.md").read_bytes()
+            == before["handoff"]
+        )
+        assert all(
+            "Task understanding" not in event.text
+            for event in emitted
+            if isinstance(event, OutputEvent)
+        )
+    finally:
+        await controller.aclose()
 
 
 @pytest.mark.asyncio

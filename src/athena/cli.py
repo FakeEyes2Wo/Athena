@@ -400,8 +400,9 @@ async def _cmd_status(args: argparse.Namespace) -> int:
 
 async def _cmd_control(args: argparse.Namespace) -> int:
     runtime = _runtime(args.project)
+    command = "resume" if args.command == "continue" else args.command
     try:
-        status = await runtime.message(f"/{args.command}")
+        status = await runtime.message(f"/{command}")
         print(f"status={status}")
         return 0
     finally:
@@ -682,7 +683,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_survey_parser(subparsers)
     _add_bench_parser(subparsers)
     _add_kaggle_parser(subparsers)
-    for name in ("status", "pause", "resume", "stop"):
+    for name in ("status", "pause", "resume", "continue", "stop"):
         subparsers.add_parser(name).add_argument(
             "--project", required=True, help="project root"
         )

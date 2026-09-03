@@ -360,6 +360,7 @@ def test_bottom_pane_renders_composer_help_overlay_and_confirmation() -> None:
     assert "输入" in help_output
     assert "导航" in help_output
     assert "控制" in help_output
+    assert "continue" in help_output
     assert close_overlay(help_state).composer == "keep"
 
     confirmation = open_confirmation(TuiState(), "停止当前研究执行？")
