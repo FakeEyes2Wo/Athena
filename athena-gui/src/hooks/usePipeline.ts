@@ -540,8 +540,7 @@ export function usePipeline(
       const promise = new Promise<boolean>((resolve) => {
         settle = resolve;
       });
-      let transition!: SessionTransition;
-      transition = {
+      const transition: SessionTransition = {
         epoch,
         targetSessionId,
         promise,
@@ -555,9 +554,7 @@ export function usePipeline(
         },
       };
       sessionTransitionRef.current = transition;
-      return {
-        transition,
-      };
+      return transition;
     },
     [advanceSessionEpoch],
   );
@@ -923,7 +920,7 @@ export function usePipeline(
   useEffect(() => {
     let mounted = true;
     let unlisteners: Array<() => void> = [];
-    const transition = beginSessionTransition().transition;
+    const transition = beginSessionTransition();
     const hydrationEpoch = transition.epoch;
     const applyHydrationSnapshot = () => {
       const resumeGeneration = resumeGenerationRef.current;
@@ -1568,7 +1565,7 @@ export function usePipeline(
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
     const previous = captureSessionView();
-    const transition = beginSessionTransition(id).transition;
+    const transition = beginSessionTransition(id);
     const requestEpoch = transition.epoch;
     let switchStarted = false;
     let switchSucceeded = false;
