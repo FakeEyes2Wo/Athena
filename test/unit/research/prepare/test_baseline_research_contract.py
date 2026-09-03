@@ -20,20 +20,38 @@ from athena.research.prepare.baseline_research import (
 
 def valid_payload() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "dataset": {
             "modality": "image",
             "task_type": "classification",
-            "labeled_samples": 480,
-            "effective_training_units": 120,
-            "group_count": 120,
-            "class_count": 5,
-            "minority_class_samples": 32,
-            "input_scale": "paired 224x224 images",
+            "input_scale": "224x224 RGB",
             "regime": "small",
-            "recommended_strategy": "partial_finetune",
-            "evidence": ["eda:EDA_REPORT_LABELS.md: 480 labels across 120 groups"],
-            "rationale": "Grouped labels are limited relative to pretrained vision capacity.",
+            "facts": [
+                {
+                    "field": "labeled_samples",
+                    "value": 480,
+                    "evidence": {
+                        "kind": "eda",
+                        "reference": "EDA_HANDOFF.md#dataset-size",
+                        "claim": "480 labeled training images",
+                    },
+                }
+            ],
+            "rationale": "Few labels relative to image dimensionality.",
+        },
+        "training": {
+            "strategy": "partial_finetune",
+            "pretrained": {
+                "status": "available",
+                "representation": "ImageNet encoder",
+                "evidence": {
+                    "kind": "source",
+                    "reference": "https://example.org/paper",
+                    "claim": "The selected method provides pretrained weights.",
+                },
+            },
+            "safeguards": None,
+            "scratch_scale": None,
         },
         "candidates": [
             {
@@ -74,7 +92,10 @@ def valid_payload() -> dict:
             },
         ],
         "selected_candidate_id": "resnet-transfer",
-        "search_queries": ["small image classification transfer baseline GitHub"],
+        "search": {
+            "queries": ["query one", "query two"],
+            "one_candidate": None,
+        },
         "limitations": [],
     }
 
@@ -113,102 +134,247 @@ def test_loads_matching_research_and_design(tmp_path: Path) -> None:
     artifacts = load_baseline_artifacts(tmp_path)
     assert artifacts.selected.candidate_id == "resnet-transfer"
     assert artifacts.design.training_strategy == "partial_finetune"
+    assert artifacts.research.training.strategy == "partial_finetune"
 
 
 @pytest.mark.parametrize(
-    ("regime", "strategy"),
-    [("unknown", "train_from_scratch"), ("tiny", "train_from_scratch")],
+    "field",
+    [
+        "labeled_samples",
+        "effective_training_units",
+        "group_count",
+        "class_count",
+        "minority_class_samples",
+    ],
 )
-def test_rejects_unsafe_scratch_policy(regime: str, strategy: str) -> None:
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing_value",
+        "missing_evidence",
+        "blank_reference",
+        "blank_claim",
+        "negative_value",
+        "source_evidence",
+    ],
+)
+def test_each_numeric_fact_requires_bound_local_evidence(
+    field: str, defect: str
+) -> None:
+    payload = valid_payload()
+    fact = payload["dataset"]["facts"][0]
+    fact["field"] = field
+    fact["value"] = 5
+    fact["evidence"]["claim"] = "The measured value is 5."
+    if defect == "missing_value":
+        del fact["value"]
+    elif defect == "missing_evidence":
+        del fact["evidence"]
+    elif defect == "blank_reference":
+        fact["evidence"]["reference"] = "   "
+    elif defect == "blank_claim":
+        fact["evidence"]["claim"] = "   "
+    elif defect == "negative_value":
+        fact["value"] = -5
+        fact["evidence"]["claim"] = "The measured value is -5."
+    else:
+        fact["evidence"]["kind"] = "source"
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "labeled_samples",
+        "effective_training_units",
+        "group_count",
+        "class_count",
+        "minority_class_samples",
+    ],
+)
+def test_rejects_duplicate_numeric_fact_names(field: str) -> None:
+    payload = valid_payload()
+    fact = payload["dataset"]["facts"][0]
+    fact["field"] = field
+    payload["dataset"]["facts"].append(dict(fact))
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+def test_rejects_numeric_fact_evidence_for_a_different_value() -> None:
+    payload = valid_payload()
+    payload["dataset"]["facts"][0]["value"] = 481
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+def scratch_scale() -> dict:
+    return {
+        "selected_candidate_id": "resnet-transfer",
+        "source_locator": "https://arxiv.org/abs/1512.03385",
+        "local_fact": "labeled_samples",
+        "local_value": 480,
+        "source_value": 400,
+        "unit": "labeled images",
+        "relationship": "comparable",
+        "rationale": "The local and cited experiments use comparable labeled scale.",
+    }
+
+
+def safeguards() -> dict:
+    return {
+        "augmentation": {
+            "kind": "source",
+            "reference": "https://example.org/augmentation",
+            "claim": "Random crops mitigate overfitting.",
+        },
+        "regularization": {
+            "kind": "source",
+            "reference": "https://example.org/regularization",
+            "claim": "Weight decay is used during fine-tuning.",
+        },
+        "validation": {
+            "kind": "eda",
+            "reference": "EDA_HANDOFF.md#split",
+            "claim": "The grouped validation split prevents leakage.",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("modality", "regime", "strategy", "pretrained_status", "with_safeguards"),
+    [
+        ("image", "tiny", "frozen_pretrained", "available", False),
+        ("text", "small", "partial_finetune", "available", False),
+        ("audio", "small", "full_finetune", "available", True),
+        ("video", "adequate", "full_finetune", "available", True),
+        ("multimodal", "unknown", "frozen_pretrained", "available", False),
+        ("image", "unknown", "classical", "unavailable", False),
+        ("tabular", "small", "classical", None, False),
+        ("tabular", "small", "partial_finetune", "available", False),
+    ],
+)
+def test_accepts_deterministic_training_policy_matrix(
+    modality: str,
+    regime: str,
+    strategy: str,
+    pretrained_status: str | None,
+    with_safeguards: bool,
+) -> None:
+    payload = valid_payload()
+    payload["dataset"].update(modality=modality, regime=regime)
+    payload["training"]["strategy"] = strategy
+    if pretrained_status is None:
+        payload["training"]["pretrained"] = None
+    else:
+        payload["training"]["pretrained"]["status"] = pretrained_status
+        if pretrained_status != "available":
+            payload["training"]["pretrained"]["representation"] = None
+    if with_safeguards:
+        payload["training"]["safeguards"] = safeguards()
+
+    assert BaselineResearch.model_validate(payload).training.strategy == strategy
+
+
+@pytest.mark.parametrize(
+    ("regime", "strategy", "pretrained_status", "with_safeguards"),
+    [
+        ("tiny", "partial_finetune", "available", False),
+        ("tiny", "full_finetune", "available", True),
+        ("small", "train_from_scratch", "available", False),
+        ("small", "full_finetune", "available", False),
+        ("unknown", "partial_finetune", "available", False),
+        ("unknown", "full_finetune", "available", True),
+        ("unknown", "train_from_scratch", "available", False),
+        ("small", "frozen_pretrained", "unavailable", False),
+        ("adequate", "partial_finetune", "unknown", False),
+    ],
+)
+def test_rejects_deterministic_training_policy_matrix(
+    regime: str,
+    strategy: str,
+    pretrained_status: str,
+    with_safeguards: bool,
+) -> None:
     payload = valid_payload()
     payload["dataset"]["regime"] = regime
-    payload["dataset"]["recommended_strategy"] = strategy
+    payload["training"]["strategy"] = strategy
+    payload["training"]["pretrained"]["status"] = pretrained_status
+    if pretrained_status != "available":
+        payload["training"]["pretrained"]["representation"] = None
+    if with_safeguards:
+        payload["training"]["safeguards"] = safeguards()
+
     with pytest.raises(ValidationError):
         BaselineResearch.model_validate(payload)
 
 
-def test_accepts_scratch_only_with_local_and_comparable_source_evidence() -> None:
+def test_full_finetune_requires_all_three_safeguards() -> None:
     payload = valid_payload()
-    payload["dataset"].update(
-        {
-            "regime": "adequate",
-            "recommended_strategy": "train_from_scratch",
-            "evidence": [
-                "calculation: effective units exceed source scale",
-                "source:resnet-transfer: comparable image classification scale",
-            ],
-        }
-    )
-    assert BaselineResearch.model_validate(payload).dataset.regime == "adequate"
+    payload["training"]["strategy"] = "full_finetune"
+    payload["training"]["safeguards"] = safeguards()
+    del payload["training"]["safeguards"]["regularization"]
 
-    payload["dataset"]["evidence"] = ["eda: local data inspection"]
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+@pytest.mark.parametrize("field", ["pretrained", "safeguards", "scratch_scale"])
+def test_rejects_missing_or_unused_training_evidence(field: str) -> None:
+    payload = valid_payload()
+    if field == "pretrained":
+        payload["training"]["pretrained"] = None
+    elif field == "safeguards":
+        payload["training"]["safeguards"] = safeguards()
+    else:
+        payload["training"]["scratch_scale"] = scratch_scale()
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+def test_accepts_scratch_only_with_selected_source_scale_comparison() -> None:
+    payload = valid_payload()
+    payload["dataset"]["regime"] = "adequate"
+    payload["training"]["strategy"] = "train_from_scratch"
+    payload["training"]["scratch_scale"] = scratch_scale()
+
+    research = BaselineResearch.model_validate(payload)
+
+    assert research.training.scratch_scale.local_value == 480
+
+
+def test_rejects_adequate_scratch_without_scale_comparison() -> None:
+    payload = valid_payload()
+    payload["dataset"]["regime"] = "adequate"
+    payload["training"]["strategy"] = "train_from_scratch"
+
     with pytest.raises(ValidationError):
         BaselineResearch.model_validate(payload)
 
 
 @pytest.mark.parametrize(
-    "evidence",
+    ("field", "value"),
     [
-        ["eda:", "source:resnet-transfer: comparable scale"],
-        ["calculation:   ", "source:resnet-transfer: comparable scale"],
-        ["eda: substantive local data", "source:resnet-transfer:"],
-        ["eda: substantive local data", "source:resnet-transfer:   "],
+        ("selected_candidate_id", "linear-probe"),
+        ("source_locator", "https://example.org/unselected-source"),
+        ("local_fact", "group_count"),
+        ("local_value", 481),
     ],
 )
-def test_rejects_non_substantive_scratch_evidence(evidence: list[str]) -> None:
+def test_rejects_scratch_scale_mismatch(field: str, value: object) -> None:
     payload = valid_payload()
-    payload["dataset"].update(
-        {
-            "regime": "adequate",
-            "recommended_strategy": "train_from_scratch",
-            "evidence": evidence,
-        }
-    )
+    payload["dataset"]["regime"] = "adequate"
+    payload["training"]["strategy"] = "train_from_scratch"
+    payload["training"]["scratch_scale"] = scratch_scale()
+    payload["training"]["scratch_scale"][field] = value
+
     with pytest.raises(ValidationError):
         BaselineResearch.model_validate(payload)
-
-
-def test_accepts_classical_strategy_for_small_tabular_data() -> None:
-    payload = valid_payload()
-    payload["dataset"].update(
-        {
-            "modality": "tabular",
-            "regime": "small",
-            "recommended_strategy": "classical",
-            "input_scale": "120 grouped rows",
-        }
-    )
-    assert (
-        BaselineResearch.model_validate(payload).dataset.recommended_strategy
-        == "classical"
-    )
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda p: p["dataset"].update(evidence=["eda: labels", "   "]),
-        lambda p: p.update(search_queries=["", "another query"]),
-        lambda p: p.update(
-            candidates=p["candidates"][:1],
-            decisions=p["decisions"][:1],
-            search_queries=["Query", " query "],
-            limitations=["only one applicable source found"],
-        ),
-        lambda p: p["dataset"].update(evidence=["web: unsupported numeric claim"]),
-    ],
-)
-def test_rejects_blank_or_untraceable_research_provenance(mutate) -> None:
-    payload = valid_payload()
-    mutate(payload)
-    with pytest.raises(ValidationError):
-        BaselineResearch.model_validate(payload)
-
-
-def test_numeric_facts_accept_data_contract_provenance() -> None:
-    payload = valid_payload()
-    payload["dataset"]["evidence"] = ["data_contract: labeled_samples=480, groups=120"]
-    assert BaselineResearch.model_validate(payload).dataset.labeled_samples == 480
 
 
 @pytest.mark.parametrize(
@@ -235,9 +401,56 @@ def test_one_candidate_requires_two_queries_and_limitation() -> None:
     with pytest.raises(ValidationError):
         BaselineResearch.model_validate(payload)
 
-    payload["search_queries"] = ["one", "two"]
-    payload["limitations"] = ["only one applicable source found"]
+    payload["search"]["one_candidate"] = {
+        "query_indices": [0, 1],
+        "scope": "Official repositories and primary papers.",
+        "limitation": "Only one relevant implementation was found.",
+    }
     assert len(BaselineResearch.model_validate(payload).candidates) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope", "   "),
+        ("limitation", "   "),
+        ("query_indices", [0, 0]),
+        ("query_indices", [0, 2]),
+    ],
+)
+def test_rejects_invalid_one_candidate_exception(field: str, value: object) -> None:
+    payload = valid_payload()
+    payload["candidates"] = payload["candidates"][:1]
+    payload["decisions"] = payload["decisions"][:1]
+    payload["search"]["one_candidate"] = {
+        "query_indices": [0, 1],
+        "scope": "Official repositories and primary papers.",
+        "limitation": "Only one relevant implementation was found.",
+    }
+    payload["search"]["one_candidate"][field] = value
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+def test_rejects_redundant_one_candidate_exception() -> None:
+    payload = valid_payload()
+    payload["search"]["one_candidate"] = {
+        "query_indices": [0, 1],
+        "scope": "Official repositories and primary papers.",
+        "limitation": "Only one relevant implementation was found.",
+    }
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
+
+
+def test_rejects_blank_or_duplicate_search_queries() -> None:
+    payload = valid_payload()
+    payload["search"]["queries"] = ["Query", " query "]
+
+    with pytest.raises(ValidationError):
+        BaselineResearch.model_validate(payload)
 
 
 @pytest.mark.parametrize(

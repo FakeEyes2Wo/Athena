@@ -38,9 +38,12 @@ _STRATEGY_RE = re.compile(
 )
 
 
-def _has_substantive_suffix(value: str, prefix: str) -> bool:
-    """Return whether a prefixed provenance entry contains useful content."""
-    return value.startswith(prefix) and bool(value[len(prefix) :].strip())
+def _substantive(value: str) -> str:
+    """Normalize one free-text contract value and reject whitespace-only input."""
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("value must contain substantive text")
+    return normalized
 
 
 class BaselineResearchError(RuntimeError):
@@ -51,66 +54,206 @@ class BaselineResearchError(RuntimeError):
         self.diagnostics = tuple(diagnostics)
 
 
-class DatasetAssessment(BaseModel):
-    """Assess local data scale and select an allowed training strategy."""
+Modality = Literal[
+    "tabular",
+    "image",
+    "text",
+    "audio",
+    "video",
+    "time_series",
+    "multimodal",
+    "other",
+]
+DataRegime = Literal["tiny", "small", "adequate", "unknown"]
+DatasetFactName = Literal[
+    "labeled_samples",
+    "effective_training_units",
+    "group_count",
+    "class_count",
+    "minority_class_samples",
+]
+
+
+class EvidenceRef(BaseModel):
+    """One typed, traceable statement supporting a research claim."""
 
     model_config = ConfigDict(extra="forbid")
 
-    modality: Literal[
-        "tabular",
-        "image",
-        "text",
-        "audio",
-        "video",
-        "time_series",
-        "multimodal",
-        "other",
-    ]
-    task_type: str = Field(min_length=1)
-    labeled_samples: int | None = Field(default=None, ge=0)
-    effective_training_units: int | None = Field(default=None, ge=0)
-    group_count: int | None = Field(default=None, ge=0)
-    class_count: int | None = Field(default=None, ge=1)
-    minority_class_samples: int | None = Field(default=None, ge=0)
-    input_scale: str = Field(min_length=1)
-    regime: Literal["tiny", "small", "adequate", "unknown"]
-    recommended_strategy: TrainingStrategy
-    evidence: list[str] = Field(min_length=1)
-    rationale: str = Field(min_length=1)
+    kind: Literal["eda", "data_contract", "calculation", "source"]
+    reference: str
+    claim: str
+
+    @field_validator("reference", "claim")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        return _substantive(value)
+
+
+class DatasetFact(BaseModel):
+    """One nonnegative local-data fact with evidence bound to its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: DatasetFactName
+    value: int = Field(ge=0)
+    evidence: EvidenceRef
 
     @model_validator(mode="after")
-    def reject_unsafe_scratch(self) -> "DatasetAssessment":
-        """Require an adequate regime before allowing scratch training."""
-        if (
-            self.recommended_strategy == "train_from_scratch"
-            and self.regime != "adequate"
-        ):
-            raise ValueError("train_from_scratch requires an adequate data regime")
-        numeric_facts = (
-            self.labeled_samples,
-            self.effective_training_units,
-            self.group_count,
-            self.class_count,
-            self.minority_class_samples,
-        )
-        provenance_prefixes = ("eda:", "data_contract:", "calculation:")
-        if any(value is not None for value in numeric_facts) and not any(
-            _has_substantive_suffix(item, prefix)
-            for item in self.evidence
-            for prefix in provenance_prefixes
-        ):
+    def bind_local_evidence(self) -> "DatasetFact":
+        if self.evidence.kind == "source":
+            raise ValueError("dataset facts require local evidence")
+        evidence_text = f"{self.evidence.reference} {self.evidence.claim}"
+        if re.search(rf"(?<!\d){self.value}(?!\d)", evidence_text) is None:
+            raise ValueError("dataset fact evidence must name its supplied value")
+        return self
+
+
+class DatasetProfile(BaseModel):
+    """Compact modality and data-regime assessment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    modality: Modality
+    task_type: str
+    input_scale: str
+    regime: DataRegime
+    facts: list[DatasetFact]
+    rationale: str
+
+    @field_validator("task_type", "input_scale", "rationale")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        return _substantive(value)
+
+    @model_validator(mode="after")
+    def reject_duplicate_facts(self) -> "DatasetProfile":
+        names = [fact.field for fact in self.facts]
+        if len(names) != len(set(names)):
+            raise ValueError("dataset fact names must be unique")
+        return self
+
+
+class PretrainedAssessment(BaseModel):
+    """Availability assessment for a relevant pretrained representation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["available", "unavailable", "unknown"]
+    representation: str | None
+    evidence: EvidenceRef
+
+    @field_validator("representation")
+    @classmethod
+    def normalize_representation(cls, value: str | None) -> str | None:
+        return None if value is None else _substantive(value)
+
+    @model_validator(mode="after")
+    def bind_representation_to_status(self) -> "PretrainedAssessment":
+        if self.status == "available" and self.representation is None:
+            raise ValueError("available pretrained weights require a representation")
+        if self.status != "available" and self.representation is not None:
             raise ValueError(
-                "numeric dataset facts require EDA, data-contract, or calculation evidence"
+                "unavailable pretrained weights cannot name a representation"
             )
         return self
 
-    @field_validator("evidence")
+
+class FineTuneSafeguards(BaseModel):
+    """The three evidence-bearing controls required for full fine-tuning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    augmentation: EvidenceRef
+    regularization: EvidenceRef
+    validation: EvidenceRef
+
+
+class ScratchScaleComparison(BaseModel):
+    """Comparable-scale proof connecting local data to the selected source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    selected_candidate_id: str
+    source_locator: str
+    local_fact: DatasetFactName
+    local_value: int = Field(ge=0)
+    source_value: int = Field(ge=0)
+    unit: str
+    relationship: Literal["comparable", "local_at_least_source"]
+    rationale: str
+
+    @field_validator("selected_candidate_id", "source_locator", "unit", "rationale")
     @classmethod
-    def reject_blank_evidence(cls, value: list[str]) -> list[str]:
-        """Require every dataset evidence entry to contain substantive text."""
-        if any(not item.strip() for item in value):
-            raise ValueError("evidence entries must not be blank")
+    def normalize_text(cls, value: str) -> str:
+        return _substantive(value)
+
+    @model_validator(mode="after")
+    def validate_relationship(self) -> "ScratchScaleComparison":
+        if (
+            self.relationship == "local_at_least_source"
+            and self.local_value < self.source_value
+        ):
+            raise ValueError("local scale must be at least the cited source scale")
+        return self
+
+
+class TrainingPolicy(BaseModel):
+    """Strategy and only the evidence structures relevant to that strategy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: TrainingStrategy
+    pretrained: PretrainedAssessment | None
+    safeguards: FineTuneSafeguards | None
+    scratch_scale: ScratchScaleComparison | None
+
+
+class OneCandidateException(BaseModel):
+    """Search evidence explaining why only one candidate was retained."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query_indices: list[int] = Field(min_length=2)
+    scope: str
+    limitation: str
+
+    @field_validator("scope", "limitation")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        return _substantive(value)
+
+    @field_validator("query_indices")
+    @classmethod
+    def reject_duplicate_indices(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)):
+            raise ValueError("one-candidate query indices must be unique")
         return value
+
+
+class SearchRecord(BaseModel):
+    """Normalized search queries and the optional one-candidate exception."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    queries: list[str] = Field(min_length=2)
+    one_candidate: OneCandidateException | None
+
+    @field_validator("queries")
+    @classmethod
+    def normalize_queries(cls, value: list[str]) -> list[str]:
+        normalized = [_substantive(query) for query in value]
+        if len({query.casefold() for query in normalized}) != len(normalized):
+            raise ValueError("search queries must be distinct")
+        return normalized
+
+    @model_validator(mode="after")
+    def bind_exception_queries(self) -> "SearchRecord":
+        if self.one_candidate is not None and any(
+            index < 0 or index >= len(self.queries)
+            for index in self.one_candidate.query_indices
+        ):
+            raise ValueError("one-candidate query index is out of range")
+        return self
 
 
 class BaselineSource(BaseModel):
@@ -128,6 +271,11 @@ class BaselineSource(BaseModel):
     publication_year: int | None = None
     claimed_citation_count: int | None = Field(default=None, ge=0)
     relevance: str = Field(min_length=1)
+
+    @field_validator("candidate_id", "title", "method", "paper_locator", "relevance")
+    @classmethod
+    def normalize_text(cls, value: str | None) -> str | None:
+        return None if value is None else _substantive(value)
 
     @field_validator("source_url", "repository_url")
     @classmethod
@@ -150,27 +298,35 @@ class CandidateDecision(BaseModel):
     decision: Literal["selected", "rejected"]
     reason: str = Field(min_length=1)
 
+    @field_validator("candidate_id", "reason")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        return _substantive(value)
+
 
 class BaselineResearch(BaseModel):
-    """Version-one machine-readable baseline research artifact."""
+    """Version-two machine-readable baseline research artifact."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1]
-    dataset: DatasetAssessment
+    schema_version: Literal[2]
+    dataset: DatasetProfile
+    training: TrainingPolicy
     candidates: list[BaselineSource] = Field(min_length=1)
     decisions: list[CandidateDecision] = Field(min_length=1)
     selected_candidate_id: str = Field(min_length=1)
-    search_queries: list[str] = Field(min_length=1)
+    search: SearchRecord
     limitations: list[str]
 
-    @field_validator("search_queries")
+    @field_validator("selected_candidate_id")
     @classmethod
-    def reject_blank_queries(cls, value: list[str]) -> list[str]:
-        """Require every recorded search query to contain substantive text."""
-        if any(not query.strip() for query in value):
-            raise ValueError("search queries must not be blank")
-        return value
+    def normalize_selected_candidate(cls, value: str) -> str:
+        return _substantive(value)
+
+    @field_validator("limitations")
+    @classmethod
+    def normalize_limitations(cls, value: list[str]) -> list[str]:
+        return [_substantive(limitation) for limitation in value]
 
     @model_validator(mode="after")
     def validate_candidate_contract(self) -> "BaselineResearch":
@@ -196,33 +352,97 @@ class BaselineResearch(BaseModel):
         if selected[0] != self.selected_candidate_id:
             raise ValueError("selected_candidate_id must match the selected decision")
 
-        normalized_queries = {query.strip().casefold() for query in self.search_queries}
-        if len(self.candidates) == 1 and (
-            len(normalized_queries) < 2 or not self.limitations
-        ):
+        if len(self.candidates) == 1 and self.search.one_candidate is None:
+            raise ValueError("one-candidate research requires a structured exception")
+        if len(self.candidates) != 1 and self.search.one_candidate is not None:
+            raise ValueError("one-candidate exception is valid only for one candidate")
+
+        selected_source = next(
+            candidate
+            for candidate in self.candidates
+            if candidate.candidate_id == self.selected_candidate_id
+        )
+        validate_training_policy(self.dataset, self.training, selected_source)
+        return self
+
+
+_PRETRAINED_MODALITIES = frozenset({"image", "text", "audio", "video", "multimodal"})
+_TRANSFER_STRATEGIES = frozenset(
+    {"frozen_pretrained", "partial_finetune", "full_finetune"}
+)
+
+
+def validate_training_policy(
+    dataset: DatasetProfile,
+    training: TrainingPolicy,
+    selected: BaselineSource,
+) -> None:
+    """Raise ValueError when v2 evidence does not justify the strategy."""
+
+    strategy = training.strategy
+    pretrained = training.pretrained
+    if dataset.modality in _PRETRAINED_MODALITIES and pretrained is None:
+        raise ValueError("this modality requires a pretrained availability assessment")
+    if strategy in _TRANSFER_STRATEGIES and (
+        pretrained is None or pretrained.status != "available"
+    ):
+        raise ValueError("transfer strategies require an available representation")
+
+    if dataset.modality in _PRETRAINED_MODALITIES:
+        if dataset.regime == "tiny":
+            allowed = (
+                {"frozen_pretrained"}
+                if pretrained is not None and pretrained.status == "available"
+                else {"classical"}
+            )
+        elif dataset.regime == "small":
+            allowed = {
+                "frozen_pretrained",
+                "partial_finetune",
+                "full_finetune",
+            }
+        elif dataset.regime == "unknown":
+            allowed = {"classical", "frozen_pretrained"}
+        else:
+            allowed = set(TrainingStrategy.__args__)
+        if strategy not in allowed:
             raise ValueError(
-                "one-candidate research requires two distinct queries and a limitation"
+                f"{dataset.regime} {dataset.modality} data does not permit {strategy}"
             )
 
-        if self.dataset.recommended_strategy == "train_from_scratch":
-            local_prefixes = ("eda:", "calculation:")
-            if not any(
-                item.startswith(prefix) and item[len(prefix) :].strip()
-                for item in self.dataset.evidence
-                for prefix in local_prefixes
-            ):
-                raise ValueError(
-                    "train_from_scratch requires EDA or calculation evidence"
-                )
-            source_prefix = f"source:{self.selected_candidate_id}:"
-            if not any(
-                item.startswith(source_prefix) and item[len(source_prefix) :].strip()
-                for item in self.dataset.evidence
-            ):
-                raise ValueError(
-                    "train_from_scratch requires comparable selected-source evidence"
-                )
-        return self
+    if strategy == "full_finetune":
+        if training.safeguards is None:
+            raise ValueError("full_finetune requires all safeguard evidence")
+    elif training.safeguards is not None:
+        raise ValueError("fine-tune safeguards are unused by the selected strategy")
+
+    if strategy == "train_from_scratch":
+        if dataset.regime != "adequate":
+            raise ValueError("train_from_scratch requires an adequate data regime")
+        comparison = training.scratch_scale
+        if comparison is None:
+            raise ValueError("train_from_scratch requires a source scale comparison")
+        if comparison.selected_candidate_id != selected.candidate_id:
+            raise ValueError("scratch comparison must name the selected candidate")
+        source_locators = {
+            value
+            for value in (
+                str(selected.source_url),
+                str(selected.repository_url) if selected.repository_url else None,
+                selected.paper_locator,
+            )
+            if value is not None
+        }
+        if comparison.source_locator not in source_locators:
+            raise ValueError("scratch comparison must use a selected-source locator")
+        local_fact = next(
+            (fact for fact in dataset.facts if fact.field == comparison.local_fact),
+            None,
+        )
+        if local_fact is None or local_fact.value != comparison.local_value:
+            raise ValueError("scratch comparison must match a supplied local fact")
+    elif training.scratch_scale is not None:
+        raise ValueError("scratch scale evidence is unused by the selected strategy")
 
 
 class BaselineDesignSelection(BaseModel):
@@ -380,12 +600,12 @@ def load_baseline_artifacts(root: Path) -> BaselineArtifacts:
                 f"research={research.selected_candidate_id}",
             ),
         )
-    if training_strategy != research.dataset.recommended_strategy:
+    if training_strategy != research.training.strategy:
         raise BaselineResearchError(
             "design training strategy does not match research artifact",
             (
                 f"design={training_strategy}",
-                f"research={research.dataset.recommended_strategy}",
+                f"research={research.training.strategy}",
             ),
         )
 
@@ -469,9 +689,17 @@ __all__ = [
     "BaselineSource",
     "BaselineVerification",
     "CandidateDecision",
-    "DatasetAssessment",
+    "DatasetFact",
+    "DatasetProfile",
     "DESIGN_FILENAME",
+    "EvidenceRef",
+    "FineTuneSafeguards",
+    "OneCandidateException",
+    "PretrainedAssessment",
     "RESEARCH_FILENAME",
+    "ScratchScaleComparison",
+    "SearchRecord",
+    "TrainingPolicy",
     "TrainingStrategy",
     "VerificationAttempt",
     "VERIFICATION_FILENAME",
@@ -480,5 +708,6 @@ __all__ = [
     "load_baseline_artifacts",
     "load_cached_verified_baseline",
     "research_sha256",
+    "validate_training_policy",
     "write_verification",
 ]

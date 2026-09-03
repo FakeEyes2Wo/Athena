@@ -17,7 +17,7 @@ Use at least two distinct, task- and modality-specific search queries. Prefer pr
 papers, official project pages, official implementations, and official repositories.
 Find and compare at least two plausible candidates unless multiple distinct searches
 could substantively locate only one; document that single-candidate exception and its
-limitation in the research artifact.
+searched scope and limitation in the research artifact.
 
 ## Source and execution boundary
 
@@ -41,24 +41,48 @@ Markdown design so later implementation can respect it.
 
 Write **both** complete files at the workspace root:
 
-1. `BASELINE_RESEARCH.json`, valid JSON with this version-one shape:
+1. `BASELINE_RESEARCH.json`, valid JSON with `schema_version: 2` and these focused
+   records. The top-level `BaselineResearch` contains `dataset`, `training`,
+   `candidates`, `decisions`, `selected_candidate_id`, `search`, and `limitations`:
 
-   - `schema_version`: `1`.
-   - `dataset`: `modality`, `task_type`, optional numeric facts (`labeled_samples`,
-     `effective_training_units`, `group_count`, `class_count`,
-     `minority_class_samples`), `input_scale`, `regime` (`tiny`, `small`,
-     `adequate`, or `unknown`), `recommended_strategy` (`classical`,
-     `frozen_pretrained`, `partial_finetune`, `full_finetune`, or
-     `train_from_scratch`), non-empty `evidence`, and `rationale`.
-   - `candidates`: for every candidate record `candidate_id`, `title`, `method`,
+   - `DatasetProfile` (`dataset`): `modality`, `task_type`, `input_scale`, `regime`
+     (`tiny`, `small`, `adequate`, or `unknown`), `facts`, and `rationale`.
+   - Each `DatasetFact` in `facts`: exactly one `field` (`labeled_samples`,
+     `effective_training_units`, `group_count`, `class_count`, or
+     `minority_class_samples`), its nonnegative integer `value`, and its own
+     `EvidenceRef`. The evidence `kind` must be `eda`, `data_contract`, or
+     `calculation`; its nonblank `reference` or `claim` must state that exact value.
+     Do not reuse generic or source-only evidence to authorize multiple numbers.
+   - `TrainingPolicy` (`training`): `strategy` (`classical`, `frozen_pretrained`,
+     `partial_finetune`, `full_finetune`, or `train_from_scratch`), plus
+     `pretrained`, `safeguards`, and `scratch_scale` records or `null` as required
+     below.
+   - `PretrainedAssessment` (`training.pretrained`): `status` (`available`,
+     `unavailable`, or `unknown`), a nonblank `representation` only when available,
+     and one traceable `EvidenceRef` with `kind`, `reference`, and `claim`.
+   - `FineTuneSafeguards` (`training.safeguards`): the three separate
+     `augmentation`, `regularization`, and `validation` `EvidenceRef` values. Supply
+     it only for `full_finetune` and always supply all three.
+   - `ScratchScaleComparison` (`training.scratch_scale`):
+     `selected_candidate_id`, one exact selected-source `source_locator`, a
+     `local_fact` and matching `local_value`, the integer `source_value`, `unit`,
+     `relationship` (`comparable` or `local_at_least_source`), and `rationale`.
+     Supply it only for `train_from_scratch`.
+   - Each `BaselineSource` in `candidates`: record `candidate_id`, `title`, `method`,
      `source_url`, `source_kind` (`paper`, `official_implementation`, or
      `technical_reference`), `paper_locator` (or `null`), `repository_url` (or
      `null`), `publication_year` (or `null`), `claimed_citation_count` (or `null`),
      and `relevance`.
-   - `decisions`: exactly one `selected` decision and one decision for every candidate;
-     include its reason. `selected_candidate_id` must name that selected candidate.
-   - the distinct `search_queries` you ran and a `limitations` list. A one-candidate
-     result requires both at least two distinct queries and a non-empty limitation.
+   - Each `CandidateDecision` in `decisions`: record exactly one `selected` decision
+     and one decision for every candidate; include its reason.
+     `selected_candidate_id` must name that selected candidate.
+   - `SearchRecord` (`search`): at least two distinct `queries` and
+     `one_candidate`. Set `one_candidate` to `null` when there are multiple
+     candidates. When there is exactly one, supply a `OneCandidateException` with at
+     least two distinct zero-based `query_indices`, nonblank searched `scope`, and a
+     nonblank `limitation`; every index must identify an entry in `queries`.
+   - `limitations`: qualitative limitations of the overall research; use an empty
+     list only when none are known.
 
 2. `BASELINE_DESIGN.md`, describing the selected source method and local adaptation
    boundary; data assessment and strategy; preprocessing, split/leakage, model, loss,
@@ -77,17 +101,17 @@ Training strategy: `partial_finetune`
 Replace the example values with the selected candidate ID and recommended strategy in
 your JSON; the two artifacts must agree exactly.
 
-Every numeric dataset fact needs a substantive evidence string beginning with one of
-`eda:`, `data_contract:`, or `calculation:`. For `train_from_scratch`, choose it only
-for an `adequate` regime and include both local `eda:` or `calculation:` evidence and
-comparable-scale source evidence beginning
-`source:{selected_candidate_id}:`. `unknown` never permits training from scratch. For
-image, text, audio, video, or multimodal data, start tiny labeled regimes with frozen
-pretrained features when relevant; small regimes normally justify partial fine-tuning;
-full fine-tuning needs augmentation, regularization, and validation evidence. Tabular
-work normally starts with an authoritative classical or boosted-tree baseline rather
-than forced transfer learning. Treat grouped or time-series independent entities or
-windows, not raw rows alone, as the data scale.
+There is no universal sample threshold. Classify the regime from the modality and
+field-specific evidence. For image, text, audio, video, and multimodal data, always
+supply a `PretrainedAssessment`. With an available representation, a `tiny` regime
+requires `frozen_pretrained`; a `small` regime permits frozen or partial fine-tuning,
+or full fine-tuning only with all three safeguards. Frozen, partial, and full
+fine-tuning require an available representation. `unknown` permits only `classical`,
+or `frozen_pretrained` when availability is established. `train_from_scratch` always
+requires an `adequate` regime and a `ScratchScaleComparison` bound to the selected
+candidate and an exact local fact. Tabular work normally starts with an authoritative
+classical or boosted-tree baseline but may use a sourced alternative. Treat grouped or
+time-series independent entities or windows, not raw rows alone, as the data scale.
 
 Do not write `BASELINE_RESEARCH_VERIFICATION.json`; it is platform-owned. Do not output
 hypotheses, predictions, or disconfirmers. After both files are complete, return only
