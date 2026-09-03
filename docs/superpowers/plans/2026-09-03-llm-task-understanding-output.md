@@ -890,7 +890,7 @@ After Steps 2-5 have fresh successful evidence, stage only the guide, this plan'
 The latest supporting-design commit is `4a17db4` and is an ancestor of the verified
 feature head. No supporting-design amendment was needed during this final pass.
 
-- [ ] **Step 7: Integrate the verified feature branch into `main`**
+- [x] **Step 7: Integrate the verified feature branch into `main`**
 
 From the main worktree, first run `git status --short --branch` and compare every dirty path with `git diff --name-only main...feat/llm-task-understanding-output`. This is the required concurrent-overlap check before merge: never stash, reset, checkout, or overwrite unrelated work. If an uncommitted main path overlaps any feature-owned path, stop before mutation and report the exact paths. If owned paths are clean, merge with:
 
@@ -900,9 +900,22 @@ git merge --no-ff feat/llm-task-understanding-output -m "merge: LLM task underst
 
 If concurrent committed work advanced `main`, rebase the feature branch onto that commit in its isolated worktree, rerun the focused suites, repeat the concurrent-overlap check, then merge.
 
-- [ ] **Step 8: Freshly verify merged `main`**
+Recorded 2026-09-04 (+08:00): the original main worktree had one overlapping,
+uncommitted `athena-gui/src/types/ui.ts` change. It was neither stashed nor
+overwritten. A clean integration worktree based on `2713f53` produced merge commit
+`d029da7`, which was pushed to `origin/main`; the original dirty worktree remains
+unchanged.
+
+- [x] **Step 8: Freshly verify merged `main`**
 
 On merged `main`, rerun the focused backend suite, full frontend suite/build, `cargo test`, `cargo check`, and `git diff --check`. Record fresh output before any cache cleanup or closeout mutation.
+
+Recorded on merge commit `d029da7`: the focused backend suite passed `184` tests;
+Vitest passed `18 files / 158 tests`; the production build transformed 2761 modules;
+Cargo passed 10 tests and `cargo check` exited zero; `git diff --check` was clean.
+The only runtime diagnostics were the already recorded Windows asyncio teardown
+warning, six existing Rust clarification-adapter `dead_code` warnings, and a benign
+WebSocket peer-close message after the successful Rust round trip.
 
 - [ ] **Step 9: Clear requested caches on verified `main`**
 
