@@ -240,6 +240,7 @@ def _under(path: str, root: str) -> bool:
 
 
 MANIFEST_NAME = "experiment.json"
+_SOURCE_SUFFIXES = frozenset({".py", ".ipynb", ".sh", ".r", ".jl"})
 
 
 def declared_output_paths(
@@ -252,6 +253,9 @@ def declared_output_paths(
     ``solution`` an output and its diff disappears. So if this repair touched
     the manifest at all, nothing is excluded and the reviewer sees everything —
     hiding then costs the very edit that makes it visible.
+
+    An output root that contains changed source code is likewise not trusted;
+    generated artifacts may be omitted, but executable repairs must stay visible.
     """
     if any(Path(path).name == MANIFEST_NAME for path in changed):
         return ()
@@ -260,7 +264,14 @@ def declared_output_paths(
     except (OSError, ValueError):
         # A broken manifest is the Agent's to repair; the review still runs.
         return ()
-    return tuple(manifest.outputs.values())
+    return tuple(
+        output
+        for output in manifest.outputs.values()
+        if not any(
+            _under(path, output) and Path(path).suffix.lower() in _SOURCE_SUFFIXES
+            for path in changed
+        )
+    )
 
 
 def drop_output_sections(raw: bytes, outputs: tuple[str, ...]) -> bytes:
@@ -297,20 +308,13 @@ def drop_output_sections(raw: bytes, outputs: tuple[str, ...]) -> bytes:
     return b"".join(kept)
 
 
-async def _reviewed_diff_text(
-    diff: GitDiff,
-    store: ArtifactStore,
-    *,
-    outputs: tuple[str, ...] = (),
-) -> str | None:
-    """Load, redact, and bound the repair being reviewed, minus its outputs.
+def _reviewed_diff_text(raw: bytes) -> str | None:
+    """Decode, redact, and bound the filtered repair being reviewed.
 
     The binary and NUL checks run on what *remains*: a binary declared output
     (a pickled model beside the predictions) used to fail the whole review as
     unreviewable, even though the repair itself was plain text.
     """
-
-    raw = drop_output_sections(await store.get_bytes(diff.ref), outputs)
     if b"\x00" in raw or b"GIT binary patch" in raw:
         return None
     try:
@@ -402,9 +406,7 @@ async def review_validation_diff(
         )
     outputs = declared_output_paths(workspace, diff.paths)
     source_paths = [
-        path
-        for path in diff.paths
-        if not any(_under(path, out) for out in outputs)
+        path for path in diff.paths if not any(_under(path, out) for out in outputs)
     ]
     semantic_paths = [
         path for path in source_paths if Path(path).name.lower() in _SEMANTIC_FILENAMES
@@ -417,13 +419,13 @@ async def review_validation_diff(
                 + ", ".join(sorted(semantic_paths))
             ),
         )
-    changed_text = await _reviewed_diff_text(diff, store, outputs=outputs)
+    scanned = drop_output_sections(await store.get_bytes(diff.ref), outputs)
+    changed_text = _reviewed_diff_text(scanned)
     if changed_text is None:
         return ValidationDiffReview(
             accepted=False,
             reason="validation diff is binary or cannot be reviewed safely",
         )
-    scanned = drop_output_sections(await store.get_bytes(diff.ref), outputs)
     leak = _marker_hit(_changed_lines(scanned, skip_artifacts=False), _LEAKAGE_MARKERS)
     if leak is not None:
         return ValidationDiffReview(
@@ -569,9 +571,7 @@ async def _execute_predictions(
                 ),
             )
             if not result.ok:
-                raise ValidationRunFailed(
-                    result.stderr or "validation command failed"
-                )
+                raise ValidationRunFailed(result.stderr or "validation command failed")
         try:
             assert_output_roots(workdir, manifest.outputs, required={"predictions"})
         except OutputFreshnessError as exc:
@@ -733,9 +733,7 @@ class ValidationSession:
         try:
             await self._verify_key()
             self.current = await _load_result(self.result_ref, self.deps.store)
-            action = await recovery_action(
-                self.result_ref, self.deps.store, self.input
-            )
+            action = await recovery_action(self.result_ref, self.deps.store, self.input)
             if (
                 action == "commit"
                 and self.current is not None
@@ -771,9 +769,7 @@ class ValidationSession:
             self.input.final_evaluator_ref,
         )
         if self.input.validation_key != expected_key:
-            raise ValueError(
-                "validation_key does not match frozen validation inputs"
-            )
+            raise ValueError("validation_key does not match frozen validation inputs")
 
     async def _run_phase(self) -> ValidationResult:
         """Repair, review, execute, and checkpoint the un-scored prediction run."""
@@ -933,9 +929,7 @@ class ValidationSession:
             raise RuntimeError("validation commit requires reviewed diff evidence")
         diff = await self.deps.git.diff(self.deps.workspace)
         if diff != reviewed_diff:
-            raise RuntimeError(
-                "validation workspace changed after independent review"
-            )
+            raise RuntimeError("validation workspace changed after independent review")
         commit = await self.deps.git.commit(
             self.deps.workspace,
             diff,

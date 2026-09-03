@@ -1089,6 +1089,20 @@ async def test_multiple_schema_valid_json_objects_are_rejected_as_ambiguous() ->
 
 
 @pytest.mark.asyncio
+async def test_schema_valid_object_nested_in_valid_wrapper_is_rejected() -> None:
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider('{"wrapper":{"answer":"hi"}}')
+
+    with pytest.raises(RuntimeError, match="structured output invalid"):
+        await agent.run(_structured_context(tools))
+
+    assert agent.model.calls == 4
+
+
+@pytest.mark.asyncio
 async def test_structured_retry_demands_one_raw_json_object() -> None:
     tools = ToolRegistry()
     agent = Agent(

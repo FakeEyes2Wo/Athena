@@ -37,29 +37,49 @@ class PredictionsCoverageError(ValueError):
     """Predictions do not answer the rows they are about to be scored on."""
 
 
-def row_ids(path: Path) -> set[str]:
-    """Row ids in one CSV, or an empty set if it carries no id column."""
+def _read_row_ids(path: Path) -> tuple[bool, set[str]]:
+    """Return whether a CSV declares row ids and its validated values."""
     with path.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None or ROW_ID_COLUMN not in reader.fieldnames:
-            return set()
-        return {row[ROW_ID_COLUMN].strip() for row in reader}
+            return False, set()
+        values: set[str] = set()
+        for row_number, row in enumerate(reader, start=2):
+            raw = row.get(ROW_ID_COLUMN)
+            if raw is None or not raw.strip():
+                raise PredictionsCoverageError(
+                    f"{path.name} row {row_number} is missing {ROW_ID_COLUMN}"
+                )
+            values.add(raw.strip())
+        return True, values
+
+
+def row_ids(path: Path) -> set[str]:
+    """Row ids in one CSV, or an empty set if it carries no id column."""
+    return _read_row_ids(path)[1]
 
 
 def assert_predictions_cover(predictions_dir: Path, expected_csv: Path) -> None:
     """Fail with the real cause when predictions answer the wrong rows.
 
-    Silent when either side carries no row-id column: not every task is tabular,
-    and a task without row ids has nothing to check here.
+    Silent when the expected data has no row-id column: not every task is
+    tabular. When expected ids exist, predictions must provide usable ids so
+    coverage cannot degrade into an unchecked evaluator join.
     """
-    expected = row_ids(expected_csv)
-    if not expected:
+    expected_has_ids, expected = _read_row_ids(expected_csv)
+    if not expected_has_ids or not expected:
         return
     produced: set[str] = set()
+    produced_has_ids = False
     for path in sorted(predictions_dir.rglob("*.csv")):
-        produced |= row_ids(path)
-    if not produced:
-        return
+        has_ids, values = _read_row_ids(path)
+        produced_has_ids |= has_ids
+        produced |= values
+    if not produced_has_ids or not produced:
+        raise PredictionsCoverageError(
+            f"prediction CSV files contain no usable {ROW_ID_COLUMN}; copy that "
+            "column from the file named by ATHENA_PREDICT_FEATURES"
+        )
     missing = expected - produced
     if not missing:
         return

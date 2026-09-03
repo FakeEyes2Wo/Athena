@@ -77,28 +77,43 @@ def test_coverage_can_be_spread_across_several_prediction_files(tmp_path) -> Non
     assert_predictions_cover(predictions, expected)
 
 
-@pytest.mark.parametrize("side", ["expected", "produced"])
-def test_a_task_without_row_ids_is_left_alone(tmp_path, side: str) -> None:
-    """Not every task is tabular; without ids there is nothing to check."""
+def test_expected_data_without_row_ids_is_left_alone(tmp_path) -> None:
+    """Not every task is tabular; without expected ids there is nothing to check."""
     expected = _csv(
         tmp_path / "features.csv",
         range(100),
-        header="row,label" if side == "expected" else "__athena_row_id,label",
+        header="row,label",
     )
     predictions = tmp_path / "predictions"
-    _csv(
-        predictions / "predictions.csv",
-        range(500, 600),
-        header="row,label" if side == "produced" else "__athena_row_id,label",
-    )
+    _csv(predictions / "predictions.csv", range(500, 600))
 
     assert_predictions_cover(predictions, expected)
 
 
+def test_predictions_without_row_ids_are_rejected_when_expected_has_them(
+    tmp_path,
+) -> None:
+    expected = _csv(tmp_path / "features.csv", range(100))
+    predictions = tmp_path / "predictions"
+    _csv(predictions / "predictions.csv", range(100), header="row,label")
+
+    with pytest.raises(PredictionsCoverageError, match="no usable __athena_row_id"):
+        assert_predictions_cover(predictions, expected)
+
+
+def test_malformed_prediction_row_id_is_a_typed_coverage_error(tmp_path) -> None:
+    expected = _csv(tmp_path / "features.csv", range(2))
+    predictions = tmp_path / "predictions"
+    path = predictions / "predictions.csv"
+    path.parent.mkdir(parents=True)
+    path.write_text("score,__athena_row_id\n0.1\n", encoding="utf-8")
+
+    with pytest.raises(PredictionsCoverageError, match="missing __athena_row_id"):
+        assert_predictions_cover(predictions, expected)
+
+
 def test_row_ids_are_read_past_a_utf8_bom_and_stripped(tmp_path) -> None:
     path = tmp_path / "features.csv"
-    path.write_text(
-        "﻿__athena_row_id,label\n 65220 ,0\n65221,1\n", encoding="utf-8"
-    )
+    path.write_text("﻿__athena_row_id,label\n 65220 ,0\n65221,1\n", encoding="utf-8")
 
     assert row_ids(path) == {"65220", "65221"}

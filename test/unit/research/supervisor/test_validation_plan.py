@@ -574,6 +574,49 @@ def test_dropping_output_sections_matches_whole_segments_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_declared_output_root_cannot_hide_changed_source(tmp_path) -> None:
+    workspace_dir = tmp_path / "validate"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "experiment.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": [["python", "solution/model.py"]],
+                "outputs": {"predictions": "solution"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = LocalArtifactStore(tmp_path / "diff-artifacts")
+    diff = GitDiff(
+        ref=await store.put_bytes(
+            _diff_section("solution/model.py", "+HIDDEN_SIZE = 128").encode()
+        ),
+        paths=("solution/model.py",),
+    )
+    reviewer_called = False
+
+    async def reviewer(_prompt: str) -> ValidationDiffReview:
+        nonlocal reviewer_called
+        reviewer_called = True
+        return ValidationDiffReview(accepted=True, reason="looks safe")
+
+    result = await review_validation_diff(
+        workspace=GitWorkBranch(
+            path=str(workspace_dir), branch="validate", base_commit="sota-a"
+        ),
+        diff=diff,
+        explanation="retune the model",
+        independent_review=reviewer,
+        store=store,
+    )
+
+    assert result.accepted is False
+    assert "model or training semantics" in result.reason
+    assert reviewer_called is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["solution/model.py", "solution/features.py"])
 async def test_validation_rejects_semantic_changes(tmp_path, path: str) -> None:
     store, (workspace, diff) = await _validation_branch(
@@ -820,7 +863,9 @@ async def test_validation_rejects_binary_diff_without_llm_review(tmp_path) -> No
 
 
 class _StubExecution:
-    def __init__(self, environment_root: Path, *, produce_predictions: bool = False) -> None:
+    def __init__(
+        self, environment_root: Path, *, produce_predictions: bool = False
+    ) -> None:
         self.environment_root = environment_root
         self.produce_predictions = produce_predictions
         self.timeouts: list[object] = []
