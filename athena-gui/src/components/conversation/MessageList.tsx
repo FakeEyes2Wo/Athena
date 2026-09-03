@@ -20,16 +20,48 @@ function ideatorNumber(plan?: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-/** Group consecutive ideator-lane messages into one block per lane set. */
-function segmentMessages(messages: UIMessage[]): Array<{ lane: number | null; items: UIMessage[] }> {
-  const segments: Array<{ lane: number | null; items: UIMessage[] }> = [];
-  for (const msg of messages) {
+type MessageSegment =
+  | { kind: "ordinary"; items: UIMessage[] }
+  | { kind: "ideator"; lane: number; items: UIMessage[] }
+  | { kind: "clarification"; items: UIMessage[] };
+
+function activeClarificationPreviewIndex(messages: UIMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const msg = messages[index];
+    if (msg.kind !== "intent-preview" || !msg.preview || !("draftId" in msg.preview)) continue;
+    return msg.preview.status === "CLARIFYING" || msg.preview.status === "CONFIRMING"
+      ? index
+      : -1;
+  }
+  return -1;
+}
+
+/** Group ideator lanes and backend output emitted during active task understanding. */
+function segmentMessages(messages: UIMessage[]): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  const clarificationPreviewIndex = activeClarificationPreviewIndex(messages);
+
+  for (const [index, msg] of messages.entries()) {
     const lane = ideatorNumber(msg.plan);
     const last = segments[segments.length - 1];
-    if (lane !== null && last && last.lane === lane) {
+
+    if (
+      clarificationPreviewIndex >= 0 &&
+      index > clarificationPreviewIndex &&
+      msg.role !== "user" &&
+      msg.kind !== "intent-preview"
+    ) {
+      if (last?.kind === "clarification") {
+        last.items.push(msg);
+      } else {
+        segments.push({ kind: "clarification", items: [msg] });
+      }
+    } else if (lane !== null && last?.kind === "ideator" && last.lane === lane) {
       last.items.push(msg);
+    } else if (lane !== null) {
+      segments.push({ kind: "ideator", lane, items: [msg] });
     } else {
-      segments.push({ lane, items: [msg] });
+      segments.push({ kind: "ordinary", items: [msg] });
     }
   }
   return segments;
@@ -175,7 +207,7 @@ export function MessageList({
   return (
     <div className={styles["message-list"]} role="log" aria-live="polite" ref={listRef}>
       {segments.map((segment, index) => {
-        if (segment.lane === null) {
+        if (segment.kind === "ordinary") {
           return segment.items.map((msg) => (
             <TrajectoryItem
               key={msg.id}
@@ -186,6 +218,29 @@ export function MessageList({
               onCancelPreview={onCancelPreview}
             />
           ));
+        }
+        if (segment.kind === "clarification") {
+          return (
+            <section
+              key={`clarification-${index}`}
+              className={styles["clarification-activity"]}
+              role="log"
+              aria-label="任务理解过程"
+              aria-live="polite"
+            >
+              <div className={styles["clarification-activity__title"]}>任务理解过程</div>
+              {segment.items.map((msg) => (
+                <TrajectoryItem
+                  key={msg.id}
+                  msg={msg}
+                  onConfirmPreview={onConfirmPreview}
+                  onRevisePreview={onRevisePreview}
+                  onRetryPreview={onRetryPreview}
+                  onCancelPreview={onCancelPreview}
+                />
+              ))}
+            </section>
+          );
         }
         return (
           <section key={`ideator-${segment.lane}-${index}`} className={styles["ideator-lane"]}>

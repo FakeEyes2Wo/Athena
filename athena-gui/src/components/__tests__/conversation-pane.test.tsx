@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { screen, fireEvent } from "@testing-library/react";
+import { act, screen, fireEvent, within } from "@testing-library/react";
 import { renderUi } from "../../test/render";
 import { ConversationPane } from "../conversation/ConversationPane";
 import { createEmptyPipelineViewModel } from "../../types/ui";
@@ -81,7 +81,9 @@ describe("ConversationPane", () => {
 
     renderUi(<ConversationPane pipeline={pipeline as never} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /确认并启动/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /确认并启动/i }));
+    });
     expect(startRun).toHaveBeenCalledTimes(1);
   });
 
@@ -158,4 +160,174 @@ describe("ConversationPane", () => {
     expect(screen.getByText(/已启动/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /确认并启动/i })).not.toBeInTheDocument();
   });
+
+  it("shows backend output inside the live task-understanding activity while clarifying", () => {
+    const pipeline = {
+      viewModel: {
+        ...createEmptyPipelineViewModel(),
+        messages: [
+          {
+            id: "preview-clarifying",
+            role: "athena" as const,
+            kind: "intent-preview" as const,
+            content: "任务理解中…",
+            preview: {
+              draftId: "draft-1",
+              revision: 1,
+              status: "CLARIFYING" as const,
+              understanding: {
+                title: "",
+                dataset: null,
+                target: null,
+                task_type: "other",
+                primary_metric: null,
+                direction: null,
+                evaluation_plan: null,
+              },
+              answers: [],
+              unresolved: [],
+              failure: null,
+            },
+          },
+          {
+            id: "agent-stream-1",
+            role: "athena" as const,
+            kind: "text" as const,
+            content: "正在分析数据结构",
+            source: "agent",
+          },
+          {
+            id: "tool-call-1",
+            role: "athena" as const,
+            kind: "text" as const,
+            content: '{"path":"train.csv"}',
+            source: "agent",
+            tool: "inspect_dataset",
+          },
+          {
+            id: "tool-output-1",
+            role: "athena" as const,
+            kind: "text" as const,
+            content: "rows=891",
+            source: "tool",
+            tool: "inspect_dataset",
+            channel: "stdout",
+          },
+        ],
+      },
+      runActive: false,
+      sendPrompt: vi.fn(),
+      startRun: vi.fn(),
+    } as const;
+
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    const activity = screen.getByRole("log", { name: "任务理解过程" });
+    expect(within(activity).getByText("正在分析数据结构")).toBeInTheDocument();
+    expect(within(activity).getByText("inspect_dataset")).toBeInTheDocument();
+    expect(within(activity).getByText("rows=891")).toBeInTheDocument();
+    expect(screen.getByText("任务理解中…")).toBeInTheDocument();
+    expect(screen.getAllByText("正在分析数据结构")).toHaveLength(1);
+  });
+
+  it("keeps grouping backend output while the task understanding is confirming", () => {
+    const pipeline = {
+      viewModel: {
+        ...createEmptyPipelineViewModel(),
+        messages: [
+          {
+            id: "preview-confirming",
+            role: "athena" as const,
+            kind: "intent-preview" as const,
+            content: "任务理解已确认",
+            preview: {
+              draftId: "draft-1",
+              revision: 2,
+              status: "CONFIRMING" as const,
+              understanding: {
+                title: "预测流失",
+                dataset: "churn.csv",
+                target: "churned",
+                task_type: "classification",
+                primary_metric: "f1",
+                direction: "maximize",
+                evaluation_plan: "holdout f1",
+              },
+              answers: [],
+              unresolved: [],
+              failure: null,
+            },
+          },
+          {
+            id: "supervisor-confirming-1",
+            role: "athena" as const,
+            kind: "text" as const,
+            content: "正在提交确认结果",
+            source: "supervisor",
+          },
+        ],
+      },
+      runActive: false,
+      sendPrompt: vi.fn(),
+      startRun: vi.fn(),
+    } as const;
+
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    expect(
+      within(screen.getByRole("log", { name: "任务理解过程" })).getByText("正在提交确认结果"),
+    ).toBeInTheDocument();
+  });
+
+  it.each(["READY_FOR_CONFIRMATION", "RUNNING"] as const)(
+    "does not relabel later research output as task understanding when preview is %s",
+    (status) => {
+      const pipeline = {
+        viewModel: {
+          ...createEmptyPipelineViewModel(),
+          messages: [
+            {
+              id: `preview-${status}`,
+              role: "athena" as const,
+              kind: "intent-preview" as const,
+              content: "任务理解完成",
+              started: status === "RUNNING",
+              preview: {
+                draftId: "draft-1",
+                revision: 2,
+                status,
+                understanding: {
+                  title: "预测流失",
+                  dataset: "churn.csv",
+                  target: "churned",
+                  task_type: "classification",
+                  primary_metric: "f1",
+                  direction: "maximize",
+                  evaluation_plan: "holdout f1",
+                },
+                answers: [],
+                unresolved: [],
+                failure: null,
+              },
+            },
+            {
+              id: `research-${status}`,
+              role: "athena" as const,
+              kind: "text" as const,
+              content: "开始搜索候选方案",
+              source: "agent",
+            },
+          ],
+        },
+        runActive: status === "RUNNING",
+        sendPrompt: vi.fn(),
+        startRun: vi.fn(),
+      } as const;
+
+      renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+      expect(screen.queryByRole("log", { name: "任务理解过程" })).not.toBeInTheDocument();
+      expect(screen.getByText("开始搜索候选方案")).toBeInTheDocument();
+    },
+  );
 });
