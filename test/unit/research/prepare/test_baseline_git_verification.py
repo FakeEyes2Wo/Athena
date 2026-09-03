@@ -3,6 +3,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,40 @@ class FakeRunner:
         if "clone" in argv:
             return subprocess.CompletedProcess(argv, self.clone_code, "", self.stderr)
         return subprocess.CompletedProcess(argv, 0, "a" * 40 + "\n", "")
+
+
+def test_fresh_import_ignores_agent_writable_cwd_and_path(
+    tmp_path: Path,
+) -> None:
+    trusted_git = source_verification._GIT_EXECUTABLE
+    if trusted_git is None:
+        pytest.skip("trusted Git executable is unavailable on this host")
+    trusted_path = Path(trusted_git).resolve(strict=True)
+    fake_bin = tmp_path / "agent-bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / trusted_path.name
+    shutil.copy2(trusted_path, fake_git)
+    fake_git.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = str(fake_bin)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from athena.research.prepare.source_verification import "
+            "_GIT_EXECUTABLE; print(_GIT_EXECUTABLE or '')",
+        ],
+        cwd=fake_bin,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(trusted_path)
 
 
 @pytest.mark.asyncio

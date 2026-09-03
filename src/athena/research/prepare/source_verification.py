@@ -4,7 +4,6 @@ import asyncio
 import ipaddress
 import os
 import re
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -55,17 +54,53 @@ _URL_CANDIDATE_RE = re.compile(
 )
 
 
-def _capture_git_executable() -> str | None:
-    """Resolve Git once, before any research Agent can influence later lookups."""
+def _trusted_git_candidates() -> tuple[tuple[Path, Path], ...]:
+    """Return fixed installation candidates outside Agent-controlled search paths."""
 
-    candidate = shutil.which("git")
-    if candidate is None:
-        return None
-    try:
-        resolved = Path(candidate).resolve(strict=True)
-    except OSError:
-        return None
-    return str(resolved) if resolved.is_file() and resolved.is_absolute() else None
+    if os.name != "nt":
+        return (
+            (Path("/usr/bin"), Path("/usr/bin/git")),
+            (Path("/bin"), Path("/bin/git")),
+        )
+
+    candidates: list[tuple[Path, Path]] = []
+    seen_roots: set[Path] = set()
+    for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        value = os.environ.get(variable)
+        if not value:
+            continue
+        try:
+            root = Path(value).resolve(strict=True)
+        except OSError:
+            continue
+        if not root.is_dir() or root in seen_roots:
+            continue
+        seen_roots.add(root)
+        candidates.extend(
+            (
+                (root, root / "Git" / "cmd" / "git.exe"),
+                (root, root / "Git" / "bin" / "git.exe"),
+            )
+        )
+    return tuple(candidates)
+
+
+def _capture_git_executable() -> str | None:
+    """Capture Git only from fixed, controller-owned installation directories."""
+
+    for trusted_root, candidate in _trusted_git_candidates():
+        try:
+            resolved_root = trusted_root.resolve(strict=True)
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if (
+            resolved.is_file()
+            and resolved.is_absolute()
+            and resolved.is_relative_to(resolved_root)
+        ):
+            return str(resolved)
+    return None
 
 
 def _capture_platform_environment() -> Mapping[str, str]:
