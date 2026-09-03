@@ -6,7 +6,9 @@ run_validation_phase / review_validation_diff）集中到一个组合单元。�
 可变字段。
 """
 
+import json
 import logging
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +43,31 @@ from athena.utils.single_turn_chat import single_turn_chat
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
+
+
+async def _load_trusted_prepare_score(
+    store: Any, evidence_ref: str
+) -> tuple[float, str]:
+    """Load the trusted PlanRunner score from its content-addressed evidence."""
+    try:
+        evidence = json.loads(await store.get_text(evidence_ref))
+        if not isinstance(evidence, dict) or evidence.get("plan") != "prepare":
+            raise ValueError("evidence is not a PREPARE score")
+        metric = evidence["metric"]
+        commit = evidence["commit"]
+        if (
+            isinstance(metric, bool)
+            or not isinstance(metric, (int, float))
+            or not math.isfinite(metric)
+        ):
+            raise ValueError("evidence metric is not finite")
+        if not isinstance(commit, str) or not commit.strip():
+            raise ValueError("evidence commit is blank")
+    except Exception as exc:  # noqa: BLE001 - artifact store trust boundary
+        raise BaselineAuthorityError(
+            "trusted PREPARE evidence is missing, corrupt, or invalid"
+        ) from exc
+    return float(metric), commit
 
 
 class PhaseRunner:
@@ -183,11 +210,23 @@ class PhaseRunner:
         experiment = rt.tree.get_experiment(sota_id)
         if experiment.eval is None or experiment.plan.kind != "baseline":
             return False
-        return (
+        matches_attestation = (
             experiment.commit == attestation.baseline_commit
             and experiment.plan.run_config_ref == attestation.evaluator_ref
             and experiment.eval.per_sample == attestation.evidence_ref
         )
+        if not matches_attestation:
+            return False
+        evidence_metric, evidence_commit = await _load_trusted_prepare_score(
+            rt.store, attestation.evidence_ref
+        )
+        if (
+            evidence_metric != experiment.eval.primary
+            or evidence_commit != experiment.commit
+        ):
+            return False
+        rt.state.evaluator_ref = experiment.plan.run_config_ref
+        return True
 
     async def run_validation_phase(
         self, sota_commit: str, metric: float

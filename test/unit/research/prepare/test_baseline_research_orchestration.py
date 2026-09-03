@@ -1511,3 +1511,134 @@ async def test_run_baseline_wraps_completion_attestation_outage(
             None,
             verified,
         )
+
+
+def _verified_at_generation(
+    verified: VerifiedBaseline, generation: int
+) -> VerifiedBaseline:
+    return VerifiedBaseline(
+        artifacts=verified.artifacts,
+        verification=verified.verification,
+        verification_bytes=verified.verification_bytes,
+        authority_generation=generation,
+    )
+
+
+def _completion_attestation(
+    verified: VerifiedBaseline, result: PrepareResult
+) -> PrepareAttestation:
+    return PrepareAttestation(
+        research_sha256=verified.verification.research_sha256,
+        design_sha256=verified.verification.design_sha256,
+        baseline_commit=result.commit,
+        evaluator_ref=result.evaluator_ref,
+        evidence_ref=result.evidence_ref,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_idempotently_accepts_generation_one_after_tree_loss(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = _verified_at_generation(verified_fixture(tmp_path), 1)
+    expected = completed_prepare_result()
+    sealed = SealedBaseline(
+        generation=1,
+        bundle=authority_bundle(tmp_path),
+        attestation=_completion_attestation(verified, expected),
+    )
+    authority = MemoryBaselineAuthorityStore(sealed)
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def rescored(**_kwargs: Any) -> PrepareResult:
+        return expected
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", rescored)
+
+    result = await run_baseline(
+        PrepareRuntime(authority),
+        workspace(tmp_path),
+        expected.evaluator_ref,
+        "task",
+        None,
+        verified,
+    )
+
+    assert result == expected
+    assert authority.attestations == []
+    assert authority.sealed == sealed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("difference", ["commit", "evaluator_ref", "evidence_ref"])
+async def test_run_baseline_rejects_generation_one_attestation_mismatch(
+    difference: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verified = _verified_at_generation(verified_fixture(tmp_path), 1)
+    prior_result = completed_prepare_result()
+    sealed = SealedBaseline(
+        generation=1,
+        bundle=authority_bundle(tmp_path),
+        attestation=_completion_attestation(verified, prior_result),
+    )
+    authority = MemoryBaselineAuthorityStore(sealed)
+    changes = {
+        "commit": "c" * 40,
+        "evaluator_ref": "sha256:" + "c" * 64,
+        "evidence_ref": "sha256:" + "f" * 64,
+    }
+    rescored_result = prior_result.model_copy(update={difference: changes[difference]})
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def rescored(**_kwargs: Any) -> PrepareResult:
+        return rescored_result
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", rescored)
+
+    with pytest.raises(BaselineAuthorityError, match="existing completion attestation"):
+        await run_baseline(
+            PrepareRuntime(authority),
+            workspace(tmp_path),
+            rescored_result.evaluator_ref,
+            "task",
+            None,
+            verified,
+        )
+
+    assert authority.attestations == []
+    assert authority.sealed == sealed
+
+
+@pytest.mark.asyncio
+async def test_run_baseline_rejects_completion_generation_above_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    verified = _verified_at_generation(verified_fixture(tmp_path), 2)
+    expected = completed_prepare_result()
+    sealed = SealedBaseline(
+        generation=2,
+        bundle=authority_bundle(tmp_path),
+        attestation=_completion_attestation(verified, expected),
+    )
+    authority = MemoryBaselineAuthorityStore(sealed)
+    monkeypatch.setattr(baseline, "_register_prepare_agent", lambda *_args: None)
+
+    async def rescored(**_kwargs: Any) -> PrepareResult:
+        return expected
+
+    monkeypatch.setattr(baseline, "run_prepare_plan", rescored)
+
+    with pytest.raises(BaselineAuthorityError, match="generation"):
+        await run_baseline(
+            PrepareRuntime(authority),
+            workspace(tmp_path),
+            expected.evaluator_ref,
+            "task",
+            None,
+            verified,
+        )
+
+    assert authority.attestations == []
+    assert authority.sealed == sealed

@@ -536,18 +536,39 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
     assert "Training strategy: partial_finetune" in str(captured["task"])
 
 
-def _seed_attested_prepare_checkpoint(
+async def _seed_attested_prepare_checkpoint(
     tmp_path: Path,
     authority: _MemoryBaselineAuthorityStore,
-) -> None:
+) -> tuple[str, str, str]:
     workspace_root = tmp_path / "workspaces" / "eda"
     verified = _write_verified_baseline_fixture(workspace_root)
+    runtime = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    evaluator_ref = await runtime.store.put_text('{"frozen":true}')
+    baseline_commit = "b" * 40
+    evidence_ref = await runtime.store.put_text(
+        json.dumps(
+            {
+                "plan": "prepare",
+                "metric": 0.71,
+                "commit": baseline_commit,
+                "predictions_ref": "sha256:" + "1" * 64,
+                "metrics_ref": None,
+                "report_ref": "sha256:" + "2" * 64,
+                "exploration_ref": None,
+                "outputs": {
+                    "predictions": "outputs/predictions",
+                    "report": "outputs/report.md",
+                },
+            },
+            ensure_ascii=False,
+        )
+    )
     attestation = PrepareAttestation(
         research_sha256=verified.verification.research_sha256,
         design_sha256=verified.verification.design_sha256,
-        baseline_commit="b" * 40,
-        evaluator_ref="sha256:" + "e" * 64,
-        evidence_ref="sha256:" + "d" * 64,
+        baseline_commit=baseline_commit,
+        evaluator_ref=evaluator_ref,
+        evidence_ref=evidence_ref,
     )
     authority.sealed = SealedBaseline(
         generation=1,
@@ -555,10 +576,17 @@ def _seed_attested_prepare_checkpoint(
         attestation=attestation,
     )
 
-    runtime = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
     runtime.state.phase = "PREPARE"
     runtime.state.status = "RUNNING"
     runtime.state.eda_dir = "workspaces/eda"
+    handoff_text = "# Confirmed task\n\nImprove the trusted baseline.\n"
+    handoff_ref = await runtime.store.put_text(handoff_text)
+    runtime.state.task_text = "Improve the trusted baseline."
+    runtime.state.task_understanding = {"goal": "Improve the trusted baseline."}
+    runtime.state.handoff_refs["task_clarification"] = handoff_ref
+    handoff_path = runtime.config.paths.handoffs / "TASK_CLARIFICATION.md"
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(handoff_text, encoding="utf-8")
     runtime.tree.add_hypothesis(
         Hypothesis(
             id="baseline",
@@ -571,30 +599,31 @@ def _seed_attested_prepare_checkpoint(
         "exp_baseline",
         Experiment(
             hypothesis_id="baseline",
-            commit="b" * 40,
+            commit=baseline_commit,
             plan=ExperimentPlan(
                 kind="baseline",
                 change="prepare trusted baseline",
-                run_config_ref="sha256:" + "e" * 64,
+                run_config_ref=evaluator_ref,
                 budget={},
                 acceptance_rule="trusted evaluator score",
             ),
             gitwork=GitWorkBranch(
                 path=str(tmp_path),
                 branch="main",
-                base_commit="b" * 40,
+                base_commit=baseline_commit,
             ),
             status=ExperimentStatus.SUCCEEDED,
             eval=EvalResult(
                 experiment_id="exp_baseline",
                 primary=0.71,
-                per_sample="sha256:" + "d" * 64,
+                per_sample=evidence_ref,
             ),
         ),
     )
     runtime.tree.set_sota("exp_baseline")
     runtime.tree.save(runtime.config.paths.tree)
     runtime.state.save(runtime.state_path)
+    return evaluator_ref, evidence_ref, baseline_commit
 
 
 @pytest.mark.asyncio
@@ -602,7 +631,7 @@ async def test_fresh_runtime_skips_prepare_for_exact_external_attestation(
     tmp_path: Path,
 ) -> None:
     authority = _MemoryBaselineAuthorityStore()
-    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    await _seed_attested_prepare_checkpoint(tmp_path, authority)
     restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
 
     await restarted.supervisor._phases._run_prepare()
@@ -612,13 +641,78 @@ async def test_fresh_runtime_skips_prepare_for_exact_external_attestation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state_ref_kind", ["conflicting", "empty"])
+async def test_attested_resume_restores_evaluator_used_by_search_plan(
+    state_ref_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    evaluator_ref, _evidence_ref, baseline_commit = (
+        await _seed_attested_prepare_checkpoint(tmp_path, authority)
+    )
+    checkpoint = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    checkpoint.state.evaluator_ref = (
+        await checkpoint.store.put_text('{"forged":true}')
+        if state_ref_kind == "conflicting"
+        else None
+    )
+    checkpoint.state.save(checkpoint.state_path)
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+
+    await restarted.supervisor._phases._run_prepare()
+    assert restarted.state.evaluator_ref == evaluator_ref
+    restarted.tree.add_hypothesis(
+        Hypothesis(
+            id="hyp_search",
+            parent_id="exp_baseline",
+            statement="test the next change",
+            intervention="change model.py",
+            expected_effect="improve the trusted metric",
+        )
+    )
+
+    async def create_workspace(commit: str, branch: str, name=None):
+        del name
+        return GitWorkBranch(
+            path=str(tmp_path / "workspaces" / branch),
+            branch=branch,
+            base_commit=commit,
+        )
+
+    async def resume_agent(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        restarted.supervisor._deps.runtime.workspaces,
+        "create",
+        create_workspace,
+    )
+    monkeypatch.setattr(
+        restarted.supervisor._deps.runtime.agents,
+        "resume_agent",
+        resume_agent,
+    )
+
+    await restarted.supervisor.start_plan("hyp_search")
+    plan_input = await restarted.supervisor.plan_input("hyp_search")
+
+    assert restarted.state.phase == "SEARCH"
+    assert restarted.state.evaluator_ref == evaluator_ref
+    assert plan_input.evaluator_ref == evaluator_ref
+    assert plan_input.reference_experiment_id == "exp_baseline"
+    assert plan_input.reference_metric == 0.71
+    assert restarted.tree.get_experiment("exp_baseline").commit == baseline_commit
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("difference", ["commit", "evaluator_ref", "evidence_ref"])
 async def test_fresh_runtime_rejects_attestation_mismatching_local_tree(
     difference: str,
     tmp_path: Path,
 ) -> None:
     authority = _MemoryBaselineAuthorityStore()
-    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    await _seed_attested_prepare_checkpoint(tmp_path, authority)
     restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
     experiment = restarted.tree.get_experiment("exp_baseline")
     if difference == "commit":
@@ -639,6 +733,119 @@ async def test_fresh_runtime_rejects_attestation_mismatching_local_tree(
 
 
 @pytest.mark.asyncio
+async def test_fresh_runtime_rejects_tampered_baseline_metric(tmp_path: Path) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    await _seed_attested_prepare_checkpoint(tmp_path, authority)
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    experiment = restarted.tree.get_experiment("exp_baseline")
+    assert experiment.eval is not None
+    experiment.eval.primary = 0.99
+
+    assert await PhaseRunner(restarted).baseline_resume_is_attested() is False
+    with pytest.raises(BaselineAuthorityError, match="not attested"):
+        await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "PREPARE"
+
+
+def _replace_attested_evidence(
+    authority: _MemoryBaselineAuthorityStore,
+    experiment: Experiment,
+    evidence_ref: str,
+) -> None:
+    assert authority.sealed is not None
+    assert authority.sealed.attestation is not None
+    original = authority.sealed.attestation
+    authority.sealed = SealedBaseline(
+        generation=1,
+        bundle=authority.sealed.bundle,
+        attestation=PrepareAttestation(
+            research_sha256=original.research_sha256,
+            design_sha256=original.design_sha256,
+            baseline_commit=original.baseline_commit,
+            evaluator_ref=original.evaluator_ref,
+            evidence_ref=evidence_ref,
+        ),
+    )
+    assert experiment.eval is not None
+    experiment.eval.per_sample = evidence_ref
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing_artifact",
+        "digest_mismatch",
+        "invalid_json",
+        "missing_metric",
+        "missing_commit",
+    ],
+)
+async def test_fresh_runtime_rejects_invalid_attested_score_evidence(
+    failure: str,
+    tmp_path: Path,
+) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    _evaluator_ref, _evidence_ref, baseline_commit = (
+        await _seed_attested_prepare_checkpoint(tmp_path, authority)
+    )
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    if failure == "missing_artifact":
+        evidence_ref = "sha256:" + "9" * 64
+    elif failure == "invalid_json":
+        evidence_ref = await restarted.store.put_text("{")
+    else:
+        evidence = {"plan": "prepare", "metric": 0.71, "commit": baseline_commit}
+        if failure == "missing_metric":
+            evidence.pop("metric")
+        elif failure == "missing_commit":
+            evidence.pop("commit")
+        evidence_ref = await restarted.store.put_text(json.dumps(evidence))
+        if failure == "digest_mismatch":
+            restarted.store.path_for(evidence_ref).write_text(
+                '{"plan":"prepare","metric":0.99,"commit":"tampered"}',
+                encoding="utf-8",
+            )
+    experiment = restarted.tree.get_experiment("exp_baseline")
+    _replace_attested_evidence(authority, experiment, evidence_ref)
+
+    with pytest.raises(BaselineAuthorityError, match="trusted PREPARE evidence"):
+        await PhaseRunner(restarted).baseline_resume_is_attested()
+    with pytest.raises(BaselineAuthorityError, match="trusted PREPARE evidence"):
+        await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "PREPARE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("difference", ["metric", "commit"])
+async def test_fresh_runtime_rejects_attested_score_content_mismatch(
+    difference: str,
+    tmp_path: Path,
+) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    _evaluator_ref, _evidence_ref, baseline_commit = (
+        await _seed_attested_prepare_checkpoint(tmp_path, authority)
+    )
+    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    evidence = {
+        "plan": "prepare",
+        "metric": 0.99 if difference == "metric" else 0.71,
+        "commit": "c" * 40 if difference == "commit" else baseline_commit,
+    }
+    evidence_ref = await restarted.store.put_text(json.dumps(evidence))
+    experiment = restarted.tree.get_experiment("exp_baseline")
+    _replace_attested_evidence(authority, experiment, evidence_ref)
+
+    assert await PhaseRunner(restarted).baseline_resume_is_attested() is False
+    with pytest.raises(BaselineAuthorityError, match="not attested"):
+        await restarted.supervisor._phases._run_prepare()
+
+    assert restarted.state.phase == "PREPARE"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "authority_state",
     ["missing_capability", "missing_record", "missing_attestation", "wrong_generation"],
@@ -648,7 +855,7 @@ async def test_fresh_runtime_rejects_missing_or_wrong_authority_state(
     tmp_path: Path,
 ) -> None:
     authority = _MemoryBaselineAuthorityStore()
-    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    await _seed_attested_prepare_checkpoint(tmp_path, authority)
     assert authority.sealed is not None
     if authority_state == "missing_capability":
         restarted = ResearchRuntime(project_root=tmp_path)
@@ -685,7 +892,7 @@ async def test_fresh_runtime_rejects_missing_or_wrong_authority_state(
 @pytest.mark.asyncio
 async def test_fresh_runtime_rejects_authority_outage(tmp_path: Path) -> None:
     authority = _MemoryBaselineAuthorityStore()
-    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    await _seed_attested_prepare_checkpoint(tmp_path, authority)
     authority.load_error = OSError("authority offline")
     restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
 
@@ -701,7 +908,7 @@ async def test_fresh_runtime_rejects_authority_outage(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_fresh_runtime_rejects_mutated_baseline_artifact(tmp_path: Path) -> None:
     authority = _MemoryBaselineAuthorityStore()
-    _seed_attested_prepare_checkpoint(tmp_path, authority)
+    await _seed_attested_prepare_checkpoint(tmp_path, authority)
     (tmp_path / "workspaces" / "eda" / "BASELINE_DESIGN.md").write_text(
         "Selected candidate: `resnet-transfer`\nTraining strategy: `classical`\n",
         encoding="utf-8",

@@ -239,6 +239,7 @@ async def _attest_prepare_completion(
     authority: BaselineAuthorityStore,
     verified: VerifiedBaseline,
     result: PrepareResult,
+    current: SealedBaseline,
 ) -> None:
     """Attach exact trusted scoring evidence to the in-memory generation."""
     evidence = PrepareAttestation(
@@ -248,10 +249,27 @@ async def _attest_prepare_completion(
         evaluator_ref=result.evaluator_ref,
         evidence_ref=result.evidence_ref,
     )
+    if (
+        current.generation != verified.authority_generation
+        or current.bundle != _verified_bundle(verified)
+    ):
+        raise BaselineAuthorityError(
+            "external baseline authority changed during PREPARE"
+        )
+    if current.generation == 1:
+        if current.attestation == evidence:
+            return
+        raise BaselineAuthorityError(
+            "existing completion attestation does not match trusted PREPARE result"
+        )
+    if current.generation != 0 or current.attestation is not None:
+        raise BaselineAuthorityError(
+            "baseline authority completion generation is invalid"
+        )
     try:
         sealed = await authority.attest_prepare(
             evidence,
-            expected_generation=verified.authority_generation,
+            expected_generation=0,
         )
     except BaselineAuthorityError:
         raise
@@ -539,11 +557,16 @@ async def run_baseline(
 
     async def assert_baseline() -> None:
         """Reject authority or mirror drift from the in-memory generation."""
-        current = await load_authoritative_baseline(root, authority)
-        if current is None:
+        await current_sealed_baseline()
+
+    async def current_sealed_baseline() -> SealedBaseline:
+        """Return the still-matching sealed authority record."""
+        loaded = await _load_authoritative_baseline_record(root, authority)
+        if loaded is None:
             raise BaselineAuthorityError(
                 "external baseline authority has no sealed baseline"
             )
+        current, sealed = loaded
         if (
             current.authority_generation != verified.authority_generation
             or current.artifacts.raw_research != verified.artifacts.raw_research
@@ -553,6 +576,7 @@ async def run_baseline(
             raise BaselineAuthorityError(
                 "external baseline authority changed during PREPARE"
             )
+        return sealed
 
     await assert_baseline()
     await runtime.publish_output(
@@ -581,6 +605,6 @@ async def run_baseline(
         predict_features=predict_features,
         assert_baseline=assert_baseline,
     )
-    await assert_baseline()
-    await _attest_prepare_completion(authority, verified, result)
+    current = await current_sealed_baseline()
+    await _attest_prepare_completion(authority, verified, result, current)
     return result
