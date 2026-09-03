@@ -14,12 +14,11 @@ class BaselineAuthorityConflict(BaselineAuthorityError):
     """The external baseline generation changed before an atomic update."""
 
 
-def _exact_bytes(value: bytes, *, field: str) -> bytes:
+def _exact_bytes(value: bytes | bytearray | memoryview, *, field: str) -> bytes:
     """Copy one non-empty bytes-like payload into an immutable value."""
-    try:
-        copied = bytes(value)
-    except (TypeError, ValueError) as exc:
-        raise BaselineAuthorityError(f"{field} must be bytes") from exc
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise BaselineAuthorityError(f"{field} must be bytes-like")
+    copied = bytes(value)
     if not copied:
         raise BaselineAuthorityError(f"{field} must not be empty")
     return copied

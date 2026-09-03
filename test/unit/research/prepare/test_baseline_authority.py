@@ -215,6 +215,26 @@ def test_authority_values_defensively_copy_bytes_and_are_frozen() -> None:
         sealed.generation = 1
 
 
+@pytest.mark.parametrize(
+    "field", ["research_bytes", "design_bytes", "verification_bytes"]
+)
+@pytest.mark.parametrize("value", [1, True, [65], 10**100])
+def test_authority_bundle_rejects_non_bytes_payloads_with_typed_error(
+    field: str, value: object
+) -> None:
+    bundle = _bundle()
+    values = {
+        "research_bytes": bundle.research_bytes,
+        "design_bytes": bundle.design_bytes,
+        "verification_bytes": bundle.verification_bytes,
+        "verification": bundle.verification,
+    }
+    values[field] = value
+
+    with pytest.raises(BaselineAuthorityError, match=field):
+        VerifiedBaselineBundle(**values)
+
+
 def test_non_integer_generation_raises_the_typed_boundary_error() -> None:
     with pytest.raises(BaselineAuthorityError, match="generation"):
         SealedBaseline(generation=0.5, bundle=_bundle())
