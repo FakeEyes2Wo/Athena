@@ -18,7 +18,10 @@ def _exact_bytes(value: bytes | bytearray | memoryview, *, field: str) -> bytes:
     """Copy one non-empty bytes-like payload into an immutable value."""
     if not isinstance(value, (bytes, bytearray, memoryview)):
         raise BaselineAuthorityError(f"{field} must be bytes-like")
-    copied = bytes(value)
+    try:
+        copied = bytes(value)
+    except (TypeError, ValueError) as exc:
+        raise BaselineAuthorityError(f"{field} must be readable bytes-like") from exc
     if not copied:
         raise BaselineAuthorityError(f"{field} must not be empty")
     return copied

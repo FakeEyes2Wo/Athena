@@ -235,6 +235,25 @@ def test_authority_bundle_rejects_non_bytes_payloads_with_typed_error(
         VerifiedBaselineBundle(**values)
 
 
+@pytest.mark.parametrize(
+    "field", ["research_bytes", "design_bytes", "verification_bytes"]
+)
+def test_authority_bundle_wraps_released_memoryview_errors(field: str) -> None:
+    released = memoryview(b"released")
+    released.release()
+    bundle = _bundle()
+    values = {
+        "research_bytes": bundle.research_bytes,
+        "design_bytes": bundle.design_bytes,
+        "verification_bytes": bundle.verification_bytes,
+        "verification": bundle.verification,
+    }
+    values[field] = released
+
+    with pytest.raises(BaselineAuthorityError, match=field):
+        VerifiedBaselineBundle(**values)
+
+
 def test_non_integer_generation_raises_the_typed_boundary_error() -> None:
     with pytest.raises(BaselineAuthorityError, match="generation"):
         SealedBaseline(generation=0.5, bundle=_bundle())
