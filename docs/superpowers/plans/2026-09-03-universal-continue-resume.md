@@ -752,7 +752,9 @@ specification review, and independent AI quality review all passed.
 **Files:**
 - Create: `test/integration/research/test_continue_resume_surfaces.py`
 - Modify: `tests/test_gui_gateway_e2e.py`
+- Modify: `tests/test_gui_protocol_contract.py`
 - Modify: `athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx`
+- Modify: `athena-gui/src/lib/__tests__/tauri-bridge.test.ts`
 
 **Interfaces:**
 - Exercises: confirmed task -> phase failure -> exact continuation -> same phase and task contract.
@@ -763,6 +765,8 @@ specification review, and independent AI quality review all passed.
 The harness must accept phase `PREPARE`, `SEARCH`, or `VALIDATE`, fail the first phase
 entry, block on the second, and record lifecycle task identities. It must create a real
 confirmed clarification handoff before the first phase starts and make no network calls.
+Patch the narrow phase entry points on a real `ResearchRuntime`; do not rebuild the
+Task 2 concurrency or baseline-authority harnesses in this adapter-matrix file.
 
 - [ ] **Step 2: Add parameterized cross-surface success tests**
 
@@ -779,50 +783,59 @@ assert runtime.handoffs_path.joinpath("TASK_CLARIFICATION.md").read_bytes() == o
 
 Exercise `runtime.message("continue")`, `runtime.start_task("continue")`,
 `GuiService.message("continue")`, and `GuiService.resume()` against the same harness.
+The matrix proves entry-point convergence; lifecycle serialization, terminal-state
+classification, and authority retry semantics remain owned by the focused Task 2 tests.
 
 - [ ] **Step 3: Add end-to-end WebSocket and native bridge assertions**
 
-Extend gateway E2E to submit a `message` request containing `continue` after a failed
-state and observe `RUNNING` plus unchanged draft ID. In frontend event tests, execute the
-same hook once with `window.__TAURI_INTERNALS__` absent and once with native invoke
-mocked; both must call the canonical resume method and neither may call clarification.
+Extend gateway E2E to submit a `message` request containing `continue` through a real
+WebSocket server after a failed state and observe `RUNNING` plus unchanged draft ID and
+revision. Frontend hook tests remain transport-agnostic because they mock the bridge;
+they must prove exact continuation calls the shared `resumeSearch` adapter and never
+clarification. In `tauri-bridge.test.ts`, separately exercise both real adapter branches:
+native invoke calls `resume_search`, while browser fallback calls
+`wsBackend.call("resume", {})` after a module reset with `__TAURI_INTERNALS__` absent.
+
+Correct the pre-existing static protocol inventory without expanding the gateway
+canonical set: declare `workspace_dialog_start_directory` as a native-only Tauri
+command, assert it is disjoint from `SUPPORTED_METHODS`, and compare registered Rust
+commands against proxied commands plus that native-only set. This is a test-model fix;
+do not add the directory helper to Python RPC methods.
 
 - [ ] **Step 4: Add negative and concurrency acceptance tests**
 
-Cover:
-
-- fresh IDLE, STOPPED, and COMPLETED return `resume_unavailable`;
-- `continue research` remains guidance;
-- a genuinely new task continues to receive `different_task`;
-- two concurrent `continue` requests return one live lifecycle task;
-- a second phase failure is surfaced normally and is not automatically retried.
-
-Use a barrier inside the old check-to-create window so the concurrency test would
-deterministically create two tasks without `resume_lock`; do not rely only on final
-state. Add in-process FAILED and reloaded FAILED-to-IDLE PREPARE cases for baseline
-authority outage and mismatch. They must retry only the authoritative gate, preserve
-the existing baseline tree and clarification bytes, and either succeed when authority
-recovers or surface the original authority failure again.
+Add only cross-surface gaps here: a genuinely new task still receives `different_task`,
+and a second phase failure is surfaced normally without creating a third lifecycle.
+Rerun, rather than duplicate, the focused Task 2 tests that already cover fresh IDLE,
+STOPPED, COMPLETED, multiword guidance, deterministic concurrent resume, stop/resume,
+and both recovered and persistent baseline-authority outage/mismatch. Their fresh
+results are part of Task 6 evidence.
 
 - [ ] **Step 5: Run cross-surface and compatibility suites**
 
 Run:
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q test/integration/research/test_continue_resume_surfaces.py tests/test_gui_gateway_e2e.py test/integration/test_tui_protocol.py
+.venv\Scripts\python.exe -m pytest -q test/integration/research/test_continue_resume_surfaces.py test/unit/research/test_breakpoint_resume.py test/integration/research/test_task_confirmation_gate.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_e2e.py tests/test_gui_protocol_contract.py test/integration/test_tui_protocol.py
 npm --prefix athena-gui test -- --run src/hooks/__tests__/usePipeline.events.test.tsx src/hooks/__tests__/usePipeline.test.tsx src/lib/__tests__/tauri-bridge.test.ts
 cargo test --manifest-path athena-rust/Cargo.toml -p athena-protocol
 npm --prefix athena_ts test -- --run packages/athena-dsh/test/index.test.ts packages/athena-autoresearch/test/runtime.test.ts
-git diff --check -- test/integration/research/test_continue_resume_surfaces.py tests/test_gui_gateway_e2e.py athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx
+git diff --check -- test/integration/research/test_continue_resume_surfaces.py tests/test_gui_gateway_e2e.py tests/test_gui_protocol_contract.py athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx athena-gui/src/lib/__tests__/tauri-bridge.test.ts
 ```
 
 Expected: every affected surface passes; Rust method parity and independent TypeScript
 resume contracts remain unchanged. Commit only Task 6 paths:
 
 ```powershell
-git add test/integration/research/test_continue_resume_surfaces.py tests/test_gui_gateway_e2e.py athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx
+git add test/integration/research/test_continue_resume_surfaces.py tests/test_gui_gateway_e2e.py tests/test_gui_protocol_contract.py athena-gui/src/hooks/__tests__/usePipeline.events.test.tsx athena-gui/src/lib/__tests__/tauri-bridge.test.ts
 git commit -m "test: cover continue resume across surfaces"
 ```
+
+Task 6 refinement (2026-09-04): two independent read-only AI explorers confirmed that
+hook tests mock the bridge and therefore cannot prove transport selection, while Task 2
+already supplies the deterministic lifecycle/authority semantics. The refined task
+places browser/native assertions at the real bridge boundary and keeps the new runtime
+file focused on phase and caller convergence.
 
 ---
 
