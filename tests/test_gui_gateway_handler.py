@@ -72,6 +72,27 @@ class RecordingRuntime:
         return []
 
 
+class SettingsRuntime(RecordingRuntime):
+    def __init__(self, project_root: str, skip_validate: bool = False) -> None:
+        super().__init__()
+        self.project_root = project_root
+        self.skip_validate = skip_validate
+
+    async def apply_settings(self, patch: dict[str, object]) -> dict[str, object]:
+        if "skip_validate" in patch:
+            self.skip_validate = bool(patch["skip_validate"])
+        return {
+            "project_root": self.project_root,
+            "skip_validate": self.skip_validate,
+        }
+
+    def settings(self) -> dict[str, object]:
+        return {
+            "project_root": self.project_root,
+            "skip_validate": self.skip_validate,
+        }
+
+
 def _handler_at(tmp_path: Path, factory=None) -> GuiRequestHandler:
     runtime = RecordingRuntime()
     runtime.project_root = str(tmp_path)
@@ -156,6 +177,63 @@ async def test_handler_session_switch_swaps_runtime(tmp_path) -> None:
     assert result == {"session_id": "s-1", "records": [], "sessions": ["s-1"]}
     assert len(created) == 1
     assert created[0] == (str(tmp_path), tmp_path / ".athena" / "conversations" / "s-1")
+
+
+@pytest.mark.asyncio
+async def test_settings_set_persists_validated_skip_preference_and_state(
+    tmp_path,
+) -> None:
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    store.save(
+        GuiState(
+            active_project_root=str(tmp_path),
+            last_sessions={str(tmp_path.resolve()): "s-1"},
+        )
+    )
+    runtime = SettingsRuntime(str(tmp_path))
+    handler = GuiRequestHandler(runtime, state_store=store)
+
+    result = await handler.dispatch("settings_set", {"patch": {"skip_validate": True}})
+    saved = store.load()
+
+    assert result["skip_validate"] is True
+    assert saved.skip_validate_for(tmp_path) is True
+    assert saved.active_project_root == str(tmp_path.resolve())
+    assert saved.last_sessions == {str(tmp_path.resolve()): "s-1"}
+
+
+@pytest.mark.asyncio
+async def test_session_switch_restores_project_skip_preference_and_isolates_projects(
+    tmp_path,
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    store.save(
+        GuiState(
+            active_project_root=str(tmp_path),
+            skip_validate_by_project={str(tmp_path.resolve()): True},
+        )
+    )
+    created: list[SettingsRuntime] = []
+
+    def factory(
+        root: str, state_root: Path | None, *, skip_validate: bool = False
+    ) -> SettingsRuntime:
+        del state_root
+        runtime = SettingsRuntime(root, skip_validate)
+        created.append(runtime)
+        return runtime
+
+    handler = GuiRequestHandler(
+        SettingsRuntime(str(tmp_path)), factory, state_store=store
+    )
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert created[-1].skip_validate is True
+    await handler.dispatch("set_project_root", {"path": str(other)})
+    assert created[-1].skip_validate is False
 
 
 @pytest.mark.asyncio
@@ -573,14 +651,20 @@ async def test_handler_remembers_the_last_session_per_workspace(tmp_path) -> Non
     other.mkdir()
     store = GuiStateStore(tmp_path / "gui_state.json")
     store.save(
-        GuiState(active_project_root=str(other), last_sessions={str(other): "s-9"})
+        GuiState(
+            active_project_root=str(other),
+            last_sessions={str(other): "s-9"},
+            skip_validate_by_project={str(other.resolve()): False},
+        )
     )
     handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
 
     await handler.dispatch("session_switch", {"session_id": "s-1"})
 
     assert (await handler.dispatch("sessions_list", {}))["active"] == "s-1"
-    assert store.load().last_sessions == {str(tmp_path): "s-1", str(other): "s-9"}
+    saved = store.load()
+    assert saved.last_sessions == {str(tmp_path): "s-1", str(other): "s-9"}
+    assert saved.skip_validate_by_project == {str(other.resolve()): False}
 
 
 @pytest.mark.asyncio
@@ -607,7 +691,11 @@ async def test_set_project_root_keeps_remembered_sessions(tmp_path) -> None:
     """切工作区只改活动工作区，不能顺手清空每个工作区的 last-active 记录。"""
     store = GuiStateStore(tmp_path / "gui_state.json")
     store.save(
-        GuiState(active_project_root=str(tmp_path), last_sessions={"/old": "s-9"})
+        GuiState(
+            active_project_root=str(tmp_path),
+            last_sessions={"/old": "s-9"},
+            skip_validate_by_project={str(tmp_path.resolve()): True},
+        )
     )
     handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
     target = tmp_path / "another"
@@ -617,6 +705,7 @@ async def test_set_project_root_keeps_remembered_sessions(tmp_path) -> None:
     saved = store.load()
     assert saved.active_project_root == str(target.resolve())
     assert saved.last_sessions == {"/old": "s-9"}
+    assert saved.skip_validate_by_project == {str(tmp_path.resolve()): True}
 
 
 def test_session_state_root_rejects_traversal(tmp_path) -> None:

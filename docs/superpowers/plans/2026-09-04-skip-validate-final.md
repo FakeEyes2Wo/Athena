@@ -279,7 +279,7 @@ git commit -m "feat: define skip validate runtime policy"
 - Changes: every gateway-created session runtime receives the active project's persisted preference.
 - Changes: a successful `settings_set` persists the returned boolean for `self._project_root` without dropping `active_project_root` or `last_sessions`.
 
-- [ ] **Step 1: Write failing tolerant-store tests**
+- [x] **Step 1: Write failing tolerant-store tests**
 
 Add these cases to `test_state_store.py`:
 
@@ -327,7 +327,7 @@ def test_malformed_skip_validate_entries_are_dropped(tmp_path) -> None:
 
 Extend missing/legacy/corrupt cases to assert `skip_validate_for(...) is False`.
 
-- [ ] **Step 2: Write failing gateway restore and preservation tests**
+- [x] **Step 2: Write failing gateway restore and preservation tests**
 
 In `tests/test_gui_gateway_main.py`, patch `ResearchRuntime`, call
 `_make_runtime(..., skip_validate=True)`, and assert the option is passed without
@@ -355,7 +355,7 @@ Switch to another named session through a factory that reads
 `test_handler_remembers_the_last_session_per_workspace` so both also preserve
 the preference map.
 
-- [ ] **Step 3: Run the tests and capture RED evidence**
+- [x] **Step 3: Run the tests and capture RED evidence**
 
 Run:
 
@@ -369,7 +369,7 @@ Run:
 Expected: FAIL because the stored map, factory argument, and handler persistence
 do not exist.
 
-- [ ] **Step 4: Implement tolerant project lookup and atomic storage**
+- [x] **Step 4: Implement tolerant project lookup and atomic storage**
 
 Add a boolean-map parser parallel to `_parse_last_sessions`:
 
@@ -396,7 +396,7 @@ Load and save the map in `GuiStateStore`. Every existing `GuiState(...)`
 reconstruction in `handler.py` must copy `stored.skip_validate_by_project` so a
 project or session switch cannot erase it.
 
-- [ ] **Step 5: Restore and persist the preference through the gateway**
+- [x] **Step 5: Restore and persist the preference through the gateway**
 
 Add `skip_validate` to `_make_runtime` and pass it to `ResearchRuntime`. In
 `start_server.factory`, load the current `GuiState` for every runtime creation
@@ -422,7 +422,7 @@ For `settings_set`, await the service first. Only if the input patch contains
 `skip_validate`, read the validated boolean from the returned snapshot and call
 the helper. Return the snapshot unchanged. Do not persist a raw request value.
 
-- [ ] **Step 6: Run, format, check, update this task, and commit**
+- [x] **Step 6: Run, format, check, update this task, and commit**
 
 Run:
 

@@ -27,6 +27,7 @@ def _make_runtime(
     ask_user: Any = None,
     session_id: str = "default",
     broker: Any = None,
+    skip_validate: bool = False,
 ) -> ResearchRuntime:
     """按选定项目目录构造 research runtime；None 时沿用进程工作目录。
 
@@ -41,6 +42,7 @@ def _make_runtime(
         session_id=session_id,
         model=settings.model_name(),
         auto_validate=True,
+        skip_validate=skip_validate,
         task_confirmation_gate=True,
         auto_confirm=False,
         ask_user=ask_user,
@@ -87,12 +89,14 @@ async def start_server(
         project_root: str | None = None, state_root: Path | None = None
     ) -> ResearchRuntime:
         session_id = state_root.name if state_root is not None else "default"
+        stored = state_store.load()
         runtime = make_runtime(
             project_root,
             state_root,
             ask_user=broker.ask,
             session_id=session_id,
             broker=broker,
+            skip_validate=stored.skip_validate_for(project_root),
         )
         broker.bind(session_id, "runtime", "runtime")
         return runtime
