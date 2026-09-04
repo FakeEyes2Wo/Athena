@@ -74,6 +74,39 @@ class SearchLoop:
     def _tree(self):
         return self._owner.tree
 
+    def _assert_prepare_finished(self) -> None:
+        """Refuse to search when PREPARE did not leave what SEARCH measures against.
+
+        SEARCH is only meaningful relative to a trusted SOTA scored by a frozen
+        evaluator. Until 2026-09-02 nothing checked that, and the first thing to
+        notice was the Ideator asking for the EDA workspace:
+
+            SEARCH scheduling loop crashed:
+            RuntimeError('EDA workspace not captured; PREPARE must run first')
+
+        That reads like a missing directory. What had actually happened is that
+        PREPARE never ran at all -- no platform split, no frozen evaluator, no
+        baseline -- because the Supervisor decided during the task-understanding
+        turn that it should establish the baseline itself and dispatched a
+        General Agent, which trained on an unrelated project's data.
+
+        Naming every missing piece turns a misleading symptom into the cause.
+        """
+        missing: list[str] = []
+        if self._tree.best_experiment_id() is None:
+            missing.append("a trusted SOTA baseline in the research tree")
+        if getattr(self._state, "evaluator_ref", None) is None:
+            missing.append("a frozen evaluator")
+        if not missing:
+            return
+        raise RuntimeError(
+            "SEARCH cannot start: PREPARE did not finish. Missing "
+            + ", and ".join(missing)
+            + ". SEARCH scores every candidate against the frozen evaluator and "
+            "compares it to the trusted baseline, so without them there is "
+            "nothing to measure and nothing to compare."
+        )
+
     def _spawn_search(self) -> None:
         """(重新)进入 SEARCH 调度循环（当前空闲且 RUNNING 时）。
 
@@ -111,6 +144,7 @@ class SearchLoop:
 
     async def run_search(self) -> None:
         """Run rolling SEARCH scheduling."""
+        self._assert_prepare_finished()
         self._task = asyncio.current_task()
         while not self._run.is_stopped():
             if self._state.status != "RUNNING":
