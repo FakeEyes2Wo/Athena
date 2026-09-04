@@ -78,6 +78,30 @@ require PowerShell 7 while the host provides Windows PowerShell 5.1, and one exi
 Rust/Python workspace-dialog protocol-inventory mismatch. No affected path was
 introduced by this feature, and focused task-owned verification remained green.
 
+## Post-closeout local-main integration
+
+The user selected local integration. `origin/main` and closeout commit `a31aa81` were
+merged into the clean local `main` as `101aced` and `2dcbd6d` without conflicts.
+Fresh verification then exposed two older main-line omissions that earlier clean
+worktrees had masked with untracked files:
+
+- `phases.py` and `settlement.py` imported `athena.research.exp_docs`, but the module
+  was absent from Git. The pre-fix focused command stopped with six collection
+  errors. The narrow upstream restoration `47608d9` was merged as `58947f7`; the
+  identical command then passed `184` tests.
+- Tauri registered `commands::dialog::workspace_dialog_start_directory`, but
+  `commands/dialog.rs` was absent from Git. The pre-fix `cargo test` failed with
+  `E0583`/`E0433`. Only the single-file, three-test restoration commit `0089397` was
+  cherry-picked as `38cbfde`; the containing feature branch was not merged because it
+  carried unrelated work.
+
+On the repaired merged `main`, Vitest passed `18 files / 158 tests`, the production
+build transformed 2761 modules, Rust passed 10 tests, and `cargo check` exited zero.
+The focused Python run retained the known Windows asyncio teardown diagnostic and a
+`.pytest_cache` permission warning; Rust retained the six documented `dead_code`
+warnings and benign peer-close teardown traceback. No full repository Python rerun
+was claimed during this local integration pass.
+
 ## Public-output safety audit
 
 - The clarification Agent exposes only `report_task_understanding`; it has no shell,
@@ -112,6 +136,12 @@ reconfigure the user's model.
 - `athena-gui/node_modules/.vite` remains. Native PowerShell deletion was rejected by
   the execution policy, while the allowed Git dry run widened the target to all of
   `node_modules`; that unsafe deletion was intentionally refused and recorded.
+- Local option-1 cleanup deleted the merged integration branch and removed its Git
+  worktree registration. Windows returned `Invalid argument` while deleting the
+  physical duplicate checkout, so
+  `.worktrees/output-main-integration` remains as an unregistered cleanup residue.
+  A Git-clean dry run would also remove another retired directory; that wider
+  deletion was refused rather than risking unrelated worktree data.
 
 ## Unrelated worktree changes preserved
 
