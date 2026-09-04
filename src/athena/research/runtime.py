@@ -349,6 +349,7 @@ class ResearchRuntime:
         "_direction": "direction",
         "_tolerance": "tolerance",
         "_auto_validate": "auto_validate",
+        "_auto_seed_task": "auto_seed_task",
         "_prepare_phase": "prepare_phase",
         "_validation_phase": "validation_phase",
         "_ask_user": "ask_user",
