@@ -1,7 +1,7 @@
 # Supervisor Transactional Control and Search Resume Design
 
 Date: 2026-09-04
-Status: draft for written review; concept approved; queued behind the active plan
+Status: approved; implementation planning queued behind the active plan
 
 ## Problem
 
@@ -48,6 +48,36 @@ session state, recent-root entry, or browser storage may be deleted.
 7. Hide empty workspace groups in the session sidebar without deleting any data.
 8. Produce deterministic, offline-testable behavior and actionable file logs for
    every control transaction failure.
+
+## Maintainability and API budget
+
+The implementation treats cognitive load as a compatibility constraint, not a style
+preference:
+
+- The normal model-visible surface is exactly the five tools in this design. Legacy
+  tool names may exist only as non-registered adapters during migration; no second
+  public path may perform the same mutation.
+- `update_research` and `manage_hypotheses` each expose one strict request envelope:
+  `{context_version, action}`. Action-specific values live inside the discriminated
+  action model. Framework values such as session ID, operation ID, journal paths,
+  retry policy, runtime handles, and rollback snapshots are derived internally and
+  are never model parameters.
+- `inspect_research` exposes only `section`, optional opaque `cursor`, and bounded
+  `page_size`. It does not expose storage paths, projection internals, or query
+  language syntax.
+- Domain choices use enums or discriminated models rather than clusters of booleans.
+  Defaults and safety caps have one configuration owner and are not repeated across
+  tool, runtime, and GUI layers.
+- The mutation coordinator, durable journal store, context projector, resume policy,
+  and GUI routing projection each have one named owner module. Compatibility adapters
+  contain delegation only, carry removal tests/milestones, and do not accumulate new
+  behavior.
+- Public tool-name and JSON-schema snapshots, import-boundary tests, and duplicate-
+  path searches enforce this budget. A new parameter or tool requires an explicit
+  design change, migration note, and test update.
+- The transaction machinery remains scoped to Athena ResearchState/ResearchTree
+  control operations. It is not generalized into a repository-wide framework until
+  a second proven consumer exists.
 
 ## Non-goals
 
@@ -177,6 +207,18 @@ The supported action families are:
 - `set_manual_mode(manual)`
 - `record_guidance(text, scope)`
 - `configure_kaggle(enabled, download)`
+
+The wire shape does not flatten variant parameters into the tool signature:
+
+```json
+{
+  "context_version": "sha256:...",
+  "action": {
+    "kind": "resume_search",
+    "additional_attempts": 20
+  }
+}
+```
 
 Every input model is strict and forbids unknown fields. At least one field must be
 present where relevant; existing maximum concurrency, Plan-turn, and patience limits
@@ -630,6 +672,9 @@ running Search.
 ### Tool and context contracts
 
 - Snapshot the normal and Kaggle tool-name sets and enforce the maximum count.
+- Snapshot public schemas and prove both mutation tools have only
+  `context_version`/`action` at the top level, while the read tool has only
+  `section`/`cursor`/`page_size`; framework-owned transaction parameters are absent.
 - Assert phase-aware schemas expose only legal action variants.
 - Prove compact context is deterministic, bounded, credential-free, and uses a
   changing version when relevant state/tree data changes.
@@ -685,7 +730,8 @@ running Search.
 - Cover SEARCH/WAITING, in-flight attempt accounting, manual mode, exhausted Plan
   budget, no viable hypotheses, missing SOTA/evaluator, FAILED, and STOPPED.
 - Drive a fake Supervisor provider from Chinese and English resume requests and
-  assert it chooses `update_research(action="resume_search")`.
+  assert it chooses
+  `update_research(action={"kind":"resume_search","additional_attempts":20})`.
 - Prove `/search +N` reaches the same transaction implementation.
 
 ### GUI
@@ -742,6 +788,8 @@ tests use fake providers and no network.
     Windows/WSL backend cannot become a second writer for the same session.
 14. With automatic validation disabled, neither the Scheduler nor a model-authored
     action can enter VALIDATE without a user-originated gateway confirmation.
+15. The public parameter budget is enforced by schema snapshots, legacy aliases are
+    absent from the registry, and there is one implementation path per domain action.
 
 ## Repository sequencing
 
@@ -752,3 +800,10 @@ routing. In accordance with the repository instructions, this design is queued a
 must not replace the active plan or modify those files until the active plan is
 completed and its closeout updates `CURRENT.md`. The implementation plan for this
 design must be written against the resulting head, with a fresh overlap audit.
+
+To keep review units small, planning is split after that audit: a backend plan owns
+transactional persistence, Supervisor APIs, Search resume, lifecycle policy, and the
+derived interaction mode; a dependent frontend plan owns interaction-mode routing and
+empty-workspace presentation only. The backend contract and compatibility tests must
+be green before frontend implementation begins. Neither plan duplicates domain rules
+from the other.
