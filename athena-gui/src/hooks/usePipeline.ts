@@ -51,6 +51,10 @@ const RUNTIME_STATUS_MAP: Record<string, PipelineViewModel["status"]> = {
   FAILED: "error",
 };
 
+function isContinueCommand(text: string): boolean {
+  return text.trim().toLowerCase() === "continue";
+}
+
 /** Slash-command help shown by ``/help`` (mirrors the TUI overlay text). */
 const HELP_TEXT = "可用命令：/pause /resume /stop /manual /auto /select <id> /help";
 
@@ -212,6 +216,13 @@ interface SessionViewSnapshot {
   pendingOutputEvents: PendingOutputEvent[];
   messageCounter: number;
   logCounter: number;
+}
+
+interface SessionTransition {
+  epoch: number;
+  targetSessionId: string | null;
+  promise: Promise<boolean>;
+  settle: (succeeded: boolean) => void;
 }
 
 type OutputScope =
@@ -388,6 +399,9 @@ function applyPipelineEvent(
   }
 
   if (event.kind === "state") {
+    next.resumeAvailable = data.resume_available === true;
+    next.resumeReason =
+      typeof data.resume_reason === "string" ? data.resume_reason : null;
     if (typeof data.phase === "string" && data.phase.trim()) {
       next.phase = data.phase;
     }
@@ -487,6 +501,7 @@ export function usePipeline(
   const outputFrameRef = useRef<number | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionRequestEpochRef = useRef(0);
+  const sessionTransitionRef = useRef<SessionTransition | null>(null);
   const pendingCreationsRef = useRef(new Map<string, Promise<unknown>>());
   const workspaceCacheRoot = workspaceRoot ?? "default";
   const authoritativeSessionsRef = useRef<{
@@ -500,10 +515,49 @@ export function usePipeline(
   const currentRevisionRef = useRef(-1);
   // start_search 已发出但后端首帧未回时，也算运行中。
   const runStarted = useRef(false);
+  const resumeInFlightRef = useRef<{
+    epoch: number;
+    sessionId: string;
+    promise: Promise<void>;
+  } | null>(null);
+  const resumeGenerationRef = useRef(0);
   // 会话标题按工作区隔离：不同项目目录的会话标题互不串扰。
   const titlesKey = sessionTitlesKey(workspaceRoot);
   const settlingRequestRef = useRef<string | null>(null);
   const humanPollFailures = useRef(0);
+
+  const advanceSessionEpoch = useCallback(() => {
+    sessionTransitionRef.current?.settle(false);
+    sessionRequestEpochRef.current += 1;
+    return sessionRequestEpochRef.current;
+  }, []);
+
+  const beginSessionTransition = useCallback(
+    (targetSessionId: string | null = null) => {
+      const epoch = advanceSessionEpoch();
+      let settle!: (succeeded: boolean) => void;
+      let settled = false;
+      const promise = new Promise<boolean>((resolve) => {
+        settle = resolve;
+      });
+      const transition: SessionTransition = {
+        epoch,
+        targetSessionId,
+        promise,
+        settle: (succeeded: boolean) => {
+          if (settled) return;
+          settled = true;
+          settle(succeeded);
+          if (succeeded && sessionTransitionRef.current?.promise === promise) {
+            sessionTransitionRef.current = null;
+          }
+        },
+      };
+      sessionTransitionRef.current = transition;
+      return transition;
+    },
+    [advanceSessionEpoch],
+  );
 
   const setClarificationIdentity = useCallback(
     (draftId: string | null, revision = -1, scopeId = draftId || null) => {
@@ -857,16 +911,34 @@ export function usePipeline(
         outputFrameRef.current = null;
       }
       pendingOutputEventsRef.current = [];
-      sessionRequestEpochRef.current += 1;
+      advanceSessionEpoch();
       pendingCreationsRef.current.clear();
     };
-  }, []);
+  }, [advanceSessionEpoch]);
 
   // Subscribe to backend pipeline events on mount.
   useEffect(() => {
     let mounted = true;
     let unlisteners: Array<() => void> = [];
-    const hydrationEpoch = ++sessionRequestEpochRef.current;
+    const transition = beginSessionTransition();
+    const hydrationEpoch = transition.epoch;
+    const applyHydrationSnapshot = () => {
+      const resumeGeneration = resumeGenerationRef.current;
+      void stateGet()
+        .then((snapshot) => {
+          if (
+            !mounted ||
+            hydrationEpoch !== sessionRequestEpochRef.current ||
+            resumeGeneration !== resumeGenerationRef.current
+          ) return;
+          setViewModel((prev) =>
+            applyPipelineEvent(prev, { kind: "state", data: snapshot }),
+          );
+        })
+        .catch(() => {
+          // Non-fatal: the live subscription above will still drive updates.
+        });
+    };
 
     subscribeToPipelineEvents((event) => {
       if (!mounted) return;
@@ -947,31 +1019,26 @@ export function usePipeline(
       unlisteners = fns;
     });
 
-    // Seed the view model from the current projected state so a fresh session
-    // (including after a workspace switch remount) never starts blank while
-    // waiting for the next streamed event.
-    stateGet()
-      .then((snapshot) => {
-        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
-        setViewModel((prev) => applyPipelineEvent(prev, { kind: "state", data: snapshot }));
-      })
-      .catch(() => {
-        // Non-fatal: the live subscription above will still drive updates.
-      });
-
     // 断点续传：列出会话 → 切到本工作区上次用的会话 → 重放其 transcript。
     sessionsList()
       .then(({ sessions: list, active }) => {
-        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) return null;
+        if (!mounted || hydrationEpoch !== sessionRequestEpochRef.current) {
+          transition.settle(false);
+          return null;
+        }
         // active 由后端按工作区记住；从没用过的工作区列表为空，落在 default 上，
         // 它同样要等到真跑起来才会出现在侧栏里。
         const target = requestedSessionId && list.includes(requestedSessionId)
           ? requestedSessionId
           : active ?? "default";
+        transition.targetSessionId = target;
         return sessionSwitch(target).then((result) => ({ target, list, result }));
       })
       .then((hydration) => {
-        if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) return;
+        if (!hydration || !mounted || hydrationEpoch !== sessionRequestEpochRef.current) {
+          transition.settle(false);
+          return;
+        }
         const { target, list, result } = hydration;
         const previous = captureSessionViewRef.current();
         try {
@@ -982,17 +1049,31 @@ export function usePipeline(
           setCurrentSessionId(target);
           setLogs([]);
           restoreRecords(result.records, true, target);
-        } catch (error) {
+        } catch {
           restoreSessionViewRef.current(previous);
-          throw error;
+          // The backend already switched, but local hydration failed. Keep the
+          // captured UI intact instead of applying a target-session snapshot to
+          // the restored previous-session view through the outer fallback.
+          transition.settle(false);
+          return;
         }
+        // The runtime is switched before state_get runs, so the snapshot belongs
+        // to the selected session rather than the mount-time default session.
+        transition.settle(true);
+        applyHydrationSnapshot();
       })
       .catch(() => {
+        transition.settle(false);
+        applyHydrationSnapshot();
         // 非致命：无历史或后端不支持时保持空白会话。
       });
 
-    return () => { mounted = false; unlisteners.forEach((fn) => fn()); };
-  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, discardPendingOutput, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords, setClarificationIdentity]);
+    return () => {
+      mounted = false;
+      transition.settle(false);
+      unlisteners.forEach((fn) => fn());
+    };
+  }, [appendClarificationOutcome, appendClarificationQuestion, appendLog, applySessions, applyDraftToPreview, beginSessionTransition, discardPendingOutput, flushPendingOutput, queueOutputEvent, requestedSessionId, restoreRecords, setClarificationIdentity]);
 
   // Poll for outstanding human questions. Pre-run states use a low-frequency
   // fallback (10s); once RUNNING we keep the existing 1.5s recovery poll.
@@ -1055,12 +1136,62 @@ export function usePipeline(
 
   // User actions.
 
+  const continueCurrentRun = useCallback(async (): Promise<void> => {
+    const transition = sessionTransitionRef.current;
+    if (transition?.epoch === sessionRequestEpochRef.current) {
+      const switched = await transition.promise;
+      if (
+        !switched ||
+        sessionRequestEpochRef.current !== transition.epoch ||
+        (transition.targetSessionId !== null &&
+          activeSessionIdRef.current !== transition.targetSessionId)
+      ) return;
+    }
+    const epoch = sessionRequestEpochRef.current;
+    const sessionId = activeSessionIdRef.current;
+    const inFlight = resumeInFlightRef.current;
+    if (inFlight?.epoch === epoch && inFlight.sessionId === sessionId) {
+      return inFlight.promise;
+    }
+    const isCurrentSession = () =>
+      sessionRequestEpochRef.current === epoch && activeSessionIdRef.current === sessionId;
+    let operation: Promise<unknown>;
+    try {
+      operation = resumeSearch();
+    } catch (err) {
+      if (isCurrentSession()) appendError(errorMessage(err));
+      return Promise.reject(err);
+    }
+    const request = operation
+      .then(() => {
+        if (!isCurrentSession()) return;
+        resumeGenerationRef.current += 1;
+        runStarted.current = true;
+        setViewModel((prev) => ({
+          ...prev,
+          status: "running",
+          resumeAvailable: false,
+          resumeReason: null,
+        }));
+      }, (err) => {
+        if (isCurrentSession()) appendError(errorMessage(err));
+        throw err;
+      })
+      .finally(() => {
+        if (resumeInFlightRef.current?.promise === request) {
+          resumeInFlightRef.current = null;
+        }
+      });
+    resumeInFlightRef.current = { epoch, sessionId, promise: request };
+    return request;
+  }, [appendError]);
+
   /** Start (or resume) clarification for a task. This never starts research. */
   const startClarification = useCallback(async (task: string) => {
     const content = task.trim();
     if (!content) return;
     // User input supersedes any mount-time transcript hydration still in flight.
-    sessionRequestEpochRef.current += 1;
+    advanceSessionEpoch();
     setClarificationIdentity("", 0);
 
     const previewId = nextId("preview");
@@ -1114,7 +1245,7 @@ export function usePipeline(
       appendError(errorMessage(err));
       throw err;
     }
-  }, [appendError, applyDraftToPreview, currentSessionId, nextId, renameSession, setClarificationIdentity]);
+  }, [advanceSessionEpoch, appendError, applyDraftToPreview, currentSessionId, nextId, renameSession, setClarificationIdentity]);
 
   /** Confirm the latest draft and start research only after the gated RPC succeeds. */
   const confirmDraft = useCallback(async (acknowledgeUnresolved: boolean) => {
@@ -1280,6 +1411,11 @@ export function usePipeline(
     const content = msg.trim();
     if (!content) return;
 
+    if (isContinueCommand(content)) {
+      await continueCurrentRun();
+      return;
+    }
+
     // Slash command surface (mirrors the TUI command surface).
     if (content.startsWith("/")) {
       const [cmd, ...rest] = content.split(/\s+/);
@@ -1290,8 +1426,7 @@ export function usePipeline(
           setViewModel((prev) => ({ ...prev, status: "paused" }));
           return;
         case "/resume":
-          await resumeSearch();
-          setViewModel((prev) => ({ ...prev, status: "running" }));
+          await continueCurrentRun();
           return;
         case "/stop":
           if (!confirmStop()) return;
@@ -1352,7 +1487,7 @@ export function usePipeline(
     }
 
     await startClarification(content);
-  }, [appendError, nextId, startClarification, viewModel]);
+  }, [appendError, continueCurrentRun, nextId, startClarification, viewModel]);
 
   const pauseRun = useCallback(async () => {
     await pauseSearch();
@@ -1363,12 +1498,8 @@ export function usePipeline(
   }, []);
 
   const resumeRun = useCallback(async () => {
-    await resumeSearch();
-    setViewModel((prev) => ({
-      ...prev,
-      status: "running",
-    }));
-  }, []);
+    await continueCurrentRun();
+  }, [continueCurrentRun]);
 
   const stopRun = useCallback(async () => {
     await stopSearch();
@@ -1399,7 +1530,7 @@ export function usePipeline(
     setSettlingRequestId(null);
     settlingRequestRef.current = null;
     saveTitle(titlesKey, id, "新会话");
-    const requestEpoch = ++sessionRequestEpochRef.current;
+    const requestEpoch = advanceSessionEpoch();
     setSessions((prev) => [{ id, title: "新会话" }, ...prev.filter((s) => s.id !== id)]);
     setCurrentSessionId(id);
     setViewModel(createEmptyPipelineViewModel());
@@ -1429,13 +1560,15 @@ export function usePipeline(
         appendError(errorMessage(error));
       },
     );
-  }, [appendError, applySessions, captureSessionView, discardPendingOutput, restoreSessionView, setClarificationIdentity, titlesKey]);
+  }, [advanceSessionEpoch, appendError, applySessions, captureSessionView, discardPendingOutput, restoreSessionView, setClarificationIdentity, titlesKey]);
 
   const switchSession = useCallback(async (id: string) => {
     // 切到历史会话并重放其 transcript（断点续传），保留当前 phase/status。
     const previous = captureSessionView();
-    const requestEpoch = ++sessionRequestEpochRef.current;
+    const transition = beginSessionTransition(id);
+    const requestEpoch = transition.epoch;
     let switchStarted = false;
+    let switchSucceeded = false;
     try {
       const { records, sessions: list } = await sessionSwitch(id);
       if (requestEpoch !== sessionRequestEpochRef.current) return;
@@ -1446,21 +1579,42 @@ export function usePipeline(
       setClarificationIdentity(null);
       runStarted.current = false;
       setCurrentSessionId(id);
+      // Pipeline controls are scoped to the selected runtime. Keep them
+      // neutral until that session's authoritative state has been fetched.
+      setViewModel(createEmptyPipelineViewModel());
       restoreRecords(records, true, id);
       applySessions(list);
       setClarificationStatus("IDLE");
       setHumanRequests([]);
+      const resumeGeneration = resumeGenerationRef.current;
+      void stateGet()
+        .then((snapshot) => {
+          if (
+            !mountedRef.current ||
+            requestEpoch !== sessionRequestEpochRef.current ||
+            resumeGeneration !== resumeGenerationRef.current
+          ) return;
+          setViewModel((prev) =>
+            applyPipelineEvent(prev, { kind: "state", data: snapshot }),
+          );
+        })
+        .catch(() => {
+          // Keep the selected session's neutral controls when state is unavailable.
+        });
+      switchSucceeded = true;
     } catch (err) {
       if (requestEpoch !== sessionRequestEpochRef.current) return;
       if (switchStarted) restoreSessionView(previous);
       // 后端重建 runtime 失败或连接抖动时，不能静默清空对话：保留当前内容并显式报错。
       appendError(`切换会话失败：${errorMessage(err)}`);
+    } finally {
+      transition.settle(switchSucceeded);
     }
-  }, [appendError, applySessions, captureSessionView, discardPendingOutput, restoreRecords, restoreSessionView, setClarificationIdentity]);
+  }, [appendError, applySessions, beginSessionTransition, captureSessionView, discardPendingOutput, restoreRecords, restoreSessionView, setClarificationIdentity]);
 
   const deleteSession = useCallback(async (id: string) => {
     // 删 default 不是删工作区，而是重置默认会话（后端清掉它的 transcript 与状态）。
-    const requestEpoch = ++sessionRequestEpochRef.current;
+    const requestEpoch = advanceSessionEpoch();
     try {
       const pendingCreation = pendingCreationsRef.current.get(id);
       if (pendingCreation) await pendingCreation;
@@ -1485,7 +1639,7 @@ export function usePipeline(
       if (!mountedRef.current || requestEpoch !== sessionRequestEpochRef.current) return;
       appendError(`删除会话失败：${errorMessage(err)}`);
     }
-  }, [appendError, applySessions, switchSession, titlesKey, workspaceCacheRoot]);
+  }, [advanceSessionEpoch, appendError, applySessions, switchSession, titlesKey, workspaceCacheRoot]);
 
   const selectHypothesis = useCallback(async (hypothesisId: string) => {
     await sendControl(`/select ${hypothesisId}`);
@@ -1510,6 +1664,7 @@ export function usePipeline(
     runStarted.current ||
     viewModel.status === "running" ||
     viewModel.status === "paused" ||
+    viewModel.resumeAvailable ||
     viewModel.plans.length > 0 ||
     viewModel.rightRail.searchAttempts > 0 ||
     viewModel.rightRail.latestExperimentId !== null;

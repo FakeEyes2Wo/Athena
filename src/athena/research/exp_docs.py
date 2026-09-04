@@ -1,160 +1,301 @@
-"""实验文档：把每个阶段的结论与派生报告落到 ``.athena/exp_docs/``。
-
-调用方是 ``supervisor/phases.py`` 与 ``supervisor/settlement.py``：每当一个阶段
-产生可信结论（PREPARE 的基线、SEARCH 的一次结算、VALIDATE 的最终评估）或一个
-阶段终态失败时，写一份 stage doc，并刷新由研究树派生的两份报告。
-
-布局::
-
-    .athena/exp_docs/
-      runs/<run_id>.json    每次结论一份，永不覆盖别人
-      <stage>.json          该阶段的最新一份（baseline / search / final）
-      FINAL_REPORT.md       研究树 + VALIDATE 的完整报告
-      OPTIMIZATION.md       按指标排序的迭代轨迹
-
-``runs/`` 按 run_id 留档、``<stage>.json`` 只保留最新，是因为两种读法都需要：
-前者要逐条追溯，后者要"这个阶段现在是什么状态"而不必先知道 run_id。
-"""
+"""Persist compact experiment records and deterministic research reports."""
 
 import json
+import re
+from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
 
-from athena.core.persistence import atomic_write_json
 from athena.core.research_tree import ResearchTree
-from athena.research.report import build_final_report
+from athena.research.report import VALIDATION_SKIPPED_NOTICE
+from athena.research.report import build_final_report as _build_tree_report
 
-DOCS_DIRNAME = "exp_docs"
-RUNS_DIRNAME = "runs"
-FINAL_REPORT_NAME = "FINAL_REPORT.md"
-OPTIMIZATION_NAME = "OPTIMIZATION.md"
-DEFAULT_METRIC_NAME = "primary"
-# run_id / stage 会直接拼进文件名，必须挡住路径穿越与分隔符。
-_UNSAFE = ("/", "\\", "..", ":")
+_STAGES = frozenset({"baseline", "search", "final"})
+_DIRECTIONS = frozenset({"maximize", "minimize"})
+_RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
-def _docs_root(project_root: Path | str) -> Path:
-    """返回 ``.athena/exp_docs`` 目录（不创建）。"""
-    return Path(project_root) / ".athena" / DOCS_DIRNAME
+def _updated_at(value: str | datetime | None) -> str:
+    if value is None:
+        return datetime.now(timezone.utc).isoformat()
+    return value.isoformat() if isinstance(value, datetime) else value
 
 
-def _safe_name(value: str, fallback: str) -> str:
-    """把 run_id/stage 收敛成一个安全的文件名主干。"""
-    text = str(value).strip()
-    if not text or any(token in text for token in _UNSAFE):
-        return fallback
-    return text
+def _document(value: Mapping[str, object]) -> dict[str, object]:
+    stage = str(value.get("stage", ""))
+    run_id = str(value.get("run_id", ""))
+    status = str(value.get("status", ""))
+    metric = value.get("metric", {})
+    if stage not in _STAGES:
+        raise ValueError(f"stage must be one of {sorted(_STAGES)}")
+    if not _RUN_ID.fullmatch(run_id):
+        raise ValueError("run_id must be a safe non-empty file name")
+    if not status.strip():
+        raise ValueError("status must be non-empty")
+    if not isinstance(metric, Mapping):
+        raise ValueError("metric must be an object")
+    metric_name = str(metric.get("name", "primary"))
+    direction = str(metric.get("direction", "maximize"))
+    if not metric_name.strip():
+        raise ValueError("metric_name must be non-empty")
+    if direction not in _DIRECTIONS:
+        raise ValueError("direction must be 'maximize' or 'minimize'")
+    return {
+        "schema_version": 1,
+        "run_id": run_id,
+        "stage": stage,
+        "status": status,
+        "metric": dict(metric),
+        "artifacts": dict(value.get("artifacts", {})),
+        "reason": dict(value.get("reason", {})),
+        "provenance": dict(value.get("provenance", {})),
+        "updated_at": _updated_at(value.get("updated_at")),
+    }
 
 
-def task_metric_name(project_root: Path | str, task_understanding: Any) -> str:
-    """主指标的展示名：冻结评估器 spec > 任务理解 > ``primary``。
-
-    优先读评估器，是因为它是被冻结的权威：任务理解可能在澄清阶段写下一个口语化
-    的名字，而报告里的指标名应当和真正打分的那个一致。
-    """
-    spec_path = Path(project_root) / ".athena" / "evaluator_spec.json"
-    if spec_path.is_file():
-        try:
-            declared = json.loads(spec_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            # spec 损坏或正被重写：退到任务理解，不该因此中断阶段结算。
-            declared = {}
-        name = declared.get("primary_metric")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    if isinstance(task_understanding, Mapping):
-        name = task_understanding.get("primary_metric")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    return DEFAULT_METRIC_NAME
+def _atomic_write(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+    return path
 
 
-def write_stage_doc(project_root: Path | str, doc: Mapping[str, Any]) -> None:
-    """写一份阶段结论：``runs/<run_id>.json`` 与 ``<stage>.json``。"""
-    root = _docs_root(project_root)
-    (root / RUNS_DIRNAME).mkdir(parents=True, exist_ok=True)
-    payload = dict(doc)
-    run_id = _safe_name(str(payload.get("run_id") or ""), "run")
-    stage = _safe_name(str(payload.get("stage") or ""), "stage")
-    atomic_write_json(root / RUNS_DIRNAME / f"{run_id}.json", payload)
-    atomic_write_json(root / f"{stage}.json", payload)
-
-
-def _optimization_report(
-    tree: ResearchTree,
-    validation: Mapping[str, Any] | None,
-    *,
-    metric_name: str,
-    direction: str,
+def task_metric_name(
+    root: str | Path, task_understanding: Mapping[str, object] | None
 ) -> str:
-    """按指标排序渲染迭代轨迹，标出当前 SOTA。"""
-    data = tree.to_dict()
-    experiments = data.get("experiments") or {}
-    sota_id = data.get("sota_id")
-    lines = [
-        "# 优化轨迹",
-        "",
-        f"指标：`{metric_name}`（{direction}）",
-        "",
-    ]
-    scored: list[tuple[float, str, dict]] = []
-    unscored: list[tuple[str, dict]] = []
-    for experiment_id, experiment in experiments.items():
-        primary = ((experiment.get("eval") or {}) or {}).get("primary")
-        if isinstance(primary, (int, float)):
-            scored.append((float(primary), experiment_id, experiment))
-        else:
-            unscored.append((experiment_id, experiment))
-    scored.sort(key=lambda item: item[0], reverse=direction != "minimize")
+    """Return the confirmed or frozen evaluator metric name for one project."""
+    value = task_understanding.get("primary_metric") if task_understanding else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, Mapping):
+        name = value.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    metric_path = Path(root) / "workspaces" / "evaluator" / "evaluate" / "metric.json"
+    if metric_path.is_file():
+        try:
+            payload = json.loads(metric_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # An unfinished evaluator has no authoritative metric yet.
+            payload = {}
+        name = payload.get("primary_metric") if isinstance(payload, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return "primary"
 
-    lines += ["| 排名 | 实验 | 指标 | 状态 | SOTA |", "|---|---|---|---|---|"]
-    for rank, (primary, experiment_id, experiment) in enumerate(scored, start=1):
-        mark = "是" if experiment_id == sota_id else ""
-        lines.append(
-            f"| {rank} | `{experiment_id}` | {primary:.6f} | "
-            f"{experiment.get('status', '')} | {mark} |"
+
+def write_stage_doc(
+    root: str | Path,
+    document: Mapping[str, object],
+) -> Path:
+    """Write one run, its stage snapshot, and ``latest.json`` atomically."""
+    payload = _document(document)
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    directory = Path(root) / ".athena" / "exp_docs"
+    run_path = _atomic_write(directory / "runs" / f"{payload['run_id']}.json", text)
+    _atomic_write(directory / f"{payload['stage']}.json", text)
+    _atomic_write(directory / "latest.json", text)
+    return run_path
+
+
+def build_final_report(
+    tree: ResearchTree,
+    validation: Mapping[str, object] | None = None,
+    *,
+    validation_skipped: bool = False,
+) -> str:
+    """Build ``FINAL_REPORT.md`` with scores and deterministic cause analysis."""
+    report = _build_tree_report(
+        tree, validation, validation_skipped=validation_skipped
+    ).rstrip()
+    data = tree.to_dict()
+    lines = [report, "", "## 结果归因"]
+    for experiment_id, experiment in data["experiments"].items():
+        if experiment["status"] == "FAILED":
+            reason = " ".join(str(experiment.get("error") or "unknown").split())
+            lines.append(f"- `{experiment_id}` failed: {reason}")
+            continue
+        evaluation = experiment.get("eval") or {}
+        primary = evaluation.get("primary")
+        role = (
+            "selected as SOTA"
+            if experiment_id == data.get("sota_id")
+            else "did not replace SOTA"
         )
-    if not scored:
-        lines.append("| — | 尚无带分数的实验 | — | — | — |")
-    if unscored:
-        lines += ["", "## 未产出分数", ""]
-        for experiment_id, experiment in unscored:
-            reason = experiment.get("error") or experiment.get("status") or "未知"
-            lines.append(f"- `{experiment_id}`：{reason}")
-    if validation:
-        final_score = validation.get("final_test_score")
-        lines += [
-            "",
-            "## VALIDATE",
-            "",
-            f"- final_test_score：{final_score}",
-            f"- search 参考：{validation.get('test_score')}",
-            f"- 泛化差：{validation.get('generalization_gap')}",
-        ]
+        lines.append(f"- `{experiment_id}` scored `{primary}` and was {role}.")
+    if (
+        not validation_skipped
+        and validation
+        and validation.get("generalization_gap") is not None
+    ):
+        lines.append(
+            "- FINAL generalization gap was "
+            f"`{validation['generalization_gap']}`; positive means FINAL was worse."
+        )
+    if len(lines) == 3:
+        lines.append("- No experiment has settled yet.")
+    return "\n".join(lines) + "\n"
+
+
+def build_optimization_report(
+    tree: ResearchTree,
+    validation: Mapping[str, object] | None = None,
+    *,
+    validation_skipped: bool = False,
+    metric_name: str = "primary",
+    direction: str = "maximize",
+) -> str:
+    """Build concise optimization guidance from outcomes and validation gap."""
+    if not metric_name.strip():
+        raise ValueError("metric_name must be non-empty")
+    if direction not in _DIRECTIONS:
+        raise ValueError("direction must be 'maximize' or 'minimize'")
+    if validation_skipped and validation:
+        raise ValueError("validation cannot be both skipped and present")
+
+    data = tree.to_dict()
+    experiments = data["experiments"]
+    successful = [
+        experiment_id
+        for experiment_id, experiment in experiments.items()
+        if experiment["status"] == "SUCCEEDED"
+    ]
+    failed = [
+        (experiment_id, experiment)
+        for experiment_id, experiment in experiments.items()
+        if experiment["status"] == "FAILED"
+    ]
+    lines = [
+        "# Optimization",
+        "",
+        f"- Metric: `{metric_name}`",
+        f"- Direction: `{direction}`",
+        f"- Successful experiments: {len(successful)}",
+        f"- Failed experiments: {len(failed)}",
+    ]
+    if validation_skipped:
+        lines.extend(["", "## Validation", f"- {VALIDATION_SKIPPED_NOTICE}"])
+
+    # Compare the operational SOTA with the baseline before proposing more search.
+    baseline = experiments.get("exp_baseline")
+    sota = experiments.get(data.get("sota_id")) if data.get("sota_id") else None
+    baseline_metric = (baseline.get("eval") or {}).get("primary") if baseline else None
+    sota_metric = (sota.get("eval") or {}).get("primary") if sota else None
+    if isinstance(baseline_metric, (int, float)) and isinstance(
+        sota_metric, (int, float)
+    ):
+        improvement = (
+            sota_metric - baseline_metric
+            if direction == "maximize"
+            else baseline_metric - sota_metric
+        )
+        lines.extend(
+            [
+                "",
+                "## Observed signal",
+                f"- Baseline: `{baseline_metric:.6f}`",
+                f"- SOTA: `{sota_metric:.6f}`",
+                f"- Direction-aware improvement: `{improvement:+.6f}`",
+            ]
+        )
+        if improvement <= 0 and len(successful) > 1:
+            lines.append(
+                "Search has not beaten the baseline; prioritize new evidence-backed "
+                "hypotheses over extra tuning of the same model family."
+            )
+        elif improvement > 0:
+            lines.append(
+                "Freeze the winning commit, then replicate it and ablate its changed "
+                "components before combining more interventions."
+            )
+
+    # A positive gap already means worse FINAL performance for either direction.
+    gap = (
+        validation.get("generalization_gap")
+        if validation and not validation_skipped
+        else None
+    )
+    if isinstance(gap, (int, float)) and not isinstance(gap, bool):
+        lines.extend(["", f"Generalization gap: `{gap:.4f}`"])
+        if gap > 0:
+            lines.append(
+                "The final result is worse in the configured direction; "
+                "prioritize overfitting checks, simpler features, and stronger "
+                "group-disjoint validation."
+            )
+        elif gap < 0:
+            lines.append(
+                "The final result is better in the configured direction; "
+                "recheck split parity and preserve the validated configuration."
+            )
+        else:
+            lines.append("No measurable generalization gap was recorded.")
+
+    # Convert observed failures into bounded engineering actions.
+    if failed:
+        lines.extend(["", "## Failure-driven actions"])
+        for experiment_id, experiment in failed:
+            reason = str(experiment.get("error") or "unspecified failure").strip()
+            lines.append(f"- `{experiment_id}`: {reason}")
+        reasons = " ".join(str(item[1].get("error") or "").lower() for item in failed)
+        if "modulenotfounderror" in reasons or "dependency" in reasons:
+            lines.append(
+                "Action: freeze dependencies and run a one-command environment "
+                "preflight before spending another SEARCH attempt."
+            )
+        if any(token in reasons for token in ("scoring", "prediction", "evaluator")):
+            lines.append(
+                "Action: validate prediction ids, columns, row counts, and evaluator "
+                "entrypoint before model training."
+            )
+        if "no_change" in reasons or "diff_rejected" in reasons:
+            lines.append(
+                "Action: require the next hypothesis to name the exact source file "
+                "and measurable intervention before dispatch."
+            )
+        lines.append("Repair the observed failure class before adding more variants.")
+    elif successful:
+        lines.extend(
+            ["", "Keep the strongest successful configuration as the reference."]
+        )
+    else:
+        lines.extend(["", "No completed experiment is available for optimization yet."])
     return "\n".join(lines) + "\n"
 
 
 def write_reports(
-    project_root: Path | str,
+    root: str | Path,
     tree: ResearchTree,
-    validation: Mapping[str, Any] | None = None,
+    validation: Mapping[str, object] | None = None,
     *,
-    metric_name: str = DEFAULT_METRIC_NAME,
+    validation_skipped: bool = False,
+    metric_name: str = "primary",
     direction: str = "maximize",
-) -> None:
-    """刷新由研究树派生的两份报告。
-
-    每次阶段结算都整份重写，而不是追加：报告是研究树的投影，追加会让它和树的
-    真实状态漂移，而树本身才是单一事实来源。
-    """
-    root = _docs_root(project_root)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / FINAL_REPORT_NAME).write_text(
-        build_final_report(tree, validation), encoding="utf-8"
+) -> tuple[Path, Path]:
+    """Write ``FINAL_REPORT.md`` and ``OPTIMIZATION.md`` atomically."""
+    directory = Path(root) / ".athena" / "exp_docs"
+    final_path = _atomic_write(
+        directory / "FINAL_REPORT.md",
+        build_final_report(tree, validation, validation_skipped=validation_skipped),
     )
-    (root / OPTIMIZATION_NAME).write_text(
-        _optimization_report(
-            tree, validation, metric_name=metric_name, direction=direction
+    optimization_path = _atomic_write(
+        directory / "OPTIMIZATION.md",
+        build_optimization_report(
+            tree,
+            validation,
+            validation_skipped=validation_skipped,
+            metric_name=metric_name,
+            direction=direction,
         ),
-        encoding="utf-8",
+    )
+    return final_path, optimization_path
+
+
+if __name__ == "__main__":
+    print(
+        write_stage_doc(
+            ".",
+            {"run_id": "example", "stage": "search", "status": "SUCCEEDED"},
+        )
     )

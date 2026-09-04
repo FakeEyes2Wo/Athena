@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pytest
 
+import athena.research.supervisor.phases as phases_module
 from athena.core.artifact_store import ArtifactNotFoundError
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
+from athena.gui.service import GuiService
 from athena.research.contracts import (
     DataScriptBundle,
     EvaluatorDescriptor,
@@ -320,6 +322,203 @@ async def test_all_phases_share_one_durable_state(tmp_path: Path) -> None:
     ] == pytest.approx(0.70)
     assert (exp_docs / "FINAL_REPORT.md").is_file()
     assert (exp_docs / "OPTIMIZATION.md").is_file()
+    final_report = (exp_docs / "FINAL_REPORT.md").read_text(encoding="utf-8")
+    assert "final_test_score" not in final_report
+    assert "generalization_gap" not in final_report
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_skip_validate_completes_from_search_without_calling_validation(
+    tmp_path: Path,
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+    evidence_ref = "sha256:" + "1" * 64
+    evaluator_ref = "sha256:" + "2" * 64
+    predictions_ref = "sha256:" + "3" * 64
+    report_ref = "sha256:" + "4" * 64
+
+    async def prepare() -> PrepareResult:
+        return PrepareResult(
+            evaluator_ref=evaluator_ref,
+            metric=0.71,
+            commit="prepare-commit",
+            predictions_ref=predictions_ref,
+            evidence_ref=evidence_ref,
+            report_ref=report_ref,
+        )
+
+    async def validate(commit: str, metric: float):
+        validation_calls.append((commit, metric))
+        raise AssertionError("VALIDATE must not run")
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="improve the trusted baseline",
+        search_limit=0,
+        auto_validate=True,
+        skip_validate=True,
+        auto_confirm=True,
+        prepare_phase=prepare,
+        validation_phase=validate,
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runtime.subscribe(lambda kind, data: events.append((kind, data)))
+
+    lifecycle = await runtime.start()
+    await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
+
+    assert validation_calls == []
+    assert runtime.state.phase == "COMPLETED"
+    assert runtime.state.status == "COMPLETED"
+    assert runtime.state.validation is None
+    assert runtime.state.validation_skipped is True
+    phases: list[str] = []
+    for kind, payload in events:
+        phase = str(payload.get("phase"))
+        if kind == "state" and (not phases or phase != phases[-1]):
+            phases.append(phase)
+    assert phases == ["PREPARE", "SEARCH", "COMPLETED"]
+    assert any(
+        "VALIDATE " in str(payload.get("text"))
+        for kind, payload in events
+        if kind == "output"
+    )
+    assert any(
+        str(payload.get("text", "")).startswith("SEARCH 已完成；")
+        for kind, payload in events
+        if kind == "output"
+    )
+    exp_docs = tmp_path / ".athena" / "exp_docs"
+    assert (exp_docs / "FINAL_REPORT.md").is_file()
+    assert (exp_docs / "OPTIMIZATION.md").is_file()
+    final = json.loads((exp_docs / "final.json").read_text(encoding="utf-8"))
+    assert final["status"] == "SKIPPED"
+    assert final["metric"]["primary"] is None
+    assert final["metric"]["reference"] == pytest.approx(0.71)
+    await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_completed_skip_report_uses_durable_marker_after_live_preference_changes(
+    tmp_path: Path,
+) -> None:
+    """A reopened run remains historically skipped after the setting is toggled off."""
+
+    async def prepare() -> PrepareResult:
+        return PrepareResult(
+            evaluator_ref="sha256:" + "2" * 64,
+            metric=0.71,
+            commit="prepare-commit",
+            predictions_ref="sha256:" + "3" * 64,
+            evidence_ref="sha256:" + "1" * 64,
+            report_ref="sha256:" + "4" * 64,
+        )
+
+    async def validate(_commit: str, _metric: float) -> ValidationResult:
+        raise AssertionError("historical skipped run must not validate")
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="improve the trusted baseline",
+        search_limit=0,
+        auto_validate=True,
+        skip_validate=True,
+        auto_confirm=True,
+        prepare_phase=prepare,
+        validation_phase=validate,
+    )
+    lifecycle = await runtime.start()
+    await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
+    assert runtime.state.validation_skipped is True
+
+    # This is a live setting change, not a rewrite of the completed run marker.
+    await runtime.apply_settings({"skip_validate": False})
+    assert runtime.settings()["skip_validate"] is False
+    await runtime.aclose()
+
+    reopened = ResearchRuntime(
+        project_root=tmp_path,
+        skip_validate=False,
+        validation_phase=validate,
+    )
+    try:
+        assert reopened.state.validation_skipped is True
+        report = (await GuiService(reopened).generate_report())["report"]
+        assert "VALIDATE \u5df2\u8df3\u8fc7" in report
+        assert "final_test_score" not in report
+        assert "generalization_gap" not in report
+    finally:
+        await reopened.aclose()
+
+
+@pytest.mark.asyncio
+async def test_skip_finalization_retries_after_report_failure_without_duplication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+    evidence_ref = "sha256:" + "1" * 64
+
+    async def prepare() -> PrepareResult:
+        return PrepareResult(
+            evaluator_ref="sha256:" + "2" * 64,
+            metric=0.71,
+            commit="prepare-commit",
+            predictions_ref="sha256:" + "3" * 64,
+            evidence_ref=evidence_ref,
+            report_ref="sha256:" + "4" * 64,
+        )
+
+    async def validate(commit: str, metric: float):
+        validation_calls.append((commit, metric))
+        raise AssertionError("VALIDATE must not run")
+
+    original_writer = phases_module.write_reports
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("final report unavailable")
+        return original_writer(*args, **kwargs)
+
+    monkeypatch.setattr(phases_module, "write_reports", fail_once)
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="improve the trusted baseline",
+        search_limit=0,
+        auto_confirm=True,
+        skip_validate=True,
+        prepare_phase=prepare,
+        validation_phase=validate,
+    )
+    lifecycle = await runtime.start()
+    await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
+    assert runtime.state.phase == "SEARCH"
+    assert runtime.state.status == "FAILED"
+    assert (
+        json.loads((tmp_path / ".athena" / "state.json").read_text())["status"]
+        == "FAILED"
+    )
+
+    monkeypatch.setattr(phases_module, "write_reports", original_writer)
+    await runtime.resume_current_task()
+    retry = runtime.session.lifecycle.task
+    assert retry is not None
+    await asyncio.wait_for(asyncio.shield(retry), timeout=5)
+
+    assert runtime.state.phase == "COMPLETED"
+    assert runtime.state.status == "COMPLETED"
+    assert validation_calls == []
+    assert (
+        len(
+            list(
+                (tmp_path / ".athena" / "exp_docs" / "runs").glob("final-skipped.json")
+            )
+        )
+        == 1
+    )
     await runtime.aclose()
 
 

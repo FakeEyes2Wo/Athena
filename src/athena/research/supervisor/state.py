@@ -33,6 +33,7 @@ RESUME_FIELDS = (
     "task_research_agent_id",
     "evaluator_ref",
     "final_evaluator_ref",
+    "validation_skipped",
 )
 
 
@@ -89,6 +90,7 @@ class ResearchState(BaseModel):
     manual_mode: bool = False
     plans: dict[str, PlanState] = Field(default_factory=dict)
     validation: dict[str, object] | None = None
+    validation_skipped: bool | None = None
     # PREPARE 产出的 EDA 工作区目录（Ideator 自行探索）；仅路径元数据，非 EDA 结果。
     eda_dir: str | None = None
     # Supervisor 在首个 task-understanding turn 产出的结构化任务理解（供 GUI 意图预览）。
@@ -169,7 +171,13 @@ class ResearchState(BaseModel):
         """
         target = Path(path)
         core = self.model_dump(mode="json", exclude=RESUME_FIELDS)
-        atomic_write_json(target, core)
+        core_matches_disk = False
+        try:
+            disk_core = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(disk_core, Mapping):
+                core_matches_disk = _core_digest(disk_core) == _core_digest(core)
+        except (OSError, json.JSONDecodeError):
+            pass
         resume_payload = {
             key: getattr(self, key)
             for key in RESUME_FIELDS
@@ -181,7 +189,10 @@ class ResearchState(BaseModel):
                 resume_path,
                 {"state_digest": _core_digest(core), **resume_payload},
             )
+            if not core_matches_disk:
+                atomic_write_json(target, core)
         else:
+            atomic_write_json(target, core)
             resume_path.unlink(missing_ok=True)
         return target
 

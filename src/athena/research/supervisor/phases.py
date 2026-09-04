@@ -12,7 +12,7 @@ from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.research.exp_docs import task_metric_name, write_reports, write_stage_doc
 from athena.research.prepare.authority import BaselineAuthorityError
-from athena.research.report import build_final_report
+from athena.research.report import VALIDATION_SKIPPED_NOTICE, build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.plan_lifecycle import PlanLifecycle
 from athena.research.supervisor.run_state import SupervisorRunState
@@ -20,6 +20,8 @@ from athena.research.supervisor.scheduling import count_search_attempts
 from athena.research.supervisor.search_loop import SearchLoop
 
 logger = logging.getLogger(__name__)
+
+SKIPPED_VALIDATION_OUTPUT = "SEARCH 已完成；" + VALIDATION_SKIPPED_NOTICE
 
 
 def _final_report_text(validation: dict) -> str:
@@ -124,15 +126,21 @@ class PhaseMachine:
     async def continue_phase(self) -> None:
         """Execute the current phase for an idle run (interactive resume).
 
-        ``start()`` runs PREPARE→SEARCH→VALIDATE once. In interactive mode
-        (no ``auto_validate``) SEARCH parks at ``WAITING`` and the machine
-        returns; a later Human turn may transition the phase through
-        ``set_phase_decision`` or extend the Search budget. Re-enter the phase
-        machine here to actually run the chosen phase.
+        ``start()`` runs PREPARE→SEARCH once, then either enters VALIDATE under
+        the existing policy or, when ``skip_validate`` is enabled, writes the
+        SEARCH-only Final report and enters ``COMPLETED`` without a durable
+        FINAL phase. When both ``skip_validate`` and ``auto_validate`` are
+        disabled, SEARCH parks at ``WAITING`` and the machine returns; a later
+        Human turn may transition the phase through ``set_phase_decision`` or
+        extend the Search budget. Re-enter the phase machine here to actually
+        run the chosen phase.
         """
         if self._state.phase == "SEARCH":
             await self._search.run_search()
             if self._run.is_stopped():
+                return
+            if self._deps.phases.skip_validate:
+                await self._finalize_without_validation()
                 return
             if self._deps.phases.auto_validate:
                 await self._transition_phase("VALIDATE")
@@ -142,6 +150,56 @@ class PhaseMachine:
                 await self._budget_gate()
         if self._state.phase == "VALIDATE":
             await self._run_validation()
+
+    async def _finalize_without_validation(self) -> None:
+        """Commit a truthful terminal result directly from a settled SEARCH."""
+        if self._state.phase != "SEARCH" or self._state.status != "RUNNING":
+            raise RuntimeError("skip finalization requires a running SEARCH")
+        if tuple(self._run.running_ids()):
+            raise RuntimeError("skip finalization requires all SEARCH plans to settle")
+        if self._state.validation is not None:
+            raise RuntimeError("cannot skip VALIDATE with a validation checkpoint")
+        sota_id = self._tree.best_experiment_id()
+        if sota_id is None:
+            raise RuntimeError("skip finalization requires a trusted SEARCH SOTA")
+        sota = self._tree.get_experiment(sota_id)
+        if sota.eval is None:
+            raise RuntimeError("skip finalization requires a trusted SEARCH score")
+
+        self._write_reports(validation_skipped=True)
+        self._record_skipped_final(sota_id, sota)
+
+        snapshot = (
+            self._state.phase,
+            self._state.status,
+            self._state.validation_skipped,
+        )
+        self._state.phase = "COMPLETED"
+        self._state.status = "COMPLETED"
+        self._state.validation_skipped = True
+        try:
+            self._plans.save_state()
+        except BaseException:
+            self._state.phase, self._state.status, self._state.validation_skipped = (
+                snapshot
+            )
+            raise
+
+        try:
+            await self._deps.phases.publish(
+                "output",
+                {
+                    "source": "supervisor",
+                    "channel": "text",
+                    "text": SKIPPED_VALIDATION_OUTPUT,
+                },
+            )
+        except Exception:
+            logger.warning("failed to publish skipped-validation output", exc_info=True)
+        try:
+            await self._plans.publish_state()
+        except Exception:
+            logger.warning("failed to publish skipped-validation state", exc_info=True)
 
     async def _budget_gate(self) -> None:
         """交互模式下预算用尽：Supervisor 汇总假设并向人类提出具体决策。
@@ -382,12 +440,40 @@ class PhaseMachine:
         )
         self._write_reports(validation)
 
-    def _write_reports(self, validation: dict | None = None) -> None:
+    def _record_skipped_final(self, sota_id: str, sota: Experiment) -> None:
+        """Persist the stable, explicitly unvalidated final-stage record."""
+        write_stage_doc(
+            self._deps.paths.project_root,
+            {
+                "run_id": "final-skipped",
+                "stage": "final",
+                "status": "SKIPPED",
+                "metric": {
+                    "name": self._metric_name,
+                    "direction": self._deps.search.direction,
+                    "primary": None,
+                    "reference": sota.eval.primary,
+                },
+                "reason": {
+                    "kind": "validation_skipped",
+                    "summary": "Independent VALIDATE was skipped by project policy.",
+                },
+                "provenance": {
+                    "sota_experiment_id": sota_id,
+                    "sota_commit": sota.commit,
+                },
+            },
+        )
+
+    def _write_reports(
+        self, validation: dict | None = None, *, validation_skipped: bool = False
+    ) -> None:
         """Refresh final and optimization reports from durable domain state."""
         write_reports(
             self._deps.paths.project_root,
             self._tree,
             validation,
+            validation_skipped=validation_skipped,
             metric_name=self._metric_name,
             direction=self._deps.search.direction,
         )
@@ -570,4 +656,4 @@ class PhaseMachine:
         return {"plans": plans, "running": list(self._run.running_ids())}
 
 
-__all__ = ["PhaseMachine", "_final_report_text"]
+__all__ = ["SKIPPED_VALIDATION_OUTPUT", "PhaseMachine", "_final_report_text"]

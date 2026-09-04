@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from athena.research import ResearchRuntime
+from athena.research.runtime.resume_contract import ResearchControlError
 
 
 def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRuntime:
@@ -71,6 +72,47 @@ async def test_auto_seed_task_first_message_starts_prepare(
         assert runtime.task_text == "predict titanic survival"
         assert runtime.session.lifecycle.started is True
         assert runtime.state.phase == "PREPARE"
+    finally:
+        await _close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_auto_seed_exact_continue_rejects_without_creating_a_task(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path, auto_seed_task=True)
+    try:
+        with pytest.raises(ResearchControlError) as caught:
+            await runtime.message("  Continue  ")
+
+        assert caught.value.code == "resume_unavailable"
+        assert runtime.state.task_text is None
+        assert runtime.state.task_understanding is None
+        assert runtime.clarification_path.exists() is False
+        assert runtime.session.lifecycle.started is False
+    finally:
+        await _close(runtime)
+
+
+@pytest.mark.asyncio
+async def test_resume_aliases_use_the_same_public_runtime_primitive(
+    tmp_path: Path,
+) -> None:
+    runtime = _make_runtime(tmp_path)
+    calls: list[str] = []
+
+    async def fake_resume() -> str:
+        calls.append("resume")
+        return "RUNNING"
+
+    runtime.resume_current_task = fake_resume  # type: ignore[method-assign]
+    try:
+        assert await runtime.message("/resume") == "RUNNING"
+        assert await runtime.message("continue") == "RUNNING"
+        assert await runtime.start_task("CONTINUE") == "RUNNING"
+        assert calls == ["resume", "resume", "resume"]
+        assert runtime.state.task_understanding is None
+        assert runtime.clarification_path.exists() is False
     finally:
         await _close(runtime)
 

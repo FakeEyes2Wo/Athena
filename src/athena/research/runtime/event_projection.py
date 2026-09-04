@@ -4,6 +4,7 @@ from typing import Any
 
 from athena.research.supervisor.events import EventProjector, StateEvent
 from athena.research.supervisor.scheduling import count_search_attempts
+from athena.research.runtime.resume_contract import resume_capability
 
 
 def supervisor_output(
@@ -30,6 +31,7 @@ def supervisor_state(supervisor: Any, ideator_lanes: int) -> StateEvent:
     """Build a replaceable runtime snapshot from Supervisor-owned state."""
     state = supervisor.state
     tree = supervisor.tree
+    capability = resume_capability(state)
     plans = [
         {"id": plan_id, **plan.model_dump(mode="json")}
         for plan_id, plan in state.plans.items()
@@ -79,6 +81,8 @@ def supervisor_state(supervisor: Any, ideator_lanes: int) -> StateEvent:
         validation=state.validation,
         eda_dir=state.eda_dir,
         task_understanding=state.task_understanding,
+        resume_available=capability.available,
+        resume_reason=capability.reason,
     )
 
 

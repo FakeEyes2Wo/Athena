@@ -10,6 +10,10 @@ from typing import Any
 
 from athena.core.research_tree import ResearchTree
 
+VALIDATION_SKIPPED_NOTICE = (
+    "VALIDATE 已跳过。本报告仅使用 SEARCH 结果，不包含独立最终测试分数或泛化差距。"
+)
+
 
 def _number(value: Any, *, signed: bool = False) -> str:
     """Format a metric for the report; non-numbers pass through as text."""
@@ -50,8 +54,12 @@ def _sota_section(data: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _validation_section(validation: Mapping[str, Any] | None) -> list[str]:
+def _validation_section(
+    validation: Mapping[str, Any] | None, *, validation_skipped: bool = False
+) -> list[str]:
     """Render optional VALIDATE results even when the tree has no SOTA yet."""
+    if validation_skipped:
+        return ["", "## 验证结果", f"- {VALIDATION_SKIPPED_NOTICE}"]
     if not validation:
         return []
     final_score = validation.get("final_test_score")
@@ -174,9 +182,14 @@ def _experiment_records_section(data: Mapping[str, Any]) -> list[str]:
 
 
 def build_final_report(
-    tree: ResearchTree, validation: Mapping[str, Any] | None = None
+    tree: ResearchTree,
+    validation: Mapping[str, Any] | None = None,
+    *,
+    validation_skipped: bool = False,
 ) -> str:
     """Render the research tree plus optional VALIDATE results as Markdown."""
+    if validation_skipped and validation:
+        raise ValueError("validation cannot be both skipped and present")
     data = tree.to_dict()
     executed = {
         experiment["hypothesis_id"] for experiment in data["experiments"].values()
@@ -185,7 +198,7 @@ def build_final_report(
     lines += _sota_section(data)
     lines.append(f"- 实验总数: {len(data['experiments'])}")
     lines.append(f"- 假设总数: {len(data['hypotheses'])}")
-    lines += _validation_section(validation)
+    lines += _validation_section(validation, validation_skipped=validation_skipped)
     lines += _iteration_table_section(data, data.get("sota_id"))
     lines += _failed_experiments_section(data)
     lines += _next_steps_section(tree, data, executed)
@@ -193,4 +206,4 @@ def build_final_report(
     return "\n".join(lines)
 
 
-__all__ = ["build_final_report"]
+__all__ = ["VALIDATION_SKIPPED_NOTICE", "build_final_report"]

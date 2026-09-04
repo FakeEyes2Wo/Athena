@@ -337,6 +337,7 @@ def test_legacy_state_without_resume_fields_defaults_to_none(tmp_path: Path) -> 
     assert loaded.task_research_ref is None
     assert loaded.task_research_agent_id is None
     assert loaded.evaluator_ref is None
+    assert loaded.validation_skipped is None
 
 
 def test_stale_resume_file_is_ignored_when_core_state_changed(tmp_path: Path) -> None:
@@ -347,6 +348,7 @@ def test_stale_resume_file_is_ignored_when_core_state_changed(tmp_path: Path) ->
         search_limit=10,
         concurrency=1,
         task_text="predict titanic survival",
+        validation_skipped=True,
     )
     state.save(path)
     # 模拟旧代码重写核心 state（不写 resume.json）后新代码重新读取。
@@ -368,6 +370,115 @@ def test_stale_resume_file_is_ignored_when_core_state_changed(tmp_path: Path) ->
 
     assert loaded.search_limit == 5
     assert loaded.task_text is None
+    assert loaded.validation_skipped is None
+
+
+def test_validation_skipped_round_trips_only_through_resume_metadata(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.json"
+    state = _search_state().model_copy(update={"validation_skipped": True})
+
+    state.save(path)
+
+    core = json.loads(path.read_text(encoding="utf-8"))
+    resume = json.loads((tmp_path / "resume.json").read_text(encoding="utf-8"))
+    assert "validation_skipped" not in core
+    assert resume["validation_skipped"] is True
+    assert ResearchState.load(path).validation_skipped is True
+
+
+def test_failed_resume_write_leaves_previous_core_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state.json"
+    baseline = _search_state()
+    baseline.save(path)
+    completed = baseline.model_copy(
+        update={
+            "status": "COMPLETED",
+            "phase": "COMPLETED",
+            "validation_skipped": True,
+        }
+    )
+
+    from athena.research.supervisor import state as state_module
+
+    original = state_module.atomic_write_json
+
+    def fail_resume(target: Path, payload: object) -> Path:
+        if Path(target).name == "resume.json":
+            raise OSError("resume write failed")
+        return original(target, payload)
+
+    monkeypatch.setattr(state_module, "atomic_write_json", fail_resume)
+
+    with pytest.raises(OSError, match="resume write failed"):
+        completed.save(path)
+
+    loaded = ResearchState.load(path)
+    assert loaded.phase == "SEARCH"
+    assert loaded.validation_skipped is None
+
+
+def test_failed_core_write_leaves_previous_core_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state.json"
+    baseline = _search_state()
+    baseline.save(path)
+    completed = baseline.model_copy(
+        update={
+            "status": "COMPLETED",
+            "phase": "COMPLETED",
+            "validation_skipped": True,
+        }
+    )
+
+    from athena.research.supervisor import state as state_module
+
+    original = state_module.atomic_write_json
+
+    def fail_core(target: Path, payload: object) -> Path:
+        if Path(target).name == "state.json":
+            raise OSError("core write failed")
+        return original(target, payload)
+
+    monkeypatch.setattr(state_module, "atomic_write_json", fail_core)
+
+    with pytest.raises(OSError, match="core write failed"):
+        completed.save(path)
+
+    loaded = ResearchState.load(path)
+    assert loaded.status == "RUNNING"
+    assert loaded.phase == "SEARCH"
+    assert loaded.validation_skipped is None
+
+
+def test_resume_only_save_skips_core_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state.json"
+    baseline = _search_state()
+    baseline.save(path)
+    marked = baseline.model_copy(update={"validation_skipped": True})
+
+    from athena.research.supervisor import state as state_module
+
+    original = state_module.atomic_write_json
+
+    def reject_core(target: Path, payload: object) -> Path:
+        if Path(target).name == "state.json":
+            raise AssertionError("core writer should not be called")
+        return original(target, payload)
+
+    monkeypatch.setattr(state_module, "atomic_write_json", reject_core)
+
+    marked.save(path)
+
+    loaded = ResearchState.load(path)
+    assert loaded.phase == "SEARCH"
+    assert loaded.validation_skipped is True
 
 
 def test_load_migrates_intermediate_inline_resume_state(tmp_path: Path) -> None:

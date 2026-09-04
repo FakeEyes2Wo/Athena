@@ -11,7 +11,7 @@ Tauri 桌面应用启动此 Python 进程并从 stdout 的第一行读取端口�
 import asyncio
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from gui_gateway.handler import GuiRequestHandler
 from gui_gateway.human import HumanRequestBroker
@@ -21,12 +21,28 @@ from athena.core.agent import settings
 from athena.research import ResearchRuntime
 
 
+class RuntimeFactory(Protocol):
+    """Factory contract used by the gateway for initial and swapped runtimes."""
+
+    def __call__(
+        self,
+        project_root: str | None = None,
+        state_root: Path | None = None,
+        *,
+        ask_user: Any = None,
+        session_id: str = "default",
+        broker: Any = None,
+        skip_validate: bool = False,
+    ) -> ResearchRuntime: ...
+
+
 def _make_runtime(
     project_root: str | None = None,
     state_root: Path | None = None,
     ask_user: Any = None,
     session_id: str = "default",
     broker: Any = None,
+    skip_validate: bool = False,
 ) -> ResearchRuntime:
     """按选定项目目录构造 research runtime；None 时沿用进程工作目录。
 
@@ -41,6 +57,7 @@ def _make_runtime(
         session_id=session_id,
         model=settings.model_name(),
         auto_validate=True,
+        skip_validate=skip_validate,
         task_confirmation_gate=True,
         auto_confirm=False,
         ask_user=ask_user,
@@ -67,16 +84,16 @@ def _fixed_port() -> int:
 async def start_server(
     test_mode: bool = False,
     runtime: ResearchRuntime | None = None,
-    make_runtime: Any = _make_runtime,
+    make_runtime: RuntimeFactory = _make_runtime,
     port: int | None = None,
 ) -> tuple[Any, int]:
     """启动 WebSocket 服务器并返回 (server, port) 元组。
 
     Args:
         test_mode: 如果为 True，则不向 stdout 打印端口号。
-        make_runtime: 给定项目目录构造 runtime 的工厂（供 GUI 运行时切换项目）。
+        make_runtime: 项目/session runtime factory; it receives the validated
+            ``skip_validate`` keyword alongside the existing keyword options.
         port: 固定端口；None 时读 ``ATHENA_GUI_PORT`` 环境变量，再回退随机端口。
-
     Returns:
         ``(websockets.WebSocketServer, port)`` 元组。
     """
@@ -87,12 +104,14 @@ async def start_server(
         project_root: str | None = None, state_root: Path | None = None
     ) -> ResearchRuntime:
         session_id = state_root.name if state_root is not None else "default"
+        stored = state_store.load()
         runtime = make_runtime(
             project_root,
             state_root,
             ask_user=broker.ask,
             session_id=session_id,
             broker=broker,
+            skip_validate=stored.skip_validate_for(project_root),
         )
         broker.bind(session_id, "runtime", "runtime")
         return runtime

@@ -46,7 +46,7 @@ class GuiService:
         return {"status": await self._runtime.message("/pause")}
 
     async def resume(self) -> dict[str, Any]:
-        return {"status": await self._runtime.message("/resume")}
+        return {"status": await self._runtime.resume_current_task()}
 
     async def stop(self) -> dict[str, Any]:
         return {"status": await self._runtime.message("/stop")}
@@ -338,4 +338,8 @@ def _build_report(runtime: ResearchRuntime) -> str:
     Reuses the Supervisor's shared report builder so ``generate_report`` and the
     auto-generated VALIDATE report are byte-identical for the same tree/result.
     """
-    return build_final_report(runtime.tree, runtime.state.validation)
+    return build_final_report(
+        runtime.tree,
+        runtime.state.validation,
+        validation_skipped=runtime.state.validation_skipped is True,
+    )

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import UTC, datetime
 
@@ -7,6 +8,10 @@ import websockets
 from athena.core.human_request import HumanOutcome
 from athena.research import ResearchRuntime
 from gui_gateway.__main__ import start_server
+from test.integration.research.test_continue_resume_surfaces import (
+    assert_confirmed_contract_unchanged,
+    build_phase_failure_harness,
+)
 from test.unit._support import make_project
 
 
@@ -107,3 +112,37 @@ async def test_real_runtime_clarification_round_trip_preserves_stale_error(
         server.close()
         await server.wait_closed()
         await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_websocket_continue_resumes_failed_confirmed_runtime(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    harness = await build_phase_failure_harness(tmp_path, monkeypatch, "PREPARE")
+    server, port = await start_server(test_mode=True, runtime=harness.runtime, port=0)
+    try:
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send(
+                json.dumps(
+                    {
+                        "request_id": 1,
+                        "method": "message",
+                        "params": {"text": "continue"},
+                    }
+                )
+            )
+            resumed = await _response(ws, 1)
+            assert resumed["result"] == {"response": "RUNNING"}
+            await asyncio.wait_for(harness.second_entered.wait(), timeout=1)
+
+            second_task = harness.runtime.session.lifecycle.task
+            assert second_task is not None
+            assert second_task is not harness.first_task
+            assert harness.runtime.state.status == "RUNNING"
+            assert harness.runtime.state.phase == "PREPARE"
+            assert_confirmed_contract_unchanged(harness)
+    finally:
+        server.close()
+        await server.wait_closed()
+        await harness.close()

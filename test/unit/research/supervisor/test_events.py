@@ -197,11 +197,68 @@ def test_state_event_is_a_complete_replaceable_snapshot() -> None:
         "validation",
         "eda_dir",
         "task_understanding",
+        "resume_available",
+        "resume_reason",
     }
     assert event.manual is False
     assert event.pending == []
     assert event.validation is None
     assert event.eda_dir is None
+    assert event.resume_available is False
+    assert event.resume_reason is None
+
+
+@pytest.mark.parametrize(
+    ("status", "phase", "task", "understanding", "available", "reason"),
+    [
+        ("IDLE", "PREPARE", "original", None, True, "interrupted"),
+        ("WAITING", "SEARCH", "original", None, True, "paused"),
+        ("FAILED", "VALIDATE", "original", None, True, "failed"),
+        ("RUNNING", "SEARCH", "original", None, False, "already_running"),
+        ("STOPPED", "SEARCH", "original", None, False, "stopped"),
+        ("COMPLETED", "COMPLETED", "original", None, False, "completed"),
+        ("IDLE", "PREPARE", None, {"title": "legacy task"}, True, "interrupted"),
+        ("IDLE", "PREPARE", None, None, False, "no_task"),
+    ],
+)
+def test_state_projection_advertises_durable_resume_capability(
+    tmp_path,
+    status: str,
+    phase: str,
+    task: str | None,
+    understanding: dict[str, str] | None,
+    available: bool,
+    reason: str,
+) -> None:
+    """A snapshot exposes the persisted resume decision, including legacy tasks."""
+    runtime = ResearchRuntime(project_root=tmp_path)
+    runtime.state.status = status
+    runtime.state.phase = phase
+    runtime.state.task_text = task
+    runtime.state.task_understanding = understanding
+
+    event = supervisor_state(runtime.supervisor, 0)
+
+    assert event.resume_available is available
+    assert event.resume_reason == reason
+
+
+def test_state_event_defaults_resume_fields_for_older_producers() -> None:
+    """Older complete state payloads cannot inherit resume state from another session."""
+    event = StateEvent.model_validate(
+        {
+            "type": "state",
+            "status": "IDLE",
+            "phase": "PREPARE",
+            "plans": [],
+            "search": {},
+            "sota": None,
+            "waiting": None,
+        }
+    )
+
+    assert event.resume_available is False
+    assert event.resume_reason is None
 
 
 @pytest.mark.asyncio

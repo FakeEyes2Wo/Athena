@@ -80,10 +80,13 @@ class _FakeRuntime:
         state_root: Path | None = None,
         *,
         output_payload: dict[str, Any] | None = None,
+        skip_validate: bool = False,
     ) -> None:
         self.root = root
         self.state_root = state_root
         self.output_payload = output_payload
+        self.skip_validate = skip_validate
+        self.applied_patches: list[dict[str, Any]] = []
         self.tree_path = Path(root) / ".athena" / "research_tree.json"
         self._subscribers: dict[int, Any] = {}
         self._next = 0
@@ -111,7 +114,14 @@ class _FakeRuntime:
         self._subscribers.clear()
 
     def settings(self) -> dict[str, Any]:
-        return {"project_root": self.root}
+        return {"project_root": self.root, "skip_validate": self.skip_validate}
+
+    async def apply_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        """Keep a real in-memory settings map behind the gateway boundary."""
+        self.applied_patches.append(dict(patch))
+        if "skip_validate" in patch:
+            self.skip_validate = patch["skip_validate"]
+        return self.settings()
 
 
 class _FakeWS:
@@ -164,6 +174,45 @@ async def test_transport_preserves_generic_scoped_output_payload() -> None:
         if (decoded := json.loads(message)).get("kind") == "output"
     ]
     assert [frame["data"] for frame in output_frames] == [payload]
+
+
+async def test_transport_round_trips_skip_validate_with_exact_snake_case_key(
+    tmp_path: Path,
+) -> None:
+    """The WS settings patch reaches the runtime and is persisted by the handler."""
+    from gui_gateway.handler import GuiRequestHandler
+    from gui_gateway.state_store import GuiStateStore
+    from gui_gateway.transport import WebSocketTransport
+
+    runtime = _FakeRuntime(str(tmp_path))
+    store = GuiStateStore(tmp_path / "gui-state.json")
+    handler = GuiRequestHandler(runtime, state_store=store)
+    transport = WebSocketTransport(handler)
+    ws = _FakeWS(
+        [
+            json.dumps(
+                {
+                    "request_id": 41,
+                    "method": "settings_set",
+                    "params": {"patch": {"skip_validate": True}},
+                }
+            )
+        ]
+    )
+
+    await transport.handle(ws)
+
+    response = next(
+        json.loads(message) for message in ws.sent if "kind" not in json.loads(message)
+    )
+    assert response["request_id"] == 41
+    assert response["result"]["skip_validate"] is True
+    assert runtime.applied_patches == [{"skip_validate": True}]
+    assert runtime.settings() == {
+        "project_root": str(tmp_path),
+        "skip_validate": True,
+    }
+    assert store.load().skip_validate_for(tmp_path) is True
 
 
 async def test_transport_resubscribes_after_project_switch() -> None:
@@ -283,3 +332,18 @@ async def test_dispatch_error_preserves_domain_error_metadata() -> None:
     assert err["data"]["code"] == "stale_revision"
     assert err["data"]["retryable"] is True
     assert err["data"]["current_revision"] == 7
+
+
+async def test_dispatch_error_preserves_resume_unavailable_metadata() -> None:
+    """A rejected resume remains a typed, non-retryable RPC domain error."""
+    from athena.research.runtime.resume_contract import ResearchControlError
+
+    err = await _dispatch_error(
+        ResearchControlError(
+            "resume_unavailable", "there is no interrupted task to continue"
+        ),
+        method="resume",
+    )
+
+    assert err["data"]["code"] == "resume_unavailable"
+    assert err["data"]["retryable"] is False

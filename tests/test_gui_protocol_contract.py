@@ -116,6 +116,9 @@ COMMAND_TO_METHOD: dict[str, str] = {
     "human_reply": "human_reply",
 }
 
+# Native shell helper with no Python/WebSocket RPC counterpart.
+NATIVE_ONLY_COMMANDS: frozenset[str] = frozenset({"workspace_dialog_start_directory"})
+
 
 def _rust_command_names() -> set[str]:
     """Extract ``commands::<mod>::<fn>`` names from ``generate_handler![...]``."""
@@ -154,6 +157,9 @@ def test_dispatch_routes_every_supported_method() -> None:
 def test_rust_commands_map_to_supported_methods() -> None:
     """Every registered Tauri command maps to a gateway method, and vice versa."""
     commands = _rust_command_names()
+    assert NATIVE_ONLY_COMMANDS.isdisjoint(SUPPORTED_METHODS)
+    assert commands == set(COMMAND_TO_METHOD) | NATIVE_ONLY_COMMANDS
+    commands -= NATIVE_ONLY_COMMANDS
     assert commands == set(
         COMMAND_TO_METHOD
     ), "lib.rs 命令与 COMMAND_TO_METHOD 表不一致；若新增/改名命令，请同步映射表"

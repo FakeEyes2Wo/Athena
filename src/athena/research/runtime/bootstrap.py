@@ -211,6 +211,7 @@ def build_services(
             direction=config.direction,
             tolerance=config.tolerance,
             auto_validate=config.auto_validate,
+            skip_validate=config.skip_validate,
         ),
     )
     if config.compute is not None and config.compute.remote:
@@ -255,6 +256,7 @@ def wire_workflow(runtime: Any) -> None:
             publish_agent_event=services.infrastructure.events.project_agent_event,
             on_plan_settled=runtime.release_lease,
             auto_validate=config.auto_validate,
+            skip_validate=config.skip_validate,
         ),
         search=SearchServices(
             scheduler=Scheduler(),

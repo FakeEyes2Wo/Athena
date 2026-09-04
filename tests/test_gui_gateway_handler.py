@@ -26,6 +26,7 @@ class RecordingRuntime:
     def __init__(self) -> None:
         self.started = False
         self.messages: list[str] = []
+        self.resume_calls = 0
         self.tree_path = Path("/tmp/athena-runtime")
         self.project_root = "/tmp"
         # 拆卸顺序断言用：suspend 必须发生在 aclose 之前。
@@ -37,7 +38,13 @@ class RecordingRuntime:
 
     async def message(self, text: str) -> str:
         self.messages.append(text)
+        if text == "continue":
+            return await self.resume_current_task()
         return "accepted"
+
+    async def resume_current_task(self) -> str:
+        self.resume_calls += 1
+        return "RUNNING"
 
     async def suspend(self) -> str:
         """替身版 ``ResearchRuntime.suspend``：真实落盘，状态守卫由真 Supervisor 负责。"""
@@ -48,7 +55,7 @@ class RecordingRuntime:
         if state is None or state.status != "RUNNING":
             return getattr(state, "status", "IDLE")
         state.status = "WAITING"
-        state.save(self._state_path)
+        state.save(self.state_path)
         return state.status
 
     async def aclose(self) -> None:
@@ -63,6 +70,37 @@ class RecordingRuntime:
 
     def replay_output_events(self) -> list[dict]:
         return []
+
+
+class SettingsRuntime(RecordingRuntime):
+    def __init__(
+        self,
+        project_root: str,
+        skip_validate: bool = False,
+        authoritative_skip_validate: bool | None = None,
+    ) -> None:
+        super().__init__()
+        self.project_root = project_root
+        self.skip_validate = skip_validate
+        self.authoritative_skip_validate = authoritative_skip_validate
+
+    async def apply_settings(self, patch: dict[str, object]) -> dict[str, object]:
+        if "skip_validate" in patch:
+            self.skip_validate = bool(patch["skip_validate"])
+        return {
+            "project_root": self.project_root,
+            "skip_validate": (
+                self.authoritative_skip_validate
+                if self.authoritative_skip_validate is not None
+                else self.skip_validate
+            ),
+        }
+
+    def settings(self) -> dict[str, object]:
+        return {
+            "project_root": self.project_root,
+            "skip_validate": self.skip_validate,
+        }
 
 
 def _handler_at(tmp_path: Path, factory=None) -> GuiRequestHandler:
@@ -100,14 +138,30 @@ async def test_handler_exposes_only_start_and_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handler_maps_exact_controls_to_messages() -> None:
+async def test_handler_routes_resume_to_the_public_runtime_operation() -> None:
     runtime = RecordingRuntime()
     handler = GuiRequestHandler(runtime)
 
-    for method in ("pause", "resume", "stop"):
+    for method in ("pause", "stop"):
         assert await handler.dispatch(method, {}) == {"status": "accepted"}
 
-    assert runtime.messages == ["/pause", "/resume", "/stop"]
+    assert await handler.dispatch("resume", {}) == {"status": "RUNNING"}
+
+    assert runtime.messages == ["/pause", "/stop"]
+    assert runtime.resume_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_handler_keeps_exact_continue_on_the_runtime_message_path() -> None:
+    """Free text uses runtime parsing, so it can intercept continue before clarification."""
+    runtime = RecordingRuntime()
+    handler = GuiRequestHandler(runtime)
+
+    assert await handler.dispatch("message", {"text": "continue"}) == {
+        "response": "RUNNING"
+    }
+    assert runtime.messages == ["continue"]
+    assert runtime.resume_calls == 1
 
 
 @pytest.mark.asyncio
@@ -133,6 +187,125 @@ async def test_handler_session_switch_swaps_runtime(tmp_path) -> None:
     assert result == {"session_id": "s-1", "records": [], "sessions": ["s-1"]}
     assert len(created) == 1
     assert created[0] == (str(tmp_path), tmp_path / ".athena" / "conversations" / "s-1")
+
+
+@pytest.mark.asyncio
+async def test_settings_set_persists_validated_skip_preference_and_state(
+    tmp_path,
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    store.save(
+        GuiState(
+            active_project_root=str(tmp_path),
+            last_sessions={str(tmp_path.resolve()): "s-1"},
+            skip_validate_by_project={str(other.resolve()): True},
+        )
+    )
+    runtime = SettingsRuntime(str(tmp_path), authoritative_skip_validate=False)
+    handler = GuiRequestHandler(runtime, state_store=store)
+
+    result = await handler.dispatch("settings_set", {"patch": {"skip_validate": True}})
+    saved = store.load()
+
+    assert result["skip_validate"] is False
+    assert saved.skip_validate_for(tmp_path) is False
+    assert saved.skip_validate_for(other) is True
+    assert saved.active_project_root == str(tmp_path.resolve())
+    assert saved.last_sessions == {str(tmp_path.resolve()): "s-1"}
+
+
+@pytest.mark.asyncio
+async def test_session_switch_restores_project_skip_preference_and_isolates_projects(
+    tmp_path,
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    store.save(
+        GuiState(
+            active_project_root=str(tmp_path),
+            skip_validate_by_project={str(tmp_path.resolve()): True},
+        )
+    )
+    created: list[SettingsRuntime] = []
+
+    def factory(
+        root: str, state_root: Path | None, *, skip_validate: bool = False
+    ) -> SettingsRuntime:
+        del state_root
+        runtime = SettingsRuntime(root, skip_validate)
+        created.append(runtime)
+        return runtime
+
+    handler = GuiRequestHandler(
+        SettingsRuntime(str(tmp_path)), factory, state_store=store
+    )
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+
+    assert created[-1].skip_validate is True
+    await handler.dispatch("set_project_root", {"path": str(other)})
+    assert created[-1].skip_validate is False
+
+
+@pytest.mark.asyncio
+async def test_skip_validate_survives_sessions_and_gateway_restart_per_project(
+    tmp_path: Path,
+) -> None:
+    """The project preference is shared by sessions and recreated gateways."""
+    other = tmp_path / "other"
+    other.mkdir()
+    store = GuiStateStore(tmp_path / "gui-state.json")
+    created: list[tuple[str, Path | None, bool]] = []
+
+    def factory(
+        root: str, state_root: Path | None, *, skip_validate: bool = False
+    ) -> SettingsRuntime:
+        created.append((root, state_root, skip_validate))
+        return SettingsRuntime(root, skip_validate)
+
+    project = str(tmp_path)
+    first = factory(
+        project, None, skip_validate=store.load().skip_validate_for(project)
+    )
+    handler = GuiRequestHandler(first, factory, state_store=store)
+    await handler.dispatch("settings_set", {"patch": {"skip_validate": True}})
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    await handler.dispatch("session_switch", {"session_id": "s-2"})
+    same_project = [entry for entry in created if entry[0] == project]
+    assert [entry[1] for entry in same_project] == [
+        None,
+        tmp_path / ".athena" / "conversations" / "s-1",
+        tmp_path / ".athena" / "conversations" / "s-2",
+    ]
+    assert [entry[2] for entry in same_project] == [False, True, True]
+
+    # A new gateway/store instance reads the durable project map before building
+    # both its default runtime and the next named session.
+    restarted_store = GuiStateStore(tmp_path / "gui-state.json")
+    restarted = factory(
+        project,
+        None,
+        skip_validate=restarted_store.load().skip_validate_for(project),
+    )
+    restarted_handler = GuiRequestHandler(
+        restarted, factory, state_store=restarted_store
+    )
+    assert restarted.skip_validate is True
+    await restarted_handler.dispatch("session_switch", {"session_id": "s-3"})
+    assert created[-1] == (
+        project,
+        tmp_path / ".athena" / "conversations" / "s-3",
+        True,
+    )
+
+    await restarted_handler.dispatch("set_project_root", {"path": str(other)})
+    assert created[-1][0] == str(other.resolve())
+    assert created[-1][2] is False
+    assert restarted_store.load().skip_validate_for(other) is False
 
 
 @pytest.mark.asyncio
@@ -180,7 +353,7 @@ async def test_handler_session_switch_resumes_running_search(tmp_path) -> None:
         state_path = tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text("{}", encoding="utf-8")
-        runtime._state_path = state_path
+        runtime.state_path = state_path
         runtime.state = SimpleNamespace(phase="SEARCH", status="RUNNING")
         created.append(runtime)
         return runtime
@@ -241,7 +414,7 @@ async def test_handler_session_switch_suspends_running_runtime_before_close(
     outgoing.project_root = str(tmp_path)
     state_path = tmp_path / ".athena" / "state.json"
     outgoing.state = _running_state()
-    outgoing._state_path = state_path
+    outgoing.state_path = state_path
     outgoing.state.save(state_path)
 
     handler = GuiRequestHandler(outgoing, lambda root, state_root: RecordingRuntime())
@@ -265,7 +438,7 @@ async def test_handler_session_switch_downgrades_unresumed_prepare_to_waiting(
         state = _running_state(phase="PREPARE")
         state.save(state_path)
         runtime.state = state
-        runtime._state_path = state_path
+        runtime.state_path = state_path
         created.append(runtime)
         return runtime
 
@@ -288,7 +461,7 @@ async def test_handler_session_switch_does_not_suspend_a_fresh_session(
     def factory(root: str, state_root: Path | None) -> RecordingRuntime:
         runtime = RecordingRuntime()
         runtime.state = _running_state()
-        runtime._state_path = (
+        runtime.state_path = (
             tmp_path / ".athena" / "conversations" / "s-1" / "state.json"
         )
         created.append(runtime)
@@ -550,14 +723,20 @@ async def test_handler_remembers_the_last_session_per_workspace(tmp_path) -> Non
     other.mkdir()
     store = GuiStateStore(tmp_path / "gui_state.json")
     store.save(
-        GuiState(active_project_root=str(other), last_sessions={str(other): "s-9"})
+        GuiState(
+            active_project_root=str(other),
+            last_sessions={str(other): "s-9"},
+            skip_validate_by_project={str(other.resolve()): False},
+        )
     )
     handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
 
     await handler.dispatch("session_switch", {"session_id": "s-1"})
 
     assert (await handler.dispatch("sessions_list", {}))["active"] == "s-1"
-    assert store.load().last_sessions == {str(tmp_path): "s-1", str(other): "s-9"}
+    saved = store.load()
+    assert saved.last_sessions == {str(tmp_path): "s-1", str(other): "s-9"}
+    assert saved.skip_validate_by_project == {str(other.resolve()): False}
 
 
 @pytest.mark.asyncio
@@ -584,7 +763,11 @@ async def test_set_project_root_keeps_remembered_sessions(tmp_path) -> None:
     """切工作区只改活动工作区，不能顺手清空每个工作区的 last-active 记录。"""
     store = GuiStateStore(tmp_path / "gui_state.json")
     store.save(
-        GuiState(active_project_root=str(tmp_path), last_sessions={"/old": "s-9"})
+        GuiState(
+            active_project_root=str(tmp_path),
+            last_sessions={"/old": "s-9"},
+            skip_validate_by_project={str(tmp_path.resolve()): True},
+        )
     )
     handler = _handler_at(tmp_path, lambda root, state_root: RecordingRuntime())
     target = tmp_path / "another"
@@ -594,6 +777,7 @@ async def test_set_project_root_keeps_remembered_sessions(tmp_path) -> None:
     saved = store.load()
     assert saved.active_project_root == str(target.resolve())
     assert saved.last_sessions == {"/old": "s-9"}
+    assert saved.skip_validate_by_project == {str(tmp_path.resolve()): True}
 
 
 def test_session_state_root_rejects_traversal(tmp_path) -> None:

@@ -79,6 +79,7 @@ class LifecycleSession:
     task: asyncio.Task | None = None
     started: bool = False
     confirmation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    resume_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass
@@ -108,6 +109,7 @@ class RuntimeOptions:
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
     auto_validate: bool = False
+    skip_validate: bool = False
     kaggle: KaggleStack | None = None
 
 

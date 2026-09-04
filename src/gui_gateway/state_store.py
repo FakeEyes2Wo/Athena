@@ -27,6 +27,12 @@ class GuiState:
 
     active_project_root: str | None = None
     last_sessions: dict[str, str] | None = None
+    skip_validate_by_project: dict[str, bool] | None = None
+
+    def skip_validate_for(self, project_root: str | Path | None) -> bool:
+        """Return the persisted skip preference for a resolved project root."""
+        key = str(Path(project_root or ".").expanduser().resolve())
+        return (self.skip_validate_by_project or {}).get(key, False)
 
 
 def _default_state() -> GuiState:
@@ -38,6 +44,17 @@ def _parse_last_sessions(raw: object) -> dict[str, str] | None:
     if not isinstance(raw, dict):
         return None
     return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _parse_skip_validate_by_project(raw: object) -> dict[str, bool] | None:
+    """Parse project preferences while dropping malformed individual entries."""
+    if not isinstance(raw, dict):
+        return None
+    return {
+        key: value
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, bool)
+    }
 
 
 def validate_project_root(path: str | None) -> str | None:
@@ -76,6 +93,9 @@ class GuiStateStore:
         return GuiState(
             active_project_root=root,
             last_sessions=_parse_last_sessions(payload.get("last_sessions")),
+            skip_validate_by_project=_parse_skip_validate_by_project(
+                payload.get("skip_validate_by_project")
+            ),
         )
 
     def save(self, state: GuiState) -> None:
@@ -86,6 +106,7 @@ class GuiStateStore:
                 {
                     "active_project_root": state.active_project_root,
                     "last_sessions": state.last_sessions,
+                    "skip_validate_by_project": state.skip_validate_by_project,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
                 ensure_ascii=False,

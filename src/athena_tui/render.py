@@ -19,7 +19,7 @@ PageUp/PageDown 滚动输出    End 回到最新    Esc 返回
 
 控制
 Tab+Shift 自动/手动    /select <id> 选假设
-/manual    /auto    /pause    /resume    /stop    /quit"""
+/manual    /auto    /pause    /resume (continue)    /stop    /quit"""
 
 _WAITING_REASON_LABELS = {
     "turn_limit_exhausted": "计划轮次已用尽，需要指导",

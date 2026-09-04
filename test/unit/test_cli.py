@@ -62,9 +62,9 @@ class FakeRuntime:
         self.closed = True
 
 
-def test_parser_exposes_only_current_runtime_commands() -> None:
+def test_parser_exposes_runtime_control_commands_including_continue_alias() -> None:
     parser = cli._build_parser()
-    for command in ("run", "status", "pause", "resume", "stop"):
+    for command in ("run", "status", "pause", "resume", "continue", "stop"):
         argv = [command, "--project", "p"]
         if command == "run":
             argv += ["--data", "d"]
@@ -361,6 +361,18 @@ async def test_controls_use_the_single_message_surface(
     assert await cli._dispatch_command(args) == 0
     assert runtime.calls == [("message", message)]
     assert capsys.readouterr().out.strip() == f"status={expected}"
+    assert runtime.closed is True
+
+
+@pytest.mark.asyncio
+async def test_continue_cli_alias_uses_resume_control(monkeypatch, capsys) -> None:
+    runtime = FakeRuntime()
+    monkeypatch.setattr(cli, "_runtime", lambda _project: runtime)
+    args = cli._build_parser().parse_args(["continue", "--project", "p"])
+
+    assert await cli._dispatch_command(args) == 0
+    assert runtime.calls == [("message", "/resume")]
+    assert capsys.readouterr().out.strip() == "status=RUNNING"
     assert runtime.closed is True
 
 

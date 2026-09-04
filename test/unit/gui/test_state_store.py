@@ -10,6 +10,7 @@ def test_missing_file_returns_default(tmp_path: Path) -> None:
     store = GuiStateStore(tmp_path / "gui_state.json")
 
     assert store.load().active_project_root is None
+    assert store.load().skip_validate_for(tmp_path) is False
 
 
 def test_round_trip(tmp_path: Path) -> None:
@@ -19,6 +20,47 @@ def test_round_trip(tmp_path: Path) -> None:
     store.save(GuiState(active_project_root=str(tmp_path)))
 
     assert store.load().active_project_root == str(tmp_path.resolve())
+
+
+def test_skip_validate_preferences_round_trip_and_are_project_scoped(tmp_path) -> None:
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    project_a.mkdir()
+    project_b.mkdir()
+    store = GuiStateStore(tmp_path / "gui_state.json")
+    store.save(
+        GuiState(
+            active_project_root=str(project_a),
+            last_sessions={str(project_a.resolve()): "s-1"},
+            skip_validate_by_project={str(project_a.resolve()): True},
+        )
+    )
+
+    restored = store.load()
+
+    assert restored.skip_validate_for(project_a) is True
+    assert restored.skip_validate_for(project_b) is False
+    assert restored.last_sessions == {str(project_a.resolve()): "s-1"}
+
+
+def test_malformed_skip_validate_entries_are_dropped(tmp_path) -> None:
+    path = tmp_path / "gui_state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "skip_validate_by_project": {
+                    str(tmp_path.resolve()): True,
+                    "/bad/int": 1,
+                    "/bad/string": "true",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored = GuiStateStore(path).load()
+
+    assert restored.skip_validate_by_project == {str(tmp_path.resolve()): True}
 
 
 def test_corrupt_file_falls_back_and_is_backed_up(tmp_path: Path) -> None:
@@ -35,6 +77,7 @@ def test_non_dict_payload_is_ignored(tmp_path: Path) -> None:
     path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
 
     assert GuiStateStore(path).load().active_project_root is None
+    assert GuiStateStore(path).load().skip_validate_for(tmp_path) is False
 
 
 def test_missing_directory_is_not_restored(tmp_path: Path) -> None:
@@ -54,6 +97,7 @@ def test_missing_last_sessions_field_is_none(tmp_path: Path) -> None:
     )
 
     assert GuiStateStore(path).load().last_sessions is None
+    assert GuiStateStore(path).load().skip_validate_for(tmp_path) is False
 
 
 def test_last_sessions_round_trip(tmp_path: Path) -> None:
@@ -72,6 +116,7 @@ def test_corrupt_file_degrades_last_sessions_to_default(tmp_path: Path) -> None:
     path.write_text('{"last_sessions": {"/work/a": "s-1"', encoding="utf-8")
 
     assert GuiStateStore(path).load().last_sessions is None
+    assert GuiStateStore(path).load().skip_validate_for(tmp_path) is False
 
 
 def test_non_string_last_session_entries_are_dropped(tmp_path: Path) -> None:

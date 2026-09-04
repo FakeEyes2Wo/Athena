@@ -36,11 +36,12 @@ from athena.research.prepare.baseline_research import (
 )
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
-from athena.research.contracts import EvaluatorDescriptor
+from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.runtime.control import (
     _consume_lifecycle_result,
     start as start_lifecycle,
 )
+from athena.research.runtime.resume_contract import ResearchControlError
 from athena.research.supervisor.prepare import PrepareResult
 
 
@@ -251,11 +252,19 @@ def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "prepare_baseline_design", verified_design)
 
 
-def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime:
+def _stub_runtime(
+    tmp_path: Path,
+    *,
+    task_understanding=None,
+    skip_validate: bool = False,
+    validation_phase=None,
+) -> ResearchRuntime:
     runtime = ResearchRuntime(
         project_root=tmp_path,
         auto_confirm=True,
         task_confirmation_gate=False,
+        skip_validate=skip_validate,
+        validation_phase=validation_phase,
     )
     runtime.session.lifecycle.provider = object()
     runtime.session.lifecycle.task_text = "predict titanic survival"
@@ -273,9 +282,103 @@ def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime
         def start(self):
             return None
 
+        async def aclose(self):
+            return None
+
     runtime.services.infrastructure.git = FakeGit()
     runtime.services.infrastructure.agents = FakeAgents()
     return runtime
+
+
+def _seed_resumable_sota(runtime: ResearchRuntime) -> None:
+    """Install the smallest trusted SEARCH baseline for resume matrix tests."""
+    runtime.tree.add_hypothesis(
+        Hypothesis(
+            id="baseline",
+            statement="trusted baseline",
+            intervention="establish baseline",
+            expected_effect="provide a reference metric",
+        )
+    )
+    runtime.tree.add_experiment(
+        "exp_baseline",
+        Experiment(
+            hypothesis_id="baseline",
+            commit="prepare-commit",
+            plan=ExperimentPlan(
+                kind="baseline",
+                change="establish baseline",
+                run_config_ref="sha256:" + "2" * 64,
+                budget={},
+                acceptance_rule="trusted score",
+            ),
+            gitwork=GitWorkBranch(
+                path=str(runtime.root), branch="main", base_commit="prepare-commit"
+            ),
+            status=ExperimentStatus.SUCCEEDED,
+            eval=EvalResult(
+                experiment_id="exp_baseline",
+                primary=0.71,
+                per_sample="sha256:" + "3" * 64,
+            ),
+        ),
+    )
+    runtime.tree.set_sota("exp_baseline")
+    runtime.save_tree()
+
+
+def _checkpointed_resume_runtime(
+    tmp_path: Path,
+    *,
+    phase: str,
+    status: str,
+    skip_validate: bool = True,
+    validation_phase=None,
+) -> ResearchRuntime:
+    runtime = _stub_runtime(
+        tmp_path,
+        skip_validate=skip_validate,
+        validation_phase=validation_phase,
+    )
+    _seed_resumable_sota(runtime)
+    runtime.state.phase = phase
+    runtime.state.status = status
+    runtime.state.search_limit = 0
+    runtime.state.task_text = "resume the trusted baseline"
+    runtime.session.lifecycle.started = False
+    runtime.session.lifecycle.task = None
+    runtime.state.save(runtime.state_path)
+    return runtime
+
+
+async def _failed_prepare_runtime(
+    tmp_path: Path,
+) -> tuple[ResearchRuntime, asyncio.Event]:
+    restarted = asyncio.Event()
+    calls = 0
+
+    async def prepare() -> PrepareResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("first PREPARE failed")
+        restarted.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        prepare_phase=prepare,
+        task_confirmation_gate=False,
+        auto_confirm=True,
+    )
+    await runtime.start_task("predict churn")
+    first = runtime.session.lifecycle.task
+    assert first is not None
+    with pytest.raises(RuntimeError, match="first PREPARE failed"):
+        await first
+    assert runtime.state.status == "FAILED"
+    return runtime, restarted
 
 
 def test_lifecycle_done_callback_observes_background_failure() -> None:
@@ -361,18 +464,19 @@ async def test_start_task_keeps_task_text_when_understanding_turn_crashed(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path)
-    runtime.state.task_text = "https://www.kaggle.com/competitions/kaggriculture"
+    original_task = "https://www.kaggle.com/competitions/kaggriculture"
+    runtime.state.task_text = original_task
     runtime.state.task_understanding = None
+    runtime.session.lifecycle.task_text = original_task
     runtime.session.lifecycle.started = True
     runtime.session.lifecycle.task = SimpleNamespace(done=lambda: False)
+    runtime.state.save(runtime.state_path)
 
     status = await runtime.start_task("continue")
 
     assert status == "RUNNING"
-    assert runtime.task_text == "https://www.kaggle.com/competitions/kaggriculture"
-    assert (
-        runtime.state.task_text == "https://www.kaggle.com/competitions/kaggriculture"
-    )
+    assert runtime.task_text == original_task
+    assert runtime.state.task_text == original_task
     assert runtime.state_path.is_file()
 
 
@@ -1091,7 +1195,7 @@ async def test_run_general_turn_interrupts_worker_on_timeout(
 
 
 @pytest.mark.asyncio
-async def test_start_task_reconstructs_task_text_from_legacy_understanding(
+async def test_start_task_preserves_reconstructed_task_text_from_legacy_understanding(
     tmp_path: Path,
 ) -> None:
     runtime = _stub_runtime(tmp_path)
@@ -1101,16 +1205,64 @@ async def test_start_task_reconstructs_task_text_from_legacy_understanding(
         "dataset": "kaggriculture environment",
         "target": "maximize income",
     }
+    reconstructed = (
+        "Kaggriculture farming simulation kaggriculture environment maximize income"
+    )
+    runtime.session.lifecycle.task_text = reconstructed
     runtime.session.lifecycle.started = True
     runtime.session.lifecycle.task = SimpleNamespace(done=lambda: False)
 
     status = await runtime.start_task("continue")
 
     assert status == "RUNNING"
-    assert runtime.task_text == (
-        "Kaggriculture farming simulation kaggriculture environment maximize income"
-    )
+    assert runtime.task_text == reconstructed
     assert runtime.state.task_text is None
+
+
+@pytest.mark.asyncio
+async def test_failed_legacy_understanding_reconstructs_task_text_for_replacement(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path)
+    runtime.state.status = "FAILED"
+    runtime.state.task_text = None
+    runtime.state.task_understanding = {
+        "title": "Kaggriculture farming simulation",
+        "dataset": "kaggriculture environment",
+        "target": "maximize income",
+    }
+    runtime.session.lifecycle.task_text = "stale process-local text"
+    runtime.session.lifecycle.started = True
+    runtime.session.lifecycle.task = None
+    replacement_hold = asyncio.Event()
+    replacements: list[asyncio.Task[None]] = []
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            assert restarting is True
+            runtime.state.status = "RUNNING"
+            return "RUNNING"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def fake_start() -> asyncio.Task[None]:
+        replacement = asyncio.create_task(replacement_hold.wait())
+        replacements.append(replacement)
+        runtime.session.lifecycle.task = replacement
+        return replacement
+
+    runtime.start = fake_start  # type: ignore[method-assign]
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        assert runtime.session.lifecycle.task_text == (
+            "Kaggriculture farming simulation kaggriculture environment maximize income"
+        )
+        assert runtime.state.task_text is None
+        assert len(replacements) == 1
+        assert runtime.session.lifecycle.task is replacements[0]
+    finally:
+        replacement_hold.set()
+        await asyncio.gather(*replacements, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1127,6 +1279,7 @@ async def test_resume_restarts_a_rebuilt_runtime_for_a_persisted_prepare_run(
     runtime = _stub_runtime(tmp_path)
     runtime.state.phase = "PREPARE"
     runtime.state.status = "WAITING"
+    runtime.state.task_text = "persisted prepare task"
     runtime.state.save(runtime.state_path)
     runtime.session.lifecycle.started = False
     runtime.session.lifecycle.task = None
@@ -1196,5 +1349,646 @@ async def test_resume_does_not_start_a_project_without_durable_state(
 
     runtime.start = start
 
-    await runtime.message("/resume")
+    with pytest.raises(ResearchControlError) as caught:
+        await runtime.message("/resume")
+
+    assert caught.value.code == "resume_unavailable"
     assert started == []
+
+
+@pytest.mark.asyncio
+async def test_plain_continue_restarts_failed_current_task_without_reseeding(
+    tmp_path: Path,
+) -> None:
+    runtime, restarted = await _failed_prepare_runtime(tmp_path)
+    original_task = runtime.state.task_text
+    original_understanding = dict(runtime.state.task_understanding or {})
+    try:
+        assert await runtime.message("  Continue  ") == "RUNNING"
+        await asyncio.wait_for(restarted.wait(), timeout=1)
+
+        assert runtime.state.task_text == original_task
+        assert runtime.state.task_understanding == original_understanding
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reloaded_idle_prepare_checkpoint_starts_a_new_lifecycle(
+    tmp_path: Path,
+) -> None:
+    failed, _restarted = await _failed_prepare_runtime(tmp_path)
+    first = failed.session.lifecycle.task
+    await failed.aclose()
+
+    entered = asyncio.Event()
+
+    async def prepare() -> PrepareResult:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        prepare_phase=prepare,
+        task_confirmation_gate=False,
+        auto_confirm=True,
+    )
+    try:
+        assert runtime.state.status == "IDLE"
+        assert runtime.state.phase == "PREPARE"
+
+        assert await runtime.resume_current_task() == "RUNNING"
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        assert runtime.session.lifecycle.task is not first
+        assert runtime.session.lifecycle.task is not None
+        assert not runtime.session.lifecycle.task.done()
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_continue_is_idempotent_while_restarted_task_is_live(
+    tmp_path: Path,
+) -> None:
+    runtime, restarted = await _failed_prepare_runtime(tmp_path)
+    try:
+        assert await runtime.message("continue") == "RUNNING"
+        await asyncio.wait_for(restarted.wait(), timeout=1)
+        replacement = runtime.session.lifecycle.task
+        runtime.session.lifecycle.task_text = "preserve process-local task text"
+        task_text_before = runtime.session.lifecycle.task_text
+
+        assert await runtime.message("continue") == "RUNNING"
+        assert runtime.session.lifecycle.task_text == task_text_before
+        assert runtime.session.lifecycle.task is replacement
+        assert replacement is not None
+        assert not replacement.done()
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_waiting_live_lifecycle_resumes_without_spawning_replacement(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    runtime.state.status = "WAITING"
+    hold = asyncio.Event()
+    live_task = asyncio.create_task(hold.wait())
+    runtime.session.lifecycle.started = True
+    runtime.session.lifecycle.task = live_task
+    resume_calls: list[bool] = []
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            resume_calls.append(restarting)
+            runtime.state.status = "RUNNING"
+            return "RUNNING"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def exploding_start() -> asyncio.Task[None]:
+        raise AssertionError("live lifecycle must not be replaced")
+
+    runtime.start = exploding_start  # type: ignore[method-assign]
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        assert resume_calls == [False]
+        assert runtime.session.lifecycle.task is live_task
+    finally:
+        hold.set()
+        await live_task
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resume_calls_create_one_lifecycle_task(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    runtime.state.status = "FAILED"
+    runtime.session.lifecycle.started = True
+    runtime.session.lifecycle.task = None
+    first_resume_entered = asyncio.Event()
+    release_first_resume = asyncio.Event()
+    replacement_hold = asyncio.Event()
+    resume_calls: list[bool] = []
+    started_tasks: list[asyncio.Task[None]] = []
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            resume_calls.append(restarting)
+            if len(resume_calls) == 1:
+                first_resume_entered.set()
+                await release_first_resume.wait()
+            runtime.state.status = "RUNNING"
+            return "RUNNING"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def fake_start() -> asyncio.Task[None]:
+        task = asyncio.create_task(replacement_hold.wait())
+        started_tasks.append(task)
+        runtime.session.lifecycle.task = task
+        runtime.session.lifecycle.started = True
+        return task
+
+    runtime.start = fake_start  # type: ignore[method-assign]
+    first_resume = asyncio.create_task(runtime.resume_current_task())
+    await asyncio.wait_for(first_resume_entered.wait(), timeout=1)
+    second_started = asyncio.Event()
+
+    async def second_call() -> str:
+        second_started.set()
+        return await runtime.resume_current_task()
+
+    second_resume = asyncio.create_task(second_call())
+    await second_started.wait()
+    try:
+        assert resume_calls == [True]
+        assert second_resume.done() is False
+
+        release_first_resume.set()
+        assert await asyncio.gather(first_resume, second_resume) == [
+            "RUNNING",
+            "RUNNING",
+        ]
+        assert resume_calls == [True]
+        assert len(started_tasks) == 1
+        assert runtime.session.lifecycle.task is started_tasks[0]
+    finally:
+        release_first_resume.set()
+        replacement_hold.set()
+        await asyncio.gather(
+            first_resume, second_resume, *started_tasks, return_exceptions=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_failed_resume_waits_for_old_exception_to_finish_unwinding(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    runtime.state.status = "FAILED"
+    runtime.session.lifecycle.started = True
+    unwinding = asyncio.Event()
+    release_unwind = asyncio.Event()
+    replacement_hold = asyncio.Event()
+    resume_calls: list[bool] = []
+    started_tasks: list[asyncio.Task[None]] = []
+
+    async def failing_lifecycle() -> None:
+        try:
+            raise RuntimeError("old PREPARE failure")
+        finally:
+            unwinding.set()
+            await release_unwind.wait()
+
+    old_task = asyncio.create_task(failing_lifecycle())
+    runtime.session.lifecycle.task = old_task
+    await unwinding.wait()
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            resume_calls.append(restarting)
+            runtime.state.status = "RUNNING"
+            return "RUNNING"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def fake_start() -> asyncio.Task[None]:
+        task = asyncio.create_task(replacement_hold.wait())
+        started_tasks.append(task)
+        runtime.session.lifecycle.task = task
+        return task
+
+    runtime.start = fake_start  # type: ignore[method-assign]
+    resume_started = asyncio.Event()
+
+    async def resume_call() -> str:
+        resume_started.set()
+        return await runtime.resume_current_task()
+
+    resumed = asyncio.create_task(resume_call())
+    await resume_started.wait()
+    try:
+        assert resumed.done() is False
+        assert resume_calls == []
+
+        release_unwind.set()
+        assert await resumed == "RUNNING"
+        assert old_task.done()
+        assert resume_calls == [True]
+        assert len(started_tasks) == 1
+        assert runtime.session.lifecycle.task is started_tasks[0]
+    finally:
+        release_unwind.set()
+        replacement_hold.set()
+        await asyncio.gather(old_task, resumed, *started_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_preempts_failed_resume_join_without_replacement(
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    runtime.state.status = "FAILED"
+    runtime.session.lifecycle.started = True
+    old_task_started = asyncio.Event()
+    old_task_cancelled = asyncio.Event()
+    resume_lock_acquired = asyncio.Event()
+    resume_calls: list[bool] = []
+    replacements: list[asyncio.Task[None]] = []
+
+    async def failing_lifecycle() -> None:
+        old_task_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            old_task_cancelled.set()
+
+    old_task = asyncio.create_task(failing_lifecycle())
+    runtime.session.lifecycle.task = old_task
+    await old_task_started.wait()
+
+    class ObservedLock:
+        def __init__(self) -> None:
+            self._lock = asyncio.Lock()
+
+        async def __aenter__(self) -> None:
+            await self._lock.acquire()
+            resume_lock_acquired.set()
+
+        async def __aexit__(self, *_args: object) -> None:
+            self._lock.release()
+
+    runtime.session.lifecycle.resume_lock = ObservedLock()
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            resume_calls.append(restarting)
+            runtime.state.status = "RUNNING"
+            return "RUNNING"
+
+        async def request_stop(self) -> str:
+            runtime.state.status = "STOPPED"
+            return "STOPPED"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def replacement_lifecycle() -> None:
+        await asyncio.Event().wait()
+
+    async def fake_start() -> asyncio.Task[None]:
+        replacement = asyncio.create_task(replacement_lifecycle())
+        replacements.append(replacement)
+        runtime.session.lifecycle.task = replacement
+        return replacement
+
+    runtime.start = fake_start  # type: ignore[method-assign]
+    resumed = asyncio.create_task(runtime.resume_current_task())
+    await resume_lock_acquired.wait()
+    stopped = asyncio.create_task(runtime.message("/stop"))
+    try:
+        assert await asyncio.wait_for(stopped, timeout=1) == "STOPPED"
+        with pytest.raises(ResearchControlError) as caught:
+            await asyncio.wait_for(resumed, timeout=1)
+
+        assert caught.value.code == "resume_unavailable"
+        assert old_task_cancelled.is_set()
+        assert old_task.done()
+        assert resume_calls == []
+        assert replacements == []
+        assert runtime.state.status == "STOPPED"
+        task = runtime.session.lifecycle.task
+        assert task is None or task.done()
+    finally:
+        for task in (resumed, stopped, old_task, *replacements):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(
+            resumed, stopped, old_task, *replacements, return_exceptions=True
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("original_status", "original_started", "expected_status", "failure_type"),
+    [
+        ("FAILED", True, "FAILED", RuntimeError),
+        ("WAITING", False, "WAITING", asyncio.CancelledError),
+        ("IDLE", False, "IDLE", RuntimeError),
+        ("RUNNING", False, "FAILED", RuntimeError),
+    ],
+)
+async def test_resume_startup_failure_restores_resumable_checkpoint(
+    original_status: str,
+    original_started: bool,
+    expected_status: str,
+    failure_type: type[BaseException],
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    runtime.state.status = original_status
+    runtime.state.save(runtime.state_path)
+    runtime.session.lifecycle.started = original_started
+    runtime.session.lifecycle.task = None
+    startup_error = failure_type("lifecycle startup failed")
+
+    class FakeSupervisor:
+        async def resume(self, *, restarting: bool = False) -> str:
+            assert restarting is True
+            runtime.state.status = "RUNNING"
+            runtime.state.save(runtime.state_path)
+            return "RUNNING"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    async def failing_start() -> asyncio.Task[None]:
+        runtime.session.lifecycle.started = True
+        raise startup_error
+
+    runtime.start = failing_start  # type: ignore[method-assign]
+
+    with pytest.raises(failure_type) as caught:
+        await runtime.resume_current_task()
+
+    assert caught.value is startup_error
+    task = runtime.session.lifecycle.task
+    assert task is None or task.done()
+    assert runtime.session.lifecycle.started is original_started
+    assert runtime.state.status == expected_status
+    assert type(runtime.state).load(runtime.state_path).status == expected_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "phase", "has_task"),
+    [
+        ("STOPPED", "PREPARE", True),
+        ("COMPLETED", "COMPLETED", True),
+        ("IDLE", "PREPARE", False),
+    ],
+)
+async def test_unavailable_continue_is_typed_before_infrastructure_actions(
+    status: str,
+    phase: str,
+    has_task: bool,
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path)
+    runtime.state.status = status
+    runtime.state.phase = phase
+    runtime.state.task_text = "original task" if has_task else None
+    runtime.state.task_understanding = {"title": "original task"} if has_task else None
+    runtime.session.lifecycle.started = False
+    runtime.session.lifecycle.task = None
+
+    class ExplodingSupervisor:
+        def __getattribute__(self, name: str):
+            raise AssertionError(f"Supervisor infrastructure touched: {name}")
+
+    runtime.services.workflow.supervisor = ExplodingSupervisor()
+
+    async def exploding_start() -> asyncio.Task[None]:
+        raise AssertionError("runtime infrastructure started")
+
+    runtime.start = exploding_start  # type: ignore[method-assign]
+
+    with pytest.raises(ResearchControlError) as caught:
+        await runtime.message("continue")
+
+    assert caught.value.code == "resume_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "guidance", ["continue research", "continue three more attempts"]
+)
+async def test_multiword_continue_guidance_reaches_supervisor_unchanged(
+    guidance: str,
+    tmp_path: Path,
+) -> None:
+    runtime = _stub_runtime(tmp_path, task_understanding={"title": "original task"})
+    received: list[str] = []
+
+    class FakeSupervisor:
+        async def message(self, text: str) -> str:
+            received.append(text)
+            return "guidance accepted"
+
+    runtime.services.workflow.supervisor = FakeSupervisor()
+
+    assert await runtime.message(guidance) == "guidance accepted"
+    assert received == [guidance]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authority_recovers", [True, False])
+async def test_authoritative_prepare_resume_reuses_attested_baseline(
+    authority_recovers: bool,
+    tmp_path: Path,
+) -> None:
+    authority = _MemoryBaselineAuthorityStore()
+    await _seed_attested_prepare_checkpoint(tmp_path, authority)
+    baseline_root = tmp_path / "workspaces" / "eda"
+    baseline_before = {
+        path.relative_to(baseline_root): path.read_bytes()
+        for path in baseline_root.rglob("*")
+        if path.is_file()
+    }
+    authority.load_error = OSError("authority offline")
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        baseline_authority=authority,
+        search_limit=0,
+    )
+    runtime.clarification_path.write_bytes(b"frozen confirmed clarification\n")
+    original_task = runtime.state.task_text
+    original_understanding = dict(runtime.state.task_understanding or {})
+    original_handoffs = dict(runtime.state.handoff_refs)
+    original_draft = runtime.clarification_path.read_bytes()
+    original_handoff = runtime.handoffs_path.joinpath(
+        "TASK_CLARIFICATION.md"
+    ).read_bytes()
+
+    class ExplodingClarification:
+        async def start_or_resume(self, _task: str) -> object:
+            raise AssertionError("resume must not enter clarification")
+
+    runtime.services.workflow.clarification = ExplodingClarification()
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        first = runtime.session.lifecycle.task
+        assert first is not None
+        with pytest.raises(BaselineAuthorityError, match="load failed"):
+            await first
+        assert runtime.state.status == "FAILED"
+
+        if authority_recovers:
+            authority.load_error = None
+
+        assert await runtime.resume_current_task() == "RUNNING"
+        replacement = runtime.session.lifecycle.task
+        assert replacement is not None
+        assert replacement is not first
+        if authority_recovers:
+            await asyncio.wait_for(replacement, timeout=1)
+        else:
+            with pytest.raises(BaselineAuthorityError, match="load failed"):
+                await replacement
+
+        assert runtime.state.task_text == original_task
+        assert runtime.state.task_understanding == original_understanding
+        assert runtime.state.handoff_refs == original_handoffs
+        assert runtime.clarification_path.read_bytes() == original_draft
+        assert (
+            runtime.handoffs_path.joinpath("TASK_CLARIFICATION.md").read_bytes()
+            == original_handoff
+        )
+        assert {
+            path.relative_to(baseline_root): path.read_bytes()
+            for path in baseline_root.rglob("*")
+            if path.is_file()
+        } == baseline_before
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_search_running_with_skip_completes_without_validation(
+    tmp_path: Path,
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        raise AssertionError("SEARCH resume must not enter VALIDATE")
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="SEARCH",
+        status="RUNNING",
+        validation_phase=validate,
+    )
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        task = runtime.session.lifecycle.task
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert validation_calls == []
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is None
+        assert runtime.state.validation_skipped is True
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_search_waiting_with_skip_waits_for_explicit_resume(
+    tmp_path: Path,
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        raise AssertionError("SEARCH resume must not enter VALIDATE")
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="SEARCH",
+        status="WAITING",
+        validation_phase=validate,
+    )
+    try:
+        assert runtime.state.status == "WAITING"
+        assert runtime.session.lifecycle.task is None
+        assert validation_calls == []
+
+        assert await runtime.resume_current_task() == "RUNNING"
+        task = runtime.session.lifecycle.task
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert validation_calls == []
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is None
+        assert runtime.state.validation_skipped is True
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_validate_running_with_skip_records_real_validation(
+    tmp_path: Path,
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        return ValidationResult(
+            result_id="validation-resume",
+            status="COMPLETED",
+            test_score=0.69,
+            final_test_score=0.68,
+            generalization_gap=0.03,
+            sota_commit=commit,
+            validation_commit="validation-commit",
+        )
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="VALIDATE",
+        status="RUNNING",
+        validation_phase=validate,
+    )
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        task = runtime.session.lifecycle.task
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert validation_calls == [("prepare-commit", pytest.approx(0.71))]
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is not None
+        assert runtime.state.validation["result_id"] == "validation-resume"
+        assert runtime.state.validation_skipped is None
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_completed_skip_resume_is_a_noop(tmp_path: Path) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        raise AssertionError("COMPLETED resume must not validate")
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="COMPLETED",
+        status="COMPLETED",
+        validation_phase=validate,
+    )
+    runtime.state.validation_skipped = True
+    runtime.state.save(runtime.state_path)
+    try:
+        assert await runtime.start_task("ignored after completion") == "COMPLETED"
+        assert validation_calls == []
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is None
+        assert runtime.state.validation_skipped is True
+    finally:
+        await runtime.aclose()

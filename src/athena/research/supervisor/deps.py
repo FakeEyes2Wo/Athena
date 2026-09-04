@@ -67,6 +67,7 @@ class PhaseActions:
     on_plan_settled: Callable[[str], Awaitable[None]] | None = None
     auto_validate: bool = False
     prepare_resume_is_attested: _PrepareResumeIsAttested | None = None
+    skip_validate: bool = False
 
 
 @dataclass

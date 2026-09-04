@@ -189,6 +189,27 @@ describe("ConversationPane", () => {
     expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
   });
 
+  it("enables Continue for an interrupted task advertised by the backend", () => {
+    const pipeline = {
+      viewModel: {
+        ...createEmptyPipelineViewModel(),
+        status: "error" as const,
+        phase: "PREPARE",
+        resumeAvailable: true,
+        resumeReason: "failed",
+      },
+      runActive: true,
+      sendPrompt: vi.fn(),
+      startRun: vi.fn(),
+    } as const;
+
+    renderUi(<ConversationPane pipeline={pipeline as never} />);
+
+    expect(screen.getByRole("button", { name: "继续" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "暂停" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "停止" })).toBeDisabled();
+  });
+
   it("shows a started state instead of the confirm button once confirmed", () => {
     const sendPrompt = vi.fn().mockResolvedValue(undefined);
     const startRun = vi.fn().mockResolvedValue(undefined);

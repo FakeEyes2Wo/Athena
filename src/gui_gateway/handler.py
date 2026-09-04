@@ -6,6 +6,7 @@ transport, which subscribes to runtime ``state``/``output`` events directly.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import shutil
@@ -28,7 +29,29 @@ from gui_gateway.state_store import GuiState, GuiStateStore
 
 logger = logging.getLogger(__name__)
 
-RuntimeFactory = Callable[[str | None, Path | None], ResearchRuntime]
+RuntimeFactory = Callable[..., ResearchRuntime]
+
+
+def _build_runtime(
+    factory: RuntimeFactory,
+    project_root: str,
+    state_root: Path | None,
+    skip_validate: bool,
+) -> ResearchRuntime:
+    """Build a runtime, passing the expanded preference keyword when supported."""
+    try:
+        parameters = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    accepts_keyword = any(
+        parameter.name == "skip_validate"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_keyword:
+        return factory(project_root, state_root, skip_validate=skip_validate)
+    return factory(project_root, state_root)
+
 
 # 权威 GUI 方法集合（docs/athena-gui-design.md §3.2 + set_project_root）。
 # 与 ``dispatch`` 的分支一一对应；契约测试（tests/test_gui_protocol_contract.py）
@@ -210,7 +233,13 @@ class GuiRequestHandler:
         if state_root is not None:
             # 新会话必须立刻落盘，否则 sessions_list 只列已存在目录，刷新后会话消失。
             state_root.mkdir(parents=True, exist_ok=True)
-        new_runtime = self._make_runtime(project_root, state_root)
+        stored = self._state_store.load()
+        new_runtime = _build_runtime(
+            self._make_runtime,
+            project_root,
+            state_root,
+            stored.skip_validate_for(project_root),
+        )
         # 切走前把旧会话仍未回复的 human requests 全部取消，避免新会话或重建后的
         # runtime 继续在同一个 broker 上看到旧会话的 pending 请求。
         await self._broker.cancel_session(self._current_session_id)
@@ -243,7 +272,7 @@ class GuiRequestHandler:
         """
         try:
             state = getattr(self._runtime, "state", None)
-            state_path = getattr(self._runtime, "_state_path", None)
+            state_path = getattr(self._runtime, "state_path", None)
             # 只有从磁盘恢复出的状态才可能是“进行中”；全新会话的内存默认状态
             # （IDLE/PREPARE）既不该被误判成需要续跑，也不该被降级。
             persisted = state_path is not None and Path(state_path).is_file()
@@ -276,10 +305,12 @@ class GuiRequestHandler:
         await self._swap_runtime(str(root), None)
         # 换工作区就换了一整套会话命名空间，旧工作区的会话 id 不能带过去。
         self._current_session_id = "default"
+        stored = self._state_store.load()
         self._state_store.save(
             GuiState(
                 active_project_root=str(root),
-                last_sessions=self._state_store.load().last_sessions,
+                last_sessions=stored.last_sessions,
+                skip_validate_by_project=stored.skip_validate_by_project,
             )
         )
         return self._runtime.settings()
@@ -333,11 +364,25 @@ class GuiRequestHandler:
                     active_project_root=stored.active_project_root
                     or str(self._project_root),
                     last_sessions=sessions,
+                    skip_validate_by_project=stored.skip_validate_by_project,
                 )
             )
         except OSError:
             # 状态文件写不进去（磁盘满 / 无写权限）→ 下次挂载退回列表首位即可。
             logger.warning("failed to persist the last active session", exc_info=True)
+
+    def _remember_skip_validate(self, enabled: bool) -> None:
+        """Persist the validated preference for the active project."""
+        stored = self._state_store.load()
+        preferences = dict(stored.skip_validate_by_project or {})
+        preferences[str(self._project_root.resolve())] = enabled
+        self._state_store.save(
+            GuiState(
+                active_project_root=stored.active_project_root,
+                last_sessions=stored.last_sessions,
+                skip_validate_by_project=preferences,
+            )
+        )
 
     def _session_ids(self, project_root: Path | None = None) -> list[str]:
         """返回会话 id（``default`` + 命名空间子目录），最近活动在前。
@@ -408,7 +453,13 @@ class GuiRequestHandler:
             # 删不掉（句柄占用）也要留下一个能继续服务的 runtime；异常照常上抛给
             # transport，前端才看得到真实原因。
             if reopen:
-                self._runtime = self._make_runtime(str(self._project_root), None)
+                stored = self._state_store.load()
+                self._runtime = _build_runtime(
+                    self._make_runtime,
+                    str(self._project_root),
+                    None,
+                    stored.skip_validate_for(self._project_root),
+                )
                 self._service = GuiService(self._runtime, broker=self._broker)
         self._current_session_id = "default"
 
@@ -493,9 +544,13 @@ class GuiRequestHandler:
         if method == "settings_get":
             return service.settings_get()
         if method == "settings_set":
-            return await service.settings_set(
-                _require_dict(params, "patch", "settings patch")
-            )
+            patch = _require_dict(params, "patch", "settings patch")
+            snapshot = await service.settings_set(patch)
+            if "skip_validate" in patch:
+                enabled = snapshot.get("skip_validate")
+                if isinstance(enabled, bool):
+                    self._remember_skip_validate(enabled)
+            return snapshot
         if method == "set_project_root":
             return await self.set_project_root(
                 _require_str(params, "path", "project path")
