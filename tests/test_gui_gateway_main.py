@@ -63,7 +63,10 @@ async def test_start_server_factory_restores_project_skip_validate(
         return FakeRuntime(project_root=project_root, **options)
 
     class FakeServer:
-        sockets = [type("Socket", (), {"getsockname": lambda self: (None, 17601)})()]
+        def __init__(self) -> None:
+            self.sockets = [
+                type("Socket", (), {"getsockname": lambda self: (None, 17601)})()
+            ]
 
     class FakeTransport:
         def __init__(self, handler) -> None:

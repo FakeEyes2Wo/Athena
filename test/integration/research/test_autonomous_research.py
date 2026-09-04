@@ -6,14 +6,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-import athena.research.supervisor.phases as phases_module
 
+import athena.research.supervisor.phases as phases_module
 from athena.core.artifact_store import ArtifactNotFoundError
-from athena.gui.service import GuiService
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
+from athena.gui.service import GuiService
 from athena.research.contracts import (
     DataScriptBundle,
     EvaluatorDescriptor,

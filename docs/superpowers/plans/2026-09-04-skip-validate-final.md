@@ -1091,7 +1091,12 @@ git commit -m "test: prove skip validate persistence and recovery"
 - Integrates: the feature branch, including its universal-Continue prerequisite history, into dirty `main` only after preserving exact overlapping user files on a safety branch.
 - Restores: the paused universal-Continue plan as `CURRENT.md`'s active plan after this feature closes.
 
-- [ ] **Step 1: Update user-facing documentation**
+- [x] **Step 1: Update user-facing documentation**
+
+  Evidence: updated `docs/athena-gui-design.md` and `docs/athena-guide/06-workflow.md` to
+  document the independent `skip_validate` project setting, precedence over
+  `auto_validate`, SEARCH-only Final reporting without validation metrics, persistence,
+  VALIDATE/WAITING recovery semantics, and the existing COMPLETED backend phase.
 
 Document the settings row as:
 
@@ -1106,7 +1111,13 @@ that project's GUI sessions.
 Document that an already entered VALIDATE run continues and a parked WAITING run
 requires Continue. Do not describe COMPLETED as a new FINAL backend phase.
 
-- [ ] **Step 2: Run backend formatting and static checks**
+- [x] **Step 2: Run backend formatting and static checks**
+
+  Evidence: Black checked 26 files and compileall both exited 0. Broad Ruff
+  reported repository-baseline findings; the same explicit feature-changed
+  paths were rerun after six authorized formatting fixes and matched the
+  `c815eaf` baseline exactly at 17 normalized findings (delta 0). No baseline
+  Ruff findings were changed.
 
 Run:
 
@@ -1158,7 +1169,11 @@ Run:
 Expected: exit 0. If broad Ruff names an unrelated pre-existing file, record it
 and rerun with every changed Python path explicitly; do not edit unrelated code.
 
-- [ ] **Step 3: Run focused and broad Python verification**
+- [x] **Step 3: Run focused and broad Python verification**
+
+  Evidence: focused suite passed 242 tests in 24.65s after static fixes;
+  affected static-fix tests passed 44 in 12.27s; broad suite passed 1348 in
+  212.46s with one Windows asyncio subprocess cleanup warning.
 
 Run in order:
 
@@ -1190,7 +1205,11 @@ Record counts, durations, and warnings for both commands. Do not claim a broad
 suite is green if it exits non-zero; isolate and report a baseline failure
 without modifying unrelated baseline-authority work.
 
-- [ ] **Step 4: Run complete frontend and Rust verification**
+- [x] **Step 4: Run complete frontend and Rust verification**
+
+  Evidence: Vitest passed 19 files/183 tests; Vite transformed 2761 modules;
+  Cargo passed 10 tests and cargo check. Existing Rust dead-code and gateway
+  connection-reset warnings were recorded in the Task 7 report.
 
 Run:
 
@@ -1204,7 +1223,13 @@ git diff --check
 
 Record Vitest file/test counts, Vite module count, Rust test counts, and warnings.
 
-- [ ] **Step 5: Audit the delivered boundary**
+- [x] **Step 5: Audit the delivered boundary**
+
+  Evidence: rg inventory and behavioral tests confirm project-keyed
+  `skip_validate` persistence, `validation_skipped` resume metadata,
+  SEARCH-only finalization without validation invocation or fabricated final
+  metrics, and retained automatic/manual VALIDATE paths. `git diff --check`
+  passed and only planned feature paths are present in the feature diff.
 
 Run:
 
@@ -1226,7 +1251,12 @@ confirm `auto_validate` paths remain, the setting map is project-keyed, and only
 planned paths changed; they are inventory evidence rather than substitutes for
 the behavioral tests.
 
-- [ ] **Step 6: Commit verified feature documentation**
+- [x] **Step 6: Commit verified feature documentation**
+
+  Evidence: completion evidence is recorded in the ignored Task 7 scratch
+  report. Only the two user guides, this plan, and the six explicitly
+  authorized Ruff-format fixes are staged for the documentation commit;
+  `uv.lock` is unchanged and unstaged.
 
 After Steps 2-5 have fresh evidence, check all implementation and documentation
 boxes through this step. Stage only the two user guides, this plan, and any

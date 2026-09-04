@@ -653,4 +653,4 @@ class PhaseMachine:
         return {"plans": plans, "running": list(self._run.running_ids())}
 
 
-__all__ = ["PhaseMachine", "SKIPPED_VALIDATION_OUTPUT", "_final_report_text"]
+__all__ = ["SKIPPED_VALIDATION_OUTPUT", "PhaseMachine", "_final_report_text"]

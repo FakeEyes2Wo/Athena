@@ -7,10 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from athena.core.research_tree import ResearchTree
-from athena.research.report import (
-    VALIDATION_SKIPPED_NOTICE,
-    build_final_report as _build_tree_report,
-)
+from athena.research.report import VALIDATION_SKIPPED_NOTICE
+from athena.research.report import build_final_report as _build_tree_report
 
 _STAGES = frozenset({"baseline", "search", "final"})
 _DIRECTIONS = frozenset({"maximize", "minimize"})

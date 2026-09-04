@@ -378,13 +378,27 @@ flowchart TD
 
 ### 6.5.8 SEARCH 的停止、等待与人工决策
 
-SEARCH 在达到预算、没有可继续动作、人工请求验证或自动策略决定收敛时结束。交互模式下，预算耗尽可以进入 `WAITING`，Supervisor 应一次询问一个决策：增加若干次尝试、立即进入验证，或停止。
+SEARCH 完成后的路径由两个独立设置决定。项目级 `skip_validate` 默认关闭，并在同一项目的
+GUI sessions 间共享；它打开时优先于 `auto_validate`：
+
+| `skip_validate` | `auto_validate` | SEARCH 完成后的策略 |
+|---|---|---|
+| `true` | 任意值 | 跳过独立 VALIDATE evaluator，写入仅基于 SEARCH SOTA 的 Final 报告并进入 `COMPLETED`；没有 final-test 分数或 generalization gap |
+| `false` | `true` | 自动进入 `VALIDATE`，完成独立复验后进入 `COMPLETED` |
+| `false` | `false` | 保留人工验证门禁；交互运行可停在 `WAITING`，等待用户 Continue 或其他阶段决策 |
+
+开启跳过策略时，系统仍会保留 SEARCH 的可信 SOTA 评分作为参考，但不会伪造最终评估指标。
+报告会明确标注 `VALIDATE` 已跳过。保存设置不会自动推进已经停在 `SEARCH/WAITING` 的运行，
+该运行需要用户点击 Continue；已经进入 `VALIDATE` 的运行也会继续现有验证流程，即使之后打开
+`skip_validate`。后端没有新增 FINAL phase，跳过后的终态仍是现有的 `COMPLETED`。
 
 这三种选择必须通过确定性控制工具修改状态；Supervisor Agent 不能只在自然语言里宣布“已增加预算”或“已开始验证”。
 
 ## 6.6 VALIDATE：在冻结 SOTA 上独立复验
 
-VALIDATE 的目标不是继续调参，而是确认 SEARCH 选出的 SOTA 在独立工作区、冻结输入和可信 evaluator 下仍然能够运行并取得一致方向的结果。
+当项目未启用 `skip_validate` 且选择自动或人工验证时，VALIDATE 的目标不是继续调参，而是确认
+SEARCH 选出的 SOTA 在独立工作区、冻结输入和可信 evaluator 下仍然能够运行并取得一致方向的结果。
+启用跳过策略的运行不会进入本节流程；它直接从 SEARCH 生成明确未验证的 Final 报告。
 
 ### 6.6.1 冻结输入
 
@@ -454,6 +468,10 @@ flowchart LR
 
 对于 Kaggle 任务，只有进入 `COMPLETED` 后，Supervisor 才能调度通用 worker 提交预测；不得在 VALIDATE 之前把中间预测当作最终提交。
 
+若 `skip_validate=true`，最终报告和状态仍按上述终态交付，但验证结果明确为缺失：报告只引用
+SEARCH SOTA，不包含 final-test 分数或 generalization gap；`resume.json` 会记录
+`validation_skipped=true`，以便之后按运行历史准确重建报告。该记录不把 `COMPLETED` 变成新的 FINAL phase。
+
 ### 6.6.5 General Agent：完成后的受限执行者
 
 General Agent 不参与假设生成、SOTA 选择或阶段决策。它只在 Supervisor 给出具体任务时执行通用工作；workflow 中最重要的用途是 Kaggle 任务在 `COMPLETED` 后提交最终预测。
@@ -489,6 +507,10 @@ task_understanding, task_text, handoff_sources, handoff_refs
 corpus_ref, corpus_ideated_ref, kaggle_download
 ```
 
+GUI 的 `skip_validate` 偏好保存在网关状态的项目键映射中，不写入研究 checkpoint；同一项目的
+不同 session 和 GUI 重启会读取同一个值。运行是否实际跳过验证则以该次运行的
+`resume.json` 中的 `validation_skipped` 为准，因此修改当前项目偏好不会改变历史已完成报告。
+
 状态保存但研究树尚未落盘的崩溃窗口由 recovery 逻辑修复；`state.json` 与 `resume.json` 摘要不一致时，过期的 resume 数据会被忽略。
 
 ## 6.8 事件与前端呈现
@@ -517,7 +539,8 @@ CLI 将事件渲染为文本行，GUI 通过 WebSocket 推送 JSON，TUI 根据�
 | PREPARE | `RUNNING` | SEARCH / `RUNNING` | evaluator 已冻结，baseline 已执行、评分并写入研究树 |
 | SEARCH | `RUNNING` | SEARCH / `RUNNING` | 仍有预算和可调度动作 |
 | SEARCH | `RUNNING` | SEARCH / `WAITING` | 交互模式预算耗尽，等待用户决策 |
-| SEARCH | `RUNNING` | VALIDATE / `RUNNING` | 搜索收敛、自动验证或人工触发验证 |
+| SEARCH | `RUNNING` | `COMPLETED` | `skip_validate=true`，生成仅基于 SEARCH 的未验证 Final 报告 |
+| SEARCH | `RUNNING` | VALIDATE / `RUNNING` | `skip_validate=false` 且自动验证或人工触发验证 |
 | VALIDATE | `RUNNING` | COMPLETED | 独立执行、可信评分、证据和最终报告均已保存 |
 
 ## 6.10 常用命令

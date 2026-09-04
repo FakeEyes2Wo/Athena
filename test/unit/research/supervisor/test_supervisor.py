@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import athena.research.supervisor.search_loop as search_loop_module
 from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
@@ -35,7 +36,6 @@ from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor, _final_report_text
-import athena.research.supervisor.search_loop as search_loop_module
 
 
 def test_prepare_resume_callback_type_alias_is_module_private() -> None:

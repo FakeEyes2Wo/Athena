@@ -211,6 +211,7 @@ GuiSettings = {
   "direction": "maximize"|"minimize",
   "tolerance": float≥0,
   "auto_validate": bool,
+  "skip_validate": bool,
   "manual_mode": bool,           // 映射 state.manual_mode
   "phase": str,                  // 只读（PREPARE/SEARCH/VALIDATE/COMPLETED）
   "status": str                  // 只读
@@ -218,12 +219,23 @@ GuiSettings = {
 ```
 
 - `settings_get` 从 `runtime.state` + `runtime` 构造参数读取；`phase/status` 只读。
-- `settings_set(patch)`：白名单字段（`concurrency/search_limit/direction/tolerance/auto_validate/manual_mode`）。
+- `settings_set(patch)`：白名单字段（`concurrency/search_limit/direction/tolerance/auto_validate/skip_validate/manual_mode`）。
   - `manual_mode` → 走 `runtime.message("/manual"|"/auto")`。
   - `search_limit`/`concurrency` → 改 `runtime.state`（`ResearchState` 可变字段）并落盘。
   - `direction`/`tolerance` 为运行时构造参数，改后仅影响**后续** plan（记录为“延迟生效”）。
   - 非法值抛 `ValueError`。
 - 前端 `SettingsPanel`：表单 + 保存按钮 + 只读字段灰显 + 校验错误内联提示。
+
+`skip_validate` 是独立于 `auto_validate` 的项目级开关，默认关闭，并由同一项目的
+所有 GUI session 共享（切换项目或重启 GUI 后仍保留）。关闭时保持现有策略：
+`auto_validate=true` 在 SEARCH 后进入 VALIDATE，`auto_validate=false` 保留人工验证门禁。
+开启时它优先于 `auto_validate`：SEARCH 完成后跳过独立 evaluator，直接生成仅基于
+SEARCH SOTA 的 Final 报告并进入 `COMPLETED`。该报告不提供 final-test 分数或
+generalization gap；`COMPLETED` 是现有终态，不是新增的 FINAL 后端 phase。
+
+开启 `skip_validate` 时，界面会禁用“自动验证”控件但保留其已保存值；关闭后恢复该值。
+已经进入 `VALIDATE` 的运行继续原验证流程，不会被开关取消或改分类；停在
+`SEARCH/WAITING` 的运行仍需用户点击 Continue 才会继续处理。
 
 ---
 
