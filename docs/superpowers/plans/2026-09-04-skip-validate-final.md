@@ -474,7 +474,7 @@ git commit -m "feat: persist skip validate GUI preference"
 - Changes: `exp_docs.build_final_report`, `build_optimization_report`, and `write_reports` gain the same defaulted keyword.
 - Preserves: all existing report callers and output when `validation_skipped=False`.
 
-- [ ] **Step 1: Write failing resume-only marker tests**
+- [x] **Step 1: Write failing resume-only marker tests**
 
 Extend `test_state.py`:
 
@@ -504,7 +504,7 @@ it must yield `phase="SEARCH"` and `validation_skipped is None`. This test fails
 under the current core-first ordering because it exposes a terminal core without
 the audit marker.
 
-- [ ] **Step 2: Write failing disclosure and contradiction tests**
+- [x] **Step 2: Write failing disclosure and contradiction tests**
 
 In `test_report.py` add:
 
@@ -533,7 +533,7 @@ In `test_exp_docs.py`, call `write_reports(..., validation_skipped=True)` and
 assert both generated documents mention the missing independent validation and
 neither contains a final score/generalization claim.
 
-- [ ] **Step 3: Run the tests and capture RED evidence**
+- [x] **Step 3: Run the tests and capture RED evidence**
 
 Run:
 
@@ -546,7 +546,7 @@ Run:
 
 Expected: FAIL because the marker and keyword contracts are absent.
 
-- [ ] **Step 4: Add the backward-compatible marker and report keyword**
+- [x] **Step 4: Add the backward-compatible marker and report keyword**
 
 Append `"validation_skipped"` to `RESUME_FIELDS` and add:
 
@@ -572,7 +572,7 @@ Thread the keyword through `exp_docs.build_final_report`,
 the same notice before its evidence-based SEARCH guidance. Existing calls omit
 the keyword and retain byte-for-byte behavior.
 
-- [ ] **Step 5: Make GUI report regeneration use run history**
+- [x] **Step 5: Make GUI report regeneration use run history**
 
 Change `_build_report(runtime)` in `src/athena/gui/service.py` to call:
 
@@ -586,7 +586,7 @@ return build_final_report(
 
 The current preference must not be consulted here.
 
-- [ ] **Step 6: Run, format, check, update this task, and commit**
+- [x] **Step 6: Run, format, check, update this task, and commit**
 
 Run:
 

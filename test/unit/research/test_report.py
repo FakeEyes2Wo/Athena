@@ -1,5 +1,7 @@
 """Tests for the deterministic final research report builder."""
 
+import pytest
+
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
@@ -62,14 +64,31 @@ def test_report_surfaces_sota_and_validation_metrics() -> None:
             "generalization_warning": True,
         },
     )
-
     assert report.startswith("# Athena 研究报告")
     assert "## SOTA" in report
     assert "`exp_baseline`" in report
     assert "0.8000" in report
-    assert "## 验证结果" in report
     assert "0.7900" in report
+    assert "## 验证结果" in report
     assert "泛化警告" in report
+
+
+def test_report_discloses_skipped_validate_without_final_metrics() -> None:
+    report = build_final_report(_tree_with_sota(), None, validation_skipped=True)
+
+    assert "VALIDATE 已跳过" in report
+    assert "仅使用 SEARCH 结果" in report
+    assert "final_test_score" not in report
+    assert "generalization_gap" not in report
+
+
+def test_report_rejects_skip_marker_with_real_validation() -> None:
+    with pytest.raises(ValueError, match="cannot be both skipped and present"):
+        build_final_report(
+            _tree_with_sota(),
+            {"final_test_score": 0.79},
+            validation_skipped=True,
+        )
 
 
 def test_report_omits_validation_when_absent() -> None:

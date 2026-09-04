@@ -10,6 +10,7 @@ from athena.research.exp_docs import (
     build_optimization_report,
     task_metric_name,
     write_stage_doc,
+    write_reports,
 )
 
 
@@ -103,6 +104,25 @@ def test_reports_include_tree_results_and_validation_guidance(tmp_path: Path) ->
     assert "overfitting" in optimization.lower()
     assert "macro-F1" in optimization
     assert "Direction-aware improvement" in optimization
+
+
+def test_write_reports_discloses_skipped_validation_without_final_metrics(
+    tmp_path: Path,
+) -> None:
+    tree = _tree(tmp_path)
+
+    final_path, optimization_path = write_reports(
+        tmp_path, tree, None, validation_skipped=True
+    )
+
+    final = final_path.read_text(encoding="utf-8")
+    optimization = optimization_path.read_text(encoding="utf-8")
+    for document in (final, optimization):
+        assert "VALIDATE 已跳过" in document
+        assert "仅使用 SEARCH 结果" in document
+        assert "final_test_score" not in document
+        assert "generalization_gap" not in document
+        assert "generalization gap" not in document.lower()
 
 
 def test_metric_name_accepts_task_metadata_or_frozen_evaluator(tmp_path: Path) -> None:

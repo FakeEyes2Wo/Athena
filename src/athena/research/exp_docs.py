@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from athena.core.research_tree import ResearchTree
-from athena.research.report import build_final_report as _build_tree_report
+from athena.research.report import (
+    VALIDATION_SKIPPED_NOTICE,
+    build_final_report as _build_tree_report,
+)
 
 _STAGES = frozenset({"baseline", "search", "final"})
 _DIRECTIONS = frozenset({"maximize", "minimize"})
@@ -99,10 +102,15 @@ def write_stage_doc(
 
 
 def build_final_report(
-    tree: ResearchTree, validation: Mapping[str, object] | None = None
+    tree: ResearchTree,
+    validation: Mapping[str, object] | None = None,
+    *,
+    validation_skipped: bool = False,
 ) -> str:
     """Build ``FINAL_REPORT.md`` with scores and deterministic cause analysis."""
-    report = _build_tree_report(tree, validation).rstrip()
+    report = _build_tree_report(
+        tree, validation, validation_skipped=validation_skipped
+    ).rstrip()
     data = tree.to_dict()
     lines = [report, "", "## 结果归因"]
     for experiment_id, experiment in data["experiments"].items():
@@ -118,7 +126,11 @@ def build_final_report(
             else "did not replace SOTA"
         )
         lines.append(f"- `{experiment_id}` scored `{primary}` and was {role}.")
-    if validation and validation.get("generalization_gap") is not None:
+    if (
+        not validation_skipped
+        and validation
+        and validation.get("generalization_gap") is not None
+    ):
         lines.append(
             "- FINAL generalization gap was "
             f"`{validation['generalization_gap']}`; positive means FINAL was worse."
@@ -132,6 +144,7 @@ def build_optimization_report(
     tree: ResearchTree,
     validation: Mapping[str, object] | None = None,
     *,
+    validation_skipped: bool = False,
     metric_name: str = "primary",
     direction: str = "maximize",
 ) -> str:
@@ -140,6 +153,8 @@ def build_optimization_report(
         raise ValueError("metric_name must be non-empty")
     if direction not in _DIRECTIONS:
         raise ValueError("direction must be 'maximize' or 'minimize'")
+    if validation_skipped and validation:
+        raise ValueError("validation cannot be both skipped and present")
 
     data = tree.to_dict()
     experiments = data["experiments"]
@@ -161,6 +176,8 @@ def build_optimization_report(
         f"- Successful experiments: {len(successful)}",
         f"- Failed experiments: {len(failed)}",
     ]
+    if validation_skipped:
+        lines.extend(["", "## Validation", f"- {VALIDATION_SKIPPED_NOTICE}"])
 
     # Compare the operational SOTA with the baseline before proposing more search.
     baseline = experiments.get("exp_baseline")
@@ -196,7 +213,11 @@ def build_optimization_report(
             )
 
     # A positive gap already means worse FINAL performance for either direction.
-    gap = validation.get("generalization_gap") if validation else None
+    gap = (
+        validation.get("generalization_gap")
+        if validation and not validation_skipped
+        else None
+    )
     if isinstance(gap, (int, float)) and not isinstance(gap, bool):
         lines.extend(["", f"Generalization gap: `{gap:.4f}`"])
         if gap > 0:
@@ -250,19 +271,22 @@ def write_reports(
     tree: ResearchTree,
     validation: Mapping[str, object] | None = None,
     *,
+    validation_skipped: bool = False,
     metric_name: str = "primary",
     direction: str = "maximize",
 ) -> tuple[Path, Path]:
     """Write ``FINAL_REPORT.md`` and ``OPTIMIZATION.md`` atomically."""
     directory = Path(root) / ".athena" / "exp_docs"
     final_path = _atomic_write(
-        directory / "FINAL_REPORT.md", build_final_report(tree, validation)
+        directory / "FINAL_REPORT.md",
+        build_final_report(tree, validation, validation_skipped=validation_skipped),
     )
     optimization_path = _atomic_write(
         directory / "OPTIMIZATION.md",
         build_optimization_report(
             tree,
             validation,
+            validation_skipped=validation_skipped,
             metric_name=metric_name,
             direction=direction,
         ),
