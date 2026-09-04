@@ -1088,8 +1088,8 @@ git commit -m "test: prove skip validate persistence and recovery"
 
 **Interfaces:**
 - Documents: three distinct post-SEARCH policies, project persistence, missing validation metrics, and resume behavior.
-- Integrates: the feature branch, including its universal-Continue prerequisite history, into dirty `main` only after preserving exact overlapping user files on a safety branch.
-- Restores: the paused universal-Continue plan as `CURRENT.md`'s active plan after this feature closes.
+- Integrates: the feature branch, including its universal-Continue prerequisite history, through an isolated integration branch after proving every dirty `main` path is non-overlapping.
+- Preserves: the latest `main` active, dependent, and subsequent `CURRENT.md` pointers instead of reviving superseded paused pointers from the older feature base.
 
 - [x] **Step 1: Update user-facing documentation**
 
@@ -1266,7 +1266,18 @@ test-backed clarification to the supporting spec. Commit:
 git commit -m "docs: document skip validate finalization"
 ```
 
-- [ ] **Step 7: Preserve overlapping dirty main files and integrate**
+- [x] **Step 7: Preserve overlapping dirty main files and integrate**
+
+  Evidence: `main` advanced during review to `5c32f89`; final pre-mutation status
+  contained only `src/athena/core/persistence.py`,
+  `src/athena/research/evaluation/trust.py`, and
+  `test/unit/research/test_evaluator_trust.py`, none of which overlapped the
+  incoming diff. No safety commit was required. The feature was merged and
+  reviewed in the isolated integration worktree at `96af25d`, refreshed with
+  latest `main` at `162d358`, and then fast-forwarded into `main`. The
+  `exp_docs.py` add/add conflict retained the reviewed feature implementation;
+  `CURRENT.md` was verified byte-identical to `5c32f89`. A fresh merge review
+  reported zero Critical, Important, or Minor findings. No push was performed.
 
 In the main worktree, run `git status --short --branch` and compare every dirty
 path against `git diff --name-only main...feat/skip-validate-final`. The user has
@@ -1285,7 +1296,18 @@ Do not stash, reset, checkout files, delete scratch paths, or push. If a new
 uncommitted overlap appears after the comparison, stop before mutation and
 report its exact path.
 
-- [ ] **Step 8: Freshly verify merged main**
+- [x] **Step 8: Freshly verify merged main**
+
+  Evidence: on merged commit `162d358`, the focused Python suite passed 242
+  tests in 107.07s with one existing pytest-cache ACL warning. Standard frontend
+  commands passed 19 files/183 tests and built 2761 modules. Cargo passed 10
+  tests and `cargo check`; six existing dead-code warnings and the known gateway
+  connection-reset shutdown log remained. `git diff --check` passed. A running
+  main-worktree Vite server initially prevented `npm ci` from replacing its
+  locked `esbuild.exe`; the dependency tree was restored by copying only missing
+  files from the same-lockfile verified integration installation, with zero copy
+  failures and no tracked dependency changes, after which the standard main
+  commands passed.
 
 On merged `main`, rerun the focused Python command from Step 3, full frontend
 suite/build, Rust tests/check, and `git diff --check`. Record new output; branch
@@ -1312,10 +1334,10 @@ Implementation and integration commits:
 ```
 
 Set the design status to `implemented and verified`, delete this completed plan,
-and update `codex_docs/CURRENT.md` so it no longer names this plan/spec as active,
-lists the new report, and restores
-`docs/superpowers/plans/2026-09-03-universal-continue-resume.md` as the active
-plan. Keep all other parallel/paused pointers. Commit only these closeout files:
+and update `codex_docs/CURRENT.md` so it no longer names this plan/spec as active
+and lists the new report. Preserve the latest `main` active, dependent,
+subsequent, parallel, and paused pointers; do not revive stale pointers from the
+older feature base. Commit only these closeout files:
 
 ```powershell
 git commit -m "docs: close skip validate finalization"
