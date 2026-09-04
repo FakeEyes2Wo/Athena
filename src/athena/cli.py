@@ -20,6 +20,10 @@ from athena.execution.compute_config import (
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
 from athena.research.fork import ForkError, fork_project
+from athena.research.dataset_contract import (
+    dataset_path_for_prompt,
+    platform_split_dataset,
+)
 from athena.research.literature.bench import (
     DEFAULT_QUERY_SET,
     corpus_health,
@@ -89,41 +93,19 @@ def _non_negative_float(value: str) -> float:
 def _platform_split_dataset(args: argparse.Namespace) -> Path | None:
     """Return the CSV the platform should split itself, or None.
 
-    ``--data`` is free-form: a CSV, a directory of images, a Kaggle URL. Only a
-    local CSV with a named target can be split by ``materialize_csv_split``;
-    handing it anything else raises inside PREPARE. So the platform-owned split
-    turns on exactly when the arguments describe one, and stays off otherwise —
-    which is the historical behaviour for every other shape of input.
+    The rule is shared with ``Athena-tui``; see
+    ``athena.research.dataset_contract.platform_split_dataset``.
     """
-    if not args.target:
-        return None
-    path = Path(args.data)
-    if path.suffix.lower() != ".csv" or not path.is_file():
-        return None
-    return path.resolve()
+    return platform_split_dataset(args.data, args.target)
 
 
 def _dataset_path_for_prompt(data: str) -> str:
     """Absolutize a local ``--data`` path before it goes into the task text.
 
-    ``--data`` is resolved against the CLI's working directory, but every agent
-    runs with its own workspace (or the project root) as cwd. A relative path
-    therefore means two different things at the two ends, and the agent's end is
-    the one that is wrong.
-
-    Real run (2026-08-29): ``--data ../data/TESS-SF/windows/model_input.csv``
-    passed the CLI's existence pre-check, then the first agent spent its whole
-    turn budget hunting for it -- ``../data/...`` from the project root resolves
-    to a sibling of the project, not of the CLI. Non-paths (a Kaggle URL) are
-    passed through untouched.
+    Shared with ``Athena-tui``; see
+    ``athena.research.dataset_contract.dataset_path_for_prompt``.
     """
-    path = Path(data)
-    try:
-        if path.exists():
-            return str(path.resolve())
-    except OSError:
-        pass
-    return data
+    return dataset_path_for_prompt(data)
 
 
 @dataclass(frozen=True)
