@@ -25,15 +25,36 @@ type MessageSegment =
   | { kind: "ideator"; lane: number; items: UIMessage[] }
   | { kind: "clarification"; items: UIMessage[] };
 
-function activeClarificationPreviewIndex(messages: UIMessage[]): number {
+interface ActiveClarificationPreview {
+  index: number;
+  preview: ClarificationPreview;
+}
+
+function activeClarificationPreview(
+  messages: UIMessage[],
+): ActiveClarificationPreview | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const msg = messages[index];
     if (msg.kind !== "intent-preview" || !msg.preview || !("draftId" in msg.preview)) continue;
     return msg.preview.status === "CLARIFYING" || msg.preview.status === "CONFIRMING"
-      ? index
-      : -1;
+      ? { index, preview: msg.preview }
+      : null;
   }
-  return -1;
+  return null;
+}
+
+function belongsToTaskUnderstanding(
+  message: UIMessage,
+  preview: ClarificationPreview,
+): boolean {
+  if (message.scope === "task_understanding") {
+    const acceptedScopeId = preview.draftId || preview.optimisticScopeId;
+    return Boolean(acceptedScopeId) && message.scopeId === acceptedScopeId;
+  }
+
+  return message.sessionId === undefined
+    && message.scope === undefined
+    && message.scopeId === undefined;
 }
 
 function clarificationSegmentKey(segment: Extract<MessageSegment, { kind: "clarification" }>): string {
@@ -58,17 +79,18 @@ function clarificationSegmentKey(segment: Extract<MessageSegment, { kind: "clari
 /** Group ideator lanes and backend output emitted during active task understanding. */
 function segmentMessages(messages: UIMessage[]): MessageSegment[] {
   const segments: MessageSegment[] = [];
-  const clarificationPreviewIndex = activeClarificationPreviewIndex(messages);
+  const clarification = activeClarificationPreview(messages);
 
   for (const [index, msg] of messages.entries()) {
     const lane = ideatorNumber(msg.plan);
     const last = segments[segments.length - 1];
 
     if (
-      clarificationPreviewIndex >= 0 &&
-      index > clarificationPreviewIndex &&
+      clarification !== null &&
+      index > clarification.index &&
       msg.role !== "user" &&
-      msg.kind !== "intent-preview"
+      msg.kind !== "intent-preview" &&
+      belongsToTaskUnderstanding(msg, clarification.preview)
     ) {
       if (last?.kind === "clarification") {
         last.items.push(msg);

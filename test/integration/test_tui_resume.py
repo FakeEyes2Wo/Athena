@@ -1,6 +1,5 @@
 """TUI 断点续传：output 事件持久化 + 重启重放 + 序列号恢复。"""
 
-import asyncio
 import json
 from pathlib import Path
 

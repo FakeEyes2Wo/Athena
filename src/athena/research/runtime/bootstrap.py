@@ -7,6 +7,7 @@ from typing import Any
 from athena.agents.supervisor_agent import register_supervisor_agent
 from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
+from athena.core.agent.provider import BaseProvider
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.git_workspace import LocalGitWorkspace
@@ -20,9 +21,16 @@ from athena.kaggle import (
     build_kaggle_stack,
     build_kaggle_tools,
 )
-from athena.research.clarification.controller import (
-    ClarificationController,
+from athena.research.clarification.controller import ClarificationController
+from athena.research.clarification.generator import (
     DeterministicClarificationGenerator,
+    ProgressSinkStage,
+    ProgressSource,
+)
+from athena.research.clarification.llm_generator import (
+    REPORT_TASK_UNDERSTANDING_TOOL,
+    TASK_UNDERSTANDING_SCOPE,
+    LLMClarificationGenerator,
 )
 from athena.research.clarification.persistence import ClarificationStore
 from athena.research.config import (
@@ -104,8 +112,13 @@ def build_services(
     config: ResearchConfig,
     broker: object | None,
     baseline_authority: BaselineAuthorityStore | None = None,
+    *,
+    provider: BaseProvider | None = None,
 ) -> tuple[ResearchServices, ResearchSession]:
     """Build durable infrastructure and transient process state."""
+    if config.model is not None and provider is None:
+        raise ValueError("a configured model requires an explicit provider")
+
     paths = config.paths
 
     # Build process-wide infrastructure from the immutable configuration.
@@ -136,6 +149,27 @@ def build_services(
         sessions_dir=paths.sessions,
     )
     events.resume_sequence()
+
+    async def publish_clarification_progress(
+        *,
+        summary: str,
+        stage: ProgressSinkStage,
+        session_id: str,
+        scope_id: str,
+        source: ProgressSource,
+        persist: bool,
+    ) -> None:
+        await events.publish_output(
+            source=source,
+            channel="error" if stage == "failure" else "text",
+            text=summary,
+            tool=REPORT_TASK_UNDERSTANDING_TOOL if source == "tool" else None,
+            persist=persist,
+            session_id=session_id,
+            scope=TASK_UNDERSTANDING_SCOPE,
+            scope_id=scope_id,
+        )
+
     services = ResearchServices(
         infrastructure=ResearchInfrastructure(
             store=store,
@@ -151,11 +185,21 @@ def build_services(
         durable=DurableResearch(tree=tree, state=state),
     )
     if broker is not None:
+        generator = (
+            DeterministicClarificationGenerator()
+            if provider is None
+            else LLMClarificationGenerator(
+                provider,
+                store,
+                publish_clarification_progress,
+            )
+        )
         services.workflow.clarification = ClarificationController(
             ClarificationStore(paths.athena),
             broker,
-            DeterministicClarificationGenerator(),
+            generator,
             session_id=config.session_id,
+            progress_sink=publish_clarification_progress,
         )
 
     # Keep mutable, process-local values outside the composition root.

@@ -481,7 +481,7 @@ Expected: all tests pass, including the existing eight-question and revision tes
 - Preserves: `build_services(config, broker)` compatibility when `config.model is None`.
 - Guarantees: one provider instance is shared by clarification and Supervisor registration.
 
-- [ ] **Step 1: Write failing composition tests**
+- [x] **Step 1: Write failing composition tests**
 
 Monkeypatch `athena.research.runtime.facade.ResponsesProvider` with a scripted `BaseProvider` factory that records constructed instances. Instantiate `ResearchRuntime(model="fake", broker=StubBroker(), task_confirmation_gate=True)` and assert:
 
@@ -495,7 +495,7 @@ assert controller._generator._provider is created[0]
 
 Add a provider-less runtime assertion for `DeterministicClarificationGenerator`. Directly call `build_services` with `config.model` non-null and no provider and assert a clear composition `ValueError`, proving there is no silent fallback. Confirm a schema-version-1 draft created in provider-less mode remains readable after constructing provider-backed services; no `generation_mode` field is added.
 
-- [ ] **Step 2: Write a failing real-runtime success/failure event test**
+- [x] **Step 2: Write a failing real-runtime success/failure event test**
 
 Use a scripted provider that calls the progress tool once and then returns a final envelope. Subscribe before `task_clarification_start` and assert:
 
@@ -506,7 +506,7 @@ Use a scripted provider that calls the progress tool once and then returns a fin
 
 Make the valid envelope `public_update.summary` and/or progress-tool summary contain a known form such as `api_key=sk-secret-value`; assert live output and successful replay contain the redacted form, never the raw secret. This proves accepted `PublicProgress.summary` flows through the existing redactor rather than claiming arbitrary-text detection. Use a second provider that exposes `sk-secret-value` in its error. Assert the result is retryable `FAILED`, replay contains one fixed failure notice, no secret/error detail, and no deterministic question was asked.
 
-- [ ] **Step 3: Write the generic WebSocket pass-through contract test**
+- [x] **Step 3: Write the generic WebSocket pass-through contract test**
 
 Extend the existing fake runtime in `tests/test_gui_gateway_transport.py` to emit:
 
@@ -526,7 +526,7 @@ Extend the existing fake runtime in `tests/test_gui_gateway_transport.py` to emi
 
 Assert the WebSocket `data` object is byte-for-byte equivalent after JSON decoding. Production transport code should require no change.
 
-- [ ] **Step 4: Run the focused tests and confirm deterministic selection remains**
+- [x] **Step 4: Run the focused tests and confirm deterministic selection remains**
 
 Run:
 
@@ -539,7 +539,7 @@ uv run pytest -q `
 
 Expected: FAIL because `build_services` does not accept/inject a provider and scoped clarification output is absent.
 
-- [ ] **Step 5: Implement the composition adapter**
+- [x] **Step 5: Implement the composition adapter**
 
 In `ResearchRuntime.__init__`, construct before `build_services`:
 
@@ -550,7 +550,7 @@ services, session = build_services(config, broker, provider=provider)
 
 Register that same non-null provider with the Supervisor. In `build_services`, reject `config.model is not None and provider is None`. After constructing `store` and `events`, define one sink closure that maps `stage="failure"` to `channel="error"`, all other stages to `channel="text"`, tool source to `tool=REPORT_TASK_UNDERSTANDING_TOOL`, and always supplies the three scope fields. Pass the same closure to `LLMClarificationGenerator` and `ClarificationController`. Select deterministic only when provider is `None`.
 
-- [ ] **Step 6: Run, format, and commit Task 5**
+- [x] **Step 6: Run, format, and commit Task 5**
 
 Run:
 
@@ -586,7 +586,7 @@ Expected: the affected backend/gateway slice passes without network access. Comm
 - Changes: `restoreRecords(records, resetMessages, sessionId)` filters scoped replay before projection.
 - Changes: optimistic `newSession` clears batches and synchronously gates output with its new session ref before React effects run; its rejected creation restores the prior ref and captured session state.
 
-- [ ] **Step 1: Write failing live projection/filter tests**
+- [x] **Step 1: Write failing live projection/filter tests**
 
 In `usePipeline.events.test.tsx`, deliver matching scoped agent and tool output and assert their projected messages retain exactly:
 
@@ -600,11 +600,11 @@ In `usePipeline.events.test.tsx`, deliver matching scoped agent and tool output 
 
 Deliver another-session event and each partial combination; after flushing animation frames, assert neither messages nor the visible log list changed. Partial metadata is rejected/discarded only—there is no dedicated "logged" event and no legacy fallback. Deliver an all-null/absent legacy event and assert it still renders. Reuse one `message_id` for two matching scoped deltas and assert batching still produces one ordered message. With an empty-id optimistic preview, deliver `scope_id="draft-a"` then `scope_id="draft-b"`: assert the first latches and joins the activity, while the second never joins that preview; after the canonical draft arrives, only its exact `scope_id` may join.
 
-- [ ] **Step 2: Write failing replay and switch-race tests**
+- [x] **Step 2: Write failing replay and switch-race tests**
 
 In `usePipeline.identity.test.tsx`, return mixed replay records for the selected session and assert only matching scoped plus legacy records restore. Test two distinct scope IDs around the optimistic-to-canonical transition: the first matching-session scope id is latched; an event from the other scope id is excluded from the preview; once the canonical `draftId` is known, even the latched value is accepted only if it equals that id. After a successful session switch, queue an old-runtime scoped output in a microtask between the synchronous switch success handling and React's `useEffect`; assert it never enters messages/logs, proving the ref gate does not wait for the effect. Repeat that microtask case immediately after optimistic `newSession` starts: an old-session scoped output is rejected before the effect, and a rejected creation restores the old ref, former current session, and captured visible conversation while retaining the existing failed optimistic row in the session list. Also assert failed or superseded explicit switch RPCs leave the old ref, batches, messages, and session state intact. Matching scoped replay must retain `message_id` ordering and canonical metadata.
 
-- [ ] **Step 3: Run focused Vitest and confirm metadata/filter failures**
+- [x] **Step 3: Run focused Vitest and confirm metadata/filter failures**
 
 Run:
 
@@ -616,7 +616,7 @@ npm --prefix athena-gui test -- `
 
 Expected: FAIL because output events are currently queued without session validation and `UIMessage` drops scope metadata.
 
-- [ ] **Step 4: Implement one exact wire parser and use it everywhere**
+- [x] **Step 4: Implement one exact wire parser and use it everywhere**
 
 Use exact output wire names only; do not alias human-request `scope_kind` or a task-specific `draft_id`:
 
@@ -649,7 +649,7 @@ Pass `target` during mount hydration and `id` during explicit session switch int
 
 `newSession` uses the same gate at the optimistic start, not only after its RPC settles: capture the prior ref and visible session state; clear the batch; set `activeSessionIdRef.current` to the new id synchronously; then install the optimistic current-session/view state and begin creation. If that creation rejects while current, restore the captured ref, previous current session, and visible conversation before reporting the error, while preserving the existing failed optimistic row in the session list. When projecting a valid scoped record, copy the three canonical camelCase fields onto every new `UIMessage`; preserve them on same-id delta updates.
 
-- [ ] **Step 5: Run, typecheck, and commit Task 6**
+- [x] **Step 5: Run, typecheck, and commit Task 6**
 
 Run:
 
@@ -678,7 +678,7 @@ Expected: focused frontend tests and TypeScript production build pass. Commit on
 - Produces internally: `belongsToTaskUnderstanding(msg, preview) -> boolean`.
 - Preserves: current ideator lanes, tool renderer, user-message boundaries, stable segment keys, and legacy positional grouping.
 
-- [ ] **Step 1: Write the failing behavior-matrix tests**
+- [x] **Step 1: Write the failing behavior-matrix tests**
 
 Add DOM tests for all six cases:
 
@@ -691,7 +691,7 @@ Add DOM tests for all six cases:
 
 Also retain the existing READY/RUNNING non-grouping and interleaved-user tests unchanged.
 
-- [ ] **Step 2: Run the component test and confirm current positional over-grouping**
+- [x] **Step 2: Run the component test and confirm current positional over-grouping**
 
 Run:
 
@@ -701,7 +701,7 @@ npm --prefix athena-gui test -- src/components/__tests__/conversation-pane.test.
 
 Expected: FAIL because the current segmenter groups every non-user message after an active preview, including a mismatched scope id.
 
-- [ ] **Step 3: Implement the minimal grouping predicate**
+- [x] **Step 3: Implement the minimal grouping predicate**
 
 Return both index and preview from the active-preview lookup. Use the synchronously maintained optimistic latch from Task 6 (not an unconstrained empty-id wildcard):
 
@@ -722,7 +722,7 @@ function belongsToTaskUnderstanding(
 
 Apply it only after the existing checks for active status, position after the preview, non-user role, and non-preview kind. Any other scoped workflow remains ordinary. Do not change rendering markup or CSS.
 
-- [ ] **Step 4: Run the frontend suite/build and commit Task 7**
+- [x] **Step 4: Run the frontend suite/build and commit Task 7**
 
 Run:
 
@@ -750,7 +750,7 @@ Expected: the full Vitest suite and production build pass. Commit only Task 7 pa
 - Produces: acceptance evidence and a clean `CURRENT.md` pointer state.
 - Integrates: `feat/llm-task-understanding-output` into `main` without stashing or overwriting unrelated main-worktree changes.
 
-- [ ] **Step 1: Update the user-facing boundary guide**
+- [x] **Step 1: Update the user-facing boundary guide**
 
 Add sections with these exact rules:
 
@@ -765,7 +765,7 @@ Add sections with these exact rules:
 
 Keep the guide's existing Q&A identity, stale reply, confirmation, retry, and card-placement rules.
 
-- [ ] **Step 2: Run backend formatting/static checks**
+- [x] **Step 2: Run backend formatting/static checks**
 
 Run:
 
@@ -802,7 +802,7 @@ git diff --check
 
 Expected: zero exit status. If the global diff check names an unrelated pre-existing file, record it and rerun `git diff --check` with every task-owned path explicitly; do not repair unrelated content.
 
-- [ ] **Step 3: Run focused and repository-wide Python verification**
+- [x] **Step 3: Run focused and repository-wide Python verification**
 
 Run in order:
 
@@ -821,7 +821,22 @@ uv run pytest -q
 
 Expected: no new failure. Record each command, timestamp, pass/fail/skip counts, duration, and warning text. Do not call a suite green if it exits non-zero.
 
-- [ ] **Step 4: Run complete frontend and Rust verification**
+Recorded 2026-09-04 (+08:00): the focused command exited zero with `184 passed,
+2 warnings` in 33.63s. The research command completed with `1179 passed,
+2 failed, 2 warnings` in 27m09s: the baseline-prompt contract is also
+independently reproducible on the main-line prompt, while the rolling-search
+timeout passed alone once in 26.65s and remains resource-sensitive. The complete
+repository command completed with `2636 passed, 5 failed, 4 warnings, 53 subtests
+passed` in 44m28s. Its five non-green results were the same rolling-search timeout,
+the existing baseline-prompt mismatch, two host-environment assertions requiring
+PowerShell 7 when only Windows PowerShell 5.1 is installed, and the existing
+`workspace_dialog_start_directory` Rust/Python protocol-inventory mismatch. None
+of those paths is changed by this feature. The two asyncio warning families are
+unclosed Windows proactor pipe/subprocess transports during teardown. These
+non-zero suites are recorded as non-green; focused task-owned verification remains
+green and no new feature regression was found.
+
+- [x] **Step 4: Run complete frontend and Rust verification**
 
 Run:
 
@@ -834,7 +849,13 @@ cargo check --manifest-path athena-gui/src-tauri/Cargo.toml
 
 Expected: all commands exit zero. Record Vitest file/test counts, build module count, Rust test count, and any pre-existing warning separately.
 
-- [ ] **Step 5: Audit scope, safety, and dead-code boundaries**
+Recorded 2026-09-04 (+08:00): Vitest exited zero with `18 files / 158 tests`;
+the production build exited zero after transforming 2761 modules; Cargo tests
+exited zero with 10 Rust tests; and `cargo check` exited zero. Cargo reported six
+pre-existing `dead_code` warnings in the clarification command adapter, and one
+WebSocket peer-closed message appeared during successful test teardown.
+
+- [x] **Step 5: Audit scope, safety, and dead-code boundaries**
 
 Run:
 
@@ -854,11 +875,22 @@ git diff --name-status main...HEAD
 
 Required evidence: no broad tool/lifecycle authority in the LLM module; the LLM adapter has no direct forwarding path from raw Agent/provider event fields to output and tests cover raw-event suppression plus known-secret summary redaction; all new task-understanding publications carry the atomic metadata; changed-file Ruff reports no unused imports or static violations, call-site inspection finds no obsolete task-owned helper, and only planned files changed.
 
-- [ ] **Step 6: Finish feature-branch guide, implementation checkboxes, and feature verification**
+Recorded 2026-09-04 (+08:00): the forbidden-authority/raw-event search returned no
+matches; the scoped-publication search confirmed the atomic session/scope/scope-id
+path and live-only/final-persist call sites; changed-file Ruff, Black, compileall,
+and diff checks passed. Branch name/status inspection contains only planned feature,
+test, guide, and plan paths. Independent frontend reviews found no blocker after
+the hydration rollback and scoped-session fixes; no obsolete task-owned helper or
+new direct raw Agent/provider forwarding path remains.
+
+- [x] **Step 6: Finish feature-branch guide, implementation checkboxes, and feature verification**
 
 After Steps 2-5 have fresh successful evidence, stage only the guide, this plan's completed implementation checkboxes, and any supporting-design changes made by this implementation. Confirm the supporting design's latest contract is committed and an ancestor of `HEAD`. Commit with `git commit -m "docs: document LLM task clarification output"`. This completes feature-branch verification; do not create the completion report or delete the plan yet.
 
-- [ ] **Step 7: Integrate the verified feature branch into `main`**
+The latest supporting-design commit is `4a17db4` and is an ancestor of the verified
+feature head. No supporting-design amendment was needed during this final pass.
+
+- [x] **Step 7: Integrate the verified feature branch into `main`**
 
 From the main worktree, first run `git status --short --branch` and compare every dirty path with `git diff --name-only main...feat/llm-task-understanding-output`. This is the required concurrent-overlap check before merge: never stash, reset, checkout, or overwrite unrelated work. If an uncommitted main path overlaps any feature-owned path, stop before mutation and report the exact paths. If owned paths are clean, merge with:
 
@@ -868,9 +900,22 @@ git merge --no-ff feat/llm-task-understanding-output -m "merge: LLM task underst
 
 If concurrent committed work advanced `main`, rebase the feature branch onto that commit in its isolated worktree, rerun the focused suites, repeat the concurrent-overlap check, then merge.
 
-- [ ] **Step 8: Freshly verify merged `main`**
+Recorded 2026-09-04 (+08:00): the original main worktree had one overlapping,
+uncommitted `athena-gui/src/types/ui.ts` change. It was neither stashed nor
+overwritten. A clean integration worktree based on `2713f53` produced merge commit
+`d029da7`, which was pushed to `origin/main`; the original dirty worktree remains
+unchanged.
+
+- [x] **Step 8: Freshly verify merged `main`**
 
 On merged `main`, rerun the focused backend suite, full frontend suite/build, `cargo test`, `cargo check`, and `git diff --check`. Record fresh output before any cache cleanup or closeout mutation.
+
+Recorded on merge commit `d029da7`: the focused backend suite passed `184` tests;
+Vitest passed `18 files / 158 tests`; the production build transformed 2761 modules;
+Cargo passed 10 tests and `cargo check` exited zero; `git diff --check` was clean.
+The only runtime diagnostics were the already recorded Windows asyncio teardown
+warning, six existing Rust clarification-adapter `dead_code` warnings, and a benign
+WebSocket peer-close message after the successful Rust round trip.
 
 - [ ] **Step 9: Clear requested caches on verified `main`**
 

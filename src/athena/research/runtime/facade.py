@@ -29,6 +29,8 @@ from athena.research.literature.survey import SurveyStack
 from athena.research.prepare.authority import BaselineAuthorityStore
 from athena.research.runtime.bootstrap import (
     baseline_ideator_tools as baseline_ideator_tools_impl,
+)
+from athena.research.runtime.bootstrap import (
     build_config,
     build_paths,
     build_services,
@@ -36,9 +38,6 @@ from athena.research.runtime.bootstrap import (
 )
 from athena.research.runtime.bootstrap import (
     ideator_tools as ideator_tools_impl,
-)
-from athena.research.runtime.bootstrap import (
-    baseline_ideator_tools as baseline_ideator_tools_impl,
 )
 from athena.research.runtime.bootstrap import (
     kaggle_stack as kaggle_stack_impl,
@@ -209,14 +208,22 @@ class ResearchRuntime:
             },
         )
 
-        services, session = build_services(config, broker, baseline_authority)
+        provider = (
+            ResponsesProvider(model, client=client) if model is not None else None
+        )
+        services, session = build_services(
+            config,
+            broker,
+            baseline_authority,
+            provider=provider,
+        )
         self._config = config
         self._services = services
         self._session = session
         self._settings = SettingsController(self)
         wire_workflow(self)
-        if model is not None:
-            self.register_supervisor(provider=ResponsesProvider(model, client=client))
+        if provider is not None:
+            self.register_supervisor(provider=provider)
 
     @property
     def state(self) -> ResearchState:

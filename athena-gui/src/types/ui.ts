@@ -78,6 +78,8 @@ export type UIMessageKind =
 /** Frontend projection of the authoritative clarification draft. */
 export interface ClarificationPreview {
   draftId: string;
+  /** First scoped activity id observed before the canonical draft id arrives. */
+  optimisticScopeId?: string;
   revision: number;
   status: ClarificationStatus;
   understanding: ClarificationUnderstanding;
@@ -109,6 +111,12 @@ export interface UIMessage {
   channel?: string;
   /** Backend plan id (e.g. "ideator-0"), used to keep streaming lanes separate. */
   plan?: string;
+  /** Canonical runtime session for a fully scoped output event. */
+  sessionId?: string;
+  /** Generic runtime output scope, such as ``task_understanding``. */
+  scope?: string;
+  /** Identity of the scoped workflow instance. */
+  scopeId?: string;
 }
 
 export interface RightRailSummary {

@@ -94,7 +94,31 @@ no-op.
   preview message is moved to the end of the conversation so the decision card
   appears after the clarification Q&A flow.
 
-## 11. What is not allowed
+## 11. Runtime generation and public-output boundary
+
+- Configured GUI runtimes use the LLM clarification Agent. Provider-less callers
+  retain the deterministic compatibility generator.
+- Model-authored output enters this feature only through the strict
+  `PublicProgress.summary` field. Raw provider and Agent event fields are not
+  projected directly, and the normal output projector redacts known credential
+  forms.
+- Tool progress is live-only. A final summary requests persistence only after
+  the matching draft transition has been saved. A transcript-write failure does
+  not replace or roll back that canonical draft.
+
+## 12. Scoped delivery, optimistic association, and replay
+
+- New task-understanding output carries the atomic metadata group
+  `session_id`, `scope="task_understanding"`, and `scope_id`. A partial group is
+  invalid; all three fields must be present or all three absent for a legacy
+  record.
+- An optimistic preview with an empty draft id latches its first
+  matching-session `scope_id` and accepts only that id. After authoritative
+  hydration, `scope_id` must equal `draft_id`.
+- Replayed scoped output without an active preview remains visible as ordinary
+  history. It does not synthesize a clarification card or activity region.
+
+## 13. What is not allowed
 
 - No raw `startSearch(task)` on the gated path.
 - No client-side `auto_confirm` default.
