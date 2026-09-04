@@ -1,16 +1,16 @@
 # Current Athena Work
 
 Active implementation plan:
-- `docs/superpowers/plans/2026-09-03-llm-task-understanding-output.md`
+- None.
 
 Most recent completed work:
+- `codex_docs/2026-09-03-llm-task-understanding-output-completion-report.md`
 - `codex_docs/2026-09-03-authoritative-baseline-hardening-completion-report.md`
 - `codex_docs/2026-09-02-authoritative-baseline-research-completion-report.md` (superseded historical report)
 - `codex_docs/2026-09-03-frontend-responsiveness-completion-report.md`
 - `codex_docs/2026-09-03-frontend-workspace-session-fixes-completion-report.md`
 
 Design spec:
-- `docs/superpowers/specs/2026-09-03-llm-task-understanding-output-design.md`
 - `docs/superpowers/specs/2026-09-03-authoritative-baseline-hardening-design.md`
 - `docs/superpowers/specs/2026-09-02-authoritative-baseline-research-design.md`
 - `docs/superpowers/specs/2026-09-01-task-clarification-confirmation-gate-design.md`
