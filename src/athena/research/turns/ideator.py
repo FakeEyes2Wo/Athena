@@ -409,6 +409,7 @@ class IdeatorTurnMixin:
             cast(list[IdeatorHypothesisDraft], batch.hypotheses),
             model=rt.model,
             artifacts=rt.store,
+            client=rt.client,
             progress=progress,
             rejections=rejections,
         )

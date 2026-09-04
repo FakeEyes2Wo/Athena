@@ -1,6 +1,8 @@
 """步骤 [4] 的两项审计：均只产出报告，不产出 verdict（判断权集中在 gatekeeper）。两份报告
 既喂给 pre_gate 做廉价前置筛选，也作为 light_hard_gate rubric 里的前两项。"""
 
+from typing import Any
+
 from athena.core.contracts import ArtifactStore
 
 from athena.research.idea_generation.prompts import (
@@ -76,6 +78,7 @@ async def falsifiability_check(
     *,
     model: str,
     artifacts: ArtifactStore,
+    client: Any = None,
 ) -> FalsifiabilityReport:
     """用一次单轮 LLM 调用判断核心变量是否可观测、是否存在可执行的可证伪测试。
 
@@ -101,6 +104,7 @@ async def falsifiability_check(
     judgment = await single_turn_structured_chat(
         prompt,
         FalsifiabilityJudgment,
+        client=client,
         model=model,
         artifacts=artifacts,
     )

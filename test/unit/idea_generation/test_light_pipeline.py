@@ -99,3 +99,37 @@ async def test_run_light_pipeline_empty_input_returns_empty(tmp_path):
     store = LocalArtifactStore(tmp_path / "artifacts")
     kept = await gate_module.run_light_pipeline([], model="fake-model", artifacts=store)
     assert kept == []
+
+
+@pytest.mark.asyncio
+async def test_run_light_pipeline_reuses_injected_client_for_every_llm_check(
+    tmp_path, monkeypatch
+):
+    """One draft costs three LLM calls; all three must use the caller's client."""
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    injected_client = object()
+    seen_clients = []
+
+    async def _recording_chat(
+        prompt, schema, *, model, artifacts, client=None, **kwargs
+    ):
+        seen_clients.append(client)
+        return _FAKE_RESPONSES[schema]()
+
+    for module_path in (
+        "athena.research.idea_generation.pre_gate_checks",
+        "athena.research.idea_generation.review_board",
+    ):
+        monkeypatch.setattr(
+            f"{module_path}.single_turn_structured_chat", _recording_chat
+        )
+
+    kept = await gate_module.run_light_pipeline(
+        [_draft("Cabin deck predicts survival")],
+        model="fake-model",
+        artifacts=store,
+        client=injected_client,
+    )
+
+    assert len(kept) == 1
+    assert seen_clients == [injected_client, injected_client, injected_client]

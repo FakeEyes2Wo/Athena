@@ -17,6 +17,7 @@ not retried inside the pipeline — the retry loop lives one level up in
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from athena.core.contracts import ArtifactStore
 from athena.core.research_models import Hypothesis
@@ -108,6 +109,7 @@ async def _screen_and_review(
     *,
     model: str,
     artifacts: ArtifactStore,
+    client: Any,
     llm_sem: asyncio.Semaphore,
     progress: ProgressFn,
     rejections: list[str],
@@ -123,7 +125,7 @@ async def _screen_and_review(
         structural = structural_check(package)
         try:
             falsifiability = await falsifiability_check(
-                package, model=model, artifacts=artifacts
+                package, model=model, artifacts=artifacts, client=client
             )
         except (
             Exception
@@ -152,6 +154,7 @@ async def _screen_and_review(
                 artifacts=artifacts,
                 llm_sem=llm_sem,
                 model=model,
+                client=client,
             )
             for perspective in REVIEW_PERSPECTIVES
         ]
@@ -181,6 +184,7 @@ async def run_light_pipeline(
     *,
     model: str,
     artifacts: ArtifactStore,
+    client: Any = None,
     progress: ProgressFn = _silent,
     rejections: list[str] | None = None,
 ) -> list[Hypothesis]:
@@ -206,6 +210,7 @@ async def run_light_pipeline(
                 draft,
                 model=model,
                 artifacts=artifacts,
+                client=client,
                 llm_sem=llm_sem,
                 progress=progress,
                 rejections=collected,

@@ -7,6 +7,7 @@ light_hard_gate 里各占一项 rubric（risk_ok_<perspective>）。
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import Any
 
 from athena.core.contracts import ArtifactStore
 from athena.research.idea_generation.idea_schemas import (
@@ -97,6 +98,7 @@ async def review_or_degrade(
     artifacts: ArtifactStore,
     llm_sem=None,
     model: str,
+    client: Any = None,
 ) -> SkepticReport:
     """跑一次视角审阅；失败就把异常映射成 failed=True 的 SkepticReport，从不向外抛。
 
@@ -112,6 +114,7 @@ async def review_or_degrade(
             judgment = await single_turn_structured_chat(
                 prompt,
                 SkepticJudgment,
+                client=client,
                 model=model,
                 artifacts=artifacts,
             )
