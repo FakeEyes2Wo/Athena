@@ -28,12 +28,14 @@ from athena.research.supervisor.deps import (
     SupervisorPaths,
     SupervisorRuntime,
 )
-from athena.research.supervisor.experiment import PlanTurnResult
-from athena.research.supervisor.plans import PlanInput, PlanState
+from athena.research.supervisor.experiment import PlanSettlement, PlanTurnResult
+from athena.research.supervisor.plan_runtime import CompletedPlanTurn
+from athena.research.supervisor.plans import PlanDecision, PlanInput, PlanState
 from athena.research.supervisor.recovery import Recovery
 from athena.research.supervisor.scheduling import Scheduler
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor, _final_report_text
+import athena.research.supervisor.search_loop as search_loop_module
 
 
 def test_prepare_resume_callback_type_alias_is_module_private() -> None:
@@ -400,6 +402,111 @@ def test_configure_options_updates_focused_dependencies(tmp_path: Path) -> None:
     assert supervisor._deps.search.tolerance == 0.05
     assert supervisor._deps.phases.auto_validate is True
     assert supervisor._deps.phases.skip_validate is True
+
+
+@pytest.mark.asyncio
+async def test_skip_finalizer_restores_memory_after_save_failure_and_reuses_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    supervisor.state.phase = "SEARCH"
+    supervisor.state.status = "RUNNING"
+    supervisor.configure_options(skip_validate=True)
+    supervisor.tree.add_hypothesis(
+        Hypothesis(
+            id="baseline",
+            statement="trusted baseline",
+            intervention="establish baseline",
+            expected_effect="reference score",
+        )
+    )
+    supervisor.tree.add_experiment(
+        "exp_baseline",
+        Experiment(
+            hypothesis_id="baseline",
+            commit="baseline-commit",
+            plan=ExperimentPlan(
+                kind="baseline",
+                change="establish baseline",
+                run_config_ref="sha256:" + "a" * 64,
+                budget={},
+                acceptance_rule="trusted score",
+            ),
+            gitwork=GitWorkBranch(
+                path=str(tmp_path), branch="main", base_commit="baseline-commit"
+            ),
+            status=ExperimentStatus.SUCCEEDED,
+            eval=EvalResult(
+                experiment_id="exp_baseline",
+                primary=0.71,
+                per_sample="sha256:" + "b" * 64,
+            ),
+        ),
+    )
+    supervisor.tree.set_sota("exp_baseline")
+
+    def fail_save() -> None:
+        raise OSError("state unavailable")
+
+    original_save = supervisor._plans.save_state
+    monkeypatch.setattr(supervisor._plans, "save_state", fail_save)
+    with pytest.raises(OSError, match="state unavailable"):
+        await supervisor._phases._finalize_without_validation()
+    assert supervisor.state.phase == "SEARCH"
+    assert supervisor.state.status == "RUNNING"
+    assert supervisor.state.validation_skipped is None
+
+    monkeypatch.setattr(supervisor._plans, "save_state", original_save)
+    await supervisor._phases._finalize_without_validation()
+    final_path = tmp_path / ".athena" / "exp_docs" / "runs" / "final-skipped.json"
+    assert final_path.is_file()
+    assert supervisor.state.phase == "COMPLETED"
+    assert supervisor.state.status == "COMPLETED"
+    assert supervisor.state.validation_skipped is True
+
+
+@pytest.mark.asyncio
+async def test_skip_policy_settles_waiting_plan_without_auto_validate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    supervisor.state.phase = "SEARCH"
+    supervisor.configure_options(auto_validate=False, skip_validate=True)
+    context_ref = await supervisor._deps.runtime.store.put_text("context")
+    state = PlanState(
+        kind="SEARCH",
+        context_ref=context_ref,
+        turns_used=1,
+        turn_limit=4,
+        patience=2,
+    )
+    supervisor.state.plans["hyp_wait"] = state
+    settled: list[tuple[str, object, object]] = []
+
+    async def capture_settle(plan_id, best_ref, result):
+        settled.append((plan_id, best_ref, result))
+
+    monkeypatch.setattr(supervisor._plans, "settle_plan", capture_settle)
+    monkeypatch.setattr(
+        search_loop_module,
+        "decide_settlement",
+        lambda *_args, **_kwargs: PlanSettlement(action="wait"),
+    )
+    await supervisor._search._apply_completed_turn(
+        CompletedPlanTurn(
+            plan_id="hyp_wait",
+            decision=PlanDecision(decision="continue", reason="needs review"),
+            result=PlanTurnResult(
+                kind="scored",
+                metric=0.72,
+                commit="candidate-commit",
+                next_state=state,
+            ),
+        )
+    )
+
+    assert len(settled) == 1
+    assert settled[0][0] == "hyp_wait"
 
 
 @pytest.mark.asyncio

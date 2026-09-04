@@ -639,7 +639,7 @@ git commit -m "feat: disclose skipped validation in final reports"
 - Changes: post-SEARCH priority is skip, automatic validation, then existing human gate.
 - Changes: Plan settlement treats `auto_validate or skip_validate` as automatic completion policy.
 
-- [ ] **Step 1: Write the failing end-to-end skip test**
+- [x] **Step 1: Write the failing end-to-end skip test**
 
 Add a test beside `test_all_phases_share_one_durable_state` using its local
 `PrepareResult` pattern:
@@ -697,7 +697,7 @@ phases are exactly `PREPARE, SEARCH, COMPLETED`, the output includes
 `status="SKIPPED"`, `metric.primary is None`, and the SEARCH score only in
 `metric.reference`.
 
-- [ ] **Step 2: Write failing precedence, wait, and recovery tests**
+- [x] **Step 2: Write failing precedence, wait, and recovery tests**
 
 Add cases proving:
 
@@ -715,7 +715,7 @@ In the completed-Plan settlement test, construct dependencies with
 assert the Plan is settled instead of parking SEARCH. Retain the existing
 `auto_validate=False, skip_validate=False` assertion.
 
-- [ ] **Step 3: Write the failing atomicity/idempotence test**
+- [x] **Step 3: Write the failing atomicity/idempotence test**
 
 Monkeypatch `athena.research.supervisor.phases.write_reports` to raise
 `OSError("final report unavailable")` on the first call. Run the skip lifecycle
@@ -728,7 +728,7 @@ Add a state-save failure at the direct-finalizer boundary and assert the helper
 restores the in-memory phase/status/marker before propagating; after retry, the
 same derived file paths are overwritten rather than duplicated.
 
-- [ ] **Step 4: Run the focused tests and capture RED evidence**
+- [x] **Step 4: Run the focused tests and capture RED evidence**
 
 Run:
 
@@ -741,7 +741,7 @@ Run:
 
 Expected: FAIL because the skip branch and direct finalizer do not exist.
 
-- [ ] **Step 5: Implement automatic settlement and transition precedence**
+- [x] **Step 5: Implement automatic settlement and transition precedence**
 
 In `SearchLoop._apply_completed_turn`, change only the wait settlement policy:
 
@@ -757,7 +757,7 @@ In `PhaseMachine.continue_phase`, immediately after `run_search()` and the stop
 guard, evaluate `skip_validate` before `auto_validate`. Return after direct
 finalization so the later VALIDATE block cannot run.
 
-- [ ] **Step 6: Implement the honest direct finalizer**
+- [x] **Step 6: Implement the honest direct finalizer**
 
 Use these preconditions before writing anything:
 
@@ -812,7 +812,7 @@ After a successful save, publish `SKIPPED_VALIDATION_OUTPUT` and then
 each notification, but do not catch `asyncio.CancelledError` or change the
 durable state after notification failure.
 
-- [ ] **Step 7: Run, format, check, update this task, and commit**
+- [x] **Step 7: Run, format, check, update this task, and commit**
 
 Run:
 

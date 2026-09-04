@@ -349,6 +349,24 @@ async def test_attempt_limit_finishes_active_plans_then_waits_or_auto_validates(
     assert runtime.state.status == "RUNNING"
 
 
+@pytest.mark.asyncio
+async def test_without_skip_or_auto_validate_keeps_the_human_search_gate(
+    runtime, monkeypatch
+):
+    async def no_search():
+        return None
+
+    monkeypatch.setattr(runtime.supervisor._search, "run_search", no_search)
+    runtime.state.search_limit = 0
+    runtime.state.status = "RUNNING"
+
+    await runtime.supervisor.continue_phase()
+
+    assert runtime.state.phase == "SEARCH"
+    assert runtime.state.status == "WAITING"
+    assert not (runtime.root / ".athena" / "exp_docs" / "final-skipped.json").exists()
+
+
 def test_four_successes_do_not_stop_production_search(runtime):
     runtime.state.search_limit = 10
     assert runtime.state.status == "RUNNING"
