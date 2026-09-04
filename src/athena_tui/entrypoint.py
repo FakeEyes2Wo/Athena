@@ -78,6 +78,14 @@ def _parse(argv: list[str]) -> argparse.Namespace:
         help="跑一次文献调研，让 Ideator 除数据集外还能读论文；与 PREPARE 并行",
     )
     parser.add_argument("--survey-query", default="", help="文献检索式；留空则由任务提炼")
+    parser.add_argument(
+        "--task-file",
+        default=None,
+        help=(
+            "任务文本文件。给了就直接起跑，不必在界面里粘贴——多行 Markdown 粘进"
+            "单行输入框会在第一个换行处提交，只有第一行成为任务"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -137,9 +145,17 @@ async def _run(args: argparse.Namespace) -> int:
         search_limit=args.search_limit,
         **options,
     )
-    # Resume: a prior run with a trusted baseline/SOTA auto-recovers and
-    # continues; otherwise the first Human message seeds the task.
-    if runtime.tree.best_experiment_id() is not None:
+    if args.task_file:
+        # ``start_task`` covers the fresh and the resume case; it returns as soon
+        # as the Supervisor loop is spawned, so the app still comes up.
+        text = Path(args.task_file).read_text(encoding="utf-8").strip()
+        if not text:
+            raise SystemExit(f"{args.task_file} is empty")
+        status = await runtime.start_task(text)
+        print(f"任务已载入（{len(text)} 字符），状态 {status}", file=sys.stderr)
+    elif runtime.tree.best_experiment_id() is not None:
+        # Resume: a prior run with a trusted baseline/SOTA auto-recovers and
+        # continues; otherwise the first Human message seeds the task.
         await runtime.start()
     app = AthenaApp(runtime, Path(args.project))
     return await app.run()
