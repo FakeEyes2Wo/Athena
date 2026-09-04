@@ -99,6 +99,7 @@ class LocalBackend:
             env=self._environment.build_env(
                 workspace_root,
                 predict_features=request.predict_features,
+                data_csv=request.data_csv,
                 evaluation_split=request.evaluation_split,
             ),
             persist=self._store.put_text if self._store is not None else None,
