@@ -171,6 +171,13 @@ class ResearchState(BaseModel):
         """
         target = Path(path)
         core = self.model_dump(mode="json", exclude=RESUME_FIELDS)
+        core_matches_disk = False
+        try:
+            disk_core = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(disk_core, Mapping):
+                core_matches_disk = _core_digest(disk_core) == _core_digest(core)
+        except (OSError, json.JSONDecodeError):
+            pass
         resume_payload = {
             key: getattr(self, key)
             for key in RESUME_FIELDS
@@ -182,7 +189,8 @@ class ResearchState(BaseModel):
                 resume_path,
                 {"state_digest": _core_digest(core), **resume_payload},
             )
-            atomic_write_json(target, core)
+            if not core_matches_disk:
+                atomic_write_json(target, core)
         else:
             atomic_write_json(target, core)
             resume_path.unlink(missing_ok=True)
