@@ -45,7 +45,12 @@ describe("SettingsPanel validation controls", () => {
 
     expect(automatic).toBeDisabled();
     expect(automatic).toBeChecked();
-    expect(screen.getByText(/不会运行独立最终评估/)).toBeVisible();
+    const help = screen.getByText(/SEARCH.*Final/);
+    expect(skip).toHaveAttribute("aria-describedby", "skip-validate-help");
+    expect(help.id).toBe("skip-validate-help");
+    expect(help).toBeVisible();
+    expect(help).toHaveTextContent("不会运行独立最终评估");
+    expect(help).toHaveTextContent("不会产生最终测试或泛化指标");
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(bridgeMocks.settingsSet).toHaveBeenCalled());
