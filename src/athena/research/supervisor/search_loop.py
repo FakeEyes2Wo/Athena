@@ -91,7 +91,16 @@ class SearchLoop:
         General Agent, which trained on an unrelated project's data.
 
         Naming every missing piece turns a misleading symptom into the cause.
+
+        The gate is a *start* condition. ``run_search`` is also re-entered while
+        SEARCH is already under way -- ``_spawn_search`` does it, and so does a
+        resume that has to drain a crashed turn. A Plan only exists because
+        SEARCH already started, so their presence is proof PREPARE finished and
+        the gate stands down rather than turning a recoverable crash into a
+        refusal.
         """
+        if getattr(self._state, "plans", None):
+            return
         missing: list[str] = []
         if self._tree.best_experiment_id() is None:
             missing.append("a trusted SOTA baseline in the research tree")

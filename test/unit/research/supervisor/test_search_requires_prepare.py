@@ -33,18 +33,27 @@ class _Tree:
 
 
 class _Owner:
-    def __init__(self, sota: str | None, evaluator_ref: str | None) -> None:
+    def __init__(
+        self,
+        sota: str | None,
+        evaluator_ref: str | None,
+        plans: dict | None = None,
+    ) -> None:
         self.tree = _Tree(sota)
-        self.state = SimpleNamespace(evaluator_ref=evaluator_ref, status="RUNNING")
+        self.state = SimpleNamespace(
+            evaluator_ref=evaluator_ref, status="RUNNING", plans=plans or {}
+        )
 
 
 async def _never_run(_plan_id: str):  # pragma: no cover - the gate runs first
     raise AssertionError("no Plan turn may be dispatched before PREPARE finishes")
 
 
-def _loop(*, sota: str | None, evaluator_ref: str | None) -> SearchLoop:
+def _loop(
+    *, sota: str | None, evaluator_ref: str | None, plans: dict | None = None
+) -> SearchLoop:
     return SearchLoop(
-        _Owner(sota, evaluator_ref),
+        _Owner(sota, evaluator_ref, plans),
         deps=None,
         run=None,
         plans=None,
@@ -85,5 +94,16 @@ async def test_an_evaluator_without_a_baseline_names_only_what_is_missing() -> N
 def test_a_finished_prepare_passes_the_gate() -> None:
     """The gate is a precondition, not a second scheduler."""
     loop = _loop(sota="exp_baseline", evaluator_ref="sha256:eval")
+
+    loop._assert_prepare_finished()
+
+
+def test_an_in_flight_plan_stands_the_gate_down() -> None:
+    """``run_search`` is re-entered mid-SEARCH; a Plan proves PREPARE finished.
+
+    ``_spawn_search`` re-enters the loop, and so does a resume that has to drain
+    a crashed turn. Refusing there would turn a recoverable crash into a refusal.
+    """
+    loop = _loop(sota=None, evaluator_ref=None, plans={"hyp_crash": object()})
 
     loop._assert_prepare_finished()
