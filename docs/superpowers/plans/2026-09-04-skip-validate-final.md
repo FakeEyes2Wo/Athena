@@ -858,7 +858,7 @@ git commit -m "feat: finalize search without validation"
 - Produces: accessible checkbox name `跳过 VALIDATE` and disclosure text `不会运行独立最终评估`.
 - Preserves: `form.auto_validate` while its checkbox is disabled by skip mode.
 
-- [ ] **Step 1: Write the failing component test**
+- [x] **Step 1: Write the failing component test**
 
 Create hoist-safe bridge mocks before importing the component:
 
@@ -916,7 +916,7 @@ it("saves skip validate while preserving the automatic validation choice", async
 Import and use `fireEvent` from `@testing-library/react`; do not add a new
 dependency. Add a second case for a loaded `skip_validate=true` snapshot.
 
-- [ ] **Step 2: Run the component test and capture RED evidence**
+- [x] **Step 2: Run the component test and capture RED evidence**
 
 Run:
 
@@ -926,7 +926,7 @@ npm --prefix athena-gui test -- --run src/components/__tests__/SettingsPanel.tes
 
 Expected: FAIL because the typed field and control are absent.
 
-- [ ] **Step 3: Implement the typed setting and accessible UI**
+- [x] **Step 3: Implement the typed setting and accessible UI**
 
 Add `skip_validate` next to `auto_validate` in `GuiSettings`, defaults,
 `WritableField`, and the save patch. Render the new checkbox in the switch
@@ -953,7 +953,7 @@ independent final evaluation or final/generalization metrics.
 Add a module class to lower opacity and use a not-allowed cursor for the disabled
 auto-validation label; retain keyboard focus and the existing switch markup.
 
-- [ ] **Step 4: Run focused frontend tests/build and capture GREEN evidence**
+- [x] **Step 4: Run focused frontend tests/build and capture GREEN evidence**
 
 Run:
 
@@ -973,7 +973,7 @@ git diff --check -- `
 
 Expected: focused Vitest files and the TypeScript/Vite production build pass.
 
-- [ ] **Step 5: Update this task and commit**
+- [x] **Step 5: Update this task and commit**
 
 After fresh GREEN evidence, check every Task 5 box. Stage only Task 5 paths and
 this plan, then commit:

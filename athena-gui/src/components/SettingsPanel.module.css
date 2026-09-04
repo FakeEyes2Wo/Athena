@@ -112,6 +112,19 @@
   padding: 4px 0;
 }
 
+.switchDisabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.switchDisabled input {
+  cursor: not-allowed;
+}
+
+.skipValidateHelp {
+  flex-basis: 100%;
+}
+
 .footer {
   flex-shrink: 0;
   display: flex;

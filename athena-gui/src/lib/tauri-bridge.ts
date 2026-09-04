@@ -365,6 +365,7 @@ export interface GuiSettings {
   direction: "maximize" | "minimize";
   tolerance: number;
   auto_validate: boolean;
+  skip_validate: boolean;
   manual_mode: boolean;
   phase: string;
   status: string;
@@ -383,6 +384,7 @@ export const DEFAULT_GUI_SETTINGS: GuiSettings = {
   direction: "maximize",
   tolerance: 0,
   auto_validate: false,
+  skip_validate: false,
   manual_mode: false,
   phase: "idle",
   status: "idle",

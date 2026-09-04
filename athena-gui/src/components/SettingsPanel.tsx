@@ -18,6 +18,7 @@ type WritableField =
   | "direction"
   | "tolerance"
   | "auto_validate"
+  | "skip_validate"
   | "manual_mode"
   | "experiment_timeout_s";
 
@@ -102,6 +103,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       direction: form.direction,
       tolerance: form.tolerance,
       auto_validate: form.auto_validate,
+      skip_validate: form.skip_validate,
       manual_mode: form.manual_mode,
       experiment_timeout_s: form.experiment_timeout_s,
       data_root: form.data_root,
@@ -426,15 +428,36 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           <section className={styles.section}>
             <h3 className={styles.sectionTitle}>开关</h3>
             <div className={styles.switches}>
-              <label className="switch">
+              <label
+                className={form.skip_validate ? `switch ${styles.switchDisabled}` : "switch"}
+              >
                 <input
                   type="checkbox"
                   checked={form.auto_validate}
+                  disabled={form.skip_validate}
                   onChange={(e) => patchField("auto_validate", e.target.checked)}
                 />
                 <span className="switch__track" />
                 自动验证
               </label>
+
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={form.skip_validate}
+                  onChange={(e) => patchField("skip_validate", e.target.checked)}
+                  aria-describedby="skip-validate-help"
+                />
+                <span className="switch__track" />
+                跳过 VALIDATE
+              </label>
+
+              <p
+                id="skip-validate-help"
+                className={`${styles.hint} ${styles.skipValidateHelp}`}
+              >
+                SEARCH 完成后将直接生成 Final，不会运行独立最终评估，也不会产生最终测试或泛化指标。
+              </p>
 
               <label className="switch">
                 <input
