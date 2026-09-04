@@ -999,7 +999,7 @@ git commit -m "feat(gui): add skip validate setting"
 - Proves: a durable skipped run regenerates its report from `validation_skipped`, not the mutable project preference.
 - Proves: old SEARCH/VALIDATE checkpoints retain their documented resume behavior.
 
-- [ ] **Step 1: Add a WebSocket settings round-trip test**
+- [x] **Step 1: Add a WebSocket settings round-trip test**
 
 Extend the test transport runtime with a real in-memory settings mapping and an
 `apply_settings` method. Send:
@@ -1011,7 +1011,7 @@ Extend the test transport runtime with a real in-memory settings mapping and an
 Assert the decoded response contains `skip_validate: true`, the fake runtime
 received the exact snake_case key, and no Tauri/RPC method addition was needed.
 
-- [ ] **Step 2: Add restart/session and historical-report integration tests**
+- [x] **Step 2: Add restart/session and historical-report integration tests**
 
 Create two runtimes for the same project through the gateway factory with
 different state roots and assert both inherit the stored `True` preference.
@@ -1022,7 +1022,7 @@ Complete one skip run, then change the project's live preference back to false,
 reload the completed run from disk, call `GuiService.generate_report()`, and
 assert the report still says `VALIDATE 已跳过` because the run marker is true.
 
-- [ ] **Step 3: Add the resume matrix**
+- [x] **Step 3: Add the resume matrix**
 
 In `test_breakpoint_resume.py`, cover these exact cases with fake adapters:
 
@@ -1034,7 +1034,7 @@ In `test_breakpoint_resume.py`, cover these exact cases with fake adapters:
 For every case assert both validation call counts and final
 `phase/status/validation/validation_skipped` values.
 
-- [ ] **Step 4: Run the cross-layer slice and fix only contract gaps**
+- [x] **Step 4: Run the cross-layer slice and fix only contract gaps**
 
 Run:
 
@@ -1053,7 +1053,7 @@ contract gap, change only the smallest production file already owned by Tasks
 1-4, rerun that task's focused test, and include the exact file in this task's
 commit.
 
-- [ ] **Step 5: Format, check, update this task, and commit**
+- [x] **Step 5: Format, check, update this task, and commit**
 
 Run Black on changed Python files and:
 

@@ -41,6 +41,7 @@ def test_research_runtime_composes_skip_validate(tmp_path) -> None:
     assert runtime.config.skip_validate is True
     assert runtime.session.options.skip_validate is True
     assert runtime.supervisor._deps.phases.skip_validate is True
+    assert runtime.settings()["skip_validate"] is True
 
 
 def test_skip_validate_defaults_off_and_projects_to_settings(tmp_path) -> None:

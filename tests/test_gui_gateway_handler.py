@@ -237,6 +237,64 @@ async def test_session_switch_restores_project_skip_preference_and_isolates_proj
 
 
 @pytest.mark.asyncio
+async def test_skip_validate_survives_sessions_and_gateway_restart_per_project(
+    tmp_path: Path,
+) -> None:
+    """The project preference is shared by sessions and recreated gateways."""
+    other = tmp_path / "other"
+    other.mkdir()
+    store = GuiStateStore(tmp_path / "gui-state.json")
+    created: list[tuple[str, Path | None, bool]] = []
+
+    def factory(
+        root: str, state_root: Path | None, *, skip_validate: bool = False
+    ) -> SettingsRuntime:
+        created.append((root, state_root, skip_validate))
+        return SettingsRuntime(root, skip_validate)
+
+    project = str(tmp_path)
+    first = factory(
+        project, None, skip_validate=store.load().skip_validate_for(project)
+    )
+    handler = GuiRequestHandler(first, factory, state_store=store)
+    await handler.dispatch("settings_set", {"patch": {"skip_validate": True}})
+
+    await handler.dispatch("session_switch", {"session_id": "s-1"})
+    await handler.dispatch("session_switch", {"session_id": "s-2"})
+    same_project = [entry for entry in created if entry[0] == project]
+    assert [entry[1] for entry in same_project] == [
+        None,
+        tmp_path / ".athena" / "conversations" / "s-1",
+        tmp_path / ".athena" / "conversations" / "s-2",
+    ]
+    assert [entry[2] for entry in same_project] == [False, True, True]
+
+    # A new gateway/store instance reads the durable project map before building
+    # both its default runtime and the next named session.
+    restarted_store = GuiStateStore(tmp_path / "gui-state.json")
+    restarted = factory(
+        project,
+        None,
+        skip_validate=restarted_store.load().skip_validate_for(project),
+    )
+    restarted_handler = GuiRequestHandler(
+        restarted, factory, state_store=restarted_store
+    )
+    assert restarted.skip_validate is True
+    await restarted_handler.dispatch("session_switch", {"session_id": "s-3"})
+    assert created[-1] == (
+        project,
+        tmp_path / ".athena" / "conversations" / "s-3",
+        True,
+    )
+
+    await restarted_handler.dispatch("set_project_root", {"path": str(other)})
+    assert created[-1][0] == str(other.resolve())
+    assert created[-1][2] is False
+    assert restarted_store.load().skip_validate_for(other) is False
+
+
+@pytest.mark.asyncio
 async def test_handler_swap_failure_keeps_previous_runtime_open(tmp_path) -> None:
     runtime = RecordingRuntime()
 

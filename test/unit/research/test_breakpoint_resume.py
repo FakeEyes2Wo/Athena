@@ -36,7 +36,7 @@ from athena.research.prepare.baseline_research import (
 )
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
-from athena.research.contracts import EvaluatorDescriptor
+from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.runtime.control import (
     _consume_lifecycle_result,
     start as start_lifecycle,
@@ -252,11 +252,19 @@ def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator, "prepare_baseline_design", verified_design)
 
 
-def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime:
+def _stub_runtime(
+    tmp_path: Path,
+    *,
+    task_understanding=None,
+    skip_validate: bool = False,
+    validation_phase=None,
+) -> ResearchRuntime:
     runtime = ResearchRuntime(
         project_root=tmp_path,
         auto_confirm=True,
         task_confirmation_gate=False,
+        skip_validate=skip_validate,
+        validation_phase=validation_phase,
     )
     runtime.session.lifecycle.provider = object()
     runtime.session.lifecycle.task_text = "predict titanic survival"
@@ -274,8 +282,72 @@ def _stub_runtime(tmp_path: Path, *, task_understanding=None) -> ResearchRuntime
         def start(self):
             return None
 
+        async def aclose(self):
+            return None
+
     runtime.services.infrastructure.git = FakeGit()
     runtime.services.infrastructure.agents = FakeAgents()
+    return runtime
+
+
+def _seed_resumable_sota(runtime: ResearchRuntime) -> None:
+    """Install the smallest trusted SEARCH baseline for resume matrix tests."""
+    runtime.tree.add_hypothesis(
+        Hypothesis(
+            id="baseline",
+            statement="trusted baseline",
+            intervention="establish baseline",
+            expected_effect="provide a reference metric",
+        )
+    )
+    runtime.tree.add_experiment(
+        "exp_baseline",
+        Experiment(
+            hypothesis_id="baseline",
+            commit="prepare-commit",
+            plan=ExperimentPlan(
+                kind="baseline",
+                change="establish baseline",
+                run_config_ref="sha256:" + "2" * 64,
+                budget={},
+                acceptance_rule="trusted score",
+            ),
+            gitwork=GitWorkBranch(
+                path=str(runtime.root), branch="main", base_commit="prepare-commit"
+            ),
+            status=ExperimentStatus.SUCCEEDED,
+            eval=EvalResult(
+                experiment_id="exp_baseline",
+                primary=0.71,
+                per_sample="sha256:" + "3" * 64,
+            ),
+        ),
+    )
+    runtime.tree.set_sota("exp_baseline")
+    runtime.save_tree()
+
+
+def _checkpointed_resume_runtime(
+    tmp_path: Path,
+    *,
+    phase: str,
+    status: str,
+    skip_validate: bool = True,
+    validation_phase=None,
+) -> ResearchRuntime:
+    runtime = _stub_runtime(
+        tmp_path,
+        skip_validate=skip_validate,
+        validation_phase=validation_phase,
+    )
+    _seed_resumable_sota(runtime)
+    runtime.state.phase = phase
+    runtime.state.status = status
+    runtime.state.search_limit = 0
+    runtime.state.task_text = "resume the trusted baseline"
+    runtime.session.lifecycle.started = False
+    runtime.session.lifecycle.task = None
+    runtime.state.save(runtime.state_path)
     return runtime
 
 
@@ -1780,5 +1852,143 @@ async def test_authoritative_prepare_resume_reuses_attested_baseline(
             for path in baseline_root.rglob("*")
             if path.is_file()
         } == baseline_before
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_search_running_with_skip_completes_without_validation(
+    tmp_path: Path,
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        raise AssertionError("SEARCH resume must not enter VALIDATE")
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="SEARCH",
+        status="RUNNING",
+        validation_phase=validate,
+    )
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        task = runtime.session.lifecycle.task
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert validation_calls == []
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is None
+        assert runtime.state.validation_skipped is True
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_search_waiting_with_skip_waits_for_explicit_resume(
+    tmp_path: Path,
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        raise AssertionError("SEARCH resume must not enter VALIDATE")
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="SEARCH",
+        status="WAITING",
+        validation_phase=validate,
+    )
+    try:
+        assert runtime.state.status == "WAITING"
+        assert runtime.session.lifecycle.task is None
+        assert validation_calls == []
+
+        assert await runtime.resume_current_task() == "RUNNING"
+        task = runtime.session.lifecycle.task
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert validation_calls == []
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is None
+        assert runtime.state.validation_skipped is True
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_validate_running_with_skip_records_real_validation(
+    tmp_path: Path,
+) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        return ValidationResult(
+            result_id="validation-resume",
+            status="COMPLETED",
+            test_score=0.69,
+            final_test_score=0.68,
+            generalization_gap=0.03,
+            sota_commit=commit,
+            validation_commit="validation-commit",
+        )
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="VALIDATE",
+        status="RUNNING",
+        validation_phase=validate,
+    )
+    try:
+        assert await runtime.resume_current_task() == "RUNNING"
+        task = runtime.session.lifecycle.task
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert validation_calls == [("prepare-commit", pytest.approx(0.71))]
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is not None
+        assert runtime.state.validation["result_id"] == "validation-resume"
+        assert runtime.state.validation_skipped is None
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_completed_skip_resume_is_a_noop(tmp_path: Path) -> None:
+    validation_calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        validation_calls.append((commit, metric))
+        raise AssertionError("COMPLETED resume must not validate")
+
+    runtime = _checkpointed_resume_runtime(
+        tmp_path,
+        phase="COMPLETED",
+        status="COMPLETED",
+        validation_phase=validate,
+    )
+    runtime.state.validation_skipped = True
+    runtime.state.save(runtime.state_path)
+    try:
+        assert await runtime.start_task("ignored after completion") == "COMPLETED"
+        assert validation_calls == []
+        assert (runtime.state.phase, runtime.state.status) == (
+            "COMPLETED",
+            "COMPLETED",
+        )
+        assert runtime.state.validation is None
+        assert runtime.state.validation_skipped is True
     finally:
         await runtime.aclose()

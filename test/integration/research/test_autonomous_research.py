@@ -9,6 +9,7 @@ import pytest
 import athena.research.supervisor.phases as phases_module
 
 from athena.core.artifact_store import ArtifactNotFoundError
+from athena.gui.service import GuiService
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
@@ -396,6 +397,59 @@ async def test_skip_validate_completes_from_search_without_calling_validation(
     assert final["metric"]["primary"] is None
     assert final["metric"]["reference"] == pytest.approx(0.71)
     await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_completed_skip_report_uses_durable_marker_after_live_preference_changes(
+    tmp_path: Path,
+) -> None:
+    """A reopened run remains historically skipped after the setting is toggled off."""
+
+    async def prepare() -> PrepareResult:
+        return PrepareResult(
+            evaluator_ref="sha256:" + "2" * 64,
+            metric=0.71,
+            commit="prepare-commit",
+            predictions_ref="sha256:" + "3" * 64,
+            evidence_ref="sha256:" + "1" * 64,
+            report_ref="sha256:" + "4" * 64,
+        )
+
+    async def validate(_commit: str, _metric: float) -> ValidationResult:
+        raise AssertionError("historical skipped run must not validate")
+
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        task="improve the trusted baseline",
+        search_limit=0,
+        auto_validate=True,
+        skip_validate=True,
+        auto_confirm=True,
+        prepare_phase=prepare,
+        validation_phase=validate,
+    )
+    lifecycle = await runtime.start()
+    await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
+    assert runtime.state.validation_skipped is True
+
+    # This is a live setting change, not a rewrite of the completed run marker.
+    await runtime.apply_settings({"skip_validate": False})
+    assert runtime.settings()["skip_validate"] is False
+    await runtime.aclose()
+
+    reopened = ResearchRuntime(
+        project_root=tmp_path,
+        skip_validate=False,
+        validation_phase=validate,
+    )
+    try:
+        assert reopened.state.validation_skipped is True
+        report = (await GuiService(reopened).generate_report())["report"]
+        assert "VALIDATE \u5df2\u8df3\u8fc7" in report
+        assert "final_test_score" not in report
+        assert "generalization_gap" not in report
+    finally:
+        await reopened.aclose()
 
 
 @pytest.mark.asyncio
