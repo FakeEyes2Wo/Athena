@@ -109,6 +109,7 @@ class RuntimeOptions:
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
     auto_validate: bool = False
+    skip_validate: bool = False
     kaggle: KaggleStack | None = None
 
 

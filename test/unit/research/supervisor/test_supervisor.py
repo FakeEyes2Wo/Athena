@@ -75,6 +75,16 @@ def test_phase_actions_preserves_historical_positional_argument_order() -> None:
     assert actions.on_plan_settled is on_plan_settled
     assert actions.auto_validate is True
     assert actions.prepare_resume_is_attested is None
+    assert actions.skip_validate is False
+
+
+def test_phase_actions_composes_skip_validate_after_historical_fields() -> None:
+    async def publish(_kind, _payload):
+        return None
+
+    actions = PhaseActions(publish, None, None, None, None, False, None, True)
+
+    assert actions.skip_validate is True
 
 
 class _SubmitProvider:

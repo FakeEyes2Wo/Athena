@@ -5,6 +5,7 @@ import pytest
 from athena.research.config import ResearchConfig, ResearchPaths, SearchLimits
 from athena.research.runtime import ResearchRuntime
 from athena.research.runtime.bootstrap import build_services
+from athena.research.runtime.services import RuntimeOptions
 
 
 def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
@@ -26,7 +27,20 @@ def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
 
     services, _session = build_services(config, None)
 
+    assert config.skip_validate is False
     assert services.durable.state.search_limit == 4
+
+
+def test_skip_validate_defaults_to_false_in_runtime_options() -> None:
+    assert RuntimeOptions().skip_validate is False
+
+
+def test_research_runtime_composes_skip_validate(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path, skip_validate=True)
+
+    assert runtime.config.skip_validate is True
+    assert runtime.session.options.skip_validate is True
+    assert runtime.supervisor._deps.phases.skip_validate is True
 
 
 def _runtime(tmp_path) -> ResearchRuntime:

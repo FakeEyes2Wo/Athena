@@ -59,6 +59,7 @@ class ResearchConfig:
     search: SearchLimits = field(default_factory=SearchLimits)
     survey: SurveyConfig = field(default_factory=SurveyConfig)
     auto_validate: bool = False
+    skip_validate: bool = False
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
     ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration"
