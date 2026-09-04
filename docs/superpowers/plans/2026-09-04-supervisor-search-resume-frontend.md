@@ -44,12 +44,12 @@
 - `docs/athena-gui-design.md`: documents the backend-owned interaction contract and presentation-only workspace filtering.
 - `docs/superpowers/specs/2026-09-04-supervisor-transactional-search-resume-design.md`: changes status to implemented only after both backend and frontend acceptance evidence is fresh.
 - `codex_docs/2026-09-04-supervisor-search-resume-frontend-completion-report.md`: records exact commands, pass counts, build evidence, and the no-deletion assertion.
-- `codex_docs/CURRENT.md`: removes the active pointer after completion without disturbing parallel or paused plans.
+- `codex_docs/CURRENT.md`: advances the active pointer to the queued experiment-document projection plan without disturbing parallel or paused plans.
 
 ## Execution preflight
 
 - [ ] Record `git status --short --branch`, `git diff --cached --name-status`, `git worktree list --porcelain`, and the current commit. Create `feat/supervisor-search-resume-frontend` in a new worktree; do not reuse `.worktrees/output-main-integration`.
-- [ ] Verify `codex_docs/CURRENT.md` names this file as the sole active plan, the backend plan file is absent, and `codex_docs/2026-09-04-supervisor-transactional-search-resume-backend-completion-report.md` exists.
+- [ ] Verify `codex_docs/CURRENT.md` names this file as the sole active plan, queues `docs/superpowers/plans/2026-09-04-experiment-document-projection.md` next, the backend plan file is absent, and `codex_docs/2026-09-04-supervisor-transactional-search-resume-backend-completion-report.md` exists.
 - [ ] Run the backend handoff gate and record its exact result: `.venv\Scripts\python.exe -m pytest -p no:cacheprovider -q test/integration/research/test_completed_search_resume.py tests/test_gui_gateway_handler.py tests/test_gui_gateway_transport.py test/unit/research/supervisor/test_events.py`.
 - [ ] Run the frontend baseline and record its exact result: `npm --prefix athena-gui test -- --run src/hooks/__tests__/usePipeline.test.tsx src/hooks/__tests__/usePipeline.events.test.tsx src/components/__tests__/app-shell.test.tsx`.
 
@@ -516,7 +516,7 @@ git commit -m "fix(gui): hide empty workspace groups"
 
 **Interfaces:**
 - Consumes: Task 1's `PipelineViewModel.interactionMode` and Task 2's presentation-only filtering behavior.
-- Produces: tested frontend artifact, Rust shell verification, final design status, exact completion evidence, and no active pointer for this completed work.
+- Produces: tested frontend artifact, Rust shell verification, final design status, exact completion evidence, and activation of the queued experiment-document projection work.
 - Preserves: the parallel authoritative-baseline plan pointer and paused JW-SSD TUI plan pointer in `codex_docs/CURRENT.md`.
 
 - [ ] **Step 1: Run formatting and diff safety gates**
@@ -529,7 +529,7 @@ git status --short
 git diff --name-only
 ```
 
-Expected: no whitespace errors; changed paths are limited to the files owned by Tasks 1-3. The pre-existing untracked `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`, if still present, remains unstaged and unchanged.
+Expected: no whitespace errors; changed paths are limited to the files owned by Tasks 1-3. The committed queued experiment-document design and implementation plan remain unstaged and unchanged.
 
 - [ ] **Step 2: Run focused acceptance tests from a cold Vitest invocation**
 
@@ -622,18 +622,18 @@ Angle-bracket lines above are report fields: replace each with the observed outp
 
 - [ ] **Step 8: Close the plan only after every frontend acceptance criterion is green**
 
-Delete this completed plan with `apply_patch`. Update `codex_docs/CURRENT.md` so `Active implementation plan` is `None`, retain the parallel and paused sections verbatim, then stage only owned documentation:
+Delete this completed plan with `apply_patch`. Update `codex_docs/CURRENT.md` so the queued experiment-document projection plan becomes active, remove its now-empty queued sections, retain the parallel and paused sections verbatim, then stage only owned documentation:
 
 ```markdown
 Active implementation plan:
-- None.
+- `docs/superpowers/plans/2026-09-04-experiment-document-projection.md`
 
 Most recent completed work:
 - `codex_docs/2026-09-04-supervisor-search-resume-frontend-completion-report.md`
 - `codex_docs/2026-09-04-supervisor-transactional-search-resume-backend-completion-report.md`
 ```
 
-The queued section must already be absent after backend closeout; do not recreate it.
+Remove the `Queued subsequent implementation plan` and `Queued subsequent supporting design spec` sections after promoting their entries. Add the experiment-document design to the ordinary `Design spec` list if it is not already present.
 
 ```powershell
 git add docs/athena-gui-design.md docs/superpowers/specs/2026-09-04-supervisor-transactional-search-resume-design.md codex_docs/2026-09-04-supervisor-search-resume-frontend-completion-report.md codex_docs/CURRENT.md
@@ -642,4 +642,4 @@ git diff --cached --check
 git commit -m "docs: complete supervisor search resume frontend"
 ```
 
-Do not stage the unrelated experiment-document design, merge, or push without a separate user instruction. Hand off exact test evidence and commit hashes.
+Do not stage the queued experiment-document plan or design, merge, or push without a separate user instruction. Hand off exact test evidence, commit hashes, and the newly active plan.

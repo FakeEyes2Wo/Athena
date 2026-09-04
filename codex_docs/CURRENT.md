@@ -6,6 +6,12 @@ Active implementation plan:
 Queued dependent implementation plan:
 - `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
 
+Queued subsequent implementation plan:
+- `docs/superpowers/plans/2026-09-04-experiment-document-projection.md`
+
+Queued subsequent supporting design spec:
+- `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`
+
 Most recent completed work:
 - `codex_docs/2026-09-03-llm-task-understanding-output-completion-report.md`
 - `codex_docs/2026-09-03-authoritative-baseline-hardening-completion-report.md`

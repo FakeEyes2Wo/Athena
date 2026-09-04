@@ -1576,7 +1576,7 @@ git commit -m "feat: recover control transactions before runtime load"
 
 **Interfaces:**
 - Documents exact files, journal phases, log fallbacks, error codes, `/search +N`, human validation origin, downgrade steps, and known platform limitations.
-- Backend closeout activates `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md` and does not mark the whole cross-stack design implemented yet.
+- Backend closeout activates `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`, preserves the queued experiment-document projection plan that follows it, and does not mark the whole cross-stack design implemented yet.
 
 - [ ] **Step 1: Run formatting, diff, import, and API-budget gates**
 
@@ -1644,12 +1644,18 @@ Delete this completed plan, update `codex_docs/CURRENT.md` so the frontend plan 
 Active implementation plan:
 - `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
 
+Queued subsequent implementation plan:
+- `docs/superpowers/plans/2026-09-04-experiment-document-projection.md`
+
+Queued subsequent supporting design spec:
+- `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`
+
 Most recent completed work:
 - `codex_docs/2026-09-04-supervisor-transactional-search-resume-backend-completion-report.md`
 ```
 
 Remove the now-empty `Queued dependent implementation plan` section and retain the
-existing parallel and paused plan sections.
+queued subsequent, parallel, and paused plan sections.
 
 ```powershell
 git add docs/research_core_mechanisms_ch.md docs/athena-gui-design.md docs/superpowers/specs/2026-09-04-supervisor-transactional-search-resume-design.md codex_docs/2026-09-04-supervisor-transactional-search-resume-backend-completion-report.md codex_docs/CURRENT.md
