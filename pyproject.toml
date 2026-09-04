@@ -50,11 +50,6 @@ packages = ["src/athena", "src/athena_tui", "src/gui_gateway"]
 [tool.uv]
 default-groups = ["dev"]
 
-[tool.uv.workspace]
-members = [
-    "examples/123",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["test", "tests"]
 pythonpath = ["."]
