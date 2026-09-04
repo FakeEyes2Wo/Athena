@@ -6,7 +6,7 @@ from dataclasses import fields
 from inspect import signature
 
 from pydantic import BaseModel
-from pydantic_ai.messages import ToolReturnPart
+from pydantic_ai.messages import ToolReturnPart, UserPromptPart
 import pytest
 import httpx
 from openai import BadRequestError
@@ -1086,6 +1086,99 @@ async def test_prose_before_a_terminal_json_object_is_accepted() -> None:
 
     assert outcome.result_ref
     assert agent.model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_prose_with_one_schema_valid_json_object_is_accepted() -> None:
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider(
+        'I need to return the JSON now. {"answer":"hi"} Validation is complete.'
+    )
+
+    outcome = await agent.run(_structured_context(tools))
+
+    assert outcome.result_ref
+    assert agent.model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_multiple_schema_valid_json_objects_are_rejected_as_ambiguous() -> None:
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider('{"answer":"first"}\n{"answer":"second"}')
+
+    with pytest.raises(RuntimeError, match="multiple schema-valid JSON objects"):
+        await agent.run(_structured_context(tools))
+
+    assert agent.model.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_schema_valid_object_nested_in_valid_wrapper_is_rejected() -> None:
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _FencedStructuredProvider('{"wrapper":{"answer":"hi"}}')
+
+    with pytest.raises(RuntimeError, match="structured output invalid"):
+        await agent.run(_structured_context(tools))
+
+    assert agent.model.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_structured_retry_demands_one_raw_json_object() -> None:
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"), tools, "system", output_type=_StructuredOut
+    )
+    agent.model = _StructuredProvider()
+    ctx = _structured_context(tools)
+
+    await agent.run(ctx)
+
+    retry_prompts = [
+        part.content
+        for message in ctx.memory.items
+        for part in message.parts
+        if isinstance(part, UserPromptPart)
+        and "Previous JSON output was invalid" in part.content
+    ]
+    assert len(retry_prompts) == 1
+    assert "Return ONLY one raw JSON object" in retry_prompts[0]
+    assert "Do not include reasoning, prose, or Markdown fences" in retry_prompts[0]
+    assert '"answer"' in retry_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_final_invalid_structured_response_is_persisted_for_diagnosis(
+    tmp_path,
+) -> None:
+    from athena.core.artifact_store import LocalArtifactStore
+
+    raw_response = "not json; diagnostic sentinel must remain complete"
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    tools = ToolRegistry()
+    agent = Agent(
+        ResponsesProvider("model"),
+        tools,
+        "system",
+        output_type=_StructuredOut,
+        artifacts=store,
+    )
+    agent.model = _FencedStructuredProvider(raw_response)
+
+    with pytest.raises(RuntimeError, match=r"raw_response_ref=(sha256:[0-9a-f]+)") as exc:
+        await agent.run(_structured_context(tools))
+
+    raw_ref = exc.value.args[0].split("raw_response_ref=", 1)[1]
+    assert await store.get_text(raw_ref) == raw_response
 
 
 @pytest.mark.asyncio
