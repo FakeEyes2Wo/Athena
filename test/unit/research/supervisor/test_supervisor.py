@@ -374,6 +374,41 @@ async def _supervisor_with_frozen_plan(
     return supervisor
 
 
+def _seed_skip_sota(supervisor: Supervisor, tmp_path: Path) -> None:
+    supervisor.tree.add_hypothesis(
+        Hypothesis(
+            id="baseline",
+            statement="trusted baseline",
+            intervention="establish baseline",
+            expected_effect="reference score",
+        )
+    )
+    supervisor.tree.add_experiment(
+        "exp_baseline",
+        Experiment(
+            hypothesis_id="baseline",
+            commit="baseline-commit",
+            plan=ExperimentPlan(
+                kind="baseline",
+                change="establish baseline",
+                run_config_ref="sha256:" + "a" * 64,
+                budget={},
+                acceptance_rule="trusted score",
+            ),
+            gitwork=GitWorkBranch(
+                path=str(tmp_path), branch="main", base_commit="baseline-commit"
+            ),
+            status=ExperimentStatus.SUCCEEDED,
+            eval=EvalResult(
+                experiment_id="exp_baseline",
+                primary=0.71,
+                per_sample="sha256:" + "b" * 64,
+            ),
+        ),
+    )
+    supervisor.tree.set_sota("exp_baseline")
+
+
 class _InfrastructureFailureAgents:
     def __init__(self, stage: str) -> None:
         self.stage = stage
@@ -412,38 +447,7 @@ async def test_skip_finalizer_restores_memory_after_save_failure_and_reuses_path
     supervisor.state.phase = "SEARCH"
     supervisor.state.status = "RUNNING"
     supervisor.configure_options(skip_validate=True)
-    supervisor.tree.add_hypothesis(
-        Hypothesis(
-            id="baseline",
-            statement="trusted baseline",
-            intervention="establish baseline",
-            expected_effect="reference score",
-        )
-    )
-    supervisor.tree.add_experiment(
-        "exp_baseline",
-        Experiment(
-            hypothesis_id="baseline",
-            commit="baseline-commit",
-            plan=ExperimentPlan(
-                kind="baseline",
-                change="establish baseline",
-                run_config_ref="sha256:" + "a" * 64,
-                budget={},
-                acceptance_rule="trusted score",
-            ),
-            gitwork=GitWorkBranch(
-                path=str(tmp_path), branch="main", base_commit="baseline-commit"
-            ),
-            status=ExperimentStatus.SUCCEEDED,
-            eval=EvalResult(
-                experiment_id="exp_baseline",
-                primary=0.71,
-                per_sample="sha256:" + "b" * 64,
-            ),
-        ),
-    )
-    supervisor.tree.set_sota("exp_baseline")
+    _seed_skip_sota(supervisor, tmp_path)
 
     def fail_save() -> None:
         raise OSError("state unavailable")
@@ -463,6 +467,68 @@ async def test_skip_finalizer_restores_memory_after_save_failure_and_reuses_path
     assert supervisor.state.phase == "COMPLETED"
     assert supervisor.state.status == "COMPLETED"
     assert supervisor.state.validation_skipped is True
+
+
+@pytest.mark.asyncio
+async def test_skip_finalizer_keeps_completion_when_notifications_fail_independently(
+    tmp_path: Path,
+) -> None:
+    attempts: list[str] = []
+
+    async def fail_publish(kind, _payload):
+        attempts.append(kind)
+        raise OSError(f"{kind} unavailable")
+
+    supervisor = _checkpoint_supervisor(tmp_path, publish_callback=fail_publish)
+    supervisor.state.phase = "SEARCH"
+    supervisor.state.status = "RUNNING"
+    supervisor.configure_options(skip_validate=True)
+    _seed_skip_sota(supervisor, tmp_path)
+
+    await supervisor._phases._finalize_without_validation()
+
+    assert attempts == ["output", "state"]
+    persisted = ResearchState.load(tmp_path / ".athena" / "state.json")
+    assert persisted.phase == "COMPLETED"
+    assert persisted.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_skip_finalizer_propagates_cancelled_notification(
+    tmp_path: Path,
+) -> None:
+    async def cancel_publish(_kind, _payload):
+        raise asyncio.CancelledError
+
+    supervisor = _checkpoint_supervisor(tmp_path, publish_callback=cancel_publish)
+    supervisor.state.phase = "SEARCH"
+    supervisor.state.status = "RUNNING"
+    supervisor.configure_options(skip_validate=True)
+    _seed_skip_sota(supervisor, tmp_path)
+
+    with pytest.raises(asyncio.CancelledError):
+        await supervisor._phases._finalize_without_validation()
+
+    assert supervisor.state.phase == "COMPLETED"
+    assert supervisor.state.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_skip_finalizer_rejects_active_search_plan(tmp_path: Path) -> None:
+    supervisor = _checkpoint_supervisor(tmp_path)
+    supervisor.state.phase = "SEARCH"
+    supervisor.state.status = "RUNNING"
+    supervisor.configure_options(skip_validate=True)
+    _seed_skip_sota(supervisor, tmp_path)
+    task = asyncio.create_task(asyncio.sleep(60))
+    supervisor._run.add_running("hyp_active", task)
+
+    try:
+        with pytest.raises(RuntimeError, match="requires all SEARCH plans to settle"):
+            await supervisor._phases._finalize_without_validation()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

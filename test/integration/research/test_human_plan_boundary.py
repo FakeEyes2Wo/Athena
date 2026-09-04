@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -330,6 +331,78 @@ async def test_start_validation_transitions_search_to_completed(runtime):
 
 
 @pytest.mark.asyncio
+async def test_validate_running_recovery_ignores_new_skip_preference(runtime):
+    calls: list[tuple[str, float]] = []
+
+    async def validate(commit: str, metric: float) -> ValidationResult:
+        calls.append((commit, metric))
+        return ValidationResult(
+            result_id="recovered-validation",
+            status="COMPLETED",
+            test_score=metric,
+            final_test_score=metric,
+            sota_commit=commit,
+            validation_commit=commit,
+        )
+
+    runtime._config = replace(runtime.config, validation_phase=validate)
+    runtime.supervisor.configure_options(skip_validate=True)
+    runtime.state.phase = "VALIDATE"
+    runtime.state.status = "RUNNING"
+
+    await runtime.supervisor.continue_phase()
+
+    assert calls == [
+        (runtime.supervisor.tree.get_experiment("exp_baseline").commit, 0.8)
+    ]
+    assert runtime.state.phase == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_search_waiting_requires_continue_before_skip_completion(
+    runtime, monkeypatch
+):
+    async def no_search():
+        return None
+
+    monkeypatch.setattr(runtime.supervisor._search, "run_search", no_search)
+    runtime.supervisor.configure_options(skip_validate=True)
+    runtime.state.phase = "SEARCH"
+    runtime.state.status = "WAITING"
+    runtime.session.lifecycle.started = True
+    assert runtime.state.status == "WAITING"
+    assert not (
+        runtime.root / ".athena" / "exp_docs" / "runs" / "final-skipped.json"
+    ).exists()
+
+    await runtime.resume_current_task()
+    lifecycle = runtime.session.lifecycle.task
+    assert lifecycle is not None
+    await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
+
+    assert runtime.state.phase == "COMPLETED"
+    assert runtime.state.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_completed_skip_run_is_a_noop(runtime, monkeypatch):
+    runtime.state.phase = "COMPLETED"
+    runtime.state.status = "COMPLETED"
+    called = False
+
+    async def unexpected_finalizer():
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        runtime.supervisor._phases, "_finalize_without_validation", unexpected_finalizer
+    )
+    await runtime.supervisor.continue_phase()
+
+    assert called is False
+
+
+@pytest.mark.asyncio
 async def test_ordinary_prose_containing_stop_is_not_a_command(runtime):
     calls = runtime.supervisor_provider.calls
     await runtime.message("please stop overfitting, but continue research")
@@ -364,7 +437,9 @@ async def test_without_skip_or_auto_validate_keeps_the_human_search_gate(
 
     assert runtime.state.phase == "SEARCH"
     assert runtime.state.status == "WAITING"
-    assert not (runtime.root / ".athena" / "exp_docs" / "final-skipped.json").exists()
+    assert not (
+        runtime.root / ".athena" / "exp_docs" / "runs" / "final-skipped.json"
+    ).exists()
 
 
 def test_four_successes_do_not_stop_production_search(runtime):

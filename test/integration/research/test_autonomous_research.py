@@ -383,6 +383,11 @@ async def test_skip_validate_completes_from_search_without_calling_validation(
         for kind, payload in events
         if kind == "output"
     )
+    assert any(
+        str(payload.get("text", "")).startswith("SEARCH 已完成；")
+        for kind, payload in events
+        if kind == "output"
+    )
     exp_docs = tmp_path / ".athena" / "exp_docs"
     assert (exp_docs / "FINAL_REPORT.md").is_file()
     assert (exp_docs / "OPTIMIZATION.md").is_file()

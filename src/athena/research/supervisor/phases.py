@@ -21,7 +21,7 @@ from athena.research.supervisor.search_loop import SearchLoop
 
 logger = logging.getLogger(__name__)
 
-SKIPPED_VALIDATION_OUTPUT = "SEARCH 宸插畬鎴愶紱" + VALIDATION_SKIPPED_NOTICE
+SKIPPED_VALIDATION_OUTPUT = "SEARCH 已完成；" + VALIDATION_SKIPPED_NOTICE
 
 
 def _final_report_text(validation: dict) -> str:
