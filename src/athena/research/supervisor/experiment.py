@@ -32,6 +32,10 @@ from athena.research.exploration_files import (
     append_experiment_log,
     read_exploration_note,
 )
+from athena.research.predictions_cover import (
+    PredictionsCoverageError,
+    assert_predictions_cover,
+)
 from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
@@ -306,6 +310,21 @@ class PlanRunner:
 
         predictions_root = manifest.outputs["predictions"]
         predictions_dir = self.workdir / predictions_root
+        # 打分之前先确认预测答的是要被打分的那些行。VALIDATE 一直有这道检查，
+        # PREPARE/SEARCH 没有——于是 2026-09-02 的基线把行号当行 id 写了出去，
+        # 169725 行标签里只有 36674 行 join 上，而且每一行配到的都是别的窗口的
+        # 预测。Agent 自测 PR-AUC 0.7982，可信评估器返回 0.016331，框架把它当成
+        # 了整轮的参考指标。坏的参考指标不会让运行失败，它只是悄悄改变了标尺。
+        if self._context.predict_features is not None:
+            try:
+                assert_predictions_cover(
+                    predictions_dir, Path(self._context.predict_features)
+                )
+            except PredictionsCoverageError as exc:
+                return await self._failure(
+                    plan_id,
+                    PlanFailure(kind="output_failed", detail=str(exc)),
+                )
         predictions_ref = await pack_directory(self._store, predictions_dir)
         predictions = await load_directory(self._store, predictions_ref)
         report_ref = await self._store_report(manifest)

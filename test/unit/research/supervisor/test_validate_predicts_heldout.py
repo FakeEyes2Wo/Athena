@@ -7,10 +7,10 @@ import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import GitWorkBranch
-from athena.research.supervisor.validation import (
-    _assert_predictions_cover,
-    _execute_predictions,
+from athena.research.predictions_cover import (
+    assert_predictions_cover as _assert_predictions_cover,
 )
+from athena.research.supervisor.validation import _execute_predictions
 
 ROW_ID = "__athena_row_id"
 
@@ -45,6 +45,7 @@ class _Execution:
     def __init__(self, produce_ids: range | None = None) -> None:
         self.produce_ids = produce_ids
         self.predict_features_seen: list[str | None] = []
+        self.data_csv_seen: list[str | None] = []
         self.evaluation_splits: list[str | None] = []
 
     async def run(self, context, command=None, *, argv=None, **kwargs):
@@ -52,6 +53,9 @@ class _Execution:
         request = command
         self.predict_features_seen.append(
             str(request.predict_features) if request.predict_features else None
+        )
+        self.data_csv_seen.append(
+            str(request.data_csv) if request.data_csv else None
         )
         self.evaluation_splits.append(request.evaluation_split)
         if self.produce_ids is not None:
@@ -102,6 +106,30 @@ async def test_the_rerun_is_pointed_at_the_held_out_split(tmp_path: Path) -> Non
 
     assert execution.predict_features_seen == [str(final)]
     assert execution.evaluation_splits == ["final"]
+
+
+@pytest.mark.asyncio
+async def test_the_rerun_receives_the_configured_dataset_path(tmp_path: Path) -> None:
+    """The original dataset reaches the command as ATHENA_DATA_CSV.
+
+    A candidate that needs the raw table has no other way to name it: every
+    absolute path it inherited belongs to the workspace it was copied from.
+    """
+    dataset = tmp_path / "model_input.csv"
+    dataset.write_text("feature,label\n1,0\n", encoding="utf-8")
+    workdir, workspace = _workspace(tmp_path)
+    execution = _Execution(produce_ids=range(0, 1))
+
+    await _execute_predictions(
+        execution=execution,
+        git=_Git(),
+        workspace=workspace,
+        store=LocalArtifactStore(tmp_path / "artifacts"),
+        publish=None,
+        data_csv=dataset,
+    )
+
+    assert execution.data_csv_seen == [str(dataset)]
 
 
 @pytest.mark.asyncio
