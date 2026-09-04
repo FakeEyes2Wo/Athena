@@ -126,11 +126,13 @@ class PhaseMachine:
     async def continue_phase(self) -> None:
         """Execute the current phase for an idle run (interactive resume).
 
-        ``start()`` runs PREPARE→SEARCH→VALIDATE once. In interactive mode
-        (no ``auto_validate``) SEARCH parks at ``WAITING`` and the machine
-        returns; a later Human turn may transition the phase through
-        ``set_phase_decision`` or extend the Search budget. Re-enter the phase
-        machine here to actually run the chosen phase.
+        ``start()`` runs PREPARE→SEARCH once, then either enters VALIDATE under
+        the existing policy or, when ``skip_validate`` is enabled, writes the
+        SEARCH-only Final report and enters ``COMPLETED`` without a durable
+        FINAL phase. In interactive mode (no ``auto_validate``) SEARCH parks at
+        ``WAITING`` and the machine returns; a later Human turn may transition
+        the phase through ``set_phase_decision`` or extend the Search budget.
+        Re-enter the phase machine here to actually run the chosen phase.
         """
         if self._state.phase == "SEARCH":
             await self._search.run_search()

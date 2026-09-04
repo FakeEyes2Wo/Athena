@@ -560,7 +560,12 @@ class ResearchRuntime:
         await project_survey_event_impl(self, kind, _ref, data)
 
     async def start_task(self, task: str) -> str:
-        """Seed the research task and start PREPARE -> SEARCH -> VALIDATE."""
+        """Seed a task through PREPARE and SEARCH, with policy-based finalization.
+
+        When ``skip_validate`` is enabled, SEARCH writes the Final report and
+        enters ``COMPLETED`` directly; no durable FINAL phase is introduced.
+        Otherwise the existing VALIDATE policy remains in effect.
+        """
         if is_continue_command(task):
             return await self.resume_current_task()
         if self.state.task_understanding is None:

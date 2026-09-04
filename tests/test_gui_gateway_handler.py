@@ -73,17 +73,27 @@ class RecordingRuntime:
 
 
 class SettingsRuntime(RecordingRuntime):
-    def __init__(self, project_root: str, skip_validate: bool = False) -> None:
+    def __init__(
+        self,
+        project_root: str,
+        skip_validate: bool = False,
+        authoritative_skip_validate: bool | None = None,
+    ) -> None:
         super().__init__()
         self.project_root = project_root
         self.skip_validate = skip_validate
+        self.authoritative_skip_validate = authoritative_skip_validate
 
     async def apply_settings(self, patch: dict[str, object]) -> dict[str, object]:
         if "skip_validate" in patch:
             self.skip_validate = bool(patch["skip_validate"])
         return {
             "project_root": self.project_root,
-            "skip_validate": self.skip_validate,
+            "skip_validate": (
+                self.authoritative_skip_validate
+                if self.authoritative_skip_validate is not None
+                else self.skip_validate
+            ),
         }
 
     def settings(self) -> dict[str, object]:
@@ -183,21 +193,25 @@ async def test_handler_session_switch_swaps_runtime(tmp_path) -> None:
 async def test_settings_set_persists_validated_skip_preference_and_state(
     tmp_path,
 ) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
     store = GuiStateStore(tmp_path / "gui_state.json")
     store.save(
         GuiState(
             active_project_root=str(tmp_path),
             last_sessions={str(tmp_path.resolve()): "s-1"},
+            skip_validate_by_project={str(other.resolve()): True},
         )
     )
-    runtime = SettingsRuntime(str(tmp_path))
+    runtime = SettingsRuntime(str(tmp_path), authoritative_skip_validate=False)
     handler = GuiRequestHandler(runtime, state_store=store)
 
     result = await handler.dispatch("settings_set", {"patch": {"skip_validate": True}})
     saved = store.load()
 
-    assert result["skip_validate"] is True
-    assert saved.skip_validate_for(tmp_path) is True
+    assert result["skip_validate"] is False
+    assert saved.skip_validate_for(tmp_path) is False
+    assert saved.skip_validate_for(other) is True
     assert saved.active_project_root == str(tmp_path.resolve())
     assert saved.last_sessions == {str(tmp_path.resolve()): "s-1"}
 

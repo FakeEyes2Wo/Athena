@@ -159,7 +159,7 @@ class Supervisor:
         auto_validate: bool | None = None,
         skip_validate: bool | None = None,
     ) -> None:
-        """Update the three runtime research options owned by Supervisor."""
+        """Update four runtime research options, including ``skip_validate``."""
         if direction is not None:
             self._deps.search.direction = direction
         if tolerance is not None:
