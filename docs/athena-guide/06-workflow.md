@@ -3,10 +3,11 @@
 Athena 不是把一个长 Prompt 一次性交给模型，而是把研究任务拆成可恢复、可审计的阶段：
 
 ```text
-任务理解 → PREPARE → SEARCH → VALIDATE → COMPLETED
+未跳过验证：任务理解 → PREPARE → SEARCH → VALIDATE → COMPLETED
+启用 `skip_validate`：任务理解 → PREPARE → SEARCH → COMPLETED（SEARCH-only Final）
 ```
 
-其中，任务理解发生在正式阶段机启动之前；阶段机持久化的主流程是 `PREPARE → SEARCH → VALIDATE → COMPLETED`。每个阶段都应回答四个问题：当前使用哪些已冻结输入，哪些 Agent 可以写什么，什么结果才算完成，以及失败后如何恢复或降级。
+其中，任务理解发生在正式阶段机启动之前；未启用 `skip_validate` 时，阶段机持久化的主流程是 `PREPARE → SEARCH → VALIDATE → COMPLETED`，启用该设置时则从 SEARCH 直接生成 SEARCH-only Final 并进入 `COMPLETED`。每个阶段都应回答四个问题：当前使用哪些已冻结输入，哪些 Agent 可以写什么，什么结果才算完成，以及失败后如何恢复或降级。
 
 ## 6.1 总体流程
 
@@ -15,7 +16,8 @@ flowchart LR
   INPUT["任务与数据"] --> CLARIFY["任务理解"]
   CLARIFY --> PREPARE["PREPARE<br/>评估器、EDA、基线"]
   PREPARE --> SEARCH["SEARCH<br/>假设与实验"]
-  SEARCH --> VALIDATE["VALIDATE<br/>独立复验 SOTA"]
+  SEARCH -->|skip_validate=false| VALIDATE["VALIDATE<br/>独立复验 SOTA"]
+  SEARCH -->|skip_validate=true| DONE
   VALIDATE --> DONE["COMPLETED<br/>报告与持久状态"]
 
   classDef input fill:#f8f9fa,stroke:#868e96,color:#343a40;
@@ -466,7 +468,9 @@ flowchart LR
 - 评分、review、运行日志等 artifacts；
 - 由 `src/athena/research/report.py::build_final_report` 生成的 Markdown 报告。
 
-对于 Kaggle 任务，只有进入 `COMPLETED` 后，Supervisor 才能调度通用 worker 提交预测；不得在 VALIDATE 之前把中间预测当作最终提交。
+对于 Kaggle 任务，只有进入 `COMPLETED` 后，Supervisor 才能调度通用 worker 提交预测。未启用
+`skip_validate` 的路径不得在 VALIDATE 之前把中间预测当作最终提交；启用跳过策略的路径也只能
+在 SEARCH 完成并进入 `COMPLETED` 后提交，不能把 SEARCH 中间结果当作最终提交。
 
 若 `skip_validate=true`，最终报告和状态仍按上述终态交付，但验证结果明确为缺失：报告只引用
 SEARCH SOTA，不包含 final-test 分数或 generalization gap；`resume.json` 会记录
@@ -476,7 +480,7 @@ SEARCH SOTA，不包含 final-test 分数或 generalization gap；`resume.json` 
 
 General Agent 不参与假设生成、SOTA 选择或阶段决策。它只在 Supervisor 给出具体任务时执行通用工作；workflow 中最重要的用途是 Kaggle 任务在 `COMPLETED` 后提交最终预测。
 
-它会先读取明确任务和项目现状，再使用文件、shell 或 Kaggle 工具完成操作，处理非零退出并验证结果，最后返回 `{"result":"...","files":[...]}`。它可以报告提交结果和相关文件，但不能读取或修改冻结标签与 evaluator，不能决定哪个实验是 SOTA，也不能改变 phase、预算或研究树。即使 Supervisor 调度了它，提交动作也必须以 VALIDATE 已产生可信结果为前提。
+它会先读取明确任务和项目现状，再使用文件、shell 或 Kaggle 工具完成操作，处理非零退出并验证结果，最后返回 `{"result":"...","files":[...]}`。它可以报告提交结果和相关文件，但不能读取或修改冻结标签与 evaluator，不能决定哪个实验是 SOTA，也不能改变 phase、预算或研究树。未启用 `skip_validate` 时，提交动作必须以 VALIDATE 已产生可信结果为前提；启用跳过策略时，则必须以 SEARCH 已完成并已进入 `COMPLETED` 为前提。
 
 ## 6.7 持久化与恢复
 
