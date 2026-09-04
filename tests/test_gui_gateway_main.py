@@ -57,6 +57,11 @@ async def test_start_server_factory_restores_project_skip_validate(
         def settings(self):
             return {"project_root": seen["project_root"]}
 
+    def capture_factory(project_root, state_root, **options):
+        del state_root
+        seen["factory_project_root"] = project_root
+        return FakeRuntime(project_root=project_root, **options)
+
     class FakeServer:
         sockets = [type("Socket", (), {"getsockname": lambda self: (None, 17601)})()]
 
@@ -67,13 +72,14 @@ async def test_start_server_factory_restores_project_skip_validate(
         async def serve(self, host, port):
             return FakeServer()
 
-    monkeypatch.setattr(main, "ResearchRuntime", FakeRuntime)
     monkeypatch.setattr(main, "WebSocketTransport", FakeTransport)
     monkeypatch.setattr(main, "GuiStateStore", lambda: store)
 
-    server, port = await main.start_server(test_mode=True, port=17601)
+    server, port = await main.start_server(
+        test_mode=True, make_runtime=capture_factory, port=17601
+    )
 
     assert server is not None
     assert port == 17601
-    assert seen["project_root"] == str(project)
+    assert seen["factory_project_root"] == str(project)
     assert seen["skip_validate"] is True
