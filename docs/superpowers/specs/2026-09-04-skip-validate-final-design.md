@@ -1,7 +1,7 @@
 # Skip VALIDATE and Finalize After SEARCH Design
 
 Date: 2026-09-04
-Status: approved for planning
+Status: approved for implementation
 
 ## Problem
 
@@ -173,6 +173,13 @@ may retry finalization. If the state save fails after in-memory fields were
 prepared, the helper restores their previous values before propagating the
 error. Once terminal state is successfully persisted, output/subscriber failure
 is logged and does not roll the run back.
+
+Because the audit marker lives in digest-bound `resume.json` while terminal
+phase/status live in `state.json`, a save with resume metadata writes the new
+resume payload first and the matching core payload second. A failed resume write
+therefore leaves the old core authoritative; a failed core write leaves a stale
+new resume payload that the existing digest check ignores. A durable COMPLETED
+core can never be intentionally committed before its skipped-validation marker.
 
 Recovery follows these rules:
 
