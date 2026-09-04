@@ -1,7 +1,7 @@
 # Supervisor Transactional Control and Search Resume Design
 
 Date: 2026-09-04
-Status: approved; implementation planning queued behind the active plan
+Status: approved; backend implementation plan active, frontend plan queued
 
 ## Problem
 
@@ -314,6 +314,15 @@ process death. A second process returns `session_busy` before loading the sessio
 writable. The lock implementation must be integration-tested on the supported
 Windows/WSL shared-filesystem path; a plain lockfile whose mere existence survives a
 crash is not an acceptable substitute.
+
+A planning-time probe on the supported `/mnt/c` DrvFS path showed that native
+Windows `msvcrt` byte locking and WSL `flock`/`lockf` can both report success on the
+same file. They therefore cannot be paired as the ownership primitive. Both sides
+must use one Win32 share-denial handle: native Windows acquires it directly, while a
+WSL process owns a small Windows PowerShell broker over a parent-lifetime pipe. If
+WSL interop or path translation is unavailable on a shared Windows path, startup
+fails closed with `cross_os_lock_unavailable`; it never silently falls back to an
+incompatible Linux lock. Native Linux filesystems continue to use `flock`.
 
 The transaction does not mutate the shared ResearchState before persistence:
 
@@ -793,17 +802,18 @@ tests use fake providers and no network.
 
 ## Repository sequencing
 
-`codex_docs/CURRENT.md` currently points to the unfinished
-`2026-09-03-llm-task-understanding-output` implementation plan. That work owns
-`athena-gui/src/types/ui.ts` and `usePipeline.ts`, which overlap this design's input
-routing. In accordance with the repository instructions, this design is queued and
-must not replace the active plan or modify those files until the active plan is
-completed and its closeout updates `CURRENT.md`. The implementation plan for this
-design must be written against the resulting head, with a fresh overlap audit.
+The previously active `2026-09-03-llm-task-understanding-output` work is complete and
+locally integrated through commit `9522a2c`. Planning was therefore performed against
+that resulting head. The still-listed parallel authoritative-baseline plan is in its
+verification/documentation closeout and shares `runtime/bootstrap.py`,
+`runtime/facade.py`, and `gui_gateway/handler.py`; the backend plan has an explicit
+preflight gate that stops before editing any of those files if a live worktree owns
+overlapping changes.
 
-To keep review units small, planning is split after that audit: a backend plan owns
-transactional persistence, Supervisor APIs, Search resume, lifecycle policy, and the
-derived interaction mode; a dependent frontend plan owns interaction-mode routing and
-empty-workspace presentation only. The backend contract and compatibility tests must
-be green before frontend implementation begins. Neither plan duplicates domain rules
-from the other.
+To keep review units small, implementation is split into two dependency-ordered
+plans. The active backend plan owns transactional persistence, Supervisor APIs,
+Search resume, lifecycle policy, logging, and the derived interaction mode. The
+queued frontend plan owns interaction-mode routing and empty-workspace presentation
+only. The backend completion report and compatibility tests must exist and be green
+before the frontend plan becomes active. Neither plan duplicates domain rules from
+the other.
