@@ -28,6 +28,7 @@ SETTINGS_WHITELIST: frozenset[str] = frozenset(
         "direction",
         "tolerance",
         "auto_validate",
+        "skip_validate",
         "manual_mode",
         "ideation",
         "ideator_count",
@@ -91,6 +92,7 @@ class SettingsController:
             "direction": rt.direction,
             "tolerance": rt.session.options.tolerance,
             "auto_validate": rt.session.options.auto_validate,
+            "skip_validate": rt.session.options.skip_validate,
             "manual_mode": rt.state.manual_mode,
             "phase": rt.state.phase,
             "status": rt.state.status,
@@ -214,6 +216,12 @@ class SettingsController:
                 raise ValueError("auto_validate must be a bool")
             rt.session.options.auto_validate = auto_validate
             rt.supervisor.configure_options(auto_validate=auto_validate)
+        if "skip_validate" in patch:
+            skip_validate = patch["skip_validate"]
+            if not isinstance(skip_validate, bool):
+                raise ValueError("skip_validate must be a bool")
+            rt.session.options.skip_validate = skip_validate
+            rt.supervisor.configure_options(skip_validate=skip_validate)
 
     async def _apply_compute_settings(self, patch: dict[str, Any]) -> None:
         """Apply data-root and local/remote compute settings."""

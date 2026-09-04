@@ -393,12 +393,13 @@ def test_configure_options_updates_focused_dependencies(tmp_path: Path) -> None:
     supervisor = _checkpoint_supervisor(tmp_path)
 
     supervisor.configure_options(
-        direction="minimize", tolerance=0.05, auto_validate=True
+        direction="minimize", tolerance=0.05, auto_validate=True, skip_validate=True
     )
 
     assert supervisor._deps.search.direction == "minimize"
     assert supervisor._deps.search.tolerance == 0.05
     assert supervisor._deps.phases.auto_validate is True
+    assert supervisor._deps.phases.skip_validate is True
 
 
 @pytest.mark.asyncio

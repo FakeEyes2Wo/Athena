@@ -112,7 +112,7 @@ Evidence: exit 0; 3 files and 25 tests passed in 3.70s.
 - Changes: GUI settings snapshot/patch accepts exactly `skip_validate` and rejects non-booleans.
 - Preserves: historical positional construction of `PhaseActions` by appending the new defaulted field after all existing fields.
 
-- [ ] **Step 1: Write failing constructor, snapshot, mutation, and validation tests**
+- [x] **Step 1: Write failing constructor, snapshot, mutation, and validation tests**
 
 Add these focused cases to `test_runtime_settings.py`:
 
@@ -158,7 +158,7 @@ Extend `test_configure_options_updates_focused_dependencies` so one call supplie
 `PhaseActions` regression to assert its old sixth and seventh arguments retain
 their meanings and the appended `skip_validate` defaults to `False`.
 
-- [ ] **Step 2: Run the tests and capture RED evidence**
+- [x] **Step 2: Run the tests and capture RED evidence**
 
 Run:
 
@@ -170,7 +170,7 @@ Run:
 
 Expected: FAIL because the constructor, session options, phase dependency, and settings whitelist do not yet expose `skip_validate`.
 
-- [ ] **Step 3: Thread the minimal policy through composition**
+- [x] **Step 3: Thread the minimal policy through composition**
 
 Add the fields without changing defaults for current callers:
 
@@ -202,7 +202,7 @@ class PhaseActions:
 Add `skip_validate` to `ResearchRuntime.__init__`, the `build_config` field map,
 `RuntimeOptions(...)`, and keyword construction of `PhaseActions(...)`.
 
-- [ ] **Step 4: Implement the strict live settings projection**
+- [x] **Step 4: Implement the strict live settings projection**
 
 Add `skip_validate` to `SETTINGS_WHITELIST` and `snapshot()`. Extend the policy
 branch exactly as follows:
@@ -220,7 +220,7 @@ Extend `Supervisor.configure_options` with an optional keyword and update only
 `self._deps.phases.skip_validate` when it is non-`None`. Do not derive or mutate
 `auto_validate`.
 
-- [ ] **Step 5: Run, format, check, update this task, and commit**
+- [x] **Step 5: Run, format, check, update this task, and commit**
 
 Run:
 

@@ -157,6 +157,7 @@ class Supervisor:
         direction: Literal["maximize", "minimize"] | None = None,
         tolerance: float | None = None,
         auto_validate: bool | None = None,
+        skip_validate: bool | None = None,
     ) -> None:
         """Update the three runtime research options owned by Supervisor."""
         if direction is not None:
@@ -165,6 +166,8 @@ class Supervisor:
             self._deps.search.tolerance = tolerance
         if auto_validate is not None:
             self._deps.phases.auto_validate = auto_validate
+        if skip_validate is not None:
+            self._deps.phases.skip_validate = skip_validate
 
     async def update_waiting_plan_budget(self, **payload: object) -> dict[str, object]:
         """Extend one exhausted Plan so SEARCH may resume it."""

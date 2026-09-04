@@ -43,6 +43,42 @@ def test_research_runtime_composes_skip_validate(tmp_path) -> None:
     assert runtime.supervisor._deps.phases.skip_validate is True
 
 
+def test_skip_validate_defaults_off_and_projects_to_settings(tmp_path) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    assert runtime.config.skip_validate is False
+    assert runtime.session.options.skip_validate is False
+    assert runtime.settings()["skip_validate"] is False
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_updates_skip_validate_without_changing_auto_validate(
+    tmp_path,
+) -> None:
+    runtime = ResearchRuntime(
+        project_root=tmp_path, auto_validate=True, skip_validate=False
+    )
+
+    snapshot = await runtime.apply_settings({"skip_validate": True})
+
+    assert snapshot["skip_validate"] is True
+    assert runtime.session.options.skip_validate is True
+    assert runtime.supervisor._deps.phases.skip_validate is True
+    assert runtime.session.options.auto_validate is True
+    assert runtime.supervisor._deps.phases.auto_validate is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [0, 1, "true", None, []])
+async def test_apply_settings_rejects_non_boolean_skip_validate(
+    tmp_path, value
+) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match="skip_validate must be a bool"):
+        await runtime.apply_settings({"skip_validate": value})
+
+
 def _runtime(tmp_path) -> ResearchRuntime:
     runtime = ResearchRuntime(project_root=tmp_path)
     runtime.state.status = "RUNNING"
