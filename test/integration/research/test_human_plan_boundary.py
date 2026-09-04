@@ -366,15 +366,19 @@ async def test_search_waiting_requires_continue_before_skip_completion(
         return None
 
     monkeypatch.setattr(runtime.supervisor._search, "run_search", no_search)
-    runtime.supervisor.configure_options(skip_validate=True)
+    runtime.supervisor.configure_options(auto_validate=False, skip_validate=False)
+    runtime.state.search_limit = 0
     runtime.state.phase = "SEARCH"
-    runtime.state.status = "WAITING"
-    runtime.session.lifecycle.started = True
+    runtime.state.status = "RUNNING"
+    await runtime.supervisor.continue_phase()
+
+    assert runtime.state.phase == "SEARCH"
     assert runtime.state.status == "WAITING"
     assert not (
         runtime.root / ".athena" / "exp_docs" / "runs" / "final-skipped.json"
     ).exists()
 
+    runtime.supervisor.configure_options(skip_validate=True)
     await runtime.resume_current_task()
     lifecycle = runtime.session.lifecycle.task
     assert lifecycle is not None
