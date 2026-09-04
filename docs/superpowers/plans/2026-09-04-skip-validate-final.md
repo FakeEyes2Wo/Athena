@@ -21,6 +21,10 @@
 - Ordinary output/subscriber failure after the terminal state save is best-effort and cannot roll back completion. `asyncio.CancelledError` continues to propagate.
 - Preserve unrelated worktree changes. The dirty main worktree is out of bounds until the explicit integration task, and every commit must stage only paths named by its task.
 - Do not use networked model providers in tests. Update this plan's checkboxes only after fresh RED/GREEN or verification evidence exists.
+- The shared root virtual environment is editable-installed against the main
+  checkout. In every PowerShell process that runs Python from this linked
+  worktree, first set `$env:PYTHONPATH = (Resolve-Path 'src').Path`; otherwise
+  pytest silently mixes this worktree's tests with main's production modules.
 
 ## File Map
 
@@ -50,9 +54,9 @@
 
 ## Execution Preflight
 
-- [ ] Record `git status --short --branch`, `git diff --cached --name-status`, `git log -1 --oneline`, and `git worktree list --porcelain` in this isolated worktree. Confirm only the committed design/planning files differ from base and do not touch the dirty main worktree.
-- [ ] Install worktree-local frontend dependencies with `npm --prefix athena-gui ci`; record npm's own audit summary separately from test results.
-- [ ] Run the focused backend baseline:
+- [x] Record `git status --short --branch`, `git diff --cached --name-status`, `git log -1 --oneline`, and `git worktree list --porcelain` in this isolated worktree. Confirm only the committed design/planning files differ from base and do not touch the dirty main worktree. Evidence: clean `feat/skip-validate-final` at planning commit `0cf0580`; linked-worktree git dir differs from the common dir; main was read only.
+- [x] Install worktree-local frontend dependencies with `npm --prefix athena-gui ci`; record npm's own audit summary separately from test results. Evidence: exit 0, 420 packages installed; npm reported one `whatwg-encoding` deprecation and no audit summary. A separate `npm audit --audit-level=moderate` produced no response from the registry and was interrupted, so no vulnerability result is claimed.
+- [x] Run the focused backend baseline:
 
 ```powershell
 ..\..\.venv\Scripts\python.exe -m pytest -q `
@@ -68,7 +72,12 @@
 
 Expected: exit 0. Record exact pass/fail/warning counts; ACL-owned pytest cache warnings are environment evidence, not feature failures.
 
-- [ ] Run the focused frontend baseline:
+Evidence: after applying the mandatory worktree `PYTHONPATH`, exit 0 with
+`130 passed in 15.67s`. A diagnostic run without that override imported
+production modules from dirty main and produced three false mixed-checkout
+failures; it is environment evidence, not a repository baseline failure.
+
+- [x] Run the focused frontend baseline:
 
 ```powershell
 npm --prefix athena-gui test -- --run `
@@ -78,6 +87,8 @@ npm --prefix athena-gui test -- --run `
 ```
 
 Expected: all listed files pass before adding the new Settings-panel test.
+
+Evidence: exit 0; 3 files and 25 tests passed in 3.70s.
 
 ---
 
