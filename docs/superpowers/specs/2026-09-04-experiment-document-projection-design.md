@@ -1,7 +1,7 @@
 # Experiment Document Projection Redesign
 
 Date: 2026-09-04
-Status: design approved; written-spec review pending
+Status: approved for implementation
 
 ## 1. Problem and objective
 
