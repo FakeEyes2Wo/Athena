@@ -8,7 +8,7 @@ import re
 from openai import AsyncOpenAI, RateLimitError
 
 from athena.core.artifact_store import LocalArtifactStore
-from athena.research.literature.paper_markdown.interfaces import (
+from athena.research.literature.paper_markdown.models import (
     VisualInterpretation,
     VisualInterpretationRequest,
 )

@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy
 
 from athena.core.artifact_store import LocalArtifactStore
-from athena.research.literature.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.models import (
     PaperChunk,
     PaperContent,
     PaperProvenance,

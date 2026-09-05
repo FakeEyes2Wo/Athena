@@ -14,15 +14,17 @@ import httpx
 from openai import RateLimitError
 
 from athena.core.agent.models import AgentOutcome
-from athena.research.literature.paper_markdown.processor import (
-    VisualInterpretationRequiredError,
-)
-from athena.research.literature.paper_markdown.schemas import (
+from athena.core.artifact_store import LocalArtifactStore
+from athena.research.literature.paper_markdown.models import (
     PaperChunk,
     PaperContent,
     PaperConversionRequest,
     PaperProvenance,
 )
+from athena.research.literature.paper_markdown.processor import (
+    VisualInterpretationRequiredError,
+)
+from athena.research.literature.paper_rag.index import split_sentences
 from athena.research.literature.paper_scout.schemas import (
     PaperScoutResult,
     ScoutCorpus,
@@ -30,7 +32,6 @@ from athena.research.literature.paper_scout.schemas import (
     ScoutRequest,
     ScoutStats,
 )
-from athena.research.literature.survey import stages as pipeline_module
 from athena.research.literature.paper_source.http import HostRateLimiter
 from athena.research.literature.paper_source.schemas import (
     PaperIdentity,
@@ -39,8 +40,8 @@ from athena.research.literature.paper_source.schemas import (
     PaperSourceResult,
     PaperSourceStats,
 )
+from athena.research.literature.survey import stages as pipeline_module
 from athena.research.literature.survey.library import PaperLibrary
-from athena.research.literature.paper_rag.index import split_sentences
 from athena.research.literature.survey.pipeline import (
     SHRED_MIN_SENTENCES,
     PaperOutcome,
@@ -48,7 +49,6 @@ from athena.research.literature.survey.pipeline import (
     SurveyRequest,
 )
 from athena.research.literature.survey.wiring import SurveyStack
-from athena.core.artifact_store import LocalArtifactStore
 
 PAPERS = [
     ("arxiv:2501.00001", "Scaling Laws for Tabular Models", 1.0),

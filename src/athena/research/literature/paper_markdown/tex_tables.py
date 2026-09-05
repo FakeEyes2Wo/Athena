@@ -99,7 +99,7 @@ def table_to_markdown(
                     .replace("|", "\\|")
                     .replace("\n", "<br>")
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - unsafe table falls back to source
                 return ""
             rendered_cells.append(value)
             continuation_cells.append(False)
@@ -147,7 +147,7 @@ def table_to_markdown(
     if data:
         possible_subheader = data[0]
         nonempty_subheaders = [value for value in possible_subheader if value]
-        has_grouped_header = len(set(value for value in header if value)) < len(
+        has_grouped_header = len({value for value in header if value}) < len(
             [value for value in header if value]
         )
         short_text_subheader = bool(nonempty_subheaders) and all(

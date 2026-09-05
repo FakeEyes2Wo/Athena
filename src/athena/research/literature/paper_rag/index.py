@@ -15,8 +15,8 @@ import re
 
 import numpy
 
-from athena.core.contracts import ArtifactRef
-from athena.research.literature.paper_markdown.schemas import (
+from athena.core.contracts import ArtifactRef, ArtifactStore
+from athena.research.literature.paper_markdown.models import (
     PaperContent,
     RetrievalUnit,
 )
@@ -27,7 +27,6 @@ from athena.research.literature.paper_rag.schemas import (
     PaperCorpusIndex,
 )
 from athena.research.literature.paper_scout.pool import title_key
-from athena.core.contracts import ArtifactStore
 
 SENTENCE_END = re.compile(r"[.!?](?=\s)")
 WORD_BOUNDARY = re.compile(r"[\s(\[]")
@@ -135,7 +134,7 @@ def is_indexable(span: str) -> bool:
     内容，用长度阈值会把它们一并误删。
     """
     stripped = span.strip()
-    if stripped.startswith(HEADING_PATH_PREFIX) or stripped.startswith("#"):
+    if stripped.startswith((HEADING_PATH_PREFIX, "#")):
         return False
     if stripped.startswith("|"):
         return TABLE_DELIMITER.match(stripped) is None

@@ -16,9 +16,11 @@ from pathlib import Path
 
 import pymupdf as fitz
 
-from athena.research.literature.paper_markdown.document import ParsedVisual
-from athena.research.literature.paper_markdown.interfaces import VisualInterpretation
-from athena.research.literature.paper_markdown.schemas import PaperVisual
+from athena.research.literature.paper_markdown.models import (
+    PaperVisual,
+    ParsedVisual,
+    VisualInterpretation,
+)
 
 FITZ_FILE_TYPES = {
     "application/pdf": "pdf",
@@ -91,9 +93,10 @@ def sniff_media_type(data: bytes, declared: str | None = None) -> str:
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image/webp"
     lowered = head.lower()
-    if lowered.startswith(XML_PROLOGUE) or lowered.lstrip().startswith(b"<"):
-        if any(marker in lowered for marker in SVG_MARKERS):
-            return "image/svg+xml"
+    if (lowered.startswith(XML_PROLOGUE) or lowered.lstrip().startswith(b"<")) and any(
+        marker in lowered for marker in SVG_MARKERS
+    ):
+        return "image/svg+xml"
     return (declared or "").strip().lower()
 
 
@@ -108,12 +111,12 @@ def render_with_fitz(data: bytes, media_type: str, dpi: int) -> bytes | None:
                 matrix=fitz.Matrix(dpi / 72.0, dpi / 72.0), alpha=False
             )
             return pixmap.tobytes("png")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - retry through the image decoder
         # 文档路径打不开（多数位图不是"文档"）→ 退到位图解码器再试一次
         pass
     try:
         return fitz.Pixmap(data).tobytes("png")
-    except Exception:
+    except Exception:  # noqa: BLE001 - unsupported/corrupt input is a soft failure
         # 内容损坏或这个 MuPDF 版本不认识该格式 → 交给调用方记诊断
         return None
 
@@ -143,7 +146,10 @@ def render_postscript(data: bytes, executable: str, dpi: int) -> bytes | None:
         ]
         try:
             done = subprocess.run(
-                arguments, capture_output=True, timeout=GHOSTSCRIPT_TIMEOUT
+                arguments,
+                capture_output=True,
+                timeout=GHOSTSCRIPT_TIMEOUT,
+                check=False,
             )
         except (OSError, subprocess.SubprocessError):
             # 可执行文件不存在、无权限或渲染超时 → 当作渲染不出来

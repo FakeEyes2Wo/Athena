@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Protocol
 import numpy
 
 if TYPE_CHECKING:
-    from athena.research.literature.paper_markdown.schemas import PaperContent
+    from athena.research.literature.paper_markdown.models import PaperContent
 
 
 class TextEmbedder(Protocol):

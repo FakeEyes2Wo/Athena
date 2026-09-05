@@ -7,9 +7,10 @@ import tempfile
 import unittest
 import zipfile
 
+from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import TOOL_BEGIN, TOOL_END, ToolContext
-from athena.research.literature.paper_markdown.schemas import PaperConversionRequest
+from athena.research.literature.paper_markdown.models import PaperConversionRequest
 from athena.research.literature.paper_source.arxiv import (
     parse_atom_feed,
     parse_raw_record,
@@ -39,7 +40,6 @@ from athena.research.literature.paper_source.schemas import (
     normalize_doi,
 )
 from athena.research.literature.paper_source.tool import PaperFetchTool
-from athena.core.artifact_store import LocalArtifactStore
 
 ZERO_INTERVALS = {bucket: 0.0 for bucket in DEFAULT_BUCKET_INTERVALS}
 QUERY_URL = "https://export.arxiv.org/api/query"

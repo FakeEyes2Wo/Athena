@@ -477,6 +477,16 @@ Replace the split `schemas.py`, `known_item.py`, `query_sets.py`, `recall.py`, a
 
 `ChannelScore` now accepts only `channel` and raw `outcomes`; its six aggregate values are computed properties, reducing Pydantic input fields from eight to two while preserving all nine serialized JSON keys. The implementation falls from seven Python files to five and from 848 to 537 nonblank lines, a 311-line reduction. The pre-change benchmark and paper-selection baseline passed 64 tests; the post-change selection passed 62 tests after deleting only the two tests for removed implementation APIs, and all 23 CLI tests passed. Targeted Ruff, Python compilation, every bench subcommand help smoke, removed-module searches, pre-commit hooks, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the ten baseline rows advances reviewed coverage to 282/602. Whole-repository acceptance remains pending.
 
+## Paper conversion boundary consolidation
+
+Read the shared literature contracts and all 17 `paper_markdown` Python files completely, then traced their imports through paper RAG, paper source, survey construction, tools, and tests. Preserve TeX-first conversion with PDF-wrapper fallback, source locators and diagnostics, deterministic chunk construction, visual evidence and interpretation auditing, persisted output schemas, and downstream retrieval units. Retain the shared contracts, chunking, quality gate, TeX source/table/parser, PDF parser, rendering, visual-media, and tool boundaries because each owns a distinct format or lifecycle concern.
+
+Consolidate transient parsed-paper records, persisted schemas, and provider request/result protocols in `models.py`, deleting `document.py`, `interfaces.py`, and `schemas.py`. Move PDF block geometry and reading order into `pdf_elements.py`, and move bibliography rendering into `tex_render.py`, deleting `pdf_layout.py` and `tex_bibliography.py`. The package falls from 17 Python files to 13 and from 5,488 to 5,408 physical lines (5,042 to 4,969 nonblank lines). These figures include the renamed and expanded model module rather than treating it as an untracked deletion.
+
+Make `PaperMarkdownTool` depend on one configured `PaperProcessor` instead of five construction inputs, reducing its stored dependencies from two to one. Keep only `process` public on `PaperProcessor`, remove the unused parsed-paper argument from visual interpretation, and replace the nine-input PDF page consumer with one three-field document context and one five-field page-analysis record. Larger parsed and persisted records remain explicit data projections rather than mutable service state.
+
+The unchanged pre-change core baseline passed 95 tests plus 18 subtests. Final verification passed the same core selection, 135 paper-RAG/source tests plus three subtests, and 94 survey tests. Targeted Ruff and removed-module/public-method searches passed; pytest reported only the existing cache-permission warning. Closing the shared-contract row and all 17 baseline `paper_markdown` rows advances reviewed coverage to 300/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1019,24 +1029,25 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/bench/metrics.py` | new | Added; pure recall and overlap calculations |
 | `src/athena/research/literature/bench/models.py` | new | Added; versioned benchmark inputs and reports |
 | `src/athena/research/literature/bench/retrieval.py` | new | Added; known-item execution and dataset/report I/O |
-| `src/athena/research/literature/contracts.py` | 45 | Pending |
-| `src/athena/research/literature/paper_markdown/__init__.py` | 15 | Pending |
-| `src/athena/research/literature/paper_markdown/chunking.py` | 213 | Pending |
-| `src/athena/research/literature/paper_markdown/document.py` | 65 | Pending |
-| `src/athena/research/literature/paper_markdown/interfaces.py` | 102 | Pending |
-| `src/athena/research/literature/paper_markdown/pdf_elements.py` | 62 | Pending |
-| `src/athena/research/literature/paper_markdown/pdf_layout.py` | 79 | Pending |
-| `src/athena/research/literature/paper_markdown/pdf_parser.py` | 1275 | Pending |
-| `src/athena/research/literature/paper_markdown/processor.py` | 515 | Pending |
-| `src/athena/research/literature/paper_markdown/quality.py` | 373 | Pending |
-| `src/athena/research/literature/paper_markdown/schemas.py` | 368 | Pending |
-| `src/athena/research/literature/paper_markdown/tex_bibliography.py` | 84 | Pending |
-| `src/athena/research/literature/paper_markdown/tex_parser.py` | 1259 | Pending |
-| `src/athena/research/literature/paper_markdown/tex_render.py` | 157 | Pending |
-| `src/athena/research/literature/paper_markdown/tex_source.py` | 414 | Pending |
-| `src/athena/research/literature/paper_markdown/tex_tables.py` | 196 | Pending |
-| `src/athena/research/literature/paper_markdown/tool.py` | 81 | Pending |
-| `src/athena/research/literature/paper_markdown/visuals.py` | 230 | Pending |
+| `src/athena/research/literature/contracts.py` | 45 | Reviewed; retain shared chunking, diagnostic, source-format, and visual-policy contracts |
+| `src/athena/research/literature/paper_markdown/__init__.py` | 15 | Reviewed; retain narrow package facade over consolidated models and processor |
+| `src/athena/research/literature/paper_markdown/chunking.py` | 213 | Reviewed; retain deterministic retrieval-unit construction boundary |
+| `src/athena/research/literature/paper_markdown/document.py` | 65 | Reviewed; transient parsed records merged into models.py and file deleted |
+| `src/athena/research/literature/paper_markdown/interfaces.py` | 102 | Reviewed; provider protocols and request/result records merged into models.py and file deleted |
+| `src/athena/research/literature/paper_markdown/pdf_elements.py` | 62 | Reviewed; absorb PDF block geometry and reading-order logic |
+| `src/athena/research/literature/paper_markdown/pdf_layout.py` | 79 | Reviewed; merged into pdf_elements.py and file deleted |
+| `src/athena/research/literature/paper_markdown/pdf_parser.py` | 1275 | Reviewed; retain cohesive parser and replace nine page inputs with two context records |
+| `src/athena/research/literature/paper_markdown/processor.py` | 515 | Reviewed; expose only process and reduce visual interpretation inputs |
+| `src/athena/research/literature/paper_markdown/quality.py` | 373 | Reviewed; retain independent deterministic conversion-quality gate |
+| `src/athena/research/literature/paper_markdown/schemas.py` | 368 | Reviewed; persisted schemas moved to consolidated models.py and file deleted |
+| `src/athena/research/literature/paper_markdown/models.py` | new | Added; parsed, persisted, and provider-boundary records |
+| `src/athena/research/literature/paper_markdown/tex_bibliography.py` | 84 | Reviewed; bibliography rendering merged into tex_render.py and file deleted |
+| `src/athena/research/literature/paper_markdown/tex_parser.py` | 1259 | Reviewed; retain cohesive TeX structure parser |
+| `src/athena/research/literature/paper_markdown/tex_render.py` | 157 | Reviewed; absorb citation, label, reference, and bibliography rendering |
+| `src/athena/research/literature/paper_markdown/tex_source.py` | 414 | Reviewed; retain archive expansion and source-selection boundary |
+| `src/athena/research/literature/paper_markdown/tex_tables.py` | 196 | Reviewed; retain specialized tabular conversion boundary |
+| `src/athena/research/literature/paper_markdown/tool.py` | 81 | Reviewed; accept one configured processor instead of five construction inputs |
+| `src/athena/research/literature/paper_markdown/visuals.py` | 230 | Reviewed; retain media extraction and rendering boundary |
 | `src/athena/research/literature/paper_rag/__init__.py` | 29 | Pending |
 | `src/athena/research/literature/paper_rag/index.py` | 676 | Pending |
 | `src/athena/research/literature/paper_rag/interfaces.py` | 42 | Pending |

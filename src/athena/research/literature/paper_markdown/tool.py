@@ -4,16 +4,8 @@ import asyncio
 
 from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
-from athena.research.literature.paper_markdown.interfaces import (
-    StructureRefiner,
-    VisualInterpreter,
-)
-from athena.research.literature.paper_markdown.processor import (
-    DEFAULT_VISUAL_CONCURRENCY,
-    PaperProcessor,
-)
-from athena.research.literature.paper_markdown.schemas import PaperConversionRequest
-from athena.core.contracts import ArtifactStore
+from athena.research.literature.paper_markdown.models import PaperConversionRequest
+from athena.research.literature.paper_markdown.processor import PaperProcessor
 
 
 class PaperMarkdownTool(BaseTool):
@@ -46,22 +38,8 @@ class PaperMarkdownTool(BaseTool):
         concurrency_safe=False,
     )
 
-    def __init__(
-        self,
-        artifacts: ArtifactStore,
-        visual_interpreter: VisualInterpreter | None,
-        structure_refiner: StructureRefiner | None = None,
-        visual_concurrency: int = DEFAULT_VISUAL_CONCURRENCY,
-        ghostscript: str | None = None,
-    ) -> None:
-        self.artifacts = artifacts
-        self.processor = PaperProcessor(
-            artifacts,
-            visual_interpreter,
-            structure_refiner,
-            visual_concurrency=visual_concurrency,
-            ghostscript=ghostscript,
-        )
+    def __init__(self, processor: PaperProcessor) -> None:
+        self.processor = processor
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """Process one persisted conversion request and return its result reference."""
@@ -71,10 +49,10 @@ class PaperMarkdownTool(BaseTool):
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        payload = await self.artifacts.get_text(request_ref)
+        payload = await self.processor.artifacts.get_text(request_ref)
         request = PaperConversionRequest.model_validate_json(payload)
         content = await self.processor.process(request)
-        result_ref = await self.artifacts.put_text(content.model_dump_json())
+        result_ref = await self.processor.artifacts.put_text(content.model_dump_json())
         return ToolResult(
             data={"paper_content_ref": result_ref},
             artifacts=[result_ref],

@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Iterable
+from typing import Any
 
 from pylatexenc.latexwalker import (
     LatexEnvironmentNode,
@@ -25,6 +26,11 @@ ENVIRONMENT_REQUIRED_ARGUMENTS = {
 IMAGE_PATH = re.compile(r"\S*\.(?:png|jpe?g|pdf|eps|svg|gif|tif{1,2})\b", re.IGNORECASE)
 INLINE_MARKUP = re.compile(r"[`*_]{1,3}")
 VENUE_PREFIX = re.compile(r"^(?:[A-Z][A-Za-z&.\-]{1,14}\s*)?[A-Z]{2,12}\s*'?\d{2,4}\b")
+CITATION_PATTERN = re.compile(
+    r"\\(?:cite|citep|citet|citealp|citeauthor|parencite|textcite)\w*\s*(?:\[[^]]*\]\s*)*\{([^}]+)\}"
+)
+LABEL_PATTERN = re.compile(r"\\label\s*\{([^}]+)\}")
+REFERENCE_PATTERN = re.compile(r"\\(?:ref|eqref|autoref|cref|Cref)\s*\{([^}]+)\}")
 
 
 def argument_nodes(node: LatexMacroNode) -> list[LatexNode]:
@@ -155,3 +161,67 @@ def clean_author_name(value: str) -> str:
     cleaned = clean_inline(value).strip(" ,;")
     cleaned = re.sub(r"\s*\$\s*\^(?:\{[^}]*\}|\\[A-Za-z]+|.)\s*\$\s*$", "", cleaned)
     return cleaned.strip(" ,;")
+
+
+def bibliography_to_markdown(
+    node: LatexEnvironmentNode,
+    renderer: Any,
+) -> tuple[str, list[str]]:
+    """Render a ``thebibliography`` environment as keyed Markdown entries."""
+    entries: list[tuple[str, str]] = []
+    current_key = ""
+    current_nodes: list[LatexNode] = []
+
+    def flush() -> None:
+        nonlocal current_key, current_nodes
+        if current_key:
+            text = re.sub(r"\s+", " ", renderer.nodes(current_nodes)).strip()
+            if text:
+                entries.append((current_key, text))
+        current_key = ""
+        current_nodes = []
+
+    for child in node.nodelist:
+        if isinstance(child, LatexMacroNode) and child.macroname == "bibitem":
+            flush()
+            current_key = clean_inline(renderer.argument(last_argument(child)))
+        else:
+            current_nodes.append(child)
+    flush()
+    if not entries:
+        body = re.sub(r"\s+", " ", renderer.nodes(node.nodelist)).strip()
+        return (f"## References\n\n{body}" if body else "", [])
+    return "## References\n\n" + "\n\n".join(
+        f"- [@{key}] {text}" for key, text in entries
+    ), [key for key, _ in entries]
+
+
+def citations(raw: str) -> list[str]:
+    """Extract unique citation keys in first-seen order."""
+    return list(
+        dict.fromkeys(
+            key.strip()
+            for match in CITATION_PATTERN.finditer(raw)
+            for key in match.group(1).split(",")
+            if key.strip()
+        )
+    )
+
+
+def references(raw: str) -> list[str]:
+    """Extract unique local-reference keys in first-seen order."""
+    return list(
+        dict.fromkeys(
+            key.strip()
+            for match in REFERENCE_PATTERN.finditer(raw)
+            for key in match.group(1).split(",")
+            if key.strip()
+        )
+    )
+
+
+def labels(raw: str) -> list[str]:
+    """Extract unique section, equation, figure, and table labels."""
+    return list(
+        dict.fromkeys(match.group(1).strip() for match in LABEL_PATTERN.finditer(raw))
+    )

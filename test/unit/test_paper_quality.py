@@ -5,21 +5,20 @@ import re
 import unittest
 
 import athena.research.literature.paper_markdown
-
 from athena.research.literature.contracts import ChunkingConfig
 from athena.research.literature.paper_markdown.chunking import build_chunks
-from athena.research.literature.paper_markdown.document import (
+from athena.research.literature.paper_markdown.models import (
     ParsedElement,
     ParsedPaper,
+    SourceLocator,
 )
 from athena.research.literature.paper_markdown.quality import (
     ALIGNMENT_ENVIRONMENTS,
     BOOKKEEPING_CODES,
     CONTENT_LOSS_CODES,
     grade_quality,
+    validate_rag_quality,
 )
-from athena.research.literature.paper_markdown.quality import validate_rag_quality
-from athena.research.literature.paper_markdown.schemas import SourceLocator
 
 LOCATOR = SourceLocator(source_kind="tex", file="main.tex", line_start=1, line_end=1)
 

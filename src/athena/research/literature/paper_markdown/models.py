@@ -5,7 +5,8 @@
 或视觉单元增量加载。
 """
 
-from typing import TYPE_CHECKING, Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
@@ -38,6 +39,59 @@ ElementKind = Literal[
 VisualKind = Literal["figure", "table", "equation", "page"]
 InterpretationStatus = Literal["interpreted", "unavailable", "unknown"]
 QualityStatus = Literal["pass", "pass_with_notes", "degraded", "unknown"]
+VISUAL_TOKEN = "<!-- athena-visual:{visual_id} -->"
+
+
+@dataclass(slots=True)
+class ParsedElement:
+    """One structured source element before artifact persistence."""
+
+    element_id: str
+    kind: ElementKind
+    markdown: str
+    heading_path: list[str]
+    locators: list["SourceLocator"]
+    citation_keys: list[str] = field(default_factory=list)
+    labels: list[str] = field(default_factory=list)
+    visual_ids: list[str] = field(default_factory=list)
+    repair_issue_codes: list[str] = field(default_factory=list)
+    reference_keys: list[str] = field(default_factory=list)
+    semantic_heading_path: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ParsedVisual:
+    """One visual before its evidence and interpretation are persisted."""
+
+    visual_id: str
+    kind: VisualKind
+    locator: "SourceLocator"
+    element_id: str
+    label: str | None = None
+    caption: str = ""
+    asset_bytes: bytes | None = None
+    asset_media_type: str | None = None
+    preview_bytes: bytes | None = None
+    structured_text: str | None = None
+    surrounding_text: str = ""
+
+
+@dataclass(slots=True)
+class ParsedPaper:
+    """Shared in-memory output of the TeX and PDF parsers."""
+
+    source_kind: SourceKind
+    source_fingerprint: str
+    converter: str
+    title: str
+    authors: list[str]
+    abstract: str
+    elements: list[ParsedElement]
+    visuals: list[ParsedVisual]
+    diagnostics: list[ProcessingDiagnostic]
+    bibliography: str = ""
+    source_labels: list[str] = field(default_factory=list)
+    source_reference_keys: list[str] = field(default_factory=list)
 
 
 class PaperConversionRequest(BaseModel):
@@ -104,6 +158,65 @@ class SourceLocator(BaseModel):
     bbox: tuple[float, float, float, float] | None = Field(
         default=None, description="PDF rectangle in points: x0, y0, x1, y1."
     )
+
+
+class VisualInterpretationRequest(BaseModel):
+    """Controlled visual task sent to a VLM."""
+
+    visual_id: str
+    kind: VisualKind
+    asset_ref: ArtifactRef | None = None
+    media_type: str | None = None
+    structured_text_ref: ArtifactRef | None = None
+    context_ref: ArtifactRef
+    locator: SourceLocator
+
+    @model_validator(mode="after")
+    def require_evidence(self) -> "VisualInterpretationRequest":
+        if self.asset_ref is None and self.structured_text_ref is None:
+            raise ValueError(
+                "Visual interpretation requires an asset or structured text."
+            )
+        return self
+
+
+class VisualInterpretation(BaseModel):
+    """Auditable structured interpretation of one visual."""
+
+    summary: str
+    searchable_text: str
+    structured_data: dict[str, object] = Field(default_factory=dict)
+    model: str
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class VisualInterpreter(Protocol):
+    async def interpret(
+        self, request: VisualInterpretationRequest
+    ) -> VisualInterpretation: ...
+
+
+class StructureRepairRequest(BaseModel):
+    """Narrow request to repair deterministic Markdown structure issues."""
+
+    content_ref: ArtifactRef
+    issue_codes: list[str]
+    locators: list[SourceLocator]
+    instruction: str
+
+
+class StructureRepairResult(BaseModel):
+    """Content-preserving structure repair result."""
+
+    markdown: str
+    model: str
+    notes: str = ""
+
+
+class StructureRefiner(Protocol):
+    async def repair(
+        self, request: StructureRepairRequest
+    ) -> StructureRepairResult: ...
 
 
 class PaperProvenance(BaseModel):

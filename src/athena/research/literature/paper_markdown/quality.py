@@ -5,8 +5,7 @@ from collections import Counter
 
 from athena.research.literature.contracts import ChunkingConfig, ProcessingDiagnostic
 from athena.research.literature.paper_markdown.chunking import DraftChunk
-from athena.research.literature.paper_markdown.document import ParsedPaper
-from athena.research.literature.paper_markdown.schemas import SourceLocator
+from athena.research.literature.paper_markdown.models import ParsedPaper, SourceLocator
 
 UNINDEXABLE_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|[\ue000-\uf8ff]")
 UNPARSED_APPENDIX_HEADING = re.compile(r"^[A-Z]\.\d+(?:\.\d+){0,3}\.?\s+[A-Z]")

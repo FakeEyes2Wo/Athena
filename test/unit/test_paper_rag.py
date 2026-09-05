@@ -5,9 +5,10 @@ import json
 import tempfile
 import unittest
 
+from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext
-from athena.research.literature.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.models import (
     PaperChunk,
     PaperContent,
     PaperProvenance,
@@ -19,20 +20,18 @@ from athena.research.literature.paper_rag.index import (
     SEMANTIC_PROBES,
     NonSemanticEmbedderError,
     build_corpus_index,
+    display_math_close,
+    is_indexable,
     paper_anchors,
     reference_edges,
     require_semantic_embedder,
     semantic_margin,
-    display_math_close,
-    is_indexable,
     split_sentences,
     title_matches,
     unpack_vectors,
 )
-from athena.research.literature.paper_scout.pool import title_key
 from athena.research.literature.paper_rag.schemas import PaperCorpusIndex
 from athena.research.literature.paper_rag.search import (
-    CorpusCache,
     RetrievalSession,
     corpus_overview,
     heading_variants,
@@ -40,14 +39,6 @@ from athena.research.literature.paper_rag.search import (
     score_by_keywords,
     self_contained_weight,
     semantic_search,
-)
-from athena.research.literature.paper_rag.traversal import (
-    ALREADY_READ_NOTICE,
-    citation_links,
-    paper_namespace,
-    read_chunks,
-    section_search,
-    visual_links,
 )
 from athena.research.literature.paper_rag.tool import (
     PaperChunkReadTool,
@@ -58,7 +49,15 @@ from athena.research.literature.paper_rag.tool import (
     PaperSemanticSearchTool,
     PaperVisualOfTool,
 )
-from athena.core.artifact_store import LocalArtifactStore
+from athena.research.literature.paper_rag.traversal import (
+    ALREADY_READ_NOTICE,
+    citation_links,
+    paper_namespace,
+    read_chunks,
+    section_search,
+    visual_links,
+)
+from athena.research.literature.paper_scout.pool import title_key
 
 VOCABULARY = ["retrieval", "grasping"]
 
@@ -1421,7 +1420,7 @@ class ReferenceEdgeTest(unittest.TestCase):
 
     @staticmethod
     def _units(namespace: str, count: int = 2) -> list:
-        from athena.research.literature.paper_markdown.schemas import RetrievalUnit
+        from athena.research.literature.paper_markdown.models import RetrievalUnit
 
         return [
             RetrievalUnit(

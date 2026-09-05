@@ -11,19 +11,20 @@ from typing import Any
 import pymupdf as fitz
 
 from athena.research.literature.contracts import ProcessingDiagnostic
-from athena.research.literature.paper_markdown.document import (
+from athena.research.literature.paper_markdown.models import (
     VISUAL_TOKEN,
     ParsedElement,
     ParsedPaper,
     ParsedVisual,
+    SourceLocator,
 )
 from athena.research.literature.paper_markdown.pdf_elements import (
+    PdfBlock,
     citation_keys,
     display_reference_keys,
     markdown_table,
+    reading_order,
 )
-from athena.research.literature.paper_markdown.pdf_layout import PdfBlock, reading_order
-from athena.research.literature.paper_markdown.schemas import SourceLocator
 from athena.research.literature.paper_markdown.visuals import render_page_region
 
 CAPTION_PATTERN = re.compile(
@@ -293,7 +294,7 @@ def extract_tables(
     blocks: list[PdfBlock] = []
     try:
         finder = page.find_tables()
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - PyMuPDF backend boundary
         diagnostics.append(
             ProcessingDiagnostic(
                 level="warning",
@@ -523,6 +524,26 @@ class PdfParseSession:
     visuals: list[ParsedVisual] = field(default_factory=list)
     diagnostics: list[ProcessingDiagnostic] = field(default_factory=list)
     heading_path: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _PdfContext:
+    """Document-scoped values shared by every page."""
+
+    body_font: float
+    title_block: PdfBlock | None
+    authors: list[str]
+
+
+@dataclass(slots=True)
+class _PageAnalysis:
+    """Deterministic analysis consumed for one PDF page."""
+
+    page: fitz.Page
+    text_blocks: list[PdfBlock]
+    visual_blocks: list[tuple[PdfBlock, PdfBlock | None]]
+    used_captions: set[int]
+    formula_fragments: set[int]
 
 
 class PdfPaperParser:
@@ -1001,19 +1022,17 @@ class PdfPaperParser:
             )
         return visual_blocks, used_captions
 
-    def consume_page(
-        self,
-        page: fitz.Page,
-        page_rect: fitz.Rect,
-        text_blocks: list[PdfBlock],
-        visual_blocks: list[tuple[PdfBlock, PdfBlock | None]],
-        used_captions: set[int],
-        title_block: PdfBlock | None,
-        authors: list[str],
-        body_font: float,
-        formula_fragments: set[int],
-    ) -> None:
+    def _consume_page(self, page_data: _PageAnalysis, context: _PdfContext) -> None:
         """按阅读顺序把一页分析结果写入统一元素与视觉列表。"""
+        page = page_data.page
+        page_rect = page.rect
+        text_blocks = page_data.text_blocks
+        visual_blocks = page_data.visual_blocks
+        used_captions = page_data.used_captions
+        formula_fragments = page_data.formula_fragments
+        title_block = context.title_block
+        authors = context.authors
+        body_font = context.body_font
         visual_by_id = {id(block): caption for block, caption in visual_blocks}
         content_blocks = [
             block
@@ -1161,6 +1180,7 @@ class PdfPaperParser:
                 title_block.text.strip() if title_block else metadata_title
             )
             authors = split_metadata_authors(str(metadata.get("author") or ""))
+            context = _PdfContext(body_font, title_block, authors)
 
             for page_index, page in enumerate(document):
                 page_rect, blocks = page_data[page_index]
@@ -1173,16 +1193,15 @@ class PdfPaperParser:
                 visual_blocks, used_captions = self.page_visual_blocks(
                     page, page_rect, blocks, text_blocks
                 )
-                self.consume_page(
-                    page,
-                    page_rect,
-                    text_blocks,
-                    visual_blocks,
-                    used_captions,
-                    title_block,
-                    authors,
-                    body_font,
-                    formula_fragments,
+                self._consume_page(
+                    _PageAnalysis(
+                        page,
+                        text_blocks,
+                        visual_blocks,
+                        used_captions,
+                        formula_fragments,
+                    ),
+                    context,
                 )
 
             self.reflow_split_paragraphs()

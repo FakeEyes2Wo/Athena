@@ -496,11 +496,10 @@ provenance, and deterministic failure causes, and are reused when a run resumes.
 | `runtime/phase_runner.py` | PREPARE、SEARCH、VALIDATE 的阶段动作 |
 | `literature/__init__.py` | literature 功能包边界，不转发子系统实现 |
 | `literature/contracts.py` | Source/Markdown 转换边界共享类型 |
-| `paper_markdown/tex_render.py` | TeX 节点到 Markdown 的纯渲染变换 |
+| `paper_markdown/models.py` | 转换请求、解析态、供应商协议与持久化产物合同 |
+| `paper_markdown/tex_render.py` | TeX 节点、引用和参考文献到 Markdown 的纯变换 |
 | `paper_markdown/tex_tables.py` | TeX 表格识别与结构化转换 |
-| `paper_markdown/tex_bibliography.py` | TeX 参考文献和引用关系解析 |
-| `paper_markdown/pdf_layout.py` | PDF 阅读顺序与版面变换 |
-| `paper_markdown/pdf_elements.py` | PDF 元素、表格与引用提取 |
+| `paper_markdown/pdf_elements.py` | PDF block、阅读顺序、表格与引用提取 |
 | `paper_source/payloads.py` | 下载 payload 识别、locator 与转换请求构造 |
 | `paper_rag/traversal.py` | 引用、章节、视觉和 chunk 图遍历 |
 | `survey/stages.py` | Scout/Fetch/Convert/Index 各阶段执行 |

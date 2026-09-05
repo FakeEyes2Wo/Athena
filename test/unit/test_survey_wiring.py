@@ -10,13 +10,13 @@ from unittest import mock
 import httpx
 from openai import RateLimitError
 
-from athena.research.literature.paper_markdown.interfaces import (
-    VisualInterpretationRequest,
-)
-from athena.research.literature.paper_markdown.schemas import SourceLocator
-from athena.research.literature.paper_source.http import HostRateLimiter
 from athena.core.agent import settings
 from athena.core.artifact_store import LocalArtifactStore
+from athena.research.literature.paper_markdown.models import (
+    SourceLocator,
+    VisualInterpretationRequest,
+)
+from athena.research.literature.paper_source.http import HostRateLimiter
 from athena.research.literature.survey.wiring import (
     ARTIFACT_ROOT_ENV,
     DEFAULT_ARTIFACT_ROOT,

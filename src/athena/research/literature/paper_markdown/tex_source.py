@@ -298,9 +298,7 @@ def resolve_include(
         for option in (candidate, candidate.with_suffix(".tex")):
             if option is candidate or not candidate.suffix:
                 normalized = str(option)
-                choices.append(
-                    normalized[2:] if normalized.startswith("./") else normalized
-                )
+                choices.append(normalized.removeprefix("./"))
     for choice in choices:
         if choice in files:
             return choice, True
@@ -312,7 +310,7 @@ def resolve_include(
         matches = folded.get(choice.lower())
         if matches:
             # 同一目录下同时存在 A.tex 与 a.tex 时按名称排序取定，保证可复现
-            return sorted(matches)[0], False
+            return min(matches), False
     return None, True
 
 

@@ -4,9 +4,9 @@ import unittest
 
 from athena.research.literature.contracts import ChunkingConfig
 from athena.research.literature.paper_markdown.chunking import build_chunks
-from athena.research.literature.paper_markdown.document import ParsedElement
-from athena.research.literature.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.models import (
     ElementKind,
+    ParsedElement,
     SourceLocator,
 )
 

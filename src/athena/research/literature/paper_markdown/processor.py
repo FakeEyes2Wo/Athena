@@ -6,12 +6,15 @@ import json
 from athena.core.contracts import ArtifactStore
 from athena.research.literature.contracts import ProcessingDiagnostic
 from athena.research.literature.paper_markdown.chunking import build_chunks
-from athena.research.literature.paper_markdown.document import (
+from athena.research.literature.paper_markdown.models import (
     VISUAL_TOKEN,
+    PaperChunk,
+    PaperContent,
+    PaperConversionRequest,
+    PaperProvenance,
+    PaperVisual,
     ParsedPaper,
     ParsedVisual,
-)
-from athena.research.literature.paper_markdown.interfaces import (
     StructureRefiner,
     StructureRepairRequest,
     VisualInterpretation,
@@ -22,13 +25,6 @@ from athena.research.literature.paper_markdown.pdf_parser import parse_pdf_paper
 from athena.research.literature.paper_markdown.quality import (
     grade_quality,
     validate_rag_quality,
-)
-from athena.research.literature.paper_markdown.schemas import (
-    PaperChunk,
-    PaperContent,
-    PaperConversionRequest,
-    PaperProvenance,
-    PaperVisual,
 )
 from athena.research.literature.paper_markdown.tex_parser import parse_tex_paper
 from athena.research.literature.paper_markdown.tex_source import load_tex_source
@@ -75,12 +71,12 @@ class VisualInterpretationRequiredError(RuntimeError):
     """请求要求完整视觉解释，但没有可用解释器或模型调用失败。"""
 
 
-def tex_body_size(paper: ParsedPaper) -> int:
-    """TeX 通道解析出的正文字符数；``tex_body_size(空壳)`` 只有几十。"""
+def _tex_body_size(paper: ParsedPaper) -> int:
+    """TeX 通道解析出的正文字符数；空壳通常只有几十。"""
     return sum(len(item.markdown) for item in paper.elements) + len(paper.abstract)
 
 
-def embedded_pdf(files: dict[str, bytes]) -> bytes | None:
+def _embedded_pdf(files: dict[str, bytes]) -> bytes | None:
     """从 TeX 包里取出最大的 PDF；包内没有 PDF 时返回 ``None``。
 
     按体积取最大而不是按文件名匹配：包装用的文件名没有约定（``0_adam_main.pdf``、
@@ -111,7 +107,7 @@ class PaperProcessor:
         self.visual_concurrency = max(1, visual_concurrency)
         self.ghostscript = ghostscript
 
-    async def parse_source(
+    async def _parse_source(
         self, request: PaperConversionRequest
     ) -> tuple[ParsedPaper, str]:
         """TeX 优先；只有 TeX 没解析出正文时才回退 PDF。
@@ -121,7 +117,7 @@ class PaperProcessor:
         投稿形态：源码是个 ``\\includepdf`` 壳，正文在同包的 PDF 里。
         """
         if request.tex_source_ref is None:
-            return await self.parse_pdf_ref(request.pdf_ref)
+            return await self._parse_pdf_ref(request.pdf_ref)
         payload = await self.artifacts.get_bytes(request.tex_source_ref)
         expanded = await asyncio.to_thread(
             load_tex_source,
@@ -130,11 +126,11 @@ class PaperProcessor:
             request.tex_entrypoint,
         )
         paper = await asyncio.to_thread(parse_tex_paper, expanded)
-        if not self.is_pdf_wrapper(paper, expanded.text):
+        if not self._is_pdf_wrapper(paper, expanded.text):
             return paper, request.tex_source_ref
-        return await self.recover_from_pdf(request, paper, expanded.files)
+        return await self._recover_from_pdf(request, paper, expanded.files)
 
-    def is_pdf_wrapper(self, paper: ParsedPaper, source_text: str) -> bool:
+    def _is_pdf_wrapper(self, paper: ParsedPaper, source_text: str) -> bool:
         """源码是不是"只是个 PDF 壳"：正文近乎为空，且用了 ``\\includepdf``。
 
         两个条件缺一不可——体量小可能只是文档确实短，用了 ``\\includepdf`` 也可能
@@ -142,16 +138,16 @@ class PaperProcessor:
         """
         if INCLUDE_PDF not in source_text:
             return False
-        return tex_body_size(paper) < MIN_TEX_BODY_CHARS
+        return _tex_body_size(paper) < MIN_TEX_BODY_CHARS
 
-    async def parse_pdf_ref(self, pdf_ref: str | None) -> tuple[ParsedPaper, str]:
+    async def _parse_pdf_ref(self, pdf_ref: str | None) -> tuple[ParsedPaper, str]:
         """按引用解析 PDF；没有 PDF 引用时说明这是上游契约被破坏。"""
         if pdf_ref is None:
             raise ValueError("PDF source is required when no TeX source is provided.")
         payload = await self.artifacts.get_bytes(pdf_ref)
         return await asyncio.to_thread(parse_pdf_paper, payload), pdf_ref
 
-    async def recover_from_pdf(
+    async def _recover_from_pdf(
         self,
         request: PaperConversionRequest,
         paper: ParsedPaper,
@@ -166,8 +162,8 @@ class PaperProcessor:
         为空"，被引的文件没进包可能是上游打包不全，也可能是解析漏掉了别的内容，
         在这里断言"内容丢了"会把猜测写成事实。真正的兜底在语料门禁那一层。
         """
-        chars = tex_body_size(paper)
-        wrapped = embedded_pdf(files)
+        chars = _tex_body_size(paper)
+        wrapped = _embedded_pdf(files)
         origin = "carried in the TeX source package"
         source_ref = request.pdf_ref
         if wrapped is not None:
@@ -176,7 +172,7 @@ class PaperProcessor:
             origin = "supplied by the upstream fetch"
         if source_ref is None:
             return paper, request.tex_source_ref
-        recovered, _ = await self.parse_pdf_ref(source_ref)
+        recovered, _ = await self._parse_pdf_ref(source_ref)
         recovered.diagnostics.append(
             ProcessingDiagnostic(
                 level="info",
@@ -189,7 +185,7 @@ class PaperProcessor:
         )
         return recovered, source_ref
 
-    async def repair_elements(self, paper: ParsedPaper) -> None:
+    async def _repair_elements(self, paper: ParsedPaper) -> None:
         """只对解析器明确标记的低置信元素调用结构修复 LLM。"""
         uncertain = [
             element for element in paper.elements if element.repair_issue_codes
@@ -232,11 +228,10 @@ class PaperProcessor:
                 )
             )
 
-    async def interpret_visual(
+    async def _interpret_visual(
         self,
         visual: ParsedVisual,
         request: PaperConversionRequest,
-        paper: ParsedPaper,
     ) -> tuple[PaperVisual, VisualInterpretation, list[ProcessingDiagnostic]]:
         """保存视觉证据，调用解释器，并持久化结构化结果。
 
@@ -376,7 +371,7 @@ class PaperProcessor:
         )
         return stored, interpretation, notes
 
-    async def enrich_visuals(
+    async def _enrich_visuals(
         self,
         paper: ParsedPaper,
         request: PaperConversionRequest,
@@ -403,7 +398,7 @@ class PaperProcessor:
         async def interpret(visual: ParsedVisual):
             """Interpret one visual under the shared concurrency gate."""
             async with gate:
-                return await self.interpret_visual(visual, request, paper)
+                return await self._interpret_visual(visual, request)
 
         results = await asyncio.gather(*(interpret(visual) for visual in paper.visuals))
 
@@ -431,9 +426,9 @@ class PaperProcessor:
 
     async def process(self, request: PaperConversionRequest) -> PaperContent:
         """完成解析、必要模型辅助、RAG chunking 和 artifact 持久化。"""
-        paper, source_ref = await self.parse_source(request)
-        await self.repair_elements(paper)
-        visuals = await self.enrich_visuals(paper, request)
+        paper, source_ref = await self._parse_source(request)
+        await self._repair_elements(paper)
+        visuals = await self._enrich_visuals(paper, request)
         markdown, draft_chunks = build_chunks(paper.elements, request.chunking)
         validate_rag_quality(paper, draft_chunks, markdown, request.chunking)
         for visual in visuals:

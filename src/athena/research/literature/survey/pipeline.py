@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from athena.core.contracts import ArtifactRef
 from athena.core.tool_types import EmitEvent
 from athena.research.literature.contracts import VisualPolicy
-from athena.research.literature.paper_markdown.schemas import (
+from athena.research.literature.paper_markdown.models import (
     PaperContent,
     PaperConversionRequest,  # noqa: F401 - established survey contract surface
     QualityStatus,

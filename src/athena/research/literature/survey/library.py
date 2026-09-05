@@ -30,7 +30,7 @@ from athena.core.artifact_store import (
     digest_ref,
 )
 from athena.core.contracts import ArtifactRef, ArtifactStore
-from athena.research.literature.paper_markdown.schemas import PaperContent
+from athena.research.literature.paper_markdown.models import PaperContent
 from athena.research.literature.paper_rag.index import pack_vectors, unpack_vectors
 
 LIBRARY_ROOT_ENV = "ATHENA_LIBRARY_ROOT"

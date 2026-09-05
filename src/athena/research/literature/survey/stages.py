@@ -11,13 +11,13 @@ from athena.core.contracts import ArtifactRef
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import EmitEvent
+from athena.research.literature.paper_markdown.models import (
+    PaperContent,
+    PaperConversionRequest,
+)
 from athena.research.literature.paper_markdown.processor import (
     PaperProcessor,
     VisualInterpretationRequiredError,
-)
-from athena.research.literature.paper_markdown.schemas import (
-    PaperContent,
-    PaperConversionRequest,
 )
 from athena.research.literature.paper_rag.index import (
     BIBLIOGRAPHY_KIND,

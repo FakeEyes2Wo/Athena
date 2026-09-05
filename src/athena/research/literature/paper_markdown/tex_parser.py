@@ -24,29 +24,27 @@ from pylatexenc.latexwalker import (
 from pylatexenc.macrospec import MacroSpec
 
 from athena.research.literature.contracts import ProcessingDiagnostic
-from athena.research.literature.paper_markdown.document import (
+from athena.research.literature.paper_markdown.models import (
     VISUAL_TOKEN,
     ParsedElement,
     ParsedPaper,
     ParsedVisual,
-)
-from athena.research.literature.paper_markdown.schemas import SourceLocator
-from athena.research.literature.paper_markdown.tex_bibliography import (
-    bibliography_to_markdown,
-    citations,
-    labels,
-    references,
+    SourceLocator,
 )
 from athena.research.literature.paper_markdown.tex_render import (
     IGNORED_ENVIRONMENTS,
     argument_nodes,
     balanced_group_end,
+    bibliography_to_markdown,
+    citations,
     clean_author_name,
     clean_inline,
     content_nodes,
     environment_body,
+    labels,
     last_argument,
     normalize_title,
+    references,
     walk_nodes,
 )
 from athena.research.literature.paper_markdown.tex_source import (
@@ -266,7 +264,7 @@ class TexRenderer:
                     self.custom_macros,
                     (*self.macro_stack, name),
                 ).nodes(nodes)
-            except Exception:
+            except Exception:  # noqa: BLE001 - preserve unknown macro expansion
                 value = expansion
             if (
                 getattr(node, "macro_post_space", "")
@@ -362,7 +360,7 @@ class TexRenderer:
             )
         try:
             return self.fallback.node_to_text(node)
-        except Exception:
+        except Exception:  # noqa: BLE001 - preserve unknown TeX macro
             return f"\\{name}"
 
     def environment(self, node: LatexEnvironmentNode) -> str:
@@ -533,7 +531,7 @@ class TexPaperParser:
                 if not markdown:
                     raise ValueError("The bibliography rendered as empty content.")
                 return path, markdown, keys, max(1, len(text.splitlines()))
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - optional bibliography fallback
                 self.session.diagnostics.append(
                     ProcessingDiagnostic(
                         level="warning",
@@ -723,7 +721,7 @@ class TexPaperParser:
                                 part_nodes
                             )
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - preserve raw author text
                         rendered = clean_author_name(part)
                     if rendered and "@" not in rendered:
                         values.append(rendered)

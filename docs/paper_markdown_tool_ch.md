@@ -345,7 +345,7 @@ RAG 摄取模块应：
 
 ## ToolRegistry 接入
 
-运行时必须显式使用共享 `ArtifactStore` 构造并注册工具。当前工具不依赖自动发现机制。
+运行时必须用共享 `ArtifactStore` 构造 Processor，再将它注入工具并注册。当前工具不依赖自动发现机制。
 
 ```python
 import asyncio
@@ -356,6 +356,7 @@ from athena.research.literature.paper_markdown import (
     PaperContent,
     PaperConversionRequest,
     PaperMarkdownTool,
+    PaperProcessor,
 )
 
 request = PaperConversionRequest(
@@ -366,7 +367,8 @@ request = PaperConversionRequest(
 )
 request_ref = await store.put_text(request.model_dump_json())
 
-tool = PaperMarkdownTool(store, visual_interpreter, structure_refiner=None)
+processor = PaperProcessor(store, visual_interpreter, structure_refiner=None)
+tool = PaperMarkdownTool(processor)
 tools = ToolRegistry()
 tools.register(tool)
 

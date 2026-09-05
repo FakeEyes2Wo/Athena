@@ -8,13 +8,15 @@ import unittest
 
 import fitz
 
+from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import TOOL_BEGIN, TOOL_END, ToolContext
-from athena.research.literature.paper_markdown.document import (
+from athena.research.literature.paper_markdown.models import (
+    PaperContent,
+    PaperConversionRequest,
     ParsedElement,
     ParsedPaper,
-)
-from athena.research.literature.paper_markdown.interfaces import (
+    SourceLocator,
     StructureRepairResult,
     VisualInterpretation,
 )
@@ -22,13 +24,7 @@ from athena.research.literature.paper_markdown.processor import (
     PaperProcessor,
     VisualInterpretationRequiredError,
 )
-from athena.research.literature.paper_markdown.schemas import (
-    PaperContent,
-    PaperConversionRequest,
-    SourceLocator,
-)
 from athena.research.literature.paper_markdown.tool import PaperMarkdownTool
-from athena.core.artifact_store import LocalArtifactStore
 
 PLAIN_TEX = rb"""\documentclass{article}
 \title{TeX Wins}\author{Ada \and Lin}
@@ -104,7 +100,7 @@ class ConcurrencyProbeInterpreter:
         self._barrier = asyncio.Barrier(parties)
 
     async def interpret(self, request):
-        from athena.research.literature.paper_markdown.interfaces import (
+        from athena.research.literature.paper_markdown.models import (
             VisualInterpretation,
         )
 
@@ -650,7 +646,7 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
             diagnostics=[],
         )
 
-        await processor.repair_elements(paper)
+        await processor._repair_elements(paper)
 
         self.assertEqual(1, len(refiner.requests))
         self.assertEqual("Repaired readable text.", paper.elements[1].markdown)
@@ -660,7 +656,7 @@ class PaperProcessorTest(unittest.IsolatedAsyncioTestCase):
     async def test_tool_round_trip_and_content_addressed_result(self) -> None:
         request = await self.request_for_tex()
         request_ref = await self.store.put_text(request.model_dump_json())
-        tool = PaperMarkdownTool(self.store, None)
+        tool = PaperMarkdownTool(PaperProcessor(self.store, None))
         registry = ToolRegistry()
         registry.register(tool)
         events: list[str] = []

@@ -24,6 +24,7 @@ from openai import AsyncOpenAI
 from athena.core.agent import settings
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.tool import ToolRegistry
+from athena.research.literature.paper_markdown.processor import PaperProcessor
 from athena.research.literature.paper_markdown.tool import PaperMarkdownTool
 from athena.research.literature.paper_rag.search import CorpusCache, RetrievalSession
 from athena.research.literature.paper_rag.tool import (
@@ -323,9 +324,11 @@ def build_survey_tools(
         )
         tools.register(
             PaperMarkdownTool(
-                stack.artifacts,
-                stack.visual_interpreter,
-                ghostscript=stack.ghostscript or None,
+                PaperProcessor(
+                    stack.artifacts,
+                    stack.visual_interpreter,
+                    ghostscript=stack.ghostscript or None,
+                )
             )
         )
     tools.register(PaperCorpusOverviewTool(stack.artifacts, session))
