@@ -11,12 +11,13 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
-pub const INITIALIZING: u8 = 1;
-pub const READY: u8 = 2;
-pub const DRAINING: u8 = 3;
-pub const TERMINATED: u8 = 4;
+const INITIALIZING: u8 = 1;
+const READY: u8 = 2;
+const DRAINING: u8 = 3;
+const TERMINATED: u8 = 4;
 
 const RESERVED_INIT_ID: u64 = 0;
+const MAX_INFLIGHT: usize = 64;
 
 /// The server-side request entrypoint: a state machine + admission gate that
 /// delegates business methods to an [`Executor`].
@@ -28,14 +29,10 @@ pub struct MessageProcessor {
 
 impl MessageProcessor {
     /// Start the dispatch loop over the server transport half.
-    pub fn start(
-        server: TransportServerHalf,
-        executor: Arc<dyn Executor>,
-        max_inflight: usize,
-    ) -> Self {
+    pub fn start(server: TransportServerHalf, executor: Arc<dyn Executor>) -> Self {
         let state = Arc::new(AtomicU8::new(INITIALIZING));
         let inflight = Arc::new(Mutex::new(HashSet::new()));
-        let slots = Arc::new(Semaphore::new(max_inflight.max(1)));
+        let slots = Arc::new(Semaphore::new(MAX_INFLIGHT));
         let dispatch = tokio::spawn(dispatch_loop(
             server,
             executor,
@@ -48,10 +45,6 @@ impl MessageProcessor {
             inflight,
             dispatch: Mutex::new(Some(dispatch)),
         }
-    }
-
-    pub fn state(&self) -> u8 {
-        self.state.load(Ordering::SeqCst)
     }
 
     /// Drain in-flight requests (up to `timeout`), then terminate.

@@ -1,7 +1,4 @@
-use athena_protocol::{
-    ClientMessage, ClientNotification, EventNotification, RequestEnvelope, ResponseEnvelope,
-    ServerControlMessage, ServerRequest, ServerRequestReply,
-};
+use athena_protocol::{ClientMessage, EventNotification, ResponseEnvelope, ServerControlMessage};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
@@ -12,210 +9,98 @@ const DEFAULT_EVENT_CAPACITY: usize = 256;
 pub enum TransportError {
     #[error("channel closed")]
     Closed,
-    #[error("channel full")]
-    Full,
 }
 
-/// In-process dual-channel transport.
-///
-/// Three logical channels over two physical mpsc queues:
-/// - c2s (client→server): requests, notifications, server-request-replies
-/// - s2c_control (server→client): responses, ServerRequests
-/// - s2c_event (server→client): EventNotifications (independent, never blocked by control)
-///
-/// A `watch` ready barrier lets the client await the `initialized` handshake.
-pub struct Transport {
-    c2s_tx: mpsc::Sender<ClientMessage>,
-    c2s_rx: mpsc::Receiver<ClientMessage>,
-    s2c_control_tx: mpsc::Sender<ServerControlMessage>,
-    s2c_control_rx: mpsc::Receiver<ServerControlMessage>,
-    s2c_event_tx: mpsc::Sender<EventNotification>,
-    s2c_event_rx: mpsc::Receiver<EventNotification>,
-    ready_tx: watch::Sender<bool>,
-    ready_rx: watch::Receiver<bool>,
+/// Build the independent client-to-server, control, and event lanes.
+pub fn transport() -> (TransportClientHalf, TransportServerHalf) {
+    transport_with_capacity(DEFAULT_CONTROL_CAPACITY, DEFAULT_EVENT_CAPACITY)
 }
 
-impl Transport {
-    pub fn new(control_capacity: usize, event_capacity: usize) -> Self {
-        let cap_c = control_capacity.max(1);
-        let cap_e = event_capacity.max(1);
-        let (c2s_tx, c2s_rx) = mpsc::channel(cap_c);
-        let (s2c_control_tx, s2c_control_rx) = mpsc::channel(cap_c);
-        let (s2c_event_tx, s2c_event_rx) = mpsc::channel(cap_e);
-        let (ready_tx, ready_rx) = watch::channel(false);
-        Self {
+fn transport_with_capacity(
+    control_capacity: usize,
+    event_capacity: usize,
+) -> (TransportClientHalf, TransportServerHalf) {
+    let (c2s_tx, c2s_rx) = mpsc::channel(control_capacity.max(1));
+    let (control_tx, control_rx) = mpsc::channel(control_capacity.max(1));
+    let (event_tx, event_rx) = mpsc::channel(event_capacity.max(1));
+    let (ready_tx, ready_rx) = watch::channel(false);
+    (
+        TransportClientHalf {
             c2s_tx,
-            c2s_rx,
-            s2c_control_tx,
-            s2c_control_rx,
-            s2c_event_tx,
-            s2c_event_rx,
-            ready_tx,
+            control_rx,
+            event_rx,
             ready_rx,
-        }
-    }
-
-    pub fn with_defaults() -> Self {
-        Self::new(DEFAULT_CONTROL_CAPACITY, DEFAULT_EVENT_CAPACITY)
-    }
-
-    /// Split into client and server halves.
-    pub fn split(self) -> (TransportClientHalf, TransportServerHalf) {
-        let client = TransportClientHalf {
-            c2s_tx: self.c2s_tx,
-            s2c_control_rx: self.s2c_control_rx,
-            s2c_event_rx: self.s2c_event_rx,
-            ready_rx: self.ready_rx,
-        };
-        let server = TransportServerHalf {
-            c2s_rx: self.c2s_rx,
-            s2c_control_tx: self.s2c_control_tx,
-            s2c_event_tx: self.s2c_event_tx,
-            ready_tx: self.ready_tx,
-        };
-        (client, server)
-    }
+        },
+        TransportServerHalf {
+            c2s_rx,
+            control_tx,
+            event_tx,
+            ready_tx,
+        },
+    )
 }
 
-// ── Client half ──
-
+/// Channels owned by the in-process client.
 pub struct TransportClientHalf {
-    c2s_tx: mpsc::Sender<ClientMessage>,
-    s2c_control_rx: mpsc::Receiver<ServerControlMessage>,
-    s2c_event_rx: mpsc::Receiver<EventNotification>,
-    ready_rx: watch::Receiver<bool>,
+    pub(crate) c2s_tx: mpsc::Sender<ClientMessage>,
+    pub(crate) control_rx: mpsc::Receiver<ServerControlMessage>,
+    pub(crate) event_rx: mpsc::Receiver<EventNotification>,
+    pub(crate) ready_rx: watch::Receiver<bool>,
 }
 
 impl TransportClientHalf {
-    /// A cloneable sender for the client→server channel.
-    pub fn sender(&self) -> mpsc::Sender<ClientMessage> {
-        self.c2s_tx.clone()
-    }
-
-    /// A receiver that flips to `true` once the server is ready.
-    pub fn ready(&self) -> watch::Receiver<bool> {
-        self.ready_rx.clone()
-    }
-
-    /// Decompose into the control and event receivers (for a reader task that
-    /// must poll both channels independently).
-    pub fn into_receivers(
-        self,
-    ) -> (
-        mpsc::Receiver<ServerControlMessage>,
-        mpsc::Receiver<EventNotification>,
-    ) {
-        (self.s2c_control_rx, self.s2c_event_rx)
-    }
-
-    /// Send a request to the server (reliable; waits for capacity).
-    pub async fn send_request(&self, msg: RequestEnvelope) -> Result<(), TransportError> {
+    pub async fn send(&self, message: ClientMessage) -> Result<(), TransportError> {
         self.c2s_tx
-            .send(ClientMessage::Request(msg))
+            .send(message)
             .await
             .map_err(|_| TransportError::Closed)
     }
 
-    /// Send a notification (fire-and-forget; drops on full).
-    pub fn send_notification(&self, msg: ClientNotification) {
-        let _ = self.c2s_tx.try_send(ClientMessage::Notification(msg));
-    }
-
-    /// Send a reply to a server-initiated request.
-    pub async fn send_server_request_reply(
-        &self,
-        msg: ServerRequestReply,
-    ) -> Result<(), TransportError> {
-        self.c2s_tx
-            .send(ClientMessage::ServerRequestReply(msg))
-            .await
-            .map_err(|_| TransportError::Closed)
-    }
-
-    /// Receive a response or server request.
     pub async fn recv_control(&mut self) -> Option<ServerControlMessage> {
-        self.s2c_control_rx.recv().await
-    }
-
-    /// Receive an event notification.
-    pub async fn recv_event(&mut self) -> Option<EventNotification> {
-        self.s2c_event_rx.recv().await
+        self.control_rx.recv().await
     }
 }
 
-// ── Server half ──
-
-/// A cloneable control-plane responder for spawned request handlers.
+/// Cloneable response sender for concurrent request handlers.
 #[derive(Clone)]
 pub struct ServerResponder {
     control_tx: mpsc::Sender<ServerControlMessage>,
 }
 
 impl ServerResponder {
-    pub async fn send_response(&self, msg: ResponseEnvelope) -> Result<(), TransportError> {
+    pub async fn send_response(&self, message: ResponseEnvelope) -> Result<(), TransportError> {
         self.control_tx
-            .send(ServerControlMessage::Response(msg))
-            .await
-            .map_err(|_| TransportError::Closed)
-    }
-
-    pub async fn send_server_request(&self, msg: ServerRequest) -> Result<(), TransportError> {
-        self.control_tx
-            .send(ServerControlMessage::ServerRequest(msg))
+            .send(ServerControlMessage::Response(message))
             .await
             .map_err(|_| TransportError::Closed)
     }
 }
 
+/// Channels owned by the in-process server.
 pub struct TransportServerHalf {
     c2s_rx: mpsc::Receiver<ClientMessage>,
-    s2c_control_tx: mpsc::Sender<ServerControlMessage>,
-    s2c_event_tx: mpsc::Sender<EventNotification>,
+    control_tx: mpsc::Sender<ServerControlMessage>,
+    event_tx: mpsc::Sender<EventNotification>,
     ready_tx: watch::Sender<bool>,
 }
 
 impl TransportServerHalf {
-    /// Receive next client message.
     pub async fn recv(&mut self) -> Option<ClientMessage> {
         self.c2s_rx.recv().await
     }
 
-    /// A cloneable responder for the control plane.
     pub fn responder(&self) -> ServerResponder {
         ServerResponder {
-            control_tx: self.s2c_control_tx.clone(),
+            control_tx: self.control_tx.clone(),
         }
     }
 
-    /// A reliable sender for the independent event lane (used by FairMux).
     pub fn event_sender(&self) -> mpsc::Sender<EventNotification> {
-        self.s2c_event_tx.clone()
+        self.event_tx.clone()
     }
 
-    /// Signal that the server is ready (after the `initialized` handshake).
     pub fn set_ready(&self) {
         let _ = self.ready_tx.send(true);
-    }
-
-    /// Send a response to the client.
-    pub async fn send_response(&self, msg: ResponseEnvelope) -> Result<(), TransportError> {
-        self.s2c_control_tx
-            .send(ServerControlMessage::Response(msg))
-            .await
-            .map_err(|_| TransportError::Closed)
-    }
-
-    /// Send a server-initiated request to the client.
-    pub async fn send_server_request(&self, msg: ServerRequest) -> Result<(), TransportError> {
-        self.s2c_control_tx
-            .send(ServerControlMessage::ServerRequest(msg))
-            .await
-            .map_err(|_| TransportError::Closed)
-    }
-
-    /// Send an event to the client (fire-and-forget; drops on full).
-    pub fn send_event(&self, msg: EventNotification) {
-        let _ = self.s2c_event_tx.try_send(msg);
     }
 }
 
@@ -223,82 +108,77 @@ impl TransportServerHalf {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use athena_protocol::RequestEnvelope;
 
     #[tokio::test]
     async fn test_request_response_roundtrip() {
-        let transport = Transport::new(4, 4);
-        let (client, server) = transport.split();
-
-        let server_handle = tokio::spawn(async move {
-            let mut s = server;
-            if let Some(ClientMessage::Request(req)) = s.recv().await {
-                assert_eq!(req.request_id, 1);
-                let resp = ResponseEnvelope {
-                    request_id: req.request_id,
-                    result: Some(serde_json::json!({"status": "ok"})),
-                    error: None,
-                };
-                s.send_response(resp).await.unwrap();
-            }
-        });
-
-        let mut client = client;
+        let (client, mut server) = transport_with_capacity(4, 4);
         client
-            .send_request(RequestEnvelope {
+            .c2s_tx
+            .send(ClientMessage::Request(RequestEnvelope {
                 request_id: 1,
                 method: "test".into(),
                 params: None,
+            }))
+            .await
+            .unwrap();
+
+        let ClientMessage::Request(request) = server.recv().await.unwrap() else {
+            panic!("expected request");
+        };
+        server
+            .responder()
+            .send_response(ResponseEnvelope {
+                request_id: request.request_id,
+                result: Some(serde_json::json!({"status": "ok"})),
+                error: None,
             })
             .await
             .unwrap();
-        if let Some(ServerControlMessage::Response(resp)) = client.recv_control().await {
-            assert_eq!(resp.request_id, 1);
-            assert_eq!(resp.result.unwrap()["status"], "ok");
-        }
-        server_handle.await.unwrap();
+
+        let mut control_rx = client.control_rx;
+        let Some(ServerControlMessage::Response(response)) = control_rx.recv().await else {
+            panic!("expected response");
+        };
+        assert_eq!(response.result.unwrap()["status"], "ok");
     }
 
     #[tokio::test]
     async fn test_events_independent_of_control() {
-        let transport = Transport::new(2, 2);
-        let (mut client, server) = transport.split();
-
+        let (client, server) = transport_with_capacity(2, 2);
+        let responder = server.responder();
+        for request_id in 0..2 {
+            responder
+                .send_response(ResponseEnvelope {
+                    request_id,
+                    result: Some(serde_json::json!({})),
+                    error: None,
+                })
+                .await
+                .unwrap();
+        }
         server
-            .send_response(ResponseEnvelope {
-                request_id: 0,
-                result: Some(serde_json::json!({})),
-                error: None,
+            .event_sender()
+            .send(EventNotification {
+                subscription_id: "s1".into(),
+                thread_id: "t1".into(),
+                turn_id: None,
+                sequence: 1,
+                kind: "test".into(),
+                event_ref: "ev://1".into(),
+                data: None,
             })
             .await
             .unwrap();
-        server
-            .send_response(ResponseEnvelope {
-                request_id: 1,
-                result: Some(serde_json::json!({})),
-                error: None,
-            })
-            .await
-            .unwrap();
 
-        server.send_event(EventNotification {
-            subscription_id: "s1".into(),
-            thread_id: "t1".into(),
-            turn_id: None,
-            sequence: 1,
-            kind: "test".into(),
-            event_ref: "ev://1".into(),
-            data: None,
-        });
-
-        let ev = client.recv_event().await.unwrap();
-        assert_eq!(ev.kind, "test");
+        let mut event_rx = client.event_rx;
+        assert_eq!(event_rx.recv().await.unwrap().kind, "test");
     }
 
     #[tokio::test]
     async fn test_ready_barrier() {
-        let transport = Transport::new(2, 2);
-        let (client, server) = transport.split();
-        let mut ready = client.ready();
+        let (client, server) = transport_with_capacity(2, 2);
+        let mut ready = client.ready_rx;
         assert!(!*ready.borrow());
         server.set_ready();
         ready.changed().await.unwrap();

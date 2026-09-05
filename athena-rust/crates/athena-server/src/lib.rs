@@ -9,11 +9,9 @@ mod processor;
 mod subscription;
 pub mod transport;
 
-pub use client::{AthenaClient, RpcException, Sequencer, ServerEvent};
+pub use client::{AthenaClient, RpcException, ServerEvent};
 pub use execution::{ExecutionAdapter, Executor, runtime_error_to_rpc};
 pub use lifecycle::AppServer;
-pub use processor::{DRAINING, INITIALIZING, MessageProcessor, READY, TERMINATED};
+pub use processor::MessageProcessor;
 pub use subscription::SubscriptionRegistry;
-pub use transport::{
-    ServerResponder, Transport, TransportClientHalf, TransportError, TransportServerHalf,
-};
+pub use transport::{TransportClientHalf, TransportError, TransportServerHalf, transport};

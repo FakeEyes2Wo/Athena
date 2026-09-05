@@ -5,7 +5,7 @@
 use athena_runtime::{
     EventDraft, RunnerError, RuntimeThreadManager, TurnInput, TurnOutput, TurnRunner,
 };
-use athena_server::{AppServer, READY, ServerEvent};
+use athena_server::{AppServer, ServerEvent};
 use athena_types::ArtifactRef;
 use serde_json::json;
 use std::sync::Arc;
@@ -34,7 +34,6 @@ impl TurnRunner for EchoRunner {
 async fn full_lifecycle_initialize_to_shutdown() {
     let manager = Arc::new(RuntimeThreadManager::new(Arc::new(EchoRunner)));
     let app = AppServer::create(manager).await.expect("server ready");
-    assert_eq!(app.processor_state(), READY);
 
     let timeout = Duration::from_secs(3);
 
@@ -102,22 +101,21 @@ async fn business_request_before_ready_is_rejected() {
     // initialize handshake and observe the NOT_INITIALIZED rejection.
     use athena_protocol::{RequestEnvelope, ServerControlMessage};
     use athena_runtime::FairMux;
-    use athena_server::{ExecutionAdapter, MessageProcessor, SubscriptionRegistry, Transport};
+    use athena_server::{ExecutionAdapter, MessageProcessor, SubscriptionRegistry, transport};
 
     let manager = Arc::new(RuntimeThreadManager::new(Arc::new(EchoRunner)));
-    let transport = Transport::with_defaults();
-    let (mut client, server) = transport.split();
+    let (mut client, server) = transport();
     let mux = Arc::new(FairMux::new(server.event_sender()));
     let subs = Arc::new(SubscriptionRegistry::new(mux.clone(), manager.clone()));
     let executor = Arc::new(ExecutionAdapter::new(manager.clone(), subs));
-    let _processor = MessageProcessor::start(server, executor, 8);
+    let _processor = MessageProcessor::start(server, executor);
 
     client
-        .send_request(RequestEnvelope {
+        .send(athena_protocol::ClientMessage::Request(RequestEnvelope {
             request_id: 7,
             method: "thread/start".into(),
             params: Some(json!({"session_id": "s", "context_ref": "artifact://c"})),
-        })
+        }))
         .await
         .unwrap();
 

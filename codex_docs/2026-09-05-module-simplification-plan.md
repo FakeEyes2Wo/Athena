@@ -48,6 +48,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the Rust agent module and reuse the runtime turn contract directly.
 - [x] Remove the unconsumed Rust research prototype crate.
 - [x] Review the Rust protocol crate and collapse duplicate error/result surfaces.
+- [x] Review the Rust server crate and replace the temporary transport container.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -128,6 +129,14 @@ Read all five protocol source files and the Python-fixture integration test comp
 Delete five result DTOs that were never constructed, the unused exception-name mapper, six code-specific error factories, the `ErrorCode::code` forwarding method, and the unused `thiserror` dependency. `RpcError::new` is now the single construction interface. Move the application-only `RpcException` out of the protocol crate into the server client and store one `RpcError` instead of copying its three fields. Merge the 19-line method module into the protocol facade and delete its file. Remove thirteen duplicate inline tests; the fixture suite retains exact wire coverage and the two unique control/empty-response contracts.
 
 Fresh verification passed 26 protocol fixture tests and five server tests; the complete Rust workspace passed 173 tests. Workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing six protocol rows advances reviewed coverage to 151/602. Whole-repository acceptance remains pending.
+
+## Rust server review
+
+Read all seven server source files and the end-to-end test completely, with protocol/runtime channel and lifecycle callers traced. Retain the client, execution adapter, lifecycle, processor, subscription registry, and transport as separate responsibilities. Their error, request dispatch, shutdown, subscription pump, and independent event-lane contracts remain covered by real in-process flows.
+
+Replace the eight-field `Transport` object, which was always immediately split, with one zero-argument `transport()` factory that constructs the client and server halves directly. Collapse seven typed/test-only half forwarding methods into two generic raw-client operations, delete the unused `Full` transport error and server-request sender, and keep server event delivery reliable through its canonical channel sender. Inline the one-call five-parameter client worker helper into client startup; remove the post-start ready receiver field, public Sequencer surface, test-only processor state getter, and four state constant exports. `MessageProcessor::start` drops its fixed capacity argument (three parameters to two), and subscription shutdown drains its map once instead of repeatedly locking it.
+
+Fresh verification passed all five server unit/end-to-end tests, including ready admission, independent event delivery, full turn lifecycle, and shutdown. The complete Rust workspace passed 173 tests; workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing eight server rows advances reviewed coverage to 159/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -829,14 +838,14 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-runtime/tests/common/mod.rs` | 85 | Pending |
 | `athena-rust/crates/athena-runtime/tests/thread_races.rs` | 54 | Pending |
 | `athena-rust/crates/athena-runtime/tests/thread_runtime.rs` | 187 | Pending |
-| `athena-rust/crates/athena-server/src/client.rs` | 219 | Pending |
-| `athena-rust/crates/athena-server/src/execution.rs` | 118 | Pending |
-| `athena-rust/crates/athena-server/src/lib.rs` | 19 | Pending |
-| `athena-rust/crates/athena-server/src/lifecycle.rs` | 62 | Pending |
-| `athena-rust/crates/athena-server/src/processor.rs` | 212 | Pending |
-| `athena-rust/crates/athena-server/src/subscription.rs` | 83 | Pending |
-| `athena-rust/crates/athena-server/src/transport.rs` | 307 | Pending |
-| `athena-rust/crates/athena-server/tests/app_server_e2e.rs` | 131 | Pending |
+| `athena-rust/crates/athena-server/src/client.rs` | 219 | Reviewed; inline one-call worker, remove retained ready state, and keep six live fields |
+| `athena-rust/crates/athena-server/src/execution.rs` | 118 | Reviewed; retain method-to-runtime boundary and use one RpcError constructor |
+| `athena-rust/crates/athena-server/src/lib.rs` | 19 | Reviewed; remove state/Sequencer/responder exports and expose direct transport factory |
+| `athena-rust/crates/athena-server/src/lifecycle.rs` | 62 | Reviewed; consume direct transport halves and delete test-only state accessor |
+| `athena-rust/crates/athena-server/src/processor.rs` | 212 | Reviewed; fixed admission capacity is internal and start takes two dependencies |
+| `athena-rust/crates/athena-server/src/subscription.rs` | 83 | Reviewed; retain pump lifecycle and drain all subscriptions under one map take |
+| `athena-rust/crates/athena-server/src/transport.rs` | 307 | Reviewed; replace eight-field temporary object and seven forwarding methods with direct halves |
+| `athena-rust/crates/athena-server/tests/app_server_e2e.rs` | 131 | Reviewed; retain ready rejection and full lifecycle coverage through generic raw transport |
 | `athena-rust/crates/athena-tools/src/context.rs` | 8 | Reviewed; merge two-field invocation context into tool.rs and delete file |
 | `athena-rust/crates/athena-tools/src/executor.rs` | 111 | Reviewed; retain lifecycle boundary; construct its sole failure result directly |
 | `athena-rust/crates/athena-tools/src/lib.rs` | 19 | Reviewed; remove context module and builder export; retain canonical facade |

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 /// Error returned by the in-process client facade.
@@ -30,25 +30,19 @@ impl From<RpcError> for RpcException {
 }
 
 /// Monotonic request-id generator. `0` is reserved for initialize.
-pub struct Sequencer {
+struct Sequencer {
     next: AtomicU64,
 }
 
 impl Sequencer {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             next: AtomicU64::new(1),
         }
     }
 
-    pub fn next_id(&self) -> u64 {
+    fn next_id(&self) -> u64 {
         self.next.fetch_add(1, Ordering::SeqCst)
-    }
-}
-
-impl Default for Sequencer {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -67,26 +61,50 @@ pub struct AthenaClient {
     pending: Pending,
     control_rx: Mutex<mpsc::Receiver<ServerRequest>>,
     event_rx: Mutex<mpsc::Receiver<EventNotification>>,
-    ready: watch::Receiver<bool>,
     sequencer: Sequencer,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl AthenaClient {
     pub async fn start(client_half: TransportClientHalf) -> Result<Self, RpcException> {
-        let sender = client_half.sender();
-        let ready = client_half.ready();
+        let TransportClientHalf {
+            c2s_tx: sender,
+            control_rx: mut inbound_control,
+            event_rx: mut inbound_events,
+            ready_rx: mut ready,
+        } = client_half;
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (control_tx, control_rx) = mpsc::channel(16);
         let (event_tx, event_rx) = mpsc::channel(256);
-        let worker = spawn_worker(client_half, pending.clone(), control_tx, event_tx);
+        let worker_pending = pending.clone();
+        let worker = tokio::spawn(async move {
+            let mut event_open = true;
+            loop {
+                tokio::select! {
+                    control = inbound_control.recv() => match control {
+                        None => break,
+                        Some(ServerControlMessage::Response(response)) => {
+                            if let Some(tx) = worker_pending.lock().await.remove(&response.request_id) {
+                                let _ = tx.send(response);
+                            }
+                        }
+                        Some(ServerControlMessage::ServerRequest(request)) => {
+                            let _ = control_tx.send(request).await;
+                        }
+                    },
+                    event = inbound_events.recv(), if event_open => match event {
+                        None => event_open = false,
+                        Some(event) => { let _ = event_tx.send(event).await; }
+                    },
+                }
+            }
+        });
 
         let client = Self {
             sender,
             pending,
             control_rx: Mutex::new(control_rx),
             event_rx: Mutex::new(event_rx),
-            ready,
             sequencer: Sequencer::new(),
             worker: Mutex::new(Some(worker)),
         };
@@ -105,7 +123,6 @@ impl AthenaClient {
             .await?;
         client.notify(method::INITIALIZED, None).await;
 
-        let mut ready = client.ready.clone();
         if !*ready.borrow() {
             let _ = tokio::time::timeout(Duration::from_secs(5), ready.changed()).await;
         }
@@ -193,35 +210,4 @@ impl AthenaClient {
             }
         }
     }
-}
-
-fn spawn_worker(
-    client_half: TransportClientHalf,
-    pending: Pending,
-    control_tx: mpsc::Sender<ServerRequest>,
-    event_tx: mpsc::Sender<EventNotification>,
-) -> JoinHandle<()> {
-    let (mut control_rx, mut event_rx) = client_half.into_receivers();
-    tokio::spawn(async move {
-        let mut event_open = true;
-        loop {
-            tokio::select! {
-                control = control_rx.recv() => match control {
-                    None => break,
-                    Some(ServerControlMessage::Response(resp)) => {
-                        if let Some(tx) = pending.lock().await.remove(&resp.request_id) {
-                            let _ = tx.send(resp);
-                        }
-                    }
-                    Some(ServerControlMessage::ServerRequest(sr)) => {
-                        let _ = control_tx.send(sr).await;
-                    }
-                },
-                event = event_rx.recv(), if event_open => match event {
-                    None => event_open = false,
-                    Some(ev) => { let _ = event_tx.send(ev).await; }
-                },
-            }
-        }
-    })
 }

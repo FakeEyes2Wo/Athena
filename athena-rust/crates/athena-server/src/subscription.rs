@@ -75,9 +75,11 @@ impl SubscriptionRegistry {
     }
 
     pub async fn remove_all(&self) {
-        let ids: Vec<String> = self.subs.lock().await.keys().cloned().collect();
-        for id in ids {
-            self.remove(&id).await;
+        let entries = std::mem::take(&mut *self.subs.lock().await);
+        for (id, entry) in entries {
+            entry.sub.active.store(false, Ordering::SeqCst);
+            self.mux.remove(&id);
+            entry.pump.abort();
         }
     }
 }

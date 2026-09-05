@@ -2,7 +2,7 @@ use crate::client::AthenaClient;
 use crate::execution::ExecutionAdapter;
 use crate::processor::MessageProcessor;
 use crate::subscription::SubscriptionRegistry;
-use crate::transport::Transport;
+use crate::transport::transport;
 use athena_runtime::{FairMux, RuntimeThreadManager};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,8 +23,7 @@ pub struct AppServer {
 impl AppServer {
     /// Create and fully initialize the server and its client.
     pub async fn create(manager: Arc<RuntimeThreadManager>) -> Result<Self, RpcException> {
-        let transport = Transport::with_defaults();
-        let (client_half, server_half) = transport.split();
+        let (client_half, server_half) = transport();
 
         let mux = Arc::new(FairMux::new(server_half.event_sender()));
         let mux_handle = tokio::spawn(mux.clone().run());
@@ -34,7 +33,7 @@ impl AppServer {
             manager.clone(),
             subscriptions.clone(),
         ));
-        let processor = MessageProcessor::start(server_half, executor, 64);
+        let processor = MessageProcessor::start(server_half, executor);
 
         let client = AthenaClient::start(client_half).await?;
 
@@ -45,11 +44,6 @@ impl AppServer {
             subscriptions,
             mux: mux_handle,
         })
-    }
-
-    /// Current message-processor state (see `processor` constants).
-    pub fn processor_state(&self) -> u8 {
-        self.processor.state()
     }
 
     /// Ordered shutdown: admission → subscriptions → threads → transport.
