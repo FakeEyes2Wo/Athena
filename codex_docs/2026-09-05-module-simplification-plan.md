@@ -24,6 +24,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove the test-only prepare runner factory and validate the real preparation pipeline.
 - [x] Consolidate PlanRunner failure handling and shared directory-presence checks.
 - [x] Remove the unconsumed settlement API and test the active Supervisor policy.
+- [x] Remove script metadata/result wrappers and consolidate the scoring interface.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -151,8 +152,17 @@ Add seven policy cases against the actual Supervisor method for submit, abandon,
 
 Settlement verification: all five package builds passed. Full TypeScript workspace returned 454 passed across 53 files with `npm test -- --testTimeout=30000` (458 minus eleven dead-function cases plus seven active-policy cases). References now resolve only to the Supervisor method, its new tests and the negative package-export assertion; PlanSettlement is absent. git diff --check passed. Default-timeout reliability and full application readiness remain unproven.
 
+Script/scoring interface review: trace freeze through prepare and run through TrustedEvaluator to PlanRunner/DSH. Delete BundleMetadata (description has no reader), ScriptRunResult (only outputs was consumed), and the public command-building method used only internally. freeze now accepts the entrypoint string; run returns its parsed output directly. Remove the unreferenced per-run result artifact write, while preserving frozen tree/source/project/lock artifacts and PlanRunner's independently persisted scoring evidence. Consolidate both subprocess helpers into one stdout-returning implementation, preserving argv, timeout, buffer limits and file-before-stdout output selection.
+
+TrustedEvaluator retains its separate scoring boundary and single runner dependency. Derive EvaluatorRunner from the canonical run method and score options from Scorer instead of duplicating declarations. Remove the redundant boolean check and unreachable Number conversion catch after the string/number guard; retain missing/non-scalar/non-finite rejection, numeric strings, candidate identity, direction and ScoringError normalization. Test doubles use structural objects instead of a forwarding class. Full source/test reads and caller tracing close evaluation.ts and evaluation.test.ts, bringing baseline coverage to 77/602.
+
+New script tests exercise real filesystem/artifact round-trips with a mocked subprocess boundary: frozen metadata, nested binary files, restored prediction files, result-file/stdout parsing, missing fields and unfrozen bundles (six cases). Four added evaluator cases cover missing scores, Error/string failures and prediction/identity/direction forwarding. The focused combined selection passed thirteen tests; all five TypeScript package builds passed. These are not real uv/Python execution or strong-isolation evidence. script_runner.ts remains Pending for deeper freeze snapshot consistency, traversal and file-injection boundary review; its four-argument run contract is not yet declared final. Whole-repository acceptance, main merge/push and task branch/worktree cleanup remain mandatory and unfinished.
+
+Script/scoring verification: final full TypeScript workspace returned 464 passed across 54 files with `npm test -- --testTimeout=30000`. All five package builds and git diff --check passed. Removed wrapper/helper references remain only in the negative package-export assertion. The timeout override is command-only; default-timeout reliability remains unproven. No real external evaluator/model run or whole-application readiness is claimed.
+
 | File | Baseline lines | Review |
 | --- | ---: | --- |
+| `athena_ts/packages/athena-research/test/script-runner.test.ts` | New | Reviewed; six filesystem/artifact cases with mocked subprocesses |
 | `athena_ts/packages/athena-research/test/execution.test.ts` | New | Reviewed; six real-process command/workdir/event/error/timeout cases |
 | `athena_ts/packages/athena-research/test/public-api.test.ts` | New | Reviewed; removed legacy root/adapter exports and retained canonical DSH services |
 | `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
@@ -714,7 +724,7 @@ Settlement verification: all five package builds passed. Full TypeScript workspa
 | `athena_ts/packages/athena-dsh/src/index.ts` | 929 | Pending |
 | `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Pending |
 | `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Pending |
-| `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Pending |
+| `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Reviewed; canonical runner/options contracts, direct output and simplified numeric validation |
 | `athena_ts/packages/athena-research/src/execution.ts` | 94 | Reviewed; deleted context/root state, single run options and four-field result |
 | `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |
 | `athena_ts/packages/athena-research/src/report.ts` | 78 | Pending |
@@ -734,7 +744,7 @@ Settlement verification: all five package builds passed. Full TypeScript workspa
 | `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Pending |
 | `athena_ts/packages/athena-research/src/validation.ts` | 54 | Pending |
 | `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; deleted after full caller tracing proved standalone root unused |
-| `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Pending |
+| `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Reviewed; seven numeric/error/prediction/identity/direction cases |
 | `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Reviewed; manifest/scoring/settlement, bundle failures and recursive presence |

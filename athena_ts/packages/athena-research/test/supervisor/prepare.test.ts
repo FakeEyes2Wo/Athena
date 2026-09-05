@@ -17,8 +17,8 @@ function tmpDir(): string {
 }
 
 const fakeScripts = {
-  freeze: async (root: string, metadata: { entrypoint: string }) =>
-    DataScriptBundleSchema.parse({ bundle_id: "b1", entrypoint: metadata.entrypoint }),
+  freeze: async (root: string, entrypoint: string) =>
+    DataScriptBundleSchema.parse({ bundle_id: "b1", entrypoint }),
 }
 
 describe("freezeEvaluator", () => {

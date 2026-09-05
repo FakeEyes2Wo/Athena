@@ -22,8 +22,8 @@ function tmpDir(): string {
 const submit = async () => PlanDecisionSchema.parse({ decision: "submit", reason: "done" })
 
 const fakeScripts = {
-  freeze: async (root: string, metadata: { entrypoint: string }) =>
-    DataScriptBundleSchema.parse({ bundle_id: "b1", entrypoint: metadata.entrypoint }),
+  freeze: async (root: string, entrypoint: string) =>
+    DataScriptBundleSchema.parse({ bundle_id: "b1", entrypoint }),
 }
 
 describe("runEvaluatorPlan", () => {

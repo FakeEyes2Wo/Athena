@@ -8,6 +8,7 @@ describe("research public surface", () => {
     for (const name of [
       "ResearchRuntime", "WorkerRunner", "zodOutputType", "PlanDecisionOutputType",
       "HypothesisBatchOutputType", "makeShellTool", "commandResultDict", "ExecutionContext", "decideSettlement",
+      "BundleMetadata", "ScriptRunResult",
     ]) expect(api).not.toHaveProperty(name)
   })
 

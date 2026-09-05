@@ -16,7 +16,7 @@ import {
 } from "@athena/core"
 
 import { DataScriptBundleSchema } from "../contracts.js"
-import { BundleMetadata, type DataScriptRunner } from "../script_runner.js"
+import type { DataScriptRunner } from "../script_runner.js"
 import type { Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
 import { PlanRunner, hasAnyFile } from "./experiment.js"
@@ -97,7 +97,7 @@ export async function freezeEvaluator(opts: {
     )
   }
 
-  const bundle = await scripts.freeze(evaluatorRoot, new BundleMetadata(entrypoint))
+  const bundle = await scripts.freeze(evaluatorRoot, entrypoint)
   return store.putText(JSON.stringify(DataScriptBundleSchema.parse(bundle)))
 }
 
