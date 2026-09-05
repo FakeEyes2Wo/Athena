@@ -32,6 +32,7 @@ from athena.research.literature.paper_rag.tool import (
     PaperCitesTool,
     PaperCorpusOverviewTool,
     PaperKeywordSearchTool,
+    PaperRagRuntime,
     PaperSearchTool,
     PaperSectionSearchTool,
     PaperSemanticSearchTool,
@@ -311,6 +312,7 @@ def build_survey_tools(
     """
     tools = ToolRegistry()
     session = session if session is not None else RetrievalSession(stack.corpus_cache)
+    rag = PaperRagRuntime(stack.artifacts, session, stack.embedder)
     if include_survey:
         tools.register(PaperSurveyTool(stack))
     if include_producers:
@@ -331,17 +333,15 @@ def build_survey_tools(
                 )
             )
         )
-    tools.register(PaperCorpusOverviewTool(stack.artifacts, session))
-    tools.register(PaperKeywordSearchTool(stack.artifacts, session))
-    tools.register(PaperChunkReadTool(stack.artifacts, session))
-    tools.register(PaperVisualOfTool(stack.artifacts, session))
-    tools.register(PaperCitesTool(stack.artifacts, session))
-    tools.register(PaperSectionSearchTool(stack.artifacts, session))
+    tools.register(PaperCorpusOverviewTool(rag))
+    tools.register(PaperKeywordSearchTool(rag))
+    tools.register(PaperChunkReadTool(rag))
+    tools.register(PaperVisualOfTool(rag))
+    tools.register(PaperCitesTool(rag))
+    tools.register(PaperSectionSearchTool(rag))
     if stack.embedder is not None:
-        tools.register(
-            PaperSemanticSearchTool(stack.artifacts, stack.embedder, session)
-        )
+        tools.register(PaperSemanticSearchTool(rag))
         # 融合入口只在有编码器时注册：没有向量它会退化成纯词面，与
         # paper_keyword_search 完全重复，多摆一个只会让选择变难。
-        tools.register(PaperSearchTool(stack.artifacts, stack.embedder, session))
+        tools.register(PaperSearchTool(rag))
     return tools

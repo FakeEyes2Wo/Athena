@@ -20,11 +20,12 @@ from athena.research.literature.paper_markdown.models import (
     PaperContent,
     RetrievalUnit,
 )
-from athena.research.literature.paper_rag.interfaces import TextEmbedder, VectorCache
-from athena.research.literature.paper_rag.schemas import (
+from athena.research.literature.paper_rag.models import (
+    CorpusBuildOptions,
     CorpusEntry,
     CorpusSentence,
     PaperCorpusIndex,
+    TextEmbedder,
 )
 from athena.research.literature.paper_scout.pool import title_key
 
@@ -299,30 +300,8 @@ def decode_json_vectors(text: str) -> numpy.ndarray:
     return numpy.asarray(json.loads(text), dtype=numpy.float32)
 
 
-async def embed_texts(
-    store: ArtifactStore, texts: list[str], embedder: TextEmbedder
-) -> ArtifactRef:
-    """分批编码并归一化后落盘，向量顺序与输入一一对应。"""
-    vectors: list[list[float]] = []
-    for start in range(0, len(texts), EMBED_BATCH):
-        batch = await embedder.embed(texts[start : start + EMBED_BATCH])
-        vectors.extend(normalize(vector) for vector in batch)
-    return await store.put_bytes(pack_vectors(vectors))
-
-
-async def embed_sentences(
-    store: ArtifactStore, index: PaperCorpusIndex, embedder: TextEmbedder
-) -> ArtifactRef:
-    """编码全部句子，向量顺序与 ``index.sentences`` 一一对应。"""
-    return await embed_texts(
-        store,
-        [index.sentence_text(position) for position in range(len(index.sentences))],
-        embedder,
-    )
-
-
 async def embed_paper_sentences(
-    index: PaperCorpusIndex, start: int, end: int, embedder: TextEmbedder
+    index: PaperCorpusIndex, span: tuple[int, int], embedder: TextEmbedder
 ) -> numpy.ndarray:
     """编码一篇论文名下的句子区间，返回归一化后的 float32 矩阵。
 
@@ -331,6 +310,7 @@ async def embed_paper_sentences(
     因此向量整篇复用是安全的。一次 44 篇的语料要编码 36920 条句子（2308 批请求），
     而两次调研之间往往有大半论文是重合的。
     """
+    start, end = span
     texts = [index.sentence_text(position) for position in range(start, end)]
     vectors: list[list[float]] = []
     for offset in range(0, len(texts), EMBED_BATCH):
@@ -568,11 +548,7 @@ def cited_paper_ids(
 async def build_corpus_index(
     store: ArtifactStore,
     papers: list[PaperContent],
-    embedder: TextEmbedder | None = None,
-    *,
-    index_bibliography: bool = False,
-    vectors: VectorCache | None = None,
-    paper_edges: dict[str, list[str]] | None = None,
+    options: CorpusBuildOptions | None = None,
 ) -> ArtifactRef:
     """把若干篇论文构建成可检索语料，返回三个检索工具接受的 ``corpus_ref``。
 
@@ -585,11 +561,12 @@ async def build_corpus_index(
     在于它是图的边，不是一段可检索的正文。``index_bibliography=True`` 可恢复旧行为，
     用于对照测量。
     """
+    options = options or CorpusBuildOptions()
     units_by_paper = [await paper.load_retrieval_units(store) for paper in papers]
     anchors = paper_anchors(units_by_paper)
     edges = citation_edges(units_by_paper, anchors)
     # 论文级引用挂在锚点上，与参考文献解析出的 chunk 级引用并存，见 reference_edges
-    anchor_edges = reference_edges(units_by_paper, anchors, paper_edges or {})
+    anchor_edges = reference_edges(units_by_paper, anchors, options.paper_edges)
 
     entries: list[CorpusEntry] = []
     sentences: list[CorpusSentence] = []
@@ -599,7 +576,7 @@ async def build_corpus_index(
     for units in units_by_paper:
         paper_start = len(sentences)
         for unit in units:
-            if unit.kind == BIBLIOGRAPHY_KIND and not index_bibliography:
+            if unit.kind == BIBLIOGRAPHY_KIND and not options.index_bibliography:
                 continue
             spans = split_sentences(unit.text)
             entries.append(
@@ -637,39 +614,25 @@ async def build_corpus_index(
         entry.cited_ids = [item for item in entry.cited_ids if item in present]
 
     index = PaperCorpusIndex(entries=entries, sentences=sentences)
-    if embedder is not None:
-        index.embedding_ref = await build_embeddings(
-            store, index, papers, spans_by_paper, embedder, vectors
-        )
+    if options.embedder is not None:
+        blocks: list[numpy.ndarray] = []
+        for paper, span in zip(papers, spans_by_paper):
+            start, end = span
+            cached = (
+                await options.vectors.load(paper, start, end)
+                if options.vectors is not None
+                else None
+            )
+            block = (
+                cached
+                if cached is not None
+                else await embed_paper_sentences(index, span, options.embedder)
+            )
+            if cached is None and options.vectors is not None:
+                await options.vectors.save(paper, block)
+            blocks.append(block)
+        combined = numpy.concatenate(blocks, axis=0) if blocks else []
+        index.embedding_ref = await store.put_bytes(pack_vectors(combined))
         index.embedding_format = "float32"
-        index.embedding_model = embedder.model
+        index.embedding_model = options.embedder.model
     return await store.put_text(index.model_dump_json())
-
-
-async def build_embeddings(
-    store: ArtifactStore,
-    index: PaperCorpusIndex,
-    papers: list[PaperContent],
-    spans_by_paper: list[tuple[int, int]],
-    embedder: TextEmbedder,
-    vectors: VectorCache | None,
-) -> ArtifactRef:
-    """按篇编码（或按篇取缓存）后拼成整份语料的向量矩阵。
-
-    没有缓存时行为与整份一次编码完全一致——拼接顺序就是 ``index.sentences`` 的顺序，
-    而那个一一对应关系是语义检索唯一的正确性前提：错位不会报错，只会让之后每一次检索
-    都返回错的句子。
-    """
-    blocks: list[numpy.ndarray] = []
-    for paper, (start, end) in zip(papers, spans_by_paper):
-        cached = await vectors.load(paper, start, end) if vectors is not None else None
-        if cached is not None:
-            blocks.append(cached)
-            continue
-        block = await embed_paper_sentences(index, start, end, embedder)
-        if vectors is not None:
-            await vectors.save(paper, block)
-        blocks.append(block)
-    if not blocks:
-        return await store.put_bytes(pack_vectors([]))
-    return await store.put_bytes(pack_vectors(numpy.concatenate(blocks, axis=0)))

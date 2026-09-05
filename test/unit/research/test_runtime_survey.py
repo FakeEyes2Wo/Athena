@@ -18,7 +18,7 @@ from athena.core.tool import ToolRegistry, tool
 from athena.research.turns import ideator as atr_module
 from athena.research.runtime import survey as runtime_survey_module
 from athena.research.turns.runner import AgentTurnRunner
-from athena.research.literature.paper_rag.schemas import PaperSummary
+from athena.research.literature.paper_rag.models import PaperSummary
 from athena.research.literature.paper_source.http import HostRateLimiter
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.state import ResearchState

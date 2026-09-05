@@ -16,8 +16,7 @@ from athena.research.literature.bench.models import (
     RetrievalBenchReport,
 )
 from athena.research.literature.paper_rag.index import normalize
-from athena.research.literature.paper_rag.interfaces import TextEmbedder
-from athena.research.literature.paper_rag.schemas import SearchHit
+from athena.research.literature.paper_rag.models import SearchHit, TextEmbedder
 from athena.research.literature.paper_rag.search import (
     LoadedCorpus,
     corpus_paper_ids,

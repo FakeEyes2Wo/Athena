@@ -4,11 +4,16 @@
 关键词检索与整篇读取因此完全不需要加载向量，这也是语料未建向量时仍可工作的原因。
 """
 
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal, Protocol
 
+import numpy
 from pydantic import BaseModel, Field
 
 from athena.core.contracts import ArtifactRef
+
+if TYPE_CHECKING:
+    from athena.research.literature.paper_markdown.models import PaperContent
 
 
 class CorpusSentence(BaseModel):
@@ -171,3 +176,34 @@ class ChunkRead(BaseModel):
         default_factory=list,
         description="In-corpus papers this chunk cites, for paper_cites.",
     )
+
+
+class TextEmbedder(Protocol):
+    """Provider-neutral batch text encoder."""
+
+    model: str
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """Encode texts in input order."""
+
+
+class VectorCache(Protocol):
+    """Paper-granularity sentence-vector cache."""
+
+    async def load(
+        self, paper: "PaperContent", start: int, end: int
+    ) -> numpy.ndarray | None:
+        """Return vectors for the sentence range, or ``None`` on a cache miss."""
+
+    async def save(self, paper: "PaperContent", vectors: numpy.ndarray) -> None:
+        """Store all sentence vectors for one paper."""
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusBuildOptions:
+    """Optional embedding, cache, and citation inputs for corpus construction."""
+
+    embedder: TextEmbedder | None = None
+    index_bibliography: bool = False
+    vectors: VectorCache | None = None
+    paper_edges: dict[str, list[str]] = field(default_factory=dict)

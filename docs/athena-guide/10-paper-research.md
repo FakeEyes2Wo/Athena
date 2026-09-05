@@ -330,15 +330,11 @@ literature/
 ├── paper_markdown/
 │   ├── __init__.py
 │   ├── chunking.py
-│   ├── document.py
-│   ├── interfaces.py
+│   ├── models.py
 │   ├── pdf_elements.py
-│   ├── pdf_layout.py
 │   ├── pdf_parser.py
 │   ├── processor.py
 │   ├── quality.py
-│   ├── schemas.py
-│   ├── tex_bibliography.py
 │   ├── tex_parser.py
 │   ├── tex_render.py
 │   ├── tex_source.py
@@ -348,11 +344,9 @@ literature/
 ├── paper_rag/
 │   ├── __init__.py
 │   ├── index.py
-│   ├── interfaces.py
-│   ├── schemas.py
+│   ├── models.py
 │   ├── search.py
-│   ├── tool.py
-│   └── traversal.py
+│   └── tool.py
 └── survey/
     ├── __init__.py
     ├── library.py
@@ -411,7 +405,7 @@ build_corpus_index(contents)
 → split_sentences
 → paper_anchors
 → citation/reference edges
-→ embed_sentences
+→ 按论文复用缓存或编码句向量
 → 返回 corpus_ref
 ```
 

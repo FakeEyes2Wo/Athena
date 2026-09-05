@@ -22,50 +22,13 @@ from athena.research.literature.paper_rag.index import (
     normalize,
     unpack_vectors,
 )
-from athena.research.literature.paper_rag.schemas import (
+from athena.research.literature.paper_rag.models import (
+    ChunkRead,
     CorpusOverview,
     PaperCorpusIndex,
     PaperSummary,
     SearchHit,
 )
-from athena.research.literature.paper_rag.traversal import (
-    ALREADY_READ_NOTICE,
-    citation_links,
-    citing_anchors,
-    edge_targets,
-    paper_namespace,
-    read_chunks,
-    read_one,
-    section_search,
-    traverse,
-    visual_links,
-)
-from athena.research.literature.paper_rag.traversal import (
-    heading_variants as _heading_variants,
-)
-from athena.research.literature.paper_rag.traversal import join_snippet as _join_snippet
-from athena.research.literature.paper_rag.traversal import make_hit as _make_hit
-
-__all__ = [
-    "ALREADY_READ_NOTICE",
-    "CorpusCache",
-    "LoadedCorpus",
-    "RetrievalSession",
-    "citation_links",
-    "citing_anchors",
-    "corpus_overview",
-    "corpus_paper_ids",
-    "edge_targets",
-    "hybrid_search",
-    "keyword_search",
-    "paper_namespace",
-    "read_chunks",
-    "read_one",
-    "section_search",
-    "semantic_search",
-    "traverse",
-    "visual_links",
-]
 
 SENTENCE_POOL_FACTOR = 8
 SELF_CONTAINED_TOKENS = 5
@@ -74,6 +37,9 @@ ABSTRACT_KIND = "abstract"
 # 语料下整份结果约 25 KB，摘要放到 400 字符则要 37 KB，多出来的部分不改变任何取舍。
 OVERVIEW_ABSTRACT_CHARS = 280
 OVERVIEW_SECTIONS = 10
+MAX_SNIPPET_CHARS = 600
+TRAVERSAL_SNIPPET_SENTENCES = 3
+ALREADY_READ_NOTICE = "This chunk has been read before."
 
 # 章节别名：论文之间对"同一个部分"的叫法不统一，而按字面子串匹配会让跨论文对比这个
 # 算子存在的理由落空。实测 44 篇真实语料里 ``Limitations`` 只命中 3 篇、``Ablation``
@@ -105,7 +71,11 @@ def heading_variants(heading: str) -> tuple[str, ...]:
     一个查询命中多组时取先声明的那组（如 ``dataset limitations``）；这种混合标题本来
     就没有唯一正确答案，取第一组至少是确定的。
     """
-    return _heading_variants(heading)
+    wanted = heading.lower().strip()
+    for aliases in SECTION_ALIASES.values():
+        if any(alias in wanted for alias in aliases):
+            return (wanted, *aliases)
+    return (wanted,)
 
 
 @dataclass(slots=True)
@@ -383,14 +353,182 @@ def join_snippet(sentences: list[str]) -> str:
 
     上游 chunk 可达数千字符，不设上限会让"只返回片段"的设计失效。
     """
-    return _join_snippet(sentences)
+    text = " ".join(part.strip() for part in sentences if part.strip())
+    if len(text) <= MAX_SNIPPET_CHARS:
+        return text
+    return text[:MAX_SNIPPET_CHARS].rstrip() + " …"
 
 
 def make_hit(
     corpus: LoadedCorpus, position: int, score: float, snippet: str
 ) -> SearchHit:
     """按 chunk 位置组装检索命中。"""
-    return _make_hit(corpus, position, score, snippet)
+    entry = corpus.index.entries[position]
+    return SearchHit(
+        chunk_id=entry.chunk_id,
+        paper_id=entry.paper_id,
+        title=entry.title,
+        kind=entry.kind,
+        heading_path=entry.heading_path,
+        score=score,
+        snippet=snippet,
+        visual_ids=entry.visual_ids,
+        cited_ids=entry.cited_ids,
+    )
+
+
+def _head_snippet(corpus: LoadedCorpus, position: int) -> str:
+    entry = corpus.index.entries[position]
+    return join_snippet(
+        [
+            corpus.index.sentence_text(index)
+            for index in range(entry.sentence_start, entry.sentence_end)
+        ][:TRAVERSAL_SNIPPET_SENTENCES]
+    )
+
+
+def traverse(corpus: LoadedCorpus, targets: list[str]) -> list[SearchHit]:
+    """Return linked chunks in first-seen order, with orientation snippets."""
+    results: list[SearchHit] = []
+    seen: set[str] = set()
+    for chunk_id in targets:
+        position = corpus.positions.get(chunk_id)
+        if position is None or chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        results.append(make_hit(corpus, position, 1.0, _head_snippet(corpus, position)))
+    return results
+
+
+def edge_targets(corpus: LoadedCorpus, chunk_ids: list[str], edge: str) -> list[str]:
+    """Resolve an entry edge in input order."""
+    targets: list[str] = []
+    for chunk_id in chunk_ids:
+        position = corpus.positions.get(chunk_id)
+        if position is not None:
+            targets.extend(getattr(corpus.index.entries[position], edge))
+    return targets
+
+
+def paper_namespace(chunk_id: str) -> str:
+    """Extract the paper namespace from a namespaced chunk id."""
+    return chunk_id.rsplit(":", 1)[0]
+
+
+def citing_anchors(corpus: LoadedCorpus, chunk_ids: list[str]) -> list[str]:
+    """Return cited-paper anchors for the supplied chunks."""
+    wanted = {paper_namespace(chunk_id) for chunk_id in chunk_ids}
+    return [anchor for anchor in corpus.cited_by if paper_namespace(anchor) in wanted]
+
+
+def visual_links(corpus: LoadedCorpus, chunk_ids: list[str]) -> list[SearchHit]:
+    """Follow visual links from the supplied chunks."""
+    return traverse(corpus, edge_targets(corpus, chunk_ids, "visual_ids"))
+
+
+def citation_links(
+    corpus: LoadedCorpus, chunk_ids: list[str], direction: str
+) -> list[SearchHit]:
+    """Follow outgoing citations or incoming citing-paper links."""
+    if direction != "cited_by":
+        return traverse(corpus, edge_targets(corpus, chunk_ids, "cited_ids"))
+    anchors = sorted(citing_anchors(corpus, chunk_ids))
+    return traverse(
+        corpus, [target for anchor in anchors for target in corpus.cited_by[anchor]]
+    )
+
+
+def section_search(
+    corpus: LoadedCorpus, heading: str, paper_ids: list[str], limit: int
+) -> list[SearchHit]:
+    """Find matching sections and interleave results by paper."""
+    variants = heading_variants(heading)
+    allowed = {item for item in paper_ids if item}
+    by_paper: dict[str, list[tuple[float, int]]] = {}
+    for position, entry in enumerate(corpus.index.entries):
+        if allowed and entry.paper_id not in allowed:
+            continue
+        depth = next(
+            (
+                level
+                for level, name in enumerate(entry.heading_path)
+                if any(variant in name.lower() for variant in variants)
+            ),
+            None,
+        )
+        if depth is not None:
+            by_paper.setdefault(entry.paper_id, []).append(
+                (1.0 / (1 + depth), position)
+            )
+    for group in by_paper.values():
+        group.sort(key=lambda item: (-item[0], item[1]))
+    order = sorted(by_paper, key=lambda paper: (-by_paper[paper][0][0], paper))
+    rounds = max((len(group) for group in by_paper.values()), default=0)
+    picked = [
+        by_paper[paper][index]
+        for index in range(rounds)
+        for paper in order
+        if index < len(by_paper[paper])
+    ]
+    return [
+        make_hit(corpus, position, score, _head_snippet(corpus, position))
+        for score, position in picked[:limit]
+    ]
+
+
+def read_one(
+    corpus: LoadedCorpus, session: RetrievalSession, position: int
+) -> ChunkRead:
+    """Read one chunk, suppressing text already read in this session."""
+    entry = corpus.index.entries[position]
+    if session.was_read(entry.chunk_id):
+        return ChunkRead(
+            chunk_id=entry.chunk_id,
+            status="already_read",
+            title=entry.title,
+            heading_path=entry.heading_path,
+            text=ALREADY_READ_NOTICE,
+        )
+    session.mark_read(entry.chunk_id)
+    return ChunkRead(
+        chunk_id=entry.chunk_id,
+        status="read",
+        title=entry.title,
+        heading_path=entry.heading_path,
+        text=entry.text,
+        visual_ids=entry.visual_ids,
+        cited_ids=entry.cited_ids,
+    )
+
+
+def read_chunks(
+    corpus: LoadedCorpus,
+    session: RetrievalSession,
+    chunk_ids: list[str],
+    include_adjacent: bool,
+) -> list[ChunkRead]:
+    """Read requested chunks and optional same-paper neighbours in input order."""
+    results: list[ChunkRead] = []
+    seen: set[int] = set()
+    for chunk_id in chunk_ids:
+        position = corpus.positions.get(chunk_id)
+        if position is None:
+            results.append(ChunkRead(chunk_id=chunk_id, status="not_found"))
+            continue
+        targets = [position]
+        if include_adjacent:
+            paper_id = corpus.index.entries[position].paper_id
+            targets = [
+                other
+                for other in (position - 1, position, position + 1)
+                if 0 <= other < len(corpus.index.entries)
+                and corpus.index.entries[other].paper_id == paper_id
+            ]
+        for target in targets:
+            if target not in seen:
+                seen.add(target)
+                results.append(read_one(corpus, session, target))
+    return results
 
 
 def score_by_keywords(

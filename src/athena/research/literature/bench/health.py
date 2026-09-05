@@ -17,8 +17,8 @@ from athena.research.literature.paper_rag.index import (
 from athena.research.literature.paper_rag.search import (
     LoadedCorpus,
     heading_variants,
+    paper_namespace,
 )
-from athena.research.literature.paper_rag.traversal import paper_namespace
 
 ABSTRACT_KIND = "abstract"
 

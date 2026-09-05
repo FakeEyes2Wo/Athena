@@ -17,7 +17,7 @@ from athena.research.literature.paper_rag.index import (
     novel_prose_chars,
     pack_vectors,
 )
-from athena.research.literature.paper_rag.schemas import (
+from athena.research.literature.paper_rag.models import (
     CorpusEntry,
     CorpusSentence,
     PaperCorpusIndex,

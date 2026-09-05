@@ -24,6 +24,7 @@ from athena.research.literature.paper_rag.index import (
     build_corpus_index,
     split_sentences,
 )
+from athena.research.literature.paper_rag.models import CorpusBuildOptions
 from athena.research.literature.paper_scout.agent import PaperScoutAgent
 from athena.research.literature.paper_scout.schemas import (
     PaperScoutResult,
@@ -514,9 +515,11 @@ class IndexStage:
             self.state.report.corpus_ref = await build_corpus_index(
                 self.stack.artifacts,
                 selected,
-                self.stack.embedder,
-                vectors=self.stack.vector_cache(),
-                paper_edges=self._index_edges(selected),
+                CorpusBuildOptions(
+                    embedder=self.stack.embedder,
+                    vectors=self.stack.vector_cache(),
+                    paper_edges=self._index_edges(selected),
+                ),
             )
         except OpenAIError as error:
             self.state.report.warnings.append(f"index_failed: {type(error).__name__}")

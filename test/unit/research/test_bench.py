@@ -31,7 +31,7 @@ from athena.research.literature.paper_rag.index import (
     MIN_ANCHOR_PROSE_CHARS,
     novel_prose_chars,
 )
-from athena.research.literature.paper_rag.schemas import (
+from athena.research.literature.paper_rag.models import (
     CorpusEntry,
     CorpusSentence,
     PaperCorpusIndex,

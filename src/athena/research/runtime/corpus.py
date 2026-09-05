@@ -8,10 +8,12 @@ the collaborator modules it owns.
 from typing import Any
 
 from athena.core.tool import ToolRegistry
-from athena.research.literature.paper_rag.schemas import PaperSummary
+from athena.research.literature.paper_rag.models import PaperSummary
 from athena.research.literature.paper_rag.search import (
     RetrievalSession,
     corpus_overview,
+)
+from athena.research.literature.paper_rag.search import (
     corpus_paper_ids as paper_corpus_paper_ids,
 )
 from athena.research.literature.paper_rag.tool import MAX_OVERVIEW_PAPERS

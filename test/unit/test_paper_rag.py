@@ -30,32 +30,34 @@ from athena.research.literature.paper_rag.index import (
     title_matches,
     unpack_vectors,
 )
-from athena.research.literature.paper_rag.schemas import PaperCorpusIndex
+from athena.research.literature.paper_rag.models import (
+    CorpusBuildOptions,
+    PaperCorpusIndex,
+)
 from athena.research.literature.paper_rag.search import (
+    ALREADY_READ_NOTICE,
     RetrievalSession,
+    citation_links,
     corpus_overview,
     heading_variants,
     keyword_search,
+    paper_namespace,
+    read_chunks,
     score_by_keywords,
+    section_search,
     self_contained_weight,
     semantic_search,
+    visual_links,
 )
 from athena.research.literature.paper_rag.tool import (
     PaperChunkReadTool,
     PaperCitesTool,
     PaperCorpusOverviewTool,
     PaperKeywordSearchTool,
+    PaperRagRuntime,
     PaperSectionSearchTool,
     PaperSemanticSearchTool,
     PaperVisualOfTool,
-)
-from athena.research.literature.paper_rag.traversal import (
-    ALREADY_READ_NOTICE,
-    citation_links,
-    paper_namespace,
-    read_chunks,
-    section_search,
-    visual_links,
 )
 from athena.research.literature.paper_scout.pool import title_key
 
@@ -453,7 +455,9 @@ class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
         )
         embedder = FakeEmbedder(VOCABULARY)
 
-        corpus_ref = await build_corpus_index(self.store, [paper], embedder)
+        corpus_ref = await build_corpus_index(
+            self.store, [paper], CorpusBuildOptions(embedder=embedder)
+        )
         session = RetrievalSession()
         corpus = await session.load(self.store, corpus_ref, vectors=True)
 
@@ -470,7 +474,9 @@ class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
             self.store, "p1", "Paper One", ["Retrieval works. Grasping differs."]
         )
         corpus_ref = await build_corpus_index(
-            self.store, [paper], FakeEmbedder(VOCABULARY)
+            self.store,
+            [paper],
+            CorpusBuildOptions(embedder=FakeEmbedder(VOCABULARY)),
         )
         session = RetrievalSession()
 
@@ -485,7 +491,9 @@ class CorpusIndexTest(unittest.IsolatedAsyncioTestCase):
         """1.0 语料的向量在磁盘上是 JSON 文本；换格式不能把已有语料变成砖头。"""
         paper = await make_paper(self.store, "p1", "Paper One", ["Retrieval works."])
         corpus_ref = await build_corpus_index(
-            self.store, [paper], FakeEmbedder(VOCABULARY)
+            self.store,
+            [paper],
+            CorpusBuildOptions(embedder=FakeEmbedder(VOCABULARY)),
         )
         index = PaperCorpusIndex.model_validate_json(
             await self.store.get_text(corpus_ref)
@@ -514,7 +522,9 @@ class SearchTest(unittest.IsolatedAsyncioTestCase):
 
     async def load(self, texts: list[str], embedder: FakeEmbedder | None = None):
         paper = await make_paper(self.store, "p1", "Paper One", texts)
-        corpus_ref = await build_corpus_index(self.store, [paper], embedder)
+        corpus_ref = await build_corpus_index(
+            self.store, [paper], CorpusBuildOptions(embedder=embedder)
+        )
         return await self.session.load(
             self.store, corpus_ref, vectors=embedder is not None
         )
@@ -649,6 +659,7 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
         self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
         self.session = RetrievalSession()
         self.embedder = FakeEmbedder(VOCABULARY)
+        self.runtime = PaperRagRuntime(self.store, self.session, self.embedder)
         self.paper = await make_paper(
             self.store,
             "p1",
@@ -657,13 +668,13 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_registry_round_trip_shares_the_read_tracker(self) -> None:
-        corpus_ref = await build_corpus_index(self.store, [self.paper], self.embedder)
-        registry = ToolRegistry()
-        registry.register(PaperKeywordSearchTool(self.store, self.session))
-        registry.register(
-            PaperSemanticSearchTool(self.store, self.embedder, self.session)
+        corpus_ref = await build_corpus_index(
+            self.store, [self.paper], CorpusBuildOptions(embedder=self.embedder)
         )
-        registry.register(PaperChunkReadTool(self.store, self.session))
+        registry = ToolRegistry()
+        registry.register(PaperKeywordSearchTool(self.runtime))
+        registry.register(PaperSemanticSearchTool(self.runtime))
+        registry.register(PaperChunkReadTool(self.runtime))
 
         found = await registry.resolve("paper_keyword_search").ainvoke(
             context("paper_keyword_search"),
@@ -690,7 +701,7 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         corpus_ref = await build_corpus_index(self.store, [self.paper])
-        tool = PaperSemanticSearchTool(self.store, self.embedder, self.session)
+        tool = PaperSemanticSearchTool(self.runtime)
 
         result = await tool.ainvoke(
             context("paper_semantic_search"), corpus_ref=corpus_ref, query="retrieval"
@@ -700,9 +711,17 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("paper_keyword_search", result.error)
 
     async def test_semantic_search_rejects_a_mismatched_embedding_model(self) -> None:
-        corpus_ref = await build_corpus_index(self.store, [self.paper], self.embedder)
+        corpus_ref = await build_corpus_index(
+            self.store,
+            [self.paper],
+            CorpusBuildOptions(embedder=self.embedder),
+        )
         tool = PaperSemanticSearchTool(
-            self.store, FakeEmbedder(VOCABULARY, model="other-embed-2"), self.session
+            PaperRagRuntime(
+                self.store,
+                self.session,
+                FakeEmbedder(VOCABULARY, model="other-embed-2"),
+            )
         )
 
         result = await tool.ainvoke(
@@ -714,7 +733,7 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("other-embed-2", result.error)
 
     async def test_missing_corpus_ref_is_reported_as_a_failed_result(self) -> None:
-        tool = PaperKeywordSearchTool(self.store, self.session)
+        tool = PaperKeywordSearchTool(self.runtime)
 
         result = await tool.ainvoke(context("paper_keyword_search"), keywords=["x"])
 
@@ -723,7 +742,7 @@ class ToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_top_k_is_clamped_because_the_schema_is_not_enforced(self) -> None:
         corpus_ref = await build_corpus_index(self.store, [self.paper])
-        tool = PaperKeywordSearchTool(self.store, self.session)
+        tool = PaperKeywordSearchTool(self.runtime)
 
         result = await tool.ainvoke(
             context("paper_keyword_search"),
@@ -749,7 +768,9 @@ class BibliographyAsCitationEdgeTest(unittest.IsolatedAsyncioTestCase):
         self.papers = await make_citing_pair(self.store)
 
     async def load(self, **kwargs) -> PaperCorpusIndex:
-        ref = await build_corpus_index(self.store, self.papers, **kwargs)
+        ref = await build_corpus_index(
+            self.store, self.papers, CorpusBuildOptions(**kwargs)
+        )
         return PaperCorpusIndex.model_validate_json(await self.store.get_text(ref))
 
     async def test_bibliography_is_not_a_retrieval_unit_by_default(self) -> None:
@@ -875,7 +896,7 @@ class CorpusOverviewTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["p2"], [item.paper_id for item in overview.summaries])
 
     async def test_the_tool_reports_whether_semantic_search_is_available(self) -> None:
-        tool = PaperCorpusOverviewTool(self.store, self.session)
+        tool = PaperCorpusOverviewTool(PaperRagRuntime(self.store, self.session))
 
         result = await tool.ainvoke(
             context("paper_corpus_overview"), corpus_ref=self.corpus_ref
@@ -890,9 +911,11 @@ class CorpusOverviewTest(unittest.IsolatedAsyncioTestCase):
         session = RetrievalSession()
         paper = await make_paper(self.store, "p3", "Paper Three", ["Retrieval works."])
         corpus_ref = await build_corpus_index(
-            self.store, [paper], FakeEmbedder(VOCABULARY)
+            self.store,
+            [paper],
+            CorpusBuildOptions(embedder=FakeEmbedder(VOCABULARY)),
         )
-        tool = PaperCorpusOverviewTool(self.store, session)
+        tool = PaperCorpusOverviewTool(PaperRagRuntime(self.store, session))
 
         await tool.ainvoke(context("paper_corpus_overview"), corpus_ref=corpus_ref)
 
@@ -1113,12 +1136,13 @@ class TypedOperatorToolTest(unittest.IsolatedAsyncioTestCase):
         self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="paper_rag_"))
         self.session = RetrievalSession()
         self.embedder = FakeEmbedder(VOCABULARY)
+        self.runtime = PaperRagRuntime(self.store, self.session, self.embedder)
 
     async def test_visual_of_tool_round_trips_through_the_registry(self) -> None:
         paper = await make_illustrated_paper(self.store, "interpreted")
         corpus_ref = await build_corpus_index(self.store, [paper])
         registry = ToolRegistry()
-        registry.register(PaperVisualOfTool(self.store, self.session))
+        registry.register(PaperVisualOfTool(self.runtime))
 
         result = await registry.resolve("paper_visual_of").ainvoke(
             context("paper_visual_of"), corpus_ref=corpus_ref, chunk_ids=["p1:c0"]
@@ -1131,7 +1155,7 @@ class TypedOperatorToolTest(unittest.IsolatedAsyncioTestCase):
         corpus_ref = await build_corpus_index(
             self.store, await make_citing_pair(self.store)
         )
-        tool = PaperCitesTool(self.store, self.session)
+        tool = PaperCitesTool(self.runtime)
 
         result = await tool.ainvoke(
             context("paper_cites"),
@@ -1147,7 +1171,7 @@ class TypedOperatorToolTest(unittest.IsolatedAsyncioTestCase):
         corpus_ref = await build_corpus_index(
             self.store, await make_citing_pair(self.store)
         )
-        tool = PaperCitesTool(self.store, self.session)
+        tool = PaperCitesTool(self.runtime)
 
         result = await tool.ainvoke(
             context("paper_cites"),
@@ -1164,7 +1188,7 @@ class TypedOperatorToolTest(unittest.IsolatedAsyncioTestCase):
             self.store,
             [await make_paper(self.store, "p1", "Paper One", ["Plain text."])],
         )
-        tool = PaperSectionSearchTool(self.store, self.session)
+        tool = PaperSectionSearchTool(self.runtime)
 
         result = await tool.ainvoke(
             context("paper_section_search"), corpus_ref=corpus_ref, heading="  "

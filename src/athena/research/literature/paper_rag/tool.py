@@ -11,24 +11,23 @@ Agent loop 复用 Athena 已有的 ``core/agent``，这里只提供接口。检�
 """
 
 import asyncio
+from dataclasses import dataclass
 
+from athena.core.contracts import ArtifactStore
 from athena.core.tool import BaseTool
 from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
-from athena.research.literature.paper_rag.interfaces import TextEmbedder
+from athena.research.literature.paper_rag.models import TextEmbedder
 from athena.research.literature.paper_rag.search import (
     RetrievalSession,
+    citation_links,
     corpus_overview,
     hybrid_search,
     keyword_search,
-    semantic_search,
-)
-from athena.research.literature.paper_rag.traversal import (
-    citation_links,
     read_chunks,
     section_search,
+    semantic_search,
     visual_links,
 )
-from athena.core.contracts import ArtifactStore
 
 DEFAULT_TOP_K = 5
 MAX_TOP_K = 20
@@ -77,16 +76,16 @@ def _optional_str_list(value: object, label: str) -> list[str]:
     """校验可选字符串数组（缺省按空处理），并返回清洗后的列表。"""
     value = value or []
     if not isinstance(value, list):
-        raise ValueError(f"{label} must be an array of paper identifiers.")
+        raise TypeError(f"{label} must be an array of paper identifiers.")
     return [item for item in value if isinstance(item, str)]
 
 
-def require_chunk_ids(input: dict) -> list[str]:
+def _require_chunk_ids(input: dict) -> list[str]:
     """校验并取出 ``chunk_ids``；``BaseTool`` 不校验 input schema，边界必须兜底。"""
     return _nonempty_str_list(input.get("chunk_ids"), "chunk_ids")
 
 
-def require_corpus_ref(input: dict) -> str:
+def _require_corpus_ref(input: dict) -> str:
     """校验并取出 ``corpus_ref``，与其他 Athena 论文工具的入参约定一致。"""
     corpus_ref = input.get("corpus_ref")
     if not isinstance(corpus_ref, str) or not corpus_ref.strip():
@@ -95,26 +94,28 @@ def require_corpus_ref(input: dict) -> str:
 
 
 class PaperRagTool(BaseTool):
-    """论文语料只读算子的公共底座：持有 artifact store 与检索会话。"""
+    """Paper corpus operator with one shared runtime dependency."""
 
-    def __init__(
-        self, artifacts: ArtifactStore, session: RetrievalSession | None = None
-    ) -> None:
-        self.artifacts = artifacts
-        self.session = session or RetrievalSession()
+    def __init__(self, runtime: "PaperRagRuntime") -> None:
+        self.runtime = runtime
 
 
-class PaperEmbeddingTool(PaperRagTool):
-    """需要句向量编码器的检索算子底座。"""
+@dataclass(slots=True)
+class PaperRagRuntime:
+    """Dependencies shared by every paper retrieval tool in one agent session."""
 
-    def __init__(
-        self,
-        artifacts: ArtifactStore,
-        embedder: TextEmbedder,
-        session: RetrievalSession | None = None,
-    ) -> None:
-        super().__init__(artifacts, session)
-        self.embedder = embedder
+    artifacts: ArtifactStore
+    session: RetrievalSession
+    embedder: TextEmbedder | None = None
+
+    async def load(self, corpus_ref: str, *, vectors: bool = False):
+        """Load a corpus through the session's shared cache."""
+        return await self.session.load(self.artifacts, corpus_ref, vectors=vectors)
+
+    async def embed_query(self, query: str) -> list[float]:
+        """Encode a query through the session's model-aware cache."""
+        assert self.embedder is not None
+        return await self.session.embed_query(self.embedder, query)
 
 
 class PaperCorpusOverviewTool(PaperRagTool):
@@ -158,12 +159,12 @@ class PaperCorpusOverviewTool(PaperRagTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """列出语料内容。"""
-        corpus_ref = require_corpus_ref(input)
+        corpus_ref = _require_corpus_ref(input)
         paper_ids = _optional_str_list(input.get("paper_ids"), "paper_ids")
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref)
+        corpus = await self.runtime.load(corpus_ref)
         overview = corpus_overview(
             corpus,
             paper_ids,
@@ -209,12 +210,12 @@ class PaperKeywordSearchTool(PaperRagTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """执行一次关键词检索。"""
-        corpus_ref = require_corpus_ref(input)
+        corpus_ref = _require_corpus_ref(input)
         keywords = _nonempty_str_list(input.get("keywords"), "keywords")
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref)
+        corpus = await self.runtime.load(corpus_ref)
         hits = keyword_search(
             corpus,
             keywords,
@@ -223,7 +224,7 @@ class PaperKeywordSearchTool(PaperRagTool):
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
 
-class PaperSemanticSearchTool(PaperEmbeddingTool):
+class PaperSemanticSearchTool(PaperRagTool):
     """按语义相似度定位 chunk，返回 chunk id 与命中句片段。
 
     句级编码后按父 chunk 聚合，取最高句得分，因此长 chunk 不会因为平均稀释而被埋没。
@@ -258,7 +259,7 @@ class PaperSemanticSearchTool(PaperEmbeddingTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """执行一次语义检索；语料未建向量或模型不一致时明确报错。"""
-        corpus_ref = require_corpus_ref(input)
+        corpus_ref = _require_corpus_ref(input)
         query = input.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string.")
@@ -267,31 +268,33 @@ class PaperSemanticSearchTool(PaperEmbeddingTool):
 
         # 唯一需要句向量的算子，因此也是唯一传 vectors=True 的调用点：其余五个算子
         # 不该为一份用不到的向量矩阵付装载代价。
-        corpus = await self.session.load(self.artifacts, corpus_ref, vectors=True)
+        embedder = self.runtime.embedder
+        assert embedder is not None
+        corpus = await self.runtime.load(corpus_ref, vectors=True)
         if corpus.index.embedding_ref is None:
             return ToolResult(
                 data={"hits": []},
                 success=False,
                 error="Corpus has no sentence embeddings; use paper_keyword_search.",
             )
-        if corpus.index.embedding_model != self.embedder.model:
+        if corpus.index.embedding_model != embedder.model:
             return ToolResult(
                 data={"hits": []},
                 success=False,
                 error=(
                     f"Corpus was embedded with '{corpus.index.embedding_model}' but "
-                    f"the active embedder is '{self.embedder.model}'."
+                    f"the active embedder is '{embedder.model}'."
                 ),
             )
 
-        vector = await self.session.embed_query(self.embedder, query)
+        vector = await self.runtime.embed_query(query)
         hits = semantic_search(
             corpus, vector, _clamp_positive(input, "k", DEFAULT_TOP_K, MAX_TOP_K)
         )
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
 
-class PaperSearchTool(PaperEmbeddingTool):
+class PaperSearchTool(PaperRagTool):
     """默认入口：词面与语义两个通道各取一批，再按 RRF 融合。
 
     存在的理由是实测的互补性，不是设计上的对称。同一份 44 篇语料、12 条改写查询（金标
@@ -351,7 +354,7 @@ class PaperSearchTool(PaperEmbeddingTool):
         退化而不报错是有理由的：融合的词面那一半在无向量语料上照常可用，把整个入口变成
         硬错误只会逼 Agent 去猜该换哪个工具。
         """
-        corpus_ref = require_corpus_ref(input)
+        corpus_ref = _require_corpus_ref(input)
         query = input.get("query")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string.")
@@ -364,13 +367,15 @@ class PaperSearchTool(PaperEmbeddingTool):
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref, vectors=True)
+        embedder = self.runtime.embedder
+        assert embedder is not None
+        corpus = await self.runtime.load(corpus_ref, vectors=True)
         vector: list[float] = []
         if (
             corpus.index.embedding_ref is not None
-            and corpus.index.embedding_model == self.embedder.model
+            and corpus.index.embedding_model == embedder.model
         ):
-            vector = await self.session.embed_query(self.embedder, query)
+            vector = await self.runtime.embed_query(query)
         hits = hybrid_search(
             corpus,
             vector,
@@ -419,15 +424,15 @@ class PaperChunkReadTool(PaperRagTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """读取请求的 chunk 全文。"""
-        corpus_ref = require_corpus_ref(input)
-        chunk_ids = require_chunk_ids(input)
+        corpus_ref = _require_corpus_ref(input)
+        chunk_ids = _require_chunk_ids(input)
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref)
+        corpus = await self.runtime.load(corpus_ref)
         chunks = read_chunks(
             corpus,
-            self.session,
+            self.runtime.session,
             chunk_ids,
             bool(input.get("include_adjacent", False)),
         )
@@ -464,12 +469,12 @@ class PaperVisualOfTool(PaperRagTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """走一步图文互链。"""
-        corpus_ref = require_corpus_ref(input)
-        chunk_ids = require_chunk_ids(input)
+        corpus_ref = _require_corpus_ref(input)
+        chunk_ids = _require_chunk_ids(input)
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref)
+        corpus = await self.runtime.load(corpus_ref)
         hits = visual_links(corpus, chunk_ids)
         return ToolResult(data={"hits": [hit.model_dump() for hit in hits]})
 
@@ -516,15 +521,15 @@ class PaperCitesTool(PaperRagTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """走一步引用边。"""
-        corpus_ref = require_corpus_ref(input)
-        chunk_ids = require_chunk_ids(input)
+        corpus_ref = _require_corpus_ref(input)
+        chunk_ids = _require_chunk_ids(input)
         direction = input.get("direction", "cites")
         if direction not in {"cites", "cited_by"}:
             raise ValueError("direction must be 'cites' or 'cited_by'.")
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref)
+        corpus = await self.runtime.load(corpus_ref)
         hits = citation_links(corpus, chunk_ids, direction)
         return ToolResult(
             data={"direction": direction, "hits": [hit.model_dump() for hit in hits]}
@@ -568,7 +573,7 @@ class PaperSectionSearchTool(PaperRagTool):
 
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         """按章节名取 chunk。"""
-        corpus_ref = require_corpus_ref(input)
+        corpus_ref = _require_corpus_ref(input)
         heading = input.get("heading")
         if not isinstance(heading, str) or not heading.strip():
             raise ValueError("heading must be a non-empty string.")
@@ -576,7 +581,7 @@ class PaperSectionSearchTool(PaperRagTool):
         if ctx.cancel.is_set():
             raise asyncio.CancelledError
 
-        corpus = await self.session.load(self.artifacts, corpus_ref)
+        corpus = await self.runtime.load(corpus_ref)
         hits = section_search(
             corpus,
             heading,

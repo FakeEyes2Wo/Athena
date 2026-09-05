@@ -106,7 +106,8 @@ A-RAG 论文的贡献本就在"给模型什么样的检索接口"，而不在循
 
 ### 参考文献作为引用边，而不是检索单元
 
-`build_corpus_index(..., index_bibliography=False)` 是默认行为：`kind == "bibliography"`
+`build_corpus_index(store, papers, CorpusBuildOptions(index_bibliography=False))`
+是默认行为：`kind == "bibliography"`
 的单元不进入语料，改为被解析成**引用边**，挂在引用它们的正文 chunk 的 `cited_ids` 上。
 
 **为什么改。** 实测一次真实全链路（5 篇 RAG 方向论文，见验收状态）里，参考文献占了语料
@@ -447,9 +448,9 @@ margin = await require_semantic_embedder(embedder)  # 不合格抛 NonSemanticEm
 
 ## 已知限制
 
-- 仓库内没有任何 `TextEmbedder` 实现。与 `paper_markdown` 的 `VisualInterpreter` 一致，
-  只给协议不给具体适配器；未配置编码器时语料照常构建，语义检索明确报错。编码器必须是
-  神经的，理由与校验方式见下一节。
+- 生产 `TextEmbedder` 是 `survey/providers.py` 的 `OpenAIEmbedder`；未配置编码器时语料
+  仍可构建并使用关键词检索，但不会注册语义检索工具。编码器必须是神经的，理由与校验
+  方式见下一节。
 - `paper_keyword_search` 在 chunk 全文上算原始词频，既没有 IDF 也没有长度归一，因此偏好
   长 chunk——与语义检索偏好短单元恰好相反。若要动打分，直接换 BM25 能一次解决这两点。
 - 结构过滤不修复上游遗留的 LaTeX 残片（`\bibliography{custom}`、`acl_natbib`、`[!htbp]`

@@ -25,6 +25,7 @@ from athena.research.literature.paper_markdown.processor import (
     VisualInterpretationRequiredError,
 )
 from athena.research.literature.paper_rag.index import split_sentences
+from athena.research.literature.paper_rag.models import CorpusBuildOptions
 from athena.research.literature.paper_scout.schemas import (
     PaperScoutResult,
     ScoutCorpus,
@@ -335,10 +336,12 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             ).model_dump_json()
         )
 
-    async def fake_index(self, store, papers, embedder=None, **kwargs) -> str:
+    async def fake_index(
+        self, store, papers, options: CorpusBuildOptions | None = None
+    ) -> str:
         self.indexed.append(list(papers))
-        if embedder is not None:
-            await embedder.embed(["probe"])
+        if options is not None and options.embedder is not None:
+            await options.embedder.embed(["probe"])
         return "sha256:" + "9" * 64
 
     async def run_pipeline(self, *, emit=None, **overrides):

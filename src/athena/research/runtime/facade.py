@@ -21,7 +21,7 @@ from athena.kaggle import KaggleStack
 from athena.research.config import SearchLimits, SurveyConfig
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
-from athena.research.literature.paper_rag.schemas import PaperSummary
+from athena.research.literature.paper_rag.models import PaperSummary
 from athena.research.literature.survey import SurveyStack
 from athena.research.prepare.authority import BaselineAuthorityStore
 from athena.research.runtime.bootstrap import (

@@ -421,7 +421,7 @@ class ToolRegistrationTest(unittest.TestCase):
         """七个算子各建一个会话时，同一份语料会被解码七次，已读账本也只对自己成立。"""
         tools = build_survey_tools(self.stack(OpenAIEmbedder(FakeClient(), "e")))
         sessions = {
-            id(tools.resolve(name).session)
+            id(tools.resolve(name).runtime.session)
             for name in (
                 "paper_corpus_overview",
                 "paper_keyword_search",
@@ -441,5 +441,8 @@ class ToolRegistrationTest(unittest.TestCase):
         first = build_survey_tools(stack).resolve("paper_keyword_search")
         second = build_survey_tools(stack).resolve("paper_keyword_search")
 
-        self.assertIsNot(first.session, second.session)
-        self.assertIs(first.session._cache, second.session._cache)
+        self.assertIsNot(first.runtime.session, second.runtime.session)
+        self.assertIs(
+            first.runtime.session._cache,
+            second.runtime.session._cache,
+        )

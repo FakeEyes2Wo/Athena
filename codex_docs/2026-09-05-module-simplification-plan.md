@@ -487,6 +487,16 @@ Make `PaperMarkdownTool` depend on one configured `PaperProcessor` instead of fi
 
 The unchanged pre-change core baseline passed 95 tests plus 18 subtests. Final verification passed the same core selection, 135 paper-RAG/source tests plus three subtests, and 94 survey tests. Targeted Ruff and removed-module/public-method searches passed; pytest reported only the existing cache-permission warning. Closing the shared-contract row and all 17 baseline `paper_markdown` rows advances reviewed coverage to 300/602. Whole-repository acceptance remains pending.
 
+## Paper retrieval boundary consolidation
+
+Read all seven `paper_rag` files completely and traced their models, index builder, vector cache, retrieval functions, traversal operators, and eight tool classes through survey wiring, runtime corpus access, benchmarks, CLI, unit tests, and current documentation. Preserve the persisted 1.0/1.1 index formats, deterministic sentence spans, per-paper vector reuse, lazy vector loading, model identity checks, lexical/semantic/hybrid ranking, paper rotation, citation and visual edges, section aliases, per-agent read ledgers, and all model-visible tool names and schemas.
+
+Merge persisted models and provider protocols into `models.py`, deleting `schemas.py` and `interfaces.py`. Merge graph/document traversal into its existing retrieval entrypoint `search.py`, deleting `traversal.py`, one duplicated section-alias table, three forwarding wrappers, and an unused implementation `__all__`. Retain `index.py` and `search.py` as separate write and read lifecycles and retain `tool.py` because its declarative model-facing contracts are distinct from retrieval algorithms. The package falls from seven Python files to five and from 2,313 to 2,176 physical lines (1,975 to 1,859 nonblank lines).
+
+Replace the six-input `build_corpus_index` interface with `store`, `papers`, and one immutable `CorpusBuildOptions` record. Delete the unused whole-corpus `embed_texts`/`embed_sentences` path, inline the sole six-parameter embedding assembly call, and reduce per-paper encoding from four inputs to three. Introduce one three-field `PaperRagRuntime` at the composition root; every tool now accepts and stores that single dependency, so tool business constructor inputs fall from two or three to one and per-tool stored attributes fall from two or three to one. Delete the intermediate `PaperEmbeddingTool` class.
+
+The unchanged pre-change paper-RAG, hybrid, benchmark, and runtime baseline passed 164 tests. The expanded final paper-RAG, hybrid, benchmark, runtime, survey-pipeline, and survey-wiring selection passed 236 tests. Targeted production Ruff, old-module/symbol searches, and documentation source-of-truth checks passed; pytest reported only the existing cache-permission warning. Closing all seven baseline rows advances reviewed coverage to 307/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1048,13 +1058,14 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/paper_markdown/tex_tables.py` | 196 | Reviewed; retain specialized tabular conversion boundary |
 | `src/athena/research/literature/paper_markdown/tool.py` | 81 | Reviewed; accept one configured processor instead of five construction inputs |
 | `src/athena/research/literature/paper_markdown/visuals.py` | 230 | Reviewed; retain media extraction and rendering boundary |
-| `src/athena/research/literature/paper_rag/__init__.py` | 29 | Pending |
-| `src/athena/research/literature/paper_rag/index.py` | 676 | Pending |
-| `src/athena/research/literature/paper_rag/interfaces.py` | 42 | Pending |
-| `src/athena/research/literature/paper_rag/schemas.py` | 173 | Pending |
-| `src/athena/research/literature/paper_rag/search.py` | 567 | Pending |
-| `src/athena/research/literature/paper_rag/tool.py` | 586 | Pending |
-| `src/athena/research/literature/paper_rag/traversal.py` | 241 | Pending |
+| `src/athena/research/literature/paper_rag/__init__.py` | 29 | Reviewed; retain narrow construction and tool facade with new option/runtime records |
+| `src/athena/research/literature/paper_rag/index.py` | 676 | Reviewed; retain cohesive write path and remove unused whole-corpus embedding path |
+| `src/athena/research/literature/paper_rag/interfaces.py` | 42 | Reviewed; provider protocols merged into models.py and file deleted |
+| `src/athena/research/literature/paper_rag/schemas.py` | 173 | Reviewed; persisted contracts moved to models.py and file deleted |
+| `src/athena/research/literature/paper_rag/models.py` | new | Added; persisted contracts, provider protocols, and corpus build options |
+| `src/athena/research/literature/paper_rag/search.py` | 567 | Reviewed; absorb graph/document traversal and delete duplicate forwarding surface |
+| `src/athena/research/literature/paper_rag/tool.py` | 586 | Reviewed; all tools accept one shared runtime and embedding-only base deleted |
+| `src/athena/research/literature/paper_rag/traversal.py` | 241 | Reviewed; merged into search.py and file deleted |
 | `src/athena/research/literature/paper_scout/__init__.py` | 13 | Pending |
 | `src/athena/research/literature/paper_scout/agent.py` | 443 | Pending |
 | `src/athena/research/literature/paper_scout/backends.py` | 311 | Pending |
