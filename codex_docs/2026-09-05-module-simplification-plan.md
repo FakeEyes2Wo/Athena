@@ -20,6 +20,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove unused TypeScript Agent state and replace data-only constructors with types.
 - [x] Remove unused Worker text forwarding and consolidate provider ownership.
 - [x] Trace the standalone TypeScript composition root to actual entries and delete its unused adapter chain.
+- [x] Remove redundant execution context/root state and migrate PlanRunner/prepare/DSH callers.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -119,10 +120,19 @@ Worker and shell are exclusively reachable through that unused root (apart from 
 
 Deletion evidence: pre-change research/DSH/headless integration selection returned 192 passed. After deleting the four Worker-only cases and adding two public-surface cases, all five package builds passed and the full workspace returned 442 passed across 52 files with `npm test -- --testTimeout=30000`. The actual DSH service/tool tests and AutoResearch headless integration remain passing. Removed-module searches find only negative public API assertions; all nine stale compiled artifacts remain absent after rebuilding, and git diff --check passed. No claim of real external model execution or default-timeout reliability is made.
 
-The source/export deletion removes 532 production lines plus the 89-line Worker-only test; the replacement public-surface test has two cases. Baseline coverage is now 69/602 plus separately tracked new files. Next module: review the shared execution services and their active PlanRunner/DSH consumers; DSH was inspected at assembly sites only and is not a completed file review. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+The source/export deletion removes 532 production lines plus the 89-line Worker-only test; the replacement public-surface test has two cases. Baseline coverage at that checkpoint is 69/602 plus separately tracked new files.
+
+TypeScript execution review: fully inspect execution.ts and trace every execution and PlanRunner construction. PlanRunner already supplies branch.path as workdir; no real executor consumes project/environment/experiment fields from ExecutionContext. Delete the four-field context, empty ensureEnvironment and LocalExecutionRuntime's two root attributes/constructor arguments. ExecutionRuntime now contains only run(CommandOptions), replacing repeated option declarations and two-argument dispatch. Require workdir in that single options object. PlanRunner drops its context attribute/constructor argument (eight to seven); prepare's factory takes branch only (two to one), and both DSH construction paths stop rebuilding unused context dictionaries.
+
+CommandResult drops three never-consumed placeholders (error, truncated, output_ref), reducing fields/constructor arguments from seven to four. Preserve explicit success, stdout/stderr and numeric exit status; retain the shared execution boundary and injectable run protocol. No shell parsing, environment setup, sandboxing or output truncation is added. Missing argv, command-start event ordering, child-process timeout and error normalization remain unchanged.
+
+Execution evidence: research/DSH tests returned 189 passed before and after migration. Six new real-child-process cases cover different working directories on one stateless executor, literal argv with spaces/metacharacters, separate stdout/stderr, nonzero exit, empty argv without events, missing executable with start event, and timeout failure. The focused new file returned six passed. All five package builds passed; full workspace verification returned 448 passed across 53 files with `npm test -- --testTimeout=30000`. Removed context/root/environment helper searches and git diff --check passed. Baseline coverage is now 70/602 plus separately tracked new files.
+
+Next module: complete PlanRunner/prepare source and test-file reviews; these and DSH were inspected at affected execution sites only, not counted as new completed file reviews. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
+| `athena_ts/packages/athena-research/test/execution.test.ts` | New | Reviewed; six real-process command/workdir/event/error/timeout cases |
 | `athena_ts/packages/athena-research/test/public-api.test.ts` | New | Reviewed; removed legacy root/adapter exports and retained canonical DSH services |
 | `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
 | `athena-gui/scripts/dev-backend.cjs` | 38 | Pending |
@@ -684,7 +694,7 @@ The source/export deletion removes 532 production lines plus the 89-line Worker-
 | `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Pending |
 | `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Pending |
 | `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Pending |
-| `athena_ts/packages/athena-research/src/execution.ts` | 94 | Pending |
+| `athena_ts/packages/athena-research/src/execution.ts` | 94 | Reviewed; deleted context/root state, single run options and four-field result |
 | `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |
 | `athena_ts/packages/athena-research/src/report.ts` | 78 | Pending |
 | `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |

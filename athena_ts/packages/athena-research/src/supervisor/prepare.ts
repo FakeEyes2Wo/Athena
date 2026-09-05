@@ -181,8 +181,7 @@ export async function runPreparePlan(opts: {
   task: string
   maxTurns: number
   planRunnerFactory?: (
-    branch: GitWorkBranch,
-    context: { project_root: string; workspace_root: string; environment_root: string; experiment_id: string }
+    branch: GitWorkBranch
   ) => { runTurn(planId: string, state: PlanState, planInput: ReturnType<typeof PlanInputSchema.parse>): Promise<PlanTurnResult> }
 }): Promise<PrepareResult> {
   if (opts.maxTurns < 1) throw new Error("max_turns must be at least 1")
@@ -191,8 +190,8 @@ export async function runPreparePlan(opts: {
   )
   const makeRunner =
     opts.planRunnerFactory ??
-    ((branch, context) =>
-      new PlanRunner(opts.execution, opts.store, opts.evaluator, opts.git, branch, context))
+    ((branch) =>
+      new PlanRunner(opts.execution, opts.store, opts.evaluator, opts.git, branch))
 
   let feedback: string | null = null
   for (let turn = 0; turn < opts.maxTurns; turn++) {
@@ -206,12 +205,7 @@ export async function runPreparePlan(opts: {
       throw new Error(`prepare Agent abandoned Plan: ${decision.reason}`)
     }
     try {
-      const runner = makeRunner(opts.workspace, {
-        project_root: opts.execution.project_root,
-        workspace_root: opts.workspace.path,
-        environment_root: opts.execution.environment_root,
-        experiment_id: PREPARE_PLAN_ID,
-      })
+      const runner = makeRunner(opts.workspace)
       const state = PlanStateSchema.parse({
         kind: "PREPARE",
         context_ref: contextRef,

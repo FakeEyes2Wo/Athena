@@ -11,7 +11,7 @@ import {
 } from "@athena/core"
 import { CandidateEvaluationSchema, DataScriptBundleSchema, type DataScriptBundle } from "../../src/contracts.js"
 import { ScoringError } from "../../src/evaluation.js"
-import { CommandResult, ExecutionContext } from "../../src/execution.js"
+import { CommandResult } from "../../src/execution.js"
 import { loadDirectory } from "../../src/script_runner.js"
 import {
   PlanRunner,
@@ -282,7 +282,6 @@ class FakeExecution {
   workdirs: Array<string | null> = []
   emitSeen: unknown[] = []
   async run(
-    _context: ExecutionContext,
     opts: { argv?: string[] | null; timeout_s?: number; workdir?: string | null; emit?: unknown }
   ): Promise<CommandResult> {
     this.calls.push(opts.argv ?? [])
@@ -343,8 +342,7 @@ async function runnerSetup(execution: FakeExecution, evaluator: FakeEvaluator) {
     store,
     evaluator as never,
     workspace as never,
-    branch,
-    new ExecutionContext(dir, branch.path, dir)
+    branch
   )
   return { runner, planInput, workspace, branch, store }
 }

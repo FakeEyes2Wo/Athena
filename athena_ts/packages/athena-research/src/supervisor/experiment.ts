@@ -19,7 +19,7 @@ import type { EmitEvent } from "@athena/agent"
 import { DataScriptBundleSchema, type DataScriptBundle } from "../contracts.js"
 import { loadDirectory, packDirectory } from "../script_runner.js"
 import { ScoringError, type Scorer } from "../evaluation.js"
-import type { ExecutionContext, ExecutionRuntime } from "../execution.js"
+import type { ExecutionRuntime } from "../execution.js"
 import { PlanBestSchema, PlanStateSchema, type PlanInput, type PlanState } from "./plans.js"
 import { redact } from "./events.js"
 
@@ -233,7 +233,6 @@ export class PlanRunner {
     private evaluator: Scorer,
     private workspace: GitWorkspace,
     private branch: GitWorkBranch,
-    private context: ExecutionContext,
     private direction: Direction = "maximize",
     private timeoutS: number = 120
   ) {}
@@ -256,7 +255,7 @@ export class PlanRunner {
     }
 
     for (const argv of manifest.commands) {
-      const result = await this.execution.run(this.context, {
+      const result = await this.execution.run({
         argv,
         timeout_s: this.timeoutS,
         workdir: this.workdir,

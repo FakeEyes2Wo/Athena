@@ -7,7 +7,7 @@ describe("research public surface", () => {
   it("removes the unused standalone runtime and its private adapter chain", () => {
     for (const name of [
       "ResearchRuntime", "WorkerRunner", "zodOutputType", "PlanDecisionOutputType",
-      "HypothesisBatchOutputType", "makeShellTool", "commandResultDict",
+      "HypothesisBatchOutputType", "makeShellTool", "commandResultDict", "ExecutionContext",
     ]) expect(api).not.toHaveProperty(name)
   })
 

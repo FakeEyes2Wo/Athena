@@ -267,7 +267,7 @@ export function researchPlugin(config: AthenaResearchConfig = {}) {
 
     const store = new LocalArtifactStore(join(athena, "artifacts"))
     const git = new LocalGitWorkspace(join(athena, "repo"), join(projectRoot, "workspaces"), (b) => store.putBytes(b))
-    const execution = new LocalExecutionRuntime(projectRoot, projectRoot)
+    const execution = new LocalExecutionRuntime()
     const scripts = new DataScriptRunner(store, join(athena, "runs"))
     const evaluator = new TrustedEvaluator(scripts)
     const tree = existsSync(treePath) ? ResearchTree.load(treePath) : new ResearchTree()
@@ -293,12 +293,6 @@ export function researchPlugin(config: AthenaResearchConfig = {}) {
         evaluator,
         git,
         supervisor.workspace(planId),
-        {
-          project_root: projectRoot,
-          workspace_root: supervisor.workspacePath(planId),
-          environment_root: projectRoot,
-          experiment_id: planId,
-        },
         planInput.direction
       )
       return runner.runTurn(planId, planState, planInput)
@@ -909,12 +903,6 @@ export function dshWorkers(ctx: Context, opts: DshWorkersOptions): SupervisorWor
             ctx.researchEvaluator,
             ctx.researchGit,
             workspace,
-            {
-              project_root: opts.projectRoot,
-              workspace_root: workspace.path,
-              environment_root: opts.projectRoot,
-              experiment_id: "validate",
-            },
             opts.direction
           )
           const outcome = await runner.runTurn("validate", planState, validationInput)

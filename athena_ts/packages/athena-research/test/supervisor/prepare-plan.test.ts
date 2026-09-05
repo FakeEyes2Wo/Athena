@@ -76,7 +76,7 @@ describe("runPreparePlan", () => {
       evaluator: { score: async () => ({ candidate_id: "prepare", test_score: 0.8, direction: "maximize" as const, kfold_mean: null, kfold_std: null }) },
       git: {} as never,
       workspace: branch,
-      execution: { project_root: dir, environment_root: dir, ensureEnvironment: () => {}, run: async () => ({ ok: true, stdout: "", stderr: "", exit_code: 0 }) } as never,
+      execution: { run: async () => ({ ok: true, stdout: "", stderr: "", exit_code: 0 }) },
       store,
       evaluatorRef: REF,
       treeRef: REF,

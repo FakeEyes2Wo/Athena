@@ -10,8 +10,8 @@ export { reconcilePlans } from "./supervisor/recovery.js"
 export { DataScriptRunner, BundleMetadata, ScriptRunResult, packDirectory, loadDirectory } from "./script_runner.js"
 export { TrustedEvaluator, ScoringError } from "./evaluation.js"
 export type { EvaluatorRunner, Scorer } from "./evaluation.js"
-export { CommandResult, ExecutionContext, LocalExecutionRuntime } from "./execution.js"
-export type { ExecutionRuntime } from "./execution.js"
+export { CommandResult, LocalExecutionRuntime } from "./execution.js"
+export type { CommandOptions, ExecutionRuntime } from "./execution.js"
 export {
   PlanRunner,
   PlanTurnResultSchema,
