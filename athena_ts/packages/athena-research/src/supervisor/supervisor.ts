@@ -3,7 +3,9 @@
  * 核心 SEARCH 滚动调度 + 阶段迁移，LLM worker 经注入函数接入，不依赖 M4 AgentRuntime）。
  */
 
+import { statSync } from "node:fs"
 import {
+  ArtifactNotFoundError,
   EvalResultSchema,
   ExperimentPlanSchema,
   ExperimentSchema,
@@ -426,11 +428,18 @@ export class FixedFlowSupervisor {
   }
 
   async recover(): Promise<ResearchState> {
-    const reconciled = reconcilePlans(this.state, this.tree, {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
-    this.state = reconciled
+    this.state = reconcilePlans(this.state, this.tree)
+    for (const [planId, plan] of Object.entries(this.state.plans)) {
+      try {
+        await this.store.getBytes(plan.context_ref)
+      } catch (error) {
+        if (!(error instanceof ArtifactNotFoundError)) throw error
+        this.state.status = "WAITING"
+      }
+      if (plan.kind === "SEARCH" && !statSync(this.workspace(planId).path, { throwIfNoEntry: false })?.isDirectory()) {
+        this.state.status = "WAITING"
+      }
+    }
     await this.persistState()
     return this.state
   }

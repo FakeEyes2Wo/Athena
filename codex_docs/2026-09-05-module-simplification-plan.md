@@ -32,10 +32,15 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Consolidate Plan schemas into shared contracts and reduce unused input/decision fields.
 - [x] Remove the unused event projection module and retain redaction at the live failure boundary.
 - [x] Remove Supervisor's duplicate workspace map and unused path accessor; resolve workspaces from the durable research tree.
+- [x] Remove recovery's placeholder callback interface and check retained Plan resources at the Supervisor boundary.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+Follow-up recovery review: `reconcilePlans(state, tree)` now only reconciles canonical state. Deleted `ReconcileOptions` and its two callbacks; the only production caller had supplied constant `true` functions. Supervisor recovery reads each retained context through the artifact store and checks that each SEARCH workspace is a directory. Missing resources retain the frozen Plan and persist WAITING. Other artifact errors and filesystem errors propagate instead of being silently treated as absent. This checks context availability and SEARCH directory existence, not Git integrity, every transitive artifact, or PREPARE/VALIDATE workspace health.
+
+Kept the small pure recovery module because canonical reconciliation remains independently testable without filesystem setup. Ten reconciliation tests preserve settled/orphan removal and durable configuration; four real Supervisor resource combinations replace the two callback-only missing-resource tests. The focused Supervisor/recovery run passed 27 tests. Initial new assertions incorrectly compared omitted in-memory defaults with serialized defaults; corrected them to compare canonical JSON projections. Five package builds passed. Full TypeScript verification with the 30-second per-test override passed 506 tests across 53 files in 78.65 seconds. This supersedes earlier ledger descriptions of the callback-based checks.
 
 Removed the private `branches` map and its second write during Plan creation. `workspace(planId)` now reads the existing `exp_${planId}` experiment's `gitwork`, the same record serialized in the research tree. Deleted `workspacePath()`: repository-wide TypeScript caller tracing found no consumers; DSH's PlanRunner construction uses `workspace()` and is unchanged. Unknown workspaces now use the tree's existing unknown-experiment error instead of an undefined map entry. No persisted schema or scheduling policy changed.
 
@@ -43,7 +48,7 @@ Baseline Supervisor tests: 12 passed. After the change, Supervisor/recovery test
 
 Full TypeScript verification (`npm test -- --testTimeout=30000`): 504 passed across 53 files in 94.40 seconds. The 30-second per-test override accommodates this host's real Git operations; this is not evidence that the default timeout is reliable.
 
-Supervisor source and its test file have now been read end to end, but lifecycle caller tracing and concurrency verification remain incomplete: retain both ledger entries as Pending and coverage at 91/602. Next review must examine wake/spawn/stop ownership and recovery's placeholder existence callbacks. Whole-repository acceptance, main merge/push, and temporary task branch/worktree cleanup remain required and unfinished.
+Supervisor source and its test file have now been read end to end, but lifecycle caller tracing and concurrency verification remain incomplete: retain both ledger entries as Pending and coverage at 91/602. Recovery's placeholder callbacks are now removed; next review must examine wake/spawn/stop ownership. Whole-repository acceptance, main merge/push, and temporary task branch/worktree cleanup remain required and unfinished.
 
 ## Serving findings
 
@@ -818,7 +823,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Reviewed; merge policy boundary into ranker.ts and delete file; priority arguments 2 to 1; 12 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Reviewed; removed test-only runner factory, retained distinct freeze/baseline policies |
 | `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; remove static class and helpers; preserve complete durable state; 12 tests pass |
+| `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; pure two-argument reconciliation; resource checks owned by Supervisor; 27 focused tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; delete factories/forwarders; 19 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Reviewed; plain schema-derived state, single parse, explicit durable projection and atomic persistence |
 | `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
@@ -834,7 +839,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Reviewed; real PlanRunner success/artifact/feedback retry plus evaluator decisions |
 | `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Reviewed; file/directory evaluator, labels and invalid declarations |
 | `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Reviewed; scoring/novelty/FIFO/dedup/configuration and snapshot-count regressions; 21 tests pass |
-| `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; correct active experiment fixtures; add configuration and phase recovery regressions; 12 tests pass |
+| `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; 10 pure reconciliation cases; real missing-resource coverage moved to Supervisor tests |
 | `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, null fixture correction, policy/budget/dedup regressions; 19 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Reviewed; 22 persistence/validation/ownership/parse-count/projection cases |
 | `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |

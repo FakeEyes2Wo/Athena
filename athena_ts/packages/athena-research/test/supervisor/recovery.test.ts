@@ -84,21 +84,15 @@ describe("reconcilePlans", () => {
         },
       },
     })
-    const reconciled = reconcilePlans(original, new ResearchTree(), {
-      workspaceExists: () => false,
-      artifactExists: () => false,
-    })
+    const reconciled = reconcilePlans(original, new ResearchTree())
     expect(reconciled.plans).toEqual(validation === null ? original.plans : {})
-    expect(reconciled.status).toBe(validation === null ? "WAITING" : "RUNNING")
+    expect(reconciled.status).toBe("RUNNING")
     expect(reconciled.validation).toEqual(validation)
   })
 
-  it("retains a running search plan with available prerequisites unchanged", () => {
+  it("retains a running search plan and its status unchanged", () => {
     const original = state()
-    const reconciled = reconcilePlans(original, tree("RUNNING"), {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
+    const reconciled = reconcilePlans(original, tree("RUNNING"))
     expect(researchStateToJSON(reconciled)).toEqual(researchStateToJSON(original))
     expect(reconciled).not.toBe(original)
   })
@@ -108,57 +102,27 @@ describe("reconcilePlans", () => {
     original.ideator_count = 5
     original.hypotheses_per_ideator = 4
     original.task_understanding = { title: "frozen research task" }
-    const reconciled = reconcilePlans(original, tree("FAILED"), {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
+    const reconciled = reconcilePlans(original, tree("FAILED"))
     expect(researchStateToJSON(reconciled)).toEqual({ ...researchStateToJSON(original), plans: {} })
     expect(original.plans).toHaveProperty("h1")
   })
 
-  it("removes settled plans even when their old prerequisites are missing", () => {
-    const reconciled = reconcilePlans(state(), tree("FAILED"), {
-      workspaceExists: () => false,
-      artifactExists: () => false,
-    })
+  it("removes settled plans without inspecting their old resources", () => {
+    const reconciled = reconcilePlans(state(), tree("FAILED"))
     expect(reconciled.plans).toEqual({})
     expect(reconciled.status).toBe("RUNNING")
   })
 
   it("tree settled but state active is reconciled once", () => {
-    const reconciled = reconcilePlans(state(), tree("FAILED"), {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
+    const reconciled = reconcilePlans(state(), tree("FAILED"))
     expect("h1" in reconciled.plans).toBe(false)
     expect(reconciled.status).toBe("RUNNING")
   })
 
   it("active plan without an experiment record is dropped as an orphan", () => {
-    const reconciled = reconcilePlans(state(), tree(), {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
+    const reconciled = reconcilePlans(state(), tree())
     expect("h1" in reconciled.plans).toBe(false)
     expect(reconciled.status).toBe("RUNNING")
-  })
-
-  it("missing context keeps plan and marks research waiting", () => {
-    const reconciled = reconcilePlans(state(), tree("RUNNING"), {
-      workspaceExists: () => true,
-      artifactExists: () => false,
-    })
-    expect("h1" in reconciled.plans).toBe(true)
-    expect(reconciled.status).toBe("WAITING")
-  })
-
-  it("missing workspace keeps frozen plan and marks waiting", () => {
-    const reconciled = reconcilePlans(state(), tree("RUNNING"), {
-      workspaceExists: () => false,
-      artifactExists: () => true,
-    })
-    expect(reconciled.plans["h1"]!.context_ref).toBe(REF)
-    expect(reconciled.status).toBe("WAITING")
   })
 
   it("proposed hypothesis without plan stays queued; orphan plan is dropped", () => {
@@ -171,10 +135,7 @@ describe("reconcilePlans", () => {
         expected_effect: "improve",
       })
     )
-    const reconciled = reconcilePlans(state(), t, {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
+    const reconciled = reconcilePlans(state(), t)
     expect("h1" in reconciled.plans).toBe(false)
     expect(t.pendingHypotheses().length).toBeGreaterThan(0)
   })
@@ -226,10 +187,7 @@ describe("reconcilePlans", () => {
     )
     t.updateHypothesisStatus("h_baseline", "SUPPORTED")
 
-    const reconciled = reconcilePlans(s, t, {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
+    const reconciled = reconcilePlans(s, t)
     expect("prepare" in reconciled.plans).toBe(false)
   })
 
@@ -278,10 +236,7 @@ describe("reconcilePlans", () => {
       })
     )
 
-    const reconciled = reconcilePlans(s, t, {
-      workspaceExists: () => true,
-      artifactExists: () => true,
-    })
+    const reconciled = reconcilePlans(s, t)
     expect("prepare" in reconciled.plans).toBe(true)
   })
 })

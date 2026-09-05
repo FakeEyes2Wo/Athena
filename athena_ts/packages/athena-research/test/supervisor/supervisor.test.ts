@@ -16,7 +16,7 @@ import { ValidationResultSchema } from "../../src/contracts.js"
 import { PlanTurnResultSchema } from "../../src/supervisor/experiment.js"
 import { PlanBestSchema, PlanDecisionSchema, PlanStateSchema } from "../../src/contracts.js"
 import { PrepareResultSchema } from "../../src/supervisor/prepare.js"
-import { parseResearchState, loadResearchState } from "../../src/supervisor/state.js"
+import { parseResearchState, loadResearchState, researchStateToJSON } from "../../src/supervisor/state.js"
 import { FixedFlowSupervisor, type SupervisorWorkers } from "../../src/supervisor/supervisor.js"
 
 const REF = "sha256:" + "a".repeat(64)
@@ -69,6 +69,7 @@ function fakeGit(root: string): GitWorkspace {
       return "c0"
     },
     async create(baseCommit: string, branch: string): Promise<GitWorkBranch> {
+      mkdirSync(join(root, branch), { recursive: true })
       return { path: join(root, branch), branch, base_commit: baseCommit }
     },
     async diff() {
@@ -200,6 +201,28 @@ function coreSupervisor(
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it.each([
+    [false, false], [true, false], [false, true], [true, true],
+  ])("checks real recovery prerequisites (missing context=%s, workspace=%s)", async (missingContext, missingWorkspace) => {
+    const dir = tmpDir()
+    const { supervisor, state, tree } = coreSupervisor(dir)
+    const id = tree.addHypothesis(HypothesisSchema.parse({
+      statement: "improve", intervention: "add feature", expected_effect: "raise metric",
+      parent_id: "exp_baseline",
+    }))
+    await supervisor.startPlan(id)
+    if (missingContext) state.plans[id]!.context_ref = REF
+    if (missingWorkspace) tree.getExperiment(`exp_${id}`).gitwork.path = join(dir, "absent")
+    const plan = { ...state.plans[id] }
+
+    const recovered = await supervisor.recover()
+
+    expect(recovered.status).toBe(missingContext || missingWorkspace ? "WAITING" : "RUNNING")
+    expect(recovered.plans[id]).toEqual(plan)
+    expect(researchStateToJSON(loadResearchState(join(dir, ".athena", "state.json"))))
+      .toEqual(researchStateToJSON(recovered))
+  })
+
   it("reads plan workspaces from the durable tree after reconstruction", async () => {
     const dir = tmpDir()
     const { supervisor } = coreSupervisor(dir)
