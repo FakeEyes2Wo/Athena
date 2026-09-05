@@ -1,9 +1,10 @@
 """Source-independent execution observability and shared execution runtime."""
 
 from athena.execution.backend import ExecutionBackend, LocalBackend
-from athena.execution.events import (
+from athena.execution.monitor import (
     ExecutionEvent,
     ExecutionEventKind,
+    ExecutionMonitor,
     ExecutionSnapshot,
     ExecutionState,
     HealthEventSink,
@@ -11,7 +12,6 @@ from athena.execution.events import (
     JsonValue,
     MonitorLimits,
 )
-from athena.execution.monitor import ExecutionMonitor
 from athena.execution.runtime import (
     CommandExecutor,
     CommandRequest,

@@ -15,7 +15,7 @@ from athena.execution import (
     HealthStateEvent,
     MonitorLimits,
 )
-from athena.execution.events import utc_now as execution_utc_now
+from athena.execution.monitor import utc_now as execution_utc_now
 
 AGENT_PROGRESS_EVENTS = frozenset(
     {"agent/function_call", "agent/text_delta", TOOL_BEGIN, TOOL_END, TOOL_ERROR}

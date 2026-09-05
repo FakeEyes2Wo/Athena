@@ -57,6 +57,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the complete Tauri backend and collapse forwarding and bridge file layers.
 - [x] Review the Python remote mirror backend and merge its wrapper layer.
 - [x] Review remote dataset staging and remove diagnostic/test-only surface.
+- [x] Review execution configuration and merge monitoring contracts into their owner.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -209,6 +210,14 @@ Read the dataset stager and its full integration-style unit suite completely, th
 Remove the test-only `StageReport.uploaded` field and entirely unused `resumed` projection, reducing reports from five fields to four. Delete the never-disabled `verify_existing` parameter so `stage` takes only the local root and spec and always verifies completed remote data. Inline the one-call marker payload, privatize remote-root and staged-ID helpers, and make tests assert bytes and filesystem outcomes rather than internal transfer lists. Remove redundant local collections/path wrapping. Marker probing now catches only `RemoteError` instead of hiding arbitrary programming failures.
 
 The same dataset/pool selection passed 25 tests before and after the change. Python compilation, task-scope code-style checks, and removed-surface searches passed; pytest reported one existing cache-permission warning. Closing the dataset row advances reviewed coverage to 214/602. Whole-repository acceptance remains pending.
+
+## Execution configuration and monitoring review
+
+Read `compute_config.py`, `events.py`, and `monitor.py` completely and traced their configuration fields, parsers, event contracts, monitor lifecycle, and public facade through the CLI, runtime settings, compute checks, and app-server observer. Retain `ComputeConfig` unchanged: all six fields have independent production consumers, file loading and mapping parsing serve separate CLI and live-settings boundaries, and the `remote` projection removes repeated mode checks at three call sites. Its focused configuration/check suite passed 18 tests.
+
+Merge the source-independent event contracts into their sole implementation owner, `monitor.py`, and delete `events.py`. External consumers continue to import every public contract and `ExecutionMonitor` through `athena.execution`; the app-server's internal clock import now targets the owning module directly. Make the shared numeric validator private because it has no external caller. This removes one source file and one internal module dependency without adding a compatibility shim or changing the monitor constructor, event fields, state transitions, JSON metadata validation, or retention behavior.
+
+The same 43 event, monitor, observer, and thread-runtime tests passed before and after the merge. Python compilation, Black, `git diff --check`, and obsolete-import searches passed. The broader execution suite reached an unrelated host-environment assertion that requires PowerShell 7 while this machine currently resolves Windows PowerShell 5.1; it does not exercise the merged modules. Closing three baseline rows advances reviewed coverage to 217/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -671,9 +680,9 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/execution/__init__.py` | 42 | Pending |
 | `src/athena/execution/backend.py` | 122 | Reviewed; retain the source-independent backend protocol and local implementation |
 | `src/athena/execution/check.py` | 249 | Pending |
-| `src/athena/execution/compute_config.py` | 124 | Pending |
-| `src/athena/execution/events.py` | 139 | Pending |
-| `src/athena/execution/monitor.py` | 286 | Pending |
+| `src/athena/execution/compute_config.py` | 124 | Reviewed; retain six consumed fields and separate file/mapping boundaries |
+| `src/athena/execution/events.py` | 139 | Reviewed; merged contracts into monitor.py and deleted file |
+| `src/athena/execution/monitor.py` | 286 | Reviewed; own event contracts and monitor lifecycle in one module |
 | `src/athena/execution/pool.py` | 363 | Pending |
 | `src/athena/execution/remote/__init__.py` | 23 | Reviewed; export the merged mirror backend from the remote facade |
 | `src/athena/execution/remote/agent.py` | 473 | Pending |
