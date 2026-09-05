@@ -1214,7 +1214,7 @@ git commit -m "feat(research): add experiment document projector"
 - Produces: complete `ExperimentDocumentProjector.rebuild` behavior returning
   `ProjectionOutcome`.
 
-- [ ] **Step 1: Add rebuild selection and preservation tests**
+- [x] **Step 1: Add rebuild selection and preservation tests**
 
 Create a tree in insertion order containing `exp_baseline`, two terminal SEARCH
 experiments, one running SEARCH experiment, and validation. Assert:
@@ -1266,7 +1266,7 @@ Add exact tests for:
 - empty tree plus existing document root refreshes the two reports and a rebuild
   manifest without deleting files.
 
-- [ ] **Step 2: Run only rebuild tests and observe failures**
+- [x] **Step 2: Run only rebuild tests and observe failures**
 
 Run:
 
@@ -1276,7 +1276,7 @@ uv run pytest test/unit/research/experiment_documents/test_projector.py -q -k re
 
 Expected: tests fail because `rebuild` still returns the temporary stale outcome.
 
-- [ ] **Step 3: Implement deterministic reconstruction helpers**
+- [x] **Step 3: Implement deterministic reconstruction helpers**
 
 Keep helpers private to `projector.py`:
 
@@ -1325,7 +1325,7 @@ commit. Iterate the ordered `tree.to_dict()["experiments"]` mapping, add every
 derivable run candidate with `match_mode="recoverable"`, and update each alias to the
 selected record bytes.
 
-- [ ] **Step 4: Implement safe rebuild commit and no-op behavior**
+- [x] **Step 4: Implement safe rebuild commit and no-op behavior**
 
 Inside `rebuild`'s `try` block:
 
@@ -1343,7 +1343,7 @@ Define `NOOP_PROJECTION_ID` as SHA-256 of the fixed ASCII string
 `athena:experiment-documents:no-op:v1`; it is an operation identity only and is never
 written as `latest.json`.
 
-- [ ] **Step 5: Run package tests and repeat the rebuild conflict case**
+- [x] **Step 5: Run package tests and repeat the rebuild conflict case**
 
 Run:
 
@@ -1354,7 +1354,7 @@ uv run pytest test/unit/research/experiment_documents/test_projector.py -q -k "r
 
 Expected: all tests pass and no archive changes in the conflict test.
 
-- [ ] **Step 6: Commit Task 6**
+- [x] **Step 6: Commit Task 6**
 
 ```powershell
 git add -- src/athena/research/experiment_documents/projector.py test/unit/research/experiment_documents/test_projector.py
