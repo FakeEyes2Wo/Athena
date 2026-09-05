@@ -16,7 +16,6 @@ class ScratchUsage:
     """scratch 下某个根目录的占用情况。"""
 
     root: str
-    exists: bool
     total: int
     free: int
     entries: tuple[dict[str, Any], ...] = ()
@@ -33,12 +32,16 @@ class HostCheck:
 
     name: str
     alias: str
-    ok: bool
     error: str = ""
     facts: dict[str, Any] = field(default_factory=dict)
     runtime_block: str = ""
     leases: ScratchUsage | None = None
     datasets: ScratchUsage | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Whether the host passed every diagnostic."""
+        return not self.error
 
     @property
     def gpus(self) -> tuple[dict[str, Any], ...]:
@@ -64,7 +67,6 @@ async def _usage(channel: RemoteChannel, root: str) -> ScratchUsage:
     reply = await channel.request("space", root=root)
     return ScratchUsage(
         root=root,
-        exists=bool(reply.get("exists")),
         total=int(reply.get("total", 0)),
         free=int(reply.get("free", 0)),
         entries=tuple(reply.get("entries") or ()),
@@ -77,7 +79,7 @@ async def _check_host(host: SshHost, transport_factory) -> HostCheck:
     try:
         facts = await channel.open()
     except Exception as exc:
-        return HostCheck(name=host.name, alias=host.alias, ok=False, error=str(exc))
+        return HostCheck(name=host.name, alias=host.alias, error=str(exc))
     try:
         scratch = PurePosixPath(host.scratch)
         leases = await _usage(channel, str(scratch / "leases"))
@@ -101,7 +103,6 @@ async def _check_host(host: SshHost, transport_factory) -> HostCheck:
         return HostCheck(
             name=host.name,
             alias=host.alias,
-            ok=not shortfall,
             error=shortfall,
             facts=dict(facts),
             runtime_block=backend.describe(host.scratch),
@@ -112,7 +113,6 @@ async def _check_host(host: SshHost, transport_factory) -> HostCheck:
         return HostCheck(
             name=host.name,
             alias=host.alias,
-            ok=False,
             error=str(exc),
             facts=dict(facts),
         )

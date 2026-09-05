@@ -59,6 +59,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review remote dataset staging and remove diagnostic/test-only surface.
 - [x] Review execution configuration and merge monitoring contracts into their owner.
 - [x] Simplify the GPU-pool lifecycle and remove redundant lease/preflight surface.
+- [x] Review compute diagnostics and derive redundant status fields.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -227,6 +228,14 @@ Read `pool.py` and its complete unit suite, then traced pool construction, readi
 Remove `Lease.plan_id` and `Lease.host`, deriving the retained host identity from `HostCard.name`; lease attributes fall from eight to six. Remove the unconsumed GPU-memory, Python-version, and package fields from the scheduler's retained card models while leaving the remote probe protocol intact for compute diagnostics. Use the condition's own lock instead of retaining a duplicate lock attribute, and derive dataset host state from the lease so `_stage_dataset` loses one parameter. Delete the test-only pool host/card projections and update tests to assert acquired lease behavior.
 
 The pool's 14 tests passed after the change. The broader pool, dataset, compute-check, and remote-experiment selection passed 36 tests. Python compilation, Black, `git diff --check`, and removed-interface searches passed; pytest reported one existing cache-permission warning. The previously reviewed execution package facade is also reconciled in the ledger. Closing the pool and facade rows advances reviewed coverage to 219/602. Whole-repository acceptance remains pending.
+
+## Compute-diagnostics review
+
+Read `check.py` and its complete unit suite, then traced the check/result/printing flow through the CLI, compute configuration, remote channel, dataset description, and SSH runtime description. Retain this file as the cohesive operator-diagnostics boundary: merging it into the already-large CLI would mix remote probing, disk inspection, rendering, and command dispatch, while the configuration parser has independent runtime consumers.
+
+Remove the unread `ScratchUsage.exists` field, reducing that record from five fields to four. Replace the stored `HostCheck.ok` boolean with a property derived from its authoritative error string, reducing retained host state from seven fields to six and removing the corresponding constructor argument at every result path. Preserve raw probe facts, runtime text, GPU details, scratch entries, and dataset fit because each is printed or asserted by the diagnostic contract.
+
+The same 18 compute-check/configuration tests passed before and after the change. Python compilation, Black, `git diff --check`, and field-construction searches passed; pytest reported one existing cache-permission warning. Closing the compute-check row advances reviewed coverage to 220/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -688,7 +697,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/core/workspace.py` | 86 | Pending |
 | `src/athena/execution/__init__.py` | 42 | Reviewed; retain one public execution facade after monitoring merge |
 | `src/athena/execution/backend.py` | 122 | Reviewed; retain the source-independent backend protocol and local implementation |
-| `src/athena/execution/check.py` | 249 | Pending |
+| `src/athena/execution/check.py` | 249 | Reviewed; four-field scratch records and derived host status |
 | `src/athena/execution/compute_config.py` | 124 | Reviewed; retain six consumed fields and separate file/mapping boundaries |
 | `src/athena/execution/events.py` | 139 | Reviewed; merged contracts into monitor.py and deleted file |
 | `src/athena/execution/monitor.py` | 286 | Reviewed; own event contracts and monitor lifecycle in one module |
