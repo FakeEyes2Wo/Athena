@@ -15,8 +15,6 @@ The LLM side (not done here): after reading paper_text.md, write candidate.md
 containing only human-style vague a-priori ideas (no evidence, no conclusions).
 """
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -46,12 +44,8 @@ def fetch(url: str) -> bytes:
         return resp.read()
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def sha256_file(path: Path) -> str:
-    return sha256_bytes(path.read_bytes())
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def strip_tags(html: str) -> str:
@@ -95,12 +89,12 @@ def parse_abs(html: str, arxiv_id: str) -> dict:
     }
 
 
-def write_manifest(out_dir: Path, meta_obj: dict, arxiv_id: str, version: str) -> None:
+def write_manifest(out_dir: Path, meta_obj: dict) -> None:
     manifest = {
         "dataset": "examples_articles",
         "entry": {
-            "arxiv_id": arxiv_id,
-            "arxiv_version": version,
+            "arxiv_id": meta_obj["arxiv_id"],
+            "arxiv_version": meta_obj["arxiv_version"],
             "title": meta_obj.get("title", ""),
             "authors": meta_obj.get("authors", []),
             "venue": meta_obj.get("venue", ""),
@@ -160,7 +154,7 @@ def main() -> None:
             meta_path.write_text(
                 json.dumps(meta_obj, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-        write_manifest(out_dir, meta_obj, arxiv_id, meta_obj.get("arxiv_version", "?"))
+        write_manifest(out_dir, meta_obj)
         print(f"manifest updated: {out_dir / 'dataset_manifest.json'}")
         return
 
@@ -217,7 +211,7 @@ def main() -> None:
     )
 
     print("[5/5] write dataset_manifest.json")
-    write_manifest(out_dir, meta_obj, arxiv_id, meta["version"])
+    write_manifest(out_dir, meta_obj)
 
     print(f"done: {out_dir}")
     print(f"  title: {meta['title']}")

@@ -56,7 +56,6 @@ async def test_controller_consumes_only_output_and_state(monkeypatch) -> None:
 
     monkeypatch.setattr(Path, "read_text", forbidden)
     controller = TuiController(runtime, emit=events.append)
-    await controller.connect()
     runtime.emit(
         "output",
         {
@@ -75,14 +74,12 @@ async def test_controller_consumes_only_output_and_state(monkeypatch) -> None:
     assert [event.type for event in events] == ["state", "output"]
     assert isinstance(events[0], StateEvent)
     assert isinstance(events[1], OutputEvent)
-    assert controller.events_seen == ["state", "output"]
 
 
 @pytest.mark.asyncio
 async def test_controller_uses_message_as_its_only_command_surface() -> None:
     runtime = FakeRuntime()
     controller = TuiController(runtime, emit=lambda _event: None)
-    await controller.connect()
 
     assert await controller.send_message("try ViT next") == "accepted"
     assert await controller.send_message("/pause") == "accepted"
@@ -93,7 +90,6 @@ async def test_controller_uses_message_as_its_only_command_surface() -> None:
 async def test_controller_rejects_unknown_runtime_event_kind() -> None:
     runtime = FakeRuntime()
     controller = TuiController(runtime, emit=lambda _event: None)
-    await controller.connect()
 
     with pytest.raises(ValueError, match="unsupported runtime event"):
         runtime.emit("status", {"type": "status"})
@@ -103,7 +99,6 @@ async def test_controller_rejects_unknown_runtime_event_kind() -> None:
 async def test_close_unsubscribes_and_closes_runtime() -> None:
     runtime = FakeRuntime()
     controller = TuiController(runtime, emit=lambda _event: None)
-    await controller.connect()
 
     await controller.aclose()
 

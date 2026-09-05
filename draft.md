@@ -275,7 +275,7 @@
   （OS 拒绝访问，可能由外部权限/占用导致），不影响主仓库。
 
 ## 追加：Release 构建
-- 执行 `node scripts/release.cjs --backend python`：
+- 执行 `node scripts/build.cjs --package --backend python`：
   - Python 后端 PyInstaller 打包 `gui_gateway.exe`
   - 前端 `tsc && vite build`
   - Tauri release + MSI/NSIS 安装器

@@ -14,17 +14,9 @@ class TuiController:
     def __init__(self, runtime: object, *, emit: EmitFn) -> None:
         self._runtime = runtime
         self._emit = emit
-        self._subscription_id: str | None = None
-        self.events_seen: list[str] = []
-        self._subscribe()
-
-    def _subscribe(self) -> None:
-        if self._subscription_id is None:
-            self._subscription_id = self._runtime.subscribe(self._on_runtime_event)
-
-    async def connect(self) -> None:
-        """Idempotently attach to the runtime event stream."""
-        self._subscribe()
+        self._subscription_id: str | None = self._runtime.subscribe(
+            self._on_runtime_event
+        )
 
     def _on_runtime_event(self, kind: str, payload: dict) -> None:
         if kind == "output":
@@ -33,7 +25,6 @@ class TuiController:
             event = StateEvent.model_validate(payload)
         else:
             raise ValueError(f"unsupported runtime event kind: {kind}")
-        self.events_seen.append(kind)
         self._emit(event)
 
     async def send_message(self, text: str) -> str:
@@ -44,10 +35,6 @@ class TuiController:
         """Toggle SEARCH scheduling between auto and manual hypothesis selection."""
         current = getattr(self._runtime.state, "manual_mode", False)
         return await self.send_message("/auto" if current else "/manual")
-
-    async def run(self) -> None:
-        """Ensure the controller is connected without starting a poll loop."""
-        await self.connect()
 
     async def aclose(self) -> None:
         """Unsubscribe and close the owned runtime."""

@@ -223,7 +223,6 @@ async def test_tui_protocol_has_no_dispatch_or_filesystem_dependency(
     monkeypatch.setattr(Path, "read_text", forbidden)
     runtime = Runtime()
     controller = TuiController(runtime, emit=lambda _event: None)
-    await controller.connect()
     await controller.send_message("continue research")
 
     assert runtime.messages == ["continue research"]

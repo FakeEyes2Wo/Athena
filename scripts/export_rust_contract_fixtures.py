@@ -9,9 +9,7 @@
 
 import argparse
 import json
-import sys
 from pathlib import Path
-from uuid import uuid4
 
 from pydantic_ai.messages import (
     ModelMessagesTypeAdapter,
@@ -46,14 +44,13 @@ from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.research.data_models import DataCard, MetricSpec
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC = PROJECT_ROOT / "src" / "athena"
 
 
 def default_output() -> Path:
     return PROJECT_ROOT / "athena-rust" / "tests" / "fixtures"
 
 
-def export_protocol_fixtures(out: Path) -> dict:
+def export_protocol_fixtures() -> dict:
     """导出 ErrorCode 值、方法常量及协议 DTO。"""
     fixtures = {}
 
@@ -63,18 +60,13 @@ def export_protocol_fixtures(out: Path) -> dict:
     }
 
     # 方法名称
-    fixtures["methods"] = [
-        m
-        for m in dir(Method)
-        if m.isupper() and not m.startswith("_") and isinstance(getattr(Method, m), str)
-    ]
-
-    # 方法 -> 值映射
-    fixtures["method_values"] = {
+    method_values = {
         m: getattr(Method, m)
         for m in dir(Method)
         if m.isupper() and not m.startswith("_") and isinstance(getattr(Method, m), str)
     }
+    fixtures["methods"] = list(method_values)
+    fixtures["method_values"] = method_values
 
     # 请求信封
     req = RequestEnvelope(
@@ -145,7 +137,7 @@ def export_protocol_fixtures(out: Path) -> dict:
     return fixtures
 
 
-def export_domain_fixtures(out: Path) -> dict:
+def export_domain_fixtures() -> dict:
     """导出 schemas.py 中的领域 DTO 和验证示例。"""
     fixtures = {}
 
@@ -229,7 +221,7 @@ def export_domain_fixtures(out: Path) -> dict:
     return fixtures
 
 
-def export_message_fixtures(out: Path) -> dict:
+def export_message_fixtures() -> dict:
     """导出 PydanticAI ModelMessage 固件。"""
     fixtures = {}
     adapter = ModelMessagesTypeAdapter
@@ -283,7 +275,7 @@ def export_message_fixtures(out: Path) -> dict:
     return fixtures
 
 
-def export_rollout_fixtures(out: Path) -> dict:
+def export_rollout_fixtures() -> dict:
     """导出 rollout 记录固件。"""
     fixtures = {}
     adapter = ModelMessagesTypeAdapter
@@ -328,44 +320,43 @@ def main():
     )
     args = parser.parse_args()
 
-    out = args.output
-    fixtures_dir = out
+    fixtures_dir = args.output
 
     # 确保输出目录存在
     for sub in ["protocol", "messages", "rollout"]:
         (fixtures_dir / sub).mkdir(parents=True, exist_ok=True)
 
     # 导出协议固件
-    protocol = export_protocol_fixtures(fixtures_dir)
+    protocol = export_protocol_fixtures()
     (fixtures_dir / "protocol" / "protocol.json").write_text(
         json.dumps(protocol, indent=2, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"  ✓ protocol.json ({len(protocol)} fixture groups)")
+    print(f"  OK protocol.json ({len(protocol)} fixture groups)")
 
     # 导出领域固件
-    domain = export_domain_fixtures(fixtures_dir)
+    domain = export_domain_fixtures()
     (fixtures_dir / "protocol" / "domain.json").write_text(
         json.dumps(domain, indent=2, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"  ✓ domain.json ({len(domain)} fixture groups)")
+    print(f"  OK domain.json ({len(domain)} fixture groups)")
 
     # 导出消息固件
-    messages = export_message_fixtures(fixtures_dir)
+    messages = export_message_fixtures()
     (fixtures_dir / "messages" / "messages.json").write_text(
         json.dumps(messages, indent=2, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"  ✓ messages.json ({len(messages)} fixture groups)")
+    print(f"  OK messages.json ({len(messages)} fixture groups)")
 
     # 导出 rollout 固件
-    rollout = export_rollout_fixtures(fixtures_dir)
+    rollout = export_rollout_fixtures()
     (fixtures_dir / "rollout" / "rollout.json").write_text(
         json.dumps(rollout, indent=2, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"  ✓ rollout.json ({len(rollout)} fixture groups)")
+    print(f"  OK rollout.json ({len(rollout)} fixture groups)")
 
     print(f"\nAll fixtures exported to: {fixtures_dir}")
 

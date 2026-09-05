@@ -45,6 +45,20 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
+## TUI controller review
+
+`TuiController` remains the focused boundary that validates the runtime's two event shapes, forwards the single message command, and owns subscription cleanup. Its constructor already subscribed synchronously, so the private `_subscribe` helper and public `connect`/`run` coroutine layers were redundant; `run` had no callers and `connect` was exercised only by tests after construction. Remove all three methods and the test-only `events_seen` instance list. The controller now has only the three runtime attributes required for forwarding and cleanup, while production construction, event validation, manual-mode toggling, and close behavior are unchanged.
+
+Fresh baseline and post-change verification each passed the same 10 unit/integration tests in `test_controller.py` and `test_tui_protocol.py`; `python -m compileall -q src/athena_tui` and `git diff --check` also passed. Closing this source row advances reviewed coverage to 96/602. The remaining TUI files and whole-repository acceptance remain pending.
+
+## Root development-script review
+
+All eight root development scripts were read completely and their package, hook, documentation, generated-fixture, and release callers were traced. Retain the code-style hook, frozen gateway entry, model-capability probe, headless runner, and article-preparation CLI because each owns a distinct executable workflow. Merge the duplicated release composition into `build.cjs` under `--package`, preserve the three `npm run release*` commands, update the direct documentation example, and delete `release.cjs`. The unified parser now honors the last repeated `--backend` value so npm-appended overrides behave predictably.
+
+The Rust fixture exporter no longer accepts four unused path parameters, scans `Method` once, or carries three dead imports/constants. Its status text is ASCII-safe on the Windows console; protocol/domain output hashes remain byte-identical, while message/rollout diffs contain only their pre-existing generated timestamps. The article-preparation script removes a single-use hash wrapper and derives both manifest identity fields from its existing metadata record, reducing `write_manifest` from four parameters to two. Two prohibited future imports were removed. `check_code_style.py` and `run_headless.py` were already cohesive and retain their current interfaces.
+
+Fresh verification passed Node syntax checking, both build/package invalid-backend gates (including npm overrides), Python compilation of all scripts, all three offline CLI help paths, the code-style hard-rule gate, a complete four-file fixture export, and an offline manifest update/round trip. `git diff --check` passed. Positive PyInstaller/Tauri packaging is not run in this source review because this environment lacks PyInstaller; the package command reaches the same preserved command composition. Closing eight ledger rows advances reviewed coverage to 104/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -697,7 +711,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena_tui/__init__.py` | 8 | Pending |
 | `src/athena_tui/__main__.py` | 6 | Pending |
 | `src/athena_tui/app.py` | 668 | Pending |
-| `src/athena_tui/controller.py` | 57 | Pending |
+| `src/athena_tui/controller.py` | 57 | Reviewed; remove three redundant subscription lifecycle methods and one test-only attribute; 10 tests pass before and after |
 | `src/athena_tui/entrypoint.py` | 62 | Pending |
 | `src/athena_tui/render.py` | 499 | Pending |
 | `src/athena_tui/state.py` | 166 | Pending |
@@ -910,11 +924,11 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Reviewed; deleted helper/class tests, migrated coverage to real plan entrypoint |
 | `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Reviewed; deleted tests exclusive to removed Worker; replacement public-surface test tracked separately |
 | `athena_ts/vitest.workspace.ts` | 4 | Pending |
-| `scripts/build.cjs` | 62 | Pending |
-| `scripts/check_code_style.py` | 162 | Pending |
-| `scripts/export_rust_contract_fixtures.py` | 374 | Pending |
-| `scripts/gui_gateway_entry.py` | 26 | Pending |
-| `scripts/prepare_examples_article.py` | 230 | Pending |
-| `scripts/probe_max_tokens.py` | 117 | Pending |
-| `scripts/release.cjs` | 60 | Pending |
-| `scripts/run_headless.py` | 112 | Pending |
+| `scripts/build.cjs` | 62 | Reviewed; absorb release composition behind `--package`; one parser/runner and preserved npm commands |
+| `scripts/check_code_style.py` | 162 | Reviewed; retain repository hook and its distinct AST/text rules; hard-rule gate passes |
+| `scripts/export_rust_contract_fixtures.py` | 374 | Reviewed; four parameters to zero, scan methods once, remove dead imports/constants; four fixture files export |
+| `scripts/gui_gateway_entry.py` | 26 | Reviewed; retain frozen-only `inspect.getsource` compatibility entry used by PyInstaller |
+| `scripts/prepare_examples_article.py` | 230 | Reviewed; merge single-use hash helper and reduce manifest writer from four parameters to two |
+| `scripts/probe_max_tokens.py` | 117 | Reviewed; retain cohesive manual diagnostic; remove prohibited future import; help path passes |
+| `scripts/release.cjs` | 60 | Reviewed; merge into build.cjs and delete duplicated parser/runner/composition file |
+| `scripts/run_headless.py` | 112 | Reviewed; retain distinct headless/CI runtime entry with already-minimal one-argument helpers |

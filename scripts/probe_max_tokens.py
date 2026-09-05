@@ -21,8 +21,6 @@ JSON 转义会让换行、引号、反斜杠各多占一个字符，中文按 UT
 **留一半余量**是合理的。
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import sys
