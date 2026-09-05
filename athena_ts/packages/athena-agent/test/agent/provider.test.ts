@@ -1,7 +1,39 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { AgentConfig } from "../../src/agent/models.js"
-import { DeepSeekTextFilter, ResponsesProvider, StreamEvent } from "../../src/agent/provider.js"
+import { createProvider, DeepSeekTextFilter, ResponsesProvider, StreamEvent } from "../../src/agent/provider.js"
 import { ToolRegistry } from "../../src/tool.js"
+
+afterEach(() => vi.unstubAllEnvs())
+
+describe("provider configuration", () => {
+  it.each([undefined, "", "deepseek", "openai"])("selects a shared provider for %j", (kind) => {
+    vi.stubEnv("LLM_PROVIDER", kind)
+    vi.stubEnv("DEEPSEEK_API_KEY", "")
+    vi.stubEnv("OPENAI_API_KEY", "")
+    const client = streamClient([])
+    const provider = createProvider("explicit-model", { client })
+    expect(provider).toBeInstanceOf(ResponsesProvider)
+    expect(provider.providerKind).toBe(kind || "deepseek")
+    expect(provider.modelName).toBe("explicit-model")
+    expect(provider.client).toBe(client)
+  })
+
+  it.each(["anthropic", "bogus"])("rejects unsupported factory selection %s", (kind) => {
+    vi.stubEnv("LLM_PROVIDER", kind)
+    expect(() => createProvider("model")).toThrow(/LLM_PROVIDER/)
+  })
+
+  it("preserves lazy missing-key and deferred-client failures without claiming SDK support", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "")
+    vi.stubEnv("OPENAI_API_KEY", "")
+    const provider = new ResponsesProvider("model", { providerKind: "openai" })
+    expect(() => provider.client).toThrow(/Missing LLM API key/)
+    vi.stubEnv("OPENAI_API_KEY", "test-key")
+    const client = provider.client
+    expect(provider.client).toBe(client)
+    await expect(client.chat.completions.create({})).rejects.toThrow(/wiring deferred/)
+  })
+})
 
 function filtered(chunks: string[]): string {
   const f = new DeepSeekTextFilter()

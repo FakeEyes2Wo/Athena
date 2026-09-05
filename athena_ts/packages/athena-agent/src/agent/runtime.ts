@@ -23,7 +23,7 @@ import { ToolContext, ToolResult, type AskUser, type EmitEvent } from "../tool-t
 import { AgentConfig, AgentContext, AgentOutcome, StepOutcome, ToolCall } from "./models.js"
 import type { StructuredOutputType } from "./models.js"
 import { BaseProvider, createProvider } from "./provider.js"
-import type { ChatClient } from "./settings.js"
+import type { ChatClient } from "./provider.js"
 
 export type { StructuredOutputType }
 

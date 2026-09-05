@@ -16,9 +16,6 @@ import {
 } from "../../src/agent/runtime.js"
 import { AgentConfig, AgentContext, AgentOutcome } from "../../src/agent/models.js"
 import {
-  AnthropicProvider,
-  DeepSeekProvider,
-  OpenAIProvider,
   ResponsesProvider,
   StreamEvent,
   createProvider,
@@ -312,7 +309,7 @@ describe("Agent", () => {
 describe("provider stream", () => {
   it("sets response_format when output type given", async () => {
     const client = new CaptureClient()
-    const provider = new OpenAIProvider("model", { client: client as never })
+    const provider = new ResponsesProvider("model", { client: client as never, providerKind: "openai" })
     const events = []
     for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal, { outputType: structuredOut })) {
       events.push(e)
@@ -336,7 +333,7 @@ describe("provider stream", () => {
 
   it("retries without unsupported response format", async () => {
     const client = new ResponseFormatFallbackClient("This response_format type is unavailable now")
-    const provider = new OpenAIProvider("model", { client: client as never })
+    const provider = new ResponsesProvider("model", { client: client as never, providerKind: "openai" })
     const events = []
     for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal, { outputType: structuredOut })) {
       events.push(e)
@@ -380,7 +377,7 @@ describe("provider stream", () => {
 
   it("deepseek stream injects schema and uses json_object", async () => {
     const client = new CaptureClient()
-    const provider = new DeepSeekProvider("model", { client: client as never })
+    const provider = new ResponsesProvider("model", { client: client as never, providerKind: "deepseek" })
     const events = []
     for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal, { outputType: structuredOut })) {
       events.push(e)
@@ -554,21 +551,15 @@ describe("create_provider", () => {
     }
 
     process.env.LLM_PROVIDER = "deepseek"
-    expect(createProvider("m")).toBeInstanceOf(DeepSeekProvider)
+    expect(createProvider("m").providerKind).toBe("deepseek")
 
     process.env.LLM_PROVIDER = "openai"
-    expect(createProvider("m")).toBeInstanceOf(OpenAIProvider)
+    expect(createProvider("m").providerKind).toBe("openai")
 
     process.env.LLM_PROVIDER = "anthropic"
     expect(() => createProvider("m")).toThrow(/LLM_PROVIDER/)
 
     process.env.LLM_PROVIDER = "bogus"
     expect(() => createProvider("m")).toThrow(/LLM_PROVIDER/)
-  })
-})
-
-describe("AnthropicProvider", () => {
-  it("raises on construction", () => {
-    expect(() => new AnthropicProvider("m")).toThrow(/LLM_PROVIDER/)
   })
 })

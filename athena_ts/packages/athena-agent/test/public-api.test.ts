@@ -9,14 +9,19 @@ import {
   ToolCall,
 } from "../src/agent/models.js"
 import {
-  DeepSeekProvider,
-  OpenAIProvider,
   ResponsesProvider,
   StreamEvent,
   createProvider,
 } from "../src/agent/provider.js"
 
 describe("public surface", () => {
+  it("does not export removed provider wrappers or unused settings", () => {
+    for (const name of ["BaseProvider", "OpenAIProvider", "DeepSeekProvider", "AnthropicProvider",
+      "apiKey", "baseUrl", "modelName", "proModelName", "getClient", "providerKind"]) {
+      expect(api).not.toHaveProperty(name)
+    }
+  })
+
   it("uses native abort signals instead of exporting a custom cancellation token", () => {
     expect(api).not.toHaveProperty("CancellationToken")
     const error = new api.CancelledError()
@@ -49,8 +54,6 @@ describe("public surface", () => {
       "createAgent",
       "createCodeAgent",
       "createProvider",
-      "OpenAIProvider",
-      "DeepSeekProvider",
       "RequestUserInputTool",
       "ContextManager",
       "Compactor",
@@ -75,7 +78,5 @@ describe("public surface", () => {
     expect(api.createAgent).toBe(createAgent)
     expect(api.createCodeAgent).toBe(createCodeAgent)
     expect(api.createProvider).toBe(createProvider)
-    expect(api.OpenAIProvider).toBe(OpenAIProvider)
-    expect(api.DeepSeekProvider).toBe(DeepSeekProvider)
   })
 })

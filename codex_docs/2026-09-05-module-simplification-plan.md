@@ -77,7 +77,13 @@ TypeScript cancellation review: all token construction, propagation, polling and
 
 Cancellation evidence: Agent plus research Worker tests returned 130 passed before and after migration. Add public-surface rejection of the deleted token and a streaming regression that aborts twice after the first chunk and asserts no later text is emitted; strengthen pre-cancelled single-turn assertions to require CancelledError. After removing three ignored stale cancel build artifacts, all five package builds passed and the full TypeScript workspace returned 431 passed across 53 files. Tracked references to the removed TS token remain only in its negative API assertion and historical design records; Rust's distinct tokio token remains untouched. Source and stale compiled cancel modules are absent; git diff --check passed. Baseline review coverage is now 56/602; partially inspected provider/runtime/chat/Worker files are not counted as complete reviews. Whole-repository acceptance, main merge/push, and temporary task branch/worktree deletion remain required and unfinished.
 
-Next reads: settings.ts and settings.test.ts have been fully inspected but remain Pending for caller tracing and a module decision. settings.getClient still returns a deferred implementation placeholder and requires examination with provider/single-turn callers before deciding its treatment.
+TypeScript provider/configuration review: fully inspected provider.ts, settings.ts and both associated test files, then traced runtime, single-turn and Worker construction. Merge the live ChatClient/ProviderKind contract, provider environment selection and deferred-client fallback into provider.ts. Delete settings.ts and settings.test.ts; unused URL/model-name/configuration exports and their tests had no runtime consumers. Keep the fallback's existing missing-key and deferred-SDK errors explicit, not a claimed real SDK implementation. Callers with real transports continue to inject client. Historical architecture documents remain historical; the Rust/Python provider APIs are unchanged.
+
+Remove OpenAIProvider/DeepSeekProvider constructor-only subclasses and the always-throwing AnthropicProvider class. createProvider now chooses one ResponsesProvider with the corresponding providerKind, rejecting Anthropic directly with the existing message. Direct construction uses new ResponsesProvider(model, { client, providerKind }); the environment-based factory remains available. BaseProvider is now a structural type interface, not an empty runtime superclass. Replace model-name getter/assignment with a readonly parameter property; preserve lazy client identity. Retain DSML filtering, tool-call assembly, schema-format fallback, API-message mapping and cancellation/error boundaries. The two production files totalled 488 lines immediately before this change and now form one 405-line provider module.
+
+Provider evidence: Agent and Worker baseline returned 132 passed; removing obsolete wrapper/configuration tests left 128 passed, and new boundary/API regressions brought the selection to 136 passed. The provider file has 18 passing tests, including injected client without credentials, default/empty/explicit provider selection, unsupported-provider errors, lazy missing-key/deferred-client failures, native cancellation and DSML handling. Existing Agent tests retain OpenAI/DeepSeek structured output and retry coverage. After deleting three ignored stale settings build artifacts, all five package builds passed and the complete TypeScript workspace returned 435 passed across 52 files. Removed modules/imports are absent and git diff --check passed. Baseline reviewed coverage is now 60/602; full repository acceptance, main merge/push, and temporary task branch/worktree cleanup remain open.
+
+Next module: TypeScript Agent runtime.ts and single-turn-chat.ts are now fully read. The runtime still has null task placeholders/result reindexing, a six-argument tool dispatch helper, and a constructor-only createCodeAgent forwarding function; one-turn options repeat sampling configuration. These require focused concurrency and configuration tests before closing their review. Worker source is read but its broader structured-output/context construction decision remains Pending.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -540,11 +546,11 @@ Next reads: settings.ts and settings.test.ts have been fully inspected but remai
 | `athena-rust/crates/athena-workspace/src/model.rs` | 10 | Pending |
 | `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Pending |
-| `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Reviewed; absorb settings; remove provider subclasses and abstract runtime base; preserve stream/schema/DSML behavior; 435 tests pass |
 | `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
 | `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Reviewed; remove MemoryView and forwarding getter; retain checkpoint semantics |
-| `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Reviewed; move live contracts/configuration to provider.ts; delete unused exports and file; preserve deferred SDK limitation |
 | `athena_ts/packages/athena-agent/src/agent/tools/user-input.ts` | 32 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/types.ts` | 215 | Reviewed; retain typed message, codec, state and error contracts; 10 tests pass |
 | `athena_ts/packages/athena-agent/src/cancel.ts` | 42 | Reviewed; delete custom token/waiters; native AbortSignal throughout callers; move CancelledError to agent/types.ts; 431 tests pass |
@@ -558,10 +564,10 @@ Next reads: settings.ts and settings.test.ts have been fully inspected but remai
 | `athena_ts/packages/athena-agent/src/tool-types.ts` | 74 | Reviewed; remove unused output-limit attribute; retain message truncation |
 | `athena_ts/packages/athena-agent/src/tool.ts` | 183 | Reviewed; consolidate lifecycle, delete forwarding helpers and redundant registry storage |
 | `athena_ts/packages/athena-agent/test/agent/agent.test.ts` | 575 | Pending |
-| `athena_ts/packages/athena-agent/test/agent/provider.test.ts` | 140 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/provider.test.ts` | 140 | Reviewed; consolidate configuration/client/streaming regressions; 18 tests pass |
 | `athena_ts/packages/athena-agent/test/agent/registry.test.ts` | 75 | Reviewed; migrate factory and verify exact argument list; 6 tests pass |
 | `athena_ts/packages/athena-agent/test/agent/session.test.ts` | 26 | Reviewed; direct context and detached mailbox contract test passes |
-| `athena_ts/packages/athena-agent/test/agent/settings.test.ts` | 58 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/settings.test.ts` | 58 | Reviewed; delete obsolete configuration tests; live lazy-client and environment contracts covered in provider.test.ts |
 | `athena_ts/packages/athena-agent/test/agent/types.test.ts` | 107 | Reviewed; retain protocol/state/error checks; 10 tests pass |
 | `athena_ts/packages/athena-agent/test/memory/compaction.test.ts` | 85 | Pending |
 | `athena_ts/packages/athena-agent/test/memory/context-manager.test.ts` | 206 | Pending |

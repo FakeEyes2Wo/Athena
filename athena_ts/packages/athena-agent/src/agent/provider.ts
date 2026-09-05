@@ -6,8 +6,41 @@ import type { ModelMessage } from "../messages.js"
 import type { ToolRegistry } from "../tool.js"
 import { truncateText } from "../tool-types.js"
 import type { AgentConfig, StructuredOutputType } from "./models.js"
-import * as settings from "./settings.js"
-import type { ChatClient, ProviderKind } from "./settings.js"
+/** Minimal injected chat-completions transport. */
+export interface ChatClient {
+  chat: {
+    completions: {
+      create(kwargs: Record<string, unknown>): Promise<AsyncIterable<unknown>>
+    }
+  }
+}
+
+const ALLOWED_PROVIDERS = ["deepseek", "openai", "anthropic"] as const
+export type ProviderKind = (typeof ALLOWED_PROVIDERS)[number]
+
+function providerKind(): ProviderKind {
+  const kind = process.env.LLM_PROVIDER || "deepseek"
+  if (!ALLOWED_PROVIDERS.includes(kind as ProviderKind)) {
+    throw new Error(`unsupported LLM_PROVIDER=${JSON.stringify(kind)}; expected one of ${ALLOWED_PROVIDERS.join(", ")}`)
+  }
+  return kind as ProviderKind
+}
+
+/** Preserve the existing deferred transport; actual clients are injected by callers. */
+function getClient(): ChatClient {
+  if (!(process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY)) {
+    throw new Error("Missing LLM API key: set DEEPSEEK_API_KEY or OPENAI_API_KEY in .env")
+  }
+  return {
+    chat: {
+      completions: {
+        async create(): Promise<AsyncIterable<unknown>> {
+          throw new Error("real OpenAI client wiring deferred to M2")
+        },
+      },
+    },
+  }
+}
 
 /** 流式响应事件 — kind 区分文本增量、函数调用、完成和错误四种类型。 */
 export class StreamEvent {
@@ -109,10 +142,10 @@ interface StreamChunk {
   }>
 }
 
-export abstract class BaseProvider {
-  abstract get modelName(): string
-  abstract get client(): ChatClient
-  abstract stream(
+export interface BaseProvider {
+  readonly modelName: string
+  readonly client: ChatClient
+  stream(
     config: AgentConfig,
     tools: ToolRegistry,
     messages: ModelMessage[],
@@ -124,27 +157,20 @@ export abstract class BaseProvider {
 const ANTHROPIC_NOT_IMPLEMENTED =
   "native Anthropic provider is not yet implemented; set LLM_PROVIDER=deepseek|openai"
 
-export class ResponsesProvider extends BaseProvider {
-  private _modelName: string
+export class ResponsesProvider implements BaseProvider {
   private _client: ChatClient | null
-  providerKind: ProviderKind
+  readonly providerKind: ProviderKind
 
   constructor(
-    model: string,
+    public readonly modelName: string,
     opts: { client?: ChatClient | null; providerKind?: ProviderKind | null } = {}
   ) {
-    super()
-    this._modelName = model
     this._client = opts.client ?? null
-    this.providerKind = opts.providerKind ?? settings.providerKind()
-  }
-
-  get modelName(): string {
-    return this._modelName
+    this.providerKind = opts.providerKind ?? providerKind()
   }
 
   get client(): ChatClient {
-    if (this._client === null) this._client = settings.getClient()
+    if (this._client === null) this._client = getClient()
     return this._client
   }
 
@@ -289,48 +315,13 @@ export class ResponsesProvider extends BaseProvider {
   }
 }
 
-export class OpenAIProvider extends ResponsesProvider {
-  constructor(model: string, opts: { client?: ChatClient | null } = {}) {
-    super(model, { client: opts.client ?? null, providerKind: "openai" })
-  }
-}
-
-export class DeepSeekProvider extends ResponsesProvider {
-  constructor(model: string, opts: { client?: ChatClient | null } = {}) {
-    super(model, { client: opts.client ?? null, providerKind: "deepseek" })
-  }
-}
-
-export class AnthropicProvider extends BaseProvider {
-  constructor(model?: string, opts?: { client?: unknown }) {
-    super()
-    void model
-    void opts
-    throw new Error(ANTHROPIC_NOT_IMPLEMENTED)
-  }
-
-  get modelName(): string {
-    throw new Error(ANTHROPIC_NOT_IMPLEMENTED)
-  }
-
-  get client(): ChatClient {
-    throw new Error(ANTHROPIC_NOT_IMPLEMENTED)
-  }
-
-  async *stream(): AsyncGenerator<StreamEvent> {
-    throw new Error(ANTHROPIC_NOT_IMPLEMENTED)
-  }
-}
-
 export function createProvider(
   model: string,
   opts: { client?: ChatClient | null } = {}
-): BaseProvider {
-  const kind = settings.providerKind()
-  if (kind === "openai") return new OpenAIProvider(model, opts)
-  if (kind === "deepseek") return new DeepSeekProvider(model, opts)
-  if (kind === "anthropic") return new AnthropicProvider(model)
-  throw new Error(`unsupported LLM_PROVIDER=${JSON.stringify(kind)}`)
+): ResponsesProvider {
+  const kind = providerKind()
+  if (kind === "anthropic") throw new Error(ANTHROPIC_NOT_IMPLEMENTED)
+  return new ResponsesProvider(model, { ...opts, providerKind: kind })
 }
 
 function schemaInstruction(outputType: StructuredOutputType): Record<string, string> {
