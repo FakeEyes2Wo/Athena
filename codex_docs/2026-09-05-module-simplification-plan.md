@@ -37,10 +37,17 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Make SEARCH own graceful stop draining; join the loop before publishing STOPPED.
 - [x] Share failure persistence/notification between initial startup and background SEARCH.
 - [x] Drain in-flight turns after SEARCH errors and narrow internal completion records.
+- [x] Narrow the Supervisor public surface and remove unused Plan/ideation return values.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+Public-surface follow-up: removed `startValidation()` and moved its tool-response projection to DSH's existing `research_validate` adapter, which still calls `setPhaseDecision("VALIDATE")` and returns `{status}`. Folded the test-only public `stop()` into the actual `requestStop()` operation. Made six internal methods private: `continuePhase`, `runPrepare`, `runValidation`, `runSearch`, `startPlan`, and `registerHypotheses`. Tests probe private SEARCH/Plan machinery explicitly and clean up through the real public stop request. `startPlan` no longer returns an unread ID; registration returns the one boolean consumed by slot filling, rather than constructing an unused ID list and wrapper.
+
+Public-surface verification: all five package builds passed; the full TypeScript run with `--testTimeout=30000` passed 526 tests across 53 files in 74.00 seconds. `git diff --check` passed. Main integration/push and temporary task branch/worktree cleanup remain required at whole-goal completion, not at this API slice.
+
+Caller tracing retained `recover()` (autoresearch engine), both getters (DSH status/evaluator wiring), and the actual tool-facing methods. The compiled declaration confirms the six methods are private; this is TypeScript API encapsulation, not runtime access control. Focused verification passed 43 tests; the DSH validation adapter test confirms the delegated decision and unchanged response. An initially unsupported Vitest matcher was replaced by this workspace's supported call-count and argument assertions. Whole Supervisor lifecycle review remains open, especially PREPARE/VALIDATE stop ownership and stop/failure reporting races. Coverage stays at 91/602.
 
 Concurrent-error follow-up: running turns attach rejection handlers when launched and deliver a plan-tagged error to the same SEARCH loop that applies normal completions. The loop retains its first error locally, stops filling slots, drains remaining completions, then rethrows for the existing startup/background reporting boundary. Failed turns retain their frozen Plan rather than inventing an untrusted result; successfully returned siblings still settle. Errors from ideation or applying a completion use the same drain path. Existing recoverable Agent-turn exceptions still produce a null decision as before. Removed the unused public `CompletedTurn` export; its private success record now carries `nextState` rather than a full `PlanTurnResult` whose other fields were unread.
 

@@ -4,6 +4,13 @@ import { FixedFlowSupervisor } from "../src/supervisor/supervisor.js"
 import { LocalExecutionRuntime } from "../src/execution.js"
 
 describe("research public surface", () => {
+  it("removes duplicate Supervisor entrypoints", () => {
+    expect(FixedFlowSupervisor.prototype).not.toHaveProperty("startValidation")
+    expect(FixedFlowSupervisor.prototype).not.toHaveProperty("stop")
+    expect(FixedFlowSupervisor.prototype.setPhaseDecision).toBeTypeOf("function")
+    expect(FixedFlowSupervisor.prototype.requestStop).toBeTypeOf("function")
+  })
+
   it("removes the unused standalone runtime and its private adapter chain", () => {
     for (const name of [
       "ResearchRuntime", "WorkerRunner", "zodOutputType", "PlanDecisionOutputType",

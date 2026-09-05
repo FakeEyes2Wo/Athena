@@ -27,7 +27,7 @@ import { Outcome, type Outcome as OutcomeType } from "./ranker.js"
 import type { PrepareResult } from "./prepare.js"
 import { reconcilePlans } from "./recovery.js"
 import { Scheduler, countSearchAttempts } from "./scheduler.js"
-import { saveResearchState, researchStateToJSON, type ResearchState, type ResearchStatus } from "./state.js"
+import { saveResearchState, researchStateToJSON, type ResearchState } from "./state.js"
 
 export type PlanTurn = (planId: string, state: PlanState) => Promise<PlanTurnResult>
 export type PlanAgentTurn = (planId: string, state: PlanState) => Promise<PlanDecision | null>
@@ -279,12 +279,6 @@ export class FixedFlowSupervisor {
     return { decision }
   }
 
-  /** 交互式快捷入口：SEARCH 达到预算/人工决策后显式推进 VALIDATE。 */
-  async startValidation(): Promise<{ status: ResearchStatus }> {
-    await this.setPhaseDecision("VALIDATE")
-    return { status: this.state.status }
-  }
-
   private saveState(): void {
     saveResearchState(this.statePath, this.state)
   }
@@ -326,7 +320,7 @@ export class FixedFlowSupervisor {
     ])
   }
 
-  async continuePhase(): Promise<void> {
+  private async continuePhase(): Promise<void> {
     if (this.state.phase === "SEARCH") {
       await this.runSearch()
       if (this.stopped) return
@@ -342,7 +336,7 @@ export class FixedFlowSupervisor {
     }
   }
 
-  async runPrepare(): Promise<void> {
+  private async runPrepare(): Promise<void> {
     const result = await this.workers.runPreparePhase()
     const hypothesisId = "baseline"
     const experimentId = "exp_baseline"
@@ -397,7 +391,7 @@ export class FixedFlowSupervisor {
     await this.transitionPhase("SEARCH")
   }
 
-  async runValidation(): Promise<void> {
+  private async runValidation(): Promise<void> {
     const sotaId = this.tree.bestExperimentId()
     if (sotaId === null) throw new Error("VALIDATE requires a frozen SOTA")
     const sota = this.tree.getExperiment(sotaId)
@@ -448,7 +442,7 @@ export class FixedFlowSupervisor {
     return this.state
   }
 
-  async runSearch(): Promise<void> {
+  private async runSearch(): Promise<void> {
     if (this.searchPromise !== null) return this.searchPromise
     this.stopped = false
     const loop = Promise.resolve().then(() => this.runSearchLoop())
@@ -528,8 +522,7 @@ export class FixedFlowSupervisor {
       if (this.stopped) return generated
       if (action.kind === "GENERATE") {
         const hypotheses = await this.workers.runIdeatorTurn(action.count)
-        const registered = await this.registerHypotheses(hypotheses)
-        generated = registered.hypothesis_ids.length > 0
+        generated = await this.registerHypotheses(hypotheses)
         continue
       }
       const { planId } = action
@@ -676,7 +669,7 @@ export class FixedFlowSupervisor {
     this.saveState()
   }
 
-  async startPlan(hypothesisId: string): Promise<string> {
+  private async startPlan(hypothesisId: string): Promise<void> {
     if (this.frozenEvaluatorRef === null) {
       const baselines = this.tree.experiments("baseline")
       if (baselines.length === 0) throw new Error("SEARCH Plan requires a frozen evaluator")
@@ -688,7 +681,7 @@ export class FixedFlowSupervisor {
           `active plan ${hypothesisId} is missing experiment exp_${hypothesisId}; remove the plan or repair the tree`
         )
       }
-      return hypothesisId
+      return
     }
     const hypothesis = this.tree.getHypothesis(hypothesisId)
     const existing = this.tree.experimentForHypothesis(hypothesisId)
@@ -750,7 +743,6 @@ export class FixedFlowSupervisor {
     })
     this.saveState()
     await this.publishState()
-    return hypothesisId
   }
 
   async planInput(planId: string) {
@@ -781,10 +773,9 @@ export class FixedFlowSupervisor {
     return { hypothesis_id: hypothesisId }
   }
 
-  async registerHypotheses(hypotheses: Hypothesis[]): Promise<{ hypothesis_ids: string[] }> {
+  private async registerHypotheses(hypotheses: Hypothesis[]): Promise<boolean> {
     const { parentId, parentHypothesis } = this.sotaParent()
     const priority = this.scheduler.policy.seed(parentHypothesis)
-    const ids: string[] = []
     for (const h of hypotheses) {
       const hypothesis = HypothesisSchema.parse({
         ...h,
@@ -793,11 +784,11 @@ export class FixedFlowSupervisor {
         parent_id: parentId,
         priority,
       })
-      ids.push(this.tree.addHypothesis(hypothesis))
+      this.tree.addHypothesis(hypothesis)
     }
     this.tree.save(this.treePath)
     await this.publishState()
-    return { hypothesis_ids: ids }
+    return hypotheses.length > 0
   }
 
   async selectNextHypothesis(hypothesisId: string): Promise<{ selected: string }> {
@@ -833,17 +824,13 @@ export class FixedFlowSupervisor {
   }
 
   async requestStop(): Promise<string> {
-    await this.stop()
-    this.state.status = "STOPPED"
-    await this.persistState()
-    return this.state.status
-  }
-
-  async stop(): Promise<void> {
     this.stopped = true
     this.wake()
     await Promise.allSettled([this.searchPromise, ...this.running.values()])
     this.running.clear()
+    this.state.status = "STOPPED"
+    await this.persistState()
+    return this.state.status
   }
 
   async readState(): Promise<Record<string, unknown>> {

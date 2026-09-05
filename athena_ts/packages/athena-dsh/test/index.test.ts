@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { Context } from "cordis"
 import { HypothesisSchema, LocalGitWorkspace, ResearchTree } from "@athena/core"
 import { DataScriptRunner, FixedFlowSupervisor, parseResearchState, Scheduler, TrustedEvaluator } from "@athena/research"
@@ -100,6 +100,14 @@ describe("researchPlugin", () => {
     expect(paused).toEqual({ result: "WAITING" })
     const resumed = await find("research_resume").execute({}, {})
     expect(resumed).toEqual({ result: "RUNNING" })
+    const decide = vi.spyOn(ctx.researchSupervisor, "setPhaseDecision").mockImplementation(async (decision) => {
+      ctx.researchSupervisor.state.status = "COMPLETED"
+      return { decision }
+    })
+    expect(await find("research_validate").execute({}, {})).toEqual({ status: "COMPLETED" })
+    expect(decide).toHaveBeenCalledTimes(1)
+    expect(decide).toHaveBeenCalledWith("VALIDATE")
+    decide.mockRestore()
   })
 
   it("PREPARE creates the same stable experiment workspaces as Python athena", async () => {

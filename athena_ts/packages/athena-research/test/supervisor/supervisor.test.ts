@@ -225,7 +225,7 @@ describe("FixedFlowSupervisor core actions", () => {
       expect(Object.keys(supervisor.state.plans)).toEqual(["bad"])
     } finally {
       release()
-      await supervisor.stop()
+      await supervisor.requestStop()
       await run
     }
   })
@@ -266,7 +266,7 @@ describe("FixedFlowSupervisor core actions", () => {
       ])
     } finally {
       release()
-      await supervisor.stop()
+      await supervisor.requestStop()
       await run
     }
   })
@@ -313,7 +313,7 @@ describe("FixedFlowSupervisor core actions", () => {
     })
     const runPlanAgentTurn = vi.fn(async () => null)
     const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn, runPlanAgentTurn } })
-    const loop = supervisor.runSearch()
+    const loop = supervisor["runSearch"]()
     let stopped = false
     try {
       await vi.waitFor(() => expect(runIdeatorTurn).toHaveBeenCalledTimes(1))
@@ -328,7 +328,7 @@ describe("FixedFlowSupervisor core actions", () => {
       expect((await supervisor.readState()).status).toBe("STOPPED")
     } finally {
       release()
-      await supervisor.stop()
+      await supervisor.requestStop()
       await loop
     }
   })
@@ -344,7 +344,7 @@ describe("FixedFlowSupervisor core actions", () => {
     for (let i = 0; i < 2; i++) tree.addHypothesis(HypothesisSchema.parse({
       statement: `idea ${i}`, intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
     }))
-    const loop = supervisor.runSearch()
+    const loop = supervisor["runSearch"]()
     try {
       await vi.waitFor(() => expect(runPlanAgentTurn).toHaveBeenCalledTimes(2))
       const stopping = supervisor.requestStop()
@@ -356,7 +356,7 @@ describe("FixedFlowSupervisor core actions", () => {
       expect(supervisor.state.status).toBe("STOPPED")
     } finally {
       release()
-      await supervisor.stop()
+      await supervisor.requestStop()
       await loop
     }
   })
@@ -372,7 +372,7 @@ describe("FixedFlowSupervisor core actions", () => {
     const id = tree.addHypothesis(HypothesisSchema.parse({
       statement: "idea", intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
     }))
-    const loop = supervisor.runSearch()
+    const loop = supervisor["runSearch"]()
     try {
       await vi.waitFor(() => expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({
         plans: expect.objectContaining({ [id]: expect.anything() }),
@@ -386,7 +386,7 @@ describe("FixedFlowSupervisor core actions", () => {
       expect(supervisor.state.status).toBe("STOPPED")
     } finally {
       release()
-      await supervisor.stop()
+      await supervisor.requestStop()
       await loop
     }
   })
@@ -394,11 +394,11 @@ describe("FixedFlowSupervisor core actions", () => {
   it("owns the loop before invoking a worker that rejoins SEARCH", async () => {
     let joined: Promise<void> | undefined
     const runIdeatorTurn = vi.fn(async () => {
-      if (runIdeatorTurn.mock.calls.length === 1) joined = supervisor.runSearch()
+      if (runIdeatorTurn.mock.calls.length === 1) joined = supervisor["runSearch"]()
       return []
     })
     const { supervisor } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn } })
-    await supervisor.runSearch()
+    await supervisor["runSearch"]()
     await joined
     expect(runIdeatorTurn).toHaveBeenCalledTimes(1)
   })
@@ -416,7 +416,7 @@ describe("FixedFlowSupervisor core actions", () => {
       statement: "improve", intervention: "add feature", expected_effect: "raise metric",
       parent_id: "exp_baseline",
     }))
-    const loop = supervisor.runSearch()
+    const loop = supervisor["runSearch"]()
     try {
       await vi.waitFor(() => expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({ status: "WAITING" })))
       await supervisor.setManualMode(false)
@@ -425,7 +425,7 @@ describe("FixedFlowSupervisor core actions", () => {
       await loop
     } finally {
       release()
-      await supervisor.stop()
+      await supervisor.requestStop()
       await loop
     }
   })
@@ -434,7 +434,7 @@ describe("FixedFlowSupervisor core actions", () => {
     const runIdeatorTurn = vi.fn(async () => [])
     const { supervisor } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn } })
     await supervisor.pause()
-    const loop = supervisor.runSearch()
+    const loop = supervisor["runSearch"]()
     await Promise.resolve()
     expect(await supervisor.requestStop()).toBe("STOPPED")
     await loop
@@ -455,12 +455,12 @@ describe("FixedFlowSupervisor core actions", () => {
         statement: "improve", intervention: "add feature", expected_effect: "raise metric",
         parent_id: "exp_baseline", turn_limit: 1,
       }))
-      await supervisor.startPlan(planId)
+      await supervisor["startPlan"](planId)
       state.plans[planId]!.turns_used = 1
     }
     await supervisor.pause()
-    const loop = supervisor.runSearch()
-    const joined = supervisor.runSearch()
+    const loop = supervisor["runSearch"]()
+    const joined = supervisor["runSearch"]()
     await Promise.resolve()
     try {
       expect(runIdeatorTurn).not.toHaveBeenCalled()
@@ -472,7 +472,7 @@ describe("FixedFlowSupervisor core actions", () => {
       await vi.waitFor(() => expect(runIdeatorTurn).toHaveBeenCalledTimes(1), { timeout: 250 })
       await Promise.all([loop, joined])
     } finally {
-      await supervisor.stop()
+      await supervisor.requestStop()
       await Promise.all([loop, joined])
     }
   })
@@ -486,7 +486,7 @@ describe("FixedFlowSupervisor core actions", () => {
       statement: "improve", intervention: "add feature", expected_effect: "raise metric",
       parent_id: "exp_baseline",
     }))
-    await supervisor.startPlan(id)
+    await supervisor["startPlan"](id)
     if (missingContext) state.plans[id]!.context_ref = REF
     if (missingWorkspace) tree.getExperiment(`exp_${id}`).gitwork.path = join(dir, "absent")
     const plan = { ...state.plans[id] }
@@ -506,7 +506,7 @@ describe("FixedFlowSupervisor core actions", () => {
       statement: "improve", intervention: "add feature", expected_effect: "raise metric",
       parent_id: "exp_baseline",
     }))
-    await supervisor.startPlan(id)
+    await supervisor["startPlan"](id)
     const expected = { path: join(dir, "worktrees", id), branch: id, base_commit: "c0" }
     expect(supervisor.workspace(id)).toEqual(expected)
 
@@ -514,7 +514,7 @@ describe("FixedFlowSupervisor core actions", () => {
     restored.state = loadResearchState(join(dir, ".athena", "state.json"))
     restored.tree = ResearchTree.load(join(dir, ".athena", "research_tree.json"))
     await restored.recover()
-    expect(await restored.startPlan(id)).toBe(id)
+    await restored["startPlan"](id)
     expect(restored.workspace(id)).toEqual(expected)
     expect(restored.workspace(id)).toBe(restored.tree.getExperiment(`exp_${id}`).gitwork)
   })
@@ -565,7 +565,7 @@ describe("FixedFlowSupervisor core actions", () => {
 
     await supervisor.recordGuidance("next hint", "next")
     await supervisor.recordGuidance("always apply this", "persistent")
-    await supervisor.startPlan(hypothesisId)
+    await supervisor["startPlan"](hypothesisId)
 
     const planInput = await supervisor.planInput(hypothesisId)
     expect(planInput.human_context).toBe("always apply this\nnext hint")

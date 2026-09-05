@@ -544,7 +544,10 @@ function researchToolDefinitions(ctx: Context, deps: RunToolDeps): ToolDefinitio
       description: "Transition SEARCH to VALIDATE and run frozen-SOTA validation to completion.",
       callTitle: "运行 Athena 验证阶段",
       resultTitle: "Athena 验证阶段",
-      run: (supervisor) => supervisor.startValidation(),
+      run: async (supervisor) => {
+        await supervisor.setPhaseDecision("VALIDATE")
+        return { status: supervisor.state.status }
+      },
     }),
     actionTool({
       name: "research_report",
