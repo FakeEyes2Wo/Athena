@@ -443,6 +443,14 @@ Remove the redundant dynamic `spec` input after the sole production caller had a
 
 Focused evaluator verification passed 21 tests, and the expanded evaluator plus complete research Supervisor selection passed 371 tests. Ruff passed after removing one unused test import; targeted pre-commit hooks, Python compilation, and `git diff --check` remain the delivery gates. Pytest reported only the existing cache-permission warning. Closing the trust row advances reviewed baseline coverage to 257/602. Whole-repository acceptance remains pending.
 
+## Experiment-document module review
+
+Read all four remaining experiment-document production files completely and traced their models, protocol, context, projector, store, reports, manifests, aliases, recovery flow, Supervisor callers, test doubles, and integration tests. Retain the four-file split: strict persisted contracts are shared by projection and storage; the projector owns state derivation; the store owns atomic replacement and immutable archive compatibility; the three-symbol package facade is the injected boundary. `DocumentStore` already has two attributes, `ExperimentDocumentProjector` has two, and `ProjectionContext` groups five repeated runtime inputs into three fields.
+
+Delete the four-field `ProjectionOutcome` Pydantic model, its package export, and the unconsumed no-op projection digest. The protocol now returns one boolean; the sole Supervisor warning publisher owns the fixed safe failure message. This makes invalid outcome combinations and exception-detail leakage structurally impossible while removing two factories, two validators, and dynamic model serialization. Remove repeated `schema_version=1` constructor inputs because the strict persisted model supplies the same canonical default, and remove the dead phase traceback assignment exposed by the widened lint gate. The package falls from 898 to 842 nonblank lines; production code falls by 60 net lines and tests by 13.
+
+The focused pre-change contract passed 99 tests. Post-change experiment-document and Supervisor projection verification passed 98 tests, and the expanded autonomous-research, recovery, and rolling-search selection passed 131 tests. Targeted pre-commit hooks, Ruff across the complete touched Python boundary, Python compilation, CLI smoke, removed-symbol search, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing all four experiment-document rows advances reviewed baseline coverage to 261/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -956,10 +964,10 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/evaluation/spec.py` | 168 | Reviewed; four-symbol schema surface replaces unused defaults and test-only filename helper |
 | `src/athena/research/evaluation/trust.py` | 264 | Reviewed; one explicit probe contract, one label parse, and linear permutation selection replace compatibility plumbing |
 | `src/athena/research/evaluation/validation.py` | 70 | Reviewed; delete stateless service and its discarded result construction |
-| `src/athena/research/experiment_documents/__init__.py` | 11 | Pending |
-| `src/athena/research/experiment_documents/models.py` | 324 | Pending |
-| `src/athena/research/experiment_documents/projector.py` | 391 | Pending |
-| `src/athena/research/experiment_documents/store.py` | 301 | Pending |
+| `src/athena/research/experiment_documents/__init__.py` | 11 | Reviewed; three-symbol facade after deleting the result wrapper export |
+| `src/athena/research/experiment_documents/models.py` | 324 | Reviewed; retain strict persisted contracts and delete the four-field transient outcome model |
+| `src/athena/research/experiment_documents/projector.py` | 391 | Reviewed; return one success boolean and retain two-attribute projection ownership |
+| `src/athena/research/experiment_documents/store.py` | 301 | Reviewed; retain cohesive atomic batch, archive compatibility, and manifest boundary |
 | `src/athena/research/exploration_files.py` | 43 | Pending |
 | `src/athena/research/fork.py` | 215 | Pending |
 | `src/athena/research/idea_generation/__init__.py` | 12 | Pending |

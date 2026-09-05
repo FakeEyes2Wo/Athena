@@ -1,7 +1,6 @@
 """Safe facade for projecting canonical research state into documents."""
 
 import copy
-import hashlib
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -13,7 +12,6 @@ from athena.research.evaluation.spec import load_evaluator_spec, load_metric_jso
 from athena.research.experiment_documents.models import (
     Direction,
     MetricRecord,
-    ProjectionOutcome,
     ProvenanceRecord,
     ReasonRecord,
     StageRecord,
@@ -28,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_EXPERIMENTS = {"SUCCEEDED", "FAILED", "CANCELLED"}
 _TERMINAL_VALIDATIONS = {"COMPLETED", "SUCCEEDED", "FAILED", "CANCELLED"}
-NOOP_PROJECTION_ID = hashlib.sha256(b"athena:experiment-documents:no-op:v1").hexdigest()
 
 
 def _resolve_metric(
@@ -79,7 +76,6 @@ def _experiment_record(
     raw_error = experiment.get("error")
     summary = str(raw_error) if raw_error else "Recovered from canonical ResearchTree."
     return StageRecord(
-        schema_version=1,
         run_id=experiment_id,
         stage=stage,
         status=str(experiment["status"]),
@@ -147,7 +143,6 @@ def _validation_record(
         ),
     )
     return StageRecord(
-        schema_version=1,
         run_id=result_id,
         stage="final",
         status=status,
@@ -198,13 +193,11 @@ class ProjectionContext:
 class DocumentProjector(Protocol):
     """Public interface for safe experiment-document projections."""
 
-    def project(
-        self, event: Mapping[str, object], context: ProjectionContext
-    ) -> ProjectionOutcome:
-        """Project one validated stage event and return a sanitized outcome."""
+    def project(self, event: Mapping[str, object], context: ProjectionContext) -> bool:
+        """Project one validated stage event and report whether it committed."""
         raise NotImplementedError
 
-    def rebuild(self, context: ProjectionContext) -> ProjectionOutcome:
+    def rebuild(self, context: ProjectionContext) -> bool:
         """Rebuild documents from canonical state after a recovery."""
         raise NotImplementedError
 
@@ -216,10 +209,8 @@ class ExperimentDocumentProjector:
         self._store = DocumentStore(Path(document_root))
         self._evaluator_roots = tuple(Path(root) for root in evaluator_roots)
 
-    def project(
-        self, event: Mapping[str, object], context: ProjectionContext
-    ) -> ProjectionOutcome:
-        """Render and atomically store one stage, returning stale on failure."""
+    def project(self, event: Mapping[str, object], context: ProjectionContext) -> bool:
+        """Render and atomically store one stage."""
         event_copy: Mapping[str, object] | None = None
         try:
             event_copy = copy.deepcopy(dict(event))
@@ -255,7 +246,8 @@ class ExperimentDocumentProjector:
                     ).encode("utf-8"),
                 },
             )
-            return ProjectionOutcome.success(self._store.commit(batch))
+            self._store.commit(batch)
+            return True
         except Exception:
             payload = event_copy if event_copy is not None else event
             getter = getattr(payload, "get", None)
@@ -267,9 +259,9 @@ class ExperimentDocumentProjector:
                 run_id,
                 exc_info=True,
             )
-            return ProjectionOutcome.stale()
+            return False
 
-    def rebuild(self, context: ProjectionContext) -> ProjectionOutcome:
+    def rebuild(self, context: ProjectionContext) -> bool:
         """Reconstruct derived documents from a snapshot of canonical state."""
         try:
             tree_copy = ResearchTree.from_dict(copy.deepcopy(context.tree.to_dict()))
@@ -318,7 +310,6 @@ class ExperimentDocumentProjector:
             if context.validation_skipped:
                 if sota_record is not None:
                     final_record = StageRecord(
-                        schema_version=1,
                         run_id="final-skipped",
                         stage="final",
                         status="SKIPPED",
@@ -356,7 +347,7 @@ class ExperimentDocumentProjector:
                 aliases["final"] = final_record.run_id
 
             if not records_for_store and not aliases and not self._store.root.exists():
-                return ProjectionOutcome.success(NOOP_PROJECTION_ID)
+                return True
 
             batch = ProjectionBatch(
                 kind="rebuild",
@@ -377,14 +368,14 @@ class ExperimentDocumentProjector:
                     ).encode("utf-8"),
                 },
             )
-            return ProjectionOutcome.success(self._store.commit(batch))
+            self._store.commit(batch)
+            return True
         except Exception:
             logger.warning("document rebuild failed", exc_info=True)
-            return ProjectionOutcome.stale()
+            return False
 
 
 __all__ = [
-    "NOOP_PROJECTION_ID",
     "DocumentProjector",
     "ExperimentDocumentProjector",
     "ProjectionContext",

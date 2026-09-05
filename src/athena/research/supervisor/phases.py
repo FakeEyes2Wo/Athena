@@ -11,7 +11,7 @@ from athena.core.contracts import ArtifactRef
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
-from athena.research.experiment_documents import ProjectionContext, ProjectionOutcome
+from athena.research.experiment_documents import ProjectionContext
 from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.report import VALIDATION_SKIPPED_NOTICE, build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
@@ -114,7 +114,6 @@ class PhaseMachine:
                 logger.warning("failed to save FAILED phase state", exc_info=True)
             if canonical_saved:
                 await self._record_phase_failure(failed_phase, exc)
-            tb = traceback.format_exc()
             logger.exception("research phase failed")
             if isinstance(exc, BaselineAuthorityError):
                 published_error = "research failed: baseline authority unavailable"
@@ -466,7 +465,7 @@ class PhaseMachine:
             )
         except Exception:
             logger.warning("document stage projection failed", exc_info=True)
-            outcome = ProjectionOutcome.stale()
+            outcome = False
         await self._owner._publish_document_outcome(outcome)
 
     async def _transition_phase(self, phase: str) -> None:

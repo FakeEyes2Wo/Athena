@@ -11,12 +11,6 @@ Direction = Literal["maximize", "minimize"]
 StageName = Literal["baseline", "search", "final"]
 ProjectionKind = Literal["stage", "rebuild"]
 
-DOCUMENTS_STALE_CODE = "experiment_documents_stale"
-DOCUMENTS_STALE_MESSAGE = (
-    "Experiment documents could not be refreshed; canonical research state is "
-    "safe and the documents will be rebuilt on recovery."
-)
-
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _STATUS = re.compile(r"^[A-Z][A-Z0-9_-]{0,63}$")
 _REASON_KIND = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -202,7 +196,6 @@ class StageRecord(_StrictModel):
         if isinstance(metric, Mapping) and ({"name", "direction"} & metric.keys()):
             raise ValueError("event cannot provide metric name or direction")
         payload = dict(event)
-        payload["schema_version"] = 1
         if isinstance(metric, Mapping):
             payload["metric"] = {**metric, "name": name, "direction": direction}
         return cls.model_validate(payload)
@@ -263,60 +256,10 @@ class LatestManifest(_StrictModel):
         return self
 
 
-class ProjectionOutcome(_StrictModel):
-    """Sanitized public result of a projection attempt."""
-
-    ok: bool
-    projection_id: str | None = None
-    warning_code: Literal[DOCUMENTS_STALE_CODE] | None = None
-    warning_message: str | None = None
-
-    @field_validator("projection_id")
-    @classmethod
-    def validate_projection_id(cls, value: str | None) -> str | None:
-        """Validate an optional lowercase SHA-256 projection digest."""
-        if value is not None and not _DIGEST.fullmatch(value):
-            raise ValueError("projection_id must be a lowercase SHA-256 digest")
-        return value
-
-    @model_validator(mode="after")
-    def validate_outcome(self) -> "ProjectionOutcome":
-        """Enforce mutually exclusive success and stale-warning fields."""
-        if self.ok:
-            if self.projection_id is None or self.warning_code is not None:
-                raise ValueError("successful outcome requires only a projection ID")
-            if self.warning_message is not None:
-                raise ValueError("successful outcome cannot carry a warning")
-        elif (
-            self.projection_id is not None
-            or self.warning_code != DOCUMENTS_STALE_CODE
-            or self.warning_message != DOCUMENTS_STALE_MESSAGE
-        ):
-            raise ValueError("stale outcome must carry the fixed warning")
-        return self
-
-    @classmethod
-    def success(cls, projection_id: str) -> "ProjectionOutcome":
-        """Build a successful outcome for a committed projection."""
-        return cls(ok=True, projection_id=projection_id)
-
-    @classmethod
-    def stale(cls) -> "ProjectionOutcome":
-        """Build the fixed sanitized outcome for a stale projection."""
-        return cls(
-            ok=False,
-            warning_code=DOCUMENTS_STALE_CODE,
-            warning_message=DOCUMENTS_STALE_MESSAGE,
-        )
-
-
 __all__ = [
-    "DOCUMENTS_STALE_CODE",
-    "DOCUMENTS_STALE_MESSAGE",
     "Direction",
     "LatestManifest",
     "MetricRecord",
-    "ProjectionOutcome",
     "ProvenanceRecord",
     "ReasonRecord",
     "StageName",

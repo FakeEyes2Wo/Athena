@@ -12,15 +12,19 @@ The experiment-document subsystem was reduced from six production files to four 
 - `StageRecord.from_event()` now validates a raw mapping directly and rejects projector-owned fields supplied by callers.
 - `ProjectionBatch` now stores four fields instead of six; stage/run identity and archive bytes are derived from validated records.
 - The projector boundary is now `project(event, context)` and `rebuild(context)`, replacing five repeated state keywords. `ProjectionContext` itself stores only `tree`, `state`, and `direction`.
+- A follow-up removed the four-field `ProjectionOutcome` model and unused no-op digest. The protocol now returns one boolean; the sole Supervisor publisher owns the fixed stale-document message.
+- Removed repeated `schema_version=1` construction because the strict persisted model already supplies that canonical default, and removed the dead phase traceback assignment exposed by the widened lint gate.
 - PREPARE, SEARCH settlement, VALIDATE, skipped validation, recovery, test doubles, and integration callers use the new boundary.
 
-Measured package size fell from 1,205 to 898 nonblank source lines (about 25%), and the change has 164 fewer production lines overall.
+Measured package size first fell from 1,205 to 898 nonblank source lines and now stands at 842. The follow-up removes another 60 production lines across the projection and Supervisor boundary.
 
 ## Verification
 
 - Experiment-document tests: **88 passed**.
 - Focused report/projector/Supervisor/integration run: **172 passed**.
 - Post-simplification model/store/Supervisor run: **129 passed**.
+- Outcome-interface follow-up across experiment documents, Supervisor projection, autonomous research, recovery, and rolling search: **131 passed**.
+- Follow-up targeted pre-commit hooks, Ruff, Python compilation, `Athena-cli --help`, removed-symbol search, and `git diff --check`: **passed**.
 - Autonomous, recovery, and rolling integration files: **8 + 13 + 12 passed**.
 - Ruff on the changed subsystem and focused tests: **passed**. The wider pre-existing `phases.py` unused `tb` finding is outside this task.
 - Import/API smoke and `Athena-cli --help`: **passed**.

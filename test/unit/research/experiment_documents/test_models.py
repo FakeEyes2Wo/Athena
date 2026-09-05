@@ -4,10 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from athena.research.experiment_documents.models import (
-    DOCUMENTS_STALE_CODE,
-    DOCUMENTS_STALE_MESSAGE,
     LatestManifest,
-    ProjectionOutcome,
     StageRecord,
 )
 
@@ -158,24 +155,4 @@ def test_latest_manifest_rejects_invalid_identity_and_digest() -> None:
             projection_id="A" * 64,
             kind="rebuild",
             files={"../latest.json": digest},
-        )
-
-
-def test_projection_outcome_never_carries_internal_failure_details() -> None:
-    failed = ProjectionOutcome.stale()
-    assert failed.model_dump() == {
-        "ok": False,
-        "projection_id": None,
-        "warning_code": DOCUMENTS_STALE_CODE,
-        "warning_message": DOCUMENTS_STALE_MESSAGE,
-    }
-    success = ProjectionOutcome.success("a" * 64)
-    assert success.ok is True
-    assert success.warning_code is None
-    with pytest.raises(ValidationError):
-        ProjectionOutcome(
-            ok=True,
-            projection_id=None,
-            warning_code=None,
-            warning_message=None,
         )

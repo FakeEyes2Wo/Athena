@@ -9,10 +9,6 @@ from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.research.contracts import ValidationResult
 from athena.research.experiment_documents import ProjectionContext
-from athena.research.experiment_documents.models import (
-    DOCUMENTS_STALE_MESSAGE,
-    ProjectionOutcome,
-)
 from athena.research.supervisor.experiment import PlanBest, PlanTurnResult
 from athena.research.supervisor.phases import PhaseMachine, _phase_failure_run_id
 from athena.research.supervisor.plans import PlanInput, PlanState
@@ -26,8 +22,8 @@ from test.unit.research.supervisor.test_supervisor import (
 
 
 class RecordingDocuments:
-    def __init__(self, outcome: ProjectionOutcome | None = None) -> None:
-        self.outcome = outcome or ProjectionOutcome.success("a" * 64)
+    def __init__(self, outcome: bool = True) -> None:
+        self.outcome = outcome
         self.stage_calls: list[dict[str, object]] = []
         self.rebuild_calls: list[dict[str, object]] = []
 
@@ -68,7 +64,7 @@ def _supervisor(documents: RecordingDocuments, publisher) -> Supervisor:
 
 @pytest.mark.asyncio
 async def test_rebuild_uses_canonical_state_and_publishes_sanitized_warning():
-    documents = RecordingDocuments(ProjectionOutcome.stale())
+    documents = RecordingDocuments(False)
     published = []
 
     async def publish(kind, payload):
@@ -93,7 +89,10 @@ async def test_rebuild_uses_canonical_state_and_publishes_sanitized_warning():
             {
                 "source": "supervisor",
                 "channel": "error",
-                "text": DOCUMENTS_STALE_MESSAGE,
+                "text": (
+                    "Experiment documents could not be refreshed; canonical research "
+                    "state is safe and the documents will be rebuilt on recovery."
+                ),
             },
         )
     ]
@@ -101,7 +100,7 @@ async def test_rebuild_uses_canonical_state_and_publishes_sanitized_warning():
 
 @pytest.mark.asyncio
 async def test_warning_publisher_failure_does_not_replace_research_result(caplog):
-    documents = RecordingDocuments(ProjectionOutcome.stale())
+    documents = RecordingDocuments(False)
 
     async def publish(kind, payload):
         raise RuntimeError("publisher down")
@@ -116,7 +115,7 @@ async def test_warning_publisher_failure_does_not_replace_research_result(caplog
 
 @pytest.mark.asyncio
 async def test_stage_projection_receives_canonical_snapshot_and_fixed_warning():
-    documents = RecordingDocuments(ProjectionOutcome.stale())
+    documents = RecordingDocuments(False)
     published = []
 
     async def publish(kind, payload):
@@ -140,7 +139,10 @@ async def test_stage_projection_receives_canonical_snapshot_and_fixed_warning():
 
     assert documents.stage_calls[0]["event"]["status"] == "SUCCEEDED"
     assert documents.stage_calls[0]["validation"] is supervisor.state.validation
-    assert published[0]["text"] == DOCUMENTS_STALE_MESSAGE
+    assert published[0]["text"] == (
+        "Experiment documents could not be refreshed; canonical research state is "
+        "safe and the documents will be rebuilt on recovery."
+    )
 
 
 def test_phase_failure_ids_are_deterministic_and_stage_scoped():
@@ -487,7 +489,10 @@ async def test_search_settlement_keeps_canonical_result_when_projection_raises(
         if kind == "output" and payload.get("channel") == "error"
     ]
     assert len(warnings) == 1
-    assert warnings[0]["text"] == DOCUMENTS_STALE_MESSAGE
+    assert warnings[0]["text"] == (
+        "Experiment documents could not be refreshed; canonical research state is "
+        "safe and the documents will be rebuilt on recovery."
+    )
     assert settled == ["h_candidate"]
     assert reaped == ["h_candidate"]
 

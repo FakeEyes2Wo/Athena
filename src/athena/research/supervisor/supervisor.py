@@ -8,7 +8,7 @@ from athena.core.contracts import ArtifactRef
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
 from athena.core.workspace import GitWorkBranch
-from athena.research.experiment_documents import ProjectionContext, ProjectionOutcome
+from athena.research.experiment_documents import ProjectionContext
 from athena.research.supervisor.deps import (
     GeneralTurn,
     IdeatorTurn,
@@ -25,6 +25,11 @@ from athena.research.supervisor.search_loop import SearchLoop
 from athena.research.supervisor.state import ResearchState
 
 logger = logging.getLogger(__name__)
+
+_DOCUMENTS_STALE_MESSAGE = (
+    "Experiment documents could not be refreshed; canonical research state is "
+    "safe and the documents will be rebuilt on recovery."
+)
 
 
 class Supervisor:
@@ -123,9 +128,9 @@ class Supervisor:
         await self._rebuild_documents()
         return recovered
 
-    async def _publish_document_outcome(self, outcome: ProjectionOutcome) -> None:
+    async def _publish_document_outcome(self, success: bool) -> None:
         """Publish one sanitized warning when derived documents are stale."""
-        if outcome.ok:
+        if success:
             return
         try:
             await self._deps.phases.publish(
@@ -133,7 +138,7 @@ class Supervisor:
                 {
                     "source": "supervisor",
                     "channel": "error",
-                    "text": outcome.warning_message,
+                    "text": _DOCUMENTS_STALE_MESSAGE,
                 },
             )
         except Exception:
@@ -149,7 +154,7 @@ class Supervisor:
             )
         except Exception:
             logger.warning("document rebuild failed", exc_info=True)
-            outcome = ProjectionOutcome.stale()
+            outcome = False
         await self._publish_document_outcome(outcome)
 
     async def propose_hypothesis(self, **payload: object) -> dict[str, object]:

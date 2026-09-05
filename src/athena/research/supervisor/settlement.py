@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import ComparisonVerdict, EvalResult
 from athena.core.research_tree import ExperimentStatus
-from athena.research.experiment_documents import ProjectionContext, ProjectionOutcome
+from athena.research.experiment_documents import ProjectionContext
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import PlanTurnResult, load_best
 from athena.research.supervisor.plans import PlanInput
@@ -275,7 +275,7 @@ class PlanSettlement:
             logger.warning(
                 "document projection failed after SEARCH settlement", exc_info=True
             )
-            outcome = ProjectionOutcome.stale()
+            outcome = False
         await self._owner._publish_document_outcome(outcome)
         if self._deps.phases.on_plan_settled is not None:
             await self._deps.phases.on_plan_settled(plan_id)

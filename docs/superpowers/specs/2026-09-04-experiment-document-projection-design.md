@@ -69,16 +69,14 @@ The new package has one responsibility per module:
 src/athena/research/experiment_documents/
   __init__.py
   models.py
-  metric.py
-  render.py
   store.py
   projector.py
 ```
 
 ### `models.py`
 
-Defines strict, frozen Pydantic value objects for a stage event, its metric, reason,
-provenance, persisted `StageRecord`, `LatestManifest`, and `ProjectionOutcome`.
+Defines strict, frozen Pydantic value objects for metrics, reasons, provenance,
+persisted `StageRecord`, and `LatestManifest`.
 Models use `strict=True` and `extra="forbid"`. They reject blank identifiers and
 metric names, non-finite numeric values, malformed artifact references, and unknown
 fields.
@@ -186,33 +184,19 @@ calling persistence helpers:
 
 ```python
 class DocumentProjector(Protocol):
-    def project_stage(
-        self,
-        event: Mapping[str, object],
-        *,
-        tree: ResearchTree,
-        validation: Mapping[str, object] | None,
-        validation_skipped: bool,
-        task_understanding: Mapping[str, object] | None,
-        direction: Literal["maximize", "minimize"],
-    ) -> ProjectionOutcome: ...
+    def project(
+        self, event: Mapping[str, object], context: ProjectionContext
+    ) -> bool: ...
 
-    def rebuild(
-        self,
-        *,
-        tree: ResearchTree,
-        validation: Mapping[str, object] | None,
-        validation_skipped: bool,
-        task_understanding: Mapping[str, object] | None,
-        direction: Literal["maximize", "minimize"],
-    ) -> ProjectionOutcome: ...
+    def rebuild(self, context: ProjectionContext) -> bool: ...
 ```
 
 The mapping enters the safe facade before strict model construction so validation
 errors cannot escape the projection boundary. Both public methods catch ordinary
-projection exceptions, log the detailed traceback, and return a fixed failure outcome;
-they do not catch process-control exceptions such as `KeyboardInterrupt` or
-`SystemExit`.
+projection exceptions, log the detailed traceback, and return `False`; successful
+projection or a no-op rebuild returns `True`. They do not catch process-control exceptions such as
+`KeyboardInterrupt` or `SystemExit`. `ProjectionContext` groups the canonical tree,
+state, and metric direction so those inputs are not repeated across method signatures.
 
 `SupervisorRuntime` gains one required `documents: DocumentProjector` field. The
 runtime composition root constructs exactly one concrete projector with:
@@ -331,17 +315,12 @@ does not disguise them as projection warnings.
 
 ## 8. Failure semantics and observability
 
-`ProjectionOutcome` exposes only success or the stable warning code
-`experiment_documents_stale` and this fixed message:
+The projector returns only `True` on success or `False` on failure. It cannot carry an
+exception, filesystem path, partially written file list, or alternate warning payload.
+The single Supervisor publisher owns this fixed message:
 
 > Experiment documents could not be refreshed; canonical research state is safe and
 > the documents will be rebuilt on recovery.
-
-Its exact fields are `ok: bool`, `projection_id: str | None`,
-`warning_code: Literal["experiment_documents_stale"] | None`, and
-`warning_message: str | None`. Success requires a projection ID and no warning fields;
-failure requires both fixed warning fields and no projection ID. It carries no
-exception, filesystem path, or partially written file list.
 
 The projector logs the concrete exception, operation, stage, and run identity with a
 traceback for operators. Raw exception text is not copied into user-facing events.
