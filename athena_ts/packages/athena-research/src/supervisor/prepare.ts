@@ -3,7 +3,7 @@
  * 与 ``_freeze_evaluator`` 确定性冻结逻辑）。
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { dirname, join, relative } from "node:path"
 import { z } from "zod"
 import {
@@ -19,7 +19,7 @@ import { DataScriptBundleSchema } from "../contracts.js"
 import { BundleMetadata, type DataScriptRunner } from "../script_runner.js"
 import type { Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
-import { PlanRunner } from "./experiment.js"
+import { PlanRunner, hasAnyFile } from "./experiment.js"
 import { PlanInputSchema, PlanStateSchema, type PlanDecision } from "./plans.js"
 import type { ResearchState } from "./state.js"
 
@@ -90,7 +90,7 @@ export async function freezeEvaluator(opts: {
   const labelsDir = join(evaluatorRoot, "labels")
   const hasLabels =
     (existsSync(labelsFile) && statSync(labelsFile).size > 0) ||
-    (existsSync(labelsDir) && hasAnyFileSync(labelsDir))
+    (existsSync(labelsDir) && hasAnyFile(labelsDir))
   if (!hasLabels) {
     throw new Error(
       "eval labels are missing: labels.csv or a non-empty labels/ dir must sit next to the eval script"
@@ -99,30 +99,6 @@ export async function freezeEvaluator(opts: {
 
   const bundle = await scripts.freeze(evaluatorRoot, new BundleMetadata(entrypoint))
   return store.putText(JSON.stringify(DataScriptBundleSchema.parse(bundle)))
-}
-
-function hasAnyFileSync(dir: string): boolean {
-  let entries: string[]
-  try {
-    entries = readdirSync(dir)
-  } catch {
-    return false
-  }
-  for (const entry of entries) {
-    const full = join(dir, entry)
-    let isDir: boolean
-    try {
-      isDir = statSync(full).isDirectory()
-    } catch {
-      continue
-    }
-    if (isDir) {
-      if (hasAnyFileSync(full)) return true
-    } else {
-      return true
-    }
-  }
-  return false
 }
 
 /** 运行一次 worker agent turn 的抽象（返回 PlanDecision 或 null）。 */

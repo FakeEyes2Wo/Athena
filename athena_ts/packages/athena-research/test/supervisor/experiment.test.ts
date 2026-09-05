@@ -19,6 +19,7 @@ import {
   applyTrustedScore,
   decideSettlement,
   loadBest,
+  hasAnyFile,
   readExperimentManifest,
 } from "../../src/supervisor/experiment.js"
 import { PlanBestSchema, PlanInputSchema, PlanStateSchema } from "../../src/supervisor/plans.js"
@@ -285,6 +286,7 @@ class FakeExecution {
     opts: { argv?: string[] | null; timeout_s?: number; workdir?: string | null; emit?: unknown }
   ): Promise<CommandResult> {
     this.calls.push(opts.argv ?? [])
+    expect(opts.timeout_s).toBe(120)
     this.workdirs.push(opts.workdir ?? null)
     if (opts.emit) {
       ;(opts.emit as (k: string, r: string, d: unknown) => void)("command/started", "exec:run", { command: opts.argv })
@@ -358,6 +360,29 @@ function writeRunManifest(branch: GitWorkBranch, opts: { commands: string[][]; o
 }
 
 describe("PlanRunner.run_turn", () => {
+  it("checks nested directory contents without requiring nonempty files", () => {
+    const dir = tmpDir()
+    expect(hasAnyFile(join(dir, "missing"))).toBe(false)
+    expect(hasAnyFile(dir)).toBe(false)
+    mkdirSync(join(dir, "nested", "empty"), { recursive: true })
+    expect(hasAnyFile(dir)).toBe(false)
+    writeFileSync(join(dir, "nested", "empty", "data.csv"), "")
+    expect(hasAnyFile(dir)).toBe(true)
+    expect(hasAnyFile(join(dir, "nested", "empty", "data.csv"))).toBe(false)
+  })
+
+  it.each([null, "not json", "{}"])("normalizes missing or invalid evaluator bundles (%j)", async (payload) => {
+    const { runner, planInput, branch, workspace, store } = await runnerSetup(new FakeExecution([]), new FakeEvaluator())
+    writeRunManifest(branch, { commands: [] })
+    const input = { ...planInput, evaluator_ref: payload === null ? OTHER_REF : await store.putText(payload) }
+    const result = await runner.runTurn("h1", searcState(), input)
+    expect(result.kind).toBe("scoring_failed")
+    expect(result.error).toBe("frozen evaluator artifact is invalid")
+    expect(result.next_state).toBeNull()
+    expect(workspace.messages).toEqual([])
+    expect(JSON.parse(await store.getText(result.evidence_ref!)).error).toBe(result.error)
+  })
+
   it("executes manifest, scores and commits", async () => {
     const execution = new FakeExecution([new CommandResult(true, "ok", "", 0)])
     const { runner, planInput, workspace, branch, store } = await runnerSetup(execution, new FakeEvaluator(0.91))

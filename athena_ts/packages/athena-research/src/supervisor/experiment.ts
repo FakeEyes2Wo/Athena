@@ -233,8 +233,7 @@ export class PlanRunner {
     private evaluator: Scorer,
     private workspace: GitWorkspace,
     private branch: GitWorkBranch,
-    private direction: Direction = "maximize",
-    private timeoutS: number = 120
+    private direction: Direction = "maximize"
   ) {}
 
   get workdir(): string {
@@ -251,13 +250,13 @@ export class PlanRunner {
     try {
       manifest = readExperimentManifest(this.workdir)
     } catch (exc) {
-      return this.failure(planId, "manifest_invalid", cleanError((exc as Error).message))
+      return this.failure(planId, "manifest_invalid", (exc as Error).message)
     }
 
     for (const argv of manifest.commands) {
       const result = await this.execution.run({
         argv,
-        timeout_s: this.timeoutS,
+        timeout_s: 120,
         workdir: this.workdir,
         emit,
       })
@@ -266,7 +265,7 @@ export class PlanRunner {
         if (result.stderr.includes("ModuleNotFoundError")) {
           error += ' Run "uv sync --project $ATHENA_ENV_ROOT" to install the declared dependencies into the environment venv, then retry.'
         }
-        return this.failure(planId, "execution_failed", cleanError(error))
+        return this.failure(planId, "execution_failed", error)
       }
     }
 
@@ -302,12 +301,12 @@ export class PlanRunner {
       })
     } catch (exc) {
       if (exc instanceof ScoringError) {
-        return this.failure(planId, "scoring_failed", cleanError(exc.message), predictionsRef)
+        return this.failure(planId, "scoring_failed", exc.message, predictionsRef)
       }
       return this.failure(
         planId,
         "evaluator_infrastructure_failed",
-        cleanError((exc as Error).message),
+        (exc as Error).message,
         predictionsRef
       )
     }
@@ -367,14 +366,8 @@ export class PlanRunner {
   }
 
   private async loadBundle(evaluatorRef: ArtifactRef): Promise<DataScriptBundle | null> {
-    let text: string
     try {
-      text = await this.store.getText(evaluatorRef)
-    } catch {
-      return null
-    }
-    try {
-      return DataScriptBundleSchema.parse(JSON.parse(text))
+      return DataScriptBundleSchema.parse(JSON.parse(await this.store.getText(evaluatorRef)))
     } catch {
       return null
     }
@@ -392,7 +385,7 @@ export class PlanRunner {
 }
 
 /** 目录（递归）内是否存在至少一个文件。 */
-function hasAnyFile(dir: string): boolean {
+export function hasAnyFile(dir: string): boolean {
   let entries: string[]
   try {
     entries = readdirSync(dir)
