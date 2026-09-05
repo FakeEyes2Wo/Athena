@@ -121,6 +121,83 @@ class ResponseFormatFallbackClient {
 }
 
 describe("Agent", () => {
+  it.each([false, true])("preserves parallel groups, barriers and result alignment (failure=%s)", async (fail) => {
+    function latch() {
+      let release!: () => void
+      const promise = new Promise<void>((resolve) => { release = resolve })
+      return { promise, release }
+    }
+    const names = ["a", "b", "c", "d", "e"]
+    const started = Object.fromEntries(names.map((name) => [name, latch()]))
+    const finish = Object.fromEntries(names.map((name) => [name, latch()]))
+    const ended = Object.fromEntries(names.map((name) => [name, latch()]))
+    const timeline: string[] = []
+    class ControlledTool extends BaseTool {
+      readonly spec: ToolSpec
+      constructor(name: string) {
+        super()
+        this.spec = new ToolSpec(name, name, {}, name !== "c")
+      }
+      async execute(): Promise<string> {
+        const name = this.spec.name
+        timeline.push(`${name}:start`)
+        started[name]!.release()
+        await finish[name]!.promise
+        timeline.push(`${name}:end`)
+        ended[name]!.release()
+        if (fail && name === "b") throw new Error("b failed")
+        return name
+      }
+    }
+    const calls = ["a", "missing", "b", "c", "d", "e"]
+    const provider = {
+      modelName: "controlled",
+      client: new CaptureClient(),
+      calls: 0,
+      async *stream() {
+        if (++this.calls === 1) {
+          for (const name of calls) yield new StreamEvent("function_call", {
+            call_id: name, name, arguments: {},
+          })
+        } else {
+          yield new StreamEvent("text_delta", { delta: "done" })
+        }
+        yield new StreamEvent("response_completed")
+      },
+    }
+    const tools = new ToolRegistry()
+    for (const name of names) tools.register(new ControlledTool(name))
+    const memory = new ContextManager()
+    const running = new Agent(provider, tools, "").run(ctx(tools, { memory }))
+    try {
+      await Promise.all([started.a!.promise, started.b!.promise])
+      expect(timeline).toEqual(["a:start", "b:start"])
+      finish.b!.release()
+      await ended.b!.promise
+      expect(timeline).not.toContain("c:start")
+      finish.a!.release()
+      await started.c!.promise
+      expect(timeline).not.toContain("d:start")
+      expect(timeline).not.toContain("e:start")
+      finish.c!.release()
+      await Promise.all([started.d!.promise, started.e!.promise])
+      finish.e!.release()
+      await ended.e!.promise
+      finish.d!.release()
+      await running
+    } finally {
+      for (const gate of Object.values(finish)) gate.release()
+      await running
+    }
+    const returns = memory.items.flatMap((message) => message.parts)
+      .filter((part) => part.part_kind === "tool-return")
+    expect(returns.map((part) => part.tool_call_id)).toEqual(calls)
+    expect(returns.map((part) => part.content)).toEqual([
+      "a", expect.stringContaining("unknown tool: missing"),
+      fail ? expect.stringContaining("b failed") : "b", "c", "d", "e",
+    ])
+  })
+
   it("model combines name and client", () => {
     const client = {}
     const model = new ResponsesProvider("test-model", { client: client as never })

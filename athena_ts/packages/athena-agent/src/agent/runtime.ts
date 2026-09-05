@@ -165,12 +165,6 @@ async function unknownToolResult(name: string, available: string[]): Promise<Too
   )
 }
 
-/** 取消并等待所有在途工具任务（JS Promise 不可取消，退化为等待完成）。 */
-async function cancelToolTasks(toolTasks: Array<Promise<unknown> | null>): Promise<void> {
-  const pending = toolTasks.filter((t): t is Promise<unknown> => t !== null)
-  if (pending.length) await Promise.allSettled(pending)
-}
-
 async function samplingLoop(agent: Agent, ctx: AgentContext): Promise<StepOutcome> {
   let retriesLeft = MAX_STREAM_RETRIES
   while (true) {
@@ -190,7 +184,7 @@ async function sampleOnce(agent: Agent, ctx: AgentContext): Promise<[StepOutcome
   if (mem === null) throw new Error("assert: memory is null")
 
   const toolCalls: ToolCall[] = []
-  const toolTasks: Array<Promise<unknown> | null> = []
+  const toolTasks: Promise<unknown>[] = []
   let serialBarrier: Promise<unknown> | null = null
   let text = ""
   let hadCalls = false
@@ -218,18 +212,16 @@ async function sampleOnce(agent: Agent, ctx: AgentContext): Promise<[StepOutcome
           name: tc.name,
           arguments: tc.args,
         })
-        const idx = toolCalls.length
         toolCalls.push(tc)
-        toolTasks.push(null)
 
         let tool: BaseTool
         try {
           tool = agent.tools.resolve(tc.name)
         } catch {
-          toolTasks[idx] = unknownToolResult(
+          toolTasks.push(unknownToolResult(
             tc.name,
             agent.tools.specs.map((s) => s.name)
-          )
+          ))
           continue
         }
         const tctx = new ToolContext(
@@ -239,13 +231,17 @@ async function sampleOnce(agent: Agent, ctx: AgentContext): Promise<[StepOutcome
           ctx.cancel,
           ctx.askUser
         )
-        const task = dispatchToolCall(tool, tctx, tc, idx, toolTasks, serialBarrier)
-        toolTasks[idx] = task
+        // Capture dependencies before appending this task, avoiding self-dependency.
+        const ready = tool.spec.concurrencySafe
+          ? serialBarrier
+          : toolTasks.length > 0 ? Promise.allSettled(toolTasks) : null
+        const task = dispatchToolCall(tool, tctx, tc, ready)
+        toolTasks.push(task)
         if (!tool.spec.concurrencySafe) serialBarrier = task
       } else if (event.kind === "response_completed") {
         break
       } else if (event.kind === "error") {
-        await cancelToolTasks(toolTasks)
+        await Promise.allSettled(toolTasks)
         const transient = !hadCalls && isTransientError(event.data["message"] ?? "")
         return [
           new StepOutcome("error", String(event.data["message"] ?? "")),
@@ -255,41 +251,27 @@ async function sampleOnce(agent: Agent, ctx: AgentContext): Promise<[StepOutcome
     }
   } catch (exc) {
     if (exc instanceof CancelledError) {
-      await cancelToolTasks(toolTasks)
+      await Promise.allSettled(toolTasks)
       throw exc
     }
-    await cancelToolTasks(toolTasks)
+    await Promise.allSettled(toolTasks)
     const transient = !hadCalls && isTransientError(exc)
     return [new StepOutcome("error", `${errName(exc)}: ${errMessage(exc)}`), transient]
   }
 
-  const outcome = await finalizeStep(mem, toolCalls, toolTasks, text, hadCalls)
+  const outcome = await finalizeStep(mem, toolCalls, toolTasks, text)
   return [outcome, false]
 }
 
 async function finalizeStep(
   mem: ContextManager,
   toolCalls: ToolCall[],
-  toolTasks: Array<Promise<unknown> | null>,
-  text: string,
-  hadCalls: boolean
+  toolTasks: Promise<unknown>[],
+  text: string
 ): Promise<StepOutcome> {
-  const results: unknown[] = new Array(toolTasks.length).fill(undefined)
-  const present = toolTasks.filter((t): t is Promise<unknown> => t !== null)
-  if (present.length) {
-    const gathered = await Promise.allSettled(present)
-    let gi = 0
-    for (let i = 0; i < toolTasks.length; i++) {
-      const t = toolTasks[i]
-      if (t !== null) {
-        const r = gathered[gi]!
-        results[i] = r.status === "fulfilled" ? r.value : r.reason
-        gi++
-      }
-    }
-  }
+  const results = await Promise.allSettled(toolTasks)
 
-  if (hadCalls && toolCalls.length) {
+  if (toolCalls.length) {
     const parts: ModelResponsePart[] = []
     if (text) parts.push(textPart(text))
     for (const tc of toolCalls) {
@@ -300,44 +282,27 @@ async function finalizeStep(
 
   for (let i = 0; i < toolCalls.length; i++) {
     const tc = toolCalls[i]!
-    let content = toStr(results[i])
+    const result = results[i]!
+    let content = toStr(result.status === "fulfilled" ? result.value : result.reason)
     if (content.length > 50_000) {
       content = content.slice(0, 24_950) + "\n...[TRUNCATED]...\n" + content.slice(-24_950)
     }
     mem.append(modelRequest([toolReturnPart(tc.name, content, tc.callId)]))
   }
 
-  if (!hadCalls && text) {
-    mem.append(modelResponse([textPart(text)]))
-    return new StepOutcome("done", text)
-  }
-  if (hadCalls) {
-    return new StepOutcome("continue")
-  }
+  if (toolCalls.length) return new StepOutcome("continue")
+  if (text) mem.append(modelResponse([textPart(text)]))
   return new StepOutcome("done", text)
 }
 
-function dispatchToolCall(
+async function dispatchToolCall(
   tool: BaseTool,
   tctx: ToolContext,
   tc: ToolCall,
-  idx: number,
-  toolTasks: Array<Promise<unknown> | null>,
-  serialBarrier: Promise<unknown> | null
+  ready: Promise<unknown> | null
 ): Promise<unknown> {
-  if (tool.spec.concurrencySafe) {
-    const runSafe = async (): Promise<unknown> => {
-      if (serialBarrier !== null) await serialBarrier
-      return tool.ainvoke(tctx, tc.args)
-    }
-    return runSafe()
-  }
-  const previous = toolTasks.slice(0, idx).filter((t): t is Promise<unknown> => t !== null)
-  const runSerial = async (): Promise<unknown> => {
-    if (previous.length) await Promise.allSettled(previous)
-    return tool.ainvoke(tctx, tc.args)
-  }
-  return runSerial()
+  if (ready !== null) await ready
+  return tool.ainvoke(tctx, tc.args)
 }
 
 export type AgentRunnerFn = ((thread: AthenaThread, turn: AthenaTurn, emit: EmitEvent) => Promise<AgentOutcome>) & {
