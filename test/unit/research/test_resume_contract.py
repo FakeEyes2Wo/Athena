@@ -1,8 +1,8 @@
 import pytest
 
 from athena.research.runtime.resume_contract import (
-    ResumeCapability,
     ResearchControlError,
+    ResumeCapability,
     is_continue_command,
     resume_capability,
 )
@@ -55,7 +55,10 @@ def test_resume_capability_matrix(
     if has_task:
         state.task_text = "original task"
 
-    assert resume_capability(state) == ResumeCapability(available, reason)
+    capability = resume_capability(state)
+
+    assert capability == ResumeCapability(reason)
+    assert capability.available is available
 
 
 def test_legacy_understanding_without_task_text_is_resumable() -> None:
@@ -67,7 +70,7 @@ def test_legacy_understanding_without_task_text_is_resumable() -> None:
         task_understanding={"title": "legacy task"},
     )
 
-    assert resume_capability(state) == ResumeCapability(True, "interrupted")
+    assert resume_capability(state) == ResumeCapability("interrupted")
 
 
 def test_research_control_error_exposes_stable_metadata() -> None:

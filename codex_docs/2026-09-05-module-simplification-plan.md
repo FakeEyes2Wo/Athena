@@ -635,6 +635,14 @@ Merge the survey lifecycle into the already-reviewed `runtime/corpus.py` and del
 
 The two runtime modules fall from 262 immediate pre-change physical lines to one 243-line module. The facade falls from 641 to 599 physical lines and now has 71 methods; production code falls by 62 net lines. The unchanged focused baseline passed 50 tests, the expanded focused selection passed 55, and the complete research plus Idea Generation unit selection passed 1,289 tests. Ruff, Black, Python compilation, removed-symbol searches, and `git diff --check` passed. Closing the deleted survey row advances reviewed coverage to 354/602. The touched facade and Ideator rows remain Pending for their own complete reviews. Whole-repository acceptance remains pending.
 
+## Runtime resume-contract review
+
+Read `runtime/resume_contract.py` and its complete direct test file, then trace command recognition, durable resume classification, event projection, control flow, integration recovery, and GUI error serialization. Retain the small shared module: both control and pure event projection consume resume classification, while the typed error crosses the gateway boundary; merging it into either consumer would introduce a reverse dependency or duplicate policy.
+
+Remove duplicated state instead. `ResumeCapability` now stores only its reason and derives availability, reducing the immutable record from two fields to one and making it slotted. `ResearchControlError` stores only its variable code while its invariant non-retryable flag is a class constant. Type the classifier against `ResearchState` and directly read its four guaranteed fields instead of accepting arbitrary objects through defensive `getattr` calls. The module is 59 physical lines versus 56 in the baseline; the gain is fewer stored attributes and a narrower input contract, not line count.
+
+The resume matrix, event projection, breakpoint/recovery control, gateway transport, and task-seeding selection passed 144 tests; the complete research unit suite passed 1,253. Ruff, Black, Python compilation, field-shape inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 355/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1252,7 +1260,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/events.py` | 457 | Reviewed; merge subscriber readiness state and reduce Agent buffers from three fields to two |
 | `src/athena/research/runtime/facade.py` | 728 | Pending; grouped constructor retained and six survey forwarders removed; remaining surface still open |
 | `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
-| `src/athena/research/runtime/resume_contract.py` | 56 | Pending |
+| `src/athena/research/runtime/resume_contract.py` | 56 | Reviewed; derive availability from one slotted reason and use the typed durable state contract |
 | `src/athena/research/runtime/services.py` | 136 | Pending |
 | `src/athena/research/runtime/settings.py` | 308 | Pending |
 | `src/athena/research/runtime/survey.py` | 165 | Reviewed; merge lifecycle into `corpus.py` and delete file |

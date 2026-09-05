@@ -3,7 +3,9 @@
 from dataclasses import dataclass
 from typing import Literal
 
-ResumeReason = Literal[
+from athena.research.supervisor.state import ResearchState
+
+_ResumeReason = Literal[
     "already_running",
     "paused",
     "failed",
@@ -14,16 +16,20 @@ ResumeReason = Literal[
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResumeCapability:
-    available: bool
-    reason: ResumeReason
+    reason: _ResumeReason
+
+    @property
+    def available(self) -> bool:
+        return self.reason in {"paused", "failed", "interrupted"}
 
 
 class ResearchControlError(RuntimeError):
+    retryable = False
+
     def __init__(self, code: str, message: str) -> None:
         self.code = code
-        self.retryable = False
         super().__init__(f"{code}: {message}")
 
 
@@ -31,26 +37,23 @@ def is_continue_command(text: str) -> bool:
     return text.strip().casefold() == "continue"
 
 
-def resume_capability(state: object) -> ResumeCapability:
+def resume_capability(state: ResearchState) -> ResumeCapability:
     """Classify whether persisted state can resume without inspecting live tasks."""
-    status = getattr(state, "status", None)
-    phase = getattr(state, "phase", None)
+    status = state.status
 
-    if status == "COMPLETED" or phase == "COMPLETED":
-        return ResumeCapability(False, "completed")
+    if status == "COMPLETED" or state.phase == "COMPLETED":
+        return ResumeCapability("completed")
     if status == "STOPPED":
-        return ResumeCapability(False, "stopped")
+        return ResumeCapability("stopped")
 
-    has_task = bool(
-        getattr(state, "task_text", None) or getattr(state, "task_understanding", None)
-    )
+    has_task = bool(state.task_text or state.task_understanding)
     if not has_task:
-        return ResumeCapability(False, "no_task")
+        return ResumeCapability("no_task")
 
     if status == "RUNNING":
-        return ResumeCapability(False, "already_running")
+        return ResumeCapability("already_running")
     if status == "WAITING":
-        return ResumeCapability(True, "paused")
+        return ResumeCapability("paused")
     if status == "FAILED":
-        return ResumeCapability(True, "failed")
-    return ResumeCapability(True, "interrupted")
+        return ResumeCapability("failed")
+    return ResumeCapability("interrupted")
