@@ -375,6 +375,12 @@ Delete the one-call reporting-tool factory and let `_ReportingTool` create its o
 
 The final LLM-generator, generator, controller, and runtime-RPC selection passed 61 tests, including prompt size/order, hostile delimiter escaping, public-report deduplication, cancellation, and the real Agent-loop adapter. Targeted pre-commit hooks, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the LLM-generator row advances reviewed baseline coverage to 245/602. Whole-repository acceptance remains pending.
 
+## Clarification durable-model review
+
+Read `models.py` completely and traced all seven records and their fields through state transitions, prompt projection, handoff rendering, confirmation rollback, JSON persistence/recovery, requirements, runtime adapters, and direct tests. Every record is independently serialized or consumed as a distinct typed boundary, and every `ClarificationDraft` consistency branch protects an active pending-request, terminal-state, or failure invariant. Retain the module unchanged. A shared Pydantic base would trade seven explicit one-line configurations for a new inheritance concept without reducing the model surface, while merging records would couple unrelated durable formats.
+
+Fresh model, state, store, journal, and requirements verification passed 14 tests; pytest reported only the existing cache-permission warning. Closing the unchanged models row advances reviewed baseline coverage to 246/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -876,7 +882,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/generator.py` | 372 | Reviewed; typed generator results replace dictionary compatibility and the internal result is a frozen dataclass |
 | `src/athena/research/clarification/handoff.py` | 86 | Reviewed; retain live render, materialize and atomic-write boundaries |
 | `src/athena/research/clarification/llm_generator.py` | 422 | Reviewed; delete four one-call wrappers and give the reporting tool sole ownership of deduplication state |
-| `src/athena/research/clarification/models.py` | 144 | Pending |
+| `src/athena/research/clarification/models.py` | 144 | Reviewed; retain seven distinct durable schemas and active cross-field invariants |
 | `src/athena/research/clarification/persistence.py` | 149 | Pending |
 | `src/athena/research/clarification/requirements.py` | 96 | Pending |
 | `src/athena/research/clarification/state.py` | 231 | Pending |
