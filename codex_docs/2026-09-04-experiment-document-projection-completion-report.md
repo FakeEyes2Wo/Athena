@@ -77,6 +77,12 @@ The unrelated main-worktree changes in `src/athena/core/persistence.py`,
 `tmp_athena_tui_authorized.py` remain outside every task commit. The paused
 transactional-resume worktree, branch, and WIP stash also remain untouched.
 
-Merge, merged-tree verification, push, worktree removal, and temporary-branch deletion
-remain the required delivery step. This section will be updated on `main` immediately
-after those actions complete.
+The feature branch was merged into `main` as `239b43f` and pushed to
+`origin/main` (`db2555f..239b43f`). At the user's direction, the merge was pushed
+immediately without a separate post-merge full-suite rerun; the pre-merge focused and
+full-suite evidence is recorded above. Git worktree metadata and the physical
+`.worktrees/experiment-document-projection` directory were removed, `git worktree
+list` no longer contains that path, and the local
+`feat/experiment-document-projection` branch was deleted. The unrelated
+`src/athena/core/persistence.py` main-worktree modification was restored after the
+merge and remains unstaged.
