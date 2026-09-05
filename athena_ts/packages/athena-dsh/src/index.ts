@@ -725,7 +725,6 @@ export function dshWorkers(ctx: Context, opts: DshWorkersOptions): SupervisorWor
     properties: {
       decision: { type: "string", enum: ["continue", "submit", "abandon"] },
       reason: { type: "string" },
-      suggestions: { type: "array", items: { type: "string" } },
     },
     required: ["decision", "reason"],
   }

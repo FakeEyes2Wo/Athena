@@ -1,7 +1,7 @@
 /** Reconcile durable plans against canonical experiment history. */
 
 import type { ResearchTree } from "@athena/core"
-import type { PlanState } from "./plans.js"
+import type { PlanState } from "../contracts.js"
 import { parseResearchState, type ResearchState } from "./state.js"
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])

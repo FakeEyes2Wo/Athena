@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { parseOrThrow } from "@athena/core"
 import * as core from "@athena/core"
-import { PlanStateSchema } from "../../src/supervisor/plans.js"
+import { PlanStateSchema } from "../../src/contracts.js"
 import { parseResearchState, loadResearchState, saveResearchState, researchStateToJSON, type ResearchState } from "../../src/supervisor/state.js"
 
 const TRUSTED_REF = "sha256:" + "b".repeat(64)
@@ -43,6 +43,19 @@ function tmpDir(): string {
 }
 
 describe("ResearchState", () => {
+  it("normalizes omitted SEARCH defaults during durable projection", () => {
+    const state = searchState()
+    delete state.plans["hyp_vit"]!.stale_rounds
+    delete state.plans["hyp_vit"]!.best_ref
+    const json = researchStateToJSON(state)
+    expect((json["plans"] as Record<string, unknown>)["hyp_vit"]).toEqual({
+      kind: "SEARCH", context_ref: CONTEXT_REF, turns_used: 2, turn_limit: 12,
+      patience: 4, stale_rounds: 0, best_ref: null,
+    })
+    expect(state.plans["hyp_vit"]).not.toHaveProperty("stale_rounds")
+    expect(state.plans["hyp_vit"]).not.toHaveProperty("best_ref")
+  })
+
   it("parses plain data with detached plan snapshots and independent defaults", () => {
     const source = searchState()
     const copy = parseResearchState(source)

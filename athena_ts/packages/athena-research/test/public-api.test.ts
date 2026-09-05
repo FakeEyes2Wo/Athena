@@ -12,6 +12,7 @@ describe("research public surface", () => {
       "ValidationService", "generalizationGap", "generalizationWarning",
       "CandidateEvaluationSchema",
       "ResearchState",
+      "planStateToJSON",
     ]) expect(api).not.toHaveProperty(name)
   })
 

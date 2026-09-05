@@ -5,8 +5,7 @@ import {
   PlanDecisionSchema,
   PlanInputSchema,
   PlanStateSchema,
-  planStateToJSON,
-} from "../../src/supervisor/plans.js"
+} from "../../src/contracts.js"
 
 const TRUSTED_REF = "sha256:" + "a".repeat(64)
 const OTHER_TRUSTED_REF = "sha256:" + "c".repeat(64)
@@ -19,19 +18,27 @@ describe("PlanDecision", () => {
   it.each(["continue", "submit", "abandon"])("accepts %s", (decision) => {
     const parsed = parseOrThrow(PlanDecisionSchema, { decision, reason: "done" })
     expect(parsed.decision).toBe(decision)
-    expect(parsed.suggestions).toEqual([])
+    expect(parsed).toEqual({ decision, reason: "done" })
   })
 })
 
 describe("PlanInput", () => {
-  it("rejects negative initial limits", () => {
-    expect(() =>
-      parseOrThrow(PlanInputSchema, {
-        evaluator_ref: TRUSTED_REF,
-        tree_ref: OTHER_TRUSTED_REF,
-        initial_turn_limit: -1,
-      })
-    ).toThrow()
+  it.each(["active_ancestor_hypotheses", "initial_turn_limit", "initial_patience"])(
+    "reads legacy %s without retaining the unused field", (field) => {
+      const current = { evaluator_ref: TRUSTED_REF, tree_ref: OTHER_TRUSTED_REF }
+      const legacy = { ...current, [field]: field === "active_ancestor_hypotheses" ? [] : 4 }
+      const parsed = parseOrThrow(PlanInputSchema, JSON.parse(JSON.stringify(legacy)))
+      expect(parsed).toEqual(parseOrThrow(PlanInputSchema, current))
+      expect(Object.keys(parsed)).toHaveLength(9)
+      expect(parsed).not.toHaveProperty(field)
+      expect(legacy).toHaveProperty(field)
+    },
+  )
+
+  it("continues rejecting unknown non-legacy fields", () => {
+    expect(() => parseOrThrow(PlanInputSchema, {
+      evaluator_ref: TRUSTED_REF, tree_ref: OTHER_TRUSTED_REF, accidental_field: 1,
+    })).toThrow()
   })
 
   it("json round trip freezes metric comparison", () => {
@@ -55,19 +62,6 @@ describe("PlanInput", () => {
       })
     ).toThrow()
   })
-
-  it.each(["initial_turn_limit", "initial_patience"])(
-    "rejects coerced numeric limits (%s)",
-    (field) => {
-      expect(() =>
-        parseOrThrow(PlanInputSchema, {
-          evaluator_ref: TRUSTED_REF,
-          tree_ref: OTHER_TRUSTED_REF,
-          [field]: "4",
-        })
-      ).toThrow()
-    }
-  )
 
   it("rejects coerced nested hypothesis counter", () => {
     expect(() =>
@@ -99,7 +93,7 @@ describe("PlanInput", () => {
     ).toThrow()
   })
 
-  it("owns deeply immutable hypothesis snapshots (deep copy)", () => {
+  it("owns detached hypothesis snapshots (deep copy)", () => {
     const source = HypothesisSchema.parse({
       statement: "Try robust scaling",
       intervention: "Replace standard scaling",
@@ -107,7 +101,6 @@ describe("PlanInput", () => {
     })
     const planInput = parseOrThrow(PlanInputSchema, {
       hypothesis: source,
-      active_ancestor_hypotheses: [source],
       evaluator_ref: TRUSTED_REF,
       tree_ref: OTHER_TRUSTED_REF,
     })
@@ -115,7 +108,6 @@ describe("PlanInput", () => {
     source.statement = "Mutated source"
 
     expect(planInput.hypothesis!.statement).toBe("Try robust scaling")
-    expect(planInput.active_ancestor_hypotheses[0]!.statement).toBe("Try robust scaling")
   })
 
   it("source supersedes mutation does not change snapshot", () => {
@@ -127,7 +119,6 @@ describe("PlanInput", () => {
     })
     const planInput = parseOrThrow(PlanInputSchema, {
       hypothesis: source,
-      active_ancestor_hypotheses: [source],
       evaluator_ref: TRUSTED_REF,
       tree_ref: OTHER_TRUSTED_REF,
     })
@@ -135,7 +126,6 @@ describe("PlanInput", () => {
     source.supersedes.push("hyp_new")
 
     expect(planInput.hypothesis!.supersedes).toEqual(["hyp_old"])
-    expect(planInput.active_ancestor_hypotheses[0]!.supersedes).toEqual(["hyp_old"])
   })
 })
 
@@ -227,42 +217,6 @@ describe("PlanState", () => {
     ).toThrow(/SEARCH-only/)
   })
 
-  it.each(["PREPARE", "VALIDATE"])("non-search serialization omits search fields (%s)", (kind) => {
-    const plan = parseOrThrow(PlanStateSchema, {
-      kind,
-      context_ref: TRUSTED_REF,
-      turns_used: 0,
-      turn_limit: 12,
-    })
-    const json = planStateToJSON(plan)
-    expect(Object.keys(json).sort()).toEqual([
-      "context_ref",
-      "kind",
-      "turn_limit",
-      "turns_used",
-    ])
-  })
-
-  it("search serialization keeps durable fields", () => {
-    const plan = parseOrThrow(PlanStateSchema, {
-      kind: "SEARCH",
-      context_ref: TRUSTED_REF,
-      turns_used: 0,
-      turn_limit: 12,
-      patience: 4,
-      stale_rounds: 1,
-      best_ref: TRUSTED_REF,
-    })
-    expect(Object.keys(planStateToJSON(plan)).sort()).toEqual([
-      "best_ref",
-      "context_ref",
-      "kind",
-      "patience",
-      "stale_rounds",
-      "turn_limit",
-      "turns_used",
-    ])
-  })
 })
 
 describe("PlanBest", () => {

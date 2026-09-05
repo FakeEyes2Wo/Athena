@@ -15,11 +15,13 @@ import {
 } from "@athena/core"
 import type { GitWorkBranch, GitWorkspace } from "@athena/core"
 
-import { ValidationResultSchema, type ValidationResult } from "../contracts.js"
+import {
+  ValidationResultSchema, PlanInputSchema, PlanStateSchema,
+  type ValidationResult, type PlanDecision, type PlanState,
+} from "../contracts.js"
 import { buildFinalReport } from "../report.js"
 import { loadBest, type PlanTurnResult } from "./experiment.js"
 import { Outcome, type Outcome as OutcomeType } from "./ranker.js"
-import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } from "./plans.js"
 import type { PrepareResult } from "./prepare.js"
 import { reconcilePlans } from "./recovery.js"
 import { Scheduler, countSearchAttempts } from "./scheduler.js"
@@ -687,7 +689,6 @@ export class FixedFlowSupervisor {
     const reference = this.tree.getExperiment(referenceId)
     if (reference.eval === null) throw new Error("reference experiment requires a trusted metric")
     const referenceHypothesis = this.tree.getHypothesis(reference.hypothesis_id)
-    const active = this.tree.activeHypotheses(referenceId, hypothesis).slice(0, -1)
     const guidance = [...this.persistentGuidance]
     if (this.nextGuidance !== null) {
       guidance.push(this.nextGuidance)
@@ -696,7 +697,6 @@ export class FixedFlowSupervisor {
     const treeRef = await this.store.putText(JSON.stringify(this.tree.toDict()))
     const planInput = PlanInputSchema.parse({
       hypothesis,
-      active_ancestor_hypotheses: active,
       reference_experiment_id: referenceId,
       reference_metric: reference.eval.primary,
       reference_priority: referenceHypothesis.priority,
@@ -705,8 +705,6 @@ export class FixedFlowSupervisor {
       evaluator_ref: this.frozenEvaluatorRef,
       tree_ref: treeRef,
       human_context: guidance.join("\n"),
-      initial_turn_limit: hypothesis.turn_limit,
-      initial_patience: hypothesis.patience,
     })
     const contextRef = await this.store.putText(JSON.stringify(planInput))
     const branch = await this.git.create(reference.commit, hypothesisId)

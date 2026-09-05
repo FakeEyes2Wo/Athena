@@ -6,7 +6,18 @@ import { readFileSync } from "node:fs"
 import { z } from "zod"
 import { atomicWriteJson, parseOrThrow } from "@athena/core"
 
-import { PlanStateSchema, planStateToJSON } from "./plans.js"
+import { PlanStateSchema, type PlanState } from "../contracts.js"
+
+function planStateToJSON(plan: PlanState): Record<string, unknown> {
+  const common = {
+    kind: plan.kind, context_ref: plan.context_ref,
+    turns_used: plan.turns_used, turn_limit: plan.turn_limit,
+  }
+  return plan.kind === "SEARCH" ? {
+    ...common, patience: plan.patience ?? null,
+    stale_rounds: plan.stale_rounds ?? 0, best_ref: plan.best_ref ?? null,
+  } : common
+}
 
 const ResearchStateSchema = z
   .strictObject({

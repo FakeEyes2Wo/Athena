@@ -21,7 +21,7 @@ import {
   hasAnyFile,
   readExperimentManifest,
 } from "../../src/supervisor/experiment.js"
-import { PlanBestSchema, PlanInputSchema, PlanStateSchema } from "../../src/supervisor/plans.js"
+import { PlanBestSchema, PlanInputSchema, PlanStateSchema } from "../../src/contracts.js"
 
 const REF = "sha256:" + "a".repeat(64)
 const OTHER_REF = "sha256:" + "c".repeat(64)

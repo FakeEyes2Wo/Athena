@@ -7,7 +7,7 @@ import {
   ResearchTree,
   parseOrThrow,
 } from "@athena/core"
-import { PlanStateSchema } from "../../src/supervisor/plans.js"
+import { PlanStateSchema } from "../../src/contracts.js"
 import { reconcilePlans } from "../../src/supervisor/recovery.js"
 import { parseResearchState, researchStateToJSON, type ResearchState } from "../../src/supervisor/state.js"
 

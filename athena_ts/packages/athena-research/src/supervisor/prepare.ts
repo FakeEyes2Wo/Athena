@@ -15,12 +15,11 @@ import {
   type GitWorkspace,
 } from "@athena/core"
 
-import { DataScriptBundleSchema } from "../contracts.js"
+import { DataScriptBundleSchema, PlanInputSchema, PlanStateSchema, type PlanDecision } from "../contracts.js"
 import type { DataScriptRunner } from "../script_runner.js"
 import type { Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
 import { PlanRunner, hasAnyFile } from "./experiment.js"
-import { PlanInputSchema, PlanStateSchema, type PlanDecision } from "./plans.js"
 import { saveResearchState, type ResearchState } from "./state.js"
 
 export const PREPARE_PLAN_ID = "prepare"
@@ -183,7 +182,6 @@ export async function runPreparePlan(opts: {
       const planInput = PlanInputSchema.parse({
         evaluator_ref: opts.evaluatorRef,
         tree_ref: opts.treeRef,
-        initial_turn_limit: opts.maxTurns,
       })
       const outcome = await runner.runTurn(PREPARE_PLAN_ID, state, planInput)
       if (outcome.kind === "evaluator_infrastructure_failed") {

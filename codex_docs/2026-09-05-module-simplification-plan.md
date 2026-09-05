@@ -29,6 +29,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Merge stateless validation result construction into its active orchestration and review reporting.
 - [x] Remove the unused candidate score wrapper and unpopulated validation metadata.
 - [x] Replace the ResearchState class with schema-derived plain state and explicit persistence.
+- [x] Consolidate Plan schemas into shared contracts and reduce unused input/decision fields.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -205,6 +206,16 @@ The baseline state/Plan/recovery selection returned 69 passed. After three regre
 State final verification: the first full run finished with 502 passed and the one missed test migration above. After correction, a fresh full run passed 503 tests across 54 files with `npm test -- --testTimeout=30000`. All five builds and git diff --check passed. No removed constructor/static/instance state APIs remain in tracked package callers. The explicit timeout override does not prove default-timeout reliability or whole-application readiness.
 
 Closing state source/test brings baseline review coverage to 87/602. plans.ts and plans.test.ts have now been fully read, but the broader PlanInput/PlanBest/decision consumer and serialization simplification review remains Pending. Whole-repository acceptance, main merge/push and this task's temporary branch/worktree removal remain mandatory and unfinished.
+
+Plan contract review: complete source/test reads and trace creation, prompt projection, scoring/settlement, best-artifact loading and state serialization. Merge supervisor/plans.ts into the existing contracts.ts and delete the old module without a forwarding file. Remove unused PlanKind and the single-use schema alias. Consolidate the three identical SEARCH-only validation branches into one field loop, preserving issue order/count and errors. Keep strict hypothesis snapshots, finite best metrics, trusted reference validation, required SEARCH patience and existing counter/default rules.
+
+PlanInput now emits nine fields instead of twelve: remove active_ancestor_hypotheses, initial_turn_limit and initial_patience, which had writers but no production reader. Stop computing the discarded ancestor array and remove the duplicate limit writes from prepare/Supervisor. Retain tree_ref as the frozen tree artifact provenance and the fields actually used by scoring, ranking and agent prompt projection. Existing content-addressed inputs are not rewritten: preprocessing removes only these three known legacy keys before strict validation. All other unknown keys still fail. This narrow read migration is required for old context_ref artifacts to remain resumable, not a retained constructor/API facade.
+
+PlanDecision drops unused suggestions (three output fields to two), including DSH's corresponding JSON-schema property. Move planStateToJSON into state.ts as a private persistence helper; share its common fields instead of copying them in both branches. The package no longer exports that helper. Remove its three direct tests because existing state persistence tests cover both plan shapes; add omitted SEARCH-default projection coverage. Replace tests for deleted initial-limit fields with three legacy-read cases and unknown-field rejection. Strengthen the real Supervisor context test to read an old artifact through planInput while preserving both its ref and original bytes.
+
+The research/DSH baseline passed 250 tests; the final focused selection passed 249, including 36 Plan contract tests and 23 state tests. All five package builds passed. Removed exactly three ignored dist/supervisor/plans JS/map/declaration artifacts; the old source remains recoverable from Git history. Removed-module searches find no remaining imports. Baseline coverage is now 89/602 after closing plans.ts and plans.test.ts. The larger Supervisor/DSH files remain reviewed only at affected sites; next full module review is the event projection boundary. Whole-repository acceptance, main merge/push and temporary task branch/worktree cleanup remain mandatory and unfinished.
+
+Plan final verification: all five builds passed; full TypeScript workspace passed 502 tests across 54 files with `npm test -- --testTimeout=30000`. The one-test net decrease reflects removal/replacement of obsolete helper/field cases, not skipping failures. git diff --check passed; obsolete module imports and all three compiled files are absent. Default-timeout reliability and whole-application readiness remain unproven.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -781,7 +792,7 @@ Closing state source/test brings baseline review coverage to 87/602. plans.ts an
 | `athena_ts/packages/athena-research/src/shell.ts` | 48 | Reviewed; deleted adapter exclusively used by removed runtime |
 | `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Reviewed; consolidated failure handling/traversal and removed unused timeout configuration |
-| `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Reviewed; merge schemas into contracts.ts, privatize serialization and delete file |
 | `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Reviewed; merge policy boundary into ranker.ts and delete file; priority arguments 2 to 1; 12 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Reviewed; removed test-only runner factory, retained distinct freeze/baseline policies |
 | `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
@@ -796,7 +807,7 @@ Closing state source/test brings baseline review coverage to 87/602. plans.ts an
 | `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Reviewed; five empty/zero/formatting/pending/validation rendering cases |
 | `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Reviewed; manifest/scoring/settlement, bundle failures and recursive presence |
-| `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Reviewed; 36 strict data/reference/snapshot/legacy-input cases; persistence tests own serialization |
 | `athena_ts/packages/athena-research/test/supervisor/policy.test.ts` | 78 | Reviewed; retain Elo contract tests; remove tests for deleted unused helper; 12 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Reviewed; real PlanRunner success/artifact/feedback retry plus evaluator decisions |
 | `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Reviewed; file/directory evaluator, labels and invalid declarations |

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { PlanDecisionSchema } from "../../src/supervisor/plans.js"
+import { PlanDecisionSchema } from "../../src/contracts.js"
 import { runValidationPlan } from "../../src/supervisor/validation.js"
 
 describe("runValidationPlan", () => {

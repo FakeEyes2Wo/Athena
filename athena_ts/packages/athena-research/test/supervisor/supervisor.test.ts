@@ -14,7 +14,7 @@ import {
 } from "@athena/core"
 import { ValidationResultSchema } from "../../src/contracts.js"
 import { PlanTurnResultSchema } from "../../src/supervisor/experiment.js"
-import { PlanBestSchema, PlanDecisionSchema, PlanStateSchema } from "../../src/supervisor/plans.js"
+import { PlanBestSchema, PlanDecisionSchema, PlanStateSchema } from "../../src/contracts.js"
 import { PrepareResultSchema } from "../../src/supervisor/prepare.js"
 import { parseResearchState, loadResearchState } from "../../src/supervisor/state.js"
 import { FixedFlowSupervisor, type SupervisorWorkers } from "../../src/supervisor/supervisor.js"
@@ -234,7 +234,7 @@ describe("FixedFlowSupervisor core actions", () => {
 
   it("freezes guidance into later Plan inputs", async () => {
     const dir = tmpDir()
-    const { supervisor } = coreSupervisor(dir)
+    const { supervisor, state, store } = coreSupervisor(dir)
     const hypothesisId = supervisor.tree.addHypothesis(
       HypothesisSchema.parse({
         statement: "improve feature",
@@ -250,6 +250,15 @@ describe("FixedFlowSupervisor core actions", () => {
 
     const planInput = await supervisor.planInput(hypothesisId)
     expect(planInput.human_context).toBe("always apply this\nnext hint")
+    expect(Object.keys(planInput)).toHaveLength(9)
+    const legacyRef = await store.putText(JSON.stringify({
+      ...planInput, active_ancestor_hypotheses: [],
+      initial_turn_limit: 12, initial_patience: 4,
+    }))
+    state.plans[hypothesisId]!.context_ref = legacyRef
+    expect(await supervisor.planInput(hypothesisId)).toEqual(planInput)
+    expect(state.plans[hypothesisId]!.context_ref).toBe(legacyRef)
+    expect(await store.getText(legacyRef)).toContain("initial_turn_limit")
   })
 
   it("configures search budget and snapshots hypotheses", async () => {

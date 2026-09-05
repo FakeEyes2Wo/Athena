@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { LocalArtifactStore, type GitWorkBranch } from "@athena/core"
 import { DataScriptBundleSchema } from "../../src/contracts.js"
-import { PlanDecisionSchema } from "../../src/supervisor/plans.js"
+import { PlanDecisionSchema } from "../../src/contracts.js"
 import { PrepareResultSchema, runEvaluatorPlan, runPreparePlan } from "../../src/supervisor/prepare.js"
 
 const REF = "sha256:" + "a".repeat(64)
