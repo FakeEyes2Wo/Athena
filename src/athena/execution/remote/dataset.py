@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from athena.execution.remote.channel import RemoteChannel
+from athena.execution.remote.channel import RemoteChannel, RemoteError
 from athena.execution.remote.mirror import FileEntry, local_manifest
 
 logger = logging.getLogger(__name__)
@@ -35,18 +35,10 @@ class DatasetSpec:
         """全部文件的字节数（用于估时与容量回收）。"""
         return sum(entry.size for entry in self.entries)
 
-    def marker_payload(self) -> dict:
-        """写进 ``.complete`` 的内容——足够事后独立复核。"""
-        return {
-            "dataset_id": self.dataset_id,
-            "files": len(self.entries),
-            "bytes": self.total_bytes,
-        }
-
 
 def describe_dataset(root: Path) -> DatasetSpec:
     """给本地数据集算清单与 id。"""
-    entries = local_manifest(Path(root), excludes=_DATASET_EXCLUDES)
+    entries = local_manifest(root, excludes=_DATASET_EXCLUDES)
     if not entries:
         raise DatasetError(f"dataset root has no files: {root}")
     ordered = tuple(entries[key] for key in sorted(entries))
@@ -62,14 +54,8 @@ class StageReport:
 
     dataset_id: str
     remote_root: str
-    uploaded: tuple[str, ...]
     bytes_sent: int
     reused: bool
-
-    @property
-    def resumed(self) -> bool:
-        """是否是续传（远端已有一部分，但没有完成标记）。"""
-        return bool(self.uploaded) and not self.reused
 
 
 class DatasetStager:
@@ -79,16 +65,16 @@ class DatasetStager:
         self._channel = channel
         self._root = PurePosixPath(data_root)
 
-    def remote_root(self, spec: DatasetSpec) -> str:
+    def _remote_root(self, spec: DatasetSpec) -> str:
         """这份数据在远端的目录（内容寻址）。"""
         return str(self._root / spec.dataset_id)
 
     async def _marker(self, spec: DatasetSpec) -> dict | None:
         """读完成标记；不存在或损坏都当作"没有"。"""
-        path = f"{self.remote_root(spec)}/{COMPLETE_MARKER}"
+        path = f"{self._remote_root(spec)}/{COMPLETE_MARKER}"
         try:
             raw = await self._channel.read_file(path)
-        except Exception:
+        except RemoteError:
             return None
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -99,7 +85,7 @@ class DatasetStager:
     async def _remote_entries(self, spec: DatasetSpec) -> dict[str, FileEntry]:
         reply = await self._channel.request(
             "manifest",
-            root=self.remote_root(spec),
+            root=self._remote_root(spec),
             exclude=sorted(_DATASET_EXCLUDES),
         )
         return {
@@ -125,17 +111,14 @@ class DatasetStager:
                 + "; ".join(problems)
             )
 
-    async def stage(
-        self, local_root: Path, spec: DatasetSpec, *, verify_existing: bool = True
-    ) -> StageReport:
+    async def stage(self, local_root: Path, spec: DatasetSpec) -> StageReport:
         """把数据集送到远端；已完整就复用，未完整就续传。"""
-        remote_root = self.remote_root(spec)
+        remote_root = self._remote_root(spec)
         marker = await self._marker(spec)
         if marker is not None and marker.get("dataset_id") == spec.dataset_id:
-            if verify_existing:
-                await self.verify(spec)
+            await self.verify(spec)
             logger.info("dataset %s already staged at %s", spec.dataset_id, remote_root)
-            return StageReport(spec.dataset_id, remote_root, (), 0, reused=True)
+            return StageReport(spec.dataset_id, remote_root, 0, reused=True)
 
         await self._channel.request("mkdir", path=remote_root)
         remote = await self._remote_entries(spec)
@@ -144,30 +127,34 @@ class DatasetStager:
             for entry in spec.entries
             if (found := remote.get(entry.path)) is None or found.sha256 != entry.sha256
         ]
-        uploaded = [entry.path for entry in missing]
         sent = sum(entry.size for entry in missing)
-        root = Path(local_root)
         await self._channel.send_files(
-            (f"{remote_root}/{entry.path}", root / entry.path) for entry in missing
+            (f"{remote_root}/{entry.path}", local_root / entry.path)
+            for entry in missing
         )
 
         await self.verify(spec)
         await self._channel.write_file(
             f"{remote_root}/{COMPLETE_MARKER}",
-            json.dumps(spec.marker_payload(), ensure_ascii=False).encode("utf-8"),
+            json.dumps(
+                {
+                    "dataset_id": spec.dataset_id,
+                    "files": len(spec.entries),
+                    "bytes": spec.total_bytes,
+                },
+                ensure_ascii=False,
+            ).encode("utf-8"),
         )
         logger.info(
             "staged dataset %s to %s (%d files, %d bytes)",
             spec.dataset_id,
             remote_root,
-            len(uploaded),
+            len(missing),
             sent,
         )
-        return StageReport(
-            spec.dataset_id, remote_root, tuple(uploaded), sent, reused=False
-        )
+        return StageReport(spec.dataset_id, remote_root, sent, reused=False)
 
-    async def staged_ids(self) -> set[str]:
+    async def _staged_ids(self) -> set[str]:
         """这台机器上已经完整分发过的数据集 id。"""
         reply = await self._channel.request("manifest", root=str(self._root))
         found: set[str] = set()
@@ -179,7 +166,7 @@ class DatasetStager:
 
     async def evict(self, keep: set[str]) -> tuple[str, ...]:
         """删掉不在 ``keep`` 里的数据集目录。"""
-        removable = sorted(await self.staged_ids() - keep)
+        removable = sorted(await self._staged_ids() - keep)
         if removable:
             await self._channel.request(
                 "remove",

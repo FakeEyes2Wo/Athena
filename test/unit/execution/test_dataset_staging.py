@@ -70,7 +70,7 @@ async def test_staging_copies_everything_and_marks_it_complete(channel, tmp_path
     report = await stager.stage(local, spec)
 
     assert not report.reused
-    assert set(report.uploaded) == {"train.csv", "test.csv", "meta/schema.json"}
+    assert report.bytes_sent == spec.total_bytes
     remote = Path(report.remote_root)
     assert (remote / "meta" / "schema.json").read_bytes() == b'{"target": "y"}'
     marker = json.loads((remote / COMPLETE_MARKER).read_text(encoding="utf-8"))
@@ -89,7 +89,6 @@ async def test_a_second_lease_reuses_what_is_already_there(channel, tmp_path):
     again = await stager.stage(local, spec)
 
     assert again.reused
-    assert again.uploaded == ()
     assert again.bytes_sent == 0
 
 
@@ -109,8 +108,10 @@ async def test_an_interrupted_transfer_resumes_instead_of_restarting(channel, tm
     report = await stager.stage(local, spec)
 
     assert not report.reused
-    assert "train.csv" not in report.uploaded, "已经对上的文件不该重传"
-    assert set(report.uploaded) == {"test.csv", "meta/schema.json"}
+    assert report.bytes_sent == (
+        (local / "test.csv").stat().st_size
+        + (local / "meta" / "schema.json").stat().st_size
+    )
 
 
 @pytest.mark.asyncio
@@ -132,8 +133,7 @@ async def test_a_mismatch_at_upload_time_never_gets_a_complete_marker(
         await stager.stage(local, spec)
 
     # 没有完成标记 = 不算数；下次会重新分发，而不是把坏数据当好数据复用。
-    assert not (Path(stager.remote_root(spec)) / COMPLETE_MARKER).exists()
-    assert await stager.staged_ids() == set()
+    assert not (tmp_path / "remote" / spec.dataset_id / COMPLETE_MARKER).exists()
 
 
 @pytest.mark.asyncio
@@ -177,11 +177,11 @@ async def test_without_the_marker_the_data_does_not_count_as_staged(channel, tmp
     report = await stager.stage(local, spec)
 
     (Path(report.remote_root) / COMPLETE_MARKER).unlink()
-    assert await stager.staged_ids() == set()
+    assert await stager.evict(set()) == ()
 
     again = await stager.stage(local, spec)
     assert not again.reused
-    assert again.uploaded == (), "内容都在，只是要重新盖章"
+    assert again.bytes_sent == 0, "内容都在，只是要重新盖章"
 
 
 @pytest.mark.asyncio
@@ -193,13 +193,12 @@ async def test_eviction_never_touches_a_pinned_dataset(channel, tmp_path):
     stale = describe_dataset(_dataset(tmp_path / "stale", rows=9))
     await stager.stage(tmp_path / "kept", kept)
     await stager.stage(tmp_path / "stale", stale)
-    assert await stager.staged_ids() == {kept.dataset_id, stale.dataset_id}
 
     removed = await stager.evict(keep={kept.dataset_id})
 
     assert removed == (stale.dataset_id,)
-    assert await stager.staged_ids() == {kept.dataset_id}
     assert (remote_root / kept.dataset_id / "train.csv").is_file()
+    assert not (remote_root / stale.dataset_id).exists()
 
 
 @pytest.mark.asyncio
@@ -225,5 +224,5 @@ async def test_staging_streams_files_instead_of_slurping(channel, tmp_path) -> N
     finally:
         Path.read_bytes = original  # type: ignore[method-assign]
 
-    assert report.uploaded == ("train.bin",)
+    assert report.bytes_sent == 1024 * 1024
     assert (Path(report.remote_root) / "train.bin").stat().st_size == 1024 * 1024

@@ -56,6 +56,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the GUI development scripts and merge duplicated process launchers.
 - [x] Review the complete Tauri backend and collapse forwarding and bridge file layers.
 - [x] Review the Python remote mirror backend and merge its wrapper layer.
+- [x] Review remote dataset staging and remove diagnostic/test-only surface.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -200,6 +201,14 @@ Read the execution backend, remote mirror/wrapper, remote facade, backend seam t
 Merge `MirroredBackend` into `mirror.py` and delete `mirrored.py`, keeping workspace mirroring and its execution wrapper in one module. Remove two never-customized constructor policy parameters and their fields, reducing the wrapper from five attributes to three and its constructor from four arguments to two. Remove the test-only mirror getter plus three public WorkspaceMirror accessors used only by the former cross-file wrapper; same-module code now uses the owned mirror state directly. Export the merged backend from the remote facade and make the release-cleanup test trigger push through the real `run` contract rather than a test-only getter.
 
 The same focused backend/channel/SSH/pool/runtime selection passed 96 tests before and after the change. Python compilation, task-scope code-style checks, and removed-module/surface searches passed. Pytest reported one existing cache-permission warning. The repository-wide style command still reports pre-existing hard-rule violations outside this slice, so whole-repository acceptance remains pending. Closing four baseline rows advances reviewed coverage to 213/602.
+
+## Remote dataset-staging review
+
+Read the dataset stager and its full integration-style unit suite completely, then trace specs, reports, capacity checks, placement evidence, staging, reuse, and eviction through the execution pool and compute checks. Retain content-addressed manifests, completion markers, mandatory verification, streaming file transfer, partial resume, staged-ID discovery, and pinned-dataset eviction because each protects an exercised corruption, capacity, or lifecycle boundary.
+
+Remove the test-only `StageReport.uploaded` field and entirely unused `resumed` projection, reducing reports from five fields to four. Delete the never-disabled `verify_existing` parameter so `stage` takes only the local root and spec and always verifies completed remote data. Inline the one-call marker payload, privatize remote-root and staged-ID helpers, and make tests assert bytes and filesystem outcomes rather than internal transfer lists. Remove redundant local collections/path wrapping. Marker probing now catches only `RemoteError` instead of hiding arbitrary programming failures.
+
+The same dataset/pool selection passed 25 tests before and after the change. Python compilation, task-scope code-style checks, and removed-surface searches passed; pytest reported one existing cache-permission warning. Closing the dataset row advances reviewed coverage to 214/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -669,7 +678,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/execution/remote/__init__.py` | 23 | Reviewed; export the merged mirror backend from the remote facade |
 | `src/athena/execution/remote/agent.py` | 473 | Pending |
 | `src/athena/execution/remote/channel.py` | 463 | Pending |
-| `src/athena/execution/remote/dataset.py` | 188 | Pending |
+| `src/athena/execution/remote/dataset.py` | 188 | Reviewed; four-field report, mandatory verification, private staging helpers |
 | `src/athena/execution/remote/mirror.py` | 191 | Reviewed; absorb the three-field mirrored execution wrapper and narrow helper surface |
 | `src/athena/execution/remote/mirrored.py` | 120 | Reviewed; merge into mirror.py and delete forwarding file |
 | `src/athena/execution/remote/ssh.py` | 362 | Pending |
