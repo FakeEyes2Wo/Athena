@@ -197,11 +197,6 @@ def _compact_understanding(
     return projected
 
 
-def _compact_original_task(original_task: str) -> str:
-    budget = _SECTION_BUDGETS["original_task"]
-    return _shorten_text(original_task, lambda value: len(_safe_json(value)) <= budget)
-
-
 def _fit_record(
     record: dict[str, object],
     retained: list[tuple[int, dict[str, object]]],
@@ -248,24 +243,6 @@ def _compact_ordered_records(
     return [value for _index, value in sorted(retained)]
 
 
-def _compact_answers(answers: list[dict[str, object]]) -> list[dict[str, object]]:
-    return _compact_ordered_records(
-        answers,
-        budget=_SECTION_BUDGETS["answers"],
-        shorten_fields=("question", "value", "choice_label"),
-    )
-
-
-def _compact_revisions(
-    revisions: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    return _compact_ordered_records(
-        revisions,
-        budget=_SECTION_BUDGETS["revisions"],
-        shorten_fields=("instruction",),
-    )
-
-
 def _compact_unresolved(
     unresolved: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -290,10 +267,21 @@ def _compact_unresolved(
 def _compact_state(state: dict[str, object]) -> dict[str, object]:
     """Apply the fixed per-section budget without changing top-level shape."""
     return {
-        "original_task": _compact_original_task(str(state["original_task"])),
+        "original_task": _shorten_text(
+            str(state["original_task"]),
+            lambda value: len(_safe_json(value)) <= _SECTION_BUDGETS["original_task"],
+        ),
         "understanding": _compact_understanding(dict(state["understanding"])),
-        "answers": _compact_answers(list(state["answers"])),
-        "revisions": _compact_revisions(list(state["revisions"])),
+        "answers": _compact_ordered_records(
+            list(state["answers"]),
+            budget=_SECTION_BUDGETS["answers"],
+            shorten_fields=("question", "value", "choice_label"),
+        ),
+        "revisions": _compact_ordered_records(
+            list(state["revisions"]),
+            budget=_SECTION_BUDGETS["revisions"],
+            shorten_fields=("instruction",),
+        ),
         "unresolved": _compact_unresolved(list(state["unresolved"])),
         "questions_asked": state["questions_asked"],
     }
@@ -325,11 +313,10 @@ class _ReportingTool(BaseTool):
         self,
         draft: ClarificationDraft,
         sink: PublicProgressSink | None,
-        seen: set[tuple[str, str]],
     ) -> None:
         self._draft = draft
         self._sink = sink
-        self._seen = seen
+        self._seen: set[tuple[str, str]] = set()
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict[str, bool]:
         del ctx
@@ -347,14 +334,6 @@ class _ReportingTool(BaseTool):
                 persist=False,
             )
         return {"acknowledged": True}
-
-
-def _build_reporting_tool(
-    draft: ClarificationDraft,
-    sink: PublicProgressSink | None,
-    seen: set[tuple[str, str]],
-) -> BaseTool:
-    return _ReportingTool(draft, sink, seen)
 
 
 async def _discard_agent_event(
@@ -379,7 +358,7 @@ class LLMClarificationGenerator:
     async def next_step(self, draft: ClarificationDraft) -> ClarificationModelOutput:
         prompt = build_clarification_prompt(draft)
         tools = ToolRegistry()
-        tools.register(_build_reporting_tool(draft, self._progress_sink, set()))
+        tools.register(_ReportingTool(draft, self._progress_sink))
         agent = Agent(
             self._provider,
             tools,

@@ -367,6 +367,14 @@ Delete the uncalled production `generate_step` wrapper and the dictionary-result
 
 The generator/controller baseline passed 38 tests. Final generator, controller, LLM-generator, and runtime-RPC verification passed 61 tests. Targeted pre-commit hooks (including Black and Athena code-style rules), Python compilation, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the generator row advances reviewed baseline coverage to 244/602. Whole-repository acceptance remains pending.
 
+## LLM clarification generator review
+
+Read `llm_generator.py` completely and traced its prompt projection, fixed section budgets, reporting tool, Agent construction, constants, and exports through runtime bootstrap, controller normalization, direct prompt/tool tests, and runtime-RPC tests. Retain the canonical six-section projection, per-section compaction policies, strict public reporting schema, raw-event suppression, and three exported constants because they govern tested safety boundaries or live runtime event metadata.
+
+Delete the one-call reporting-tool factory and let `_ReportingTool` create its own always-empty deduplication set, reducing construction from three arguments to two. Inline the three one-call original-task, answer, and revision compaction wrappers into the existing state projection while retaining the shared ordered-record algorithm. No new abstraction or compatibility path replaces them; production code falls by 21 net lines.
+
+The final LLM-generator, generator, controller, and runtime-RPC selection passed 61 tests, including prompt size/order, hostile delimiter escaping, public-report deduplication, cancellation, and the real Agent-loop adapter. Targeted pre-commit hooks, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the LLM-generator row advances reviewed baseline coverage to 245/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -867,7 +875,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
 | `src/athena/research/clarification/generator.py` | 372 | Reviewed; typed generator results replace dictionary compatibility and the internal result is a frozen dataclass |
 | `src/athena/research/clarification/handoff.py` | 86 | Reviewed; retain live render, materialize and atomic-write boundaries |
-| `src/athena/research/clarification/llm_generator.py` | 422 | Pending |
+| `src/athena/research/clarification/llm_generator.py` | 422 | Reviewed; delete four one-call wrappers and give the reporting tool sole ownership of deduplication state |
 | `src/athena/research/clarification/models.py` | 144 | Pending |
 | `src/athena/research/clarification/persistence.py` | 149 | Pending |
 | `src/athena/research/clarification/requirements.py` | 96 | Pending |

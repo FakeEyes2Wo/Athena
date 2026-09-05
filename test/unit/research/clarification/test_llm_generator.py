@@ -25,7 +25,7 @@ from athena.research.clarification.llm_generator import (
     REPORT_TASK_UNDERSTANDING_TOOL,
     TASK_UNDERSTANDING_SCOPE,
     LLMClarificationGenerator,
-    _build_reporting_tool,
+    _ReportingTool,
     build_clarification_prompt,
 )
 from athena.research.clarification.models import (
@@ -686,7 +686,7 @@ async def test_reporting_helper_validates_input_and_propagates_direct_cancellati
     async def cancelled_sink(**_kwargs: object) -> None:
         raise asyncio.CancelledError
 
-    tool = _build_reporting_tool(_draft(), cancelled_sink, set())
+    tool = _ReportingTool(_draft(), cancelled_sink)
     assert tool.spec.name == REPORT_TASK_UNDERSTANDING_TOOL
     assert tool.spec.input_schema == PublicProgress.model_json_schema()
     assert tool.spec.concurrency_safe is False
