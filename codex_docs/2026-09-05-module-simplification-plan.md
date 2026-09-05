@@ -36,10 +36,17 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Consolidate SEARCH wake/start ownership and replace the waiter collection with one loop-owned callback.
 - [x] Make SEARCH own graceful stop draining; join the loop before publishing STOPPED.
 - [x] Share failure persistence/notification between initial startup and background SEARCH.
+- [x] Drain in-flight turns after SEARCH errors and narrow internal completion records.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+Concurrent-error follow-up: running turns attach rejection handlers when launched and deliver a plan-tagged error to the same SEARCH loop that applies normal completions. The loop retains its first error locally, stops filling slots, drains remaining completions, then rethrows for the existing startup/background reporting boundary. Failed turns retain their frozen Plan rather than inventing an untrusted result; successfully returned siblings still settle. Errors from ideation or applying a completion use the same drain path. Existing recoverable Agent-turn exceptions still produce a null decision as before. Removed the unused public `CompletedTurn` export; its private success record now carries `nextState` rather than a full `PlanTurnResult` whose other fields were unread.
+
+Concurrent-error verification: all five package builds passed; full TypeScript run with `--testTimeout=30000` passed 525 tests across 53 files in 77.42 seconds. `git diff --check` passed; caller search found no consumers of the removed type export. Baseline coverage remains 91/602, with whole-goal acceptance, main integration/push and temporary task branch/worktree cleanup still outstanding.
+
+Two pre-change tests demonstrated early startup completion with an unresolved sibling, for both deterministic-turn and ideator errors. The resulting 36-test Supervisor file passed, including rejection with `undefined` and an early turn rejection while slot filling awaits ideation. The latter spans an event-loop turn without unhandled rejection. No additional Supervisor attribute, second task registry, or retry layer was introduced. PREPARE/VALIDATE shutdown and failure-reporting/stop races remain unfinished; these tests are not evidence for forced cancellation or recovery from a permanently hung worker.
 
 Failure-reporting follow-up: extracted the startup error path into one private `fail(error)` method and replaced background SEARCH's empty catch with that method. Both paths stop new dispatch and save FAILED before attempting output/state notifications. `Promise.allSettled` attempts both notifications independently and prevents notification rejection from replacing the canonical failure result; disk-save failure still propagates. No error-history field, retry wrapper, or parallel status model was added. Direct callers of `runSearch()` still receive its rejection; startup and fire-and-forget dispatch own reporting.
 

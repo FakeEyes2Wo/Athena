@@ -201,6 +201,76 @@ function coreSupervisor(
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it("observes turn rejection while slot filling is still awaiting ideation", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const runPlanTurn = vi.fn(async () => { throw new Error("early turn failure") })
+    const runIdeatorTurn = vi.fn(async () => { await gate; return [] })
+    const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: {
+      runPlanTurn, runIdeatorTurn,
+      runPlanAgentTurn: async () => PlanDecisionSchema.parse({ decision: "submit", reason: "done" }),
+    } })
+    tree.addHypothesis(HypothesisSchema.parse({
+      id: "bad", statement: "idea", intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
+    }))
+    const run = supervisor.start()
+    try {
+      await vi.waitFor(() => expect(runPlanTurn).toHaveBeenCalledTimes(1))
+      expect(runIdeatorTurn).toHaveBeenCalledTimes(1)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      release()
+      await run
+      expect(supervisor.state.status).toBe("FAILED")
+      expect(supervisor.runningPlanIds).toEqual([])
+      expect(Object.keys(supervisor.state.plans)).toEqual(["bad"])
+    } finally {
+      release()
+      await supervisor.stop()
+      await run
+    }
+  })
+
+  it.each(["turn", "ideator", "undefined"] as const)("drains a sibling after a %s rejection", async (source) => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const publish = vi.fn(async (_kind: string, _data: Record<string, unknown>) => {})
+    const failure = source === "undefined" ? undefined : new Error("primary failure")
+    const failing = vi.fn(async () => { throw failure })
+    const runPlanAgentTurn = vi.fn(async (id: string) => {
+      if (id === "good") await gate
+      return PlanDecisionSchema.parse({ decision: id === "good" ? "abandon" : "submit", reason: "done" })
+    })
+    const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: {
+      publish, runPlanAgentTurn, runPlanTurn: failing,
+      runIdeatorTurn: source === "ideator" ? failing : async () => [],
+    } })
+    for (const id of source === "ideator" ? ["good"] : ["good", "bad"]) {
+      tree.addHypothesis(HypothesisSchema.parse({
+        id, statement: id, intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
+      }))
+    }
+    let finished = false
+    const run = supervisor.start().then(() => { finished = true })
+    try {
+      await vi.waitFor(() => expect(failing).toHaveBeenCalledTimes(1))
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(finished).toBe(false)
+      release()
+      await run
+      expect(tree.getExperiment("exp_good").status).toBe("FAILED")
+      expect(Object.keys(supervisor.state.plans)).toEqual(source === "ideator" ? [] : ["bad"])
+      expect(supervisor.runningPlanIds).toEqual([])
+      expect(supervisor.state.status).toBe("FAILED")
+      expect(publish.mock.calls.filter(([kind]) => kind === "output")).toEqual([
+        ["output", { source: "supervisor", channel: "error", text: `research failed: ${failure?.message ?? "undefined"}` }],
+      ])
+    } finally {
+      release()
+      await supervisor.stop()
+      await run
+    }
+  })
+
   it.each(["start", "resume"] as const)("persists and reports SEARCH failure through %s", async (entry) => {
     const dir = tmpDir()
     const publish = vi.fn(async (_kind: string, _data: Record<string, unknown>) => {})

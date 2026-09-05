@@ -66,10 +66,10 @@ function finalReportText(validation: Record<string, unknown>): string {
   return parts.join(" · ")
 }
 
-export interface CompletedTurn {
+interface CompletedTurn {
   planId: string
   decision: PlanDecision | null
-  result: PlanTurnResult | null
+  nextState: PlanState | null
 }
 
 export interface SupervisorWorkers {
@@ -91,7 +91,7 @@ export class FixedFlowSupervisor {
   private direction: "maximize" | "minimize"
   private tolerance: number
   private workers: SupervisorWorkers
-  private running: Map<string, Promise<CompletedTurn>> = new Map()
+  private running = new Map<string, Promise<CompletedTurn | { planId: string; error: unknown }>>()
   private stopped = false
   private statePath: string
   private treePath: string
@@ -461,33 +461,41 @@ export class FixedFlowSupervisor {
   }
 
   private async runSearchLoop(): Promise<void> {
+    let failure: { error: unknown } | undefined
     while (!this.stopped || this.running.size > 0) {
-      if (!this.stopped && this.state.status !== "RUNNING") {
-        // 暂停/等待人工决策：不再派发新 turn，直到 resume 或选择操作唤醒。
-        await this.waitForWake()
-        continue
-      }
-      const generated = this.stopped ? false : await this.fillSlots()
-      if (this.running.size === 0) {
-        if (this.stopped) return
-        if (generated) continue
-        if (
-          this.state.manual_mode &&
-          this.nextHypothesisId === null &&
-          this.tree.pendingHypotheses().length > 0
-        ) {
-          this.state.status = "WAITING"
-          await this.persistState()
+      try {
+        if (!this.stopped && this.state.status !== "RUNNING") {
+          // 暂停/等待人工决策：不再派发新 turn，直到 resume 或选择操作唤醒。
           await this.waitForWake()
           continue
         }
-        return
+        const generated = this.stopped ? false : await this.fillSlots()
+        if (this.running.size === 0) {
+          if (this.stopped) break
+          if (generated) continue
+          if (
+            this.state.manual_mode &&
+            this.nextHypothesisId === null &&
+            this.tree.pendingHypotheses().length > 0
+          ) {
+            this.state.status = "WAITING"
+            await this.persistState()
+            await this.waitForWake()
+            continue
+          }
+          break
+        }
+        const completed = await Promise.race(this.running.values())
+        const planId = completed.planId
+        this.running.delete(planId)
+        if ("error" in completed) throw completed.error
+        await this.applyCompletedTurn(completed)
+      } catch (error) {
+        failure ??= { error }
+        this.stopped = true
       }
-      const completed = await Promise.race(this.running.values())
-      const planId = completed.planId
-      this.running.delete(planId)
-      await this.applyCompletedTurn(completed)
     }
+    if (failure) throw failure.error
   }
 
   private async waitForWake(): Promise<void> {
@@ -539,7 +547,7 @@ export class FixedFlowSupervisor {
 
   private launchTurn(planId: string): void {
     if (!this.running.has(planId)) {
-      this.running.set(planId, this.runOneTurn(planId))
+      this.running.set(planId, this.runOneTurn(planId).catch((error: unknown) => ({ planId, error })))
     }
   }
 
@@ -553,21 +561,21 @@ export class FixedFlowSupervisor {
     try {
       decision = await this.workers.runPlanAgentTurn(planId, state)
     } catch {
-      return { planId, decision: null, result: null }
+      return { planId, decision: null, nextState: null }
     }
-    if (decision === null) return { planId, decision: null, result: null }
+    if (decision === null) return { planId, decision: null, nextState: null }
     if (decision.decision === "abandon" && (state.best_ref ?? null) === null) {
-      return { planId, decision, result: null }
+      return { planId, decision, nextState: null }
     }
     const result = await this.workers.runPlanTurn(planId, state)
-    return { planId, decision, result }
+    return { planId, decision, nextState: result.next_state }
   }
 
   private async applyCompletedTurn(completed: CompletedTurn): Promise<void> {
     const planId = completed.planId
     let state = this.state.plans[planId]!
-    if (completed.result !== null && completed.result.next_state !== null) {
-      state = completed.result.next_state
+    if (completed.nextState !== null) {
+      state = completed.nextState
       this.state.plans[planId] = state
     }
     if (completed.decision === null) {
