@@ -337,7 +337,7 @@ The complete clarification unit selection plus continue/resume and confirmation-
 
 ## Clarification confirmation review
 
-Read `confirmation.py` completely and traced every dependency field, transaction phase, helper, export, and confirmation entry through the runtime adapter/facade, GUI service, persistence stores, and direct transaction/integration tests. Retain the journaled commit core, seven durable/resource ports, state snapshot, and explicit validation/projection helpers because rollback, idempotency, and recovery tests consume their distinct ordering.
+Read `confirmation.py` completely and traced every dependency field, transaction phase, helper, export, and confirmation entry through the runtime adapter/facade, GUI service, persistence stores, and direct transaction/integration tests. Retain the journaled commit core, durable/resource ports, state snapshot, and explicit validation/projection helpers because rollback, idempotency, and recovery tests consume their distinct ordering.
 
 Remove lifecycle `start` from `ConfirmationDependencies`: commit deliberately does not start PREPARE, so the eighth field mixed runtime lifecycle with transaction state. Delete the module-level `launch_confirmed` and five-parameter `confirm_and_start` compatibility functions. Make `runtime.clarification` the sole adapter: its public path commits then starts, while auto-confirm directly commits without a boolean branch. Remove `start_after` from `ResearchRuntime.confirm_and_start`, reducing its explicit parameters from four to three, and consolidate the facade import. Production code falls by twelve net lines.
 
@@ -380,6 +380,14 @@ The final LLM-generator, generator, controller, and runtime-RPC selection passed
 Read `models.py` completely and traced all seven records and their fields through state transitions, prompt projection, handoff rendering, confirmation rollback, JSON persistence/recovery, requirements, runtime adapters, and direct tests. Every record is independently serialized or consumed as a distinct typed boundary, and every `ClarificationDraft` consistency branch protects an active pending-request, terminal-state, or failure invariant. Retain the module unchanged. A shared Pydantic base would trade seven explicit one-line configurations for a new inheritance concept without reducing the model surface, while merging records would couple unrelated durable formats.
 
 Fresh model, state, store, journal, and requirements verification passed 14 tests; pytest reported only the existing cache-permission warning. Closing the unchanged models row advances reviewed baseline coverage to 246/602. Whole-repository acceptance remains pending.
+
+## Clarification persistence consolidation
+
+Read `persistence.py` completely and traced draft, journal, handoff, state, and resume paths through confirmation composition, rollback/recovery, runtime startup, controller storage, and direct/integration tests. Production and tests always construct the draft and journal stores from the same session root, while journal recovery was separately passed that same draft store and its derived state path. Keeping two root-owning objects allowed inconsistent paths without supporting a real use case.
+
+Merge `ConfirmationJournalStore` into `ClarificationStore` without a compatibility class. The unified store owns all five session paths and exposes explicit journal operations; `recover` drops both parameters and derives every rollback target from its root. Remove `journals` and `state_path` from `ConfirmationDependencies`, reducing it from seven fields to five, and route transaction preparation, state persistence, recovery, and cleanup through `drafts`. Production code falls by 11 net lines while deleting one class, two dependency fields, and two recovery parameters.
+
+The transaction baseline passed 17 tests. Final verification across the complete clarification unit directory plus confirmation-gate and continue/resume integrations passed 111 tests. Targeted pre-commit hooks, Python compilation, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the persistence row advances reviewed baseline coverage to 247/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -875,7 +883,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/memory/rollout.py` | 194 | Reviewed; delete redundant attribute and recovery wrapper; 42 tests pass |
 | `src/athena/research/__init__.py` | 18 | Reviewed; retain one lazy runtime export to isolate submodule imports |
 | `src/athena/research/clarification/__init__.py` | 1 | Reviewed; retain package documentation marker |
-| `src/athena/research/clarification/confirmation.py` | 240 | Reviewed; seven-field transaction ports and runtime-owned lifecycle start |
+| `src/athena/research/clarification/confirmation.py` | 240 | Reviewed; five-field transaction ports, unified persistence root and runtime-owned lifecycle start |
 | `src/athena/research/clarification/context.py` | 230 | Reviewed; verified prompt string replaces six-field result and metadata fallbacks |
 | `src/athena/research/clarification/controller.py` | 323 | Reviewed; four-parameter construction, four attributes and three synchronous pure operations |
 | `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
@@ -883,7 +891,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/handoff.py` | 86 | Reviewed; retain live render, materialize and atomic-write boundaries |
 | `src/athena/research/clarification/llm_generator.py` | 422 | Reviewed; delete four one-call wrappers and give the reporting tool sole ownership of deduplication state |
 | `src/athena/research/clarification/models.py` | 144 | Reviewed; retain seven distinct durable schemas and active cross-field invariants |
-| `src/athena/research/clarification/persistence.py` | 149 | Pending |
+| `src/athena/research/clarification/persistence.py` | 149 | Reviewed; merge draft and journal stores, delete one class and make recovery zero-argument |
 | `src/athena/research/clarification/requirements.py` | 96 | Pending |
 | `src/athena/research/clarification/state.py` | 231 | Pending |
 | `src/athena/research/config.py` | 83 | Pending |

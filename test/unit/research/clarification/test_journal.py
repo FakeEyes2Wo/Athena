@@ -7,16 +7,13 @@ from athena.research.clarification.models import (
     ClarificationDraft,
     ConfirmationJournal,
 )
-from athena.research.clarification.persistence import (
-    ClarificationStore,
-    ConfirmationJournalStore,
-)
+from athena.research.clarification.persistence import ClarificationStore
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "clarification"
 
 
 def test_journal_round_trip(tmp_path) -> None:
-    store = ConfirmationJournalStore(tmp_path)
+    store = ClarificationStore(tmp_path)
     journal = ConfirmationJournal(
         transaction_id="tx-1",
         session_id="s-1",
@@ -28,9 +25,9 @@ def test_journal_round_trip(tmp_path) -> None:
         previous_handoff_text=None,
     )
 
-    store.save(journal)
+    store.save_journal(journal)
 
-    assert store.load() == journal
+    assert store.load_journal() == journal
 
 
 def test_prepared_recovery_restores_state_and_resume_together(tmp_path) -> None:
@@ -45,8 +42,7 @@ def test_prepared_recovery_restores_state_and_resume_together(tmp_path) -> None:
     resume_path.write_text('{"task_text":"before"}', encoding="utf-8")
     drafts.handoff_path.parent.mkdir(parents=True)
     drafts.handoff_path.write_text("before handoff", encoding="utf-8")
-    journals = ConfirmationJournalStore(tmp_path)
-    journals.save(
+    drafts.save_journal(
         ConfirmationJournal(
             transaction_id="tx-restore",
             session_id=draft.session_id,
@@ -64,11 +60,11 @@ def test_prepared_recovery_restores_state_and_resume_together(tmp_path) -> None:
     drafts.draft_path.write_text("{}", encoding="utf-8")
     drafts.handoff_path.write_text("after handoff", encoding="utf-8")
 
-    recovered = journals.recover(drafts, state_path)
+    recovered = drafts.recover()
 
     assert recovered is True
     assert state_path.read_text(encoding="utf-8") == '{"status":"IDLE"}'
     assert resume_path.read_text(encoding="utf-8") == '{"task_text":"before"}'
     assert drafts.draft_path.read_text(encoding="utf-8") == previous_draft
     assert drafts.handoff_path.read_text(encoding="utf-8") == "before handoff"
-    assert journals.load() is None
+    assert drafts.load_journal() is None

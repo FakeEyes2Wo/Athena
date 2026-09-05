@@ -15,7 +15,7 @@ import pytest
 from athena.research import ResearchRuntime
 from athena.research.clarification.errors import ClarificationError
 from athena.research.clarification.models import ConfirmationJournal
-from athena.research.clarification.persistence import ConfirmationJournalStore
+from athena.research.clarification.persistence import ClarificationStore
 
 
 async def _close(runtime: ResearchRuntime) -> None:
@@ -168,7 +168,7 @@ async def test_start_syncs_memory_after_confirmation_rollback(tmp_path: Path) ->
             previous_draft_json="{}",
             previous_handoff_text=None,
         )
-        ConfirmationJournalStore(tmp_path / ".athena").save(journal)
+        ClarificationStore(tmp_path / ".athena").save_journal(journal)
 
         await runtime.start()
 

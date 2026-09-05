@@ -12,10 +12,7 @@ from athena.research.clarification.errors import (
 )
 from athena.research.clarification.handoff import materialize_handoff
 from athena.research.clarification.models import ClarificationDraft, ConfirmationJournal
-from athena.research.clarification.persistence import (
-    ClarificationStore,
-    ConfirmationJournalStore,
-)
+from athena.research.clarification.persistence import ClarificationStore
 
 
 class ArtifactWriter(Protocol):
@@ -31,9 +28,7 @@ class ConfirmationDependencies:
     """Focused ports used by the transaction, independent from ResearchRuntime."""
 
     drafts: ClarificationStore
-    journals: ConfirmationJournalStore
     state: Any
-    state_path: Path
     artifacts: ArtifactWriter
     session_id: str
     lock: asyncio.Lock
@@ -49,7 +44,7 @@ async def commit_confirmation(
     async with deps.lock:
         # Phase 1: settle any interrupted transaction, then validate the exact
         # session, revision, readiness, and unresolved acknowledgement.
-        deps.journals.recover(deps.drafts, deps.state_path)
+        deps.drafts.recover()
         draft = _validated_draft(deps, draft_id, revision, acknowledge_unresolved)
         if draft.status == "CONFIRMED":
             return draft
@@ -57,7 +52,7 @@ async def commit_confirmation(
         # Phase 2: snapshot memory and all durable projections before mutation.
         previous = _StateSnapshot.capture(deps.state)
         journal = _prepare_journal(deps, draft)
-        deps.journals.save(journal)
+        deps.drafts.save_journal(journal)
         try:
             # Phase 3: derive one confirmed handoff, store its artifact, then
             # persist state and draft projections before marking the commit.
@@ -71,16 +66,16 @@ async def commit_confirmation(
                     "artifact_write_failed", "artifact store returned an empty ref"
                 )
             _project_state(deps.state, confirmed, ref)
-            deps.state.save(deps.state_path)
+            deps.state.save(deps.drafts.state_path)
             deps.drafts.save(confirmed)
-            deps.journals.save(
+            deps.drafts.save_journal(
                 journal.model_copy(update={"phase": "COMMITTED", "handoff_ref": ref})
             )
         except Exception as error:
             # This is the transaction boundary: every pre-commit failure must
             # restore memory, state.json, resume.json, draft, and handoff.
             previous.restore(deps.state)
-            deps.journals.recover(deps.drafts, deps.state_path)
+            deps.drafts.recover()
             if isinstance(error, ClarificationError):
                 raise
             code = (
@@ -90,7 +85,7 @@ async def commit_confirmation(
             )
             raise ClarificationError(code, str(error)) from error
         # Phase 4: COMMITTED is durable; launch happens separately and may retry.
-        deps.journals.delete()
+        deps.drafts.delete_journal()
         return confirmed
 
 
@@ -98,7 +93,7 @@ async def recover_confirmation_transaction(runtime: Any) -> None:
     """Recover an interrupted confirmation before lifecycle work resumes."""
     deps = dependencies_from_runtime(runtime)
     async with deps.lock:
-        deps.journals.recover(deps.drafts, deps.state_path)
+        deps.drafts.recover()
 
 
 def dependencies_from_runtime(runtime: Any) -> ConfirmationDependencies:
@@ -106,9 +101,7 @@ def dependencies_from_runtime(runtime: Any) -> ConfirmationDependencies:
     root = runtime.config.paths.athena
     return ConfirmationDependencies(
         drafts=ClarificationStore(root),
-        journals=ConfirmationJournalStore(root),
         state=runtime.state,
-        state_path=runtime.state_path,
         artifacts=runtime.store,
         session_id=runtime.session_id,
         lock=runtime.session.lifecycle.confirmation_lock,
@@ -155,8 +148,10 @@ def _prepare_journal(
         draft_id=draft.draft_id,
         revision=draft.revision,
         phase="PREPARED",
-        previous_state_json=_read_optional(deps.state_path),
-        previous_resume_json=_read_optional(deps.state_path.with_name("resume.json")),
+        previous_state_json=_read_optional(deps.drafts.state_path),
+        previous_resume_json=_read_optional(
+            deps.drafts.state_path.with_name("resume.json")
+        ),
         previous_draft_json=deps.drafts.draft_path.read_text(encoding="utf-8"),
         previous_handoff_text=_read_optional(deps.drafts.handoff_path),
     )

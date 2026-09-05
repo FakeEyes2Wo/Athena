@@ -34,6 +34,11 @@ class ClarificationStore:
         """Return the research checkpoint path beside the draft."""
         return self.root / "state.json"
 
+    @property
+    def journal_path(self) -> Path:
+        """Return the confirmation transaction journal path."""
+        return self.root / "clarification-confirmation.json"
+
     def exists(self) -> bool:
         """Report whether this session has a persisted clarification draft."""
         return self.draft_path.is_file()
@@ -65,26 +70,13 @@ class ClarificationStore:
                 f"draft_write_failed: {error}"
             ) from error
 
-
-class ConfirmationJournalStore:
-    """Read, write, and recover one confirmation journal."""
-
-    def __init__(self, state_root: str | Path) -> None:
-        """Bind transaction recovery to one session state directory."""
-        self.root = Path(state_root).resolve()
-
-    @property
-    def path(self) -> Path:
-        """Return the session's confirmation journal path."""
-        return self.root / "clarification-confirmation.json"
-
-    def load(self) -> ConfirmationJournal | None:
+    def load_journal(self) -> ConfirmationJournal | None:
         """Load a pending journal or report that no transaction exists."""
-        if not self.path.is_file():
+        if not self.journal_path.is_file():
             return None
         try:
             return ConfirmationJournal.model_validate_json(
-                self.path.read_text(encoding="utf-8")
+                self.journal_path.read_text(encoding="utf-8")
             )
         except Exception as error:
             raise ClarificationError(
@@ -92,31 +84,33 @@ class ConfirmationJournalStore:
                 f"confirmation journal is corrupt: {error}",
             ) from error
 
-    def save(self, journal: ConfirmationJournal) -> None:
+    def save_journal(self, journal: ConfirmationJournal) -> None:
         """Atomically persist the latest transaction phase."""
         try:
-            atomic_write_json(self.path, journal.model_dump(mode="json"))
+            atomic_write_json(self.journal_path, journal.model_dump(mode="json"))
         except OSError as error:
             raise ClarificationError("confirmation_write_failed", str(error)) from error
 
-    def delete(self) -> None:
+    def delete_journal(self) -> None:
         """Remove the journal after commit or rollback completes."""
-        self.path.unlink(missing_ok=True)
+        self.journal_path.unlink(missing_ok=True)
 
-    def recover(self, drafts: ClarificationStore, state_path: Path) -> bool:
+    def recover(self) -> bool:
         """Rollback prepared data or finish committed derived files."""
-        journal = self.load()
+        journal = self.load_journal()
         if journal is None:
             return False
         if journal.phase == "PREPARED":
-            _restore(state_path, journal.previous_state_json)
-            _restore(state_path.with_name("resume.json"), journal.previous_resume_json)
-            atomic_write_text(drafts.draft_path, journal.previous_draft_json)
-            _restore(drafts.handoff_path, journal.previous_handoff_text)
+            _restore(self.state_path, journal.previous_state_json)
+            _restore(
+                self.state_path.with_name("resume.json"), journal.previous_resume_json
+            )
+            atomic_write_text(self.draft_path, journal.previous_draft_json)
+            _restore(self.handoff_path, journal.previous_handoff_text)
         else:
-            draft = _confirmed_draft(drafts, journal)
-            materialize_handoff(drafts.handoff_path, draft)
-        self.delete()
+            draft = _confirmed_draft(self, journal)
+            materialize_handoff(self.handoff_path, draft)
+        self.delete_journal()
         return True
 
 
@@ -144,4 +138,4 @@ def _restore(path: Path, text: str | None) -> None:
         atomic_write_text(path, text)
 
 
-__all__ = ["ClarificationStore", "ConfirmationJournalStore"]
+__all__ = ["ClarificationStore"]

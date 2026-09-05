@@ -7,10 +7,7 @@ import pytest
 from athena.research.clarification.errors import ClarificationPersistenceError
 from athena.research.clarification.handoff import materialize_handoff, render_handoff
 from athena.research.clarification.models import ClarificationDraft, ConfirmationJournal
-from athena.research.clarification.persistence import (
-    ClarificationStore,
-    ConfirmationJournalStore,
-)
+from athena.research.clarification.persistence import ClarificationStore
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "clarification"
 
@@ -71,8 +68,7 @@ def test_confirmation_journal_round_trip_and_recovery(tmp_path: Path) -> None:
     store.save(draft)
     before = store.draft_path.read_text(encoding="utf-8")
 
-    journals = ConfirmationJournalStore(tmp_path)
-    journal = journals.load()
+    journal = store.load_journal()
     assert journal is None
 
     store.draft_path.write_text('{"status":"CONFIRMED"}', encoding="utf-8")
@@ -87,8 +83,8 @@ def test_confirmation_journal_round_trip_and_recovery(tmp_path: Path) -> None:
         previous_draft_json=before,
         previous_handoff_text=None,
     )
-    journals.save(journal)
-    assert journals.load().draft_id == "draft-1"
-    assert journals.recover(store, store.state_path) is True
+    store.save_journal(journal)
+    assert store.load_journal().draft_id == "draft-1"
+    assert store.recover() is True
     assert store.draft_path.read_text(encoding="utf-8") == before
-    assert journals.load() is None
+    assert store.load_journal() is None
