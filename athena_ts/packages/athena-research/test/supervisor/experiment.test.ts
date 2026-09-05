@@ -372,11 +372,16 @@ describe("PlanRunner.run_turn", () => {
     expect(workspace.messages).toEqual([])
   })
 
-  it("redacts evaluator failure details", async () => {
+  it.each([
+    "api_key=private-value", "API-KEY:private-value",
+    "access_token=private-value", "auth-token:private-value",
+    "password=private-value", "secret:private-value",
+    "sk-private-value", "api_key=private-value; password=private-value",
+  ])("redacts evaluator failure details: %s", async (secret) => {
     const execution = new FakeExecution([new CommandResult(true, "ok", "", 0)])
     const { runner, planInput, branch, store } = await runnerSetup(
       execution,
-      new FakeEvaluator(0.9, new ScoringError("row ids do not align; api_key=private-value"))
+      new FakeEvaluator(0.9, new ScoringError(`row ids do not align; ${secret}`))
     )
     writeRunManifest(branch, { commands: [["node", "predict.py"]] })
     const state = parseOrThrow(PlanStateSchema, { kind: "SEARCH", context_ref: REF, turns_used: 1, turn_limit: 12, patience: 4, stale_rounds: 2 })
@@ -389,6 +394,31 @@ describe("PlanRunner.run_turn", () => {
     const evidence = JSON.parse(await store.getText(result.evidence_ref!))
     expect(evidence["error"]).not.toContain("private-value")
     expect(evidence["error"]).toContain("[REDACTED]")
+    expect(evidence["error"]).toBe(result.error)
+  })
+
+  it("normalizes whitespace and caps persisted failure text after redaction", async () => {
+    const { runner, planInput, branch, store } = await runnerSetup(
+      new FakeExecution([]),
+      new FakeEvaluator(0.9, new ScoringError("failure\r\napi_key=private-value\t" + "x".repeat(1100))),
+    )
+    writeRunManifest(branch, { commands: [] })
+    const result = await runner.runTurn("h1", searcState(), planInput)
+    expect(result.error).toHaveLength(1000)
+    expect(result.error).toMatch(/^failure api_key=\[REDACTED\] x+$/)
+    expect(JSON.parse(await store.getText(result.evidence_ref!)).error).toBe(result.error)
+  })
+
+  it("uses the same redaction boundary for execution failures", async () => {
+    const { runner, planInput, branch, store } = await runnerSetup(
+      new FakeExecution([new CommandResult(false, "", "password=private-value; sk-private-value", 1)]),
+      new FakeEvaluator(),
+    )
+    writeRunManifest(branch, { commands: [["node", "train.py"]] })
+    const result = await runner.runTurn("h1", searcState(), planInput)
+    expect(result.kind).toBe("execution_failed")
+    expect(result.error).toBe("command failed (exit 1): password=[REDACTED]; [REDACTED]")
+    expect(JSON.parse(await store.getText(result.evidence_ref!)).error).toBe(result.error)
   })
 
   it("invalid manifest is rejected without running commands", async () => {

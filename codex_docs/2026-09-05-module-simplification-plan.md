@@ -30,6 +30,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove the unused candidate score wrapper and unpopulated validation metadata.
 - [x] Replace the ResearchState class with schema-derived plain state and explicit persistence.
 - [x] Consolidate Plan schemas into shared contracts and reduce unused input/decision fields.
+- [x] Remove the unused event projection module and retain redaction at the live failure boundary.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -216,6 +217,16 @@ PlanDecision drops unused suggestions (three output fields to two), including DS
 The research/DSH baseline passed 250 tests; the final focused selection passed 249, including 36 Plan contract tests and 23 state tests. All five package builds passed. Removed exactly three ignored dist/supervisor/plans JS/map/declaration artifacts; the old source remains recoverable from Git history. Removed-module searches find no remaining imports. Baseline coverage is now 89/602 after closing plans.ts and plans.test.ts. The larger Supervisor/DSH files remain reviewed only at affected sites; next full module review is the event projection boundary. Whole-repository acceptance, main merge/push and temporary task branch/worktree cleanup remain mandatory and unfinished.
 
 Plan final verification: all five builds passed; full TypeScript workspace passed 502 tests across 54 files with `npm test -- --testTimeout=30000`. The one-test net decrease reflects removal/replacement of obsolete helper/field cases, not skipping failures. git diff --check passed; obsolete module imports and all three compiled files are absent. Default-timeout reliability and whole-application readiness remain unproven.
+
+Event module review: fully read events.ts and its tests, then search the tracked TypeScript implementation for every export and constructor. EventProjector, its unused store constructor argument/sequence state, both event schemas/types, sanitizeTerminalText and truncateMiddle have no production consumers. Actual Supervisor/DSH publication does not use this adapter. Delete the entire events.ts module and its eight exclusive tests rather than refactoring the unconnected projector. Remove all corresponding package exports, with negative public API coverage.
+
+The only live function was redact, called exclusively by PlanRunner.cleanError. Inline its two ordered replacements there, removing the regex/options container and loop. Preserve whitespace normalization, both existing secret patterns, replacement strings and the final 1000-character limit. This does not add comprehensive secret detection or terminal sanitization to the application's actual event stream, and the removed module never provided those guarantees there. Actual event publication remains unchanged.
+
+Expand the real PlanRunner failure tests to cover eight secret syntax combinations, whitespace/length behavior and execution failures, checking persisted evidence equals the returned redacted error. There are now 33 PlanRunner tests. Baseline event/PlanRunner/Supervisor/DSH checks passed 48 tests; after deleting eight obsolete cases and adding nine live-boundary cases the focused selection passed 49. That first selection emitted a stale-source-map warning from the old compiled event module; remove exactly its three ignored JS/map/declaration files and rebuild all five packages successfully. Source/test deletions remain recoverable from Git history.
+
+Event final evidence: all five builds passed. After rebuilding without stale event artifacts, the full TypeScript workspace passed 503 tests across 53 files with `npm test -- --testTimeout=30000`. Removed symbols remain only in negative API assertions; source/declaration/map removals and git diff --check are verified. Default-timeout reliability, comprehensive secret/terminal filtering and whole-application readiness are not claimed.
+
+Closing the event source/test reviews brings baseline coverage to 91/602. Next full module review: Supervisor scheduling and task ownership; its earlier scoped edits do not count as a completed full-file review. Whole-repository acceptance, main merge/push and task branch/worktree cleanup remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -790,7 +801,7 @@ Plan final verification: all five builds passed; full TypeScript workspace passe
 | `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |
 | `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Reviewed; two-argument run, canonical source snapshot, shared restore and bounded file staging |
 | `athena_ts/packages/athena-research/src/shell.ts` | 48 | Reviewed; deleted adapter exclusively used by removed runtime |
-| `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Reviewed; delete unconnected projector/schemas/helpers; fold live redaction into PlanRunner |
 | `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Reviewed; consolidated failure handling/traversal and removed unused timeout configuration |
 | `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Reviewed; merge schemas into contracts.ts, privatize serialization and delete file |
 | `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Reviewed; merge policy boundary into ranker.ts and delete file; priority arguments 2 to 1; 12 tests pass |
@@ -805,7 +816,7 @@ Plan final verification: all five builds passed; full TypeScript workspace passe
 | `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; deleted after full caller tracing proved standalone root unused |
 | `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Reviewed; seven numeric/error/prediction/identity/direction cases |
 | `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Reviewed; five empty/zero/formatting/pending/validation rendering cases |
-| `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Reviewed; delete exclusive dead-API tests; live failure/evidence tests cover redaction |
 | `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Reviewed; manifest/scoring/settlement, bundle failures and recursive presence |
 | `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Reviewed; 36 strict data/reference/snapshot/legacy-input cases; persistence tests own serialization |
 | `athena_ts/packages/athena-research/test/supervisor/policy.test.ts` | 78 | Reviewed; retain Elo contract tests; remove tests for deleted unused helper; 12 tests pass |

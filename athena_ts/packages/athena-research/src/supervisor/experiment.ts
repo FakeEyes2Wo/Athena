@@ -23,7 +23,6 @@ import {
 import { loadDirectory, packDirectory } from "../script_runner.js"
 import { ScoringError, type Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
-import { redact } from "./events.js"
 
 export type Direction = "maximize" | "minimize"
 
@@ -189,7 +188,10 @@ export async function applyTrustedScore(
 
 
 function cleanError(error: string): string {
-  return redact(error.split(/\s+/).join(" ")).slice(0, 1000)
+  return error.split(/\s+/).join(" ")
+    .replace(/(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\b\s*[=:]\s*)([^\s,;]+)/gi, "$1[REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .slice(0, 1000)
 }
 
 /** 执行一次 Plan turn：manifest、打分、提交与 trusted patience。 */

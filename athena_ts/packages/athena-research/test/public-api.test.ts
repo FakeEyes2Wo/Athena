@@ -13,6 +13,8 @@ describe("research public surface", () => {
       "CandidateEvaluationSchema",
       "ResearchState",
       "planStateToJSON",
+      "EventProjector", "OutputEventSchema", "StateEventSchema",
+      "redact", "sanitizeTerminalText", "truncateMiddle",
     ]) expect(api).not.toHaveProperty(name)
   })
 

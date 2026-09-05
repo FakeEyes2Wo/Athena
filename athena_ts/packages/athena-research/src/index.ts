@@ -20,15 +20,6 @@ export {
   readExperimentManifest,
 } from "./supervisor/experiment.js"
 export type { Direction, ExperimentManifest, PlanTurnResult } from "./supervisor/experiment.js"
-export {
-  redact,
-  sanitizeTerminalText,
-  truncateMiddle,
-  EventProjector,
-  OutputEventSchema,
-  StateEventSchema,
-} from "./supervisor/events.js"
-export type { OutputEvent, StateEvent } from "./supervisor/events.js"
 export { buildFinalReport } from "./report.js"
 export { runValidationPlan } from "./supervisor/validation.js"
 export { PrepareResultSchema, createPrepareWorkspace, freezeEvaluator, runEvaluatorPlan, runPreparePlan } from "./supervisor/prepare.js"
