@@ -51,19 +51,11 @@ DEFAULT_PERMISSIONS: dict[str, set[str]] = {
 
 
 class _RuntimeTool(BaseTool):
-    """持有 AgentRuntime 与目标 agent_id 的编排工具基类。
-
-    三个 wait/send 工具共用 ``(runtime, agent_id)`` 构造与存储；spawn 的
-    ``parent_id`` 语义不同、followup 无需目标 id，各自独立实现。
-    """
+    """绑定 runtime 与调用方 agent_id；用于 spawn、send 和 wait。"""
 
     def __init__(self, runtime: AgentRuntime, agent_id: AgentId) -> None:
         self._runtime = runtime
         self._agent_id = agent_id
-
-    async def execute(self, input: dict, ctx: ToolContext) -> dict:
-        """执行工具逻辑（子类实现）。"""
-        raise NotImplementedError
 
 
 class _SpawnTool(_RuntimeTool):
@@ -123,8 +115,8 @@ class _SendTool(_RuntimeTool):
         return {"sent": True}
 
 
-class _FollowupTool(_RuntimeTool):
-    """follow-up 原实例并创建新 turn；目标 agent 由输入指定，故基座 ``agent_id`` 为空。"""
+class _FollowupTool(BaseTool):
+    """follow-up 原实例并创建新 turn；目标 agent 由输入指定。"""
 
     spec = ToolSpec(
         name="followup",
@@ -133,7 +125,7 @@ class _FollowupTool(_RuntimeTool):
     )
 
     def __init__(self, runtime: AgentRuntime) -> None:
-        super().__init__(runtime, agent_id="")
+        self._runtime = runtime
 
     async def execute(self, input: dict, ctx: ToolContext) -> dict:
         """follow-up 原实例并创建新 turn，返回新 Run id。"""

@@ -411,7 +411,7 @@ def register_supervisor_agent(
     ``kaggle_stack`` 提供时给 Supervisor 挂上 ``kaggle_get_competition``。
     """
 
-    def factory(_agent_id: str, _config: str | None = None) -> AgentSpec:
+    def factory(_agent_id: str) -> AgentSpec:
         """Construct one SupervisorAgent specification."""
         projector = SupervisorToolProjector(actions, kaggle_stack)
         tools = supervisor_tool_registry(actions, kaggle_stack)

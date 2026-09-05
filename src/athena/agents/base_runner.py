@@ -99,7 +99,7 @@ class BaseAgentRunner:
         # Mailbox → model memory（memory-flow-fixes §Mailbox To Memory）：未读消息以
         # 稳定信封追加到会话 ContextManager。发生在 ThreadRuntime 快照之后 → turn
         # 失败时 rollback 一并移除；与 trigger 完全一致的消息跳过。
-        _append_mailbox_messages(session.memory.raw, trigger, unread)
+        _append_mailbox_messages(session.memory, trigger, unread)
         input_text = trigger.content if trigger is not None else ""
         messages = [trigger, *unread] if trigger is not None else unread
         # 每 turn 按 agent_type + RunSession 投影编排工具（设计 §5.2）
@@ -126,7 +126,7 @@ class BaseAgentRunner:
             emit=emit,
             tools=tools,
             cancel=asyncio.Event(),
-            memory=session.memory.raw,
+            memory=session.memory,
             input_text=input_text,  # 迁移期兼容视图：仅当前触发消息 content
             messages=messages,
             ask_user=self._ask_user(thread, turn) if self._ask_user else None,

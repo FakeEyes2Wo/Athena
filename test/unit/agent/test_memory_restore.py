@@ -24,12 +24,12 @@ class MemoryWriterRunner:
     async def run(self, request, *, session, emit) -> dict:
         contents = [
             p.content
-            for m in session.memory.raw.items
+            for m in session.memory.items
             for p in m.parts
             if isinstance(p, UserPromptPart)
         ]
         self.seen.append(contents)
-        session.memory.raw.append(
+        session.memory.append(
             ModelRequest(parts=[UserPromptPart(content=request["msg"])])
         )
         return {"ok": True}
@@ -39,7 +39,7 @@ def _runtime(project_root, runner) -> AgentRuntime:
     registry = AgentTypeRegistry()
     registry.register(
         "mem",
-        lambda _aid, _cfg=None: AgentSpec(runner=runner, codec=JsonCodec()),
+        lambda _aid: AgentSpec(runner=runner, codec=JsonCodec()),
     )
     return AgentRuntime(
         type_registry=registry,

@@ -14,7 +14,7 @@ from athena.core.agent.types import (
     ErrorCode,
 )
 
-AgentFactory = Callable[[AgentId, str | None], AgentSpec]
+AgentFactory = Callable[[AgentId], AgentSpec]
 
 
 class AgentTypeRegistry:
@@ -47,7 +47,7 @@ class AgentTypeRegistry:
             raise AgentCommandError(
                 ErrorCode.NOT_FOUND, f"unknown agent_type: {agent_type}"
             )
-        return factory(agent_id, None)
+        return factory(agent_id)
 
     @property
     def types(self) -> tuple[str, ...]:

@@ -213,7 +213,7 @@ async def test_restart_resumes_stable_agent_context_and_workspace(harness: _Harn
     registry = AgentTypeRegistry()
     registry.register(
         "plan",
-        lambda agent_id, _config=None: AgentSpec(
+        lambda agent_id: AgentSpec(
             runner=_ControlledRunner(agent_id, harness), codec=JsonCodec()
         ),
     )

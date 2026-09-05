@@ -115,9 +115,7 @@ async def test_research_runtime_writes_agent_recovery_log(
     try:
         runtime.registry.register(
             "echo",
-            lambda _agent_id, _config=None: AgentSpec(
-                runner=EchoRunner(), codec=JsonCodec()
-            ),
+            lambda _agent_id: AgentSpec(runner=EchoRunner(), codec=JsonCodec()),
         )
         _, run_id = await runtime.agents.create_root(
             "echo", {"content": "first"}, agent_id="hyp_vit"

@@ -65,13 +65,13 @@ async def test_wait_for_registers_when_target_starts_new_turn_after_terminal(
     registry = AgentTypeRegistry()
     registry.register(
         "block",
-        lambda aid, cfg=None: AgentSpec(
+        lambda aid: AgentSpec(
             runner=BaseAgentRunner(BlockingAgent(gate)), codec=JsonCodec()
         ),
     )
     registry.register(
         "stub",
-        lambda aid, cfg=None: AgentSpec(
+        lambda aid: AgentSpec(
             runner=BaseAgentRunner(StubAgent(store)), codec=JsonCodec()
         ),
     )

@@ -45,11 +45,11 @@ def _runtime(agent: BaseAgent, agent_type: str, tmp_path) -> AgentRuntime:
     registry = AgentTypeRegistry()
     runner = BaseAgentRunner(agent, projector=RunToolProjector(), agent_type=agent_type)
     registry.register(
-        agent_type, lambda _aid, _cfg=None: AgentSpec(runner=runner, codec=JsonCodec())
+        agent_type, lambda _aid: AgentSpec(runner=runner, codec=JsonCodec())
     )
     registry.register(
         "plot",
-        lambda _aid, _cfg=None: AgentSpec(
+        lambda _aid: AgentSpec(
             runner=BaseAgentRunner(_SimpleAgent()), codec=JsonCodec()
         ),
     )
@@ -122,14 +122,12 @@ async def test_send_tool_source_is_calling_agent(tmp_path) -> None:
     target_agent = RecordingTarget()
     registry.register(
         "target",
-        lambda _aid, _cfg=None: AgentSpec(
-            runner=BaseAgentRunner(target_agent), codec=JsonCodec()
-        ),
+        lambda _aid: AgentSpec(runner=BaseAgentRunner(target_agent), codec=JsonCodec()),
     )
     sender = SenderAgent()
     registry.register(
         "sender",
-        lambda _aid, _cfg=None: AgentSpec(
+        lambda _aid: AgentSpec(
             runner=BaseAgentRunner(
                 sender, projector=RunToolProjector(), agent_type="data"
             ),

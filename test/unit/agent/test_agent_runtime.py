@@ -107,7 +107,7 @@ async def test_create_root_rejects_stable_id_bound_to_different_type(tmp_path):
     rt = make_runtime(tmp_path)
     rt._registry.register(
         "other",
-        lambda _aid, _cfg=None: AgentSpec(
+        lambda _aid: AgentSpec(
             runner=BaseAgentRunner(FailingAgent()), codec=JsonCodec()
         ),
     )
@@ -181,7 +181,7 @@ async def test_interrupt_marks_run_interrupted(tmp_path):
     registry = AgentTypeRegistry()
     registry.register(
         "block",
-        lambda aid, cfg=None: AgentSpec(
+        lambda aid: AgentSpec(
             runner=BaseAgentRunner(BlockingAgent(gate)), codec=JsonCodec()
         ),
     )
@@ -215,7 +215,7 @@ async def test_failed_run_summary_preserves_exception_message(tmp_path):
     registry = AgentTypeRegistry()
     registry.register(
         "fail",
-        lambda aid, cfg=None: AgentSpec(
+        lambda aid: AgentSpec(
             runner=BaseAgentRunner(FailingAgent()), codec=JsonCodec()
         ),
     )

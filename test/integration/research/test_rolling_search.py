@@ -153,7 +153,7 @@ class _Harness:
         registry = AgentTypeRegistry()
         registry.register(
             "plan",
-            lambda agent_id, _config=None: AgentSpec(
+            lambda agent_id: AgentSpec(
                 runner=_ControlledRunner(agent_id, self), codec=JsonCodec()
             ),
         )

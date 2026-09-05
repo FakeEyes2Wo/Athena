@@ -103,7 +103,7 @@ def register_prompt_agent(
     ``ideator_gated_agent.md``），是目前唯一的用例。
     """
 
-    def factory(agent_id: str, _config: str | None = None) -> AgentSpec:
+    def factory(agent_id: str) -> AgentSpec:
         root = workspace(agent_id) if callable(workspace) else workspace
         tools = generic_tool_registry(root, runtime=runtime)
         resolved = extra_tools() if callable(extra_tools) else extra_tools

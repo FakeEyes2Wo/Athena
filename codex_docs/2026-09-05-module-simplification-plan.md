@@ -24,7 +24,13 @@ Verification: `python -m pytest test/unit/serving -q -p no:cacheprovider` return
 
 Memory module: all four files and runtime call sites inspected. Retain the context/token accounting, summarization, and JSONL persistence boundaries. Removed the recorder's per-instance reference to the global serialization adapter (5 slots to 4), and made asynchronous recovery call the synchronous implementation directly, deleting the private forwarding function. The existing rollback/compaction checkpoint contract remains used by ThreadRuntime. Focused memory, rollout recovery, and agent restore tests: 42 passed before and after.
 
-Additional reads awaiting module-wide decisions: `core/agent/session.py` contains a legacy memory view still consumed by BaseAgentRunner; removing it requires runner migration. `utils/single_turn_chat.py` forwards model configuration through an eleven-parameter convenience API; review its call sites and the agent construction API together before changing it. Remote execution's `mirror.py`, `mirrored.py`, and `backend.py` have been read; mirror transfer policies and the backend output-return contract require tracing through the pool/channel before deciding how to consolidate them.
+Agent session and orchestration: removed `_MemoryView` and migrated every `.memory.raw` consumer to the thread-owned ContextManager. RunSession now uses a frozen, slotted dataclass instead of a handwritten constructor and four forwarding properties. Bindings remain immutable; mailbox reads remain non-consuming until checkpoint; failed turns retain retryable messages. Both list and deque mailboxes are covered. Followup tools retain only runtime, deleting the unused empty agent ID; the shared runtime tool inherits BaseTool's abstract execute contract instead of repeating it.
+
+Agent registry: factories now accept only agent_id. Deleted the config parameter that require_spec always supplied as None, migrated both production factories and test factories, preserving fresh per-instance bindings, duplicate registration errors, and sorted type enumeration.
+
+Verification for session/orchestration/registry: before the latest tool and factory simplifications, `test/unit/agent test/unit/app_server` returned 289 passed and 25 subtests. After migration, those suites plus Kaggle wiring/handoff and integration rolling-search/search-recovery returned 321 passed and 25 subtests. Session coverage includes list and deque mailbox acknowledgement and immutable memory binding. The scope ledger now has 12 reviewed baseline files, not a completed repository review.
+
+Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, `__init__.py`, `agents/prompt_agent.py`, and `core/tool.py` have been read. AgentOutcome.next_context_ref still has active ThreadRuntime consumers: remove only alongside a complete context handoff migration, not as a dead field. `agent_runtime.py` and `supervisor_agent.py` are partially inspected, not completed reviews. `utils/single_turn_chat.py` forwards model configuration through an eleven-parameter convenience API; review its call sites and the agent construction API together before changing it. Remote execution's `mirror.py`, `mirrored.py`, and `backend.py` have been read; mirror transfer policies and the backend output-return contract require tracing through the pool/channel before deciding how to consolidate them.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -147,13 +153,13 @@ Additional reads awaiting module-wide decisions: `core/agent/session.py` contain
 | `athena-gui/src/vite-env.d.ts` | 1 | Pending |
 | `src/athena/__init__.py` | 1 | Pending |
 | `src/athena/agents/__init__.py` | 4 | Pending |
-| `src/athena/agents/base_runner.py` | 142 | Pending |
+| `src/athena/agents/base_runner.py` | 142 | Reviewed; use session memory directly; retain mailbox and tool projection semantics |
 | `src/athena/agents/ideator/__init__.py` | 4 | Pending |
 | `src/athena/agents/ideator/ideator.py` | 624 | Pending |
 | `src/athena/agents/ideator/types.py` | 69 | Pending |
 | `src/athena/agents/ideator_agent.py` | 157 | Pending |
 | `src/athena/agents/kaggle_handoff_agent.py` | 108 | Pending |
-| `src/athena/agents/orchestration.py` | 215 | Pending |
+| `src/athena/agents/orchestration.py` | 215 | Reviewed; remove dummy followup attribute and repeated abstract method; retain tool policy |
 | `src/athena/agents/prepare_agent.py` | 145 | Pending |
 | `src/athena/agents/prompt_agent.py` | 126 | Pending |
 | `src/athena/agents/prompts/baseline_ideator_agent.md` | 133 | Pending |
@@ -193,9 +199,9 @@ Additional reads awaiting module-wide decisions: `core/agent/session.py` contain
 | `src/athena/core/agent/agent_runtime.py` | 730 | Pending |
 | `src/athena/core/agent/models.py` | 83 | Pending |
 | `src/athena/core/agent/provider.py` | 599 | Pending |
-| `src/athena/core/agent/registry.py` | 55 | Pending |
+| `src/athena/core/agent/registry.py` | 55 | Reviewed; factory parameters reduced from 2 to 1; migrate production and test factories |
 | `src/athena/core/agent/runtime.py` | 654 | Pending |
-| `src/athena/core/agent/session.py` | 82 | Pending |
+| `src/athena/core/agent/session.py` | 82 | Reviewed; delete memory facade and property forwarding; preserve checkpoint ownership |
 | `src/athena/core/agent/settings.py` | 242 | Pending |
 | `src/athena/core/agent/tools/__init__.py` | 5 | Pending |
 | `src/athena/core/agent/tools/user_input.py` | 157 | Pending |

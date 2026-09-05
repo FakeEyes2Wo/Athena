@@ -34,9 +34,7 @@ def _runtime(agent: BaseAgent, tmp_path) -> AgentRuntime:
     registry = AgentTypeRegistry()
     registry.register(
         "echo",
-        lambda _aid, _cfg=None: AgentSpec(
-            runner=BaseAgentRunner(agent), codec=JsonCodec()
-        ),
+        lambda _aid: AgentSpec(runner=BaseAgentRunner(agent), codec=JsonCodec()),
     )
     rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
     rt.start()

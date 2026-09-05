@@ -118,7 +118,7 @@ def make_runtime(tmp_path: Path) -> AgentRuntime:
     registry = AgentTypeRegistry()
     registry.register(
         "stub",
-        lambda aid, cfg=None: AgentSpec(
+        lambda aid: AgentSpec(
             runner=BaseAgentRunner(StubAgent(store)), codec=JsonCodec()
         ),
     )

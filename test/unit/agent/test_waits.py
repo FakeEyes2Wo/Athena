@@ -22,7 +22,7 @@ def _runtime(tmp_path, types: dict[str, object]) -> AgentRuntime:
     for name, runner in types.items():
         registry.register(
             name,
-            lambda _aid, _cfg=None, r=runner: AgentSpec(runner=r, codec=JsonCodec()),
+            lambda _aid, r=runner: AgentSpec(runner=r, codec=JsonCodec()),
         )
     rt = AgentRuntime(type_registry=registry, project_root=tmp_path)
     rt.start()

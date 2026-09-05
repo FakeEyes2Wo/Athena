@@ -20,7 +20,7 @@ class _CountingRunner:
 
 
 def _factory() -> callable:
-    return lambda _aid, _cfg=None: AgentSpec(runner=EchoRunner(), codec=JsonCodec())
+    return lambda _aid: AgentSpec(runner=EchoRunner(), codec=JsonCodec())
 
 
 def test_register_and_require_spec_round_trip() -> None:
@@ -56,7 +56,7 @@ def test_factory_creates_independent_binding_per_agent_id() -> None:
     registry = AgentTypeRegistry()
     registry.register(
         "echo",
-        lambda _aid, _cfg=None: AgentSpec(runner=_CountingRunner(), codec=JsonCodec()),
+        lambda _aid: AgentSpec(runner=_CountingRunner(), codec=JsonCodec()),
     )
     first = registry.require_spec("echo", agent_id="a1").runner
     second = registry.require_spec("echo", agent_id="a2").runner
