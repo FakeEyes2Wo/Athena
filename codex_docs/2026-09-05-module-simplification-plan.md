@@ -18,6 +18,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Consolidate TypeScript Agent factory and single-turn sampling configuration.
 - [x] Remove the unused TypeScript dual-signature Agent runner adapter.
 - [x] Remove unused TypeScript Agent state and replace data-only constructors with types.
+- [x] Remove unused Worker text forwarding and consolidate provider ownership.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -105,7 +106,13 @@ Replace three behavior-free classes (AgentOutcome, StepOutcome, ToolCall) with e
 
 Model evidence: focused Agent/Worker baseline returned 142 passed; after the new public-surface regression and stronger result/context shape assertions, 143 passed. All five package builds passed. Full TypeScript verification with `npm test -- --testTimeout=30000` returned 442 passed across 52 files; this command-only timeout override remains explicit because default-timeout reliability is unresolved. Tracked source searches find no removed field or constructor consumers, and git diff --check passed. Existing structured artifact/retry, tool sequencing, memory reuse, native cancellation and askUser tests remain in the passing selection.
 
-Next module: Worker source and its test are read, but their broader structured-output/context construction decision remains Pending. Review shared text/structured call setup and Worker configuration ownership next. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+TypeScript Worker review: read the full source/test and trace ResearchRuntime's structured, plan-decision and ideator consumers. No tracked caller uses WorkerRunner.runText; delete it rather than adding another shared chat abstraction. Text callers can use the existing singleTurnChat API. Worker now owns store plus provider instead of store/model/client (three attributes to two), constructing one reusable ResponsesProvider instead of rebuilding it each turn. Provider selection and unsupported-provider validation now occur at Worker construction; injected transport is reused and lazy SDK client resolution still occurs only when streaming needs it. Reconfiguration requires a new Worker; mutable environment changes no longer switch an existing Worker's provider.
+
+Retain the structured Worker boundary: fresh thread/turn identities, literal input, optional caller memory/tools, schema validation/retries and artifact round-trip differ from text extraction. Keep planDecision's null-on-failure contract because ResearchRuntime consumes it. Retain the Zod adapter and shared output definitions; runtime still needs the parsed result contract. Source shrinks from 125 to 107 lines. New OpenAI/DeepSeek cases verify provider snapshot, fresh default history, explicit memory reuse, one system prompt and literal artifact-like input. The first new assertion omitted DeepSeek's existing schema instruction; corrected the expected requests without removing that behavior. Baseline reviewed coverage is now 67/602.
+
+Worker evidence: Agent/Worker baseline returned 143 passed. Final Worker tests returned four passed, and all five package builds passed. After correcting the new DeepSeek request expectation, the full TypeScript workspace returned 444 passed across 52 files with `npm test -- --testTimeout=30000`; no timeout configuration was committed. Tracked searches find no runText callers, and git diff --check passed.
+
+Next module: ResearchRuntime has now been read completely, but caller/test tracing and implementation decisions remain Pending. Review its construction-only attributes, repeated settings validation and mutation ordering, loose transport/output casts and orchestration adapters. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -687,7 +694,7 @@ Next module: Worker source and its test are read, but their broader structured-o
 | `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Pending |
 | `athena_ts/packages/athena-research/src/validation.ts` | 54 | Pending |
-| `athena_ts/packages/athena-research/src/worker.ts` | 125 | Pending |
+| `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; removed unused text forwarding, provider ownership 3 attributes to 2 |
 | `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Pending |
 | `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Pending |
@@ -703,7 +710,7 @@ Next module: Worker source and its test are read, but their broader structured-o
 | `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Pending |
 | `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Pending |
-| `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Pending |
+| `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Reviewed; structured persistence/failure and provider/history/literal-input contracts |
 | `athena_ts/vitest.workspace.ts` | 4 | Pending |
 | `scripts/build.cjs` | 62 | Pending |
 | `scripts/check_code_style.py` | 162 | Pending |

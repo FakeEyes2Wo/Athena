@@ -1,6 +1,6 @@
 /**
  * LLM worker 抽象：用 M1 @athena/agent 的 Agent/ResponsesProvider 直接运行 worker
- * turn（结构化输出 / 文本），替代 M4 AgentRuntime 门面。
+ * 结构化 turn，替代 M4 AgentRuntime 门面。文本调用使用 singleTurnChat。
  */
 
 import { randomBytes } from "node:crypto"
@@ -11,7 +11,6 @@ import {
   ContextManager,
   ResponsesProvider,
   ToolRegistry,
-  singleTurnChat,
   type StructuredOutputType,
 } from "@athena/agent"
 import {
@@ -50,14 +49,12 @@ export interface WorkerRunnerOptions {
 }
 
 export class WorkerRunner {
-  private store: ArtifactStore
-  private model: string
-  private client: unknown
+  private readonly store: ArtifactStore
+  private readonly provider: ResponsesProvider
 
   constructor(opts: WorkerRunnerOptions) {
     this.store = opts.store
-    this.model = opts.model
-    this.client = opts.client ?? null
+    this.provider = new ResponsesProvider(opts.model, { client: opts.client as never })
   }
 
   /** 运行一次结构化输出 turn，返回已解析的结构化结果。 */
@@ -66,9 +63,8 @@ export class WorkerRunner {
     outputType: StructuredOutputType,
     opts: { systemPrompt?: string; memory?: ContextManager | null; tools?: ToolRegistry | null } = {}
   ): Promise<T> {
-    const provider = new ResponsesProvider(this.model, { client: this.client as never })
     const tools = opts.tools ?? new ToolRegistry()
-    const agent = new Agent(provider, tools, opts.systemPrompt ?? "", null, {
+    const agent = new Agent(this.provider, tools, opts.systemPrompt ?? "", null, {
       outputType,
       artifacts: this.store,
     })
@@ -98,19 +94,6 @@ export class WorkerRunner {
     const outcome = await agent.run(ctx)
     const json = await this.store.getText(outcome.resultRef)
     return outputType.parseJson(json) as T
-  }
-
-  /** 运行一次文本 turn。 */
-  async runText(
-    prompt: string,
-    opts: { systemPrompt?: string | null; memory?: ContextManager | null } = {}
-  ): Promise<string> {
-    return singleTurnChat(prompt, {
-      model: this.model,
-      client: this.client as never,
-      systemPrompt: opts.systemPrompt ?? null,
-      memory: opts.memory ?? null,
-    })
   }
 
   /** 运行一次 PlanDecision turn（无记忆复用时用单轮）。 */
