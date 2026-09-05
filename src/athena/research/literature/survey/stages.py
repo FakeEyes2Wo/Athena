@@ -41,7 +41,6 @@ from athena.research.literature.paper_scout.scorer import (
 )
 from athena.research.literature.paper_scout.selection import LlmBoundarySelector
 from athena.research.literature.paper_scout.session import ScoutServices
-from athena.research.literature.paper_source.fetcher import PaperSourceFetcher
 from athena.research.literature.paper_source.schemas import (
     PaperIdentity,
     PaperRef,
@@ -326,14 +325,7 @@ class FetchStage:
         request = PaperSourceRequest.model_validate_json(
             await self.stack.artifacts.get_text(source_request_ref)
         )
-        fetcher = PaperSourceFetcher(
-            self.stack.artifacts,
-            http=self.stack.http,
-            contact_email=self.stack.contact_email or None,
-            openalex_api_key=self.stack.openalex_api_key or None,
-            cache=self.stack.locator_cache(),
-        )
-        result = await fetcher.fetch(request)
+        result = await self.stack.source_fetcher().fetch(request)
         self.state.report.timings.source_seconds = round(time.monotonic() - started, 3)
         self.state.report.source_result_ref = await self.stack.artifacts.put_text(
             result.model_dump_json()

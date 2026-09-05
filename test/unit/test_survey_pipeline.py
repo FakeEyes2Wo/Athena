@@ -8,6 +8,7 @@ TeX 解析和模型调用。
 import asyncio
 import tempfile
 import unittest
+from typing import ClassVar
 from unittest import mock
 
 import httpx
@@ -144,7 +145,7 @@ class FakeScoutAgent:
     seen_request: ScoutRequest | None = None
     seen_reranker: object = None
     status = "complete"
-    warnings: list[str] = []
+    warnings: ClassVar[list[str]] = []
 
     def __init__(self, runtime):
         self.artifacts = runtime.artifacts
@@ -203,11 +204,11 @@ class FakeFetcher:
     键是输入批次下标，值是解析后的 DOI。
     """
 
-    statuses: list[str] = ["fetched", "fetched"]
-    conversion_refs: list[str] = []
-    enriched: dict[int, str] = {}
+    statuses: ClassVar[list[str]] = ["fetched", "fetched"]
+    conversion_refs: ClassVar[list[str]] = []
+    enriched: ClassVar[dict[int, str]] = {}
 
-    def __init__(self, artifacts, **kwargs) -> None:
+    def __init__(self, artifacts) -> None:
         self.artifacts = artifacts
 
     async def fetch(self, request, cancel=None) -> PaperSourceResult:
@@ -253,11 +254,11 @@ class FakeFetcher:
 class FakeProcessor:
     """按 ``outcomes`` 决定每篇论文转换成功、失败还是降级。"""
 
-    outcomes: dict[str, object] = {}
-    empty: set = set()
-    shredded: set = set()
+    outcomes: ClassVar[dict[str, object]] = {}
+    empty: ClassVar[set] = set()
+    shredded: ClassVar[set] = set()
     delay: float = 0.0
-    visuals_per_paper: dict[str, int] = {}
+    visuals_per_paper: ClassVar[dict[str, int]] = {}
 
     def __init__(self, artifacts, interpreter, refiner, **kwargs) -> None:
         self.artifacts = artifacts
@@ -283,6 +284,13 @@ class FakeProcessor:
 
 class PipelineTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        source_patch = mock.patch.object(
+            SurveyStack,
+            "source_fetcher",
+            lambda stack: FakeFetcher(stack.artifacts),
+        )
+        source_patch.start()
+        self.addCleanup(source_patch.stop)
         self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="pipeline_"))
         self.interpreter = FakeInterpreter()
         self.embedder = FakeEmbedder()
@@ -338,7 +346,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=FakeScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=FakeProcessor,
             GradedRelevanceScorer=mock.MagicMock(),
             build_corpus_index=self.fake_index,
@@ -686,7 +693,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=FakeScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=FakeProcessor,
             GradedRelevanceScorer=mock.MagicMock(),
             build_corpus_index=failing_index,
@@ -723,7 +729,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=FakeScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=FakeProcessor,
             GradedRelevanceScorer=scorer,
             build_corpus_index=self.fake_index,
@@ -744,7 +749,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=FakeScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=FakeProcessor,
             build_corpus_index=self.fake_index,
         ):
@@ -759,7 +763,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=FakeScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=FakeProcessor,
             build_corpus_index=self.fake_index,
         ):
@@ -783,7 +786,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=FakeScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=FakeProcessor,
             build_corpus_index=self.fake_index,
         ):
@@ -818,7 +820,6 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=FakeScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=FakeProcessor,
             GradedRelevanceScorer=scorer,
             build_corpus_index=self.fake_index,
@@ -926,6 +927,13 @@ class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self) -> None:
+        source_patch = mock.patch.object(
+            SurveyStack,
+            "source_fetcher",
+            lambda stack: FakeFetcher(stack.artifacts),
+        )
+        source_patch.start()
+        self.addCleanup(source_patch.stop)
         self.store = LocalArtifactStore(tempfile.mkdtemp(prefix="reuse_store_"))
         self.library = PaperLibrary(tempfile.mkdtemp(prefix="reuse_lib_"))
         self.interpreter = FakeInterpreter()
@@ -976,7 +984,6 @@ class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.multiple(
             pipeline_module,
             PaperScoutAgent=CountingScoutAgent,
-            PaperSourceFetcher=FakeFetcher,
             PaperProcessor=CountingProcessor,
             GradedRelevanceScorer=mock.MagicMock(),
         ):

@@ -43,12 +43,16 @@ from athena.research.literature.paper_scout.backends import (
     build_default_backends,
 )
 from athena.research.literature.paper_scout.scorer import DashScopeReranker
-from athena.research.literature.paper_source.fetcher import LocatorCache
+from athena.research.literature.paper_source.fetcher import (
+    LocatorCache,
+    PaperFetchTool,
+    PaperSourceFetcher,
+    PaperSourceRuntime,
+)
 from athena.research.literature.paper_source.http import (
     HostRateLimiter,
     UrllibTransport,
 )
-from athena.research.literature.paper_source.tool import PaperFetchTool
 from athena.research.literature.survey.library import LibraryVectorCache, PaperLibrary
 from athena.research.literature.survey.providers import (
     EMBED_MAX_RETRIES,  # noqa: F401 - established wiring import surface
@@ -200,6 +204,18 @@ class SurveyStack:
             return LocatorCache()
         return LocatorCache(self.library.root / "locators.json")
 
+    def source_fetcher(self) -> PaperSourceFetcher:
+        """Build the source service from this stack's shared transport and cache."""
+        return PaperSourceFetcher(
+            PaperSourceRuntime(
+                self.artifacts,
+                http=self.http,
+                cache=self.locator_cache(),
+                contact_email=self.contact_email or None,
+                openalex_api_key=self.openalex_api_key or None,
+            )
+        )
+
     def vector_cache(self) -> LibraryVectorCache | None:
         """按篇复用句向量的缓存；没有库或没有编码器时为 ``None``。
 
@@ -316,14 +332,7 @@ def build_survey_tools(
     if include_survey:
         tools.register(PaperSurveyTool(stack))
     if include_producers:
-        tools.register(
-            PaperFetchTool(
-                stack.artifacts,
-                http=stack.http,
-                contact_email=stack.contact_email or None,
-                openalex_api_key=stack.openalex_api_key or None,
-            )
-        )
+        tools.register(PaperFetchTool(stack.source_fetcher()))
         tools.register(
             PaperMarkdownTool(
                 PaperProcessor(

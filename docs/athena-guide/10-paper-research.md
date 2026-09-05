@@ -185,7 +185,6 @@ plain TeX
 不信任 `Content-Type`。
 
 依据：`src/athena/research/literature/paper_source/fetcher.py`、
-`src/athena/research/literature/paper_source/payloads.py`、
 `src/athena/research/literature/paper_source/http.py`。
 
 ## 10.6 paper_markdown
@@ -321,9 +320,7 @@ literature/
 │   ├── fetcher.py
 │   ├── http.py
 │   ├── openalex.py
-│   ├── payloads.py
-│   ├── schemas.py
-│   └── tool.py
+│   └── schemas.py
 ├── paper_markdown/
 │   ├── __init__.py
 │   ├── chunking.py

@@ -18,7 +18,9 @@ from athena.research.literature.paper_source.arxiv import (
 from athena.research.literature.paper_source.fetcher import (
     DEFAULT_FETCH_CONCURRENCY,
     LocatorCache,
+    PaperFetchTool,
     PaperSourceFetcher,
+    PaperSourceRuntime,
     sniff_payload,
     title_similarity,
 )
@@ -39,7 +41,6 @@ from athena.research.literature.paper_source.schemas import (
     normalize_arxiv_id,
     normalize_doi,
 )
-from athena.research.literature.paper_source.tool import PaperFetchTool
 
 ZERO_INTERVALS = {bucket: 0.0 for bucket in DEFAULT_BUCKET_INTERVALS}
 QUERY_URL = "https://export.arxiv.org/api/query"
@@ -419,10 +420,12 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
         """Build a fetcher wired to a fake transport and an in-memory cache."""
         transport = FakeTransport(routes)
         fetcher = PaperSourceFetcher(
-            self.artifacts,
-            http=limiter(transport, []),
-            cache=LocatorCache(),
-            concurrency=concurrency,
+            PaperSourceRuntime(
+                self.artifacts,
+                http=limiter(transport, []),
+                cache=LocatorCache(),
+                concurrency=concurrency,
+            )
         )
         return fetcher, transport
 
@@ -448,7 +451,7 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
         线索 URL 来自检索后端，域名完全不可控。取源是唯一按篇计费的阶段，跑到一半崩掉
         等于前面下载的都白花，因此传输层失败只能降级成诊断。
         """
-        fetcher, transport = self.build(
+        fetcher, _transport = self.build(
             {
                 QUERY_URL: ok(ATOM_FEED),
                 SRC_URL: ok(self.source),
@@ -726,7 +729,7 @@ class FetcherTest(unittest.IsolatedAsyncioTestCase):
         成功率按通道差一倍（实测 arXiv 91%、期刊 47%），而候选的通道构成每轮都不同，
         任何固定的超额系数都会随构成失准——真机上失准过一次，13 篇候选里 5 篇取不到。
         """
-        fetcher, transport = self.build(
+        fetcher, _transport = self.build(
             {QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(self.source)}
         )
         request = self.pasa_request(max_papers=5, stop_after_fetched=1)
@@ -802,10 +805,12 @@ class FetchConcurrencyTest(unittest.IsolatedAsyncioTestCase):
 
     def _fetcher(self, routes, concurrency):
         return PaperSourceFetcher(
-            self.artifacts,
-            http=limiter(FakeTransport(routes), []),
-            cache=LocatorCache(),
-            concurrency=concurrency,
+            PaperSourceRuntime(
+                self.artifacts,
+                http=limiter(FakeTransport(routes), []),
+                cache=LocatorCache(),
+                concurrency=concurrency,
+            )
         )
 
     def _request(self, ids: list[str], target: int) -> PaperSourceRequest:
@@ -885,7 +890,11 @@ class PaperFetchToolTest(unittest.IsolatedAsyncioTestCase):
             artifacts = LocalArtifactStore(root)
             source = tar_gz_bytes({"main.tex": b"\\documentclass{article}\\section{A}"})
             transport = FakeTransport({QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(source)})
-            tool = PaperFetchTool(artifacts, http=limiter(transport, []))
+            tool = PaperFetchTool(
+                PaperSourceFetcher(
+                    PaperSourceRuntime(artifacts, http=limiter(transport, []))
+                )
+            )
             request = PaperSourceRequest(
                 papers=[PaperRef(identity=PaperIdentity(arxiv_id="2501.10120"))]
             )
@@ -910,7 +919,11 @@ class PaperFetchToolTest(unittest.IsolatedAsyncioTestCase):
             artifacts = LocalArtifactStore(root)
             source = tar_gz_bytes({"main.tex": b"\\documentclass{article}"})
             transport = FakeTransport({QUERY_URL: ok(ATOM_FEED), SRC_URL: ok(source)})
-            tool = PaperFetchTool(artifacts, http=limiter(transport, []))
+            tool = PaperFetchTool(
+                PaperSourceFetcher(
+                    PaperSourceRuntime(artifacts, http=limiter(transport, []))
+                )
+            )
             registry = ToolRegistry()
             registry.register(tool)
             events: list[str] = []
@@ -934,7 +947,9 @@ class PaperFetchToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_rejects_a_blank_request_ref(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            tool = PaperFetchTool(LocalArtifactStore(root))
+            tool = PaperFetchTool(
+                PaperSourceFetcher(PaperSourceRuntime(LocalArtifactStore(root)))
+            )
             ctx = ToolContext("paper_fetch", "call-2", noop_emit, asyncio.Event())
 
             result = await tool.ainvoke(ctx, request_ref="  ")

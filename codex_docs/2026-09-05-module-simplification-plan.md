@@ -507,6 +507,16 @@ Introduce immutable `ScoutServices` plus transient `ScoutRunState`; `ScoutSessio
 
 The unchanged baseline returned 198 tests. Removing seven tests exclusive to the deleted disabled scorer leaves 191 active PaperScout/survey tests, all passing. Targeted Ruff, Python compilation, package import smoke, removed-module/symbol searches, and current documentation checks passed; pytest reported only the existing cache-permission warning. Closing all eleven baseline rows advances reviewed coverage to 318/602. Work is performed directly on `main`; no temporary task branch or worktree exists to clean up. Whole-repository acceptance remains pending.
 
+## Paper source boundary consolidation
+
+Read all eight `paper_source` Python files completely and traced source requests, persisted records, conversion handoff, arXiv/OpenAlex clients, shared HTTP transport, tool registration, Survey execution, baseline authority verification, Kaggle, Web Search, and their tests. Preserve batch version resolution, ranked concurrent fetch waves, success-target stopping, stable pre-network paper keys, per-channel degradation, magic-byte recognition, locator caching, conversion-request persistence, diagnostic order, HTTP counting, retry/rate-limit behavior, and the 1.0 result schema.
+
+Retain `arxiv.py` and `openalex.py` as independently reused external protocols, `http.py` as cross-domain transport, and `schemas.py` as the persisted contract boundary. Merge payload recognition and channel value objects into their sole production consumer `fetcher.py`; merge the one-class Agent adapter into the same module; delete `payloads.py` and `tool.py` without forwarding modules. Remove two uncalled decompression wrappers, a stale implementation `__all__`, and an unused conversion-helper parameter. The package falls from eight current Python files and 1,919 physical lines to six files and 1,850 lines.
+
+Introduce `PaperSourceRuntime` as the explicit resource record. `PaperSourceFetcher` falls from six business constructor inputs and six stored dependencies to one runtime input and one attribute; `PaperFetchTool` accepts and stores only that configured fetcher. A transient `_FetchAttempt` carries per-paper policy, identity, resolution, version, and diagnostics through the channel chain. Eight methods formerly had at least five parameters including `self`; only one remained before a `_Download` value object reduced every behavior method to at most three business inputs. `SurveyStack.source_fetcher()` is now the single composition point shared by the pipeline stage and tool registry.
+
+The unchanged cross-consumer baseline passed 165 tests plus three subtests. Final verification retained the same active selection, including source fetching, Survey, OpenAlex authority verification, Kaggle, and Web Search. Targeted Ruff, Python compilation, removed-module/import searches, and current documentation checks passed; pytest reported only the existing cache-permission warning. Closing all eight baseline rows advances reviewed coverage to 326/602. Work remains directly on `main`, with no temporary task branch or worktree to remove. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1087,14 +1097,14 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/paper_scout/selection.py` | 369 | Reviewed; retain source-aware delivery and boundary selection policy |
 | `src/athena/research/literature/paper_scout/session.py` | 238 | Reviewed; split services/run state and reduce constructor/state surface |
 | `src/athena/research/literature/paper_scout/tool.py` | 97 | Reviewed; run-local adapters merged into agent.py and file deleted |
-| `src/athena/research/literature/paper_source/__init__.py` | 9 | Pending |
-| `src/athena/research/literature/paper_source/arxiv.py` | 245 | Pending |
-| `src/athena/research/literature/paper_source/fetcher.py` | 709 | Pending |
-| `src/athena/research/literature/paper_source/http.py` | 236 | Pending |
-| `src/athena/research/literature/paper_source/openalex.py` | 152 | Pending |
-| `src/athena/research/literature/paper_source/payloads.py` | 198 | Pending |
-| `src/athena/research/literature/paper_source/schemas.py` | 379 | Pending |
-| `src/athena/research/literature/paper_source/tool.py` | 91 | Pending |
+| `src/athena/research/literature/paper_source/__init__.py` | 9 | Reviewed; narrow facade exports fetcher, runtime, and Agent adapter |
+| `src/athena/research/literature/paper_source/arxiv.py` | 245 | Reviewed; retain versioned arXiv parsing and endpoint adapter |
+| `src/athena/research/literature/paper_source/fetcher.py` | 709 | Reviewed; absorb payload/tool layers and reduce fetch runtime and method inputs |
+| `src/athena/research/literature/paper_source/http.py` | 236 | Reviewed; retain shared rate-limited GET transport used beyond literature |
+| `src/athena/research/literature/paper_source/openalex.py` | 152 | Reviewed; retain free metadata and guarded paid-content protocol |
+| `src/athena/research/literature/paper_source/payloads.py` | 198 | Reviewed; merged into sole production consumer fetcher.py and deleted |
+| `src/athena/research/literature/paper_source/schemas.py` | 379 | Reviewed; retain persisted request/result and identity contracts |
+| `src/athena/research/literature/paper_source/tool.py` | 91 | Reviewed; Agent adapter merged into fetcher.py and file deleted |
 | `src/athena/research/literature/survey/__init__.py` | 43 | Pending |
 | `src/athena/research/literature/survey/library.py` | 333 | Pending |
 | `src/athena/research/literature/survey/pipeline.py` | 581 | Pending |
