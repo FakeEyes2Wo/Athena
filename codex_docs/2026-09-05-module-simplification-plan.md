@@ -263,6 +263,14 @@ Replace the mutually exclusive `CommandRequest.command`/`argv` pair with one req
 
 The affected execution, SSH, pool, supervisor experiment, and prepare-contract selection passed 145 tests with two PowerShell-7-specific tests deselected because this host currently resolves Windows PowerShell 5.1; running those tests directly produced the same host capability failure and did not exercise the changed request interface. Python compilation, Black, blocking Ruff checks, `git diff --check`, and removed-interface searches passed; pytest reported one existing cache-permission warning. Closing the runtime row advances reviewed coverage to 224/602. Whole-repository acceptance remains pending.
 
+## GUI experiment-query review
+
+Read the GUI package facade and experiment-query module completely, then traced the public service and gateway routes. Retain the facade as the single `GuiService` package export and keep experiment projection separate from the already-large service composition root. All five experiment helpers serve active service routes, and their transition, path, descendant, and SOTA semantics remain unchanged.
+
+`list_experiments` previously serialized the complete research tree once for iteration and once more per matching experiment. Pass the existing dictionary snapshot into the private detail projector so each list request serializes the tree exactly once; single-detail and transition requests also take one fresh snapshot after any mutation. A focused regression covers ordering, filtering, SOTA projection, and the one-snapshot invariant.
+
+The GUI unit and complete gateway-handler selection passed 55 tests. Python compilation, Black, blocking Ruff checks, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the two GUI source rows advances reviewed baseline coverage to 226/602; the new regression file is tracked separately below. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -736,8 +744,9 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/execution/remote/mirrored.py` | 120 | Reviewed; merge into mirror.py and delete forwarding file |
 | `src/athena/execution/remote/ssh.py` | 362 | Reviewed; five-parameter backend construction and per-run cwd ownership |
 | `src/athena/execution/runtime.py` | 895 | Reviewed; unify string/argv commands, remove dead environment/backend inputs and cwd calculation |
-| `src/athena/gui/__init__.py` | 9 | Pending |
-| `src/athena/gui/experiments.py` | 59 | Pending |
+| `src/athena/gui/__init__.py` | 9 | Reviewed; retain the single-service package facade |
+| `src/athena/gui/experiments.py` | 59 | Reviewed; reuse one tree snapshot across experiment projections |
+| `test/unit/gui/test_experiments.py` | New | Reviewed; ordering, filtering, SOTA and one-snapshot regression |
 | `src/athena/gui/graph.py` | 309 | Pending |
 | `src/athena/gui/service.py` | 345 | Pending |
 | `src/athena/gui/traces.py` | 122 | Pending |

@@ -5,9 +5,8 @@ from typing import Any
 from athena.core.research_tree import ExperimentStatus, ResearchTree
 
 
-def _detail(tree: ResearchTree, exp_id: str) -> dict[str, Any]:
+def _detail(data: dict[str, Any], exp_id: str) -> dict[str, Any]:
     """Expand one experiment into an id-stamped detail with its hypothesis."""
-    data = tree.to_dict()
     experiment = dict(data["experiments"][exp_id])
     experiment["id"] = exp_id
     hyp_id = experiment["hypothesis_id"]
@@ -20,14 +19,16 @@ def _detail(tree: ResearchTree, exp_id: str) -> dict[str, Any]:
     }
 
 
-def list_experiments(tree: ResearchTree, kind: str | None = None) -> list[dict[str, Any]]:
+def list_experiments(
+    tree: ResearchTree, kind: str | None = None
+) -> list[dict[str, Any]]:
     """List experiments, optionally filtered to one plan kind, ordered by hypothesis order."""
     data = tree.to_dict()
     details: list[dict[str, Any]] = []
     for exp_id in data["experiments"]:
         if kind is not None and data["experiments"][exp_id]["plan"]["kind"] != kind:
             continue
-        details.append(_detail(tree, exp_id))
+        details.append(_detail(data, exp_id))
 
     def sort_key(detail: dict[str, Any]) -> tuple[bool, int]:
         order = detail["hypothesis"].get("order")
@@ -39,7 +40,7 @@ def list_experiments(tree: ResearchTree, kind: str | None = None) -> list[dict[s
 
 def get_experiment_detail(tree: ResearchTree, exp_id: str) -> dict[str, Any]:
     """Return one experiment detail plus its ancestor path and descendants."""
-    detail = _detail(tree, exp_id)
+    detail = _detail(tree.to_dict(), exp_id)
     detail["path"] = tree.experiment_path(exp_id)
     detail["descendants"] = tree.list_descendants(exp_id)
     return detail
@@ -50,7 +51,7 @@ def transition(
 ) -> dict[str, Any]:
     """Advance an experiment status via the allowed-transition table."""
     tree.transition_experiment(exp_id, ExperimentStatus(status), error=error)
-    return _detail(tree, exp_id)
+    return _detail(tree.to_dict(), exp_id)
 
 
 def set_sota(tree: ResearchTree, exp_id: str) -> dict[str, Any]:
