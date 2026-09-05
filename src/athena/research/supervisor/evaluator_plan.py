@@ -284,7 +284,7 @@ async def _validate_frozen_evaluator(
             score,
             prediction_column=prediction_column,
             prediction_id_column=id_column,
-            spec=spec,
+            probability_columns=spec.probability_columns if spec is not None else (),
         )
     except AttributeError:
         # Legacy script runners lack run_dir(), so automated probes are unavailable.

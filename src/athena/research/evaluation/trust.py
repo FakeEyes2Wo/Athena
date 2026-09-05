@@ -14,7 +14,6 @@ import io
 import random
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
 
 ScoreFn = Callable[[str], Awaitable[float]]
 
@@ -23,15 +22,8 @@ ScoreFn = Callable[[str], Awaitable[float]]
 # prediction field: xxx”这类显式声明；解析不到时返回 None，由调用方拒绝。
 _PREDICTION_COLUMN_PATTERNS = (
     re.compile(
-        r"prediction[_ ]*column\s*[:=]\s*[`\"]?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[`\"]?",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"prediction[_ ]*field\s*[:=]\s*[`\"]?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[`\"]?",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"predictions?[_ ]*column\s*[:=]\s*[`\"]?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[`\"]?",
+        r"predictions?[_ ]*(?:column|field)\s*[:=]\s*"
+        r"[`\"]?(?P<name>[A-Za-z_][A-Za-z0-9_]*)[`\"]?",
         re.IGNORECASE,
     ),
     re.compile(
@@ -142,7 +134,7 @@ def _probability(value: str, column: str) -> str:
 
 def _parse_labels(
     labels_csv: str, *, id_column: str | None = None
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], str]:
     reader = csv.DictReader(io.StringIO(labels_csv))
     if not reader.fieldnames:
         raise ValueError("labels CSV must contain an identity column")
@@ -156,7 +148,7 @@ def _parse_labels(
     rows = list(reader)
     ids = [row[id_column].strip() for row in rows]
     values = [row[target_field] for row in rows]
-    return ids, values
+    return ids, values, id_column
 
 
 async def validate_evaluator_properties(
@@ -167,29 +159,17 @@ async def validate_evaluator_properties(
     prediction_column: str | None = None,
     prediction_id_column: str | None = None,
     probability_columns: Sequence[str] = (),
-    spec: Any | None = None,
-) -> dict[str, Any]:
+) -> dict[str, bool | str]:
     """Run row-order and value-permutation checks against a scoring callable.
-
-    The declared evaluator spec may provide the identity, prediction, and
-    probability columns.  The explicit keyword arguments remain available to
-    old callers and are ignored when ``spec`` supplies the same declarations.
 
     Returns ``{"ok": True}`` or ``{"ok": False, "reason": ...}``. Raises
     ``ValueError`` only for malformed label input.
     """
-    if spec is not None:
-        prediction_column = getattr(spec, "prediction_column", prediction_column)
-        prediction_id_column = getattr(
-            spec, "prediction_id_column", prediction_id_column
-        )
-        probability_columns = tuple(
-            getattr(spec, "probability_columns", probability_columns) or ()
-        )
     if not prediction_column:
         raise ValueError("evaluator must declare a prediction column")
-    ids, values = _parse_labels(labels_csv, id_column=prediction_id_column)
-    prediction_id_column = prediction_id_column or _first_csv_column(labels_csv)
+    ids, values, prediction_id_column = _parse_labels(
+        labels_csv, id_column=prediction_id_column
+    )
     if len(ids) < 2:
         return {"ok": False, "reason": "need at least two labeled rows"}
 
@@ -207,11 +187,11 @@ async def validate_evaluator_properties(
     # Row-order invariance: shuffle complete (id, value) pairs, not values.
     pairs = list(zip(ids, values))
     rng.shuffle(pairs)
-    shuffled_ids, shuffled_values = zip(*pairs) if pairs else ((), ())
+    shuffled_ids, shuffled_values = map(list, zip(*pairs))
     shuffled = await score(
         _build_predictions(
-            list(shuffled_ids),
-            list(shuffled_values),
+            shuffled_ids,
+            shuffled_values,
             prediction_column=prediction_column,
             prediction_id_column=prediction_id_column,
             probability_columns=probability_columns,
@@ -225,17 +205,21 @@ async def validate_evaluator_properties(
 
     # Value-permutation sensitivity: deterministically swap two rows with
     # different target values so a correct-prediction metric must change.
-    different = [
-        (i, j)
-        for i in range(len(values))
-        for j in range(i + 1, len(values))
-        if values[i] != values[j]
-    ]
-    if not different:
+    different_index = next(
+        (
+            index
+            for index, value in enumerate(values[1:], start=1)
+            if value != values[0]
+        ),
+        None,
+    )
+    if different_index is None:
         return {"ok": True, "note": "all labels identical; permutation not applicable"}
-    i, j = different[0]
     permuted = values[:]
-    permuted[i], permuted[j] = permuted[j], permuted[i]
+    permuted[0], permuted[different_index] = (
+        permuted[different_index],
+        permuted[0],
+    )
     permuted_score = await score(
         _build_predictions(
             ids,
@@ -253,12 +237,3 @@ async def validate_evaluator_properties(
         }
 
     return {"ok": True}
-
-
-def _first_csv_column(labels_csv: str) -> str:
-    """Return the first declared labels column for legacy probe callers."""
-    reader = csv.reader(io.StringIO(labels_csv))
-    try:
-        return next(reader)[0]
-    except (StopIteration, IndexError) as exc:
-        raise ValueError("labels CSV must declare an identity column") from exc

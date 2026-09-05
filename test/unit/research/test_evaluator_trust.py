@@ -1,9 +1,7 @@
 """Evaluator behavioral property tests."""
 
-import asyncio
 import csv
 import io
-from types import SimpleNamespace
 
 import pytest
 
@@ -67,9 +65,10 @@ class _PredColumnEvaluator:
 
 
 def test_parse_labels_extracts_ids_and_targets() -> None:
-    ids, values = _parse_labels(_LABELS)
+    ids, values, id_column = _parse_labels(_LABELS)
     assert ids == ["0", "1", "2", "3", "4", "5"]
     assert values == ["0", "1", "0", "1", "0", "1"]
+    assert id_column == "__athena_row_id"
 
 
 def test_extract_prediction_column_returns_none_when_not_declared() -> None:
@@ -189,11 +188,9 @@ async def test_property_probe_uses_declared_dataset_columns() -> None:
     outcome = await validate_evaluator_properties(
         labels,
         score,
-        spec=SimpleNamespace(
-            prediction_id_column="sample_key",
-            prediction_column="pred_label",
-            probability_columns=("prob_0", "prob_1"),
-        ),
+        prediction_id_column="sample_key",
+        prediction_column="pred_label",
+        probability_columns=("prob_0", "prob_1"),
     )
 
     assert outcome["ok"] is True

@@ -435,6 +435,14 @@ Delete the unconsumed prediction-column constant, inline the two module-only fil
 
 Final evaluator/spec/validation-plan/validate-agent verification passed 57 tests. Targeted pre-commit hooks, Python compilation, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the spec row advances reviewed baseline coverage to 256/602. `trust.py` remains Pending; whole-repository acceptance remains pending.
 
+## Evaluator trust-probe review
+
+Read `trust.py` completely and traced its handoff/source parsers and behavioral probes through the frozen-evaluator Supervisor path and direct contracts. Retain both parsers because legacy evaluator bundles may lack `metric.json`, and retain explicit column parameters because that path must still probe a resolved schema without an `EvaluatorSpec`.
+
+Remove the redundant dynamic `spec` input after the sole production caller had already resolved the same fields. Return the resolved ID column from the existing label parse instead of reparsing the CSV header, collapse three overlapping prediction-declaration regular expressions into one, and replace the quadratic all-pairs allocation with a linear search for the first different label. The Supervisor now passes the optional probability columns explicitly. Production and test code falls by 32 net lines without changing probe outcomes or fallback policy.
+
+Focused evaluator verification passed 21 tests, and the expanded evaluator plus complete research Supervisor selection passed 371 tests. Ruff passed after removing one unused test import; targeted pre-commit hooks, Python compilation, and `git diff --check` remain the delivery gates. Pytest reported only the existing cache-permission warning. Closing the trust row advances reviewed baseline coverage to 257/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -946,7 +954,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/evaluation/__init__.py` | 5 | Reviewed; retain one three-symbol facade for trusted scoring and generalization policy |
 | `src/athena/research/evaluation/evaluator.py` | 115 | Reviewed; absorb pure generalization calculations beside trusted scoring |
 | `src/athena/research/evaluation/spec.py` | 168 | Reviewed; four-symbol schema surface replaces unused defaults and test-only filename helper |
-| `src/athena/research/evaluation/trust.py` | 264 | Pending |
+| `src/athena/research/evaluation/trust.py` | 264 | Reviewed; one explicit probe contract, one label parse, and linear permutation selection replace compatibility plumbing |
 | `src/athena/research/evaluation/validation.py` | 70 | Reviewed; delete stateless service and its discarded result construction |
 | `src/athena/research/experiment_documents/__init__.py` | 11 | Pending |
 | `src/athena/research/experiment_documents/models.py` | 324 | Pending |
