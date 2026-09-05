@@ -29,7 +29,7 @@ flowchart TB
   START["PhaseRunner<br/>run_prepare_phase"] --> WS["创建 EDA 工作区<br/>保存 state.eda_dir"]
   WS --> PLAN["EDA Orchestrator · Turn 1<br/>识别模态并拆分任务"]
   PLAN --> TODO["EDA_TODO.md"]
-  TODO --> RUNNER["run_eda_todos<br/>按阶段调度"]
+  TODO --> RUNNER["EdaTodoRunner.run<br/>按阶段调度"]
   RUNNER --> WORKERS["EDA Workers<br/>串行或最多 3 个并行"]
   WORKERS --> REPORTS["EDA_REPORT_*.md"]
   REPORTS --> FINAL["EDA Orchestrator · Turn 2<br/>汇总与压缩"]
@@ -84,7 +84,8 @@ Orchestrator 可根据模态增加专用任务。例如图像数据需要尺寸�
 
 ### 12.3.3 Todo Runner：阶段化并发
 
-`run_eda_todos()` 逐阶段执行任务，不跨阶段并发：
+`EdaTodoRunner.run()` 逐阶段执行任务，不跨阶段并发。Runner 只保存
+`agents` / `store` / `workspace` 三个资源，调度策略由 `EdaTodoOptions` 统一携带：
 
 ```text
 解析 Stage
@@ -129,7 +130,7 @@ EDA_HANDOFF.md
 
 | 文件或目录 | 写入者 | 消费者 | 作用 |
 |---|---|---|---|
-| `EDA_TODO.md` | `prepare/eda.py` orchestrator | `run_eda_todos`、开发者 | EDA 任务图、阶段并发标记和完成状态 |
+| `EDA_TODO.md` | `prepare/eda.py` orchestrator | `EdaTodoRunner`、开发者 | EDA 任务图、阶段并发标记和完成状态 |
 | `EDA_REPORT_*.md` | `eda_worker` | orchestrator、baseline/SEARCH Agent | 单主题分析和可引用发现 |
 | `EDA_INDEX.md` | `prepare/eda.py` orchestrator | 人类、下游 Agent | 全部 EDA 报告的导航和摘要 |
 | `EDA_HANDOFF.md` | `prepare/eda.py` orchestrator | `baseline_ideator` | baseline 设计所需的压缩数据事实 |
@@ -183,7 +184,7 @@ sequenceDiagram
 1. **单 todo 失败**：worker 按默认策略重试两次；仍失败则保持 checkbox 未勾选，并把任务文本加入失败列表。
 2. **阶段链路失败**：`PhaseRunner` 写入最小 `EDA_INDEX.md`、`EDA_HANDOFF.md`，并为 todo 中缺失的 `EDA_REPORT_*.md` 生成占位文件。
 
-如果 `run_eda_todos()` 返回失败项，`eda_ok=False`，系统跳过 `BASELINE_DESIGN.md`，让 Prepare Agent 基于任务原文和原始数据降级执行。若 worker 成功但最终汇总缺失索引或 handoff，系统补写 fallback 文件，避免下游因文件不存在直接崩溃。
+如果 `EdaTodoRunner.run()` 返回失败项，`eda_ok=False`，系统跳过 `BASELINE_DESIGN.md`，让 Prepare Agent 基于任务原文和原始数据降级执行。若 worker 成功但最终汇总缺失索引或 handoff，系统补写 fallback 文件，避免下游因文件不存在直接崩溃。
 
 ### 12.6.2 路径安全
 

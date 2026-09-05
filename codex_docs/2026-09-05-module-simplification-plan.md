@@ -537,6 +537,12 @@ Read the package marker, authority, data-contract, evaluator, orchestrator, and 
 
 Delete the internal two-field `EvaluatorJob` wrapper and pass its name/task directly to the evaluator runner, reducing three construction sites and one class without increasing the runner beyond three total inputs. Inline the single-use DataContract factory, remove redundant implementation `__all__` declarations, and express hostname suffix removal directly. These six files fall from 849 to 819 physical lines. The direct and cross-contract selection passed 302 tests; Ruff, Black, removed-symbol checks, and `git diff --check` passed. Closing six rows advances reviewed coverage to 341/602. The remaining baseline, baseline-research, EDA, and source-verification files stay Pending until their complete reviews finish. Whole-repository acceptance remains pending.
 
+## PREPARE EDA scheduler consolidation
+
+Read `prepare/eda.py` and all direct scheduler/fallback tests completely, then traced its production call from PREPARE orchestration and its documentation. Preserve staged serial/parallel ordering, the three-worker default, two retries, timeout-without-retry behavior, per-worker event projection and reap, report resume threshold, handoff-task exclusion, checkbox persistence, partial-report survival, and fallback files.
+
+Replace the eight-parameter `run_eda_todos` function and its nine-/seven-parameter helpers with a three-resource `EdaTodoRunner` and immutable `EdaTodoOptions`. `run` now receives at most one options object, while stage and worker methods receive only their work item plus shared options. Bind each worker id into its event closure rather than capturing the loop variable. Delete the old function without a compatibility wrapper and update the EDA guide. The module falls from 378 to 355 physical lines. The unchanged focused baseline and final selection both passed 17 tests; an expanded EDA/PREPARE breakpoint selection passed 13 tests. Ruff, Black, Python compilation, old-call searches, and `git diff --check` passed. Closing the EDA row advances reviewed coverage to 342/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1139,7 +1145,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/prepare/baseline.py` | 629 | Pending |
 | `src/athena/research/prepare/baseline_research.py` | 883 | Pending |
 | `src/athena/research/prepare/data.py` | 118 | Reviewed; inline sole contract factory and retain durable split record |
-| `src/athena/research/prepare/eda.py` | 378 | Pending |
+| `src/athena/research/prepare/eda.py` | 378 | Reviewed; replace eight-parameter scheduler with three-resource runner and one options record |
 | `src/athena/research/prepare/evaluator.py` | 363 | Reviewed; delete one-use job DTO and pass two required values directly |
 | `src/athena/research/prepare/orchestrator.py` | 61 | Reviewed; retain authoritative PREPARE phase order |
 | `src/athena/research/prepare/repository_url.py` | 135 | Reviewed; retain shared trust-boundary normalizer and remove redundant export list |

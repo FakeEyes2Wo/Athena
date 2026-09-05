@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,17 @@ PLACEHOLDER_MARK = "EDA generation failed or was skipped."
 _STAGE_RE = re.compile(r"^##\s+.+?\(parallel:\s*(true|false)\)\s*$")
 _TODO_RE = re.compile(r"^- \[ \]\s+(.+?)(?:\s*->\s*([^\s#]+))?\s*$")
 _MIN_REPORT_BYTES = 200
+
+
+@dataclass(frozen=True, slots=True)
+class EdaTodoOptions:
+    """Scheduling policy for one EDA todo run."""
+
+    todo_file: str = "EDA_TODO.md"
+    parent_id: str = PREPARE_EDA_AGENT_ID
+    max_workers: int = 3
+    retries: int = 2
+    project_event: PublishEvent | None = None
 
 
 def write_missing_report_placeholders(workspace: Path) -> None:
@@ -126,13 +138,12 @@ async def _collect_reports(
         output_file="EDA_TODO.md",
         content=task,
     )
-    failed = await run_eda_todos(
-        agents=runtime.agents,
-        store=runtime.store,
-        workspace=workspace,
-        project_event=lambda aid, kind, ref, data: runtime.events.project_agent_event(
-            aid, kind, ref, data
-        ),
+    failed = await EdaTodoRunner(runtime.agents, runtime.store, workspace).run(
+        EdaTodoOptions(
+            project_event=lambda aid, kind, ref, data: runtime.events.project_agent_event(
+                aid, kind, ref, data
+            )
+        )
     )
     # Preserve successful reports when only a subset of todo items fails.
     if failed:
@@ -227,152 +238,118 @@ def _parse(lines: list[str]) -> list[tuple[bool, list[Todo]]]:
     return stages
 
 
-async def _reap_worker(agents: AgentRuntime, agent_id: str | None) -> None:
-    """Release one finished EDA worker without masking its outcome."""
-    if agent_id is None:
-        return
-    try:
-        await agents.reap(agent_id)
-    except Exception:  # noqa: BLE001,S110 - cleanup must not mask task outcome
-        pass
+@dataclass(slots=True)
+class EdaTodoRunner:
+    """Execute staged EDA work with one shared resource bundle."""
 
+    agents: AgentRuntime
+    store: ArtifactStore
+    workspace: Path
 
-async def _run_one(
-    todo: Todo,
-    *,
-    agents: AgentRuntime,
-    store: ArtifactStore,
-    workspace: Path,
-    parent_id: str,
-    retries: int,
-    project_event: PublishEvent | None,
-) -> bool:
-    """Run one EDA worker and verify that it wrote its assigned report."""
-    _, text, output_file = todo
-    existing = workspace / output_file
-    if existing.is_file() and existing.stat().st_size > _MIN_REPORT_BYTES:
-        return True
-    for attempt in range(retries + 1):
-        agent_id: str | None = None
-        try:
-            content = (
-                "Write exactly one EDA report file.\n\n"
-                f"Assigned output file: {output_file}\n"
-                f"Todo: {text}\n"
-                f"Workspace: {workspace}\n\n"
-                "Finish quickly and use at most 8 tool calls. Use only installed "
-                "dependencies; do not install packages with pip, conda, or uv. "
-                "Keep the report focused and do not exhaustively enumerate the "
-                "dataset. Do not write EDA_INDEX.md, EDA_HANDOFF.md, EDA_TODO.md, "
-                "or any file other than the assigned output file."
+    async def run(self, options: EdaTodoOptions | None = None) -> list[str]:
+        """Execute pending TODOs and return failed task descriptions."""
+        options = options or EdaTodoOptions()
+        todo_path = self.workspace / options.todo_file
+        if not todo_path.is_file():
+            return [options.todo_file]
+        lines = todo_path.read_text(encoding="utf-8").splitlines()
+        failed: list[str] = []
+        for stage in _parse(lines):
+            failed.extend(await self._run_stage(stage, lines, options))
+        todo_path.write_text(
+            "\n".join(lines) + ("\n" if lines else ""), encoding="utf-8"
+        )
+        return failed
+
+    async def _run_stage(
+        self,
+        stage: tuple[bool, list[Todo]],
+        lines: list[str],
+        options: EdaTodoOptions,
+    ) -> list[str]:
+        """Run one staged TODO group and update successful checkboxes."""
+        parallel, todos = stage
+        failed: list[str] = []
+        batch_size = options.max_workers if parallel else 1
+        for start in range(0, len(todos), batch_size):
+            batch = todos[start : start + batch_size]
+            results = await asyncio.gather(
+                *(self._run_one(todo, options) for todo in batch)
             )
-            agent_id, run_id = await agents.spawn(
-                parent_id,
-                EDA_WORKER_AGENT_TYPE,
-                {
-                    "content": content,
-                    "todo_line": text,
-                    "output_file": output_file,
-                    "workspace": str(workspace),
-                },
-                name=f"eda-{output_file}",
-            )
+            for (line_index, text, _), ok in zip(batch, results):
+                if ok:
+                    lines[line_index] = lines[line_index].replace("- [ ]", "- [x]", 1)
+                else:
+                    failed.append(text)
+        return failed
 
-            async def publish(kind: str, ref: str, data: dict | None = None) -> None:
-                """Forward a worker event to the runtime event bus."""
-                if project_event is not None and agent_id is not None:
-                    await project_event(agent_id, kind, ref, data)
-
-            summary = await asyncio.wait_for(
-                wait_run_events(agents, run_id, publish),
-                timeout=AGENT_TURN_TIMEOUT_SECONDS,
-            )
-            if await load_agent_result(summary, store, HandoffResult) is None:
-                raise RuntimeError(f"{output_file} returned no result")
-            if not (workspace / output_file).is_file():
-                raise RuntimeError(f"{output_file} was not written")
+    async def _run_one(self, todo: Todo, options: EdaTodoOptions) -> bool:
+        """Run one EDA worker and verify that it wrote its assigned report."""
+        _, text, output_file = todo
+        existing = self.workspace / output_file
+        if existing.is_file() and existing.stat().st_size > _MIN_REPORT_BYTES:
             return True
-        except TimeoutError:
-            return False
-        except Exception:
-            if attempt >= retries:
-                return False
-            await asyncio.sleep(0.2)
-        finally:
-            await _reap_worker(agents, agent_id)
-    return False
-
-
-async def _run_stage(
-    stage: tuple[bool, list[Todo]],
-    *,
-    agents: AgentRuntime,
-    store: ArtifactStore,
-    workspace: Path,
-    lines: list[str],
-    parent_id: str,
-    max_workers: int,
-    retries: int,
-    project_event: PublishEvent | None,
-) -> list[str]:
-    """Run one staged TODO group and update successful checkboxes."""
-    parallel, todos = stage
-    failed: list[str] = []
-    batch_size = max_workers if parallel else 1
-    for start in range(0, len(todos), batch_size):
-        batch = todos[start : start + batch_size]
-        results = await asyncio.gather(
-            *(
-                _run_one(
-                    todo,
-                    agents=agents,
-                    store=store,
-                    workspace=workspace,
-                    parent_id=parent_id,
-                    retries=retries,
-                    project_event=project_event,
+        for attempt in range(options.retries + 1):
+            agent_id: str | None = None
+            try:
+                content = (
+                    "Write exactly one EDA report file.\n\n"
+                    f"Assigned output file: {output_file}\n"
+                    f"Todo: {text}\n"
+                    f"Workspace: {self.workspace}\n\n"
+                    "Finish quickly and use at most 8 tool calls. Use only installed "
+                    "dependencies; do not install packages with pip, conda, or uv. "
+                    "Keep the report focused and do not exhaustively enumerate the "
+                    "dataset. Do not write EDA_INDEX.md, EDA_HANDOFF.md, EDA_TODO.md, "
+                    "or any file other than the assigned output file."
                 )
-                for todo in batch
-            )
-        )
-        for (line_index, text, _), ok in zip(batch, results):
-            if ok:
-                lines[line_index] = lines[line_index].replace("- [ ]", "- [x]", 1)
-            else:
-                failed.append(text)
-    return failed
+                agent_id, run_id = await self.agents.spawn(
+                    options.parent_id,
+                    EDA_WORKER_AGENT_TYPE,
+                    {
+                        "content": content,
+                        "todo_line": text,
+                        "output_file": output_file,
+                        "workspace": str(self.workspace),
+                    },
+                    name=f"eda-{output_file}",
+                )
 
+                async def publish(
+                    kind: str,
+                    ref: str,
+                    data: dict | None = None,
+                    *,
+                    worker_id: str = agent_id,
+                ) -> None:
+                    """Forward a worker event to the runtime event bus."""
+                    if options.project_event is not None:
+                        await options.project_event(worker_id, kind, ref, data)
 
-async def run_eda_todos(
-    *,
-    agents: AgentRuntime,
-    store: ArtifactStore,
-    workspace: Path,
-    todo_file: str = "EDA_TODO.md",
-    parent_id: str = PREPARE_EDA_AGENT_ID,
-    max_workers: int = 3,
-    retries: int = 2,
-    project_event: PublishEvent | None = None,
-) -> list[str]:
-    """Execute pending EDA TODOs and return the failed task descriptions."""
-    todo_path = workspace / todo_file
-    if not todo_path.is_file():
-        return [todo_file]
-    lines = todo_path.read_text(encoding="utf-8").splitlines()
-    failed: list[str] = []
-    for stage in _parse(lines):
-        failed.extend(
-            await _run_stage(
-                stage,
-                agents=agents,
-                store=store,
-                workspace=workspace,
-                lines=lines,
-                parent_id=parent_id,
-                max_workers=max_workers,
-                retries=retries,
-                project_event=project_event,
-            )
-        )
-    todo_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-    return failed
+                summary = await asyncio.wait_for(
+                    wait_run_events(self.agents, run_id, publish),
+                    timeout=AGENT_TURN_TIMEOUT_SECONDS,
+                )
+                if await load_agent_result(summary, self.store, HandoffResult) is None:
+                    raise RuntimeError(f"{output_file} returned no result")
+                if not (self.workspace / output_file).is_file():
+                    raise RuntimeError(f"{output_file} was not written")
+                return True
+            except TimeoutError:
+                return False
+            except Exception:  # noqa: BLE001 - worker retry boundary
+                if attempt >= options.retries:
+                    return False
+                await asyncio.sleep(0.2)
+            finally:
+                await self._reap(agent_id)
+        return False
+
+    async def _reap(self, agent_id: str | None) -> None:
+        """Release one finished worker without masking its outcome."""
+        if agent_id is None:
+            return
+        try:
+            await self.agents.reap(agent_id)
+        except Exception:  # noqa: BLE001,S110 - cleanup must not mask task outcome
+            pass

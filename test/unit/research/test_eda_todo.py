@@ -8,7 +8,7 @@ import pytest
 
 from athena.agents.ideator_agent import HandoffResult
 from athena.research.prepare import eda as eda_todo
-from athena.research.prepare.eda import run_eda_todos
+from athena.research.prepare.eda import EdaTodoOptions, EdaTodoRunner
 
 
 class _FakeAgents:
@@ -32,6 +32,10 @@ class _FakeAgents:
 def _write_reports(workspace: Path, files: list[str]) -> None:
     for name in files:
         (workspace / name).write_text("# report\n", encoding="utf-8")
+
+
+async def _run_todos(*, agents, store, workspace: Path, **options) -> list[str]:
+    return await EdaTodoRunner(agents, store, workspace).run(EdaTodoOptions(**options))
 
 
 @pytest.mark.asyncio
@@ -71,7 +75,7 @@ async def test_run_eda_todos_marks_checkboxes_and_returns_no_failures(
     monkeypatch.setattr(eda_todo, "wait_run_events", fake_wait)
     monkeypatch.setattr(eda_todo, "load_agent_result", fake_load)
 
-    failed = await run_eda_todos(agents=agents, store=None, workspace=workspace)
+    failed = await _run_todos(agents=agents, store=None, workspace=workspace)
 
     assert failed == []
     text = todo_file.read_text(encoding="utf-8")
@@ -121,7 +125,7 @@ async def test_run_eda_todos_skips_orchestrator_index_and_handoff_todo(
     monkeypatch.setattr(eda_todo, "wait_run_events", fake_wait)
     monkeypatch.setattr(eda_todo, "load_agent_result", fake_load)
 
-    failed = await run_eda_todos(agents=agents, store=None, workspace=workspace)
+    failed = await _run_todos(agents=agents, store=None, workspace=workspace)
 
     # The Index & Handoff step belongs to the orchestrator finalize turn; it
     # must not be scheduled as an EDA worker (which is forbidden to write it).
@@ -161,9 +165,7 @@ async def test_run_eda_todos_keeps_failed_todo_unchecked(
 
     monkeypatch.setattr(eda_todo, "load_agent_result", fake_load)
 
-    failed = await run_eda_todos(
-        agents=agents, store=None, workspace=workspace, retries=1
-    )
+    failed = await _run_todos(agents=agents, store=None, workspace=workspace, retries=1)
 
     assert failed == ["00 Overview"]
     text = todo_file.read_text(encoding="utf-8")
@@ -190,7 +192,7 @@ async def test_timed_out_todo_fails_once_and_reaps_worker(
     monkeypatch.setattr(eda_todo, "wait_run_events", never_finishes)
     monkeypatch.setattr(eda_todo, "AGENT_TURN_TIMEOUT_SECONDS", 0.01)
 
-    failed = await run_eda_todos(
+    failed = await _run_todos(
         agents=agents,
         store=None,
         workspace=tmp_path,
@@ -232,7 +234,7 @@ async def test_a_report_already_on_disk_is_not_regenerated(tmp_path) -> None:
     )
     agents = Agents()
 
-    failed = await run_eda_todos(
+    failed = await _run_todos(
         agents=agents, store=object(), workspace=workspace, project_event=None
     )
 
@@ -264,7 +266,7 @@ async def test_a_stub_sized_report_is_still_regenerated(tmp_path) -> None:
     )
     agents = Agents()
 
-    failed = await run_eda_todos(
+    failed = await _run_todos(
         agents=agents, store=object(), workspace=workspace, project_event=None
     )
 
