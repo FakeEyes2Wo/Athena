@@ -507,6 +507,87 @@ class TestBaseAgent:
         assert timeline == ["unsafe:start", "unsafe:end", "safe:start"]
 
 
+async def test_parallel_tool_groups_join_at_serial_barrier() -> None:
+    timeline: list[str] = []
+    first_group_started = asyncio.Event()
+    last_group_started = asyncio.Event()
+
+    class ProbeTool(BaseTool):
+        def __init__(self, name: str, concurrency_safe: bool = True):
+            self.spec = ToolSpec(
+                name=name,
+                description=name,
+                input_schema={},
+                concurrency_safe=concurrency_safe,
+            )
+
+        async def execute(self, input: dict, ctx: ToolContext):
+            name = self.spec.name
+            timeline.append(f"{name}:start")
+            if name == "a":
+                await first_group_started.wait()
+            elif name == "b":
+                first_group_started.set()
+            elif name == "d":
+                await last_group_started.wait()
+            elif name == "e":
+                last_group_started.set()
+            await asyncio.sleep(0)
+            timeline.append(f"{name}:end")
+            return name
+
+    class CallsProvider:
+        async def stream(self, _config, _tools, messages, _cancel, **_kwargs):
+            returns = [
+                part
+                for message in messages
+                for part in message.parts
+                if isinstance(part, ToolReturnPart)
+            ]
+            if returns:
+                assert [(part.tool_call_id, part.content) for part in returns] == [
+                    (name, name) for name in "abcde"
+                ]
+                yield StreamEvent("text_delta", {"accumulated": "done"})
+            else:
+                for name in "abcde":
+                    yield StreamEvent(
+                        "function_call",
+                        {"call_id": name, "name": name, "arguments": {}},
+                    )
+            yield StreamEvent("response_completed")
+
+    tools = ToolRegistry()
+    for name in "abcde":
+        tools.register(ProbeTool(name, concurrency_safe=name != "c"))
+    agent = Agent(CallsProvider(), tools, "")
+    ctx = AgentContext(
+        AthenaThread(
+            thread_id="thread",
+            session_id="session",
+            status="running",
+            context_ref="context",
+        ),
+        AthenaTurn(
+            turn_id="turn", thread_id="thread", request_ref="request", status="running"
+        ),
+        lambda *_args: asyncio.sleep(0),
+        tools,
+        asyncio.Event(),
+    )
+
+    await asyncio.wait_for(agent.run(ctx), timeout=2)
+
+    assert timeline.index("b:start") < timeline.index("a:end")
+    assert max(timeline.index(f"{name}:end") for name in "ab") < timeline.index(
+        "c:start"
+    )
+    assert timeline.index("c:end") < min(
+        timeline.index(f"{name}:start") for name in "de"
+    )
+    assert timeline.index("e:start") < timeline.index("d:end")
+
+
 def test_chat_completions_tool_schema_is_nested() -> None:
     spec = ToolSpec(name="echo", description="echo", input_schema={"type": "object"})
 

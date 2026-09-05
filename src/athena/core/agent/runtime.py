@@ -34,7 +34,7 @@ from athena.core.agent.models import (
 )
 from athena.core.agent.provider import BaseProvider, create_provider
 from athena.core.thread_models import AthenaThread, AthenaTurn
-from athena.core.tool import ToolRegistry
+from athena.core.tool import BaseTool, ToolRegistry
 from athena.core.tool_types import AskUser, EmitEvent, ToolContext, ToolResult
 from athena.memory.context_manager import ContextManager
 
@@ -259,9 +259,9 @@ async def _truncated_tool_result(
     )
 
 
-async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any] | None]) -> None:
+async def _cancel_tool_tasks(tool_tasks: list[asyncio.Task[Any]]) -> None:
     """取消并等待所有在途工具任务；吞掉取消引发的异常。"""
-    pending = [t for t in tool_tasks if t is not None and not t.done()]
+    pending = [t for t in tool_tasks if not t.done()]
     for task in pending:
         task.cancel()
     if pending:
@@ -303,7 +303,7 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
     assert mem is not None
 
     tool_calls: list[ToolCall] = []
-    tool_tasks: list[asyncio.Task[Any] | None] = []
+    tool_tasks: list[asyncio.Task[Any]] = []
     serial_barrier: asyncio.Task[Any] | None = None
     text = ""
     had_calls = False
@@ -340,20 +340,20 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
                             f"event:{ctx.turn.turn_id}:{tc.call_id}",
                             {"name": tc.name, "arguments": tc.arguments},
                         )
-                        idx = len(tool_calls)
                         tool_calls.append(tc)
-                        tool_tasks.append(None)
 
                         if event.data.get("truncated"):
                             # 实参被 max_tokens 截断 → 可恢复工具错误（同一 turn
                             # 重试，不终止 worker）。必须在 resolve 之前拦下：工具
                             # 本身会把空参数报成"缺必填参数"，那条信息会把模型引向
                             # 原样重发，而不是分块重写。
-                            tool_tasks[idx] = asyncio.create_task(
-                                _truncated_tool_result(
-                                    tc.name,
-                                    int(event.data.get("raw_argument_chars", 0)),
-                                    str(event.data.get("finish_reason", "")),
+                            tool_tasks.append(
+                                asyncio.create_task(
+                                    _truncated_tool_result(
+                                        tc.name,
+                                        int(event.data.get("raw_argument_chars", 0)),
+                                        str(event.data.get("finish_reason", "")),
+                                    )
                                 )
                             )
                             continue
@@ -362,9 +362,12 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
                             tool = agent.tools.resolve(tc.name)
                         except KeyError:
                             # 未知工具名 → 可恢复工具错误（同一 turn 重试，不终止 worker）
-                            tool_tasks[idx] = asyncio.create_task(
-                                _unknown_tool_result(
-                                    tc.name, [spec.name for spec in agent.tools.specs]
+                            tool_tasks.append(
+                                asyncio.create_task(
+                                    _unknown_tool_result(
+                                        tc.name,
+                                        [spec.name for spec in agent.tools.specs],
+                                    )
                                 )
                             )
                             continue
@@ -377,10 +380,15 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
                             session_id=ctx.thread.session_id,
                         )
 
-                        task = _dispatch_tool_call(
-                            tool, tctx, tc, idx, tool_tasks, serial_barrier
+                        dependencies = (
+                            ((serial_barrier,) if serial_barrier is not None else ())
+                            if tool.spec.concurrency_safe
+                            else tuple(tool_tasks)
                         )
-                        tool_tasks[idx] = task
+                        task = asyncio.create_task(
+                            _execute_tool_after(tool, tctx, tc.arguments, dependencies)
+                        )
+                        tool_tasks.append(task)
                         if not tool.spec.concurrency_safe:
                             serial_barrier = task
 
@@ -410,31 +418,21 @@ async def _sample_once(agent: Agent, ctx: AgentContext) -> tuple[StepOutcome, bo
         transient = not had_calls and is_transient_error(exc)
         return StepOutcome(kind="error", text=f"{type(exc).__name__}: {exc}"), transient
 
-    outcome = await _finalize_step(mem, tool_calls, tool_tasks, text, had_calls)
+    outcome = await _finalize_step(mem, tool_calls, tool_tasks, text)
     return outcome, False
 
 
 async def _finalize_step(
     mem: ContextManager,
     tool_calls: list[ToolCall],
-    tool_tasks: list[asyncio.Task[Any] | None],
+    tool_tasks: list[asyncio.Task[Any]],
     text: str,
-    had_calls: bool,
 ) -> StepOutcome:
     """收集工具结果、写回消息历史，并决定下一步的 StepOutcome。"""
-    results: list[Any] = [None] * len(tool_tasks)
-    if tool_tasks:
-        gathered = await asyncio.gather(
-            *[t for t in tool_tasks if t], return_exceptions=True
-        )
-        gi = 0
-        for i, t in enumerate(tool_tasks):
-            if t:
-                results[i] = gathered[gi]
-                gi += 1
+    results = await asyncio.gather(*tool_tasks, return_exceptions=True)
 
     # 写入 assistant 消息（文本 + 工具调用）
-    if had_calls and tool_calls:
+    if tool_calls:
         parts: list[Any] = []
         if text:
             parts.append(TextPart(content=text))
@@ -449,8 +447,7 @@ async def _finalize_step(
         mem.append(ModelResponse(parts=parts))
 
     # 写入工具返回结果到对话历史
-    for i, tc in enumerate(tool_calls):
-        r = results[i]
+    for tc, r in zip(tool_calls, results, strict=True):
         if isinstance(r, ToolResult):
             if not r.success:
                 content = f"[ERROR] {r.error}" if r.error else "[ERROR]"
@@ -479,54 +476,25 @@ async def _finalize_step(
         )
 
     # 无工具调用且有文本 → 完成；有工具调用 → 继续下一轮
-    if not had_calls and text:
-        mem.append(ModelResponse(parts=[TextPart(content=text)]))
-        return StepOutcome(kind="done", text=text)
-    if had_calls:
+    if tool_calls:
         return StepOutcome(kind="continue")
+    if text:
+        mem.append(ModelResponse(parts=[TextPart(content=text)]))
     return StepOutcome(kind="done", text=text)
 
 
-def _dispatch_tool_call(
-    tool,
+async def _execute_tool_after(
+    tool: BaseTool,
     tctx: ToolContext,
-    tc: ToolCall,
-    idx: int,
-    tool_tasks: list[asyncio.Task[Any] | None],
-    serial_barrier: asyncio.Task[Any] | None,
-) -> asyncio.Task[Any]:
-    """根据工具是否并发安全，创建并返回对应的异步任务。
-
-    将 function_call 分支中的嵌套逻辑抽取为独立函数，
-    避免 match/case 内出现超过 3 层的代码嵌套。
-    """
-    if tool.spec.concurrency_safe:
-
-        async def _run_safe(
-            barrier: asyncio.Task[Any] | None = serial_barrier,
-            selected_tool=tool,
-            selected_ctx=tctx,
-            arguments=tc.arguments,
-        ) -> ToolResult:
-            if barrier is not None:
-                await barrier
-            return await selected_tool.ainvoke(selected_ctx, **arguments)
-
-        return asyncio.create_task(_run_safe())
-    else:
-        previous = [task for task in tool_tasks[:idx] if task is not None]
-
-        async def _run_serial(
-            pending: list[asyncio.Task[Any]] = previous,
-            selected_tool=tool,
-            selected_ctx=tctx,
-            arguments=tc.arguments,
-        ) -> ToolResult:
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            return await selected_tool.ainvoke(selected_ctx, **arguments)
-
-        return asyncio.create_task(_run_serial())
+    arguments: dict[str, Any],
+    dependencies: tuple[asyncio.Task[Any], ...],
+) -> ToolResult:
+    """等待派发时冻结的前序任务，再执行工具；安全工具继承串行屏障的失败。"""
+    if dependencies:
+        await asyncio.gather(
+            *dependencies, return_exceptions=not tool.spec.concurrency_safe
+        )
+    return await tool.ainvoke(tctx, **arguments)
 
 
 def agent_runner(
