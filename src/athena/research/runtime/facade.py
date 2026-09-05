@@ -26,7 +26,6 @@ from athena.research.config import (
 )
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_rag.models import PaperSummary
-from athena.research.literature.survey import SurveyStack
 from athena.research.prepare.authority import BaselineAuthorityStore
 from athena.research.runtime.bootstrap import (
     baseline_ideator_tools as baseline_ideator_tools_impl,
@@ -95,21 +94,6 @@ from athena.research.runtime.corpus import (
 from athena.research.runtime.events import RuntimeEvents
 from athena.research.runtime.resume_contract import is_continue_command
 from athena.research.runtime.settings import SettingsController
-from athena.research.runtime.survey import (
-    ensure_survey_stack as ensure_survey_stack_impl,
-)
-from athena.research.runtime.survey import (
-    project_survey_event as project_survey_event_impl,
-)
-from athena.research.runtime.survey import (
-    run_survey as run_survey_impl,
-)
-from athena.research.runtime.survey import (
-    start_survey as start_survey_impl,
-)
-from athena.research.runtime.survey import (
-    survey_topic as survey_topic_impl,
-)
 from athena.research.script_runner import DataScriptRunner
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
@@ -462,32 +446,6 @@ class ResearchRuntime:
         await recover_confirmation(self)
         await confirm_pending_task(self)
         return await start_impl(self)
-
-    def start_survey(self) -> None:
-        """Start the background survey once, unless a corpus already exists."""
-        start_survey_impl(self)
-
-    def survey_corpus_ref(self) -> str | None:
-        """Return the currently available corpus reference, if any."""
-        return self.state.corpus_ref
-
-    async def survey_topic(self) -> str:
-        """Return the survey query: explicit setting first, task-derived otherwise."""
-        return await survey_topic_impl(self)
-
-    async def run_survey(self) -> None:
-        """Run one full survey and record the resulting corpus reference."""
-        await run_survey_impl(self)
-
-    def ensure_survey_stack(self) -> SurveyStack:
-        """Build and cache the survey dependency stack on this runtime's store."""
-        return ensure_survey_stack_impl(self)
-
-    async def project_survey_event(
-        self, kind: str, _ref: str, data: dict[str, Any] | None = None
-    ) -> None:
-        """Project a survey progress event into a human-readable output line."""
-        await project_survey_event_impl(self, kind, _ref, data)
 
     async def start_task(self, task: str) -> str:
         """Seed a task through PREPARE and SEARCH, with policy-based finalization.

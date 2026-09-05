@@ -8,7 +8,7 @@
 import asyncio
 import tempfile
 from pathlib import Path
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,7 +27,7 @@ from athena.research.literature.paper_source.http import HostRateLimiter
 from athena.research.literature.survey import SurveyReport, SurveyStack
 from athena.research.literature.survey.wiring import build_survey_tools
 from athena.research.runtime import ResearchRuntime
-from athena.research.runtime import survey as runtime_survey_module
+from athena.research.runtime import corpus as runtime_corpus_module
 from athena.research.supervisor.state import ResearchState
 from athena.research.turns import ideator as atr_module
 from athena.research.turns.runner import AgentTurnRunner
@@ -122,24 +122,26 @@ def _recorder(sink: list[dict]):
 def test_survey_is_off_by_default_so_no_run_pays_for_it_unasked() -> None:
     runtime = _runtime(_state())
 
-    runtime.start_survey()
+    runtime_corpus_module.start_survey(runtime)
 
     assert runtime.session.survey.task is None
 
 
 @pytest.mark.asyncio
-async def test_enabling_the_survey_starts_exactly_one_background_run() -> None:
+async def test_enabling_the_survey_starts_exactly_one_background_run(
+    monkeypatch,
+) -> None:
     runtime = _runtime(_state(), survey=True)
     runs = 0
 
-    async def fake_run(self) -> None:
+    async def fake_run(_runtime) -> None:
         nonlocal runs
         runs += 1
 
-    runtime.run_survey = MethodType(fake_run, runtime)
+    monkeypatch.setattr(runtime_corpus_module, "run_survey", fake_run)
 
-    runtime.start_survey()
-    runtime.start_survey()
+    runtime_corpus_module.start_survey(runtime)
+    runtime_corpus_module.start_survey(runtime)
     await runtime.session.survey.task
 
     assert runs == 1
@@ -148,7 +150,7 @@ async def test_enabling_the_survey_starts_exactly_one_background_run() -> None:
 def test_an_existing_corpus_is_never_paid_for_twice() -> None:
     runtime = _runtime(_state(corpus_ref="sha256:cached"), survey=True)
 
-    runtime.start_survey()
+    runtime_corpus_module.start_survey(runtime)
 
     assert runtime.session.survey.task is None
 
@@ -170,9 +172,9 @@ async def test_the_corpus_ref_lands_on_the_state_the_supervisor_will_persist(
     async def fake_survey(_stack, _request, *, emit=None):
         return SurveyReport(query="q", status="complete", corpus_ref="sha256:corpus")
 
-    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
+    monkeypatch.setattr(runtime_corpus_module, "run_survey_pipeline", fake_survey)
 
-    await runtime.run_survey()
+    await runtime_corpus_module.run_survey(runtime)
 
     assert live.corpus_ref == "sha256:corpus"
     assert stale.corpus_ref is None
@@ -190,9 +192,9 @@ async def test_a_failed_survey_is_reported_and_leaves_search_untouched(
     async def fake_survey(_stack, _request, *, emit=None):
         raise RuntimeError("upstream is down")
 
-    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
+    monkeypatch.setattr(runtime_corpus_module, "run_survey_pipeline", fake_survey)
 
-    await runtime.run_survey()
+    await runtime_corpus_module.run_survey(runtime)
 
     assert runtime.state.corpus_ref is None
     assert [item["channel"] for item in published] == ["text", "error"]
@@ -208,9 +210,9 @@ async def test_an_empty_corpus_is_reported_rather_than_recorded(monkeypatch) -> 
     async def fake_survey(_stack, _request, *, emit=None):
         return SurveyReport(query="q", status="empty")
 
-    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", fake_survey)
+    monkeypatch.setattr(runtime_corpus_module, "run_survey_pipeline", fake_survey)
 
-    await runtime.run_survey()
+    await runtime_corpus_module.run_survey(runtime)
 
     assert runtime.state.corpus_ref is None
     assert published[-1]["channel"] == "error"
@@ -376,7 +378,7 @@ def test_no_paper_tools_are_offered_before_a_corpus_exists() -> None:
     runtime = _runtime(_state(), survey_stack=_stack())
 
     assert runtime.corpus_tools() is None
-    assert runtime.survey_corpus_ref() is None
+    assert runtime.state.corpus_ref is None
 
 
 def test_the_ideator_tool_set_merges_kaggle_and_corpus_lazily() -> None:
@@ -410,7 +412,7 @@ async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
 
     await AgentTurnRunner(runtime)._run_ideator_lane("ideator-1-1", 2, _eda_dir())
 
-    assert runtime.survey_corpus_ref() is None
+    assert runtime.state.corpus_ref is None
     assert "corpus_ref" not in requests[0]["content"]
 
 
@@ -595,7 +597,7 @@ def _lane_harness(monkeypatch) -> list[dict]:
     async def load(_summary, _store, _schema):
         return SimpleNamespace(hypotheses=[])
 
-    monkeypatch.setattr(runtime_survey_module, "run_survey_pipeline", _unused_survey)
+    monkeypatch.setattr(runtime_corpus_module, "run_survey_pipeline", _unused_survey)
     monkeypatch.setattr("athena.research.turns.common.wait_run_events", wait)
     monkeypatch.setattr("athena.research.turns.ideator.load_agent_result", load)
     return []
@@ -634,7 +636,7 @@ def test_a_corpus_restored_from_state_still_hands_the_ideator_its_operators(
     assert runtime.session.survey.stack is None
     built: list[object] = []
     monkeypatch.setattr(
-        runtime_survey_module,
+        runtime_corpus_module,
         "build_survey_stack",
         lambda **kwargs: built.append(kwargs) or _stack(),
     )
@@ -655,7 +657,7 @@ async def test_citations_are_verifiable_against_a_corpus_restored_from_state(
     runtime = _runtime(_state(corpus_ref="sha256:corpus"))
     stack = _stack()
     monkeypatch.setattr(
-        runtime_survey_module, "build_survey_stack", lambda **_kwargs: stack
+        runtime_corpus_module, "build_survey_stack", lambda **_kwargs: stack
     )
 
     async def _load(_store, _corpus_ref, **_kwargs):

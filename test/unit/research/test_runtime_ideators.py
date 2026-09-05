@@ -70,7 +70,7 @@ def _lane_runner(monkeypatch, batches: list[HypothesisBatch]):
         ideation="baseline",
         store=object(),
         supervisor=SimpleNamespace(evaluator_ref=None),
-        survey_corpus_ref=lambda: None,
+        state=SimpleNamespace(corpus_ref=None),
     )
     pending = iter(batches)
 

@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any
 
+from athena.research.runtime.corpus import start_survey
 from athena.research.runtime.resume_contract import (
     ResearchControlError,
     is_continue_command,
@@ -37,7 +38,7 @@ async def start(runtime: Any) -> asyncio.Task[None]:
     lifecycle.task_text = _task_text(runtime, runtime.task_text)
     await runtime.git.init(initial_file=".gitignore", initial_content=".venv/\n")
     runtime.agents.start()
-    runtime.start_survey()
+    start_survey(runtime)
     if runtime.state.status == "IDLE":
         runtime.state.status = "RUNNING"
         runtime.state.save(runtime.state_path)

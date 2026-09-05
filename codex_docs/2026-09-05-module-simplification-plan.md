@@ -627,6 +627,14 @@ Delete the CLI's duplicate 18-field `CliRunConfig` and dictionary-expansion prot
 
 The complete research unit suite passes 1,253 tests; the migrated CLI/TUI/GUI entry selection passes 34; and the nine affected integration files pass 89. A direct contract test fixes the constructor at four parameters, `ResearchConfig` at four fields, and each external group at no more than five fields. The facade row remains Pending and reviewed coverage stays at 353/602 because its remaining forwarding methods still require full caller decisions. `runtime/survey.py` also remains Pending because this slice migrated its config read but did not perform its full-file review. Whole-repository acceptance remains pending.
 
+## Runtime survey/corpus consolidation
+
+Read `runtime/survey.py` and its complete focused test file end to end, then trace survey startup, cancellation, topic rewriting, progress projection, corpus persistence, lazy stack construction, corpus tool delivery, and citation verification through control, the runtime facade, Ideator turns, and the broader research tests. Preserve the optional-survey contract: it starts at most once, never replaces an existing corpus, propagates cancellation, reports ordinary failures without stopping SEARCH, and exposes only read-only paper tools to Ideators.
+
+Merge the survey lifecycle into the already-reviewed `runtime/corpus.py` and delete `runtime/survey.py`, leaving one owner for corpus creation and use. Privatize topic rewriting, stack construction, and event projection. Remove all six survey-specific Runtime forwarding methods (`start_survey`, `run_survey`, `survey_topic`, `project_survey_event`, `ensure_survey_stack`, and `survey_corpus_ref`); control calls the module lifecycle entry directly and Ideator code reads the authoritative `state.corpus_ref`. Update test doubles to model that same minimal state/config contract instead of preserving removed methods.
+
+The two runtime modules fall from 262 immediate pre-change physical lines to one 243-line module. The facade falls from 641 to 599 physical lines and now has 71 methods; production code falls by 62 net lines. The unchanged focused baseline passed 50 tests, the expanded focused selection passed 55, and the complete research plus Idea Generation unit selection passed 1,289 tests. Ruff, Black, Python compilation, removed-symbol searches, and `git diff --check` passed. Closing the deleted survey row advances reviewed coverage to 354/602. The touched facade and Ideator rows remain Pending for their own complete reviews. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1239,15 +1247,15 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/bootstrap.py` | 438 | Reviewed; delete single-use config forwarder and redundant implementation export list |
 | `src/athena/research/runtime/clarification.py` | 149 | Reviewed; privatize store resolver and remove redundant implementation exports |
 | `src/athena/research/runtime/control.py` | 214 | Reviewed; privatize four lifecycle helpers and remove redundant exports/defensive catch |
-| `src/athena/research/runtime/corpus.py` | 90 | Reviewed; retain minimal one-runtime-argument corpus/read-ledger facade |
+| `src/athena/research/runtime/corpus.py` | 90 | Reviewed; own merged survey lifecycle and corpus/read ledger behind module functions |
 | `src/athena/research/runtime/event_projection.py` | 89 | Reviewed; retain pure projection boundary and remove redundant implementation export list |
 | `src/athena/research/runtime/events.py` | 457 | Reviewed; merge subscriber readiness state and reduce Agent buffers from three fields to two |
-| `src/athena/research/runtime/facade.py` | 728 | Pending; constructor reduced from 36 keywords to four grouped inputs, forwarding surface still open |
+| `src/athena/research/runtime/facade.py` | 728 | Pending; grouped constructor retained and six survey forwarders removed; remaining surface still open |
 | `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
 | `src/athena/research/runtime/resume_contract.py` | 56 | Pending |
 | `src/athena/research/runtime/services.py` | 136 | Pending |
 | `src/athena/research/runtime/settings.py` | 308 | Pending |
-| `src/athena/research/runtime/survey.py` | 165 | Pending |
+| `src/athena/research/runtime/survey.py` | 165 | Reviewed; merge lifecycle into `corpus.py` and delete file |
 | `src/athena/research/script_runner.py` | 388 | Pending |
 | `src/athena/research/splitter.py` | 308 | Pending |
 | `src/athena/research/supervisor/__init__.py` | 5 | Pending |

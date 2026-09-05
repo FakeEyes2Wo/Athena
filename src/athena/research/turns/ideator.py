@@ -292,7 +292,7 @@ class IdeatorTurnMixin:
                 )
             )
             content += handoff_block(handoff)
-        corpus_ref = rt.survey_corpus_ref()
+        corpus_ref = rt.state.corpus_ref
         if corpus_ref is not None:
             content += await self._corpus_block(corpus_ref)
         request = {"content": content, "context_refs": context_refs}
@@ -461,7 +461,7 @@ class IdeatorTurnMixin:
         from athena.agents.ideator import Ideator  # 延迟导入避免循环依赖
 
         rt = self._runtime
-        corpus_ref = rt.survey_corpus_ref()
+        corpus_ref = rt.state.corpus_ref
         debate_tools = rt.ideator_tools()()
 
         class _StructuredResult:

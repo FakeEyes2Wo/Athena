@@ -412,7 +412,9 @@ def test_lifecycle_done_callback_observes_background_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_start_does_not_require_clarification_services() -> None:
+async def test_lifecycle_start_does_not_require_clarification_services(
+    monkeypatch,
+) -> None:
     class FakeGit:
         async def init(self, *args, **kwargs) -> None:
             return None
@@ -444,7 +446,9 @@ async def test_lifecycle_start_does_not_require_clarification_services() -> None
         git=FakeGit(),
         agents=FakeAgents(),
         supervisor=FakeSupervisor(),
-        start_survey=lambda: None,
+    )
+    monkeypatch.setattr(
+        "athena.research.runtime.control.start_survey", lambda _runtime: None
     )
 
     task = await start_lifecycle(runtime)
