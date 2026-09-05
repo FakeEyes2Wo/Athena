@@ -35,10 +35,6 @@ class GuiState:
         return (self.skip_validate_by_project or {}).get(key, False)
 
 
-def _default_state() -> GuiState:
-    return GuiState()
-
-
 def _parse_last_sessions(raw: object) -> dict[str, str] | None:
     """解析「工作区 → 上次会话」映射：缺字段返回 None，脏条目逐条丢弃。"""
     if not isinstance(raw, dict):
@@ -79,13 +75,13 @@ class GuiStateStore:
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return _default_state()
+            return GuiState()
         except (OSError, json.JSONDecodeError):
             self._backup_corrupt()
-            return _default_state()
+            return GuiState()
         if not isinstance(payload, dict):
             self._backup_corrupt()
-            return _default_state()
+            return GuiState()
         raw_root = payload.get("active_project_root")
         # 活动工作区不可用（被删/被改名）不影响其余字段：last-active 记录要留着，
         # 用户下次打开那个工作区时还得靠它恢复会话。

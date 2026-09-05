@@ -10,30 +10,18 @@ Tauri 桌面应用启动此 Python 进程并从 stdout 的第一行读取端口�
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from gui_gateway.handler import GuiRequestHandler
 from gui_gateway.human import HumanRequestBroker
-from gui_gateway.state_store import GuiStateStore, validate_project_root
+from gui_gateway.state_store import GuiStateStore
 from gui_gateway.transport import WebSocketTransport
 from athena.core.agent import settings
 from athena.research import ResearchRuntime
 
-
-class RuntimeFactory(Protocol):
-    """Factory contract used by the gateway for initial and swapped runtimes."""
-
-    def __call__(
-        self,
-        project_root: str | None = None,
-        state_root: Path | None = None,
-        *,
-        ask_user: Any = None,
-        session_id: str = "default",
-        broker: Any = None,
-        skip_validate: bool = False,
-    ) -> ResearchRuntime: ...
+RuntimeFactory = Callable[..., ResearchRuntime]
 
 
 def _make_runtime(
@@ -100,7 +88,7 @@ async def start_server(
     broker = HumanRequestBroker()
     state_store = GuiStateStore()
 
-    def factory(
+    def _factory(
         project_root: str | None = None, state_root: Path | None = None
     ) -> ResearchRuntime:
         session_id = state_root.name if state_root is not None else "default"
@@ -116,26 +104,26 @@ async def start_server(
         broker.bind(session_id, "runtime", "runtime")
         return runtime
 
-    stored_root = validate_project_root(state_store.load().active_project_root)
+    stored_root = state_store.load().active_project_root
     handler = GuiRequestHandler(
-        runtime or factory(stored_root),
-        factory,
+        runtime or _factory(stored_root),
+        _factory,
         broker,
         state_store=state_store,
     )
     transport = WebSocketTransport(handler)
     chosen_port = port if port is not None else _fixed_port()
     server = await transport.serve("127.0.0.1", chosen_port)
-    port: int = server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+    bound_port: int = server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
     if not test_mode:
         # Tauri 读取 stdout 第一行以获取端口号
-        print(port, flush=True)
-    return server, port
+        print(bound_port, flush=True)
+    return server, bound_port
 
 
 async def main() -> None:
     """主入口点 — 启动服务器并持续运行。"""
-    server, port = await start_server(test_mode=False, port=_fixed_port())
+    server, port = await start_server()
     print(f"Athena GUI gateway listening on ws://127.0.0.1:{port}", flush=True)
     try:
         await asyncio.Future()  # 持续运行

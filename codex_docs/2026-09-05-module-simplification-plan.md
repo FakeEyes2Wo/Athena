@@ -42,6 +42,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Narrow the Supervisor public surface and remove unused Plan/ideation return values.
 - [x] Generalize the single task owner across recovery, PREPARE, SEARCH and VALIDATE; join phases during stop/validation handoff.
 - [x] Complete the Supervisor source/test review, consolidate authoritative fields, and close phase-command races.
+- [x] Review the GUI gateway boundary modules and remove duplicated state/factory layers.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -56,6 +57,14 @@ The remaining six TUI files were then read completely and their production/test 
 Within the application, localize the five history/pane controls that are retained by the prompt-toolkit layout rather than application logic, combine selection anchor/cursor into one tuple, and remove the constant exit-code attribute. `AthenaApp` construction falls from 17 instance attributes to 11. Delete the unused `plans` display-state copy and forwarding `control_status` property. Delete the test-only joined-history wrapper, and reduce `apply_event` from three parameters to two by removing its unread width. Runtime event order, selection, scrolling, clipboard fallback, dynamic panes, composer behavior, rendering, resume, and shutdown remain unchanged.
 
 Fresh full TUI verification passed 91 unit/integration tests, the module CLI help path, Python compilation, the code-style hard-rule gate, removed-symbol searches, and `git diff --check`. Closing the remaining six rows advances reviewed coverage to 118/602. Whole-repository acceptance remains pending.
+
+## GUI gateway boundary review
+
+Read the gateway package marker, process entry, human-request broker, state store, and WebSocket transport completely and trace their callers through the handler and gateway tests. Retain the broker's legacy and scoped request paths because both are active, retain its context binding, and retain the transport's send lock, subscription replacement, and error projection because they enforce session and wire-protocol behavior. The package marker remains the required import boundary. The large request handler remains Pending for its own complete review.
+
+Remove the state store's zero-logic default-state wrapper and construct its data record directly on the three fallback paths. The process entry now trusts the state store's existing project-root validation instead of validating the loaded value twice, replaces a fifteen-line callable Protocol with the canonical `Callable` alias, gives its nested runtime factory private scope, avoids rebinding the requested port, and lets `main` use `start_server`'s defaults. Remove the gateway broker's prohibited future import; its Python 3.11+ annotations need no compatibility layer. No compatibility aliases or new abstractions were added.
+
+Fresh verification passed 104 gateway, state-store, protocol, clarification, and end-to-end tests; Python compilation, the code-style hard-rule gate, and `git diff --check` also passed. Pytest reported one existing Windows subprocess finalizer warning and one cache-permission warning after all tests passed. Closing five ledger rows advances reviewed coverage to 123/602. Whole-repository acceptance remains pending.
 
 ## Root development-script review
 
@@ -729,12 +738,12 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena_tui/entrypoint.py` | 62 | Reviewed; retain tested argument, TTY, composition and resume boundaries |
 | `src/athena_tui/render.py` | 499 | Reviewed; retain pure renderer and delete test-only joined-history wrapper |
 | `src/athena_tui/state.py` | 166 | Reviewed; remove unread plans projection and forwarding status property |
-| `src/gui_gateway/__init__.py` | 1 | Pending |
-| `src/gui_gateway/__main__.py` | 149 | Pending |
+| `src/gui_gateway/__init__.py` | 1 | Reviewed; retain required package boundary |
+| `src/gui_gateway/__main__.py` | 149 | Reviewed; remove duplicate root validation and callable protocol; use one server-default path |
 | `src/gui_gateway/handler.py` | 617 | Pending |
-| `src/gui_gateway/human.py` | 279 | Pending |
-| `src/gui_gateway/state_store.py` | 139 | Pending |
-| `src/gui_gateway/transport.py` | 123 | Pending |
+| `src/gui_gateway/human.py` | 279 | Reviewed; retain active legacy/scoped broker contracts; remove prohibited future import |
+| `src/gui_gateway/state_store.py` | 139 | Reviewed; inline zero-logic default-state wrapper |
+| `src/gui_gateway/transport.py` | 123 | Reviewed; retain session subscription, serialization, and send-lock boundary |
 | `athena-rust/crates/athena-agent/src/agent.rs` | 369 | Pending |
 | `athena-rust/crates/athena-agent/src/input.rs` | 47 | Pending |
 | `athena-rust/crates/athena-agent/src/lib.rs` | 21 | Pending |

@@ -10,8 +10,6 @@ A bounded ledger of recently settled request IDs lets duplicate replies return a
 typed ``duplicate_reply`` error instead of ``unknown_request``.
 """
 
-from __future__ import annotations
-
 import asyncio
 from collections import deque
 from collections.abc import Callable
