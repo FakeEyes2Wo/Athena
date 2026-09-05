@@ -295,6 +295,14 @@ Read each rollout file's stat once, replace the manual message counter with a ge
 
 The GUI unit and complete gateway-handler selection passed 59 tests, including a new real-JSONL summary, malformed-record, compaction, user-message, and tool-call regression. Python compilation, Black, blocking Ruff, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the trace row advances reviewed baseline coverage to 229/602; the new regression file is tracked separately below. Whole-repository acceptance remains pending.
 
+## Kaggle facade, authentication, and schema review
+
+Read the Kaggle package facade, credential resolver, and schema module completely, then traced every export, credential field, and request/report field through the CLI, runtime bootstrap, client, tools, pipeline, and tests. Retain the three files as distinct package boundary, filesystem authentication, and validated data-contract owners; merging them into the HTTP client or pipeline would mix environment/filesystem policy with transport and mutable run state.
+
+Reduce the package facade from twenty-six exports to the six symbols actually imported through `athena.kaggle`; package-internal modules continue to import their concrete owners directly. Delete the unconstructed `DiscussionThreadSummary` model and the test-only `KaggleCredentials.configured` property, leaving `auth_header()` as the single credential authority used by the client. Reuse `KaggleCredentials` for explicit overrides so `resolve_credentials` falls from five parameters to three instead of introducing a second options type. The wiring caller now passes the environment token through that record. The three reviewed source files fall by fifty-six net lines; `wiring.py` remains Pending because only its necessary call site was inspected and migrated in this slice.
+
+The complete Kaggle selection passed 37 tests before and after the change; the CLI/wiring consumer selection passed 27 tests. All six retained facade imports loaded successfully. Python compilation, Black, blocking Ruff, removed-symbol searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the facade, authentication, and schema rows advances reviewed baseline coverage to 232/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -776,11 +784,11 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/gui/service.py` | 345 | Reviewed; one runtime attribute, one confirmation request, synchronous reads and no legacy task path |
 | `src/athena/gui/traces.py` | 122 | Reviewed; one stat per file, direct lookup and consolidated part normalization |
 | `test/unit/gui/test_traces.py` | New | Reviewed; real JSONL summary and normalized-message regression |
-| `src/athena/kaggle/__init__.py` | 59 | Pending |
-| `src/athena/kaggle/auth.py` | 72 | Pending |
+| `src/athena/kaggle/__init__.py` | 59 | Reviewed; six live package exports instead of twenty-six |
+| `src/athena/kaggle/auth.py` | 72 | Reviewed; one credential authority and three-parameter resolver |
 | `src/athena/kaggle/client.py` | 418 | Pending |
 | `src/athena/kaggle/pipeline.py` | 156 | Pending |
-| `src/athena/kaggle/schemas.py` | 63 | Pending |
+| `src/athena/kaggle/schemas.py` | 63 | Reviewed; delete unconstructed discussion summary and retain live request/report models |
 | `src/athena/kaggle/tool.py` | 444 | Pending |
 | `src/athena/kaggle/wiring.py` | 124 | Pending |
 | `src/athena/memory/__init__.py` | 13 | Reviewed; retain public exports |

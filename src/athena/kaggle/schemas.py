@@ -32,17 +32,6 @@ class NotebookSummary(BaseModel):
     url: str = ""
 
 
-class DiscussionThreadSummary(BaseModel):
-    """One Kaggle competition discussion thread summary."""
-
-    ref: str
-    title: str = ""
-    author: str = ""
-    total_votes: int = 0
-    comment_count: int = 0
-    url: str = ""
-
-
 class KaggleRunRequest(BaseModel):
     competition: str = Field(min_length=1)
     download_subdir: str = ""

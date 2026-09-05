@@ -61,7 +61,7 @@ def build_kaggle_stack(
     download: bool = True,
 ) -> KaggleStack:
     resolved = credentials or resolve_credentials(
-        explicit_token=os.environ.get(KAGGLE_TOKEN_ENV, "")
+        KaggleCredentials(bearer_token=os.environ.get(KAGGLE_TOKEN_ENV, ""))
     )
     root = Path(
         download_root or os.environ.get(DOWNLOAD_ROOT_ENV, "") or DEFAULT_DOWNLOAD_ROOT

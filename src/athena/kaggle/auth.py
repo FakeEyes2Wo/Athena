@@ -16,10 +16,6 @@ class KaggleCredentials:
     username: str = ""
     key: str = ""
 
-    @property
-    def configured(self) -> bool:
-        return bool(self.bearer_token or (self.username and self.key))
-
     def auth_header(self) -> str | None:
         if self.bearer_token:
             return f"Bearer {self.bearer_token}"
@@ -50,19 +46,18 @@ def _read_config_credentials(path: Path) -> tuple[str, str]:
 
 
 def resolve_credentials(
-    explicit_token: str = "",
-    explicit_username: str = "",
-    explicit_key: str = "",
+    explicit: KaggleCredentials | None = None,
     *,
     access_token_path: Path | None = None,
     config_path: Path | None = None,
 ) -> KaggleCredentials:
     """显式参数优先，其次回退磁盘文件。"""
-    token = explicit_token.strip() or _read_token_file(
+    explicit = explicit or KaggleCredentials()
+    token = explicit.bearer_token.strip() or _read_token_file(
         access_token_path or DEFAULT_ACCESS_TOKEN_PATH
     )
-    username = explicit_username.strip()
-    key = explicit_key.strip()
+    username = explicit.username.strip()
+    key = explicit.key.strip()
     if not (username and key):
         file_username, file_key = _read_config_credentials(
             config_path or DEFAULT_CONFIG_PATH
