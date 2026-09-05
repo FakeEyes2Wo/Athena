@@ -311,9 +311,7 @@ class KaggleDownloadDataTool(StackTool):
                 }
             )
         report = await run_kaggle(
-            self.stack.client,
-            self.stack.artifacts,
-            self.stack.download_root,
+            self.stack,
             KaggleRunRequest(
                 competition=ref,
                 download_subdir=str(input.get("download_subdir", "")),
@@ -366,9 +364,7 @@ class KaggleRunTool(StackTool):
             download_data=self.stack.download,
         )
         report = await run_kaggle(
-            self.stack.client,
-            self.stack.artifacts,
-            self.stack.download_root,
+            self.stack,
             request,
         )
         data = {

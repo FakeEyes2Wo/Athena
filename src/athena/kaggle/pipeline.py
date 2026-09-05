@@ -1,16 +1,11 @@
-"""Kaggle 取数流水线：connect → download → search notebooks，各段失败降级不中断。
-
-EDA / SOTA 分析不在这里做：下载后的数据交给 agent 用 workspace + shell 的
-代码生成流程自行分析（与本地数据集走同一条 PREPARE 流程）。
-"""
+"""Fetch the Kaggle inputs consumed by Athena's PREPARE workflow."""
 
 import json
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from athena.core.artifact_store import LocalArtifactStore
 from athena.core.workspace import resolve_workspace_path
-from athena.kaggle.client import KaggleApiClient, author_name, pick_first
+from athena.kaggle.client import author_name, pick_first
 from athena.kaggle.schemas import (
     Competition,
     KaggleRunReport,
@@ -18,87 +13,72 @@ from athena.kaggle.schemas import (
     NotebookSummary,
 )
 
+if TYPE_CHECKING:
+    from athena.kaggle.wiring import KaggleStack
 
-class KagglePipeline:
-    def __init__(
-        self,
-        client: KaggleApiClient,
-        artifacts: LocalArtifactStore,
-        download_root: Path,
-        request: KaggleRunRequest,
-    ) -> None:
-        self.client = client
-        self.artifacts = artifacts
-        self.download_root = download_root
-        self.request = request
-        self.report = KaggleRunReport(competition_ref=request.competition)
 
-    async def run(self) -> KaggleRunReport:
-        started = time.monotonic()
-        competition = await self._connect()
-        self.report.competition = competition
-        if competition is not None:
-            if self.request.download_data:
-                await self._download(competition)
-            self.report.notebooks = await self._search()
-        self.report.http_requests = self.client.http_request_count
-        self.report.total_seconds = round(time.monotonic() - started, 3)
-        self.report.status = self.final_status()
-        return self.report
+async def run_kaggle(
+    stack: "KaggleStack", request: KaggleRunRequest
+) -> KaggleRunReport:
+    """Fetch competition metadata, optional data, and notebook evidence."""
+    started = time.monotonic()
+    report = KaggleRunReport(competition_ref=request.competition)
 
-    def final_status(self) -> str:
-        return "empty" if self.report.competition is None else "complete"
+    # Connect first; later stages have no meaningful input without metadata.
+    try:
+        raw_competition = await stack.client.get_competition(request.competition)
+    except Exception as error:  # connect failure -> empty report
+        report.warnings.append(_failure("connect", error))
+        raw_competition = {}
+    if raw_competition:
+        report.competition = _competition_from_raw(request.competition, raw_competition)
+    elif not report.warnings:
+        report.warnings.append("connect returned an empty competition object")
 
-    def _target_dir(self, competition: Competition) -> Path:
-        subdir = self.request.download_subdir or competition.ref or "kaggle-data"
-        return resolve_workspace_path(self.download_root, subdir)
-
-    async def _connect(self) -> Competition | None:
+    # Download and search degrade independently after a successful connection.
+    if report.competition is not None and request.download_data:
+        subdir = request.download_subdir or report.competition.ref or "kaggle-data"
+        target = resolve_workspace_path(stack.download_root, subdir)
         try:
-            raw = await self.client.get_competition(self.request.competition)
-        except Exception as error:  # 连接失败 → 空报告
-            self.report.warnings.append(
-                f"connect failed: {type(error).__name__}: {error}"
+            paths = await stack.client.download_competition(
+                report.competition.ref, target
             )
-            return None
-        if not raw:
-            self.report.warnings.append("connect returned an empty competition object")
-            return None
-        return _competition_from_raw(self.request.competition, raw)
+        except Exception as error:  # download failure -> metadata-only report
+            report.warnings.append(_failure("download", error))
+        else:
+            report.data_manifest_ref = await stack.artifacts.put_text(
+                json.dumps(
+                    [
+                        {"name": path.name, "size": path.stat().st_size}
+                        for path in paths
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+            report.downloaded_files = [str(path) for path in paths]
+            if not paths:
+                report.warnings.append("download produced no files")
 
-    async def _download(self, competition: Competition) -> None:
+    if report.competition is not None and request.max_notebooks > 0:
         try:
-            paths = await self.client.download_competition(
-                competition.ref, self._target_dir(competition)
+            raw_notebooks = await stack.client.list_notebooks(
+                request.competition, page=1, sort_by="hotness"
             )
-        except Exception as error:  # 下载失败 → 无本地文件
-            self.report.warnings.append(
-                f"download failed: {type(error).__name__}: {error}"
+        except Exception as error:  # search failure -> omit notebook evidence
+            report.warnings.append(_failure("notebook search", error))
+        else:
+            report.notebooks = _notebooks_from_raw(
+                raw_notebooks[: request.max_notebooks]
             )
-            return
-        self.report.data_manifest_ref = await self.artifacts.put_text(
-            json.dumps(
-                [{"name": p.name, "size": p.stat().st_size} for p in paths],
-                ensure_ascii=False,
-            )
-        )
-        self.report.downloaded_files = [str(p) for p in paths]
-        if not paths:
-            self.report.warnings.append("download produced no files")
 
-    async def _search(self) -> list[NotebookSummary]:
-        if self.request.max_notebooks <= 0:
-            return []
-        try:
-            raw = await self.client.list_notebooks(
-                self.request.competition, page=1, sort_by="hotness"
-            )
-            return _notebooks_from_raw(raw[: self.request.max_notebooks])
-        except Exception as error:  # 检索失败只省略证据
-            self.report.warnings.append(
-                f"notebook search failed: {type(error).__name__}: {error}"
-            )
-            return []
+    report.http_requests = stack.client.http_request_count
+    report.total_seconds = round(time.monotonic() - started, 3)
+    report.status = "complete" if report.competition is not None else "empty"
+    return report
+
+
+def _failure(stage: str, error: Exception) -> str:
+    return f"{stage} failed: {type(error).__name__}: {error}"
 
 
 def _competition_from_raw(ref: str, raw: dict) -> Competition:
@@ -145,12 +125,3 @@ def _notebooks_from_raw(raw: list[dict]) -> list[NotebookSummary]:
             )
         )
     return notebooks
-
-
-async def run_kaggle(
-    client: KaggleApiClient,
-    artifacts: LocalArtifactStore,
-    download_root: Path,
-    request: KaggleRunRequest,
-) -> KaggleRunReport:
-    return await KagglePipeline(client, artifacts, download_root, request).run()

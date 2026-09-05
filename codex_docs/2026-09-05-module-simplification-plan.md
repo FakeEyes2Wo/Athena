@@ -311,6 +311,14 @@ Delete the uncalled public `get_bytes` method, make JSON GET and URL-slug normal
 
 The complete Kaggle selection passed 37 tests before and after the change, including metadata, notebook JSON/BOM/zip, discussion, download, authorization error, multipart submission, pipeline, tools, auth, and wiring coverage. Python compilation, Black, blocking Ruff, removed-interface searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the client row advances reviewed baseline coverage to 233/602. Whole-repository acceptance remains pending.
 
+## Kaggle pipeline review
+
+Read `pipeline.py` completely and traced its class, stage helpers, report mutations, and public runner through the package facade, CLI, Kaggle tools, schemas, and tests. The `KagglePipeline` class was an unexported one-shot executor instantiated only by its own four-parameter wrapper; its five attributes merely promoted one run's local inputs and report into mutable object state.
+
+Delete the class and inline its connect, optional download, notebook search, timing, and final-status flow into `run_kaggle`. Reuse the existing `KaggleStack` as the resource aggregate through a type-only reference, reducing the public runner from four parameters to two without introducing another container or a runtime import cycle. Keep only the two pure API-to-schema projections and one failure-message formatter. Migrate the CLI and both tool callers directly; production code falls by thirty-seven net lines, including twenty-nine from the reviewed pipeline.
+
+The complete Kaggle selection passed 37 tests before and 40 after the change. Three new parameterized cases prove the documented stage degradation contracts: connection failure returns an empty report, while download and notebook-search failures return partial complete reports. The Kaggle CLI help path, Python compilation, Black, blocking Ruff, code-style hard rules, removed-class/old-signature searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the pipeline row advances reviewed baseline coverage to 234/602. The tool and wiring rows remain Pending for their own complete reviews.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -795,7 +803,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/kaggle/__init__.py` | 59 | Reviewed; six live package exports instead of twenty-six |
 | `src/athena/kaggle/auth.py` | 72 | Reviewed; one credential authority and three-parameter resolver |
 | `src/athena/kaggle/client.py` | 418 | Reviewed; private JSON transport, one decoder and one-field API errors |
-| `src/athena/kaggle/pipeline.py` | 156 | Pending |
+| `src/athena/kaggle/pipeline.py` | 156 | Reviewed; delete one-shot five-attribute class and reduce runner to two parameters |
 | `src/athena/kaggle/schemas.py` | 63 | Reviewed; delete unconstructed discussion summary and retain live request/report models |
 | `src/athena/kaggle/tool.py` | 444 | Pending |
 | `src/athena/kaggle/wiring.py` | 124 | Pending |

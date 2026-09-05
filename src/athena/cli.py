@@ -22,29 +22,27 @@ from athena.research import ResearchRuntime
 from athena.research.fork import ForkError, fork_project
 from athena.research.literature.bench import (
     DEFAULT_QUERY_SET,
+    RELEVANT_THRESHOLD,
     corpus_health,
+    delivery_overlap,
     dump_report,
+    evaluate_recall,
     load_query_set,
     run_known_item,
 )
 from athena.research.literature.bench import available as bench_available
-from athena.research.literature.bench import (
-    RELEVANT_THRESHOLD,
-    delivery_overlap,
-    evaluate_recall,
-)
 from athena.research.literature.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
 from athena.research.literature.bench.query_sets import load_recall_set
 from athena.research.literature.paper_rag.search import corpus_paper_ids
 from athena.research.literature.paper_scout.schemas import RETAIN_THRESHOLD, ScoutCorpus
-from athena.research.runtime import DEFAULT_SURVEY_PAPERS
-from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 from athena.research.literature.survey import (
     SurveyRequest,
     build_survey_stack,
     run_survey,
 )
 from athena.research.literature.survey.report import print_check, print_report
+from athena.research.runtime import DEFAULT_SURVEY_PAPERS
+from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 
 
 def _runtime(project_root: str, **options: Any) -> ResearchRuntime:
@@ -500,9 +498,7 @@ async def _cmd_kaggle(args: argparse.Namespace) -> int:
         print("需要 --competition，或用 --list / --check。", file=sys.stderr)
         return 2
     report = await run_kaggle(
-        stack.client,
-        stack.artifacts,
-        stack.download_root,
+        stack,
         KaggleRunRequest(
             competition=args.competition,
             download_subdir=args.download_subdir,
