@@ -501,16 +501,16 @@ async def test_projection_failure_does_not_block_skip_finalization(
     events: list[tuple[str, dict[str, object]]] = []
     runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
     projector = runtime.supervisor._deps.runtime.documents
-    original_project_stage = projector.project_stage
+    original_project = projector.project
 
-    def fail_once(event, **kwargs):
+    def fail_once(event, context):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("final report unavailable")
-        return original_project_stage(event, **kwargs)
+        return original_project(event, context)
 
-    monkeypatch.setattr(projector, "project_stage", fail_once)
+    monkeypatch.setattr(projector, "project", fail_once)
     lifecycle = await runtime.start()
     await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
     assert runtime.state.phase == "COMPLETED"
@@ -529,7 +529,7 @@ async def test_projection_failure_does_not_block_skip_finalization(
         if kind == "output"
     )
 
-    monkeypatch.setattr(projector, "project_stage", original_project_stage)
+    monkeypatch.setattr(projector, "project", original_project)
     warning_count = sum(
         payload.get("channel") == "error"
         and "documents" in str(payload.get("text", ""))

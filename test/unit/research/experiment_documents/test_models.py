@@ -8,7 +8,6 @@ from athena.research.experiment_documents.models import (
     DOCUMENTS_STALE_MESSAGE,
     LatestManifest,
     ProjectionOutcome,
-    StageEvent,
     StageRecord,
 )
 
@@ -38,27 +37,29 @@ def _event_payload() -> dict[str, object]:
     "run_id",
     ["", "../escape", "a..b", "a/b", r"a\\b", "a:", "name.", "CON"],
 )
-def test_stage_event_rejects_unsafe_run_ids(run_id: str) -> None:
+def test_stage_record_rejects_unsafe_event_run_ids(run_id: str) -> None:
     payload = _event_payload()
     payload["run_id"] = run_id
-    with pytest.raises(ValidationError):
-        StageEvent.model_validate(payload)
+    with pytest.raises(ValueError):
+        StageRecord.from_event(payload, name="accuracy", direction="maximize")
 
 
 @pytest.mark.parametrize("value", [nan, inf, -inf])
 @pytest.mark.parametrize("field", ["primary", "reference", "generalization_gap"])
-def test_stage_event_rejects_non_finite_metrics(field: str, value: float) -> None:
+def test_stage_record_rejects_non_finite_event_metrics(
+    field: str, value: float
+) -> None:
     payload = _event_payload()
     payload["metric"][field] = value  # type: ignore[index]
     with pytest.raises(ValidationError):
-        StageEvent.model_validate(payload)
+        StageRecord.from_event(payload, name="accuracy", direction="maximize")
 
 
-def test_stage_event_rejects_non_finite_secondary_metric() -> None:
+def test_stage_record_rejects_non_finite_secondary_metric() -> None:
     payload = _event_payload()
     payload["metric"]["secondary"] = {"f1": nan}  # type: ignore[index]
     with pytest.raises(ValidationError):
-        StageEvent.model_validate(payload)
+        StageRecord.from_event(payload, name="accuracy", direction="maximize")
 
 
 @pytest.mark.parametrize(
@@ -71,21 +72,21 @@ def test_stage_event_rejects_non_finite_secondary_metric() -> None:
         (("provenance", "commit"), "\n"),
     ],
 )
-def test_stage_event_rejects_invalid_nested_values(path, value) -> None:
+def test_stage_record_rejects_invalid_event_values(path, value) -> None:
     payload = _event_payload()
     target = payload
     for key in path[:-1]:
         target = target[key]  # type: ignore[index]
     target[path[-1]] = value  # type: ignore[index]
     with pytest.raises(ValidationError):
-        StageEvent.model_validate(payload)
+        StageRecord.from_event(payload, name="accuracy", direction="maximize")
 
 
 def test_models_forbid_extra_fields_at_every_level() -> None:
     payload = _event_payload()
     payload["metric"]["surprise"] = 1  # type: ignore[index]
     with pytest.raises(ValidationError):
-        StageEvent.model_validate(payload)
+        StageRecord.from_event(payload, name="accuracy", direction="maximize")
 
 
 @pytest.mark.parametrize(
@@ -98,28 +99,38 @@ def test_models_forbid_extra_fields_at_every_level() -> None:
         ("provenance", {}),
     ],
 )
-def test_stage_event_rejects_invalid_contract_values(field, value) -> None:
+def test_stage_record_rejects_invalid_contract_values(field, value) -> None:
     payload = _event_payload()
     if field == "name":
-        event = StageEvent.model_validate(payload)
         with pytest.raises(ValidationError):
-            StageRecord.from_event(event, name=value, direction="maximize")
+            StageRecord.from_event(payload, name=value, direction="maximize")
     elif field == "direction":
-        event = StageEvent.model_validate(payload)
         with pytest.raises(ValidationError):
-            StageRecord.from_event(event, name="accuracy", direction=value)
+            StageRecord.from_event(payload, name="accuracy", direction=value)
     else:
         payload[field] = value
         with pytest.raises(ValidationError):
-            StageEvent.model_validate(payload)
+            StageRecord.from_event(payload, name="accuracy", direction="maximize")
 
 
 def test_stage_record_adds_resolved_metric_contract() -> None:
-    event = StageEvent.model_validate(_event_payload())
-    record = StageRecord.from_event(event, name="accuracy", direction="maximize")
+    record = StageRecord.from_event(
+        _event_payload(), name="accuracy", direction="maximize"
+    )
     assert record.schema_version == 1
     assert record.metric.name == "accuracy"
     assert record.metric.direction == "maximize"
+
+
+@pytest.mark.parametrize("field", ["schema_version", "name", "direction"])
+def test_stage_record_rejects_projector_owned_event_fields(field: str) -> None:
+    payload = _event_payload()
+    if field in {"name", "direction"}:
+        payload["metric"][field] = "injected"  # type: ignore[index]
+    else:
+        payload[field] = 1
+    with pytest.raises(ValueError):
+        StageRecord.from_event(payload, name="accuracy", direction="maximize")
 
 
 def test_latest_manifest_requires_stage_identity_only_for_stage_kind() -> None:

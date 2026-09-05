@@ -8,6 +8,7 @@ from athena.core.contracts import ArtifactRef
 from athena.core.research_models import Hypothesis
 from athena.core.research_tree import ResearchTree
 from athena.core.workspace import GitWorkBranch
+from athena.research.experiment_documents import ProjectionContext, ProjectionOutcome
 from athena.research.supervisor.deps import (
     GeneralTurn,
     IdeatorTurn,
@@ -22,7 +23,6 @@ from athena.research.supervisor.plans import PlanInput
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.search_loop import SearchLoop
 from athena.research.supervisor.state import ResearchState
-from athena.research.experiment_documents import ProjectionOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +145,7 @@ class Supervisor:
         """Rebuild derived documents from the current canonical state."""
         try:
             outcome = self._deps.runtime.documents.rebuild(
-                tree=self.tree,
-                validation=self.state.validation,
-                validation_skipped=self.state.validation_skipped,
-                task_understanding=self.state.task_understanding,
-                direction=self._deps.search.direction,
+                ProjectionContext(self.tree, self.state, self._deps.search.direction)
             )
         except Exception:
             logger.warning("document rebuild failed", exc_info=True)

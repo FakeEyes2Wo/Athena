@@ -4,18 +4,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_models import ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
+from athena.research.contracts import ValidationResult
+from athena.research.experiment_documents import ProjectionContext
 from athena.research.experiment_documents.models import (
     DOCUMENTS_STALE_MESSAGE,
     ProjectionOutcome,
 )
-from athena.research.contracts import ValidationResult
 from athena.research.supervisor.experiment import PlanBest, PlanTurnResult
-from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.phases import PhaseMachine, _phase_failure_run_id
 from athena.research.supervisor.plans import PlanInput, PlanState
+from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 from test.unit.research.supervisor.test_supervisor import (
@@ -30,12 +31,22 @@ class RecordingDocuments:
         self.stage_calls: list[dict[str, object]] = []
         self.rebuild_calls: list[dict[str, object]] = []
 
-    def project_stage(self, event, **context):
-        self.stage_calls.append({"event": dict(event), **context})
+    @staticmethod
+    def _payload(context: ProjectionContext) -> dict[str, object]:
+        return {
+            "tree": context.tree,
+            "validation": context.validation,
+            "validation_skipped": context.validation_skipped,
+            "task_understanding": context.task_understanding,
+            "direction": context.direction,
+        }
+
+    def project(self, event, context: ProjectionContext):
+        self.stage_calls.append({"event": dict(event), **self._payload(context)})
         return self.outcome
 
-    def rebuild(self, **context):
-        self.rebuild_calls.append(context)
+    def rebuild(self, context: ProjectionContext):
+        self.rebuild_calls.append(self._payload(context))
         return self.outcome
 
 
@@ -164,7 +175,7 @@ class CanonicalObservingDocuments(RecordingDocuments):
         self.supervisor = supervisor
         self.observations: list[tuple[str, object, object]] = []
 
-    def project_stage(self, event, **context):
+    def project(self, event, context: ProjectionContext):
         from athena.core.research_tree import ResearchTree
         from athena.research.supervisor.state import ResearchState
 
@@ -172,7 +183,7 @@ class CanonicalObservingDocuments(RecordingDocuments):
         tree = ResearchTree.load(tree_path) if tree_path.is_file() else None
         state = ResearchState.load(self.supervisor._deps.paths.state_path)
         self.observations.append((event["stage"], tree, state))
-        return super().project_stage(event, **context)
+        return super().project(event, context)
 
 
 @pytest.mark.asyncio
@@ -313,7 +324,7 @@ async def test_resume_orders_plan_recovery_then_rebuild_then_new_work(tmp_path):
     supervisor._plans.recover = recover
     documents = RecordingDocuments()
 
-    def rebuild(**context):
+    def rebuild(context):
         order.append("rebuild")
         documents.rebuild_calls.append(context)
         return documents.outcome
@@ -343,7 +354,7 @@ async def test_prepare_start_rebuilds_once_before_prepare_adapter(tmp_path):
     supervisor = _checkpoint_supervisor(tmp_path, run_prepare_phase=prepare)
     documents = RecordingDocuments()
 
-    def rebuild(**context):
+    def rebuild(context):
         order.append("rebuild")
         documents.rebuild_calls.append(context)
         return documents.outcome
@@ -439,7 +450,7 @@ async def test_search_settlement_keeps_canonical_result_when_projection_raises(
             reaped.append(plan_id)
 
     class RaisingDocuments(RecordingDocuments):
-        def project_stage(self, event, **context):
+        def project(self, event, context):
             persisted_tree = ResearchTree.load(supervisor._deps.paths.tree_path)
             persisted_state = ResearchState.load(supervisor._deps.paths.state_path)
             assert (

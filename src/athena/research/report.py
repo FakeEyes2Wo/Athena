@@ -6,7 +6,7 @@ result dict, so both the Supervisor (after VALIDATE completes) and the GUI
 """
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from athena.core.research_tree import ResearchTree
 
@@ -206,4 +206,192 @@ def build_final_report(
     return "\n".join(lines)
 
 
-__all__ = ["VALIDATION_SKIPPED_NOTICE", "build_final_report"]
+def _markdown_cell(value: object) -> str:
+    """Escape dynamic Markdown cell content without allowing row breaks."""
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+
+
+def build_optimization_report(
+    tree: ResearchTree,
+    validation: Mapping[str, object] | None,
+    *,
+    metric_name: str,
+    direction: Literal["maximize", "minimize"],
+    validation_skipped: bool,
+) -> str:
+    """Render a deterministic, direction-aware optimization trajectory."""
+    if not metric_name.strip():
+        raise ValueError("metric_name must be non-empty")
+    if direction not in {"maximize", "minimize"}:
+        raise ValueError("direction must be 'maximize' or 'minimize'")
+    if validation_skipped and validation:
+        raise ValueError("validation cannot be both skipped and present")
+
+    data = tree.to_dict()
+    experiments = data.get("experiments") or {}
+    sota_id = data.get("sota_id")
+    successful = [
+        experiment_id
+        for experiment_id, experiment in experiments.items()
+        if experiment.get("status") == "SUCCEEDED"
+    ]
+    failed = [
+        (experiment_id, experiment)
+        for experiment_id, experiment in experiments.items()
+        if experiment.get("status") == "FAILED"
+    ]
+    scored: list[tuple[float, str, Mapping[str, object]]] = []
+    unscored: list[tuple[str, Mapping[str, object]]] = []
+    for experiment_id, experiment in experiments.items():
+        primary = (experiment.get("eval") or {}).get("primary")
+        if isinstance(primary, (int, float)) and not isinstance(primary, bool):
+            scored.append((float(primary), experiment_id, experiment))
+        else:
+            unscored.append((experiment_id, experiment))
+
+    if direction == "maximize":
+        scored.sort(key=lambda item: (-item[0], item[1]))
+    else:
+        scored.sort(key=lambda item: (item[0], item[1]))
+
+    lines = [
+        "# 优化轨迹",
+        "",
+        f"指标：`{_markdown_cell(metric_name)}`（{direction}）",
+        "",
+        "| 排名 | 实验 | 指标 | 状态 | SOTA |",
+        "|---|---|---|---|---|",
+    ]
+    for rank, (primary, experiment_id, experiment) in enumerate(scored, start=1):
+        mark = "是" if experiment_id == sota_id else ""
+        lines.append(
+            f"| {rank} | `{_markdown_cell(experiment_id)}` | {primary:.6f} | "
+            f"{_markdown_cell(experiment.get('status', ''))} | {mark} |"
+        )
+    if not scored:
+        lines.append("| — | 尚无带分数的实验 | — | — | — |")
+    if unscored:
+        lines += ["", "## 未产出分数", ""]
+        for experiment_id, experiment in unscored:
+            reason = experiment.get("error") or experiment.get("status") or "未知"
+            lines.append(
+                f"- `{_markdown_cell(experiment_id)}`：{_markdown_cell(reason)}"
+            )
+    if validation_skipped:
+        lines += ["", "## VALIDATE", "", f"- {VALIDATION_SKIPPED_NOTICE}"]
+    elif validation:
+        final_score = validation.get("final_test_score")
+        lines += [
+            "",
+            "## VALIDATE",
+            "",
+            f"- final_test_score：{_markdown_cell(final_score)}",
+            f"- search 参考：{_markdown_cell(validation.get('test_score'))}",
+            f"- 泛化差：{_markdown_cell(validation.get('generalization_gap'))}",
+        ]
+    lines[4:4] = [
+        f"- Successful experiments: {len(successful)}",
+        f"- Failed experiments: {len(failed)}",
+    ]
+    baseline = experiments.get("exp_baseline")
+    sota = experiments.get(sota_id) if sota_id else None
+    baseline_metric = (baseline.get("eval") or {}).get("primary") if baseline else None
+    sota_metric = (sota.get("eval") or {}).get("primary") if sota else None
+    if (
+        isinstance(baseline_metric, (int, float))
+        and not isinstance(baseline_metric, bool)
+        and isinstance(sota_metric, (int, float))
+        and not isinstance(sota_metric, bool)
+    ):
+        improvement = (
+            sota_metric - baseline_metric
+            if direction == "maximize"
+            else baseline_metric - sota_metric
+        )
+        lines.extend(
+            [
+                "",
+                "## Observed signal",
+                f"- Baseline: `{baseline_metric:.6f}`",
+                f"- SOTA: `{sota_metric:.6f}`",
+                f"- Direction-aware improvement: `{improvement:+.6f}`",
+            ]
+        )
+        if improvement <= 0 and len(successful) > 1:
+            lines.append(
+                "Search has not beaten the baseline; prioritize new evidence-backed "
+                "hypotheses over extra tuning of the same model family."
+            )
+        elif improvement > 0:
+            lines.append(
+                "Freeze the winning commit, then replicate it and ablate its changed "
+                "components before combining more interventions."
+            )
+
+    gap = (
+        validation.get("generalization_gap")
+        if validation and not validation_skipped
+        else None
+    )
+    if isinstance(gap, (int, float)) and not isinstance(gap, bool):
+        lines.extend(["", f"Generalization gap: `{gap:.4f}`"])
+        if gap > 0:
+            lines.append(
+                "The final result is worse in the configured direction; prioritize "
+                "overfitting checks, simpler features, and stronger group-disjoint "
+                "validation."
+            )
+        elif gap < 0:
+            lines.append(
+                "The final result is better in the configured direction; recheck "
+                "split parity and preserve the validated configuration."
+            )
+        else:
+            lines.append("No measurable generalization gap was recorded.")
+
+    if failed:
+        lines.extend(["", "## Failure-driven actions"])
+        for experiment_id, experiment in failed:
+            reason = str(experiment.get("error") or "unspecified failure").strip()
+            lines.append(
+                f"- `{_markdown_cell(experiment_id)}`: {_markdown_cell(reason)}"
+            )
+        reasons = " ".join(
+            str(experiment.get("error") or "").lower() for _, experiment in failed
+        )
+        if "modulenotfounderror" in reasons or "dependency" in reasons:
+            lines.append(
+                "Action: freeze dependencies and run a one-command environment "
+                "preflight before spending another SEARCH attempt."
+            )
+        if any(token in reasons for token in ("scoring", "prediction", "evaluator")):
+            lines.append(
+                "Action: validate prediction ids, columns, row counts, and evaluator "
+                "entrypoint before model training."
+            )
+        if "no_change" in reasons or "diff_rejected" in reasons:
+            lines.append(
+                "Action: require the next hypothesis to name the exact source file "
+                "and measurable intervention before dispatch."
+            )
+        lines.append("Repair the observed failure class before adding more variants.")
+    elif successful:
+        lines.extend(
+            ["", "Keep the strongest successful configuration as the reference."]
+        )
+    else:
+        lines.extend(["", "No completed experiment is available for optimization yet."])
+    return "\n".join(lines) + "\n"
+
+
+__all__ = [
+    "VALIDATION_SKIPPED_NOTICE",
+    "build_final_report",
+    "build_optimization_report",
+]

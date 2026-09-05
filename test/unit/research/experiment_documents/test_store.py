@@ -16,12 +16,11 @@ from athena.research.experiment_documents.models import (
     ReasonRecord,
     StageRecord,
 )
-from athena.research.experiment_documents.render import render_stage_record
 from athena.research.experiment_documents.store import (
     DocumentStore,
     ProjectionBatch,
-    RunCandidate,
     RunDocumentConflict,
+    _render_stage_record,
 )
 
 
@@ -45,24 +44,17 @@ def record() -> StageRecord:
     )
 
 
-def make_batch(record: StageRecord, *, content: bytes | None = None) -> ProjectionBatch:
+def make_batch(record: StageRecord) -> ProjectionBatch:
     return ProjectionBatch(
         kind="stage",
-        stage=record.stage,
-        run_id=record.run_id,
-        runs=(
-            RunCandidate(
-                record=record,
-                content=render_stage_record(record) if content is None else content,
-            ),
-        ),
+        records=(record,),
         aliases={record.stage: record.run_id},
         reports={"FINAL_REPORT.md": b"report", "OPTIMIZATION.md": b"optimization\n"},
     )
 
 
 def changed_batch(batch: ProjectionBatch, primary: float) -> ProjectionBatch:
-    record = batch.runs[0].record
+    record = batch.records[0]
     changed = record.model_copy(
         update={"metric": record.metric.model_copy(update={"primary": primary})}
     )
@@ -78,7 +70,9 @@ def test_commit_creates_layout_and_digest_valid_latest(
     projection_id = store.commit(batch)
 
     root = store.root
-    assert (root / "runs" / "exp_search-1.json").read_bytes() == batch.runs[0].content
+    assert (root / "runs" / "exp_search-1.json").read_bytes() == _render_stage_record(
+        batch.records[0]
+    )
     latest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
     assert latest["projection_id"] == projection_id
     for relative, digest in latest["files"].items():
@@ -114,7 +108,7 @@ def test_unversioned_restored_shape_is_semantically_idempotent(
     batch = make_batch(record)
     store = DocumentStore(tmp_path / "docs")
     store.root.joinpath("runs").mkdir(parents=True)
-    legacy = batch.runs[0].record.model_dump(mode="json", exclude={"schema_version"})
+    legacy = batch.records[0].model_dump(mode="json", exclude={"schema_version"})
     legacy["metric"]["primary"] = 1
     legacy_bytes = (json.dumps(legacy) + "\n").encode()
     (store.root / "runs" / "exp_search-1.json").write_bytes(legacy_bytes)
@@ -184,18 +178,14 @@ def test_batch_rejects_bad_aliases_and_report_names(record: StageRecord) -> None
     with pytest.raises(ValueError):
         ProjectionBatch(
             kind="stage",
-            stage="search",
-            run_id=record.run_id,
-            runs=(RunCandidate(record, render_stage_record(record)),),
+            records=(record,),
             aliases={"baseline": "missing-run"},
             reports={"FINAL_REPORT.md": b"report", "OPTIMIZATION.md": b"opt"},
         )
     with pytest.raises(ValueError):
         ProjectionBatch(
             kind="stage",
-            stage="search",
-            run_id=record.run_id,
-            runs=(RunCandidate(record, render_stage_record(record)),),
+            records=(record,),
             aliases={"search": record.run_id},
             reports={
                 "FINAL_REPORT.md": b"report",
@@ -206,15 +196,15 @@ def test_batch_rejects_bad_aliases_and_report_names(record: StageRecord) -> None
 
 
 def test_batch_defensively_copies_inputs(record: StageRecord) -> None:
-    runs = [RunCandidate(record, render_stage_record(record))]
+    records = [record]
     aliases = {"search": record.run_id}
     reports = {"FINAL_REPORT.md": b"report", "OPTIMIZATION.md": b"opt"}
-    batch = ProjectionBatch("stage", "search", record.run_id, runs, aliases, reports)
-    runs.clear()
+    batch = ProjectionBatch("stage", records, aliases, reports)
+    records.clear()
     aliases.clear()
     reports.clear()
 
-    assert len(batch.runs) == 1
+    assert len(batch.records) == 1
     assert dict(batch.aliases) == {"search": record.run_id}
     assert dict(batch.reports) == {
         "FINAL_REPORT.md": b"report",

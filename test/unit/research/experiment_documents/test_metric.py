@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from athena.research.experiment_documents.metric import MetricResolver
+from athena.research.experiment_documents.projector import _resolve_metric
 
 
 def _write_metric(root: Path, payload: dict[str, object]) -> None:
@@ -33,17 +33,15 @@ def test_frozen_evaluate_metric_wins_over_every_fallback(tmp_path: Path) -> None
     flat = evaluate.parent
     _write_metric(evaluate, _v2_metric("roc_auc"))
     _write_metric(flat, {"primary_metric": "accuracy"})
-    resolver = MetricResolver((evaluate, flat))
-
-    assert resolver.resolve({"primary_metric": "f1"}) == "roc_auc"
+    assert _resolve_metric((evaluate, flat), {"primary_metric": "f1"}) == "roc_auc"
 
 
 def test_legacy_flat_metric_wins_when_evaluate_is_absent(tmp_path: Path) -> None:
     flat = tmp_path / "workspaces" / "evaluator"
     _write_metric(flat, {"primary_metric": "mae"})
-    resolver = MetricResolver((flat / "evaluate", flat))
-
-    assert resolver.resolve({"primary_metric": "rmse"}) == "mae"
+    assert (
+        _resolve_metric((flat / "evaluate", flat), {"primary_metric": "rmse"}) == "mae"
+    )
 
 
 def test_invalid_evaluator_falls_through_with_diagnostic(
@@ -52,7 +50,7 @@ def test_invalid_evaluator_falls_through_with_diagnostic(
     evaluate = tmp_path / "evaluate"
     _write_metric(evaluate, {"task_id": "partial", "primary_metric": "bad"})
 
-    assert MetricResolver((evaluate,)).resolve({"primary_metric": "f1"}) == "f1"
+    assert _resolve_metric((evaluate,), {"primary_metric": "f1"}) == "f1"
     assert "invalid evaluator metric" in caplog.text
 
 
@@ -61,7 +59,7 @@ def test_malformed_json_falls_through_with_diagnostic(tmp_path: Path, caplog) ->
     evaluate.mkdir()
     (evaluate / "metric.json").write_text("{", encoding="utf-8")
 
-    assert MetricResolver((evaluate,)).resolve({"primary_metric": "f1"}) == "f1"
+    assert _resolve_metric((evaluate,), {"primary_metric": "f1"}) == "f1"
     assert "invalid evaluator metric" in caplog.text
 
 
@@ -70,7 +68,7 @@ def test_non_object_json_falls_through_with_diagnostic(tmp_path: Path, caplog) -
     evaluate.mkdir()
     (evaluate / "metric.json").write_text("[]", encoding="utf-8")
 
-    assert MetricResolver((evaluate,)).resolve({"primary_metric": "f1"}) == "f1"
+    assert _resolve_metric((evaluate,), {"primary_metric": "f1"}) == "f1"
     assert "invalid evaluator metric" in caplog.text
 
 
@@ -81,7 +79,7 @@ def test_blank_legacy_metric_falls_through_to_task_understanding(
     evaluate = tmp_path / "evaluate"
     _write_metric(evaluate, {"primary_metric": "  "})
 
-    assert MetricResolver((evaluate,)).resolve({"primary_metric": "f1"}) == "f1"
+    assert _resolve_metric((evaluate,), {"primary_metric": "f1"}) == "f1"
     assert "invalid evaluator metric" in caplog.text
 
 
@@ -91,19 +89,19 @@ def test_valid_second_evaluator_wins_after_invalid_first(tmp_path: Path) -> None
     _write_metric(invalid, {"task_id": "partial", "primary_metric": "bad"})
     _write_metric(valid, _v2_metric("balanced_accuracy"))
 
-    assert MetricResolver((invalid, valid)).resolve({"primary_metric": "f1"}) == (
+    assert _resolve_metric((invalid, valid), {"primary_metric": "f1"}) == (
         "balanced_accuracy"
     )
 
 
 def test_task_understanding_then_literal_fallback(tmp_path: Path) -> None:
-    resolver = MetricResolver((tmp_path / "missing",))
+    roots = (tmp_path / "missing",)
 
-    assert resolver.resolve({"primary_metric": " balanced_accuracy "}) == (
+    assert _resolve_metric(roots, {"primary_metric": " balanced_accuracy "}) == (
         "balanced_accuracy"
     )
-    assert resolver.resolve({"primary_metric": " "}) == "primary"
-    assert resolver.resolve(None) == "primary"
+    assert _resolve_metric(roots, {"primary_metric": " "}) == "primary"
+    assert _resolve_metric(roots, None) == "primary"
 
 
 def test_resolver_does_not_read_legacy_athena_evaluator_spec(tmp_path: Path) -> None:
@@ -111,4 +109,4 @@ def test_resolver_does_not_read_legacy_athena_evaluator_spec(tmp_path: Path) -> 
     legacy.parent.mkdir()
     legacy.write_text(json.dumps({"primary_metric": "accuracy"}), encoding="utf-8")
 
-    assert MetricResolver((tmp_path / "missing",)).resolve(None) == "primary"
+    assert _resolve_metric((tmp_path / "missing",), None) == "primary"

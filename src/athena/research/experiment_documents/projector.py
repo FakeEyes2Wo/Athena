@@ -4,36 +4,62 @@ import copy
 import hashlib
 import logging
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
 from athena.core.research_tree import ResearchTree
-from athena.research.experiment_documents.metric import MetricResolver
+from athena.research.evaluation.spec import load_evaluator_spec, load_metric_json
 from athena.research.experiment_documents.models import (
     Direction,
     MetricRecord,
-    ProvenanceRecord,
     ProjectionOutcome,
+    ProvenanceRecord,
     ReasonRecord,
-    StageEvent,
     StageRecord,
-)
-from athena.research.experiment_documents.render import (
-    render_final_report,
-    render_optimization_report,
-    render_stage_record,
 )
 from athena.research.experiment_documents.store import (
     DocumentStore,
     ProjectionBatch,
-    RunCandidate,
 )
+from athena.research.report import build_final_report, build_optimization_report
 
 logger = logging.getLogger(__name__)
 
 _TERMINAL_EXPERIMENTS = {"SUCCEEDED", "FAILED", "CANCELLED"}
 _TERMINAL_VALIDATIONS = {"COMPLETED", "SUCCEEDED", "FAILED", "CANCELLED"}
 NOOP_PROJECTION_ID = hashlib.sha256(b"athena:experiment-documents:no-op:v1").hexdigest()
+
+
+def _resolve_metric(
+    roots: Iterable[Path], task_understanding: Mapping[str, object] | None
+) -> str:
+    """Resolve the evaluator metric, then fall back to task understanding."""
+    for root in roots:
+        if not (root / "metric.json").is_file():
+            continue
+        try:
+            payload = load_metric_json(root)
+            if "task_id" in payload:
+                spec = load_evaluator_spec(root, legacy_ok=False)
+                if spec is None:
+                    raise ValueError("evaluator metric is missing")
+                name = spec.primary_metric.strip()
+            else:
+                value = payload.get("primary_metric")
+                if not isinstance(value, str):
+                    raise ValueError("primary_metric is blank or missing")
+                name = value.strip()
+            if not name:
+                raise ValueError("primary_metric is blank or missing")
+            return name
+        except (OSError, TypeError, ValueError):
+            logger.warning("invalid evaluator metric at %s", root, exc_info=True)
+    if isinstance(task_understanding, Mapping):
+        value = task_understanding.get("primary_metric")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "primary"
 
 
 def _experiment_record(
@@ -142,31 +168,43 @@ def _validation_record(
     )
 
 
+class _ProjectionState(Protocol):
+    validation: Mapping[str, object] | None
+    validation_skipped: bool | None
+    task_understanding: Mapping[str, object] | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionContext:
+    """Canonical inputs shared by stage projection and recovery rebuild."""
+
+    tree: ResearchTree
+    state: _ProjectionState
+    direction: Direction
+
+    @property
+    def validation(self) -> Mapping[str, object] | None:
+        return self.state.validation
+
+    @property
+    def validation_skipped(self) -> bool:
+        return bool(self.state.validation_skipped)
+
+    @property
+    def task_understanding(self) -> Mapping[str, object] | None:
+        return self.state.task_understanding
+
+
 class DocumentProjector(Protocol):
     """Public interface for safe experiment-document projections."""
 
-    def project_stage(
-        self,
-        event: Mapping[str, object],
-        *,
-        tree: ResearchTree,
-        validation: Mapping[str, object] | None,
-        validation_skipped: bool,
-        task_understanding: Mapping[str, object] | None,
-        direction: Direction,
+    def project(
+        self, event: Mapping[str, object], context: ProjectionContext
     ) -> ProjectionOutcome:
         """Project one validated stage event and return a sanitized outcome."""
         raise NotImplementedError
 
-    def rebuild(
-        self,
-        *,
-        tree: ResearchTree,
-        validation: Mapping[str, object] | None,
-        validation_skipped: bool,
-        task_understanding: Mapping[str, object] | None,
-        direction: Direction,
-    ) -> ProjectionOutcome:
+    def rebuild(self, context: ProjectionContext) -> ProjectionOutcome:
         """Rebuild documents from canonical state after a recovery."""
         raise NotImplementedError
 
@@ -176,52 +214,45 @@ class ExperimentDocumentProjector:
 
     def __init__(self, document_root: Path, evaluator_roots: Iterable[Path]) -> None:
         self._store = DocumentStore(Path(document_root))
-        self._metrics = MetricResolver(evaluator_roots)
+        self._evaluator_roots = tuple(Path(root) for root in evaluator_roots)
 
-    def project_stage(
-        self,
-        event: Mapping[str, object],
-        *,
-        tree: ResearchTree,
-        validation: Mapping[str, object] | None,
-        validation_skipped: bool,
-        task_understanding: Mapping[str, object] | None,
-        direction: Direction,
+    def project(
+        self, event: Mapping[str, object], context: ProjectionContext
     ) -> ProjectionOutcome:
         """Render and atomically store one stage, returning stale on failure."""
         event_copy: Mapping[str, object] | None = None
         try:
             event_copy = copy.deepcopy(dict(event))
-            tree_copy = ResearchTree.from_dict(copy.deepcopy(tree.to_dict()))
-            validation_copy = copy.deepcopy(dict(validation)) if validation else None
+            tree_copy = ResearchTree.from_dict(copy.deepcopy(context.tree.to_dict()))
+            validation_copy = (
+                copy.deepcopy(dict(context.validation)) if context.validation else None
+            )
             task_copy = (
-                copy.deepcopy(dict(task_understanding)) if task_understanding else None
+                copy.deepcopy(dict(context.task_understanding))
+                if context.task_understanding
+                else None
             )
-            parsed = StageEvent.model_validate(event_copy)
-            metric_name = self._metrics.resolve(task_copy)
+            metric_name = _resolve_metric(self._evaluator_roots, task_copy)
             record = StageRecord.from_event(
-                parsed, name=metric_name, direction=direction
+                event_copy, name=metric_name, direction=context.direction
             )
-            record_bytes = render_stage_record(record)
             batch = ProjectionBatch(
                 kind="stage",
-                stage=record.stage,
-                run_id=record.run_id,
-                runs=(RunCandidate(record=record, content=record_bytes),),
+                records=(record,),
                 aliases={record.stage: record.run_id},
                 reports={
-                    "FINAL_REPORT.md": render_final_report(
+                    "FINAL_REPORT.md": build_final_report(
                         tree_copy,
                         validation_copy,
-                        validation_skipped=validation_skipped,
-                    ),
-                    "OPTIMIZATION.md": render_optimization_report(
+                        validation_skipped=context.validation_skipped,
+                    ).encode("utf-8"),
+                    "OPTIMIZATION.md": build_optimization_report(
                         tree_copy,
                         validation_copy,
                         metric_name=metric_name,
-                        direction=direction,
-                        validation_skipped=validation_skipped,
-                    ),
+                        direction=context.direction,
+                        validation_skipped=context.validation_skipped,
+                    ).encode("utf-8"),
                 },
             )
             return ProjectionOutcome.success(self._store.commit(batch))
@@ -238,26 +269,22 @@ class ExperimentDocumentProjector:
             )
             return ProjectionOutcome.stale()
 
-    def rebuild(
-        self,
-        *,
-        tree: ResearchTree,
-        validation: Mapping[str, object] | None,
-        validation_skipped: bool,
-        task_understanding: Mapping[str, object] | None,
-        direction: Direction,
-    ) -> ProjectionOutcome:
+    def rebuild(self, context: ProjectionContext) -> ProjectionOutcome:
         """Reconstruct derived documents from a snapshot of canonical state."""
         try:
-            tree_copy = ResearchTree.from_dict(copy.deepcopy(tree.to_dict()))
-            validation_copy = copy.deepcopy(dict(validation)) if validation else None
+            tree_copy = ResearchTree.from_dict(copy.deepcopy(context.tree.to_dict()))
+            validation_copy = (
+                copy.deepcopy(dict(context.validation)) if context.validation else None
+            )
             task_copy = (
-                copy.deepcopy(dict(task_understanding)) if task_understanding else None
+                copy.deepcopy(dict(context.task_understanding))
+                if context.task_understanding
+                else None
             )
             data = tree_copy.to_dict()
             experiments = data.get("experiments") or {}
-            metric_name = self._metrics.resolve(task_copy)
-            runs: list[RunCandidate] = []
+            metric_name = _resolve_metric(self._evaluator_roots, task_copy)
+            records_for_store: list[StageRecord] = []
             aliases: dict[str, str] = {}
             records: dict[str, StageRecord] = {}
             if isinstance(experiments, Mapping):
@@ -278,23 +305,17 @@ class ExperimentDocumentProjector:
                         experiment,
                         stage=kind,
                         metric_name=metric_name,
-                        direction=direction,
+                        direction=context.direction,
                     )
                     records[experiment_id] = record
-                    runs.append(
-                        RunCandidate(
-                            record=record,
-                            content=render_stage_record(record),
-                            match_mode="recoverable",
-                        )
-                    )
+                    records_for_store.append(record)
                     if kind == "baseline" and experiment_id == "exp_baseline":
                         aliases["baseline"] = experiment_id
                     if kind == "search":
                         aliases["search"] = experiment_id
 
             sota_record = records.get(data.get("sota_id"))
-            if validation_skipped:
+            if context.validation_skipped:
                 if sota_record is not None:
                     final_record = StageRecord(
                         schema_version=1,
@@ -303,7 +324,7 @@ class ExperimentDocumentProjector:
                         status="SKIPPED",
                         metric=MetricRecord(
                             name=metric_name,
-                            direction=direction,
+                            direction=context.direction,
                             primary=None,
                             reference=sota_record.metric.primary,
                             generalization_gap=None,
@@ -326,42 +347,34 @@ class ExperimentDocumentProjector:
                     validation_copy,
                     sota=sota_record,
                     metric_name=metric_name,
-                    direction=direction,
+                    direction=context.direction,
                 )
             else:
                 final_record = None
             if final_record is not None:
-                runs.append(
-                    RunCandidate(
-                        record=final_record,
-                        content=render_stage_record(final_record),
-                        match_mode="recoverable",
-                    )
-                )
+                records_for_store.append(final_record)
                 aliases["final"] = final_record.run_id
 
-            if not runs and not aliases and not self._store.root.exists():
+            if not records_for_store and not aliases and not self._store.root.exists():
                 return ProjectionOutcome.success(NOOP_PROJECTION_ID)
 
             batch = ProjectionBatch(
                 kind="rebuild",
-                stage=None,
-                run_id=None,
-                runs=tuple(runs),
+                records=tuple(records_for_store),
                 aliases=aliases,
                 reports={
-                    "FINAL_REPORT.md": render_final_report(
+                    "FINAL_REPORT.md": build_final_report(
                         tree_copy,
                         validation_copy,
-                        validation_skipped=validation_skipped,
-                    ),
-                    "OPTIMIZATION.md": render_optimization_report(
+                        validation_skipped=context.validation_skipped,
+                    ).encode("utf-8"),
+                    "OPTIMIZATION.md": build_optimization_report(
                         tree_copy,
                         validation_copy,
                         metric_name=metric_name,
-                        direction=direction,
-                        validation_skipped=validation_skipped,
-                    ),
+                        direction=context.direction,
+                        validation_skipped=context.validation_skipped,
+                    ).encode("utf-8"),
                 },
             )
             return ProjectionOutcome.success(self._store.commit(batch))
@@ -370,4 +383,9 @@ class ExperimentDocumentProjector:
             return ProjectionOutcome.stale()
 
 
-__all__ = ["DocumentProjector", "ExperimentDocumentProjector", "NOOP_PROJECTION_ID"]
+__all__ = [
+    "NOOP_PROJECTION_ID",
+    "DocumentProjector",
+    "ExperimentDocumentProjector",
+    "ProjectionContext",
+]

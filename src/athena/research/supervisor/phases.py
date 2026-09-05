@@ -11,7 +11,7 @@ from athena.core.contracts import ArtifactRef
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
-from athena.research.experiment_documents import ProjectionOutcome
+from athena.research.experiment_documents import ProjectionContext, ProjectionOutcome
 from athena.research.prepare.authority import BaselineAuthorityError
 from athena.research.report import VALIDATION_SKIPPED_NOTICE, build_final_report
 from athena.research.supervisor.deps import SupervisorDeps
@@ -460,13 +460,9 @@ class PhaseMachine:
     async def _project_stage(self, event: dict[str, object]) -> None:
         """Project a stage after canonical saves, containing derived failures."""
         try:
-            outcome = self._deps.runtime.documents.project_stage(
+            outcome = self._deps.runtime.documents.project(
                 event,
-                tree=self._tree,
-                validation=self._state.validation,
-                validation_skipped=bool(self._state.validation_skipped),
-                task_understanding=self._state.task_understanding,
-                direction=self._deps.search.direction,
+                ProjectionContext(self._tree, self._state, self._deps.search.direction),
             )
         except Exception:
             logger.warning("document stage projection failed", exc_info=True)

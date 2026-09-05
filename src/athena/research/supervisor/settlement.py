@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import ComparisonVerdict, EvalResult
 from athena.core.research_tree import ExperimentStatus
-from athena.research.experiment_documents import ProjectionOutcome
+from athena.research.experiment_documents import ProjectionContext, ProjectionOutcome
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import PlanTurnResult, load_best
 from athena.research.supervisor.plans import PlanInput
@@ -267,13 +267,9 @@ class PlanSettlement:
             },
         }
         try:
-            outcome = self._deps.runtime.documents.project_stage(
+            outcome = self._deps.runtime.documents.project(
                 event,
-                tree=self._tree,
-                validation=self._state.validation,
-                validation_skipped=bool(self._state.validation_skipped),
-                task_understanding=self._state.task_understanding,
-                direction=plan_input.direction,
+                ProjectionContext(self._tree, self._state, plan_input.direction),
             )
         except Exception:
             logger.warning(

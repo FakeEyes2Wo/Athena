@@ -2,6 +2,7 @@
 
 import math
 import re
+from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -68,9 +69,11 @@ def _validate_run_id(value: str | None) -> str | None:
     return value
 
 
-class MetricObservation(_StrictModel):
-    """Observed primary, reference, gap, and secondary metric values."""
+class MetricRecord(_StrictModel):
+    """Observed metrics plus the authoritative metric contract."""
 
+    name: str
+    direction: Direction
     primary: float | None = None
     reference: float | None = None
     generalization_gap: float | None = None
@@ -79,6 +82,12 @@ class MetricObservation(_StrictModel):
     _finite_primary = field_validator("primary", "reference", "generalization_gap")(
         _finite
     )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        """Reject blank or unsafe metric names."""
+        return _text(value, limit=128, label="metric name")
 
     @field_validator("secondary")
     @classmethod
@@ -89,19 +98,6 @@ class MetricObservation(_StrictModel):
             if not math.isfinite(metric):
                 raise ValueError("metric values must be finite")
         return value
-
-
-class MetricRecord(MetricObservation):
-    """Observed metrics annotated with the authoritative metric contract."""
-
-    name: str
-    direction: Direction
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, value: str) -> str:
-        """Reject blank or unsafe metric names."""
-        return _text(value, limit=128, label="metric name")
 
 
 class ReasonRecord(_StrictModel):
@@ -164,37 +160,6 @@ class ProvenanceRecord(_StrictModel):
         return self
 
 
-class StageEvent(_StrictModel):
-    """Strict stage-level observation before metric resolution."""
-
-    run_id: str
-    stage: StageName
-    status: str
-    metric: MetricObservation
-    artifacts: dict[str, str] = Field(default_factory=dict)
-    reason: ReasonRecord
-    provenance: ProvenanceRecord
-
-    _validate_run_id_field = field_validator("run_id")(_validate_run_id)
-
-    @field_validator("status")
-    @classmethod
-    def validate_status(cls, value: str) -> str:
-        """Validate the uppercase stage status identifier."""
-        if not _STATUS.fullmatch(value):
-            raise ValueError("status is not a valid uppercase identifier")
-        return value
-
-    @field_validator("artifacts")
-    @classmethod
-    def validate_artifacts(cls, value: dict[str, str]) -> dict[str, str]:
-        """Validate artifact keys and bounded references."""
-        for key, reference in value.items():
-            _text(key, limit=128, label="artifact key")
-            _reference(reference, label="artifact reference")
-        return value
-
-
 class StageRecord(_StrictModel):
     """Persisted stage record with a resolved metric name and direction."""
 
@@ -228,15 +193,19 @@ class StageRecord(_StrictModel):
 
     @classmethod
     def from_event(
-        cls, event: StageEvent, *, name: str, direction: Direction
+        cls, event: Mapping[str, object], *, name: str, direction: Direction
     ) -> "StageRecord":
-        """Resolve an event into its immutable persisted record form."""
-        return cls(
-            **event.model_dump(exclude={"metric"}),
-            metric=MetricRecord(
-                **event.metric.model_dump(), name=name, direction=direction
-            ),
-        )
+        """Validate a raw event after adding projector-owned metric facts."""
+        if "schema_version" in event:
+            raise ValueError("event cannot provide schema_version")
+        metric = event.get("metric")
+        if isinstance(metric, Mapping) and ({"name", "direction"} & metric.keys()):
+            raise ValueError("event cannot provide metric name or direction")
+        payload = dict(event)
+        payload["schema_version"] = 1
+        if isinstance(metric, Mapping):
+            payload["metric"] = {**metric, "name": name, "direction": direction}
+        return cls.model_validate(payload)
 
 
 def _safe_manifest_path(value: str) -> str:
@@ -342,16 +311,14 @@ class ProjectionOutcome(_StrictModel):
 
 
 __all__ = [
-    "Direction",
-    "StageName",
-    "MetricObservation",
-    "MetricRecord",
-    "ReasonRecord",
-    "ProvenanceRecord",
-    "StageEvent",
-    "StageRecord",
-    "LatestManifest",
-    "ProjectionOutcome",
     "DOCUMENTS_STALE_CODE",
     "DOCUMENTS_STALE_MESSAGE",
+    "Direction",
+    "LatestManifest",
+    "MetricRecord",
+    "ProjectionOutcome",
+    "ProvenanceRecord",
+    "ReasonRecord",
+    "StageName",
+    "StageRecord",
 ]

@@ -1,5 +1,6 @@
 """Atomic persistence for immutable experiment-document projections."""
 
+import hashlib
 import json
 import os
 import threading
@@ -17,31 +18,49 @@ from athena.research.experiment_documents.models import (
     StageName,
     StageRecord,
 )
-from athena.research.experiment_documents.render import (
-    build_latest_manifest,
-    render_latest_manifest,
-    render_stage_record,
-)
 
 _REPORT_NAMES = ("FINAL_REPORT.md", "OPTIMIZATION.md")
 _STAGE_ORDER = ("baseline", "search", "final")
 
 
-@dataclass(frozen=True)
-class RunCandidate:
-    """One validated run archive proposed by a projection."""
+def _json_bytes(payload: Mapping[str, object]) -> bytes:
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    )
+    return f"{text}\n".encode()
 
-    record: StageRecord
-    content: bytes
-    match_mode: Literal["exact", "recoverable"] = "exact"
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.record, StageRecord):
-            raise TypeError("record must be a StageRecord")
-        if not isinstance(self.content, bytes):
-            raise TypeError("content must be bytes")
-        if self.match_mode not in {"exact", "recoverable"}:
-            raise ValueError("match_mode must be exact or recoverable")
+def _render_stage_record(record: StageRecord) -> bytes:
+    return _json_bytes(record.model_dump(mode="json"))
+
+
+def _build_manifest(
+    batch: "ProjectionBatch", files: Mapping[str, bytes]
+) -> LatestManifest:
+    digests = {
+        path: hashlib.sha256(content).hexdigest()
+        for path, content in sorted(files.items())
+    }
+    identity = _json_bytes(
+        {
+            "schema_version": 1,
+            "kind": batch.kind,
+            "stage": batch.stage,
+            "run_id": batch.run_id,
+            "files": digests,
+        }
+    )
+    return LatestManifest(
+        projection_id=hashlib.sha256(identity).hexdigest(),
+        kind=batch.kind,
+        stage=batch.stage,
+        run_id=batch.run_id,
+        files=digests,
+    )
 
 
 @dataclass(frozen=True)
@@ -49,32 +68,21 @@ class ProjectionBatch:
     """Immutable set of files committed as one projection."""
 
     kind: Literal["stage", "rebuild"]
-    stage: StageName | None
-    run_id: str | None
-    runs: Sequence[RunCandidate]
+    records: Sequence[StageRecord]
     aliases: Mapping[StageName, str]
     reports: Mapping[Literal["FINAL_REPORT.md", "OPTIMIZATION.md"], bytes]
 
     def __post_init__(self) -> None:
         if self.kind not in {"stage", "rebuild"}:
             raise ValueError("kind must be stage or rebuild")
-        if self.stage is not None and self.stage not in _STAGE_ORDER:
-            raise ValueError("invalid stage")
-        if self.kind == "stage" and (self.stage is None or self.run_id is None):
-            raise ValueError("stage batches require stage and run_id")
-        if self.kind == "rebuild" and (
-            self.stage is not None or self.run_id is not None
-        ):
-            raise ValueError("rebuild batches cannot carry stage identity")
-
-        runs = tuple(self.runs)
-        if any(not isinstance(run, RunCandidate) for run in runs):
-            raise TypeError("runs must contain RunCandidate values")
-        run_ids = [run.record.run_id for run in runs]
+        records = tuple(self.records)
+        if any(not isinstance(record, StageRecord) for record in records):
+            raise TypeError("records must contain StageRecord values")
+        if self.kind == "stage" and len(records) != 1:
+            raise ValueError("stage batches require exactly one record")
+        run_ids = [record.run_id for record in records]
         if len(run_ids) != len(set(run_ids)):
             raise ValueError("run IDs must be unique")
-        if self.kind == "stage" and self.run_id not in run_ids:
-            raise ValueError("stage run_id must identify a run in the batch")
 
         aliases = dict(self.aliases)
         for stage, run_id in aliases.items():
@@ -89,16 +97,27 @@ class ProjectionBatch:
         if any(not isinstance(content, bytes) for content in reports.values()):
             raise TypeError("report content must be bytes")
 
-        object.__setattr__(self, "runs", runs)
+        object.__setattr__(self, "records", records)
         object.__setattr__(self, "aliases", MappingProxyType(aliases))
         object.__setattr__(self, "reports", MappingProxyType(reports))
+
+    @property
+    def stage(self) -> StageName | None:
+        """Derive stage identity for a one-record stage projection."""
+        return self.records[0].stage if self.kind == "stage" else None
+
+    @property
+    def run_id(self) -> str | None:
+        """Derive run identity for a one-record stage projection."""
+        return self.records[0].run_id if self.kind == "stage" else None
 
 
 class RunDocumentConflict(ValueError):
     """Raised when an existing run archive cannot be safely reused."""
 
 
-def _record_payload(content: bytes, *, legacy: bool = False) -> StageRecord:
+def _existing_record(content: bytes) -> StageRecord:
+    """Parse a strict archive, normalizing only the supported legacy shape."""
     try:
         payload = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -107,7 +126,7 @@ def _record_payload(content: bytes, *, legacy: bool = False) -> StageRecord:
         ) from exc
     if not isinstance(payload, dict):
         raise RunDocumentConflict("existing run archive must contain an object")
-    if legacy:
+    if "schema_version" not in payload:
         payload = dict(payload)
         payload["schema_version"] = 1
         metric = payload.get("metric")
@@ -134,19 +153,6 @@ def _record_payload(content: bytes, *, legacy: bool = False) -> StageRecord:
         raise RunDocumentConflict(
             "existing run archive does not match the schema"
         ) from exc
-
-
-def _existing_record(content: bytes) -> StageRecord:
-    """Parse an existing archive and select its explicit legacy compatibility mode."""
-    try:
-        payload = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RunDocumentConflict(
-            "existing run archive is not valid UTF-8 JSON"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise RunDocumentConflict("existing run archive must contain an object")
-    return _record_payload(content, legacy="schema_version" not in payload)
 
 
 def _records_match(existing: StageRecord, candidate: StageRecord, mode: str) -> bool:
@@ -231,26 +237,25 @@ class DocumentStore:
         replacements: list[tuple[str, bytes]] = []
         selected: dict[str, bytes] = {}
 
-        for candidate in sorted(batch.runs, key=lambda item: item.record.run_id):
-            relative = f"runs/{candidate.record.run_id}.json"
+        mode = "exact" if batch.kind == "stage" else "recoverable"
+        for record in sorted(batch.records, key=lambda item: item.run_id):
+            relative = f"runs/{record.run_id}.json"
             target = self._target(relative)
-            expected = _record_payload(candidate.content)
-            if expected != candidate.record:
-                raise RunDocumentConflict("candidate content does not match its record")
+            content = _render_stage_record(record)
             if target.exists():
                 if not target.is_file():
                     raise RunDocumentConflict("run archive target is not a file")
                 existing_bytes = target.read_bytes()
                 existing = _existing_record(existing_bytes)
-                if not _records_match(existing, candidate.record, candidate.match_mode):
+                if not _records_match(existing, record, mode):
                     raise RunDocumentConflict(
-                        f"run archive {candidate.record.run_id} conflicts with existing bytes"
+                        f"run archive {record.run_id} conflicts with existing bytes"
                     )
-                selected[candidate.record.run_id] = existing_bytes
+                selected[record.run_id] = existing_bytes
             else:
-                selected[candidate.record.run_id] = candidate.content
-                replacements.append((relative, candidate.content))
-            effective[relative] = selected[candidate.record.run_id]
+                selected[record.run_id] = content
+                replacements.append((relative, content))
+            effective[relative] = selected[record.run_id]
 
         for stage in _STAGE_ORDER:
             if stage not in batch.aliases:
@@ -274,13 +279,8 @@ class DocumentStore:
         """Preflight, stage, and atomically replace one projection batch."""
         with self._lock:
             effective, replacements = self._preflight(batch)
-            manifest = build_latest_manifest(
-                kind=batch.kind,
-                stage=batch.stage,
-                run_id=batch.run_id,
-                files=effective,
-            )
-            latest_bytes = render_latest_manifest(manifest)
+            manifest = _build_manifest(batch, effective)
+            latest_bytes = _json_bytes(manifest.model_dump(mode="json"))
             ordered = [*replacements, ("latest.json", latest_bytes)]
             temporary: dict[str, Path] = {}
             try:
@@ -297,6 +297,5 @@ class DocumentStore:
 __all__ = [
     "DocumentStore",
     "ProjectionBatch",
-    "RunCandidate",
     "RunDocumentConflict",
 ]

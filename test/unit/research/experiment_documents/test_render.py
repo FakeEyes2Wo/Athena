@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,20 +10,23 @@ from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
 from athena.research.experiment_documents.models import (
-    LatestManifest,
     MetricRecord,
     ProvenanceRecord,
     ReasonRecord,
     StageRecord,
 )
-from athena.research.experiment_documents.render import (
-    build_latest_manifest,
-    render_final_report,
-    render_latest_manifest,
-    render_optimization_report,
-    render_stage_record,
+from athena.research.experiment_documents.store import (
+    _build_manifest,
+    _json_bytes,
+    _render_stage_record,
 )
-from athena.research.report import build_final_report
+from athena.research.report import build_final_report, build_optimization_report
+
+
+def build_latest_manifest(*, kind, stage, run_id, files):
+    return _build_manifest(
+        SimpleNamespace(kind=kind, stage=stage, run_id=run_id), files
+    )
 
 
 @pytest.fixture
@@ -41,7 +45,7 @@ def stage_record() -> StageRecord:
 def test_stage_json_is_sorted_utf8_lf_and_final_newline(
     stage_record: StageRecord,
 ) -> None:
-    rendered = render_stage_record(stage_record)
+    rendered = _render_stage_record(stage_record)
     assert rendered.endswith(b"\n")
     assert b"\r\n" not in rendered
     assert json.loads(rendered) == stage_record.model_dump(mode="json")
@@ -65,7 +69,7 @@ def test_manifest_hashes_exact_effective_bytes_and_is_content_derived() -> None:
         == hashlib.sha256(files["runs/exp_1.json"]).hexdigest()
     )
     assert (
-        json.loads(render_latest_manifest(first))["projection_id"]
+        json.loads(_json_bytes(first.model_dump(mode="json")))["projection_id"]
         == first.projection_id
     )
 
@@ -156,43 +160,46 @@ def _tree() -> ResearchTree:
 def test_disk_final_report_is_exact_shared_builder_bytes() -> None:
     tree = _tree()
     validation = {"final_test_score": 0.88, "generalization_gap": 0.02}
-    assert render_final_report(
+    rendered = build_final_report(tree, validation, validation_skipped=False).encode(
+        "utf-8"
+    )
+    assert rendered.decode("utf-8") == build_final_report(
         tree, validation, validation_skipped=False
-    ) == build_final_report(tree, validation, validation_skipped=False).encode("utf-8")
+    )
 
 
 def test_optimization_report_sorts_for_both_directions() -> None:
     tree = _tree()
-    maximize = render_optimization_report(
+    maximize = build_optimization_report(
         tree, None, metric_name="score", direction="maximize", validation_skipped=False
-    ).decode()
-    minimize = render_optimization_report(
+    )
+    minimize = build_optimization_report(
         tree, None, metric_name="score", direction="minimize", validation_skipped=False
-    ).decode()
+    )
     assert maximize.index("`exp_high`") < maximize.index("`exp_low`")
     assert minimize.index("`exp_low`") < minimize.index("`exp_high`")
 
 
 def test_optimization_report_escapes_dynamic_markdown_cells() -> None:
-    rendered = render_optimization_report(
+    rendered = build_optimization_report(
         _tree(),
         None,
         metric_name="score|unsafe\nline",
         direction="maximize",
         validation_skipped=False,
-    ).decode()
+    )
     assert "score\\|unsafe line" in rendered
 
 
 def test_optimization_report_retains_unscored_sota_format_and_validation() -> None:
     tree = _tree()
-    rendered = render_optimization_report(
+    rendered = build_optimization_report(
         tree,
         {"final_test_score": 0.88, "test_score": 0.9, "generalization_gap": 0.02},
         metric_name="score",
         direction="maximize",
         validation_skipped=False,
-    ).decode()
+    )
     assert "| 1 | `exp_high` | 0.900000 |" in rendered
     assert "| 是 |" in rendered
     assert "## 未产出分数" in rendered
@@ -203,13 +210,13 @@ def test_optimization_report_retains_unscored_sota_format_and_validation() -> No
 
 
 def test_optimization_report_retains_legacy_summary_and_guidance() -> None:
-    rendered = render_optimization_report(
+    rendered = build_optimization_report(
         _tree(),
         {"final_test_score": 0.88, "test_score": 0.9, "generalization_gap": 0.02},
         metric_name="score",
         direction="maximize",
         validation_skipped=False,
-    ).decode()
+    )
     assert "Successful experiments: 3" in rendered
     assert "Failed experiments: 1" in rendered
     assert "Observed signal" in rendered
@@ -222,22 +229,22 @@ def test_optimization_report_retains_legacy_summary_and_guidance() -> None:
 
 
 def test_optimization_report_retains_empty_fallback() -> None:
-    rendered = render_optimization_report(
+    rendered = build_optimization_report(
         ResearchTree(),
         None,
         metric_name="score",
         direction="maximize",
         validation_skipped=False,
-    ).decode()
+    )
     assert "No completed experiment is available for optimization yet." in rendered
 
 
 def test_optimization_report_discloses_skipped_validation() -> None:
-    rendered = render_optimization_report(
+    rendered = build_optimization_report(
         _tree(),
         None,
         metric_name="score",
         direction="maximize",
         validation_skipped=True,
-    ).decode()
+    )
     assert "VALIDATE 已跳过" in rendered

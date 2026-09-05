@@ -1,20 +1,22 @@
 """Tests for the safe experiment-document projection facade."""
 
 import hashlib
+import inspect
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from athena.core.research_tree import ResearchTree
-from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
-from athena.core.research_tree import Experiment, ExperimentStatus
-from athena.core.workspace import GitWorkBranch
 import athena.research.experiment_documents.projector as projector_module
 import athena.research.experiment_documents.store as store_module
+from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
+from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
+from athena.core.workspace import GitWorkBranch
 from athena.research.experiment_documents import (
     ExperimentDocumentProjector,
+    ProjectionContext,
     ProjectionOutcome,
 )
 from athena.research.experiment_documents.store import RunDocumentConflict
@@ -23,6 +25,25 @@ from athena.research.experiment_documents.store import RunDocumentConflict
 @pytest.fixture
 def research_tree() -> ResearchTree:
     return ResearchTree()
+
+
+def context(
+    tree: ResearchTree,
+    validation: dict[str, object] | None = None,
+    *,
+    skipped: bool = False,
+    task: dict[str, object] | None = None,
+    direction: str = "maximize",
+) -> ProjectionContext:
+    return ProjectionContext(
+        tree=tree,
+        state=SimpleNamespace(
+            validation=validation,
+            validation_skipped=skipped,
+            task_understanding=task,
+        ),
+        direction=direction,  # type: ignore[arg-type]
+    )
 
 
 def valid_search_event() -> dict[str, object]:
@@ -46,7 +67,20 @@ def valid_search_event() -> dict[str, object]:
     }
 
 
-def test_project_stage_writes_archive_alias_reports_and_valid_manifest(
+def test_projector_boundary_has_one_context_parameter() -> None:
+    assert tuple(inspect.signature(ExperimentDocumentProjector.project).parameters) == (
+        "self",
+        "event",
+        "context",
+    )
+    assert tuple(inspect.signature(ExperimentDocumentProjector.rebuild).parameters) == (
+        "self",
+        "context",
+    )
+    assert not hasattr(ExperimentDocumentProjector, "project_stage")
+
+
+def test_project_writes_archive_alias_reports_and_valid_manifest(
     tmp_path: Path, research_tree: ResearchTree
 ) -> None:
     evaluator = tmp_path / "workspaces" / "evaluator"
@@ -59,13 +93,9 @@ def test_project_stage_writes_archive_alias_reports_and_valid_manifest(
         (evaluator / "evaluate", evaluator),
     )
 
-    outcome = projector.project_stage(
+    outcome = projector.project(
         valid_search_event(),
-        tree=research_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "f1"},
-        direction="maximize",
+        context(research_tree, task={"primary_metric": "f1"}),
     )
 
     assert outcome.ok is True
@@ -87,13 +117,9 @@ def test_invalid_event_returns_only_sanitized_failure_and_writes_nothing(
     projector = ExperimentDocumentProjector(tmp_path / "docs", (tmp_path / "missing",))
 
     with caplog.at_level(logging.WARNING):
-        outcome = projector.project_stage(
+        outcome = projector.project(
             {**valid_search_event(), "run_id": "../escape"},
-            tree=research_tree,
-            validation=None,
-            validation_skipped=False,
-            task_understanding=None,
-            direction="maximize",
+            context(research_tree),
         )
 
     assert outcome == ProjectionOutcome.stale()
@@ -111,13 +137,9 @@ def test_store_conflict_returns_stale_without_exposing_exception(
         raise RunDocumentConflict("internal target path")
 
     monkeypatch.setattr(projector._store, "commit", fail)
-    outcome = projector.project_stage(
+    outcome = projector.project(
         valid_search_event(),
-        tree=research_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding=None,
-        direction="maximize",
+        context(research_tree),
     )
 
     assert outcome == ProjectionOutcome.stale()
@@ -135,13 +157,9 @@ def test_replace_failure_returns_fixed_stale_without_leaking_error(
         raise OSError("secret-target-path")
 
     monkeypatch.setattr(store_module.os, "replace", fail_replace)
-    outcome = projector.project_stage(
+    outcome = projector.project(
         valid_search_event(),
-        tree=research_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding=None,
-        direction="maximize",
+        context(research_tree),
     )
 
     assert outcome == ProjectionOutcome.stale()
@@ -158,14 +176,14 @@ def test_projection_snapshots_inputs_before_store_callback_mutates_them(
     projector = ExperimentDocumentProjector(tmp_path / "docs", ())
     captured: dict[str, object] = {}
 
-    original_render = projector_module.render_final_report
+    original_render = projector_module.build_final_report
 
     def capture_render(
         tree: ResearchTree,
         rendered_validation: object,
         *,
         validation_skipped: bool,
-    ) -> bytes:
+    ) -> str:
         captured["tree"] = tree
         captured["validation"] = rendered_validation
         research_tree._sota_id = "mutated-tree"
@@ -174,20 +192,16 @@ def test_projection_snapshots_inputs_before_store_callback_mutates_them(
             tree, rendered_validation, validation_skipped=validation_skipped
         )
 
-    def capture_metric(task: object) -> str:
+    def capture_metric(_roots: object, task: object) -> str:
         captured["task"] = task
         task_understanding["primary_metric"] = "after"
         return task["primary_metric"]  # type: ignore[index]
 
-    monkeypatch.setattr(projector_module, "render_final_report", capture_render)
-    monkeypatch.setattr(projector._metrics, "resolve", capture_metric)
-    outcome = projector.project_stage(
+    monkeypatch.setattr(projector_module, "build_final_report", capture_render)
+    monkeypatch.setattr(projector_module, "_resolve_metric", capture_metric)
+    outcome = projector.project(
         valid_search_event(),
-        tree=research_tree,
-        validation=validation,
-        validation_skipped=False,
-        task_understanding=task_understanding,
-        direction="maximize",
+        context(research_tree, validation, task=task_understanding),
     )
 
     assert outcome.ok is True
@@ -290,11 +304,7 @@ def test_rebuild_restores_all_derivable_runs_and_latest_aliases(
     unknown.write_bytes(b'{"opaque": true}\n')
 
     outcome = projector_for(tmp_path).rebuild(
-        tree=completed_tree,
-        validation=validation,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, validation, task={"primary_metric": "accuracy"})
     )
 
     assert outcome.ok
@@ -318,11 +328,7 @@ def test_rebuild_excludes_nonterminal_experiments(tmp_path: Path, status: str) -
     rebuilt_tree = ResearchTree.from_dict(payload)
 
     outcome = projector_for(tmp_path).rebuild(
-        tree=rebuilt_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(rebuilt_tree, task={"primary_metric": "accuracy"})
     )
 
     assert outcome.ok
@@ -338,21 +344,13 @@ def test_rebuild_final_requires_terminal_validation_identity(
     projector = projector_for(tmp_path)
     checkpoint = {"status": "RUNNING", "result_ref": "pending-result"}
     assert projector.rebuild(
-        tree=completed_tree,
-        validation=checkpoint,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, checkpoint, task={"primary_metric": "accuracy"})
     ).ok
     assert not (root / "final.json").exists()
 
     legacy = {"status": "SUCCEEDED", "test_score": 0.72, "final_test_score": 0.70}
     assert projector.rebuild(
-        tree=completed_tree,
-        validation=legacy,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, legacy, task={"primary_metric": "accuracy"})
     ).ok
     assert json.loads((root / "final.json").read_text())["run_id"] == "final"
 
@@ -365,11 +363,7 @@ def test_rebuild_final_prefers_persisted_validation_sota_commit(
     validation["sota_commit"] = "persisted-sota-commit"
 
     outcome = projector_for(tmp_path).rebuild(
-        tree=completed_tree,
-        validation=validation,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, validation, task={"primary_metric": "accuracy"})
     )
 
     assert outcome.ok
@@ -382,11 +376,11 @@ def test_rebuild_skipped_validation_uses_sota_without_metrics(
 ) -> None:
     root = tmp_path / ".athena" / "exp_docs"
     outcome = projector_for(tmp_path).rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=True,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(
+            completed_tree,
+            skipped=True,
+            task={"primary_metric": "accuracy"},
+        )
     )
     assert outcome.ok
     final = json.loads((root / "final.json").read_text())
@@ -405,11 +399,7 @@ def test_rebuild_retains_enriched_compatible_run_bytes(
 ) -> None:
     projector = projector_for(tmp_path)
     assert projector.rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, task={"primary_metric": "accuracy"})
     ).ok
     run_path = tmp_path / ".athena" / "exp_docs" / "runs" / "exp_search-1.json"
     payload = json.loads(run_path.read_text())
@@ -418,11 +408,7 @@ def test_rebuild_retains_enriched_compatible_run_bytes(
     enriched = run_path.read_bytes()
 
     assert projector.rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, task={"primary_metric": "accuracy"})
     ).ok
     assert run_path.read_bytes() == enriched
 
@@ -435,7 +421,7 @@ def test_rebuild_accepts_archives_written_by_normal_stage_projection(
     tree_payload["experiments"]["exp_baseline"]["eval"]["secondary"] = {}
     completed_tree = ResearchTree.from_dict(tree_payload)
     baseline = completed_tree.get_experiment("exp_baseline")
-    assert projector.project_stage(
+    assert projector.project(
         {
             "run_id": "exp_baseline",
             "stage": "baseline",
@@ -449,22 +435,14 @@ def test_rebuild_accepts_archives_written_by_normal_stage_projection(
                 "commit": baseline.commit,
             },
         },
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, task={"primary_metric": "accuracy"}),
     ).ok
     archive = (
         tmp_path / ".athena" / "exp_docs" / "runs" / "exp_baseline.json"
     ).read_bytes()
 
     outcome = projector.rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, task={"primary_metric": "accuracy"})
     )
 
     assert outcome.ok
@@ -477,7 +455,7 @@ def test_rebuild_accepts_final_archive_and_normalizes_artifact_keys(
     tmp_path: Path, completed_tree: ResearchTree, validation: dict[str, object]
 ) -> None:
     projector = projector_for(tmp_path)
-    assert projector.project_stage(
+    assert projector.project(
         {
             "run_id": validation["result_id"],
             "stage": "final",
@@ -498,22 +476,14 @@ def test_rebuild_accepts_final_archive_and_normalizes_artifact_keys(
                 "validation_commit": validation["validation_commit"],
             },
         },
-        tree=completed_tree,
-        validation=validation,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, validation, task={"primary_metric": "accuracy"}),
     ).ok
     archive = (
         tmp_path / ".athena" / "exp_docs" / "runs" / "validation-1.json"
     ).read_bytes()
 
     outcome = projector.rebuild(
-        tree=completed_tree,
-        validation=validation,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, validation, task={"primary_metric": "accuracy"})
     )
 
     assert outcome.ok
@@ -527,11 +497,7 @@ def test_rebuild_conflict_preserves_run_alias_and_manifest(
 ) -> None:
     projector = projector_for(tmp_path)
     assert projector.rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, task={"primary_metric": "accuracy"})
     ).ok
     root = tmp_path / ".athena" / "exp_docs"
     run_path = root / "runs" / "exp_search-1.json"
@@ -544,11 +510,7 @@ def test_rebuild_conflict_preserves_run_alias_and_manifest(
     conflicting_run = run_path.read_bytes()
 
     outcome = projector.rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, task={"primary_metric": "accuracy"})
     )
 
     assert outcome == ProjectionOutcome.stale()
@@ -561,13 +523,7 @@ def test_rebuild_conflict_preserves_run_alias_and_manifest(
 def test_rebuild_does_not_invent_phase_failure_records(
     tmp_path: Path, completed_tree: ResearchTree
 ) -> None:
-    outcome = projector_for(tmp_path).rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding=None,
-        direction="maximize",
-    )
+    outcome = projector_for(tmp_path).rebuild(context(completed_tree))
     assert outcome.ok
     assert not list(
         (tmp_path / ".athena" / "exp_docs" / "runs").glob("*-phase-failure-*.json")
@@ -612,11 +568,7 @@ def test_rebuild_keeps_baseline_alias_at_canonical_baseline_id(
     )
 
     outcome = projector_for(tmp_path).rebuild(
-        tree=completed_tree,
-        validation=None,
-        validation_skipped=False,
-        task_understanding={"primary_metric": "accuracy"},
-        direction="maximize",
+        context(completed_tree, task={"primary_metric": "accuracy"})
     )
 
     assert outcome.ok
@@ -626,13 +578,7 @@ def test_rebuild_keeps_baseline_alias_at_canonical_baseline_id(
 
 def test_empty_rebuild_without_existing_root_is_noop(tmp_path: Path) -> None:
     root = tmp_path / "docs"
-    outcome = ExperimentDocumentProjector(root, ()).rebuild(
-        tree=ResearchTree(),
-        validation=None,
-        validation_skipped=False,
-        task_understanding=None,
-        direction="maximize",
-    )
+    outcome = ExperimentDocumentProjector(root, ()).rebuild(context(ResearchTree()))
     assert outcome.ok
     assert (
         outcome.projection_id
@@ -649,13 +595,7 @@ def test_empty_rebuild_refreshes_existing_root_without_deleting_files(
     unknown.parent.mkdir(parents=True)
     unknown.write_bytes(b"opaque\n")
 
-    outcome = ExperimentDocumentProjector(root, ()).rebuild(
-        tree=ResearchTree(),
-        validation=None,
-        validation_skipped=False,
-        task_understanding=None,
-        direction="maximize",
-    )
+    outcome = ExperimentDocumentProjector(root, ()).rebuild(context(ResearchTree()))
 
     assert outcome.ok
     assert unknown.read_bytes() == b"opaque\n"
