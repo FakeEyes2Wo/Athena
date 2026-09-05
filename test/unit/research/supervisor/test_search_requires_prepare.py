@@ -33,27 +33,18 @@ class _Tree:
 
 
 class _Owner:
-    def __init__(
-        self,
-        sota: str | None,
-        evaluator_ref: str | None,
-        plans: dict | None = None,
-    ) -> None:
+    def __init__(self, sota: str | None, plans: dict | None = None) -> None:
         self.tree = _Tree(sota)
-        self.state = SimpleNamespace(
-            evaluator_ref=evaluator_ref, status="RUNNING", plans=plans or {}
-        )
+        self.state = SimpleNamespace(status="RUNNING", plans=plans or {})
 
 
 async def _never_run(_plan_id: str):  # pragma: no cover - the gate runs first
     raise AssertionError("no Plan turn may be dispatched before PREPARE finishes")
 
 
-def _loop(
-    *, sota: str | None, evaluator_ref: str | None, plans: dict | None = None
-) -> SearchLoop:
+def _loop(*, sota: str | None, plans: dict | None = None) -> SearchLoop:
     return SearchLoop(
-        _Owner(sota, evaluator_ref, plans),
+        _Owner(sota, plans),
         deps=None,
         run=None,
         plans=None,
@@ -62,40 +53,20 @@ def _loop(
 
 
 @pytest.mark.asyncio
-async def test_search_refuses_to_run_without_a_baseline_or_evaluator() -> None:
+async def test_search_refuses_to_run_without_a_trusted_baseline() -> None:
     with pytest.raises(RuntimeError) as excinfo:
-        await _loop(sota=None, evaluator_ref=None).run_search()
+        await _loop(sota=None).run_search()
 
     detail = str(excinfo.value)
     assert "PREPARE did not finish" in detail
-    assert "a trusted SOTA baseline" in detail
-    assert "a frozen evaluator" in detail
-
-
-@pytest.mark.asyncio
-async def test_a_baseline_without_an_evaluator_names_only_what_is_missing() -> None:
-    """Half-finished PREPARE must not be reported as if nothing exists."""
-    with pytest.raises(RuntimeError) as excinfo:
-        await _loop(sota="exp_baseline", evaluator_ref=None).run_search()
-
-    missing = str(excinfo.value).split("Missing ", 1)[1].split(". SEARCH", 1)[0]
-    assert missing == "a frozen evaluator"
-
-
-@pytest.mark.asyncio
-async def test_an_evaluator_without_a_baseline_names_only_what_is_missing() -> None:
-    with pytest.raises(RuntimeError) as excinfo:
-        await _loop(sota=None, evaluator_ref="sha256:eval").run_search()
-
-    missing = str(excinfo.value).split("Missing ", 1)[1].split(". SEARCH", 1)[0]
-    assert missing == "a trusted SOTA baseline in the research tree"
+    assert "no trusted SOTA baseline" in detail
+    # 说明为什么这件事致命，而不是只说缺了什么。
+    assert "nothing to measure and nothing to compare" in detail
 
 
 def test_a_finished_prepare_passes_the_gate() -> None:
     """The gate is a precondition, not a second scheduler."""
-    loop = _loop(sota="exp_baseline", evaluator_ref="sha256:eval")
-
-    loop._assert_prepare_finished()
+    _loop(sota="exp_baseline")._assert_prepare_finished()
 
 
 def test_an_in_flight_plan_stands_the_gate_down() -> None:
@@ -104,6 +75,18 @@ def test_an_in_flight_plan_stands_the_gate_down() -> None:
     ``_spawn_search`` re-enters the loop, and so does a resume that has to drain
     a crashed turn. Refusing there would turn a recoverable crash into a refusal.
     """
-    loop = _loop(sota=None, evaluator_ref=None, plans={"hyp_crash": object()})
+    _loop(sota=None, plans={"hyp_crash": object()})._assert_prepare_finished()
+
+
+def test_a_seeded_sota_without_a_state_evaluator_ref_still_resumes() -> None:
+    """The evaluator is recorded on the SOTA experiment, not on the state.
+
+    An earlier version of this gate also required ``state.evaluator_ref``. A
+    resumed run holds a seeded SOTA with that field unset, so the extra condition
+    turned a valid resume into ``SEARCH/FAILED`` -- caught by
+    ``test_resume_search_running_with_skip_completes_without_validation``.
+    """
+    loop = _loop(sota="exp_baseline")
+    assert not hasattr(loop._state, "evaluator_ref")
 
     loop._assert_prepare_finished()

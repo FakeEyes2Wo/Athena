@@ -98,22 +98,24 @@ class SearchLoop:
         SEARCH already started, so their presence is proof PREPARE finished and
         the gate stands down rather than turning a recoverable crash into a
         refusal.
+
+        The trusted SOTA is the whole condition. An earlier version also required
+        ``state.evaluator_ref``, but that is not where a frozen evaluator is
+        recorded -- the SOTA experiment carries it, which is why ``fork.py`` reads
+        it from the baseline record. A resumed run holding a seeded SOTA leaves
+        that state field unset, so the extra check turned a valid resume into
+        ``SEARCH/FAILED``. It was redundant besides: a SOTA cannot exist without
+        the evaluator that scored it.
         """
         if getattr(self._state, "plans", None):
             return
-        missing: list[str] = []
-        if self._tree.best_experiment_id() is None:
-            missing.append("a trusted SOTA baseline in the research tree")
-        if getattr(self._state, "evaluator_ref", None) is None:
-            missing.append("a frozen evaluator")
-        if not missing:
+        if self._tree.best_experiment_id() is not None:
             return
         raise RuntimeError(
-            "SEARCH cannot start: PREPARE did not finish. Missing "
-            + ", and ".join(missing)
-            + ". SEARCH scores every candidate against the frozen evaluator and "
-            "compares it to the trusted baseline, so without them there is "
-            "nothing to measure and nothing to compare."
+            "SEARCH cannot start: PREPARE did not finish. There is no trusted "
+            "SOTA baseline in the research tree. SEARCH scores every candidate "
+            "against the frozen evaluator and compares it to that baseline, so "
+            "without it there is nothing to measure and nothing to compare."
         )
 
     def _spawn_search(self) -> None:
