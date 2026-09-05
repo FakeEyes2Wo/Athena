@@ -35,10 +35,17 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove recovery's placeholder callback interface and check retained Plan resources at the Supervisor boundary.
 - [x] Consolidate SEARCH wake/start ownership and replace the waiter collection with one loop-owned callback.
 - [x] Make SEARCH own graceful stop draining; join the loop before publishing STOPPED.
+- [x] Share failure persistence/notification between initial startup and background SEARCH.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+Failure-reporting follow-up: extracted the startup error path into one private `fail(error)` method and replaced background SEARCH's empty catch with that method. Both paths stop new dispatch and save FAILED before attempting output/state notifications. `Promise.allSettled` attempts both notifications independently and prevents notification rejection from replacing the canonical failure result; disk-save failure still propagates. No error-history field, retry wrapper, or parallel status model was added. Direct callers of `runSearch()` still receive its rejection; startup and fire-and-forget dispatch own reporting.
+
+Failure-reporting verification: all five package builds passed; full TypeScript run (`--testTimeout=30000`) passed 521 tests across 53 files in 83.21 seconds. `git diff --check` passed. Coverage remains 91/602; no claim of whole-application readiness or full Supervisor lifecycle completion is made. Main integration/push and temporary task branch/worktree cleanup remain mandatory at whole-goal completion.
+
+The new pre-change entry comparison reproduced a background-only failure: startup persisted FAILED, while resume swallowed the identical ideator exception and left RUNNING. Afterward, 32 Supervisor tests passed, including both entries and rejection of each failure-notification channel. This does not yet establish cleanup of every concurrently rejecting worker, failure reporting ownership during stop races, or PREPARE/VALIDATE shutdown. Those remain required before closing the Supervisor ledger rows.
 
 Graceful-stop follow-up: `stop()` now joins the SEARCH Promise as well as already-running turns. The loop stops filling slots but drains completed turns through its existing settlement path; only after joining does stop clear residual handles. This removes competing lifecycle ownership that previously let STOPPED return while ideation still wrote the tree, and abandoned the second of two completed turns without applying its result. A stop observed after asynchronous Plan creation retains that zero-turn Plan without dispatching it. No AbortController, second task registry, or cancellation adapter was added. DSH's stop description now accurately says it waits for in-flight work, rather than claiming local cancellation.
 

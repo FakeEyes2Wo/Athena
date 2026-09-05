@@ -201,6 +201,39 @@ function coreSupervisor(
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it.each(["start", "resume"] as const)("persists and reports SEARCH failure through %s", async (entry) => {
+    const dir = tmpDir()
+    const publish = vi.fn(async (_kind: string, _data: Record<string, unknown>) => {})
+    const { supervisor } = coreSupervisor(dir, { workers: {
+      publish,
+      runIdeatorTurn: async () => { throw new Error("ideation failed") },
+    } })
+    if (entry === "start") await supervisor.start()
+    else await supervisor.resume()
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({ status: "FAILED" })))
+    expect(supervisor.state.status).toBe("FAILED")
+    expect(loadResearchState(join(dir, ".athena", "state.json")).status).toBe("FAILED")
+    expect(publish.mock.calls.filter(([kind]) => kind === "output")).toHaveLength(1)
+    expect(publish).toHaveBeenCalledWith("output", {
+      source: "supervisor", channel: "error", text: "research failed: ideation failed",
+    })
+  })
+
+  it.each(["output", "state"])("preserves FAILED when its %s notification rejects", async (rejectedKind) => {
+    const dir = tmpDir()
+    const publish = vi.fn(async (kind: string, data: Record<string, unknown>) => {
+      if (kind === rejectedKind && (kind === "output" || data.status === "FAILED")) throw new Error("offline")
+    })
+    const { supervisor } = coreSupervisor(dir, { workers: {
+      publish,
+      runIdeatorTurn: async () => { throw new Error("ideation failed") },
+    } })
+    await supervisor.start()
+    expect(loadResearchState(join(dir, ".athena", "state.json")).status).toBe("FAILED")
+    expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({ status: "FAILED" }))
+    expect(publish).toHaveBeenCalledWith("output", expect.objectContaining({ text: "research failed: ideation failed" }))
+  })
+
   it("joins in-flight ideation before reporting STOPPED", async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })

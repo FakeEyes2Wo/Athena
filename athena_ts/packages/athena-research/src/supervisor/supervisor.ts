@@ -308,17 +308,22 @@ export class FixedFlowSupervisor {
       }
       await this.continuePhase()
     } catch (error) {
-      // 阶段执行失败统一观测：置 FAILED 并发布，避免后台驱动把异常吞掉后
-      // 状态永远卡在 PREPARE/SEARCH。
-      this.state.status = "FAILED"
-      this.saveState()
-      await this.workers.publish("output", {
+      await this.fail(error)
+    }
+  }
+
+  private async fail(error: unknown): Promise<void> {
+    this.stopped = true
+    this.state.status = "FAILED"
+    this.saveState()
+    await Promise.allSettled([
+      this.workers.publish("output", {
         source: "supervisor",
         channel: "error",
         text: `research failed: ${error instanceof Error ? error.message : String(error)}`,
-      })
-      await this.publishState()
-    }
+      }),
+      this.publishState(),
+    ])
   }
 
   async continuePhase(): Promise<void> {
@@ -501,7 +506,7 @@ export class FixedFlowSupervisor {
   private spawnSearch(): void {
     if (this.state.phase !== "SEARCH" || this.state.status !== "RUNNING" || this.stopped) return
     this.wake()
-    if (this.searchPromise === null) this.runSearch().catch(() => {})
+    if (this.searchPromise === null) this.runSearch().catch((error) => this.fail(error))
   }
 
   private async fillSlots(): Promise<boolean> {
