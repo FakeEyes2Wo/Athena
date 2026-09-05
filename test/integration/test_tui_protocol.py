@@ -175,6 +175,33 @@ async def test_async_subscriber_finishes_initial_state_before_new_output(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["unsubscribe", "close"])
+async def test_pending_initial_snapshot_is_cancelled(tmp_path, action: str) -> None:
+    runtime = ResearchRuntime(project_root=tmp_path)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def receive(kind: str, _payload: dict[str, object]) -> None:
+        if kind != "state":
+            return
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    subscription_id = runtime.subscribe(receive)
+    await started.wait()
+    if action == "unsubscribe":
+        runtime.unsubscribe(subscription_id)
+        await runtime.aclose()
+    else:
+        await runtime.aclose()
+    await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_tui_protocol_has_no_dispatch_or_filesystem_dependency(
     monkeypatch, tmp_path
 ) -> None:

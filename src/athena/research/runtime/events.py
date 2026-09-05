@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _MAX_COMMAND_CHARS = 400
 
 EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
+_Subscriber = tuple[EmitFn, asyncio.Task[object] | None]
 
 # Agent 流式增量不再逐 token 持久化到 session transcript。实时订阅仍逐 delta
 # 推送；落盘时在消息边界（函数调用 / turn 终态）合并成一条完整文本。
@@ -56,9 +57,8 @@ class RuntimeEvents:
         self._sessions_dir = sessions_dir
         self._supervisor: Supervisor | None = None
         self._ideator_lanes = 0
-        self._subscribers: dict[str, EmitFn] = {}
-        self._subscriber_ready: dict[str, asyncio.Task[object]] = {}
-        self._agent_buffers: dict[str, dict[str, Any]] = {}
+        self._subscribers: dict[str, _Subscriber] = {}
+        self._agent_buffers: dict[str, tuple[str, str]] = {}
 
     @property
     def _log_path(self) -> Path:
@@ -76,7 +76,7 @@ class RuntimeEvents:
     def subscribe(self, emit: EmitFn) -> str:
         """Subscribe and immediately receive one complete state snapshot."""
         subscription_id = new_id("research")
-        self._subscribers[subscription_id] = emit
+        self._subscribers[subscription_id] = (emit, None)
         result = emit(
             "state",
             supervisor_state(self._supervisor, self._ideator_lanes).model_dump(
@@ -84,13 +84,16 @@ class RuntimeEvents:
             ),
         )
         if asyncio.iscoroutine(result):
-            self._subscriber_ready[subscription_id] = asyncio.create_task(result)
+            self._subscribers[subscription_id] = (
+                emit,
+                asyncio.create_task(result),
+            )
         return subscription_id
 
     def unsubscribe(self, subscription_id: str) -> None:
         """Remove one runtime event subscriber and cancel its pending snapshot."""
-        self._subscribers.pop(subscription_id, None)
-        ready = self._subscriber_ready.pop(subscription_id, None)
+        subscriber = self._subscribers.pop(subscription_id, None)
+        _, ready = subscriber or (None, None)
         if ready is not None and not ready.done():
             ready.cancel()
 
@@ -208,14 +211,15 @@ class RuntimeEvents:
     def _flush_agent_text(self, plan: str) -> None:
         """Persist one complete Agent text message at a natural boundary."""
         buffer = self._agent_buffers.pop(plan or "", None)
-        if not buffer or not buffer.get("text"):
+        if not buffer or not buffer[0]:
             return
+        text, message_id = buffer
         event = self._events.output(
             source="agent",
             channel="text",
-            text=buffer["text"],
-            plan=buffer.get("plan"),
-            message_id=buffer.get("message_id"),
+            text=text,
+            plan=plan,
+            message_id=message_id,
         )
         self._append_log(event.model_dump(mode="json"))
 
@@ -243,12 +247,14 @@ class RuntimeEvents:
             return
         text = raw.rstrip("\n\r") if ideator else raw
         key = plan or ""
-        previous = self._agent_buffers.get(key)
-        message_id = previous["message_id"] if previous else new_id("msg")
+        previous_text, message_id = self._agent_buffers.get(key) or (
+            "",
+            new_id("msg"),
+        )
 
         # Suppress leading whitespace-only display items without dropping spaces
         # that arrive as standalone deltas after the message body has started.
-        has_content = bool(previous and str(previous["text"]).strip())
+        has_content = bool(previous_text.strip())
         if text.strip() or has_content:
             await self.publish_output(
                 source="agent",
@@ -260,12 +266,8 @@ class RuntimeEvents:
             )
         full_text = str(payload.get("accumulated") or "")
         if not full_text:
-            full_text = (previous["text"] + raw) if previous else raw
-        self._agent_buffers[key] = {
-            "text": full_text,
-            "plan": plan,
-            "message_id": message_id,
-        }
+            full_text = previous_text + raw
+        self._agent_buffers[key] = (full_text, message_id)
 
     async def _project_agent_tool(
         self,
@@ -384,11 +386,13 @@ class RuntimeEvents:
         if kind == "output" and log:
             self._append_log(payload)
 
-        async def invoke(subscription_id: str, emit: EmitFn) -> None:
+        async def invoke(subscription_id: str, subscriber: _Subscriber) -> None:
             """Deliver one event to a subscriber after its initial snapshot."""
             try:
-                ready = self._subscriber_ready.pop(subscription_id, None)
+                emit, ready = subscriber
                 if ready is not None:
+                    if self._subscribers.get(subscription_id) == subscriber:
+                        self._subscribers[subscription_id] = (emit, None)
                     await ready
                 result = emit(kind, payload)
                 if asyncio.iscoroutine(result):
@@ -401,7 +405,10 @@ class RuntimeEvents:
                 )
 
         await asyncio.gather(
-            *(invoke(key, emit) for key, emit in list(self._subscribers.items()))
+            *(
+                invoke(key, subscriber)
+                for key, subscriber in list(self._subscribers.items())
+            )
         )
 
     async def aclose(self) -> None:
@@ -410,10 +417,9 @@ class RuntimeEvents:
         # complete message in the resume transcript, not a dangling delta buffer.
         for plan in list(self._agent_buffers):
             self._flush_agent_text(plan)
-        for ready in self._subscriber_ready.values():
-            if not ready.done():
+        for _, ready in self._subscribers.values():
+            if ready is not None and not ready.done():
                 ready.cancel()
-        self._subscriber_ready.clear()
         self._subscribers.clear()
 
     def _append_log(self, record: dict[str, object]) -> None:

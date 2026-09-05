@@ -597,6 +597,12 @@ Read `runtime/event_projection.py` completely and traced both pure projections t
 
 Retain the explicit output field mapping because it applies projector defaults, redaction, sequence allocation, and deliberate unknown-key omission. Retain the declarative plan/waiting projections and the two-input state function because Ideator lane count is transient runtime data rather than Supervisor state. Delete only the redundant implementation `__all__`; named imports remain unchanged. The module falls from 89 to 86 physical lines. The unchanged baseline and final event/document/resume selection both passed 78 tests; Ruff, Black, Python compilation, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 352/602. Whole-repository acceptance remains pending.
 
+## Runtime event service state consolidation
+
+Read `runtime/events.py` completely and traced every projection, subscription, transcript, replay, command-result, Agent-buffer, and shutdown path through the runtime facade, Supervisor/phase callbacks, TUI integration, and direct tests. Preserve sequence resumption, output redaction, safe artifact replacement, initial-snapshot ordering, subscriber isolation, message identity, natural-boundary transcript flushing, malformed-line recovery, and deterministic state projection.
+
+Replace the parallel subscriber and initial-snapshot-task dictionaries with one subscriber record map, reducing `RuntimeEvents` from eight instance fields to seven while keeping snapshot readiness beside its callback. Remove the duplicated `plan` value from Agent text buffers; the map key and flush argument already own it, reducing each buffer from three fields to two. No new state class or request DTO was introduced. The module grows from 457 to 461 physical lines because readiness transition and cancellation remain explicit; this is a state-ownership simplification rather than a line-count reduction. The unchanged baseline passed 70 tests; the final expanded selection passed 72 after adding direct unsubscribe/close cancellation regressions for pending initial snapshots. Ruff, Black, Python compilation, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 353/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1211,7 +1217,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/control.py` | 214 | Reviewed; privatize four lifecycle helpers and remove redundant exports/defensive catch |
 | `src/athena/research/runtime/corpus.py` | 90 | Reviewed; retain minimal one-runtime-argument corpus/read-ledger facade |
 | `src/athena/research/runtime/event_projection.py` | 89 | Reviewed; retain pure projection boundary and remove redundant implementation export list |
-| `src/athena/research/runtime/events.py` | 457 | Pending |
+| `src/athena/research/runtime/events.py` | 457 | Reviewed; merge subscriber readiness state and reduce Agent buffers from three fields to two |
 | `src/athena/research/runtime/facade.py` | 728 | Pending |
 | `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
 | `src/athena/research/runtime/resume_contract.py` | 56 | Pending |
