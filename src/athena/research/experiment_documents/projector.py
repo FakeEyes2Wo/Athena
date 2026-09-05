@@ -71,7 +71,6 @@ def _experiment_record(
             summary=summary,
         ),
         provenance=ProvenanceRecord(
-            phase="PREPARE" if stage == "baseline" else "SEARCH",
             experiment_id=experiment_id,
             hypothesis_id=str(experiment["hypothesis_id"]),
             commit=str(experiment["commit"]),
@@ -100,7 +99,7 @@ def _validation_record(
     if not isinstance(result_id, str) or not result_id.strip():
         return None
     raw_artifacts = {
-        key: value
+        key.removesuffix("_ref"): value
         for key, value in validation.items()
         if key.endswith("_ref") and isinstance(value, str)
     }
@@ -113,7 +112,6 @@ def _validation_record(
         else (sota.provenance.commit if sota else None)
     )
     provenance = ProvenanceRecord(
-        phase="VALIDATE",
         sota_experiment_id=sota.provenance.experiment_id if sota else None,
         sota_commit=sota_commit,
         validation_commit=(
@@ -317,7 +315,6 @@ class ExperimentDocumentProjector:
                             summary="Validation was explicitly skipped.",
                         ),
                         provenance=ProvenanceRecord(
-                            phase="VALIDATE",
                             sota_experiment_id=sota_record.run_id,
                             sota_commit=sota_record.provenance.commit,
                         ),

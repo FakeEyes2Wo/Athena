@@ -427,6 +427,101 @@ def test_rebuild_retains_enriched_compatible_run_bytes(
     assert run_path.read_bytes() == enriched
 
 
+def test_rebuild_accepts_archives_written_by_normal_stage_projection(
+    tmp_path: Path, completed_tree: ResearchTree
+) -> None:
+    projector = projector_for(tmp_path)
+    tree_payload = completed_tree.to_dict()
+    tree_payload["experiments"]["exp_baseline"]["eval"]["secondary"] = {}
+    completed_tree = ResearchTree.from_dict(tree_payload)
+    baseline = completed_tree.get_experiment("exp_baseline")
+    assert projector.project_stage(
+        {
+            "run_id": "exp_baseline",
+            "stage": "baseline",
+            "status": baseline.status.value,
+            "metric": {"primary": baseline.eval.primary},
+            "artifacts": baseline.artifacts,
+            "reason": {"kind": "trusted_score", "summary": "trusted baseline"},
+            "provenance": {
+                "experiment_id": "exp_baseline",
+                "hypothesis_id": baseline.hypothesis_id,
+                "commit": baseline.commit,
+            },
+        },
+        tree=completed_tree,
+        validation=None,
+        validation_skipped=False,
+        task_understanding={"primary_metric": "accuracy"},
+        direction="maximize",
+    ).ok
+    archive = (
+        tmp_path / ".athena" / "exp_docs" / "runs" / "exp_baseline.json"
+    ).read_bytes()
+
+    outcome = projector.rebuild(
+        tree=completed_tree,
+        validation=None,
+        validation_skipped=False,
+        task_understanding={"primary_metric": "accuracy"},
+        direction="maximize",
+    )
+
+    assert outcome.ok
+    assert (
+        tmp_path / ".athena" / "exp_docs" / "runs" / "exp_baseline.json"
+    ).read_bytes() == archive
+
+
+def test_rebuild_accepts_final_archive_and_normalizes_artifact_keys(
+    tmp_path: Path, completed_tree: ResearchTree, validation: dict[str, object]
+) -> None:
+    projector = projector_for(tmp_path)
+    assert projector.project_stage(
+        {
+            "run_id": validation["result_id"],
+            "stage": "final",
+            "status": validation["status"],
+            "metric": {
+                "primary": validation["final_test_score"],
+                "reference": validation["test_score"],
+                "generalization_gap": validation["generalization_gap"],
+            },
+            "artifacts": {
+                "predictions": validation["predictions_ref"],
+                "report": validation["report_ref"],
+            },
+            "reason": {"kind": "generalizes", "summary": "validated result"},
+            "provenance": {
+                "sota_experiment_id": "exp_search-2",
+                "sota_commit": completed_tree.get_experiment("exp_search-2").commit,
+                "validation_commit": validation["validation_commit"],
+            },
+        },
+        tree=completed_tree,
+        validation=validation,
+        validation_skipped=False,
+        task_understanding={"primary_metric": "accuracy"},
+        direction="maximize",
+    ).ok
+    archive = (
+        tmp_path / ".athena" / "exp_docs" / "runs" / "validation-1.json"
+    ).read_bytes()
+
+    outcome = projector.rebuild(
+        tree=completed_tree,
+        validation=validation,
+        validation_skipped=False,
+        task_understanding={"primary_metric": "accuracy"},
+        direction="maximize",
+    )
+
+    assert outcome.ok
+    assert (
+        tmp_path / ".athena" / "exp_docs" / "runs" / "validation-1.json"
+    ).read_bytes() == archive
+
+
 def test_rebuild_conflict_preserves_run_alias_and_manifest(
     tmp_path: Path, completed_tree: ResearchTree
 ) -> None:
