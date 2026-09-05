@@ -200,7 +200,102 @@ function coreSupervisor(
   return { supervisor, store, state, tree }
 }
 
+function runSearch(supervisor: FixedFlowSupervisor): Promise<void> {
+  return supervisor["runPhase"](() => supervisor["runSearchLoop"]())
+}
+
 describe("FixedFlowSupervisor core actions", () => {
+  it("joins SEARCH before starting interactive validation", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const runPlanAgentTurn = vi.fn(async () => {
+      await gate
+      return PlanDecisionSchema.parse({ decision: "abandon", reason: "done" })
+    })
+    const runValidationPhase = vi.fn(async () => ValidationResultSchema.parse({
+      result_id: "validation", status: "COMPLETED", test_score: 0.8, final_test_score: 0.8,
+    }))
+    const { supervisor, tree } = coreSupervisor(tmpDir(), { autoValidate: true, workers: { runPlanAgentTurn, runValidationPhase } })
+    tree.addHypothesis(HypothesisSchema.parse({
+      statement: "idea", intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
+    }))
+    const run = supervisor.start()
+    try {
+      await vi.waitFor(() => expect(runPlanAgentTurn).toHaveBeenCalledTimes(1))
+      const validation = supervisor.setPhaseDecision("VALIDATE")
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(runValidationPhase).not.toHaveBeenCalled()
+      release()
+      await Promise.all([run, validation])
+      expect(runValidationPhase).toHaveBeenCalledTimes(1)
+      expect(tree.experiments("search")[0]!.status).toBe("FAILED")
+      expect(supervisor.state.status).toBe("COMPLETED")
+    } finally {
+      release()
+      await run
+      await supervisor.requestStop()
+    }
+  })
+
+  it.each(["PREPARE", "VALIDATE"] as const)("retains %s failure when stopping its active worker", async (phase) => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const work = vi.fn(async () => { await gate; throw new Error("phase failed") })
+    const { supervisor, state } = coreSupervisor(tmpDir(), { workers: { runPreparePhase: work, runValidationPhase: work } })
+    state.phase = phase
+    const run = supervisor.start()
+    try {
+      await vi.waitFor(() => expect(work).toHaveBeenCalledTimes(1))
+      const stopping = supervisor.requestStop()
+      release()
+      await Promise.all([run, stopping])
+      expect(supervisor.state.status).toBe("FAILED")
+    } finally {
+      release()
+      await run
+      await supervisor.requestStop()
+    }
+  })
+
+  it.each(["PREPARE", "VALIDATE", "interactive"] as const)("waits for the active %s phase before stop returns", async (phase) => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const work = vi.fn(async () => { await gate })
+    const runIdeatorTurn = vi.fn(async () => [])
+    const { supervisor, state } = coreSupervisor(tmpDir(), { workers: {
+      runIdeatorTurn,
+      runPreparePhase: async () => {
+        await work()
+        return PrepareResultSchema.parse({ evaluator_ref: REF, metric: 0.8, commit: "c0",
+          predictions_ref: REF, evidence_ref: REF, report_ref: REF })
+      },
+      runValidationPhase: async () => {
+        await work()
+        return ValidationResultSchema.parse({ result_id: "validation", status: "COMPLETED", test_score: 0.8, final_test_score: 0.8 })
+      },
+    } })
+    state.phase = phase === "interactive" ? "SEARCH" : phase
+    const run = phase === "interactive" ? supervisor.setPhaseDecision("VALIDATE") : supervisor.start()
+    let stopped = false
+    try {
+      await vi.waitFor(() => expect(work).toHaveBeenCalledTimes(1))
+      const stopping = supervisor.requestStop().then(() => { stopped = true })
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(stopped).toBe(false)
+      release()
+      await stopping
+      const snapshot = researchStateToJSON(supervisor.state)
+      await run
+      expect(researchStateToJSON(supervisor.state)).toEqual(snapshot)
+      expect(supervisor.state.status).toBe(phase === "PREPARE" ? "STOPPED" : "COMPLETED")
+      expect(runIdeatorTurn).not.toHaveBeenCalled()
+    } finally {
+      release()
+      await run
+      await supervisor.requestStop()
+    }
+  })
+
   it("observes turn rejection while slot filling is still awaiting ideation", async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -313,7 +408,7 @@ describe("FixedFlowSupervisor core actions", () => {
     })
     const runPlanAgentTurn = vi.fn(async () => null)
     const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn, runPlanAgentTurn } })
-    const loop = supervisor["runSearch"]()
+    const loop = runSearch(supervisor)
     let stopped = false
     try {
       await vi.waitFor(() => expect(runIdeatorTurn).toHaveBeenCalledTimes(1))
@@ -344,7 +439,7 @@ describe("FixedFlowSupervisor core actions", () => {
     for (let i = 0; i < 2; i++) tree.addHypothesis(HypothesisSchema.parse({
       statement: `idea ${i}`, intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
     }))
-    const loop = supervisor["runSearch"]()
+    const loop = runSearch(supervisor)
     try {
       await vi.waitFor(() => expect(runPlanAgentTurn).toHaveBeenCalledTimes(2))
       const stopping = supervisor.requestStop()
@@ -372,7 +467,7 @@ describe("FixedFlowSupervisor core actions", () => {
     const id = tree.addHypothesis(HypothesisSchema.parse({
       statement: "idea", intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
     }))
-    const loop = supervisor["runSearch"]()
+    const loop = runSearch(supervisor)
     try {
       await vi.waitFor(() => expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({
         plans: expect.objectContaining({ [id]: expect.anything() }),
@@ -394,11 +489,11 @@ describe("FixedFlowSupervisor core actions", () => {
   it("owns the loop before invoking a worker that rejoins SEARCH", async () => {
     let joined: Promise<void> | undefined
     const runIdeatorTurn = vi.fn(async () => {
-      if (runIdeatorTurn.mock.calls.length === 1) joined = supervisor["runSearch"]()
+      if (runIdeatorTurn.mock.calls.length === 1) joined = runSearch(supervisor)
       return []
     })
     const { supervisor } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn } })
-    await supervisor["runSearch"]()
+    await runSearch(supervisor)
     await joined
     expect(runIdeatorTurn).toHaveBeenCalledTimes(1)
   })
@@ -416,7 +511,7 @@ describe("FixedFlowSupervisor core actions", () => {
       statement: "improve", intervention: "add feature", expected_effect: "raise metric",
       parent_id: "exp_baseline",
     }))
-    const loop = supervisor["runSearch"]()
+    const loop = runSearch(supervisor)
     try {
       await vi.waitFor(() => expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({ status: "WAITING" })))
       await supervisor.setManualMode(false)
@@ -434,7 +529,7 @@ describe("FixedFlowSupervisor core actions", () => {
     const runIdeatorTurn = vi.fn(async () => [])
     const { supervisor } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn } })
     await supervisor.pause()
-    const loop = supervisor["runSearch"]()
+    const loop = runSearch(supervisor)
     await Promise.resolve()
     expect(await supervisor.requestStop()).toBe("STOPPED")
     await loop
@@ -459,8 +554,8 @@ describe("FixedFlowSupervisor core actions", () => {
       state.plans[planId]!.turns_used = 1
     }
     await supervisor.pause()
-    const loop = supervisor["runSearch"]()
-    const joined = supervisor["runSearch"]()
+    const loop = runSearch(supervisor)
+    const joined = runSearch(supervisor)
     await Promise.resolve()
     try {
       expect(runIdeatorTurn).not.toHaveBeenCalled()

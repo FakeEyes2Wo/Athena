@@ -38,10 +38,17 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Share failure persistence/notification between initial startup and background SEARCH.
 - [x] Drain in-flight turns after SEARCH errors and narrow internal completion records.
 - [x] Narrow the Supervisor public surface and remove unused Plan/ideation return values.
+- [x] Generalize the single task owner across recovery, PREPARE, SEARCH and VALIDATE; join phases during stop/validation handoff.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+Phase-ownership follow-up: replaced `searchPromise`/`runSearch()` with one `phasePromise`/`runPhase(work)` slot shared by recovery, PREPARE, SEARCH, and VALIDATE. No additional Supervisor attribute was introduced. Startup checks the stopped flag before continuing to another phase. Interactive validation first drains SEARCH, then owns both the phase transition and validation work; automatic validation uses the same owned boundary. The private `stopDispatch()` is now shared by the two actual production consumers (stop and validation handoff), not reintroduced as a public/test-only API. `requestStop()` preserves already-produced COMPLETED or FAILED instead of overwriting terminal results with STOPPED.
+
+Phase-ownership verification: all five package builds passed; the full TypeScript run with `--testTimeout=30000` passed 532 tests across 53 files in 73.07 seconds. `git diff --check` passed and removed SEARCH-only owner searches found no production references. Baseline coverage remains 91/602. Whole-repository acceptance, main integration/push and temporary task branch/worktree cleanup remain mandatory and unfinished.
+
+Three pre-change gated tests showed stop returning before PREPARE, resumed VALIDATE, and interactive VALIDATE workers finished. Afterward, 42 Supervisor tests passed, including preserved phase failure during stop and SEARCH-to-interactive-validation handoff with auto-validation enabled (one validation call). Snapshot checks use the current Supervisor state because recovery intentionally replaces the input state object. These guarantees are graceful joining, not forced process cancellation. Concurrent/conflicting user phase commands and direct interactive-validation failure reporting still need review before the Supervisor ledger closes.
 
 Public-surface follow-up: removed `startValidation()` and moved its tool-response projection to DSH's existing `research_validate` adapter, which still calls `setPhaseDecision("VALIDATE")` and returns `{status}`. Folded the test-only public `stop()` into the actual `requestStop()` operation. Made six internal methods private: `continuePhase`, `runPrepare`, `runValidation`, `runSearch`, `startPlan`, and `registerHypotheses`. Tests probe private SEARCH/Plan machinery explicitly and clean up through the real public stop request. `startPlan` no longer returns an unread ID; registration returns the one boolean consumed by slot filling, rather than constructing an unused ID list and wrapper.
 

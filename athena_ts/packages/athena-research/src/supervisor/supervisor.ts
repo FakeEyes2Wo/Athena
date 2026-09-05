@@ -100,7 +100,7 @@ export class FixedFlowSupervisor {
   private persistentGuidance: string[] = []
   private nextHypothesisId: string | null = null
   private wakeSearch: (() => void) | null = null
-  private searchPromise: Promise<void> | null = null
+  private phasePromise: Promise<void> | null = null
 
   constructor(opts: {
     projectRoot: string
@@ -269,12 +269,14 @@ export class FixedFlowSupervisor {
       if (this.state.phase !== "SEARCH") {
         throw new Error(`cannot VALIDATE from phase ${this.state.phase}; run SEARCH first`)
       }
-    }
-    await this.transitionPhase(decision)
-    if (decision === "SEARCH") {
-      this.spawnSearch()
+      await this.stopDispatch()
+      await this.runPhase(async () => {
+        await this.transitionPhase("VALIDATE")
+        await this.runValidation()
+      })
     } else {
-      await this.runValidation()
+      await this.transitionPhase("SEARCH")
+      this.spawnSearch()
     }
     return { decision }
   }
@@ -296,11 +298,11 @@ export class FixedFlowSupervisor {
     this.stopped = false
     try {
       if (this.state.phase === "PREPARE") {
-        await this.runPrepare()
+        await this.runPhase(() => this.runPrepare())
       } else {
-        await this.recover()
+        await this.runPhase(async () => { await this.recover() })
       }
-      await this.continuePhase()
+      if (!this.stopped) await this.continuePhase()
     } catch (error) {
       await this.fail(error)
     }
@@ -322,17 +324,21 @@ export class FixedFlowSupervisor {
 
   private async continuePhase(): Promise<void> {
     if (this.state.phase === "SEARCH") {
-      await this.runSearch()
+      await this.runPhase(() => this.runSearchLoop())
       if (this.stopped) return
       if (this.autoValidate && this.tree.bestExperimentId() !== null) {
-        await this.transitionPhase("VALIDATE")
+        await this.runPhase(async () => {
+          await this.transitionPhase("VALIDATE")
+          await this.runValidation()
+        })
+        return
       } else if (this.searchLimitReached() && this.state.status === "RUNNING") {
         this.state.status = "WAITING"
         await this.persistState()
       }
     }
     if (this.state.phase === "VALIDATE") {
-      await this.runValidation()
+      await this.runPhase(() => this.runValidation())
     }
   }
 
@@ -442,15 +448,15 @@ export class FixedFlowSupervisor {
     return this.state
   }
 
-  private async runSearch(): Promise<void> {
-    if (this.searchPromise !== null) return this.searchPromise
+  private async runPhase(work: () => Promise<void>): Promise<void> {
+    if (this.phasePromise !== null) return this.phasePromise
     this.stopped = false
-    const loop = Promise.resolve().then(() => this.runSearchLoop())
-    this.searchPromise = loop
+    const task = Promise.resolve().then(work)
+    this.phasePromise = task
     try {
-      await loop
+      await task
     } finally {
-      this.searchPromise = null
+      this.phasePromise = null
     }
   }
 
@@ -508,7 +514,7 @@ export class FixedFlowSupervisor {
   private spawnSearch(): void {
     if (this.state.phase !== "SEARCH" || this.state.status !== "RUNNING" || this.stopped) return
     this.wake()
-    if (this.searchPromise === null) this.runSearch().catch((error) => this.fail(error))
+    if (this.phasePromise === null) this.runPhase(() => this.runSearchLoop()).catch((error) => this.fail(error))
   }
 
   private async fillSlots(): Promise<boolean> {
@@ -824,13 +830,17 @@ export class FixedFlowSupervisor {
   }
 
   async requestStop(): Promise<string> {
-    this.stopped = true
-    this.wake()
-    await Promise.allSettled([this.searchPromise, ...this.running.values()])
-    this.running.clear()
-    this.state.status = "STOPPED"
+    await this.stopDispatch()
+    if (this.state.status !== "COMPLETED" && this.state.status !== "FAILED") this.state.status = "STOPPED"
     await this.persistState()
     return this.state.status
+  }
+
+  private async stopDispatch(): Promise<void> {
+    this.stopped = true
+    this.wake()
+    await Promise.allSettled([this.phasePromise, ...this.running.values()])
+    this.running.clear()
   }
 
   async readState(): Promise<Record<string, unknown>> {
