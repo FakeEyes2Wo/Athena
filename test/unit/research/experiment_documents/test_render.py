@@ -202,6 +202,36 @@ def test_optimization_report_retains_unscored_sota_format_and_validation() -> No
     assert rendered.endswith("\n")
 
 
+def test_optimization_report_retains_legacy_summary_and_guidance() -> None:
+    rendered = render_optimization_report(
+        _tree(),
+        {"final_test_score": 0.88, "test_score": 0.9, "generalization_gap": 0.02},
+        metric_name="score",
+        direction="maximize",
+        validation_skipped=False,
+    ).decode()
+    assert "Successful experiments: 3" in rendered
+    assert "Failed experiments: 1" in rendered
+    assert "Observed signal" in rendered
+    assert "Direction-aware improvement: `+0.400000`" in rendered
+    assert "Freeze the winning commit" in rendered
+    assert "Generalization gap: `0.0200`" in rendered
+    assert "overfitting checks" in rendered
+    assert "Failure-driven actions" in rendered
+    assert "validate prediction ids" in rendered
+
+
+def test_optimization_report_retains_empty_fallback() -> None:
+    rendered = render_optimization_report(
+        ResearchTree(),
+        None,
+        metric_name="score",
+        direction="maximize",
+        validation_skipped=False,
+    ).decode()
+    assert "No completed experiment is available for optimization yet." in rendered
+
+
 def test_optimization_report_discloses_skipped_validation() -> None:
     rendered = render_optimization_report(
         _tree(),
