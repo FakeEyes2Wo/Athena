@@ -15,7 +15,6 @@ from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input import DummyInput, create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
-from prompt_toolkit.widgets import Frame
 
 from athena.research.supervisor.events import OutputEvent, StateEvent
 from athena_tui.app import AthenaApp, apply_event
@@ -399,7 +398,8 @@ def test_mouse_wheel_scrolls_only_output_viewport_and_resumes_tail() -> None:
                 text=f"line {sequence}\n",
             )
         )
-    app._build()
+    prompt_app = app._build()
+    history_control = prompt_app.layout.container.children[1].content
     wheel_up = MouseEvent(
         position=Point(x=0, y=0),
         event_type=MouseEventType.SCROLL_UP,
@@ -419,18 +419,18 @@ def test_mouse_wheel_scrolls_only_output_viewport_and_resumes_tail() -> None:
         modifiers=frozenset(),
     )
 
-    assert app._history_control.mouse_handler(wheel_up) is None
+    assert history_control.mouse_handler(wheel_up) is None
     assert app._history_scroll == 3
     assert app.state.history_follow_tail is False
-    assert app._history_control.mouse_handler(click) is None
+    assert history_control.mouse_handler(click) is None
     assert app._history_scroll == 3
     assert app._history_selection_lines is not None
-    assert app._history_control.mouse_handler(wheel_down) is None
+    assert history_control.mouse_handler(wheel_down) is None
     assert app._history_scroll == 0
     assert app._history_selection_lines is None
     assert app.state.history_follow_tail is True
     assert app._app.mouse_support() is True
-    assert app._composer.control is not app._history_control
+    assert app._composer.control is not history_control
 
 
 def test_mouse_drag_selects_output_text_without_stealing_composer_focus() -> None:
@@ -441,6 +441,7 @@ def test_mouse_drag_selects_output_text_without_stealing_composer_focus() -> Non
         OutputEvent(seq=1, source="supervisor", channel="text", text="select me")
     )
     prompt_app = app._build()
+    history_control = prompt_app.layout.container.children[1].content
     app._history_fragments()
     down = MouseEvent(
         position=Point(x=0, y=0),
@@ -461,9 +462,9 @@ def test_mouse_drag_selects_output_text_without_stealing_composer_focus() -> Non
         modifiers=frozenset(),
     )
 
-    app._history_control.mouse_handler(down)
-    app._history_control.mouse_handler(move)
-    app._history_control.mouse_handler(up)
+    history_control.mouse_handler(down)
+    history_control.mouse_handler(move)
+    history_control.mouse_handler(up)
     selected = app._history_fragments()
 
     assert any("class:history.selection" in style for style, _text in selected)
@@ -479,14 +480,12 @@ def test_streaming_output_preserves_selection_and_frozen_viewport() -> None:
     app._start_history_selection(Point(x=0, y=0))
     app._extend_history_selection(Point(x=8, y=0))
     prompt_app.invalidate = Mock()
-    anchor = app._history_selection_anchor
-    cursor = app._history_selection_cursor
+    selection = app._history_selection
     focused = prompt_app.layout.current_control
 
     app._on_event(OutputEvent(seq=2, source="agent", channel="text", text=" later"))
 
-    assert app._history_selection_anchor == anchor
-    assert app._history_selection_cursor == cursor
+    assert app._history_selection == selection
     assert app.state.history_follow_tail is False
     assert app.state.unseen_output_count == 1
     assert prompt_app.layout.current_control is focused
@@ -641,14 +640,13 @@ async def test_ctrl_c_falls_back_when_system_clipboard_is_unavailable(
     assert app.state.mode == COMPOSER
 
 
-def test_composer_is_multiline_bounded_and_framed() -> None:
+def test_composer_is_multiline_bounded() -> None:
     app = AthenaApp(
         FakeRuntime(), Path("/tmp"), input=DummyInput(), output=DummyOutput()
     )
     prompt_app = app._build()
 
     assert app._composer.buffer.multiline() is True
-    assert isinstance(app._composer_pane, Frame)
     assert app._composer_height() == 1
     app._composer.text = "1\n2\n3\n4\n5\n6\n7"
     assert app._composer_height() == 6

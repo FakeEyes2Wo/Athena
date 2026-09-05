@@ -45,11 +45,17 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
-## TUI controller review
+## TUI module review
 
 `TuiController` remains the focused boundary that validates the runtime's two event shapes, forwards the single message command, and owns subscription cleanup. Its constructor already subscribed synchronously, so the private `_subscribe` helper and public `connect`/`run` coroutine layers were redundant; `run` had no callers and `connect` was exercised only by tests after construction. Remove all three methods and the test-only `events_seen` instance list. The controller now has only the three runtime attributes required for forwarding and cleanup, while production construction, event validation, manual-mode toggling, and close behavior are unchanged.
 
-Fresh baseline and post-change verification each passed the same 10 unit/integration tests in `test_controller.py` and `test_tui_protocol.py`; `python -m compileall -q src/athena_tui` and `git diff --check` also passed. Closing this source row advances reviewed coverage to 96/602. The remaining TUI files and whole-repository acceptance remain pending.
+Fresh baseline and post-change verification each passed the same 10 unit/integration tests in `test_controller.py` and `test_tui_protocol.py`; `python -m compileall -q src/athena_tui` and `git diff --check` also passed. This first slice advanced reviewed coverage to 96/602.
+
+The remaining six TUI files were then read completely and their production/test callers traced. Retain the package facade, module entry, argument/runtime composition, immutable state projection, pure renderer, and prompt-toolkit application as distinct cohesive roles; merging state or rendering into the already-large application would increase coupling. The entrypoint has one options namespace and every helper owns a tested boundary, so it remains unchanged.
+
+Within the application, localize the five history/pane controls that are retained by the prompt-toolkit layout rather than application logic, combine selection anchor/cursor into one tuple, and remove the constant exit-code attribute. `AthenaApp` construction falls from 17 instance attributes to 11. Delete the unused `plans` display-state copy and forwarding `control_status` property. Delete the test-only joined-history wrapper, and reduce `apply_event` from three parameters to two by removing its unread width. Runtime event order, selection, scrolling, clipboard fallback, dynamic panes, composer behavior, rendering, resume, and shutdown remain unchanged.
+
+Fresh full TUI verification passed 91 unit/integration tests, the module CLI help path, Python compilation, the code-style hard-rule gate, removed-symbol searches, and `git diff --check`. Closing the remaining six rows advances reviewed coverage to 118/602. Whole-repository acceptance remains pending.
 
 ## Root development-script review
 
@@ -716,13 +722,13 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/serving/predictions_api.py` | 39 | Reviewed; owns HTTP implementation and CLI; 22 tests pass |
 | `src/athena/utils/__init__.py` | 5 | Reviewed; delete one-function package shim; all consumers migrated |
 | `src/athena/utils/single_turn_chat.py` | 135 | Reviewed; merge into core/agent/chat.py; reduce sampling arguments to AgentConfig |
-| `src/athena_tui/__init__.py` | 8 | Pending |
-| `src/athena_tui/__main__.py` | 6 | Pending |
-| `src/athena_tui/app.py` | 668 | Pending |
+| `src/athena_tui/__init__.py` | 8 | Reviewed; retain minimal one-symbol package facade |
+| `src/athena_tui/__main__.py` | 6 | Reviewed; retain required `python -m` entry |
+| `src/athena_tui/app.py` | 668 | Reviewed; instance attributes 17 to 11, event reducer arguments 3 to 2, preserve prompt-toolkit behavior |
 | `src/athena_tui/controller.py` | 57 | Reviewed; remove three redundant subscription lifecycle methods and one test-only attribute; 10 tests pass before and after |
-| `src/athena_tui/entrypoint.py` | 62 | Pending |
-| `src/athena_tui/render.py` | 499 | Pending |
-| `src/athena_tui/state.py` | 166 | Pending |
+| `src/athena_tui/entrypoint.py` | 62 | Reviewed; retain tested argument, TTY, composition and resume boundaries |
+| `src/athena_tui/render.py` | 499 | Reviewed; retain pure renderer and delete test-only joined-history wrapper |
+| `src/athena_tui/state.py` | 166 | Reviewed; remove unread plans projection and forwarding status property |
 | `src/gui_gateway/__init__.py` | 1 | Pending |
 | `src/gui_gateway/__main__.py` | 149 | Pending |
 | `src/gui_gateway/handler.py` | 617 | Pending |

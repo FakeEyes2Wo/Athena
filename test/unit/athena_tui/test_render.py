@@ -7,9 +7,9 @@ from prompt_toolkit.utils import get_cwidth
 from athena_tui.render import (
     HELP_TEXT,
     composer_height,
+    join_lines,
     render_bottom_pane,
     render_header,
-    render_history,
     render_history_lines,
     render_status,
 )
@@ -54,7 +54,7 @@ def test_history_renders_user_runtime_tool_and_error_with_distinct_markers() -> 
         )
     )
 
-    output = plain(render_history(state, 50))
+    output = plain(join_lines(render_history_lines(state, 50)))
 
     assert "› try a forest" in output
     assert "◆ directing" in output
@@ -74,7 +74,7 @@ def test_history_roles_have_distinct_semantic_styles() -> None:
         )
     )
 
-    styles = {style for style, _text in render_history(state, 80)}
+    styles = {style for style, _text in join_lines(render_history_lines(state, 80))}
 
     assert "class:history.user" in styles
     assert "class:history.supervisor" in styles
@@ -91,7 +91,7 @@ def test_consecutive_text_from_the_same_source_suppresses_repeat_marker() -> Non
         )
     )
 
-    output = plain(render_history(state, 50))
+    output = plain(join_lines(render_history_lines(state, 50)))
 
     assert output.count("●") == 1
     assert "  second" in output
@@ -113,7 +113,7 @@ def test_dynamic_text_is_not_interpreted_as_style_markup() -> None:
         history=(HistoryEntry(kind="runtime", source="agent", text="[red]literal"),)
     )
 
-    output = render_history(state, 40)
+    output = join_lines(render_history_lines(state, 40))
 
     assert "[red]literal" in fragment_list_to_text(output)
 

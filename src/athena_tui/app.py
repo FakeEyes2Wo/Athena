@@ -138,7 +138,7 @@ class _HistoryControl(FormattedTextControl):
         return super().mouse_handler(mouse_event)
 
 
-def apply_event(state: TuiState, event: object, _width: int = 80) -> TuiState:
+def apply_event(state: TuiState, event: object) -> TuiState:
     """Apply one validated runtime event to immutable TUI state."""
     if isinstance(event, StateEvent):
         return apply_snapshot(state, event)
@@ -158,17 +158,10 @@ class AthenaApp:
         self._restore_history(runtime)
         self._app: Application | None = None
         self._composer: TextArea | None = None
-        self._composer_pane = None
-        self._confirmation_pane = None
-        self._overlay_pane = None
-        self._bottom = None
-        self._history_control = None
         self._history_scroll = 0
-        self._history_selection_anchor = None
-        self._history_selection_cursor = None
+        self._history_selection = None
         self._history_selection_lines = None
         self._confirm_action = ""
-        self._exit_code = 0
         self._input = input
         self._output = output
         self._controller = TuiController(runtime, emit=self._on_event)
@@ -206,7 +199,7 @@ class AthenaApp:
             if isinstance(event, OutputEvent) and not was_following
             else 0
         )
-        self.state = apply_event(self.state, event, width)
+        self.state = apply_event(self.state, event)
 
         if isinstance(event, OutputEvent) and not was_following:
             after = self._history_line_count(width)
@@ -312,7 +305,7 @@ class AthenaApp:
                 self._app.invalidate()
 
     async def _request_quit(self) -> None:
-        if self.state.control_status in {"STOPPED", "COMPLETED", "FAILED"}:
+        if self.state.status in {"STOPPED", "COMPLETED", "FAILED"}:
             if self._app is not None:
                 self._app.exit(result=0)
             return
@@ -426,21 +419,19 @@ class AthenaApp:
         start = max(0, end - height)
         self._history_selection_lines = tuple(lines[start:end])
         self.state = set_history_follow(self.state, False)
-        self._history_selection_anchor = point
-        self._history_selection_cursor = point
+        self._history_selection = (point, point)
         if self._app is not None:
             self._app.invalidate()
 
     def _extend_history_selection(self, point) -> None:
-        if self._history_selection_anchor is None:
+        if self._history_selection is None:
             return
-        self._history_selection_cursor = point
+        self._history_selection = (self._history_selection[0], point)
         if self._app is not None:
             self._app.invalidate()
 
     def _clear_history_selection(self, *, invalidate: bool = True) -> None:
-        self._history_selection_anchor = None
-        self._history_selection_cursor = None
+        self._history_selection = None
         self._history_selection_lines = None
         if invalidate and self._app is not None:
             self._app.invalidate()
@@ -457,12 +448,12 @@ class AthenaApp:
         return True
 
     def _selected_history_text(self) -> str:
-        anchor = self._history_selection_anchor
-        cursor = self._history_selection_cursor
+        selection = self._history_selection
         lines = self._history_selection_lines
-        if anchor is None or cursor is None or lines is None or anchor == cursor:
+        if selection is None or lines is None or selection[0] == selection[1]:
             return ""
 
+        anchor, cursor = selection
         first, last = sorted(((anchor.y, anchor.x), (cursor.y, cursor.x)))
         selected_lines: list[str] = []
         for row in range(first[0], min(last[0], len(lines) - 1) + 1):
@@ -483,11 +474,11 @@ class AthenaApp:
     def _apply_history_selection(
         self, line: StyleAndTextTuples, row: int
     ) -> StyleAndTextTuples:
-        anchor = self._history_selection_anchor
-        cursor = self._history_selection_cursor
-        if anchor is None or cursor is None or anchor == cursor:
+        selection = self._history_selection
+        if selection is None or selection[0] == selection[1]:
             return line
 
+        anchor, cursor = selection
         first, last = sorted(((anchor.y, anchor.x), (cursor.y, cursor.x)))
         if row < first[0] or row > last[0]:
             return line
@@ -528,13 +519,6 @@ class AthenaApp:
         if self._app is not None:
             self._app.invalidate()
 
-    def _bottom_container(self):
-        if self.state.mode == CONFIRMATION:
-            return self._confirmation_pane
-        if self.state.overlay:
-            return self._overlay_pane
-        return self._composer_pane
-
     def _build(self) -> Application:
         self._composer = TextArea(
             height=lambda: Dimension.exact(self._composer_height()),
@@ -555,38 +539,43 @@ class AthenaApp:
             height=1,
             dont_extend_height=True,
         )
-        self._history_control = _HistoryControl(self)
-        history = Window(self._history_control, wrap_lines=True)
-        self._composer_pane = Frame(
+        history = Window(_HistoryControl(self), wrap_lines=True)
+        composer_pane = Frame(
             self._composer,
             title=lambda: render_bottom_pane(self.state, self._render_width()),
             style="class:composer-frame.focused",
         )
-        self._confirmation_pane = Window(
+        confirmation_pane = Window(
             FormattedTextControl(
                 lambda: render_bottom_pane(self.state, self._render_width()),
                 focusable=True,
             )
         )
-        self._overlay_pane = Window(
+        overlay_pane = Window(
             FormattedTextControl(
                 lambda: render_bottom_pane(self.state, self._render_width()),
                 focusable=True,
             )
         )
-        self._bottom = DynamicContainer(self._bottom_container)
+
+        def _bottom_container():
+            if self.state.mode == CONFIRMATION:
+                return confirmation_pane
+            if self.state.overlay:
+                return overlay_pane
+            return composer_pane
+
+        bottom = DynamicContainer(_bottom_container)
         status = Window(
             FormattedTextControl(
                 lambda: render_status(self.state, self._render_width())
             ),
             height=1,
             dont_extend_height=True,
-            style=lambda: f"class:status.{self.state.control_status.lower()}",
+            style=lambda: f"class:status.{self.state.status.lower()}",
         )
         self._app = Application(
-            layout=Layout(
-                HSplit([header, history, self._bottom, status]), self._composer
-            ),
+            layout=Layout(HSplit([header, history, bottom, status]), self._composer),
             key_bindings=self._key_bindings(),
             full_screen=True,
             mouse_support=True,
@@ -662,7 +651,7 @@ class AthenaApp:
             await self._app.run_async()
         finally:
             await self._controller.aclose()
-        return self._exit_code
+        return 0
 
 
 __all__ = ["AthenaApp", "apply_event"]

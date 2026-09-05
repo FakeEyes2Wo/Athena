@@ -306,11 +306,6 @@ def render_history_lines(state: TuiState, width: int) -> tuple[StyleAndTextTuple
     return tuple(output)
 
 
-def render_history(state: TuiState, width: int) -> StyleAndTextTuples:
-    """Join visual history lines for a FormattedTextControl."""
-    return join_lines(render_history_lines(state, width))
-
-
 def render_header(state: TuiState, width: int) -> StyleAndTextTuples:
     """Render one prioritized product/project/phase/status row."""
     brand = ("class:header.brand", "Athena")

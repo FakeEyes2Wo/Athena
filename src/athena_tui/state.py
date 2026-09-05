@@ -44,7 +44,6 @@ class TuiState:
     mode: str = COMPOSER
     status: str = "RUNNING"
     phase: str = "PREPARE"
-    plans: tuple[dict[str, Any], ...] = ()
     search: dict[str, Any] | None = None
     sota: dict[str, Any] | None = None
     waiting: dict[str, Any] | None = None
@@ -58,11 +57,6 @@ class TuiState:
     overlay: str | None = None
     last_error: str | None = None
 
-    @property
-    def control_status(self) -> str:
-        """Compatibility name used by prompt-toolkit styling."""
-        return self.status
-
 
 def apply_snapshot(state: TuiState, event: StateEvent) -> TuiState:
     """Replace every runtime-owned field from one complete state event."""
@@ -70,7 +64,6 @@ def apply_snapshot(state: TuiState, event: StateEvent) -> TuiState:
         state,
         status=event.status,
         phase=event.phase,
-        plans=tuple(dict(plan) for plan in event.plans),
         search=dict(event.search),
         sota=None if event.sota is None else dict(event.sota),
         waiting=None if event.waiting is None else dict(event.waiting),
