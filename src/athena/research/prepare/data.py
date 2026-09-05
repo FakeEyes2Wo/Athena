@@ -75,16 +75,6 @@ class DataContract:
         return data_contract_block(self.contract_text())
 
 
-def _contract(runtime: Any, split_dir: Path) -> DataContract:
-    """Build the durable contract for an already materialized split."""
-    return DataContract(
-        train_csv=split_dir / "train.csv",
-        predict_features_csv=split_dir / "search_features.csv",
-        dataset_path=runtime.config.dataset_path,
-        group_column=runtime.config.group_column,
-    )
-
-
 async def prepare_platform_split(runtime: Any) -> DataContract | None:
     """Materialize a deterministic CSV split and persist its agent contract."""
     config = runtime.config
@@ -104,7 +94,12 @@ async def prepare_platform_split(runtime: Any) -> DataContract | None:
             group_column=config.group_column,
         ),
     )
-    contract = _contract(runtime, split_dir)
+    contract = DataContract(
+        train_csv=split_dir / "train.csv",
+        predict_features_csv=split_dir / "search_features.csv",
+        dataset_path=config.dataset_path,
+        group_column=config.group_column,
+    )
 
     # Persist before agents run because later SEARCH turns do not receive task text.
     runtime.state.data_contract = contract.contract_text()

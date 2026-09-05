@@ -23,14 +23,6 @@ from athena.research.supervisor.evaluator_plan import (
 
 
 @dataclass(frozen=True)
-class EvaluatorJob:
-    """Describe one evaluator workspace and supervisor plan."""
-
-    name: str
-    task: str
-
-
-@dataclass(frozen=True)
 class EvaluatorBundle:
     """Frozen evaluator references for SEARCH and FINAL."""
 
@@ -186,14 +178,15 @@ def final_evaluator_task(task: str, workspace: Path, data_rule: str) -> str:
 
 async def run_evaluator_agent(
     runtime: Any,
-    job: EvaluatorJob,
+    name: str,
+    task: str,
 ) -> str:
     """Bind one evaluator agent to one directory and freeze its output."""
     # The agent owns the role workspace, while ``evaluate/`` is the only
     # authoritative bundle root recorded in its descriptor.  Keeping these
     # distinct lets the prompt enforce an evaluate/ subdirectory without
     # accidentally creating evaluate/evaluate/.
-    agent_workspace = runtime.workspaces_root / job.name
+    agent_workspace = runtime.workspaces_root / name
     evaluator_dir = agent_workspace / "evaluate"
     evaluator_dir.mkdir(parents=True, exist_ok=True)
 
@@ -216,14 +209,14 @@ async def run_evaluator_agent(
         store=runtime.store,
         evaluator_dir=evaluator_dir,
         execution=runtime.execution,
-        task=job.task,
+        task=task,
         max_turns=MAX_PLAN_TURNS,
         publish=lambda kind, ref, data: runtime.events.project_agent_event(
-            job.name, kind, ref, data
+            name, kind, ref, data
         ),
         ask_user=getattr(runtime, "ask_user", None),
-        agent_id=job.name,
-        plan_id=job.name,
+        agent_id=name,
+        plan_id=name,
     )
 
 
@@ -244,10 +237,8 @@ async def _search_evaluator(runtime: Any, task: str) -> Any:
     # Freeze and checkpoint a new evaluator when no valid artifact remains.
     ref = await run_evaluator_agent(
         runtime,
-        EvaluatorJob(
-            name=EVALUATOR_PLAN_ID,
-            task=task,
-        ),
+        EVALUATOR_PLAN_ID,
+        task,
     )
     await runtime.supervisor.checkpoint_evaluator(ref)
     return ref
@@ -267,10 +258,8 @@ async def _final_evaluator(
     )
     ref = await run_evaluator_agent(
         runtime,
-        EvaluatorJob(
-            name=FINAL_EVALUATOR_PLAN_ID,
-            task=task,
-        ),
+        FINAL_EVALUATOR_PLAN_ID,
+        task,
     )
     return ref
 

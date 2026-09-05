@@ -21,9 +21,11 @@ from types import SimpleNamespace
 import pytest
 
 import athena.research.prepare.evaluator as evaluator_module
-from athena.research.prepare.evaluator import assert_evaluator_splits_are_disjoint
-from athena.research.prepare.evaluator import reusable_ref
 from athena.research.contracts import EvaluatorDescriptor
+from athena.research.prepare.evaluator import (
+    assert_evaluator_splits_are_disjoint,
+    reusable_ref,
+)
 
 
 async def _noop(*_args, **_kwargs) -> None:
@@ -149,10 +151,8 @@ async def test_each_evaluator_agent_is_bound_to_its_own_workspace(
     for directory in ("evaluator", "final_evaluator"):
         await evaluator_module.run_evaluator_agent(
             rt,
-            evaluator_module.EvaluatorJob(
-                name=directory,
-                task="build it",
-            ),
+            directory,
+            "build it",
         )
 
     assert bound == [
@@ -229,8 +229,8 @@ async def test_evaluator_prompts_match_the_data_source(
     checked: list[tuple[Path, Path]] = []
 
     # Capture agent prompts and the isolation check without running an LLM.
-    async def fake_evaluator(_runtime, job):
-        tasks.append(job.task)
+    async def fake_evaluator(_runtime, _name, task):
+        tasks.append(task)
         return f"ref-{len(tasks)}"
 
     def check_disjoint(search: Path, final: Path) -> None:
@@ -277,9 +277,9 @@ async def test_final_prompt_carries_the_frozen_search_metric(
     runtime = _runtime(tmp_path)
     tasks: list[str] = []
 
-    async def fake_evaluator(_runtime, job):
-        tasks.append(job.task)
-        if job.name == "evaluator":
+    async def fake_evaluator(_runtime, name, task):
+        tasks.append(task)
+        if name == "evaluator":
             evaluate = runtime.workspaces_root / "evaluator" / "evaluate"
             _frozen_evaluator(evaluate)
         else:

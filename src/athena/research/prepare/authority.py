@@ -63,7 +63,7 @@ class VerifiedBaselineBundle:
             verification = BaselineVerification.model_validate(
                 self.verification.model_dump(mode="python", warnings=False)
             )
-        except Exception as exc:  # noqa: BLE001 - external trust boundary
+        except Exception as exc:
             raise BaselineAuthorityError(
                 "verification must satisfy the baseline verification contract"
             ) from exc
@@ -159,13 +159,3 @@ class BaselineAuthorityStore(Protocol):
         expected_generation: int,
     ) -> SealedBaseline:
         """Atomically attach trusted PREPARE evidence and advance generation."""
-
-
-__all__ = [
-    "BaselineAuthorityConflict",
-    "BaselineAuthorityError",
-    "BaselineAuthorityStore",
-    "PrepareAttestation",
-    "SealedBaseline",
-    "VerifiedBaselineBundle",
-]

@@ -57,8 +57,7 @@ def normalize_public_https_repository_url(value: str) -> str:
         normalized_host = hostname.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise ValueError("repository hostname is not valid IDNA") from exc
-    if normalized_host.endswith("."):
-        normalized_host = normalized_host[:-1]
+    normalized_host = normalized_host.removesuffix(".")
     if "." not in normalized_host and ":" not in normalized_host:
         raise ValueError("repository hostname must be a public DNS name")
     if normalized_host == "localhost" or normalized_host.endswith(
@@ -130,6 +129,3 @@ def _is_public_repository_address(
         and not getattr(address, "is_site_local", False)
         and not getattr(routed, "is_site_local", False)
     )
-
-
-__all__ = ["normalize_public_https_repository_url"]

@@ -531,6 +531,12 @@ Read `output_freshness.py` and its complete direct test file, then traced both p
 
 Delete `restore_output_roots`: it had no production caller and existed only for one exclusive direct test. Fold its single-use version validator into the history-root constructor and remove the redundant implementation `__all__`; the active API now consists only of the error, archive operation, and freshness assertion. The module falls from 115 to 82 physical lines. The pre-change cross-consumer baseline passed 86 tests; the post-change selection passed 85 after removing only the deleted API's exclusive test. Ruff, Black, Python compilation, and `git diff --check` passed. Closing the source row advances reviewed coverage to 335/602. Whole-repository acceptance remains pending.
 
+## PREPARE composition and contract review
+
+Read the package marker, authority, data-contract, evaluator, orchestrator, and repository-URL files completely and traced their production/test consumers. Retain their distinct boundaries: controller-owned baseline authority, durable platform split prompts, isolated SEARCH/FINAL evaluator freezing, PREPARE stage ordering, and public-network URL normalization are different trust or lifecycle concerns. The package marker remains the minimal namespace boundary.
+
+Delete the internal two-field `EvaluatorJob` wrapper and pass its name/task directly to the evaluator runner, reducing three construction sites and one class without increasing the runner beyond three total inputs. Inline the single-use DataContract factory, remove redundant implementation `__all__` declarations, and express hostname suffix removal directly. These six files fall from 849 to 819 physical lines. The direct and cross-contract selection passed 302 tests; Ruff, Black, removed-symbol checks, and `git diff --check` passed. Closing six rows advances reviewed coverage to 341/602. The remaining baseline, baseline-research, EDA, and source-verification files stay Pending until their complete reviews finish. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1128,15 +1134,15 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/survey/tool.py` | 110 | Reviewed; merged into wiring.py and deleted |
 | `src/athena/research/literature/survey/wiring.py` | 344 | Reviewed; composition root now owns the single survey Agent tool |
 | `src/athena/research/output_freshness.py` | 115 | Reviewed; delete test-only restore API and fold single-use version validation |
-| `src/athena/research/prepare/__init__.py` | 1 | Pending |
-| `src/athena/research/prepare/authority.py` | 171 | Pending |
+| `src/athena/research/prepare/__init__.py` | 1 | Reviewed; retain minimal package marker |
+| `src/athena/research/prepare/authority.py` | 171 | Reviewed; retain controller trust contract and remove redundant export list |
 | `src/athena/research/prepare/baseline.py` | 629 | Pending |
 | `src/athena/research/prepare/baseline_research.py` | 883 | Pending |
-| `src/athena/research/prepare/data.py` | 118 | Pending |
+| `src/athena/research/prepare/data.py` | 118 | Reviewed; inline sole contract factory and retain durable split record |
 | `src/athena/research/prepare/eda.py` | 378 | Pending |
-| `src/athena/research/prepare/evaluator.py` | 363 | Pending |
-| `src/athena/research/prepare/orchestrator.py` | 61 | Pending |
-| `src/athena/research/prepare/repository_url.py` | 135 | Pending |
+| `src/athena/research/prepare/evaluator.py` | 363 | Reviewed; delete one-use job DTO and pass two required values directly |
+| `src/athena/research/prepare/orchestrator.py` | 61 | Reviewed; retain authoritative PREPARE phase order |
+| `src/athena/research/prepare/repository_url.py` | 135 | Reviewed; retain shared trust-boundary normalizer and remove redundant export list |
 | `src/athena/research/prepare/source_verification.py` | 613 | Pending |
 | `src/athena/research/report.py` | 397 | Pending |
 | `src/athena/research/runtime/__init__.py` | 5 | Pending |
