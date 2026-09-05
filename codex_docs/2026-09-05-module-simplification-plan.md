@@ -39,10 +39,17 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Drain in-flight turns after SEARCH errors and narrow internal completion records.
 - [x] Narrow the Supervisor public surface and remove unused Plan/ideation return values.
 - [x] Generalize the single task owner across recovery, PREPARE, SEARCH and VALIDATE; join phases during stop/validation handoff.
+- [x] Complete the Supervisor source/test review, consolidate authoritative fields, and close phase-command races.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+Supervisor full-file decision: retain the orchestration module as one phase owner; splitting its state machine would add cross-file lifecycle interfaces. The source and test were read end to end, all public methods/getters were traced, and DSH/autoresearch call sites were inspected. Concurrent VALIDATE commands coalesce to one worker call and one failure report. A SEARCH command outside SEARCH is rejected before mutation. Interactive validation errors now persist/report FAILED, and a SEARCH error during validation handoff propagates and prevents validation. `fail()` ignores repeated reports after the first canonical FAILED transition.
+
+Removed the duplicated evaluator constructor option and mutable field: the baseline experiment's durable `run_config_ref` is now the sole authority, including after reconstruction. This also deleted DSH's `baselineEvaluatorRef` helper. Grouped direction/tolerance/auto-validation, state/tree paths, and one-shot/persistent guidance into cohesive records; Supervisor instance fields fell from 18 immediately before this slice to 14. Removed six unreferenced callback type aliases and their barrel exports by inlining their signatures into `SupervisorWorkers`. The external constructor remains one options object and existing DSH worker composition is unchanged.
+
+The new focused boundary suite passed 54 tests; after all lifecycle and attribute changes the Supervisor file passed 47 tests. Final verification after the type-alias removal passed all five package builds and 537 tests across 53 files in 111.52 seconds with `--testTimeout=30000`; `git diff --check` passed. The timeout override accommodates slow real-Git tests on this host and is not evidence for the default timeout. Closing these two baseline ledger rows advances reviewed coverage to 93/602. DSH was inspected only at affected call sites and remains Pending.
 
 Phase-ownership follow-up: replaced `searchPromise`/`runSearch()` with one `phasePromise`/`runPhase(work)` slot shared by recovery, PREPARE, SEARCH, and VALIDATE. No additional Supervisor attribute was introduced. Startup checks the stopped flag before continuing to another phase. Interactive validation first drains SEARCH, then owns both the phase transition and validation work; automatic validation uses the same owned boundary. The private `stopDispatch()` is now shared by the two actual production consumers (stop and validation handoff), not reintroduced as a public/test-only API. `requestStop()` preserves already-produced COMPLETED or FAILED instead of overwriting terminal results with STOPPED.
 
@@ -90,7 +97,7 @@ Baseline Supervisor tests: 12 passed. After the change, Supervisor/recovery test
 
 Full TypeScript verification (`npm test -- --testTimeout=30000`): 504 passed across 53 files in 94.40 seconds. The 30-second per-test override accommodates this host's real Git operations; this is not evidence that the default timeout is reliable.
 
-Supervisor source and its test file have now been read end to end, but lifecycle caller tracing and concurrency verification remain incomplete: retain both ledger entries as Pending and coverage at 91/602. Recovery's placeholder callbacks are now removed; next review must examine wake/spawn/stop ownership. Whole-repository acceptance, main merge/push, and temporary task branch/worktree cleanup remain required and unfinished.
+This earlier checkpoint is superseded by the completed lifecycle/caller review above. Supervisor source/test are now Reviewed and current coverage is 93/602. Whole-repository acceptance, main merge/push, and temporary task branch/worktree cleanup remain required and unfinished.
 
 ## Serving findings
 
@@ -868,7 +875,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; pure two-argument reconciliation; resource checks owned by Supervisor; 27 focused tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; delete factories/forwarders; 19 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Reviewed; plain schema-derived state, single parse, explicit durable projection and atomic persistence |
-| `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Reviewed; one 14-field phase owner, durable evaluator authority, narrowed public surface, lifecycle/race regressions |
 | `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Reviewed; owns result construction and existing decision/scoring loop |
 | `athena_ts/packages/athena-research/src/validation.ts` | 54 | Reviewed; merged sole production use into supervisor/validation.ts and deleted |
 | `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; deleted after full caller tracing proved standalone root unused |
@@ -884,7 +891,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; 10 pure reconciliation cases; real missing-resource coverage moved to Supervisor tests |
 | `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, null fixture correction, policy/budget/dedup regressions; 19 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Reviewed; 22 persistence/validation/ownership/parse-count/projection cases |
-| `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Reviewed; 47 deterministic flow, recovery, wake, stop, failure and phase-concurrency cases |
 | `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Reviewed; fourteen metric/tolerance/feedback/decision/budget cases |
 | `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Reviewed; deleted helper/class tests, migrated coverage to real plan entrypoint |
 | `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Reviewed; deleted tests exclusive to removed Worker; replacement public-surface test tracked separately |

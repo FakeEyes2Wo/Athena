@@ -29,13 +29,6 @@ import { reconcilePlans } from "./recovery.js"
 import { Scheduler, countSearchAttempts } from "./scheduler.js"
 import { saveResearchState, researchStateToJSON, type ResearchState } from "./state.js"
 
-export type PlanTurn = (planId: string, state: PlanState) => Promise<PlanTurnResult>
-export type PlanAgentTurn = (planId: string, state: PlanState) => Promise<PlanDecision | null>
-export type IdeatorTurn = (count: number) => Promise<Hypothesis[]>
-export type PreparePhase = () => Promise<PrepareResult>
-export type ValidationPhase = (commit: string, metric: number) => Promise<ValidationResult>
-export type Publish = (kind: "output" | "state", data: Record<string, unknown>) => Promise<void>
-
 function compareMetric(
   candidate: number,
   reference: number,
@@ -73,12 +66,12 @@ interface CompletedTurn {
 }
 
 export interface SupervisorWorkers {
-  runPlanTurn: PlanTurn
-  runPlanAgentTurn: PlanAgentTurn
-  runIdeatorTurn: IdeatorTurn
-  runPreparePhase: PreparePhase
-  runValidationPhase: ValidationPhase
-  publish: Publish
+  runPlanTurn(planId: string, state: PlanState): Promise<PlanTurnResult>
+  runPlanAgentTurn(planId: string, state: PlanState): Promise<PlanDecision | null>
+  runIdeatorTurn(count: number): Promise<Hypothesis[]>
+  runPreparePhase(): Promise<PrepareResult>
+  runValidationPhase(commit: string, metric: number): Promise<ValidationResult>
+  publish(kind: "output" | "state", data: Record<string, unknown>): Promise<void>
 }
 
 export class FixedFlowSupervisor {
@@ -87,17 +80,16 @@ export class FixedFlowSupervisor {
   private store: ArtifactStore
   private git: GitWorkspace
   private scheduler: Scheduler
-  private frozenEvaluatorRef: ArtifactRef | null
-  private direction: "maximize" | "minimize"
-  private tolerance: number
+  private settings: {
+    direction: "maximize" | "minimize"
+    tolerance: number
+    autoValidate: boolean
+  }
   private workers: SupervisorWorkers
   private running = new Map<string, Promise<CompletedTurn | { planId: string; error: unknown }>>()
   private stopped = false
-  private statePath: string
-  private treePath: string
-  private autoValidate: boolean
-  private nextGuidance: string | null = null
-  private persistentGuidance: string[] = []
+  private paths: { state: string; tree: string }
+  private guidance: { next: string | null; persistent: string[] } = { next: null, persistent: [] }
   private nextHypothesisId: string | null = null
   private wakeSearch: (() => void) | null = null
   private phasePromise: Promise<void> | null = null
@@ -109,7 +101,6 @@ export class FixedFlowSupervisor {
     store: ArtifactStore
     git: GitWorkspace
     scheduler?: Scheduler | null
-    evaluatorRef?: ArtifactRef | null
     direction?: "maximize" | "minimize"
     tolerance?: number
     autoValidate?: boolean
@@ -120,13 +111,16 @@ export class FixedFlowSupervisor {
     this.store = opts.store
     this.git = opts.git
     this.scheduler = opts.scheduler ?? new Scheduler()
-    this.frozenEvaluatorRef = opts.evaluatorRef ?? null
-    this.direction = opts.direction ?? "maximize"
-    this.tolerance = opts.tolerance ?? 0.0
-    this.autoValidate = opts.autoValidate ?? false
+    this.settings = {
+      direction: opts.direction ?? "maximize",
+      tolerance: opts.tolerance ?? 0.0,
+      autoValidate: opts.autoValidate ?? false,
+    }
     this.workers = opts.workers
-    this.statePath = `${opts.projectRoot}/.athena/state.json`
-    this.treePath = `${opts.projectRoot}/.athena/research_tree.json`
+    this.paths = {
+      state: `${opts.projectRoot}/.athena/state.json`,
+      tree: `${opts.projectRoot}/.athena/research_tree.json`,
+    }
   }
 
   get runningPlanIds(): string[] {
@@ -134,7 +128,7 @@ export class FixedFlowSupervisor {
   }
 
   get evaluatorRef(): ArtifactRef | null {
-    return this.frozenEvaluatorRef
+    return this.tree.experiments("baseline")[0]?.plan.run_config_ref ?? null
   }
 
   /** 替换 worker 接线（例如 research_run 工具在拿到 DSH ``exec.agent`` 后注入）。 */
@@ -153,9 +147,9 @@ export class FixedFlowSupervisor {
   async recordGuidance(text: string, scope: "next" | "persistent"): Promise<{ text: string; scope: string }> {
     if (!text.trim()) throw new Error("guidance text must be nonblank")
     if (scope === "next") {
-      this.nextGuidance = text
+      this.guidance.next = text
     } else if (scope === "persistent") {
-      this.persistentGuidance.push(text)
+      this.guidance.persistent.push(text)
     } else {
       throw new Error(`unsupported guidance scope: ${scope}`)
     }
@@ -262,18 +256,23 @@ export class FixedFlowSupervisor {
 
   /** 交互路径的阶段决策：切 SEARCH 重启调度循环，切 VALIDATE 直接跑完。 */
   async setPhaseDecision(decision: "SEARCH" | "VALIDATE"): Promise<{ decision: string }> {
+    if (this.state.phase !== "SEARCH") {
+      throw new Error(`cannot ${decision} from phase ${this.state.phase}; run SEARCH first`)
+    }
     if (decision === "VALIDATE") {
       if (this.tree.bestExperimentId() === null) {
         throw new Error("VALIDATE requires a trusted SOTA baseline from completed PREPARE")
       }
-      if (this.state.phase !== "SEARCH") {
-        throw new Error(`cannot VALIDATE from phase ${this.state.phase}; run SEARCH first`)
+      try {
+        await this.stopDispatch()
+        await this.runPhase(async () => {
+          await this.transitionPhase("VALIDATE")
+          await this.runValidation()
+        })
+      } catch (error) {
+        await this.fail(error)
+        throw error
       }
-      await this.stopDispatch()
-      await this.runPhase(async () => {
-        await this.transitionPhase("VALIDATE")
-        await this.runValidation()
-      })
     } else {
       await this.transitionPhase("SEARCH")
       this.spawnSearch()
@@ -282,7 +281,7 @@ export class FixedFlowSupervisor {
   }
 
   private saveState(): void {
-    saveResearchState(this.statePath, this.state)
+    saveResearchState(this.paths.state, this.state)
   }
 
   private async publishState(): Promise<void> {
@@ -309,6 +308,7 @@ export class FixedFlowSupervisor {
   }
 
   private async fail(error: unknown): Promise<void> {
+    if (this.state.status === "FAILED") return
     this.stopped = true
     this.state.status = "FAILED"
     this.saveState()
@@ -326,7 +326,7 @@ export class FixedFlowSupervisor {
     if (this.state.phase === "SEARCH") {
       await this.runPhase(() => this.runSearchLoop())
       if (this.stopped) return
-      if (this.autoValidate && this.tree.bestExperimentId() !== null) {
+      if (this.settings.autoValidate && this.tree.bestExperimentId() !== null) {
         await this.runPhase(async () => {
           await this.transitionPhase("VALIDATE")
           await this.runValidation()
@@ -386,9 +386,8 @@ export class FixedFlowSupervisor {
         })
       )
       this.tree.setSota(experimentId)
-      this.tree.save(this.treePath)
+      this.tree.save(this.paths.tree)
     }
-    this.frozenEvaluatorRef = result.evaluator_ref
     await this.workers.publish("output", {
       source: "supervisor",
       channel: "text",
@@ -670,17 +669,14 @@ export class FixedFlowSupervisor {
         }
       }
     }
-    this.tree.save(this.treePath)
+    this.tree.save(this.paths.tree)
     delete this.state.plans[planId]
     this.saveState()
   }
 
   private async startPlan(hypothesisId: string): Promise<void> {
-    if (this.frozenEvaluatorRef === null) {
-      const baselines = this.tree.experiments("baseline")
-      if (baselines.length === 0) throw new Error("SEARCH Plan requires a frozen evaluator")
-      this.frozenEvaluatorRef = baselines[0]!.plan.run_config_ref
-    }
+    const evaluatorRef = this.evaluatorRef
+    if (evaluatorRef === null) throw new Error("SEARCH Plan requires a frozen evaluator")
     if (hypothesisId in this.state.plans) {
       if (this.tree.experimentForHypothesis(hypothesisId) === null) {
         throw new Error(
@@ -702,10 +698,10 @@ export class FixedFlowSupervisor {
     const reference = this.tree.getExperiment(referenceId)
     if (reference.eval === null) throw new Error("reference experiment requires a trusted metric")
     const referenceHypothesis = this.tree.getHypothesis(reference.hypothesis_id)
-    const guidance = [...this.persistentGuidance]
-    if (this.nextGuidance !== null) {
-      guidance.push(this.nextGuidance)
-      this.nextGuidance = null
+    const guidance = [...this.guidance.persistent]
+    if (this.guidance.next !== null) {
+      guidance.push(this.guidance.next)
+      this.guidance.next = null
     }
     const treeRef = await this.store.putText(JSON.stringify(this.tree.toDict()))
     const planInput = PlanInputSchema.parse({
@@ -713,9 +709,9 @@ export class FixedFlowSupervisor {
       reference_experiment_id: referenceId,
       reference_metric: reference.eval.primary,
       reference_priority: referenceHypothesis.priority,
-      direction: this.direction,
-      tolerance: this.tolerance,
-      evaluator_ref: this.frozenEvaluatorRef,
+      direction: this.settings.direction,
+      tolerance: this.settings.tolerance,
+      evaluator_ref: evaluatorRef,
       tree_ref: treeRef,
       human_context: guidance.join("\n"),
     })
@@ -739,7 +735,7 @@ export class FixedFlowSupervisor {
       })
     )
     this.tree.transitionExperiment(experimentId, "RUNNING")
-    this.tree.save(this.treePath)
+    this.tree.save(this.paths.tree)
     this.state.plans[hypothesisId] = PlanStateSchema.parse({
       kind: "SEARCH",
       context_ref: contextRef,
@@ -774,7 +770,7 @@ export class FixedFlowSupervisor {
       priority: this.scheduler.policy.seed(parentHypothesis),
     })
     const hypothesisId = this.tree.addHypothesis(hypothesis)
-    this.tree.save(this.treePath)
+    this.tree.save(this.paths.tree)
     await this.publishState()
     return { hypothesis_id: hypothesisId }
   }
@@ -792,7 +788,7 @@ export class FixedFlowSupervisor {
       })
       this.tree.addHypothesis(hypothesis)
     }
-    this.tree.save(this.treePath)
+    this.tree.save(this.paths.tree)
     await this.publishState()
     return hypotheses.length > 0
   }
@@ -830,7 +826,11 @@ export class FixedFlowSupervisor {
   }
 
   async requestStop(): Promise<string> {
-    await this.stopDispatch()
+    try {
+      await this.stopDispatch()
+    } catch (error) {
+      await this.fail(error)
+    }
     if (this.state.status !== "COMPLETED" && this.state.status !== "FAILED") this.state.status = "STOPPED"
     await this.persistState()
     return this.state.status
@@ -839,8 +839,11 @@ export class FixedFlowSupervisor {
   private async stopDispatch(): Promise<void> {
     this.stopped = true
     this.wake()
-    await Promise.allSettled([this.phasePromise, ...this.running.values()])
-    this.running.clear()
+    try {
+      await this.phasePromise
+    } finally {
+      this.running.clear()
+    }
   }
 
   async readState(): Promise<Record<string, unknown>> {

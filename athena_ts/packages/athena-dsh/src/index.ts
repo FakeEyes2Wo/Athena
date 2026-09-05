@@ -16,7 +16,6 @@ import {
   LocalArtifactStore,
   LocalGitWorkspace,
   ResearchTree,
-  type ArtifactRef,
   type Hypothesis,
 } from "@athena/core"
 import {
@@ -307,7 +306,6 @@ export function researchPlugin(config: AthenaResearchConfig = {}) {
       store,
       git,
       scheduler,
-      evaluatorRef: baselineEvaluatorRef(tree),
       direction,
       tolerance,
       autoValidate: config.autoValidate ?? false,
@@ -354,11 +352,6 @@ export function researchPlugin(config: AthenaResearchConfig = {}) {
       }
     }
   }
-}
-
-function baselineEvaluatorRef(tree: ResearchTree): ArtifactRef | null {
-  const baselines = tree.experiments("baseline")
-  return baselines.length > 0 ? baselines[0]!.plan.run_config_ref : null
 }
 
 /** DSH 模型可见的研究域工具集：只读快照 + 核心 Supervisor 动作 + 流程启动。 */

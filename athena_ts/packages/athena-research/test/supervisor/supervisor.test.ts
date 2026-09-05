@@ -142,7 +142,6 @@ describe("FixedFlowSupervisor", () => {
       tree,
       store,
       git: fakeGit(join(dir, "worktrees")),
-      evaluatorRef: REF,
       workers,
     })
 
@@ -193,7 +192,6 @@ function coreSupervisor(
     tree,
     store,
     git: fakeGit(join(dir, "worktrees")),
-    evaluatorRef: REF,
     workers,
     autoValidate: opts.autoValidate ?? false,
   })
@@ -205,6 +203,114 @@ function runSearch(supervisor: FixedFlowSupervisor): Promise<void> {
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it("persists and reports an interactive validation failure", async () => {
+    const dir = tmpDir()
+    const publish = vi.fn(async (_kind: string, _data: Record<string, unknown>) => {})
+    const { supervisor } = coreSupervisor(dir, { workers: {
+      publish,
+      runValidationPhase: async () => { throw new Error("validation failed") },
+    } })
+
+    await expect(supervisor.setPhaseDecision("VALIDATE")).rejects.toThrow("validation failed")
+
+    expect(supervisor.state.status).toBe("FAILED")
+    expect(loadResearchState(join(dir, ".athena", "state.json")).status).toBe("FAILED")
+    expect(publish).toHaveBeenCalledWith("output", {
+      source: "supervisor", channel: "error", text: "research failed: validation failed",
+    })
+    expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({ status: "FAILED" }))
+  })
+
+  it("rejects SEARCH while validation is active without changing its phase", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { supervisor } = coreSupervisor(tmpDir(), { workers: {
+      runValidationPhase: async () => {
+        await gate
+        return ValidationResultSchema.parse({
+          result_id: "validation", status: "COMPLETED", test_score: 0.8, final_test_score: 0.8,
+        })
+      },
+    } })
+    const validation = supervisor.setPhaseDecision("VALIDATE")
+    try {
+      await vi.waitFor(() => expect(supervisor.state.phase).toBe("VALIDATE"))
+      await expect(supervisor.setPhaseDecision("SEARCH")).rejects.toThrow("cannot SEARCH from phase VALIDATE")
+      expect(supervisor.state.phase).toBe("VALIDATE")
+      release()
+      await validation
+      expect(supervisor.state.status).toBe("COMPLETED")
+    } finally {
+      release()
+      await validation
+      await supervisor.requestStop()
+    }
+  })
+
+  it.each([false, true])("coalesces concurrent validation commands (failure=%s)", async (failure) => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const publish = vi.fn(async (_kind: string, _data: Record<string, unknown>) => {})
+    const runValidationPhase = vi.fn(async () => {
+      await gate
+      if (failure) throw new Error("validation failed")
+      return ValidationResultSchema.parse({
+        result_id: "validation", status: "COMPLETED", test_score: 0.8, final_test_score: 0.8,
+      })
+    })
+    const { supervisor } = coreSupervisor(tmpDir(), { workers: { publish, runValidationPhase } })
+    const first = supervisor.setPhaseDecision("VALIDATE")
+    const second = supervisor.setPhaseDecision("VALIDATE")
+    try {
+      await vi.waitFor(() => expect(runValidationPhase).toHaveBeenCalledTimes(1))
+      release()
+      if (failure) {
+        await expect(Promise.all([first, second])).rejects.toThrow("validation failed")
+        expect(publish.mock.calls.filter(([kind]) => kind === "output")).toHaveLength(1)
+        expect(supervisor.state.status).toBe("FAILED")
+      } else {
+        await expect(Promise.all([first, second])).resolves.toEqual([
+          { decision: "VALIDATE" }, { decision: "VALIDATE" },
+        ])
+        expect(supervisor.state.status).toBe("COMPLETED")
+      }
+    } finally {
+      release()
+      await Promise.allSettled([first, second])
+      await supervisor.requestStop()
+    }
+  })
+
+  it("does not validate after SEARCH fails during the phase handoff", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const runPlanTurn = vi.fn(async () => { await gate; throw new Error("search failed") })
+    const runValidationPhase = vi.fn(async () => ValidationResultSchema.parse({
+      result_id: "validation", status: "COMPLETED", test_score: 0.8, final_test_score: 0.8,
+    }))
+    const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: {
+      runPlanTurn, runValidationPhase,
+      runPlanAgentTurn: async () => PlanDecisionSchema.parse({ decision: "submit", reason: "done" }),
+    } })
+    tree.addHypothesis(HypothesisSchema.parse({
+      statement: "idea", intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
+    }))
+    const search = supervisor.start()
+    try {
+      await vi.waitFor(() => expect(runPlanTurn).toHaveBeenCalledTimes(1))
+      const validation = supervisor.setPhaseDecision("VALIDATE")
+      release()
+      await search
+      await expect(validation).rejects.toThrow("search failed")
+      expect(runValidationPhase).not.toHaveBeenCalled()
+      expect(supervisor.state.status).toBe("FAILED")
+    } finally {
+      release()
+      await search
+      await supervisor.requestStop()
+    }
+  })
+
   it("joins SEARCH before starting interactive validation", async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -612,6 +718,7 @@ describe("FixedFlowSupervisor core actions", () => {
     await restored["startPlan"](id)
     expect(restored.workspace(id)).toEqual(expected)
     expect(restored.workspace(id)).toBe(restored.tree.getExperiment(`exp_${id}`).gitwork)
+    expect(restored.evaluatorRef).toBe(REF)
   })
 
   it.each([
