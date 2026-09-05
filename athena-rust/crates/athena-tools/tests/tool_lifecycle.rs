@@ -70,7 +70,6 @@ impl EventSink for MockEventSink {
 
 fn make_context(call_id: &str, cancel: watch::Receiver<bool>) -> ToolContext {
     ToolContext {
-        tool_name: "mock".into(),
         call_id: call_id.into(),
         cancel,
     }

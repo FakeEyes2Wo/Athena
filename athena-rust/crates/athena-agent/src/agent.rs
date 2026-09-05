@@ -317,7 +317,6 @@ impl Agent {
         ctx: &AgentContext,
     ) -> Result<String, AgentError> {
         let tool_ctx = ToolContext {
-            tool_name: tc.name.clone(),
             call_id: format!("{}:{}", ctx.turn.turn_id.as_str(), tc.name),
             cancel: ctx.cancel.clone(),
         };

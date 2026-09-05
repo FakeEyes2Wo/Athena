@@ -11,7 +11,7 @@ use athena_agent::{
 };
 use athena_memory::ContextManager;
 use athena_runtime::{EmitError, EventDraft, EventSink};
-use athena_tools::{Tool, ToolContext, ToolError, ToolRegistryBuilder, ToolSpec};
+use athena_tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolSpec};
 use athena_types::{
     ArtifactRef, AthenaThread, AthenaTurn, SessionId, ThreadId, ThreadStatus, TurnId, TurnStatus,
 };
@@ -167,14 +167,14 @@ impl Tool for SleeperTool {
 
 /// Build an `Agent` from a provider and a set of tools.
 pub fn make_agent(provider: Arc<dyn LlmProvider>, tools: Vec<Arc<dyn Tool>>) -> Arc<Agent> {
-    let mut builder = ToolRegistryBuilder::new();
+    let mut registry = ToolRegistry::new();
     for tool in tools {
-        builder = builder.register(tool).expect("unique tool");
+        registry = registry.register(tool).expect("unique tool");
     }
     Arc::new(Agent::new(
         AgentConfig::new("test-model", "You are a test agent."),
         provider,
-        Arc::new(builder.build()),
+        Arc::new(registry),
         Arc::new(PlainInputResolver),
     ))
 }

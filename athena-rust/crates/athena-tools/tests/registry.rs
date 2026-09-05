@@ -39,11 +39,11 @@ fn make_tool(name: &str, description: &str) -> Arc<dyn Tool> {
 
 #[test]
 fn test_duplicate_registration_errors() {
-    let builder = ToolRegistryBuilder::new()
+    let registry = ToolRegistry::new()
         .register(make_tool("alpha", "first tool"))
         .unwrap();
 
-    let err = match builder.register(make_tool("alpha", "duplicate")) {
+    let err = match registry.register(make_tool("alpha", "duplicate")) {
         Ok(_) => panic!("duplicate registration should fail"),
         Err(err) => err,
     };
@@ -55,15 +55,12 @@ fn test_duplicate_registration_errors() {
 }
 
 #[test]
-fn test_builder_consumes_and_registry_is_read_only() {
-    let builder = ToolRegistryBuilder::new()
+fn test_registration_consumes_and_registry_is_read_only() {
+    let registry = ToolRegistry::new()
         .register(make_tool("a", "tool a"))
         .unwrap()
         .register(make_tool("b", "tool b"))
         .unwrap();
-
-    // build() consumes the builder — it can't be used afterwards
-    let registry = builder.build();
 
     // Registry only exposes &self methods — no way to modify it
     assert_eq!(registry.len(), 2);
@@ -74,14 +71,13 @@ fn test_builder_consumes_and_registry_is_read_only() {
 
 #[test]
 fn test_specs_sorted_order() {
-    let registry = ToolRegistryBuilder::new()
+    let registry = ToolRegistry::new()
         .register(make_tool("zebra", "striped animal"))
         .unwrap()
         .register(make_tool("alpha", "first letter"))
         .unwrap()
         .register(make_tool("beta", "second letter"))
-        .unwrap()
-        .build();
+        .unwrap();
 
     let specs: Vec<&str> = registry.specs().iter().map(|s| s.name.as_str()).collect();
     assert_eq!(specs, vec!["alpha", "beta", "zebra"]);
@@ -89,14 +85,13 @@ fn test_specs_sorted_order() {
 
 #[test]
 fn test_search_by_name() {
-    let registry = ToolRegistryBuilder::new()
+    let registry = ToolRegistry::new()
         .register(make_tool("web_search", "Search the web"))
         .unwrap()
         .register(make_tool("file_read", "Read a file from disk"))
         .unwrap()
         .register(make_tool("bash_run", "Execute a bash command"))
-        .unwrap()
-        .build();
+        .unwrap();
 
     // Search by exact name
     let results = registry.search("web_search");
@@ -111,14 +106,13 @@ fn test_search_by_name() {
 
 #[test]
 fn test_search_by_description() {
-    let registry = ToolRegistryBuilder::new()
+    let registry = ToolRegistry::new()
         .register(make_tool("web", "Search the web for information"))
         .unwrap()
         .register(make_tool("file", "Read and write files on disk"))
         .unwrap()
         .register(make_tool("bash", "Execute shell commands"))
-        .unwrap()
-        .build();
+        .unwrap();
 
     // Search by description substring
     let results = registry.search("disk");
@@ -133,12 +127,11 @@ fn test_search_by_description() {
 
 #[test]
 fn test_search_empty_query() {
-    let registry = ToolRegistryBuilder::new()
+    let registry = ToolRegistry::new()
         .register(make_tool("a", "alpha tool"))
         .unwrap()
         .register(make_tool("b", "beta tool"))
-        .unwrap()
-        .build();
+        .unwrap();
 
     // Empty string matches everything (via substring check)
     let results = registry.search("");
@@ -147,10 +140,9 @@ fn test_search_empty_query() {
 
 #[test]
 fn test_search_no_match() {
-    let registry = ToolRegistryBuilder::new()
+    let registry = ToolRegistry::new()
         .register(make_tool("present", "this tool exists"))
-        .unwrap()
-        .build();
+        .unwrap();
 
     let results = registry.search("nonexistent");
     assert!(results.is_empty());
@@ -158,7 +150,7 @@ fn test_search_no_match() {
 
 #[test]
 fn test_empty_registry() {
-    let registry = ToolRegistryBuilder::new().build();
+    let registry = ToolRegistry::new();
     assert_eq!(registry.len(), 0);
     assert!(registry.is_empty());
     assert!(registry.specs().is_empty());

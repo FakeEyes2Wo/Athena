@@ -48,38 +48,4 @@ pub struct ToolResult {
     pub error: Option<String>,
     #[serde(default)]
     pub truncated: bool,
-    #[serde(default)]
-    pub artifacts: Vec<String>,
-}
-
-impl ToolResult {
-    pub fn ok(data: Value) -> Self {
-        Self {
-            data: Some(data),
-            success: true,
-            error: None,
-            truncated: false,
-            artifacts: vec![],
-        }
-    }
-
-    pub fn empty_ok() -> Self {
-        Self {
-            data: None,
-            success: true,
-            error: None,
-            truncated: false,
-            artifacts: vec![],
-        }
-    }
-
-    pub fn err(error: impl Into<String>) -> Self {
-        Self {
-            data: None,
-            success: false,
-            error: Some(error.into()),
-            truncated: false,
-            artifacts: vec![],
-        }
-    }
 }

@@ -1,24 +1,18 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::spec::ToolSpec;
 use crate::tool::Tool;
 
-// ── ToolRegistryBuilder ──
-
-/// Builder for a read-only [`ToolRegistry`].
-///
-/// Once `build()` is called the builder is consumed and the registry is
-/// immutable — no interior mutability, no `RwLock`, zero-cost reads.
-pub struct ToolRegistryBuilder {
-    tools: HashMap<String, Arc<dyn Tool>>,
+/// Immutable registry assembled through consuming registrations.
+#[derive(Default)]
+pub struct ToolRegistry {
+    tools: BTreeMap<String, Arc<dyn Tool>>,
 }
 
-impl ToolRegistryBuilder {
+impl ToolRegistry {
     pub fn new() -> Self {
-        Self {
-            tools: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a tool.
@@ -32,37 +26,6 @@ impl ToolRegistryBuilder {
         self.tools.insert(name, tool);
         Ok(self)
     }
-
-    /// Consume the builder and produce an immutable [`ToolRegistry`].
-    pub fn build(self) -> ToolRegistry {
-        let mut sorted_names: Vec<String> = self.tools.keys().cloned().collect();
-        sorted_names.sort();
-
-        ToolRegistry {
-            tools: self.tools,
-            sorted_names,
-        }
-    }
-}
-
-impl Default for ToolRegistryBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ── ToolRegistry ──
-
-/// A read-only registry of tools, built via [`ToolRegistryBuilder`].
-///
-/// After construction the registry is immutable.  All query methods take
-/// `&self` — no async, no locks.
-pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
-    sorted_names: Vec<String>,
-}
-
-impl ToolRegistry {
     /// Look up a tool by name.
     pub fn resolve(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.get(name)
@@ -71,20 +34,15 @@ impl ToolRegistry {
     /// Return the specs of all registered tools, sorted alphabetically by
     /// name for stable prompt-cache ordering.
     pub fn specs(&self) -> Vec<&ToolSpec> {
-        self.sorted_names
-            .iter()
-            .filter_map(|name| self.tools.get(name))
-            .map(|tool| tool.spec())
-            .collect()
+        self.tools.values().map(|tool| tool.spec()).collect()
     }
 
     /// Search tools by name or description (case-insensitive substring match).
     pub fn search(&self, query: &str) -> Vec<&ToolSpec> {
         let query_lower = query.to_lowercase();
 
-        self.sorted_names
-            .iter()
-            .filter_map(|name| self.tools.get(name))
+        self.tools
+            .values()
             .filter(|tool| {
                 let spec = tool.spec();
                 spec.name.to_lowercase().contains(&query_lower)

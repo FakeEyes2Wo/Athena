@@ -59,6 +59,14 @@ The Rust fixture exporter no longer accepts four unused path parameters, scans `
 
 Fresh verification passed Node syntax checking, both build/package invalid-backend gates (including npm overrides), Python compilation of all scripts, all three offline CLI help paths, the code-style hard-rule gate, a complete four-file fixture export, and an offline manifest update/round trip. `git diff --check` passed. Positive PyInstaller/Tauri packaging is not run in this source review because this environment lacks PyInstaller; the package command reaches the same preserved command composition. Closing eight ledger rows advances reviewed coverage to 104/602. Whole-repository acceptance remains pending.
 
+## Rust tool-system review
+
+All six `athena-tools` source files and both integration test files were read completely, with construction and execution call sites traced into `athena-agent`. Replace the builder-plus-registry pair with one consuming `ToolRegistry` backed by `BTreeMap`: this deletes the public `ToolRegistryBuilder`, removes its `build()` phase, removes the cached sorted-name field, and preserves deterministic prompt ordering intrinsically. Registration still rejects duplicate names and the finished value remains immutable to callers.
+
+Merge the eight-line `context.rs` data holder into the cohesive tool contract module and delete the file. Remove the unread `tool_name` field from `ToolContext`, the never-populated `artifacts` field from `ToolResult`, and three unused result constructors. Agent and test construction now use the single registry directly; no compatibility facade or replacement state was added. Tool execution, cancellation, lifecycle events, result truncation, error sanitization, lookup, sorting, and search behavior are unchanged.
+
+Fresh verification passed 22 tests across `athena-tools` and `athena-agent`, plus Clippy with `-D warnings`, Rust formatting, caller searches for every removed symbol, and `git diff --check`. Closing eight ledger rows advances reviewed coverage to 112/602. The touched `athena-agent` call sites remain Pending for their own full-file reviews, and whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -767,14 +775,14 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-server/src/subscription.rs` | 83 | Pending |
 | `athena-rust/crates/athena-server/src/transport.rs` | 307 | Pending |
 | `athena-rust/crates/athena-server/tests/app_server_e2e.rs` | 131 | Pending |
-| `athena-rust/crates/athena-tools/src/context.rs` | 8 | Pending |
-| `athena-rust/crates/athena-tools/src/executor.rs` | 111 | Pending |
-| `athena-rust/crates/athena-tools/src/lib.rs` | 19 | Pending |
-| `athena-rust/crates/athena-tools/src/registry.rs` | 105 | Pending |
-| `athena-rust/crates/athena-tools/src/spec.rs` | 85 | Pending |
-| `athena-rust/crates/athena-tools/src/tool.rs` | 44 | Pending |
-| `athena-rust/crates/athena-tools/tests/registry.rs` | 166 | Pending |
-| `athena-rust/crates/athena-tools/tests/tool_lifecycle.rs` | 279 | Pending |
+| `athena-rust/crates/athena-tools/src/context.rs` | 8 | Reviewed; merge two-field invocation context into tool.rs and delete file |
+| `athena-rust/crates/athena-tools/src/executor.rs` | 111 | Reviewed; retain lifecycle boundary; construct its sole failure result directly |
+| `athena-rust/crates/athena-tools/src/lib.rs` | 19 | Reviewed; remove context module and builder export; retain canonical facade |
+| `athena-rust/crates/athena-tools/src/registry.rs` | 105 | Reviewed; two types/two fields to one type/one BTreeMap; delete build phase; stable order preserved |
+| `athena-rust/crates/athena-tools/src/spec.rs` | 85 | Reviewed; remove unread artifacts field and three unused constructors |
+| `athena-rust/crates/athena-tools/src/tool.rs` | 44 | Reviewed; absorb ToolContext and remove its unread tool-name field |
+| `athena-rust/crates/athena-tools/tests/registry.rs` | 166 | Reviewed; eight duplicate/order/search/empty cases migrated to direct registry construction |
+| `athena-rust/crates/athena-tools/tests/tool_lifecycle.rs` | 279 | Reviewed; six success/error/cancellation/truncation cases retained |
 | `athena-rust/crates/athena-types/src/domain.rs` | 237 | Pending |
 | `athena-rust/crates/athena-types/src/ids.rs` | 119 | Pending |
 | `athena-rust/crates/athena-types/src/lib.rs` | 122 | Pending |

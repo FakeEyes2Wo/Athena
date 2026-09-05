@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::context::ToolContext;
 use crate::spec::ToolResult;
-use crate::tool::{EventSink, TOOL_BEGIN, TOOL_END, TOOL_ERROR, Tool, ToolError};
+use crate::tool::{EventSink, TOOL_BEGIN, TOOL_END, TOOL_ERROR, Tool, ToolContext, ToolError};
 
 /// Decorates a [`Tool`] with lifecycle events (begin/end/error) emitted to a
 /// [`EventSink`], result truncation, and error sanitisation.
@@ -48,7 +47,6 @@ impl ToolExecutor {
                     success: true,
                     error: None,
                     truncated,
-                    artifacts: vec![],
                 };
 
                 self.sink.emit(TOOL_END, &ctx.call_id, Some(data));
@@ -67,7 +65,12 @@ impl ToolExecutor {
                     &ctx.call_id,
                     Some(serde_json::json!({"error": msg})),
                 );
-                Ok(ToolResult::err(msg))
+                Ok(ToolResult {
+                    data: None,
+                    success: false,
+                    error: Some(msg),
+                    truncated: false,
+                })
             }
         }
     }

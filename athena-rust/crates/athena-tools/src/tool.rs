@@ -1,8 +1,14 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::sync::watch;
 
-use crate::context::ToolContext;
 use crate::spec::ToolSpec;
+
+/// Per-invocation state required by tool execution.
+pub struct ToolContext {
+    pub call_id: String,
+    pub cancel: watch::Receiver<bool>,
+}
 
 // ── Event constants ──
 
