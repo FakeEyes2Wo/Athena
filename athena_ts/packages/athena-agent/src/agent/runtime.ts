@@ -363,29 +363,12 @@ export function createAgent(
   systemPrompt: string,
   opts: {
     client?: ChatClient | null
-    maxTurns?: number
-    maxTokens?: number
-    temperature?: number
-    name?: string
+    config?: AgentConfig
   } = {}
 ): Agent {
   const provider = createProvider(model, { client: opts.client ?? null })
-  const config = new AgentConfig(
-    opts.maxTurns ?? 200,
-    opts.maxTokens ?? 4096,
-    opts.temperature ?? 0.1,
-    opts.name ?? "agent"
-  )
-  return createCodeAgent(provider, tools, systemPrompt, config)
-}
-
-export function createCodeAgent(
-  model: BaseProvider,
-  tools: ToolRegistry,
-  systemPrompt: string,
-  config: AgentConfig | null = null
-): Agent {
-  return new Agent(model, tools, systemPrompt, config)
+  const config = opts.config ?? new AgentConfig(200, 4096, 0.1, "agent")
+  return new Agent(provider, tools, systemPrompt, config)
 }
 
 function toStr(r: unknown): string {

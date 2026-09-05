@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto"
 import { AthenaThreadSchema, AthenaTurnSchema } from "@athena/core"
 
 import { CancelledError } from "./agent/types.js"
-import { AgentContext } from "./agent/models.js"
+import { AgentConfig, AgentContext } from "./agent/models.js"
 import { createAgent } from "./agent/runtime.js"
 import type { ChatClient } from "./agent/provider.js"
 import { ToolRegistry } from "./tool.js"
@@ -15,21 +15,12 @@ import type { EmitEvent } from "./tool-types.js"
 import { ContextManager } from "./memory/context-manager.js"
 import type { ModelMessage } from "./messages.js"
 
-async function noopEmit(
-  _kind: string,
-  _ref: string,
-  _data?: Record<string, unknown> | null
-): Promise<void> {
-  void 0
-}
-
 function validate(
   prompt: string,
   model: string,
-  maxTurns: number,
-  maxTokens: number,
-  temperature: number
+  config: AgentConfig
 ): void {
+  const { maxTurns, maxTokens, temperature } = config
   if (typeof prompt !== "string" || !prompt.trim()) {
     throw new Error("prompt must be a non-empty string")
   }
@@ -67,9 +58,7 @@ export interface SingleTurnChatOptions {
   tools?: ToolRegistry | null
   systemPrompt?: string | null
   client?: ChatClient | null
-  maxTurns?: number
-  maxTokens?: number
-  temperature?: number
+  config?: AgentConfig
   emit?: EmitEvent | null
   cancel?: AbortSignal | null
 }
@@ -81,14 +70,12 @@ export async function singleTurnChat(prompt: string, opts: SingleTurnChatOptions
     tools = null,
     systemPrompt = null,
     client = null,
-    maxTurns = 200,
-    maxTokens = 4096,
-    temperature = 0.1,
+    config = new AgentConfig(200, 4096, 0.1, "single-turn-chat"),
     emit = null,
     cancel = null,
   } = opts
 
-  validate(prompt, model, maxTurns, maxTokens, temperature)
+  validate(prompt, model, config)
   const activeCancel = cancel ?? new AbortController().signal
   if (activeCancel.aborted) throw new CancelledError()
 
@@ -114,15 +101,12 @@ export async function singleTurnChat(prompt: string, opts: SingleTurnChatOptions
 
   const agent = createAgent(model, activeTools, systemPrompt ?? "", {
     client,
-    maxTurns,
-    maxTokens,
-    temperature,
-    name: "single-turn-chat",
+    config,
   })
   const context = new AgentContext(
     thread,
     turn,
-    emit ?? noopEmit,
+    emit ?? (async () => {}),
     activeTools,
     activeCancel,
     activeMemory,

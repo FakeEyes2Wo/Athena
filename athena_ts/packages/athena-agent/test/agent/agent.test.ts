@@ -11,7 +11,6 @@ import {
   BaseAgent,
   agentRunner,
   createAgent,
-  createCodeAgent,
   type StructuredOutputType,
 } from "../../src/agent/runtime.js"
 import { AgentConfig, AgentContext, AgentOutcome } from "../../src/agent/models.js"
@@ -121,6 +120,19 @@ class ResponseFormatFallbackClient {
 }
 
 describe("Agent", () => {
+  it("preserves explicit factory configuration and creates independent defaults", () => {
+    const tools = new ToolRegistry()
+    const client = new CaptureClient()
+    const config = new AgentConfig(3, 128, 0, "custom", "required")
+    const configured = createAgent("model", tools, "system", { client, config })
+    expect(configured.config).toBe(config)
+    const first = createAgent("model", tools, "system", { client })
+    const second = createAgent("model", tools, "system", { client })
+    expect(first.config).toEqual(new AgentConfig(200, 4096, 0.1, "agent"))
+    expect(second.config).toEqual(first.config)
+    expect(second.config).not.toBe(first.config)
+  })
+
   it.each([false, true])("preserves parallel groups, barriers and result alignment (failure=%s)", async (fail) => {
     function latch() {
       let release!: () => void
@@ -216,7 +228,7 @@ describe("Agent", () => {
   it("environment builds three independent core agents", () => {
     const model = new ResponsesProvider("test-model", { client: {} as never })
     const agents = ["code", "data", "plot"].map((name) =>
-      createCodeAgent(model, new ToolRegistry(), `${name} prompt`, new AgentConfig(200, 4096, 0.1, `${name}-agent`))
+      new Agent(model, new ToolRegistry(), `${name} prompt`, new AgentConfig(200, 4096, 0.1, `${name}-agent`))
     )
     expect(agents.map((a) => a.name)).toEqual(["code-agent", "data-agent", "plot-agent"])
     expect(new Set(agents).size).toBe(3)

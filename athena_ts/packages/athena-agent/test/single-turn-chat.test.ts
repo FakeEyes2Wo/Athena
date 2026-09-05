@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { AgentConfig } from "../src/agent/models.js"
 import { modelResponse, textPart } from "../src/messages.js"
 import { ContextManager } from "../src/memory/context-manager.js"
 import { singleTurnChat } from "../src/single-turn-chat.js"
@@ -53,6 +54,32 @@ function toolCall(name: string, arguments_: Record<string, unknown>): ToolCallSc
 }
 
 describe("single_turn_chat", () => {
+  it("preserves default sampling and forwards explicit configuration", async () => {
+    const client = new ScriptedClient(["default answer", "configured answer"])
+    await singleTurnChat("question", { model: "model", client })
+    expect(client.requests[0]).toMatchObject({ max_tokens: 4096, temperature: 0.1 })
+    const tools = new ToolRegistry()
+    tools.register(tool(async () => "unused", { name: "echo", inputSchema: { type: "object" } }))
+    const config = new AgentConfig(2, 123, 0, "custom", "required")
+    await singleTurnChat("question", { model: "model", client, tools, config })
+    expect(client.requests[1]).toMatchObject({
+      max_tokens: 123, temperature: 0, tool_choice: "required",
+    })
+    expect(config).toEqual(new AgentConfig(2, 123, 0, "custom", "required"))
+  })
+
+  it.each([1, 2])("honors the configured turn budget (%s)", async (maxTurns) => {
+    const tools = new ToolRegistry()
+    tools.register(tool(async () => "value", { name: "echo", inputSchema: { type: "object" } }))
+    const client = new ScriptedClient([toolCall("echo", {}), "final answer"])
+    const result = singleTurnChat("question", {
+      model: "model", client, tools, config: new AgentConfig(maxTurns),
+    })
+    if (maxTurns === 1) await expect(result).rejects.toThrow(/final assistant text/)
+    else await expect(result).resolves.toBe("final answer")
+    expect(client.requests).toHaveLength(maxTurns)
+  })
+
   it("returns final text without reusing implicit history", async () => {
     const client = new ScriptedClient(["first answer", "second answer"])
     expect(await singleTurnChat("first", { model: "model", client })).toBe("first answer")
@@ -146,9 +173,11 @@ describe("single_turn_chat", () => {
     const client = new ScriptedClient(["unused"])
     const options: Record<string, unknown> = {
       model: opts["model"],
-      maxTurns: opts["maxTurns"],
-      maxTokens: opts["maxTokens"],
-      temperature: opts["temperature"],
+      config: new AgentConfig(
+        opts["maxTurns"] as number,
+        opts["maxTokens"] as number,
+        opts["temperature"] as number
+      ),
       client,
     }
     await expect(singleTurnChat(opts["prompt"] as string, options as never)).rejects.toThrow(

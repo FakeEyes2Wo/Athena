@@ -15,6 +15,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [ ] Implement the identified simplifications with scoped regression checks.
 - [x] Resolve TypeScript recovery fixture/state-copy failures and reconcile its workspace lockfile.
 - [x] Simplify TypeScript sampling task storage/dispatch and verify concurrency/result ordering.
+- [x] Consolidate TypeScript Agent factory and single-turn sampling configuration.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -88,7 +89,11 @@ TypeScript sampling runtime: delete nullable task placeholders, task-index assig
 
 Sampling evidence: Agent plus research Worker tests returned 136 passed before and after the initial simplification. Added two controlled five-tool parallel/serial/parallel regressions, with an interleaved unknown tool and both successful/failing parallel results. Latches verify both parallel starts, each serial barrier, deliberately reversed completion order and exact call/result alignment without timing assertions. The full Agent test file returned 25 passed against both the original committed runtime and the new runtime. Final full TypeScript suite returned 437 passed across 52 files; all five package builds and git diff --check passed. Runtime constructor/configuration work remains open, so the runtime inventory row stays Pending; completing the associated Agent test-file review brings baseline coverage to 61/602, not full application acceptance.
 
-Next module: TypeScript Agent runtime.ts and single-turn-chat.ts are fully read. The constructor-only createCodeAgent forwarding function and repeated primitive sampling configuration still require migration; runtime's remaining constructor/adapter decisions remain Pending. Worker source is read but its broader structured-output/context construction decision also remains Pending. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+TypeScript construction/chat review: delete createCodeAgent, a constructor-only forwarding function; known-provider tests construct Agent directly. createAgent accepts the existing AgentConfig instead of four duplicated primitive configuration fields (options: 5 fields to 2). SingleTurnChatOptions similarly replaces three sampling fields with config (10 fields to 8); validation takes three arguments instead of five. Remove the named no-op event helper. Explicit configuration is passed by identity, including name and toolChoice; default factories still use name "agent" and one-turn calls "single-turn-chat". Retain the independently consumed one-turn boundary, literal prompt handling, caller-owned memory, input validation, tool events and current-turn-only text extraction. Worker.runText requires no argument migration because it uses defaults.
+
+Construction evidence: Agent plus Worker selection returned 138 passed before and after the initial migration. Four new regressions cover independent factory defaults, configuration identity, default/explicit sampling including zero temperature and required tool choice, and one/two-turn budgets. All five TypeScript package builds passed. The first full suite returned 440 passed and one 5-second timeout in the unchanged Git workspace suite; a full rerun with unchanged timeout and implementation returned 441 passed across 52 files. Removed createCodeAgent references remain only in the negative public API assertion; git diff --check passed. Source/test single-turn reviews bring baseline coverage to 63/602. This is not full application acceptance or evidence of real external LLM transport readiness.
+
+Next module: runtime adapter review remains Pending. The tracked TypeScript search finds runWithContext only in its declaration and implementation, so its extra callable-property API requires removal/consolidation assessment. Worker source is read but its broader structured-output/context construction decision also remains Pending. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -553,7 +558,7 @@ Next module: TypeScript Agent runtime.ts and single-turn-chat.ts are fully read.
 | `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Reviewed; absorb settings; remove provider subclasses and abstract runtime base; preserve stream/schema/DSML behavior; 435 tests pass |
 | `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
-| `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Pending; sampling dispatch/results simplified and verified; constructor/configuration review remains open |
+| `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Pending; sampling and factory configuration verified; adapter review remains open |
 | `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Reviewed; remove MemoryView and forwarding getter; retain checkpoint semantics |
 | `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Reviewed; move live contracts/configuration to provider.ts; delete unused exports and file; preserve deferred SDK limitation |
 | `athena_ts/packages/athena-agent/src/agent/tools/user-input.ts` | 32 | Pending |
@@ -565,7 +570,7 @@ Next module: TypeScript Agent runtime.ts and single-turn-chat.ts are fully read.
 | `athena_ts/packages/athena-agent/src/memory/index.ts` | 4 | Pending |
 | `athena_ts/packages/athena-agent/src/memory/rollout.ts` | 158 | Pending |
 | `athena_ts/packages/athena-agent/src/messages.ts` | 139 | Pending |
-| `athena_ts/packages/athena-agent/src/single-turn-chat.ts` | 134 | Pending |
+| `athena_ts/packages/athena-agent/src/single-turn-chat.ts` | 134 | Reviewed; shared AgentConfig, retained literal input/history/tool/cancellation boundary |
 | `athena_ts/packages/athena-agent/src/tool-types.ts` | 74 | Reviewed; remove unused output-limit attribute; retain message truncation |
 | `athena_ts/packages/athena-agent/src/tool.ts` | 183 | Reviewed; consolidate lifecycle, delete forwarding helpers and redundant registry storage |
 | `athena_ts/packages/athena-agent/test/agent/agent.test.ts` | 575 | Reviewed; retain runtime/structured output contracts; add latch-controlled concurrency/failure/alignment checks; 25 tests pass before and after |
@@ -578,7 +583,7 @@ Next module: TypeScript Agent runtime.ts and single-turn-chat.ts are fully read.
 | `athena_ts/packages/athena-agent/test/memory/context-manager.test.ts` | 206 | Pending |
 | `athena_ts/packages/athena-agent/test/memory/rollout.test.ts` | 221 | Pending |
 | `athena_ts/packages/athena-agent/test/public-api.test.ts` | 69 | Reviewed; retain canonical exports and reject removed facade; 3 tests pass |
-| `athena_ts/packages/athena-agent/test/single-turn-chat.test.ts` | 179 | Pending |
+| `athena_ts/packages/athena-agent/test/single-turn-chat.test.ts` | 179 | Reviewed; 20 tests including sampling defaults/overrides and turn budgets |
 | `athena_ts/packages/athena-agent/test/tool.test.ts` | 154 | Reviewed; add cancellation, non-Error and duplicate registry checks; 16 tests pass |
 | `athena_ts/packages/athena-autoresearch/dsh-ui/app.js` | 107 | Pending |
 | `athena_ts/packages/athena-autoresearch/dsh-ui/hypothesis-graph.js` | 350 | Pending |
