@@ -43,6 +43,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Generalize the single task owner across recovery, PREPARE, SEARCH and VALIDATE; join phases during stop/validation handoff.
 - [x] Complete the Supervisor source/test review, consolidate authoritative fields, and close phase-command races.
 - [x] Review the GUI gateway boundary modules and remove duplicated state/factory layers.
+- [x] Review the research turn dispatcher/shared support modules and narrow their internal interfaces.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -65,6 +66,14 @@ Read the gateway package marker, process entry, human-request broker, state stor
 Remove the state store's zero-logic default-state wrapper and construct its data record directly on the three fallback paths. The process entry now trusts the state store's existing project-root validation instead of validating the loaded value twice, replaces a fifteen-line callable Protocol with the canonical `Callable` alias, gives its nested runtime factory private scope, avoids rebinding the requested port, and lets `main` use `start_server`'s defaults. Remove the gateway broker's prohibited future import; its Python 3.11+ annotations need no compatibility layer. No compatibility aliases or new abstractions were added.
 
 Fresh verification passed 104 gateway, state-store, protocol, clarification, and end-to-end tests; Python compilation, the code-style hard-rule gate, and `git diff --check` also passed. Pytest reported one existing Windows subprocess finalizer warning and one cache-permission warning after all tests passed. Closing five ledger rows advances reviewed coverage to 123/602. Whole-repository acceptance remains pending.
+
+## Research turn boundary review
+
+Read the turn package boundary, shared wait helpers, General/Kaggle turn mixin, public dispatcher, and citation-support mixin completely, then trace their production and test callers. Retain these files as separate cohesive roles: the shared wait loop prevents circular imports, General owns optional Kaggle handoff policy, the dispatcher owns Supervisor/Data entrypoints, and support owns the two-stage citation policy. Their distinct failure and result contracts do not justify a generic turn-execution abstraction. The large Ideator lane module remains Pending for its own complete review.
+
+Every production heartbeat call passed both the runtime and the same `runtime.agents` object. Remove that duplicate dependency parameter and derive the agent service from the runtime, reducing the helper from seven parameters to six while preserving event projection, cursor advancement, timeout interruption, heartbeat publication, and the direct-wait path. Delete the two one-call General/Kaggle tool wrappers and call the existing kind-parameterized tool constructor directly. No compatibility signatures or replacement wrappers remain.
+
+The same focused baseline and post-change selection passed 78 turn, event-forwarding, citation, preflight, handoff, survey, ideator, and gate tests. Python compilation, the code-style hard-rule gate, removed-symbol searches, and `git diff --check` passed. Closing five ledger rows advances reviewed coverage to 128/602. Whole-repository acceptance remains pending.
 
 ## Root development-script review
 
@@ -717,12 +726,12 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/supervisor/supervisor.py` | 288 | Pending |
 | `src/athena/research/supervisor/validation.py` | 711 | Pending |
 | `src/athena/research/supervisor/validation_contracts.py` | 84 | Pending |
-| `src/athena/research/turns/__init__.py` | 1 | Pending |
-| `src/athena/research/turns/common.py` | 98 | Pending |
-| `src/athena/research/turns/general.py` | 215 | Pending |
+| `src/athena/research/turns/__init__.py` | 1 | Reviewed; retain package boundary |
+| `src/athena/research/turns/common.py` | 98 | Reviewed; derive agent service from runtime instead of duplicate parameter |
+| `src/athena/research/turns/general.py` | 215 | Reviewed; delete two single-call tool wrappers; retain optional handoff policy |
 | `src/athena/research/turns/ideator.py` | 520 | Pending |
-| `src/athena/research/turns/runner.py` | 98 | Pending |
-| `src/athena/research/turns/support.py` | 126 | Pending |
+| `src/athena/research/turns/runner.py` | 98 | Reviewed; retain distinct Supervisor/Data result boundaries |
+| `src/athena/research/turns/support.py` | 126 | Reviewed; retain two-stage citation verification policy |
 | `src/athena/retrieval/__init__.py` | 1 | Pending |
 | `src/athena/retrieval/web_search.py` | 386 | Pending |
 | `src/athena/serving/__init__.py` | 1 | Reviewed; retain package boundary |

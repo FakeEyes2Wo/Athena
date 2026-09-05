@@ -36,7 +36,6 @@ class AgentTurnRunner(
             )
         summary = await wait_run_with_heartbeat(
             rt,
-            rt.agents,
             run_id,
             agent_id=SUPERVISOR_AGENT_ID,
             label="SupervisorAgent turn",
@@ -81,7 +80,6 @@ class AgentTurnRunner(
             )
         summary = await wait_run_with_heartbeat(
             rt,
-            rt.agents,
             run_id,
             agent_id=DATA_AGENT_ID,
             label="Data Agent turn",

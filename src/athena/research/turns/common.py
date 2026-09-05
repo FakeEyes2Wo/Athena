@@ -26,7 +26,6 @@ MAX_KAGGLE_HANDOFF_CHARS = 12_000
 
 async def wait_run_with_heartbeat(
     rt: Any,
-    agents: Any,
     run_id: str,
     *,
     agent_id: str,
@@ -35,6 +34,7 @@ async def wait_run_with_heartbeat(
     project: bool = True,
 ):
     """Wait for an Agent run, publishing heartbeats and enforcing a hard timeout."""
+    agents = rt.agents
     deadline = time.monotonic() + AGENT_TURN_TIMEOUT_SECONDS
     # 心跳超时会取消当前 waiter 并重新转发 journal；游标跨轮保留，否则超过 5 分钟的
     # turn（SEARCH/训练是常态）会把整段 agent 文本和工具调用重新投影一遍。

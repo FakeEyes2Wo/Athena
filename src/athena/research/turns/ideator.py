@@ -322,7 +322,6 @@ class IdeatorTurnMixin:
             for attempt in range(MAX_GATE_RETRIES + 1):
                 summary = await _wait_run_with_heartbeat(
                     rt,
-                    rt.agents,
                     run_id,
                     agent_id=agent_id,
                     label=label,

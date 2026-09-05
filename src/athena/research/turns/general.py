@@ -44,14 +44,6 @@ class GeneralTurnMixin:
                 registry.register(kaggle.resolve(spec.name))
         return registry
 
-    def _general_tools(self) -> ToolRegistry:
-        """General Agent 的工具。"""
-        return self._tools_with_kaggle("general")
-
-    def _kaggle_handoff_tools(self) -> ToolRegistry:
-        """Kaggle Handoff Agent 的工具。"""
-        return self._tools_with_kaggle("kaggle_handoff")
-
     async def _ensure_kaggle_handoff(self) -> str:
         """Run the Kaggle Handoff Agent once and return its markdown text.
 
@@ -93,7 +85,7 @@ class GeneralTurnMixin:
                     artifacts=rt.store,
                     workspace=eda_dir,
                     runtime=rt.execution,
-                    extra_tools=self._kaggle_handoff_tools(),
+                    extra_tools=self._tools_with_kaggle("kaggle_handoff"),
                 )
             content = (
                 f"Competition slug: {slug}\n\n"
@@ -114,7 +106,6 @@ class GeneralTurnMixin:
                 )
             summary = await wait_run_with_heartbeat(
                 rt,
-                rt.agents,
                 run_id,
                 agent_id=KAGGLE_HANDOFF_AGENT_ID,
                 label="Kaggle handoff",
@@ -178,7 +169,7 @@ class GeneralTurnMixin:
                 artifacts=rt.store,
                 project_root=rt.root,
                 runtime=rt.execution,
-                extra_tools=self._general_tools(),
+                extra_tools=self._tools_with_kaggle("general"),
             )
         request = {"content": task, "context_refs": []}
         if prior_agent_id is not None and rt.agents.has_agent(prior_agent_id):
@@ -203,7 +194,6 @@ class GeneralTurnMixin:
                 state.save(rt.state_path)
         summary = await wait_run_with_heartbeat(
             rt,
-            rt.agents,
             run_id,
             agent_id=agent_id,
             label="General Agent turn",

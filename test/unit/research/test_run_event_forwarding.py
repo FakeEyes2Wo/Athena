@@ -96,12 +96,13 @@ async def test_heartbeat_reentry_resumes_after_last_forwarded_event(
         heartbeats.append(text)
 
     rt = SimpleNamespace(
+        agents=agents,
         events=SimpleNamespace(project_agent_event=project_agent_event),
         publish_output=publish_output,
     )
 
     summary = await wait_run_with_heartbeat(
-        rt, agents, "run-1", agent_id="plan-worker", label="PLAN", plan="plan-1"
+        rt, "run-1", agent_id="plan-worker", label="PLAN", plan="plan-1"
     )
 
     assert summary.error is None
