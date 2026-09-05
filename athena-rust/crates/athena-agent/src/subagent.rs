@@ -11,8 +11,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-const SUB_CONTEXT_LIMIT: usize = 128_000;
-
 /// A sub-agent's structured result.
 #[derive(Debug, Clone)]
 pub struct AgentResult {
@@ -102,7 +100,7 @@ impl AgentControl {
 
         let id = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let agent_id = format!("sub-{id}");
-        let memory = Arc::new(Mutex::new(ContextManager::new(SUB_CONTEXT_LIMIT)));
+        let memory = Arc::new(Mutex::new(ContextManager::new()));
         let cancel = CancellationToken::new();
 
         let thread = AthenaThread {

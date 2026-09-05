@@ -52,6 +52,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the Rust type crate and remove the unconsumed research domain layer.
 - [x] Remove the unconsumed Rust Git-workspace prototype crate.
 - [x] Review the Rust runtime crate and remove unused retained state and parameters.
+- [x] Review the Rust memory crate and remove unconnected compaction/rollout prototypes.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -164,6 +165,14 @@ Read all seven runtime source files and all three integration-test files complet
 Remove the unused memory dependency; seven unread journal inspection/subscription helpers; four write-only subscription fields; the write-only completed-result map; the unused manager lookup; and the handle's unread thread ID. Successful runner signals no longer carry a result reference that the actor discarded. Interrupt, shutdown, and manager-close interfaces no longer accept ignored reason strings. Event forwarding moves owned fields instead of cloning them, and the subscription registry no longer wraps its lock in an unnecessary second `Arc`. No compatibility wrappers or replacement abstractions were added.
 
 Fresh focused verification passed 25 runtime/server/agent tests. The complete Rust workspace passed 139 tests; workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing ten runtime rows advances reviewed coverage to 180/602. Whole-repository acceptance remains pending.
+
+## Rust memory review
+
+Read all five memory source files and three integration-test files completely, then trace every export and `ContextManager` method through the Rust workspace and current documentation. The Rust compactor and rollout recorder had no production caller outside their own crate, while Python owns the connected compaction, checkpoint, recovery, and rollout path. The exported `AgentRunner` likewise had no constructor or runtime caller; its only retained configuration fed the unused Rust context limit.
+
+Delete the unconnected compaction, rollout, and agent-runner implementations plus their exclusive and duplicate tests. Merge the active context buffer into `message.rs` and make that module private behind the crate facade. `ContextManager` falls from four fields to one and its constructor from one ignored limit argument to zero; token/version/snapshot/rollback/range APIs disappear with their only consumers. The crate's production dependencies fall from six to one. Retain message normalization, detached history, all wire types, and the fixture-governed Python serialization contract. Update the Rust README so it no longer advertises removed prototypes.
+
+Fresh focused verification passed 19 memory/agent tests. The complete Rust workspace passed 80 tests; workspace Clippy with `-D warnings` and Rust formatting passed. Closing eight memory rows advances reviewed coverage to 188/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -832,20 +841,20 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-agent/src/lib.rs` | 21 | Reviewed; remove duplicate AgentOutcome export and retain canonical facade |
 | `athena-rust/crates/athena-agent/src/openai_provider.rs` | 216 | Reviewed; remove unread emitter parameter and retain isolated transport boundary |
 | `athena-rust/crates/athena-agent/src/provider.rs` | 141 | Reviewed; preserve message roles instead of forcing plain text to user |
-| `athena-rust/crates/athena-agent/src/runner.rs` | 50 | Reviewed; return TurnOutput directly and abort completed cancellation bridge |
+| `athena-rust/crates/athena-agent/src/runner.rs` | 50 | Reviewed; delete the unconstructed runtime adapter and its ignored context limit |
 | `athena-rust/crates/athena-agent/src/subagent.rs` | 229 | Reviewed; retain concurrency, memory, event, and cancellation lifecycle owner |
 | `athena-rust/crates/athena-agent/tests/common/mod.rs` | 230 | Reviewed; retain shared deterministic provider/tool/context fixtures |
 | `athena-rust/crates/athena-agent/tests/provider_mapping.rs` | 54 | Reviewed; add plain assistant-role regression |
 | `athena-rust/crates/athena-agent/tests/subagent.rs` | 51 | Reviewed; retain completion, messaging, event, and cancellation coverage |
 | `athena-rust/crates/athena-agent/tests/tool_loop.rs` | 113 | Reviewed; retain ordering/barrier/error coverage and add pre-cancelled regression |
-| `athena-rust/crates/athena-memory/src/compaction.rs` | 308 | Pending |
-| `athena-rust/crates/athena-memory/src/context.rs` | 443 | Pending |
-| `athena-rust/crates/athena-memory/src/lib.rs` | 9 | Pending |
-| `athena-rust/crates/athena-memory/src/message.rs` | 188 | Pending |
-| `athena-rust/crates/athena-memory/src/rollout.rs` | 519 | Pending |
-| `athena-rust/crates/athena-memory/tests/compaction.rs` | 312 | Pending |
-| `athena-rust/crates/athena-memory/tests/context_parity.rs` | 219 | Pending |
-| `athena-rust/crates/athena-memory/tests/rollout_recovery.rs` | 371 | Pending |
+| `athena-rust/crates/athena-memory/src/compaction.rs` | 308 | Reviewed; delete the self-tested, unconnected compaction prototype |
+| `athena-rust/crates/athena-memory/src/context.rs` | 443 | Reviewed; merge the active one-field buffer into message.rs and delete file |
+| `athena-rust/crates/athena-memory/src/lib.rs` | 9 | Reviewed; expose one private-module facade without prototype exports |
+| `athena-rust/crates/athena-memory/src/message.rs` | 188 | Reviewed; own wire types and the active normalized conversation buffer |
+| `athena-rust/crates/athena-memory/src/rollout.rs` | 519 | Reviewed; delete the unconnected duplicate of Python rollout persistence |
+| `athena-rust/crates/athena-memory/tests/compaction.rs` | 312 | Reviewed; delete tests exclusive to the removed prototype |
+| `athena-rust/crates/athena-memory/tests/context_parity.rs` | 219 | Reviewed; retain fixture-governed message wire parity |
+| `athena-rust/crates/athena-memory/tests/rollout_recovery.rs` | 371 | Reviewed; delete tests exclusive to the removed prototype |
 | `athena-rust/crates/athena-protocol/src/envelope.rs` | 88 | Reviewed; retain fixture-governed wire envelopes and transport unions |
 | `athena-rust/crates/athena-protocol/src/error.rs` | 103 | Reviewed; one RpcError constructor, no copied application exception or forwarding helpers |
 | `athena-rust/crates/athena-protocol/src/lib.rs` | 162 | Reviewed; absorb method constants and delete duplicate inline tests |

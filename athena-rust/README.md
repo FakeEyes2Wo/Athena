@@ -15,10 +15,10 @@ depends on protocol + runtime; `athena-agent` implements the runtime
 |---|---|---|---|
 | `athena-types` | Validated identifiers, thread/turn DTOs, statuses | `core/schemas.py` | ✅ done |
 | `athena-protocol` | v1 wire protocol, error codes, method names | `app_server/protocol.py` | ✅ done |
-| `athena-memory` | `ContextManager`, compaction, rollout, `MessagePart` | `memory/*` | ✅ done |
+| `athena-memory` | `ContextManager`, `MessagePart` | `memory/*` | ✅ done |
 | `athena-tools` | `Tool`/`ToolExecutor`, read-only registry | `core/tool*.py` | ✅ done |
 | `athena-runtime` | Event journal, per-thread actor, `TurnRunner`, `ThreadManager` | `app_server/{events,submissions,thread_runtime,thread_manager}.py` | ✅ done |
-| `athena-agent` | Provider stream, tool-call loop, sub-agents, `AgentRunner` | `core/agent/*` | ✅ done |
+| `athena-agent` | Provider stream, tool-call loop, sub-agents | `core/agent/*` | ✅ done |
 | `athena-server` | Transport, message processor, execution, subscriptions, lifecycle | `app_server/{transport,server,execution,client,lifecycle}.py` | ✅ done |
 
 ## Build & test

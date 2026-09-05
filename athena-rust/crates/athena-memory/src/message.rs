@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Maximum characters allowed in a single `ToolReturn` content before truncation.
-pub const MAX_TOOL_RESULT_CHARS: usize = 50_000;
+const MAX_TOOL_RESULT_CHARS: usize = 50_000;
 
 /// Role of a message within a conversation.
 ///
@@ -57,132 +56,97 @@ pub struct ModelMessage {
     pub parts: Vec<MessagePart>,
 }
 
+/// An isolated conversation buffer that normalizes messages on insertion.
+#[derive(Default)]
+pub struct ContextManager {
+    items: Vec<ModelMessage>,
+}
+
+impl ContextManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Clone the conversation so providers cannot mutate stored history.
+    pub fn items(&self) -> Vec<ModelMessage> {
+        self.items.clone()
+    }
+
+    pub fn append(&mut self, mut message: ModelMessage) {
+        for part in &mut message.parts {
+            let MessagePart::ToolReturn { content, .. } = part else {
+                continue;
+            };
+            if content.len() <= MAX_TOOL_RESULT_CHARS {
+                continue;
+            }
+
+            let budget = MAX_TOOL_RESULT_CHARS - 50;
+            let head = budget / 2;
+            let tail = budget - head;
+            *content = format!(
+                "{}...\n...[TRUNCATED]...\n{}",
+                &content[..head],
+                &content[content.len() - tail..]
+            );
+        }
+        self.items.push(message);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    #[test]
-    fn test_serialize_message_role() {
-        assert_eq!(
-            serde_json::to_string(&MessageRole::System).unwrap(),
-            r#""system""#
-        );
-        assert_eq!(
-            serde_json::to_string(&MessageRole::User).unwrap(),
-            r#""user""#
-        );
-        assert_eq!(
-            serde_json::to_string(&MessageRole::Assistant).unwrap(),
-            r#""assistant""#
-        );
-        assert_eq!(
-            serde_json::to_string(&MessageRole::Tool).unwrap(),
-            r#""tool""#
-        );
+    fn message(role: MessageRole, part: MessagePart) -> ModelMessage {
+        ModelMessage {
+            role,
+            parts: vec![part],
+        }
     }
 
     #[test]
-    fn test_message_role_partial_eq() {
-        assert_eq!(MessageRole::User, MessageRole::User);
-        assert_ne!(MessageRole::User, MessageRole::Assistant);
+    fn context_starts_empty_and_returns_detached_history() {
+        let mut context = ContextManager::new();
+        context.append(message(
+            MessageRole::User,
+            MessagePart::UserPrompt {
+                content: "original".into(),
+            },
+        ));
+
+        let mut history = context.items();
+        history[0].parts.clear();
+        assert_eq!(context.items()[0].parts.len(), 1);
     }
 
     #[test]
-    fn test_roundtrip_system_prompt() {
-        let part = MessagePart::SystemPrompt {
-            content: "You are a bot.".into(),
-        };
-        let json = serde_json::to_string(&part).unwrap();
-        let back: MessagePart = serde_json::from_str(&json).unwrap();
-        assert_eq!(part, back);
-        assert!(json.contains(r#""part_kind":"system-prompt""#));
-        assert!(json.contains(r#""content":"You are a bot.""#));
-    }
+    fn context_truncates_only_long_tool_results() {
+        let mut context = ContextManager::new();
+        context.append(message(
+            MessageRole::Tool,
+            MessagePart::ToolReturn {
+                tool_call_id: "call".into(),
+                tool_name: "tool".into(),
+                content: "A".repeat(60_000),
+            },
+        ));
+        context.append(message(
+            MessageRole::User,
+            MessagePart::UserPrompt {
+                content: "B".repeat(60_000),
+            },
+        ));
 
-    #[test]
-    fn test_roundtrip_user_prompt() {
-        let part = MessagePart::UserPrompt {
-            content: "hello".into(),
-        };
-        let json = serde_json::to_string(&part).unwrap();
-        let back: MessagePart = serde_json::from_str(&json).unwrap();
-        assert_eq!(part, back);
-        assert!(json.contains(r#""part_kind":"user-prompt""#));
-    }
-
-    #[test]
-    fn test_roundtrip_text() {
-        let part = MessagePart::Text {
-            content: "Sure, here is the answer.".into(),
-        };
-        let json = serde_json::to_string(&part).unwrap();
-        let back: MessagePart = serde_json::from_str(&json).unwrap();
-        assert_eq!(part, back);
-        assert!(json.contains(r#""part_kind":"text""#));
-    }
-
-    #[test]
-    fn test_roundtrip_tool_call() {
-        let part = MessagePart::ToolCall {
-            tool_call_id: "call_abc".into(),
-            tool_name: "search".into(),
-            arguments: r#"{"query":"rust"}"#.into(),
-        };
-        let json = serde_json::to_string(&part).unwrap();
-        let back: MessagePart = serde_json::from_str(&json).unwrap();
-        assert_eq!(part, back);
-        // Field is serialized as "args" not "arguments"
-        assert!(json.contains(r#""args":""#));
-        assert!(!json.contains(r#""arguments""#));
-    }
-
-    #[test]
-    fn test_roundtrip_tool_return() {
-        let part = MessagePart::ToolReturn {
-            tool_call_id: "call_abc".into(),
-            tool_name: "search".into(),
-            content: "result data".into(),
-        };
-        let json = serde_json::to_string(&part).unwrap();
-        let back: MessagePart = serde_json::from_str(&json).unwrap();
-        assert_eq!(part, back);
-    }
-
-    #[test]
-    fn test_model_message_roundtrip() {
-        let msg = ModelMessage {
-            role: MessageRole::Assistant,
-            parts: vec![
-                MessagePart::Text {
-                    content: "Let me search.".into(),
-                },
-                MessagePart::ToolCall {
-                    tool_call_id: "call_1".into(),
-                    tool_name: "search".into(),
-                    arguments: r#"{"q":"test"}"#.into(),
-                },
-            ],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let back: ModelMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(msg.role, back.role);
-        assert_eq!(msg.parts.len(), back.parts.len());
-        assert_eq!(msg, back);
-    }
-
-    #[test]
-    fn test_model_message_serialization_structure() {
-        let msg = ModelMessage {
-            role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                content: "Hello.".into(),
-            }],
-        };
-        let value = serde_json::to_value(&msg).unwrap();
-        assert_eq!(value["role"], "assistant");
-        assert!(value["parts"].is_array());
-        assert_eq!(value["parts"][0]["part_kind"], "text");
-        assert_eq!(value["parts"][0]["content"], "Hello.");
+        let history = context.items();
+        assert!(matches!(
+            &history[0].parts[0],
+            MessagePart::ToolReturn { content, .. }
+                if content.len() < 60_000 && content.contains("[TRUNCATED]")
+        ));
+        assert!(matches!(
+            &history[1].parts[0],
+            MessagePart::UserPrompt { content } if content.len() == 60_000
+        ));
     }
 }

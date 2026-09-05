@@ -185,7 +185,7 @@ pub fn make_ctx(
     request: &str,
 ) -> (AgentContext, Arc<Mutex<ContextManager>>) {
     let (_cancel_tx, cancel_rx) = watch::channel(false);
-    let memory = Arc::new(Mutex::new(ContextManager::new(100_000)));
+    let memory = Arc::new(Mutex::new(ContextManager::new()));
     let ctx = AgentContext {
         thread: AthenaThread {
             thread_id: ThreadId::new("t1").unwrap(),
