@@ -10,7 +10,7 @@
 
 import unittest
 
-from athena.research.literature.bench.reproducibility import delivery_overlap
+from athena.research.literature.bench import delivery_overlap
 from athena.research.literature.paper_scout.pool import tie_break
 from athena.research.literature.paper_scout.schemas import ScoutPaper
 from athena.research.literature.paper_scout.selection import (

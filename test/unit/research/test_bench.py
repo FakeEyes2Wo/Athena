@@ -6,37 +6,30 @@
 """
 
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from athena.research.literature.bench.health import (
-    MIN_ANCHOR_PROSE_CHARS,
-    all_headings,
-    corpus_health,
-    novel_prose_chars,
-)
-from athena.research.literature.bench.known_item import (
+from athena.research.literature.bench import (
     KEYWORD_CHANNEL,
     SEMANTIC_CHANNEL,
-    compare,
-    distinct_papers,
-    first_gold_rank,
-    run_channel,
-    run_known_item,
-    score_channel,
-    usable_queries,
-)
-from athena.research.literature.bench.query_sets import (
-    available,
-    load_query_set,
-    load_recall_set,
-)
-from athena.research.literature.bench.recall import RecallQuerySet, evaluate_recall
-from athena.research.literature.bench.reproducibility import delivery_overlap, jaccard
-from athena.research.literature.bench.schemas import (
+    ChannelScore,
     KnownItemQuery,
     QueryOutcome,
     QuerySet,
+    RecallQuerySet,
+    available,
+    corpus_health,
+    delivery_overlap,
+    evaluate_recall,
+    load_query_set,
+    load_recall_set,
+    run_known_item,
+)
+from athena.research.literature.bench.retrieval import _paper_rank
+from athena.research.literature.paper_rag.index import (
+    MIN_ANCHOR_PROSE_CHARS,
+    novel_prose_chars,
 )
 from athena.research.literature.paper_rag.schemas import (
     CorpusEntry,
@@ -113,17 +106,21 @@ class RankingTest(unittest.TestCase):
         """
         hits = [_hit("p1:a", "p1"), _hit("p1:b", "p1"), _hit("p2:a", "p2")]
 
-        self.assertEqual(["p1", "p2"], distinct_papers(hits))
-        self.assertEqual(2, first_gold_rank(distinct_papers(hits), ["p2"]))
+        rank, papers = _paper_rank(hits, ["p2"])
+
+        self.assertEqual(["p1", "p2"], papers)
+        self.assertEqual(2, rank)
 
     def test_any_gold_counts_and_the_earliest_one_wins(self) -> None:
         returned = ["p3", "p1", "p2"]
 
-        self.assertEqual(2, first_gold_rank(returned, ["p1", "p2"]))
+        hits = [_hit(f"{paper}:a", paper) for paper in returned]
+
+        self.assertEqual(2, _paper_rank(hits, ["p1", "p2"])[0])
 
     def test_nothing_returned_is_a_miss_not_a_zero_rank(self) -> None:
         """未命中必须是 ``None``，因为 0 会被 ``1/rank`` 变成除零或无穷大。"""
-        self.assertIsNone(first_gold_rank(["p9"], ["p1"]))
+        self.assertIsNone(_paper_rank([_hit("p9:a", "p9")], ["p1"])[0])
 
 
 class ChannelScoreTest(unittest.TestCase):
@@ -134,7 +131,7 @@ class ChannelScoreTest(unittest.TestCase):
             QueryOutcome(query_id="c", rank=None),
         ]
 
-        score = score_channel("k", outcomes)
+        score = ChannelScore(channel="k", outcomes=outcomes)
 
         self.assertEqual(3, score.scored)
         self.assertEqual(1, score.hit_at_1)
@@ -142,15 +139,16 @@ class ChannelScoreTest(unittest.TestCase):
         self.assertEqual(2, score.hit_at_5)
         self.assertEqual(1, score.missed)
         self.assertAlmostEqual((1.0 + 0.25) / 3, score.mrr)
+        self.assertEqual(score.mrr, score.model_dump()["mrr"])
 
     def test_an_empty_channel_scores_zero_instead_of_dividing_by_zero(self) -> None:
-        self.assertEqual(0.0, score_channel("k", []).mrr)
+        self.assertEqual(0.0, ChannelScore(channel="k").mrr)
 
 
-class GoldPresenceTest(unittest.TestCase):
+class GoldPresenceTest(unittest.IsolatedAsyncioTestCase):
     """金标不在语料里是出题问题，不是检索失败。"""
 
-    def test_a_gold_missing_from_the_corpus_is_excluded_not_counted_as_a_miss(
+    async def test_a_gold_missing_from_the_corpus_is_excluded_not_counted_as_a_miss(
         self,
     ) -> None:
         """真机上这一步当场抓出过一个错标；没有它，出题错误会伪装成检索失败。"""
@@ -163,10 +161,12 @@ class GoldPresenceTest(unittest.TestCase):
             ],
         )
 
-        usable, unusable = usable_queries(query_set, corpus)
+        report = await run_known_item(corpus, query_set)
 
-        self.assertEqual(["here"], usable)
-        self.assertEqual(["absent"], unusable)
+        self.assertEqual(["absent"], report.unusable_queries)
+        self.assertEqual(
+            ["here"], [item.query_id for item in report.channels[0].outcomes]
+        )
 
 
 class KnownItemRunTest(unittest.IsolatedAsyncioTestCase):
@@ -235,48 +235,23 @@ class KnownItemRunTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        async def flaky(question: str, keywords: list[str], top_k: int):
-            if question == "boom":
+        def flaky(_corpus, terms: list[str], top_k: int):
+            if terms == ["boom"]:
                 raise RuntimeError("upstream said no")
-            return keyword_search(corpus, keywords, top_k)
+            return keyword_search(corpus, terms, top_k)
 
-        score = await run_channel(query_set, ["bad", "ok"], KEYWORD_CHANNEL, flaky, 10)
+        with patch(
+            "athena.research.literature.bench.retrieval.keyword_search",
+            side_effect=flaky,
+        ):
+            report = await run_known_item(corpus, query_set)
+        score = report.channels[0]
 
         self.assertEqual(2, score.scored)
         by_id = {item.query_id: item for item in score.outcomes}
         self.assertIn("upstream said no", by_id["bad"].error)
         self.assertIsNone(by_id["bad"].rank)
         self.assertEqual(1, by_id["ok"].rank)
-
-
-class CompareTest(unittest.TestCase):
-    def test_a_swap_that_leaves_mrr_flat_still_shows_up_per_query(self) -> None:
-        """汇总指标会把互相抵消的变化藏起来，逐条比对不会。"""
-        before = await_free_report([("a", 1), ("b", 3)])
-        after = await_free_report([("a", 3), ("b", 1)])
-
-        lines = compare(before, after)
-
-        self.assertTrue(any("a: 1 -> 3" in line for line in lines))
-        self.assertTrue(any("b: 3 -> 1" in line for line in lines))
-
-
-def await_free_report(pairs: list[tuple[str, int | None]]):
-    """构造一份只有名次信息的报告，用于比对逻辑的用例。"""
-    from athena.research.literature.bench.schemas import RetrievalBenchReport
-
-    return RetrievalBenchReport(
-        query_set="t",
-        corpus_ref="",
-        corpus_papers=0,
-        corpus_chunks=0,
-        channels=[
-            score_channel(
-                KEYWORD_CHANNEL,
-                [QueryOutcome(query_id=name, rank=rank) for name, rank in pairs],
-            )
-        ],
-    )
 
 
 class CorpusHealthTest(unittest.TestCase):
@@ -349,16 +324,6 @@ class CorpusHealthTest(unittest.TestCase):
 
         self.assertEqual(1, corpus_health(corpus).section_coverage["limitation"])
 
-    def test_all_headings_keeps_document_order_and_deduplicates(self) -> None:
-        corpus = _corpus(
-            [
-                _entry("p1:a", "p1", "x", heading_path=["Method", "Loss"]),
-                _entry("p1:b", "p1", "y", heading_path=["Method", "Loss"]),
-            ]
-        )
-
-        self.assertEqual(["Method", "Loss"], all_headings(corpus, [0, 1]))
-
 
 class AnchorProseTest(unittest.TestCase):
     """门面额度买到了多少新信息。"""
@@ -418,7 +383,7 @@ class DeliveryOverlapTest(unittest.TestCase):
             delivery_overlap([["a"]])
 
     def test_two_empty_runs_agree_rather_than_disagree(self) -> None:
-        self.assertEqual(1.0, jaccard(set(), set()))
+        self.assertEqual(1.0, delivery_overlap([[], []]).mean_jaccard)
 
 
 def first_and(*runs: list[str]) -> list[list[str]]:

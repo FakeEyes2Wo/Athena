@@ -8,6 +8,7 @@
 本模块只读索引：不调模型、不访网络、不碰句向量。
 """
 
+from athena.research.literature.bench.models import CorpusHealthReport, PaperHealth
 from athena.research.literature.paper_rag.index import (
     MIN_ANCHOR_PROSE_CHARS,
     anchor_index,
@@ -18,7 +19,6 @@ from athena.research.literature.paper_rag.search import (
     heading_variants,
 )
 from athena.research.literature.paper_rag.traversal import paper_namespace
-from athena.research.literature.bench.schemas import CorpusHealthReport, PaperHealth
 
 ABSTRACT_KIND = "abstract"
 
@@ -41,7 +41,7 @@ PROBED_SECTIONS = (
 """
 
 
-def anchor_position(corpus: LoadedCorpus, positions: list[int]) -> int:
+def _anchor_position(corpus: LoadedCorpus, positions: list[int]) -> int:
     """一篇论文被引用与被总览时的落点。
 
     直接走 ``index.anchor_index``，不另写一套——体检要量的是**生产路径实际选中的那个
@@ -58,11 +58,11 @@ def anchor_position(corpus: LoadedCorpus, positions: list[int]) -> int:
     ]
 
 
-def paper_sections(corpus: LoadedCorpus, positions: list[int]) -> list[str]:
+def _paper_sections(corpus: LoadedCorpus, positions: list[int]) -> list[str]:
     """一篇论文出现过的顶层章节名，按文档顺序去重。
 
     只取 ``path[0]``，与 ``PaperSummary.sections`` 同一口径：那是 Ideator 在总览里看到
-    的东西。章节覆盖率用的是另一套（``all_headings``），因为它要回答的是另一个问题。
+    的东西。章节覆盖率用的是另一套（``_all_headings``），因为它要回答的是另一个问题。
     """
     entries = corpus.index.entries
     sections: list[str] = []
@@ -73,7 +73,7 @@ def paper_sections(corpus: LoadedCorpus, positions: list[int]) -> list[str]:
     return sections
 
 
-def all_headings(corpus: LoadedCorpus, positions: list[int]) -> list[str]:
+def _all_headings(corpus: LoadedCorpus, positions: list[int]) -> list[str]:
     """一篇论文各层级出现过的全部章节名。
 
     章节覆盖率必须按**全部层级**统计，因为 ``section_search`` 就是这么匹配的（它遍历
@@ -90,7 +90,7 @@ def all_headings(corpus: LoadedCorpus, positions: list[int]) -> list[str]:
     return names
 
 
-def matches_section(headings: list[str], probe: str) -> bool:
+def _matches_section(headings: list[str], probe: str) -> bool:
     """该论文是否有一个章节名落在 ``probe`` 的同义写法里。
 
     走 ``heading_variants`` 而不是字面比较：论文之间对同一部分的叫法不统一，按字面统计
@@ -118,9 +118,9 @@ def corpus_health(corpus: LoadedCorpus, corpus_ref: str = "") -> CorpusHealthRep
 
     for paper_id, positions in grouped.items():
         entries = [index.entries[position] for position in positions]
-        anchor = index.entries[anchor_position(corpus, positions)]
-        sections = paper_sections(corpus, positions)
-        headings = all_headings(corpus, positions)
+        anchor = index.entries[_anchor_position(corpus, positions)]
+        sections = _paper_sections(corpus, positions)
+        headings = _all_headings(corpus, positions)
         outbound = {
             paper_namespace(target)
             for entry in entries
@@ -131,7 +131,7 @@ def corpus_health(corpus: LoadedCorpus, corpus_ref: str = "") -> CorpusHealthRep
         links = sum(len(entry.visual_ids) for entry in entries)
         visual_links += links
         for probe in PROBED_SECTIONS:
-            if matches_section(headings, probe):
+            if _matches_section(headings, probe):
                 section_coverage[probe] += 1
         details.append(
             PaperHealth(

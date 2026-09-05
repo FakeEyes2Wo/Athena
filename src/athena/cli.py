@@ -22,17 +22,17 @@ from athena.research import ResearchRuntime
 from athena.research.fork import ForkError, fork_project
 from athena.research.literature.bench import (
     DEFAULT_QUERY_SET,
+    DEFAULT_TOP_K,
     RELEVANT_THRESHOLD,
     corpus_health,
     delivery_overlap,
     dump_report,
     evaluate_recall,
     load_query_set,
+    load_recall_set,
     run_known_item,
 )
 from athena.research.literature.bench import available as bench_available
-from athena.research.literature.bench.known_item import DEFAULT_TOP_K as BENCH_TOP_K
-from athena.research.literature.bench.query_sets import load_recall_set
 from athena.research.literature.paper_rag.search import corpus_paper_ids
 from athena.research.literature.paper_scout.schemas import RETAIN_THRESHOLD, ScoutCorpus
 from athena.research.literature.survey import (
@@ -879,7 +879,7 @@ def _add_bench_parser(subparsers) -> None:
             "QuerySet JSON file"
         ),
     )
-    retrieval.add_argument("--top-k", type=int, default=BENCH_TOP_K, help="返回条数")
+    retrieval.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help="返回条数")
     retrieval.add_argument(
         "--no-semantic",
         action="store_true",

@@ -469,6 +469,14 @@ Absorb falsifiability checks into `gate.py` and each prompt into its sole owning
 
 The restored pre-change module baseline passed 49 tests. Final complete Idea Generation plus citation verification passed 49 tests; the expanded runtime-Ideator, data-contract, hypothesis-prompt, and Supervisor-wiring selection passed 89 tests. Targeted Ruff and pre-commit hooks, Python compilation, removed-module/symbol searches, CLI smoke, and `git diff --check` passed; pytest reported only the existing cache-permission warning. A deliberately broader Ruff observation found four pre-existing import-order findings in unchanged Supervisor integration tests, outside this batch. Closing all nine pending module rows advances reviewed baseline coverage to 272/602. Whole-repository acceptance remains pending.
 
+## Literature benchmark consolidation
+
+Read the literature package marker, all seven benchmark Python files, and both packaged datasets completely. Trace every exported function and report through the CLI, benchmark tests, paper-selection reproducibility checks, paper-RAG search primitives, and current documentation. Preserve paper-level rank deduplication, per-query failure isolation, unusable-gold exclusion, hit/MRR semantics, three-stage recall attribution, pairwise delivery overlap, corpus-health calculations, report JSON keys, and both versioned datasets.
+
+Replace the split `schemas.py`, `known_item.py`, `query_sets.py`, `recall.py`, and `reproducibility.py` surface with three cohesive modules: `models.py` owns versioned input/output contracts, `retrieval.py` owns dataset I/O and known-item execution, and `metrics.py` owns pure recall/overlap calculations. Retain `health.py` as the independent corpus-structure boundary and make its helpers private. The package facade is now the only supported import surface, including the CLI and paper-selection tests. Delete the production-unused report `compare` helper and stop exporting six implementation-only rank/scoring/usability/Jaccard helpers.
+
+`ChannelScore` now accepts only `channel` and raw `outcomes`; its six aggregate values are computed properties, reducing Pydantic input fields from eight to two while preserving all nine serialized JSON keys. The implementation falls from seven Python files to five and from 848 to 537 nonblank lines, a 311-line reduction. The pre-change benchmark and paper-selection baseline passed 64 tests; the post-change selection passed 62 tests after deleting only the two tests for removed implementation APIs, and all 23 CLI tests passed. Targeted Ruff, Python compilation, every bench subcommand help smoke, removed-module searches, pre-commit hooks, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the ten baseline rows advances reviewed coverage to 282/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -998,16 +1006,19 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/idea_generation/review_board.py` | 134 | Reviewed; retain two-perspective boundary and inline its single-use formatting chain |
 | `src/athena/research/idea_generation/structured_chat.py` | 83 | Reviewed; merged into core/agent/chat.py and deleted; schema retry/artifact test passes |
 | `src/athena/research/idea_generation/validation.py` | 99 | Reviewed; delete unreachable fixed-domain verifier planning and discarded artifacts |
-| `src/athena/research/literature/__init__.py` | 1 | Pending |
-| `src/athena/research/literature/bench/__init__.py` | 72 | Pending |
-| `src/athena/research/literature/bench/datasets/imbalance_auc.json` | 91 | Pending |
-| `src/athena/research/literature/bench/datasets/imbalance_auc_recall.json` | 35 | Pending |
-| `src/athena/research/literature/bench/health.py` | 175 | Pending |
-| `src/athena/research/literature/bench/known_item.py` | 273 | Pending |
-| `src/athena/research/literature/bench/query_sets.py` | 60 | Pending |
-| `src/athena/research/literature/bench/recall.py` | 169 | Pending |
-| `src/athena/research/literature/bench/reproducibility.py` | 55 | Pending |
-| `src/athena/research/literature/bench/schemas.py` | 204 | Pending |
+| `src/athena/research/literature/__init__.py` | 1 | Reviewed; retain concise package marker |
+| `src/athena/research/literature/bench/__init__.py` | 72 | Reviewed; one facade replaces direct imports from five implementation modules |
+| `src/athena/research/literature/bench/datasets/imbalance_auc.json` | 91 | Reviewed; retain versioned twelve-query known-item gold unchanged |
+| `src/athena/research/literature/bench/datasets/imbalance_auc_recall.json` | 35 | Reviewed; retain provenance-declared multi-pass proxy gold unchanged |
+| `src/athena/research/literature/bench/health.py` | 175 | Reviewed; retain corpus-structure boundary and make four helpers private |
+| `src/athena/research/literature/bench/known_item.py` | 273 | Reviewed; cohesive retrieval path moved to retrieval.py and file deleted |
+| `src/athena/research/literature/bench/query_sets.py` | 60 | Reviewed; dataset I/O merged into retrieval.py and file deleted |
+| `src/athena/research/literature/bench/recall.py` | 169 | Reviewed; models and pure metric split by responsibility and file deleted |
+| `src/athena/research/literature/bench/reproducibility.py` | 55 | Reviewed; pairwise overlap merged into metrics.py and file deleted |
+| `src/athena/research/literature/bench/schemas.py` | 204 | Reviewed; contracts moved to models.py and aggregate input fields reduced |
+| `src/athena/research/literature/bench/metrics.py` | new | Added; pure recall and overlap calculations |
+| `src/athena/research/literature/bench/models.py` | new | Added; versioned benchmark inputs and reports |
+| `src/athena/research/literature/bench/retrieval.py` | new | Added; known-item execution and dataset/report I/O |
 | `src/athena/research/literature/contracts.py` | 45 | Pending |
 | `src/athena/research/literature/paper_markdown/__init__.py` | 15 | Pending |
 | `src/athena/research/literature/paper_markdown/chunking.py` | 213 | Pending |
