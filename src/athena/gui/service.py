@@ -7,7 +7,6 @@ methods that touch the runtime loop are async.
 
 import base64
 import json
-import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -16,20 +15,16 @@ from athena.gui import experiments, graph, traces
 from athena.research.report import build_final_report
 from athena.research.runtime import ResearchRuntime
 
-logger = logging.getLogger(__name__)
-
 
 class GuiService:
     """Expose the full research runtime over JSON-friendly methods."""
 
-    def __init__(self, runtime: ResearchRuntime, broker: Any = None) -> None:
+    def __init__(self, runtime: ResearchRuntime) -> None:
         self._runtime = runtime
-        self._broker = broker
-        self._rollout_dir: Path = runtime.tree_path.parent / "logs" / "agents"
 
     # ── 控制 ──────────────────────────────────────────────────────────────
 
-    async def ping(self) -> dict[str, Any]:
+    def ping(self) -> dict[str, Any]:
         return {"pong": True}
 
     async def start(self) -> dict[str, Any]:
@@ -51,67 +46,25 @@ class GuiService:
     async def stop(self) -> dict[str, Any]:
         return {"status": await self._runtime.message("/stop")}
 
-    async def start_search(
-        self,
-        config: dict[str, Any] | None = None,
-        *,
-        draft_id: str | None = None,
-        revision: int | None = None,
-        acknowledge_unresolved: bool | None = None,
-    ) -> dict[str, Any]:
-        """Start PREPARE through the confirmed draft path.
-
-        On the gated GUI path this accepts only the confirmed draft parameters.
-        The legacy ``{config: {task: ...}}`` shape is kept for non-gated callers.
-        """
-        if config is not None:
-            # Accept the legacy ``{"config": {task: ...}}`` envelope as well as
-            # the gated flat params emitted by the native/WebSocket adapters.
-            nested = config.get("config")
-            if (
-                draft_id is None
-                and revision is None
-                and acknowledge_unresolved is None
-                and isinstance(nested, dict)
-            ):
-                config = nested
-            draft_id = draft_id or config.get("draft_id")
-            revision = revision if revision is not None else config.get("revision")
-            if acknowledge_unresolved is None:
-                acknowledge_unresolved = config.get("acknowledge_unresolved")
-        if draft_id is not None or revision is not None:
-            if not isinstance(draft_id, str) or not draft_id.strip():
-                raise ValueError("start_search requires a non-empty 'draft_id'")
-            if revision is None:
-                raise ValueError("start_search requires an integer 'revision'")
-            if acknowledge_unresolved is None:
-                raise ValueError("start_search requires 'acknowledge_unresolved'")
-            confirm = getattr(self._runtime, "confirm_and_start", None)
-            if confirm is None:
-                raise ValueError(
-                    "start_search requires a confirmed clarification draft"
-                )
-            result = await confirm(
-                draft_id,
-                int(revision),
-                bool(acknowledge_unresolved),
-            )
-            if hasattr(result, "model_dump"):
-                result = result.model_dump(mode="json")
-            elif not isinstance(result, dict):
-                result = {"draft_id": draft_id, "result": result}
-            return result
-
-        task = (
-            config.get("task") or config.get("message") or config.get("task_type") or ""
-            if config
-            else ""
+    async def start_search(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Start PREPARE through the confirmed clarification draft path."""
+        draft_id = request.get("draft_id")
+        revision = request.get("revision")
+        acknowledge_unresolved = request.get("acknowledge_unresolved")
+        if not isinstance(draft_id, str) or not draft_id.strip():
+            raise ValueError("start_search requires a non-empty 'draft_id'")
+        if revision is None:
+            raise ValueError("start_search requires an integer 'revision'")
+        if acknowledge_unresolved is None:
+            raise ValueError("start_search requires 'acknowledge_unresolved'")
+        result = await self._runtime.confirm_and_start(
+            draft_id, int(revision), bool(acknowledge_unresolved)
         )
-        if isinstance(task, dict):
-            task = json.dumps(task, ensure_ascii=False)
-        if not isinstance(task, str) or not task.strip():
-            raise ValueError("start_search requires a non-empty 'task' string")
-        return {"status": await self._runtime.start_task(task)}
+        if hasattr(result, "model_dump"):
+            return result.model_dump(mode="json")
+        if isinstance(result, dict):
+            return result
+        return {"draft_id": draft_id, "result": result}
 
     @staticmethod
     def _clarification_response(result: object) -> dict[str, Any]:
@@ -154,9 +107,14 @@ class GuiService:
         """Run the VALIDATE phase and return the resulting runtime status."""
         return {"status": await self._runtime.start_validation()}
 
-    async def generate_report(self) -> dict[str, Any]:
+    def generate_report(self) -> dict[str, Any]:
         """Produce a deterministic Markdown research report from the tree."""
-        return {"status": "ok", "report": _build_report(self._runtime)}
+        report = build_final_report(
+            self._runtime.tree,
+            self._runtime.state.validation,
+            validation_skipped=self._runtime.state.validation_skipped is True,
+        )
+        return {"status": "ok", "report": report}
 
     # ── 状态与树 ──────────────────────────────────────────────────────────
 
@@ -248,10 +206,12 @@ class GuiService:
     # ── LLM I/O 轨迹 ─────────────────────────────────────────────────────
 
     def traces_list(self) -> dict[str, Any]:
-        return {"traces": traces.list_traces(self._rollout_dir)}
+        rollout_dir = self._runtime.tree_path.parent / "logs" / "agents"
+        return {"traces": traces.list_traces(rollout_dir)}
 
     def trace_get(self, agent_id: str) -> dict[str, Any]:
-        return traces.read_trace(self._rollout_dir, agent_id)
+        rollout_dir = self._runtime.tree_path.parent / "logs" / "agents"
+        return traces.read_trace(rollout_dir, agent_id)
 
     # ── 实验管理 ──────────────────────────────────────────────────────────
 
@@ -330,16 +290,3 @@ def _embed_images(markdown: str, figures: list[dict[str, Any]]) -> str:
             markdown,
         )
     return markdown
-
-
-def _build_report(runtime: ResearchRuntime) -> str:
-    """Render the research tree as a Markdown report.
-
-    Reuses the Supervisor's shared report builder so ``generate_report`` and the
-    auto-generated VALIDATE report are byte-identical for the same tree/result.
-    """
-    return build_final_report(
-        runtime.tree,
-        runtime.state.validation,
-        validation_skipped=runtime.state.validation_skipped is True,
-    )

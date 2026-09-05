@@ -331,7 +331,7 @@ async def test_all_phases_share_one_durable_state(tmp_path: Path) -> None:
     for relative, digest in latest["files"].items():
         content = (exp_docs / relative).read_bytes()
         assert hashlib.sha256(content).hexdigest() == digest
-    gui_report = await GuiService(runtime).generate_report()
+    gui_report = GuiService(runtime).generate_report()
     assert gui_report["status"] == "ok"
     assert (
         gui_report["report"].encode("utf-8")
@@ -459,7 +459,7 @@ async def test_completed_skip_report_uses_durable_marker_after_live_preference_c
     )
     try:
         assert reopened.state.validation_skipped is True
-        report = (await GuiService(reopened).generate_report())["report"]
+        report = GuiService(reopened).generate_report()["report"]
         assert "VALIDATE \u5df2\u8df3\u8fc7" in report
         assert "final_test_score" not in report
         assert "generalization_gap" not in report

@@ -279,6 +279,14 @@ Replace the duplicated `ALGORITHMS` metadata list and `_HANDLERS` name map with 
 
 The GUI unit and complete gateway-handler selection passed 58 tests, including new single-snapshot, parameterless-dispatch, and cycle-path regressions. Python compilation, Black, blocking Ruff checks, removed-structure searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the graph row advances reviewed baseline coverage to 227/602; the new regression file is tracked separately below. Whole-repository acceptance remains pending.
 
+## GUI service review
+
+Read `service.py` completely and traced all control, clarification, state/tree, EDA, graph, settings, trace, experiment, and report routes through the gateway and direct integration callers. Retain one service composition root: folding these JSON projections into the already-large gateway handler would couple runtime policy to transport/session switching, while the graph, experiment, and trace modules remain cohesive pure helpers.
+
+Delete the unread broker dependency and cached rollout path so `GuiService` construction falls from two inputs to one and retained instance state falls from three attributes to one. Derive the trace directory from the runtime only where needed. Replace the four-parameter `start_search` compatibility surface and raw-task/config fallback with the one request mapping actually sent by both WebSocket and native Tauri clients; the confirmation draft, revision, and unresolved-acknowledgement protocol is unchanged. Make the read-only `ping` and deterministic report operations synchronous, matching the module's stated read-method contract, and update the gateway/direct callers. Remove the unused logger, the one-call report wrapper, and the defensive lookup for a method guaranteed by `ResearchRuntime`. Service production code falls by fifty-three net lines.
+
+The complete gateway-handler, GUI unit, continue/resume, durable-report, and skipped-validation report selection passed 78 tests after final formatting. Python compilation, Black, blocking Ruff, removed-interface searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the service row advances reviewed baseline coverage to 228/602. The already-reviewed handler and integration test rows receive only necessary caller migration and do not increase coverage. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -757,7 +765,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `test/unit/gui/test_experiments.py` | New | Reviewed; ordering, filtering, SOTA and one-snapshot regression |
 | `src/athena/gui/graph.py` | 309 | Reviewed; one algorithm registry, snapshot projection and deque traversals |
 | `test/unit/gui/test_graph.py` | New | Reviewed; snapshot, dispatch and cycle-path regressions |
-| `src/athena/gui/service.py` | 345 | Pending |
+| `src/athena/gui/service.py` | 345 | Reviewed; one runtime attribute, one confirmation request, synchronous reads and no legacy task path |
 | `src/athena/gui/traces.py` | 122 | Pending |
 | `src/athena/kaggle/__init__.py` | 59 | Pending |
 | `src/athena/kaggle/auth.py` | 72 | Pending |

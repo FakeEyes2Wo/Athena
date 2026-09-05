@@ -11,9 +11,9 @@ import logging
 import os
 import shutil
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
 
 from athena.core.human_request import (
     ChoiceReply,
@@ -210,7 +210,7 @@ class GuiRequestHandler:
         self._make_runtime = make_runtime
         self._broker = broker or HumanRequestBroker()
         self._state_store = state_store or GuiStateStore()
-        self._service = GuiService(runtime, broker=self._broker)
+        self._service = GuiService(runtime)
         self._project_root = Path(runtime.settings().get("project_root") or ".")
         self._current_session_id = "default"
 
@@ -244,7 +244,7 @@ class GuiRequestHandler:
         await self._suspend_runtime()
         await self._runtime.aclose()
         self._runtime = new_runtime
-        self._service = GuiService(self._runtime, broker=self._broker)
+        self._service = GuiService(self._runtime)
         await self._resume_running_session()
 
     async def _suspend_runtime(self) -> None:
@@ -456,14 +456,14 @@ class GuiRequestHandler:
                     None,
                     stored.skip_validate_for(self._project_root),
                 )
-                self._service = GuiService(self._runtime, broker=self._broker)
+                self._service = GuiService(self._runtime)
         self._current_session_id = "default"
 
     async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, object]:
         """Dispatch one canonical GUI RPC method to its service/handler implementation."""
         service = self._service
         if method == "ping":
-            return await service.ping()
+            return service.ping()
         if method == "start":
             return await service.start()
         if method == "start_task":
@@ -477,7 +477,7 @@ class GuiRequestHandler:
         if method == "start_validation":
             return await service.start_validation()
         if method == "generate_report":
-            return await service.generate_report()
+            return service.generate_report()
 
         if method == "state_get":
             return service.state_get()
