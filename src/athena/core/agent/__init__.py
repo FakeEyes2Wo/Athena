@@ -22,7 +22,6 @@ from athena.core.agent.runtime import (
     BaseAgent,
     agent_runner,
     create_agent,
-    create_code_agent,
 )
 from athena.core.agent.tools import RequestUserInputTool
 from athena.core.agent.agent_runtime import AgentRuntime
@@ -46,6 +45,5 @@ __all__ = [
     "ToolCall",
     "agent_runner",
     "create_agent",
-    "create_code_agent",
     "create_provider",
 ]

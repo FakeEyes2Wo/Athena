@@ -20,7 +20,7 @@ from athena.research.idea_generation.prompts import (
     REVIEW_STATISTICS_SYSTEM_PROMPT,
     SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE,
 )
-from athena.research.idea_generation.structured_chat import single_turn_structured_chat
+from athena.core.agent.chat import single_turn_structured_chat
 
 
 @dataclass(frozen=True)

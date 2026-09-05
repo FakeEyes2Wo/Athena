@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai.messages import ModelResponse, TextPart
 
+from athena.core.agent.models import AgentConfig
+from athena.core.artifact_store import LocalArtifactStore, digest_ref
 from athena.core.tool import ToolRegistry, tool
 from athena.memory.context_manager import ContextManager
-from athena.utils.single_turn_chat import single_turn_chat
+from athena.core.agent.chat import single_turn_chat, single_turn_structured_chat
 
 
 @dataclass(frozen=True)
@@ -187,16 +190,52 @@ async def test_executes_tools_and_forwards_events():
     [
         ({"prompt": "", "model": "model"}, "prompt"),
         ({"prompt": "question", "model": ""}, "model"),
-        ({"prompt": "question", "model": "model", "max_turns": 0}, "max_turns"),
-        ({"prompt": "question", "model": "model", "max_turns": True}, "max_turns"),
-        ({"prompt": "question", "model": "model", "max_tokens": 0}, "max_tokens"),
-        ({"prompt": "question", "model": "model", "max_tokens": True}, "max_tokens"),
         (
-            {"prompt": "question", "model": "model", "temperature": 2.1},
+            {
+                "prompt": "question",
+                "model": "model",
+                "config": AgentConfig(max_turns=0),
+            },
+            "max_turns",
+        ),
+        (
+            {
+                "prompt": "question",
+                "model": "model",
+                "config": AgentConfig(max_turns=True),
+            },
+            "max_turns",
+        ),
+        (
+            {
+                "prompt": "question",
+                "model": "model",
+                "config": AgentConfig(max_tokens=0),
+            },
+            "max_tokens",
+        ),
+        (
+            {
+                "prompt": "question",
+                "model": "model",
+                "config": AgentConfig(max_tokens=True),
+            },
+            "max_tokens",
+        ),
+        (
+            {
+                "prompt": "question",
+                "model": "model",
+                "config": AgentConfig(temperature=2.1),
+            },
             "temperature",
         ),
         (
-            {"prompt": "question", "model": "model", "temperature": True},
+            {
+                "prompt": "question",
+                "model": "model",
+                "config": AgentConfig(temperature=True),
+            },
             "temperature",
         ),
     ],
@@ -241,3 +280,60 @@ async def test_task_cancellation_propagates():
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_chat_defaults_resolve_settings_but_preserve_chat_temperature(
+    monkeypatch,
+):
+    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.8")
+    monkeypatch.setenv("LLM_SEED", "73")
+    client = ScriptedClient(["answer"])
+
+    await single_turn_chat("question", model="model", client=client)
+
+    request = client.requests[0]
+    assert request["max_tokens"] == 16384
+    assert request["temperature"] == 0.1
+    assert request["seed"] == 73
+
+
+async def test_explicit_chat_config_overrides_settings_and_can_omit_seed(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.8")
+    monkeypatch.setenv("LLM_SEED", "73")
+    client = ScriptedClient(["answer"])
+    config = AgentConfig(max_turns=2, max_tokens=512, temperature=0.6, seed=None)
+
+    await single_turn_chat("question", model="model", client=client, config=config)
+
+    request = client.requests[0]
+    assert request["max_tokens"] == 512
+    assert request["temperature"] == 0.6
+    assert "seed" not in request
+
+
+async def test_structured_chat_retries_invalid_json_and_persists_valid_output(tmp_path):
+    class Answer(BaseModel):
+        value: int
+
+    store = LocalArtifactStore(tmp_path / "artifacts")
+    client = ScriptedClient(['{"value":"invalid"}', '{"value":7}'])
+
+    result = await single_turn_structured_chat(
+        "artifact://literal-question",
+        Answer,
+        model="model",
+        client=client,
+        artifacts=store,
+    )
+
+    assert result == Answer(value=7)
+    assert client.requests[0]["messages"][0] == {
+        "role": "user",
+        "content": "artifact://literal-question",
+    }
+    assert "Return a JSON object" in client.requests[0]["messages"][1]["content"]
+    assert len(client.requests) == 2
+    serialized = result.model_dump_json()
+    assert await store.get_text(digest_ref(serialized.encode())) == serialized

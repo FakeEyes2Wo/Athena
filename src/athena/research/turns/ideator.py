@@ -21,6 +21,7 @@ from athena.agents.ideator_agent import (
     IdeatorProfile,
     register_ideator_agent,
 )
+from athena.core.agent.chat import single_turn_structured_chat
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.research.clarification.context import confirmed_task_context_block
@@ -459,9 +460,6 @@ class IdeatorTurnMixin:
         there is no pipeline-local ranking either.
         """
         from athena.agents.ideator import Ideator  # 延迟导入避免循环依赖
-        from athena.research.idea_generation.structured_chat import (  # 延迟导入避免循环依赖
-            single_turn_structured_chat,
-        )
 
         rt = self._runtime
         corpus_ref = rt.survey_corpus_ref()

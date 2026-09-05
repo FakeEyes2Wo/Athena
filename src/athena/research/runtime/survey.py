@@ -17,7 +17,7 @@ from athena.research.literature.survey import (
     build_survey_stack,
     run_survey as run_survey_pipeline,
 )
-from athena.utils.single_turn_chat import single_turn_chat
+from athena.core.agent.chat import single_turn_chat
 
 logger = logging.getLogger(__name__)
 

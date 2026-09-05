@@ -32,7 +32,6 @@ def test_supported_public_surfaces_remain_available() -> None:
         "ToolCall",
         "agent_runner",
         "create_agent",
-        "create_code_agent",
     }
     assert core_names <= set(core.__all__)
     assert agent_names <= set(agent.__all__)

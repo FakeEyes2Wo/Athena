@@ -39,7 +39,7 @@ from athena.research.supervisor.validation_contracts import (
     ValidationInput,
     ValidationOptions,
 )
-from athena.utils.single_turn_chat import single_turn_chat
+from athena.core.agent.chat import single_turn_chat
 
 if TYPE_CHECKING:
     from athena.research.runtime import ResearchRuntime
@@ -333,6 +333,5 @@ class PhaseRunner:
                 "features, preprocessing, training, or final-label access. Return "
                 'JSON only: {"accepted":true|false,"reason":"..."}.'
             ),
-            max_turns=200,
         )
         return ValidationDiffReview.model_validate_json(answer)

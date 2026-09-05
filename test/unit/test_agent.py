@@ -34,7 +34,6 @@ from athena.core.agent.runtime import (
     BaseAgent,
     agent_runner,
     create_agent,
-    create_code_agent,
 )
 from athena.core.agent.tools import RequestUserInputTool
 from athena.core.thread_models import AthenaThread, AthenaTurn
@@ -59,7 +58,6 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert agent_api.ToolCall is ToolCall
     assert agent_api.agent_runner is agent_runner
     assert agent_api.create_agent is create_agent
-    assert agent_api.create_code_agent is create_code_agent
 
     assert agent_api.create_provider is create_provider
     assert agent_api.OpenAIProvider is OpenAIProvider
@@ -77,11 +75,12 @@ def test_public_agent_exports_point_to_canonical_owners() -> None:
     assert core_api.create_agent is create_agent
 
 
-def test_code_agent_interface_has_four_parameters_and_six_fields() -> None:
-    assert list(signature(create_code_agent).parameters) == [
+def test_agent_factory_accepts_one_configuration_object() -> None:
+    assert list(signature(create_agent).parameters) == [
         "model",
         "tools",
         "system_prompt",
+        "client",
         "config",
     ]
     assert [field.name for field in fields(AgentConfig)] == [
@@ -104,7 +103,7 @@ def test_model_combines_name_and_client() -> None:
 def test_environment_builds_three_independent_core_agents() -> None:
     model = ResponsesProvider("test-model", client=object())
     agents = [
-        create_code_agent(
+        Agent(
             model,
             ToolRegistry(),
             f"{name} prompt",
@@ -190,9 +189,17 @@ class TestBaseAgent:
             tools=ToolRegistry(),
             system_prompt="s",
             client=object(),
-            max_tokens=512,
+            config=AgentConfig(max_tokens=512),
         )
         assert agent.config.max_tokens == 512
+
+    def test_create_agent_preserves_the_supplied_configuration(self):
+        config = AgentConfig(name="custom", temperature=0.4, seed=None)
+        agent = create_agent(
+            "model", ToolRegistry(), "", client=object(), config=config
+        )
+        assert agent.config is config
+        assert agent.name == "custom"
 
     def test_run_receives_context(self):
         agent = _SpyAgent()

@@ -98,6 +98,8 @@ class SupportVerificationTest(unittest.IsolatedAsyncioTestCase):
         runner = AgentTurnRunner(runtime)
 
         async def fake_chat(prompt, *, model, client=None, **kwargs):
+            assert kwargs["config"].max_tokens == 200
+            assert kwargs["config"].temperature == 0.1
             runtime.prompts.append(prompt)
             for paper_id, reply in runtime._verdicts.items():
                 if f"`{paper_id}`" in prompt:

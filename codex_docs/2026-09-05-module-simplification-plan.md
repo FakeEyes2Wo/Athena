@@ -34,7 +34,13 @@ Agent sampling runtime: read the complete module and traced private helper calle
 
 Sampling verification: focused Agent/truncation/single-turn baseline and post-change checks both returned 70 passed. Added a five-tool parallel/serial/parallel regression that checks result-to-call alignment and uses events to prove parallelism. Agent, AgentRuntime, app-server, and single-turn suites then returned 356 passed and 25 subtests. Coverage now includes 13 reviewed baseline files; this is not full application acceptance.
 
-Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, `__init__.py`, `agents/prompt_agent.py`, and `core/tool.py` have been read. AgentOutcome.next_context_ref still has active ThreadRuntime consumers: remove only alongside a complete context handoff migration, not as a dead field. `agent_runtime.py` and `supervisor_agent.py` are partially inspected, not completed reviews. `utils/single_turn_chat.py` forwards model configuration through an eleven-parameter convenience API; production consumers located in turns/support.py, runtime/survey.py, and runtime/phase_runner.py still require full caller inspection before changing it. Remote execution's `mirror.py`, `mirrored.py`, and `backend.py` have been read; mirror transfer policies and the backend output-return contract require tracing through the pool/channel before deciding how to consolidate them.
+Agent construction and one-turn calls: replace five primitive factory configuration keywords with the existing AgentConfig (create_agent: 9 parameters to 5). Remove create_code_agent, a pure constructor forwarding function with no independent production consumers. Known-provider callers construct Agent directly. Single-turn text calls accept the same config object instead of three sampling keywords (11 parameters to 9); citation support explicitly preserves its 200-token limit and 0.1 temperature. Explicit config is not copied or rebuilt; settings defaults and seed=None remain expressible.
+
+Merged text and structured chat into core/agent/chat.py. Deleted utils/__init__.py, utils/single_turn_chat.py, and research/idea_generation/structured_chat.py, without compatibility shims. Both call modes share context construction while retaining their identity namespaces, literal prompt handling, tools, and separate default sampling policies. Structured results still pass Agent's validation/retry and artifact persistence before return. Migrated every tracked production/test import and public-export expectation; historical design documents remain historical.
+
+Construction/chat verification: original focused Agent/chat/citation baseline returned 79 passed. Final combined Agent, single-turn chat, citation support, runtime survey, idea-generation, public API, AgentRuntime, and app-server suites returned 432 passed and 25 subtests. Added configuration identity, environment defaults, explicit overrides including absent seed, and real structured retry/artifact round-trip coverage. One earlier combined run hit an unrelated 0.1-second message-processor timeout; the affected suites reran with 34 passed, then the complete combined selection passed without modifying that test. Reviewed baseline coverage is now 17/391, plus the newly introduced chat module. Full-application acceptance, main merge/push, and task branch/worktree cleanup remain open until the whole scope is verified.
+
+Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, `agents/prompt_agent.py`, and `core/tool.py` have been read. AgentOutcome.next_context_ref still has active ThreadRuntime consumers: remove only alongside a complete context handoff migration, not as a dead field. `agent_runtime.py` and `supervisor_agent.py` are partially inspected, not completed reviews. turns/support.py, runtime/survey.py, idea_generation/pre_gate_checks.py and review_board.py have been read while migrating chat consumers; their broader module decisions remain pending. runtime/phase_runner.py and turns/ideator.py were inspected only around affected call sites. Remote execution's `mirror.py`, `mirrored.py`, and `backend.py` have been read; mirror transfer policies and the backend output-return contract require tracing through the pool/channel before deciding how to consolidate them.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -199,7 +205,8 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `src/athena/app_server/transport.py` | 138 | Pending |
 | `src/athena/cli.py` | 1125 | Pending |
 | `src/athena/core/__init__.py` | 35 | Pending |
-| `src/athena/core/agent/__init__.py` | 51 | Pending |
+| `src/athena/core/agent/__init__.py` | 51 | Reviewed; retain canonical exports, remove constructor alias; public API tests pass |
+| `src/athena/core/agent/chat.py` | New | Reviewed; merged text/structured call context; 432 combined tests pass |
 | `src/athena/core/agent/agent_runtime.py` | 730 | Pending |
 | `src/athena/core/agent/models.py` | 83 | Pending |
 | `src/athena/core/agent/provider.py` | 599 | Pending |
@@ -289,7 +296,7 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `src/athena/research/idea_generation/pre_gate_checks.py` | 112 | Pending |
 | `src/athena/research/idea_generation/prompts.py` | 59 | Pending |
 | `src/athena/research/idea_generation/review_board.py` | 134 | Pending |
-| `src/athena/research/idea_generation/structured_chat.py` | 83 | Pending |
+| `src/athena/research/idea_generation/structured_chat.py` | 83 | Reviewed; merged into core/agent/chat.py and deleted; schema retry/artifact test passes |
 | `src/athena/research/idea_generation/validation.py` | 99 | Pending |
 | `src/athena/research/literature/__init__.py` | 1 | Pending |
 | `src/athena/research/literature/bench/__init__.py` | 72 | Pending |
@@ -414,8 +421,8 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `src/athena/serving/http_api.py` | 152 | Reviewed; merged into predictions_api and deleted |
 | `src/athena/serving/model.py` | 305 | Reviewed; retain isolated model contract |
 | `src/athena/serving/predictions_api.py` | 39 | Reviewed; owns HTTP implementation and CLI; 22 tests pass |
-| `src/athena/utils/__init__.py` | 5 | Pending |
-| `src/athena/utils/single_turn_chat.py` | 135 | Pending |
+| `src/athena/utils/__init__.py` | 5 | Reviewed; delete one-function package shim; all consumers migrated |
+| `src/athena/utils/single_turn_chat.py` | 135 | Reviewed; merge into core/agent/chat.py; reduce sampling arguments to AgentConfig |
 | `src/athena_tui/__init__.py` | 8 | Pending |
 | `src/athena_tui/__main__.py` | 6 | Pending |
 | `src/athena_tui/app.py` | 668 | Pending |

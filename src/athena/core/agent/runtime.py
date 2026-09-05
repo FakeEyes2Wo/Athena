@@ -561,41 +561,11 @@ def create_agent(
     system_prompt: str,
     *,
     client: "AsyncOpenAI | None" = None,
-    max_turns: int = 200,
-    max_tokens: int | None = None,
-    temperature: float | None = None,
-    name: str = "agent",
-    seed: int | None = None,
-) -> Agent:
-    """创建 Agent 实例的便捷工厂函数。
-
-    将分散的配置参数统一构造为 AgentConfig 和 Agent 对象。``max_tokens``/
-    ``temperature``/``seed`` 留空时交给 ``AgentConfig`` 从 settings 解析，避免
-    这里的字面量默认值把 ``LLM_MAX_TOKENS`` / ``LLM_TEMPERATURE`` / ``LLM_SEED``
-    悄悄覆盖掉。``max_tokens`` 一度漏在这个保护之外：dataclass 默认值改成从
-    settings 取之后，这里仍写死 4096，于是经本函数构造的 Agent 全都还是 4096，
-    config.toml 配了也不生效。
-    """
-    provider = create_provider(model, client=client)
-    overrides: dict[str, object] = {}
-    if max_tokens is not None:
-        overrides["max_tokens"] = max_tokens
-    if temperature is not None:
-        overrides["temperature"] = temperature
-    if seed is not None:
-        overrides["seed"] = seed
-    config = AgentConfig(max_turns, name=name, **overrides)
-    return create_code_agent(provider, tools, system_prompt, config)
-
-
-def create_code_agent(
-    model: BaseProvider,
-    tools: ToolRegistry,
-    system_prompt: str,
     config: AgentConfig | None = None,
 ) -> Agent:
-    """构造代码 agent（Agent 别名，供组合根使用）。"""
-    return Agent(model, tools, system_prompt, config)
+    """由模型名构造 Agent；采样设置由 AgentConfig 统一解析和传递。"""
+    provider = create_provider(model, client=client)
+    return Agent(provider, tools, system_prompt, config or AgentConfig(name="agent"))
 
 
 def _load_input(ctx: AgentContext) -> str:

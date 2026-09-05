@@ -322,7 +322,7 @@ async def test_debate_ideation_receives_corpus_instruction_and_read_only_tools(
         return SimpleNamespace()
 
     monkeypatch.setattr(
-        "athena.research.idea_generation.structured_chat.single_turn_structured_chat",
+        "athena.research.turns.ideator.single_turn_structured_chat",
         fake_single_turn,
     )
 

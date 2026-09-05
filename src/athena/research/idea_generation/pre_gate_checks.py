@@ -14,7 +14,7 @@ from athena.research.idea_generation.idea_schemas import (
     HypothesisPackage,
     StructuralCheckReport,
 )
-from athena.research.idea_generation.structured_chat import single_turn_structured_chat
+from athena.core.agent.chat import single_turn_structured_chat
 
 
 def structural_check(package: HypothesisPackage) -> StructuralCheckReport:

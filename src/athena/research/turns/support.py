@@ -7,6 +7,7 @@ support the claim?) in one focused module instead of bloating the runner.
 import asyncio
 from typing import Any
 
+from athena.core.agent.models import AgentConfig
 from athena.core.research_models import Hypothesis
 from athena.research.idea_generation.citation_support import (
     SUPPORT_PROMPT,
@@ -14,7 +15,7 @@ from athena.research.idea_generation.citation_support import (
     format_evidence,
     parse_verdict,
 )
-from athena.utils.single_turn_chat import single_turn_chat
+from athena.core.agent.chat import single_turn_chat
 
 
 class SupportVerificationMixin:
@@ -121,6 +122,11 @@ class SupportVerificationMixin:
             evidence=format_evidence(passages),
         )
         content = await single_turn_chat(
-            prompt, model=rt.model, client=rt.client, max_tokens=200
+            prompt,
+            model=rt.model,
+            client=rt.client,
+            config=AgentConfig(
+                name="single-turn-chat", max_tokens=200, temperature=0.1
+            ),
         )
         return parse_verdict(paper_id, content)
