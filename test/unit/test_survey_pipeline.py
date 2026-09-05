@@ -42,13 +42,16 @@ from athena.research.literature.paper_source.schemas import (
     PaperSourceResult,
     PaperSourceStats,
 )
-from athena.research.literature.survey import stages as pipeline_module
+from athena.research.literature.survey import pipeline as pipeline_module
 from athena.research.literature.survey.library import PaperLibrary
 from athena.research.literature.survey.pipeline import (
     SHRED_MIN_SENTENCES,
     PaperOutcome,
+    ScoutStage,
     SurveyPipeline,
     SurveyRequest,
+    SurveyRuntime,
+    judge_shredded,
 )
 from athena.research.literature.survey.wiring import SurveyStack
 
@@ -350,7 +353,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             GradedRelevanceScorer=mock.MagicMock(),
             build_corpus_index=self.fake_index,
         ):
-            return await SurveyPipeline(self.stack, request, emit=emit).run()
+            return await SurveyPipeline(SurveyRuntime(self.stack, request, emit)).run()
 
     async def test_each_stage_reports_progress_to_a_subscribed_emit(self) -> None:
         events: list[tuple[str, dict]] = []
@@ -609,13 +612,15 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             fetch_status="fetched",
             conversion_status="converted",
         )
-        pipeline = SurveyPipeline(self.stack, SurveyRequest(query="q"))
+        runtime = SurveyRuntime(self.stack, SurveyRequest(query="q"))
 
         units = await content.load_retrieval_units(self.store)
         total = sum(len(split_sentences(unit.text)) for unit in units)
         self.assertLess(total, SHRED_MIN_SENTENCES)
-        self.assertFalse(await pipeline._shredded(content, outcome))
-        self.assertEqual([], pipeline.report.shredded_papers)
+        self.assertFalse(
+            await judge_shredded(content, outcome, self.store, runtime.report)
+        )
+        self.assertEqual([], runtime.report.shredded_papers)
         self.assertFalse(outcome.shredded)
 
     async def test_silent_content_loss_is_flagged_and_never_indexed(self) -> None:
@@ -697,7 +702,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             GradedRelevanceScorer=mock.MagicMock(),
             build_corpus_index=failing_index,
         ):
-            report = await SurveyPipeline(self.stack, request).run()
+            report = await SurveyPipeline(SurveyRuntime(self.stack, request)).run()
 
         self.assertEqual(2, report.converted())
         self.assertIsNone(report.corpus_ref)
@@ -733,7 +738,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             GradedRelevanceScorer=scorer,
             build_corpus_index=self.fake_index,
         ):
-            await SurveyPipeline(self.stack, request).run()
+            await SurveyPipeline(SurveyRuntime(self.stack, request)).run()
 
         self.assertEqual("flash", scorer.call_args.args[1])
 
@@ -752,7 +757,9 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             PaperProcessor=FakeProcessor,
             build_corpus_index=self.fake_index,
         ):
-            await SurveyPipeline(self.stack, SurveyRequest(query="tabular auc")).run()
+            await SurveyPipeline(
+                SurveyRuntime(self.stack, SurveyRequest(query="tabular auc"))
+            ).run()
 
         self.assertIs(self.stack.reranker, FakeScoutAgent.seen_reranker)
 
@@ -767,7 +774,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             build_corpus_index=self.fake_index,
         ):
             report = await SurveyPipeline(
-                self.stack, SurveyRequest(query="tabular auc")
+                SurveyRuntime(self.stack, SurveyRequest(query="tabular auc"))
             ).run()
 
         self.assertIsNone(FakeScoutAgent.seen_reranker)
@@ -790,7 +797,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             build_corpus_index=self.fake_index,
         ):
             report = await SurveyPipeline(
-                self.stack, SurveyRequest(query="tabular auc")
+                SurveyRuntime(self.stack, SurveyRequest(query="tabular auc"))
             ).run()
 
         self.assertEqual(12, report.scout.rerank_calls)
@@ -804,11 +811,11 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
         """
         request = SurveyRequest(query="tabular auc")
         self.stack.reranker = None
-        without = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+        without = ScoutStage(SurveyRuntime(self.stack, request)).cache_key("{}")
         self.stack.reranker = mock.MagicMock(model="gte-rerank-v2")
-        with_rerank = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+        with_rerank = ScoutStage(SurveyRuntime(self.stack, request)).cache_key("{}")
         self.stack.reranker = mock.MagicMock(model="some-other-reranker")
-        other = SurveyPipeline(self.stack, request)._scout_cache_key("{}")
+        other = ScoutStage(SurveyRuntime(self.stack, request)).cache_key("{}")
 
         self.assertNotEqual(without, with_rerank)
         self.assertNotEqual(with_rerank, other)
@@ -824,7 +831,7 @@ class PipelineTest(unittest.IsolatedAsyncioTestCase):
             GradedRelevanceScorer=scorer,
             build_corpus_index=self.fake_index,
         ):
-            await SurveyPipeline(self.stack, request).run()
+            await SurveyPipeline(SurveyRuntime(self.stack, request)).run()
 
         self.assertEqual(self.stack.model, scorer.call_args.args[1])
 
@@ -987,7 +994,7 @@ class LibraryReuseTest(unittest.IsolatedAsyncioTestCase):
             PaperProcessor=CountingProcessor,
             GradedRelevanceScorer=mock.MagicMock(),
         ):
-            return await SurveyPipeline(self.stack, request).run()
+            return await SurveyPipeline(SurveyRuntime(self.stack, request)).run()
 
     async def test_a_second_identical_run_pays_no_conversion_and_no_scout(self) -> None:
         """转换是唯一按篇调多模态模型的一段；检索占 71% 的墙钟。两者都不该重付。"""

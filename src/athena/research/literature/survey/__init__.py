@@ -10,33 +10,22 @@
 """
 
 from athena.research.literature.survey.pipeline import (
-    PaperOutcome,
-    StageTimings,
-    SurveyPipeline,
     SurveyReport,
     SurveyRequest,
     run_survey,
 )
-from athena.research.literature.survey.tool import SURVEY_TOOL_NAME, PaperSurveyTool
 from athena.research.literature.survey.wiring import (
-    OpenAIEmbedder,
+    PaperSurveyTool,
     SurveyStack,
-    VisionInterpreter,
     build_survey_stack,
     build_survey_tools,
 )
 
 __all__ = [
-    "OpenAIEmbedder",
-    "PaperOutcome",
     "PaperSurveyTool",
-    "SURVEY_TOOL_NAME",
-    "StageTimings",
-    "SurveyPipeline",
     "SurveyReport",
     "SurveyRequest",
     "SurveyStack",
-    "VisionInterpreter",
     "build_survey_stack",
     "build_survey_tools",
     "run_survey",

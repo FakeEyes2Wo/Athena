@@ -517,6 +517,14 @@ Introduce `PaperSourceRuntime` as the explicit resource record. `PaperSourceFetc
 
 The unchanged cross-consumer baseline passed 165 tests plus three subtests. Final verification retained the same active selection, including source fetching, Survey, OpenAlex authority verification, Kaggle, and Web Search. Targeted Ruff, Python compilation, removed-module/import searches, and current documentation checks passed; pytest reported only the existing cache-permission warning. Closing all eight baseline rows advances reviewed coverage to 326/602. Work remains directly on `main`, with no temporary task branch or worktree to remove. Whole-repository acceptance remains pending.
 
+## Survey runtime consolidation
+
+Read all eight `survey` Python files completely and traced the request/report schemas, four execution stages, provider adapters, persistent library caches, CLI rendering, composition root, Agent tool, runtime corpus access, and focused tests. Preserve schema 1.0, Scout → Source → Convert → Index ordering, per-stage degradation, four progress events, arXiv shortcuts, cross-run cache keys, conversion concurrency, per-paper visual accounting, quality gates, model-visible tool contracts, and optional-capability degradation.
+
+Merge the four stage implementations into their lifecycle owner `pipeline.py` and merge the single survey Agent tool into its composition owner `wiring.py`; delete `stages.py` and `tool.py` without forwarding modules. Introduce one run-local `SurveyRuntime`, so the pipeline and every stage accept and store one dependency instead of copying stack, request, state, report, and emitter references. Remove the test-only pipeline forwarding methods and the write-only retained-paper state. Keep library, provider, report, and wiring boundaries because they own distinct persistence, external-model, human-rendering, and composition lifecycles. The package falls from eight files and 2,428 physical lines to six files and 2,334 lines.
+
+The unchanged focused baseline and post-change selection both passed 116 survey pipeline, library, wiring, and research-runtime tests. Closing all eight baseline rows advances reviewed coverage to 334/602. Work remains directly on `main`; no temporary task branch or worktree exists to clean up. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1105,14 +1113,14 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/paper_source/payloads.py` | 198 | Reviewed; merged into sole production consumer fetcher.py and deleted |
 | `src/athena/research/literature/paper_source/schemas.py` | 379 | Reviewed; retain persisted request/result and identity contracts |
 | `src/athena/research/literature/paper_source/tool.py` | 91 | Reviewed; Agent adapter merged into fetcher.py and file deleted |
-| `src/athena/research/literature/survey/__init__.py` | 43 | Pending |
-| `src/athena/research/literature/survey/library.py` | 333 | Pending |
-| `src/athena/research/literature/survey/pipeline.py` | 581 | Pending |
-| `src/athena/research/literature/survey/providers.py` | 174 | Pending |
-| `src/athena/research/literature/survey/report.py` | 237 | Pending |
-| `src/athena/research/literature/survey/stages.py` | 591 | Pending |
-| `src/athena/research/literature/survey/tool.py` | 110 | Pending |
-| `src/athena/research/literature/survey/wiring.py` | 344 | Pending |
+| `src/athena/research/literature/survey/__init__.py` | 43 | Reviewed; narrow facade to the six library/composition entrypoints and Agent tool |
+| `src/athena/research/literature/survey/library.py` | 333 | Reviewed; retain persistent paper/vector caches and cross-run reuse boundary |
+| `src/athena/research/literature/survey/pipeline.py` | 581 | Reviewed; absorb stages, introduce one run runtime, and remove test-only forwarders/dead state |
+| `src/athena/research/literature/survey/providers.py` | 174 | Reviewed; retain isolated embedding and vision provider implementations |
+| `src/athena/research/literature/survey/report.py` | 237 | Reviewed; retain CLI report rendering boundary |
+| `src/athena/research/literature/survey/stages.py` | 591 | Reviewed; merged into pipeline.py and deleted |
+| `src/athena/research/literature/survey/tool.py` | 110 | Reviewed; merged into wiring.py and deleted |
+| `src/athena/research/literature/survey/wiring.py` | 344 | Reviewed; composition root now owns the single survey Agent tool |
 | `src/athena/research/output_freshness.py` | 115 | Pending |
 | `src/athena/research/prepare/__init__.py` | 1 | Pending |
 | `src/athena/research/prepare/authority.py` | 171 | Pending |

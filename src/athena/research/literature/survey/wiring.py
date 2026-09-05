@@ -23,7 +23,8 @@ from openai import AsyncOpenAI
 
 from athena.core.agent import settings
 from athena.core.artifact_store import LocalArtifactStore
-from athena.core.tool import ToolRegistry
+from athena.core.tool import StackTool, ToolRegistry
+from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.research.literature.paper_markdown.processor import PaperProcessor
 from athena.research.literature.paper_markdown.tool import PaperMarkdownTool
 from athena.research.literature.paper_rag.search import CorpusCache, RetrievalSession
@@ -54,12 +55,12 @@ from athena.research.literature.paper_source.http import (
     UrllibTransport,
 )
 from athena.research.literature.survey.library import LibraryVectorCache, PaperLibrary
+from athena.research.literature.survey.pipeline import SurveyRequest, run_survey
 from athena.research.literature.survey.providers import (
     EMBED_MAX_RETRIES,  # noqa: F401 - established wiring import surface
     OpenAIEmbedder,
     VisionInterpreter,
 )
-from athena.research.literature.survey.tool import PaperSurveyTool
 
 ARTIFACT_ROOT_ENV = "ATHENA_ARTIFACT_ROOT"
 SURVEY_MODEL_ENV = "ATHENA_SURVEY_MODEL"
@@ -74,6 +75,96 @@ OPENALEX_KEY_ENV = "OPENALEX_API_KEY"
 DEFAULT_ARTIFACT_ROOT = Path.home() / ".athena" / "artifacts"
 GHOSTSCRIPT_ENV = "ATHENA_GHOSTSCRIPT"
 GHOSTSCRIPT_NAMES = ("gs", "gswin64c", "gswin32c", "mgs", "rungs")
+SURVEY_TOOL_NAME = "paper_survey"
+
+
+class PaperSurveyTool(StackTool):
+    """Build one searchable paper corpus from a natural-language topic."""
+
+    spec = ToolSpec(
+        name=SURVEY_TOOL_NAME,
+        description=(
+            "Build a searchable corpus of academic papers on a topic. Retrieves "
+            "candidate papers, fetches their TeX or PDF source, converts them to "
+            "Markdown with figures and tables interpreted, and indexes the result. "
+            "Returns corpus_ref plus per-paper outcomes. Pass corpus_ref to "
+            "paper_keyword_search, paper_semantic_search and paper_chunk_read to "
+            "read the corpus. This runs for several minutes and downloads tens of "
+            "megabytes, so call it once per topic and reuse the corpus_ref."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Natural language survey topic.",
+                },
+                "max_papers": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "default": 10,
+                    "description": (
+                        "Papers carried through to the corpus. Cost grows roughly "
+                        "linearly downstream of retrieval."
+                    ),
+                },
+                "published_to": {
+                    "type": "string",
+                    "description": (
+                        "Inclusive ISO date upper bound, for reproducing a survey as "
+                        "of a past date. Empty means no bound."
+                    ),
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        concurrency_safe=False,
+    )
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        query = input.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string.")
+        report = await run_survey(
+            self.stack,
+            SurveyRequest(
+                query=query,
+                max_papers=_max_papers(input),
+                published_to=str(input.get("published_to") or ""),
+            ),
+        )
+        report_ref = await self.stack.artifacts.put_text(report.model_dump_json())
+        data = {
+            "corpus_ref": report.corpus_ref,
+            "report_ref": report_ref,
+            "status": report.status,
+            "papers_indexed": sum(1 for item in report.papers if item.indexed),
+            "papers_converted": report.converted(),
+            "papers_fetched": report.fetched,
+            "pool_size": report.scout.pool_size,
+            "warnings": report.warnings,
+        }
+        if report.corpus_ref is None:
+            return ToolResult(
+                data=data,
+                success=False,
+                error=(
+                    f"No corpus was built (status={report.status}); "
+                    f"see report_ref {report_ref} for per-paper reasons."
+                ),
+            )
+        return ToolResult(data=data)
+
+
+def _max_papers(input: dict) -> int:
+    """Clamp the unvalidated model input to the tool's documented range."""
+    value = input.get("max_papers")
+    if not isinstance(value, int) or value < 1:
+        return SurveyRequest.model_fields["max_papers"].default
+    return min(value, 50)
 
 
 def resolve_model(explicit: str = "") -> str:

@@ -347,8 +347,6 @@ literature/
     ├── pipeline.py
     ├── providers.py
     ├── report.py
-    ├── stages.py
-    ├── tool.py
     └── wiring.py
 ```
 

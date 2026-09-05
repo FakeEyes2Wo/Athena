@@ -502,7 +502,7 @@ provenance, and deterministic failure causes, and are reused when a run resumes.
 | `paper_markdown/pdf_elements.py` | PDF block、阅读顺序、表格与引用提取 |
 | `paper_source/fetcher.py` | 下载通道、payload 识别、locator 与转换请求构造 |
 | `paper_rag/search.py` | 检索、引用、章节、视觉和 chunk 图遍历 |
-| `survey/stages.py` | Scout/Fetch/Convert/Index 各阶段执行 |
+| `survey/pipeline.py` | Survey 请求、运行时状态与 Scout/Fetch/Convert/Index 各阶段执行 |
 | `survey/providers.py` | embedding 与视觉模型生产实现 |
 
 ## 7. 相关测试
