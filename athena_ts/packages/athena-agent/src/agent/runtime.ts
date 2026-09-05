@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs"
 
-import { isTransientError, type ArtifactStore, type AthenaThread, type AthenaTurn } from "@athena/core"
+import { isTransientError, type ArtifactStore } from "@athena/core"
 
 import { CancelledError } from "./types.js"
 import {
@@ -19,7 +19,7 @@ import {
 } from "../messages.js"
 import { ContextManager } from "../memory/context-manager.js"
 import { BaseTool, ToolRegistry } from "../tool.js"
-import { ToolContext, ToolResult, type AskUser, type EmitEvent } from "../tool-types.js"
+import { ToolContext, ToolResult } from "../tool-types.js"
 import { AgentConfig, AgentContext, AgentOutcome, StepOutcome, ToolCall } from "./models.js"
 import type { StructuredOutputType } from "./models.js"
 import { BaseProvider, createProvider } from "./provider.js"
@@ -303,58 +303,6 @@ async function dispatchToolCall(
 ): Promise<unknown> {
   if (ready !== null) await ready
   return tool.ainvoke(tctx, tc.args)
-}
-
-export type AgentRunnerFn = ((thread: AthenaThread, turn: AthenaTurn, emit: EmitEvent) => Promise<AgentOutcome>) & {
-  runWithContext: (
-    thread: AthenaThread,
-    turn: AthenaTurn,
-    emit: EmitEvent,
-    memory: ContextManager | null,
-    cancel: AbortSignal
-  ) => Promise<AgentOutcome>
-}
-
-/** 将 BaseAgent 适配为两套 Runner 签名，向后兼容 ThreadRuntime。 */
-export function agentRunner(
-  agent: BaseAgent,
-  tools: ToolRegistry,
-  opts: { askUser?: (thread: AthenaThread, turn: AthenaTurn) => AskUser | null } = {}
-): AgentRunnerFn {
-  const bind = (thread: AthenaThread, turn: AthenaTurn): AskUser | null =>
-    opts.askUser ? opts.askUser(thread, turn) : null
-
-  const run = async (
-    thread: AthenaThread,
-    turn: AthenaTurn,
-    emit: EmitEvent
-  ): Promise<AgentOutcome> => {
-    const ctx = new AgentContext(
-      thread,
-      turn,
-      emit,
-      tools,
-      new AbortController().signal,
-      null,
-      null,
-      [],
-      bind(thread, turn)
-    )
-    return agent.run(ctx)
-  }
-
-  const runWithContext = async (
-    thread: AthenaThread,
-    turn: AthenaTurn,
-    emit: EmitEvent,
-    memory: ContextManager | null,
-    cancel: AbortSignal
-  ): Promise<AgentOutcome> => {
-    const ctx = new AgentContext(thread, turn, emit, tools, cancel, memory, null, [], bind(thread, turn))
-    return agent.run(ctx)
-  }
-
-  return Object.assign(run, { runWithContext })
 }
 
 export function createAgent(

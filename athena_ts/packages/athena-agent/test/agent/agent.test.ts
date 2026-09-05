@@ -9,7 +9,6 @@ import { ToolContext, ToolResult, ToolSpec, type AskUser, type EmitEvent } from 
 import {
   Agent,
   BaseAgent,
-  agentRunner,
   createAgent,
   type StructuredOutputType,
 } from "../../src/agent/runtime.js"
@@ -245,12 +244,12 @@ describe("Agent", () => {
       }
     }
     const tools = new ToolRegistry()
-    const runner = agentRunner(new SpyAgent(), tools)
-
-    const outcome = await runner(thread(), turn(), noopEmit)
+    const context = ctx(tools)
+    const outcome = await new SpyAgent().run(context)
     expect(outcome.resultRef).toBe("result://ok")
     expect(outcome.nextContextRef).toBe("context://next")
     expect(calls.length).toBe(1)
+    expect(calls[0]).toBe(context)
     expect(calls[0]!.thread.thread_id).toBe("t1")
     expect(calls[0]!.turn.turn_id).toBe("t1.1")
     expect(calls[0]!.tools).toBe(tools)
@@ -268,8 +267,7 @@ describe("Agent", () => {
     }
     const tools = new ToolRegistry()
     tools.register(new EchoTool())
-    const runner = agentRunner(new ToolUsingAgent(), tools)
-    const outcome = await runner(thread(), turn(), noopEmit)
+    const outcome = await new ToolUsingAgent().run(ctx(tools))
     expect(outcome.resultRef).toBe("hello")
   })
 
@@ -600,7 +598,7 @@ describe("ask_user tool", () => {
     expect(outcome.resultRef).toBe("result://t1.1")
   })
 
-  it("agent_runner binds ask_user factory", async () => {
+  it("accepts an ask_user callback bound to the current context", async () => {
     const bound: Array<[string, string]> = []
     const makeAskUser = (_t: AthenaThread, _u: AthenaTurn): AskUser => {
       return async () => {
@@ -612,8 +610,9 @@ describe("ask_user tool", () => {
     tools.register(new RequestUserInputTool())
     const agent = new Agent(new ResponsesProvider("model", { client: {} as never }), tools, "system")
     agent.model = new AskUserProvider() as never
-    const runner = agentRunner(agent, tools, { askUser: makeAskUser })
-    const outcome = await runner(thread(), turn(), noopEmit)
+    const context = ctx(tools)
+    context.askUser = makeAskUser(context.thread, context.turn)
+    const outcome = await agent.run(context)
     expect(bound).toEqual([["t1", "t1.1"]])
     expect(outcome.resultRef).toBe("result://t1.1")
   })

@@ -16,6 +16,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Resolve TypeScript recovery fixture/state-copy failures and reconcile its workspace lockfile.
 - [x] Simplify TypeScript sampling task storage/dispatch and verify concurrency/result ordering.
 - [x] Consolidate TypeScript Agent factory and single-turn sampling configuration.
+- [x] Remove the unused TypeScript dual-signature Agent runner adapter.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -93,7 +94,11 @@ TypeScript construction/chat review: delete createCodeAgent, a constructor-only 
 
 Construction evidence: Agent plus Worker selection returned 138 passed before and after the initial migration. Four new regressions cover independent factory defaults, configuration identity, default/explicit sampling including zero temperature and required tool choice, and one/two-turn budgets. All five TypeScript package builds passed. The first full suite returned 440 passed and one 5-second timeout in the unchanged Git workspace suite; a full rerun with unchanged timeout and implementation returned 441 passed across 52 files. Removed createCodeAgent references remain only in the negative public API assertion; git diff --check passed. Source/test single-turn reviews bring baseline coverage to 63/602. This is not full application acceptance or evidence of real external LLM transport readiness.
 
-Next module: runtime adapter review remains Pending. The tracked TypeScript search finds runWithContext only in its declaration and implementation, so its extra callable-property API requires removal/consolidation assessment. Worker source is read but its broader structured-output/context construction decision also remains Pending. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+TypeScript adapter review: the complete runtime was reread and all tracked caller references traced. Neither agentRunner nor its callable-property runWithContext API has a production consumer; delete the entire adapter, AgentRunnerFn type and factory-binding closure instead of preserving an unused compatibility signature. Production callers already use Agent.run(context). Migrate all three adapter tests to direct context calls, retaining context identity, tool invocation and bound askUser behavior assertions; the public API test now rejects the removed export. Runtime shrinks from 404 to 352 lines. Retain the runtime module as the owner of streaming, serial/parallel tools, retry and structured-output persistence. This completes its baseline review, bringing coverage to 64/602, not whole-application acceptance.
+
+Adapter evidence: the pre-change Agent/Worker selection returned 142 passed. All five package builds passed after removal. The default full suite returned 440 passed and one 5-second timeout in the unchanged real-Git workspace test. A fresh full run with the command-only override `npm test -- --testTimeout=30000` returned 441 passed across 52 files; no test configuration or timeout was committed. This verifies functional assertions, not default-timeout reliability. Removed adapter references remain only in the negative public API assertion; git diff --check passed.
+
+Next module: agent/models.ts has been fully read. nextContextRef appears only in its declaration and one test assertion, and AgentContext.messages has no runtime reads in the Agent/research source search; confirm all construction and external consumers before removing these fields. Worker source is read but its broader structured-output/context construction decision also remains Pending. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -558,7 +563,7 @@ Next module: runtime adapter review remains Pending. The tracked TypeScript sear
 | `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Reviewed; absorb settings; remove provider subclasses and abstract runtime base; preserve stream/schema/DSML behavior; 435 tests pass |
 | `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
-| `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Pending; sampling and factory configuration verified; adapter review remains open |
+| `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Reviewed; simplified sampling/configuration and deleted unused dual-signature runner |
 | `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Reviewed; remove MemoryView and forwarding getter; retain checkpoint semantics |
 | `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Reviewed; move live contracts/configuration to provider.ts; delete unused exports and file; preserve deferred SDK limitation |
 | `athena_ts/packages/athena-agent/src/agent/tools/user-input.ts` | 32 | Pending |

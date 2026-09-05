@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import * as api from "../src/index.js"
-import { Agent, BaseAgent, agentRunner, createAgent } from "../src/agent/runtime.js"
+import { Agent, BaseAgent, createAgent } from "../src/agent/runtime.js"
 import {
   AgentConfig,
   AgentContext,
@@ -17,7 +17,7 @@ import {
 describe("public surface", () => {
   it("does not export removed provider wrappers or unused settings", () => {
     for (const name of ["BaseProvider", "OpenAIProvider", "DeepSeekProvider", "AnthropicProvider",
-      "apiKey", "baseUrl", "modelName", "proModelName", "getClient", "providerKind", "createCodeAgent"]) {
+      "apiKey", "baseUrl", "modelName", "proModelName", "getClient", "providerKind", "createCodeAgent", "agentRunner"]) {
       expect(api).not.toHaveProperty(name)
     }
   })
@@ -50,7 +50,6 @@ describe("public surface", () => {
       "StepOutcome",
       "StreamEvent",
       "ToolCall",
-      "agentRunner",
       "createAgent",
       "createProvider",
       "RequestUserInputTool",
@@ -73,7 +72,6 @@ describe("public surface", () => {
     expect(api.StepOutcome).toBe(StepOutcome)
     expect(api.StreamEvent).toBe(StreamEvent)
     expect(api.ToolCall).toBe(ToolCall)
-    expect(api.agentRunner).toBe(agentRunner)
     expect(api.createAgent).toBe(createAgent)
     expect(api.createProvider).toBe(createProvider)
   })
