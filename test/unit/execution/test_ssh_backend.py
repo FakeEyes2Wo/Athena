@@ -10,16 +10,16 @@
 
 import asyncio
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from athena.core.artifact_store import LocalArtifactStore
 from athena.execution import ExecutionBackend
 from athena.execution.remote import (
-    RemoteChannel,
     MirroredBackend,
+    RemoteChannel,
     SshBackend,
     SshHost,
     WorkspaceMirror,
@@ -203,7 +203,7 @@ async def test_a_command_runs_remotely_and_reports_its_exit_code(backend) -> Non
     result = await backend.run(
         workspace_root=Path(backend.remote_workspace),
         request=CommandRequest(
-            argv=[sys.executable, "-c", "import sys; print('hello'); sys.exit(0)"],
+            command=[sys.executable, "-c", "import sys; print('hello'); sys.exit(0)"],
             workdir=Path(backend.remote_workspace),
             timeout_s=60,
         ),
@@ -219,7 +219,7 @@ async def test_a_failing_command_is_a_normal_result_not_an_exception(backend) ->
     result = await backend.run(
         workspace_root=Path(backend.remote_workspace),
         request=CommandRequest(
-            argv=[
+            command=[
                 sys.executable,
                 "-c",
                 "import sys; sys.stderr.write('boom'); sys.exit(7)",
@@ -239,7 +239,7 @@ async def test_the_experiment_env_reaches_the_remote_process(backend) -> None:
     result = await backend.run(
         workspace_root=Path(backend.remote_workspace),
         request=CommandRequest(
-            argv=[
+            command=[
                 sys.executable,
                 "-c",
                 "import os; print(os.environ['ATHENA_DATA_ROOT']); "
@@ -262,7 +262,7 @@ async def test_a_timeout_kills_the_remote_process_group(backend, tmp_path) -> No
     result = await backend.run(
         workspace_root=Path(backend.remote_workspace),
         request=CommandRequest(
-            argv=[
+            command=[
                 sys.executable,
                 "-c",
                 "import pathlib, sys, time; "
@@ -292,7 +292,7 @@ async def test_output_is_emitted_as_events_while_the_command_runs(backend) -> No
     result = await backend.run(
         workspace_root=Path(backend.remote_workspace),
         request=CommandRequest(
-            argv=[sys.executable, "-c", "print('progress 1'); print('progress 2')"],
+            command=[sys.executable, "-c", "print('progress 1'); print('progress 2')"],
             workdir=Path(backend.remote_workspace),
             timeout_s=60,
             emit=emit,
@@ -336,7 +336,7 @@ async def test_a_long_remote_log_keeps_its_tail_and_its_full_copy(
         result = await backend.run(
             workspace_root=workspace,
             request=CommandRequest(
-                argv=[
+                command=[
                     sys.executable,
                     "-c",
                     "print('HEAD-MARK'); print('n' * 5000); print('TAIL-MARK')",
@@ -374,7 +374,7 @@ async def test_each_run_maps_workdir_from_its_workspace_root(tmp_path) -> None:
         result = await backend.run(
             workspace_root=tmp_path,
             request=CommandRequest(
-                argv=[sys.executable, "-c", "print('ok')"],
+                command=[sys.executable, "-c", "print('ok')"],
                 workdir=tmp_path / "somewhere-else",
                 timeout_s=30,
             ),

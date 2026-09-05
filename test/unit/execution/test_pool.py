@@ -261,7 +261,7 @@ async def test_releasing_a_lease_takes_its_remote_workspace_with_it(
     result = await lease.backend.run(
         workspace_root=workspace,
         request=CommandRequest(
-            argv=[sys.executable, "-c", "pass"],
+            command=[sys.executable, "-c", "pass"],
             workdir=workspace,
             timeout_s=60,
         ),
@@ -292,7 +292,7 @@ async def test_a_lease_can_actually_run_a_command_in_its_workspace(
         result = await lease.backend.run(
             workspace_root=workspace,
             request=CommandRequest(
-                argv=[sys.executable, "hello.py"],
+                command=[sys.executable, "hello.py"],
                 workdir=workspace,
                 timeout_s=60,
             ),

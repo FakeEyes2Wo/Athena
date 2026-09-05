@@ -53,7 +53,6 @@ class _FakeBackend:
             {
                 "op": "run",
                 "command": request.command,
-                "argv": request.argv,
                 "workspace_root": workspace_root,
                 "workdir": (
                     Path(request.workdir)
@@ -77,7 +76,7 @@ def _runtime(tmp_path: Path, backend) -> ExecutionRuntime:
 
 
 def test_the_local_backend_satisfies_the_protocol(tmp_path) -> None:
-    backend = LocalBackend(project_root=tmp_path, environment_root=tmp_path)
+    backend = LocalBackend(environment_root=tmp_path)
     assert isinstance(backend, ExecutionBackend)
     assert backend.name == "local"
 
@@ -108,16 +107,16 @@ async def test_every_command_goes_through_the_backend(tmp_path) -> None:
         project_root=tmp_path, workspace_root=tmp_path, environment_root=tmp_path
     )
 
+    await runtime.run(context, CommandRequest(command="echo hi", timeout_s=11))
     await runtime.run(
-        context, CommandRequest(command="echo hi", timeout_s=11)
-    )
-    await runtime.run(
-        context, CommandRequest(argv=["python", "train.py"], timeout_s=22)
+        context, CommandRequest(command=["python", "train.py"], timeout_s=22)
     )
 
     runs = [call for call in backend.calls if call["op"] == "run"]
-    assert [call["command"] for call in runs] == ["echo hi", None]
-    assert [call["argv"] for call in runs] == [None, ["python", "train.py"]]
+    assert [call["command"] for call in runs] == [
+        "echo hi",
+        ["python", "train.py"],
+    ]
     assert [call["timeout_s"] for call in runs] == [11, 22]
 
 

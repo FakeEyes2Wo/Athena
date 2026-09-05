@@ -83,11 +83,12 @@ class _FakeExecution:
         request: CommandRequest,
     ) -> CommandResult:
         del context
-        self.calls.append(list(request.argv or []))
+        assert isinstance(request.command, list)
+        self.calls.append(request.command)
         self.workdirs.append(str(request.workdir) if request.workdir else None)
         self.evaluation_splits.append(request.evaluation_split)
         if request.emit is not None:
-            request.emit("command/started", "exec:run", {"command": request.argv})
+            request.emit("command/started", "exec:run", {"command": request.command})
             self.emit_seen.append(request.emit)
         result = self._results.pop(0)
         if result.ok and request.workdir is not None:

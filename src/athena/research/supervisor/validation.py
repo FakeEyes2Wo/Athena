@@ -297,7 +297,7 @@ async def _execute_predictions(
             result = await execution.run(
                 context,
                 CommandRequest(
-                    argv=argv,
+                    command=argv,
                     timeout_s=timeout_s,
                     workdir=workdir,
                     emit=publish,

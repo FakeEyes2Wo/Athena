@@ -95,7 +95,6 @@ def test_command_request_defaults_preserve_old_behaviour() -> None:
     request = CommandRequest(command="echo hi")
 
     assert request.command == "echo hi"
-    assert request.argv is None
     assert request.timeout_s == 120
     assert request.workdir is None
     assert request.emit is None
@@ -107,7 +106,7 @@ def test_environment_manager_injects_predict_features_exactly_when_requested() -
     work_dir = _work_dir()
     target = _feature(work_dir / "data_split" / "search_features.csv")
     try:
-        manager = EnvironmentManager(project_root=work_dir, environment_root=work_dir)
+        manager = EnvironmentManager(environment_root=work_dir)
 
         with_target = manager.build_env(work_dir, predict_features=target)
         assert with_target["ATHENA_PREDICT_FEATURES"] == str(target)
@@ -121,7 +120,7 @@ def test_environment_manager_injects_predict_features_exactly_when_requested() -
 def test_environment_manager_injects_evaluation_split_per_request() -> None:
     work_dir = _work_dir()
     try:
-        manager = EnvironmentManager(project_root=work_dir, environment_root=work_dir)
+        manager = EnvironmentManager(environment_root=work_dir)
 
         search = manager.build_env(work_dir, evaluation_split="search")
         final = manager.build_env(work_dir, evaluation_split="final")

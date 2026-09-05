@@ -254,9 +254,9 @@ class SshBackend:
         # makes a backend usable without an explicitly bound local root.
         await self._channel.request("mkdir", path=cwd)
         display = (
-            " ".join(request.argv)
-            if request.argv is not None
-            else (request.command or "")
+            " ".join(request.command)
+            if isinstance(request.command, list)
+            else request.command
         )
         emit = request.emit
         await _dispatch(emit, "command/started", "exec:run", {"command": display})
@@ -286,10 +286,8 @@ class SshBackend:
             env = self.build_env()
             if request.evaluation_split is not None:
                 env["ATHENA_EVALUATION_SPLIT"] = request.evaluation_split
-            command = request.argv if request.argv is not None else request.command
-            assert command is not None
             job_id, exited = await self._channel.spawn(
-                command,
+                request.command,
                 cwd=cwd,
                 env=env,
                 on_output=on_output,

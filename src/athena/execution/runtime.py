@@ -176,8 +176,7 @@ class CommandRequest:
     and no event emitter unless one is supplied.
     """
 
-    command: str | None = None
-    argv: list[str] | None = None
+    command: str | list[str]
     timeout_s: int = 120
     workdir: str | Path | None = None
     emit: EmitEvent | None = None
@@ -229,15 +228,13 @@ class CommandResult:
         return data
 
 
-def _validate_command_input(command: str | None, argv: list[str] | None) -> None:
-    if (command is None) == (argv is None):
-        raise ValueError("exactly one of command or argv must be provided")
-    if command is not None and not command.strip():
+def _validate_command_input(command: str | list[str]) -> None:
+    if isinstance(command, str) and not command.strip():
         raise ValueError("command must be a non-empty string")
-    if argv is not None and (
-        not argv or any(not isinstance(part, str) or not part for part in argv)
+    if isinstance(command, list) and (
+        not command or any(not isinstance(part, str) or not part for part in command)
     ):
-        raise ValueError("argv must be a non-empty list of non-empty strings")
+        raise ValueError("command must be a non-empty list of non-empty strings")
 
 
 _ATHENA_WRITE_MARKERS = re.compile(
@@ -275,12 +272,10 @@ class EnvironmentManager:
     def __init__(
         self,
         *,
-        project_root: str | Path,
         environment_root: str | Path,
         data_root: str | Path | None = None,
         host: dict[str, str] | None = None,
     ) -> None:
-        self._project_root = Path(project_root)
         self._environment_root = Path(environment_root)
         self._data_root = Path(data_root) if data_root is not None else None
         self._host = host if host is not None else os.environ
@@ -611,8 +606,7 @@ class CommandExecutor:
     async def run(
         self,
         *,
-        command: str | None = None,
-        argv: list[str] | None = None,
+        command: str | list[str],
         workdir: Path,
         shell: str | None = None,
         shell_args: list[str] | None = None,
@@ -620,15 +614,15 @@ class CommandExecutor:
         emit: EmitEvent | None = None,
     ) -> CommandResult:
         """执行命令并返回紧凑结果；命令事件经 ``emit`` 流式推送。"""
-        _validate_command_input(command, argv)
+        _validate_command_input(command)
         flags, new_session = self._spawn_flags()
-        display = " ".join(argv) if argv is not None else command
+        display = " ".join(command) if isinstance(command, list) else command
         await _dispatch(emit, "command/started", "exec:run", {"command": display})
         try:
-            if argv is not None:
-                argv = self._resolve_executable(argv)
+            if isinstance(command, list):
+                command = self._resolve_executable(command)
                 proc = await asyncio.create_subprocess_exec(
-                    *argv,
+                    *command,
                     cwd=str(workdir),
                     env=self._env,
                     stdout=asyncio.subprocess.PIPE,
@@ -649,7 +643,9 @@ class CommandExecutor:
                     start_new_session=new_session,
                 )
         except FileNotFoundError:
-            error = "command_not_found" if argv is not None else "shell_not_found"
+            error = (
+                "command_not_found" if isinstance(command, list) else "shell_not_found"
+            )
             return CommandResult(
                 ok=False, stdout="", stderr="", exit_code=127, error=error
             )
@@ -688,7 +684,8 @@ class CommandExecutor:
             # drain 也要有界：孙进程可能脱离进程组仍霸占管道。
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*readers, return_exceptions=True), timeout=5
+                    asyncio.gather(*readers, return_exceptions=True),
+                    timeout=POST_EXIT_DRAIN_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
                 pass
@@ -763,7 +760,6 @@ class ExecutionRuntime:
             from athena.execution.backend import LocalBackend  # 延迟导入避免循环依赖
 
             backend = LocalBackend(
-                project_root=self._project_root,
                 environment_root=self._environment_root,
                 data_root=self._data_root,
                 store=store,
@@ -816,12 +812,7 @@ class ExecutionRuntime:
         ``predict_features`` travels on the immutable execution context and is
         materialised onto the per-command request before it reaches the backend.
         """
-        _validate_command_input(request.command, request.argv)
-        cwd = (
-            Path(request.workdir)
-            if request.workdir is not None
-            else context.workspace_root
-        )
+        _validate_command_input(request.command)
         backend_request = replace(
             request,
             predict_features=(

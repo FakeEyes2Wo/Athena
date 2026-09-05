@@ -31,9 +31,7 @@ def _context(tmp_path: Path) -> ExecutionContext:
 
 def test_shell_parts_detects_native_shell(tmp_path: Path) -> None:
     """探测返回当前平台可用的 shell 绝对路径与启动参数。"""
-    shell, args = EnvironmentManager(
-        project_root=tmp_path, environment_root=tmp_path
-    ).shell_parts()
+    shell, args = EnvironmentManager(environment_root=tmp_path).shell_parts()
     assert Path(shell).is_file()
     assert args
 
@@ -42,9 +40,7 @@ def test_build_env_places_venv_first(tmp_path: Path) -> None:
     """环境根 .venv 的 Scripts/bin 前置 PATH，且注入 UTF-8 与 ATHENA_ENV_ROOT。"""
     bindir = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin")
     bindir.mkdir(parents=True)
-    env = EnvironmentManager(
-        project_root=tmp_path, environment_root=tmp_path
-    ).build_env()
+    env = EnvironmentManager(environment_root=tmp_path).build_env()
     assert env["PATH"].split(os.pathsep)[0] == str(bindir)
     assert env["PYTHONUTF8"] == "1"
     assert env["ATHENA_ENV_ROOT"] == str(tmp_path)
@@ -190,7 +186,7 @@ async def test_run_returns_when_exited_process_pipe_never_reaches_eof(
 
     result = await asyncio.wait_for(
         CommandExecutor(env={}).run(
-            argv=["finished-command"],
+            command=["finished-command"],
             workdir=tmp_path,
             timeout_s=10,
         ),
@@ -231,7 +227,7 @@ async def test_run_uses_returncode_when_process_wait_never_returns(
 
     result = await asyncio.wait_for(
         CommandExecutor(env={}).run(
-            argv=["finished-command"],
+            command=["finished-command"],
             workdir=tmp_path,
             timeout_s=10,
         ),
@@ -243,24 +239,9 @@ async def test_run_uses_returncode_when_process_wait_never_returns(
 
 
 @pytest.mark.asyncio
-async def test_run_rejects_command_and_argv_together(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="exactly one"):
-        await _runtime(tmp_path).run(
-            _context(tmp_path),
-            CommandRequest(command="echo shell", argv=[PY, "-c", "print('argv')"]),
-        )
-
-
-@pytest.mark.asyncio
-async def test_run_requires_command_or_argv(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="exactly one"):
-        await _runtime(tmp_path).run(_context(tmp_path), CommandRequest())
-
-
-@pytest.mark.asyncio
-async def test_run_rejects_empty_argv(tmp_path: Path) -> None:
+async def test_run_rejects_empty_command_list(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="non-empty"):
-        await _runtime(tmp_path).run(_context(tmp_path), CommandRequest(argv=[]))
+        await _runtime(tmp_path).run(_context(tmp_path), CommandRequest(command=[]))
 
 
 @pytest.mark.asyncio
@@ -457,7 +438,7 @@ async def test_shell_tool_allows_framework_owned_athena_reads(tmp_path: Path) ->
 
 def test_environment_hash_changes_with_declaration(tmp_path: Path) -> None:
     """环境哈希随 pyproject.toml 内容变化；缺声明文件也可计算。"""
-    env = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path)
+    env = EnvironmentManager(environment_root=tmp_path)
     before = env.environment_hash()
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
     assert env.environment_hash() != before
@@ -466,7 +447,7 @@ def test_environment_hash_changes_with_declaration(tmp_path: Path) -> None:
 
 def test_sync_requires_pyproject(tmp_path: Path) -> None:
     """环境根缺 pyproject.toml → 明确不 ready，不尝试 uv。"""
-    result = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path).sync()
+    result = EnvironmentManager(environment_root=tmp_path).sync()
     assert result["ready"] is False
     assert "pyproject" in str(result["error"])
 
@@ -475,7 +456,7 @@ def test_sync_uv_missing(tmp_path: Path, monkeypatch) -> None:
     """uv 不在 PATH → 明确报错，不 ready。"""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.setattr("athena.execution.runtime.shutil.which", lambda _name: None)
-    result = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path).sync()
+    result = EnvironmentManager(environment_root=tmp_path).sync()
     assert result["ready"] is False
     assert "uv" in str(result["error"])
 
@@ -491,7 +472,7 @@ def test_sync_runs_uv_with_frozen_flag(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr("athena.execution.runtime.shutil.which", lambda _name: "uv")
     monkeypatch.setattr("athena.execution.runtime.subprocess.run", fake_run)
-    env = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path)
+    env = EnvironmentManager(environment_root=tmp_path)
     assert env.sync(frozen=True)["ready"] is True
     assert calls and calls[0][:2] == ["uv", "sync"]
     assert "--frozen" in calls[0]
@@ -503,7 +484,7 @@ def test_sync_failure_marks_needs_repair_in_summary(
     """sync 失败 → needs_repair 记录，运行时摘要报告修复（design §needs_repair）。"""
     (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     monkeypatch.setattr("athena.execution.runtime.shutil.which", lambda _name: None)
-    env = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path)
+    env = EnvironmentManager(environment_root=tmp_path)
     result = env.sync()
     assert result["ready"] is False
     assert env.needs_repair is not None
@@ -519,7 +500,7 @@ def test_sync_success_clears_needs_repair(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr("athena.execution.runtime.shutil.which", lambda _name: "uv")
     monkeypatch.setattr("athena.execution.runtime.subprocess.run", fake_run)
-    env = EnvironmentManager(project_root=tmp_path, environment_root=tmp_path)
+    env = EnvironmentManager(environment_root=tmp_path)
     assert env.sync()["ready"] is True
     assert env.needs_repair is None
 

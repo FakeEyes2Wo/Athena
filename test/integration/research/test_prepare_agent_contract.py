@@ -249,10 +249,9 @@ class _ManifestExecution:
     async def run(
         self, context: ExecutionContext, request: CommandRequest
     ) -> CommandResult:
-        assert request.command is None
-        assert request.argv is not None
+        assert isinstance(request.command, list)
         assert request.evaluation_split == "search"
-        self.argv_calls.append(request.argv)
+        self.argv_calls.append(request.command)
         root = context.workspace_root
         assert (root / "solution" / "features.py").is_file()
         assert (root / "solution" / "model.py").is_file()

@@ -255,6 +255,14 @@ Replace `spawn(argv, command, ...)` with one `command: list[str] | str` input, r
 
 The same 25 remote-channel tests passed before and after the change; the direct channel/SSH/pool selection passed 56 tests and the complete affected remote-execution selection passed 96. Python compilation, Black, `git diff --check`, and removed-state/interface searches passed; pytest reported one existing cache-permission warning. Source code falls by thirty net lines. Closing the channel and agent rows advances reviewed coverage to 223/602. Whole-repository acceptance remains pending.
 
+## Execution runtime review
+
+Read `runtime.py` completely and traced its request/result contracts, environment management, local and remote backends, manifest runners, shell tool, and direct executor tests. Retain bounded streaming output, incremental decoding, host-shell discovery, per-command environment projection, and the runtime/backend boundary because each protects an independent execution invariant. The three runtime roots remain available because supervisor and tool construction consume them.
+
+Replace the mutually exclusive `CommandRequest.command`/`argv` pair with one required `command: str | list[str]` field, matching the remote channel's existing generalized command contract. Local and SSH backends now branch on the value type, while manifest commands pass their argument list through the same field. This removes one request field, one executor parameter, two invalid request states, and duplicated backend selection logic. Remove the unread `project_root` parameter and attribute from `EnvironmentManager`, then remove the newly orphaned `LocalBackend.project_root` parameter. Delete the runtime's unused cwd calculation and reuse the existing post-exit drain timeout constant instead of a second literal. Production source falls by fourteen net lines without compatibility wrappers.
+
+The affected execution, SSH, pool, supervisor experiment, and prepare-contract selection passed 145 tests with two PowerShell-7-specific tests deselected because this host currently resolves Windows PowerShell 5.1; running those tests directly produced the same host capability failure and did not exercise the changed request interface. Python compilation, Black, blocking Ruff checks, `git diff --check`, and removed-interface searches passed; pytest reported one existing cache-permission warning. Closing the runtime row advances reviewed coverage to 224/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -727,7 +735,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/execution/remote/mirror.py` | 191 | Reviewed; absorb the three-field mirrored execution wrapper and narrow helper surface |
 | `src/athena/execution/remote/mirrored.py` | 120 | Reviewed; merge into mirror.py and delete forwarding file |
 | `src/athena/execution/remote/ssh.py` | 362 | Reviewed; five-parameter backend construction and per-run cwd ownership |
-| `src/athena/execution/runtime.py` | 895 | Pending |
+| `src/athena/execution/runtime.py` | 895 | Reviewed; unify string/argv commands, remove dead environment/backend inputs and cwd calculation |
 | `src/athena/gui/__init__.py` | 9 | Pending |
 | `src/athena/gui/experiments.py` | 59 | Pending |
 | `src/athena/gui/graph.py` | 309 | Pending |

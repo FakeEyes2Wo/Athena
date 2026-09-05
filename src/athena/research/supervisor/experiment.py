@@ -410,7 +410,7 @@ class PlanRunner:
             result = await self._execution.run(
                 self._context,
                 CommandRequest(
-                    argv=argv,
+                    command=argv,
                     timeout_s=self._timeout_s,
                     workdir=str(self.workdir),
                     emit=emit,

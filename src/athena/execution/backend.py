@@ -50,13 +50,11 @@ class LocalBackend:
     def __init__(
         self,
         *,
-        project_root: str | Path,
         environment_root: str | Path,
         data_root: str | Path | None = None,
         store: ArtifactStore | None = None,
     ) -> None:
         self._environment = EnvironmentManager(
-            project_root=project_root,
             environment_root=environment_root,
             data_root=data_root,
         )
@@ -90,8 +88,8 @@ class LocalBackend:
         workspace_root: Path,
         request: CommandRequest,
     ) -> CommandResult:
-        """在本机执行；``request.argv`` 不经 shell，``request.command`` 走本机 shell。"""
-        if request.argv is not None:
+        """在本机执行；参数列表不经 shell，字符串命令走本机 shell。"""
+        if isinstance(request.command, list):
             shell, shell_args = None, None
         else:
             shell, shell_args = self._environment.shell_parts()
@@ -105,7 +103,6 @@ class LocalBackend:
         )
         return await executor.run(
             command=request.command,
-            argv=request.argv,
             workdir=(
                 Path(request.workdir) if request.workdir is not None else workspace_root
             ),

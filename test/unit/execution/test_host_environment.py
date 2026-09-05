@@ -19,14 +19,13 @@ import pytest
 from athena.execution.runtime import (
     CommandRequest,
     EnvironmentManager,
+    ExecutionContext,
     ExecutionRuntime,
 )
 
 
 def _manager(tmp_path: Path, *, data_root: Path | None = None) -> EnvironmentManager:
-    return EnvironmentManager(
-        project_root=tmp_path, environment_root=tmp_path, data_root=data_root
-    )
+    return EnvironmentManager(environment_root=tmp_path, data_root=data_root)
 
 
 def test_env_refs_use_the_host_shell_syntax(tmp_path) -> None:
@@ -74,8 +73,6 @@ async def test_the_shell_form_in_the_summary_actually_resolves(tmp_path) -> None
 
     这是上面那几条断言的兜底——只比对字符串的话，换个 shell 又会悄悄错回去。
     """
-    from athena.execution.runtime import CommandRequest, ExecutionContext
-
     data = tmp_path / "data"
     data.mkdir()
     runtime = ExecutionRuntime(
