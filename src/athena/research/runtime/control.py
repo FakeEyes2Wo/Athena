@@ -15,7 +15,7 @@ def _consume_lifecycle_result(task: asyncio.Task[None]) -> None:
         task.exception()
 
 
-def resume_task_text(runtime: Any, fallback: str) -> str:
+def _task_text(runtime: Any, fallback: str) -> str:
     """Recover the original task instead of treating a resume command as work."""
     if runtime.state.task_text:
         return runtime.state.task_text
@@ -34,7 +34,7 @@ async def start(runtime: Any) -> asyncio.Task[None]:
     if lifecycle.task is not None and not lifecycle.task.done():
         return lifecycle.task
 
-    lifecycle.task_text = resume_task_text(runtime, runtime.task_text)
+    lifecycle.task_text = _task_text(runtime, runtime.task_text)
     await runtime.git.init(initial_file=".gitignore", initial_content=".venv/\n")
     runtime.agents.start()
     runtime.start_survey()
@@ -47,7 +47,7 @@ async def start(runtime: Any) -> asyncio.Task[None]:
     return lifecycle.task
 
 
-def rearm_if_terminal(runtime: Any) -> None:
+def _rearm_if_terminal(runtime: Any) -> None:
     """Clear a completed lifecycle task so the durable run can resume."""
     lifecycle = runtime.session.lifecycle
     if lifecycle.task is None or not lifecycle.task.done():
@@ -58,8 +58,8 @@ def rearm_if_terminal(runtime: Any) -> None:
 
 async def start_task(runtime: Any, task: str) -> str:
     """Seed or resume a confirmed task and launch the phase machine."""
-    runtime.session.lifecycle.task_text = resume_task_text(runtime, task)
-    rearm_if_terminal(runtime)
+    runtime.session.lifecycle.task_text = _task_text(runtime, task)
+    _rearm_if_terminal(runtime)
     lifecycle = runtime.session.lifecycle
     if not lifecycle.started or lifecycle.task is None:
         if (
@@ -75,7 +75,7 @@ async def start_validation(runtime: Any) -> str:
     """Enter VALIDATE from SEARCH or resume an interrupted validation."""
     if runtime.state.phase == "COMPLETED":
         return runtime.state.status
-    await ensure_started(runtime)
+    await _ensure_started(runtime)
     if runtime.state.phase == "SEARCH":
         await runtime.supervisor.set_phase_decision("VALIDATE")
     elif runtime.state.phase == "VALIDATE":
@@ -89,11 +89,12 @@ async def start_validation(runtime: Any) -> str:
 
 async def message(runtime: Any, text: str) -> str:
     """Apply control commands or send ordinary text to Supervisor."""
-    command_result = await _control_command(runtime, text.strip())
+    command = text.strip()
+    command_result = await _control_command(runtime, command)
     if command_result is not None:
         return command_result
     if runtime.config.auto_seed_task and not runtime.session.lifecycle.started:
-        return await start_task(runtime, text.strip())
+        return await start_task(runtime, command)
     answer = await runtime.supervisor.message(text)
     if runtime.state.phase == "VALIDATE" and (
         runtime.session.lifecycle.task is None or runtime.session.lifecycle.task.done()
@@ -106,22 +107,22 @@ async def _control_command(runtime: Any, command: str) -> str | None:
     if command == "/stop":
         async with runtime.session.lifecycle.resume_lock:
             status = await runtime.supervisor.request_stop()
-            await cancel_supervisor_task(runtime)
+            await _cancel_supervisor_task(runtime)
             return status
     if command == "/pause":
         status = await runtime.supervisor.pause()
         if runtime.state.phase in {"PREPARE", "VALIDATE"}:
-            await cancel_supervisor_task(runtime)
+            await _cancel_supervisor_task(runtime)
         return status
     if command == "/resume" or is_continue_command(command):
         return await runtime.resume_current_task()
     if command in {"/manual", "/auto"}:
-        await ensure_started(runtime)
+        await _ensure_started(runtime)
         manual = command == "/manual"
         await runtime.supervisor.set_manual_mode(manual)
         return f"manual mode {'on' if manual else 'off'}"
     if command.startswith("/select "):
-        await ensure_started(runtime)
+        await _ensure_started(runtime)
         hypothesis_id = command.removeprefix("/select ").strip()
         if not hypothesis_id:
             return "usage: /select <hypothesis_id>"
@@ -151,13 +152,13 @@ async def resume_current_task(runtime: Any) -> str:
             else:
                 original_status = runtime.state.status
                 original_started = lifecycle.started
-                lifecycle.task_text = resume_task_text(runtime, lifecycle.task_text)
+                lifecycle.task_text = _task_text(runtime, lifecycle.task_text)
                 if task is None or task.done():
-                    rearm_if_terminal(runtime)
+                    _rearm_if_terminal(runtime)
                     try:
                         await runtime.supervisor.resume(restarting=True)
                         await runtime.start()
-                    except BaseException as error:
+                    except BaseException:
                         task = lifecycle.task
                         if task is None or task.done():
                             lifecycle.started = original_started
@@ -166,13 +167,7 @@ async def resume_current_task(runtime: Any) -> str:
                                 if original_status == "RUNNING"
                                 else original_status
                             )
-                            try:
-                                runtime.state.save(runtime.state_path)
-                            except BaseException as rollback_error:
-                                error.add_note(
-                                    "resume rollback persistence failed: "
-                                    f"{rollback_error}"
-                                )
+                            runtime.state.save(runtime.state_path)
                         raise
                 else:
                     await runtime.supervisor.resume()
@@ -183,7 +178,7 @@ async def resume_current_task(runtime: Any) -> str:
             raise RuntimeError("failed lifecycle task did not finish unwinding")
 
 
-async def ensure_started(runtime: Any) -> None:
+async def _ensure_started(runtime: Any) -> None:
     """Start the Supervisor only when a trusted baseline already exists."""
     if (
         not runtime.session.lifecycle.started
@@ -192,23 +187,10 @@ async def ensure_started(runtime: Any) -> None:
         await runtime.start()
 
 
-async def cancel_supervisor_task(runtime: Any) -> None:
+async def _cancel_supervisor_task(runtime: Any) -> None:
     """Cancel and join the current Supervisor lifecycle task."""
     task = runtime.session.lifecycle.task
     if task is None or task.done():
         return
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
-
-
-__all__ = [
-    "cancel_supervisor_task",
-    "ensure_started",
-    "message",
-    "rearm_if_terminal",
-    "resume_current_task",
-    "resume_task_text",
-    "start",
-    "start_task",
-    "start_validation",
-]

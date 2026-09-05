@@ -579,6 +579,12 @@ Read `runtime/clarification.py` completely and traced confirmation, automatic co
 
 Privatize the clarification-store resolver, which had no caller outside its module, and delete the redundant implementation `__all__`. No confirmation error code, persistence path, transaction order, or public runtime method changes. The file falls from 171 immediately before this slice to 161 physical lines; it remains above the 149-line baseline because previously delivered confirmation transaction and retry behavior is retained. The unchanged baseline and final clarification/task-seeding selection both passed 128 tests; Ruff, Black, old-symbol searches, Python compilation, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 349/602. Whole-repository acceptance remains pending.
 
+## Runtime control surface review
+
+Read `runtime/control.py` completely and traced lifecycle start, task seeding, validation entry, command dispatch, resume, pause, stop, and task cancellation through the runtime facade, GUI/TUI surfaces, and control-focused tests. Preserve the single lifecycle task, resume lock, failed-task drain before restart, durable status rollback, trusted-baseline start gate, and pause/stop cancellation ordering.
+
+Privatize the four helpers used only inside this module (task-text recovery, terminal rearming, conditional start, and Supervisor-task cancellation), delete the redundant implementation `__all__`, and normalize command text once instead of stripping it twice. Remove the nested broad catch around rollback persistence: ordinary rollback still saves before rethrowing the original resume error, while a persistence failure now surfaces directly rather than being hidden as an attached note. The module falls from 214 to 196 physical lines. The unchanged baseline and final control selection both passed 119 tests; Ruff, Black, Python compilation, old-symbol searches, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 350/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1190,7 +1196,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/__init__.py` | 5 | Reviewed; retain the two-symbol public runtime facade |
 | `src/athena/research/runtime/bootstrap.py` | 438 | Reviewed; delete single-use config forwarder and redundant implementation export list |
 | `src/athena/research/runtime/clarification.py` | 149 | Reviewed; privatize store resolver and remove redundant implementation exports |
-| `src/athena/research/runtime/control.py` | 214 | Pending |
+| `src/athena/research/runtime/control.py` | 214 | Reviewed; privatize four lifecycle helpers and remove redundant exports/defensive catch |
 | `src/athena/research/runtime/corpus.py` | 90 | Pending |
 | `src/athena/research/runtime/event_projection.py` | 89 | Pending |
 | `src/athena/research/runtime/events.py` | 457 | Pending |
