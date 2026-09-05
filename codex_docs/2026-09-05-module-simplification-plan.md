@@ -27,6 +27,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove script metadata/result wrappers and consolidate the scoring interface.
 - [x] Reduce script run arguments and consolidate frozen-file restoration/snapshot ownership.
 - [x] Merge stateless validation result construction into its active orchestration and review reporting.
+- [x] Remove the unused candidate score wrapper and unpopulated validation metadata.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -184,8 +185,19 @@ Validation/report final evidence: full TypeScript workspace passed 497 tests acr
 
 These six baseline file reviews bring coverage to 84/602. contracts.ts has been read but its cross-consumer field review remains Pending. Whole-repository acceptance, main merge/push and task branch/worktree removal remain mandatory and unfinished.
 
+Research artifact contract review supersedes the earlier candidate identity/direction retention decision. Full contracts.ts read and score-consumer tracing show PlanRunner consumes only test_score; candidate_id/direction were passed into the scorer only to be returned unread, while both kfold fields always defaulted to null. Delete CandidateEvaluationSchema/type entirely. Scorer.score now returns a number and its options shrink from five fields to three (bundle, predictions and prediction root). PlanRunner keeps its existing plan identity, optimization direction, evidence persistence and trusted-score update; neither belongs in a redundant score envelope. Migrate all test doubles and the real-uv smoke. Numeric-string conversion and missing/non-scalar/non-finite rejection remain in TrustedEvaluator.
+
+ValidationResult drops five fields with no production writer or reader: sota_commit, validation_commit, predictions_ref, predictions_path and evidence_ref. Results now contain six actual conclusion fields. Supervisor still persists its independently created report_ref alongside them; historical state files are not rewritten. Legacy null placeholders are ignored by the existing schema projection when supplied. Retain DataScriptBundle's freeze refs and provenance metadata, its incomplete defaults for explicit freeze checks, the validation status/default semantics and the shared contracts module; do not split schemas into additional files.
+
+Baseline score/PlanRunner/prepare/validation/Supervisor checks returned 61 passed before and after migration. Three new contract cases verify bundle defaults, metadata JSON round-trip and legacy validation projection. Strengthen the actual Supervisor validation test to verify exactly six result fields plus report_ref, state reload equality and readable report content. All five package builds passed, and the explicit offline real-uv smoke returned the same scalar 0.25. New contract plus Supervisor tests returned 15 passed.
+
+Artifact final verification: all five builds passed; the full TypeScript workspace passed 500 tests across 54 files with `npm test -- --testTimeout=30000`, and the separate real-uv smoke passed. Removed score-envelope references remain only in the negative API assertion; removed validation fields appear only in the legacy-projection test. git diff --check passed. Default-timeout reliability and whole-application acceptance remain unproven.
+
+Completing contracts.ts brings baseline coverage to 85/602; contracts.test.ts is tracked separately as New. state.ts and plans.ts have been fully read but caller/serialization and test review remain Pending. Their existing state fields are not assumed dead merely because this artifact slice removed other placeholders. Whole-repository acceptance, main merge/push and temporary task branch/worktree cleanup remain mandatory and unfinished.
+
 | File | Baseline lines | Review |
 | --- | ---: | --- |
+| `athena_ts/packages/athena-research/test/contracts.test.ts` | New | Reviewed; three bundle-default/provenance/validation-projection cases |
 | `athena_ts/packages/athena-research/test/script-runner.test.ts` | New | Reviewed; 29 snapshot/staging/output cases with mocked subprocesses |
 | `athena_ts/packages/athena-research/test/script-runner.uv-smoke.mjs` | New | Reviewed; explicit offline real-uv freeze/restore/trusted-score smoke passes |
 | `athena_ts/packages/athena-research/test/execution.test.ts` | New | Reviewed; six real-process command/workdir/event/error/timeout cases |
@@ -748,7 +760,7 @@ These six baseline file reviews bring coverage to 84/602. contracts.ts has been 
 | `athena_ts/packages/athena-core/test/smoke.test.ts` | 7 | Pending |
 | `athena_ts/packages/athena-dsh/src/index.ts` | 929 | Pending |
 | `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Pending |
-| `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Pending |
+| `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Reviewed; delete score envelope and five unused validation placeholders; retain bundle provenance |
 | `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Reviewed; canonical runner/options contracts, direct output and simplified numeric validation |
 | `athena_ts/packages/athena-research/src/execution.ts` | 94 | Reviewed; deleted context/root state, single run options and four-field result |
 | `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |

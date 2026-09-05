@@ -255,13 +255,11 @@ export class PlanRunner {
     if (bundle === null) {
       return this.failure(planId, "scoring_failed", "frozen evaluator artifact is invalid", predictionsRef)
     }
-    let evaluation
+    let metric: number
     try {
-      evaluation = await this.evaluator.score({
+      metric = await this.evaluator.score({
         evalBundle: bundle,
         predictions,
-        candidateId: planId,
-        direction: this.direction,
         predictionsRoot,
       })
     } catch (exc) {
@@ -275,7 +273,6 @@ export class PlanRunner {
         predictionsRef
       )
     }
-    const metric = evaluation.test_score
 
     const diff: GitDiff = await this.workspace.diff(this.branch)
     const commit = await this.workspace.commit(

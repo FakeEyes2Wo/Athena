@@ -38,13 +38,9 @@ try {
   const result = await new TrustedEvaluator(runner).score({
     evalBundle: bundle,
     predictions: { "value.csv": Buffer.from("0.75\n") },
-    candidateId: "smoke",
-    direction: "minimize",
     predictionsRoot: "predictions",
   })
-  assert.equal(result.test_score, 0.25)
-  assert.equal(result.candidate_id, "smoke")
-  assert.equal(result.direction, "minimize")
+  assert.equal(result, 0.25)
   console.log("PASS: offline uv freeze -> restored frozen evaluator -> trusted score 0.25")
 } finally {
   rmSync(root, { recursive: true, force: true })

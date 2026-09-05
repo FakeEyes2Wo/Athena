@@ -10,6 +10,7 @@ describe("research public surface", () => {
       "HypothesisBatchOutputType", "makeShellTool", "commandResultDict", "ExecutionContext", "decideSettlement",
       "BundleMetadata", "ScriptRunResult",
       "ValidationService", "generalizationGap", "generalizationWarning",
+      "CandidateEvaluationSchema",
     ]) expect(api).not.toHaveProperty(name)
   })
 

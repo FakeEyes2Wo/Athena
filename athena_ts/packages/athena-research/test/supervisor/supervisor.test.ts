@@ -267,7 +267,7 @@ describe("FixedFlowSupervisor core actions", () => {
 
   it("runs VALIDATE interactively and persists the final report ref", async () => {
     const dir = tmpDir()
-    const { supervisor, state } = coreSupervisor(dir)
+    const { supervisor, state, store } = coreSupervisor(dir)
 
     await supervisor.setPhaseDecision("VALIDATE")
 
@@ -275,5 +275,11 @@ describe("FixedFlowSupervisor core actions", () => {
     expect(state.status).toBe("COMPLETED")
     expect(state.validation).not.toBeNull()
     expect(typeof state.validation?.["report_ref"]).toBe("string")
+    expect(Object.keys(state.validation!).sort()).toEqual([
+      "final_test_score", "generalization_gap", "generalization_warning",
+      "report_ref", "result_id", "status", "test_score",
+    ])
+    expect(ResearchState.load(join(dir, ".athena", "state.json")).validation).toEqual(state.validation)
+    expect(await store.getText(state.validation!["report_ref"] as string)).toContain("## 验证结果")
   })
 })

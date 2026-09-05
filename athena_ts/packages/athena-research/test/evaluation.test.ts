@@ -6,12 +6,10 @@ function evaluator(outputs: Record<string, unknown>): TrustedEvaluator {
   return new TrustedEvaluator({ run: async () => outputs })
 }
 
-function score(primary: unknown, direction: "maximize" | "minimize" = "maximize") {
+function score(primary: unknown) {
   return evaluator({ primary }).score({
     evalBundle: null as never,
     predictions: {},
-    candidateId: "c",
-    direction,
     predictionsRoot: "predictions",
   })
 }
@@ -27,22 +25,21 @@ describe("TrustedEvaluator", () => {
     const evaluator = new TrustedEvaluator({ run: async () => { throw failure } })
     await expect(evaluator.score({
       evalBundle: DataScriptBundleSchema.parse({ bundle_id: "b", entrypoint: "eval.py" }),
-      predictions: {}, candidateId: "c", direction: "maximize", predictionsRoot: "predictions",
+      predictions: {}, predictionsRoot: "predictions",
     })).rejects.toEqual(new ScoringError("evaluator failed to produce a score: failed"))
   })
 
-  it("forwards frozen bundle and prediction files while retaining score identity and direction", async () => {
+  it("forwards frozen bundle and prediction files and returns the scalar score", async () => {
     const run = vi.fn().mockResolvedValue({ primary: "-0.25" })
     const bundle = DataScriptBundleSchema.parse({ bundle_id: "b", entrypoint: "eval.py" })
     const predictions = { "nested/data.csv": Buffer.from("prediction") }
     const result = await new TrustedEvaluator({ run }).score({
-      evalBundle: bundle, predictions, candidateId: "candidate",
-      direction: "minimize", predictionsRoot: "outputs",
+      evalBundle: bundle, predictions, predictionsRoot: "outputs",
     })
     expect(run).toHaveBeenCalledWith(bundle, {
       "outputs/nested/data.csv": predictions["nested/data.csv"],
     })
-    expect(result).toMatchObject({ candidate_id: "candidate", direction: "minimize", test_score: -0.25 })
+    expect(result).toBe(-0.25)
     expect(Object.keys(predictions)).toEqual(["nested/data.csv"])
   })
 
@@ -60,10 +57,10 @@ describe("TrustedEvaluator", () => {
 
   it("accepts finite number and numeric string", async () => {
     const result = await score(0.84)
-    expect(result.test_score).toBe(0.84)
-    expect(Number.isFinite(result.test_score)).toBe(true)
+    expect(result).toBe(0.84)
+    expect(Number.isFinite(result)).toBe(true)
 
     const result2 = await score("0.84")
-    expect(result2.test_score).toBe(0.84)
+    expect(result2).toBe(0.84)
   })
 })

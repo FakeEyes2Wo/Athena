@@ -84,7 +84,7 @@ describe("runPreparePlan", () => {
 
     const result = await runPreparePlan({
       agent: { turn: async (prompt) => { prompts.push(prompt); return submit() } },
-      evaluator: { score: async () => ({ candidate_id: "prepare", test_score: 0.8, direction: "maximize" as const, kfold_mean: null, kfold_std: null }) },
+      evaluator: { score: async () => 0.8 },
       git: {
         diff: async (workspace: GitWorkBranch) => {
           expect(workspace).toBe(branch)

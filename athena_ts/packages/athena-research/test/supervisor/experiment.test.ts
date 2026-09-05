@@ -9,7 +9,7 @@ import {
   type GitDiff,
   type GitWorkBranch,
 } from "@athena/core"
-import { CandidateEvaluationSchema, DataScriptBundleSchema, type DataScriptBundle } from "../../src/contracts.js"
+import { DataScriptBundleSchema, type DataScriptBundle } from "../../src/contracts.js"
 import { ScoringError } from "../../src/evaluation.js"
 import { CommandResult } from "../../src/execution.js"
 import { loadDirectory } from "../../src/script_runner.js"
@@ -237,13 +237,9 @@ class FakeEvaluator {
     private metric = 0.9,
     private error: Error | null = null
   ) {}
-  async score(opts: { candidateId: string; direction: "maximize" | "minimize" }) {
+  async score() {
     if (this.error) throw this.error
-    return CandidateEvaluationSchema.parse({
-      candidate_id: opts.candidateId,
-      test_score: this.metric,
-      direction: opts.direction,
-    })
+    return this.metric
   }
 }
 
