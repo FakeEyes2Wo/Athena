@@ -18,9 +18,6 @@ from athena.core.tool_types import AskUser
 from athena.execution.compute_config import ComputeConfig, load_compute_config
 from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.kaggle import KaggleStack
-from athena.research.clarification.confirmation import (
-    confirm_and_start as confirm_and_start_impl,
-)
 from athena.research.config import SearchLimits, SurveyConfig
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
@@ -50,6 +47,9 @@ from athena.research.runtime.bootstrap import (
 )
 from athena.research.runtime.bootstrap import (
     register_supervisor as register_supervisor_impl,
+)
+from athena.research.runtime.clarification import (
+    confirm_and_start as confirm_and_start_impl,
 )
 from athena.research.runtime.clarification import (
     confirm_pending_task,
@@ -611,8 +611,6 @@ class ResearchRuntime:
         draft_id: str,
         revision: int,
         acknowledge_unresolved: bool,
-        *,
-        start_after: bool = True,
     ) -> object:
         """Confirm the latest clarification revision and start PREPARE atomically."""
         return await confirm_and_start_impl(
@@ -620,7 +618,6 @@ class ResearchRuntime:
             draft_id,
             revision,
             acknowledge_unresolved,
-            start_after=start_after,
         )
 
     async def start_validation(self) -> str:

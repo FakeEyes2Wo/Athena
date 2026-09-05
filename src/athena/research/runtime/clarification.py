@@ -5,7 +5,8 @@ from typing import Any
 from uuid import uuid4
 
 from athena.research.clarification.confirmation import (
-    confirm_and_start,
+    commit_confirmation,
+    dependencies_from_runtime,
     recover_confirmation_transaction,
 )
 from athena.research.clarification.errors import ClarificationError
@@ -29,6 +30,28 @@ def clarification_store(runtime: Any) -> ClarificationStore:
             "runtime has no clarification state root",
         )
     return ClarificationStore(state_root)
+
+
+async def confirm_and_start(
+    runtime: Any,
+    draft_id: str,
+    revision: int,
+    acknowledge_unresolved: bool,
+) -> ClarificationDraft:
+    """Commit a confirmation and start PREPARE, leaving start failures retryable."""
+    draft = await commit_confirmation(
+        dependencies_from_runtime(runtime),
+        draft_id,
+        revision,
+        acknowledge_unresolved,
+    )
+    try:
+        await runtime.start()
+    except Exception as error:
+        raise ClarificationError(
+            "confirmed_start_failed", f"confirmed start failed; retry is safe: {error}"
+        ) from error
+    return draft
 
 
 async def auto_confirm(runtime: Any, task: str) -> ClarificationDraft:
@@ -55,12 +78,11 @@ async def auto_confirm(runtime: Any, task: str) -> ClarificationDraft:
             updated_at=now,
         )
         store.save(draft)
-    return await confirm_and_start(
-        runtime,
+    return await commit_confirmation(
+        dependencies_from_runtime(runtime),
         draft.draft_id,
         draft.revision,
         acknowledge_unresolved=True,
-        start_after=False,
     )
 
 
@@ -143,6 +165,7 @@ async def seed_unconfirmed_task(runtime: Any, task: str) -> None:
 __all__ = [
     "auto_confirm",
     "clarification_store",
+    "confirm_and_start",
     "confirm_pending_task",
     "recover_confirmation",
     "seed_unconfirmed_task",

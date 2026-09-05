@@ -1,7 +1,6 @@
 """Atomic clarification confirmation followed by retryable lifecycle launch."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -38,7 +37,6 @@ class ConfirmationDependencies:
     artifacts: ArtifactWriter
     session_id: str
     lock: asyncio.Lock
-    start: Callable[[], Awaitable[None]]
 
 
 async def commit_confirmation(
@@ -96,33 +94,6 @@ async def commit_confirmation(
         return confirmed
 
 
-async def launch_confirmed(
-    deps: ConfirmationDependencies, draft: ClarificationDraft
-) -> ClarificationDraft:
-    """Start PREPARE after commit; a failure leaves confirmation retryable."""
-    try:
-        await deps.start()
-    except Exception as error:
-        raise ClarificationError(
-            "confirmed_start_failed", f"confirmed start failed; retry is safe: {error}"
-        ) from error
-    return draft
-
-
-async def confirm_and_start(
-    runtime: Any,
-    draft_id: str,
-    revision: int,
-    acknowledge_unresolved: bool,
-    *,
-    start_after: bool = True,
-) -> ClarificationDraft:
-    """Compatibility facade for the stable ResearchRuntime public method."""
-    deps = dependencies_from_runtime(runtime)
-    draft = await commit_confirmation(deps, draft_id, revision, acknowledge_unresolved)
-    return await launch_confirmed(deps, draft) if start_after else draft
-
-
 async def recover_confirmation_transaction(runtime: Any) -> None:
     """Recover an interrupted confirmation before lifecycle work resumes."""
     deps = dependencies_from_runtime(runtime)
@@ -141,7 +112,6 @@ def dependencies_from_runtime(runtime: Any) -> ConfirmationDependencies:
         artifacts=runtime.store,
         session_id=runtime.session_id,
         lock=runtime.session.lifecycle.confirmation_lock,
-        start=runtime.start,
     )
 
 
@@ -231,8 +201,6 @@ class _StateSnapshot:
 __all__ = [
     "ConfirmationDependencies",
     "commit_confirmation",
-    "confirm_and_start",
     "dependencies_from_runtime",
-    "launch_confirmed",
     "recover_confirmation_transaction",
 ]

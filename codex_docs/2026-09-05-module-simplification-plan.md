@@ -335,6 +335,14 @@ The controller and confirmation exceptions had identical constructors, fields, a
 
 The complete clarification unit selection plus continue/resume and confirmation-gate integrations passed 113 tests before and after the change. Python compilation, Black, blocking Ruff, code-style hard rules, old-exception searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing four rows advances reviewed baseline coverage to 240/602. Whole-repository acceptance remains pending.
 
+## Clarification confirmation review
+
+Read `confirmation.py` completely and traced every dependency field, transaction phase, helper, export, and confirmation entry through the runtime adapter/facade, GUI service, persistence stores, and direct transaction/integration tests. Retain the journaled commit core, seven durable/resource ports, state snapshot, and explicit validation/projection helpers because rollback, idempotency, and recovery tests consume their distinct ordering.
+
+Remove lifecycle `start` from `ConfirmationDependencies`: commit deliberately does not start PREPARE, so the eighth field mixed runtime lifecycle with transaction state. Delete the module-level `launch_confirmed` and five-parameter `confirm_and_start` compatibility functions. Make `runtime.clarification` the sole adapter: its public path commits then starts, while auto-confirm directly commits without a boolean branch. Remove `start_after` from `ResearchRuntime.confirm_and_start`, reducing its explicit parameters from four to three, and consolidate the facade import. Production code falls by twelve net lines.
+
+The complete clarification selection passed 113 tests and the GUI unit/handler selection passed 59. Python compilation, Black, blocking Ruff, code-style hard rules, removed-function/parameter searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the confirmation row advances reviewed baseline coverage to 241/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -829,7 +837,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/memory/rollout.py` | 194 | Reviewed; delete redundant attribute and recovery wrapper; 42 tests pass |
 | `src/athena/research/__init__.py` | 18 | Reviewed; retain one lazy runtime export to isolate submodule imports |
 | `src/athena/research/clarification/__init__.py` | 1 | Reviewed; retain package documentation marker |
-| `src/athena/research/clarification/confirmation.py` | 240 | Pending |
+| `src/athena/research/clarification/confirmation.py` | 240 | Reviewed; seven-field transaction ports and runtime-owned lifecycle start |
 | `src/athena/research/clarification/context.py` | 230 | Pending |
 | `src/athena/research/clarification/controller.py` | 323 | Pending |
 | `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
