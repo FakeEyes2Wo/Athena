@@ -10,6 +10,8 @@ Every function here reads the tree via its public API (``to_dict`` / ``get_*`` /
 can mirror them without importing the runtime.
 """
 
+from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 from athena.core.research_tree import ResearchTree
@@ -26,13 +28,12 @@ def build_hypothesis_graph(tree: ResearchTree) -> dict[str, Any]:
     experiments: dict[str, dict[str, Any]] = data["experiments"]
     sota_id = data.get("sota_id")
 
-    exp_to_hyp = {
-        exp_id: exp["hypothesis_id"] for exp_id, exp in experiments.items()
-    }
+    exp_to_hyp = {exp_id: exp["hypothesis_id"] for exp_id, exp in experiments.items()}
+    hyp_to_exp = {hyp_id: exp_id for exp_id, hyp_id in exp_to_hyp.items()}
 
     nodes: list[dict[str, Any]] = []
     for hyp_id, hyp in hypotheses.items():
-        exp_id = tree.experiment_for_hypothesis(hyp_id)
+        exp_id = hyp_to_exp.get(hyp_id)
         primary = None
         if exp_id is not None and experiments.get(exp_id, {}).get("eval"):
             primary = experiments[exp_id]["eval"]["primary"]
@@ -86,9 +87,9 @@ def topological_order(tree: ResearchTree) -> dict[str, Any]:
     """BFS 层序排序实验树假设；无实验登记的假设按 ``order`` 补在末尾。"""
     order: list[str] = []
     visited: set[str] = set()
-    queue = list(tree.root_experiment_ids())
+    queue = deque(tree.root_experiment_ids())
     while queue:
-        exp_id = queue.pop(0)
+        exp_id = queue.popleft()
         if exp_id in visited:
             continue
         visited.add(exp_id)
@@ -115,13 +116,12 @@ def _dfs_cycles(adjacency: dict[str, list[str]]) -> tuple[bool, list[list[str]]]
     cycles: list[list[str]] = []
     stack: list[str] = []
 
-    def dfs(node: str) -> bool:
+    def dfs(node: str) -> None:
         color[node] = GRAY
         stack.append(node)
         for neighbor in adjacency[node]:
             if color[neighbor] == WHITE:
-                if dfs(neighbor):
-                    return True
+                dfs(neighbor)
             elif color[neighbor] == GRAY:
                 index = stack.index(neighbor)
                 cycles.append(stack[index:])
@@ -164,9 +164,7 @@ def lineage(tree: ResearchTree, params: dict[str, Any]) -> dict[str, Any]:
     exp_id = params["experiment_id"]
     return {
         "path": tree.experiment_path(exp_id),
-        "hypotheses": [
-            h.model_dump(mode="json") for h in tree.hypotheses_path(exp_id)
-        ],
+        "hypotheses": [h.model_dump(mode="json") for h in tree.hypotheses_path(exp_id)],
     }
 
 
@@ -226,9 +224,9 @@ def supersedes_closure(tree: ResearchTree, params: dict[str, Any]) -> dict[str, 
     hyp_id = params["hypothesis_id"]
     closure: list[str] = []
     seen: set[str] = set()
-    queue = list(tree.get_hypothesis(hyp_id).supersedes)
+    queue = deque(tree.get_hypothesis(hyp_id).supersedes)
     while queue:
-        current = queue.pop(0)
+        current = queue.popleft()
         if current in seen:
             continue
         seen.add(current)
@@ -240,7 +238,9 @@ def supersedes_closure(tree: ResearchTree, params: dict[str, Any]) -> dict[str, 
     return {"hypothesis_id": hyp_id, "closure": closure}
 
 
-def refutation_reachability(tree: ResearchTree, params: dict[str, Any]) -> dict[str, Any]:
+def refutation_reachability(
+    tree: ResearchTree, params: dict[str, Any]
+) -> dict[str, Any]:
     """Hypotheses affected downstream if a hypothesis is refuted (lineage propagation)."""
     hyp_id = params["hypothesis_id"]
     exp_id = tree.experiment_for_hypothesis(hyp_id)
@@ -253,57 +253,48 @@ def refutation_reachability(tree: ResearchTree, params: dict[str, Any]) -> dict[
     return {"hypothesis_id": hyp_id, "affected": affected}
 
 
-ALGORITHMS: list[dict[str, Any]] = [
-    {"name": "topological_order", "label": "拓扑排序（BFS 层序）", "params": []},
-    {"name": "cycle_detect", "label": "环检测", "params": []},
-    {
-        "name": "lineage",
-        "label": "祖先谱系",
-        "params": [{"name": "experiment_id", "type": "string", "required": True}],
-    },
-    {
-        "name": "active_hypotheses",
-        "label": "活跃假设集（去取代）",
-        "params": [
-            {"name": "experiment_id", "type": "string", "required": True},
-            {"name": "child_hypothesis_id", "type": "string", "required": True},
-        ],
-    },
-    {
-        "name": "descendants",
-        "label": "后代实验",
-        "params": [{"name": "experiment_id", "type": "string", "required": True}],
-    },
-    {"name": "best_path", "label": "最佳路径（SOTA 链）", "params": []},
-    {"name": "rank_pending", "label": "待选假设按优先级排序", "params": []},
-    {
-        "name": "supersedes_closure",
-        "label": "取代传递闭包",
-        "params": [{"name": "hypothesis_id", "type": "string", "required": True}],
-    },
-    {
-        "name": "refutation_reachability",
-        "label": "证伪影响范围",
-        "params": [{"name": "hypothesis_id", "type": "string", "required": True}],
-    },
-]
-
-_HANDLERS = {
-    "topological_order": topological_order,
-    "cycle_detect": cycle_detect,
-    "lineage": lineage,
-    "active_hypotheses": active_hypotheses,
-    "descendants": descendants,
-    "best_path": best_path,
-    "rank_pending": rank_pending,
-    "supersedes_closure": supersedes_closure,
-    "refutation_reachability": refutation_reachability,
+_ALGORITHMS: dict[str, tuple[str, tuple[str, ...], Callable[..., dict[str, Any]]]] = {
+    "topological_order": ("拓扑排序（BFS 层序）", (), topological_order),
+    "cycle_detect": ("环检测", (), cycle_detect),
+    "lineage": ("祖先谱系", ("experiment_id",), lineage),
+    "active_hypotheses": (
+        "活跃假设集（去取代）",
+        ("experiment_id", "child_hypothesis_id"),
+        active_hypotheses,
+    ),
+    "descendants": ("后代实验", ("experiment_id",), descendants),
+    "best_path": ("最佳路径（SOTA 链）", (), best_path),
+    "rank_pending": ("待选假设按优先级排序", (), rank_pending),
+    "supersedes_closure": (
+        "取代传递闭包",
+        ("hypothesis_id",),
+        supersedes_closure,
+    ),
+    "refutation_reachability": (
+        "证伪影响范围",
+        ("hypothesis_id",),
+        refutation_reachability,
+    ),
 }
 
+ALGORITHMS: list[dict[str, Any]] = [
+    {
+        "name": name,
+        "label": label,
+        "params": [
+            {"name": param, "type": "string", "required": True} for param in param_names
+        ],
+    }
+    for name, (label, param_names, _) in _ALGORITHMS.items()
+]
 
-def run_algorithm(tree: ResearchTree, name: str, params: dict[str, Any]) -> dict[str, Any]:
+
+def run_algorithm(
+    tree: ResearchTree, name: str, params: dict[str, Any]
+) -> dict[str, Any]:
     """Dispatch one algorithm by name, raising ``KeyError`` for unknown names."""
-    handler = _HANDLERS.get(name)
-    if handler is None:
+    algorithm = _ALGORITHMS.get(name)
+    if algorithm is None:
         raise KeyError(f"unknown algorithm: {name}")
-    return handler(tree, params)
+    _, param_names, handler = algorithm
+    return handler(tree, params) if param_names else handler(tree)

@@ -271,6 +271,14 @@ Read the GUI package facade and experiment-query module completely, then traced 
 
 The GUI unit and complete gateway-handler selection passed 55 tests. Python compilation, Black, blocking Ruff checks, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the two GUI source rows advances reviewed baseline coverage to 226/602; the new regression file is tracked separately below. Whole-repository acceptance remains pending.
 
+## GUI graph review
+
+Read `graph.py` completely and traced graph construction, all nine algorithm routes, service exposure, and gateway dispatch. Retain the graph module as a pure JSON projection/algorithm boundary rather than merging it into the already-large stateful GUI service. Preserve every public algorithm name, label, parameter schema, and result shape.
+
+Replace the duplicated `ALGORITHMS` metadata list and `_HANDLERS` name map with one private ordered registry, deriving the frontend metadata from it. Dispatch now uses the registered parameter schema to call zero-parameter algorithms without inventing a positional argument; this fixes the four algorithms that previously raised `TypeError` through the gateway. Build the hypothesis-to-experiment index from the existing tree snapshot instead of making one public-tree query per node. Replace both FIFO list queues with `deque`, and remove the DFS callback's dead boolean return/branch. Production source falls by nine net lines.
+
+The GUI unit and complete gateway-handler selection passed 58 tests, including new single-snapshot, parameterless-dispatch, and cycle-path regressions. Python compilation, Black, blocking Ruff checks, removed-structure searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the graph row advances reviewed baseline coverage to 227/602; the new regression file is tracked separately below. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -747,7 +755,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/gui/__init__.py` | 9 | Reviewed; retain the single-service package facade |
 | `src/athena/gui/experiments.py` | 59 | Reviewed; reuse one tree snapshot across experiment projections |
 | `test/unit/gui/test_experiments.py` | New | Reviewed; ordering, filtering, SOTA and one-snapshot regression |
-| `src/athena/gui/graph.py` | 309 | Pending |
+| `src/athena/gui/graph.py` | 309 | Reviewed; one algorithm registry, snapshot projection and deque traversals |
+| `test/unit/gui/test_graph.py` | New | Reviewed; snapshot, dispatch and cycle-path regressions |
 | `src/athena/gui/service.py` | 345 | Pending |
 | `src/athena/gui/traces.py` | 122 | Pending |
 | `src/athena/kaggle/__init__.py` | 59 | Pending |
