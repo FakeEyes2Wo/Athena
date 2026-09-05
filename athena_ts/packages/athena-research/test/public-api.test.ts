@@ -11,6 +11,7 @@ describe("research public surface", () => {
       "BundleMetadata", "ScriptRunResult",
       "ValidationService", "generalizationGap", "generalizationWarning",
       "CandidateEvaluationSchema",
+      "ResearchState",
     ]) expect(api).not.toHaveProperty(name)
   })
 
@@ -19,5 +20,8 @@ describe("research public surface", () => {
     expect(api.LocalExecutionRuntime).toBe(LocalExecutionRuntime)
     expect(api.runPreparePlan).toBeTypeOf("function")
     expect(api.runValidationPlan).toBeTypeOf("function")
+    expect(api.parseResearchState).toBeTypeOf("function")
+    expect(api.loadResearchState).toBeTypeOf("function")
+    expect(api.saveResearchState).toBeTypeOf("function")
   })
 })

@@ -21,7 +21,7 @@ import type { Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
 import { PlanRunner, hasAnyFile } from "./experiment.js"
 import { PlanInputSchema, PlanStateSchema, type PlanDecision } from "./plans.js"
-import type { ResearchState } from "./state.js"
+import { saveResearchState, type ResearchState } from "./state.js"
 
 export const PREPARE_PLAN_ID = "prepare"
 
@@ -49,7 +49,7 @@ export async function createPrepareWorkspace(opts: {
   const baseCommit = await opts.git.init(undefined, ".gitignore", ".venv/\n")
   const workspace = await opts.git.create(baseCommit, "athena/prepare", { name: "eda" })
   opts.state.eda_dir = relative(opts.projectRoot, workspace.path) || "."
-  opts.state.save(opts.statePath)
+  saveResearchState(opts.statePath, opts.state)
   return workspace
 }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { ExperimentSchema, HypothesisSchema, ResearchTree, parseOrThrow } from "@athena/core"
 import { PlanStateSchema } from "../../src/supervisor/plans.js"
 import { EloPolicy } from "../../src/supervisor/ranker.js"
-import { ResearchState } from "../../src/supervisor/state.js"
+import { parseResearchState, researchStateToJSON, type ResearchState } from "../../src/supervisor/state.js"
 import { Scheduler, countSearchAttempts } from "../../src/supervisor/scheduler.js"
 
 const CONTEXT_REF = "sha256:" + "d".repeat(64)
@@ -23,7 +23,7 @@ function state(
   plans: Record<string, ReturnType<typeof plan>> = {},
   opts: { concurrency?: number; searchLimit?: number } = {}
 ): ResearchState {
-  return new ResearchState({
+  return parseResearchState({
     status: "RUNNING",
     phase: "SEARCH",
     search_limit: opts.searchLimit ?? 10,
@@ -152,13 +152,13 @@ describe("Scheduler", () => {
     t.getHypothesis("h_duplicate").intervention = t.getHypothesis("h_first").intervention
     const s = state({}, { concurrency: 2 })
     const beforeTree = JSON.stringify(t.toDict())
-    const beforeState = s.toJSON()
+    const beforeState = researchStateToJSON(s)
     expect(new Scheduler().nextActions(s, t, [])).toEqual([
       { kind: "START_NEW", planId: "h_first" },
       { kind: "GENERATE", count: 1 },
     ])
     expect(JSON.stringify(t.toDict())).toBe(beforeTree)
-    expect(s.toJSON()).toEqual(beforeState)
+    expect(researchStateToJSON(s)).toEqual(beforeState)
     expect(t.pendingHypotheses()).toHaveLength(2)
   })
 

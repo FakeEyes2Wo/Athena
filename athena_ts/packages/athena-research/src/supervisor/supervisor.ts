@@ -23,7 +23,7 @@ import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } f
 import type { PrepareResult } from "./prepare.js"
 import { reconcilePlans } from "./recovery.js"
 import { Scheduler, countSearchAttempts } from "./scheduler.js"
-import { ResearchState, type ResearchStatus } from "./state.js"
+import { saveResearchState, researchStateToJSON, type ResearchState, type ResearchStatus } from "./state.js"
 
 export type PlanTurn = (planId: string, state: PlanState) => Promise<PlanTurnResult>
 export type PlanAgentTurn = (planId: string, state: PlanState) => Promise<PlanDecision | null>
@@ -284,11 +284,11 @@ export class FixedFlowSupervisor {
   }
 
   private saveState(): void {
-    this.state.save(this.statePath)
+    saveResearchState(this.statePath, this.state)
   }
 
   private async publishState(): Promise<void> {
-    await this.workers.publish("state", { type: "state", ...this.state.toJSON() })
+    await this.workers.publish("state", { type: "state", ...researchStateToJSON(this.state) })
   }
 
   private async persistState(): Promise<void> {

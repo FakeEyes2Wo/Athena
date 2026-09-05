@@ -4,7 +4,7 @@ import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { Context } from "cordis"
 import { HypothesisSchema, LocalGitWorkspace, ResearchTree } from "@athena/core"
-import { DataScriptRunner, FixedFlowSupervisor, ResearchState, Scheduler, TrustedEvaluator } from "@athena/research"
+import { DataScriptRunner, FixedFlowSupervisor, parseResearchState, Scheduler, TrustedEvaluator } from "@athena/research"
 import { dshWorkers, researchPlugin, researchStatus } from "../src/index.js"
 
 let tmp: string
@@ -19,7 +19,7 @@ describe("researchPlugin", () => {
     await ctx.plugin(researchPlugin({ projectRoot: tmp }))
 
     expect(ctx.researchTree).toBeInstanceOf(ResearchTree)
-    expect(ctx.researchState).toBeInstanceOf(ResearchState)
+    expect(Object.getPrototypeOf(ctx.researchState)).toBe(Object.prototype)
     expect(ctx.researchScheduler).toBeInstanceOf(Scheduler)
     expect(ctx.researchEvaluator).toBeInstanceOf(TrustedEvaluator)
     expect(ctx.researchScriptRunner).toBeInstanceOf(DataScriptRunner)
@@ -112,7 +112,7 @@ describe("researchPlugin", () => {
         if (name === "subagents") return undefined
         return undefined
       },
-      researchState: new ResearchState({
+      researchState: parseResearchState({
         status: "RUNNING",
         phase: "PREPARE",
         search_limit: 10,

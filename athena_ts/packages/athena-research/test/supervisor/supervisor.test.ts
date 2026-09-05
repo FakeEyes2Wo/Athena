@@ -16,7 +16,7 @@ import { ValidationResultSchema } from "../../src/contracts.js"
 import { PlanTurnResultSchema } from "../../src/supervisor/experiment.js"
 import { PlanBestSchema, PlanDecisionSchema, PlanStateSchema } from "../../src/supervisor/plans.js"
 import { PrepareResultSchema } from "../../src/supervisor/prepare.js"
-import { ResearchState } from "../../src/supervisor/state.js"
+import { parseResearchState, loadResearchState } from "../../src/supervisor/state.js"
 import { FixedFlowSupervisor, type SupervisorWorkers } from "../../src/supervisor/supervisor.js"
 
 const REF = "sha256:" + "a".repeat(64)
@@ -87,7 +87,7 @@ describe("FixedFlowSupervisor", () => {
     const dir = tmpDir()
     const store = new LocalArtifactStore(join(dir, "artifacts"))
     const tree = baselineTree(dir)
-    const state = new ResearchState({
+    const state = parseResearchState({
       status: "RUNNING",
       phase: "SEARCH",
       search_limit: 2,
@@ -161,7 +161,7 @@ function coreSupervisor(
 ) {
   const store = new LocalArtifactStore(join(dir, "artifacts"))
   const tree = baselineTree(dir)
-  const state = new ResearchState({
+  const state = parseResearchState({
     status: "RUNNING",
     phase: "SEARCH",
     search_limit: 10,
@@ -228,7 +228,7 @@ describe("FixedFlowSupervisor core actions", () => {
 
     expect(result).toEqual({ recorded: true, task_understanding: understanding })
     expect(state.task_understanding).toEqual(understanding)
-    const persisted = ResearchState.load(join(dir, ".athena", "state.json"))
+    const persisted = loadResearchState(join(dir, ".athena", "state.json"))
     expect(persisted.task_understanding).toEqual(understanding)
   })
 
@@ -279,7 +279,7 @@ describe("FixedFlowSupervisor core actions", () => {
       "final_test_score", "generalization_gap", "generalization_warning",
       "report_ref", "result_id", "status", "test_score",
     ])
-    expect(ResearchState.load(join(dir, ".athena", "state.json")).validation).toEqual(state.validation)
+    expect(loadResearchState(join(dir, ".athena", "state.json")).validation).toEqual(state.validation)
     expect(await store.getText(state.validation!["report_ref"] as string)).toContain("## 验证结果")
   })
 })

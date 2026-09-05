@@ -9,12 +9,12 @@ import {
 } from "@athena/core"
 import { PlanStateSchema } from "../../src/supervisor/plans.js"
 import { reconcilePlans } from "../../src/supervisor/recovery.js"
-import { ResearchState } from "../../src/supervisor/state.js"
+import { parseResearchState, researchStateToJSON, type ResearchState } from "../../src/supervisor/state.js"
 
 const REF = "sha256:" + "a".repeat(64)
 
 function state(): ResearchState {
-  return new ResearchState({
+  return parseResearchState({
     status: "RUNNING",
     phase: "SEARCH",
     search_limit: 10,
@@ -69,7 +69,7 @@ function tree(status?: "RUNNING" | "FAILED"): ResearchTree {
 
 describe("reconcilePlans", () => {
   it.each([null, { score: 0.5 }])("retains validation plans only without a result: %j", (validation) => {
-    const original = new ResearchState({
+    const original = parseResearchState({
       status: "RUNNING",
       phase: "VALIDATE",
       search_limit: 10,
@@ -99,7 +99,7 @@ describe("reconcilePlans", () => {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
-    expect(reconciled.toJSON()).toEqual(original.toJSON())
+    expect(researchStateToJSON(reconciled)).toEqual(researchStateToJSON(original))
     expect(reconciled).not.toBe(original)
   })
 
@@ -112,7 +112,7 @@ describe("reconcilePlans", () => {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
-    expect(reconciled.toJSON()).toEqual({ ...original.toJSON(), plans: {} })
+    expect(researchStateToJSON(reconciled)).toEqual({ ...researchStateToJSON(original), plans: {} })
     expect(original.plans).toHaveProperty("h1")
   })
 
@@ -180,7 +180,7 @@ describe("reconcilePlans", () => {
   })
 
   it("settled prepare plan is removed when baseline final experiment exists", () => {
-    const s = new ResearchState({
+    const s = parseResearchState({
       status: "RUNNING",
       phase: "SEARCH",
       search_limit: 10,
@@ -234,7 +234,7 @@ describe("reconcilePlans", () => {
   })
 
   it("non-terminal baseline keeps prepare plan", () => {
-    const s = new ResearchState({
+    const s = parseResearchState({
       status: "RUNNING",
       phase: "SEARCH",
       search_limit: 10,

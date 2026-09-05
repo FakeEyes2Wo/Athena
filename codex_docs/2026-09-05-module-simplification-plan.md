@@ -28,6 +28,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Reduce script run arguments and consolidate frozen-file restoration/snapshot ownership.
 - [x] Merge stateless validation result construction into its active orchestration and review reporting.
 - [x] Remove the unused candidate score wrapper and unpopulated validation metadata.
+- [x] Replace the ResearchState class with schema-derived plain state and explicit persistence.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -194,6 +195,16 @@ Baseline score/PlanRunner/prepare/validation/Supervisor checks returned 61 passe
 Artifact final verification: all five builds passed; the full TypeScript workspace passed 500 tests across 54 files with `npm test -- --testTimeout=30000`, and the separate real-uv smoke passed. Removed score-envelope references remain only in the negative API assertion; removed validation fields appear only in the legacy-projection test. git diff --check passed. Default-timeout reliability and whole-application acceptance remain unproven.
 
 Completing contracts.ts brings baseline coverage to 85/602; contracts.test.ts is tracked separately as New. state.ts and plans.ts have been fully read but caller/serialization and test review remain Pending. Their existing state fields are not assumed dead merely because this artifact slice removed other placeholders. Whole-repository acceptance, main merge/push and temporary task branch/worktree cleanup remain mandatory and unfinished.
+
+Research state review: read state.ts/state.test.ts fully and trace DSH initialization, prepare persistence, Supervisor publication/save, recovery cloning and scheduler consumers. All eleven durable fields remain used; retain their names, defaults, constraints and plan-key rules. Delete the ResearchState runtime class, eleven repeated property declarations and eleven constructor assignments. ResearchState is now inferred from the existing schema; ResearchStatus derives from that type and the unused ResearchPhase alias is removed. Expose parseResearchState, loadResearchState, saveResearchState and researchStateToJSON rather than construction/static/instance methods.
+
+Load validates once through the shared parse function instead of parse followed by constructor revalidation, retaining AthenaValidationError normalization and the explicit non-object-root error. Keep exact durable-field projection and Plan serialization instead of persisting arbitrary properties from a spread. Preserve mutable state ownership, independent schema defaults, detached plan snapshots and the existing atomic writer/failure cleanup. No save-time validation layer or additional state wrapper is added. Migrate every live DSH/Supervisor/prepare/recovery caller and associated tests; package tests reject the removed runtime export. State source shrinks from 111 to 80 lines.
+
+The baseline state/Plan/recovery selection returned 69 passed. After three regressions for plain data/default independence, a single parsing pass and exact durable projection, state/Plan/recovery/DSH returned 76 passed. All five package builds passed. The first full run exposed a missed scheduler test alias (s.toJSON); migrate both occurrences to researchStateToJSON and verify all nineteen scheduler tests. DSH's JSON.stringify(state) in its agent prompt uses PlanState, not the removed ResearchState class, and remains unchanged.
+
+State final verification: the first full run finished with 502 passed and the one missed test migration above. After correction, a fresh full run passed 503 tests across 54 files with `npm test -- --testTimeout=30000`. All five builds and git diff --check passed. No removed constructor/static/instance state APIs remain in tracked package callers. The explicit timeout override does not prove default-timeout reliability or whole-application readiness.
+
+Closing state source/test brings baseline review coverage to 87/602. plans.ts and plans.test.ts have now been fully read, but the broader PlanInput/PlanBest/decision consumer and serialization simplification review remains Pending. Whole-repository acceptance, main merge/push and this task's temporary branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -776,7 +787,7 @@ Completing contracts.ts brings baseline coverage to 85/602; contracts.test.ts is
 | `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; remove static class and helpers; preserve complete durable state; 12 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; delete factories/forwarders; 19 tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Reviewed; plain schema-derived state, single parse, explicit durable projection and atomic persistence |
 | `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Reviewed; owns result construction and existing decision/scoring loop |
 | `athena_ts/packages/athena-research/src/validation.ts` | 54 | Reviewed; merged sole production use into supervisor/validation.ts and deleted |
@@ -792,7 +803,7 @@ Completing contracts.ts brings baseline coverage to 85/602; contracts.test.ts is
 | `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Reviewed; scoring/novelty/FIFO/dedup/configuration and snapshot-count regressions; 21 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; correct active experiment fixtures; add configuration and phase recovery regressions; 12 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, null fixture correction, policy/budget/dedup regressions; 19 tests pass |
-| `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Reviewed; 22 persistence/validation/ownership/parse-count/projection cases |
 | `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Reviewed; fourteen metric/tolerance/feedback/decision/budget cases |
 | `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Reviewed; deleted helper/class tests, migrated coverage to real plan entrypoint |

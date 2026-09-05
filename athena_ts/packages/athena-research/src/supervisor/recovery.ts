@@ -2,7 +2,7 @@
 
 import type { ResearchTree } from "@athena/core"
 import type { PlanState } from "./plans.js"
-import { ResearchState } from "./state.js"
+import { parseResearchState, type ResearchState } from "./state.js"
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])
 
@@ -35,5 +35,5 @@ export function reconcilePlans(
     if (!opts.artifactExists(plan.context_ref) || !opts.workspaceExists(planId)) waiting = true
     plans[planId] = plan
   }
-  return new ResearchState({ ...state, plans, status: waiting ? "WAITING" : state.status })
+  return parseResearchState({ ...state, plans, status: waiting ? "WAITING" : state.status })
 }

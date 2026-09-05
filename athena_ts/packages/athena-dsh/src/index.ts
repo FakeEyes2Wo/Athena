@@ -26,7 +26,9 @@ import {
   PlanInputSchema,
   PlanRunner,
   PlanStateSchema,
-  ResearchState,
+  parseResearchState,
+  loadResearchState,
+  type ResearchState,
   Scheduler,
   TrustedEvaluator,
   buildFinalReport,
@@ -272,8 +274,8 @@ export function researchPlugin(config: AthenaResearchConfig = {}) {
     const evaluator = new TrustedEvaluator(scripts)
     const tree = existsSync(treePath) ? ResearchTree.load(treePath) : new ResearchTree()
     const state = existsSync(statePath)
-      ? ResearchState.load(statePath)
-      : new ResearchState({
+      ? loadResearchState(statePath)
+      : parseResearchState({
           status: "RUNNING",
           phase: "PREPARE",
           search_limit: config.searchLimit ?? 10,

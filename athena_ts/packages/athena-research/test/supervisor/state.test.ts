@@ -4,14 +4,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { parseOrThrow } from "@athena/core"
+import * as core from "@athena/core"
 import { PlanStateSchema } from "../../src/supervisor/plans.js"
-import { ResearchState } from "../../src/supervisor/state.js"
+import { parseResearchState, loadResearchState, saveResearchState, researchStateToJSON, type ResearchState } from "../../src/supervisor/state.js"
 
 const TRUSTED_REF = "sha256:" + "b".repeat(64)
 const CONTEXT_REF = "sha256:" + "d".repeat(64)
 
 function searchState(): ResearchState {
-  return new ResearchState({
+  return parseResearchState({
     status: "RUNNING",
     phase: "SEARCH",
     search_limit: 10,
@@ -42,15 +43,54 @@ function tmpDir(): string {
 }
 
 describe("ResearchState", () => {
+  it("parses plain data with detached plan snapshots and independent defaults", () => {
+    const source = searchState()
+    const copy = parseResearchState(source)
+    expect(Object.getPrototypeOf(copy)).toBe(Object.prototype)
+    source.plans["hyp_vit"]!.turns_used = 99
+    expect(copy.plans["hyp_vit"]!.turns_used).toBe(2)
+    const input = { status: "RUNNING", phase: "PREPARE", search_limit: 1, concurrency: 1 }
+    const first = parseResearchState(input)
+    const second = parseResearchState(input)
+    first.plans["hyp_vit"] = copy.plans["hyp_vit"]!
+    expect(second.plans).toEqual({})
+  })
+
+  it("loads through a single validation pass", () => {
+    const path = join(tmpDir(), "state.json")
+    saveResearchState(path, searchState())
+    const parse = vi.spyOn(core, "parseOrThrow")
+    const loaded = loadResearchState(path)
+    expect(loaded.plans["hyp_vit"]!.turns_used).toBe(2)
+    expect(parse).toHaveBeenCalledTimes(1)
+  })
+
+  it("projects only durable fields while keeping current mutable state", () => {
+    const state = searchState()
+    state.ideator_count = 5
+    state.hypotheses_per_ideator = 4
+    state.eda_dir = "workspaces/eda"
+    state.task_understanding = { title: "task" }
+    state.validation = { report_ref: TRUSTED_REF }
+    Object.assign(state, { transient: "not persisted" })
+    const json = researchStateToJSON(state)
+    expect(json).not.toHaveProperty("transient")
+    expect(json).toMatchObject({
+      ideator_count: 5, hypotheses_per_ideator: 4, eda_dir: "workspaces/eda",
+      task_understanding: { title: "task" }, validation: { report_ref: TRUSTED_REF },
+    })
+    expect(Object.keys(json)).toHaveLength(11)
+  })
+
   it("search plan round trips with exact durable fields", () => {
     const dir = tmpDir()
     const path = join(dir, "state.json")
     const state = searchState()
 
-    const savedPath = state.save(path)
+    const savedPath = saveResearchState(path, state)
 
     expect(savedPath).toBe(path)
-    expect(ResearchState.load(path)).toEqual(state)
+    expect(loadResearchState(path)).toEqual(state)
     const planJson = JSON.parse(readFileSync(path, "utf-8"))["plans"]["hyp_vit"]
     expect(Object.keys(planJson).sort()).toEqual([
       "best_ref",
@@ -69,7 +109,7 @@ describe("ResearchState", () => {
   ])("non-search plans omit search-only fields (%s)", (planId, kind) => {
     const dir = tmpDir()
     const path = join(dir, "state.json")
-    const state = new ResearchState({
+    const state = parseResearchState({
       status: "RUNNING",
       phase: kind as "PREPARE" | "VALIDATE",
       search_limit: 10,
@@ -84,7 +124,7 @@ describe("ResearchState", () => {
       },
     })
 
-    state.save(path)
+    saveResearchState(path, state)
 
     const planJson = JSON.parse(readFileSync(path, "utf-8"))["plans"][planId]
     expect(Object.keys(planJson).sort()).toEqual([
@@ -110,7 +150,7 @@ describe("ResearchState", () => {
     if (kind === "SEARCH") planPayload["patience"] = 4
 
     expect(() =>
-      new ResearchState({
+      parseResearchState({
         status: "RUNNING",
         phase: "SEARCH",
         search_limit: 10,
@@ -132,12 +172,12 @@ describe("ResearchState", () => {
       plans: {},
       [field]: value,
     }
-    expect(() => new ResearchState(payload as never)).toThrow()
+    expect(() => parseResearchState(payload as never)).toThrow()
   })
 
   it.each(["search_limit", "concurrency"])("rejects coerced numeric limits (%s)", (field) => {
     expect(() =>
-      new ResearchState({
+      parseResearchState({
         status: "RUNNING",
         phase: "SEARCH",
         search_limit: 10,
@@ -150,7 +190,7 @@ describe("ResearchState", () => {
 
   it.each(["", " ", "\t"])("search plan key must be nonblank (%j)", (planId) => {
     expect(() =>
-      new ResearchState({
+      parseResearchState({
         status: "RUNNING",
         phase: "SEARCH",
         search_limit: 10,
@@ -191,13 +231,13 @@ describe("ResearchState", () => {
       "utf-8"
     )
 
-    const loaded = ResearchState.load(path)
+    const loaded = loadResearchState(path)
     expect(loaded.plans["prepare"]!.kind).toBe("PREPARE")
   })
 
   it("rejects unknown status and phase", () => {
     expect(() =>
-      new ResearchState({
+      parseResearchState({
         status: "PAUSED",
         phase: "IDLE",
         search_limit: 10,
@@ -211,9 +251,9 @@ describe("ResearchState", () => {
     const path = join(dir, "state.json")
     writeFileSync(path, '{"old": true}\n', "utf-8")
 
-    searchState().save(path)
+    saveResearchState(path, searchState())
 
-    expect(ResearchState.load(path)).toEqual(searchState())
+    expect(loadResearchState(path)).toEqual(searchState())
     expect(existsSync(join(dir, "state.json.tmp"))).toBe(false)
   })
 
@@ -227,7 +267,7 @@ describe("ResearchState", () => {
       throw new Error("replace failed")
     })
 
-    expect(() => searchState().save(path)).toThrow(/replace failed/)
+    expect(() => saveResearchState(path, searchState())).toThrow(/replace failed/)
 
     expect(readFileSync(path, "utf-8")).toBe(original)
     expect(existsSync(join(dir, "state.json.tmp"))).toBe(false)
@@ -239,6 +279,6 @@ describe("ResearchState", () => {
     const path = join(dir, "state.json")
     writeFileSync(path, "[]", "utf-8")
 
-    expect(() => ResearchState.load(path)).toThrow(/must be an object/)
+    expect(() => loadResearchState(path)).toThrow(/must be an object/)
   })
 })
