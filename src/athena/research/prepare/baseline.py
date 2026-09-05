@@ -358,7 +358,7 @@ async def _run_ideator_turn(
             content=content,
             reap_after=False,
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - Agent response boundary
         _remove_verification(root)
         return BaselineResearchError(
             "baseline ideator response failed", (_bounded_diagnostic(error),)
@@ -426,7 +426,7 @@ async def _reap_ideator(runtime: Any) -> None:
             _observe_ideator_reap(task)
             return
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - reap observation boundary
         _observe_ideator_reap(task)
     else:
         _observe_ideator_reap(task)
@@ -552,7 +552,7 @@ def verified_baseline_task(task: str, verified: VerifiedBaseline) -> str:
         f"- {DESIGN_FILENAME}\n"
         f"Selected candidate: {verified.artifacts.selected.candidate_id}\n"
         "Training strategy: "
-        f"{verified.artifacts.design.training_strategy}\n"
+        f"{verified.artifacts.training_strategy}\n"
         f"Verification route: {verification.route}\n"
         f"Verified revision: {revision}"
     )

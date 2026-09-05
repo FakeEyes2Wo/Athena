@@ -5,11 +5,12 @@ import os
 import re
 import tempfile
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -407,7 +408,7 @@ class BaselineResearch(BaseModel):
             for candidate in self.candidates
             if candidate.candidate_id == self.selected_candidate_id
         )
-        validate_training_policy(self.dataset, self.training, selected_source)
+        _validate_training_policy(self.dataset, self.training, selected_source)
         return self
 
 
@@ -417,7 +418,7 @@ _TRANSFER_STRATEGIES = frozenset(
 )
 
 
-def validate_training_policy(
+def _validate_training_policy(
     dataset: DatasetProfile,
     training: TrainingPolicy,
     selected: BaselineSource,
@@ -494,16 +495,7 @@ def validate_training_policy(
         raise ValueError("scratch scale evidence is unused by the selected strategy")
 
 
-class BaselineDesignSelection(BaseModel):
-    """Immutable selection parsed from the human-readable design artifact."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    selected_candidate_id: str = Field(min_length=1)
-    training_strategy: TrainingStrategy
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BaselineArtifacts:
     """Validated research/design pair, retaining both exact byte sequences."""
 
@@ -511,9 +503,16 @@ class BaselineArtifacts:
     raw_research: bytes
     raw_design: bytes
     research: BaselineResearch
-    design_text: str
-    design: BaselineDesignSelection
-    selected: BaselineSource
+    training_strategy: TrainingStrategy
+
+    @property
+    def selected(self) -> BaselineSource:
+        """Return the selected candidate from the validated research contract."""
+        return next(
+            candidate
+            for candidate in self.research.candidates
+            if candidate.candidate_id == self.research.selected_candidate_id
+        )
 
 
 class VerificationAttempt(BaseModel):
@@ -592,7 +591,7 @@ class BaselineVerification(BaseModel):
         return self
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class VerifiedBaseline:
     """Validated artifacts carried with canonical external-authority evidence."""
 
@@ -667,23 +666,12 @@ def _parse_baseline_artifacts(
             ),
         )
 
-    selected = next(
-        candidate
-        for candidate in research.candidates
-        if candidate.candidate_id == research.selected_candidate_id
-    )
-    design = BaselineDesignSelection(
-        selected_candidate_id=selected_candidate_id,
-        training_strategy=training_strategy,
-    )
     return BaselineArtifacts(
         root=root,
         raw_research=raw_research,
         raw_design=raw_design,
         research=research,
-        design_text=design_text,
-        design=design,
-        selected=selected,
+        training_strategy=training_strategy,
     )
 
 
@@ -846,38 +834,3 @@ def _write_verification_bytes(root: Path, raw: bytes) -> Path:
 def write_verification(root: Path, verification: BaselineVerification) -> Path:
     """Persist canonical platform verification as an untrusted audit mirror."""
     return _write_verification_bytes(root, verification_bytes(verification))
-
-
-__all__ = [
-    "AUTHORITY_CITATION_THRESHOLD",
-    "BaselineArtifacts",
-    "BaselineDesignSelection",
-    "BaselineResearch",
-    "BaselineResearchError",
-    "BaselineSource",
-    "BaselineVerification",
-    "CandidateDecision",
-    "DatasetFact",
-    "DatasetProfile",
-    "DESIGN_FILENAME",
-    "EvidenceRef",
-    "FineTuneSafeguards",
-    "OneCandidateException",
-    "PretrainedAssessment",
-    "RESEARCH_FILENAME",
-    "ScratchScaleComparison",
-    "SearchRecord",
-    "TrainingPolicy",
-    "TrainingStrategy",
-    "VerificationAttempt",
-    "VERIFICATION_FILENAME",
-    "VerifiedBaseline",
-    "assert_verification_matches_artifacts",
-    "design_sha256",
-    "load_baseline_artifacts",
-    "research_sha256",
-    "titles_match",
-    "validate_training_policy",
-    "verification_bytes",
-    "write_verification",
-]

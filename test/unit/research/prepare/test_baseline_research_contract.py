@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -119,7 +119,7 @@ def verification_for(root: Path, **changes: object) -> BaselineVerification:
         "design_sha256": baseline_contract.design_sha256(artifacts.raw_design),
         "selected_candidate_id": artifacts.selected.candidate_id,
         "route": "git",
-        "verified_at": datetime.now(timezone.utc),
+        "verified_at": datetime.now(UTC),
         "repository_url": str(artifacts.selected.repository_url),
         "commit": "a" * 40,
         "attempts": [{"route": "git", "success": True, "diagnostic": "clone verified"}],
@@ -158,7 +158,7 @@ def test_loads_matching_research_and_design(tmp_path: Path) -> None:
     write_artifacts(tmp_path)
     artifacts = load_baseline_artifacts(tmp_path)
     assert artifacts.selected.candidate_id == "resnet-transfer"
-    assert artifacts.design.training_strategy == "partial_finetune"
+    assert artifacts.training_strategy == "partial_finetune"
     assert artifacts.research.training.strategy == "partial_finetune"
 
 

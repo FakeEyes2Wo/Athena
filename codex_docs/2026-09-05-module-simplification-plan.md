@@ -549,6 +549,12 @@ Read `source_verification.py` completely and traced its Git/OpenAlex adapters, b
 
 Replace both handwritten verifier constructors with slotted dataclasses while preserving their existing call syntax: `GitCloneVerifier` keeps two attributes and `BaselineSourceVerifier` keeps three. Inline the sole OpenAlex identity helper, privatize the sole-use diagnostic joiner, and remove the redundant implementation export list. The module falls from 613 to 593 physical lines. The unchanged direct baseline and final selection both passed 126 tests; source Ruff, Black, Python compilation, removed-helper searches, and `git diff --check` passed. Closing the source-verification row advances reviewed coverage to 343/602. Whole-repository acceptance remains pending.
 
+## Baseline research contract simplification
+
+Read `baseline_research.py` completely and traced every contract, parser, digest, verification, and artifact projection through source verification, controller authority, PREPARE orchestration, breakpoint recovery, and tests. Preserve the version-two JSON schema, strict extra-field rejection, evidence-bound dataset/training policy, candidate/decision consistency, design markers, exact raw bytes and digests, route-specific proof, canonical verification serialization, atomic mirror writes, and normalized title/repository matching.
+
+Delete the zero-reuse `BaselineDesignSelection` model and store its sole training-strategy value directly on `BaselineArtifacts`. Remove the unread `design_text` field and replace the copied selected-candidate reference with a derived property, reducing that record from seven fields to five; make both artifact records slotted. Privatize the training-policy validator and delete the redundant implementation export list. The module falls from 883 to 836 physical lines. Contract, source, authority, and full baseline-orchestration verification passed 230 tests; Ruff, Black, Python compilation, removed-surface searches, and `git diff --check` passed. The authoritative-gate integration fixture currently stops before baseline code because its legacy runtime lacks the now-required `state`/`config.paths`; its 56 unaffected tests passed, so it is not counted as positive evidence. Closing the baseline-research row advances reviewed coverage to 344/602. The one-line `baseline.py` caller migration does not close that still-Pending file. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1149,7 +1155,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/prepare/__init__.py` | 1 | Reviewed; retain minimal package marker |
 | `src/athena/research/prepare/authority.py` | 171 | Reviewed; retain controller trust contract and remove redundant export list |
 | `src/athena/research/prepare/baseline.py` | 629 | Pending |
-| `src/athena/research/prepare/baseline_research.py` | 883 | Pending |
+| `src/athena/research/prepare/baseline_research.py` | 883 | Reviewed; delete one-use design model and reduce artifact state from seven fields to five |
 | `src/athena/research/prepare/data.py` | 118 | Reviewed; inline sole contract factory and retain durable split record |
 | `src/athena/research/prepare/eda.py` | 378 | Reviewed; replace eight-parameter scheduler with three-resource runner and one options record |
 | `src/athena/research/prepare/evaluator.py` | 363 | Reviewed; delete one-use job DTO and pass two required values directly |
