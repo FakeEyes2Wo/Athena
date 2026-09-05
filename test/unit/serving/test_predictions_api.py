@@ -12,7 +12,7 @@ import urllib.request
 import numpy as np
 import pytest
 
-from athena.serving.predictions_api import (
+from athena.serving.model import (
     PredictionRequest,
     ID_COL,
     MAX_RECORDS,
@@ -20,9 +20,9 @@ from athena.serving.predictions_api import (
     EXAMPLE_TRUTH,
     ModelBundle,
     ValidationError,
-    build_server,
     create_features,
 )
+from athena.serving.predictions_api import build_server
 
 FEATURES = [
     "max_snr",
@@ -196,7 +196,9 @@ def test_prediction_flips_with_the_threshold() -> None:
 
 def test_id_is_echoed_or_null() -> None:
     bundle = _bundle()
-    out = bundle.predict(PredictionRequest([_record(**{ID_COL: "TIC1_s0001_w00000"}), _record()], 0.5))
+    out = bundle.predict(
+        PredictionRequest([_record(**{ID_COL: "TIC1_s0001_w00000"}), _record()], 0.5)
+    )
     assert out[0][ID_COL] == "TIC1_s0001_w00000"
     assert out[1][ID_COL] is None
 
@@ -295,7 +297,9 @@ def test_example_body_posts_back_unchanged(server) -> None:
 
 
 def test_predict_reports_the_threshold_it_used(server) -> None:
-    status, body = _post(server, "/predict", {"records": [_record()], "threshold": 0.25})
+    status, body = _post(
+        server, "/predict", {"records": [_record()], "threshold": 0.25}
+    )
     assert status == 200 and body["threshold"] == 0.25
 
 

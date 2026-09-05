@@ -31,6 +31,7 @@ Design spec:
 - `docs/superpowers/specs/2026-09-03-native-directory-dialog-recovery-design.md`
 
 Parallel implementation plan:
+- `codex_docs/2026-09-05-module-simplification-plan.md`
 - `docs/superpowers/plans/2026-09-02-authoritative-baseline-research-gate.md`
 
 Parallel supporting design spec:

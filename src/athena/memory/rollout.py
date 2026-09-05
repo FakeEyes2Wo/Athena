@@ -42,14 +42,13 @@ class RolloutRecorder:
         path: 当前文件路径（``open()`` 之前为 ``None``）。
     """
 
-    __slots__ = ("_base", "_path", "_fd", "_seq", "_adapter")
+    __slots__ = ("_base", "_path", "_fd", "_seq")
 
     def __init__(self, project_root: Path) -> None:
         self._base = project_root / ".athena" / "sessions"
         self._path: Path | None = None
         self._fd = None
         self._seq = 0
-        self._adapter = ModelMessagesTypeAdapter  # 预构建的单例
 
     @property
     def path(self) -> Path | None:
@@ -95,7 +94,7 @@ class RolloutRecorder:
         """追加一条 PydanticAI 消息为 JSONL 行。"""
         if self._fd is None:
             return
-        payload = self._adapter.dump_python([msg], mode="json")
+        payload = ModelMessagesTypeAdapter.dump_python([msg], mode="json")
         self._write_line(
             {
                 "seq": self._seq,
@@ -141,15 +140,10 @@ async def resume_context(rollout_path: Path) -> "ContextManager":
     文件在事件循环线程之外流式读取。每个更新的 compaction 替换之前的重放状态，
     只保留其摘要及后续消息。损坏/截断的记录被跳过。
     """
-    return await asyncio.to_thread(_resume_context_sync, rollout_path)
+    return await asyncio.to_thread(resume_context_sync, rollout_path)
 
 
 def resume_context_sync(rollout_path: Path) -> ContextManager:
-    """同步重建 ContextManager（供同步工厂路径在序列器内恢复私有记忆）。"""
-    return _resume_context_sync(rollout_path)
-
-
-def _resume_context_sync(rollout_path: Path) -> ContextManager:
     """流式读取一个 rollout，仅保留最新的 compacted 上下文。"""
     adapter = ModelMessagesTypeAdapter
     ctx = ContextManager()
@@ -174,7 +168,9 @@ def _resume_context_sync(rollout_path: Path) -> ContextManager:
                 ctx.append(
                     ModelRequest(
                         parts=[
-                            SystemPromptPart(content=f"{HISTORY_SUMMARY_PREFIX}{summary}")
+                            SystemPromptPart(
+                                content=f"{HISTORY_SUMMARY_PREFIX}{summary}"
+                            )
                         ]
                     )
                 )
