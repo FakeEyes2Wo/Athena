@@ -6,12 +6,14 @@ Coverage correction: the original 391-file inventory omitted 65 Rust, 138 TypeSc
 
 Inventory is not a completed semantic review. Each pending file requires content inspection, caller tracing, a retain/merge/delete decision, and relevant verification before closing this plan. Reconcile new or removed files before final acceptance.
 
+Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScript checkpoint now and do not spend further simplification time in `athena_ts`. Remaining unreviewed TypeScript ledger entries are deferred, not counted as reviewed. Continue the repository-wide review on Python, GUI, gateway, Rust, and development scripts directly on `main`.
+
 ## Tasks
 
 - [x] Enumerate tracked application source files and record baseline line counts.
 - [x] Read all four serving source files and trace their immediate callers.
 - [x] Resolve serving compatibility entrypoint duplication and verify callers (22 tests before and after; module CLI help exits 0).
-- [ ] Review every remaining file and module; record decisions and evidence.
+- [ ] Review every remaining non-TypeScript file and module; record decisions and evidence.
 - [ ] Implement the identified simplifications with scoped regression checks.
 - [x] Resolve TypeScript recovery fixture/state-copy failures and reconcile its workspace lockfile.
 - [x] Simplify TypeScript sampling task storage/dispatch and verify concurrency/result ordering.
@@ -41,7 +43,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Generalize the single task owner across recovery, PREPARE, SEARCH and VALIDATE; join phases during stop/validation handoff.
 - [x] Complete the Supervisor source/test review, consolidate authoritative fields, and close phase-command races.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
-- [ ] Merge into main, push, and remove this task's temporary branch/worktree.
+- [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
 ## DSH composition-root review
 
