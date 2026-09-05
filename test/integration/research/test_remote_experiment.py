@@ -114,7 +114,6 @@ async def _lease_runtime(tmp_path, fake_gpus, workspace_dir: Path, store):
         transport_factory=_FakeTransport,
         store=store,
     )
-    await pool.preflight()
     lease = await pool.acquire("h1", local_workspace=workspace_dir)
     runtime = ExecutionRuntime(
         project_root=tmp_path,

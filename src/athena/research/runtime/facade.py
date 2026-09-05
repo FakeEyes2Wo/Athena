@@ -317,8 +317,6 @@ class ResearchRuntime:
         lease = self._session.compute.leases.get(plan_id)
         compute = self._session.compute.config
         if lease is None:
-            if not pool.cards():
-                await pool.preflight()
             lease = await pool.acquire(
                 plan_id,
                 local_workspace=Path(workspace),
@@ -329,7 +327,7 @@ class ResearchRuntime:
             logger.info(
                 "plan %s leased %s gpu %s",
                 plan_id,
-                lease.host.name,
+                lease.card.name,
                 list(lease.gpu_ids),
             )
         return ExecutionRuntime(

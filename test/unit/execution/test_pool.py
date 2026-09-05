@@ -76,20 +76,20 @@ def _make_pool(hosts: list[SshHost], **kwargs) -> GpuPool:
 
 
 @pytest.mark.asyncio
-async def test_preflight_records_the_facts_a_lease_needs(tmp_path, patched_probe):
+async def test_first_acquire_records_the_facts_a_lease_needs(tmp_path, patched_probe):
     host = _host("gpu-01", tmp_path)
     patched_probe["gpu-01"] = [_gpu(0), _gpu(1)]
     pool = _make_pool([host])
 
-    cards = await pool.preflight()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
 
-    card = cards["gpu-01"]
-    assert card.python.startswith("3.")
-    assert card.gpu_model == "NVIDIA A100"
-    assert [gpu.index for gpu in card.gpus] == [0, 1]
-    # "机器上现成有什么"决定了"能跑什么"——远端装不了东西，所以这一项属于预检
-    # 的结论，不是附加信息。
-    assert isinstance(card.packages, dict)
+    lease = await pool.acquire("h1", local_workspace=workspace)
+    try:
+        assert lease.card.gpu_model == "NVIDIA A100"
+        assert [gpu.index for gpu in lease.card.gpus] == [0, 1]
+    finally:
+        await pool.release("h1")
 
 
 @pytest.mark.asyncio
@@ -97,16 +97,17 @@ async def test_a_host_without_gpus_never_enters_the_pool(tmp_path, patched_probe
     """半可用的机器比不可用更糟：它会在第一个实验才失败，那时已经烧掉了 PREPARE。"""
     patched_probe["gpu-01"] = []
     pool = _make_pool([_host("gpu-01", tmp_path)])
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
 
     with pytest.raises(PreflightError, match="no GPUs"):
-        await pool.preflight()
+        await pool.acquire("h1", local_workspace=workspace)
 
 
 @pytest.mark.asyncio
 async def test_a_lease_pins_gpus_and_records_where_it_ran(tmp_path, patched_probe):
     patched_probe["gpu-01"] = [_gpu(0), _gpu(1)]
     pool = _make_pool([_host("gpu-01", tmp_path, max_leases=2)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -128,7 +129,6 @@ async def test_a_lease_pins_gpus_and_records_where_it_ran(tmp_path, patched_prob
 async def test_two_leases_never_share_a_card(tmp_path, patched_probe):
     patched_probe["gpu-01"] = [_gpu(0), _gpu(1)]
     pool = _make_pool([_host("gpu-01", tmp_path, max_leases=2)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -152,7 +152,6 @@ async def test_an_exhausted_pool_raises_instead_of_falling_back(
     """
     patched_probe["gpu-01"] = [_gpu(0)]
     pool = _make_pool([_host("gpu-01", tmp_path, max_leases=1)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -170,7 +169,6 @@ async def test_a_queued_plan_gets_the_card_when_it_is_returned(tmp_path, patched
     """排队是可见的等待，不是失败——归还之后必须自动醒来。"""
     patched_probe["gpu-01"] = [_gpu(0)]
     pool = _make_pool([_host("gpu-01", tmp_path, max_leases=1)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -203,7 +201,6 @@ async def test_homogeneous_placement_refuses_a_different_gpu_model(
     pool = _make_pool(
         [_host("a100", tmp_path), _host("rtx", tmp_path)], placement="homogeneous"
     )
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -226,7 +223,6 @@ async def test_releasing_a_lease_closes_its_channel(tmp_path, patched_probe):
     """归还 = 关通道；远端 stdin 因此 EOF，它自己把进程组清掉。"""
     patched_probe["gpu-01"] = [_gpu(0)]
     pool = _make_pool([_host("gpu-01", tmp_path)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -252,7 +248,6 @@ async def test_releasing_a_lease_takes_its_remote_workspace_with_it(
     """
     patched_probe["gpu-01"] = [_gpu(0)]
     pool = _make_pool([_host("gpu-01", tmp_path)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "train.py").write_text("print(1)\n", encoding="utf-8")
@@ -283,7 +278,6 @@ async def test_a_lease_can_actually_run_a_command_in_its_workspace(
     """端到端：租约拿到手就该能跑东西，工作区在远端已经建好。"""
     patched_probe["gpu-01"] = [_gpu(0)]
     pool = _make_pool([_host("gpu-01", tmp_path)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "hello.py").write_text("print('from the lease')\n", encoding="utf-8")
@@ -321,7 +315,6 @@ async def test_a_lease_points_ATHENA_DATA_ROOT_at_the_staged_copy(
     patched_probe["gpu-01"] = [_gpu(0)]
     data = _dataset(tmp_path / "dataset")
     pool = _make_pool([_host("gpu-01", tmp_path)], dataset_root=data)
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -349,7 +342,6 @@ async def test_the_second_lease_on_a_host_reuses_the_staged_dataset(
     patched_probe["gpu-01"] = [_gpu(0), _gpu(1)]
     data = _dataset(tmp_path / "dataset")
     pool = _make_pool([_host("gpu-01", tmp_path, max_leases=2)], dataset_root=data)
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -383,17 +375,16 @@ async def test_placement_prefers_a_host_that_already_has_the_data(
         placement="spread",
         dataset_root=data,
     )
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
     # 先让 gpu-01 上有数据，并且**占着一份租约**——这样 spread 会明确倾向 gpu-02
     # （负载 0 < 1）。亲和压不住策略的话，第二份租约就会落到 gpu-02 上。
     first = await pool.acquire("h1", local_workspace=workspace)
-    assert first.host.name == "gpu-01"
+    assert first.card.name == "gpu-01"
     second = await pool.acquire("h2", local_workspace=workspace)
     try:
-        assert second.host.name == "gpu-01", "数据亲和必须压过 spread 的负载均衡"
+        assert second.card.name == "gpu-01", "数据亲和必须压过 spread 的负载均衡"
         assert second.dataset is not None and second.dataset.reused
     finally:
         await pool.release("h1")
@@ -409,7 +400,6 @@ async def test_a_released_lease_frees_the_card_for_the_next_plan(
     """
     patched_probe["gpu-01"] = [_gpu(0)]
     pool = _make_pool([_host("gpu-01", tmp_path, max_leases=1)])
-    await pool.preflight()
     workspace = tmp_path / "ws"
     workspace.mkdir()
 

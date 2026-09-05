@@ -58,6 +58,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the Python remote mirror backend and merge its wrapper layer.
 - [x] Review remote dataset staging and remove diagnostic/test-only surface.
 - [x] Review execution configuration and merge monitoring contracts into their owner.
+- [x] Simplify the GPU-pool lifecycle and remove redundant lease/preflight surface.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -218,6 +219,14 @@ Read `compute_config.py`, `events.py`, and `monitor.py` completely and traced th
 Merge the source-independent event contracts into their sole implementation owner, `monitor.py`, and delete `events.py`. External consumers continue to import every public contract and `ExecutionMonitor` through `athena.execution`; the app-server's internal clock import now targets the owning module directly. Make the shared numeric validator private because it has no external caller. This removes one source file and one internal module dependency without adding a compatibility shim or changing the monitor constructor, event fields, state transitions, JSON metadata validation, or retention behavior.
 
 The same 43 event, monitor, observer, and thread-runtime tests passed before and after the merge. Python compilation, Black, `git diff --check`, and obsolete-import searches passed. The broader execution suite reached an unrelated host-environment assertion that requires PowerShell 7 while this machine currently resolves Windows PowerShell 5.1; it does not exercise the merged modules. Closing three baseline rows advances reviewed coverage to 217/602. Whole-repository acceptance remains pending.
+
+## GPU-pool lifecycle review
+
+Read `pool.py` and its complete unit suite, then traced pool construction, readiness checks, lease acquisition/release, placement evidence, and remote execution through runtime bootstrap/settings/facade and the remote-experiment integration tests. Replace the public `cards() -> preflight() -> acquire()` sequencing contract with one `acquire()` operation that performs the initial host probe itself. Explicit operator diagnostics remain owned by `check_compute`; production callers no longer inspect pool internals to decide whether an initialization method must run.
+
+Remove `Lease.plan_id` and `Lease.host`, deriving the retained host identity from `HostCard.name`; lease attributes fall from eight to six. Remove the unconsumed GPU-memory, Python-version, and package fields from the scheduler's retained card models while leaving the remote probe protocol intact for compute diagnostics. Use the condition's own lock instead of retaining a duplicate lock attribute, and derive dataset host state from the lease so `_stage_dataset` loses one parameter. Delete the test-only pool host/card projections and update tests to assert acquired lease behavior.
+
+The pool's 14 tests passed after the change. The broader pool, dataset, compute-check, and remote-experiment selection passed 36 tests. Python compilation, Black, `git diff --check`, and removed-interface searches passed; pytest reported one existing cache-permission warning. The previously reviewed execution package facade is also reconciled in the ledger. Closing the pool and facade rows advances reviewed coverage to 219/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -677,13 +686,13 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/core/tool.py` | 208 | Reviewed; inline private forwarding layers; keep one registry mapping; 402 tests pass |
 | `src/athena/core/tool_types.py` | 91 | Reviewed; remove unused max_result_chars; retain shared data contracts |
 | `src/athena/core/workspace.py` | 86 | Pending |
-| `src/athena/execution/__init__.py` | 42 | Pending |
+| `src/athena/execution/__init__.py` | 42 | Reviewed; retain one public execution facade after monitoring merge |
 | `src/athena/execution/backend.py` | 122 | Reviewed; retain the source-independent backend protocol and local implementation |
 | `src/athena/execution/check.py` | 249 | Pending |
 | `src/athena/execution/compute_config.py` | 124 | Reviewed; retain six consumed fields and separate file/mapping boundaries |
 | `src/athena/execution/events.py` | 139 | Reviewed; merged contracts into monitor.py and deleted file |
 | `src/athena/execution/monitor.py` | 286 | Reviewed; own event contracts and monitor lifecycle in one module |
-| `src/athena/execution/pool.py` | 363 | Pending |
+| `src/athena/execution/pool.py` | 363 | Reviewed; automatic preflight, six-field leases, one condition lock |
 | `src/athena/execution/remote/__init__.py` | 23 | Reviewed; export the merged mirror backend from the remote facade |
 | `src/athena/execution/remote/agent.py` | 473 | Pending |
 | `src/athena/execution/remote/channel.py` | 463 | Pending |

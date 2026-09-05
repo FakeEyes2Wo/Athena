@@ -36,7 +36,6 @@ class GpuCard:
 
     index: int
     name: str
-    memory_total_mib: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,8 +45,6 @@ class HostCard:
     name: str
     os: str
     hostname: str
-    python: str
-    packages: dict[str, str]
     gpus: tuple[GpuCard, ...]
 
     @property
@@ -60,8 +57,6 @@ class HostCard:
 class Lease:
     """一个 Plan 对一台机器上若干张卡的独占声明。"""
 
-    plan_id: str
-    host: SshHost
     card: HostCard
     gpu_ids: tuple[int, ...]
     backend: MirroredBackend
@@ -73,7 +68,7 @@ class Lease:
         """写进实验证据的 ``placement`` 块。"""
         names = {gpu.index: gpu.name for gpu in self.card.gpus}
         block: dict[str, Any] = {
-            "host": self.host.name,
+            "host": self.card.name,
             "hostname": self.card.hostname,
             "os": self.card.os,
             "gpu_ids": list(self.gpu_ids),
@@ -135,23 +130,9 @@ class GpuPool:
         self._store = store
         self._transport_factory = transport_factory or SshTransport
         self._leases: dict[str, Lease] = {}
-        self._lock = asyncio.Lock()
-        self._freed = asyncio.Condition(self._lock)
+        self._freed = asyncio.Condition()
 
-    @property
-    def hosts(self) -> tuple[str, ...]:
-        """池子里的主机名。"""
-        return tuple(self._states)
-
-    def cards(self) -> dict[str, HostCard]:
-        """已预检过的主机卡片。"""
-        return {
-            name: state.card
-            for name, state in self._states.items()
-            if state.card is not None
-        }
-
-    async def preflight(self) -> dict[str, HostCard]:
+    async def _preflight(self) -> None:
         """连上每一台机器问清事实；有任何一台不过就抛错。"""
         problems: list[str] = []
         for name, state in self._states.items():
@@ -161,7 +142,6 @@ class GpuPool:
                 problems.append(f"{name}: {exc}")
         if problems:
             raise PreflightError("; ".join(problems))
-        return self.cards()
 
     async def _probe(self, host: SshHost) -> HostCard:
         channel = RemoteChannel(self._transport_factory(host))
@@ -175,7 +155,6 @@ class GpuPool:
             GpuCard(
                 index=int(gpu["index"]),
                 name=str(gpu["name"]),
-                memory_total_mib=int(gpu["memory_total_mib"]),
             )
             for gpu in facts.get("gpus") or []
         )
@@ -185,8 +164,6 @@ class GpuPool:
             name=host.name,
             os=str(facts.get("os", "")),
             hostname=str(facts.get("hostname", "")),
-            python=str(facts["python"]),
-            packages=dict(facts.get("packages") or {}),
             gpus=gpus,
         )
 
@@ -202,7 +179,9 @@ class GpuPool:
         """为一个 Plan 取一份租约；池子满时排队等待。"""
         loop = asyncio.get_running_loop()
         started = loop.time()
-        async with self._lock:
+        async with self._freed:
+            if any(state.card is None for state in self._states.values()):
+                await self._preflight()
             while True:
                 choice = self._select(gpus, same_model_as)
                 if choice is not None:
@@ -213,7 +192,7 @@ class GpuPool:
                 if timeout_s is not None and loop.time() - started >= timeout_s:
                     raise NoComputeAvailable(
                         f"no free GPU for plan {plan_id} after {timeout_s}s "
-                        f"(hosts: {', '.join(self.hosts)})"
+                        f"(hosts: {', '.join(self._states)})"
                     )
                 logger.info("plan %s is queued for a GPU lease", plan_id)
                 try:
@@ -227,9 +206,9 @@ class GpuPool:
             lease = await self._open_lease(
                 plan_id, state, tuple(gpu_ids), local_workspace
             )
-            lease.dataset = await self._stage_dataset(state, lease)
+            lease.dataset = await self._stage_dataset(lease)
         except Exception:
-            async with self._lock:
+            async with self._freed:
                 state.busy_gpus.difference_update(gpu_ids)
                 state.leases -= 1
                 self._freed.notify_all()
@@ -295,22 +274,19 @@ class GpuPool:
         )
         assert state.card is not None
         return Lease(
-            plan_id=plan_id,
-            host=host,
             card=state.card,
             gpu_ids=gpu_ids,
             backend=MirroredBackend(inner, mirror),
             remote_workspace=remote_workspace,
         )
 
-    async def _stage_dataset(
-        self, state: _HostState, lease: Lease
-    ) -> StageReport | None:
+    async def _stage_dataset(self, lease: Lease) -> StageReport | None:
         """把数据集送到这台机器（已有就复用），并把 ATHENA_DATA_ROOT 指过去。"""
         if self._dataset_root is None:
             return None
         if self._dataset is None:
             self._dataset = describe_dataset(self._dataset_root)
+        state = self._states[lease.card.name]
         stager = DatasetStager(
             lease.backend.inner.channel,
             data_root=str(PurePosixPath(state.host.scratch) / "data"),
@@ -329,8 +305,8 @@ class GpuPool:
             await self._discard_workspace(lease)
             await lease.backend.aclose()
         finally:
-            async with self._lock:
-                state = self._states[lease.host.name]
+            async with self._freed:
+                state = self._states[lease.card.name]
                 state.busy_gpus.difference_update(lease.gpu_ids)
                 state.leases = max(0, state.leases - 1)
                 self._freed.notify_all()
@@ -340,8 +316,8 @@ class GpuPool:
         discarded = lease.backend.remote_only
         if discarded:
             logger.info(
-                "lease %s discards %d remote-only path(s) with its workspace: %s",
-                lease.plan_id,
+                "lease at %s discards %d remote-only path(s) with its workspace: %s",
+                lease.remote_workspace,
                 len(discarded),
                 ", ".join(discarded[:10]),
             )
@@ -352,7 +328,7 @@ class GpuPool:
             logger.warning(
                 "could not remove remote workspace %s on %s: %s",
                 lease_root,
-                lease.host.name,
+                lease.card.name,
                 exc,
             )
 
