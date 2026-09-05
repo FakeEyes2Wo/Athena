@@ -156,14 +156,23 @@ def evaluator_tasks(runtime: Any, task: str) -> tuple[str, str]:
     """Render SEARCH and FINAL tasks for CSV or directory data."""
     final_labels = runtime.workspaces_root / "data_split" / "final_labels.csv"
     if final_labels.is_file():
+        # ``DataContract.evaluator_task`` carries the generic build contract
+        # here, but it never names the role or the partition file. Returning
+        # the bare task left the SEARCH agent to choose between the sibling
+        # search_labels.csv and final_labels.csv on its own: the 2026-09-03
+        # TESS run picked the final labels, and PREPARE died on the
+        # disjointness guard after both evaluators scored the same rows.
+        search_task = (
+            f"{task}\n\nYou are building the SEARCH evaluator. Take its labels "
+            "from search_labels.csv in the platform's data_split directory. "
+            "Do not read, copy, derive, or disclose FINAL labels; they belong "
+            "to the hidden FINAL evaluator, which is built separately."
+        )
         final_rule = (
             "Take the final labels from final_labels.csv in the platform's "
             "data_split directory, and copy them into your workspace."
         )
-        # ``DataContract.evaluator_task`` already carries the full generic
-        # contract in the platform-split path.  Keep direct legacy callers
-        # unchanged while adding the contract there in production.
-        return task, final_rule
+        return search_task, final_rule
     search = (
         f"{task}\n\n{DIRECTORY_EVALUATOR_CONTRACT}\n\n"
         "You are building the SEARCH evaluator. Use only the SEARCH partition. "

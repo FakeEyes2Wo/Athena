@@ -175,6 +175,23 @@ async def test_validate_rejects_too_few_rows() -> None:
     assert outcome["ok"] is False
 
 
+class _ProbabilityColumnEvaluator:
+    """Scores from a generic probability column, the way a real evaluator does.
+
+    A written evaluator commonly declares one ``pred_proba`` column and prefers
+    it over the hard label. If the probe feeds that column a constant, no
+    permutation can move the score and the evaluator is rejected forever.
+    """
+
+    async def __call__(self, predictions_csv: str) -> float:
+        truth = dict(line.split(",") for line in _LABELS.strip().splitlines()[1:])
+        rows = list(csv.DictReader(io.StringIO(predictions_csv)))
+        return sum(
+            float(row["pred_proba"]) * float(truth[row["__athena_row_id"]])
+            for row in rows
+        )
+
+
 @pytest.mark.asyncio
 async def test_property_probe_uses_declared_dataset_columns() -> None:
     labels = "sample_key,target\na,0\nb,1\nc,0\nd,1\n"
@@ -198,3 +215,25 @@ async def test_property_probe_uses_declared_dataset_columns() -> None:
 
     assert outcome["ok"] is True
     assert seen[0].splitlines()[0] == "sample_key,pred_label,prob_0,prob_1"
+
+
+@pytest.mark.asyncio
+async def test_generic_probability_column_varies_with_the_label() -> None:
+    """A probability column that names no class must still track the label.
+
+    Regression for the 2026-09-03 TESS run: ``pred_proba`` matched neither the
+    ``prob_``/``probability_`` prefix nor a class value, so every row got
+    "0.0". The evaluator preferred that constant column, permutation could not
+    change the score, and PREPARE burned its whole turn budget being rejected.
+    """
+    outcome = await validate_evaluator_properties(
+        _LABELS,
+        _ProbabilityColumnEvaluator(),
+        spec=SimpleNamespace(
+            prediction_id_column="__athena_row_id",
+            prediction_column="pred_label",
+            probability_columns=("pred_proba",),
+        ),
+    )
+
+    assert outcome["ok"] is True, outcome.get("reason")

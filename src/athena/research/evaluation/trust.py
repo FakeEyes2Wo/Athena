@@ -135,9 +135,26 @@ def _build_predictions(
 
 
 def _probability(value: str, column: str) -> str:
-    """Create a deterministic probe probability for a declared class column."""
-    suffix = column.lower().removeprefix("prob_").removeprefix("probability_")
-    return "1.0" if suffix and suffix == value.strip().lower() else "0.0"
+    """Create a deterministic probe probability for a declared class column.
+
+    ``prob_1``/``probability_0`` name their class, so the probe emits the
+    one-hot indicator. A column naming no class (``pred_proba``, ``score``)
+    means P(positive), so it gets the label itself: emitting "0.0" for every
+    row hands the evaluator a constant column, and an evaluator that prefers
+    that column can then never show permutation sensitivity. The 2026-09-03
+    TESS run spent its entire evaluator turn budget being rejected for exactly
+    that, and PREPARE failed.
+    """
+    normalised = value.strip().lower()
+    lowered = column.lower()
+    for prefix in ("prob_", "probability_"):
+        if lowered.startswith(prefix):
+            return "1.0" if lowered.removeprefix(prefix) == normalised else "0.0"
+    try:
+        float(normalised)
+    except ValueError:  # 非数值标签配通用概率列：写回去会让评估器的 float() 崩
+        return "0.0"
+    return normalised
 
 
 def _parse_labels(
