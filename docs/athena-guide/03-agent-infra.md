@@ -228,8 +228,10 @@ name
 description
 input_schema
 concurrency_safe
-max_result_chars
 ```
+
+Python 工具不提供单工具输出长度设置：消息处理层执行截断，不读取 ToolSpec 配置。
+旧 `max_result_chars` 字段没有消费方，已删除；Rust 工具执行器的同名配置不受影响。
 
 `BaseTool` 位于 `src/athena/core/tool.py:28-54`，发出 `tool/begin`、`tool/end`、`tool/error` 事件。
 

@@ -23,14 +23,14 @@ class _EchoTool(BaseTool):
     )
 
     async def execute(self, inpt: dict, ctx: ToolContext) -> dict:
-        return inpt  # 原始字典，由 _execute 自动包装
+        return inpt  # 原始字典，由 ainvoke 自动包装
 
 
 class _FailingTool(BaseTool):
     spec = ToolSpec(name="fail", description="fail", input_schema={})
 
     async def execute(self, inpt: dict, ctx: ToolContext):
-        raise RuntimeError("boom")  # 由 _execute 捕获 → ToolResult(success=False)
+        raise RuntimeError("boom")  # 由 ainvoke 捕获 → ToolResult(success=False)
 
 
 class _CancellingTool(BaseTool):
@@ -41,7 +41,7 @@ class _CancellingTool(BaseTool):
 
 
 class _ToolResultTool(BaseTool):
-    """直接返回 ToolResult 的工具 — _execute 透传。"""
+    """直接返回 ToolResult 的工具 — ainvoke 透传。"""
 
     spec = ToolSpec(name="direct", description="direct", input_schema={})
 
@@ -155,6 +155,31 @@ class TestToolRegistry:
         reg.register(_EchoTool())
         reg.register(_deco_echo)  # "deco_echo"
         assert [s.name for s in reg.specs] == ["deco_echo", "echo"]
+
+    def test_duplicate_preserves_registry_and_specs_are_detached(self):
+        reg = ToolRegistry()
+        echo = _EchoTool()
+        reg.register(echo)
+        reg.register(_deco_echo)
+        specs = reg.specs
+        specs.clear()
+        with pytest.raises(KeyError):
+            reg.register(_EchoTool())
+        assert reg.resolve("echo") is echo
+        assert len(reg) == 2
+        assert [spec.name for spec in reg.specs] == ["deco_echo", "echo"]
+
+
+async def test_tool_cancellation_emits_error_without_success_event():
+    events = []
+
+    async def emit(kind, ref, data=None):
+        events.append(kind)
+
+    ctx = ToolContext("cancel_me", "cancel-1", emit, asyncio.Event())
+    with pytest.raises(asyncio.CancelledError):
+        await _CancellingTool().ainvoke(ctx)
+    assert events == [TOOL_BEGIN, TOOL_ERROR]
 
 
 @tool

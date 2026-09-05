@@ -1,6 +1,8 @@
 # Module-by-module simplification review
 
-Baseline: `4b9dbaa`. Scope: tracked backend, TUI, gateway, GUI source, Rust bridge and GUI development scripts. Tests and assets embedded in these roots remain listed so coverage cannot silently shrink.
+Baseline: `4b9dbaa`. Scope: tracked backend, TUI, gateway, GUI source, Rust bridge, Rust/TypeScript implementations, and development scripts. Tests and assets embedded in these roots remain listed so coverage cannot silently shrink.
+
+Coverage correction: the original 391-file inventory omitted 65 Rust, 138 TypeScript/JavaScript implementation and colocated test files, and 8 root development scripts. These completed or independently buildable modules belong to the user's repository-wide goal even when Python is the production entrypoint. All 211 were unchanged from the baseline when enumerated and are added as Pending, bringing the baseline ledger to 602 files. Enumeration is not review; earlier 17/391 reports covered only the original subset. New files introduced by this refactor are tracked separately and must also be verified.
 
 Inventory is not a completed semantic review. Each pending file requires content inspection, caller tracing, a retain/merge/delete decision, and relevant verification before closing this plan. Reconcile new or removed files before final acceptance.
 
@@ -40,10 +42,17 @@ Merged text and structured chat into core/agent/chat.py. Deleted utils/__init__.
 
 Construction/chat verification: original focused Agent/chat/citation baseline returned 79 passed. Final combined Agent, single-turn chat, citation support, runtime survey, idea-generation, public API, AgentRuntime, and app-server suites returned 432 passed and 25 subtests. Added configuration identity, environment defaults, explicit overrides including absent seed, and real structured retry/artifact round-trip coverage. One earlier combined run hit an unrelated 0.1-second message-processor timeout; the affected suites reran with 34 passed, then the complete combined selection passed without modifying that test. Reviewed baseline coverage is now 17/391, plus the newly introduced chat module. Full-application acceptance, main merge/push, and task branch/worktree cleanup remain open until the whole scope is verified.
 
-Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, `agents/prompt_agent.py`, and `core/tool.py` have been read. AgentOutcome.next_context_ref still has active ThreadRuntime consumers: remove only alongside a complete context handoff migration, not as a dead field. `agent_runtime.py` and `supervisor_agent.py` are partially inspected, not completed reviews. turns/support.py, runtime/survey.py, idea_generation/pre_gate_checks.py and review_board.py have been read while migrating chat consumers; their broader module decisions remain pending. runtime/phase_runner.py and turns/ideator.py were inspected only around affected call sites. Remote execution's `mirror.py`, `mirrored.py`, and `backend.py` have been read; mirror transfer policies and the backend output-return contract require tracing through the pool/channel before deciding how to consolidate them.
+Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, and `agents/prompt_agent.py` have been read. AgentOutcome.next_context_ref still has active ThreadRuntime consumers: remove only alongside a complete context handoff migration, not as a dead field. `agent_runtime.py` and `supervisor_agent.py` are partially inspected, not completed reviews. turns/support.py, runtime/survey.py, idea_generation/pre_gate_checks.py and review_board.py have been read while migrating chat consumers; their broader module decisions remain pending. runtime/phase_runner.py and turns/ideator.py were inspected only around affected call sites. Remote execution's `mirror.py`, `mirrored.py`, and `backend.py` have been read; mirror transfer policies and the backend output-return contract require tracing through the pool/channel before deciding how to consolidate them.
+
+Tool layer: completed core/tool.py and tool_types.py review. Removed the single-use _sync_ctx and _execute forwarding methods; ainvoke now owns result normalization, error wrapping and cancellation events together. ToolRegistry keeps one sorted mapping instead of a mapping plus mirrored list (2 attributes to 1), without adding sorting to the read path. Deleted Python ToolSpec.max_result_chars (5 fields to 4): no tracked Python consumer reads it; actual truncation remains in message handling. Rust's actively used field remains unchanged. Tool/schema boundaries remain separate to avoid pulling execution dependencies into data consumers. Baseline tool/Agent/context tests: 89 passed; expanded post-change tool/Agent/memory/session/app-server/chat tests: 402 passed and 25 subtests, including duplicate-registration atomicity and cancellation event coverage. Updated the Python tool guide accordingly.
+
+GUI small-module review (two bounded parallel audits, integrated by parent): inspected five lib helpers and three associated tests plus eight common component/hook/style files. Retain the error-text, RPC adapter, path-display and native-dialog boundaries. workspaceStorage now shares JSON storage read/write and exception handling instead of repeating them. Delete unconsumed useEvents.ts, inline the one-use ErrorCard in MessageList, and delete ThemeToggle.module.css in favor of the identical global icon-btn rules. ErrorBoundary drops its unconsumed fallback prop (2 props to 1). Retain EmptyState and StatusBadge as genuinely shared primitives. Retain useTheme's mount-time storage read: caching only the initial import-time theme would make remounts stale. MessageList and global styles were inspected at affected sites only and remain pending for full review.
+
+GUI evidence: worker post-change lib checks returned 17 passed (no pre-change GUI baseline claimed). Parent full GUI suite returned 186 passed across 20 files; TypeScript --noEmit and diff checks passed. New component tests cover error containment and both persisted theme transitions. Tests used a temporary junction to the existing active-quality-pass GUI dependencies, removed afterward; the dependency target was verified intact. With these reviews the corrected baseline ledger has 35/602 reviewed files, plus the new chat module and common-contracts test. Remaining files and full integration/delivery gates stay pending.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
+| `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
 | `athena-gui/scripts/dev-backend.cjs` | 38 | Pending |
 | `athena-gui/scripts/dev-web.cjs` | 46 | Pending |
 | `athena-gui/scripts/ensure-generated.mjs` | 15 | Pending |
@@ -89,14 +98,14 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `athena-gui/src/components/__tests__/conversation-pane.test.tsx` | 649 | Pending |
 | `athena-gui/src/components/__tests__/function-rail.test.tsx` | 24 | Pending |
 | `athena-gui/src/components/__tests__/research-tree-viz.test.tsx` | 291 | Pending |
-| `athena-gui/src/components/cards/ErrorCard.tsx` | 13 | Pending |
+| `athena-gui/src/components/cards/ErrorCard.tsx` | 13 | Reviewed; inline single consumer markup in MessageList and delete |
 | `athena-gui/src/components/cards/IntentPreviewCard.module.css` | 245 | Pending |
 | `athena-gui/src/components/cards/IntentPreviewCard.tsx` | 250 | Pending |
 | `athena-gui/src/components/cards/__tests__/IntentPreviewCard.test.tsx` | 117 | Pending |
-| `athena-gui/src/components/common/EmptyState.tsx` | 18 | Pending |
-| `athena-gui/src/components/common/ErrorBoundary.tsx` | 33 | Pending |
+| `athena-gui/src/components/common/EmptyState.tsx` | 18 | Reviewed; retain shared two-prop primitive used by 12 consumers |
+| `athena-gui/src/components/common/ErrorBoundary.tsx` | 33 | Reviewed; remove unused fallback prop; error containment test passes |
 | `athena-gui/src/components/common/Icon.tsx` | 166 | Pending |
-| `athena-gui/src/components/common/StatusBadge.tsx` | 13 | Pending |
+| `athena-gui/src/components/common/StatusBadge.tsx` | 13 | Reviewed; retain shared status display contract |
 | `athena-gui/src/components/context/panels.ts` | 45 | Pending |
 | `athena-gui/src/components/conversation/Composer.module.css` | 68 | Pending |
 | `athena-gui/src/components/conversation/Composer.tsx` | 40 | Pending |
@@ -123,8 +132,8 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `athena-gui/src/components/shell/HumanRequestDialog.tsx` | 231 | Pending |
 | `athena-gui/src/components/shell/LogDrawer.module.css` | 160 | Pending |
 | `athena-gui/src/components/shell/LogDrawer.tsx` | 65 | Pending |
-| `athena-gui/src/components/shell/ThemeToggle.module.css` | 19 | Pending |
-| `athena-gui/src/components/shell/ThemeToggle.tsx` | 25 | Pending |
+| `athena-gui/src/components/shell/ThemeToggle.module.css` | 19 | Reviewed; identical global icon-btn rules exist; delete duplicate |
+| `athena-gui/src/components/shell/ThemeToggle.tsx` | 25 | Reviewed; use global icon-btn style; both theme transitions tested |
 | `athena-gui/src/components/shell/WorkspacePicker.module.css` | 123 | Pending |
 | `athena-gui/src/components/shell/WorkspacePicker.tsx` | 119 | Pending |
 | `athena-gui/src/components/shell/WorkspaceSwitcher.module.css` | 33 | Pending |
@@ -136,23 +145,23 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `athena-gui/src/hooks/__tests__/usePipeline.identity.test.tsx` | 696 | Pending |
 | `athena-gui/src/hooks/__tests__/usePipeline.test.tsx` | 1529 | Pending |
 | `athena-gui/src/hooks/__tests__/useWorkspace.test.tsx` | 358 | Pending |
-| `athena-gui/src/hooks/useEvents.ts` | 26 | Pending |
+| `athena-gui/src/hooks/useEvents.ts` | 26 | Reviewed; no source/test callers; delete unused event window |
 | `athena-gui/src/hooks/usePipeline.ts` | 1708 | Pending |
-| `athena-gui/src/hooks/useTheme.ts` | 40 | Pending |
+| `athena-gui/src/hooks/useTheme.ts` | 40 | Reviewed; retain initial paint side effect and mount-time persisted preference |
 | `athena-gui/src/hooks/useWorkspace.ts` | 174 | Pending |
 | `athena-gui/src/lib/__tests__/graphLayout.test.ts` | 46 | Pending |
-| `athena-gui/src/lib/__tests__/rpc-error.test.ts` | 31 | Pending |
+| `athena-gui/src/lib/__tests__/rpc-error.test.ts` | 31 | Reviewed; retain RPC error mapping checks; tests pass |
 | `athena-gui/src/lib/__tests__/tauri-bridge.test.ts` | 168 | Pending |
-| `athena-gui/src/lib/__tests__/workspaceDialog.test.ts` | 69 | Pending |
-| `athena-gui/src/lib/__tests__/workspaceStorage.test.ts` | 136 | Pending |
+| `athena-gui/src/lib/__tests__/workspaceDialog.test.ts` | 69 | Reviewed; retain browser/native fallback checks; tests pass |
+| `athena-gui/src/lib/__tests__/workspaceStorage.test.ts` | 136 | Reviewed; retain storage normalization/failure checks; tests pass |
 | `athena-gui/src/lib/clarification-conversation.ts` | 97 | Pending |
-| `athena-gui/src/lib/errors.ts` | 4 | Pending |
+| `athena-gui/src/lib/errors.ts` | 4 | Reviewed; retain shared exception-to-text boundary |
 | `athena-gui/src/lib/graphLayout.ts` | 66 | Pending |
-| `athena-gui/src/lib/path.ts` | 5 | Pending |
-| `athena-gui/src/lib/rpc-error.ts` | 46 | Pending |
+| `athena-gui/src/lib/path.ts` | 5 | Reviewed; retain workspace path display semantics |
+| `athena-gui/src/lib/rpc-error.ts` | 46 | Reviewed; retain RPC wire error normalization for both transports |
 | `athena-gui/src/lib/tauri-bridge.ts` | 766 | Pending |
-| `athena-gui/src/lib/workspaceDialog.ts` | 20 | Pending |
-| `athena-gui/src/lib/workspaceStorage.ts` | 96 | Pending |
+| `athena-gui/src/lib/workspaceDialog.ts` | 20 | Reviewed; retain native-dialog/browser boundary |
+| `athena-gui/src/lib/workspaceStorage.ts` | 96 | Reviewed; unify JSON storage IO and exception handling; 17 focused tests pass |
 | `athena-gui/src/lib/ws-backend.ts` | 154 | Pending |
 | `athena-gui/src/main.tsx` | 15 | Pending |
 | `athena-gui/src/styles.css` | 1046 | Pending |
@@ -227,8 +236,8 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `src/athena/core/research_tree.py` | 569 | Pending |
 | `src/athena/core/retry.py` | 98 | Pending |
 | `src/athena/core/thread_models.py` | 24 | Pending |
-| `src/athena/core/tool.py` | 208 | Pending |
-| `src/athena/core/tool_types.py` | 91 | Pending |
+| `src/athena/core/tool.py` | 208 | Reviewed; inline private forwarding layers; keep one registry mapping; 402 tests pass |
+| `src/athena/core/tool_types.py` | 91 | Reviewed; remove unused max_result_chars; retain shared data contracts |
 | `src/athena/core/workspace.py` | 86 | Pending |
 | `src/athena/execution/__init__.py` | 42 | Pending |
 | `src/athena/execution/backend.py` | 122 | Pending |
@@ -436,3 +445,214 @@ Additional reads awaiting module-wide decisions: agent `models.py`, `types.py`, 
 | `src/gui_gateway/human.py` | 279 | Pending |
 | `src/gui_gateway/state_store.py` | 139 | Pending |
 | `src/gui_gateway/transport.py` | 123 | Pending |
+| `athena-rust/crates/athena-agent/src/agent.rs` | 369 | Pending |
+| `athena-rust/crates/athena-agent/src/input.rs` | 47 | Pending |
+| `athena-rust/crates/athena-agent/src/lib.rs` | 21 | Pending |
+| `athena-rust/crates/athena-agent/src/openai_provider.rs` | 216 | Pending |
+| `athena-rust/crates/athena-agent/src/provider.rs` | 141 | Pending |
+| `athena-rust/crates/athena-agent/src/runner.rs` | 50 | Pending |
+| `athena-rust/crates/athena-agent/src/subagent.rs` | 229 | Pending |
+| `athena-rust/crates/athena-agent/tests/common/mod.rs` | 230 | Pending |
+| `athena-rust/crates/athena-agent/tests/provider_mapping.rs` | 54 | Pending |
+| `athena-rust/crates/athena-agent/tests/subagent.rs` | 51 | Pending |
+| `athena-rust/crates/athena-agent/tests/tool_loop.rs` | 113 | Pending |
+| `athena-rust/crates/athena-memory/src/compaction.rs` | 308 | Pending |
+| `athena-rust/crates/athena-memory/src/context.rs` | 443 | Pending |
+| `athena-rust/crates/athena-memory/src/lib.rs` | 9 | Pending |
+| `athena-rust/crates/athena-memory/src/message.rs` | 188 | Pending |
+| `athena-rust/crates/athena-memory/src/rollout.rs` | 519 | Pending |
+| `athena-rust/crates/athena-memory/tests/compaction.rs` | 312 | Pending |
+| `athena-rust/crates/athena-memory/tests/context_parity.rs` | 219 | Pending |
+| `athena-rust/crates/athena-memory/tests/rollout_recovery.rs` | 371 | Pending |
+| `athena-rust/crates/athena-protocol/src/envelope.rs` | 88 | Pending |
+| `athena-rust/crates/athena-protocol/src/error.rs` | 103 | Pending |
+| `athena-rust/crates/athena-protocol/src/lib.rs` | 162 | Pending |
+| `athena-rust/crates/athena-protocol/src/method.rs` | 19 | Pending |
+| `athena-rust/crates/athena-protocol/src/operations.rs` | 91 | Pending |
+| `athena-rust/crates/athena-protocol/tests/python_fixtures.rs` | 386 | Pending |
+| `athena-rust/crates/athena-research/src/experiment.rs` | 92 | Pending |
+| `athena-rust/crates/athena-research/src/lib.rs` | 166 | Pending |
+| `athena-rust/crates/athena-research/src/tree.rs` | 141 | Pending |
+| `athena-rust/crates/athena-runtime/src/event.rs` | 303 | Pending |
+| `athena-rust/crates/athena-runtime/src/lib.rs` | 20 | Pending |
+| `athena-rust/crates/athena-runtime/src/runner.rs` | 57 | Pending |
+| `athena-rust/crates/athena-runtime/src/submission.rs` | 84 | Pending |
+| `athena-rust/crates/athena-runtime/src/thread_actor.rs` | 338 | Pending |
+| `athena-rust/crates/athena-runtime/src/thread_handle.rs` | 111 | Pending |
+| `athena-rust/crates/athena-runtime/src/thread_manager.rs` | 222 | Pending |
+| `athena-rust/crates/athena-runtime/tests/common/mod.rs` | 85 | Pending |
+| `athena-rust/crates/athena-runtime/tests/thread_races.rs` | 54 | Pending |
+| `athena-rust/crates/athena-runtime/tests/thread_runtime.rs` | 187 | Pending |
+| `athena-rust/crates/athena-server/src/client.rs` | 219 | Pending |
+| `athena-rust/crates/athena-server/src/execution.rs` | 118 | Pending |
+| `athena-rust/crates/athena-server/src/lib.rs` | 19 | Pending |
+| `athena-rust/crates/athena-server/src/lifecycle.rs` | 62 | Pending |
+| `athena-rust/crates/athena-server/src/processor.rs` | 212 | Pending |
+| `athena-rust/crates/athena-server/src/subscription.rs` | 83 | Pending |
+| `athena-rust/crates/athena-server/src/transport.rs` | 307 | Pending |
+| `athena-rust/crates/athena-server/tests/app_server_e2e.rs` | 131 | Pending |
+| `athena-rust/crates/athena-tools/src/context.rs` | 8 | Pending |
+| `athena-rust/crates/athena-tools/src/executor.rs` | 111 | Pending |
+| `athena-rust/crates/athena-tools/src/lib.rs` | 19 | Pending |
+| `athena-rust/crates/athena-tools/src/registry.rs` | 105 | Pending |
+| `athena-rust/crates/athena-tools/src/spec.rs` | 85 | Pending |
+| `athena-rust/crates/athena-tools/src/tool.rs` | 44 | Pending |
+| `athena-rust/crates/athena-tools/tests/registry.rs` | 166 | Pending |
+| `athena-rust/crates/athena-tools/tests/tool_lifecycle.rs` | 279 | Pending |
+| `athena-rust/crates/athena-types/src/domain.rs` | 237 | Pending |
+| `athena-rust/crates/athena-types/src/ids.rs` | 119 | Pending |
+| `athena-rust/crates/athena-types/src/lib.rs` | 122 | Pending |
+| `athena-rust/crates/athena-types/src/status.rs` | 21 | Pending |
+| `athena-rust/crates/athena-types/tests/python_fixtures.rs` | 216 | Pending |
+| `athena-rust/crates/athena-workspace/src/command.rs` | 61 | Pending |
+| `athena-rust/crates/athena-workspace/src/error.rs` | 20 | Pending |
+| `athena-rust/crates/athena-workspace/src/lib.rs` | 17 | Pending |
+| `athena-rust/crates/athena-workspace/src/local.rs` | 421 | Pending |
+| `athena-rust/crates/athena-workspace/src/model.rs` | 10 | Pending |
+| `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/tools/user-input.ts` | 32 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/types.ts` | 215 | Pending |
+| `athena_ts/packages/athena-agent/src/cancel.ts` | 42 | Pending |
+| `athena_ts/packages/athena-agent/src/index.ts` | 29 | Pending |
+| `athena_ts/packages/athena-agent/src/memory/compaction.ts` | 133 | Pending |
+| `athena_ts/packages/athena-agent/src/memory/context-manager.ts` | 123 | Pending |
+| `athena_ts/packages/athena-agent/src/memory/index.ts` | 4 | Pending |
+| `athena_ts/packages/athena-agent/src/memory/rollout.ts` | 158 | Pending |
+| `athena_ts/packages/athena-agent/src/messages.ts` | 139 | Pending |
+| `athena_ts/packages/athena-agent/src/single-turn-chat.ts` | 134 | Pending |
+| `athena_ts/packages/athena-agent/src/tool-types.ts` | 74 | Pending |
+| `athena_ts/packages/athena-agent/src/tool.ts` | 183 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/agent.test.ts` | 575 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/provider.test.ts` | 140 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/registry.test.ts` | 75 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/session.test.ts` | 26 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/settings.test.ts` | 58 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/types.test.ts` | 107 | Pending |
+| `athena_ts/packages/athena-agent/test/memory/compaction.test.ts` | 85 | Pending |
+| `athena_ts/packages/athena-agent/test/memory/context-manager.test.ts` | 206 | Pending |
+| `athena_ts/packages/athena-agent/test/memory/rollout.test.ts` | 221 | Pending |
+| `athena_ts/packages/athena-agent/test/public-api.test.ts` | 69 | Pending |
+| `athena_ts/packages/athena-agent/test/single-turn-chat.test.ts` | 179 | Pending |
+| `athena_ts/packages/athena-agent/test/tool.test.ts` | 154 | Pending |
+| `athena_ts/packages/athena-autoresearch/dsh-ui/app.js` | 107 | Pending |
+| `athena_ts/packages/athena-autoresearch/dsh-ui/hypothesis-graph.js` | 350 | Pending |
+| `athena_ts/packages/athena-autoresearch/scripts/dsh-ui-server.mjs` | 204 | Pending |
+| `athena_ts/packages/athena-autoresearch/scripts/run-autoresearch.mjs` | 72 | Pending |
+| `athena_ts/packages/athena-autoresearch/scripts/smoke.mjs` | 115 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/bootstrap.ts` | 31 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/budget-service.ts` | 50 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/console-port.ts` | 36 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/gate-runner.ts` | 45 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/hypothesis-pool.ts` | 180 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/pipeline-runner.ts` | 113 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/pipeline-types.ts` | 46 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/core/provider-registry.ts` | 35 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/index.ts` | 22 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/plugin.ts` | 141 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/builtins.ts` | 154 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/compiler/local-tex.ts` | 44 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/compiler/overleaf.ts` | 95 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/experiment/athena-engine.ts` | 34 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/template/curl-template.ts` | 85 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/providers/types.ts` | 104 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/runtime.ts` | 126 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/schemas/pool.ts` | 43 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/schemas/run-spec.ts` | 132 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/schemas/state.ts` | 102 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/services/packaging.ts` | 37 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/services/paper-composer.ts` | 69 | Pending |
+| `athena_ts/packages/athena-autoresearch/src/stages.ts` | 114 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/_support.ts` | 53 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/budget-service.test.ts` | 43 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/gate-runner.test.ts` | 19 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/hypothesis-pool.test.ts` | 80 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/pipeline-runner.test.ts` | 58 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/core/provider-registry.test.ts` | 32 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/dsh-headless.integration.test.ts` | 72 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/providers/curl-template.test.ts` | 38 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/providers/native-svg.test.ts` | 36 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/providers/overleaf.test.ts` | 34 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/runtime.test.ts` | 49 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/schemas/run-spec.test.ts` | 45 | Pending |
+| `athena_ts/packages/athena-autoresearch/test/services/paper-composer.test.ts` | 22 | Pending |
+| `athena_ts/packages/athena-core/src/app.ts` | 53 | Pending |
+| `athena_ts/packages/athena-core/src/errors.ts` | 33 | Pending |
+| `athena_ts/packages/athena-core/src/id.ts` | 12 | Pending |
+| `athena_ts/packages/athena-core/src/index.ts` | 21 | Pending |
+| `athena_ts/packages/athena-core/src/models/contracts.ts` | 37 | Pending |
+| `athena_ts/packages/athena-core/src/models/hypothesis-graph.ts` | 100 | Pending |
+| `athena_ts/packages/athena-core/src/models/research-data-models.ts` | 51 | Pending |
+| `athena_ts/packages/athena-core/src/models/research-models.ts` | 72 | Pending |
+| `athena_ts/packages/athena-core/src/models/research-tree.ts` | 707 | Pending |
+| `athena_ts/packages/athena-core/src/models/thread-models.ts` | 21 | Pending |
+| `athena_ts/packages/athena-core/src/services/artifact-store.ts` | 115 | Pending |
+| `athena_ts/packages/athena-core/src/services/git-workspace.ts` | 545 | Pending |
+| `athena_ts/packages/athena-core/src/services/persistence.ts` | 22 | Pending |
+| `athena_ts/packages/athena-core/src/services/retry.ts` | 83 | Pending |
+| `athena_ts/packages/athena-core/src/services/workspace.ts` | 44 | Pending |
+| `athena_ts/packages/athena-core/test/app.test.ts` | 25 | Pending |
+| `athena_ts/packages/athena-core/test/errors.test.ts` | 11 | Pending |
+| `athena_ts/packages/athena-core/test/id.test.ts` | 15 | Pending |
+| `athena_ts/packages/athena-core/test/models/contracts.test.ts` | 32 | Pending |
+| `athena_ts/packages/athena-core/test/models/research-models.test.ts` | 54 | Pending |
+| `athena_ts/packages/athena-core/test/models/research-tree-scheduling.test.ts` | 324 | Pending |
+| `athena_ts/packages/athena-core/test/models/research-tree.test.ts` | 389 | Pending |
+| `athena_ts/packages/athena-core/test/services/artifact-store.test.ts` | 57 | Pending |
+| `athena_ts/packages/athena-core/test/services/git-workspace.test.ts` | 527 | Pending |
+| `athena_ts/packages/athena-core/test/services/persistence.test.ts` | 28 | Pending |
+| `athena_ts/packages/athena-core/test/services/retry.test.ts` | 36 | Pending |
+| `athena_ts/packages/athena-core/test/smoke.test.ts` | 7 | Pending |
+| `athena_ts/packages/athena-dsh/src/index.ts` | 929 | Pending |
+| `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Pending |
+| `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Pending |
+| `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Pending |
+| `athena_ts/packages/athena-research/src/execution.ts` | 94 | Pending |
+| `athena_ts/packages/athena-research/src/index.ts` | 45 | Pending |
+| `athena_ts/packages/athena-research/src/report.ts` | 78 | Pending |
+| `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Pending |
+| `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Pending |
+| `athena_ts/packages/athena-research/src/shell.ts` | 48 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Pending |
+| `athena_ts/packages/athena-research/src/validation.ts` | 54 | Pending |
+| `athena_ts/packages/athena-research/src/worker.ts` | 125 | Pending |
+| `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Pending |
+| `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/policy.test.ts` | 78 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Pending |
+| `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Pending |
+| `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Pending |
+| `athena_ts/vitest.workspace.ts` | 4 | Pending |
+| `scripts/build.cjs` | 62 | Pending |
+| `scripts/check_code_style.py` | 162 | Pending |
+| `scripts/export_rust_contract_fixtures.py` | 374 | Pending |
+| `scripts/gui_gateway_entry.py` | 26 | Pending |
+| `scripts/prepare_examples_article.py` | 230 | Pending |
+| `scripts/probe_max_tokens.py` | 117 | Pending |
+| `scripts/release.cjs` | 60 | Pending |
+| `scripts/run_headless.py` | 112 | Pending |

@@ -14,6 +14,27 @@ function workspaceSessionsKey(root: string): string {
   return `${WORKSPACE_SESSIONS_PREFIX}${root}`;
 }
 
+function readStorage(key: string): unknown {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: unknown): void {
+  try {
+    if (value === undefined) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify(value));
+    }
+  } catch {
+    // Storage may be unavailable (private mode / quota); memory remains authoritative.
+  }
+}
+
 function normalizeWorkspaceSessions(value: unknown): SessionSummary[] {
   if (!Array.isArray(value)) return [];
 
@@ -44,38 +65,23 @@ export function addRecentRoot(root: string, existing: readonly string[]): string
 
 /** Read recent roots from localStorage (never throws; returns [] on parse errors). */
 export function loadRecentRoots(): string[] {
-  try {
-    const raw = localStorage.getItem(RECENT_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item): item is string => typeof item === "string" && item.trim() !== "")
-      .map((item) => item.trim())
-      .slice(0, MAX_RECENT);
-  } catch {
-    return [];
-  }
+  const parsed = readStorage(RECENT_KEY);
+  return Array.isArray(parsed)
+    ? parsed
+        .filter((item): item is string => typeof item === "string" && item.trim() !== "")
+        .map((item) => item.trim())
+        .slice(0, MAX_RECENT)
+    : [];
 }
 
 /** Persist recent roots to localStorage (never throws). */
 export function persistRecentRoots(roots: readonly string[]): void {
-  try {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(roots.slice(0, MAX_RECENT)));
-  } catch {
-    // Storage may be unavailable (private mode / quota); selection still works in-memory.
-  }
+  writeStorage(RECENT_KEY, roots.slice(0, MAX_RECENT));
 }
 
 /** Read cached session summaries for one workspace (never throws). */
 export function loadWorkspaceSessions(root: string): SessionSummary[] {
-  try {
-    const raw = localStorage.getItem(workspaceSessionsKey(root));
-    if (!raw) return [];
-    return normalizeWorkspaceSessions(JSON.parse(raw));
-  } catch {
-    return [];
-  }
+  return normalizeWorkspaceSessions(readStorage(workspaceSessionsKey(root)));
 }
 
 /** Persist authoritative session summaries for one workspace (never throws). */
@@ -83,14 +89,9 @@ export function persistWorkspaceSessions(
   root: string,
   sessions: readonly SessionSummary[],
 ): void {
-  try {
-    const normalized = normalizeWorkspaceSessions(sessions);
-    if (normalized.length === 0) {
-      localStorage.removeItem(workspaceSessionsKey(root));
-      return;
-    }
-    localStorage.setItem(workspaceSessionsKey(root), JSON.stringify(normalized));
-  } catch {
-    // Storage may be unavailable; authoritative in-memory state remains usable.
-  }
+  const normalized = normalizeWorkspaceSessions(sessions);
+  writeStorage(
+    workspaceSessionsKey(root),
+    normalized.length > 0 ? normalized : undefined,
+  );
 }

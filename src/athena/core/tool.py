@@ -21,10 +21,6 @@ async def _noop_emit(_k: str, _r: str, _d: dict | None = None) -> None:
     pass
 
 
-def _sync_ctx() -> ToolContext:
-    return ToolContext("", "sync", _noop_emit, asyncio.Event())
-
-
 class BaseTool(ABC):
     """子类需定义 ``spec`` + ``execute()``（返回原始数据，非 ToolResult）。
 
@@ -37,25 +33,10 @@ class BaseTool(ABC):
     async def execute(self, input: dict, ctx: ToolContext) -> Any:
         """执行工具逻辑，返回原始数据（非 ToolResult）。"""
 
-    async def _execute(self, input: dict, ctx: ToolContext) -> ToolResult:
-        """将返回值或异常包装为 ``ToolResult``。
-
-        取消（CancelledError 继承 BaseException）不会被 ``except Exception``
-        捕获，因此直接向上传播，由调用方处理。
-        """
-        try:
-            raw = await self.execute(input, ctx)
-            return raw if isinstance(raw, ToolResult) else ToolResult(data=raw)
-        except Exception as exc:
-            return ToolResult(
-                success=False,
-                error=f"{type(exc).__name__}: {exc}",
-                data={"traceback": traceback.format_exc()},
-            )
-
     def invoke(self, **input: Any) -> ToolResult:
         """同步入口：用独立事件循环执行一次调用。"""
-        return asyncio.run(self.ainvoke(_sync_ctx(), **input))
+        ctx = ToolContext("", "sync", _noop_emit, asyncio.Event())
+        return asyncio.run(self.ainvoke(ctx, **input))
 
     async def ainvoke(self, ctx: ToolContext, **input: Any) -> ToolResult:
         """生命周期：开始 → 执行 → 结束/错误。"""
@@ -65,11 +46,18 @@ class BaseTool(ABC):
             event_data["path"] = path
         await ctx.emit(TOOL_BEGIN, f"ev:{ctx.call_id}:begin", event_data)
         try:
-            result = await self._execute(input, ctx)
+            raw = await self.execute(input, ctx)
+            result = raw if isinstance(raw, ToolResult) else ToolResult(data=raw)
         except asyncio.CancelledError:
             # 工具调用被外部取消 → 通知错误后重新传播
             await ctx.emit(TOOL_ERROR, f"ev:{ctx.call_id}:error", None)
             raise
+        except Exception as exc:
+            result = ToolResult(
+                success=False,
+                error=f"{type(exc).__name__}: {exc}",
+                data={"traceback": traceback.format_exc()},
+            )
         await ctx.emit(
             TOOL_END if result.success else TOOL_ERROR,
             f"ev:{ctx.call_id}:end",
@@ -181,14 +169,13 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
-        self._sorted: list[BaseTool] = []
 
     def register(self, t: BaseTool) -> None:
         """注册工具；重名报错，按名称维持排序。"""
         if t.spec.name in self._tools:
             raise KeyError(f"Tool '{t.spec.name}' already registered")
         self._tools[t.spec.name] = t
-        self._sorted = sorted(self._tools.values(), key=lambda t: t.spec.name)
+        self._tools = dict(sorted(self._tools.items()))
 
     def resolve(self, name: str) -> BaseTool:
         """按名称取工具；未注册报 KeyError。"""
@@ -199,7 +186,7 @@ class ToolRegistry:
     @property
     def specs(self) -> list[ToolSpec]:
         """按名称排序的工具 spec 列表。"""
-        return [t.spec for t in self._sorted]
+        return [t.spec for t in self._tools.values()]
 
     def __len__(self) -> int:
         return len(self._tools)

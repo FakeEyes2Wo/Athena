@@ -1,7 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { ClarificationPreview, UIMessage, UIMessagePreview } from "../../types/ui";
 import { IntentPreviewCard } from "../cards/IntentPreviewCard";
-import { ErrorCard } from "../cards/ErrorCard";
 import { Icon } from "../common/Icon";
 import styles from "./MessageList.module.css";
 
@@ -166,7 +165,12 @@ const TrajectoryItem = memo(function TrajectoryItem({ msg, onConfirmPreview, onR
     );
   }
   if (msg.kind === "error") {
-    return <ErrorCard content={msg.content} />;
+    return (
+      <section className="card card--error">
+        <h3 className="card__title">错误</h3>
+        <p className="card__body">{msg.content}</p>
+      </section>
+    );
   }
   if (msg.role === "user") {
     return (

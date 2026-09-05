@@ -1,6 +1,6 @@
 """工具类型、常量和轻量级数据类。
 
-零逻辑 — ``tool.py`` 和 ``agent.py`` 共享的纯数据容器。
+``tool.py`` 与 Agent 共享的数据契约，以及消息存储使用的文本截断函数。
 """
 
 import asyncio
@@ -53,7 +53,6 @@ class ToolSpec:
     input_schema: dict  # JSON Schema
     concurrency_safe: bool = True
     """是否支持并行执行 — AgentLoop 以此决定串行还是并发。"""
-    max_result_chars: int = 50_000
 
     def to_openai_tool(self) -> dict:
         """转为 OpenAI function tool schema dict。"""
