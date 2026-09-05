@@ -1,4 +1,4 @@
-import athena.research.data_models as research_models
+import athena.research.contracts as research_contracts
 
 from athena.core.contracts import EventEnvelope, new_id
 from athena.core.research_models import (
@@ -8,7 +8,7 @@ from athena.core.research_models import (
     Hypothesis,
 )
 from athena.core.thread_models import AthenaThread, AthenaTurn
-from athena.research.data_models import DataCard, MetricSpec, TaskMetaData
+from athena.research.contracts import DataCard, MetricSpec, TaskMetaData
 
 
 def test_canonical_contracts_construct_real_domain_records() -> None:
@@ -61,10 +61,10 @@ def test_domain_models_retain_validation_and_serialization() -> None:
     assert verdict.winner == "candidate"
 
 
-def test_evaluation_protocol_models_live_in_research_models() -> None:
-    """evaluation/ 已删；评估协议模型归入 research/data_models.py（EvalSpec 链已删）。"""
+def test_evaluation_protocol_models_live_in_research_contracts() -> None:
+    """评估协议模型与其他研究合同共享一个权威模块。"""
     for name in (
         "MetricSpec",
         "TaskMetaData",
     ):
-        assert hasattr(research_models, name), name
+        assert hasattr(research_contracts, name), name

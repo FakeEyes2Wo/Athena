@@ -411,6 +411,14 @@ Reduce `ResearchPaths` from nine stored fields and constructor arguments to thre
 
 Expanded testing exposed a real earlier context regression: `confirmed_task_context_block` read a nonexistent `ResearchRuntime.task_confirmation_gate` convenience attribute. Read the canonical `runtime.config.task_confirmation_gate` instead and update the focused fake runtime to provide the same explicit contract; no defensive fallback was added. The four previously failing regressions pass. Final path/config/clarification/breakpoint/confirmation/continue testing passed 188 tests, and the alternate complete runtime-survey selection passed 156. Targeted pre-commit hooks, Black, Python compilation, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the config row advances reviewed baseline coverage to 250/602. Whole-repository acceptance remains pending.
 
+## Research contract-module consolidation
+
+Read `contracts.py` and `data_models.py` completely and traced all eight records through script execution, trusted evaluation, validation, Supervisor turns, runtime phase adapters, Rust fixture export, and model-contract tests. Both files own the same kind of shared Pydantic/domain payload contract; `data_models.py` has only two import sites and no independent runtime boundary.
+
+Move `DataCard`, `MetricSpec`, and `TaskMetaData` into `research.contracts`, add one explicit eight-name public export list, migrate the fixture exporter and contract test, and delete `data_models.py` without a forwarding module. Preserve every field, default factory, literal, and artifact-ref validator. Update the module and test wording to name the single authority. Production code falls by eight net lines while deleting one file and one import surface.
+
+The model-contract baseline and final selection passed three tests. A broader evaluator/prepare/experiment/validation selection passed 100 tests. The fixture exporter generated all four files in an automatically cleaned temporary directory, and the Rust `athena-types` Python-fixture suite passed six tests. Targeted pre-commit hooks, Python compilation, deleted-module searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing both contract rows advances reviewed baseline coverage to 252/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -917,8 +925,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/requirements.py` | 96 | Reviewed; share predictive field policy and use native whitespace normalization |
 | `src/athena/research/clarification/state.py` | 231 | Reviewed; retain cohesive pure transitions and centralized invariant revalidation |
 | `src/athena/research/config.py` | 83 | Reviewed; three stored roots replace nine independently supplied paths |
-| `src/athena/research/contracts.py` | 88 | Pending |
-| `src/athena/research/data_models.py` | 46 | Pending |
+| `src/athena/research/contracts.py` | 88 | Reviewed; absorb all shared research payload models behind one explicit export surface |
+| `src/athena/research/data_models.py` | 46 | Reviewed; merged into contracts.py and deleted |
 | `src/athena/research/evaluation/__init__.py` | 5 | Pending |
 | `src/athena/research/evaluation/evaluator.py` | 115 | Pending |
 | `src/athena/research/evaluation/spec.py` | 168 | Pending |

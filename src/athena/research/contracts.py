@@ -1,6 +1,6 @@
-"""Athena 研究流程的 Artifact payload 合同（supervisor_imp_docs Task 1）。
+"""Athena 研究流程的领域模型与 Artifact payload 合同。
 
-跨任务的数据结构在此冻结：DataScript Bundle、候选评估与 final-test。领域服务
+跨任务的数据结构在此冻结：任务元数据、DataScript Bundle、候选评估与 final-test。领域服务
 （script_runner / evaluation / validation）与 Supervisor 只消费这些 Pydantic
 模型；字段改动必须同步设计文档与所有消费者。
 
@@ -10,7 +10,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from athena.core.contracts import ArtifactRef, NonBlankText
 
@@ -21,6 +21,32 @@ class GeneralTurnOutcome:
 
     agent_id: str
     result: dict[str, object]
+
+
+class DataCard(BaseModel):
+    """Describe a dataset through immutable artifact references."""
+
+    dataset_ref: ArtifactRef
+    fingerprint: str
+    schema_ref: ArtifactRef
+    split_manifest_ref: ArtifactRef | None = None
+
+
+class MetricSpec(BaseModel):
+    """Name an evaluation metric and its optimization direction."""
+
+    name: NonBlankText
+    direction: Literal["maximize", "minimize"]
+
+
+class TaskMetaData(BaseModel):
+    """Describe task shape and evaluation constraints."""
+
+    task_type: str
+    data_type: str
+    target_vars: list[str] = Field(default_factory=list)
+    primary_metric: MetricSpec
+    constraints: list[str] = Field(default_factory=list)
 
 
 class DataScriptBundle(BaseModel):
@@ -86,3 +112,15 @@ class ValidationResult(BaseModel):
     predictions_path: str | None = None
     metrics_ref: ArtifactRef | None = None
     evidence_ref: ArtifactRef | None = None
+
+
+__all__ = [
+    "CandidateEvaluation",
+    "DataCard",
+    "DataScriptBundle",
+    "EvaluatorDescriptor",
+    "GeneralTurnOutcome",
+    "MetricSpec",
+    "TaskMetaData",
+    "ValidationResult",
+]
