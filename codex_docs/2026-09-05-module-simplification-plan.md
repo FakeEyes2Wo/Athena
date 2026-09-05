@@ -591,6 +591,12 @@ Read `runtime/corpus.py` completely and traced all six functions through the run
 
 Do not extract a shared async corpus loader. `corpus_passages_read` deliberately avoids loading the corpus when no chunks were opened, while summaries and paper-id queries must load it; preserving that behavior would require an extra reference parameter or duplicated absence checks and would increase interface complexity. Preserve per-Ideator retrieval sessions, round-local read ledgers, deterministic passage order, and empty-corpus fallbacks. The current 92 lines differ from the 90-line baseline only because an already-reviewed paper-rag model migration split one import group. The unchanged focused selection passed 47 tests. Closing this row advances reviewed coverage to 351/602. Whole-repository acceptance remains pending.
 
+## Runtime event projection review
+
+Read `runtime/event_projection.py` completely and traced both pure projections through `RuntimeEvents`, Supervisor event tests, and resume-state contracts. Retain this small module instead of merging it into the 457-line stateful event sequencer: raw-output normalization and replaceable state snapshots are a cohesive pure boundary, while sequencing, persistence, replay, and subscriptions remain separate concerns.
+
+Retain the explicit output field mapping because it applies projector defaults, redaction, sequence allocation, and deliberate unknown-key omission. Retain the declarative plan/waiting projections and the two-input state function because Ideator lane count is transient runtime data rather than Supervisor state. Delete only the redundant implementation `__all__`; named imports remain unchanged. The module falls from 89 to 86 physical lines. The unchanged baseline and final event/document/resume selection both passed 78 tests; Ruff, Black, Python compilation, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 352/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1204,7 +1210,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/clarification.py` | 149 | Reviewed; privatize store resolver and remove redundant implementation exports |
 | `src/athena/research/runtime/control.py` | 214 | Reviewed; privatize four lifecycle helpers and remove redundant exports/defensive catch |
 | `src/athena/research/runtime/corpus.py` | 90 | Reviewed; retain minimal one-runtime-argument corpus/read-ledger facade |
-| `src/athena/research/runtime/event_projection.py` | 89 | Pending |
+| `src/athena/research/runtime/event_projection.py` | 89 | Reviewed; retain pure projection boundary and remove redundant implementation export list |
 | `src/athena/research/runtime/events.py` | 457 | Pending |
 | `src/athena/research/runtime/facade.py` | 728 | Pending |
 | `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
