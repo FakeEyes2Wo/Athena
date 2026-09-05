@@ -286,9 +286,10 @@ class SshBackend:
             env = self.build_env()
             if request.evaluation_split is not None:
                 env["ATHENA_EVALUATION_SPLIT"] = request.evaluation_split
+            command = request.argv if request.argv is not None else request.command
+            assert command is not None
             job_id, exited = await self._channel.spawn(
-                argv=request.argv,
-                command=request.command,
+                command,
                 cwd=cwd,
                 env=env,
                 on_output=on_output,

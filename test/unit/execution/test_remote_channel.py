@@ -72,13 +72,12 @@ async def test_the_agent_reports_the_facts_needed_for_preflight(channel) -> None
 async def test_stdout_stderr_and_exit_code_come_back_separately(channel, tmp_path):
     buffers, on_output = _sink()
     _job, exited = await channel.spawn(
-        argv=[
+        command=[
             sys.executable,
             "-c",
             "import sys; sys.stdout.write('out'); sys.stderr.write('err'); "
             "sys.exit(3)",
         ],
-        command=None,
         cwd=str(tmp_path),
         env={},
         on_output=on_output,
@@ -98,12 +97,11 @@ async def test_output_streams_before_the_process_exits(channel, tmp_path) -> Non
             seen.set()
 
     _job, exited = await channel.spawn(
-        argv=[
+        command=[
             sys.executable,
             "-c",
             "import sys,time; print('tick', flush=True); time.sleep(30)",
         ],
-        command=None,
         cwd=str(tmp_path),
         env={},
         on_output=on_output,
@@ -136,8 +134,7 @@ async def test_cancel_kills_the_whole_process_group(channel, tmp_path) -> None:
             started.set()
 
     job, exited = await channel.spawn(
-        argv=[sys.executable, str(script), str(marker)],
-        command=None,
+        command=[sys.executable, str(script), str(marker)],
         cwd=str(tmp_path),
         env={},
         on_output=on_output,
@@ -164,14 +161,13 @@ async def test_closing_the_channel_kills_everything_it_started(tmp_path) -> None
     await channel.open()
     marker = tmp_path / "still-running"
     _job, _exited = await channel.spawn(
-        argv=[
+        command=[
             sys.executable,
             "-c",
             "import pathlib, sys, time; "
             "pathlib.Path(sys.argv[1]).write_text('1'); time.sleep(120)",
             str(marker),
         ],
-        command=None,
         cwd=str(tmp_path),
         env={},
         on_output=lambda fd, block: None,
@@ -183,7 +179,6 @@ async def test_closing_the_channel_kills_everything_it_started(tmp_path) -> None
     assert marker.exists()
 
     await channel.close()
-    assert channel.closed
 
     # 进程真的走了：它还活着的话，下面这个删除在 Windows 上会被文件锁挡住。
     await asyncio.sleep(1.0)

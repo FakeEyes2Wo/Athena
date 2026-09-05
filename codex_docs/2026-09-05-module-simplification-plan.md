@@ -61,6 +61,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Simplify the GPU-pool lifecycle and remove redundant lease/preflight surface.
 - [x] Review compute diagnostics and derive redundant status fields.
 - [x] Simplify the SSH backend construction and workspace lifecycle.
+- [x] Simplify the remote channel/agent protocol and consolidate job state.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -245,6 +246,14 @@ Read `remote/ssh.py` and its complete unit suite, then traced host configuration
 Make each `run(workspace_root=...)` call the sole authority for local-to-remote cwd translation, removing the duplicate `_local_workspace` attribute plus `bind_local_root` and `_remote_cwd`. Remove the `remote_data_root` constructor parameter; the existing `set_data_root` now exclusively records the content-addressed path after staging. Delete the redundant `prepare_remote` step because both mirror push and direct execution create their target directories. Inline the single-use remote PATH projection and remove the test-only `facts` property. The backend constructor falls from six parameters to five, retained instance state falls from seven attributes to six, and four public/private helper methods disappear.
 
 The same 29 SSH/backend/environment tests passed before and after the change. The broader SSH, command-request, pool, dataset, compute-check, and remote-experiment selection passed 71 tests. Python compilation, Black, `git diff --check`, and removed-interface searches passed; pytest reported one existing cache-permission warning. Closing the SSH row advances reviewed coverage to 221/602. Whole-repository acceptance remains pending.
+
+## Remote channel/agent protocol review
+
+Read `remote/channel.py`, `remote/agent.py`, and the complete remote-channel suite end to end, then traced transports, bootstrap source injection, request correlation, process streaming/cancellation, file transfer, manifests, diagnostics, SSH execution, pool cleanup, and dataset mirroring. Retain the client and agent as two files: the agent is deliberately shipped as its own dependency-free stdlib source text and executed on hosts without Athena installed; merging client imports and asyncio state into that payload would break this deployment boundary.
+
+Replace `spawn(argv, command, ...)` with one `command: list[str] | str` input, removing an invalid dual-empty call shape and one parameter. Merge the parallel `_streams` and `_exits` maps into one `_jobs` mapping so callbacks and exit futures share a lifecycle; RemoteChannel instance attributes fall from twelve to eleven. Make the asynchronous response primitive private and remove the test-only `closed` projection, with callers asserting actual post-close request rejection. Trim the agent's unconsumed space `root/exists` response and probe `protocol/path_sep/git/nvidia_smi/cwd` fields, deleting the now-unused version helper while preserving handshake protocol, Python, executable, PATH, packages, shell, OS, hostname, and GPU facts.
+
+The same 25 remote-channel tests passed before and after the change; the direct channel/SSH/pool selection passed 56 tests and the complete affected remote-execution selection passed 96. Python compilation, Black, `git diff --check`, and removed-state/interface searches passed; pytest reported one existing cache-permission warning. Source code falls by thirty net lines. Closing the channel and agent rows advances reviewed coverage to 223/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -712,8 +721,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/execution/monitor.py` | 286 | Reviewed; own event contracts and monitor lifecycle in one module |
 | `src/athena/execution/pool.py` | 363 | Reviewed; automatic preflight, six-field leases, one condition lock |
 | `src/athena/execution/remote/__init__.py` | 23 | Reviewed; export the merged mirror backend from the remote facade |
-| `src/athena/execution/remote/agent.py` | 473 | Pending |
-| `src/athena/execution/remote/channel.py` | 463 | Pending |
+| `src/athena/execution/remote/agent.py` | 473 | Reviewed; trim unconsumed probe/space fields and version helper |
+| `src/athena/execution/remote/channel.py` | 463 | Reviewed; single command input and consolidated remote-job state |
 | `src/athena/execution/remote/dataset.py` | 188 | Reviewed; four-field report, mandatory verification, private staging helpers |
 | `src/athena/execution/remote/mirror.py` | 191 | Reviewed; absorb the three-field mirrored execution wrapper and narrow helper surface |
 | `src/athena/execution/remote/mirrored.py` | 120 | Reviewed; merge into mirror.py and delete forwarding file |

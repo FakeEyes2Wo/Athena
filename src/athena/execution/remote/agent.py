@@ -343,8 +343,6 @@ def _space(message):
         {
             "op": "space",
             "id": message["id"],
-            "root": root,
-            "exists": os.path.isdir(root),
             "total": total,
             "free": free,
             "entries": entries,
@@ -354,22 +352,6 @@ def _space(message):
 
 def _probe(message):
     """注册期预检要的那些事实，一次问清。"""
-
-    def _version(name, *args):
-        binary = shutil.which(name, path=_search_path())
-        if not binary:
-            return None
-        try:
-            out = subprocess.run(
-                [binary] + list(args),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        text = out.stdout.decode("utf-8", "replace").strip().splitlines()
-        return text[0] if text else ""
 
     gpus = []
     if shutil.which("nvidia-smi"):
@@ -404,19 +386,14 @@ def _probe(message):
         {
             "op": "probe",
             "id": message["id"],
-            "protocol": PROTOCOL_VERSION,
             "os": os.uname().sysname if hasattr(os, "uname") else sys.platform,
             "hostname": os.uname().nodename if hasattr(os, "uname") else "",
             "shell": shell,
             "python": sys.version.split()[0],
             "python_executable": sys.executable,
             "path": _search_path(),
-            "path_sep": os.pathsep,
             "packages": _packages(),
-            "git": _version("git", "--version"),
-            "nvidia_smi": _version("nvidia-smi", "--version") is not None,
             "gpus": gpus,
-            "cwd": os.getcwd(),
         }
     )
 

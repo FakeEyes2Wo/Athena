@@ -358,13 +358,8 @@ async def test_a_long_remote_log_keeps_its_tail_and_its_full_copy(
     assert full.count("n") >= 5000, "artifact 必须是完整输出，不是被砍过的那份"
 
 
-async def test_a_backend_without_a_bound_local_root_still_runs(tmp_path) -> None:
-    """没调过 ``bind_local_root`` 也要能跑。
-
-    ``compute --check`` 就是这么用的：它建一个后端只为渲染 Runtime 块，从不绑本地
-    根。折算不出远端路径时落回工作区根，而不是在一个从未出现在 ``__init__`` 里的
-    属性上抛 AttributeError——那种错读代码时完全看不出来。
-    """
+async def test_each_run_maps_workdir_from_its_workspace_root(tmp_path) -> None:
+    """A workdir outside this run's workspace falls back to the remote root."""
     channel = RemoteChannel(SubprocessTransport(sys.executable))
     await channel.open()
     workspace = tmp_path / "remote-ws"

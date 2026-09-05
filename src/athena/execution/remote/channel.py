@@ -161,8 +161,9 @@ class RemoteChannel:
         self._pump: asyncio.Task[None] | None = None
         self._pending: dict[str, asyncio.Future[dict]] = {}
         self._collect: dict[str, list[bytes]] = {}
-        self._streams: dict[str, Callable[[int, bytes], Any]] = {}
-        self._exits: dict[str, asyncio.Future[int]] = {}
+        self._jobs: dict[
+            str, tuple[Callable[[int, bytes], Any], asyncio.Future[int]]
+        ] = {}
         self._counter = 0
         self._closed = False
         self.ready: dict[str, Any] = {}
@@ -172,11 +173,6 @@ class RemoteChannel:
     def description(self) -> str:
         """连接描述（进错误信息）。"""
         return self._transport.description
-
-    @property
-    def closed(self) -> bool:
-        """通道是否已经关闭或掉线。"""
-        return self._closed
 
     async def open(self) -> dict[str, Any]:
         """连上、喂源码、等 ``ready``；握手不成立即失败。"""
@@ -232,10 +228,10 @@ class RemoteChannel:
 
     async def request(self, op: str, **fields: Any) -> dict:
         """发一条请求并等它的终结响应（``ok`` / 该 op 自己的结果 / ``error``）。"""
-        future = await self.send(op, **fields)
+        future = await self._send_request(op, **fields)
         return await future
 
-    async def send(self, op: str, **fields: Any) -> asyncio.Future[dict]:
+    async def _send_request(self, op: str, **fields: Any) -> asyncio.Future[dict]:
         """发一条请求，**不等**响应，返回它的 future。"""
         request_id = self._next_id()
         future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
@@ -245,9 +241,8 @@ class RemoteChannel:
 
     async def spawn(
         self,
+        command: list[str] | str,
         *,
-        argv: list[str] | None,
-        command: str | None,
         cwd: str,
         env: dict[str, str],
         on_output: Callable[[int, bytes], Any],
@@ -259,18 +254,17 @@ class RemoteChannel:
         started: asyncio.Future[dict] = loop.create_future()
         exited: asyncio.Future[int] = loop.create_future()
         self._pending[job_id] = started
-        self._streams[job_id] = on_output
-        self._exits[job_id] = exited
+        self._jobs[job_id] = (on_output, exited)
         payload: dict[str, Any] = {
             "op": "spawn",
             "id": job_id,
             "cwd": cwd,
             "env": env,
         }
-        if argv is not None:
-            payload["argv"] = argv
-        if command is not None:
+        if isinstance(command, str):
             payload["command"] = command
+        else:
+            payload["argv"] = command
         if shell is not None:
             payload["shell"] = shell
         await self._send(payload)
@@ -300,7 +294,7 @@ class RemoteChannel:
         try:
             async for block in blocks:
                 inflight.append(
-                    await self.send(
+                    await self._send_request(
                         "put",
                         path=path,
                         b64=base64.b64encode(block).decode("ascii"),
@@ -313,7 +307,7 @@ class RemoteChannel:
                     await inflight.popleft()
             if index == 0 or executable:
                 inflight.append(
-                    await self.send(
+                    await self._send_request(
                         "put",
                         path=path,
                         b64="",
@@ -391,11 +385,10 @@ class RemoteChannel:
             if not future.done():
                 future.set_exception(error)
         self._pending.clear()
-        for exit_future in list(self._exits.values()):
+        for _callback, exit_future in self._jobs.values():
             if not exit_future.done():
                 exit_future.set_exception(error)
-        self._exits.clear()
-        self._streams.clear()
+        self._jobs.clear()
 
     async def _read_loop(self) -> None:
         reader = self._reader
@@ -438,9 +431,9 @@ class RemoteChannel:
         if op in ("ready", "fatal"):
             message_id = "@ready"
         elif op == "out":
-            callback = self._streams.get(message_id)
-            if callback is not None:
-                callback(int(message.get("fd", 1)), base64.b64decode(message["b64"]))
+            job = self._jobs.get(message_id)
+            if job is not None:
+                job[0](int(message.get("fd", 1)), base64.b64decode(message["b64"]))
             return
         elif op == "chunk":
             self._collect.setdefault(message_id, []).append(
@@ -448,10 +441,9 @@ class RemoteChannel:
             )
             return
         elif op == "exit":
-            self._streams.pop(message_id, None)
-            exited = self._exits.pop(message_id, None)
-            if exited is not None and not exited.done():
-                exited.set_result(int(message.get("code", -1)))
+            job = self._jobs.pop(message_id, None)
+            if job is not None and not job[1].done():
+                job[1].set_result(int(message.get("code", -1)))
             return
         future = self._pending.pop(message_id, None)
         if future is None or future.done():

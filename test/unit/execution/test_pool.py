@@ -20,7 +20,11 @@ from athena.execution.pool import (
     NoComputeAvailable,
     PreflightError,
 )
-from athena.execution.remote.channel import RemoteChannel, SubprocessTransport
+from athena.execution.remote.channel import (
+    RemoteChannel,
+    RemoteError,
+    SubprocessTransport,
+)
 from athena.execution.remote.ssh import SshHost
 from athena.execution.runtime import CommandRequest
 
@@ -228,10 +232,11 @@ async def test_releasing_a_lease_closes_its_channel(tmp_path, patched_probe):
 
     lease = await pool.acquire("h1", local_workspace=workspace)
     channel = lease.backend.inner._channel
-    assert not channel.closed
+    await channel.request("probe")
 
     await pool.release("h1")
-    assert channel.closed
+    with pytest.raises(RemoteError):
+        await channel.request("probe")
 
 
 @pytest.mark.asyncio
