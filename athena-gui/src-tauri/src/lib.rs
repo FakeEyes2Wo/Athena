@@ -1,10 +1,30 @@
 mod commands;
-mod events;
 mod python;
 
-use python::bridge::PythonBridge;
+use python::PythonBridge;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
+
+fn start_event_relay(app: AppHandle, bridge: Arc<PythonBridge>) {
+    let mut events = bridge.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let kind = event.kind.clone();
+                    let _ = app.emit(
+                        &kind,
+                        serde_json::json!({ "kind": event.kind, "data": event.data }),
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    eprintln!("[athena-gui] event relay skipped {count} messages");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,47 +39,47 @@ pub fn run() {
                     .expect("Failed to start Python backend")
             });
             let bridge = Arc::new(bridge);
-            events::start_event_relay(app.handle().clone(), bridge.clone());
+            start_event_relay(app.handle().clone(), bridge.clone());
             app.manage(bridge);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::chat::message,
-            commands::clarification::task_clarification_start,
-            commands::clarification::task_clarification_get,
-            commands::clarification::task_clarification_retry,
-            commands::clarification::task_clarification_revise,
-            commands::clarification::task_clarification_cancel,
-            commands::dialog::workspace_dialog_start_directory,
-            commands::search::start_search,
-            commands::search::pause_search,
-            commands::search::resume_search,
-            commands::search::stop_search,
-            commands::validate::start_validation,
-            commands::validate::generate_report,
-            commands::research::tree_get,
-            commands::research::tree_save,
-            commands::research::tree_load,
-            commands::research::eda_report,
-            commands::settings::settings_get,
-            commands::settings::settings_set,
-            commands::settings::set_project_root,
-            commands::traces::traces_list,
-            commands::traces::trace_get,
-            commands::graph::hypothesis_graph,
-            commands::graph::graph_algorithms,
-            commands::graph::graph_algorithm,
-            commands::experiments::experiments_list,
-            commands::experiments::experiment_get,
-            commands::experiments::experiment_transition,
-            commands::experiments::experiment_set_sota,
-            commands::state::state_get,
-            commands::state::sessions_list,
-            commands::state::sessions_list_for,
-            commands::state::session_switch,
-            commands::state::session_delete,
-            commands::state::human_pending,
-            commands::clarification::human_reply,
+            commands::message,
+            commands::task_clarification_start,
+            commands::task_clarification_get,
+            commands::task_clarification_retry,
+            commands::task_clarification_revise,
+            commands::task_clarification_cancel,
+            commands::workspace_dialog_start_directory,
+            commands::start_search,
+            commands::pause_search,
+            commands::resume_search,
+            commands::stop_search,
+            commands::start_validation,
+            commands::generate_report,
+            commands::tree_get,
+            commands::tree_save,
+            commands::tree_load,
+            commands::eda_report,
+            commands::settings_get,
+            commands::settings_set,
+            commands::set_project_root,
+            commands::traces_list,
+            commands::trace_get,
+            commands::hypothesis_graph,
+            commands::graph_algorithms,
+            commands::graph_algorithm,
+            commands::experiments_list,
+            commands::experiment_get,
+            commands::experiment_transition,
+            commands::experiment_set_sota,
+            commands::state_get,
+            commands::sessions_list,
+            commands::sessions_list_for,
+            commands::session_switch,
+            commands::session_delete,
+            commands::human_pending,
+            commands::human_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

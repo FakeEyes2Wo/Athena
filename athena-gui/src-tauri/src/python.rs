@@ -1,3 +1,6 @@
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
@@ -5,20 +8,60 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
-use crate::python::types::*;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct RpcError {
+    pub code: i64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl RpcError {
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self {
+            code: -32000,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+pub type RpcResult<T> = Result<T, RpcError>;
+
+fn decode_response(response: Value) -> RpcResult<Value> {
+    if let Some(error) = response.get("error").filter(|value| !value.is_null()) {
+        let error = serde_json::from_value(error.clone())
+            .map_err(|error| RpcError::transport(format!("invalid RPC error: {error}")))?;
+        return Err(error);
+    }
+    Ok(response.get("result").cloned().unwrap_or(Value::Null))
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventNotification {
+    pub kind: String,
+    pub data: Value,
+}
+
 pub struct PythonBridge {
     child: Mutex<Child>,
-    ws_send: Mutex<futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+    ws_send: Mutex<
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
         >,
-        Message,
-    >>,
+    >,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResult<Value>>>>>,
     events: broadcast::Sender<EventNotification>,
 }
@@ -47,7 +90,7 @@ impl PythonBridge {
 
         let mut child = if let Some(exe) = bundled {
             Command::new(&exe)
-                .current_dir(&repo_root)
+                .current_dir(repo_root)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
@@ -56,7 +99,7 @@ impl PythonBridge {
             Command::new("uv")
                 .args(["run", "python", "-m", "gui_gateway"])
                 .env("ATHENA_GUI_PORT", "0")
-                .current_dir(&repo_root)
+                .current_dir(repo_root)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
@@ -100,10 +143,7 @@ impl PythonBridge {
                 match msg {
                     Ok(Message::Text(text)) => {
                         if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                            if let Some(rid) = val
-                                .get("request_id")
-                                .and_then(|v| v.as_u64())
-                            {
+                            if let Some(rid) = val.get("request_id").and_then(|v| v.as_u64()) {
                                 // Response to a pending request
                                 let tx = {
                                     let mut p = pending_recv.lock().await;
@@ -114,9 +154,7 @@ impl PythonBridge {
                                 }
                             } else if val.get("kind").is_some() {
                                 // Event notification
-                                if let Ok(evt) =
-                                    serde_json::from_value::<EventNotification>(val)
-                                {
+                                if let Ok(evt) = serde_json::from_value::<EventNotification>(val) {
                                     let _ = events_clone.send(evt);
                                 }
                             }
@@ -161,7 +199,9 @@ impl PythonBridge {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.call_rpc(method, params).await.map_err(|error| error.to_string())
+        self.call_rpc(method, params)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Subscribe to event notifications from the Python backend.
@@ -199,6 +239,38 @@ impl Drop for PythonBridge {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn deserializes_minimal_event() {
+        let event: EventNotification = serde_json::from_value(json!({
+            "kind": "output",
+            "data": {"text": "hello"}
+        }))
+        .expect("deserialize event");
+        assert_eq!(event.kind, "output");
+        assert_eq!(event.data["text"], "hello");
+    }
+
+    #[test]
+    fn decodes_success_and_structured_error() {
+        let result = decode_response(json!({
+            "result": {"ok": true},
+            "error": null
+        }))
+        .expect("successful response");
+        assert_eq!(result, json!({"ok": true}));
+
+        let error = decode_response(json!({
+            "error": {
+                "code": -32602,
+                "message": "stale revision",
+                "data": {"code": "stale_revision"}
+            }
+        }))
+        .expect_err("domain error");
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.data.unwrap()["code"], "stale_revision");
+    }
 
     #[test]
     fn real_python_gateway_completes_a_native_rpc_round_trip() {

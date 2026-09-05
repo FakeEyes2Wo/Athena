@@ -54,6 +54,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the Rust runtime crate and remove unused retained state and parameters.
 - [x] Review the Rust memory crate and remove unconnected compaction/rollout prototypes.
 - [x] Review the GUI development scripts and merge duplicated process launchers.
+- [x] Review the complete Tauri backend and collapse forwarding and bridge file layers.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -182,6 +183,14 @@ Read all three GUI development scripts completely and trace their npm lifecycle 
 Merge both launchers into `dev.cjs`, using one `--backend-only` switch while preserving the public `npm run backend` and `npm run dev:web` commands. Share one two-argument child monitor and one shutdown path; invoke npm as an executable plus literal arguments so browser preview also works outside Windows. Delete both old scripts and add no compatibility wrappers.
 
 Node syntax checks and obsolete-reference searches passed. The complete TypeScript/Vite production build passed before and after the change, including the retained generated-directory prebuild. Closing three baseline script rows advances reviewed coverage to 191/602; the replacement `dev.cjs` is separately tracked below. Whole-repository acceptance remains pending.
+
+## Tauri backend review
+
+Read all eighteen Tauri backend source files completely and trace every command through `generate_handler!`, the frontend bridge, Python gateway, event relay, and native entrypoint. Retain clarification and directory-dialog files because they own typed reply validation and platform-path selection with focused tests. Retain `main.rs` as the platform entrypoint and the application composition root in `lib.rs`. All other command files were import-plus-forwarder partitions with no independent state or policy.
+
+Merge nine pure RPC command files into `commands/mod.rs`, make the two meaningful child modules private, and register all 36 commands through one flat command namespace. Delete the Rust-only `HumanRequest` mirror and its tests because production never deserialized it; retain the actual `HumanReply` input contract. Collapse `python/mod.rs`, `bridge.rs`, and `types.rs` into one `python.rs`; drop the unread event subscription ID and redundant error trait implementation. Inline the single-consumer event relay into `lib.rs`, remove per-event diagnostic serialization, and delete `events.rs`. No dynamic arbitrary-method command or macro-generated compatibility layer was introduced.
+
+Fresh verification passed seven Tauri tests, including a real Python gateway RPC round trip, plus ten frontend bridge contract tests. Tauri formatting, all-target Clippy with `-D warnings`, command registration compilation, and obsolete-module searches passed. The Python gateway logs an existing connection-reset traceback when the Rust integration test closes its socket, but both test runs exit successfully. Closing eighteen baseline rows advances reviewed coverage to 209/602; the replacement `python.rs` is separately tracked below. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -457,24 +466,25 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-gui/scripts/dev-web.cjs` | 46 | Reviewed; merge duplicate dual-process launcher into dev.cjs and delete file |
 | `athena-gui/scripts/dev.cjs` | New | Reviewed; one backend/preview launcher with shared monitoring and shutdown |
 | `athena-gui/scripts/ensure-generated.mjs` | 15 | Reviewed; retain the minimal build-directory precondition |
-| `athena-gui/src-tauri/src/commands/chat.rs` | 12 | Pending |
-| `athena-gui/src-tauri/src/commands/clarification.rs` | 270 | Pending |
-| `athena-gui/src-tauri/src/commands/dialog.rs` | 103 | Pending |
-| `athena-gui/src-tauri/src/commands/experiments.rs` | 47 | Pending |
-| `athena-gui/src-tauri/src/commands/graph.rs` | 27 | Pending |
-| `athena-gui/src-tauri/src/commands/mod.rs` | 11 | Pending |
-| `athena-gui/src-tauri/src/commands/research.rs` | 32 | Pending |
-| `athena-gui/src-tauri/src/commands/search.rs` | 42 | Pending |
-| `athena-gui/src-tauri/src/commands/settings.rs` | 27 | Pending |
-| `athena-gui/src-tauri/src/commands/state.rs` | 53 | Pending |
-| `athena-gui/src-tauri/src/commands/traces.rs` | 19 | Pending |
-| `athena-gui/src-tauri/src/commands/validate.rs` | 18 | Pending |
-| `athena-gui/src-tauri/src/events.rs` | 34 | Pending |
-| `athena-gui/src-tauri/src/lib.rs` | 66 | Pending |
-| `athena-gui/src-tauri/src/main.rs` | 6 | Pending |
-| `athena-gui/src-tauri/src/python/bridge.rs` | 218 | Pending |
-| `athena-gui/src-tauri/src/python/mod.rs` | 2 | Pending |
-| `athena-gui/src-tauri/src/python/types.rs` | 92 | Pending |
+| `athena-gui/src-tauri/src/commands/chat.rs` | 12 | Reviewed; merge pure command into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/clarification.rs` | 270 | Reviewed; retain typed reply boundary and delete test-only request mirror |
+| `athena-gui/src-tauri/src/commands/dialog.rs` | 103 | Reviewed; retain native fallback selection and its three tests |
+| `athena-gui/src-tauri/src/commands/experiments.rs` | 47 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/graph.rs` | 27 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/mod.rs` | 11 | Reviewed; own the flat RPC-forwarding command surface |
+| `athena-gui/src-tauri/src/commands/research.rs` | 32 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/search.rs` | 42 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/settings.rs` | 27 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/state.rs` | 53 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/traces.rs` | 19 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/commands/validate.rs` | 18 | Reviewed; merge pure commands into commands/mod.rs and delete file |
+| `athena-gui/src-tauri/src/events.rs` | 34 | Reviewed; inline the single-consumer relay into lib.rs and delete file |
+| `athena-gui/src-tauri/src/lib.rs` | 66 | Reviewed; own setup, event relay and flat command registration |
+| `athena-gui/src-tauri/src/main.rs` | 6 | Reviewed; retain the minimal platform entrypoint |
+| `athena-gui/src-tauri/src/python/bridge.rs` | 218 | Reviewed; merge transport, wire types and tests into python.rs |
+| `athena-gui/src-tauri/src/python/mod.rs` | 2 | Reviewed; remove the two-layer facade and delete file |
+| `athena-gui/src-tauri/src/python/types.rs` | 92 | Reviewed; merge live wire contracts into python.rs and delete file |
+| `athena-gui/src-tauri/src/python.rs` | New | Reviewed; one four-field process/WebSocket bridge and wire boundary |
 | `athena-gui/src/App.tsx` | 49 | Pending |
 | `athena-gui/src/__tests__/App.test.tsx` | 164 | Pending |
 | `athena-gui/src/components/AlgorithmsPanel.tsx` | 127 | Pending |
