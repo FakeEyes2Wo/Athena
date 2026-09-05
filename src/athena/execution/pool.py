@@ -14,8 +14,7 @@ from athena.execution.remote.dataset import (
     StageReport,
     describe_dataset,
 )
-from athena.execution.remote.mirror import WorkspaceMirror
-from athena.execution.remote.mirrored import MirroredBackend
+from athena.execution.remote.mirror import MirroredBackend, WorkspaceMirror
 from athena.execution.remote.ssh import SshBackend, SshHost, SshTransport
 
 logger = logging.getLogger(__name__)

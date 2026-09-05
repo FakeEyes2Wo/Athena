@@ -19,11 +19,11 @@ from athena.core.artifact_store import LocalArtifactStore
 from athena.execution import ExecutionBackend
 from athena.execution.remote import (
     RemoteChannel,
+    MirroredBackend,
     SshBackend,
     SshHost,
     WorkspaceMirror,
 )
-from athena.execution.remote.mirrored import MirroredBackend
 from athena.execution.remote.channel import SubprocessTransport
 from athena.execution.remote.ssh import REMOTE_COMMAND_LIMIT_BYTES
 from athena.execution.runtime import CommandRequest

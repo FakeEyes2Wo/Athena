@@ -258,7 +258,15 @@ async def test_releasing_a_lease_takes_its_remote_workspace_with_it(
     (workspace / "train.py").write_text("print(1)\n", encoding="utf-8")
 
     lease = await pool.acquire("h1", local_workspace=workspace)
-    await lease.backend.mirror.push()
+    result = await lease.backend.run(
+        workspace_root=workspace,
+        request=CommandRequest(
+            argv=[sys.executable, "-c", "pass"],
+            workdir=workspace,
+            timeout_s=60,
+        ),
+    )
+    assert result.ok
     remote_workspace = Path(lease.remote_workspace)
     assert (remote_workspace / "train.py").is_file(), "先确认真有东西可删"
 

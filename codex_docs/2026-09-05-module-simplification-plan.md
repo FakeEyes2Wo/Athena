@@ -55,6 +55,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the Rust memory crate and remove unconnected compaction/rollout prototypes.
 - [x] Review the GUI development scripts and merge duplicated process launchers.
 - [x] Review the complete Tauri backend and collapse forwarding and bridge file layers.
+- [x] Review the Python remote mirror backend and merge its wrapper layer.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -191,6 +192,14 @@ Read all eighteen Tauri backend source files completely and trace every command 
 Merge nine pure RPC command files into `commands/mod.rs`, make the two meaningful child modules private, and register all 36 commands through one flat command namespace. Delete the Rust-only `HumanRequest` mirror and its tests because production never deserialized it; retain the actual `HumanReply` input contract. Collapse `python/mod.rs`, `bridge.rs`, and `types.rs` into one `python.rs`; drop the unread event subscription ID and redundant error trait implementation. Inline the single-consumer event relay into `lib.rs`, remove per-event diagnostic serialization, and delete `events.rs`. No dynamic arbitrary-method command or macro-generated compatibility layer was introduced.
 
 Fresh verification passed seven Tauri tests, including a real Python gateway RPC round trip, plus ten frontend bridge contract tests. Tauri formatting, all-target Clippy with `-D warnings`, command registration compilation, and obsolete-module searches passed. The Python gateway logs an existing connection-reset traceback when the Rust integration test closes its socket, but both test runs exit successfully. Closing eighteen baseline rows advances reviewed coverage to 209/602; the replacement `python.rs` is separately tracked below. Whole-repository acceptance remains pending.
+
+## Python remote-mirror review
+
+Read the execution backend, remote mirror/wrapper, remote facade, backend seam tests, and SSH backend tests completely; trace mirror and backend access through the runtime, pool, channel, dataset staging, and focused tests. Retain `ExecutionBackend` and `LocalBackend` as the source-independent runtime seam. Retain manifest hashing, bounded push/pull, pruning, source suffix policy, oversized-output evidence, and the inner SSH backend because each has a production pool or runtime consumer.
+
+Merge `MirroredBackend` into `mirror.py` and delete `mirrored.py`, keeping workspace mirroring and its execution wrapper in one module. Remove two never-customized constructor policy parameters and their fields, reducing the wrapper from five attributes to three and its constructor from four arguments to two. Remove the test-only mirror getter plus three public WorkspaceMirror accessors used only by the former cross-file wrapper; same-module code now uses the owned mirror state directly. Export the merged backend from the remote facade and make the release-cleanup test trigger push through the real `run` contract rather than a test-only getter.
+
+The same focused backend/channel/SSH/pool/runtime selection passed 96 tests before and after the change. Python compilation, task-scope code-style checks, and removed-module/surface searches passed. Pytest reported one existing cache-permission warning. The repository-wide style command still reports pre-existing hard-rule violations outside this slice, so whole-repository acceptance remains pending. Closing four baseline rows advances reviewed coverage to 213/602.
 
 ## DSH composition-root review
 
@@ -651,18 +660,18 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/core/tool_types.py` | 91 | Reviewed; remove unused max_result_chars; retain shared data contracts |
 | `src/athena/core/workspace.py` | 86 | Pending |
 | `src/athena/execution/__init__.py` | 42 | Pending |
-| `src/athena/execution/backend.py` | 122 | Pending |
+| `src/athena/execution/backend.py` | 122 | Reviewed; retain the source-independent backend protocol and local implementation |
 | `src/athena/execution/check.py` | 249 | Pending |
 | `src/athena/execution/compute_config.py` | 124 | Pending |
 | `src/athena/execution/events.py` | 139 | Pending |
 | `src/athena/execution/monitor.py` | 286 | Pending |
 | `src/athena/execution/pool.py` | 363 | Pending |
-| `src/athena/execution/remote/__init__.py` | 23 | Pending |
+| `src/athena/execution/remote/__init__.py` | 23 | Reviewed; export the merged mirror backend from the remote facade |
 | `src/athena/execution/remote/agent.py` | 473 | Pending |
 | `src/athena/execution/remote/channel.py` | 463 | Pending |
 | `src/athena/execution/remote/dataset.py` | 188 | Pending |
-| `src/athena/execution/remote/mirror.py` | 191 | Pending |
-| `src/athena/execution/remote/mirrored.py` | 120 | Pending |
+| `src/athena/execution/remote/mirror.py` | 191 | Reviewed; absorb the three-field mirrored execution wrapper and narrow helper surface |
+| `src/athena/execution/remote/mirrored.py` | 120 | Reviewed; merge into mirror.py and delete forwarding file |
 | `src/athena/execution/remote/ssh.py` | 362 | Pending |
 | `src/athena/execution/runtime.py` | 895 | Pending |
 | `src/athena/gui/__init__.py` | 9 | Pending |

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from athena.execution.remote.channel import RemoteChannel
+from athena.execution.remote.ssh import SshBackend
+from athena.execution.runtime import CommandRequest, CommandResult
 
 # 永不镜像的目录/文件名（缓存、venv 与 .git 指针）。
 DEFAULT_EXCLUDES: frozenset[str] = frozenset(
@@ -23,6 +25,24 @@ DEFAULT_EXCLUDES: frozenset[str] = frozenset(
 MAX_PUSH_BYTES = 32 * 1024 * 1024
 
 _HASH_BLOCK = 1024 * 1024
+
+PULLED_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".py",
+        ".sh",
+        ".toml",
+        ".cfg",
+        ".ini",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".md",
+        ".txt",
+        ".csv",
+        ".log",
+    }
+)
+PULLED_MAX_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,31 +120,13 @@ class WorkspaceMirror:
         self._excludes = excludes
         self._max_push_bytes = max_push_bytes
 
-    @property
-    def remote_root(self) -> str:
-        """远端工作区根（posix 路径）。"""
-        return str(self._remote)
-
-    @property
-    def local_root(self) -> Path:
-        """本地工作区根。"""
-        return self._local
-
-    def local_manifest(self) -> dict[str, FileEntry]:
-        """本地工作区当前的清单。"""
-        return local_manifest(self._local, excludes=self._excludes)
-
-    async def fetch(self, relative: str) -> bytes:
-        """取回工作区里某个相对路径的字节。"""
-        return await self._channel.read_file(self.remote_path(relative))
-
-    def remote_path(self, relative: str) -> str:
+    def _remote_path(self, relative: str) -> str:
         """把工作区相对路径映射成远端绝对路径。"""
         return str(self._remote / PurePosixPath(relative))
 
     async def remote_manifest(self, subdir: str = "") -> dict[str, FileEntry]:
         """远端一棵子树的清单。"""
-        root = self.remote_path(subdir) if subdir else str(self._remote)
+        root = self._remote_path(subdir) if subdir else str(self._remote)
         reply = await self._channel.request(
             "manifest", root=root, exclude=sorted(self._excludes)
         )
@@ -154,7 +156,7 @@ class WorkspaceMirror:
             sent += entry.size
         if pending:
             await self._channel.send_files(
-                (self.remote_path(key), self._local / key) for key in pending
+                (self._remote_path(key), self._local / key) for key in pending
             )
             uploaded = pending
 
@@ -163,7 +165,7 @@ class WorkspaceMirror:
             stale = [key for key in sorted(remote) if key not in local]
             if stale:
                 await self._channel.request(
-                    "remove", paths=[self.remote_path(key) for key in stale]
+                    "remove", paths=[self._remote_path(key) for key in stale]
                 )
                 deleted = stale
         return PushReport(tuple(uploaded), tuple(deleted), tuple(oversized), sent)
@@ -182,10 +184,92 @@ class WorkspaceMirror:
                 if entry.size > max_bytes:
                     remote_only.append(relative)
                     continue
-                data = await self._channel.read_file(self.remote_path(relative))
+                data = await self._channel.read_file(self._remote_path(relative))
                 target = self._local / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
                 downloaded.append(relative)
                 received += len(data)
         return PullReport(tuple(downloaded), tuple(remote_only), received)
+
+
+class MirroredBackend:
+    """Execute remotely while mirroring source changes and declared outputs."""
+
+    def __init__(self, inner: SshBackend, mirror: WorkspaceMirror) -> None:
+        self._inner = inner
+        self._mirror = mirror
+        self._remote_only: set[str] = set()
+
+    @property
+    def name(self) -> str:
+        """Return the remote host name."""
+        return self._inner.name
+
+    @property
+    def inner(self) -> SshBackend:
+        """Expose the executor used by lease management."""
+        return self._inner
+
+    @property
+    def remote_only(self) -> tuple[str, ...]:
+        """Return output paths retained only on the remote host."""
+        return tuple(sorted(self._remote_only))
+
+    def describe(self, workspace_root: str | Path) -> str:
+        """Describe the machine that executes commands."""
+        return self._inner.describe(workspace_root)
+
+    def env_ref(self, name: str) -> str:
+        """Format an environment reference for the remote shell."""
+        return self._inner.env_ref(name)
+
+    def ensure_environment(self) -> None:
+        """Confirm the leased remote environment is ready."""
+        self._inner.ensure_environment()
+
+    async def aclose(self) -> None:
+        """Close the underlying remote channel."""
+        await self._inner.aclose()
+
+    async def run(
+        self,
+        *,
+        workspace_root: Path,
+        request: CommandRequest,
+    ) -> CommandResult:
+        """Push source, execute remotely, then pull changed source files."""
+        await self._mirror.push()
+        result = await self._inner.run(
+            workspace_root=workspace_root,
+            request=request,
+        )
+        await self._pull_sources()
+        return result
+
+    async def collect_outputs(self, subdirs: tuple[str, ...]) -> PullReport:
+        """Pull declared output directories and remember oversized paths."""
+        report = await self._mirror.pull(subdirs)
+        self._remote_only.update(report.remote_only)
+        return report
+
+    async def _pull_sources(self) -> None:
+        remote = await self._mirror.remote_manifest()
+        local = local_manifest(
+            self._mirror._local,
+            excludes=self._mirror._excludes,
+        )
+        for key, entry in sorted(remote.items()):
+            if Path(key).suffix.lower() not in PULLED_SUFFIXES:
+                continue
+            if entry.size > PULLED_MAX_BYTES:
+                self._remote_only.add(key)
+                continue
+            existing = local.get(key)
+            if existing is not None and existing.sha256 == entry.sha256:
+                continue
+            target = self._mirror._local / key
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(
+                await self._mirror._channel.read_file(self._mirror._remote_path(key))
+            )

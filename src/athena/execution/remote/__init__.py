@@ -6,11 +6,17 @@ from athena.execution.remote.channel import (
     RemoteTransport,
     SubprocessTransport,
 )
-from athena.execution.remote.mirror import FileEntry, WorkspaceMirror, local_manifest
+from athena.execution.remote.mirror import (
+    FileEntry,
+    MirroredBackend,
+    WorkspaceMirror,
+    local_manifest,
+)
 from athena.execution.remote.ssh import SshBackend, SshHost, SshTransport
 
 __all__ = [
     "FileEntry",
+    "MirroredBackend",
     "RemoteChannel",
     "RemoteError",
     "RemoteTransport",
