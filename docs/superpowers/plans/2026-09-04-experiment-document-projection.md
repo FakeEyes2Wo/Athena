@@ -184,7 +184,7 @@ by the backend; do not copy the older `446aba2` wording over newer policy.
 - Consumes: Pydantic 2 only.
 - Produces: `Direction`, `StageName`, `MetricObservation`, `MetricRecord`, `ReasonRecord`, `ProvenanceRecord`, `StageEvent`, `StageRecord`, `LatestManifest`, `ProjectionOutcome`, `DOCUMENTS_STALE_CODE`, and `DOCUMENTS_STALE_MESSAGE`.
 
-- [ ] **Step 1: Write the model validation tests**
+- [x] **Step 1: Write the model validation tests**
 
 Create a reusable valid payload and enumerate each rejected boundary explicitly:
 
@@ -319,7 +319,7 @@ the type checker objects. Also test blank metric names, invalid directions, empt
 provenance, extra top-level/reason/provenance fields, malformed SHA-256 values, and
 the inverse `LatestManifest`/`ProjectionOutcome` invariants.
 
-- [ ] **Step 2: Run the new model test and observe the missing package failure**
+- [x] **Step 2: Run the new model test and observe the missing package failure**
 
 Run:
 
@@ -330,7 +330,7 @@ uv run pytest test/unit/research/experiment_documents/test_models.py -q
 Expected: collection fails with `ModuleNotFoundError` for
 `athena.research.experiment_documents`.
 
-- [ ] **Step 3: Implement the strict models**
+- [x] **Step 3: Implement the strict models**
 
 Use one private strict base model and field/model validators; do not silently coerce
 or sanitize caller values:
@@ -429,7 +429,7 @@ Apply these exact validation rules:
 Keep `__init__.py` to a package docstring for now; Task 5 adds the final exports after
 the projector exists.
 
-- [ ] **Step 4: Run model tests and the formatter check**
+- [x] **Step 4: Run model tests and the formatter check**
 
 Run:
 
@@ -440,7 +440,7 @@ uv run black --check src/athena/research/experiment_documents/models.py test/uni
 
 Expected: all model tests pass and Black reports both files unchanged.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```powershell
 git add -- src/athena/research/experiment_documents/__init__.py src/athena/research/experiment_documents/models.py test/unit/research/experiment_documents/__init__.py test/unit/research/experiment_documents/test_models.py
@@ -460,7 +460,7 @@ git commit -m "feat(research): define experiment document contracts"
 - Produces: `MetricResolver(evaluator_roots: Iterable[Path])` and
   `resolve(task_understanding: Mapping[str, object] | None) -> str`.
 
-- [ ] **Step 1: Write authority-order and invalid-file tests**
+- [x] **Step 1: Write authority-order and invalid-file tests**
 
 ```python
 import json
@@ -525,7 +525,7 @@ Also test malformed JSON, a non-object JSON payload, a blank legacy
 `primary_metric`, and a valid second evaluator candidate after an invalid first one.
 Assert no test creates `.athena/evaluator_spec.json`.
 
-- [ ] **Step 2: Run the resolver test and observe the missing module failure**
+- [x] **Step 2: Run the resolver test and observe the missing module failure**
 
 Run:
 
@@ -535,7 +535,7 @@ uv run pytest test/unit/research/experiment_documents/test_metric.py -q
 
 Expected: collection fails because `experiment_documents.metric` does not exist.
 
-- [ ] **Step 3: Implement `MetricResolver`**
+- [x] **Step 3: Implement `MetricResolver`**
 
 ```python
 class MetricResolver:
@@ -568,7 +568,7 @@ class MetricResolver:
 Do not catch a valid first result and continue. Do catch invalid metadata and try the
 next configured evaluator candidate before task-understanding fallback.
 
-- [ ] **Step 4: Run focused resolver and evaluator-spec tests**
+- [x] **Step 4: Run focused resolver and evaluator-spec tests**
 
 Run:
 
@@ -578,7 +578,7 @@ uv run pytest test/unit/research/experiment_documents/test_metric.py test/unit/r
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 ```powershell
 git add -- src/athena/research/experiment_documents/metric.py test/unit/research/experiment_documents/test_metric.py
