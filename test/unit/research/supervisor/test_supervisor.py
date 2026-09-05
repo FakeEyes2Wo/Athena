@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from test.support import RecordingDocumentProjector
+
 import athena.research.supervisor.search_loop as search_loop_module
 from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
@@ -221,7 +223,10 @@ async def test_new_plan_freezes_evaluator_tree_and_human_context(
                 tree_path=tmp_path / ".athena" / "research_tree.json",
             ),
             runtime=SupervisorRuntime(
-                store=store, agents=agents, workspaces=workspaces
+                store=store,
+                agents=agents,
+                workspaces=workspaces,
+                documents=RecordingDocumentProjector(),
             ),
             research=ResearchActions(
                 plan=unused_plan_turn, supervisor=unused_supervisor_turn
@@ -327,6 +332,7 @@ def _checkpoint_supervisor(
                 store=LocalArtifactStore(tmp_path / "artifacts"),
                 agents=runtime_agents or SimpleNamespace(),
                 workspaces=SimpleNamespace(),
+                documents=RecordingDocumentProjector(),
             ),
             research=ResearchActions(
                 plan=no_plan_turn,
@@ -462,11 +468,18 @@ async def test_skip_finalizer_restores_memory_after_save_failure_and_reuses_path
 
     monkeypatch.setattr(supervisor._plans, "save_state", original_save)
     await supervisor._phases._finalize_without_validation()
-    final_path = tmp_path / ".athena" / "exp_docs" / "runs" / "final-skipped.json"
-    assert final_path.is_file()
     assert supervisor.state.phase == "COMPLETED"
     assert supervisor.state.status == "COMPLETED"
     assert supervisor.state.validation_skipped is True
+    persisted = ResearchState.load(supervisor._deps.paths.state_path)
+    assert persisted.phase == "COMPLETED"
+    assert persisted.status == "COMPLETED"
+    assert persisted.validation_skipped is True
+    documents = supervisor._deps.runtime.documents
+    assert [call["event"]["run_id"] for call in documents.stage_calls] == [
+        "final-skipped"
+    ]
+    assert documents.stage_calls[0]["event"]["status"] == "SKIPPED"
 
 
 @pytest.mark.asyncio
@@ -848,11 +861,16 @@ async def test_prepare_failure_is_observable_and_retry_enters_running(
         await supervisor.start()
     assert statuses == ["RUNNING", "RUNNING"]
     assert supervisor.state.status == "FAILED"
-    failure_doc = tmp_path / ".athena" / "exp_docs" / "baseline.json"
-    failure = json.loads(failure_doc.read_text(encoding="utf-8"))
+    persisted = ResearchState.load(supervisor._deps.paths.state_path)
+    assert persisted.phase == "PREPARE"
+    assert persisted.status == "FAILED"
+    documents = supervisor._deps.runtime.documents
+    assert len(documents.stage_calls) == 2
+    failure = documents.stage_calls[-1]["event"]
     assert failure["status"] == "FAILED"
     assert failure["reason"]["kind"] == "phase_failed"
     assert "prepare attempt 2 failed" in failure["reason"]["summary"]
+    assert str(failure["run_id"]).startswith("baseline-phase-failure-")
 
 
 @pytest.mark.asyncio

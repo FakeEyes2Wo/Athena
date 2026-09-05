@@ -12,13 +12,8 @@ Active refinement design spec:
 Queued dependent implementation plan:
 - `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
 
-Queued subsequent implementation plan:
-- `docs/superpowers/plans/2026-09-04-experiment-document-projection.md`
-
-Queued subsequent supporting design spec:
-- `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`
-
 Most recent completed work:
+- `codex_docs/2026-09-04-experiment-document-projection-completion-report.md`
 - `codex_docs/2026-09-04-skip-validate-final-completion-report.md`
 - `codex_docs/2026-09-03-llm-task-understanding-output-completion-report.md`
 - `codex_docs/2026-09-03-authoritative-baseline-hardening-completion-report.md`
@@ -27,6 +22,7 @@ Most recent completed work:
 - `codex_docs/2026-09-03-frontend-workspace-session-fixes-completion-report.md`
 
 Design spec:
+- `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`
 - `docs/superpowers/specs/2026-09-04-supervisor-transactional-search-resume-design.md`
 - `docs/superpowers/specs/2026-09-03-authoritative-baseline-hardening-design.md`
 - `docs/superpowers/specs/2026-09-02-authoritative-baseline-research-design.md`

@@ -6,6 +6,8 @@ import shutil
 
 import pytest
 
+from test.support import RecordingDocumentProjector
+
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec, JsonCodec
@@ -239,6 +241,7 @@ async def test_restart_resumes_stable_agent_context_and_workspace(harness: _Harn
                 store=harness.store,
                 agents=agents,
                 workspaces=workspaces,
+                documents=RecordingDocumentProjector(),
             ),
             research=ResearchActions(
                 plan=lambda _plan_id, _state: asyncio.sleep(0),

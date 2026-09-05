@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from athena.core.contracts import ArtifactRef
 from athena.core.research_models import ComparisonVerdict, EvalResult
 from athena.core.research_tree import ExperimentStatus
-from athena.research.exp_docs import task_metric_name, write_reports, write_stage_doc
+from athena.research.experiment_documents import ProjectionOutcome
 from athena.research.supervisor.deps import SupervisorDeps
 from athena.research.supervisor.experiment import PlanTurnResult, load_best
 from athena.research.supervisor.plans import PlanInput
@@ -231,46 +231,56 @@ class PlanSettlement:
         else:
             reason_kind = result.kind if result is not None else "no_trusted_result"
             reason_summary = experiment.error or "No trusted score was produced."
-        write_stage_doc(
-            self._deps.paths.project_root,
-            {
-                "run_id": experiment_id,
-                "stage": "search",
-                "status": experiment.status.value,
-                "metric": {
-                    "name": task_metric_name(
-                        self._deps.paths.project_root,
-                        self._state.task_understanding,
-                    ),
-                    "direction": plan_input.direction,
-                    "primary": primary,
-                    "reference": plan_input.reference_metric,
-                    "secondary": (
-                        experiment.eval.secondary if experiment.eval is not None else {}
-                    ),
-                },
-                "artifacts": experiment.artifacts,
-                "reason": {"kind": reason_kind, "summary": reason_summary},
-                "provenance": {
-                    "experiment_id": experiment_id,
-                    "hypothesis_id": hypothesis.id,
-                    "commit": experiment.commit,
-                },
-            },
-        )
-        write_reports(
-            self._deps.paths.project_root,
-            self._tree,
-            self._state.validation,
-            metric_name=task_metric_name(
-                self._deps.paths.project_root,
-                self._state.task_understanding,
-            ),
-            direction=plan_input.direction,
-        )
+        reason_summary = " ".join(str(reason_summary).split())[:1000]
+        # The canonical tree and state are authoritative.  Persist both before
+        # constructing the derived event so a projection failure cannot roll a
+        # settled SEARCH result back into an active Plan.
         self._tree.save(self._deps.paths.tree_path)
         self._state.plans.pop(plan_id)
         self._save_state()
+        secondary = {}
+        if experiment.eval is not None and experiment.eval.secondary:
+            secondary = {
+                key: float(value)
+                for key, value in experiment.eval.secondary.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        event = {
+            "run_id": experiment_id,
+            "stage": "search",
+            "status": experiment.status.value,
+            "metric": {
+                "primary": primary,
+                "reference": plan_input.reference_metric,
+                "secondary": secondary,
+            },
+            "artifacts": {
+                key: value
+                for key, value in experiment.artifacts.items()
+                if isinstance(value, str)
+            },
+            "reason": {"kind": reason_kind, "summary": reason_summary},
+            "provenance": {
+                "experiment_id": experiment_id,
+                "hypothesis_id": hypothesis.id,
+                "commit": experiment.commit,
+            },
+        }
+        try:
+            outcome = self._deps.runtime.documents.project_stage(
+                event,
+                tree=self._tree,
+                validation=self._state.validation,
+                validation_skipped=bool(self._state.validation_skipped),
+                task_understanding=self._state.task_understanding,
+                direction=plan_input.direction,
+            )
+        except Exception:
+            logger.warning(
+                "document projection failed after SEARCH settlement", exc_info=True
+            )
+            outcome = ProjectionOutcome.stale()
+        await self._owner._publish_document_outcome(outcome)
         if self._deps.phases.on_plan_settled is not None:
             await self._deps.phases.on_plan_settled(plan_id)
         try:

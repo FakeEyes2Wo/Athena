@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from test.support import RecordingDocumentProjector
+
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.agent.types import AgentSpec, JsonCodec
@@ -211,6 +213,7 @@ class _Harness:
                     store=self.store,
                     agents=self.agents,
                     workspaces=self.git,
+                    documents=RecordingDocumentProjector(),
                 ),
                 research=ResearchActions(
                     plan=run_plan_turn,

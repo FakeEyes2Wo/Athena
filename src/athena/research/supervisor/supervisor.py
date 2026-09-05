@@ -1,5 +1,6 @@
 """Explicit facade for Athena's autonomous research Supervisor."""
 
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -21,6 +22,9 @@ from athena.research.supervisor.plans import PlanInput
 from athena.research.supervisor.run_state import SupervisorRunState
 from athena.research.supervisor.search_loop import SearchLoop
 from athena.research.supervisor.state import ResearchState
+from athena.research.experiment_documents import ProjectionOutcome
+
+logger = logging.getLogger(__name__)
 
 
 class Supervisor:
@@ -115,7 +119,42 @@ class Supervisor:
 
     async def recover(self, state: ResearchState | None = None) -> ResearchState:
         """Reconcile durable Plans and live Agent threads after restart."""
-        return await self._plans.recover(state)
+        recovered = await self._plans.recover(state)
+        await self._rebuild_documents()
+        return recovered
+
+    async def _publish_document_outcome(self, outcome: ProjectionOutcome) -> None:
+        """Publish one sanitized warning when derived documents are stale."""
+        if outcome.ok:
+            return
+        try:
+            await self._deps.phases.publish(
+                "output",
+                {
+                    "source": "supervisor",
+                    "channel": "error",
+                    "text": outcome.warning_message,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "failed to publish document projection warning", exc_info=True
+            )
+
+    async def _rebuild_documents(self) -> None:
+        """Rebuild derived documents from the current canonical state."""
+        try:
+            outcome = self._deps.runtime.documents.rebuild(
+                tree=self.tree,
+                validation=self.state.validation,
+                validation_skipped=self.state.validation_skipped,
+                task_understanding=self.state.task_understanding,
+                direction=self._deps.search.direction,
+            )
+        except Exception:
+            logger.warning("document rebuild failed", exc_info=True)
+            outcome = ProjectionOutcome.stale()
+        await self._publish_document_outcome(outcome)
 
     async def propose_hypothesis(self, **payload: object) -> dict[str, object]:
         """Validate and register one Supervisor-proposed Hypothesis."""
@@ -179,6 +218,8 @@ class Supervisor:
 
     async def start(self) -> None:
         """Run the current research phase lifecycle."""
+        if self.state.phase == "PREPARE":
+            await self._rebuild_documents()
         await self._phases.start()
 
     async def continue_phase(self) -> None:
