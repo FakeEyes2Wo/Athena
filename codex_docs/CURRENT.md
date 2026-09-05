@@ -3,6 +3,12 @@
 Active implementation plan:
 - `docs/superpowers/plans/2026-09-04-supervisor-transactional-search-resume-backend.md`
 
+Active implementation-plan refinement (applies during backend Tasks 10, 11, and 14):
+- `docs/superpowers/plans/2026-09-05-skip-validate-engineering-simplification.md`
+
+Active refinement design spec:
+- `docs/superpowers/specs/2026-09-05-skip-validate-engineering-simplification-design.md`
+
 Queued dependent implementation plan:
 - `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
 

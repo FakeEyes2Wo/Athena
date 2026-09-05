@@ -1163,6 +1163,11 @@ git commit -m "refactor: transact supervisor domain actions"
 
 ### Task 10: Serialize Plan starts, settlement, phases, settings, and background checkpoints
 
+> Required refinement: execute Tasks 1-2 from
+> `docs/superpowers/plans/2026-09-05-skip-validate-engineering-simplification.md`
+> as part of this task. They replace duplicated validation booleans and the
+> reflective GUI runtime factory without changing the public wire contract.
+
 **Files:**
 - Modify: `src/athena/research/supervisor/plan_lifecycle.py`
 - Modify: `src/athena/research/supervisor/plan_runtime.py`
@@ -1268,6 +1273,11 @@ git commit -m "refactor: route research writes through coordinator"
 ---
 
 ### Task 11: Durable validation policy and final-evaluator consumption
+
+> Required refinement: execute Tasks 3-4 from
+> `docs/superpowers/plans/2026-09-05-skip-validate-engineering-simplification.md`
+> as part of this task. Report state and skipped finalization must use the same
+> transaction coordinator and cannot retain parallel boolean/report APIs.
 
 **Files:**
 - Modify: `src/athena/research/supervisor/phases.py`
@@ -1565,6 +1575,10 @@ git commit -m "feat: recover control transactions before runtime load"
 ---
 
 ### Task 14: Backend regression, security audit, documentation, and handoff
+
+> Required refinement: include Task 5 from
+> `docs/superpowers/plans/2026-09-05-skip-validate-engineering-simplification.md`
+> in this task's verification and documentation closure.
 
 **Files:**
 - Modify: `docs/research_core_mechanisms_ch.md`
