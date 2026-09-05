@@ -13,10 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-DEFAULT_EVAL_SCRIPT = "eval_metrics.py"
-DEFAULT_METRICS_FILE = "metrics_public_test.csv"
 DEFAULT_PREDICTION_ID_COLUMN = "__athena_row_id"
-DEFAULT_PREDICTION_COLUMN = "prediction"
 _SAFE_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
@@ -39,8 +36,8 @@ class EvaluatorSpec(BaseModel):
     prediction_id_column: str = Field(min_length=1)
     prediction_column: str = Field(min_length=1)
     probability_columns: list[str] = Field(default_factory=list)
-    metrics_file: str = Field(default=DEFAULT_METRICS_FILE, min_length=1)
-    eval_script: str = Field(default=DEFAULT_EVAL_SCRIPT, min_length=1)
+    metrics_file: str = Field(default="metrics_public_test.csv", min_length=1)
+    eval_script: str = Field(default="eval_metrics.py", min_length=1)
     prediction_format: str = Field(default="tabular_csv", min_length=1)
 
     @field_validator("prediction_file", "metrics_file", "eval_script")
@@ -118,13 +115,6 @@ class EvaluatorSpec(BaseModel):
         return self
 
 
-def prediction_filename(task_id: str) -> str:
-    """Return the standard public prediction filename for a task identifier."""
-    if not _SAFE_TASK_ID.fullmatch(task_id):
-        raise ValueError(f"invalid task_id: {task_id!r}")
-    return f"predictions__{task_id}.csv"
-
-
 def load_metric_json(root: Path) -> dict[str, Any]:
     """Read one evaluator's metric.json without applying legacy defaults."""
     path = Path(root) / "metric.json"
@@ -157,12 +147,8 @@ def load_evaluator_spec(root: Path, *, legacy_ok: bool = True) -> EvaluatorSpec 
 
 
 __all__ = [
-    "DEFAULT_EVAL_SCRIPT",
-    "DEFAULT_METRICS_FILE",
-    "DEFAULT_PREDICTION_COLUMN",
     "DEFAULT_PREDICTION_ID_COLUMN",
     "EvaluatorSpec",
     "load_evaluator_spec",
     "load_metric_json",
-    "prediction_filename",
 ]

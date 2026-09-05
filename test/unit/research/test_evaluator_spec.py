@@ -8,7 +8,6 @@ import pytest
 from athena.research.evaluation.spec import (
     EvaluatorSpec,
     load_evaluator_spec,
-    prediction_filename,
 )
 
 
@@ -67,7 +66,15 @@ def test_classification_contract_requires_the_complete_label_universe() -> None:
         )
 
 
-def test_prediction_filename_rejects_path_injection() -> None:
+def test_evaluator_spec_rejects_task_id_path_injection() -> None:
     """Task ids cannot cause evaluator output to escape its directory."""
     with pytest.raises(ValueError):
-        prediction_filename("../labels")
+        EvaluatorSpec(
+            contract_version=2,
+            task_id="../labels",
+            task_type="regression",
+            primary_metric="rmse",
+            prediction_file="predictions__../labels.csv",
+            prediction_id_column="id",
+            prediction_column="prediction",
+        )
