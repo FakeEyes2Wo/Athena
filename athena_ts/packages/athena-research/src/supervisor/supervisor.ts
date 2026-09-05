@@ -21,7 +21,7 @@ import { loadBest, type PlanTurnResult } from "./experiment.js"
 import { Outcome, type Outcome as OutcomeType } from "./policy.js"
 import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } from "./plans.js"
 import type { PrepareResult } from "./prepare.js"
-import { Recovery } from "./recovery.js"
+import { reconcilePlans } from "./recovery.js"
 import { ScheduleKind, Scheduler, countSearchAttempts } from "./scheduler.js"
 import { ResearchState, type ResearchStatus } from "./state.js"
 
@@ -425,7 +425,7 @@ export class FixedFlowSupervisor {
   }
 
   async recover(): Promise<ResearchState> {
-    const reconciled = Recovery.reconcile(this.state, this.tree, {
+    const reconciled = reconcilePlans(this.state, this.tree, {
       workspaceExists: () => true,
       artifactExists: () => true,
     })

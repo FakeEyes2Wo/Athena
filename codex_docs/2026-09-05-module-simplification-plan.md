@@ -13,7 +13,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Resolve serving compatibility entrypoint duplication and verify callers (22 tests before and after; module CLI help exits 0).
 - [ ] Review every remaining file and module; record decisions and evidence.
 - [ ] Implement the identified simplifications with scoped regression checks.
-- [ ] Resolve TypeScript recovery ordering failures and reconcile its workspace lockfile before final acceptance.
+- [x] Resolve TypeScript recovery fixture/state-copy failures and reconcile its workspace lockfile.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -56,6 +56,12 @@ TypeScript Agent layer: completed registry/session/tool/tool-types/index/agent-t
 TypeScript verification: core/agent/research builds passed before and after; Agent package tests returned 123 passed before and after the initial simplification. Added five regressions for single-argument factories, detached registry views, cancellation events, non-Error throws, and absence of the removed facade export. The full TypeScript workspace run then returned 405 passed / 2 failed. Both failures are in untouched recovery.ts/recovery.test.ts: orphan plans are removed before missing-context/workspace prerequisites can mark WAITING. The inspected recovery implementation imports ResearchState and core types, not the modified Agent layer. Track the conflict for the recovery module review rather than claiming full green acceptance. Source recovery.ts was fully read but its tests only partially inspected; neither is marked reviewed yet.
 
 TypeScript environment: npm ci --offline rejected the existing out-of-sync workspace lock (including missing autoresearch/DeepSeek entries). npm install --offline --ignore-scripts --no-package-lock prepared local ignored dependencies without modifying manifests/lock; tests resolved this task's own workspace packages after building them. Reconcile the lock before final reproducible-install verification. Corrected baseline review coverage is now 46/602, plus the separately listed new files; all remaining scope and delivery gates remain open.
+
+TypeScript recovery review: the earlier two failures were invalid fixtures, not a recovery-ordering defect. Missing experiment records are deliberately treated as orphan plans; missing-prerequisite tests now create a RUNNING canonical experiment. Preserve settlement/orphan removal before prerequisite checks. A separate regression exposed three durable fields reset during recovery (ideator_count, hypotheses_per_ideator, task_understanding). Reconciliation now copies the entire validated state and overrides only plans/status, preserving the input. Remove the static-only Recovery class and its two private helpers; expose reconcilePlans and migrate its Supervisor caller and package export. The recovery source shrank from 69 to 39 lines. Retain the standalone recovery boundary for independent reconciliation tests and the research index as the canonical public API.
+
+Recovery verification: 12 recovery tests pass, including frozen configuration, non-mutating recovery, missing dependencies, orphan/terminal removal, running SEARCH, and both VALIDATE outcomes. Full TypeScript workspace: 412 passed across 53 files; core/agent/research, DSH, and autoresearch builds all pass. The regenerated lock adds the already-declared autoresearch/DeepSeek dependency graph without upgrading existing locked versions. A clean npm ci --ignore-scripts --no-audit --no-fund succeeded. No package manifests were changed. Reviewed baseline coverage is now 49/602, plus the separately tracked new files; repository-wide acceptance and main merge/push/branch/worktree cleanup remain open.
+
+Next module: scheduler.ts, scheduler.test.ts, policy.ts, policy.test.ts, and ranker.ts have been fully read and immediate consumers traced. The four-field ScheduleAction class carries unused null/default slots and has four forwarding constructors; a discriminated action union can express each action with only its actual payload. Scheduler/ranker integration and policy behavior still require a completed decision and regression evidence, so these files remain Pending.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -620,7 +626,7 @@ TypeScript environment: npm ci --offline rejected the existing out-of-sync works
 | `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Pending |
 | `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Pending |
 | `athena_ts/packages/athena-research/src/execution.ts` | 94 | Pending |
-| `athena_ts/packages/athena-research/src/index.ts` | 45 | Pending |
+| `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |
 | `athena_ts/packages/athena-research/src/report.ts` | 78 | Pending |
 | `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Pending |
 | `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Pending |
@@ -631,7 +637,7 @@ TypeScript environment: npm ci --offline rejected the existing out-of-sync works
 | `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Pending |
-| `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; remove static class and helpers; preserve complete durable state; 12 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
@@ -647,7 +653,7 @@ TypeScript environment: npm ci --offline rejected the existing out-of-sync works
 | `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Pending |
-| `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; correct active experiment fixtures; add configuration and phase recovery regressions; 12 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |

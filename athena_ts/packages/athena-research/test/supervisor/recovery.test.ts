@@ -8,7 +8,7 @@ import {
   parseOrThrow,
 } from "@athena/core"
 import { PlanStateSchema } from "../../src/supervisor/plans.js"
-import { Recovery } from "../../src/supervisor/recovery.js"
+import { reconcilePlans } from "../../src/supervisor/recovery.js"
 import { ResearchState } from "../../src/supervisor/state.js"
 
 const REF = "sha256:" + "a".repeat(64)
@@ -31,7 +31,7 @@ function state(): ResearchState {
   })
 }
 
-function tree(opts: { settled?: boolean } = {}): ResearchTree {
+function tree(status?: "RUNNING" | "FAILED"): ResearchTree {
   const t = new ResearchTree()
   t.addHypothesis(
     HypothesisSchema.parse({
@@ -41,7 +41,7 @@ function tree(opts: { settled?: boolean } = {}): ResearchTree {
       expected_effect: "improve",
     })
   )
-  if (opts.settled) {
+  if (status !== undefined) {
     t.addExperiment(
       "e1",
       ExperimentSchema.parse({
@@ -59,17 +59,74 @@ function tree(opts: { settled?: boolean } = {}): ResearchTree {
           branch: "athena/plan/h1",
           base_commit: "c0",
         }),
-        status: "FAILED",
-        error: "settled before crash",
+        status,
+        error: status === "FAILED" ? "settled before crash" : null,
       })
     )
   }
   return t
 }
 
-describe("Recovery", () => {
+describe("reconcilePlans", () => {
+  it.each([null, { score: 0.5 }])("retains validation plans only without a result: %j", (validation) => {
+    const original = new ResearchState({
+      status: "RUNNING",
+      phase: "VALIDATE",
+      search_limit: 10,
+      concurrency: 4,
+      validation,
+      plans: {
+        validate: {
+          kind: "VALIDATE",
+          context_ref: REF,
+          turns_used: 1,
+          turn_limit: 12,
+        },
+      },
+    })
+    const reconciled = reconcilePlans(original, new ResearchTree(), {
+      workspaceExists: () => false,
+      artifactExists: () => false,
+    })
+    expect(reconciled.plans).toEqual(validation === null ? original.plans : {})
+    expect(reconciled.status).toBe(validation === null ? "WAITING" : "RUNNING")
+    expect(reconciled.validation).toEqual(validation)
+  })
+
+  it("retains a running search plan with available prerequisites unchanged", () => {
+    const original = state()
+    const reconciled = reconcilePlans(original, tree("RUNNING"), {
+      workspaceExists: () => true,
+      artifactExists: () => true,
+    })
+    expect(reconciled.toJSON()).toEqual(original.toJSON())
+    expect(reconciled).not.toBe(original)
+  })
+
+  it("preserves all durable configuration and does not mutate the input", () => {
+    const original = state()
+    original.ideator_count = 5
+    original.hypotheses_per_ideator = 4
+    original.task_understanding = { title: "frozen research task" }
+    const reconciled = reconcilePlans(original, tree("FAILED"), {
+      workspaceExists: () => true,
+      artifactExists: () => true,
+    })
+    expect(reconciled.toJSON()).toEqual({ ...original.toJSON(), plans: {} })
+    expect(original.plans).toHaveProperty("h1")
+  })
+
+  it("removes settled plans even when their old prerequisites are missing", () => {
+    const reconciled = reconcilePlans(state(), tree("FAILED"), {
+      workspaceExists: () => false,
+      artifactExists: () => false,
+    })
+    expect(reconciled.plans).toEqual({})
+    expect(reconciled.status).toBe("RUNNING")
+  })
+
   it("tree settled but state active is reconciled once", () => {
-    const reconciled = Recovery.reconcile(state(), tree({ settled: true }), {
+    const reconciled = reconcilePlans(state(), tree("FAILED"), {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
@@ -78,7 +135,7 @@ describe("Recovery", () => {
   })
 
   it("active plan without an experiment record is dropped as an orphan", () => {
-    const reconciled = Recovery.reconcile(state(), tree(), {
+    const reconciled = reconcilePlans(state(), tree(), {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
@@ -87,7 +144,7 @@ describe("Recovery", () => {
   })
 
   it("missing context keeps plan and marks research waiting", () => {
-    const reconciled = Recovery.reconcile(state(), tree(), {
+    const reconciled = reconcilePlans(state(), tree("RUNNING"), {
       workspaceExists: () => true,
       artifactExists: () => false,
     })
@@ -96,7 +153,7 @@ describe("Recovery", () => {
   })
 
   it("missing workspace keeps frozen plan and marks waiting", () => {
-    const reconciled = Recovery.reconcile(state(), tree(), {
+    const reconciled = reconcilePlans(state(), tree("RUNNING"), {
       workspaceExists: () => false,
       artifactExists: () => true,
     })
@@ -114,7 +171,7 @@ describe("Recovery", () => {
         expected_effect: "improve",
       })
     )
-    const reconciled = Recovery.reconcile(state(), t, {
+    const reconciled = reconcilePlans(state(), t, {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
@@ -169,7 +226,7 @@ describe("Recovery", () => {
     )
     t.updateHypothesisStatus("h_baseline", "SUPPORTED")
 
-    const reconciled = Recovery.reconcile(s, t, {
+    const reconciled = reconcilePlans(s, t, {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
@@ -221,7 +278,7 @@ describe("Recovery", () => {
       })
     )
 
-    const reconciled = Recovery.reconcile(s, t, {
+    const reconciled = reconcilePlans(s, t, {
       workspaceExists: () => true,
       artifactExists: () => true,
     })
