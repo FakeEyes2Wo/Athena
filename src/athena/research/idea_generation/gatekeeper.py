@@ -3,8 +3,8 @@
 两个门：
 - pre_gate（2 项 rubric）：只看结构完整性与可证伪性，任一不满足 -> REVISE。它是廉价前置
   筛子，跑在昂贵的审阅步骤之前，不合格的候选直接淘汰。
-- light_hard_gate（4 + 视角数 项 rubric）：在 pre_gate 两项之上追加 verifier_ok /
-  risk_total，外加每个审阅视角一项 risk_ok_<perspective>，产出 gate_phase="full" 的终审
+- light_hard_gate（3 + 视角数 项 rubric）：在 pre_gate 两项之上追加 risk_total，
+  外加每个审阅视角一项 risk_ok_<perspective>，产出 gate_phase="full" 的终审
   判决。
 
 设计参考：verdict 判定本质是准入谓词（对应 AutoSOTA 论文里的 Adm(h)——逐项校验是否保持
@@ -20,8 +20,6 @@ from athena.research.idea_generation.idea_schemas import (
     GateVerdict,
     RubricItemScore,
     SkepticReport,
-    StructuralCheckReport,
-    ValidationPlan,
 )
 
 MAX_TOLERATED_RISKS: int = 6
@@ -58,30 +56,25 @@ def max_total_risks(perspective_count: int) -> int:
 
 
 def structural_rubric_scores(
-    structural: StructuralCheckReport, falsifiability: FalsifiabilityReport
-) -> tuple[bool, RubricItemScore, RubricItemScore]:
-    """产出 pre_gate 与 light_hard_gate 共用的前两项 rubric（evidence_traceable /
-    falsifiable），外加 evidence_traceable 这个派生判定本身（它不是报告上的现成字段，是
-    两个布尔的合取）。
+    premise_evidence_ok: bool, falsifiability: FalsifiabilityReport
+) -> tuple[RubricItemScore, RubricItemScore]:
+    """Build the evidence and falsifiability scores shared by both gates.
 
     两个门必须对同一份报告给出完全一致的评分与证据文案，写两遍会在后续改动时悄悄分叉，
     因此收敛到一处。
 
     Example:
-        >>> ok, traceable, falsifiable = structural_rubric_scores(structural, falsifiability)  # doctest: +SKIP
+        >>> traceable, falsifiable = structural_rubric_scores(True, report)  # doctest: +SKIP
         >>> traceable.item
         'evidence_traceable'
     """
-    evidence_traceable_ok = (
-        structural.premise_evidence_ok and structural.novel_hypothesis_testable
-    )
     evidence_traceable_score = RubricItemScore(
         item="evidence_traceable",
-        score=1.0 if evidence_traceable_ok else 0.0,
+        score=1.0 if premise_evidence_ok else 0.0,
         evidence=(
-            "all premises cite evidence and predictions/disconfirmers are present"
-            if evidence_traceable_ok
-            else f"structural violations: {structural.violations}"
+            "at least one supported premise cites evidence"
+            if premise_evidence_ok
+            else "no supported premise cites evidence"
         ),
     )
     falsifiable_score = RubricItemScore(
@@ -93,7 +86,7 @@ def structural_rubric_scores(
             else f"unobservable variables: {falsifiability.unobservable_variables}"
         ),
     )
-    return evidence_traceable_ok, evidence_traceable_score, falsifiable_score
+    return evidence_traceable_score, falsifiable_score
 
 
 def perspective_ok(review: SkepticReport) -> bool:
@@ -112,27 +105,22 @@ def perspective_ok(review: SkepticReport) -> bool:
 
 
 def pre_gate(
-    structural: StructuralCheckReport, falsifiability: FalsifiabilityReport
+    premise_evidence_ok: bool, falsifiability: FalsifiabilityReport
 ) -> GateDecision:
-    """依据 StructuralCheckReport 与 FalsifiabilityReport 产出 pre_gate 阶段的 GateDecision。
+    """Use premise evidence and falsifiability to produce the early decision.
 
     Example:
         >>> pre_gate(structural_report, falsifiability_report).verdict  # doctest: +SKIP
         <GateVerdict.PASS: 'PASS'>
     """
-    if structural.idea_id != falsifiability.idea_id:
-        raise ValueError(
-            "structural and falsifiability reports refer to different ideas"
-        )
-
-    evidence_traceable_ok, evidence_traceable_score, falsifiable_score = (
-        structural_rubric_scores(structural, falsifiability)
+    evidence_traceable_score, falsifiable_score = structural_rubric_scores(
+        premise_evidence_ok, falsifiability
     )
 
-    if evidence_traceable_ok and falsifiability.is_falsifiable:
+    if premise_evidence_ok and falsifiability.is_falsifiable:
         verdict = GateVerdict.PASS
         blocking_factor = None
-    elif not evidence_traceable_ok:
+    elif not premise_evidence_ok:
         verdict = GateVerdict.REVISE
         blocking_factor = "evidence_traceable"
     else:
@@ -140,7 +128,7 @@ def pre_gate(
         blocking_factor = "falsifiable"
 
     return GateDecision(
-        idea_id=structural.idea_id,
+        idea_id=falsifiability.idea_id,
         gate_phase="pre_gate",
         verdict=verdict,
         rubric_version=GATE_RUBRIC_VERSION,
@@ -150,20 +138,18 @@ def pre_gate(
 
 
 def light_hard_gate(
-    structural: StructuralCheckReport,
+    premise_evidence_ok: bool,
     falsifiability: FalsifiabilityReport,
     reviews: list[SkepticReport],
-    validation_plan: ValidationPlan,
 ) -> GateDecision:
-    """依据结构/可证伪性报告、每视角一份 review、验证方案产出终审 GateDecision。
+    """Use premise evidence, falsifiability, and independent reviews for final gating.
 
     判定优先级（从上到下短路，blocking_factor 记第一个拦住它的项）：
     1. 结构/可证伪性问题 -> REVISE（设计上可修正）
     2. 任一视角 fatal_flaw_found -> REJECT
     3. 任一视角 failed 或风险超阈值 -> REVISE
     4. 跨视角风险总数超 max_total_risks(视角数) -> REVISE
-    5. 无可用 verifier -> EXPLORATORY
-    6. 全过 -> PASS
+    5. 全过 -> PASS
 
     Example:
         >>> light_hard_gate(structural, falsifiability, reviews, plan).gate_phase  # doctest: +SKIP
@@ -175,15 +161,13 @@ def light_hard_gate(
             f"light_hard_gate requires distinct perspectives, got {perspective_ids}"
         )
 
-    idea_ids = {structural.idea_id, falsifiability.idea_id, validation_plan.idea_id} | {
-        r.idea_id for r in reviews
-    }
+    idea_ids = {falsifiability.idea_id, *(r.idea_id for r in reviews)}
     if len(idea_ids) != 1:
         raise ValueError(f"reports refer to different ideas: {sorted(idea_ids)}")
-    idea_id = structural.idea_id
+    idea_id = falsifiability.idea_id
 
-    evidence_traceable_ok, evidence_traceable_score, falsifiable_score = (
-        structural_rubric_scores(structural, falsifiability)
+    evidence_traceable_score, falsifiable_score = structural_rubric_scores(
+        premise_evidence_ok, falsifiability
     )
 
     ordered = sorted(reviews, key=lambda r: r.perspective)
@@ -214,32 +198,20 @@ def light_hard_gate(
         evidence=f"{total_note} (ceiling {ceiling}){incomplete_note}",
     )
 
-    verifier_ok = validation_plan.verifier is not None
-    verifier_score = RubricItemScore(
-        item="verifier_ok",
-        score=1.0 if verifier_ok else 0.0,
-        evidence=(
-            f"verifier={validation_plan.verifier.verifier_type}"
-            if verifier_ok
-            else "no verifier matched; validation plan is EXPLORATORY"
-        ),
-    )
-
     item_scores = [
         evidence_traceable_score,
         falsifiable_score,
         risk_total_score,
-        verifier_score,
         *risk_scores,
     ]
 
     fatal = next((r for r in ordered if r.fatal_flaw_found), None)
     blocked = next((r for r in ordered if not perspective_ok(r)), None)
 
-    if not evidence_traceable_ok or not falsifiability.is_falsifiable:
+    if not premise_evidence_ok or not falsifiability.is_falsifiable:
         verdict = GateVerdict.REVISE
         blocking_factor = (
-            "evidence_traceable" if not evidence_traceable_ok else "falsifiable"
+            "evidence_traceable" if not premise_evidence_ok else "falsifiable"
         )
     elif fatal is not None:
         verdict, blocking_factor = GateVerdict.REJECT, f"risk_ok_{fatal.perspective}"
@@ -247,8 +219,6 @@ def light_hard_gate(
         verdict, blocking_factor = GateVerdict.REVISE, f"risk_ok_{blocked.perspective}"
     elif not total_ok:
         verdict, blocking_factor = GateVerdict.REVISE, "risk_total"
-    elif not verifier_ok:
-        verdict, blocking_factor = GateVerdict.EXPLORATORY, "verifier_ok"
     else:
         verdict, blocking_factor = GateVerdict.PASS, None
 

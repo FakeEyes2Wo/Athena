@@ -8,19 +8,48 @@ light_hard_gate 里各占一项 rubric（risk_ok_<perspective>）。
 from contextlib import nullcontext
 from dataclasses import dataclass
 
+from athena.core.agent.chat import single_turn_structured_chat
 from athena.core.contracts import ArtifactStore
 from athena.research.idea_generation.idea_schemas import (
-    HypothesisPackage,
+    IdeatorHypothesisDraft,
     SkepticJudgment,
     SkepticReport,
 )
-from athena.research.idea_generation.prompts import (
-    REVIEW_METHODOLOGY_SYSTEM_PROMPT,
-    REVIEW_PERSPECTIVE_HEADER_TEMPLATE,
-    REVIEW_STATISTICS_SYSTEM_PROMPT,
-    SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE,
+
+_REVIEW_USER_PROMPT = (
+    "Novel hypothesis: {novel_hypothesis}\n"
+    "Supported premises:\n{supported_premises}\n"
+    "Predicted observations:\n{predicted_observations}\n"
+    "Disconfirming observations:\n{disconfirming_observations}\n\n"
+    "Provide an independent critique."
 )
-from athena.core.agent.chat import single_turn_structured_chat
+
+_METHODOLOGY_PROMPT = (
+    "You are an independent methodology reviewer on a review board. You are given a "
+    "hypothesis package without any self-assessed confidence score from its generator, "
+    "precisely so you do not anchor on it. Restrict your critique to methodology: "
+    "whether a control or baseline is clearly defined, whether confounding variables "
+    "are accounted for, whether the claim conflates correlation with causation, and "
+    "whether the stated intervention is actually operable as written. Do not reject a "
+    "hypothesis merely because it departs from the baseline or replaces the "
+    "architecture; judge whether it is well-defined and falsifiable. Do not comment "
+    "on statistical power or on agreement with published literature - other reviewers "
+    "cover those. Report only risks that fall within methodology. Set fatal_flaw_found "
+    "to true only if the flaw cannot be fixed by revising the hypothesis."
+)
+
+_STATISTICS_PROMPT = (
+    "You are an independent statistical-validity reviewer on a review board. You are "
+    "given a hypothesis package without any self-assessed confidence score from its "
+    "generator, precisely so you do not anchor on it. Restrict your critique to "
+    "statistical validity: sample size and power, multiple-comparison exposure, whether "
+    "the expected effect is distinguishable from the noise floor, and whether the "
+    "predicted observations are quantifiable at all. Do not comment on experimental "
+    "design choices or on agreement with published literature - other reviewers cover "
+    "those. Report only risks that fall within statistical validity. Set "
+    "fatal_flaw_found to true only if the flaw cannot be fixed by revising the "
+    "hypothesis."
+)
 
 
 @dataclass(frozen=True)
@@ -37,61 +66,15 @@ class ReviewPerspective:
 
 
 REVIEW_PERSPECTIVES: tuple[ReviewPerspective, ...] = (
-    ReviewPerspective("methodology", REVIEW_METHODOLOGY_SYSTEM_PROMPT),
-    ReviewPerspective("statistics", REVIEW_STATISTICS_SYSTEM_PROMPT),
+    ReviewPerspective("methodology", _METHODOLOGY_PROMPT),
+    ReviewPerspective("statistics", _STATISTICS_PROMPT),
 )
 """视角顺序是稳定的：light_hard_gate 按此顺序扫描以确定 blocking_factor。"""
 
 
-def format_premise_lines(package: HypothesisPackage) -> str:
-    """把 supported_premises 格式化成逐行文本，供审阅 prompt 使用。
-
-    Example:
-        >>> format_premise_lines(package)  # doctest: +SKIP
-        '- [supported_premise] X correlates with Y (refs: ev-0)'
-    """
-    return (
-        "\n".join(
-            f"- [{premise.role.value}] {premise.claim} (refs: {', '.join(premise.supporting_refs) or '-'})"
-            for premise in package.supported_premises
-        )
-        or "(no supported premises)"
-    )
-
-
-def build_review_prompt(
-    package: HypothesisPackage, perspective: ReviewPerspective
-) -> str:
-    """拼装单视角审阅 prompt。只取 novel_hypothesis / supported_premises /
-    predicted_observations / disconfirming_observations，不传任何生成侧自评分数。
-
-    Example:
-        >>> build_review_prompt(package, REVIEW_PERSPECTIVES[0]).startswith("You are")  # doctest: +SKIP
-        True
-    """
-    premise_lines = format_premise_lines(package)
-    return "\n\n".join(
-        [
-            perspective.system_prompt,
-            REVIEW_PERSPECTIVE_HEADER_TEMPLATE.format(
-                perspective_id=perspective.perspective_id
-            )
-            + SKEPTIC_REVIEW_USER_PROMPT_TEMPLATE.format(
-                novel_hypothesis=package.novel_hypothesis,
-                supported_premises=premise_lines,
-                predicted_observations="\n".join(
-                    f"- {o}" for o in package.predicted_observations
-                ),
-                disconfirming_observations="\n".join(
-                    f"- {o}" for o in package.disconfirming_observations
-                ),
-            ),
-        ]
-    )
-
-
 async def review_or_degrade(
-    package: HypothesisPackage,
+    draft: IdeatorHypothesisDraft,
+    idea_id: str,
     perspective: ReviewPerspective,
     *,
     artifacts: ArtifactStore,
@@ -107,7 +90,30 @@ async def review_or_degrade(
         False
     """
     try:
-        prompt = build_review_prompt(package, perspective)
+        premises = (
+            "\n".join(
+                f"- [{item.role.value}] {item.claim} "
+                f"(refs: {', '.join(item.supporting_refs) or '-'})"
+                for item in draft.supported_premises
+            )
+            or "(no supported premises)"
+        )
+        prompt = "\n\n".join(
+            [
+                perspective.system_prompt,
+                f"Review perspective: {perspective.perspective_id}\n"
+                + _REVIEW_USER_PROMPT.format(
+                    novel_hypothesis=draft.statement,
+                    supported_premises=premises,
+                    predicted_observations="\n".join(
+                        f"- {item}" for item in draft.predicted_observations
+                    ),
+                    disconfirming_observations="\n".join(
+                        f"- {item}" for item in draft.disconfirming_observations
+                    ),
+                ),
+            ]
+        )
         async with llm_sem if llm_sem is not None else nullcontext():
             judgment = await single_turn_structured_chat(
                 prompt,
@@ -116,7 +122,7 @@ async def review_or_degrade(
                 artifacts=artifacts,
             )
         return SkepticReport(
-            idea_id=package.idea_id,
+            idea_id=idea_id,
             perspective=perspective.perspective_id,
             critique=judgment.critique,
             unaddressed_risks=judgment.unaddressed_risks,
@@ -125,7 +131,7 @@ async def review_or_degrade(
         )
     except Exception as error:  # noqa: BLE001 - provider 报错形态不定，直接降级
         return SkepticReport(
-            idea_id=package.idea_id,
+            idea_id=idea_id,
             perspective=perspective.perspective_id,
             critique=f"review failed: {error}",
             unaddressed_risks=[],

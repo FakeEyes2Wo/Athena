@@ -12,11 +12,11 @@ import pytest
 
 from athena.agents.ideator_agent import register_ideator_agent
 from athena.core.research_models import Hypothesis, HypothesisBatch
-from athena.research.turns.runner import AgentTurnRunner
 from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisBatch,
     IdeatorHypothesisDraft,
 )
+from athena.research.turns.runner import AgentTurnRunner
 
 _PROMPT_DIR = Path("src/athena/agents/prompts")
 

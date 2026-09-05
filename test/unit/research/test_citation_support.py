@@ -6,16 +6,15 @@
 """
 
 import unittest
-from types import SimpleNamespace
 
 from athena.core.research_models import Hypothesis
-from athena.research.turns.runner import AgentTurnRunner
 from athena.research.idea_generation.citation_support import (
     EVIDENCE_CHARS,
     MAX_EVIDENCE_CHUNKS,
     format_evidence,
     parse_verdict,
 )
+from athena.research.turns.runner import AgentTurnRunner
 
 
 def _hypothesis(sources: list[str]) -> Hypothesis:

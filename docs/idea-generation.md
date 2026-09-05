@@ -66,41 +66,34 @@ async def run_light_pipeline(
 
 ## 4. 每个候选的流水线
 
-### 4.1 构造 `HypothesisPackage`
+### 4.1 候选身份与结构检查
 
-代码从 `IdeatorHypothesisDraft` 构造审计对象 `HypothesisPackage`，其中
-`idea_id`（`idea-<12 hex>`）、`generation_strategy`（固定 `eda_grounded`）、
-`lineage_op`（固定 `generate`）全部由代码分配——LLM 从不撰写标识符或簿记字段。
+代码为每个 `IdeatorHypothesisDraft` 分配 `idea-<12 hex>`，但不再复制一份 package。
+draft 直接贯穿门禁，LLM 不撰写标识符。
 
-### 4.2 结构检查（纯函数，无 LLM）
+结构谓词只检查至少存在一条绑定证据的 `SUPPORTED_PREMISE`。predictions 与
+disconfirmers 非空已由 `IdeatorHypothesisDraft` 的 Pydantic validator 保证，不再生成
+重复的四字段结构报告。
 
-`pre_gate_checks.structural_check` 检查两条不变量：
+### 4.2 可证伪性审计（LLM 单轮）
 
-1. `premise_evidence_ok`：每个 `SUPPORTED_PREMISE` 至少绑定一个证据 ref。
-2. `novel_hypothesis_testable`：`predicted_observations` 与
-   `disconfirming_observations` 都非空。
-
-这两条其实已被 Pydantic validator 保证，此处把它们落成可审计的报告对象。
-
-### 4.3 可证伪性审计（LLM 单轮）
-
-`pre_gate_checks.falsifiability_check` 用一次 `single_turn_structured_chat` 调
+`gate._check_falsifiability` 用一次 `single_turn_structured_chat` 调
 `FalsifiabilityJudgment`，判断是否存在真正可执行的证伪测试、列出不可观测变量。
-调用失败时降级为 `degraded_falsifiability_report`（不可证伪），不静默放行。
+调用失败时生成不可证伪报告，不静默放行。
 
-### 4.4 `pre_gate`
+### 4.3 `pre_gate`
 
 `gatekeeper.pre_gate` 是廉价前置筛子，只有两项 rubric：
 
 | rubric | 不通过 |
 |---|---|
-| `evidence_traceable` | 前提无证据或缺少预测/反证 |
+| `evidence_traceable` | 没有绑定证据的 supported premise |
 | `falsifiable` | 可证伪性审计不通过 |
 
 任一不通过 → `GateVerdict.REVISE` → 候选本轮丢弃，并记录 `blocking_factor`
 与该项证据到 `rejections`。
 
-### 4.5 两视角反方审阅
+### 4.4 两视角反方审阅
 
 `review_board` 定义两个独立视角（`REVIEW_PERSPECTIVES`）：
 
@@ -111,13 +104,7 @@ async def run_light_pipeline(
 `SkepticReport`。审阅失败映射为 `failed=True`（fail-closed），从不向外抛。
 审阅 prompt 刻意不携带生成侧的任何自评概率。
 
-### 4.6 验证方案
-
-`validation.match_verifier` 用固定 domain `machine_learning` 匹配内置 verifier 表，
-只保留 `ablation_replication`（"改一个特征/模型，比较改前改后指标"），再由
-`plan_validation` 生成 `ValidationPlan`。找不到 verifier 时不虚构，标 EXPLORATORY。
-
-### 4.7 `light_hard_gate` 终审
+### 4.5 `light_hard_gate` 终审
 
 `gatekeeper.light_hard_gate` 判定优先级（短路，`blocking_factor` 记第一项）：
 
@@ -125,10 +112,9 @@ async def run_light_pipeline(
 2. 任一视角 `fatal_flaw_found` → `REJECT`
 3. 任一视角 `failed` 或 `unaddressed_risks` 超过单项阈值 → `REVISE`
 4. 跨视角风险总数超过 `max_total_risks(视角数)` → `REVISE`
-5. 无可用 verifier → `EXPLORATORY`
-6. 全过 → `PASS`
+5. 全过 → `PASS`
 
-`PASS` 与 `EXPLORATORY` 都放行；`REVISE`/`REJECT` 本轮丢弃。
+只有 `PASS` 放行；`REVISE`/`REJECT` 本轮丢弃。
 
 **风险阈值（实测校准）**：
 
@@ -168,21 +154,19 @@ Pydantic 校验的结构化对象，因此它直接用 `core.agent.Agent` 的
 
 ```
 src/athena/research/idea_generation/
+  citation_support.py  引用正文支持性判定
   gate.py              生产入口 run_light_pipeline，编排门禁
   gatekeeper.py        pre_gate / light_hard_gate 判定逻辑
-  pre_gate_checks.py   结构检查 + 可证伪性审计
   review_board.py      methodology/statistics 两视角审阅
-  validation.py        Verifier 匹配 + ValidationPlan
-  prompts.py           门禁各阶段 prompt
   idea_schemas.py      门禁用结构化数据模型
-  structured_chat.py   单轮结构化输出调用
   __init__.py          包说明
 ```
 
 已删除（最小化中移除）：`ranking.py`（pipeline 本地 Elo 排序，排序职责回归共享
 `ResearchTree`/Supervisor 假设池）、`workflow.py`、`revision.py`、
 `candidate_generation.py`、`evidence_retrieval.py`、`state.py`、
-`hypothesis_selector.py`，以及对应的 3 个测试文件。
+`hypothesis_selector.py`、`pre_gate_checks.py`、`prompts.py`、`validation.py`，以及
+不再被实际门禁消费的 package、结构报告与 verifier/validation-plan 模型。
 
 ## 8. 测试与验证
 

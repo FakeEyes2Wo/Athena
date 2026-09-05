@@ -220,13 +220,12 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 
 实时 Ideator 不会跑完整 workflow，而是走一个轻量门禁：
 
-- 对每个 `IdeatorHypothesisDraft` 构造 `HypothesisPackage`（`generation_strategy="eda_grounded"`）。
-- `pre_gate`：结构完整性 + 可证伪性。
-- 审阅：无语料时只跑 `methodology + statistics` 两个视角；有 `corpus_ref` 时先跑新颖性审计，再跑全部三个视角。
-- `light_hard_gate`（无语料）或 `hard_gate`（有语料）。
+- 对每个 `IdeatorHypothesisDraft` 分配内部 idea id，draft 本身直接贯穿门禁。
+- `pre_gate`：证据绑定 + 可证伪性。
+- 审阅：并行运行 `methodology + statistics` 两个独立视角。
+- `light_hard_gate`：综合可证伪性、单视角风险和跨视角风险总量。
 - REVISE/REJECT 的候选本轮直接丢弃（不进入修订闭环），但逐条理由返回给生成侧。
 - 存活候选按提交顺序转回 `core.Hypothesis`，不在门禁内部维护第二套排序状态。
-- 语料半配置（给了 `corpus_ref` 没给 agent）直接抛错，绝不静默降级。
 
 ### 3.4 门禁判定逻辑
 
@@ -237,16 +236,12 @@ PREPARE ──> SEARCH ──> VALIDATE ──> COMPLETED
 - `evidence_traceable`：所有 premises 绑证据 + 新假设带 predictions/disconfirmers。
 - `falsifiable`：LLM 判定存在可检验推论，且无不可观测变量。
 
-`hard_gate`（完整）在 pre_gate 之上追加：
+`light_hard_gate` 在 pre_gate 之上追加：
 
-- `novelty_ok`：`facet_overlap` 非空且均值 < 0.7，否则 REVISE / REJECT。
 - 每视角 `risk_ok_{perspective}`：`failed=False`、`fatal_flaw_found=False`、`unaddressed_risks ≤ MAX_TOLERATED_RISKS(6)`。
 - `risk_total`：跨视角总风险 ≤ `max_total_risks(N) = 6N - 1`。
-- `verifier_ok`：有匹配的 verifier；无 verifier → `EXPLORATORY`。
 
-`light_hard_gate` 跳过 `novelty_ok` 与 domain_consistency，其余优先级一致。
-
-判定优先级：结构/可证伪性 → 新颖性缺证据/超阈值 → 视角 fatal flaw → 视角风险超阈值/失败 → 总量超阈值 → verifier 缺失 → PASS。
+判定优先级：证据/可证伪性 → 视角 fatal flaw → 视角风险超阈值/失败 → 总量超阈值 → PASS。
 
 ---
 

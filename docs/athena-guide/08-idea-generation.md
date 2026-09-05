@@ -65,24 +65,13 @@ class IdeatorHypothesisDraft(BaseModel):
     sources: list[str] = []
 ```
 
-LLM 只写事实子集，`idea_id` / `generation_strategy` / `lineage_op` 由代码分配。
+LLM 只写事实子集；gate 为每个 draft 分配内部 `idea_id`。
 
-### 8.3.2 HypothesisPackage
+### 8.3.2 直接 draft 流
 
-`idea_schemas.py:155-197`。
-
-```python
-class HypothesisPackage(BaseModel):
-    idea_id: str
-    generation_strategy: str
-    novel_hypothesis: str
-    supported_premises: list[ClaimEvidence]
-    inference_chain: list[InferenceStep]
-    predicted_observations: list[str]
-    disconfirming_observations: list[str]
-    lineage_op: str
-    sources: list[str] = []
-```
+门禁直接消费 `IdeatorHypothesisDraft`，不再复制为第二个 package 模型。predictions 与
+disconfirmers 非空由 draft validator 保证；纯结构检查只判断是否存在绑定证据的
+`SUPPORTED_PREMISE`。
 
 ### 8.3.3 分层证据规则
 
@@ -101,20 +90,19 @@ flowchart TD
   A[Draft] --> B[pre_gate]
   B -->|REVISE| X[丢弃并记录理由]
   B -->|PASS| C[审阅]
-  C --> D[Verifier + Validation Plan]
-  D --> E[light_hard_gate]
-  E -->|PASS/EXPLORATORY| F[core.Hypothesis]
+  C --> E[light_hard_gate]
+  E -->|PASS| F[core.Hypothesis]
   E -->|REVISE/REJECT| X
 ```
 
-门禁采用漏斗结构。候选先经过廉价的 pre_gate，不满足结构或可证伪性要求时立即丢弃。通过者进入方法论与统计学审阅，随后生成验证方案，最终由 light_hard_gate 做出 PASS、EXPLORATORY、REVISE 或 REJECT 判定。只有 PASS 与 EXPLORATORY 能进入 ResearchTree，其余候选被丢弃，但丢弃理由会写回生成侧用于重试。
+门禁采用漏斗结构。候选先经过廉价的 pre_gate，不满足证据或可证伪性要求时立即丢弃。通过者进入方法论与统计学审阅，最终由 light_hard_gate 做出 PASS、REVISE 或 REJECT 判定。只有 PASS 能进入 ResearchTree，其余候选被丢弃，但丢弃理由会写回生成侧用于重试。
 
 ### 8.4.2 pre_gate
 
 `src/athena/research/idea_generation/gatekeeper.py:117-148`。
 
 ```text
-evidence_traceable = premise_evidence_ok AND novel_hypothesis_testable
+evidence_traceable = 至少一个 supported premise 绑定证据
 falsifiable = FalsifiabilityReport.is_falsifiable
 
 任一不满足 → REVISE
@@ -136,7 +124,6 @@ falsifiable = FalsifiabilityReport.is_falsifiable
 
 - `risk_ok_<perspective>` ≤ 6
 - `risk_total` ≤ 6N-1
-- `verifier_ok`
 
 判定顺序：
 
@@ -145,7 +132,6 @@ falsifiable = FalsifiabilityReport.is_falsifiable
 fatal_flaw → REJECT
 视角失败/风险超阈值 → REVISE
 总量超阈值 → REVISE
-无 verifier → EXPLORATORY
 通过 → PASS
 ```
 
@@ -206,11 +192,9 @@ Data Agent 约束：
 
 ```text
 run_light_pipeline(drafts)
-→ 为每个 draft 构造 HypothesisPackage
+→ 为每个 draft 分配内部 idea id
 → pre_gate
 → 并行审阅
-→ match_verifier
-→ plan_validation
 → light_hard_gate
 → 收集 survivors
 → 转为 core.Hypothesis
@@ -219,7 +203,7 @@ run_light_pipeline(drafts)
 
 ### 8.7.2 门禁返回
 
-- `PASS` / `EXPLORATORY` 保留。
+- `PASS` 保留。
 - `REVISE` / `REJECT` 丢弃，记录拒绝理由。
 
 ## 8.7.1 审阅视角
@@ -242,20 +226,9 @@ failed
 input_ref
 ```
 
-## 8.7.2 验证计划
+## 8.7.2 结构化聊天
 
-`validation.py` 提供：
-
-```text
-match_verifier(package, domain)
-plan_validation(package, verifier, ...)
-```
-
-`verifier_ok` 为 False 时，light_hard_gate 返回 `EXPLORATORY`。
-
-## 8.7.3 结构化聊天
-
-`structured_chat.py` 使用 `Agent(output_type=...)` 完成单次结构化 LLM 调用。
+`core.agent.chat.single_turn_structured_chat` 使用 `Agent(output_type=...)` 完成单次结构化 LLM 调用。
 
 ## 8.8 关键代码路径
 
@@ -275,16 +248,12 @@ _finish_ideator_batch(lane_output, ...)
 
 ```text
 run_light_pipeline(drafts)
-→ 构造 HypothesisPackage
 → 每个 draft：
-    structural_check
-    falsifiability_check
+    证据谓词 + falsifiability check
     pre_gate
     并行审阅
-    match_verifier
-    plan_validation
     light_hard_gate
-→ 保留 PASS / EXPLORATORY
+→ 保留 PASS
 → 转为 core.Hypothesis
 ```
 
@@ -304,7 +273,6 @@ run_data_turn(request)
 - 重试仍全部拒绝：返回空并发布错误。
 - `eda_request` 为空：不触发 Data Agent。
 - 审阅失败：按 fail-closed 处理。
-- 无 verifier：假设进入 EXPLORATORY。
 - 语料半配置：明确报错，不静默降级。
 
 ## 8.8.4 Ideator Profiles
@@ -327,8 +295,7 @@ research/idea_generation/gate.py
 research/idea_generation/gatekeeper.py
 research/idea_generation/idea_schemas.py
 research/idea_generation/review_board.py
-research/idea_generation/validation.py
-research/idea_generation/pre_gate_checks.py
+research/idea_generation/citation_support.py
 research/turns/ideator.py
 agents/ideator_agent.py
 agents/task_agents.py
@@ -338,8 +305,8 @@ agents/task_agents.py
 
 | 结论 | 证据 |
 |---|---|
-| 门禁入口 | `src/athena/research/idea_generation/gate.py:156` |
-| pre_gate | `src/athena/research/idea_generation/gatekeeper.py:117-148` |
-| light_hard_gate | `src/athena/research/idea_generation/gatekeeper.py:151-246` |
+| 门禁入口 | `src/athena/research/idea_generation/gate.py::run_light_pipeline` |
+| pre_gate | `src/athena/research/idea_generation/gatekeeper.py::pre_gate` |
+| light_hard_gate | `src/athena/research/idea_generation/gatekeeper.py::light_hard_gate` |
 | 动态 EDA | `src/athena/research/turns/ideator.py:319-365` |
-| 无本地排序 | `src/athena/research/idea_generation/gate.py:160-185` |
+| 无本地排序 | `src/athena/research/idea_generation/gate.py::run_light_pipeline` |

@@ -1,5 +1,4 @@
-"""Idea Generation light pipeline（pre_gate + 两视角审阅 + light_hard_gate + 排序）专用的
-结构化事实模型。
+"""Structured facts for Idea Generation screening and independent review.
 
 这些模型只服务本模块，不进入 core/schemas.py 的跨平面共享模型集合；所有字段的 description
 与后续 Prompt 均使用英文。
@@ -38,13 +37,11 @@ class ClaimRole(str, Enum):
 
 class GateVerdict(str, Enum):
     """Gate verdict values. pre_gate only ever produces PASS or REVISE; light_hard_gate
-    can also produce REJECT (not fixable by revision) and EXPLORATORY (no verifier
-    available)."""
+    can also produce REJECT when revision cannot fix a flaw."""
 
     PASS = "PASS"
     REVISE = "REVISE"
     REJECT = "REJECT"
-    EXPLORATORY = "EXPLORATORY"
 
 
 # 数据模型
@@ -154,73 +151,6 @@ class IdeatorHypothesisBatch(BaseModel):
     )
 
 
-class HypothesisPackage(BaseModel):
-    """Full structured hypothesis package; the module-local audit object for one candidate.
-
-    Example:
-        >>> HypothesisPackage(idea_id="idea-1", generation_strategy="eda_grounded",
-        ...                    novel_hypothesis="n", supported_premises=[], inference_chain=[],
-        ...                    predicted_observations=["p"], disconfirming_observations=["d"],
-        ...                    lineage_op="generate").idea_id
-        'idea-1'
-    """
-
-    idea_id: str = Field(description="Same id as the Hypothesis node.")
-    generation_strategy: str = Field(
-        description="Strategy that produced this candidate."
-    )
-    novel_hypothesis: str = Field(description="The novel claim under test.")
-    supported_premises: list[ClaimEvidence] = Field(
-        description="Evidence-bound premises."
-    )
-    inference_chain: list[InferenceStep] = Field(
-        description="Explicit reasoning steps."
-    )
-    predicted_observations: list[str] = Field(
-        description="Observations predicted if true."
-    )
-    disconfirming_observations: list[str] = Field(
-        description="Observations that would refute it."
-    )
-    lineage_op: str = Field(
-        description="generate | specialize | merge | mutate | branch."
-    )
-    sources: list[str] = Field(
-        default_factory=list,
-        description="Paper keys the generator actually read while producing this candidate; "
-        "empty when no literature corpus was available.",
-    )
-
-    @model_validator(mode="after")
-    def check_novel_hypothesis_testability(self) -> "HypothesisPackage":
-        """Require predictions and disconfirmers on the persisted package."""
-        # 与 IdeatorHypothesisDraft 相同的不变量；在最终落盘对象上再校验一次
-        if not self.predicted_observations or not self.disconfirming_observations:
-            raise ValueError("novel hypothesis requires predictions and disconfirmers")
-        return self
-
-
-class StructuralCheckReport(BaseModel):
-    """Pure-function structural check result; not a verdict (judgment stays with the gatekeeper).
-
-    Example:
-        >>> StructuralCheckReport(idea_id="idea-1", premise_evidence_ok=True,
-        ...                        novel_hypothesis_testable=True).violations
-        []
-    """
-
-    idea_id: str = Field(description="Candidate id.")
-    premise_evidence_ok: bool = Field(
-        description="Every SUPPORTED_PREMISE has bound evidence refs."
-    )
-    novel_hypothesis_testable: bool = Field(
-        description="Novel hypothesis carries predictions and disconfirmers."
-    )
-    violations: list[str] = Field(
-        default_factory=list, description="Failed rule ids; empty if ok."
-    )
-
-
 class FalsifiabilityJudgment(BaseModel):
     """LLM-authored subset of a falsifiability report; idea_id is assigned by code.
 
@@ -319,81 +249,11 @@ class GateDecision(BaseModel):
     )
     item_scores: list[RubricItemScore] = Field(
         description="Per-item scores with evidence: pre_gate always has 2 items "
-        "(evidence_traceable, falsifiable); light_hard_gate has 4 + one per review "
-        "perspective (evidence_traceable, falsifiable, risk_total, verifier_ok, and "
-        "one risk_ok_<perspective> per review perspective)."
+        "(evidence_traceable, falsifiable); light_hard_gate adds risk_total and one "
+        "risk_ok_<perspective> per review perspective."
     )
     blocking_factor: str | None = Field(
         default=None, description="First blocking item if any."
-    )
-
-
-# 验证方案（VerifierRegistry + ValidationPlanner）
-
-
-class VerifierSpec(BaseModel):
-    """A concrete, matched verification procedure.
-
-    Example:
-        >>> VerifierSpec(verifier_type="ablation_replication", applicable_domains=["ai4s"],
-        ...     observable_vars=["metric"], statistical_assumptions=["same seed budget"],
-        ...     success_condition="s", failure_condition="f", inconclusive_condition="i",
-        ...     cost_ref="sha256:" + "a" * 64, supports_auto_exec=True,
-        ...     requires_human_approval=False).verifier_type
-        'ablation_replication'
-    """
-
-    verifier_type: str = Field(description="Verifier identifier.")
-    applicable_domains: list[str] = Field(
-        description="Domains this verifier applies to."
-    )
-    observable_vars: list[str] = Field(
-        description="Variables this verifier requires to be observable."
-    )
-    statistical_assumptions: list[str] = Field(
-        description="Assumptions the verifier relies on."
-    )
-    success_condition: str = Field(
-        description="Condition under which the verifier reports success."
-    )
-    failure_condition: str = Field(
-        description="Condition under which the verifier reports failure."
-    )
-    inconclusive_condition: str = Field(
-        description="Condition under which the verifier is inconclusive."
-    )
-    cost_ref: ArtifactRef = Field(
-        description="Artifact ref of the estimated cost for this verifier run."
-    )
-    supports_auto_exec: bool = Field(
-        description="Whether this verifier can run without human execution."
-    )
-    requires_human_approval: bool = Field(
-        description="Whether a human must approve before running it."
-    )
-
-
-class ValidationPlan(BaseModel):
-    """Validation plan for one candidate; verifier=None triggers EXPLORATORY in light_hard_gate.
-
-    Example:
-        >>> ValidationPlan(idea_id="idea-1", minimal_test="t", verifier=None,
-        ...     decision_rule="EXPLORATORY",
-        ...     estimated_cost_ref="sha256:" + "a" * 64).verifier is None
-        True
-    """
-
-    idea_id: str = Field(description="Candidate id.")
-    minimal_test: str = Field(
-        description="Smallest test that would exercise this hypothesis."
-    )
-    verifier: VerifierSpec | None = Field(
-        default=None,
-        description="Matched verifier; None means no verifier was available (EXPLORATORY).",
-    )
-    decision_rule: str = Field(description="Explicit PASS/FAIL/INCONCLUSIVE rule text.")
-    estimated_cost_ref: ArtifactRef = Field(
-        description="Artifact ref of the estimated cost for this plan."
     )
 
 

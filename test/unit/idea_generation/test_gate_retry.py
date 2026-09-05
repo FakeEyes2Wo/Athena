@@ -48,6 +48,10 @@ def _runner(agents: _Agents, tmp_path) -> AgentTurnRunner:
         _supervisor=SimpleNamespace(evaluator_ref=None),
         supervisor=SimpleNamespace(evaluator_ref=None),
         _events_bus=SimpleNamespace(project_agent_event=lambda *a, **k: None),
+        config=SimpleNamespace(
+            task_confirmation_gate=False,
+            paths=SimpleNamespace(athena=tmp_path / ".athena"),
+        ),
         publish_output=_noop_publish,
         survey_corpus_ref=lambda: None,
         start_corpus_round=lambda: None,
@@ -56,6 +60,7 @@ def _runner(agents: _Agents, tmp_path) -> AgentTurnRunner:
         state=SimpleNamespace(
             handoff_sources=[],
             handoff_refs={},
+            task_understanding=None,
             ideator_count=3,
             hypotheses_per_ideator=2,
         ),
@@ -186,6 +191,7 @@ async def test_a_lane_that_succeeds_survives_the_trip_back_to_run_ideator_turn(
         hypotheses_per_ideator=1,
         handoff_sources=[],
         handoff_refs={},
+        task_understanding=None,
     )
     runner._runtime._events_bus.set_ideator_lanes = lambda _count: None
     runner._runtime._events_bus.publish_ideator_state = _publish_ideator_state

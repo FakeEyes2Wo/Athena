@@ -459,6 +459,16 @@ Reduce `ForkResult` from five fields to the three facts not derivable by the CLI
 
 The focused pre-change fork, runtime, and exploration selection passed 26 tests. The complete CLI plus fork/runtime/exploration selection passed 49 tests. Targeted pre-commit hooks, Ruff across every touched Python file, Python compilation, CLI smoke, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing both rows advances reviewed baseline coverage to 263/602. Whole-repository acceptance remains pending.
 
+## Idea-generation pipeline consolidation
+
+Read all nine pending Idea Generation files completely and traced every schema, gate, prompt, reviewer, citation helper, validation-planning artifact, retry callback, and output conversion through the live Ideator, Supervisor registration, unit tests, and runtime wiring. Retain citation support as the independent content-verification boundary used by `turns.support`; retain the pure gatekeeper, two-perspective review board, LLM schemas, orchestration entrypoint, and package marker. The original full-module baseline exposed five stale `test_gate_retry` fake-runtime failures after the config authority change; supplying the canonical config path/gate and task-understanding fields restored the true 49-test green baseline without a production fallback.
+
+Delete `HypothesisPackage`: it copied five draft fields, added three fixed bookkeeping fields, and was never consumed outside the pipeline. The original draft now flows directly through screening. Delete `StructuralCheckReport` because draft validation already guarantees predictions/disconfirmers and the remaining structure rule is one premise-evidence boolean. Delete the unreachable validation-planning path: production hard-coded `machine_learning`, the sole verifier always matched, every cost artifact and plan field was discarded, and `verifier_ok` was therefore always true. This removes `VerifierSpec`, `ValidationPlan`, the EXPLORATORY verdict, and `validation.py` without a forwarding module.
+
+Absorb falsifiability checks into `gate.py` and each prompt into its sole owning execution module, deleting `pre_gate_checks.py` and `prompts.py`. A five-field per-run context reduces `_screen_and_review` from seven parameters to two. Inline three one-call report/prompt helpers and reduce the shared rubric helper from three return values to two. The module falls from nine files to six and now has 830 nonblank production lines; production code falls by 443 net lines. Update all three current Idea Generation guides to the real draft → falsifiability → two-review → risk-gate flow and remove previously stale hard-gate/verifier/structured-chat-file descriptions.
+
+The restored pre-change module baseline passed 49 tests. Final complete Idea Generation plus citation verification passed 49 tests; the expanded runtime-Ideator, data-contract, hypothesis-prompt, and Supervisor-wiring selection passed 89 tests. Targeted Ruff and pre-commit hooks, Python compilation, removed-module/symbol searches, CLI smoke, and `git diff --check` passed; pytest reported only the existing cache-permission warning. A deliberately broader Ruff observation found four pre-existing import-order findings in unchanged Supervisor integration tests, outside this batch. Closing all nine pending module rows advances reviewed baseline coverage to 272/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -978,16 +988,16 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/experiment_documents/store.py` | 301 | Reviewed; retain cohesive atomic batch, archive compatibility, and manifest boundary |
 | `src/athena/research/exploration_files.py` | 43 | Reviewed; retain four distinct two-parameter-or-smaller exploration I/O boundaries |
 | `src/athena/research/fork.py` | 215 | Reviewed; three-field result and canonical-tree-only extraction replace redundant output and compatibility plumbing |
-| `src/athena/research/idea_generation/__init__.py` | 12 | Pending |
-| `src/athena/research/idea_generation/citation_support.py` | 89 | Pending |
-| `src/athena/research/idea_generation/gate.py` | 219 | Pending |
-| `src/athena/research/idea_generation/gatekeeper.py` | 262 | Pending |
-| `src/athena/research/idea_generation/idea_schemas.py` | 453 | Pending |
-| `src/athena/research/idea_generation/pre_gate_checks.py` | 112 | Pending |
-| `src/athena/research/idea_generation/prompts.py` | 59 | Pending |
-| `src/athena/research/idea_generation/review_board.py` | 134 | Pending |
+| `src/athena/research/idea_generation/__init__.py` | 12 | Reviewed; concise package marker for the single production pipeline |
+| `src/athena/research/idea_generation/citation_support.py` | 89 | Reviewed; retain independent content-support parsing and bounded evidence formatting |
+| `src/athena/research/idea_generation/gate.py` | 219 | Reviewed; direct-draft orchestration and two-parameter candidate screening replace copied packages and dead planning |
+| `src/athena/research/idea_generation/gatekeeper.py` | 262 | Reviewed; retain pure evidence/falsifiability/risk policy and remove the constant verifier rubric |
+| `src/athena/research/idea_generation/idea_schemas.py` | 453 | Reviewed; delete four unused duplicate/planning models and the unreachable exploratory verdict |
+| `src/athena/research/idea_generation/pre_gate_checks.py` | 112 | Reviewed; merged into gate.py and deleted |
+| `src/athena/research/idea_generation/prompts.py` | 59 | Reviewed; prompts moved to their sole owning execution modules and file deleted |
+| `src/athena/research/idea_generation/review_board.py` | 134 | Reviewed; retain two-perspective boundary and inline its single-use formatting chain |
 | `src/athena/research/idea_generation/structured_chat.py` | 83 | Reviewed; merged into core/agent/chat.py and deleted; schema retry/artifact test passes |
-| `src/athena/research/idea_generation/validation.py` | 99 | Pending |
+| `src/athena/research/idea_generation/validation.py` | 99 | Reviewed; delete unreachable fixed-domain verifier planning and discarded artifacts |
 | `src/athena/research/literature/__init__.py` | 1 | Pending |
 | `src/athena/research/literature/bench/__init__.py` | 72 | Pending |
 | `src/athena/research/literature/bench/datasets/imbalance_auc.json` | 91 | Pending |

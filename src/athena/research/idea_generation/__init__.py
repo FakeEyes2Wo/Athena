@@ -1,12 +1,5 @@
-"""Idea Generation light pipeline: pre_gate (structural + falsifiability) ->
-methodology/statistics review -> light_hard_gate, then survivors are returned in
-submission order to the shared ResearchTree/Supervisor hypothesis pool (no local ranking).
+"""Falsifiability and independent-review gate for generated research ideas.
 
-Ported from feature/idea-generation-pre-gate onto this branch's Supervisor/ResearchRuntime
-architecture. Orchestration is plain asyncio (gather/semaphores); no langgraph dependency.
-
-The production entry point is ``gate.run_light_pipeline``, called by
-``research.turns.ideator.IdeatorTurnMixin._finish_ideator_batch`` when
-``--ideation ideageneration``
-(the default). ``--ideation debate`` routes to the debate-based Ideator instead.
+The production entry point is :func:`gate.run_light_pipeline`; survivors enter the
+shared ResearchTree/Supervisor pool in submission order without local ranking.
 """

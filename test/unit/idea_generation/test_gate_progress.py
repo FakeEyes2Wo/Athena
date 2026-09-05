@@ -19,11 +19,16 @@ from athena.research.idea_generation.idea_schemas import (
 
 def _draft(statement: str = "s") -> IdeatorHypothesisDraft:
     return IdeatorHypothesisDraft(
-        statement=statement, intervention="i", expected_effect="e",
+        statement=statement,
+        intervention="i",
+        expected_effect="e",
         supported_premises=[
-            ClaimEvidence(claim="c", role=ClaimRole.SUPPORTED_PREMISE, supporting_refs=["r"])
+            ClaimEvidence(
+                claim="c", role=ClaimRole.SUPPORTED_PREMISE, supporting_refs=["r"]
+            )
         ],
-        predicted_observations=["p"], disconfirming_observations=["d"],
+        predicted_observations=["p"],
+        disconfirming_observations=["d"],
     )
 
 
@@ -32,14 +37,17 @@ def _patch(monkeypatch, *, falsifiable: bool = True):
         if schema is FalsifiabilityJudgment:
             return FalsifiabilityJudgment(
                 testable_implication="t" if falsifiable else "",
-                unobservable_variables=[], is_falsifiable=falsifiable,
+                unobservable_variables=[],
+                is_falsifiable=falsifiable,
             )
         if schema is SkepticJudgment:
-            return SkepticJudgment(critique="c", unaddressed_risks=[], fatal_flaw_found=False)
+            return SkepticJudgment(
+                critique="c", unaddressed_risks=[], fatal_flaw_found=False
+            )
         raise AssertionError(f"unexpected schema: {schema}")
 
     for path in (
-        "athena.research.idea_generation.pre_gate_checks",
+        "athena.research.idea_generation.gate",
         "athena.research.idea_generation.review_board",
     ):
         monkeypatch.setattr(f"{path}.single_turn_structured_chat", _fake_chat)
