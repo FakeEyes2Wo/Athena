@@ -200,6 +200,26 @@ function coreSupervisor(
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it("reads plan workspaces from the durable tree after reconstruction", async () => {
+    const dir = tmpDir()
+    const { supervisor } = coreSupervisor(dir)
+    const id = supervisor.tree.addHypothesis(HypothesisSchema.parse({
+      statement: "improve", intervention: "add feature", expected_effect: "raise metric",
+      parent_id: "exp_baseline",
+    }))
+    await supervisor.startPlan(id)
+    const expected = { path: join(dir, "worktrees", id), branch: id, base_commit: "c0" }
+    expect(supervisor.workspace(id)).toEqual(expected)
+
+    const restored = coreSupervisor(dir).supervisor
+    restored.state = loadResearchState(join(dir, ".athena", "state.json"))
+    restored.tree = ResearchTree.load(join(dir, ".athena", "research_tree.json"))
+    await restored.recover()
+    expect(await restored.startPlan(id)).toBe(id)
+    expect(restored.workspace(id)).toEqual(expected)
+    expect(restored.workspace(id)).toBe(restored.tree.getExperiment(`exp_${id}`).gitwork)
+  })
+
   it.each([
     ["submit", 1, 10, 0, REF, "settle"],
     ["abandon", 1, 10, 0, null, "settle"],

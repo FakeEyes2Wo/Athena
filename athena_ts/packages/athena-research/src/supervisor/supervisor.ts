@@ -89,7 +89,6 @@ export class FixedFlowSupervisor {
   private direction: "maximize" | "minimize"
   private tolerance: number
   private workers: SupervisorWorkers
-  private branches: Record<string, GitWorkBranch> = {}
   private running: Map<string, Promise<CompletedTurn>> = new Map()
   private stopped = false
   private statePath: string
@@ -708,7 +707,6 @@ export class FixedFlowSupervisor {
     })
     const contextRef = await this.store.putText(JSON.stringify(planInput))
     const branch = await this.git.create(reference.commit, hypothesisId)
-    this.branches[hypothesisId] = branch
     const experimentId = `exp_${hypothesisId}`
     this.tree.addExperiment(
       experimentId,
@@ -744,12 +742,8 @@ export class FixedFlowSupervisor {
     return PlanInputSchema.parse(JSON.parse(await this.store.getText(this.state.plans[planId]!.context_ref)))
   }
 
-  workspacePath(planId: string): string {
-    return this.branches[planId]!.path
-  }
-
   workspace(planId: string): GitWorkBranch {
-    return this.branches[planId]!
+    return this.tree.getExperiment(`exp_${planId}`).gitwork
   }
 
   private sotaParent(): { parentId: string; parentHypothesis: Hypothesis } {

@@ -31,8 +31,19 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Replace the ResearchState class with schema-derived plain state and explicit persistence.
 - [x] Consolidate Plan schemas into shared contracts and reduce unused input/decision fields.
 - [x] Remove the unused event projection module and retain redaction at the live failure boundary.
+- [x] Remove Supervisor's duplicate workspace map and unused path accessor; resolve workspaces from the durable research tree.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
+
+## Supervisor workspace ownership
+
+Removed the private `branches` map and its second write during Plan creation. `workspace(planId)` now reads the existing `exp_${planId}` experiment's `gitwork`, the same record serialized in the research tree. Deleted `workspacePath()`: repository-wide TypeScript caller tracing found no consumers; DSH's PlanRunner construction uses `workspace()` and is unchanged. Unknown workspaces now use the tree's existing unknown-experiment error instead of an undefined map entry. No persisted schema or scheduling policy changed.
+
+Baseline Supervisor tests: 12 passed. After the change, Supervisor/recovery tests: 25 passed. The new regression creates a Plan, reloads both JSON files into a fresh Supervisor, runs recovery, and confirms the active Plan still resolves its original workspace. This verifies metadata reconstruction, not existence or health of the physical Git worktree. All five TypeScript package builds passed.
+
+Full TypeScript verification (`npm test -- --testTimeout=30000`): 504 passed across 53 files in 94.40 seconds. The 30-second per-test override accommodates this host's real Git operations; this is not evidence that the default timeout is reliable.
+
+Supervisor source and its test file have now been read end to end, but lifecycle caller tracing and concurrency verification remain incomplete: retain both ledger entries as Pending and coverage at 91/602. Next review must examine wake/spawn/stop ownership and recovery's placeholder existence callbacks. Whole-repository acceptance, main merge/push, and temporary task branch/worktree cleanup remain required and unfinished.
 
 ## Serving findings
 
