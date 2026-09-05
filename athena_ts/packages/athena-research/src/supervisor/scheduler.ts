@@ -10,7 +10,7 @@ import type { ResearchState } from "./state.js"
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])
 
 /** 每个动作仅携带实际需要的数据；SEARCH plan ID 就是假设 ID。 */
-export type ScheduleAction =
+type ScheduleAction =
   | { readonly kind: "RESUME" | "START_NEW" | "START_NEXT_HYPOTHESIS"; readonly planId: string }
   | { readonly kind: "GENERATE"; readonly count: number }
 
@@ -19,11 +19,6 @@ export function countSearchAttempts(state: ResearchState, tree: ResearchTree): n
   const settled = tree.experiments("search").filter((experiment) => TERMINAL.has(experiment.status)).length
   const active = Object.values(state.plans).filter((plan) => plan.kind === "SEARCH").length
   return settled + active
-}
-
-export interface NextActionsOptions {
-  humanNext?: string | null
-  manual?: boolean
 }
 
 /** 按固定确定性顺序填充 SEARCH 并发槽位。 */
@@ -38,12 +33,11 @@ export class Scheduler {
   nextActions(
     state: ResearchState,
     tree: ResearchTree,
-    runningIds: Iterable<string>,
-    opts: NextActionsOptions = {}
+    runtime: { running?: Iterable<string>; humanNext?: string | null } = {}
   ): ScheduleAction[] {
     if (state.phase !== "SEARCH") return []
 
-    const running = new Set(runningIds)
+    const running = new Set(runtime.running)
     let freeSlots = Math.max(0, state.concurrency - running.size)
     const actions: ScheduleAction[] = []
 
@@ -62,7 +56,7 @@ export class Scheduler {
 
     let createBudget = state.search_limit - countSearchAttempts(state, tree)
     if (createBudget <= 0 || freeSlots === 0) return actions
-    const humanNext = opts.humanNext ?? null
+    const humanNext = runtime.humanNext ?? null
 
     // 2. 用户单次点名的下一个假设，绕过策略队列但不改优先级
     if (humanNext !== null) {
@@ -72,8 +66,8 @@ export class Scheduler {
     }
 
     // 手动模式保留待选假设，只在队列为空时生成候选。
-    if (opts.manual && tree.pendingHypotheses().length > 0) return actions
-    if (!opts.manual) {
+    if (state.manual_mode && tree.pendingHypotheses().length > 0) return actions
+    if (!state.manual_mode) {
       // 3. 按选择器评分排序，FIFO 打破同分；本轮近似假设去重。
       for (const hypothesis of this.queued(tree, state, humanNext)) {
         if (freeSlots === 0 || createBudget === 0) break

@@ -519,9 +519,9 @@ export class FixedFlowSupervisor {
   private async fillSlots(): Promise<boolean> {
     if (this.stopped) return false
     let generated = false
-    const actions = this.scheduler.nextActions(this.state, this.tree, this.running.keys(), {
+    const actions = this.scheduler.nextActions(this.state, this.tree, {
+      running: this.running.keys(),
       humanNext: this.nextHypothesisId,
-      manual: this.state.manual_mode,
     })
     for (const action of actions) {
       if (this.stopped) return generated

@@ -18,6 +18,7 @@ describe("research public surface", () => {
       "BundleMetadata", "ScriptRunResult",
       "ValidationService", "generalizationGap", "generalizationWarning",
       "CandidateEvaluationSchema",
+      "countSearchAttempts",
       "ResearchState",
       "planStateToJSON",
       "EventProjector", "OutputEventSchema", "StateEventSchema",

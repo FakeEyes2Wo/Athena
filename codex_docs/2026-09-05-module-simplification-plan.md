@@ -43,6 +43,12 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
+## Scheduler runtime-input follow-up
+
+Scheduler full-file review follow-up: replace the separate running-ID argument and options object with one optional runtime record, reducing `nextActions` from four parameters to three. The record contains only ephemeral inputs (`running` and `humanNext`); durable manual mode now has one authority in `ResearchState.manual_mode` instead of being copied into every call. Inline the single-use runtime shape and keep action types private. Remove `countSearchAttempts` from the package barrel after caller tracing found only Supervisor and direct scheduler tests; it remains an internal module export for those consumers. Scheduling order, recovery priority, creation limits, manual selection, ranking, and selection-local deduplication are unchanged.
+
+Fresh focused verification passed 69 tests: 19 Scheduler, 47 Supervisor, and three public-surface tests. All five TypeScript packages built successfully. The full workspace passed 537 tests across 53 files in 148.22 seconds with the command-only `--testTimeout=30000` override, and `git diff --check` passed. All touched source/test rows were already Reviewed, so baseline coverage correctly remains 93/602. Whole-repository acceptance, main integration/push, and temporary task branch/worktree cleanup remain unfinished.
+
 ## Supervisor workspace ownership
 
 Supervisor full-file decision: retain the orchestration module as one phase owner; splitting its state machine would add cross-file lifecycle interfaces. The source and test were read end to end, all public methods/getters were traced, and DSH/autoresearch call sites were inspected. Concurrent VALIDATE commands coalesce to one worker call and one failure report. A SEARCH command outside SEARCH is rejected before mutation. Interactive validation errors now persist/report FAILED, and a SEARCH error during validation handoff propagates and prevents validation. `fail()` ignores repeated reports after the first canonical FAILED transition.
@@ -861,7 +867,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Reviewed; delete score envelope and five unused validation placeholders; retain bundle provenance |
 | `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Reviewed; canonical runner/options contracts, direct output and simplified numeric validation |
 | `athena_ts/packages/athena-research/src/execution.ts` | 94 | Reviewed; deleted context/root state, single run options and four-field result |
-| `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |
+| `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; remove internal scheduling count from barrel |
 | `athena_ts/packages/athena-research/src/report.ts` | 78 | Reviewed; retain shared pure renderer, remove unused precision option |
 | `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |
 | `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Reviewed; two-argument run, canonical source snapshot, shared restore and bounded file staging |
@@ -873,7 +879,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Reviewed; removed test-only runner factory, retained distinct freeze/baseline policies |
 | `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; pure two-argument reconciliation; resource checks owned by Supervisor; 27 focused tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; delete factories/forwarders; 19 tests pass |
+| `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; runtime inputs 2 arguments to 1; one durable manual-mode authority; 19 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Reviewed; plain schema-derived state, single parse, explicit durable projection and atomic persistence |
 | `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Reviewed; one 14-field phase owner, durable evaluator authority, narrowed public surface, lifecycle/race regressions |
 | `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Reviewed; owns result construction and existing decision/scoring loop |
@@ -889,7 +895,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Reviewed; file/directory evaluator, labels and invalid declarations |
 | `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Reviewed; scoring/novelty/FIFO/dedup/configuration and snapshot-count regressions; 21 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; 10 pure reconciliation cases; real missing-resource coverage moved to Supervisor tests |
-| `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, null fixture correction, policy/budget/dedup regressions; 19 tests pass |
+| `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, durable manual-mode authority, policy/budget/dedup regressions; 19 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Reviewed; 22 persistence/validation/ownership/parse-count/projection cases |
 | `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Reviewed; 47 deterministic flow, recovery, wake, stop, failure and phase-concurrency cases |
 | `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Reviewed; fourteen metric/tolerance/feedback/decision/budget cases |

@@ -21,13 +21,14 @@ function plan(opts: { turns?: number; limit?: number | null; best?: string | nul
 
 function state(
   plans: Record<string, ReturnType<typeof plan>> = {},
-  opts: { concurrency?: number; searchLimit?: number } = {}
+  opts: { concurrency?: number; searchLimit?: number; manual?: boolean } = {}
 ): ResearchState {
   return parseResearchState({
     status: "RUNNING",
     phase: "SEARCH",
     search_limit: opts.searchLimit ?? 10,
     concurrency: opts.concurrency ?? 4,
+    manual_mode: opts.manual ?? false,
     plans,
   })
 }
@@ -125,7 +126,7 @@ describe("Scheduler", () => {
     expect(scheduler.policy).toBe(policy)
     expect(scheduler.policy.seed(t.getHypothesis("h_high"))).toBe(1200)
     expect(scheduler.policy.settle(1200, "WIN")).toBe(1232)
-    expect(scheduler.nextActions(state({}, { concurrency: 1 }), t, [])).toEqual([
+    expect(scheduler.nextActions(state({}, { concurrency: 1 }), t)).toEqual([
       { kind: "START_NEW", planId: "h_low" },
     ])
   })
@@ -133,7 +134,7 @@ describe("Scheduler", () => {
   it("resumes unlimited plans even when the creation budget is exhausted", () => {
     const s = state({ h_old: plan({ turns: 100, limit: null, best: null }) }, { searchLimit: 1 })
     expect(s.plans["h_old"]!.best_ref).toBeNull()
-    expect(new Scheduler().nextActions(s, tree("h_old", "h_new"), [])).toEqual([
+    expect(new Scheduler().nextActions(s, tree("h_old", "h_new"))).toEqual([
       { kind: "RESUME", planId: "h_old" },
     ])
   })
@@ -141,9 +142,9 @@ describe("Scheduler", () => {
   it("does not schedule outside SEARCH or beyond occupied capacity", () => {
     const scheduler = new Scheduler()
     const s = state({}, { concurrency: 1 })
-    expect(scheduler.nextActions(s, tree("h_new"), ["h_running"])).toEqual([])
+    expect(scheduler.nextActions(s, tree("h_new"), { running: ["h_running"] })).toEqual([])
     s.phase = "PREPARE"
-    expect(scheduler.nextActions(s, tree("h_new"), [])).toEqual([])
+    expect(scheduler.nextActions(s, tree("h_new"))).toEqual([])
   })
 
   it("deduplicates only this selection without mutating durable inputs", () => {
@@ -153,7 +154,7 @@ describe("Scheduler", () => {
     const s = state({}, { concurrency: 2 })
     const beforeTree = JSON.stringify(t.toDict())
     const beforeState = researchStateToJSON(s)
-    expect(new Scheduler().nextActions(s, t, [])).toEqual([
+    expect(new Scheduler().nextActions(s, t)).toEqual([
       { kind: "START_NEW", planId: "h_first" },
       { kind: "GENERATE", count: 1 },
     ])
@@ -165,7 +166,7 @@ describe("Scheduler", () => {
   it("completed slot is refilled without batch barrier", () => {
     const s = state({ h1: plan(), h2: plan(), h3: plan() })
     const t = tree("h1", "h2", "h3", "h5")
-    expect(new Scheduler().nextActions(s, t, ["h1", "h2", "h3"])).toEqual([
+    expect(new Scheduler().nextActions(s, t, { running: ["h1", "h2", "h3"] })).toEqual([
       { kind: "START_NEW", planId: "h5" },
     ])
   })
@@ -174,10 +175,10 @@ describe("Scheduler", () => {
     const s = state({ h_old: plan({ turns: 3, limit: 3, best: null }) }, { concurrency: 1 })
     const t = tree("h_old", "h_new")
 
-    expect(new Scheduler().nextActions(s, t, [])).toEqual([{ kind: "START_NEW", planId: "h_new" }])
+    expect(new Scheduler().nextActions(s, t)).toEqual([{ kind: "START_NEW", planId: "h_new" }])
 
     s.plans["h_old"]!.turn_limit = 5
-    expect(new Scheduler().nextActions(s, t, [])).toEqual([{ kind: "RESUME", planId: "h_old" }])
+    expect(new Scheduler().nextActions(s, t)).toEqual([{ kind: "RESUME", planId: "h_old" }])
   })
 
   it("policy priority and fifo order new hypotheses", () => {
@@ -185,7 +186,7 @@ describe("Scheduler", () => {
     t.getHypothesis("h_high").priority = 1016.0
     const s = state({}, { concurrency: 3 })
 
-    expect(new Scheduler().nextActions(s, t, [])).toEqual([
+    expect(new Scheduler().nextActions(s, t)).toEqual([
       { kind: "START_NEW", planId: "h_high" },
       { kind: "START_NEW", planId: "h_fifo_first" },
       { kind: "START_NEW", planId: "h_fifo_second" },
@@ -200,7 +201,6 @@ describe("Scheduler", () => {
     const actions = new Scheduler().nextActions(
       state({}, { concurrency: 1 }),
       t,
-      [],
       { humanNext: "h_requested" }
     )
 
@@ -212,35 +212,35 @@ describe("Scheduler", () => {
     const s = state({ h_active: plan() }, { concurrency: 4, searchLimit: 3 })
     const t = tree("h_active")
 
-    expect(new Scheduler().nextActions(s, t, ["h_active"])).toEqual([
+    expect(new Scheduler().nextActions(s, t, { running: ["h_active"] })).toEqual([
       { kind: "GENERATE", count: 2 },
     ])
   })
 
   it("manual mode does not auto start pending hypotheses", () => {
     const t = tree("h1", "h2")
-    const s = state({}, { concurrency: 2 })
+    const s = state({}, { concurrency: 2, manual: true })
 
-    expect(new Scheduler().nextActions(s, t, [], { manual: true })).toEqual([])
+    expect(new Scheduler().nextActions(s, t)).toEqual([])
   })
 
   it("manual mode generates only when no pending hypotheses", () => {
-    const s = state({}, { concurrency: 2 })
-    expect(new Scheduler().nextActions(s, new ResearchTree(), [], { manual: true })).toEqual([
+    const s = state({}, { concurrency: 2, manual: true })
+    expect(new Scheduler().nextActions(s, new ResearchTree())).toEqual([
       { kind: "GENERATE", count: 2 },
     ])
   })
 
   it("manual mode starts human selected hypothesis", () => {
     const t = tree("h1", "h2")
-    const s = state({}, { concurrency: 2 })
+    const s = state({}, { concurrency: 2, manual: true })
     expect(
-      new Scheduler().nextActions(s, t, [], { humanNext: "h2", manual: true })
+      new Scheduler().nextActions(s, t, { humanNext: "h2" })
     ).toEqual([{ kind: "START_NEXT_HYPOTHESIS", planId: "h2" }])
   })
 
   it("fresh search asks for all unfilled slots", () => {
-    expect(new Scheduler().nextActions(state(), new ResearchTree(), [])).toEqual([
+    expect(new Scheduler().nextActions(state(), new ResearchTree())).toEqual([
       { kind: "GENERATE", count: 4 },
     ])
   })
@@ -254,7 +254,7 @@ describe("Scheduler", () => {
     })
     const s = state({ prepare }, { concurrency: 2, searchLimit: 2 })
 
-    expect(new Scheduler().nextActions(s, new ResearchTree(), [])).toEqual([
+    expect(new Scheduler().nextActions(s, new ResearchTree())).toEqual([
       { kind: "GENERATE", count: 2 },
     ])
   })
