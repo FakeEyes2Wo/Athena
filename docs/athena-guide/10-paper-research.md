@@ -311,13 +311,10 @@ literature/
 │   ├── agent.py
 │   ├── backends.py
 │   ├── pool.py
-│   ├── prompts.py
-│   ├── reranker.py
 │   ├── schemas.py
 │   ├── scorer.py
 │   ├── selection.py
-│   ├── session.py
-│   └── tool.py
+│   └── session.py
 ├── paper_source/
 │   ├── __init__.py
 │   ├── arxiv.py

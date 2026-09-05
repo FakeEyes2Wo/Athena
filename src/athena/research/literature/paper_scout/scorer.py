@@ -1,33 +1,21 @@
 """相关性打分：决定论文能否进池、如何排序、以及是否进入最终交付集合。
 
-论文用 pasa-7b-selector 输出 "True" token 的概率作为 ρ(p) ∈ [0,1]，是个连续分数。本仓库
-拿不到那个分数，但**原因不是端点不支持 logprobs**——那句话曾经写在这里，2026-08-17 实测
-证明它是错的，见下。
-
-- ``GradedRelevanceScorer`` —— **默认实现**。用论文 LLM-score 一节的 0–3 分级评分归一到
+``GradedRelevanceScorer`` 用论文 LLM-score 一节的 0–3 分级评分归一到
   [0,1]。四个取值不够细，交付名额几乎总在某一档内部被截断——真机一轮 352 篇里 197 篇
-  同分。这一层不再试图自己解决它：同分论文的次序交给 ``paper_scout.reranker`` 的交叉
-  编码器，本模块只负责"这篇够不够格进池、过不过交付门槛"。
-- ``TokenProbabilityScorer`` —— 复现论文口径。**代码已修好，但不要启用**，理由见该类的
-  文档字符串：它会让 ρ 退化成两个取值，比四档更粗。
-
-两者都不读环境变量，客户端由调用方注入。
+  同分。本模块也包含只拆同档平局的交叉编码器；离散分数仍决定论文是否进池和交付。
+实现不读环境变量，客户端由调用方注入。
 """
 
 import asyncio
 import json
-import math
 import re
 import time
+import urllib.error
+import urllib.request
 from typing import Protocol
 
 from openai import AsyncOpenAI
 
-from athena.research.literature.paper_scout.prompts import (
-    GRADED_SELECT_PROMPT,
-    SELECT_PROMPT,
-    format_papers_for_scoring,
-)
 from athena.research.literature.paper_scout.schemas import ScoutPaper
 
 GRADE_SCORES = (0.0, 0.2, 0.45, 1.0)
@@ -48,8 +36,23 @@ DEFAULT_BATCH_SIZE = 24
 
 SCORING_ABSTRACT_CHARS = 1200
 JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
-TRUE_TOKEN = re.compile(r"^\s*true", re.IGNORECASE)
-FALSE_TOKEN = re.compile(r"^\s*false", re.IGNORECASE)
+GRADED_SELECT_PROMPT = """You are an elite researcher assessing whether papers \
+satisfy a research query. Judge only semantic relevance to the query; ignore writing \
+quality, length, style and popularity.
+
+Rate each paper on this four-level scale:
+3 - directly answers the query; it is exactly the kind of paper being asked for
+2 - clearly on topic and useful, but does not satisfy every stated condition
+1 - same broad area, yet misses the specific subject of the query
+0 - unrelated, or violates an explicit exclusion in the query
+
+User Query: {user_query}
+
+Papers:
+{papers}
+
+Return a JSON object mapping each paper index to its integer score, and nothing else.
+Example for two papers: {{"1": 3, "2": 0}}"""
 
 
 class RelevanceScorer(Protocol):
@@ -62,9 +65,167 @@ class RelevanceScorer(Protocol):
         """返回与 ``papers`` 等长、顺序一致的分数列表。"""
 
 
+DASHSCOPE_RERANK_ENDPOINT = (
+    "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+)
+
+RERANK_DOCUMENT_CHARS = 1200
+"""送进交叉编码器的摘要长度，与 ``scorer.SCORING_ABSTRACT_CHARS`` 对齐。
+
+两者读的必须是同一段文本：affinity 用来给打分器认为无差别的论文排序，如果它比打分器
+多看或少看一截摘要，排出来的次序回答的就不是同一个问题了。
+"""
+
+DEFAULT_RERANK_BATCH = 50
+"""一次请求的文档数。
+
+实测上限至少 500，取 50 是为了让单次失败作废的论文少一些——与 ``DEFAULT_BATCH_SIZE``
+同样的取舍。352 篇分成 8 个请求并发发出，全程 0.4 秒，请求数不构成瓶颈。
+"""
+
+DEFAULT_RERANK_CONCURRENCY = 8
+DEFAULT_RERANK_TIMEOUT = 60.0
+RERANK_ATTEMPTS = 2
+"""失败重试次数。
+
+一次请求 0.4 秒，重试几乎不花钱，而失败的代价不对称：失败批次的 affinity 全为 0，
+在各自档位里会被排到最后（见 ``affinity`` 的说明），那是一条系统性偏置。宁可多发一次。
+"""
+
+
+class RelevanceReranker(Protocol):
+    """给同分论文排序的契约：返回与 ``papers`` 等长、顺序一致的 affinity。"""
+
+    model: str
+    calls: int
+    failures: int
+
+    async def affinity(self, query: str, papers: list[ScoutPaper]) -> list[float]:
+        """返回每篇论文对 ``query`` 的连续亲和度，越大越相关。"""
+
+
+def document_for(paper: ScoutPaper) -> str:
+    """拼出送进交叉编码器的文档文本：标题加截断后的摘要。"""
+    return f"{paper.title}\n{paper.abstract[:RERANK_DOCUMENT_CHARS]}"
+
+
+def parse_scores(payload: dict, count: int) -> list[float]:
+    """把 rerank 响应按 ``index`` 还原成与入参同序的分数列表；缺失项为 0。
+
+    响应里的 ``results`` **不保证按 index 排列**——它是按分数降序返回的，所以必须按
+    ``index`` 回填而不是按响应顺序 ``zip``。顺序错位不会报错，只会让每一篇论文都拿到
+    别人的分数，而结果看上去完全正常。这与 ``OpenAIEmbedder`` 那里是同一类陷阱。
+    """
+    scores = [0.0] * count
+    for item in payload.get("output", {}).get("results", []):
+        index = item.get("index")
+        if isinstance(index, int) and 0 <= index < count:
+            scores[index] = float(item.get("relevance_score", 0.0))
+    return scores
+
+
+class DashScopeReranker:
+    """DashScope ``text-rerank`` 交叉编码器。
+
+    接口不是 OpenAI 兼容的那套，所以不能复用注入的 ``AsyncOpenAI`` 客户端；也没有走
+    ``paper_source.http``——那一层是 GET 专用的 ``Protocol``，为一个 POST 去拓宽它会
+    牵动所有检索后端。这里自带一个 ``urllib`` POST，与 ``UrllibTransport`` 同样的
+    "阻塞调用放进 ``asyncio.to_thread``"写法，不引入新依赖。
+
+    失败按整批 0 分降级，与 ``GradedRelevanceScorer`` 同一种保守处理：affinity 只是
+    次序信号，拿不到它最坏退回 sha256，不该让整条链路失败。
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        endpoint: str = DASHSCOPE_RERANK_ENDPOINT,
+        batch_size: int = DEFAULT_RERANK_BATCH,
+        concurrency: int = DEFAULT_RERANK_CONCURRENCY,
+        timeout: float = DEFAULT_RERANK_TIMEOUT,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.endpoint = endpoint
+        self.batch_size = batch_size
+        self.timeout = timeout
+        self.calls = 0
+        self.failures = 0
+        self.seconds = 0.0
+        self._limit = asyncio.Semaphore(concurrency)
+
+    async def affinity(self, query: str, papers: list[ScoutPaper]) -> list[float]:
+        """批量取 affinity；分数为 0 表示该篇没拿到信号。
+
+        拿不到信号的论文在 ``pool.ranked`` 里会排到本档末尾（0 小于任何真实分数，实测
+        最小值 0.0058）。这确实是一条偏置，但它只在请求失败时出现，且 ``failures``
+        把它记了下来——相比之下让整轮调研失败要糟得多。
+        """
+        if not papers:
+            return []
+        batches = [
+            papers[start : start + self.batch_size]
+            for start in range(0, len(papers), self.batch_size)
+        ]
+        results = await asyncio.gather(
+            *(self._rank_batch(query, batch) for batch in batches)
+        )
+        return [score for batch in results for score in batch]
+
+    async def _rank_batch(self, query: str, papers: list[ScoutPaper]) -> list[float]:
+        documents = [document_for(paper) for paper in papers]
+        async with self._limit:
+            for attempt in range(RERANK_ATTEMPTS):
+                self.calls += 1
+                started = time.monotonic()
+                try:
+                    payload = await asyncio.to_thread(self._post, query, documents)
+                except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                    self.seconds += time.monotonic() - started
+                    # 网络故障、超时或响应不是 JSON → 再试一次，仍失败才按 0 分降级
+                    if attempt == RERANK_ATTEMPTS - 1:
+                        self.failures += 1
+                        return [0.0] * len(papers)
+                    continue
+                self.seconds += time.monotonic() - started
+                return parse_scores(payload, len(papers))
+        raise RuntimeError("unreachable: the retry loop either returns or degrades")
+
+    def _post(self, query: str, documents: list[str]) -> dict:
+        """同步发一次 rerank 请求；供 ``asyncio.to_thread`` 调用，也便于直接测试。"""
+        body = json.dumps(
+            {
+                "model": self.model,
+                "input": {"query": query, "documents": documents},
+                "parameters": {"return_documents": False, "top_n": len(documents)},
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
 def clip_abstract(abstract: str) -> str:
     """截断摘要到打分够用的长度，避免一次批量请求塞爆上下文。"""
     return abstract[:SCORING_ABSTRACT_CHARS]
+
+
+def format_papers_for_scoring(papers: list[tuple[str, str]]) -> str:
+    """Render scored papers with stable one-based identifiers."""
+    return "\n\n".join(
+        f"[{index}] Title: {title}\nAbstract: {abstract}"
+        for index, (title, abstract) in enumerate(papers, start=1)
+    )
 
 
 def parse_grades(content: str, count: int) -> list[float]:
@@ -195,132 +356,10 @@ class GradedRelevanceScorer:
                 temperature=0,
                 timeout=self.timeout,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - external scoring provider boundary
             # 打分失败不能把论文误判为高相关 → 整批按 0 分，让它们留在池外
             return [0.0] * len(papers)
         finally:
             # 失败的调用同样花了墙钟，超时那种尤其贵，不计入会低估成本
             self.seconds += time.monotonic() - started
         return parse_grades(reply.choices[0].message.content or "", len(papers))
-
-
-class TokenProbabilityScorer:
-    """复现论文口径：ρ(p) 为 selector 输出 "True" token 的概率。
-
-    ⚠️ **不要把它设成默认打分器。** 代码是好的（2026-08-17 修掉了读错 token 的 bug，见
-    ``decision_position``），但在通用 instruct 模型上它产出的 ρ 比四档**更粗**。
-
-    2026-08-17 在阿里云百炼 compatible-mode 上逐条实测：
-
-    1. **端点支持 logprobs。** 此前模块头写着"端点不返回（实测字段缺失）"，是错的。
-       条件是必须与 ``top_logprobs`` 一起发——只发 ``logprobs=True`` 时 qwen3.6-flash
-       字段缺失、qwen3.7-plus 返回 0 个候选；加上 ``top_logprobs=5`` 两个模型都给满 5 个。
-       本类发的正是这个组合，所以端点从来不是障碍。
-    2. **旧实现读错了 token**，于是每篇都得 0.0。已修。
-    3. **修好之后 ρ 仍然只有两个取值。** 判决 token 的概率是 ``' False':1.000``，
-       其余候选 ``0.000``——温度 0 下模型完全饱和。取到的 ρ 因此非 1 即 0。
-
-    第 3 条才是它不可用的真正原因，而且换端点解决不了：论文的 ρ 来自
-    ``pasa-7b-selector``，一个**为这件事微调、输出分布经过校准**的判别器；通用 instruct
-    模型在二选一判断上给的就是饱和概率。要拿回连续 ρ 得换判别模型，那是训练问题不是
-    接口问题。
-
-    留着它有两个用处：换到校准过的 selector 时直接可用；以及作为"端点能力"与"模型标定"
-    是两件事的记录。
-    """
-
-    def __init__(
-        self,
-        client: AsyncOpenAI,
-        model: str,
-        *,
-        concurrency: int = 8,
-        timeout: float = 60.0,
-    ) -> None:
-        self.client = client
-        self.model = model
-        self.timeout = timeout
-        self.calls = 0
-        self.degraded = False
-        self._limit = asyncio.Semaphore(concurrency)
-
-    async def score(self, query: str, papers: list[ScoutPaper]) -> list[float]:
-        """逐篇取 "True" 的概率。"""
-        if not papers:
-            return []
-        return list(
-            await asyncio.gather(*(self._score_one(query, paper) for paper in papers))
-        )
-
-    async def _score_one(self, query: str, paper: ScoutPaper) -> float:
-        prompt = SELECT_PROMPT.format(
-            user_query=query, title=paper.title, abstract=clip_abstract(paper.abstract)
-        )
-        async with self._limit:
-            self.calls += 1
-            try:
-                reply = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=4,
-                    temperature=0,
-                    logprobs=True,
-                    top_logprobs=5,
-                    timeout=self.timeout,
-                )
-            except Exception:
-                # 打分失败 → 0 分，与 GradedRelevanceScorer 保持同一种保守降级
-                return 0.0
-        choice = reply.choices[0]
-        probability = true_probability(getattr(choice, "logprobs", None))
-        if probability is not None:
-            return probability
-        self.degraded = True
-        return 1.0 if TRUE_TOKEN.match(choice.message.content or "") else 0.0
-
-
-def decision_position(content: list) -> int | None:
-    """找出判决 token 在序列里的位置；找不到时返回 ``None``。
-
-    不能假定判决在 ``content[0]``。``SELECT_PROMPT`` 要求的输出格式是
-    ``Decision: True/False``，于是首 token 是 ``'Decision'``——实测
-    （qwen3.6-flash，2026-08-17）：
-
-    ======  ==============  ====================================================
-    位置    token           top_logprobs
-    ======  ==============  ====================================================
-    0       ``'Decision'``  ``'Decision':1.000, 'Dec':0.000, 'Reason':0.000 …``
-    1       ``':'``         ``':':1.000 …``
-    2       ``' False'``    ``' False':1.000, ' false':0.000, ' True':0.000 …``
-    ======  ==============  ====================================================
-
-    判决在位置 2。旧实现只看位置 0，在那里找不到 ``True``，于是**每一篇都返回 0.0**——
-    分数看上去正常（是个合法的 [0,1] 浮点），实际毫无信息。这是"安静地成功"的又一例。
-
-    按 token 内容定位而不是按固定下标：换个提示词或换个模型，前缀长度就会变。
-    """
-    for position, item in enumerate(content):
-        token = getattr(item, "token", "")
-        if TRUE_TOKEN.match(token) or FALSE_TOKEN.match(token):
-            return position
-    return None
-
-
-def true_probability(logprobs: object) -> float | None:
-    """从 logprobs 里取判决 token 为 "True" 的概率；端点未返回时为 ``None``。
-
-    ⚠️ **本函数已修好，但 ``TokenProbabilityScorer`` 仍然不该启用。** 原因不在这里，
-    在模型：见该类的文档字符串。
-    """
-    content = getattr(logprobs, "content", None)
-    if not content:
-        return None
-    position = decision_position(content)
-    if position is None:
-        return None
-    alternatives = getattr(content[position], "top_logprobs", None) or []
-    for item in alternatives:
-        if TRUE_TOKEN.match(getattr(item, "token", "")):
-            return math.exp(getattr(item, "logprob", 0.0))
-    # 判决 token 找到了，但候选里没有 True——说明模型给 True 的概率低于 top_k 截断
-    return 0.0

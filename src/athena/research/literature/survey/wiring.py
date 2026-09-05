@@ -42,7 +42,7 @@ from athena.research.literature.paper_scout.backends import (
     SEMANTIC_SCHOLAR_INTERVAL,
     build_default_backends,
 )
-from athena.research.literature.paper_scout.reranker import DashScopeReranker
+from athena.research.literature.paper_scout.scorer import DashScopeReranker
 from athena.research.literature.paper_source.fetcher import LocatorCache
 from athena.research.literature.paper_source.http import (
     HostRateLimiter,

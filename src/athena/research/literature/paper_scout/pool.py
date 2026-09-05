@@ -55,7 +55,7 @@ def tie_break(paper_key: str) -> str:
     更细的分数，而不是在这里发明信号。
 
     **这已经不再是同档论文的第一顺位。** ``ScoutPaper.affinity``（交叉编码器给的连续分数，
-    见 ``paper_scout.reranker``）排在本函数之前，把"发明信号"换成了"引入一个独立的信号"。
+    见 ``paper_scout.scorer``）排在本函数之前，把"发明信号"换成了"引入一个独立的信号"。
     散列仍然是最后的兜底：没配 rerank、或者 rerank 请求失败时，次序回到这里。
     """
     return hashlib.sha256(paper_key.encode("utf-8")).hexdigest()

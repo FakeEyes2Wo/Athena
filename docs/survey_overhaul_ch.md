@@ -521,7 +521,7 @@ evaluator + 训基线）才能分叉。
 ### 病根在 `scorer.py` 里已经写着
 
 打分器是四档离散的，而它离散的原因是通用 instruct 模型在二选一判断上给的是饱和概率
-（`TokenProbabilityScorer` 那一节实测过：判决 token 概率 `' False':1.000`，其余全 0）。
+（已删除的 token-probability 实验路径实测：判决 token 概率 `' False':1.000`，其余全 0）。
 论文的连续 ρ 来自 `pasa-7b-selector`——一个**为这件事微调、输出分布经过校准**的判别器。
 那句话的推论是：要拿回连续分数，得换判别模型。
 

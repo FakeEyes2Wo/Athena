@@ -25,7 +25,10 @@ from athena.research.literature.paper_rag.index import (
     split_sentences,
 )
 from athena.research.literature.paper_rag.models import CorpusBuildOptions
-from athena.research.literature.paper_scout.agent import PaperScoutAgent
+from athena.research.literature.paper_scout.agent import (
+    PaperScoutAgent,
+    PaperScoutRuntime,
+)
 from athena.research.literature.paper_scout.schemas import (
     PaperScoutResult,
     ScoutCorpus,
@@ -37,6 +40,7 @@ from athena.research.literature.paper_scout.scorer import (
     GradedRelevanceScorer,
 )
 from athena.research.literature.paper_scout.selection import LlmBoundarySelector
+from athena.research.literature.paper_scout.session import ScoutServices
 from athena.research.literature.paper_source.fetcher import PaperSourceFetcher
 from athena.research.literature.paper_source.schemas import (
     PaperIdentity,
@@ -123,16 +127,20 @@ class ScoutStage:
         started = time.monotonic()
         backends, references = self.stack.build_backends()
         agent = PaperScoutAgent(
-            self.stack.artifacts,
-            backends,
-            references,
-            GradedRelevanceScorer(
-                self.stack.client, self.stack.effective_scorer_model()
+            PaperScoutRuntime(
+                artifacts=self.stack.artifacts,
+                services=ScoutServices(
+                    backends,
+                    references,
+                    GradedRelevanceScorer(
+                        self.stack.client, self.stack.effective_scorer_model()
+                    ),
+                    self.stack.reranker,
+                ),
+                model=self.stack.model,
+                client=self.stack.client,
+                selector=LlmBoundarySelector(self.stack.client, self.stack.model),
             ),
-            model=self.stack.model,
-            client=self.stack.client,
-            selector=LlmBoundarySelector(self.stack.client, self.stack.model),
-            reranker=self.stack.reranker,
         )
         candidates = self.request.max_papers * self.request.source_candidate_multiple
         scout_request = ScoutRequest(

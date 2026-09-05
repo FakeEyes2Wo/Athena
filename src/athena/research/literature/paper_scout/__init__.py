@@ -1,13 +1,11 @@
-"""Public PaperScout Agent and tool entrypoints."""
+"""Public PaperScout runtime entrypoints."""
 
-from athena.research.literature.paper_scout.agent import PaperScoutAgent
-from athena.research.literature.paper_scout.tool import (
-    PaperScoutExpandTool,
-    PaperScoutSearchTool,
+from athena.research.literature.paper_scout.agent import (
+    PaperScoutAgent,
+    PaperScoutRuntime,
 )
 
 __all__ = [
     "PaperScoutAgent",
-    "PaperScoutExpandTool",
-    "PaperScoutSearchTool",
+    "PaperScoutRuntime",
 ]

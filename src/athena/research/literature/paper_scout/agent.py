@@ -10,6 +10,7 @@
 
 import asyncio
 import time
+from dataclasses import InitVar, dataclass, field
 
 from openai import AsyncOpenAI
 from pydantic import ValidationError
@@ -19,17 +20,8 @@ from athena.core.agent.models import AgentConfig, AgentContext, AgentOutcome
 from athena.core.agent.provider import BaseProvider, ResponsesProvider
 from athena.core.agent.runtime import BaseAgent
 from athena.core.contracts import ArtifactStore
-from athena.core.tool import ToolRegistry
-from athena.core.tool_types import ToolContext, ToolResult
-from athena.research.literature.paper_scout.backends import (
-    ReferenceBackend,
-    SearchBackend,
-)
-from athena.research.literature.paper_scout.prompts import (
-    PAPERSCOUT_SYSTEM_PROMPT,
-    PAPERSCOUT_USER_PROMPT,
-    format_history,
-)
+from athena.core.tool import BaseTool, ToolRegistry
+from athena.core.tool_types import ToolContext, ToolResult, ToolSpec
 from athena.research.literature.paper_scout.schemas import (
     IDLE_TURNS_BEFORE_STOP,
     PaperScoutResult,
@@ -37,24 +29,16 @@ from athena.research.literature.paper_scout.schemas import (
     ScoutRequest,
     ScoutStats,
 )
-from athena.research.literature.paper_scout.reranker import RelevanceReranker
-from athena.research.literature.paper_scout.scorer import RelevanceScorer
 from athena.research.literature.paper_scout.selection import (
     BoundarySelector,
     select_delivery,
 )
-from athena.research.literature.paper_scout.session import ScoutSession
+from athena.research.literature.paper_scout.session import ScoutServices, ScoutSession
 from athena.research.literature.paper_source.schemas import (
     PaperIdentity,
     PaperRef,
     PaperSourceRequest,
     SourceHint,
-)
-from athena.research.literature.paper_scout.tool import (
-    EXPAND_TOOL_NAME,
-    SEARCH_TOOL_NAME,
-    PaperScoutExpandTool,
-    PaperScoutSearchTool,
 )
 
 REFERENCE_LIMIT = 200
@@ -66,7 +50,127 @@ REFERENCE_LIMIT = 200
 
 POLICY_MAX_TOKENS = 2048
 POLICY_TEMPERATURE = 0.3
+SEARCH_TOOL_NAME = "paper_scout_search"
+EXPAND_TOOL_NAME = "paper_scout_expand"
 ACTION_TOOLS = (SEARCH_TOOL_NAME, EXPAND_TOOL_NAME)
+PAPERSCOUT_SYSTEM_PROMPT = (
+    "You are a research agent. Your goal is to find papers relevant to the User Query."
+)
+PAPERSCOUT_USER_PROMPT = """### User Query
+{user_query}
+
+### History Actions
+{history_actions}
+
+### Paper List
+{paper_list}
+
+### Instructions
+Analyze the **Paper List** and **History Actions** to determine the next set of \
+actions. Enclose your analysis of the state and decision logic within \
+`<analysis>...</analysis>` tags.
+**You support parallel tool calling.** You should output multiple tool calls in a \
+single step if several independent actions are valuable at the current state.
+**Attend to the history actions and avoid expanding the same papers.**
+"""
+
+
+def format_history(actions: list[tuple[str, str]]) -> str:
+    """Render prior search and expansion actions for the policy prompt."""
+    if not actions:
+        return "None"
+    labels = {"search": "[Search]", "expand": "[Expand]"}
+    return "\n".join(f"{labels[kind]} {argument}" for kind, argument in actions)
+
+
+class PaperScoutTool(BaseTool):
+    """Stateless adapter for one run's scout session."""
+
+    def __init__(self, session: ScoutSession) -> None:
+        self.session = session
+
+
+class PaperScoutSearchTool(PaperScoutTool):
+    """Search for papers and absorb them into the current pool."""
+
+    spec = ToolSpec(
+        name=SEARCH_TOOL_NAME,
+        description="Search for relevant papers in the arXiv repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "A single natural-language or keyword query without field "
+                        "scopes or boolean operators; it must differ from history."
+                    ),
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    )
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        query = input.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string.")
+        if ctx.cancel.is_set():
+            raise asyncio.CancelledError
+        action = await self.session.search(query)
+        return ToolResult(data=action.model_dump(mode="json"))
+
+
+class PaperScoutExpandTool(PaperScoutTool):
+    """Expand one paper's references into the current pool."""
+
+    spec = ToolSpec(
+        name=EXPAND_TOOL_NAME,
+        description=(
+            "Follow references from a paper already in the list to broaden coverage."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "locator": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Copy the locator from the paper list verbatim, for example "
+                        "'1706.03762' or 'doi:10.1109/access.2025.3569523'."
+                    ),
+                }
+            },
+            "required": ["locator"],
+            "additionalProperties": False,
+        },
+    )
+
+    async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
+        locator = input.get("locator")
+        if not isinstance(locator, str) or not locator.strip():
+            raise ValueError("locator must be a non-empty string.")
+        if ctx.cancel.is_set():
+            raise asyncio.CancelledError
+        action = await self.session.expand(locator)
+        return ToolResult(data=action.model_dump(mode="json"))
+
+
+@dataclass(slots=True)
+class PaperScoutRuntime:
+    """Injected storage, providers, and selection policy for PaperScout."""
+
+    artifacts: ArtifactStore
+    services: ScoutServices
+    model: str
+    client: InitVar[AsyncOpenAI | None] = None
+    selector: BoundarySelector | None = None
+    provider: BaseProvider = field(init=False)
+
+    def __post_init__(self, client: AsyncOpenAI | None) -> None:
+        self.provider = ResponsesProvider(self.model, client=client)
 
 
 async def collect_tool_calls(
@@ -138,41 +242,15 @@ class PaperScoutAgent(BaseAgent):
     name = "paper_scout"
     description = "Multi-turn academic paper search with search/expand actions."
 
-    def __init__(
-        self,
-        artifacts: ArtifactStore,
-        search_backends: list[SearchBackend],
-        reference_backend: ReferenceBackend | None,
-        scorer: RelevanceScorer,
-        *,
-        model: str,
-        client: AsyncOpenAI | None = None,
-        selector: BoundarySelector | None = None,
-        reranker: RelevanceReranker | None = None,
-    ) -> None:
-        self.artifacts = artifacts
-        self.search_backends = search_backends
-        self.reference_backend = reference_backend
-        self.scorer = scorer
-        # 同分论文的次序信号；缺省时排序回退到散列，行为与此前一致。
-        self.reranker = reranker
-        self.model = model
-        # 边界档重排器；缺省时选片回退到散列次序，行为与此前一致。
-        self.selector = selector
-        self._provider = ResponsesProvider(model, client=client)
+    def __init__(self, runtime: PaperScoutRuntime) -> None:
+        self.runtime = runtime
 
     async def run(self, ctx: AgentContext) -> AgentOutcome:
         """执行一次完整的 PaperScout 检索并落盘结果。"""
         request = ScoutRequest.model_validate_json(
-            await self.artifacts.get_text(ctx.turn.request_ref)
+            await self.runtime.artifacts.get_text(ctx.turn.request_ref)
         )
-        session = ScoutSession(
-            request,
-            self.search_backends,
-            self.reference_backend,
-            self.scorer,
-            self.reranker,
-        )
+        session = ScoutSession(request, self.runtime.services)
         tools = ToolRegistry()
         tools.register(PaperScoutSearchTool(session))
         tools.register(PaperScoutExpandTool(session))
@@ -184,13 +262,13 @@ class PaperScoutAgent(BaseAgent):
         await ctx.emit(
             "paper_scout/started",
             ctx.turn.request_ref,
-            {"query": request.query, "model": self.model},
+            {"query": request.query, "model": self.runtime.model},
         )
 
         started = time.monotonic()
         stats = ScoutStats()
         stop_reason = await self._loop(ctx, session, config, tools, stats, started)
-        stats.steps = session.step
+        stats.steps = session.state.step
         stats.wall_seconds = round(time.monotonic() - started, 3)
         stats.stop_reason = stop_reason
         return await self._finish(ctx, session, stats)
@@ -211,22 +289,22 @@ class PaperScoutAgent(BaseAgent):
                 return "cancelled"
             if time.monotonic() - started >= session.request.max_seconds:
                 return "max_seconds"
-            session.step = step
+            session.state.step = step
             prompt = PAPERSCOUT_USER_PROMPT.format(
                 user_query=session.request.query,
-                history_actions=format_history(session.history),
-                paper_list=session.pool.observation(),
+                history_actions=format_history(session.state.history),
+                paper_list=session.state.pool.observation(),
             )
             stats.policy_calls += 1
             policy_started = time.monotonic()
             calls, analysis = await collect_tool_calls(
-                self._provider, config, tools, prompt, ctx.cancel
+                self.runtime.provider, config, tools, prompt, ctx.cancel
             )
             stats.policy_seconds += time.monotonic() - policy_started
             if not calls:
                 return "policy_returned_no_action"
 
-            before = len(session.pool)
+            before = len(session.state.pool)
             await dispatch_tool_calls(
                 tools,
                 [
@@ -244,11 +322,11 @@ class PaperScoutAgent(BaseAgent):
                 {
                     "step": step,
                     "calls": len(calls),
-                    "pool": len(session.pool),
+                    "pool": len(session.state.pool),
                     "analysis": analysis[:500],
                 },
             )
-            idle_turns = idle_turns + 1 if len(session.pool) == before else 0
+            idle_turns = idle_turns + 1 if len(session.state.pool) == before else 0
             if idle_turns >= IDLE_TURNS_BEFORE_STOP:
                 return "pool_unchanged"
         return "max_steps"
@@ -257,10 +335,10 @@ class PaperScoutAgent(BaseAgent):
         self, ctx: AgentContext, session: ScoutSession, stats: ScoutStats
     ) -> AgentOutcome:
         """汇总统计、写入 artifact 并返回 Turn 结果。"""
-        eligible = session.pool.retained(session.request.retain_threshold)
+        eligible = session.state.pool.retained(session.request.retain_threshold)
         # 截断前的完整候选：交付名额几乎总是落在某一档内部，而"该选哪几篇"不能由
         # tie_break 的散列决定（见 selection.select_delivery）。
-        contenders = session.pool.retained(
+        contenders = session.state.pool.retained(
             session.request.retain_threshold,
             require_retrievable_source=session.request.require_retrievable_source,
         )
@@ -274,7 +352,7 @@ class PaperScoutAgent(BaseAgent):
             session.request.query,
             contenders,
             target or session.request.max_papers,
-            self.selector,
+            self.runtime.selector,
         )
         # 选出的交付集合在前，其余候选按原次序垫在后面：取源逐个尝试、失败就往后走，
         # 垫底的存在意义就是接住取源失败，不该因为没被选中而消失。
@@ -289,7 +367,7 @@ class PaperScoutAgent(BaseAgent):
         if session.request.require_retrievable_source:
             stats.dropped_no_source = len(eligible) - len(contenders)
         search_actions = expand_actions = repeated_actions = 0
-        for action in session.actions:
+        for action in session.state.actions:
             if action.kind == "search":
                 search_actions += 1
             else:
@@ -299,43 +377,47 @@ class PaperScoutAgent(BaseAgent):
         stats.search_actions = search_actions
         stats.expand_actions = expand_actions
         stats.repeated_actions = repeated_actions
-        stats.pool_size = len(session.pool)
+        stats.pool_size = len(session.state.pool)
         stats.retained_papers = len(retained)
-        stats.scorer_calls = getattr(session.scorer, "calls", 0)
-        stats.rerank_calls = getattr(session.reranker, "calls", 0)
-        stats.rerank_failures = getattr(session.reranker, "failures", 0)
-        stats.scorer_seconds = round(getattr(session.scorer, "seconds", 0.0), 3)
-        stats.rerank_seconds = round(getattr(session.reranker, "seconds", 0.0), 3)
-        stats.backend_seconds = round(session.backend_seconds, 3)
+        stats.scorer_calls = getattr(session.services.scorer, "calls", 0)
+        stats.rerank_calls = getattr(session.services.reranker, "calls", 0)
+        stats.rerank_failures = getattr(session.services.reranker, "failures", 0)
+        stats.scorer_seconds = round(
+            getattr(session.services.scorer, "seconds", 0.0), 3
+        )
+        stats.rerank_seconds = round(
+            getattr(session.services.reranker, "seconds", 0.0), 3
+        )
+        stats.backend_seconds = round(session.state.backend_seconds, 3)
         stats.policy_seconds = round(stats.policy_seconds, 3)
         stats.backend_requests = self._backend_requests()
-        stats.errors = session.errors[:50]
+        stats.errors = session.state.errors[:50]
 
         edges = await self._reference_edges(retained)
         stats.reference_edges = sum(len(item) for item in edges.values())
-        stats_ref = await self.artifacts.put_text(stats.model_dump_json())
+        stats_ref = await self.runtime.artifacts.put_text(stats.model_dump_json())
         corpus = ScoutCorpus(
             query=session.request.query,
             retained=retained,
-            pool=session.pool.ranked(),
-            actions=session.actions,
+            pool=session.state.pool.ranked(),
+            actions=session.state.actions,
             stats_ref=stats_ref,
             reference_edges=edges,
         )
-        corpus_ref = await self.artifacts.put_text(corpus.model_dump_json())
+        corpus_ref = await self.runtime.artifacts.put_text(corpus.model_dump_json())
         source_ref = await self._paper_source_request(
             retained, corpus_ref, session.request
         )
-        status = "partial" if session.errors else "complete"
+        status = "partial" if session.state.errors else "complete"
         result = PaperScoutResult(
             status=status,
             corpus_ref=corpus_ref,
             stats_ref=stats_ref,
             paper_source_request_ref=source_ref,
             paper_count=len(retained),
-            warnings=sorted({error.split(":")[0] for error in session.errors}),
+            warnings=sorted({error.split(":")[0] for error in session.state.errors}),
         )
-        result_ref = await self.artifacts.put_text(result.model_dump_json())
+        result_ref = await self.runtime.artifacts.put_text(result.model_dump_json())
         await ctx.emit(
             "paper_scout/completed",
             result_ref,
@@ -359,7 +441,7 @@ class PaperScoutAgent(BaseAgent):
 
         逐篇失败只跳过那一篇：引用图是增益，缺几条边不该让一次已经付过检索成本的运行失败。
         """
-        backend = self.reference_backend
+        backend = self.runtime.services.reference_backend
         if backend is None or not retained:
             return {}
         known = {paper.paper_key for paper in retained}
@@ -367,7 +449,7 @@ class PaperScoutAgent(BaseAgent):
         for paper in retained:
             try:
                 cited = await backend.references(paper, REFERENCE_LIMIT)
-            except Exception:  # noqa: BLE001 - 少几条边不该中断整轮
+            except Exception:  # noqa: BLE001, S112 - external reference boundary
                 continue
             targets = [
                 item.paper_key
@@ -431,13 +513,13 @@ class PaperScoutAgent(BaseAgent):
         source_request = PaperSourceRequest(
             papers=papers, policy=request.paper_source_policy, corpus_ref=corpus_ref
         )
-        return await self.artifacts.put_text(source_request.model_dump_json())
+        return await self.runtime.artifacts.put_text(source_request.model_dump_json())
 
     def _backend_requests(self) -> int:
         """汇总各后端共享限流器的真实请求数；限流器缺失时返回 0。"""
         limiters = {
             id(backend.http): backend.http
-            for backend in self.search_backends
+            for backend in self.runtime.services.search_backends
             if hasattr(backend, "http")
         }
         return sum(getattr(item, "request_count", 0) for item in limiters.values())

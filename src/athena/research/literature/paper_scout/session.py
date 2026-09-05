@@ -10,10 +10,16 @@ paper pool。把它单独放一层是因为两个动作共享同一段"打分 �
 
 import asyncio
 import time
+from dataclasses import dataclass, field
 
 from athena.research.literature.paper_scout.backends import (
     ReferenceBackend,
     SearchBackend,
+)
+from athena.research.literature.paper_scout.pool import (
+    PaperPool,
+    locator_for,
+    title_key,
 )
 from athena.research.literature.paper_scout.schemas import (
     ACCEPT_THRESHOLD,
@@ -26,13 +32,10 @@ from athena.research.literature.paper_scout.schemas import (
     ScoutPaper,
     ScoutRequest,
 )
-from athena.research.literature.paper_scout.pool import (
-    PaperPool,
-    locator_for,
-    title_key,
+from athena.research.literature.paper_scout.scorer import (
+    RelevanceReranker,
+    RelevanceScorer,
 )
-from athena.research.literature.paper_scout.reranker import RelevanceReranker
-from athena.research.literature.paper_scout.scorer import RelevanceScorer
 
 
 def process_reward(scores: list[float], cost: float) -> float:
@@ -43,6 +46,29 @@ def process_reward(scores: list[float], cost: float) -> float:
     """
     top = sorted(scores, reverse=True)[:REWARD_TOP_K]
     return sum(1.0 for score in top if score >= REWARD_THRESHOLD) - cost
+
+
+@dataclass(frozen=True, slots=True)
+class ScoutServices:
+    """Search and ranking providers shared by a scout run."""
+
+    search_backends: list[SearchBackend]
+    reference_backend: ReferenceBackend | None
+    scorer: RelevanceScorer
+    reranker: RelevanceReranker | None = None
+
+
+@dataclass(slots=True)
+class ScoutRunState:
+    """Mutable pool, trace, counters, and lock for one scout run."""
+
+    pool: PaperPool = field(default_factory=PaperPool)
+    history: list[tuple[str, str]] = field(default_factory=list)
+    actions: list[ScoutAction] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    step: int = 0
+    backend_seconds: float = 0.0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ScoutSession:
@@ -56,29 +82,19 @@ class ScoutSession:
     def __init__(
         self,
         request: ScoutRequest,
-        search_backends: list[SearchBackend],
-        reference_backend: ReferenceBackend | None,
-        scorer: RelevanceScorer,
-        reranker: RelevanceReranker | None = None,
+        services: ScoutServices,
     ) -> None:
         self.request = request
-        self.search_backends = search_backends
-        self.reference_backend = reference_backend
-        self.scorer = scorer
-        self.reranker = reranker
-        self.pool = PaperPool()
-        self.history: list[tuple[str, str]] = []
-        self.actions: list[ScoutAction] = []
-        self.errors: list[str] = []
-        self.step = 0
-        self.backend_seconds = 0.0
-        self._lock = asyncio.Lock()
+        self.services = services
+        self.state = ScoutRunState()
 
     async def search(self, query: str) -> ScoutAction:
         """执行一次 ``search``：跨后端检索、打分、按 τ 入池。"""
         cleaned = query.strip()
-        action = ScoutAction(step=max(self.step, 1), kind="search", argument=cleaned)
-        if not cleaned or ("search", cleaned) in self.history:
+        action = ScoutAction(
+            step=max(self.state.step, 1), kind="search", argument=cleaned
+        )
+        if not cleaned or ("search", cleaned) in self.state.history:
             action.repeated = True
             action.reward = -REPEAT_PENALTY
             self._record(action, ("search", cleaned))
@@ -87,14 +103,19 @@ class ScoutSession:
         found: list[ScoutPaper] = []
         seen: set[str] = set()
         outcomes = await asyncio.gather(
-            *(self._ask_backend(backend, cleaned) for backend in self.search_backends)
+            *(
+                self._ask_backend(backend, cleaned)
+                for backend in self.services.search_backends
+            )
         )
         for backend, (results, error) in zip(
-            self.search_backends, outcomes, strict=True
+            self.services.search_backends, outcomes, strict=True
         ):
             if error is not None:
                 # 单个后端失败（限流、解析失败、网络）→ 记录并继续用其他后端
-                self.errors.append(f"{backend.name}: {type(error).__name__}: {error}")
+                self.state.errors.append(
+                    f"{backend.name}: {type(error).__name__}: {error}"
+                )
                 action.error = f"{backend.name}: {type(error).__name__}"
                 continue
             for paper in results:
@@ -121,19 +142,19 @@ class ScoutSession:
         失败，扣分也扣在错的地方。
         """
         cleaned = locator.strip()
-        async with self._lock:
-            target = self.pool.resolve(cleaned)
-            expandable = target is not None and self.pool.mark_expanded(
+        async with self.state.lock:
+            target = self.state.pool.resolve(cleaned)
+            expandable = target is not None and self.state.pool.mark_expanded(
                 target.paper_key
             )
         action = ScoutAction(
-            step=max(self.step, 1),
+            step=max(self.state.step, 1),
             kind="expand",
             argument=locator_for(target) if target is not None else cleaned,
         )
         if target is None:
             action.error = "unknown paper locator"
-            self.errors.append(f"expand: unknown paper locator {cleaned!r}")
+            self.state.errors.append(f"expand: unknown paper locator {cleaned!r}")
             self._record(action, ("expand", action.argument))
             return action
         if not expandable:
@@ -141,27 +162,29 @@ class ScoutSession:
             action.reward = -REPEAT_PENALTY
             self._record(action, ("expand", action.argument))
             return action
-        if self.reference_backend is None:
+        if self.services.reference_backend is None:
             action.error = "no reference backend configured"
             self._record(action, ("expand", action.argument))
             return action
 
         started = time.monotonic()
         try:
-            found = await self.reference_backend.references(
+            found = await self.services.reference_backend.references(
                 target, self.request.expand_top_k
             )
-        except Exception as error:
-            self.backend_seconds += time.monotonic() - started
+        except Exception as error:  # noqa: BLE001 - external backend boundary
+            self.state.backend_seconds += time.monotonic() - started
             # 引用后端失败 → 该动作零收益，但论文仍保持已扩展，避免立刻重复请求
-            self.errors.append(
-                f"{self.reference_backend.name}: {type(error).__name__}: {error}"
+            self.state.errors.append(
+                f"{self.services.reference_backend.name}: {type(error).__name__}: {error}"
             )
-            action.error = f"{self.reference_backend.name}: {type(error).__name__}"
+            action.error = (
+                f"{self.services.reference_backend.name}: {type(error).__name__}"
+            )
             self._record(action, ("expand", action.argument))
             return action
 
-        self.backend_seconds += time.monotonic() - started
+        self.state.backend_seconds += time.monotonic() - started
         action.returned = len(found)
         await self._absorb(found, action, EXPAND_COST)
         self._record(action, ("expand", action.argument))
@@ -191,10 +214,10 @@ class ScoutSession:
                 ),
                 None,
             )
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - external backend boundary
             return [], error
         finally:
-            self.backend_seconds += time.monotonic() - started
+            self.state.backend_seconds += time.monotonic() - started
 
     async def _absorb(
         self, found: list[ScoutPaper], action: ScoutAction, cost: float
@@ -206,22 +229,22 @@ class ScoutSession:
 
         没配 reranker 时 ``affinity`` 保持 0.0，排序退回 ``tie_break``（见 ``rank_key``）。
         """
-        async with self._lock:
-            fresh = [paper for paper in found if not self.pool.contains(paper)]
+        async with self.state.lock:
+            fresh = [paper for paper in found if not self.state.pool.contains(paper)]
         if not fresh:
             return
         scores, affinities = await asyncio.gather(
-            self.scorer.score(self.request.query, fresh),
+            self.services.scorer.score(self.request.query, fresh),
             self._affinity(fresh),
         )
         accepted: list[float] = []
-        async with self._lock:
+        async with self.state.lock:
             for paper, score, affinity in zip(fresh, scores, affinities, strict=True):
                 if score < ACCEPT_THRESHOLD:
                     continue
                 paper.relevance = score
                 paper.affinity = affinity
-                if not self.pool.add(paper):
+                if not self.state.pool.add(paper):
                     continue
                 accepted.append(score)
         action.accepted = len(accepted)
@@ -229,10 +252,10 @@ class ScoutSession:
 
     async def _affinity(self, papers: list[ScoutPaper]) -> list[float]:
         """取同分次序信号；没配 reranker 时返回全 0，与"没拿到信号"是同一种取值。"""
-        if self.reranker is None:
+        if self.services.reranker is None:
             return [0.0] * len(papers)
-        return await self.reranker.affinity(self.request.query, papers)
+        return await self.services.reranker.affinity(self.request.query, papers)
 
     def _record(self, action: ScoutAction, entry: tuple[str, str]) -> None:
-        self.actions.append(action)
-        self.history.append(entry)
+        self.state.actions.append(action)
+        self.state.history.append(entry)

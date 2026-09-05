@@ -31,7 +31,7 @@ PSPO 训练：PSPO 是训练算法，需要 4×H800、Qwen3-4B 底座与 verl/ra
 | 过程奖励 top-k | 3，判定阈值 0.4 | A.2 与开源实现 |
 | 重复动作惩罚 η | 0.5 | 式 (2) |
 | 终止条件 | 池连续三步不变 | A.2 |
-| 策略提示、SELECT_PROMPT | 逐字移植 | 开源实现 `prompts.py` |
+| 策略提示、分级评分提示 | 按推理期接口移植 | 开源实现 |
 
 过程奖励在推理期不参与任何决策，只作为可审计的过程信号写进 `ScoutAction.reward`。
 
@@ -47,7 +47,7 @@ PSPO 训练：PSPO 是训练算法，需要 4×H800、Qwen3-4B 底座与 verl/ra
 3. **相关性分数**。论文的 ρ(p) 是 pasa-7b-selector 输出 `"True"` token 的概率，需要推理端点
    返回 logprobs。当前端点实测不返回 logprobs，二值判定会让 ρ 只剩两个取值、Recall@k 排序
    和 0.5 阈值同时退化，因此默认改用论文 LLM-score 一节的 0–3 分级评分归一到 [0,1]。
-   `TokenProbabilityScorer` 保留了原口径，端点支持 logprobs 时可直接切换。
+   已删除未启用且会退化为二值分数的 token-probability 实现。
 4. **交付门槛与可取源过滤**。默认值不再是论文的 ρ ≥ 0.5，理由见下节；复现基准时必须显式
    传 `retain_threshold=PASA_RETAIN_THRESHOLD, require_retrievable_source=False`。
 
@@ -210,14 +210,17 @@ limiter = HostRateLimiter(
     bucket_intervals={"api.semanticscholar.org": SEMANTIC_SCHOLAR_INTERVAL},
 )
 semantic_scholar = SemanticScholarBackend(limiter, api_key=...)
-agent = PaperScoutAgent(
-    artifacts,
-    [ArxivSearchBackend(limiter), semantic_scholar],
-    semantic_scholar,
-    GradedRelevanceScorer(client, model),
+services = ScoutServices(
+    search_backends=[ArxivSearchBackend(limiter), semantic_scholar],
+    reference_backend=semantic_scholar,
+    scorer=GradedRelevanceScorer(client, model),
+)
+agent = PaperScoutAgent(PaperScoutRuntime(
+    artifacts=artifacts,
+    services=services,
     model=model,
     client=client,
-)
+))
 ```
 
 运行期发出三类事件：`paper_scout/started`、`paper_scout/step`（步号、调用数、池大小、

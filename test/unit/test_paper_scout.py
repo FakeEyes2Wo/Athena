@@ -3,31 +3,33 @@
 import asyncio
 import json
 import tempfile
-import math
 import time
 import unittest
 import urllib.error
-from unittest import mock
-import athena.research.literature.paper_scout.agent as agent_module
-from athena.research.literature.paper_scout.selection import DeliverySelection
-from athena.research.literature.paper_source.schemas import PaperSourcePolicy
-from types import SimpleNamespace
 import zlib
+from types import SimpleNamespace
+from unittest import mock
 
 from pydantic import ValidationError
 
+import athena.research.literature.paper_scout.agent as agent_module
 from athena.core.agent.models import AgentContext
+from athena.core.artifact_store import LocalArtifactStore
 from athena.core.thread_models import AthenaThread, AthenaTurn
 from athena.core.tool import ToolRegistry
 from athena.core.tool_types import ToolContext
 from athena.research.literature.paper_scout.agent import (
     PaperScoutAgent,
+    PaperScoutExpandTool,
+    PaperScoutRuntime,
+    PaperScoutSearchTool,
     dispatch_tool_calls,
+    format_history,
 )
 from athena.research.literature.paper_scout.backends import (
     ARXIV_MAX_RESULTS,
-    SEMANTIC_SCHOLAR_MAX_RESULTS,
     SEMANTIC_SCHOLAR_FIELDS,
+    SEMANTIC_SCHOLAR_MAX_RESULTS,
     ArxivSearchBackend,
     BackendError,
     SemanticScholarBackend,
@@ -44,13 +46,6 @@ from athena.research.literature.paper_scout.pool import (
     tie_break,
     truncate_abstract,
 )
-from athena.research.literature.paper_scout.reranker import (
-    RERANK_ATTEMPTS,
-    DashScopeReranker,
-    document_for,
-    parse_scores,
-)
-from athena.research.literature.paper_scout.prompts import format_history
 from athena.research.literature.paper_scout.schemas import (
     ACCEPT_THRESHOLD,
     PASA_RETAIN_THRESHOLD,
@@ -65,19 +60,24 @@ from athena.research.literature.paper_scout.schemas import (
 from athena.research.literature.paper_scout.scorer import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_PASSES,
+    RERANK_ATTEMPTS,
+    DashScopeReranker,
     GradedRelevanceScorer,
-    decision_position,
+    document_for,
     parse_grades,
-    true_probability,
+    parse_scores,
 )
-from athena.research.literature.paper_scout.session import ScoutSession, process_reward
-from athena.research.literature.paper_scout.tool import (
-    PaperScoutExpandTool,
-    PaperScoutSearchTool,
+from athena.research.literature.paper_scout.selection import DeliverySelection
+from athena.research.literature.paper_scout.session import (
+    ScoutServices,
+    ScoutSession,
+    process_reward,
 )
 from athena.research.literature.paper_source.http import HostRateLimiter, HttpResponse
-from athena.research.literature.paper_source.schemas import PaperSourceRequest
-from athena.core.artifact_store import LocalArtifactStore
+from athena.research.literature.paper_source.schemas import (
+    PaperSourcePolicy,
+    PaperSourceRequest,
+)
 
 ATOM_FEED = b"""<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -205,7 +205,7 @@ def aid(key: str) -> str:
     PaperIdentity validates the identifier format, so fixtures cannot use bare
     counters like "1" once the delivered set is turned into a paper_source request.
     """
-    return "2401.%05d" % (zlib.crc32(key.encode()) % 90000 + 10000)
+    return f"2401.{zlib.crc32(key.encode()) % 90000 + 10000:05d}"
 
 
 def paper(key: str, title: str, score: float, expanded: bool = False) -> ScoutPaper:
@@ -509,9 +509,6 @@ class ScorerTest(unittest.TestCase):
     def test_unparsable_output_scores_zero(self):
         self.assertEqual(parse_grades("no json at all", 2), [0.0, 0.0])
 
-    def test_true_probability_is_none_without_logprobs(self):
-        self.assertIsNone(true_probability(None))
-
 
 class StubScoringClient:
     """记录每次打分请求的 prompt，可按论文标题触发一次失败。"""
@@ -672,7 +669,9 @@ def session_for(
     backends: list, reference=None, scores: dict[str, float] | None = None, **kwargs
 ) -> ScoutSession:
     request = ScoutRequest(query="anomaly detection", **kwargs)
-    return ScoutSession(request, backends, reference, StubScorer(scores or {}))
+    return ScoutSession(
+        request, ScoutServices(backends, reference, StubScorer(scores or {}))
+    )
 
 
 class SessionSearchTest(unittest.TestCase):
@@ -681,8 +680,10 @@ class SessionSearchTest(unittest.TestCase):
         session = session_for([backend], scores={"Relevant": 0.8})
         action = asyncio.run(session.search("graph anomaly"))
         self.assertEqual(action.accepted, 1)
-        self.assertEqual(len(session.pool), 1)
-        self.assertAlmostEqual(session.pool.get(f"arxiv:{aid('1')}").relevance, 0.8)
+        self.assertEqual(len(session.state.pool), 1)
+        self.assertAlmostEqual(
+            session.state.pool.get(f"arxiv:{aid('1')}").relevance, 0.8
+        )
 
     def test_papers_below_tau_are_rejected(self):
         backend = StubBackend("stub", [paper("1", "Irrelevant", 0.0)])
@@ -690,13 +691,13 @@ class SessionSearchTest(unittest.TestCase):
         action = asyncio.run(session.search("graph anomaly"))
         self.assertEqual(action.returned, 1)
         self.assertEqual(action.accepted, 0)
-        self.assertEqual(len(session.pool), 0)
+        self.assertEqual(len(session.state.pool), 0)
 
     def test_tau_boundary_is_inclusive(self):
         backend = StubBackend("stub", [paper("1", "Edge", 0.0)])
         session = session_for([backend], scores={"Edge": ACCEPT_THRESHOLD})
         asyncio.run(session.search("q"))
-        self.assertEqual(len(session.pool), 1)
+        self.assertEqual(len(session.state.pool), 1)
 
     def test_repeating_a_query_is_penalised_and_skips_the_backend(self):
         backend = StubBackend("stub", [paper("1", "Relevant", 0.0)])
@@ -727,7 +728,7 @@ class SessionSearchTest(unittest.TestCase):
         action = asyncio.run(session.search("q"))
         self.assertEqual(action.returned, 1)
         self.assertEqual(action.accepted, 1)
-        self.assertEqual(session.scorer.seen, ["A Neural Model"])
+        self.assertEqual(session.services.scorer.seen, ["A Neural Model"])
 
     def test_results_are_deduplicated_across_backends(self):
         shared = paper("1", "Shared", 0.0)
@@ -737,7 +738,7 @@ class SessionSearchTest(unittest.TestCase):
         )
         action = asyncio.run(session.search("q"))
         self.assertEqual(action.returned, 1)
-        self.assertEqual(len(session.pool), 1)
+        self.assertEqual(len(session.state.pool), 1)
 
     def test_one_failing_backend_does_not_stop_the_other(self):
         session = session_for(
@@ -749,25 +750,25 @@ class SessionSearchTest(unittest.TestCase):
         )
         action = asyncio.run(session.search("q"))
         self.assertEqual(action.accepted, 1)
-        self.assertTrue(session.errors)
-        self.assertIn("bad", session.errors[0])
+        self.assertTrue(session.state.errors)
+        self.assertIn("bad", session.state.errors[0])
 
     def test_already_pooled_papers_are_not_rescored(self):
         backend = StubBackend("stub", [paper("1", "Relevant", 0.0)])
         session = session_for([backend], scores={"Relevant": 0.8})
         asyncio.run(session.search("first"))
         asyncio.run(session.search("second"))
-        self.assertEqual(session.scorer.seen, ["Relevant"])
+        self.assertEqual(session.services.scorer.seen, ["Relevant"])
 
 
 class SessionExpandTest(unittest.TestCase):
     def test_expanding_a_pooled_paper_adds_its_references(self):
         reference = StubBackend("refs", [paper("cited", "Cited", 0.0)])
         session = session_for([], reference=reference, scores={"Cited": 0.7})
-        session.pool.add(paper("seed", "Seed", 0.9))
+        session.state.pool.add(paper("seed", "Seed", 0.9))
         action = asyncio.run(session.expand(aid("seed")))
         self.assertEqual(action.accepted, 1)
-        self.assertTrue(session.pool.get(f"arxiv:{aid('seed')}").expanded)
+        self.assertTrue(session.state.pool.get(f"arxiv:{aid('seed')}").expanded)
 
     def test_expanding_an_unknown_locator_is_an_error_not_a_repeat(self):
         """ "认不出这个定位符"与"这篇扩展过了"是两回事，混在一起会掩盖解析失败。"""
@@ -778,7 +779,7 @@ class SessionExpandTest(unittest.TestCase):
         self.assertFalse(action.repeated)
         self.assertEqual("unknown paper locator", action.error)
         self.assertEqual(0.0, action.reward)
-        self.assertTrue(session.errors)
+        self.assertTrue(session.state.errors)
 
     def test_expanding_a_journal_paper_by_its_doi_locator(self):
         """observation 对纯期刊论文渲染 doi: 前缀的 key，expand 必须认得。
@@ -789,31 +790,31 @@ class SessionExpandTest(unittest.TestCase):
         reference = StubBackend("refs", [paper("cited", "Cited", 0.0)])
         session = session_for([], reference=reference, scores={"Cited": 0.7})
         seed = journal_paper("10.1109/access.2025.3569523", "Journal Seed", 0.9)
-        session.pool.add(seed)
+        session.state.pool.add(seed)
 
         action = asyncio.run(session.expand(locator_for(seed)))
 
         self.assertEqual("", action.error)
         self.assertEqual(1, action.accepted)
-        self.assertTrue(session.pool.get(seed.paper_key).expanded)
+        self.assertTrue(session.state.pool.get(seed.paper_key).expanded)
 
     def test_a_doi_locator_is_matched_case_insensitively(self):
         """DOI 在 paper_key 里保持上游写法，而模型转述时常改变大小写。"""
         reference = StubBackend("refs", [])
         session = session_for([], reference=reference)
         seed = journal_paper("10.1109/ACCESS.2025.3569523", "Journal Seed", 0.9)
-        session.pool.add(seed)
+        session.state.pool.add(seed)
 
         action = asyncio.run(session.expand(locator_for(seed).lower()))
 
         self.assertEqual("", action.error)
         self.assertFalse(action.repeated)
-        self.assertTrue(session.pool.get(seed.paper_key).expanded)
+        self.assertTrue(session.state.pool.get(seed.paper_key).expanded)
 
     def test_expanding_twice_is_penalised(self):
         reference = StubBackend("refs", [paper("cited", "Cited", 0.0)])
         session = session_for([], reference=reference, scores={"Cited": 0.7})
-        session.pool.add(paper("seed", "Seed", 0.9))
+        session.state.pool.add(paper("seed", "Seed", 0.9))
         first = asyncio.run(session.expand(aid("seed")))
         action = asyncio.run(session.expand(aid("seed")))
         self.assertFalse(first.repeated)
@@ -829,7 +830,7 @@ class SessionExpandTest(unittest.TestCase):
             source="search",
             relevance=0.9,
         )
-        session.pool.add(seed)
+        session.state.pool.add(seed)
         action = asyncio.run(session.expand("arXiv:1706.03762v5"))
         self.assertFalse(action.repeated)
         self.assertEqual(action.argument, "1706.03762")
@@ -837,10 +838,10 @@ class SessionExpandTest(unittest.TestCase):
     def test_reference_backend_failure_is_recorded(self):
         reference = StubBackend("refs", [], error=BackendError("HTTP 429"))
         session = session_for([], reference=reference)
-        session.pool.add(paper("seed", "Seed", 0.9))
+        session.state.pool.add(paper("seed", "Seed", 0.9))
         action = asyncio.run(session.expand(aid("seed")))
         self.assertIn("refs", action.error)
-        self.assertTrue(session.errors)
+        self.assertTrue(session.state.errors)
 
 
 class ToolTest(unittest.TestCase):
@@ -929,13 +930,13 @@ class AgentTest(unittest.TestCase):
             request = ScoutRequest(query="anomaly detection", **kwargs)
             ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
             agent = PaperScoutAgent(
-                artifacts,
-                backends,
-                reference,
-                StubScorer(scores or {}),
-                model="stub-model",
+                PaperScoutRuntime(
+                    artifacts,
+                    ScoutServices(backends, reference, StubScorer(scores or {})),
+                    "stub-model",
+                )
             )
-            agent._provider = ScriptedProvider(batches)
+            agent.runtime.provider = ScriptedProvider(batches)
             outcome = asyncio.run(agent.run(agent_context(ref)))
             result = PaperScoutResult.model_validate_json(
                 asyncio.run(artifacts.get_text(outcome.result_ref))
@@ -946,7 +947,7 @@ class AgentTest(unittest.TestCase):
             stats = ScoutStats.model_validate_json(
                 asyncio.run(artifacts.get_text(result.stats_ref))
             )
-            return result, corpus, stats, agent._provider
+            return result, corpus, stats, agent.runtime.provider
 
     def test_a_single_search_step_produces_a_retained_paper(self):
         result, corpus, stats, _ = self.run_agent(
@@ -1061,13 +1062,17 @@ class AgentTest(unittest.TestCase):
             request = ScoutRequest(query="anomaly detection", max_steps=1)
             ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
             agent = PaperScoutAgent(
-                artifacts,
-                [StubBackend("stub", [paper("1", "Relevant", 0.0)])],
-                None,
-                StubScorer({"Relevant": 0.9}),
-                model="stub-model",
+                PaperScoutRuntime(
+                    artifacts,
+                    ScoutServices(
+                        [StubBackend("stub", [paper("1", "Relevant", 0.0)])],
+                        None,
+                        StubScorer({"Relevant": 0.9}),
+                    ),
+                    "stub-model",
+                )
             )
-            agent._provider = ScriptedProvider(
+            agent.runtime.provider = ScriptedProvider(
                 [[("paper_scout_search", {"query": "graph anomaly"})]]
             )
             outcome = asyncio.run(agent.run(agent_context(ref)))
@@ -1098,13 +1103,17 @@ class AgentTest(unittest.TestCase):
                 paper_key="title:only", title="Title Only", source="search"
             )
             agent = PaperScoutAgent(
-                artifacts,
-                [StubBackend("stub", [titled])],
-                None,
-                StubScorer({"Title Only": 0.9}),
-                model="stub-model",
+                PaperScoutRuntime(
+                    artifacts,
+                    ScoutServices(
+                        [StubBackend("stub", [titled])],
+                        None,
+                        StubScorer({"Title Only": 0.9}),
+                    ),
+                    "stub-model",
+                )
             )
-            agent._provider = ScriptedProvider(
+            agent.runtime.provider = ScriptedProvider(
                 [[("paper_scout_search", {"query": "q"})]]
             )
             outcome = asyncio.run(agent.run(agent_context(ref)))
@@ -1124,21 +1133,30 @@ class AgentTest(unittest.TestCase):
             request = ScoutRequest(query="auc", max_steps=1)
             ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
             agent = PaperScoutAgent(
-                artifacts,
-                [
-                    StubBackend(
-                        "semantic_scholar",
+                PaperScoutRuntime(
+                    artifacts,
+                    ScoutServices(
                         [
-                            paper("1", "Preprint", 0.0),
-                            journal_paper("10.29220/csam", "L1-penalized", 0.0, OA_PDF),
+                            StubBackend(
+                                "semantic_scholar",
+                                [
+                                    paper("1", "Preprint", 0.0),
+                                    journal_paper(
+                                        "10.29220/csam",
+                                        "L1-penalized",
+                                        0.0,
+                                        OA_PDF,
+                                    ),
+                                ],
+                            )
                         ],
-                    )
-                ],
-                None,
-                StubScorer({"Preprint": 1.0, "L1-penalized": 0.9}),
-                model="stub-model",
+                        None,
+                        StubScorer({"Preprint": 1.0, "L1-penalized": 0.9}),
+                    ),
+                    "stub-model",
+                )
             )
-            agent._provider = ScriptedProvider(
+            agent.runtime.provider = ScriptedProvider(
                 [[("paper_scout_search", {"query": "q"})]]
             )
             outcome = asyncio.run(agent.run(agent_context(ref)))
@@ -1366,80 +1384,6 @@ class OpenAccessFieldTest(unittest.TestCase):
         self.assertIn("isOpenAccess", SEMANTIC_SCHOLAR_FIELDS)
 
 
-class DecisionTokenTest(unittest.TestCase):
-    """判决 token 不在序列开头——旧实现假定它在，于是每篇都得 0 分。"""
-
-    @staticmethod
-    def _logprobs(tokens: list[tuple[str, list[tuple[str, float]]]]):
-        """按 OpenAI 的 logprobs 形状造一个替身。"""
-        return SimpleNamespace(
-            content=[
-                SimpleNamespace(
-                    token=token,
-                    top_logprobs=[
-                        SimpleNamespace(token=name, logprob=math.log(max(prob, 1e-12)))
-                        for name, prob in alternatives
-                    ],
-                )
-                for token, alternatives in tokens
-            ]
-        )
-
-    def test_the_verdict_is_found_behind_the_decision_prefix(self) -> None:
-        """真机形态：token[0]='Decision'、token[1]=':'、token[2]=' True'。"""
-        logprobs = self._logprobs(
-            [
-                ("Decision", [("Decision", 1.0), ("Dec", 0.0), ("Reason", 0.0)]),
-                (":", [(":", 1.0)]),
-                (" True", [(" True", 0.72), (" False", 0.28)]),
-            ]
-        )
-
-        self.assertEqual(2, decision_position(logprobs.content))
-        self.assertAlmostEqual(0.72, true_probability(logprobs), places=6)
-
-    def test_a_false_verdict_reports_the_true_probability_not_zero(self) -> None:
-        logprobs = self._logprobs(
-            [
-                ("Decision", [("Decision", 1.0)]),
-                (":", [(":", 1.0)]),
-                (" False", [(" False", 0.9), (" True", 0.1)]),
-            ]
-        )
-
-        self.assertAlmostEqual(0.1, true_probability(logprobs), places=6)
-
-    def test_a_verdict_in_first_position_still_works(self) -> None:
-        """换个提示词前缀就没了；定位必须按 token 内容，不能按固定下标。"""
-        logprobs = self._logprobs([("True", [("True", 0.8), ("False", 0.2)])])
-
-        self.assertEqual(0, decision_position(logprobs.content))
-        self.assertAlmostEqual(0.8, true_probability(logprobs), places=6)
-
-    def test_no_verdict_anywhere_degrades_rather_than_scoring_zero(self) -> None:
-        """返回 None 让调用方走文本回退；返回 0.0 会把"读不出来"伪装成"不相关"。"""
-        logprobs = self._logprobs([("I", [("I", 1.0)]), (" think", [(" think", 1.0)])])
-
-        self.assertIsNone(decision_position(logprobs.content))
-        self.assertIsNone(true_probability(logprobs))
-
-    def test_an_endpoint_without_logprobs_still_returns_none(self) -> None:
-        self.assertIsNone(true_probability(None))
-        self.assertIsNone(true_probability(SimpleNamespace(content=[])))
-
-    def test_a_verdict_whose_alternatives_omit_true_scores_zero(self) -> None:
-        """True 掉出 top_k 截断 = 概率极低，判 0 是对的。"""
-        logprobs = self._logprobs(
-            [
-                ("Decision", [("Decision", 1.0)]),
-                (":", [(":", 1.0)]),
-                (" False", [(" False", 1.0), (" false", 0.0)]),
-            ]
-        )
-
-        self.assertEqual(0.0, true_probability(logprobs))
-
-
 class BackendLimitTest(unittest.IsolatedAsyncioTestCase):
     """两个后端的返回上限必须夹紧，而不是把超限的值原样透传。"""
 
@@ -1517,9 +1461,13 @@ class DeliveryTargetTest(unittest.TestCase):
             )
             ref = asyncio.run(artifacts.put_text(request.model_dump_json()))
             agent = PaperScoutAgent(
-                artifacts, [backend], None, StubScorer(scores), model="stub-model"
+                PaperScoutRuntime(
+                    artifacts,
+                    ScoutServices([backend], None, StubScorer(scores)),
+                    "stub-model",
+                )
             )
-            agent._provider = ScriptedProvider(
+            agent.runtime.provider = ScriptedProvider(
                 [[("paper_scout_search", {"query": "graph anomaly"})]]
             )
             with mock.patch.object(agent_module, "select_delivery", spy):
@@ -1732,10 +1680,7 @@ class SessionRerankTest(unittest.IsolatedAsyncioTestCase):
     def _session(self, reranker) -> ScoutSession:
         return ScoutSession(
             ScoutRequest(query="q"),
-            [],
-            None,
-            StubScorer({"A": 0.45, "B": 0.45}),
-            reranker,
+            ScoutServices([], None, StubScorer({"A": 0.45, "B": 0.45}), reranker),
         )
 
     async def test_affinity_lands_on_the_papers_that_enter_the_pool(self) -> None:
@@ -1748,7 +1693,9 @@ class SessionRerankTest(unittest.IsolatedAsyncioTestCase):
             0.1,
         )
 
-        self.assertEqual(["A", "B"], [item.title for item in session.pool.ranked()])
+        self.assertEqual(
+            ["A", "B"], [item.title for item in session.state.pool.ranked()]
+        )
         self.assertEqual(1, reranker.calls)
 
     async def test_no_reranker_leaves_affinity_at_zero(self) -> None:
@@ -1761,7 +1708,7 @@ class SessionRerankTest(unittest.IsolatedAsyncioTestCase):
             0.1,
         )
 
-        self.assertEqual(0.0, session.pool.ranked()[0].affinity)
+        self.assertEqual(0.0, session.state.pool.ranked()[0].affinity)
 
     async def test_scoring_and_reranking_run_concurrently(self) -> None:
         """两者互不依赖，串行发出等于白等 rerank 的那一整段延迟。"""
@@ -1783,10 +1730,12 @@ class SessionRerankTest(unittest.IsolatedAsyncioTestCase):
 
         session = ScoutSession(
             ScoutRequest(query="q"),
-            [],
-            None,
-            SlowScorer({"A": 0.45}),
-            SlowReranker({"A": 0.3}),
+            ScoutServices(
+                [],
+                None,
+                SlowScorer({"A": 0.45}),
+                SlowReranker({"A": 0.3}),
+            ),
         )
 
         await session._absorb(
@@ -1847,12 +1796,13 @@ class ScoutBusyTimeTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("timeout")
 
         session = ScoutSession(
-            ScoutRequest(query="q"), [SlowFailing()], None, StubScorer({})
+            ScoutRequest(query="q"),
+            ScoutServices([SlowFailing()], None, StubScorer({})),
         )
 
         await session.search("q")
 
-        self.assertGreater(session.backend_seconds, 0.0)
+        self.assertGreater(session.state.backend_seconds, 0.0)
 
     async def test_busy_time_is_not_presented_as_a_wall_clock_share(self) -> None:
         """并发下四项之和会超过墙钟；这个测试锁住"可以超过"，防止有人加个错误的断言。
@@ -1878,7 +1828,9 @@ class ScoutBusyTimeTest(unittest.IsolatedAsyncioTestCase):
         scorer = Slow({"A": 0.45})
         scorer.seconds = 0.05
         reranker = SlowRerank({"A": 0.3})
-        session = ScoutSession(ScoutRequest(query="q"), [], None, scorer, reranker)
+        session = ScoutSession(
+            ScoutRequest(query="q"), ScoutServices([], None, scorer, reranker)
+        )
 
         started = time.monotonic()
         await session._absorb(

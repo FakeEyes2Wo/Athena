@@ -146,20 +146,9 @@ class FakeScoutAgent:
     status = "complete"
     warnings: list[str] = []
 
-    def __init__(
-        self,
-        artifacts,
-        backends,
-        references,
-        scorer,
-        *,
-        model,
-        client,
-        selector=None,
-        reranker=None,
-    ):
-        self.artifacts = artifacts
-        type(self).seen_reranker = reranker
+    def __init__(self, runtime):
+        self.artifacts = runtime.artifacts
+        type(self).seen_reranker = runtime.services.reranker
 
     async def run(self, ctx) -> AgentOutcome:
         type(self).seen_request = ScoutRequest.model_validate_json(

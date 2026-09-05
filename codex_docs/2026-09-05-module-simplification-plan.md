@@ -497,6 +497,16 @@ Replace the six-input `build_corpus_index` interface with `store`, `papers`, and
 
 The unchanged pre-change paper-RAG, hybrid, benchmark, and runtime baseline passed 164 tests. The expanded final paper-RAG, hybrid, benchmark, runtime, survey-pipeline, and survey-wiring selection passed 236 tests. Targeted production Ruff, old-module/symbol searches, and documentation source-of-truth checks passed; pytest reported only the existing cache-permission warning. Closing all seven baseline rows advances reviewed coverage to 307/602. Whole-repository acceptance remains pending.
 
+## Paper scouting runtime consolidation
+
+Read all eleven `paper_scout` Python files completely and traced policy actions, backend search and reference expansion, pool mutation, relevance signals, delivery selection, persisted artifacts, event emission, and survey composition. Preserve the POMDP observation, concurrent search/expand actions, deterministic retention order, per-backend failure isolation, retrievable-source filtering, reference edges, progress events, timing/call statistics, and source-request handoff. Persisted schemas, backend adapters, the pool, delivery selection, and the per-run session remain distinct lifecycle or contract boundaries.
+
+Delete the disabled `TokenProbabilityScorer` path: it had no production composition, its decision-token API existed only for seven exclusive tests, and even the repaired experiment collapsed relevance to two saturated values. Keep the active four-grade scorer and move the tie-only cross-encoder beside it. Move policy prompts and the two run-local tool adapters into `agent.py`, deleting `prompts.py`, `reranker.py`, and `tool.py` without forwarding modules. The package falls from eleven Python files and 2,677 physical lines to eight files and 2,135 lines.
+
+Introduce immutable `ScoutServices` plus transient `ScoutRunState`; `ScoutSession` falls from five business constructor inputs and eleven stored attributes to two inputs and three attributes. Introduce `PaperScoutRuntime`; `PaperScoutAgent` falls from eight construction inputs and eight attributes to one runtime input and one attribute. Data schemas remain explicit records rather than being hidden in mutable service objects. The survey composition root and its real test double now use the same runtime contract.
+
+The unchanged baseline returned 198 tests. Removing seven tests exclusive to the deleted disabled scorer leaves 191 active PaperScout/survey tests, all passing. Targeted Ruff, Python compilation, package import smoke, removed-module/symbol searches, and current documentation checks passed; pytest reported only the existing cache-permission warning. Closing all eleven baseline rows advances reviewed coverage to 318/602. Work is performed directly on `main`; no temporary task branch or worktree exists to clean up. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1066,17 +1076,17 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/paper_rag/search.py` | 567 | Reviewed; absorb graph/document traversal and delete duplicate forwarding surface |
 | `src/athena/research/literature/paper_rag/tool.py` | 586 | Reviewed; all tools accept one shared runtime and embedding-only base deleted |
 | `src/athena/research/literature/paper_rag/traversal.py` | 241 | Reviewed; merged into search.py and file deleted |
-| `src/athena/research/literature/paper_scout/__init__.py` | 13 | Pending |
-| `src/athena/research/literature/paper_scout/agent.py` | 443 | Pending |
-| `src/athena/research/literature/paper_scout/backends.py` | 311 | Pending |
-| `src/athena/research/literature/paper_scout/pool.py` | 222 | Pending |
-| `src/athena/research/literature/paper_scout/prompts.py` | 98 | Pending |
-| `src/athena/research/literature/paper_scout/reranker.py` | 210 | Pending |
-| `src/athena/research/literature/paper_scout/schemas.py` | 350 | Pending |
-| `src/athena/research/literature/paper_scout/scorer.py` | 326 | Pending |
-| `src/athena/research/literature/paper_scout/selection.py` | 369 | Pending |
-| `src/athena/research/literature/paper_scout/session.py` | 238 | Pending |
-| `src/athena/research/literature/paper_scout/tool.py` | 97 | Pending |
+| `src/athena/research/literature/paper_scout/__init__.py` | 13 | Reviewed; narrow facade to Agent and its runtime |
+| `src/athena/research/literature/paper_scout/agent.py` | 443 | Reviewed; absorb prompts/tools and reduce Agent to one runtime dependency |
+| `src/athena/research/literature/paper_scout/backends.py` | 311 | Reviewed; retain isolated search/reference adapters |
+| `src/athena/research/literature/paper_scout/pool.py` | 222 | Reviewed; retain deterministic observation, resolution, and ranking state |
+| `src/athena/research/literature/paper_scout/prompts.py` | 98 | Reviewed; prompts moved to their owning execution modules and file deleted |
+| `src/athena/research/literature/paper_scout/reranker.py` | 210 | Reviewed; tie-only relevance signal merged into scorer.py and file deleted |
+| `src/athena/research/literature/paper_scout/schemas.py` | 350 | Reviewed; retain persisted request/corpus/result contracts |
+| `src/athena/research/literature/paper_scout/scorer.py` | 326 | Reviewed; delete disabled token path and consolidate active relevance signals |
+| `src/athena/research/literature/paper_scout/selection.py` | 369 | Reviewed; retain source-aware delivery and boundary selection policy |
+| `src/athena/research/literature/paper_scout/session.py` | 238 | Reviewed; split services/run state and reduce constructor/state surface |
+| `src/athena/research/literature/paper_scout/tool.py` | 97 | Reviewed; run-local adapters merged into agent.py and file deleted |
 | `src/athena/research/literature/paper_source/__init__.py` | 9 | Pending |
 | `src/athena/research/literature/paper_source/arxiv.py` | 245 | Pending |
 | `src/athena/research/literature/paper_source/fetcher.py` | 709 | Pending |
