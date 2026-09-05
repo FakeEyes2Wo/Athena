@@ -53,6 +53,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Remove the unconsumed Rust Git-workspace prototype crate.
 - [x] Review the Rust runtime crate and remove unused retained state and parameters.
 - [x] Review the Rust memory crate and remove unconnected compaction/rollout prototypes.
+- [x] Review the GUI development scripts and merge duplicated process launchers.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -173,6 +174,14 @@ Read all five memory source files and three integration-test files completely, t
 Delete the unconnected compaction, rollout, and agent-runner implementations plus their exclusive and duplicate tests. Merge the active context buffer into `message.rs` and make that module private behind the crate facade. `ContextManager` falls from four fields to one and its constructor from one ignored limit argument to zero; token/version/snapshot/rollback/range APIs disappear with their only consumers. The crate's production dependencies fall from six to one. Retain message normalization, detached history, all wire types, and the fixture-governed Python serialization contract. Update the Rust README so it no longer advertises removed prototypes.
 
 Fresh focused verification passed 19 memory/agent tests. The complete Rust workspace passed 80 tests; workspace Clippy with `-D warnings` and Rust formatting passed. Closing eight memory rows advances reviewed coverage to 188/602. Whole-repository acceptance remains pending.
+
+## GUI development-script review
+
+Read all three GUI development scripts completely and trace their npm lifecycle and direct package-script callers. Retain the generated-directory preparation script because both development and production builds require its distinct filesystem precondition. The backend-only and browser-preview launchers duplicated repository resolution, virtual-environment selection, port propagation, gateway spawning, diagnostics, and signal forwarding.
+
+Merge both launchers into `dev.cjs`, using one `--backend-only` switch while preserving the public `npm run backend` and `npm run dev:web` commands. Share one two-argument child monitor and one shutdown path; invoke npm as an executable plus literal arguments so browser preview also works outside Windows. Delete both old scripts and add no compatibility wrappers.
+
+Node syntax checks and obsolete-reference searches passed. The complete TypeScript/Vite production build passed before and after the change, including the retained generated-directory prebuild. Closing three baseline script rows advances reviewed coverage to 191/602; the replacement `dev.cjs` is separately tracked below. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -444,9 +453,10 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-research/test/execution.test.ts` | New | Reviewed; six real-process command/workdir/event/error/timeout cases |
 | `athena_ts/packages/athena-research/test/public-api.test.ts` | New | Reviewed; removed legacy root/adapter exports and retained canonical DSH services |
 | `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
-| `athena-gui/scripts/dev-backend.cjs` | 38 | Pending |
-| `athena-gui/scripts/dev-web.cjs` | 46 | Pending |
-| `athena-gui/scripts/ensure-generated.mjs` | 15 | Pending |
+| `athena-gui/scripts/dev-backend.cjs` | 38 | Reviewed; merge duplicate gateway launcher into dev.cjs and delete file |
+| `athena-gui/scripts/dev-web.cjs` | 46 | Reviewed; merge duplicate dual-process launcher into dev.cjs and delete file |
+| `athena-gui/scripts/dev.cjs` | New | Reviewed; one backend/preview launcher with shared monitoring and shutdown |
+| `athena-gui/scripts/ensure-generated.mjs` | 15 | Reviewed; retain the minimal build-directory precondition |
 | `athena-gui/src-tauri/src/commands/chat.rs` | 12 | Pending |
 | `athena-gui/src-tauri/src/commands/clarification.rs` | 270 | Pending |
 | `athena-gui/src-tauri/src/commands/dialog.rs` | 103 | Pending |
