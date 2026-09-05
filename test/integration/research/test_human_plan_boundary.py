@@ -408,11 +408,11 @@ async def test_completed_skip_run_is_a_noop(runtime, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ordinary_prose_containing_stop_is_not_a_command(runtime):
-    calls = runtime.supervisor_provider.calls
+    calls = runtime.provider.calls
     await runtime.message("please stop overfitting, but continue research")
 
     assert runtime.state.status == "RUNNING"
-    assert runtime.supervisor_provider.calls == calls + 1
+    assert runtime.provider.calls == calls + 1
 
 
 @pytest.mark.asyncio
@@ -458,6 +458,6 @@ def test_four_successes_do_not_stop_production_search(runtime):
     [("/pause", "WAITING"), ("/resume", "RUNNING"), ("/stop", "STOPPED")],
 )
 async def test_exact_strong_commands_bypass_llm(runtime, command: str, expected: str):
-    provider_calls = runtime.supervisor_provider.calls
+    provider_calls = runtime.provider.calls
     assert await runtime.message(command) == expected
-    assert runtime.supervisor_provider.calls == provider_calls
+    assert runtime.provider.calls == provider_calls

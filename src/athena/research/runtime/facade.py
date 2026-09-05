@@ -247,11 +247,6 @@ class ResearchRuntime:
         return supervisor
 
     @property
-    def supervisor_provider(self) -> object | None:
-        """Return the provider registered for Supervisor turns."""
-        return self._session.lifecycle.provider
-
-    @property
     def root(self) -> Path:
         """Return the research project root."""
         return self._config.paths.root
@@ -680,11 +675,6 @@ class ResearchRuntime:
     def replay_output_events(self) -> list[dict[str, object]]:
         """Return output events recovered from the durable transcript."""
         return self.events.replay_output_events()
-
-    def baseline_evaluator_ref(self) -> ArtifactRef | None:
-        """Return the baseline evaluator reference, if one is recorded."""
-        baselines = self.tree.experiments(kind="baseline")
-        return baselines[0].plan.run_config_ref if baselines else None
 
     async def suspend(self) -> str:
         """Park a live run at WAITING so a torn-down session stops reading as running.

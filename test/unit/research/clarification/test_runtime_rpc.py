@@ -191,7 +191,7 @@ async def test_configured_runtime_constructs_and_shares_one_provider(
         controller = runtime.services.workflow.clarification
         assert controller is not None
         assert factory.calls == [("fake-model", client)]
-        assert runtime.supervisor_provider is provider
+        assert runtime.provider is provider
         assert isinstance(controller._generator, LLMClarificationGenerator)
         assert controller._generator._provider is provider
     finally:
