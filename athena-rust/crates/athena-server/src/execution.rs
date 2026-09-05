@@ -79,7 +79,7 @@ impl Executor for ExecutionAdapter {
             method::TURN_INTERRUPT => {
                 let p: TurnInterruptParams = parse(params)?;
                 self.manager
-                    .interrupt(p.thread_id.as_str(), p.turn_id.as_str(), &p.reason)
+                    .interrupt(p.thread_id.as_str(), p.turn_id.as_str())
                     .await
                     .map_err(runtime_error_to_rpc)?;
                 Ok(json!({ "turn_id": p.turn_id.as_str(), "status": "interrupted" }))

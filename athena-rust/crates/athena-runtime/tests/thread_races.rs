@@ -27,7 +27,7 @@ async fn complete_interrupt_race_yields_single_terminal() {
             let m = mgr.clone();
             let tid = tid.clone();
             async move {
-                let _ = m.interrupt(&tid, &turn_id, "race").await;
+                let _ = m.interrupt(&tid, &turn_id).await;
             }
         });
         interrupt.await.unwrap();
@@ -47,8 +47,8 @@ async fn complete_interrupt_race_yields_single_terminal() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         assert_eq!(terminals, 1, "iteration {i}: expected exactly one terminal");
-        handle.shutdown("done").await;
+        handle.shutdown().await;
     }
 
-    mgr.close("end").await;
+    mgr.close().await;
 }

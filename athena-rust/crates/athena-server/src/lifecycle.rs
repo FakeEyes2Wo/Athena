@@ -52,6 +52,6 @@ impl AppServer {
         self.processor.shutdown(Duration::from_secs(2)).await;
         self.subscriptions.remove_all().await;
         self.mux.abort();
-        self.manager.close("server_shutdown").await;
+        self.manager.close().await;
     }
 }

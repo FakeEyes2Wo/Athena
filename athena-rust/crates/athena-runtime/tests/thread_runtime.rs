@@ -43,7 +43,7 @@ async fn turn_completes_and_records_snapshot() {
     assert_eq!(snap.as_str(), format!("ctx://{}", turn.turn_id.as_str()));
     // Thread returns to idle.
     assert_eq!(handle.state(), ThreadState::Idle);
-    mgr.close("done").await;
+    mgr.close().await;
 }
 
 #[tokio::test]
@@ -69,7 +69,7 @@ async fn concurrent_start_is_rejected() {
         )
         .await;
     assert_eq!(second, Err(RuntimeError::AlreadyRunning));
-    mgr.close("done").await;
+    mgr.close().await;
 }
 
 #[tokio::test]
@@ -89,7 +89,7 @@ async fn failed_turn_emits_single_terminal() {
         .filter(|e| is_terminal(&e.kind))
         .count();
     assert_eq!(terminals, 1);
-    mgr.close("done").await;
+    mgr.close().await;
 }
 
 #[tokio::test]
@@ -107,7 +107,7 @@ async fn interrupt_commits_terminal_and_rejects_late_emit() {
 
     // Let the runner reach its cancel await.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    mgr.interrupt(thread.thread_id.as_str(), turn.turn_id.as_str(), "stop")
+    mgr.interrupt(thread.thread_id.as_str(), turn.turn_id.as_str())
         .await
         .unwrap();
 
@@ -116,7 +116,7 @@ async fn interrupt_commits_terminal_and_rejects_late_emit() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(*rejected.lock().await, Some(true));
     assert_eq!(handle.state(), ThreadState::Idle);
-    mgr.close("done").await;
+    mgr.close().await;
 }
 
 #[tokio::test]
@@ -139,7 +139,7 @@ async fn fork_creates_child_from_completed_snapshot() {
         format!("ctx://{}", turn.turn_id.as_str())
     );
     assert_ne!(child.thread_id.as_str(), thread.thread_id.as_str());
-    mgr.close("done").await;
+    mgr.close().await;
 }
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn shutdown_closes_thread_and_rejects_submit() {
         .unwrap();
     let handle = mgr.get(thread.thread_id.as_str()).await.unwrap();
 
-    handle.shutdown("bye").await;
+    handle.shutdown().await;
     assert_eq!(handle.state(), ThreadState::Closed);
     let denied = handle
         .start_turn(
@@ -164,7 +164,7 @@ async fn shutdown_closes_thread_and_rejects_submit() {
         .await;
     assert_eq!(denied, Err(RuntimeError::Closed));
     // Idempotent close over an already-closed thread.
-    mgr.close("done").await;
+    mgr.close().await;
 }
 
 #[tokio::test]
@@ -174,9 +174,9 @@ async fn manager_close_is_idempotent() {
     let m2 = mgr.clone();
     let a = tokio::spawn({
         let m = mgr.clone();
-        async move { m.close("a").await }
+        async move { m.close().await }
     });
-    let b = tokio::spawn(async move { m2.close("b").await });
+    let b = tokio::spawn(async move { m2.close().await });
     a.await.unwrap();
     b.await.unwrap();
     // A start after close is rejected.

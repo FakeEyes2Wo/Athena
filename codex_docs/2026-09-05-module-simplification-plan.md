@@ -51,6 +51,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the Rust server crate and replace the temporary transport container.
 - [x] Review the Rust type crate and remove the unconsumed research domain layer.
 - [x] Remove the unconsumed Rust Git-workspace prototype crate.
+- [x] Review the Rust runtime crate and remove unused retained state and parameters.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -155,6 +156,14 @@ Read all five `athena-workspace` source files and its real-Git integration test 
 Delete the entire crate instead of retaining a four-field manager and two injectable interfaces with no runtime path. Remove the workspace member/dependency declarations and current README row, regenerate the lockfile, and remove `CommitHash`, whose only production consumer was this crate. The historical WIP inventory remains unchanged because it records the baseline migration state.
 
 After deletion, the complete remaining Rust workspace passed 139 tests. Workspace Clippy with `-D warnings`, Rust formatting, repository reference searches, and `git diff --check` passed. Closing six deleted workspace rows advances reviewed coverage to 170/602 while removing 846 baseline source/test lines plus the crate manifest. Whole-repository acceptance remains pending.
+
+## Rust runtime review
+
+Read all seven runtime source files and all three integration-test files completely, then trace their public methods and event/submission contracts through the agent and server crates. Retain the actor, handle, manager, runner, journal, and submission boundaries because each owns distinct concurrency or lifecycle behavior. Retain generation counters, completed context snapshots, journal tail state, and atomic thread state because race, fork, subscription, and shutdown paths consume them.
+
+Remove the unused memory dependency; seven unread journal inspection/subscription helpers; four write-only subscription fields; the write-only completed-result map; the unused manager lookup; and the handle's unread thread ID. Successful runner signals no longer carry a result reference that the actor discarded. Interrupt, shutdown, and manager-close interfaces no longer accept ignored reason strings. Event forwarding moves owned fields instead of cloning them, and the subscription registry no longer wraps its lock in an unnecessary second `Arc`. No compatibility wrappers or replacement abstractions were added.
+
+Fresh focused verification passed 25 runtime/server/agent tests. The complete Rust workspace passed 139 tests; workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing ten runtime rows advances reviewed coverage to 180/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -846,16 +855,16 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-research/src/experiment.rs` | 92 | Reviewed; delete with unconsumed prototype crate |
 | `athena-rust/crates/athena-research/src/lib.rs` | 166 | Reviewed; delete unused facade and inline-only tests with crate |
 | `athena-rust/crates/athena-research/src/tree.rs` | 141 | Reviewed; delete stale duplicate of authoritative Python ResearchTree |
-| `athena-rust/crates/athena-runtime/src/event.rs` | 303 | Pending |
-| `athena-rust/crates/athena-runtime/src/lib.rs` | 20 | Pending |
-| `athena-rust/crates/athena-runtime/src/runner.rs` | 57 | Pending |
-| `athena-rust/crates/athena-runtime/src/submission.rs` | 84 | Pending |
-| `athena-rust/crates/athena-runtime/src/thread_actor.rs` | 338 | Pending |
-| `athena-rust/crates/athena-runtime/src/thread_handle.rs` | 111 | Pending |
-| `athena-rust/crates/athena-runtime/src/thread_manager.rs` | 222 | Pending |
-| `athena-rust/crates/athena-runtime/tests/common/mod.rs` | 85 | Pending |
-| `athena-rust/crates/athena-runtime/tests/thread_races.rs` | 54 | Pending |
-| `athena-rust/crates/athena-runtime/tests/thread_runtime.rs` | 187 | Pending |
+| `athena-rust/crates/athena-runtime/src/event.rs` | 303 | Reviewed; remove unused journal surface and subscription state |
+| `athena-rust/crates/athena-runtime/src/lib.rs` | 20 | Reviewed; retain the minimal runtime facade |
+| `athena-rust/crates/athena-runtime/src/runner.rs` | 57 | Reviewed; retain the runtime execution contract |
+| `athena-rust/crates/athena-runtime/src/submission.rs` | 84 | Reviewed; remove the actor-discarded success result reference |
+| `athena-rust/crates/athena-runtime/src/thread_actor.rs` | 338 | Reviewed; remove write-only completion state and ignored reasons |
+| `athena-rust/crates/athena-runtime/src/thread_handle.rs` | 111 | Reviewed; remove unread identity and narrow lifecycle commands |
+| `athena-rust/crates/athena-runtime/src/thread_manager.rs` | 222 | Reviewed; remove unused lookup and narrow interrupt/close interfaces |
+| `athena-rust/crates/athena-runtime/tests/common/mod.rs` | 85 | Reviewed; retain shared deterministic runner fixtures |
+| `athena-rust/crates/athena-runtime/tests/thread_races.rs` | 54 | Reviewed; retain late-event and terminal race coverage |
+| `athena-rust/crates/athena-runtime/tests/thread_runtime.rs` | 187 | Reviewed; retain lifecycle, fork, subscription, and shutdown coverage |
 | `athena-rust/crates/athena-server/src/client.rs` | 219 | Reviewed; inline one-call worker, remove retained ready state, and keep six live fields |
 | `athena-rust/crates/athena-server/src/execution.rs` | 118 | Reviewed; retain method-to-runtime boundary and use one RpcError constructor |
 | `athena-rust/crates/athena-server/src/lib.rs` | 19 | Reviewed; remove state/Sequencer/responder exports and expose direct transport factory |

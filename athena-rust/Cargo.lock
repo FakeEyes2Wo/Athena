@@ -64,7 +64,6 @@ name = "athena-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "athena-memory",
  "athena-protocol",
  "athena-types",
  "futures",

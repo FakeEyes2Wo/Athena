@@ -37,12 +37,7 @@ impl SubscriptionRegistry {
         let handle = self.manager.get(thread_id).await?;
         let sub_id = format!("sub:{}", &Uuid::new_v4().simple().to_string()[..12]);
         let (tx, rx) = mpsc::channel::<Event>(256);
-        let sub = Arc::new(Subscription::new(
-            sub_id.clone(),
-            thread_id.to_string(),
-            after_sequence,
-            rx,
-        ));
+        let sub = Arc::new(Subscription::new(sub_id.clone(), rx));
         self.mux.add(sub.clone());
 
         let journal = handle.journal().clone();

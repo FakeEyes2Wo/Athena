@@ -65,7 +65,7 @@ impl RuntimeThreadManager {
         let mut inner = self.inner.lock().await;
         if inner.state != ManagerState::Alive {
             drop(inner);
-            handle.shutdown("manager closed").await;
+            handle.shutdown().await;
             return Err(RuntimeError::Closed);
         }
         inner.handles.insert(thread_id.as_str().to_string(), handle);
@@ -122,7 +122,7 @@ impl RuntimeThreadManager {
         let mut inner = self.inner.lock().await;
         if inner.state != ManagerState::Alive {
             drop(inner);
-            handle.shutdown("manager closed").await;
+            handle.shutdown().await;
             return Err(RuntimeError::Closed);
         }
         inner.handles.insert(child_id.as_str().to_string(), handle);
@@ -135,16 +135,9 @@ impl RuntimeThreadManager {
     }
 
     /// Interrupt a turn on `thread_id`.
-    pub async fn interrupt(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-        reason: &str,
-    ) -> Result<(), RuntimeError> {
+    pub async fn interrupt(&self, thread_id: &str, turn_id: &str) -> Result<(), RuntimeError> {
         let handle = self.get(thread_id).await?;
-        handle
-            .interrupt(turn_id.to_string(), reason.to_string())
-            .await
+        handle.interrupt(turn_id.to_string()).await
     }
 
     /// Look up a live thread handle.
@@ -157,26 +150,8 @@ impl RuntimeThreadManager {
             .ok_or_else(|| RuntimeError::UnknownThread(thread_id.to_string()))
     }
 
-    /// Snapshot a thread as an `AthenaThread`.
-    pub async fn get_thread(&self, thread_id: &str) -> Result<AthenaThread, RuntimeError> {
-        let handle = self.get(thread_id).await?;
-        let context_ref = handle.fork_snapshot(None).await?;
-        let status = match handle.state() {
-            ThreadState::Idle => ThreadStatus::Idle,
-            ThreadState::Running => ThreadStatus::Running,
-            ThreadState::Closing => ThreadStatus::Closing,
-            ThreadState::Closed => ThreadStatus::Closed,
-        };
-        Ok(AthenaThread {
-            thread_id: handle.thread_id().clone(),
-            session_id: handle.session_id().clone(),
-            status,
-            context_ref,
-        })
-    }
-
     /// Shut down every thread. Idempotent; does not hold the lock while waiting.
-    pub async fn close(&self, reason: &str) {
+    pub async fn close(&self) {
         let handles = {
             let mut inner = self.inner.lock().await;
             if inner.state != ManagerState::Alive {
@@ -186,7 +161,7 @@ impl RuntimeThreadManager {
             inner.handles.values().cloned().collect::<Vec<_>>()
         };
 
-        futures::future::join_all(handles.iter().map(|h| h.shutdown(reason))).await;
+        futures::future::join_all(handles.iter().map(ThreadHandle::shutdown)).await;
 
         let mut inner = self.inner.lock().await;
         inner.state = ManagerState::Closed;
@@ -218,5 +193,5 @@ fn spawn_thread(
     );
     tokio::spawn(actor.run());
 
-    ThreadHandle::new(thread_id, session_id, cmd_tx, journal, state)
+    ThreadHandle::new(session_id, cmd_tx, journal, state)
 }

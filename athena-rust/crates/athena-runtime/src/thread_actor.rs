@@ -53,7 +53,6 @@ pub(crate) struct ThreadActor {
     next_gen: u64,
     active: Option<ActiveTurn>,
     completed_contexts: HashMap<String, ArtifactRef>,
-    completed_results: HashMap<String, ArtifactRef>,
     cmd_rx: mpsc::Receiver<Command>,
     sig_tx: mpsc::Sender<RunnerSignal>,
     sig_rx: mpsc::Receiver<RunnerSignal>,
@@ -83,7 +82,6 @@ impl ThreadActor {
             next_gen: 0,
             active: None,
             completed_contexts: HashMap::new(),
-            completed_results: HashMap::new(),
             cmd_rx,
             sig_tx,
             sig_rx,
@@ -199,7 +197,6 @@ impl ThreadActor {
             let signal = match runner.run(input).await {
                 Ok(out) => RunnerSignal::Succeeded {
                     turn_id: signal_turn,
-                    result_ref: out.result_ref,
                     next_context_ref: out.next_context_ref,
                 },
                 Err(_) if cancel_probe.is_cancelled() => RunnerSignal::Cancelled {
@@ -226,7 +223,6 @@ impl ThreadActor {
         match sig {
             RunnerSignal::Succeeded {
                 turn_id,
-                result_ref,
                 next_context_ref,
             } => {
                 if self.is_active(&turn_id) {
@@ -235,7 +231,6 @@ impl ThreadActor {
                     self.context_ref = next_context_ref.clone();
                     self.completed_contexts
                         .insert(turn_id.clone(), next_context_ref);
-                    self.completed_results.insert(turn_id, result_ref);
                     self.finish_turn();
                 }
             }

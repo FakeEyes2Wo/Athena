@@ -71,7 +71,6 @@ impl From<ValidationError> for RuntimeError {
 pub(crate) enum RunnerSignal {
     Succeeded {
         turn_id: String,
-        result_ref: athena_types::ArtifactRef,
         next_context_ref: athena_types::ArtifactRef,
     },
     Failed {

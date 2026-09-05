@@ -1,7 +1,7 @@
 use crate::event::EventJournal;
 use crate::submission::{RuntimeError, ThreadState};
 use crate::thread_actor::Command;
-use athena_types::{ArtifactRef, AthenaTurn, SessionId, ThreadId};
+use athena_types::{ArtifactRef, AthenaTurn, SessionId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::{mpsc, oneshot};
@@ -9,7 +9,6 @@ use tokio::sync::{mpsc, oneshot};
 /// The public boundary to a thread actor — no queues, tasks, or locks leak out.
 #[derive(Clone)]
 pub struct ThreadHandle {
-    thread_id: ThreadId,
     session_id: SessionId,
     cmd_tx: mpsc::Sender<Command>,
     journal: Arc<EventJournal>,
@@ -18,23 +17,17 @@ pub struct ThreadHandle {
 
 impl ThreadHandle {
     pub(crate) fn new(
-        thread_id: ThreadId,
         session_id: SessionId,
         cmd_tx: mpsc::Sender<Command>,
         journal: Arc<EventJournal>,
         state: Arc<AtomicU8>,
     ) -> Self {
         Self {
-            thread_id,
             session_id,
             cmd_tx,
             journal,
             state,
         }
-    }
-
-    pub fn thread_id(&self) -> &ThreadId {
-        &self.thread_id
     }
 
     pub fn session_id(&self) -> &SessionId {
@@ -64,7 +57,7 @@ impl ThreadHandle {
     }
 
     /// Interrupt the given turn, committing a single interrupted terminal.
-    pub async fn interrupt(&self, turn_id: String, _reason: String) -> Result<(), RuntimeError> {
+    pub async fn interrupt(&self, turn_id: String) -> Result<(), RuntimeError> {
         self.request(|reply| Command::Interrupt { turn_id, reply })
             .await?
     }
@@ -82,7 +75,7 @@ impl ThreadHandle {
     }
 
     /// Gracefully shut down the thread and wait for the actor to finish.
-    pub async fn shutdown(&self, _reason: &str) {
+    pub async fn shutdown(&self) {
         if matches!(self.state(), ThreadState::Closed) {
             return;
         }

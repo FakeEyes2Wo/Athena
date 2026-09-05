@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 
 // ── Event ──
 
@@ -81,10 +81,6 @@ impl EventJournal {
         }
     }
 
-    pub fn thread_id(&self) -> &str {
-        &self.thread_id
-    }
-
     /// Append a drafted event, assigning the next sequence internally.
     pub fn append(&self, draft: EventDraft) -> Event {
         let mut records = write_guard(&self.records);
@@ -104,35 +100,8 @@ impl EventJournal {
         event
     }
 
-    pub fn len(&self) -> usize {
-        read_guard(&self.records).len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        read_guard(&self.records).is_empty()
-    }
-
-    pub fn last_sequence(&self) -> u64 {
-        *self.tail.borrow()
-    }
-
     pub fn snapshot(&self) -> Vec<Event> {
         read_guard(&self.records).clone()
-    }
-
-    /// Events strictly after `after_index` (0-based position in the log).
-    pub fn events_since(&self, after_index: usize) -> Vec<Event> {
-        let records = read_guard(&self.records);
-        if after_index >= records.len() {
-            Vec::new()
-        } else {
-            records[after_index..].to_vec()
-        }
-    }
-
-    /// A receiver for tail-sequence updates, for cursor-driven replay.
-    pub fn subscribe_tail(&self) -> watch::Receiver<u64> {
-        self.tail.subscribe()
     }
 
     /// Block until an event exists at `after_index`, then return it.
@@ -158,36 +127,23 @@ impl EventJournal {
 /// A single event subscription; the paired `Sender` is held by its pump.
 pub struct Subscription {
     pub subscription_id: String,
-    pub thread_id: String,
-    pub cursor: RwLock<u64>,
     pub rx: std::sync::Mutex<tokio::sync::mpsc::Receiver<Event>>,
-    pub has_data: Notify,
     pub active: AtomicBool,
-    pub pump_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Subscription {
-    pub fn new(
-        subscription_id: String,
-        thread_id: String,
-        cursor: u64,
-        rx: tokio::sync::mpsc::Receiver<Event>,
-    ) -> Self {
+    pub fn new(subscription_id: String, rx: tokio::sync::mpsc::Receiver<Event>) -> Self {
         Self {
             subscription_id,
-            thread_id,
-            cursor: RwLock::new(cursor),
             rx: std::sync::Mutex::new(rx),
-            has_data: Notify::new(),
             active: AtomicBool::new(true),
-            pump_handle: RwLock::new(None),
         }
     }
 }
 
 /// Round-robin multiplexer — prevents starvation across subscriptions.
 pub struct FairMux {
-    subs: Arc<RwLock<HashMap<String, Arc<Subscription>>>>,
+    subs: RwLock<HashMap<String, Arc<Subscription>>>,
     outgoing: tokio::sync::mpsc::Sender<athena_protocol::EventNotification>,
 }
 
@@ -198,7 +154,7 @@ fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl FairMux {
     pub fn new(outgoing: tokio::sync::mpsc::Sender<athena_protocol::EventNotification>) -> Self {
         Self {
-            subs: Arc::new(RwLock::new(HashMap::new())),
+            subs: RwLock::new(HashMap::new()),
             outgoing,
         }
     }
@@ -239,15 +195,14 @@ impl FairMux {
             let notification = match recv_result {
                 Ok(event) => Some(athena_protocol::EventNotification {
                     subscription_id: sub.subscription_id.clone(),
-                    thread_id: event.thread_id.clone(),
-                    turn_id: event.turn_id.clone(),
+                    thread_id: event.thread_id,
+                    turn_id: event.turn_id,
                     sequence: event.sequence,
-                    kind: event.kind.clone(),
-                    event_ref: event.event_ref.clone(),
-                    data: event.data.clone(),
+                    kind: event.kind,
+                    event_ref: event.event_ref,
+                    data: event.data,
                 }),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    sub.has_data.notify_one();
                     tokio::task::yield_now().await;
                     None
                 }
@@ -272,19 +227,15 @@ mod tests {
     #[tokio::test]
     async fn journal_assigns_sequences_and_replays() {
         let journal = EventJournal::new("t1");
-        assert!(journal.is_empty());
-        assert_eq!(journal.last_sequence(), 0);
 
         let e1 = journal.append(EventDraft::new("started", "ev:1"));
         assert_eq!(e1.sequence, 1);
         let e2 = journal.append(EventDraft::new("delta", "ev:2").turn("turn-1"));
         assert_eq!(e2.sequence, 2);
 
-        assert_eq!(journal.len(), 2);
-        assert_eq!(journal.last_sequence(), 2);
-        assert_eq!(journal.events_since(1).len(), 1);
-        assert_eq!(journal.events_since(1)[0].kind, "delta");
-        assert!(journal.events_since(2).is_empty());
+        let events = journal.snapshot();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].kind, "delta");
     }
 
     #[tokio::test]
