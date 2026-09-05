@@ -8,14 +8,14 @@ import pytest
 from athena.core.human_request import HumanChoice, HumanOutcome, HumanRequest
 from athena.research.clarification.controller import (
     CLARIFICATION_FAILURE_NOTICE,
-    MAX_QUESTIONS,
     ClarificationController,
-    ClarificationError,
-    ClarificationFinalStep,
-    ClarificationQuestionStep,
+    ClarificationOptions,
 )
+from athena.research.clarification.errors import ClarificationError
 from athena.research.clarification.generator import (
+    ClarificationFinalStep,
     ClarificationModelOutput,
+    ClarificationQuestionStep,
     DeterministicClarificationGenerator,
     PublicProgress,
 )
@@ -26,7 +26,7 @@ from athena.research.clarification.models import (
     UnresolvedItem,
 )
 from athena.research.clarification.persistence import ClarificationStore
-from athena.research.clarification.state import new_draft, set_pending
+from athena.research.clarification.state import MAX_QUESTIONS, new_draft, set_pending
 
 
 class AutoBroker:
@@ -138,10 +138,12 @@ def _controller(tmp_path, generator=None, *, session="s-1", progress_sink=None):
         store,
         broker,
         generator or AlwaysQuestionGenerator(),
-        session_id=session,
-        clock=lambda: datetime(2026, 9, 1, 10, tzinfo=UTC),
-        id_factory=lambda prefix: f"{prefix}-1",
-        progress_sink=progress_sink,
+        ClarificationOptions(
+            session_id=session,
+            clock=lambda: datetime(2026, 9, 1, 10, tzinfo=UTC),
+            id_factory=lambda prefix: f"{prefix}-1",
+            progress_sink=progress_sink,
+        ),
     )
     return store, broker, controller
 
@@ -204,14 +206,14 @@ async def test_revise_preserves_answers_and_returns_to_clarifying(tmp_path) -> N
     _store, _broker, controller = _controller(tmp_path)
     ready = await controller.start_or_resume("predict churn")
     before_answers = len(ready.answers)
-    revised = await controller.revise(ready.draft_id, ready.revision, "add recall")
+    revised = controller.revise(ready.draft_id, ready.revision, "add recall")
     assert revised.status == "CLARIFYING"
     assert len(revised.answers) == before_answers
     assert len(revised.revisions) == 1
     assert len(revised.answers) == 8
 
     with pytest.raises(ClarificationError, match="stale_revision"):
-        await controller.revise(ready.draft_id, ready.revision, "old")
+        controller.revise(ready.draft_id, ready.revision, "old")
 
     resumed = await controller.run(revised)
     assert resumed.status == "READY_FOR_CONFIRMATION"
@@ -225,7 +227,7 @@ async def test_revision_instruction_changes_final_understanding(tmp_path) -> Non
     ready = await controller.start_or_resume("predict churn")
     assert ready.understanding.primary_metric == "accuracy"
 
-    revised = await controller.revise(
+    revised = controller.revise(
         ready.draft_id,
         ready.revision,
         "Use recall as the primary metric",
@@ -244,7 +246,7 @@ async def test_revision_negation_does_not_override_primary_metric(tmp_path) -> N
     ready = await controller.start_or_resume("predict churn")
     assert ready.understanding.primary_metric == "accuracy"
 
-    revised = await controller.revise(
+    revised = controller.revise(
         ready.draft_id,
         ready.revision,
         "Keep accuracy, not recall",
@@ -262,7 +264,7 @@ async def test_revision_explicit_plan_beats_token_order(tmp_path) -> None:
     ready = await controller.start_or_resume("predict churn")
     assert ready.understanding.evaluation_plan == "holdout"
 
-    revised = await controller.revise(
+    revised = controller.revise(
         ready.draft_id,
         ready.revision,
         "Use holdout instead of cross-validation",
@@ -320,7 +322,7 @@ async def test_retry_clears_failure_and_returns_to_clarifying(tmp_path) -> None:
         )
 
     controller._generator = working_generator  # type: ignore[method-assign]
-    retried = await controller.retry(failed.draft_id, failed.revision)
+    retried = controller.retry(failed.draft_id, failed.revision)
     assert retried.status == "CLARIFYING"
     assert retried.failure is None
     assert (await controller.run(retried)).status == "READY_FOR_CONFIRMATION"
@@ -620,7 +622,7 @@ async def test_sink_error_does_not_change_ready_or_failed_state(tmp_path) -> Non
         raise RuntimeError("provider down")
 
     controller._generator = failing_generator  # type: ignore[method-assign]
-    revised = await controller.revise(ready.draft_id, ready.revision, "retry")
+    revised = controller.revise(ready.draft_id, ready.revision, "retry")
     failed = await controller.run(revised)
     assert failed.status == "FAILED"
 

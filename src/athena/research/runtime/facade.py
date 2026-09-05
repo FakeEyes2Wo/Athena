@@ -586,17 +586,17 @@ class ResearchRuntime:
 
     async def task_clarification_get(self, draft_id: str) -> object:
         """Return the authoritative latest clarification draft."""
-        return await self._clarification_controller_or_raise().get(draft_id)
+        return self._clarification_controller_or_raise().get(draft_id)
 
     async def task_clarification_retry(self, draft_id: str, revision: int) -> object:
         """Retry a retryable FAILED draft."""
-        return await self._clarification_controller_or_raise().retry(draft_id, revision)
+        return self._clarification_controller_or_raise().retry(draft_id, revision)
 
     async def task_clarification_revise(
         self, draft_id: str, revision: int, instruction: str
     ) -> object:
         """Revise a ready draft and return it to CLARIFYING."""
-        return await self._clarification_controller_or_raise().revise(
+        return self._clarification_controller_or_raise().revise(
             draft_id, revision, instruction
         )
 

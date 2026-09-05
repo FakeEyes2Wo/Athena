@@ -351,6 +351,14 @@ Delete the result class, its render method, the uncalled public wrapper, and sta
 
 The context and phase-preflight focus passed 13 tests, and the broad context/Supervisor/rolling-search/human-plan selection passed 394 tests. Python compilation, Black, blocking Ruff, code-style hard rules, removed-structure searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the context row advances reviewed baseline coverage to 242/602. Whole-repository acceptance remains pending.
 
+## Clarification controller review
+
+Read `controller.py` completely and traced every constructor input, attribute, public method, state transition, broker call, progress publication, helper, and export through runtime bootstrap/facade and controller/RPC/integration tests. Retain the generator, broker, store, transition loop, persisted-return helper, and scope-cancellation helper because they respectively own external async boundaries or prevent duplicated persistence/scope calculations.
+
+Replace the private three-field option wrapper plus separate progress attribute with one public `ClarificationOptions` record containing all four optional policies. Controller construction falls from seven parameters to four and retained attributes fall from five to four. Make `get`, `retry`, and `revise` synchronous because they contain no async operation; keep ResearchRuntime's transport-facing RPC methods asynchronous. Remove nine convenience re-exports and import test dependencies from their authoritative generator/error/state modules, reducing the controller public surface from twelve symbols to three. Production code falls by sixteen net lines.
+
+Controller, runtime-RPC, continue/resume, and confirmation-gate verification passed 55 tests. Python compilation, Black, blocking Ruff, code-style hard rules, constructor/export/sync-method searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the controller row advances reviewed baseline coverage to 243/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -847,7 +855,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/__init__.py` | 1 | Reviewed; retain package documentation marker |
 | `src/athena/research/clarification/confirmation.py` | 240 | Reviewed; seven-field transaction ports and runtime-owned lifecycle start |
 | `src/athena/research/clarification/context.py` | 230 | Reviewed; verified prompt string replaces six-field result and metadata fallbacks |
-| `src/athena/research/clarification/controller.py` | 323 | Pending |
+| `src/athena/research/clarification/controller.py` | 323 | Reviewed; four-parameter construction, four attributes and three synchronous pure operations |
 | `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
 | `src/athena/research/clarification/generator.py` | 372 | Pending |
 | `src/athena/research/clarification/handoff.py` | 86 | Reviewed; retain live render, materialize and atomic-write boundaries |

@@ -21,7 +21,10 @@ from athena.kaggle import (
     build_kaggle_stack,
     build_kaggle_tools,
 )
-from athena.research.clarification.controller import ClarificationController
+from athena.research.clarification.controller import (
+    ClarificationController,
+    ClarificationOptions,
+)
 from athena.research.clarification.generator import (
     DeterministicClarificationGenerator,
     ProgressSinkStage,
@@ -199,8 +202,10 @@ def build_services(
             ClarificationStore(paths.athena),
             broker,
             generator,
-            session_id=config.session_id,
-            progress_sink=publish_clarification_progress,
+            ClarificationOptions(
+                session_id=config.session_id,
+                progress_sink=publish_clarification_progress,
+            ),
         )
 
     # Keep mutable, process-local values outside the composition root.

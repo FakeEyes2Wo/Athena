@@ -15,20 +15,14 @@ from athena.research.clarification.generator import (
     ClarificationFinalStep,
     ClarificationGenerator,
     ClarificationQuestionStep,
-    ClarificationStep,
     ClarificationTurnResult,
-    DeterministicClarificationGenerator,
     PublicProgressSink,
     generate_turn,
     publish_public_progress,
 )
 from athena.research.clarification.models import ClarificationDraft
 from athena.research.clarification.persistence import ClarificationStore
-from athena.research.clarification.requirements import (
-    initial_task_understanding,
-    normalize_task,
-    required_critical_fields,
-)
+from athena.research.clarification.requirements import normalize_task
 from athena.research.clarification.state import (
     MAX_QUESTIONS,
     best_final,
@@ -63,10 +57,13 @@ CLARIFICATION_FAILURE_NOTICE = "Task understanding failed. Retry to continue."
 
 
 @dataclass(frozen=True)
-class _ControllerOptions:
-    session_id: str
-    id_factory: Callable[[str], str]
-    clock: Callable[[], datetime]
+class ClarificationOptions:
+    """Configure controller identity, time, and public progress projection."""
+
+    session_id: str = "default"
+    id_factory: Callable[[str], str] = lambda prefix: (f"{prefix}_{uuid4().hex[:12]}")
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    progress_sink: PublicProgressSink | None = None
 
 
 class ClarificationController:
@@ -77,22 +74,13 @@ class ClarificationController:
         store: ClarificationStore,
         broker: HumanBroker,
         generator: ClarificationGenerator,
-        *,
-        session_id: str = "default",
-        id_factory: Callable[[str], str] | None = None,
-        clock: Callable[[], datetime] | None = None,
-        progress_sink: PublicProgressSink | None = None,
+        options: ClarificationOptions | None = None,
     ) -> None:
         """Bind the three workflow ports and stable identity policy."""
         self._store = store
         self._broker = broker
         self._generator = generator
-        self._progress_sink = progress_sink
-        self._options = _ControllerOptions(
-            session_id,
-            id_factory or (lambda prefix: f"{prefix}_{uuid4().hex[:12]}"),
-            clock or (lambda: datetime.now(UTC)),
-        )
+        self._options = options or ClarificationOptions()
 
     async def start_or_resume(self, task: str) -> ClarificationDraft:
         """Create a fresh draft or continue the matching active draft."""
@@ -129,7 +117,7 @@ class ClarificationController:
                 # provider failure becomes a durable, retryable FAILED draft.
                 failed = self._save(fail(draft, self._options.clock()))
                 await publish_public_progress(
-                    self._progress_sink,
+                    self._options.progress_sink,
                     summary=CLARIFICATION_FAILURE_NOTICE,
                     stage="failure",
                     session_id=failed.session_id,
@@ -149,11 +137,11 @@ class ClarificationController:
             draft = await self._ask(draft, turn.step, turn)
         return draft
 
-    async def get(self, draft_id: str) -> ClarificationDraft:
+    def get(self, draft_id: str) -> ClarificationDraft:
         """Read the authoritative persisted draft."""
         return self._store.load(draft_id)
 
-    async def retry(self, draft_id: str, revision: int) -> ClarificationDraft:
+    def retry(self, draft_id: str, revision: int) -> ClarificationDraft:
         """Return a retryable failed draft to clarification."""
         draft = self._for_revision(draft_id, revision)
         if draft.status != "FAILED":
@@ -162,7 +150,7 @@ class ClarificationController:
             raise ClarificationError("not_retryable", "draft failure is not retryable")
         return self._save(retry_draft(draft, self._options.clock()))
 
-    async def revise(
+    def revise(
         self, draft_id: str, revision: int, instruction: str
     ) -> ClarificationDraft:
         """Record a revision instruction against the latest ready draft."""
@@ -234,7 +222,7 @@ class ClarificationController:
         if update is None:
             return
         await publish_public_progress(
-            self._progress_sink,
+            self._options.progress_sink,
             summary=update.summary,
             stage=update.stage,
             session_id=draft.session_id,
@@ -305,15 +293,6 @@ def _matching_outcome(
 
 __all__ = [
     "CLARIFICATION_FAILURE_NOTICE",
-    "MAX_QUESTIONS",
     "ClarificationController",
-    "ClarificationError",
-    "ClarificationFinalStep",
-    "ClarificationGenerator",
-    "ClarificationQuestionStep",
-    "ClarificationStep",
-    "DeterministicClarificationGenerator",
-    "initial_task_understanding",
-    "normalize_task",
-    "required_critical_fields",
+    "ClarificationOptions",
 ]
