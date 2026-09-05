@@ -456,14 +456,15 @@ export class FixedFlowSupervisor {
   }
 
   private async runSearchLoop(): Promise<void> {
-    while (!this.stopped) {
-      if (this.state.status !== "RUNNING") {
+    while (!this.stopped || this.running.size > 0) {
+      if (!this.stopped && this.state.status !== "RUNNING") {
         // 暂停/等待人工决策：不再派发新 turn，直到 resume 或选择操作唤醒。
         await this.waitForWake()
         continue
       }
-      const generated = await this.fillSlots()
+      const generated = this.stopped ? false : await this.fillSlots()
       if (this.running.size === 0) {
+        if (this.stopped) return
         if (generated) continue
         if (
           this.state.manual_mode &&
@@ -522,6 +523,7 @@ export class FixedFlowSupervisor {
       if (action.kind !== "RESUME") {
         await this.startPlan(planId)
       }
+      if (this.stopped) return generated
       if (action.kind === "START_NEXT_HYPOTHESIS") {
         this.nextHypothesisId = null
       }
@@ -827,7 +829,7 @@ export class FixedFlowSupervisor {
   async stop(): Promise<void> {
     this.stopped = true
     this.wake()
-    await Promise.allSettled(this.running.values())
+    await Promise.allSettled([this.searchPromise, ...this.running.values()])
     this.running.clear()
   }
 

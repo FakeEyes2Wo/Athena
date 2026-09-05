@@ -201,6 +201,93 @@ function coreSupervisor(
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it("joins in-flight ideation before reporting STOPPED", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const runIdeatorTurn = vi.fn(async () => {
+      await gate
+      return [HypothesisSchema.parse({ statement: "idea", intervention: "change", expected_effect: "improve" })]
+    })
+    const runPlanAgentTurn = vi.fn(async () => null)
+    const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn, runPlanAgentTurn } })
+    const loop = supervisor.runSearch()
+    let stopped = false
+    try {
+      await vi.waitFor(() => expect(runIdeatorTurn).toHaveBeenCalledTimes(1))
+      const stopping = supervisor.requestStop().then(() => { stopped = true })
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(stopped).toBe(false)
+      release()
+      await stopping
+      await loop
+      expect(tree.pendingHypotheses().filter((hypothesis) => hypothesis.statement === "idea")).toHaveLength(1)
+      expect(runPlanAgentTurn).not.toHaveBeenCalled()
+      expect((await supervisor.readState()).status).toBe("STOPPED")
+    } finally {
+      release()
+      await supervisor.stop()
+      await loop
+    }
+  })
+
+  it("drains every running turn through settlement before STOPPED", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const runPlanAgentTurn = vi.fn(async () => {
+      await gate
+      return PlanDecisionSchema.parse({ decision: "abandon", reason: "done" })
+    })
+    const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: { runPlanAgentTurn } })
+    for (let i = 0; i < 2; i++) tree.addHypothesis(HypothesisSchema.parse({
+      statement: `idea ${i}`, intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
+    }))
+    const loop = supervisor.runSearch()
+    try {
+      await vi.waitFor(() => expect(runPlanAgentTurn).toHaveBeenCalledTimes(2))
+      const stopping = supervisor.requestStop()
+      release()
+      await stopping
+      await loop
+      expect(tree.experiments("search").map((experiment) => experiment.status)).toEqual(["FAILED", "FAILED"])
+      expect(supervisor.state.plans).toEqual({})
+      expect(supervisor.state.status).toBe("STOPPED")
+    } finally {
+      release()
+      await supervisor.stop()
+      await loop
+    }
+  })
+
+  it("retains a Plan created during stop without launching its first turn", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const publish = vi.fn(async (_kind: string, data: Record<string, unknown>) => {
+      if (data.plans && Object.keys(data.plans).length > 0) await gate
+    })
+    const runPlanAgentTurn = vi.fn(async () => null)
+    const { supervisor, tree } = coreSupervisor(tmpDir(), { workers: { publish, runPlanAgentTurn } })
+    const id = tree.addHypothesis(HypothesisSchema.parse({
+      statement: "idea", intervention: "change", expected_effect: "improve", parent_id: "exp_baseline",
+    }))
+    const loop = supervisor.runSearch()
+    try {
+      await vi.waitFor(() => expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({
+        plans: expect.objectContaining({ [id]: expect.anything() }),
+      })))
+      const stopping = supervisor.requestStop()
+      release()
+      await stopping
+      await loop
+      expect(runPlanAgentTurn).not.toHaveBeenCalled()
+      expect(supervisor.state.plans[id]!.turns_used).toBe(0)
+      expect(supervisor.state.status).toBe("STOPPED")
+    } finally {
+      release()
+      await supervisor.stop()
+      await loop
+    }
+  })
+
   it("owns the loop before invoking a worker that rejoins SEARCH", async () => {
     let joined: Promise<void> | undefined
     const runIdeatorTurn = vi.fn(async () => {

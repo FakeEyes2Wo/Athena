@@ -534,7 +534,7 @@ function researchToolDefinitions(ctx: Context, deps: RunToolDeps): ToolDefinitio
     }),
     supervisorTool(ctx, {
       name: "research_stop",
-      description: "Stop Athena research scheduling and cancel locally running plans.",
+      description: "Stop new Athena dispatch and wait for in-flight work and turn settlement to finish.",
       callTitle: "停止 Athena 研究",
       resultTitle: "Athena 研究已停止",
       run: (supervisor) => supervisor.requestStop(),

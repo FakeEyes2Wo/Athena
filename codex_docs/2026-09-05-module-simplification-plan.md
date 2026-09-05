@@ -34,10 +34,17 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove Supervisor's duplicate workspace map and unused path accessor; resolve workspaces from the durable research tree.
 - [x] Remove recovery's placeholder callback interface and check retained Plan resources at the Supervisor boundary.
 - [x] Consolidate SEARCH wake/start ownership and replace the waiter collection with one loop-owned callback.
+- [x] Make SEARCH own graceful stop draining; join the loop before publishing STOPPED.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+Graceful-stop follow-up: `stop()` now joins the SEARCH Promise as well as already-running turns. The loop stops filling slots but drains completed turns through its existing settlement path; only after joining does stop clear residual handles. This removes competing lifecycle ownership that previously let STOPPED return while ideation still wrote the tree, and abandoned the second of two completed turns without applying its result. A stop observed after asynchronous Plan creation retains that zero-turn Plan without dispatching it. No AbortController, second task registry, or cancellation adapter was added. DSH's stop description now accurately says it waits for in-flight work, rather than claiming local cancellation.
+
+Graceful-stop verification: full TypeScript run with `--testTimeout=30000` passed 517 tests across 53 files in 73.39 seconds; `git diff --check` passed. No baseline ledger rows are newly closed by this lifecycle slice; coverage remains 91/602. Whole-goal acceptance, main integration/push, and temporary task branch/worktree cleanup remain required.
+
+Two new pre-change tests failed with concrete evidence: stop returned before gated ideation was released, and concurrent settlement left statuses `[FAILED, RUNNING]`. After the change, 28 Supervisor plus four DSH tests passed, including a third gated Plan-creation/stop regression. The ideation fixture initially counted the baseline's existing pending hypothesis; corrected the assertion to identify the newly returned hypothesis specifically. Five package builds passed. These checks cover normally resolving in-flight work, not workers that never resolve, worker rejection during draining, PREPARE/VALIDATE stop ownership, or background error reporting. Those remain part of the unfinished Supervisor lifecycle review.
 
 SEARCH wake follow-up: all resume-capable actions use `spawnSearch()` to wake an existing loop or start one if absent. Removed three duplicate wake calls and replaced the waiter Set/iteration with a single nullable callback, matching the one-loop `searchPromise` owner. `waitForWake()` rechecks RUNNING after asynchronous state publication so a resume during publication is not lost. Pause and stop retain their direct wake operation. No scheduler ranking, concurrency budget, or worker cancellation policy changed.
 
