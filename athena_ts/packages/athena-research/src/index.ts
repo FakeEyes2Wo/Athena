@@ -29,7 +29,6 @@ export {
   StateEventSchema,
 } from "./supervisor/events.js"
 export type { OutputEvent, StateEvent } from "./supervisor/events.js"
-export { ValidationService, generalizationGap, generalizationWarning } from "./validation.js"
 export { buildFinalReport } from "./report.js"
 export { runValidationPlan } from "./supervisor/validation.js"
 export { PrepareResultSchema, createPrepareWorkspace, freezeEvaluator, runEvaluatorPlan, runPreparePlan } from "./supervisor/prepare.js"

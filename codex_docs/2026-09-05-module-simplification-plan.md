@@ -26,6 +26,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove the unconsumed settlement API and test the active Supervisor policy.
 - [x] Remove script metadata/result wrappers and consolidate the scoring interface.
 - [x] Reduce script run arguments and consolidate frozen-file restoration/snapshot ownership.
+- [x] Merge stateless validation result construction into its active orchestration and review reporting.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -172,6 +173,16 @@ Evidence: pre-change script/evaluator/prepare selection passed 25 tests. The upd
 Lifecycle final verification: all five builds passed; the full TypeScript workspace passed 487 tests across 54 files with `npm test -- --testTimeout=30000`, plus the separate real-uv smoke above. git diff --check passed. No removed outputSchema/validateSchema consumers remain in the research package. The command-only timeout override does not establish default-timeout reliability.
 
 Closing script_runner.ts brings baseline review coverage to 78/602; new test/smoke files are tracked separately below. Next review: research contracts, validation and reporting consumers. Whole-repository acceptance, main merge/push and task branch/worktree removal remain mandatory and unfinished.
+
+Validation/report review: fully read both validation modules, report.ts and their three test files; trace DSH's runValidationPlan and report-tool calls plus Supervisor validation/report persistence. ValidationService has no state and only one production construction site. Merge result construction into runValidationPlan; delete src/validation.ts, its public class/gap/warning exports, the private isClose helper and unused configurable tolerances. Remove the supervisor module's redundant schema reexport; the schema remains available from contracts and the canonical package barrel.
+
+Preserve both metric directions, gap sign, relative/absolute tie semantics and warning-with-COMPLETED behavior. The comparison against zero is expressed directly without adding a helper or service object. Preserve existing decision/scoring order, invalid-decision feedback, scorer retry, abandon and budget-exhaustion behavior. Delete the old five helper/service tests and move numeric coverage to the real runValidationPlan entrypoint: fourteen cases now cover directions, noise and exact threshold, valid completion, retries, continue feedback, invalid decisions, abandon and zero/exhausted budgets. The orchestration boundary remains one five-field options object used by DSH; no compatibility class remains.
+
+Retain report.ts as the deterministic, shared Supervisor/DSH renderer, with two inputs and no object state. Remove fmt's unused precision parameter (two arguments to one), retaining four-decimal formatting and legacy text values. Five report cases cover empty trees/validation, zero scores, formatting, pending-versus-executed hypotheses, validation warning and repeated non-mutating rendering. The baseline validation/report/Supervisor/DSH selection passed 25 tests; after consolidation it passed 35. All five package builds passed. Removed exactly three ignored dist/validation JS/map/declaration files to prevent stale deep imports; sources and tests remain recoverable from Git history.
+
+Validation/report final evidence: full TypeScript workspace passed 497 tests across 53 files with `npm test -- --testTimeout=30000`; all five builds and git diff --check passed. Removed symbols remain only in negative public API assertions, and obsolete source/test/compiled files are absent. The timeout override is command-only; default-timeout reliability and whole-application readiness are not claimed.
+
+These six baseline file reviews bring coverage to 84/602. contracts.ts has been read but its cross-consumer field review remains Pending. Whole-repository acceptance, main merge/push and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -741,7 +752,7 @@ Closing script_runner.ts brings baseline review coverage to 78/602; new test/smo
 | `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Reviewed; canonical runner/options contracts, direct output and simplified numeric validation |
 | `athena_ts/packages/athena-research/src/execution.ts` | 94 | Reviewed; deleted context/root state, single run options and four-field result |
 | `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |
-| `athena_ts/packages/athena-research/src/report.ts` | 78 | Pending |
+| `athena_ts/packages/athena-research/src/report.ts` | 78 | Reviewed; retain shared pure renderer, remove unused precision option |
 | `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |
 | `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Reviewed; two-argument run, canonical source snapshot, shared restore and bounded file staging |
 | `athena_ts/packages/athena-research/src/shell.ts` | 48 | Reviewed; deleted adapter exclusively used by removed runtime |
@@ -755,11 +766,11 @@ Closing script_runner.ts brings baseline review coverage to 78/602; new test/smo
 | `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; delete factories/forwarders; 19 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
-| `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Pending |
-| `athena_ts/packages/athena-research/src/validation.ts` | 54 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Reviewed; owns result construction and existing decision/scoring loop |
+| `athena_ts/packages/athena-research/src/validation.ts` | 54 | Reviewed; merged sole production use into supervisor/validation.ts and deleted |
 | `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; deleted after full caller tracing proved standalone root unused |
 | `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Reviewed; seven numeric/error/prediction/identity/direction cases |
-| `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Pending |
+| `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Reviewed; five empty/zero/formatting/pending/validation rendering cases |
 | `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Reviewed; manifest/scoring/settlement, bundle failures and recursive presence |
 | `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Pending |
@@ -771,8 +782,8 @@ Closing script_runner.ts brings baseline review coverage to 78/602; new test/smo
 | `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, null fixture correction, policy/budget/dedup regressions; 19 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |
-| `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Pending |
-| `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Reviewed; fourteen metric/tolerance/feedback/decision/budget cases |
+| `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Reviewed; deleted helper/class tests, migrated coverage to real plan entrypoint |
 | `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Reviewed; deleted tests exclusive to removed Worker; replacement public-surface test tracked separately |
 | `athena_ts/vitest.workspace.ts` | 4 | Pending |
 | `scripts/build.cjs` | 62 | Pending |

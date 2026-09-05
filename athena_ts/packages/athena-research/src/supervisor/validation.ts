@@ -2,8 +2,8 @@
  * VALIDATE 阶段执行（移植 ``research/supervisor/validation.py`` 的 final-test 编排，简化版）。
  */
 
+import { newId } from "@athena/core"
 import { ValidationResultSchema, type ValidationResult } from "../contracts.js"
-import { ValidationService } from "../validation.js"
 import type { AgentTurn } from "./prepare.js"
 
 /** 运行 validate agent 直到产出 final-test 分数并构建 ValidationResult。 */
@@ -31,10 +31,17 @@ export async function runValidationPlan(opts: {
       if (decision.decision !== "submit") {
         throw new Error(`final-test scored successfully but the decision was ${decision.decision}`)
       }
-      return new ValidationService().buildResult({
-        testScore: opts.testScore,
-        finalTestScore,
-        direction: opts.direction,
+      const gap = opts.direction === "minimize"
+        ? finalTestScore - opts.testScore
+        : opts.testScore - finalTestScore
+      return ValidationResultSchema.parse({
+        result_id: newId("vr"),
+        status: "COMPLETED",
+        test_score: opts.testScore,
+        final_test_score: finalTestScore,
+        generalization_gap: gap,
+        // Same relative/absolute tie tolerance, comparing the gap with zero.
+        generalization_warning: gap > Math.max(1e-9 * Math.abs(gap), 1e-12),
       })
     } catch (exc) {
       feedback = (exc as Error).message
@@ -42,5 +49,3 @@ export async function runValidationPlan(opts: {
   }
   throw new Error("validate turn budget exhausted without a final-test result")
 }
-
-export { ValidationResultSchema }

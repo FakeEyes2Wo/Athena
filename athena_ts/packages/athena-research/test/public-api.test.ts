@@ -9,6 +9,7 @@ describe("research public surface", () => {
       "ResearchRuntime", "WorkerRunner", "zodOutputType", "PlanDecisionOutputType",
       "HypothesisBatchOutputType", "makeShellTool", "commandResultDict", "ExecutionContext", "decideSettlement",
       "BundleMetadata", "ScriptRunResult",
+      "ValidationService", "generalizationGap", "generalizationWarning",
     ]) expect(api).not.toHaveProperty(name)
   })
 

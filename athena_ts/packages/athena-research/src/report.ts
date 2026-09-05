@@ -7,9 +7,9 @@
 
 import type { ResearchTree } from "@athena/core"
 
-function fmt(value: unknown, digits = 4): string {
+function fmt(value: unknown): string {
   if (typeof value === "number") {
-    return Number.isInteger(value) ? String(value) : value.toFixed(digits)
+    return Number.isInteger(value) ? String(value) : value.toFixed(4)
   }
   return String(value)
 }
