@@ -33,10 +33,17 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove the unused event projection module and retain redaction at the live failure boundary.
 - [x] Remove Supervisor's duplicate workspace map and unused path accessor; resolve workspaces from the durable research tree.
 - [x] Remove recovery's placeholder callback interface and check retained Plan resources at the Supervisor boundary.
+- [x] Consolidate SEARCH wake/start ownership and replace the waiter collection with one loop-owned callback.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
 ## Supervisor workspace ownership
+
+SEARCH wake follow-up: all resume-capable actions use `spawnSearch()` to wake an existing loop or start one if absent. Removed three duplicate wake calls and replaced the waiter Set/iteration with a single nullable callback, matching the one-loop `searchPromise` owner. `waitForWake()` rechecks RUNNING after asynchronous state publication so a resume during publication is not lost. Pause and stop retain their direct wake operation. No scheduler ranking, concurrency budget, or worker cancellation policy changed.
+
+Verification for wake ownership: all five package builds passed; the final full TypeScript run (`--testTimeout=30000`) passed 514 tests across 53 files in 66.93 seconds. A final test-only microtask barrier ensures the stop case actually enters the waiting loop; the 25-test Supervisor file was rerun successfully after that barrier. `git diff --check` passed. Baseline coverage remains 91/602; main integration and task branch/worktree deletion remain deferred until whole-goal acceptance.
+
+Before the production change, new tests reproduced two failures: search-budget updates and SEARCH phase decisions left an existing loop asleep. Afterward, 25 Supervisor tests passed, including five resume paths (search budget, Plan budget, mode, resume, phase), joining the same loop, stopping while waiting, and a gated in-flight WAITING publication. The Plan-budget fixture uses one slot: with two slots, a second ideator call is legitimate concurrent scheduling rather than a duplicate loop. A follow-up ownership test covers a worker synchronously rejoining SEARCH: register the Promise before invoking worker callbacks, using a microtask for loop startup. Reset the stopped flag before that microtask, so a stop issued before startup is not overwritten. Full-file completion remains pending: next inspect stop during active workers/ideation and background failure ownership; these tests do not prove worker cancellation.
 
 Follow-up recovery review: `reconcilePlans(state, tree)` now only reconciles canonical state. Deleted `ReconcileOptions` and its two callbacks; the only production caller had supplied constant `true` functions. Supervisor recovery reads each retained context through the artifact store and checks that each SEARCH workspace is a directory. Missing resources retain the frozen Plan and persist WAITING. Other artifact errors and filesystem errors propagate instead of being silently treated as absent. This checks context availability and SEARCH directory existence, not Git integrity, every transitive artifact, or PREPARE/VALIDATE workspace health.
 

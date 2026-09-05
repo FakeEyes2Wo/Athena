@@ -99,7 +99,7 @@ export class FixedFlowSupervisor {
   private nextGuidance: string | null = null
   private persistentGuidance: string[] = []
   private nextHypothesisId: string | null = null
-  private wakeWaiters = new Set<() => void>()
+  private wakeSearch: (() => void) | null = null
   private searchPromise: Promise<void> | null = null
 
   constructor(opts: {
@@ -211,7 +211,6 @@ export class FixedFlowSupervisor {
       this.state.status = "RUNNING"
     }
     await this.persistState()
-    this.wake()
     this.spawnSearch()
     return { manual_mode: this.state.manual_mode }
   }
@@ -446,7 +445,8 @@ export class FixedFlowSupervisor {
 
   async runSearch(): Promise<void> {
     if (this.searchPromise !== null) return this.searchPromise
-    const loop = this.runSearchLoop()
+    this.stopped = false
+    const loop = Promise.resolve().then(() => this.runSearchLoop())
     this.searchPromise = loop
     try {
       await loop
@@ -456,7 +456,6 @@ export class FixedFlowSupervisor {
   }
 
   private async runSearchLoop(): Promise<void> {
-    this.stopped = false
     while (!this.stopped) {
       if (this.state.status !== "RUNNING") {
         // 暂停/等待人工决策：不再派发新 turn，直到 resume 或选择操作唤醒。
@@ -486,30 +485,22 @@ export class FixedFlowSupervisor {
   }
 
   private async waitForWake(): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped || this.state.status === "RUNNING") return
     await new Promise<void>((resolve) => {
-      this.wakeWaiters.add(resolve)
+      this.wakeSearch = resolve
     })
   }
 
   private wake(): void {
-    for (const resolve of [...this.wakeWaiters]) {
-      this.wakeWaiters.delete(resolve)
-      resolve()
-    }
+    const resolve = this.wakeSearch
+    this.wakeSearch = null
+    resolve?.()
   }
 
   private spawnSearch(): void {
-    if (
-      this.state.phase === "SEARCH" &&
-      this.state.status === "RUNNING" &&
-      !this.stopped &&
-      this.searchPromise === null
-    ) {
-      this.wake()
-      const search = this.runSearch()
-      search.catch(() => {})
-    }
+    if (this.state.phase !== "SEARCH" || this.state.status !== "RUNNING" || this.stopped) return
+    this.wake()
+    if (this.searchPromise === null) this.runSearch().catch(() => {})
   }
 
   private async fillSlots(): Promise<boolean> {
@@ -808,7 +799,6 @@ export class FixedFlowSupervisor {
       this.state.status = "RUNNING"
       this.saveState()
     }
-    this.wake()
     this.spawnSearch()
     return { selected: hypothesisId }
   }
@@ -823,7 +813,6 @@ export class FixedFlowSupervisor {
   async resume(): Promise<string> {
     this.state.status = "RUNNING"
     await this.persistState()
-    this.wake()
     this.spawnSearch()
     return this.state.status
   }

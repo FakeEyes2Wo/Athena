@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   ExperimentPlanSchema,
   ExperimentSchema,
@@ -201,6 +201,92 @@ function coreSupervisor(
 }
 
 describe("FixedFlowSupervisor core actions", () => {
+  it("owns the loop before invoking a worker that rejoins SEARCH", async () => {
+    let joined: Promise<void> | undefined
+    const runIdeatorTurn = vi.fn(async () => {
+      if (runIdeatorTurn.mock.calls.length === 1) joined = supervisor.runSearch()
+      return []
+    })
+    const { supervisor } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn } })
+    await supervisor.runSearch()
+    await joined
+    expect(runIdeatorTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not lose a resume while the WAITING publication is in flight", async () => {
+    let release!: () => void
+    const publication = new Promise<void>((resolve) => { release = resolve })
+    const publish = vi.fn(async (_kind: string, data: Record<string, unknown>) => {
+      if (data.status === "WAITING") await publication
+    })
+    const runPlanAgentTurn = vi.fn(async () => PlanDecisionSchema.parse({ decision: "abandon", reason: "done" }))
+    const { supervisor, state, tree } = coreSupervisor(tmpDir(), { workers: { publish, runPlanAgentTurn } })
+    state.manual_mode = true
+    tree.addHypothesis(HypothesisSchema.parse({
+      statement: "improve", intervention: "add feature", expected_effect: "raise metric",
+      parent_id: "exp_baseline",
+    }))
+    const loop = supervisor.runSearch()
+    try {
+      await vi.waitFor(() => expect(publish).toHaveBeenCalledWith("state", expect.objectContaining({ status: "WAITING" })))
+      await supervisor.setManualMode(false)
+      release()
+      await vi.waitFor(() => expect(runPlanAgentTurn).toHaveBeenCalledTimes(1), { timeout: 250 })
+      await loop
+    } finally {
+      release()
+      await supervisor.stop()
+      await loop
+    }
+  })
+
+  it("stops a waiting loop without dispatching work", async () => {
+    const runIdeatorTurn = vi.fn(async () => [])
+    const { supervisor } = coreSupervisor(tmpDir(), { workers: { runIdeatorTurn } })
+    await supervisor.pause()
+    const loop = supervisor.runSearch()
+    await Promise.resolve()
+    expect(await supervisor.requestStop()).toBe("STOPPED")
+    await loop
+    expect(runIdeatorTurn).not.toHaveBeenCalled()
+    expect(supervisor.runningPlanIds).toEqual([])
+  })
+
+  it.each(["budget", "plan-budget", "mode", "resume", "phase"] as const)("wakes the existing SEARCH loop through %s", async (action) => {
+    const runIdeatorTurn = vi.fn(async () => [])
+    const { supervisor, state, tree } = coreSupervisor(tmpDir(), { workers: {
+      runIdeatorTurn,
+      runPlanAgentTurn: async () => PlanDecisionSchema.parse({ decision: "abandon", reason: "done" }),
+    } })
+    let planId = ""
+    state.concurrency = 1
+    if (action === "plan-budget") {
+      planId = tree.addHypothesis(HypothesisSchema.parse({
+        statement: "improve", intervention: "add feature", expected_effect: "raise metric",
+        parent_id: "exp_baseline", turn_limit: 1,
+      }))
+      await supervisor.startPlan(planId)
+      state.plans[planId]!.turns_used = 1
+    }
+    await supervisor.pause()
+    const loop = supervisor.runSearch()
+    const joined = supervisor.runSearch()
+    await Promise.resolve()
+    try {
+      expect(runIdeatorTurn).not.toHaveBeenCalled()
+      if (action === "budget") await supervisor.configureSearch({ search_limit: 11 })
+      else if (action === "plan-budget") await supervisor.updateWaitingPlanBudget({ plan_id: planId, turn_limit: 2 })
+      else if (action === "mode") await supervisor.setManualMode(false)
+      else if (action === "resume") await supervisor.resume()
+      else await supervisor.setPhaseDecision("SEARCH")
+      await vi.waitFor(() => expect(runIdeatorTurn).toHaveBeenCalledTimes(1), { timeout: 250 })
+      await Promise.all([loop, joined])
+    } finally {
+      await supervisor.stop()
+      await Promise.all([loop, joined])
+    }
+  })
+
   it.each([
     [false, false], [true, false], [false, true], [true, true],
   ])("checks real recovery prerequisites (missing context=%s, workspace=%s)", async (missingContext, missingWorkspace) => {
