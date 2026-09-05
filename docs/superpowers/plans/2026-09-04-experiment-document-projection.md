@@ -11,25 +11,26 @@
 ## Global Constraints
 
 - Read `codex_docs/CURRENT.md` and this complete plan before implementation; update the checkbox for every completed step.
-- Do not start implementation while the transactional-search-resume backend or its
-  dependent frontend plan is active. This plan begins only when `CURRENT.md` names it
-  as the sole active implementation plan and both predecessor completion reports
-  exist.
+- Priority override (2026-09-05): the user explicitly promoted this plan ahead of
+  the transactional-search-resume backend and frontend plans. `CURRENT.md` must name
+  only this plan as active; both predecessor plans remain paused and their missing
+  completion reports are recorded rather than fabricated.
 - Preserve unrelated worktree changes. Stage and commit only the exact task-owned paths listed in each task.
 - Add no dependency and no GUI, `ResearchTree`, `ResearchState`, artifact-store, or event-schema change.
 - Keep `ResearchTree` plus Supervisor `ResearchState` canonical; experiment documents never authorize recovery, phase, or SOTA behavior.
-- Preserve the predecessor backend's `SupervisorMutationCoordinator` as the sole
-  state/tree writer. Project only after an awaited coordinator commit succeeds; never
-  reintroduce direct `.save()` calls in Supervisor collaborators.
+- At the selected base commit, `SupervisorMutationCoordinator` does not exist.
+  Preserve the current canonical `ResearchTree`/`ResearchState` save boundaries and
+  move every projection after the relevant tree/state saves complete. A later
+  transactional-resume integration must adapt those boundaries to the injected
+  projector instead of restoring derived `.athena/exp_docs` bytes to transactions.
 - Delete `src/athena/research/exp_docs.py`; do not add an import shim for `task_metric_name`, `write_stage_doc`, or `write_reports`.
 - Preserve `.athena/exp_docs/{runs,baseline.json,search.json,final.json,latest.json,FINAL_REPORT.md,OPTIMIZATION.md}` and never bulk-rewrite or delete unknown run archives.
 - New models use `ConfigDict(extra="forbid", frozen=True, strict=True)` and reject unsafe identifiers, unknown fields, blank references, and non-finite metrics.
 - The metric-name order is frozen evaluator `evaluate/metric.json`, legacy flat evaluator `metric.json`, confirmed task understanding, then `primary`; never read `.athena/evaluator_spec.json`.
-- Preserve the predecessor backend's completed-search resume behavior, manual
-  validation policy, final-evaluator consumption, and explicit exploratory-validation
-  labels. Remove only `.athena/exp_docs` bytes from canonical control transactions;
-  content-addressed report artifacts and canonical control documents remain governed
-  by that design.
+- Preserve current manual-validation, skipped-validation, resume, and report-artifact
+  behavior. The paused predecessor's future completed-search/control behavior is out
+  of scope for this branch and must integrate with the projector after this branch
+  lands; no nonexistent control transaction is claimed or emulated here.
 - Render every batch fully before target replacement. Use unique sibling temp files, flush/fsync, atomic `os.replace`, and replace `latest.json` last.
 - Same run ID plus the same normalized record is idempotent. Same run ID plus different semantics raises an internal conflict and preserves the archive and prior manifest.
 - Projection and rebuild catch ordinary `Exception`, retain detailed operator logs, and expose only `experiment_documents_stale` plus the exact warning text from the approved spec.
@@ -37,6 +38,11 @@
 - Follow TDD: create the focused failing test, observe the expected failure, implement the minimum complete behavior, rerun the focused test, then commit.
 - Use the path-specific `uv run pytest` commands below and `uv run python -c` for
   import smoke so commands use the repository environment.
+- Final delivery is mandatory: after feature and closeout commits pass fresh tests,
+  merge `feat/experiment-document-projection` into `main`, verify the merged tree,
+  push `main`, remove only this plan's isolated worktree, and delete only this
+  temporary feature branch. Preserve unrelated main-worktree changes and all other
+  branches/worktrees.
 
 ---
 
@@ -68,12 +74,8 @@
 - `src/athena/research/supervisor/deps.py` — require `DocumentProjector` in `SupervisorRuntime`.
 - `src/athena/research/runtime/bootstrap.py` — build and inject the concrete projector with configured evaluator roots.
 - `src/athena/research/supervisor/supervisor.py` — rebuild on recovery and centralize sanitized warning publication.
-- `src/athena/research/supervisor/phases.py` — migrate PREPARE/VALIDATE/failure projections to coordinator-commit-first order.
-- `src/athena/research/supervisor/settlement.py` — project SEARCH only after its canonical settlement checkpoint.
-- `src/athena/research/control/resume.py` — stop constructing transaction-owned
-  `exp_docs` bytes while preserving resume policy.
-- `src/athena/research/control/service.py` — refresh the derived projection after a
-  committed completed-search resume without changing the control result.
+- `src/athena/research/supervisor/phases.py` — migrate PREPARE/VALIDATE/failure projections to canonical-save-first order.
+- `src/athena/research/supervisor/settlement.py` — project SEARCH only after its canonical tree/state saves.
 - Delete `src/athena/research/exp_docs.py`.
 
 ### Existing tests to modify
@@ -87,7 +89,7 @@
 - `test/integration/research/test_search_recovery.py`
 - `test/integration/research/test_rolling_search.py`
 - `test/integration/research/test_autonomous_research.py`
-- `test/integration/research/test_completed_search_resume.py`
+- Delete `test/unit/research/test_exp_docs.py` after migrating its relevant coverage.
 
 ### Workflow documents
 
@@ -98,27 +100,24 @@
 
 ---
 
-## Execution Preflight and Predecessor Integration Gate
+## Execution Preflight and Priority Override
 
-This plan was authored at commit `446aba2`. The queued transactional-search-resume
-backend owns `core/persistence.py`, `report.py`, `exp_docs.py`, `supervisor/deps.py`,
-`supervisor/supervisor.py`, `supervisor/phases.py`, `supervisor/settlement.py`,
-`runtime/bootstrap.py`, and several shared tests before this plan runs. Its frontend
-plan is dependency-ordered immediately after it.
+This plan was authored at commit `446aba2`. On 2026-09-05 the user explicitly moved
+it ahead of the queued transactional-search-resume backend and frontend plans. The
+implementation therefore targets the current direct-save Supervisor interfaces at
+base commit `1eae06a`; it does not invent the absent coordinator/control APIs. The
+later transactional work must preserve this injected projection boundary.
 
-- [ ] Confirm `codex_docs/CURRENT.md` names only this plan as active, both predecessor
-  plan files are absent, and these reports exist:
+- [x] Confirm `codex_docs/CURRENT.md` names only this plan as active. Record that the
+  two predecessor plan files remain paused and their completion reports do not exist
+  because this is an explicit priority override.
 
-  ```text
-  codex_docs/2026-09-04-supervisor-transactional-search-resume-backend-completion-report.md
-  codex_docs/2026-09-04-supervisor-search-resume-frontend-completion-report.md
-  ```
+- [x] Record base commit `1eae06a1c3dda38f7e4c5dd7f7cc315fd78c9e7b`, existing
+  worktrees, clean staged paths, and isolated worktree
+  `.worktrees/experiment-document-projection` on
+  `feat/experiment-document-projection`.
 
-- [ ] Record the then-current commit, worktrees, status, and staged paths. Create an
-  isolated implementation worktree using `using-git-worktrees`; do not reuse another
-  task's worktree.
-
-- [ ] Audit predecessor changes before editing:
+- [x] Audit changes and actual integration surfaces before editing:
 
   ```powershell
   git diff --stat 446aba2..HEAD -- src/athena/core/persistence.py src/athena/research/report.py src/athena/research/exp_docs.py src/athena/research/supervisor/deps.py src/athena/research/supervisor/supervisor.py src/athena/research/supervisor/phases.py src/athena/research/supervisor/settlement.py src/athena/research/runtime/bootstrap.py src/athena/research/control test/unit/research/supervisor test/integration/research
@@ -126,25 +125,26 @@ plan is dependency-ordered immediately after it.
   rg -n -e "MutationEffect" -e "documents=" -e "commit_plan_settlement" -e "coordinator\.checkpoint" src/athena/research
   ```
 
-- [ ] Confirm the final predecessor code still provides
-  `SupervisorMutationCoordinator.checkpoint`, performs state/tree installation before
-  returning success, and keeps rendering/Git/Agent work outside its mutation lock.
-  If those named guarantees are absent, stop before Task 1, update this plan to the
-  actual committed coordinator interface, and obtain review of that plan-only change.
+- [x] Confirm `SupervisorMutationCoordinator`, `MutationEffect`,
+  `ResearchControlService`, `commit_plan_settlement`, and `research/control` are
+  absent. Task 7 is amended below to require successful current tree/state saves
+  before projection and to keep a narrow injection point for later coordinator work.
 
-- [ ] Identify every predecessor path that writes `.athena/exp_docs` or carries those
-  bytes in `MutationEffect.documents`. Record it in the execution notes. The migration
-  in Task 7 must remove all such derived paths from rollback-authoritative document
-  sets and replace every post-commit consumer, including completed-search resume.
+- [x] Identify the complete current write surface: only
+  `supervisor/phases.py` and `supervisor/settlement.py` call the three legacy free
+  functions. No transaction-owned `.athena/exp_docs` bytes exist on this base.
 
-- [ ] Run the post-predecessor baseline before Task 1:
+- [x] Run the executable current baseline before Task 1:
 
   ```powershell
-  uv run pytest test/unit/research/supervisor test/unit/research/control test/unit/research/test_report.py test/integration/research/test_autonomous_research.py test/integration/research/test_search_recovery.py test/integration/research/test_rolling_search.py test/integration/research/test_completed_search_resume.py -q
+  uv run pytest test/unit/research/supervisor test/unit/research/test_report.py test/integration/research/test_autonomous_research.py test/integration/research/test_search_recovery.py test/integration/research/test_rolling_search.py -q
   ```
 
-  Expected: zero failures. Record exact counts. Any baseline failure must be diagnosed
-  and assigned before this plan changes code.
+  Result: `382 passed in 129.93s`; import smoke for
+  `athena.research.supervisor` and `athena.cli` exited 0. The original command's
+  nonexistent `test/unit/research/control` and
+  `test/integration/research/test_completed_search_resume.py` paths were removed and
+  are not reported as passing tests.
 
 The package tasks below are stable across the predecessor work. For Task 3, port the
 then-current optimization renderer, including any exploratory-validation label added
@@ -161,12 +161,12 @@ by the backend; do not copy the older `446aba2` wording over newer policy.
 | Frozen evaluator metric path and fallback priority are correct | 2, 5 |
 | Records, identifiers, paths, and metrics are strict | 1, 4 |
 | Same-run idempotency and different-content conflict preserve history | 4, 6 |
-| Coordinator commit precedes every normal stage projection | 7 |
+| Canonical tree/state saves precede every normal stage projection | 7 |
 | Projection failure is sanitized, observable, and non-fatal | 5, 7 |
 | Every target is pre-rendered and atomically replaced; manifest is last | 3, 4 |
 | One runtime's projections cannot interleave | 4, 5, 7 |
 | Recovery rebuild repairs derivable views without deleting history | 6, 7 |
-| Completed-search resume refreshes only after its canonical commit | 7 |
+| Current recovery and skipped-validation flows refresh after canonical saves | 7 |
 | GUI and disk final-report bytes are identical | 3, 8 |
 | Supervisor/CLI imports and focused/full suites pass | 8 |
 
@@ -644,17 +644,19 @@ Assert:
 
 ```python
 def test_disk_final_report_is_exact_shared_builder_bytes(tree, validation) -> None:
-    assert render_final_report(tree, validation) == build_final_report(
-        tree, validation
+    assert render_final_report(
+        tree, validation, validation_skipped=False
+    ) == build_final_report(
+        tree, validation, validation_skipped=False
     ).encode("utf-8")
 
 
 def test_optimization_report_sorts_for_both_directions(tree) -> None:
     maximize = render_optimization_report(
-        tree, None, metric_name="score", direction="maximize"
+        tree, None, metric_name="score", direction="maximize", validation_skipped=False
     ).decode()
     minimize = render_optimization_report(
-        tree, None, metric_name="score", direction="minimize"
+        tree, None, metric_name="score", direction="minimize", validation_skipped=False
     ).decode()
     assert maximize.index("`exp_high`") < maximize.index("`exp_low`")
     assert minimize.index("`exp_low`") < minimize.index("`exp_high`")
@@ -662,7 +664,11 @@ def test_optimization_report_sorts_for_both_directions(tree) -> None:
 
 def test_optimization_report_escapes_dynamic_markdown_cells(tree) -> None:
     rendered = render_optimization_report(
-        tree, None, metric_name="score|unsafe\nline", direction="maximize"
+        tree,
+        None,
+        metric_name="score|unsafe\nline",
+        direction="maximize",
+        validation_skipped=False,
     ).decode()
     assert "score\\|unsafe line" in rendered
 ```
@@ -720,12 +726,19 @@ def build_latest_manifest(*, kind, stage, run_id, files) -> LatestManifest:
 
 
 def render_final_report(
-    tree: ResearchTree, validation: Mapping[str, object] | None
+    tree: ResearchTree,
+    validation: Mapping[str, object] | None,
+    *,
+    validation_skipped: bool,
 ) -> bytes:
-    return build_final_report(tree, validation).encode("utf-8")
+    return build_final_report(
+        tree, validation, validation_skipped=validation_skipped
+    ).encode("utf-8")
 ```
 
-Port the current optimization-report content without importing the old module. Escape
+Pass the same required `validation_skipped` flag through the optimization renderer so
+both reports preserve the current explicit skip disclosure. Port the current
+optimization-report content without importing the old module. Escape
 backslashes first, then pipes, CR, and LF in dynamic Markdown text. Do not add a final
 newline to `FINAL_REPORT.md`; shared-builder byte parity is the contract.
 
@@ -1017,6 +1030,7 @@ def test_project_stage_writes_archive_alias_reports_and_valid_manifest(
         valid_search_event(),
         tree=research_tree,
         validation=None,
+        validation_skipped=False,
         task_understanding={"primary_metric": "f1"},
         direction="maximize",
     )
@@ -1038,6 +1052,7 @@ def test_invalid_event_returns_only_sanitized_failure_and_writes_nothing(
         {**valid_search_event(), "run_id": "../escape"},
         tree=research_tree,
         validation=None,
+        validation_skipped=False,
         task_understanding=None,
         direction="maximize",
     )
@@ -1073,6 +1088,7 @@ class DocumentProjector(Protocol):
         *,
         tree: ResearchTree,
         validation: Mapping[str, object] | None,
+        validation_skipped: bool,
         task_understanding: Mapping[str, object] | None,
         direction: Direction,
     ) -> ProjectionOutcome:
@@ -1083,6 +1099,7 @@ class DocumentProjector(Protocol):
         *,
         tree: ResearchTree,
         validation: Mapping[str, object] | None,
+        validation_skipped: bool,
         task_understanding: Mapping[str, object] | None,
         direction: Direction,
     ) -> ProjectionOutcome:
@@ -1098,6 +1115,7 @@ def project_stage(
     *,
     tree: ResearchTree,
     validation: Mapping[str, object] | None,
+    validation_skipped: bool,
     task_understanding: Mapping[str, object] | None,
     direction: Direction,
 ) -> ProjectionOutcome:
@@ -1116,12 +1134,17 @@ def project_stage(
             runs=(RunCandidate(record=record, content=record_bytes),),
             aliases={record.stage: record.run_id},
             reports={
-                "FINAL_REPORT.md": render_final_report(tree_copy, validation_copy),
+                "FINAL_REPORT.md": render_final_report(
+                    tree_copy,
+                    validation_copy,
+                    validation_skipped=validation_skipped,
+                ),
                 "OPTIMIZATION.md": render_optimization_report(
                     tree_copy,
                     validation_copy,
                     metric_name=metric_name,
                     direction=direction,
+                    validation_skipped=validation_skipped,
                 ),
             },
         )
@@ -1209,6 +1232,7 @@ def test_rebuild_restores_all_derivable_runs_and_latest_aliases(
     outcome = projector.rebuild(
         tree=completed_tree,
         validation=validation,
+        validation_skipped=False,
         task_understanding={"primary_metric": "accuracy"},
         direction="maximize",
     )
@@ -1230,6 +1254,8 @@ Add exact tests for:
 - final is generated only for terminal validation (`status` plus `result_id`, or a
   legacy terminal validation with score/status and fallback ID `final`), not a
   checkpoint containing only `result_ref`;
+- `validation_skipped=True` reconstructs the explicit skipped-validation report and
+  final alias from the canonical SOTA without inventing validation metrics;
 - existing enriched compatible run bytes are retained under recoverable matching;
 - an existing run contradicting canonical status/primary/artifacts/provenance aborts
   the batch and retains its bytes, the old alias, and the old manifest;
@@ -1348,8 +1374,7 @@ git commit -m "feat(research): rebuild experiment documents from state"
 - Modify: `src/athena/research/supervisor/supervisor.py`
 - Modify: `src/athena/research/supervisor/phases.py`
 - Modify: `src/athena/research/supervisor/settlement.py`
-- Modify: `src/athena/research/control/resume.py`
-- Modify: `src/athena/research/control/service.py`
+- Delete: `test/unit/research/test_exp_docs.py`
 - Modify: `test/unit/research/supervisor/test_supervisor.py`
 - Modify: `test/unit/research/supervisor/test_phase_suspend.py`
 - Modify: `test/unit/research/supervisor/test_ideator_wiring.py`
@@ -1358,14 +1383,13 @@ git commit -m "feat(research): rebuild experiment documents from state"
 - Modify: `test/unit/research/test_plan_hypothesis_prompt.py`
 - Modify: `test/integration/research/test_search_recovery.py`
 - Modify: `test/integration/research/test_rolling_search.py`
-- Modify: `test/integration/research/test_completed_search_resume.py`
 - Delete: `src/athena/research/exp_docs.py`
 
 **Interfaces:**
 - Consumes: `DocumentProjector` and `ProjectionOutcome` from Task 5.
-- Produces: required `SupervisorRuntime.documents`, coordinator-commit-first stage
-  calls, lifecycle/restart rebuild, completed-search post-commit refresh,
-  deterministic phase-failure identity, and one sanitized output event on projection
+- Produces: required `SupervisorRuntime.documents`, canonical-save-first stage calls,
+  lifecycle/restart rebuild, deterministic phase-failure identity,
+  skipped-validation projection, and one sanitized output event on projection
   failure.
 
 - [ ] **Step 1: Add shared recording/no-op projector doubles**
@@ -1388,7 +1412,7 @@ class RecordingDocumentProjector:
         return self.outcome
 ```
 
-Find every manually constructed runtime after the predecessor plans have landed:
+Find every manually constructed runtime on the selected base:
 
 ```powershell
 rg -l "SupervisorRuntime\(" src test tests
@@ -1402,11 +1426,10 @@ fail until the production dataclass accepts the new field.
 - [ ] **Step 2: Write canonical ordering and warning tests**
 
 In `test_document_projection.py`, use a projector double whose `project_stage` reads
-the coordinator-owned files and shared objects and asserts that they already contain
+the saved canonical files and shared objects and asserts that they already contain
 the expected baseline, settled SEARCH Plan removal/SOTA, completed validation, or
-FAILED phase state. At each call, assert the coordinator journal has no active
-PREPARED/rollback transaction: projection observes a successfully committed
-checkpoint, never a candidate or before-image.
+FAILED phase state. Projection observes successfully saved tree/state bytes, never a
+pre-save in-memory candidate.
 
 Add tests that return `ProjectionOutcome.stale()` and assert:
 
@@ -1419,15 +1442,10 @@ Add tests that return `ProjectionOutcome.stale()` and assert:
 - a publish callback that raises while sending the warning is logged and does not
   alter or replace the research result.
 
-In `test_completed_search_resume.py`, add two post-commit assertions. A successful
-resume calls `rebuild` only after the response's state/tree mutation and resume
-receipt are durable, with `validation=None`. A stale projection outcome or raising
-warning publisher still returns the original successful `ControlResponse`, leaves
-SEARCH/RUNNING and the receipt committed. A stale outcome emits the fixed sanitized
-warning exactly once; a raising publisher is attempted once and logged without
-replacing the response. Assert `.athena/exp_docs` paths are absent from the resume
-`MutationEffect.documents` mapping while canonical control documents and
-content-addressed report artifacts remain unchanged.
+Add skipped-validation assertions: canonical skipped-validation fields and COMPLETED
+state are saved before final projection. A stale projection outcome or raising
+warning publisher leaves that successful finalization intact and exposes no internal
+path or exception text.
 
 For phase failure, assert two different exceptions generate two IDs matching
 `baseline-phase-failure-[0-9a-f]{12}` and repeating one exception reproduces its ID.
@@ -1452,15 +1470,14 @@ the migrated calls do not exist.
 - [ ] **Step 5: Add the required dependency and production composition**
 
 In `deps.py`, import `DocumentProjector` under `TYPE_CHECKING` and add this required
-field to the then-current frozen `SupervisorRuntime` without removing predecessor
-fields:
+field to the current frozen `SupervisorRuntime` without removing existing fields:
 
 ```python
 documents: "DocumentProjector"
 ```
 
-In `wire_workflow`, construct exactly one projector and inject that same instance
-into `SupervisorRuntime` and `ResearchControlService`:
+In `wire_workflow`, construct exactly one projector and inject that instance into
+`SupervisorRuntime`:
 
 ```python
 documents = ExperimentDocumentProjector(
@@ -1472,12 +1489,8 @@ documents = ExperimentDocumentProjector(
 )
 ```
 
-Add a required `documents: DocumentProjector` constructor dependency to
-`ResearchControlService`; it uses the canonical state/tree references, direction,
-and existing event publisher supplied by the composition root. Add the keyword
-argument `documents=documents` to both the existing `SupervisorRuntime` constructor
-and `ResearchControlService` constructor. Do not add an optional/default projector
-or construct one in Supervisor/control code.
+Add `documents=documents` to the existing `SupervisorRuntime` constructor. Do not add
+an optional/default projector or construct one in Supervisor code.
 
 - [ ] **Step 6: Add the Supervisor warning boundary and recovery rebuild**
 
@@ -1504,6 +1517,7 @@ async def _rebuild_documents(self) -> None:
     outcome = self._deps.runtime.documents.rebuild(
         tree=self.tree,
         validation=self.state.validation,
+        validation_skipped=self.state.validation_skipped,
         task_understanding=self.state.task_understanding,
         direction=self._deps.search.direction,
     )
@@ -1518,33 +1532,32 @@ PREPARE start, `Supervisor.start()` calls `_rebuild_documents()` before delegati
 
 Remove the old import and `_metric_name`/`_write_reports`. Make record helpers async
 and call only `self._deps.runtime.documents.project_stage`, followed by
-`await self._owner._publish_document_outcome(outcome)`. Do not place any
-`.athena/exp_docs` target or bytes in `MutationEffect.documents`; retain all
-predecessor-owned canonical documents, control sidecars, and content-addressed report
-artifacts.
+`await self._owner._publish_document_outcome(outcome)`. Derived document failures
+must not enter or replace canonical tree/state save handling; retain current
+content-addressed report artifacts.
 
 Order PREPARE exactly:
 
-1. complete evaluator/report/artifact preparation outside the mutation lock;
-2. await one named coordinator checkpoint that installs the baseline tree/SOTA and
-   `state.evaluator_ref` together;
+1. complete evaluator/report/artifact preparation outside the projection boundary;
+2. install the baseline tree/SOTA and `state.evaluator_ref`, then successfully save
+   both canonical tree and state;
 3. build the baseline event from the committed shared tree/state and project it;
 4. publish the sanitized projection warning when needed;
 5. publish PREPARE completion;
-6. perform the existing transition to SEARCH through its coordinator checkpoint.
+6. perform the existing transition to SEARCH through its durable state save.
 
 Order VALIDATE exactly:
 
 1. create and store the content-addressed shared report artifact outside the lock;
-2. await the predecessor's validation checkpoint, which atomically installs
-   validation, report reference, final-evaluator consumption, phase, and status;
+2. install validation, report reference, phase, and status and successfully save the
+   canonical state;
 3. build the final event from the committed shared state and project it;
 4. publish the sanitized projection warning when needed;
-5. publish the final result/state using the predecessor's existing event semantics.
+5. publish the final result/state using the current event semantics.
 
-In the outer phase exception handler, await the coordinator's FAILED checkpoint first,
-then request failure projection from the committed shared state. A checkpoint failure
-does not project. Generate the run ID with a private helper:
+In the outer phase exception handler, save the FAILED canonical state first, then
+request failure projection from the saved shared state. A canonical save failure does
+not project. Generate the run ID with a private helper:
 
 ```python
 def _phase_failure_run_id(stage: str, error: Exception) -> str:
@@ -1555,46 +1568,33 @@ def _phase_failure_run_id(stage: str, error: Exception) -> str:
 ```
 
 The local failure document can retain the normalized original phase error summary;
-only a *document projection* failure uses the fixed sanitized warning. Do not add a
-direct `.state.save()` or tree save anywhere in these flows.
+only a *document projection* failure uses the fixed sanitized warning. Reuse the
+existing canonical save entry points instead of adding a second save path.
 
 - [ ] **Step 8: Migrate SEARCH settlement to canonical-first order**
 
 Keep evidence loading, report rendering, Git operations, and Agent work outside the
-mutation lock. After calculating the settlement input, perform this order:
+derived projection boundary. After calculating the settlement input, perform this
+order:
 
-1. await the predecessor's `commit_plan_settlement()`/named coordinator checkpoint,
-   which atomically installs the experiment, hypothesis, priority, SOTA, and Plan
-   removal;
-2. use its returned immutable settlement data plus the now-committed shared state/tree
-   to construct the SEARCH event;
+1. install the experiment, hypothesis, priority, SOTA, and Plan removal, then
+   successfully save the canonical tree and state in the existing lifecycle order;
+2. use the now-saved shared state/tree to construct the SEARCH event;
 3. call `documents.project_stage`;
 4. await sanitized warning publication if needed;
-5. run `on_plan_settled` and Agent reap using the predecessor's existing ordering.
+5. run `on_plan_settled` and Agent reap using the current ordering.
 
-Do not put experiment-document bytes into the settlement transaction. Do not restore
-a Plan or SOTA when steps 3-4 fail, and do not catch coordinator/checkpoint errors as
-projection failures. No direct state/tree save is permitted.
+Do not restore a Plan or SOTA when steps 3-4 fail, and do not catch canonical save
+errors as projection failures. Keep the current direct saves only as the canonical
+boundary that the paused transactional backend will later replace.
 
-- [ ] **Step 9: Refresh projection after a committed completed-search resume**
+- [ ] **Step 9: Preserve skipped-validation and current resume behavior**
 
-In `control/resume.py`, stop generating or returning `.athena/exp_docs` paths in
-`MutationEffect.documents`. Preserve the archived prior report reference, resume
-receipt, manual-validation policy, final-evaluator status, and every canonical/control
-document required by the predecessor design.
-
-In `control/service.py`, after the resume call to `coordinator.execute` returns a
-successful response for `ResumeSearch`, call the injected projector's `rebuild` with
-the committed shared tree/state, `validation=None`, current task understanding, and
-direction. This call is ordinary post-commit service work: do not put it in
-`MutationEffect.start`, because a projection or warning-publication failure must not
-trigger coordinator rollback. Publish the fixed warning through the existing
-output-event publisher, catch publisher failure with operator logging, and return the
-original `ControlResponse` unchanged.
-
-Use the exact same projector instance injected into `SupervisorRuntime`. Verify both
-model-tool and GUI/runtime resume routes delegate to this service path, so neither can
-skip the refresh.
+Move `_finalize_without_validation` to canonical-save-first ordering and project its
+explicit `SKIPPED` final event only after the completed state is durable. Recovery
+uses the injected `rebuild` path after existing Plan recovery. A projection or
+warning-publication failure must not change the successful skipped-validation result,
+current resume result, or phase/status.
 
 - [ ] **Step 10: Delete the legacy module and prove all callers migrated**
 
@@ -1604,19 +1604,20 @@ Delete `src/athena/research/exp_docs.py`. Run:
 rg -n -e "athena\.research\.exp_docs" -e "\btask_metric_name\b" -e "\bwrite_stage_doc\b" -e "(^|[^A-Za-z0-9_])write_reports\(" src test
 ```
 
-Expected: no matches. A nonzero `rg` exit code with empty output is the expected
-success condition.
+Delete `test/unit/research/test_exp_docs.py` after its still-relevant expectations
+have moved into the focused package tests. Expected: no matches. A nonzero `rg` exit
+code with empty output is the expected success condition.
 
 - [ ] **Step 11: Run affected Supervisor, control, and recovery tests**
 
 Run:
 
 ```powershell
-uv run pytest test/unit/research/experiment_documents test/unit/research/supervisor/test_document_projection.py test/unit/research/supervisor/test_supervisor.py test/unit/research/supervisor/test_phase_suspend.py test/unit/research/supervisor/test_ideator_wiring.py test/unit/research/supervisor/test_plan_turn_streaming.py test/unit/research/control/test_resume.py test/unit/research/test_data_contract_reaches_candidates.py test/unit/research/test_plan_hypothesis_prompt.py test/integration/research/test_search_recovery.py test/integration/research/test_rolling_search.py test/integration/research/test_completed_search_resume.py -q
+uv run pytest test/unit/research/experiment_documents test/unit/research/supervisor/test_document_projection.py test/unit/research/supervisor/test_supervisor.py test/unit/research/supervisor/test_phase_suspend.py test/unit/research/supervisor/test_ideator_wiring.py test/unit/research/supervisor/test_plan_turn_streaming.py test/unit/research/test_data_contract_reaches_candidates.py test/unit/research/test_plan_hypothesis_prompt.py test/integration/research/test_search_recovery.py test/integration/research/test_rolling_search.py -q
 ```
 
-Expected: all tests pass with no direct-writer architecture failure, unhandled
-projection warning, changed control response, or constructor error.
+Expected: all tests pass with no pre-save projection, unhandled projection warning,
+changed phase result, or constructor error.
 
 - [ ] **Step 12: Commit Task 7**
 
@@ -1661,7 +1662,9 @@ for relative, digest in latest["files"].items():
     assert hashlib.sha256(content).hexdigest() == digest
 
 assert (exp_docs / "FINAL_REPORT.md").read_bytes() == build_final_report(
-    runtime.tree, runtime.state.validation
+    runtime.tree,
+    runtime.state.validation,
+    validation_skipped=runtime.state.validation_skipped,
 ).encode("utf-8")
 ```
 
@@ -1698,7 +1701,7 @@ Run:
 ```powershell
 uv run pytest test/unit/research/experiment_documents -q
 uv run pytest test/unit/research/supervisor -q
-uv run pytest test/unit/research/control/test_resume.py test/integration/research/test_autonomous_research.py test/integration/research/test_search_recovery.py test/integration/research/test_rolling_search.py test/integration/research/test_completed_search_resume.py test/architecture/test_supervisor_surface.py -q
+uv run pytest test/integration/research/test_autonomous_research.py test/integration/research/test_search_recovery.py test/integration/research/test_rolling_search.py test/architecture/test_supervisor_surface.py -q
 rg -n -e "athena\.research\.exp_docs" -e "\btask_metric_name\b" -e "\bwrite_stage_doc\b" -e "(^|[^A-Za-z0-9_])write_reports\(" src test
 rg -n "evaluator_spec\.json" src
 git diff --check
@@ -1729,10 +1732,9 @@ Before closeout, record evidence for each item:
 - evaluator priority and no nonexistent spec path;
 - strict unsafe/non-finite/extra-field rejection;
 - semantic idempotency and conflict preservation;
-- coordinator commits observed before every stage projection, with no reintroduced
-  direct state/tree writer;
-- completed-search resume excludes `.athena/exp_docs` from `MutationEffect.documents`,
-  refreshes after commit, and preserves its successful `ControlResponse` on projection
+- canonical tree/state bytes observed before every stage projection, with no new
+  competing save path;
+- skipped-validation and current recovery behavior remain successful on projection
   or warning-publication failure;
 - sanitized warning with state/SOTA/phase isolation;
 - atomic temp/replace behavior and old manifest on injected failures;
@@ -1776,7 +1778,9 @@ for any environment-only limitation.
 ## Repository state
 
 List every Task 1-8 implementation commit ID and state which unrelated worktree paths
-were preserved.
+were preserved. Add the merge commit (or fast-forward range), merged-tree verification
+result, pushed remote ref, removed worktree path, and deleted temporary branch after
+those delivery actions complete.
 ```
 
 The prose instructions above are not copied into the completion report; replace them
@@ -1814,7 +1818,16 @@ git add -- codex_docs/CURRENT.md codex_docs/2026-09-04-experiment-document-proje
 git commit -m "docs: close experiment document projection"
 ```
 
-- [ ] **Step 10: Final repository handoff check**
+- [ ] **Step 10: Merge, verify, push, and clean the temporary branch**
+
+Use `finishing-a-development-branch`. Preserve any unrelated dirty files in the main
+worktree while integrating. Merge `feat/experiment-document-projection` into `main`,
+run the full default suite on the exact merged tree, and stop without pushing or
+cleaning if that merged-tree suite fails. When it passes, push `main`, remove
+`.worktrees/experiment-document-projection`, prune worktree metadata, and delete the
+local feature branch. Never force-push and never delete another worktree or branch.
+
+- [ ] **Step 11: Final repository handoff check**
 
 Run:
 
@@ -1823,6 +1836,6 @@ git status --short --branch
 git log -10 --oneline --decorate
 ```
 
-Report implementation commits, exact test evidence, any environment-only limitation,
-and any unrelated preserved worktree files. Do not claim the whole worktree is clean
-unless `git status --short` is empty.
+Report implementation commits, exact test evidence, merge/push/cleanup evidence, any
+environment-only limitation, and any unrelated preserved main-worktree files. Do not
+claim the whole main worktree is clean unless `git status --short` is empty.

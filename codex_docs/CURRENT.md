@@ -1,16 +1,21 @@
 # Current Athena Work
 
 Active implementation plan:
-- `docs/superpowers/plans/2026-09-04-supervisor-transactional-search-resume-backend.md`
-
-Queued dependent implementation plan:
-- `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
-
-Queued subsequent implementation plan:
 - `docs/superpowers/plans/2026-09-04-experiment-document-projection.md`
 
-Queued subsequent supporting design spec:
+Active supporting design spec:
 - `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`
+
+Required delivery:
+- After every acceptance check passes, merge `feat/experiment-document-projection`
+  into `main`, verify the merged result, push `main`, remove this task's isolated
+  worktree, and delete this temporary feature branch. Preserve every unrelated branch,
+  worktree, and uncommitted main-worktree change. The user authorized these exact
+  actions without another conversational confirmation.
+
+Paused predecessor implementation plans (explicit user priority override on 2026-09-05):
+- `docs/superpowers/plans/2026-09-04-supervisor-transactional-search-resume-backend.md`
+- `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
 
 Most recent completed work:
 - `codex_docs/2026-09-04-skip-validate-final-completion-report.md`

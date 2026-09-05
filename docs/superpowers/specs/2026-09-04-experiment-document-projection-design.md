@@ -192,6 +192,7 @@ class DocumentProjector(Protocol):
         *,
         tree: ResearchTree,
         validation: Mapping[str, object] | None,
+        validation_skipped: bool,
         task_understanding: Mapping[str, object] | None,
         direction: Literal["maximize", "minimize"],
     ) -> ProjectionOutcome: ...
@@ -201,6 +202,7 @@ class DocumentProjector(Protocol):
         *,
         tree: ResearchTree,
         validation: Mapping[str, object] | None,
+        validation_skipped: bool,
         task_understanding: Mapping[str, object] | None,
         direction: Literal["maximize", "minimize"],
     ) -> ProjectionOutcome: ...
@@ -221,6 +223,9 @@ runtime composition root constructs exactly one concrete projector with:
 
 Tests inject recording or failing protocol implementations. `PhaseMachine` and
 `PlanSettlement` no longer import any experiment-document implementation module.
+The explicit `validation_skipped` flag preserves the current finalization contract
+when no independent final evaluator runs; it controls report wording but never
+changes canonical phase or SOTA state.
 
 ## 5. Projection batch and commit marker
 
@@ -366,7 +371,7 @@ brand-new empty project creates no document tree until it has a stage result.
 Rebuild runs under the same store lock and follows these rules:
 
 - regenerate `FINAL_REPORT.md` and `OPTIMIZATION.md` from the loaded canonical
-  snapshot;
+  snapshot, including the canonical skipped-validation disclosure when set;
 - regenerate baseline, search, and final aliases when their source is derivable;
 - create a missing run record for each derivable terminal experiment or final
   validation result;
@@ -477,3 +482,14 @@ reported as product failures or silently ignored.
 - Disk and GUI final reports are byte-identical for the same canonical snapshot.
 - Focused, Supervisor, integration, import-smoke, and full-suite verification provide
   fresh passing evidence, with any environment limitation called out explicitly.
+
+## 13. Delivery and cleanup
+
+After all acceptance evidence is fresh, the feature branch is merged into `main` and
+the exact merged tree is verified before any push. A green merged tree is pushed to
+the configured `main` remote. The isolated
+`.worktrees/experiment-document-projection` worktree is then removed and the local
+`feat/experiment-document-projection` branch is deleted. This cleanup is limited to
+this task; unrelated dirty main-worktree files, branches, and worktrees are preserved.
+The user explicitly authorized these exact integration and cleanup actions without a
+second conversational confirmation.
