@@ -13,6 +13,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Resolve serving compatibility entrypoint duplication and verify callers (22 tests before and after; module CLI help exits 0).
 - [ ] Review every remaining file and module; record decisions and evidence.
 - [ ] Implement the identified simplifications with scoped regression checks.
+- [ ] Resolve TypeScript recovery ordering failures and reconcile its workspace lockfile before final acceptance.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -49,6 +50,12 @@ Tool layer: completed core/tool.py and tool_types.py review. Removed the single-
 GUI small-module review (two bounded parallel audits, integrated by parent): inspected five lib helpers and three associated tests plus eight common component/hook/style files. Retain the error-text, RPC adapter, path-display and native-dialog boundaries. workspaceStorage now shares JSON storage read/write and exception handling instead of repeating them. Delete unconsumed useEvents.ts, inline the one-use ErrorCard in MessageList, and delete ThemeToggle.module.css in favor of the identical global icon-btn rules. ErrorBoundary drops its unconsumed fallback prop (2 props to 1). Retain EmptyState and StatusBadge as genuinely shared primitives. Retain useTheme's mount-time storage read: caching only the initial import-time theme would make remounts stale. MessageList and global styles were inspected at affected sites only and remain pending for full review.
 
 GUI evidence: worker post-change lib checks returned 17 passed (no pre-change GUI baseline claimed). Parent full GUI suite returned 186 passed across 20 files; TypeScript --noEmit and diff checks passed. New component tests cover error containment and both persisted theme transitions. Tests used a temporary junction to the existing active-quality-pass GUI dependencies, removed afterward; the dependency target was verified intact. With these reviews the corrected baseline ledger has 35/602 reviewed files, plus the new chat module and common-contracts test. Remaining files and full integration/delivery gates stay pending.
+
+TypeScript Agent layer: completed registry/session/tool/tool-types/index/agent-types and five associated test-file reviews. Remove the factory config argument always supplied as null, MemoryView and its raw forwarding path, the unused ToolSpec/ToolOptions maxResultChars configuration, unused _noopEmit export, and private sync/error/schema forwarding helpers. ainvoke now owns normalization and cancellation/error events. ToolRegistry keeps one sorted Map instead of a Map plus mirrored list. Retain data/codec/status contracts and canonical package exports; session mailbox reads still return detached snapshots and checkpoint consumes messages.
+
+TypeScript verification: core/agent/research builds passed before and after; Agent package tests returned 123 passed before and after the initial simplification. Added five regressions for single-argument factories, detached registry views, cancellation events, non-Error throws, and absence of the removed facade export. The full TypeScript workspace run then returned 405 passed / 2 failed. Both failures are in untouched recovery.ts/recovery.test.ts: orphan plans are removed before missing-context/workspace prerequisites can mark WAITING. The inspected recovery implementation imports ResearchState and core types, not the modified Agent layer. Track the conflict for the recovery module review rather than claiming full green acceptance. Source recovery.ts was fully read but its tests only partially inspected; neither is marked reviewed yet.
+
+TypeScript environment: npm ci --offline rejected the existing out-of-sync workspace lock (including missing autoresearch/DeepSeek entries). npm install --offline --ignore-scripts --no-package-lock prepared local ignored dependencies without modifying manifests/lock; tests resolved this task's own workspace packages after building them. Reconcile the lock before final reproducible-install verification. Corrected baseline review coverage is now 46/602, plus the separately listed new files; all remaining scope and delivery gates remain open.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -512,34 +519,34 @@ GUI evidence: worker post-change lib checks returned 17 passed (no pre-change GU
 | `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Pending |
-| `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
 | `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Pending |
-| `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/session.ts` | 55 | Reviewed; remove MemoryView and forwarding getter; retain checkpoint semantics |
 | `athena_ts/packages/athena-agent/src/agent/settings.ts` | 74 | Pending |
 | `athena_ts/packages/athena-agent/src/agent/tools/user-input.ts` | 32 | Pending |
-| `athena_ts/packages/athena-agent/src/agent/types.ts` | 215 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/types.ts` | 215 | Reviewed; retain typed message, codec, state and error contracts; 10 tests pass |
 | `athena_ts/packages/athena-agent/src/cancel.ts` | 42 | Pending |
-| `athena_ts/packages/athena-agent/src/index.ts` | 29 | Pending |
+| `athena_ts/packages/athena-agent/src/index.ts` | 29 | Reviewed; retain canonical exports; removed MemoryView no longer exported |
 | `athena_ts/packages/athena-agent/src/memory/compaction.ts` | 133 | Pending |
 | `athena_ts/packages/athena-agent/src/memory/context-manager.ts` | 123 | Pending |
 | `athena_ts/packages/athena-agent/src/memory/index.ts` | 4 | Pending |
 | `athena_ts/packages/athena-agent/src/memory/rollout.ts` | 158 | Pending |
 | `athena_ts/packages/athena-agent/src/messages.ts` | 139 | Pending |
 | `athena_ts/packages/athena-agent/src/single-turn-chat.ts` | 134 | Pending |
-| `athena_ts/packages/athena-agent/src/tool-types.ts` | 74 | Pending |
-| `athena_ts/packages/athena-agent/src/tool.ts` | 183 | Pending |
+| `athena_ts/packages/athena-agent/src/tool-types.ts` | 74 | Reviewed; remove unused output-limit attribute; retain message truncation |
+| `athena_ts/packages/athena-agent/src/tool.ts` | 183 | Reviewed; consolidate lifecycle, delete forwarding helpers and redundant registry storage |
 | `athena_ts/packages/athena-agent/test/agent/agent.test.ts` | 575 | Pending |
 | `athena_ts/packages/athena-agent/test/agent/provider.test.ts` | 140 | Pending |
-| `athena_ts/packages/athena-agent/test/agent/registry.test.ts` | 75 | Pending |
-| `athena_ts/packages/athena-agent/test/agent/session.test.ts` | 26 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/registry.test.ts` | 75 | Reviewed; migrate factory and verify exact argument list; 6 tests pass |
+| `athena_ts/packages/athena-agent/test/agent/session.test.ts` | 26 | Reviewed; direct context and detached mailbox contract test passes |
 | `athena_ts/packages/athena-agent/test/agent/settings.test.ts` | 58 | Pending |
-| `athena_ts/packages/athena-agent/test/agent/types.test.ts` | 107 | Pending |
+| `athena_ts/packages/athena-agent/test/agent/types.test.ts` | 107 | Reviewed; retain protocol/state/error checks; 10 tests pass |
 | `athena_ts/packages/athena-agent/test/memory/compaction.test.ts` | 85 | Pending |
 | `athena_ts/packages/athena-agent/test/memory/context-manager.test.ts` | 206 | Pending |
 | `athena_ts/packages/athena-agent/test/memory/rollout.test.ts` | 221 | Pending |
-| `athena_ts/packages/athena-agent/test/public-api.test.ts` | 69 | Pending |
+| `athena_ts/packages/athena-agent/test/public-api.test.ts` | 69 | Reviewed; retain canonical exports and reject removed facade; 3 tests pass |
 | `athena_ts/packages/athena-agent/test/single-turn-chat.test.ts` | 179 | Pending |
-| `athena_ts/packages/athena-agent/test/tool.test.ts` | 154 | Pending |
+| `athena_ts/packages/athena-agent/test/tool.test.ts` | 154 | Reviewed; add cancellation, non-Error and duplicate registry checks; 16 tests pass |
 | `athena_ts/packages/athena-autoresearch/dsh-ui/app.js` | 107 | Pending |
 | `athena_ts/packages/athena-autoresearch/dsh-ui/hypothesis-graph.js` | 350 | Pending |
 | `athena_ts/packages/athena-autoresearch/scripts/dsh-ui-server.mjs` | 204 | Pending |

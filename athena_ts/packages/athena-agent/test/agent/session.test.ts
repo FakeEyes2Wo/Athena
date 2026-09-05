@@ -13,14 +13,14 @@ describe("RunSession", () => {
     expect(sess.agentId).toBe("a1")
     expect(sess.runtime).toBe(runtime)
     expect(sess.contextRef).toBe("art:ctx")
-    expect(sess.memory.raw).toBe(memory)
+    expect(sess.memory).toBe(memory)
 
     const unread = sess.receiveMessages()
     expect(unread.map((m) => m.content)).toEqual(["hi"])
+    unread.length = 0
     // receive_messages 只读不删：失败 turn 的未读消息须保留待重试
     expect(sess.receiveMessages().map((m) => m.content)).toEqual(["hi"])
     sess.checkpoint() // 提交消费 → 清空 mailbox
     expect(sess.receiveMessages()).toEqual([])
-    expect(() => sess.memory.append()).toThrow(/memory writes/)
   })
 })

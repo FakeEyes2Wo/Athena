@@ -65,6 +65,22 @@ async function collectEvents(
 }
 
 describe("BaseTool", () => {
+  it("cancellation emits error but never success", async () => {
+    const events: string[] = []
+    const ctx = new ToolContext("cancel_me", "cancel-1", (kind) => {
+      events.push(kind)
+    }, new CancellationToken())
+    await expect(new CancellingTool().ainvoke(ctx, {})).rejects.toBeInstanceOf(CancelledError)
+    expect(events).toEqual([TOOL_BEGIN, TOOL_ERROR])
+  })
+
+  it("wraps non-Error throws without losing their type", async () => {
+    const throwing = tool(() => { throw "failure" }, { name: "throwing" })
+    const { result, events } = await collectEvents(throwing, {})
+    expect(result.error).toBe("string: failure")
+    expect(events).toEqual([TOOL_BEGIN, TOOL_ERROR])
+  })
+
   it("sync invoke", async () => {
     const result = await new EchoTool().invoke({ x: 1, y: "hello" })
     expect(result.success).toBe(true)
@@ -128,6 +144,18 @@ describe("tool() factory", () => {
 })
 
 describe("ToolRegistry", () => {
+  it("keeps state after a duplicate and returns detached spec lists", () => {
+    const reg = new ToolRegistry()
+    const echo = new EchoTool()
+    reg.register(echo)
+    reg.register(decoEcho)
+    reg.specs.length = 0
+    expect(() => reg.register(new EchoTool())).toThrow(/already registered/)
+    expect(reg.resolve("echo")).toBe(echo)
+    expect(reg.size).toBe(2)
+    expect(reg.specs.map((spec) => spec.name)).toEqual(["deco_echo", "echo"])
+  })
+
   it("register and resolve", () => {
     const reg = new ToolRegistry()
     reg.register(new EchoTool())

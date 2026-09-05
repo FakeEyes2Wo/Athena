@@ -35,8 +35,7 @@ export class ToolSpec {
     public readonly name: string,
     public readonly description: string,
     public readonly inputSchema: Record<string, unknown>,
-    public readonly concurrencySafe: boolean = true,
-    public readonly maxResultChars: number = 50_000
+    public readonly concurrencySafe: boolean = true
   ) {}
 
   /** 转为 OpenAI function tool schema dict。 */

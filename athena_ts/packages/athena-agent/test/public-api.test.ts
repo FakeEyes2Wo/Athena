@@ -17,6 +17,10 @@ import {
 } from "../src/agent/provider.js"
 
 describe("public surface", () => {
+  it("does not export the removed memory facade", () => {
+    expect(api).not.toHaveProperty("MemoryView")
+  })
+
   it("exports canonical agent symbols", () => {
     const names = [
       "BaseTool",

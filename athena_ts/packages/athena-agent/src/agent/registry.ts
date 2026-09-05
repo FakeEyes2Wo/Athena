@@ -4,7 +4,7 @@
 
 import { AgentCommandError, AgentSpec, ErrorCode, type AgentId } from "./types.js"
 
-export type AgentFactory = (agentId: AgentId, config: string | null) => AgentSpec
+export type AgentFactory = (agentId: AgentId) => AgentSpec
 
 export class AgentTypeRegistry {
   private factories = new Map<string, AgentFactory>()
@@ -28,7 +28,7 @@ export class AgentTypeRegistry {
     if (factory === undefined) {
       throw new AgentCommandError(ErrorCode.NOT_FOUND, `unknown agent_type: ${agentType}`)
     }
-    return factory(agentId, null)
+    return factory(agentId)
   }
 
   /** 已注册类型（排序后）。 */

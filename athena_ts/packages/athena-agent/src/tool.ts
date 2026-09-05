@@ -14,15 +14,10 @@ import {
   ToolContext,
   ToolResult,
   ToolSpec,
-  type EmitEvent,
 } from "./tool-types.js"
 
 async function noopEmit(_k: string, _r: string, _d?: Record<string, unknown> | null): Promise<void> {
   void 0
-}
-
-function syncCtx(): ToolContext {
-  return new ToolContext("", "sync", noopEmit, new CancellationToken())
 }
 
 /** 工具执行函数：接收参数 dict，返回原始数据或 ToolResult。 */
@@ -36,20 +31,6 @@ export interface ToolOptions {
   description?: string
   inputSchema?: Record<string, unknown>
   concurrencySafe?: boolean
-  maxResultChars?: number
-}
-
-function errName(exc: unknown): string {
-  return exc instanceof Error ? exc.constructor.name : typeof exc
-}
-
-function errMessage(exc: unknown): string {
-  return exc instanceof Error ? exc.message : String(exc)
-}
-
-/** 空对象 JSON Schema（TS 无类型内省时 ``inputSchema`` 的缺省值）。 */
-function emptySchema(): Record<string, unknown> {
-  return { type: "object", properties: {}, required: [] }
 }
 
 export abstract class BaseTool {
@@ -62,28 +43,10 @@ export abstract class BaseTool {
     ctx: ToolContext
   ): Promise<unknown> | unknown
 
-  /** 将返回值或异常包装为 ``ToolResult``（取消原样传播）。 */
-  private async _execute(
-    input: Record<string, unknown>,
-    ctx: ToolContext
-  ): Promise<ToolResult> {
-    try {
-      const raw = await this.execute(input, ctx)
-      return raw instanceof ToolResult ? raw : new ToolResult(raw)
-    } catch (exc) {
-      if (exc instanceof CancelledError) throw exc
-      return new ToolResult(
-        { traceback: exc instanceof Error ? exc.stack : undefined },
-        false,
-        `${errName(exc)}: ${errMessage(exc)}`,
-        []
-      )
-    }
-  }
-
   /** 同步入口（TS 无 asyncio.run，退化为 async）：用独立取消令牌执行一次调用。 */
   invoke(input: Record<string, unknown> = {}): Promise<ToolResult> {
-    return this.ainvoke(syncCtx(), input)
+    const ctx = new ToolContext("", "sync", noopEmit, new CancellationToken())
+    return this.ainvoke(ctx, input)
   }
 
   /** 生命周期：开始 → 执行 → 结束/错误。 */
@@ -97,13 +60,21 @@ export abstract class BaseTool {
     await ctx.emit(TOOL_BEGIN, `ev:${ctx.callId}:begin`, eventData)
     let result: ToolResult
     try {
-      result = await this._execute(input, ctx)
+      const raw = await this.execute(input, ctx)
+      result = raw instanceof ToolResult ? raw : new ToolResult(raw)
     } catch (exc) {
       if (exc instanceof CancelledError) {
         await ctx.emit(TOOL_ERROR, `ev:${ctx.callId}:error`, null)
         throw exc
       }
-      throw exc
+      const message = exc instanceof Error
+        ? `${exc.constructor.name}: ${exc.message}`
+        : `${typeof exc}: ${String(exc)}`
+      result = new ToolResult(
+        { traceback: exc instanceof Error ? exc.stack : undefined },
+        false,
+        message
+      )
     }
     await ctx.emit(
       result.success ? TOOL_END : TOOL_ERROR,
@@ -125,9 +96,8 @@ export function tool(fn: ToolFn, opts: ToolOptions = {}): BaseTool {
   const spec = new ToolSpec(
     opts.name ?? fn.name,
     opts.description ?? fn.name,
-    opts.inputSchema ?? emptySchema(),
-    opts.concurrencySafe ?? true,
-    opts.maxResultChars ?? 50_000
+    opts.inputSchema ?? { type: "object", properties: {}, required: [] },
+    opts.concurrencySafe ?? true
   )
 
   class DecoratedTool extends BaseTool {
@@ -144,8 +114,7 @@ export function tool(fn: ToolFn, opts: ToolOptions = {}): BaseTool {
 }
 
 export class ToolRegistry {
-  private readonly tools = new Map<string, BaseTool>()
-  private sorted: BaseTool[] = []
+  private tools = new Map<string, BaseTool>()
 
   /** 注册工具；重名报错，按名称维持排序。 */
   register(t: BaseTool): void {
@@ -153,9 +122,9 @@ export class ToolRegistry {
       throw new Error(`Tool '${t.spec.name}' already registered`)
     }
     this.tools.set(t.spec.name, t)
-    this.sorted = [...this.tools.values()].sort((a, b) =>
+    this.tools = new Map([...this.tools].sort(([, a], [, b]) =>
       a.spec.name.localeCompare(b.spec.name)
-    )
+    ))
   }
 
   /** 按名称取工具；未注册报错。 */
@@ -167,7 +136,7 @@ export class ToolRegistry {
 
   /** 按名称排序的工具 spec 列表。 */
   get specs(): ToolSpec[] {
-    return this.sorted.map((t) => t.spec)
+    return [...this.tools.values()].map((t) => t.spec)
   }
 
   get size(): number {
@@ -178,6 +147,3 @@ export class ToolRegistry {
     return this.tools.has(name)
   }
 }
-
-/** 供内部引用的空发射器（等价 tool.py 的 _noop_emit）。 */
-export const _noopEmit: EmitEvent = noopEmit

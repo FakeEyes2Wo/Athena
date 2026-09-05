@@ -23,11 +23,22 @@ class CountingRunner implements AgentRunner {
   }
 }
 
-function factory(): (aid: string, cfg: string | null) => AgentSpec {
-  return (_aid, _cfg) => new AgentSpec(new EchoRunner(), new JsonCodec())
+function factory(): (aid: string) => AgentSpec {
+  return (_aid) => new AgentSpec(new EchoRunner(), new JsonCodec())
 }
 
 describe("AgentTypeRegistry", () => {
+  it("passes only the requested agent id to its factory", () => {
+    const registry = new AgentTypeRegistry()
+    const calls: unknown[][] = []
+    registry.register("echo", (...args) => {
+      calls.push(args)
+      return new AgentSpec(new EchoRunner(), new JsonCodec())
+    })
+    registry.requireSpec("echo", "a1")
+    expect(calls).toEqual([["a1"]])
+  })
+
   it("register and require spec round trip", () => {
     const registry = new AgentTypeRegistry()
     registry.register("data", factory())
@@ -64,7 +75,7 @@ describe("AgentTypeRegistry", () => {
     const registry = new AgentTypeRegistry()
     registry.register(
       "echo",
-      (_aid, _cfg) => new AgentSpec(new CountingRunner(), new JsonCodec())
+      (_aid) => new AgentSpec(new CountingRunner(), new JsonCodec())
     )
     const first = registry.requireSpec("echo", "a1").runner as CountingRunner
     const second = registry.requireSpec("echo", "a2").runner as CountingRunner
