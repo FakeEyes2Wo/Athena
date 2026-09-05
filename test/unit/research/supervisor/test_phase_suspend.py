@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from test.support import RecordingDocumentProjector
+
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_tree import ResearchTree
 from athena.research.supervisor.deps import (
@@ -53,6 +55,7 @@ def _supervisor(tmp_path: Path, *, status: str) -> Supervisor:
                 store=LocalArtifactStore(tmp_path / "artifacts"),
                 agents=None,
                 workspaces=None,
+                documents=RecordingDocumentProjector(),
             ),
             research=ResearchActions(
                 plan=unused_plan_turn, supervisor=unused_supervisor_turn

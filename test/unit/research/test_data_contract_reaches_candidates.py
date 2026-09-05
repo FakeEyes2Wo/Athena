@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from test.support import RecordingDocumentProjector
+
 from athena.research.prepare.data import DataContract
 from athena.research.supervisor.deps import (
     PhaseActions,
@@ -194,7 +196,12 @@ def _supervisor(tree, state, agents) -> Supervisor:
         tree=tree,
         deps=SupervisorDeps(
             paths=SupervisorPaths(Path("."), Path("state.json"), Path("tree.json")),
-            runtime=SupervisorRuntime(SimpleNamespace(), agents, SimpleNamespace()),
+            runtime=SupervisorRuntime(
+                SimpleNamespace(),
+                agents,
+                SimpleNamespace(),
+                documents=RecordingDocumentProjector(),
+            ),
             research=ResearchActions(_unused_plan, _unused_supervisor),
             phases=PhaseActions(publish),
             search=SearchServices(Scheduler(), Recovery()),

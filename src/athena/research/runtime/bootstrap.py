@@ -40,6 +40,7 @@ from athena.research.config import (
     SurveyConfig,
 )
 from athena.research.evaluation import TrustedEvaluator
+from athena.research.experiment_documents import ExperimentDocumentProjector
 from athena.research.prepare.authority import BaselineAuthorityStore
 from athena.research.runtime.events import RuntimeEvents
 from athena.research.runtime.phase_runner import PhaseRunner
@@ -241,6 +242,13 @@ def wire_workflow(runtime: Any) -> None:
             store=services.infrastructure.store,
             agents=services.infrastructure.agents,
             workspaces=services.infrastructure.git,
+            documents=ExperimentDocumentProjector(
+                document_root=config.paths.root / ".athena" / "exp_docs",
+                evaluator_roots=(
+                    config.paths.workspaces / "evaluator" / "evaluate",
+                    config.paths.workspaces / "evaluator",
+                ),
+            ),
         ),
         research=ResearchActions(
             plan=phases.run_plan_turn,

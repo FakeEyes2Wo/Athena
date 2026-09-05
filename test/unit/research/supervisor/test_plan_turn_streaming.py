@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from test.support import RecordingDocumentProjector
+
 from athena.agents.task_agents import register_plan_agent
 from athena.core.agent.agent_runtime import AgentRuntime
 from athena.core.agent.provider import StreamEvent
@@ -174,7 +176,10 @@ async def test_plan_turn_forwards_text_delta_to_runtime_publisher(
                 tree_path=tmp_path / ".athena" / "research_tree.json",
             ),
             runtime=SupervisorRuntime(
-                store=store, agents=agents, workspaces=workspaces
+                store=store,
+                agents=agents,
+                workspaces=workspaces,
+                documents=RecordingDocumentProjector(),
             ),
             research=ResearchActions(
                 plan=stub_plan_turn, supervisor=unused_supervisor_turn

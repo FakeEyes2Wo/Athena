@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from test.support import RecordingDocumentProjector
+
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
@@ -79,7 +81,12 @@ async def _make_supervisor(tmp_path: Path, *, run_ideator_turn=None) -> Supervis
                 state_path=tmp_path / ".athena" / "state.json",
                 tree_path=tmp_path / ".athena" / "research_tree.json",
             ),
-            runtime=SupervisorRuntime(store=store, agents=None, workspaces=None),
+            runtime=SupervisorRuntime(
+                store=store,
+                agents=None,
+                workspaces=None,
+                documents=RecordingDocumentProjector(),
+            ),
             research=ResearchActions(
                 plan=unused_plan_turn,
                 supervisor=unused_supervisor_turn,
