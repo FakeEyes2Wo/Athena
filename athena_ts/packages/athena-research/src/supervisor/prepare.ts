@@ -19,8 +19,8 @@ import { DataScriptBundleSchema } from "../contracts.js"
 import { BundleMetadata, type DataScriptRunner } from "../script_runner.js"
 import type { Scorer } from "../evaluation.js"
 import type { ExecutionRuntime } from "../execution.js"
-import { PlanRunner, type PlanTurnResult } from "./experiment.js"
-import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } from "./plans.js"
+import { PlanRunner } from "./experiment.js"
+import { PlanInputSchema, PlanStateSchema, type PlanDecision } from "./plans.js"
 import type { ResearchState } from "./state.js"
 
 export const PREPARE_PLAN_ID = "prepare"
@@ -180,19 +180,11 @@ export async function runPreparePlan(opts: {
   treeRef: ArtifactRef
   task: string
   maxTurns: number
-  planRunnerFactory?: (
-    branch: GitWorkBranch
-  ) => { runTurn(planId: string, state: PlanState, planInput: ReturnType<typeof PlanInputSchema.parse>): Promise<PlanTurnResult> }
 }): Promise<PrepareResult> {
   if (opts.maxTurns < 1) throw new Error("max_turns must be at least 1")
   const contextRef = await opts.store.putText(
     JSON.stringify({ plan_id: PREPARE_PLAN_ID, task: opts.task, tree_ref: opts.treeRef })
   )
-  const makeRunner =
-    opts.planRunnerFactory ??
-    ((branch) =>
-      new PlanRunner(opts.execution, opts.store, opts.evaluator, opts.git, branch))
-
   let feedback: string | null = null
   for (let turn = 0; turn < opts.maxTurns; turn++) {
     const prompt = feedback ?? opts.task
@@ -205,7 +197,7 @@ export async function runPreparePlan(opts: {
       throw new Error(`prepare Agent abandoned Plan: ${decision.reason}`)
     }
     try {
-      const runner = makeRunner(opts.workspace)
+      const runner = new PlanRunner(opts.execution, opts.store, opts.evaluator, opts.git, opts.workspace)
       const state = PlanStateSchema.parse({
         kind: "PREPARE",
         context_ref: contextRef,

@@ -4,9 +4,8 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { LocalArtifactStore, type GitWorkBranch } from "@athena/core"
 import { DataScriptBundleSchema } from "../../src/contracts.js"
-import { PlanDecisionSchema, PlanStateSchema } from "../../src/supervisor/plans.js"
+import { PlanDecisionSchema } from "../../src/supervisor/plans.js"
 import { PrepareResultSchema, runEvaluatorPlan, runPreparePlan } from "../../src/supervisor/prepare.js"
-import { PlanTurnResultSchema } from "../../src/supervisor/experiment.js"
 
 const REF = "sha256:" + "a".repeat(64)
 
@@ -65,38 +64,61 @@ describe("runEvaluatorPlan", () => {
 })
 
 describe("runPreparePlan", () => {
-  it("returns PrepareResult on scored submit", async () => {
+  it.each([false, true])("returns a real PlanRunner result with feedback retry (%s)", async (failFirst) => {
     const dir = tmpDir()
     const store = new LocalArtifactStore(join(dir, "artifacts"))
     const branch: GitWorkBranch = { path: join(dir, "ws"), branch: "athena/prepare", base_commit: "c0" }
     mkdirSync(branch.path, { recursive: true })
+    mkdirSync(join(branch.path, "predictions"))
+    writeFileSync(join(branch.path, "predictions", "values.csv"), "id,pred\n1,0.8\n")
+    writeFileSync(join(branch.path, "report.md"), "# baseline report")
+    writeFileSync(join(branch.path, "experiment.json"), JSON.stringify({
+      version: 1, commands: [["train"]], outputs: { predictions: "predictions", report: "report.md" },
+    }))
+    const evaluatorRef = await store.putText(JSON.stringify(DataScriptBundleSchema.parse({
+      bundle_id: "eval", entrypoint: "evaluate.py",
+    })))
+    const prompts: string[] = []
+    const commits: string[] = []
+    let executions = 0
 
     const result = await runPreparePlan({
-      agent: { turn: submit },
+      agent: { turn: async (prompt) => { prompts.push(prompt); return submit() } },
       evaluator: { score: async () => ({ candidate_id: "prepare", test_score: 0.8, direction: "maximize" as const, kfold_mean: null, kfold_std: null }) },
-      git: {} as never,
+      git: {
+        diff: async (workspace: GitWorkBranch) => {
+          expect(workspace).toBe(branch)
+          return { ref: REF, paths: ["experiment.json"] }
+        },
+        commit: async (_branch: GitWorkBranch, _diff: unknown, message: string) => {
+          commits.push(message)
+          return "c1"
+        },
+      } as never,
       workspace: branch,
-      execution: { run: async () => ({ ok: true, stdout: "", stderr: "", exit_code: 0 }) },
+      execution: { run: async (opts) => {
+        expect(opts.workdir).toBe(branch.path)
+        expect(opts.argv).toEqual(["train"])
+        executions++
+        return failFirst && executions === 1
+          ? { ok: false, stdout: "", stderr: "retry command", exit_code: 1 }
+          : { ok: true, stdout: "", stderr: "", exit_code: 0 }
+      } },
       store,
-      evaluatorRef: REF,
+      evaluatorRef,
       treeRef: REF,
       task: "prepare baseline",
       maxTurns: 3,
-      planRunnerFactory: () => ({
-        runTurn: async () =>
-          PlanTurnResultSchema.parse({
-            kind: "scored",
-            metric: 0.8,
-            commit: "c1",
-            next_state: PlanStateSchema.parse({ kind: "PREPARE", context_ref: REF, turns_used: 1, turn_limit: 3 }),
-            predictions_ref: REF,
-            evidence_ref: REF,
-            report_ref: REF,
-          }),
-      }),
     })
 
     expect(PrepareResultSchema.parse(result).metric).toBe(0.8)
     expect(result.commit).toBe("c1")
+    expect(result.evaluator_ref).toBe(evaluatorRef)
+    expect(await store.getText(result.report_ref)).toBe("# baseline report")
+    expect(JSON.parse(await store.getText(result.evidence_ref))).toMatchObject({ plan: "prepare", metric: 0.8, commit: "c1" })
+    expect(commits).toHaveLength(1)
+    expect(executions).toBe(failFirst ? 2 : 1)
+    expect(prompts[0]).toBe("prepare baseline")
+    if (failFirst) expect(prompts[1]).toContain("retry command")
   })
 })

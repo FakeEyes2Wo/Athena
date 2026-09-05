@@ -21,6 +21,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove unused Worker text forwarding and consolidate provider ownership.
 - [x] Trace the standalone TypeScript composition root to actual entries and delete its unused adapter chain.
 - [x] Remove redundant execution context/root state and migrate PlanRunner/prepare/DSH callers.
+- [x] Remove the test-only prepare runner factory and validate the real preparation pipeline.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -128,7 +129,13 @@ CommandResult drops three never-consumed placeholders (error, truncated, output_
 
 Execution evidence: research/DSH tests returned 189 passed before and after migration. Six new real-child-process cases cover different working directories on one stateless executor, literal argv with spaces/metacharacters, separate stdout/stderr, nonzero exit, empty argv without events, missing executable with start event, and timeout failure. The focused new file returned six passed. All five package builds passed; full workspace verification returned 448 passed across 53 files with `npm test -- --testTimeout=30000`. Removed context/root/environment helper searches and git diff --check passed. Baseline coverage is now 70/602 plus separately tracked new files.
 
-Next module: complete PlanRunner/prepare source and test-file reviews; these and DSH were inspected at affected execution sites only, not counted as new completed file reviews. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+TypeScript prepare review: fully read prepare.ts and its two test files, then trace DSH's evaluator/prepare calls. Delete planRunnerFactory, whose only override was a test fabricating a scored outcome; options shrink from eleven fields to ten. Remove its duplicate runner protocol and forwarding closure. Production still constructs a fresh PlanRunner at the same point in each attempted turn. Preserve separate evaluator and baseline loops because their freeze/output/fatal-error policies differ; keep stable workspace persistence, label/entrypoint checks, feedback retries, abandonment and trusted-result validation. Do not merge these policies into a generic retry framework.
+
+Replace the factory-based test with two cases using the real PlanRunner, manifests, content-addressed artifact storage and fake external execution/scorer/Git ports. Verify command/workspace propagation, one committed successful result, report/evidence round-trip and retry feedback following a failed command. Add five freeze regressions for malformed JSON, non-string eval_script, missing file, missing directory entrypoint and nested labels. The baseline focused prepare/PlanRunner/DSH selection returned 41 passed; the first real-pipeline selection returned four passed.
+
+Prepare verification: all five package builds passed; final full workspace run returned 454 passed across 53 files with `npm test -- --testTimeout=30000`. The two prepare files contribute twelve passing tests, including the real pipeline and freeze cases. No remaining tracked planRunnerFactory references were found, and git diff --check passed. The command-only timeout override does not establish default-timeout reliability.
+
+Prepare source/test reviews bring baseline coverage to 73/602. Next module: PlanRunner source has now been read completely; finish its test/caller review and consolidate duplicate directory-presence traversal with prepare where appropriate. DSH remains inspected at affected call sites only. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -704,7 +711,7 @@ Next module: complete PlanRunner/prepare source and test-file reviews; these and
 | `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Reviewed; merge policy boundary into ranker.ts and delete file; priority arguments 2 to 1; 12 tests pass |
-| `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Reviewed; removed test-only runner factory, retained distinct freeze/baseline policies |
 | `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; remove static class and helpers; preserve complete durable state; 12 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; delete factories/forwarders; 19 tests pass |
@@ -719,8 +726,8 @@ Next module: complete PlanRunner/prepare source and test-file reviews; these and
 | `athena_ts/packages/athena-research/test/supervisor/experiment.test.ts` | 473 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/plans.test.ts` | 303 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/policy.test.ts` | 78 | Reviewed; retain Elo contract tests; remove tests for deleted unused helper; 12 tests pass |
-| `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Pending |
-| `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Reviewed; real PlanRunner success/artifact/feedback retry plus evaluator decisions |
+| `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Reviewed; file/directory evaluator, labels and invalid declarations |
 | `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Reviewed; scoring/novelty/FIFO/dedup/configuration and snapshot-count regressions; 21 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; correct active experiment fixtures; add configuration and phase recovery regressions; 12 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, null fixture correction, policy/budget/dedup regressions; 19 tests pass |
