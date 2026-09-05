@@ -7,11 +7,12 @@ import re
 import socket
 import subprocess
 import tempfile
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Awaitable, Callable, Final, Mapping, Protocol, Sequence
+from typing import Final, Protocol
 from urllib.parse import urlsplit
 
 from pydantic import ValidationError
@@ -263,12 +264,12 @@ def _curlopt_resolve_value(host: str, port: int, addresses: Sequence[str]) -> st
     return f"http.curloptResolve={host}:{port}:{rendered}"
 
 
+@dataclass(slots=True)
 class GitCloneVerifier:
     """Prove that a public repository is reachable without reading its files."""
 
-    def __init__(self, runner: CommandRunner = run_command, timeout_s: float = 60.0):
-        self._runner = runner
-        self._timeout_s = timeout_s
+    runner: CommandRunner = run_command
+    timeout_s: float = 60.0
 
     async def verify(self, repository_url: str) -> GitCloneEvidence:
         """Clone a repository shallowly and return its resolved HEAD commit."""
@@ -423,10 +424,10 @@ class GitCloneVerifier:
         operation: str,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            return await self._runner(argv, cwd=cwd, env=env, timeout_s=self._timeout_s)
-        except (asyncio.TimeoutError, subprocess.TimeoutExpired) as exc:
+            return await self.runner(argv, cwd=cwd, env=env, timeout_s=self.timeout_s)
+        except (TimeoutError, subprocess.TimeoutExpired) as exc:
             self._raise_failure(
-                f"git {operation} timed out after {self._timeout_s:g} seconds: {exc}"
+                f"git {operation} timed out after {self.timeout_s:g} seconds: {exc}"
             )
         except (OSError, ValueError) as exc:
             self._raise_failure(f"git {operation} could not be started: {exc}")
@@ -439,12 +440,7 @@ class GitCloneVerifier:
         )
 
 
-def _has_substantive_openalex_proof(work: OpenAlexWork) -> bool:
-    """Require meaningful work and title identities before recording authority proof."""
-    return bool(work.openalex_id.strip()) and titles_match(work.title, work.title)
-
-
-def joined_diagnostic(error: BaselineResearchError) -> str:
+def _joined_diagnostic(error: BaselineResearchError) -> str:
     """Join the verifier's already bounded diagnostics into one attempt note."""
 
     diagnostic = " ".join(error.diagnostics) or str(error)
@@ -452,21 +448,16 @@ def joined_diagnostic(error: BaselineResearchError) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
+@dataclass(slots=True)
 class BaselineSourceVerifier:
     """Verify a selected source via public Git, then OpenAlex metadata if needed."""
 
-    def __init__(
-        self,
-        git: GitCloneVerifier,
-        openalex: OpenAlexLookup,
-        now: Callable[[], datetime] = _now,
-    ) -> None:
-        self.git = git
-        self.openalex = openalex
-        self.now = now
+    git: GitCloneVerifier
+    openalex: OpenAlexLookup
+    now: Callable[[], datetime] = _now
 
     async def verify(self, artifacts: BaselineArtifacts) -> BaselineVerification:
         """Return the first qualifying Git or authority-metadata proof."""
@@ -497,14 +488,14 @@ class BaselineSourceVerifier:
             except BaselineResearchError as error:
                 attempts.append(
                     VerificationAttempt(
-                        route="git", success=False, diagnostic=joined_diagnostic(error)
+                        route="git", success=False, diagnostic=_joined_diagnostic(error)
                     )
                 )
 
         if selected.paper_locator:
             try:
                 work = await self.openalex.fetch_work(selected.paper_locator)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - external lookup degradation
                 attempts.append(
                     VerificationAttempt(
                         route="openalex",
@@ -523,7 +514,9 @@ class BaselineSourceVerifier:
                             diagnostic="OpenAlex did not resolve the paper locator",
                         )
                     )
-                elif not _has_substantive_openalex_proof(work):
+                elif not work.openalex_id.strip() or not titles_match(
+                    work.title, work.title
+                ):
                     attempts.append(
                         VerificationAttempt(
                             route="openalex",
@@ -598,16 +591,3 @@ def build_default_source_verifier() -> BaselineSourceVerifier:
         git=GitCloneVerifier(),
         openalex=OpenAlexClient(HostRateLimiter(UrllibTransport())),
     )
-
-
-__all__ = [
-    "BaselineSourceVerifier",
-    "CommandRunner",
-    "GitCloneEvidence",
-    "GitCloneVerifier",
-    "OpenAlexLookup",
-    "build_default_source_verifier",
-    "joined_diagnostic",
-    "run_command",
-    "titles_match",
-]

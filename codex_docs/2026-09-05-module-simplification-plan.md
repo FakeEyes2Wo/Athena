@@ -543,6 +543,12 @@ Read `prepare/eda.py` and all direct scheduler/fallback tests completely, then t
 
 Replace the eight-parameter `run_eda_todos` function and its nine-/seven-parameter helpers with a three-resource `EdaTodoRunner` and immutable `EdaTodoOptions`. `run` now receives at most one options object, while stage and worker methods receive only their work item plus shared options. Bind each worker id into its event closure rather than capturing the loop variable. Delete the old function without a compatibility wrapper and update the EDA guide. The module falls from 378 to 355 physical lines. The unchanged focused baseline and final selection both passed 17 tests; an expanded EDA/PREPARE breakpoint selection passed 13 tests. Ruff, Black, Python compilation, old-call searches, and `git diff --check` passed. Closing the EDA row advances reviewed coverage to 342/602. Whole-repository acceptance remains pending.
 
+## PREPARE source-verification review
+
+Read `source_verification.py` completely and traced its Git/OpenAlex adapters, baseline integration, integration fakes, and both direct test suites. Preserve fixed Git executable discovery, allowlisted subprocess environment, public-address resolution and repeat-DNS pinning, disabled credentials/hooks/protocols/redirects, shallow no-checkout clone, commit validation, diagnostic redaction, Git-first fallback, citation threshold, title matching, and persisted verification attempts.
+
+Replace both handwritten verifier constructors with slotted dataclasses while preserving their existing call syntax: `GitCloneVerifier` keeps two attributes and `BaselineSourceVerifier` keeps three. Inline the sole OpenAlex identity helper, privatize the sole-use diagnostic joiner, and remove the redundant implementation export list. The module falls from 613 to 593 physical lines. The unchanged direct baseline and final selection both passed 126 tests; source Ruff, Black, Python compilation, removed-helper searches, and `git diff --check` passed. Closing the source-verification row advances reviewed coverage to 343/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1149,7 +1155,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/prepare/evaluator.py` | 363 | Reviewed; delete one-use job DTO and pass two required values directly |
 | `src/athena/research/prepare/orchestrator.py` | 61 | Reviewed; retain authoritative PREPARE phase order |
 | `src/athena/research/prepare/repository_url.py` | 135 | Reviewed; retain shared trust-boundary normalizer and remove redundant export list |
-| `src/athena/research/prepare/source_verification.py` | 613 | Pending |
+| `src/athena/research/prepare/source_verification.py` | 613 | Reviewed; use slotted verifier records and remove single-use helpers/export list |
 | `src/athena/research/report.py` | 397 | Pending |
 | `src/athena/research/runtime/__init__.py` | 5 | Pending |
 | `src/athena/research/runtime/bootstrap.py` | 438 | Pending |
