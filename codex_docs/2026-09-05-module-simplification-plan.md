@@ -67,6 +67,14 @@ Retain policy.ts as the independently testable scoring strategy boundary. Delete
 
 Scheduling verification: pre-change scheduler/ranker/policy/Supervisor selection returned 40 passed; after new regressions and before removing the dead helper's tests, 44 passed. Final full TypeScript run returned 412 passed across 53 files, including 19 scheduler and 12 policy tests. All five package builds and git diff --check passed. Tracked TypeScript searches find no remaining removed factory/enum/helper or forwarding-method consumers. Baseline reviewed coverage is now 53/602. Ranker source/tests have been fully read but deeper scoring/configuration review remains pending; runtime.ts, supervisor.ts, and DSH index were inspected at affected call sites only. Whole-repository verification, main merge/push, and deletion of this task's branch/worktree remain required and unfinished.
 
+TypeScript ranking review: the policy boundary remains logically separate but no longer needs a separate file. Merge policy.ts into ranker.ts and delete policy.ts without a compatibility shim; migrate package exports, Scheduler, Supervisor, and all three test consumers. The two production files totalled 220 lines immediately before this change and now form one 168-line module. HypothesisPolicy.priority and EloPolicy.priority take one argument instead of two; no implementation used the tree parameter. Replace HypothesisPolicyLike with a Pick of the canonical interface. Delete the unused dedupThreshold getter, novelty export, private validation/normalization/scoring forwarding methods, and public rubricPrior export.
+
+Rank now snapshots settled history once and precomputes one score per candidate before sorting. Deduplication tokenizes each input once; Jaccard computes union size algebraically instead of allocating a union set per comparison. Retain the scoring formula, finite-priority normalization, no-ID/equal-score behavior, FIFO ties, clipped cost, selection-local deduplication and fresh scores on subsequent calls. Constructor validation now rejects non-finite weights/thresholds; the previous comparisons silently admitted NaN. No repeated validation or persistent cache was introduced.
+
+Ranking evidence: baseline ranker/policy/scheduler checks returned 35 passed. New regressions first exposed 14 tree snapshots for eight candidates and five missing non-finite configuration checks (6 failed / 6 passed). Final ranking tests: 21 passed, covering default/custom weighted scoring, cost clipping, empty/unregistered candidates, fresh re-ranking, finite/range validation, existing-candidate deduplication, novelty and non-mutation. A new test initially used duplicate hypothesis order zero; corrected its fixture before the final run. After removing three ignored stale policy build artifacts, all five TypeScript package builds passed and the complete workspace returned 429 passed across 53 files. Removed-module/API searches and git diff --check passed. Baseline review coverage is now 55/602; all whole-repository acceptance and main merge/push/temporary branch/worktree cleanup gates remain unfinished.
+
+Next reads: agent cancel.ts, settings.ts and settings.test.ts have been fully inspected but remain Pending for caller tracing and a module decision. Cancellation still has explicit waiters; settings.getClient still returns a deferred implementation placeholder and requires examination with provider/single-turn callers before deciding its treatment.
+
 | File | Baseline lines | Review |
 | --- | ---: | --- |
 | `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
@@ -638,9 +646,9 @@ Scheduling verification: pre-change scheduler/ranker/policy/Supervisor selection
 | `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Pending |
-| `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Reviewed; retain scoring boundary; delete unused queueOrder and redundant k assignment; 12 tests pass |
+| `athena_ts/packages/athena-research/src/supervisor/policy.ts` | 68 | Reviewed; merge policy boundary into ranker.ts and delete file; priority arguments 2 to 1; 12 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/prepare.ts` | 255 | Pending |
-| `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Pending |
+| `athena_ts/packages/athena-research/src/supervisor/ranker.ts` | 167 | Reviewed; absorb policy; score once per candidate, snapshot history once, cache local tokens; 21 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/recovery.ts` | 69 | Reviewed; remove static class and helpers; preserve complete durable state; 12 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/scheduler.ts` | 159 | Reviewed; actions 4 fields to 2; constructor 2 arguments to 1; delete factories/forwarders; 19 tests pass |
 | `athena_ts/packages/athena-research/src/supervisor/state.ts` | 111 | Pending |
@@ -656,7 +664,7 @@ Scheduling verification: pre-change scheduler/ranker/policy/Supervisor selection
 | `athena_ts/packages/athena-research/test/supervisor/policy.test.ts` | 78 | Reviewed; retain Elo contract tests; remove tests for deleted unused helper; 12 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/prepare-plan.test.ts` | 102 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/prepare.test.ts` | 59 | Pending |
-| `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Pending |
+| `athena_ts/packages/athena-research/test/supervisor/ranker.test.ts` | 90 | Reviewed; scoring/novelty/FIFO/dedup/configuration and snapshot-count regressions; 21 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/recovery.test.ts` | 230 | Reviewed; correct active experiment fixtures; add configuration and phase recovery regressions; 12 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/scheduler.test.ts` | 247 | Reviewed; literal action contracts, null fixture correction, policy/budget/dedup regressions; 19 tests pass |
 | `athena_ts/packages/athena-research/test/supervisor/state.test.ts` | 244 | Pending |

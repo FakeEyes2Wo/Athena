@@ -1,69 +1,92 @@
-/**
- * Hypothesis ranking and deduplication for rolling SEARCH（移植
- * ``research/supervisor/ranker.py``）。
- *
- * 用一个小型 UCB 风格选择器替代纯 ``(-priority, order)`` FIFO 排序：
- * rubric 冷启动先验 + 策略累计强度（Elo/BT 代理）+ novelty 探索奖励 -
- * 归一化成本惩罚。所有信号都是 tree 的确定性纯函数。
- */
+/** Hypothesis scoring policy, ranking and selection-local deduplication. */
 
 import type { Hypothesis, ResearchTree } from "@athena/core"
 
-const WORD = /[a-z0-9]+/g
+/** 候选相对其冻结参照的可信结果。 */
+export const Outcome = {
+  WIN: "WIN",
+  DRAW: "DRAW",
+  LOSS: "LOSS",
+} as const
+export type Outcome = (typeof Outcome)[keyof typeof Outcome]
+
+/** Supervisor 调度器使用的窄策略。 */
+export interface HypothesisPolicy {
+  seed(parent: Hypothesis | null): number
+  priority(hypothesis: Hypothesis): number
+  settle(referencePriority: number, outcome: Outcome): number
+}
+
+/**
+ * 单侧 Elo 更新，固定 0.5 期望得分。
+ *
+ * TODO(search-policy): 有足够真实搜索轨迹后，用 evidence-aware 调度策略替换
+ * EloPolicy；Supervisor 只依赖 HypothesisPolicy。
+ */
+export class EloPolicy implements HypothesisPolicy {
+  static readonly ROOT_PRIORITY = 1000.0
+
+  constructor(private readonly k: number = 32.0) {
+    if (!Number.isFinite(k) || k <= 0) {
+      throw new Error("Elo k must be a positive finite number")
+    }
+  }
+
+  seed(parent: Hypothesis | null): number {
+    return parent === null ? EloPolicy.ROOT_PRIORITY : parent.priority
+  }
+
+  priority(hypothesis: Hypothesis): number {
+    return hypothesis.priority
+  }
+
+  settle(referencePriority: number, outcome: Outcome): number {
+    if (!Number.isFinite(referencePriority)) {
+      throw new Error("reference priority must be finite")
+    }
+    const score =
+      outcome === Outcome.WIN ? 1.0 : outcome === Outcome.DRAW ? 0.5 : 0.0
+    return referencePriority + this.k * (score - 0.5)
+  }
+}
 
 export function tokenize(text: string): Set<string> {
-  return new Set(text.toLowerCase().match(WORD) ?? [])
+  return new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? [])
 }
 
 export function jaccard(left: Set<string>, right: Set<string>): number {
   if (left.size === 0 && right.size === 0) return 0.0
-  const union = new Set([...left, ...right])
   let intersection = 0
   for (const token of left) {
     if (right.has(token)) intersection += 1
   }
-  return intersection / union.size
+  return intersection / (left.size + right.size - intersection)
 }
 
-function textSimilarity(left: Hypothesis, right: Hypothesis): number {
-  const a = new Set([...tokenize(left.statement), ...tokenize(left.intervention)])
-  const b = new Set([...tokenize(right.statement), ...tokenize(right.intervention)])
-  return jaccard(a, b)
+function tokens(hypothesis: Hypothesis): Set<string> {
+  return tokenize(hypothesis.statement + " " + hypothesis.intervention)
 }
 
-/** 证据与具体性给出的 [0.4, 1.0] 冷启动先验。 */
-export function rubricPrior(hypothesis: Hypothesis): number {
+/** Evidence and specificity provide the unchanged [0.4, 1.0] cold-start prior. */
+function rubricPrior(hypothesis: Hypothesis): number {
   const evidence = hypothesis.sources.length > 0 ? 1.0 : 0.0
   const specific = tokenize(hypothesis.intervention).size >= 3 ? 1.0 : 0.0
   return 0.4 + 0.3 * evidence + 0.3 * specific
 }
 
-function settledHypotheses(tree: ResearchTree): Hypothesis[] {
-  return Object.values(tree.toDict().hypotheses).filter(
-    (hypothesis) => hypothesis.status !== "PROPOSED"
-  )
-}
-
-/** 1 - 与已结算假设的最大相似度（无已结算时 1.0）。 */
-export function novelty(hypothesis: Hypothesis, tree: ResearchTree): number {
-  const settled = settledHypotheses(tree)
-  if (settled.length === 0) return 1.0
-  const similarity = Math.max(...settled.map((other) => textSimilarity(hypothesis, other)))
-  return 1.0 - similarity
-}
-
-/** Greedy keep candidates distinct from existing and each other (input order wins ties). */
+/** Greedy selection: input order wins ties; neither input is mutated. */
 export function deduplicate(
   candidates: Hypothesis[],
   existing: Hypothesis[],
   threshold: number
 ): Hypothesis[] {
   const kept: Hypothesis[] = []
-  const seen = [...existing]
+  const seen = existing.map(tokens)
   for (const candidate of candidates) {
-    if (seen.some((other) => textSimilarity(candidate, other) >= threshold)) continue
+    const words = tokens(candidate)
+    if (seen.some((other) => jaccard(words, other) >= threshold)) continue
     kept.push(candidate)
-    seen.push(candidate)
+    seen.push(words)
   }
   return kept
 }
@@ -84,32 +107,22 @@ export const DEFAULT_RANK_CONFIG: RankConfig = {
   dedupThreshold: 0.8,
 }
 
-export interface HypothesisPolicyLike {
-  priority(hypothesis: Hypothesis, tree: ResearchTree): number
-}
-
-/** Rank pending hypotheses by ``prior + strength + novelty - cost``. */
+/** Rank by prior + normalized policy strength + novelty - clipped cost. */
 export class Selector {
   constructor(
-    private policy: HypothesisPolicyLike,
-    private config: RankConfig = DEFAULT_RANK_CONFIG
+    private readonly policy: Pick<HypothesisPolicy, "priority">,
+    private readonly config: RankConfig = DEFAULT_RANK_CONFIG
   ) {
-    this.validateConfig(config)
-  }
-
-  private validateConfig(config: RankConfig): void {
-    const weights = [config.priorWeight, config.strengthWeight, config.noveltyWeight] as const
-    if (weights.some((weight) => weight < 0 || weight > 1)) {
+    const weights = [config.priorWeight, config.strengthWeight, config.noveltyWeight]
+    if (weights.some((weight) => !Number.isFinite(weight) || weight < 0 || weight > 1)) {
       throw new Error("selector weights must be between 0 and 1")
     }
-    if (config.costWeight < 0) throw new Error("cost_weight must be nonnegative")
-    if (config.dedupThreshold <= 0 || config.dedupThreshold > 1) {
+    if (!Number.isFinite(config.costWeight) || config.costWeight < 0) {
+      throw new Error("cost_weight must be finite and nonnegative")
+    }
+    if (!Number.isFinite(config.dedupThreshold) || config.dedupThreshold <= 0 || config.dedupThreshold > 1) {
       throw new Error("dedup_threshold must be in (0, 1]")
     }
-  }
-
-  get dedupThreshold(): number {
-    return this.config.dedupThreshold
   }
 
   deduplicate(candidates: Hypothesis[], existing: Hypothesis[]): Hypothesis[] {
@@ -117,51 +130,39 @@ export class Selector {
   }
 
   rank(tree: ResearchTree, candidates: Hypothesis[]): Hypothesis[] {
-    const strengths = this.normalizedStrengths(candidates, tree)
-    return [...candidates].sort((left, right) => {
-      const leftScore = this.score(left, tree, strengths)
-      const rightScore = this.score(right, tree, strengths)
-      if (rightScore !== leftScore) return rightScore - leftScore
-      return (left.order ?? 0) - (right.order ?? 0)
-    })
-  }
-
-  private normalizedStrengths(
-    candidates: Hypothesis[],
-    tree: ResearchTree
-  ): Map<string, number> {
     const priorities = new Map<string, number>()
     for (const hypothesis of candidates) {
       if (hypothesis.id !== null) {
-        priorities.set(hypothesis.id, this.policy.priority(hypothesis, tree))
+        priorities.set(hypothesis.id, this.policy.priority(hypothesis))
       }
     }
-    const values = [...priorities.values()].filter((value) => Number.isFinite(value))
+    const values = [...priorities.values()].filter(Number.isFinite)
     const low = values.length > 0 ? Math.min(...values) : 0.0
     const high = values.length > 0 ? Math.max(...values) : 0.0
     const span = high - low
-    const normalized = new Map<string, number>()
-    for (const [id, priority] of priorities) {
-      normalized.set(id, span <= 0 ? 0.5 : (priority - low) / span)
-    }
-    return normalized
-  }
-
-  private score(
-    hypothesis: Hypothesis,
-    tree: ResearchTree,
-    strengths: Map<string, number>
-  ): number {
+    const settled = Object.values(tree.toDict().hypotheses)
+      .filter((hypothesis) => hypothesis.status !== "PROPOSED")
+      .map(tokens)
     const config = this.config
-    const prior = rubricPrior(hypothesis)
-    const strength = hypothesis.id === null ? 0.5 : (strengths.get(hypothesis.id) ?? 0.5)
-    const explore = novelty(hypothesis, tree)
-    const cost = Math.min(Math.max(hypothesis.cost, 0.0), 1.0)
-    return (
-      config.priorWeight * prior +
-      config.strengthWeight * strength +
-      config.noveltyWeight * explore -
-      config.costWeight * cost
-    )
+    const scored = candidates.map((hypothesis) => {
+      const strength = hypothesis.id === null || span <= 0
+        ? 0.5
+        : (priorities.get(hypothesis.id)! - low) / span
+      const words = tokens(hypothesis)
+      let similarity = 0
+      for (const other of settled) similarity = Math.max(similarity, jaccard(words, other))
+      const cost = Math.min(Math.max(hypothesis.cost, 0.0), 1.0)
+      const score =
+        config.priorWeight * rubricPrior(hypothesis) +
+        config.strengthWeight * strength +
+        config.noveltyWeight * (1 - similarity) -
+        config.costWeight * cost
+      return { hypothesis, score }
+    })
+    scored.sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score
+      return (left.hypothesis.order ?? 0) - (right.hypothesis.order ?? 0)
+    })
+    return scored.map(({ hypothesis }) => hypothesis)
   }
 }

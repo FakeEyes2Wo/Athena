@@ -1,7 +1,6 @@
 /** @athena/research 公开面（M2：固定确定性 SEARCH 调度器 + 数据/评估服务层）。 */
 
 export * from "./contracts.js"
-export * from "./supervisor/policy.js"
 export * from "./supervisor/ranker.js"
 export * from "./supervisor/plans.js"
 export { ResearchState } from "./supervisor/state.js"

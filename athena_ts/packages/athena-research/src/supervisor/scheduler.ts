@@ -4,8 +4,7 @@
 
 import type { Hypothesis, ResearchTree } from "@athena/core"
 
-import { EloPolicy, type HypothesisPolicy } from "./policy.js"
-import { Selector } from "./ranker.js"
+import { EloPolicy, Selector, type HypothesisPolicy } from "./ranker.js"
 import type { ResearchState } from "./state.js"
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])

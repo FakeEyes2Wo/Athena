@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { ExperimentSchema, HypothesisSchema, ResearchTree, parseOrThrow } from "@athena/core"
 import { PlanStateSchema } from "../../src/supervisor/plans.js"
-import { EloPolicy } from "../../src/supervisor/policy.js"
+import { EloPolicy } from "../../src/supervisor/ranker.js"
 import { ResearchState } from "../../src/supervisor/state.js"
 import { Scheduler, countSearchAttempts } from "../../src/supervisor/scheduler.js"
 

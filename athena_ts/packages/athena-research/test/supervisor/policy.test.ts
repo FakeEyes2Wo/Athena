@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { HypothesisSchema, ResearchTree } from "@athena/core"
-import { EloPolicy, Outcome } from "../../src/supervisor/policy.js"
+import { EloPolicy, Outcome } from "../../src/supervisor/ranker.js"
 
 function hypothesis(priority: number, order = 0) {
   return HypothesisSchema.parse({
@@ -33,7 +33,7 @@ describe("policy", () => {
   it("policy priority reads hypothesis priority", () => {
     const tree = new ResearchTree()
     tree.addHypothesis(hypothesis(1032.0))
-    expect(new EloPolicy().priority(tree.pendingHypotheses()[0]!, tree)).toBe(1032.0)
+    expect(new EloPolicy().priority(tree.pendingHypotheses()[0]!)).toBe(1032.0)
   })
 
   it.each([0.0, -1.0, NaN, Infinity, -Infinity])(
