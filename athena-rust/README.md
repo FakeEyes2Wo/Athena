@@ -13,7 +13,7 @@ depends on protocol + runtime; `athena-agent` implements the runtime
 
 | Crate | Responsibility | Source (`src/athena`) | Status |
 |---|---|---|---|
-| `athena-types` | Validated newtypes, domain DTOs, statuses | `core/schemas.py` | ✅ done |
+| `athena-types` | Validated identifiers, thread/turn DTOs, statuses | `core/schemas.py` | ✅ done |
 | `athena-protocol` | v1 wire protocol, error codes, method names | `app_server/protocol.py` | ✅ done |
 | `athena-memory` | `ContextManager`, compaction, rollout, `MessagePart` | `memory/*` | ✅ done |
 | `athena-tools` | `Tool`/`ToolExecutor`, read-only registry | `core/tool*.py` | ✅ done |

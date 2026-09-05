@@ -49,6 +49,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Remove the unconsumed Rust research prototype crate.
 - [x] Review the Rust protocol crate and collapse duplicate error/result surfaces.
 - [x] Review the Rust server crate and replace the temporary transport container.
+- [x] Review the Rust type crate and remove the unconsumed research domain layer.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -128,7 +129,7 @@ Read all five protocol source files and the Python-fixture integration test comp
 
 Delete five result DTOs that were never constructed, the unused exception-name mapper, six code-specific error factories, the `ErrorCode::code` forwarding method, and the unused `thiserror` dependency. `RpcError::new` is now the single construction interface. Move the application-only `RpcException` out of the protocol crate into the server client and store one `RpcError` instead of copying its three fields. Merge the 19-line method module into the protocol facade and delete its file. Remove thirteen duplicate inline tests; the fixture suite retains exact wire coverage and the two unique control/empty-response contracts.
 
-Fresh verification passed 26 protocol fixture tests and five server tests; the complete Rust workspace passed 173 tests. Workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing six protocol rows advances reviewed coverage to 151/602. Whole-repository acceptance remains pending.
+Fresh verification passed 26 protocol fixture tests and five server tests; the complete Rust workspace passed 167 tests. Workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing six protocol rows advances reviewed coverage to 151/602. Whole-repository acceptance remains pending.
 
 ## Rust server review
 
@@ -136,7 +137,15 @@ Read all seven server source files and the end-to-end test completely, with prot
 
 Replace the eight-field `Transport` object, which was always immediately split, with one zero-argument `transport()` factory that constructs the client and server halves directly. Collapse seven typed/test-only half forwarding methods into two generic raw-client operations, delete the unused `Full` transport error and server-request sender, and keep server event delivery reliable through its canonical channel sender. Inline the one-call five-parameter client worker helper into client startup; remove the post-start ready receiver field, public Sequencer surface, test-only processor state getter, and four state constant exports. `MessageProcessor::start` drops its fixed capacity argument (three parameters to two), and subscription shutdown drains its map once instead of repeatedly locking it.
 
-Fresh verification passed all five server unit/end-to-end tests, including ready admission, independent event delivery, full turn lifecycle, and shutdown. The complete Rust workspace passed 173 tests; workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing eight server rows advances reviewed coverage to 159/602. Whole-repository acceptance remains pending.
+Fresh verification passed all five server unit/end-to-end tests, including ready admission, independent event delivery, full turn lifecycle, and shutdown. The complete Rust workspace passed 167 tests; workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing eight server rows advances reviewed coverage to 159/602. Whole-repository acceptance remains pending.
+
+## Rust type-contract review
+
+Read all four type source files and the Python-fixture test completely, then trace every export across all remaining Rust crates. The thread/turn DTOs, five validated identifiers, two runtime status enums, and validation error are active cross-crate contracts and remain. After removing the unconsumed Rust research prototype, the seven research-domain types in `domain.rs` had no remaining production caller and existed only to pass their own tests.
+
+Delete `domain.rs` and its `Hypothesis`, `ExperimentPlan`, `DataCard`, task metadata, metric, and hypothesis-status exports rather than retaining a stale second domain model. Remove the fourteen duplicate inline tests and eight fixture cases that only certified those dead types. Replace the public two-layer `NonBlankString` wrapper with direct String-backed ID newtypes, deleting unused `TryFrom<String>` and `AsRef<str>` implementations while preserving validation, `new`, `as_str`, display, and exact Serde behavior. Make the source modules private and move `serde_json` to test-only dependencies.
+
+Fresh focused verification passed all six retained thread/turn/identifier fixture cases. The complete Rust workspace passed 144 tests; workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing five type rows advances reviewed coverage to 164/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -854,11 +863,11 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-tools/src/tool.rs` | 44 | Reviewed; absorb ToolContext and remove its unread tool-name field |
 | `athena-rust/crates/athena-tools/tests/registry.rs` | 166 | Reviewed; eight duplicate/order/search/empty cases migrated to direct registry construction |
 | `athena-rust/crates/athena-tools/tests/tool_lifecycle.rs` | 279 | Reviewed; six success/error/cancellation/truncation cases retained |
-| `athena-rust/crates/athena-types/src/domain.rs` | 237 | Pending |
-| `athena-rust/crates/athena-types/src/ids.rs` | 119 | Pending |
-| `athena-rust/crates/athena-types/src/lib.rs` | 122 | Pending |
-| `athena-rust/crates/athena-types/src/status.rs` | 21 | Pending |
-| `athena-rust/crates/athena-types/tests/python_fixtures.rs` | 216 | Pending |
+| `athena-rust/crates/athena-types/src/domain.rs` | 237 | Reviewed; delete seven unconsumed research-domain contracts with their prototype |
+| `athena-rust/crates/athena-types/src/ids.rs` | 119 | Reviewed; remove public intermediate wrapper and unused conversion traits |
+| `athena-rust/crates/athena-types/src/lib.rs` | 122 | Reviewed; retain thread/turn contracts and delete duplicate inline tests/domain exports |
+| `athena-rust/crates/athena-types/src/status.rs` | 21 | Reviewed; retain two fixture-governed runtime enums |
+| `athena-rust/crates/athena-types/tests/python_fixtures.rs` | 216 | Reviewed; retain six live thread/turn/identifier parity cases |
 | `athena-rust/crates/athena-workspace/src/command.rs` | 61 | Pending |
 | `athena-rust/crates/athena-workspace/src/error.rs` | 20 | Pending |
 | `athena-rust/crates/athena-workspace/src/lib.rs` | 17 | Pending |
