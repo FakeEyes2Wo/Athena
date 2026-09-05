@@ -303,6 +303,14 @@ Reduce the package facade from twenty-six exports to the six symbols actually im
 
 The complete Kaggle selection passed 37 tests before and after the change; the CLI/wiring consumer selection passed 27 tests. All six retained facade imports loaded successfully. Python compilation, Black, blocking Ruff, removed-symbol searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the facade, authentication, and schema rows advances reviewed baseline coverage to 232/602. Whole-repository acceptance remains pending.
 
+## Kaggle HTTP client review
+
+Read `client.py` completely and traced every helper, public method, error field, query parameter, body parser, and submission step through the CLI, pipeline, tools, and both client/wiring suites. Retain one two-attribute client owning credentials and the shared host limiter. Resolve optional `kagglehub` lazily inside the download worker because it is an optional runtime dependency, and retain the distinct competition, notebook, discussion, download, and submission methods because each has a production consumer and endpoint-specific result contract.
+
+Delete the uncalled public `get_bytes` method, make JSON GET and URL-slug normalization private, and remove the single-call `_get` forwarding layer. Consolidate three response-body JSON decoders and their exception translation into one helper. Reduce `KaggleApiError` retained attributes from three to one by keeping only the consumed status; message and URL remain in the canonical exception string. Snapshot submission file metadata once instead of calling `stat()` again. After adding the repository-required public API documentation, client production code falls by three net lines without compatibility aliases.
+
+The complete Kaggle selection passed 37 tests before and after the change, including metadata, notebook JSON/BOM/zip, discussion, download, authorization error, multipart submission, pipeline, tools, auth, and wiring coverage. Python compilation, Black, blocking Ruff, removed-interface searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the client row advances reviewed baseline coverage to 233/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -786,7 +794,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `test/unit/gui/test_traces.py` | New | Reviewed; real JSONL summary and normalized-message regression |
 | `src/athena/kaggle/__init__.py` | 59 | Reviewed; six live package exports instead of twenty-six |
 | `src/athena/kaggle/auth.py` | 72 | Reviewed; one credential authority and three-parameter resolver |
-| `src/athena/kaggle/client.py` | 418 | Pending |
+| `src/athena/kaggle/client.py` | 418 | Reviewed; private JSON transport, one decoder and one-field API errors |
 | `src/athena/kaggle/pipeline.py` | 156 | Pending |
 | `src/athena/kaggle/schemas.py` | 63 | Reviewed; delete unconstructed discussion summary and retain live request/report models |
 | `src/athena/kaggle/tool.py` | 444 | Pending |

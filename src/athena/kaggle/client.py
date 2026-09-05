@@ -1,6 +1,7 @@
 """Kaggle API v1 客户端：元数据走 urllib GET，数据下载经 kagglehub，提交走两步 POST。"""
 
 import asyncio
+import importlib
 import io
 import json
 import urllib.error
@@ -24,7 +25,7 @@ BASE_URL = f"https://{KAGGLE_HOST}/api/v1"
 MAX_SUBMIT_BYTES = 256 * 1024 * 1024
 
 
-def slug_from_ref(ref: str) -> str:
+def _slug_from_ref(ref: str) -> str:
     """新版 API 的 ``ref`` 是完整 URL，取其最后一段作 slug；非 URL 原样返回。"""
     value = (ref or "").strip()
     if not value or "://" not in value:
@@ -51,10 +52,10 @@ def author_name(author: object) -> str:
 
 
 class KaggleApiError(RuntimeError):
+    """Report a failed Kaggle request while retaining its response status."""
+
     def __init__(self, status: int, message: str, url: str) -> None:
         self.status = status
-        self.message = message
-        self.url = url
         super().__init__(f"Kaggle API {status} for {url}: {message}")
 
 
@@ -74,7 +75,16 @@ def _error_message(response: HttpResponse) -> str:
     return response.body.decode("utf-8", errors="replace").strip()[:300] or "no body"
 
 
+def _response_json(response: HttpResponse, error_message: str = "not JSON") -> Any:
+    try:
+        return json.loads(response.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise KaggleApiError(response.status, error_message, response.url) from error
+
+
 class KaggleApiClient:
+    """Expose the Kaggle operations used by Athena over one rate-limited client."""
+
     def __init__(
         self, credentials: KaggleCredentials, http: HostRateLimiter | None = None
     ) -> None:
@@ -86,10 +96,12 @@ class KaggleApiClient:
 
     @property
     def http_request_count(self) -> int:
+        """Return the number of HTTP requests issued by this client."""
         return self._http.request_count
 
     @property
     def configured(self) -> bool:
+        """Report whether credentials can produce an authorization header."""
         return self._credentials.auth_header() is not None
 
     def _auth_headers(self) -> dict[str, str]:
@@ -110,20 +122,8 @@ class KaggleApiClient:
             )
         return response
 
-    async def _get(
-        self, path: str, params: dict[str, Any] | None = None
-    ) -> HttpResponse:
-        return await self._get_url(BASE_URL + path, params)
-
-    async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        response = await self._get(path, params)
-        try:
-            return json.loads(response.body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise KaggleApiError(response.status, "not JSON", response.url) from error
-
-    async def get_bytes(self, path: str, params: dict[str, Any] | None = None) -> bytes:
-        return (await self._get(path, params)).body
+    async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return _response_json(await self._get_url(BASE_URL + path, params))
 
     async def list_competitions(
         self,
@@ -133,23 +133,26 @@ class KaggleApiClient:
         sort_by: str = "latestDeadline",
         group: str = "general",
     ) -> list[dict]:
+        """List competitions matching the requested Kaggle filters."""
         params = {"page": max(page, 1), "sortBy": sort_by, "group": group}
         if search:
             params["search"] = search
-        result = await self.get_json("/competitions/list", params)
+        result = await self._get_json("/competitions/list", params)
         if not isinstance(result, list):
             return []
         for item in result:
             if isinstance(item, dict) and item.get("ref"):
-                item["ref"] = slug_from_ref(item["ref"])
+                item["ref"] = _slug_from_ref(item["ref"])
         return result
 
     async def get_competition(self, ref: str) -> dict:
-        result = await self.get_json(f"/competitions/get/{ref}")
+        """Return metadata for one competition."""
+        result = await self._get_json(f"/competitions/get/{ref}")
         return result if isinstance(result, dict) else {}
 
     async def list_data_files(self, ref: str) -> list[dict]:
-        result = await self.get_json(f"/competitions/data/list/{ref}")
+        """List downloadable data files for one competition."""
+        result = await self._get_json(f"/competitions/data/list/{ref}")
         if isinstance(result, list):
             return result
         if isinstance(result, dict):
@@ -163,7 +166,7 @@ class KaggleApiClient:
         target.mkdir(parents=True, exist_ok=True)
 
         def _download() -> list[Path]:
-            import kagglehub
+            kagglehub = importlib.import_module("kagglehub")
 
             try:
                 downloaded = kagglehub.competition_download(ref, output_dir=str(target))
@@ -196,10 +199,11 @@ class KaggleApiClient:
         page: int = 1,
         sort_by: str = "hotness",
     ) -> list[dict]:
+        """List notebooks associated with a competition."""
         params = {"competition": competition, "page": max(page, 1), "sortBy": sort_by}
         if search:
             params["search"] = search
-        result = await self.get_json("/kernels/list", params)
+        result = await self._get_json("/kernels/list", params)
         return result if isinstance(result, list) else []
 
     async def get_notebook(self, ref: str) -> str:
@@ -231,12 +235,7 @@ class KaggleApiClient:
             f"{urllib.parse.quote(competition)}/discussions"
         )
         response = await self._get_url(url, params)
-        try:
-            payload = json.loads(response.body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise KaggleApiError(
-                response.status, "discussions response is not JSON", response.url
-            ) from error
+        payload = _response_json(response, "discussions response is not JSON")
         if isinstance(payload, list):
             return payload
         if isinstance(payload, dict):
@@ -260,7 +259,7 @@ class KaggleApiClient:
     ) -> HttpResponse:
         """一次 POST（JSON 或文件上传），在 worker 线程里执行阻塞 urllib。"""
 
-        def do_post() -> HttpResponse:
+        def _do_post() -> HttpResponse:
             request = urllib.request.Request(
                 url, data=data, headers=headers, method="POST"
             )
@@ -282,11 +281,12 @@ class KaggleApiClient:
             except urllib.error.URLError as error:
                 raise KaggleApiError(0, f"POST failed: {error.reason}", url) from error
 
-        return await asyncio.to_thread(do_post)
+        return await asyncio.to_thread(_do_post)
 
     async def submit_submission(self, competition: str, file_path: str | Path) -> dict:
         """提交预测文件到竞赛：先拿签名上传 URL，再把文件 multipart 上传。"""
         path = Path(file_path)
+        stat = path.stat()
         content = path.read_bytes()
         file_name = path.name
 
@@ -295,7 +295,7 @@ class KaggleApiClient:
             {
                 "fileName": file_name,
                 "contentLength": len(content),
-                "lastModifiedEpoch": int(path.stat().st_mtime),
+                "lastModifiedEpoch": int(stat.st_mtime),
             }
         ).encode("utf-8")
         response = await self._post(
@@ -305,10 +305,7 @@ class KaggleApiClient:
             raise KaggleApiError(
                 response.status, _error_message(response), response.url
             )
-        try:
-            data = json.loads(response.body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise KaggleApiError(response.status, "not JSON", response.url) from error
+        data = _response_json(response)
         create_url = data.get("createUrl") or data.get("create_url")
         if not create_url:
             raise KaggleApiError(

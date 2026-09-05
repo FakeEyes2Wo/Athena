@@ -167,6 +167,6 @@ async def test_non_2xx_raises_kaggle_api_error() -> None:
         await client.list_competitions()
     except KaggleApiError as error:
         assert error.status == 403
-        assert "forbidden" in error.message
+        assert "forbidden" in str(error)
     else:
         raise AssertionError("expected KaggleApiError")
