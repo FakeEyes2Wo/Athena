@@ -1,10 +1,7 @@
 # Current Athena Work
 
 Active implementation plan:
-- `docs/superpowers/plans/2026-09-04-experiment-document-projection.md`
-
-Active supporting design spec:
-- `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`
+- None.
 
 Required delivery:
 - After every acceptance check passes, merge `feat/experiment-document-projection`
@@ -18,6 +15,7 @@ Paused predecessor implementation plans (explicit user priority override on 2026
 - `docs/superpowers/plans/2026-09-04-supervisor-search-resume-frontend.md`
 
 Most recent completed work:
+- `codex_docs/2026-09-04-experiment-document-projection-completion-report.md`
 - `codex_docs/2026-09-04-skip-validate-final-completion-report.md`
 - `codex_docs/2026-09-03-llm-task-understanding-output-completion-report.md`
 - `codex_docs/2026-09-03-authoritative-baseline-hardening-completion-report.md`
@@ -26,6 +24,7 @@ Most recent completed work:
 - `codex_docs/2026-09-03-frontend-workspace-session-fixes-completion-report.md`
 
 Design spec:
+- `docs/superpowers/specs/2026-09-04-experiment-document-projection-design.md`
 - `docs/superpowers/specs/2026-09-04-supervisor-transactional-search-resume-design.md`
 - `docs/superpowers/specs/2026-09-03-authoritative-baseline-hardening-design.md`
 - `docs/superpowers/specs/2026-09-02-authoritative-baseline-research-design.md`
