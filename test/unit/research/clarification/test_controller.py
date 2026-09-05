@@ -10,7 +10,7 @@ from athena.research.clarification.controller import (
     CLARIFICATION_FAILURE_NOTICE,
     MAX_QUESTIONS,
     ClarificationController,
-    ClarificationControllerError,
+    ClarificationError,
     ClarificationFinalStep,
     ClarificationQuestionStep,
 )
@@ -195,7 +195,7 @@ async def test_identical_task_resumes_and_different_task_conflicts(tmp_path) -> 
     assert second.draft_id == first.draft_id
     assert second.questions_asked == 8
 
-    with pytest.raises(ClarificationControllerError, match="different_task"):
+    with pytest.raises(ClarificationError, match="different_task"):
         await controller.start_or_resume("another task")
 
 
@@ -210,7 +210,7 @@ async def test_revise_preserves_answers_and_returns_to_clarifying(tmp_path) -> N
     assert len(revised.revisions) == 1
     assert len(revised.answers) == 8
 
-    with pytest.raises(ClarificationControllerError, match="stale_revision"):
+    with pytest.raises(ClarificationError, match="stale_revision"):
         await controller.revise(ready.draft_id, ready.revision, "old")
 
     resumed = await controller.run(revised)

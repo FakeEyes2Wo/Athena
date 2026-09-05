@@ -5,7 +5,7 @@ from pathlib import Path
 
 from athena.core.persistence import atomic_write_json
 from athena.research.clarification.errors import (
-    ClarificationConfirmationError,
+    ClarificationError,
     ClarificationPersistenceError,
 )
 from athena.research.clarification.handoff import atomic_write_text, materialize_handoff
@@ -87,7 +87,7 @@ class ConfirmationJournalStore:
                 self.path.read_text(encoding="utf-8")
             )
         except Exception as error:
-            raise ClarificationConfirmationError(
+            raise ClarificationError(
                 "confirmation_recovery_failed",
                 f"confirmation journal is corrupt: {error}",
             ) from error
@@ -97,9 +97,7 @@ class ConfirmationJournalStore:
         try:
             atomic_write_json(self.path, journal.model_dump(mode="json"))
         except OSError as error:
-            raise ClarificationConfirmationError(
-                "confirmation_write_failed", str(error)
-            ) from error
+            raise ClarificationError("confirmation_write_failed", str(error)) from error
 
     def delete(self) -> None:
         """Remove the journal after commit or rollback completes."""

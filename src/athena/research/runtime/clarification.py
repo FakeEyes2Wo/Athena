@@ -8,7 +8,7 @@ from athena.research.clarification.confirmation import (
     confirm_and_start,
     recover_confirmation_transaction,
 )
-from athena.research.clarification.errors import ClarificationConfirmationError
+from athena.research.clarification.errors import ClarificationError
 from athena.research.clarification.handoff import atomic_write_text
 from athena.research.clarification.models import ClarificationDraft
 from athena.research.clarification.persistence import ClarificationStore
@@ -24,7 +24,7 @@ def clarification_store(runtime: Any) -> ClarificationStore:
     config = getattr(runtime, "config", None)
     state_root = config.paths.athena if config is not None else None
     if state_root is None:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "confirmation_recovery_failed",
             "runtime has no clarification state root",
         )
@@ -96,7 +96,7 @@ async def _restore_legacy_named_handoff(runtime: Any) -> None:
             raise ValueError("task clarification handoff artifact is empty")
         atomic_write_text(store.handoff_path, handoff)
     except Exception as error:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "confirmation_recovery_failed",
             f"could not restore legacy task clarification handoff: {error}",
         ) from error
@@ -114,7 +114,7 @@ async def confirm_pending_task(runtime: Any) -> None:
         if runtime.config.task_confirmation_gate
         else "confirmation_policy_required"
     )
-    raise ClarificationConfirmationError(
+    raise ClarificationError(
         code,
         "raw task start requires explicit confirmation or auto_confirm=True",
     )
@@ -123,12 +123,12 @@ async def confirm_pending_task(runtime: Any) -> None:
 async def seed_unconfirmed_task(runtime: Any, task: str) -> None:
     """Seed raw task text only through the configured confirmation policy."""
     if runtime.config.task_confirmation_gate:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "confirmation_required",
             "raw task start requires an explicitly confirmed clarification draft",
         )
     if not runtime.config.auto_confirm:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "confirmation_policy_required",
             "raw task start requires auto_confirm=True",
         )

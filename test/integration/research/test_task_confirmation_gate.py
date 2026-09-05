@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from athena.research import ResearchRuntime
-from athena.research.clarification.errors import ClarificationConfirmationError
+from athena.research.clarification.errors import ClarificationError
 from athena.research.clarification.models import ConfirmationJournal
 from athena.research.clarification.persistence import ConfirmationJournalStore
 
@@ -35,9 +35,7 @@ async def _prepare_noop() -> object:
 async def test_default_runtime_requires_explicit_policy(tmp_path: Path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path, prepare_phase=_prepare_noop)
     try:
-        with pytest.raises(
-            ClarificationConfirmationError, match="confirmation_policy_required"
-        ):
+        with pytest.raises(ClarificationError, match="confirmation_policy_required"):
             await runtime.start_task("predict churn")
     finally:
         await _close(runtime)
@@ -54,9 +52,7 @@ async def test_gated_runtime_rejects_raw_task_until_confirmed(
         auto_confirm=False,
     )
     try:
-        with pytest.raises(
-            ClarificationConfirmationError, match="confirmation_required"
-        ):
+        with pytest.raises(ClarificationError, match="confirmation_required"):
             await runtime.start_task("predict churn")
     finally:
         await _close(runtime)

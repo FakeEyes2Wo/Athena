@@ -327,6 +327,14 @@ Replace the nine concrete `StackTool` subclasses with one two-attribute `KaggleT
 
 All nine old and new `ToolSpec` objects compare equal, proving descriptions, input schemas, names, and concurrency flags are unchanged. The complete Kaggle/Supervisor selection passed 44 tests and the TUI/autonomous-research integration selection passed 14. Package construction exposed the same nine tools. Python compilation, Black, blocking Ruff, code-style hard rules, deleted-module/class/factory searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing both rows advances reviewed baseline coverage to 236/602. Whole-repository acceptance remains pending.
 
+## Research facade and clarification boundary review
+
+Read the research package facade, clarification package marker, clarification errors, and confirmed-handoff module completely. Trace the root `ResearchRuntime` import through the CLI, gateway, TUI, scripts, and integration tests. Retain its lazy facade because eagerly importing the 700-line runtime for every `athena.research.*` submodule would expand initialization and optional-dependency coupling. Retain the clarification marker as package documentation. Trace all three handoff functions through confirmation, persistence, legacy restore, and rendering tests; each owns a live rendering, composition, or atomic-write boundary, so the module remains unchanged.
+
+The controller and confirmation exceptions had identical constructors, fields, and string contracts. Their callers distinguish operations through the stable `code`, not through catching both types in one scope. Replace both with one `ClarificationError`, preserve the independent persistence exception, and migrate controller, confirmation, persistence, runtime, and tests without aliases. Clarification error classes fall from three to two and affected production code falls by eighteen net lines.
+
+The complete clarification unit selection plus continue/resume and confirmation-gate integrations passed 113 tests before and after the change. Python compilation, Black, blocking Ruff, code-style hard rules, old-exception searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing four rows advances reviewed baseline coverage to 240/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -819,14 +827,14 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/memory/compaction.py` | 138 | Reviewed; retain checkpoint consumed by ThreadRuntime |
 | `src/athena/memory/context_manager.py` | 118 | Reviewed; retain token and rollback owner |
 | `src/athena/memory/rollout.py` | 194 | Reviewed; delete redundant attribute and recovery wrapper; 42 tests pass |
-| `src/athena/research/__init__.py` | 18 | Pending |
-| `src/athena/research/clarification/__init__.py` | 1 | Pending |
+| `src/athena/research/__init__.py` | 18 | Reviewed; retain one lazy runtime export to isolate submodule imports |
+| `src/athena/research/clarification/__init__.py` | 1 | Reviewed; retain package documentation marker |
 | `src/athena/research/clarification/confirmation.py` | 240 | Pending |
 | `src/athena/research/clarification/context.py` | 230 | Pending |
 | `src/athena/research/clarification/controller.py` | 323 | Pending |
-| `src/athena/research/clarification/errors.py` | 30 | Pending |
+| `src/athena/research/clarification/errors.py` | 30 | Reviewed; one coded domain error replaces controller/confirmation duplicates |
 | `src/athena/research/clarification/generator.py` | 372 | Pending |
-| `src/athena/research/clarification/handoff.py` | 86 | Pending |
+| `src/athena/research/clarification/handoff.py` | 86 | Reviewed; retain live render, materialize and atomic-write boundaries |
 | `src/athena/research/clarification/llm_generator.py` | 422 | Pending |
 | `src/athena/research/clarification/models.py` | 144 | Pending |
 | `src/athena/research/clarification/persistence.py` | 149 | Pending |

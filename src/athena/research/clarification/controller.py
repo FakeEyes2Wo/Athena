@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from athena.core.human_request import HumanOutcome, HumanRequest
 from athena.research.clarification.errors import (
-    ClarificationControllerError,
+    ClarificationError,
     ClarificationPersistenceError,
 )
 from athena.research.clarification.generator import (
@@ -101,7 +101,7 @@ class ClarificationController:
             current = self._store.load()
             if current.status not in {"CANCELLED", "FAILED"}:
                 if normalize_task(current.original_task) != normalized:
-                    raise ClarificationControllerError(
+                    raise ClarificationError(
                         "different_task",
                         "cancel the active draft before starting another task",
                     )
@@ -157,13 +157,9 @@ class ClarificationController:
         """Return a retryable failed draft to clarification."""
         draft = self._for_revision(draft_id, revision)
         if draft.status != "FAILED":
-            raise ClarificationControllerError(
-                "not_failed", "only FAILED drafts can be retried"
-            )
+            raise ClarificationError("not_failed", "only FAILED drafts can be retried")
         if draft.failure is None or not draft.failure.retryable:
-            raise ClarificationControllerError(
-                "not_retryable", "draft failure is not retryable"
-            )
+            raise ClarificationError("not_retryable", "draft failure is not retryable")
         return self._save(retry_draft(draft, self._options.clock()))
 
     async def revise(
@@ -173,11 +169,11 @@ class ClarificationController:
         draft = self._for_revision(draft_id, revision)
         instruction = instruction.strip()
         if draft.status != "READY_FOR_CONFIRMATION":
-            raise ClarificationControllerError(
+            raise ClarificationError(
                 "draft_not_ready", "only a ready draft can be revised"
             )
         if not instruction:
-            raise ClarificationControllerError(
+            raise ClarificationError(
                 "invalid_instruction", "revision instruction is empty"
             )
         return self._save(revise_draft(draft, instruction, self._options.clock()))
@@ -186,7 +182,7 @@ class ClarificationController:
         """Cancel an unconfirmed draft and persist any pending outcome."""
         draft = self._for_revision(draft_id, revision)
         if draft.status not in {"CLARIFYING", "READY_FOR_CONFIRMATION", "FAILED"}:
-            raise ClarificationControllerError(
+            raise ClarificationError(
                 "draft_not_cancellable", f"draft status is {draft.status}"
             )
         outcomes = await self._cancel_scope(draft)
@@ -285,9 +281,9 @@ class ClarificationController:
             draft = self._store.load(draft_id)
         except ClarificationPersistenceError as error:
             # The requested draft is absent or corrupt, so expose a stable RPC code.
-            raise ClarificationControllerError("draft_not_found", str(error)) from error
+            raise ClarificationError("draft_not_found", str(error)) from error
         if draft.revision != revision:
-            raise ClarificationControllerError(
+            raise ClarificationError(
                 "stale_revision",
                 f"draft revision is {draft.revision}, expected {revision}",
             )
@@ -311,7 +307,7 @@ __all__ = [
     "CLARIFICATION_FAILURE_NOTICE",
     "MAX_QUESTIONS",
     "ClarificationController",
-    "ClarificationControllerError",
+    "ClarificationError",
     "ClarificationFinalStep",
     "ClarificationGenerator",
     "ClarificationQuestionStep",

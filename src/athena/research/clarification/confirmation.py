@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from athena.research.clarification.errors import (
-    ClarificationConfirmationError,
+    ClarificationError,
     ClarificationPersistenceError,
 )
 from athena.research.clarification.handoff import materialize_handoff
@@ -69,7 +69,7 @@ async def commit_confirmation(
             handoff = materialize_handoff(deps.drafts.handoff_path, confirmed)
             ref = await deps.artifacts.put_text(handoff)
             if not ref:
-                raise ClarificationConfirmationError(
+                raise ClarificationError(
                     "artifact_write_failed", "artifact store returned an empty ref"
                 )
             _project_state(deps.state, confirmed, ref)
@@ -83,14 +83,14 @@ async def commit_confirmation(
             # restore memory, state.json, resume.json, draft, and handoff.
             previous.restore(deps.state)
             deps.journals.recover(deps.drafts, deps.state_path)
-            if isinstance(error, ClarificationConfirmationError):
+            if isinstance(error, ClarificationError):
                 raise
             code = (
                 "state_save_failed"
                 if isinstance(error, OSError)
                 else "confirmation_write_failed"
             )
-            raise ClarificationConfirmationError(code, str(error)) from error
+            raise ClarificationError(code, str(error)) from error
         # Phase 4: COMMITTED is durable; launch happens separately and may retry.
         deps.journals.delete()
         return confirmed
@@ -103,7 +103,7 @@ async def launch_confirmed(
     try:
         await deps.start()
     except Exception as error:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "confirmed_start_failed", f"confirmed start failed; retry is safe: {error}"
         ) from error
     return draft
@@ -155,23 +155,21 @@ def _validated_draft(
         draft = deps.drafts.load(draft_id)
     except ClarificationPersistenceError as error:
         # The requested canonical draft is absent or corrupt at confirmation time.
-        raise ClarificationConfirmationError("draft_not_found", str(error)) from error
+        raise ClarificationError("draft_not_found", str(error)) from error
     if draft.session_id != deps.session_id:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "wrong_session", "draft belongs to a different session"
         )
     if draft.revision != revision:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "stale_revision", f"draft revision is {draft.revision}, expected {revision}"
         )
     if draft.status == "CONFIRMED":
         return draft
     if draft.status != "READY_FOR_CONFIRMATION":
-        raise ClarificationConfirmationError(
-            "draft_not_ready", f"draft status is {draft.status}"
-        )
+        raise ClarificationError("draft_not_ready", f"draft status is {draft.status}")
     if any(item.critical for item in draft.unresolved) and not acknowledge_unresolved:
-        raise ClarificationConfirmationError(
+        raise ClarificationError(
             "unresolved_ack_required",
             "critical unresolved items require acknowledgement",
         )

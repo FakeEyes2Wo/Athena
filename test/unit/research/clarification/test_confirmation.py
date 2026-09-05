@@ -12,7 +12,7 @@ from athena.research.clarification.confirmation import (
     confirm_and_start,
     dependencies_from_runtime,
 )
-from athena.research.clarification.errors import ClarificationConfirmationError
+from athena.research.clarification.errors import ClarificationError
 from athena.research.clarification.models import ClarificationDraft
 from athena.research.clarification.persistence import ClarificationStore
 
@@ -118,7 +118,7 @@ async def test_state_save_failure_rolls_back_and_never_starts_prepare(
     store, draft, runtime = _runtime_with_draft(tmp_path, unresolved=False)
     runtime.state.save_error = True
 
-    with pytest.raises(ClarificationConfirmationError, match="state_save_failed"):
+    with pytest.raises(ClarificationError, match="state_save_failed"):
         await confirm_and_start(runtime, draft.draft_id, draft.revision, False)
 
     assert store.load().status == "READY_FOR_CONFIRMATION"
@@ -129,9 +129,9 @@ async def test_state_save_failure_rolls_back_and_never_starts_prepare(
 async def test_stale_revision_and_unresolved_ack_are_typed(tmp_path: Path) -> None:
     _store, draft, runtime = _runtime_with_draft(tmp_path)
 
-    with pytest.raises(ClarificationConfirmationError, match="stale_revision"):
+    with pytest.raises(ClarificationError, match="stale_revision"):
         await confirm_and_start(runtime, draft.draft_id, draft.revision - 1, True)
-    with pytest.raises(ClarificationConfirmationError, match="unresolved_ack_required"):
+    with pytest.raises(ClarificationError, match="unresolved_ack_required"):
         await confirm_and_start(runtime, draft.draft_id, draft.revision, False)
 
 
@@ -152,7 +152,7 @@ async def test_confirmed_start_failure_is_retryable(tmp_path: Path) -> None:
     _store, draft, runtime = _runtime_with_draft(tmp_path, unresolved=False)
     runtime.fail_start = True
 
-    with pytest.raises(ClarificationConfirmationError, match="confirmed start failed"):
+    with pytest.raises(ClarificationError, match="confirmed start failed"):
         await confirm_and_start(runtime, draft.draft_id, draft.revision, False)
 
     # A second confirm sees the durable CONFIRMED revision and retries start.

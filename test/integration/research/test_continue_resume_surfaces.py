@@ -10,12 +10,12 @@ from typing import Literal
 
 import pytest
 
-from athena.gui.service import GuiService
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus, ResearchTree
 from athena.core.workspace import GitWorkBranch
+from athena.gui.service import GuiService
 from athena.research import ResearchRuntime
-from athena.research.clarification.errors import ClarificationControllerError
+from athena.research.clarification.errors import ClarificationError
 from athena.research.runtime.clarification import auto_confirm
 
 Phase = Literal["PREPARE", "SEARCH", "VALIDATE"]
@@ -232,7 +232,7 @@ async def test_genuinely_new_gui_task_keeps_different_task_protection(
     harness = await build_phase_failure_harness(tmp_path, monkeypatch, "PREPARE")
     try:
         service = GuiService(harness.runtime)
-        with pytest.raises(ClarificationControllerError) as caught:
+        with pytest.raises(ClarificationError) as caught:
             await service.task_clarification_start("genuinely different task")
 
         assert caught.value.code == "different_task"
