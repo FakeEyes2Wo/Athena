@@ -25,6 +25,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Consolidate PlanRunner failure handling and shared directory-presence checks.
 - [x] Remove the unconsumed settlement API and test the active Supervisor policy.
 - [x] Remove script metadata/result wrappers and consolidate the scoring interface.
+- [x] Reduce script run arguments and consolidate frozen-file restoration/snapshot ownership.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -160,9 +161,22 @@ New script tests exercise real filesystem/artifact round-trips with a mocked sub
 
 Script/scoring verification: final full TypeScript workspace returned 464 passed across 54 files with `npm test -- --testTimeout=30000`. All five package builds and git diff --check passed. Removed wrapper/helper references remain only in the negative package-export assertion. The timeout override is command-only; default-timeout reliability remains unproven. No real external evaluator/model run or whole-application readiness is claimed.
 
+Script lifecycle follow-up: complete the script_runner.ts review and trace every tracked constructor/freeze/run and directory-pack consumer. run now takes bundle plus optional extraFiles (four arguments to two); remove the always-empty request input and score-specific outputSchema. The protocol still writes an empty request.json. TrustedEvaluator alone validates primary; the runner only parses a JSON object, preferring result.json over the last nonblank stdout line. Invalid JSON and non-object output are rejected consistently. No compatibility overload remains.
+
+Freeze reuses the entrypoint reference from its captured tree instead of rereading/storing the source after uv runs. Normalize and require an actual captured entrypoint; skip the root virtual environment before traversing it, and sort the complete file list once. Exclude stale request.json/result.json from snapshots so a previous evaluation cannot become a new result. Retain bundle metadata and the two store/workdir dependencies; environment metadata remains provenance, not an interpreter sandbox.
+
+Restore the tree through existing loadDirectory and use one file-writing loop for frozen and injected files. Resolve paths within the fresh run directory, reject absolute/outside paths, reserve the output filename and use exclusive creation to prevent injections from overwriting frozen source/labels/dependency/request files. These are file-staging checks, not process isolation: generated Python still executes locally with the user's permissions. No generalized security framework or cleanup policy is introduced.
+
+Evidence: pre-change script/evaluator/prepare selection passed 25 tests. The updated script file has 29 passing cases and the combined script/evaluator selection has 36, covering subprocess-time source mutation, stale output exclusion, invalid entrypoints, injected collisions, escaping/absolute paths, output shape and file precedence. Five package builds passed. An explicit offline real-uv smoke check also passed: freeze a dependency-free Python evaluator, mutate the draft, restore the frozen source/labels, inject predictions and obtain the trusted score 0.25. Reproduce after building with `node packages/athena-research/test/script-runner.uv-smoke.mjs` from athena_ts; requires uv and an installed Python >= 3.11, disables downloads, and removes its own temporary fixture. This smoke is separate from the default Vitest suite.
+
+Lifecycle final verification: all five builds passed; the full TypeScript workspace passed 487 tests across 54 files with `npm test -- --testTimeout=30000`, plus the separate real-uv smoke above. git diff --check passed. No removed outputSchema/validateSchema consumers remain in the research package. The command-only timeout override does not establish default-timeout reliability.
+
+Closing script_runner.ts brings baseline review coverage to 78/602; new test/smoke files are tracked separately below. Next review: research contracts, validation and reporting consumers. Whole-repository acceptance, main merge/push and task branch/worktree removal remain mandatory and unfinished.
+
 | File | Baseline lines | Review |
 | --- | ---: | --- |
-| `athena_ts/packages/athena-research/test/script-runner.test.ts` | New | Reviewed; six filesystem/artifact cases with mocked subprocesses |
+| `athena_ts/packages/athena-research/test/script-runner.test.ts` | New | Reviewed; 29 snapshot/staging/output cases with mocked subprocesses |
+| `athena_ts/packages/athena-research/test/script-runner.uv-smoke.mjs` | New | Reviewed; explicit offline real-uv freeze/restore/trusted-score smoke passes |
 | `athena_ts/packages/athena-research/test/execution.test.ts` | New | Reviewed; six real-process command/workdir/event/error/timeout cases |
 | `athena_ts/packages/athena-research/test/public-api.test.ts` | New | Reviewed; removed legacy root/adapter exports and retained canonical DSH services |
 | `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
@@ -729,7 +743,7 @@ Script/scoring verification: final full TypeScript workspace returned 464 passed
 | `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |
 | `athena_ts/packages/athena-research/src/report.ts` | 78 | Pending |
 | `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |
-| `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Pending |
+| `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Reviewed; two-argument run, canonical source snapshot, shared restore and bounded file staging |
 | `athena_ts/packages/athena-research/src/shell.ts` | 48 | Reviewed; deleted adapter exclusively used by removed runtime |
 | `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Reviewed; consolidated failure handling/traversal and removed unused timeout configuration |

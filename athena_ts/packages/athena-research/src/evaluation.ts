@@ -37,7 +37,7 @@ export class TrustedEvaluator implements Scorer {
       for (const [rel, content] of Object.entries(opts.predictions)) {
         extraFiles[`${opts.predictionsRoot}/${rel}`] = content
       }
-      result = await this.runner.run(opts.evalBundle, {}, { primary: null }, extraFiles)
+      result = await this.runner.run(opts.evalBundle, extraFiles)
     } catch (exc) {
       throw new ScoringError(
         `evaluator failed to produce a score: ${exc instanceof Error ? exc.message : String(exc)}`

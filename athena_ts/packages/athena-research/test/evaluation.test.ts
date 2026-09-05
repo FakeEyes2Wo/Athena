@@ -39,7 +39,7 @@ describe("TrustedEvaluator", () => {
       evalBundle: bundle, predictions, candidateId: "candidate",
       direction: "minimize", predictionsRoot: "outputs",
     })
-    expect(run).toHaveBeenCalledWith(bundle, {}, { primary: null }, {
+    expect(run).toHaveBeenCalledWith(bundle, {
       "outputs/nested/data.csv": predictions["nested/data.csv"],
     })
     expect(result).toMatchObject({ candidate_id: "candidate", direction: "minimize", test_score: -0.25 })
