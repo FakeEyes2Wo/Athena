@@ -1,8 +1,6 @@
 use athena_types::{ArtifactRef, ThreadId, TurnId};
 use serde::{Deserialize, Serialize};
 
-// ── Parameter DTOs ──
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadStartParams {
@@ -50,42 +48,4 @@ pub struct ThreadSubscribeParams {
 #[serde(deny_unknown_fields)]
 pub struct ThreadUnsubscribeParams {
     pub subscription_id: String,
-}
-
-// ── Result DTOs ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadStartedResult {
-    pub thread_id: ThreadId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TurnStartedResult {
-    pub turn_id: TurnId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThreadForkedResult {
-    pub thread_id: ThreadId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubscribedResult {
-    pub subscription_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InterruptedResult {
-    pub turn_id: TurnId,
-    #[serde(default = "default_interrupted_status")]
-    pub status: String,
-}
-
-fn default_interrupted_status() -> String {
-    "interrupted".into()
 }

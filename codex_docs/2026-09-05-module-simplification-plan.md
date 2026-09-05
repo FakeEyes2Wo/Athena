@@ -47,6 +47,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the web retrieval module and make its shared session the sole HTTP owner.
 - [x] Review the Rust agent module and reuse the runtime turn contract directly.
 - [x] Remove the unconsumed Rust research prototype crate.
+- [x] Review the Rust protocol crate and collapse duplicate error/result surfaces.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -119,6 +120,14 @@ Read all three `athena-research` source files and their six inline tests complet
 Delete the entire crate rather than polishing an unused public API. Remove its workspace member and dependency declarations, regenerate the lockfile, and remove the completed-crate claim from the Rust README. The historical WIP inventory remains unchanged because it explicitly records baseline state rather than current architecture.
 
 After deletion, the complete remaining Rust workspace passed 184 tests. Workspace Clippy with `-D warnings`, Rust formatting, repository reference searches, and `git diff --check` passed. Closing the three deleted source rows advances reviewed coverage to 145/602 while removing 359 baseline production/test lines plus the crate manifest. Whole-repository acceptance remains pending.
+
+## Rust protocol review
+
+Read all five protocol source files and the Python-fixture integration test completely, then trace every exported DTO, method, error helper, and message union through `athena-server` and `athena-runtime`. Retain the six request parameter DTOs, six wire envelopes, two transport unions, nine error codes, and twelve method names because they are consumed or fixture-governed. The touched server callers remain Pending for their own complete module review.
+
+Delete five result DTOs that were never constructed, the unused exception-name mapper, six code-specific error factories, the `ErrorCode::code` forwarding method, and the unused `thiserror` dependency. `RpcError::new` is now the single construction interface. Move the application-only `RpcException` out of the protocol crate into the server client and store one `RpcError` instead of copying its three fields. Merge the 19-line method module into the protocol facade and delete its file. Remove thirteen duplicate inline tests; the fixture suite retains exact wire coverage and the two unique control/empty-response contracts.
+
+Fresh verification passed 26 protocol fixture tests and five server tests; the complete Rust workspace passed 173 tests. Workspace Clippy with `-D warnings`, Rust formatting, removed-symbol searches, and `git diff --check` passed. Closing six protocol rows advances reviewed coverage to 151/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -801,12 +810,12 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-memory/tests/compaction.rs` | 312 | Pending |
 | `athena-rust/crates/athena-memory/tests/context_parity.rs` | 219 | Pending |
 | `athena-rust/crates/athena-memory/tests/rollout_recovery.rs` | 371 | Pending |
-| `athena-rust/crates/athena-protocol/src/envelope.rs` | 88 | Pending |
-| `athena-rust/crates/athena-protocol/src/error.rs` | 103 | Pending |
-| `athena-rust/crates/athena-protocol/src/lib.rs` | 162 | Pending |
-| `athena-rust/crates/athena-protocol/src/method.rs` | 19 | Pending |
-| `athena-rust/crates/athena-protocol/src/operations.rs` | 91 | Pending |
-| `athena-rust/crates/athena-protocol/tests/python_fixtures.rs` | 386 | Pending |
+| `athena-rust/crates/athena-protocol/src/envelope.rs` | 88 | Reviewed; retain fixture-governed wire envelopes and transport unions |
+| `athena-rust/crates/athena-protocol/src/error.rs` | 103 | Reviewed; one RpcError constructor, no copied application exception or forwarding helpers |
+| `athena-rust/crates/athena-protocol/src/lib.rs` | 162 | Reviewed; absorb method constants and delete duplicate inline tests |
+| `athena-rust/crates/athena-protocol/src/method.rs` | 19 | Reviewed; merge constants into facade and delete file |
+| `athena-rust/crates/athena-protocol/src/operations.rs` | 91 | Reviewed; retain consumed request DTOs and delete five unused result DTOs |
+| `athena-rust/crates/athena-protocol/tests/python_fixtures.rs` | 386 | Reviewed; retain 26 canonical wire/control/boundary cases |
 | `athena-rust/crates/athena-research/src/experiment.rs` | 92 | Reviewed; delete with unconsumed prototype crate |
 | `athena-rust/crates/athena-research/src/lib.rs` | 166 | Reviewed; delete unused facade and inline-only tests with crate |
 | `athena-rust/crates/athena-research/src/tree.rs` | 141 | Reviewed; delete stale duplicate of authoritative Python ResearchTree |

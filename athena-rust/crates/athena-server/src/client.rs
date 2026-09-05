@@ -1,7 +1,7 @@
 use crate::transport::TransportClientHalf;
 use athena_protocol::{
-    ClientMessage, ClientNotification, EventNotification, RequestEnvelope, ResponseEnvelope,
-    RpcException, ServerControlMessage, ServerRequest, method,
+    ClientMessage, ClientNotification, ErrorCode, EventNotification, RequestEnvelope,
+    ResponseEnvelope, RpcError, ServerControlMessage, ServerRequest, method,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -11,7 +11,23 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-const CLOSED_CODE: i64 = -32006;
+/// Error returned by the in-process client facade.
+#[derive(Debug, Clone)]
+pub struct RpcException(RpcError);
+
+impl std::fmt::Display for RpcException {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RPC error {}: {}", self.0.code, self.0.message)
+    }
+}
+
+impl std::error::Error for RpcException {}
+
+impl From<RpcError> for RpcException {
+    fn from(error: RpcError) -> Self {
+        Self(error)
+    }
+}
 
 /// Monotonic request-id generator. `0` is reserved for initialize.
 pub struct Sequencer {
@@ -161,7 +177,7 @@ impl AthenaClient {
             .is_err()
         {
             self.pending.lock().await.remove(&request_id);
-            return Err(closed_exception("transport closed"));
+            return Err(RpcError::new(ErrorCode::Closed, "transport closed").into());
         }
 
         match tokio::time::timeout(timeout, rx).await {
@@ -173,17 +189,9 @@ impl AthenaClient {
             }
             _ => {
                 self.pending.lock().await.remove(&request_id);
-                Err(closed_exception("request timed out or cancelled"))
+                Err(RpcError::new(ErrorCode::Closed, "request timed out or cancelled").into())
             }
         }
-    }
-}
-
-fn closed_exception(message: &str) -> RpcException {
-    RpcException {
-        code: CLOSED_CODE,
-        message: message.to_string(),
-        data: None,
     }
 }
 

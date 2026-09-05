@@ -119,9 +119,11 @@ async fn dispatch_loop(
                 if !method::is_control_method(&req.method) && state.load(Ordering::SeqCst) != READY
                 {
                     let err = match state.load(Ordering::SeqCst) {
-                        INITIALIZING => RpcError::not_initialized("server not initialized"),
-                        DRAINING => RpcError::closed("server is draining"),
-                        _ => RpcError::closed("server closed"),
+                        INITIALIZING => {
+                            RpcError::new(ErrorCode::NotInitialized, "server not initialized")
+                        }
+                        DRAINING => RpcError::new(ErrorCode::Closed, "server is draining"),
+                        _ => RpcError::new(ErrorCode::Closed, "server closed"),
                     };
                     let _ = responder
                         .send_response(ResponseEnvelope {
@@ -190,7 +192,8 @@ async fn dispatch_loop(
 
 fn handle_initialize(req: &RequestEnvelope, state: &AtomicU8) -> Result<Value, RpcError> {
     if req.request_id != RESERVED_INIT_ID {
-        return Err(RpcError::invalid_argument(
+        return Err(RpcError::new(
+            ErrorCode::InvalidArgument,
             "initialize must use request_id=0",
         ));
     }
@@ -206,7 +209,10 @@ fn handle_initialize(req: &RequestEnvelope, state: &AtomicU8) -> Result<Value, R
         .and_then(|v| v.as_u64())
         .unwrap_or(1);
     if version != 1 {
-        return Err(RpcError::invalid_argument("unsupported protocol version"));
+        return Err(RpcError::new(
+            ErrorCode::InvalidArgument,
+            "unsupported protocol version",
+        ));
     }
     Ok(json!({ "protocol_version": 1, "server_name": "athena", "status": "ok" }))
 }

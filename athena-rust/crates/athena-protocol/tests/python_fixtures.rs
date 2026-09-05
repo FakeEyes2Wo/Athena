@@ -20,36 +20,36 @@ fn test_all_error_code_values_match_python() {
         .expect("error_codes should be an object");
 
     assert_eq!(
-        ErrorCode::InvalidArgument.code(),
+        ErrorCode::InvalidArgument as i64,
         codes["INVALID_ARGUMENT"].as_i64().unwrap()
     );
     assert_eq!(
-        ErrorCode::NotFound.code(),
+        ErrorCode::NotFound as i64,
         codes["NOT_FOUND"].as_i64().unwrap()
     );
     assert_eq!(
-        ErrorCode::FailedPrecondition.code(),
+        ErrorCode::FailedPrecondition as i64,
         codes["FAILED_PRECONDITION"].as_i64().unwrap()
     );
     assert_eq!(
-        ErrorCode::NotInitialized.code(),
+        ErrorCode::NotInitialized as i64,
         codes["NOT_INITIALIZED"].as_i64().unwrap()
     );
     assert_eq!(
-        ErrorCode::AlreadyInitialized.code(),
+        ErrorCode::AlreadyInitialized as i64,
         codes["ALREADY_INITIALIZED"].as_i64().unwrap()
     );
     assert_eq!(
-        ErrorCode::DuplicateRequestId.code(),
+        ErrorCode::DuplicateRequestId as i64,
         codes["DUPLICATE_REQUEST_ID"].as_i64().unwrap()
     );
     assert_eq!(
-        ErrorCode::Overloaded.code(),
+        ErrorCode::Overloaded as i64,
         codes["OVERLOADED"].as_i64().unwrap()
     );
-    assert_eq!(ErrorCode::Closed.code(), codes["CLOSED"].as_i64().unwrap());
+    assert_eq!(ErrorCode::Closed as i64, codes["CLOSED"].as_i64().unwrap());
     assert_eq!(
-        ErrorCode::Internal.code(),
+        ErrorCode::Internal as i64,
         codes["INTERNAL"].as_i64().unwrap()
     );
 }
@@ -349,38 +349,15 @@ fn test_request_id_large_is_valid() {
 // ── RpcError factory methods ──
 
 #[test]
-fn test_rpc_error_invalid_argument() {
-    let err = RpcError::invalid_argument("bad input");
-    assert_eq!(err.code, -32602);
-    assert_eq!(err.message, "bad input");
+fn test_control_method_boundary() {
+    assert!(method::is_control_method(method::INITIALIZE));
+    assert!(method::is_control_method(method::SERVER_SHUTDOWN));
+    assert!(!method::is_control_method(method::TURN_START));
 }
 
 #[test]
-fn test_rpc_error_not_found() {
-    let err = RpcError::not_found("missing");
-    assert_eq!(err.code, -32601);
-}
-
-#[test]
-fn test_rpc_error_internal() {
-    let err = RpcError::internal("oops");
-    assert_eq!(err.code, -32603);
-}
-
-#[test]
-fn test_rpc_error_closed() {
-    let err = RpcError::closed("shutdown");
-    assert_eq!(err.code, -32006);
-}
-
-#[test]
-fn test_rpc_error_overloaded() {
-    let err = RpcError::overloaded("busy");
-    assert_eq!(err.code, -32005);
-}
-
-#[test]
-fn test_rpc_error_not_initialized() {
-    let err = RpcError::not_initialized("not ready");
-    assert_eq!(err.code, -32002);
+fn test_response_envelope_allows_no_result_or_error() {
+    let response: ResponseEnvelope = serde_json::from_value(json!({"request_id": 42})).unwrap();
+    assert!(response.result.is_none());
+    assert!(response.error.is_none());
 }

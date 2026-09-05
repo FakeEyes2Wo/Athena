@@ -3,11 +3,12 @@ use crate::execution::ExecutionAdapter;
 use crate::processor::MessageProcessor;
 use crate::subscription::SubscriptionRegistry;
 use crate::transport::Transport;
-use athena_protocol::RpcException;
 use athena_runtime::{FairMux, RuntimeThreadManager};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+
+use crate::client::RpcException;
 
 /// Top-level in-process AppServer: wires transport, mux, subscriptions, the
 /// message processor, and a connected client through the initialize handshake.

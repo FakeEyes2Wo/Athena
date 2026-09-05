@@ -11,9 +11,11 @@ use std::sync::Arc;
 /// Map a runtime error to a sanitized protocol error.
 pub fn runtime_error_to_rpc(e: RuntimeError) -> RpcError {
     match e {
-        RuntimeError::UnknownThread(id) => RpcError::not_found(format!("unknown thread: {id}")),
+        RuntimeError::UnknownThread(id) => {
+            RpcError::new(ErrorCode::NotFound, format!("unknown thread: {id}"))
+        }
         RuntimeError::UnknownSnapshot(id) => {
-            RpcError::not_found(format!("no completed snapshot: {id}"))
+            RpcError::new(ErrorCode::NotFound, format!("no completed snapshot: {id}"))
         }
         RuntimeError::AlreadyRunning => RpcError::new(
             ErrorCode::FailedPrecondition,
@@ -23,8 +25,8 @@ pub fn runtime_error_to_rpc(e: RuntimeError) -> RpcError {
             ErrorCode::FailedPrecondition,
             format!("no active turn: {id}"),
         ),
-        RuntimeError::Closed => RpcError::closed("thread is closed"),
-        RuntimeError::Invalid(m) => RpcError::invalid_argument(m),
+        RuntimeError::Closed => RpcError::new(ErrorCode::Closed, "thread is closed"),
+        RuntimeError::Invalid(m) => RpcError::new(ErrorCode::InvalidArgument, m),
     }
 }
 
@@ -108,11 +110,15 @@ impl Executor for ExecutionAdapter {
                 self.subscriptions.remove(&p.subscription_id).await;
                 Ok(json!({ "status": "unsubscribed" }))
             }
-            other => Err(RpcError::not_found(format!("unknown method: {other}"))),
+            other => Err(RpcError::new(
+                ErrorCode::NotFound,
+                format!("unknown method: {other}"),
+            )),
         }
     }
 }
 
 fn parse<T: DeserializeOwned>(value: Value) -> Result<T, RpcError> {
-    serde_json::from_value(value).map_err(|e| RpcError::invalid_argument(e.to_string()))
+    serde_json::from_value(value)
+        .map_err(|e| RpcError::new(ErrorCode::InvalidArgument, e.to_string()))
 }
