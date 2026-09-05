@@ -38,7 +38,7 @@ class _FakeHttp:
 
 
 async def test_search_parses_title_url_and_snippet() -> None:
-    results = await WebSearchTool(http=_FakeHttp()).search("test", limit=10)
+    results = await WebSearchTool(WebSession(_FakeHttp())).search("test", limit=10)
     assert len(results) == 2
     assert results[0] == {
         "ref_id": "turn0search0-0",
@@ -53,7 +53,7 @@ async def test_search_parses_title_url_and_snippet() -> None:
 
 async def test_search_many_composes_domain_and_recency_filters_and_dedups() -> None:
     http = _FakeHttp()
-    tool = WebSearchTool(http=http)
+    tool = WebSearchTool(WebSession(http))
     results = await tool.search_many(
         [
             {"q": "ml model", "domains": ["arxiv.org"], "recency": 7},
@@ -68,7 +68,7 @@ async def test_search_many_composes_domain_and_recency_filters_and_dedups() -> N
 
 
 async def test_search_many_rejects_more_than_four_queries() -> None:
-    tool = WebSearchTool(http=_FakeHttp())
+    tool = WebSearchTool(WebSession(_FakeHttp()))
     with pytest.raises(ValueError, match="at most 4"):
         await tool.search_many([{"q": str(i)} for i in range(5)], limit=8)
 
@@ -84,7 +84,7 @@ def test_extract_page_text_strips_scripts_styles_and_tags() -> None:
 
 
 async def test_web_fetch_returns_title_and_text() -> None:
-    tool = WebFetchTool(http=_FakeHttp(_PAGE_HTML))
+    tool = WebFetchTool(WebSession(_FakeHttp(_PAGE_HTML)))
 
     result = await tool.execute({"url": "https://example.com"}, ctx=None)
 
@@ -94,9 +94,11 @@ async def test_web_fetch_returns_title_and_text() -> None:
 
 
 async def test_web_fetch_opens_search_ref_without_repeating_search() -> None:
-    search_tool = WebSearchTool(http=_FakeHttp())
+    http = _FakeHttp()
+    search_tool = WebSearchTool(WebSession(http))
     results = await search_tool.search("test", limit=1)
-    fetch_tool = WebFetchTool(http=_FakeHttp(_PAGE_HTML), session=search_tool.session)
+    http.body = _PAGE_HTML.encode()
+    fetch_tool = WebFetchTool(search_tool.session)
 
     result = await fetch_tool.execute({"ref_id": results[0]["ref_id"]}, ctx=None)
 
@@ -107,7 +109,7 @@ async def test_web_fetch_opens_search_ref_without_repeating_search() -> None:
 
 
 async def test_web_fetch_find_returns_excerpts_around_pattern() -> None:
-    tool = WebFetchTool(http=_FakeHttp(_PAGE_HTML))
+    tool = WebFetchTool(WebSession(_FakeHttp(_PAGE_HTML)))
 
     result = await tool.execute(
         {"url": "https://example.com", "pattern": "readable"}, ctx=None
@@ -120,13 +122,13 @@ async def test_web_fetch_find_returns_excerpts_around_pattern() -> None:
 
 
 async def test_web_fetch_rejects_unknown_ref() -> None:
-    tool = WebFetchTool(http=_FakeHttp(_PAGE_HTML))
+    tool = WebFetchTool(WebSession(_FakeHttp(_PAGE_HTML)))
     with pytest.raises(ValueError, match="unknown web ref_id"):
         await tool.execute({"ref_id": "turn0search9-9"}, ctx=None)
 
 
 async def test_web_fetch_rejects_non_http_urls() -> None:
-    tool = WebFetchTool(http=_FakeHttp(_PAGE_HTML))
+    tool = WebFetchTool(WebSession(_FakeHttp(_PAGE_HTML)))
     with pytest.raises(ValueError, match="only supports http and https"):
         await tool.execute({"url": "file:///tmp/private.txt"}, ctx=None)
 
@@ -139,7 +141,7 @@ def test_find_in_page_is_case_insensitive_and_bounded() -> None:
 
 
 async def test_more_than_three_queries_requires_medium_or_long() -> None:
-    tool = WebSearchTool(http=_FakeHttp())
+    tool = WebSearchTool(WebSession(_FakeHttp()))
     with pytest.raises(ValueError, match="medium or long"):
         await tool.execute(
             {

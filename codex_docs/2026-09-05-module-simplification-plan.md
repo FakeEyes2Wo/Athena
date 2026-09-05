@@ -44,6 +44,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Complete the Supervisor source/test review, consolidate authoritative fields, and close phase-command races.
 - [x] Review the GUI gateway boundary modules and remove duplicated state/factory layers.
 - [x] Review the research turn dispatcher/shared support modules and narrow their internal interfaces.
+- [x] Review the web retrieval module and make its shared session the sole HTTP owner.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -76,6 +77,14 @@ Read the turn package boundary, shared wait helpers, General/Kaggle turn mixin, 
 Every production heartbeat call passed both the runtime and the same `runtime.agents` object. Remove that duplicate dependency parameter and derive the agent service from the runtime, reducing the helper from seven parameters to six while preserving event projection, cursor advancement, timeout interruption, heartbeat publication, and the direct-wait path. Delete the two one-call General/Kaggle tool wrappers and call the existing kind-parameterized tool constructor directly. No compatibility signatures or replacement wrappers remain.
 
 The same focused baseline and post-change selection passed 78 turn, event-forwarding, citation, preflight, handoff, survey, ideator, and gate tests. Python compilation, the code-style hard-rule gate, removed-symbol searches, and `git diff --check` passed. Closing five ledger rows advances reviewed coverage to 128/602. Whole-repository acceptance remains pending.
+
+## Web retrieval review
+
+Read both retrieval files and trace General, baseline-Ideator, and direct test callers. Retain the module boundary because moving it into core agent tools would introduce a reverse dependency on research HTTP infrastructure. Retain the shared reference session, URL/page caches, query/fetch counters, HTTP limiter, parsers, search/fetch operations, and registry builder; each has active behavior or coverage. The package marker remains the minimal namespace boundary.
+
+Delete `_WebTool`, which retained both a session and a second HTTP attribute and allowed callers to supply inconsistent dependencies. `WebSearchTool` and `WebFetchTool` now each accept only one optional `WebSession` and use that session's HTTP client. Their constructor dependency count falls from two to one; `build_web_tools` continues to give both tools the same session. Tests express injected HTTP through that single owner, including changing the shared fake response between search and fetch.
+
+Fresh focused verification passed all 15 retrieval and baseline-tool wiring tests. Python compilation, the code-style hard-rule gate, removed-symbol searches, and `git diff --check` passed. Closing two ledger rows advances reviewed coverage to 131/602. Whole-repository acceptance remains pending.
 
 ## Root development-script review
 
@@ -734,8 +743,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/turns/ideator.py` | 520 | Pending |
 | `src/athena/research/turns/runner.py` | 98 | Reviewed; retain distinct Supervisor/Data result boundaries |
 | `src/athena/research/turns/support.py` | 126 | Reviewed; retain two-stage citation verification policy |
-| `src/athena/retrieval/__init__.py` | 1 | Pending |
-| `src/athena/retrieval/web_search.py` | 386 | Pending |
+| `src/athena/retrieval/__init__.py` | 1 | Reviewed; retain minimal package boundary |
+| `src/athena/retrieval/web_search.py` | 386 | Reviewed; delete dual-owner tool base and use one shared session dependency |
 | `src/athena/serving/__init__.py` | 1 | Reviewed; retain package boundary |
 | `src/athena/serving/http_api.py` | 152 | Reviewed; merged into predictions_api and deleted |
 | `src/athena/serving/model.py` | 305 | Reviewed; retain isolated model contract |

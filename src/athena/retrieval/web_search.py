@@ -140,19 +140,7 @@ class WebSession:
         return self._urls.get(ref_id)
 
 
-class _WebTool(BaseTool):
-    """共享 WebSession 的公共构造。"""
-
-    def __init__(
-        self,
-        http: HostRateLimiter | None = None,
-        session: WebSession | None = None,
-    ) -> None:
-        self.session = session or WebSession(http)
-        self.http = http or self.session.http
-
-
-class WebSearchTool(_WebTool):
+class WebSearchTool(BaseTool):
     spec = ToolSpec(
         name="web_search",
         description=(
@@ -201,6 +189,9 @@ class WebSearchTool(_WebTool):
         },
     )
 
+    def __init__(self, session: WebSession | None = None) -> None:
+        self.session = session or WebSession()
+
     def _queries(self, input: dict) -> list[dict]:
         batch = input.get("search_query")
         if isinstance(batch, list) and batch:
@@ -242,7 +233,7 @@ class WebSearchTool(_WebTool):
         params: dict[str, str] = {"q": _compose_query(query, domains)}
         if recency is not None:
             params["df"] = _recency_filter(int(recency))
-        response = await self.http.get(
+        response = await self.session.http.get(
             f"{DDG_HTML}?{urllib.parse.urlencode(params)}", {"User-Agent": BROWSER_UA}
         )
         if not response.ok:
@@ -299,7 +290,7 @@ class WebSearchTool(_WebTool):
         return ToolResult(data={"results": results, "count": len(results)})
 
 
-class WebFetchTool(_WebTool):
+class WebFetchTool(BaseTool):
     spec = ToolSpec(
         name="web_fetch",
         description=(
@@ -324,11 +315,14 @@ class WebFetchTool(_WebTool):
         },
     )
 
+    def __init__(self, session: WebSession | None = None) -> None:
+        self.session = session or WebSession()
+
     async def fetch(self, url: str, max_chars: int = 12000) -> dict:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
             raise ValueError("web_fetch only supports http and https URLs")
-        response = await self.http.get(url, {"User-Agent": BROWSER_UA})
+        response = await self.session.http.get(url, {"User-Agent": BROWSER_UA})
         if not response.ok:
             raise RuntimeError(f"web_fetch returned HTTP {response.status}")
         return extract_page_text(
