@@ -74,6 +74,50 @@ class SearchLoop:
     def _tree(self):
         return self._owner.tree
 
+    def _assert_prepare_finished(self) -> None:
+        """Refuse to search when PREPARE did not leave what SEARCH measures against.
+
+        SEARCH is only meaningful relative to a trusted SOTA scored by a frozen
+        evaluator. Until 2026-09-02 nothing checked that, and the first thing to
+        notice was the Ideator asking for the EDA workspace:
+
+            SEARCH scheduling loop crashed:
+            RuntimeError('EDA workspace not captured; PREPARE must run first')
+
+        That reads like a missing directory. What had actually happened is that
+        PREPARE never ran at all -- no platform split, no frozen evaluator, no
+        baseline -- because the Supervisor decided during the task-understanding
+        turn that it should establish the baseline itself and dispatched a
+        General Agent, which trained on an unrelated project's data.
+
+        Naming every missing piece turns a misleading symptom into the cause.
+
+        The gate is a *start* condition. ``run_search`` is also re-entered while
+        SEARCH is already under way -- ``_spawn_search`` does it, and so does a
+        resume that has to drain a crashed turn. A Plan only exists because
+        SEARCH already started, so their presence is proof PREPARE finished and
+        the gate stands down rather than turning a recoverable crash into a
+        refusal.
+
+        The trusted SOTA is the whole condition. An earlier version also required
+        ``state.evaluator_ref``, but that is not where a frozen evaluator is
+        recorded -- the SOTA experiment carries it, which is why ``fork.py`` reads
+        it from the baseline record. A resumed run holding a seeded SOTA leaves
+        that state field unset, so the extra check turned a valid resume into
+        ``SEARCH/FAILED``. It was redundant besides: a SOTA cannot exist without
+        the evaluator that scored it.
+        """
+        if getattr(self._state, "plans", None):
+            return
+        if self._tree.best_experiment_id() is not None:
+            return
+        raise RuntimeError(
+            "SEARCH cannot start: PREPARE did not finish. There is no trusted "
+            "SOTA baseline in the research tree. SEARCH scores every candidate "
+            "against the frozen evaluator and compares it to that baseline, so "
+            "without it there is nothing to measure and nothing to compare."
+        )
+
     def _spawn_search(self) -> None:
         """(重新)进入 SEARCH 调度循环（当前空闲且 RUNNING 时）。
 
@@ -111,6 +155,7 @@ class SearchLoop:
 
     async def run_search(self) -> None:
         """Run rolling SEARCH scheduling."""
+        self._assert_prepare_finished()
         self._task = asyncio.current_task()
         while not self._run.is_stopped():
             if self._state.status != "RUNNING":

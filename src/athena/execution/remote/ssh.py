@@ -258,6 +258,12 @@ class SshBackend:
                 "Run platform-split projects with --compute local, or stage the "
                 "split under the remote data root first."
             )
+        if request.data_csv is not None:
+            raise NotImplementedError(
+                "ATHENA_DATA_CSV is not supported on the ssh backend: the control "
+                "node's path does not resolve on the remote host. Configure and use "
+                "ATHENA_DATA_ROOT for remotely staged datasets instead."
+            )
         cwd = self._remote_cwd(
             Path(request.workdir) if request.workdir is not None else workspace_root
         )

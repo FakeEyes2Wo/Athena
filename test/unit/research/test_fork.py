@@ -133,6 +133,90 @@ class ForkTest(unittest.TestCase):
         self.assertEqual(6, state.search_limit)
         self.assertEqual("workspaces/eda", state.eda_dir)
 
+    def test_the_data_contract_and_frozen_evaluators_come_along(self) -> None:
+        """These live in resume.json, which the fork used to leave behind.
+
+        ``ResearchState.save`` splits PREPARE's durable output across
+        ``state.json`` and a sibling ``resume.json``. The fork copied only the
+        first, so a forked arm started SEARCH with ``data_contract=None`` --
+        candidates never see the task text, so the contract is their only source
+        for "train on this file, predict the rows in ATHENA_PREDICT_FEATURES";
+        without it they go find a split themselves and train on the rows they are
+        scored on. ``final_evaluator_ref=None`` then made VALIDATE fall back to
+        the *search* evaluator behind a lone warning.
+
+        Both show up only as a score, and only in the flattering direction: in an
+        A/B this arm looks like it won.
+        """
+        source, target = _prepared(), _target()
+        state = ResearchState.load(source / ".athena" / "state.json")
+        state.data_contract = "Train ONLY on train.csv"
+        state.evaluator_ref = "sha256:search-eval"
+        state.final_evaluator_ref = "sha256:final-eval"
+        state.task_text = "detect stellar flares"
+        state.save(source / ".athena" / "state.json")
+
+        fork_project(source, target)
+
+        forked = ResearchState.load(target / ".athena" / "state.json")
+        self.assertEqual("Train ONLY on train.csv", forked.data_contract)
+        self.assertEqual("sha256:final-eval", forked.final_evaluator_ref)
+        self.assertEqual("sha256:search-eval", forked.evaluator_ref)
+        self.assertEqual("detect stellar flares", forked.task_text)
+
+    def test_the_carried_resume_file_is_digested_against_the_new_state(self) -> None:
+        """A verbatim copy would be dropped: the fork rewrites the core state.
+
+        ``_merge_resume`` compares the file's ``state_digest`` against the core
+        payload and silently ignores a mismatch, so copying resume.json as-is
+        loses exactly as much as not copying it, minus the evidence.
+        """
+        source, target = _prepared(), _target()
+        state = ResearchState.load(source / ".athena" / "state.json")
+        state.data_contract = "Train ONLY on train.csv"
+        state.save(source / ".athena" / "state.json")
+
+        fork_project(source, target)
+
+        resume = json.loads(
+            (target / ".athena" / "resume.json").read_text(encoding="utf-8")
+        )
+        core = json.loads(
+            (target / ".athena" / "state.json").read_text(encoding="utf-8")
+        )
+        self.assertNotEqual(
+            resume["state_digest"],
+            json.loads(
+                (source / ".athena" / "resume.json").read_text(encoding="utf-8")
+            )["state_digest"],
+        )
+        self.assertEqual("SEARCH", core["phase"])
+
+    def test_the_research_cache_is_cleared_like_the_corpus(self) -> None:
+        """``task_research_*`` is the variable under test, not shared PREPARE."""
+        source, target = _prepared(), _target()
+        state = ResearchState.load(source / ".athena" / "state.json")
+        state.data_contract = "Train ONLY on train.csv"
+        state.task_research_task = "survey flares"
+        state.task_research_ref = "sha256:survey"
+        state.save(source / ".athena" / "state.json")
+
+        fork_project(source, target)
+
+        forked = ResearchState.load(target / ".athena" / "state.json")
+        self.assertIsNone(forked.task_research_ref)
+        self.assertIsNone(forked.task_research_task)
+
+    def test_a_source_without_a_resume_file_still_forks(self) -> None:
+        source, target = _prepared(), _target()
+
+        fork_project(source, target)
+
+        self.assertFalse((target / ".athena" / "resume.json").exists())
+        self.assertIsNone(
+            ResearchState.load(target / ".athena" / "state.json").data_contract
+        )
+
     def test_the_eda_workspace_comes_along_with_its_path(self) -> None:
         """只带字段不带目录，等于让每个 Ideator lane 各抛一次异常。
 

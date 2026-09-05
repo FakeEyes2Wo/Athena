@@ -191,7 +191,11 @@ async def _scored_plan(
 
 
 async def _runner_setup(
-    tmp_path: Path, *, execution: _FakeExecution, evaluator: _FakeEvaluator
+    tmp_path: Path,
+    *,
+    execution: _FakeExecution,
+    evaluator: _FakeEvaluator,
+    predict_features: Path | None = None,
 ):
     store = LocalArtifactStore(tmp_path / "artifacts")
     evaluator_dir = tmp_path / "eval"
@@ -221,6 +225,7 @@ async def _runner_setup(
             project_root=tmp_path,
             workspace_root=Path(branch.path),
             environment_root=tmp_path,
+            predict_features=predict_features,
         ),
     )
     return runner, plan_input, workspace, branch, store
@@ -719,6 +724,80 @@ async def test_run_turn_executes_manifest_scores_and_commits(tmp_path) -> None:
     assert await store.get_text(evidence["exploration_ref"]) == exploration
     assert result.metrics_ref == metrics_ref
     assert evidence["metrics_ref"] == metrics_ref
+
+
+def _features(tmp_path: Path, ids) -> Path:
+    path = tmp_path / "search_features.csv"
+    rows = "\n".join(f"{row_id},0.5" for row_id in ids)
+    path.write_text(f"__athena_row_id,x\n{rows}\n", encoding="utf-8")
+    return path
+
+
+@pytest.mark.asyncio
+async def test_predictions_for_the_wrong_rows_never_become_a_score(tmp_path) -> None:
+    """A wrong answer looks exactly like a right one until you check the ids.
+
+    VALIDATE has checked this since 2026-08-30; PREPARE and SEARCH did not. On
+    2026-09-02 a baseline wrote positional indices as row ids -- ``0, 1, 2, ...``
+    against labels spanning ``304 … 846890``. The evaluator joined 36,674 of
+    169,725 rows, each pairing a label with some other window's prediction, and
+    returned 0.016331. That became the trusted reference metric for the run.
+
+    A bad reference does not fail a run, it re-scales it: every later candidate
+    is measured against 0.0163, so the first one to merely write correct ids
+    looks like a breakthrough.
+    """
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, _ = await _runner_setup(
+        tmp_path,
+        execution=execution,
+        evaluator=_FakeEvaluator(metric=0.0163),
+        predict_features=_features(tmp_path, range(65220, 65240)),
+    )
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "-c", "print('train')"]],
+        predictions="__athena_row_id,prediction\n"
+        + "".join(f"{i},0.5\n" for i in range(20)),
+    )
+    state = PlanState(kind="PREPARE", context_ref=_REF, turns_used=1, turn_limit=12)
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "output_failed"
+    assert result.metric is None
+    assert "no prediction" in (result.error or "")
+    # 不能提交：这一轮没有可信分数。
+    assert workspace.messages == []
+
+
+@pytest.mark.asyncio
+async def test_predictions_covering_the_asked_rows_still_score(tmp_path) -> None:
+    execution = _FakeExecution(
+        [CommandResult(ok=True, stdout="ok", stderr="", exit_code=0)]
+    )
+    runner, plan_input, workspace, branch, _ = await _runner_setup(
+        tmp_path,
+        execution=execution,
+        evaluator=_FakeEvaluator(metric=0.91),
+        predict_features=_features(tmp_path, range(65220, 65240)),
+    )
+    _write_manifest(
+        branch,
+        commands=[[sys.executable, "-c", "print('train')"]],
+        predictions="__athena_row_id,prediction\n"
+        + "".join(f"{i},0.5\n" for i in range(65220, 65240)),
+    )
+    state = PlanState(
+        kind="SEARCH", context_ref=_REF, turns_used=1, turn_limit=12, patience=4
+    )
+
+    result = await runner.run_turn("h1", state, plan_input)
+
+    assert result.kind == "scored"
+    assert result.metric == 0.91
 
 
 @pytest.mark.asyncio
