@@ -22,6 +22,20 @@ def _number(value: Any, *, signed: bool = False) -> str:
     return f"{value:+.4f}" if signed else f"{value:.4f}"
 
 
+def _score(value: object) -> int | float | None:
+    """Return a numeric score while rejecting bools masquerading as integers."""
+    return (
+        value
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        else None
+    )
+
+
+def _primary(value: object) -> str:
+    """Preserve the compact integer and four-decimal float report format."""
+    return f"{value:.4f}" if isinstance(value, float) else str(value)
+
+
 def _sota_section(data: Mapping[str, Any]) -> list[str]:
     """Render the SOTA block, if the tree has one."""
     sota_id = data.get("sota_id")
@@ -35,10 +49,7 @@ def _sota_section(data: Mapping[str, Any]) -> list[str]:
     lines = ["", "## SOTA"]
     lines.append(f"- **SOTA 实验**: `{sota_id}`")
     if primary is not None:
-        lines.append(
-            f"- **最佳 primary**: "
-            f"{(f'{primary:.4f}' if isinstance(primary, float) else str(primary))}"
-        )
+        lines.append(f"- **最佳 primary**: {_primary(primary)}")
     lines.append(f"- **SOTA 假设**: {hypothesis['statement']}")
     secondary = (
         sota_experiment["eval"].get("secondary") or {}
@@ -69,15 +80,9 @@ def _validation_section(
         return []
     lines = ["", "## 验证结果"]
     if final_score is not None:
-        lines.append(
-            f"- **最终测试分数**: "
-            f"{(f'{final_score:.4f}' if isinstance(final_score, float) else str(final_score))}"
-        )
+        lines.append(f"- **最终测试分数**: {_primary(final_score)}")
     if gap is not None:
-        lines.append(
-            f"- **泛化差距**: "
-            f"{(f'{gap:.4f}' if isinstance(gap, float) else str(gap))}"
-        )
+        lines.append(f"- **泛化差距**: {_primary(gap)}")
     if warning:
         lines.append("- **泛化警告**: 测试集表现与训练/验证集差距过大，存在过拟合风险")
     return lines
@@ -168,12 +173,7 @@ def _experiment_records_section(data: Mapping[str, Any]) -> list[str]:
     for exp_id, experiment in data["experiments"].items():
         hypothesis = data["hypotheses"][experiment["hypothesis_id"]]
         primary = experiment["eval"]["primary"] if experiment.get("eval") else None
-        suffix = (
-            f" — primary "
-            f"{(f'{primary:.4f}' if isinstance(primary, float) else str(primary))}"
-            if primary is not None
-            else ""
-        )
+        suffix = f" — primary {_primary(primary)}" if primary is not None else ""
         lines.append(
             f"- **{exp_id}** [{experiment['status']}] "
             f"{hypothesis['statement']}{suffix}"
@@ -236,22 +236,19 @@ def build_optimization_report(
     data = tree.to_dict()
     experiments = data.get("experiments") or {}
     sota_id = data.get("sota_id")
-    successful = [
-        experiment_id
-        for experiment_id, experiment in experiments.items()
-        if experiment.get("status") == "SUCCEEDED"
-    ]
-    failed = [
-        (experiment_id, experiment)
-        for experiment_id, experiment in experiments.items()
-        if experiment.get("status") == "FAILED"
-    ]
+    successful = 0
+    failed: list[tuple[str, Mapping[str, object]]] = []
     scored: list[tuple[float, str, Mapping[str, object]]] = []
     unscored: list[tuple[str, Mapping[str, object]]] = []
     for experiment_id, experiment in experiments.items():
-        primary = (experiment.get("eval") or {}).get("primary")
-        if isinstance(primary, (int, float)) and not isinstance(primary, bool):
-            scored.append((float(primary), experiment_id, experiment))
+        status = experiment.get("status")
+        if status == "SUCCEEDED":
+            successful += 1
+        elif status == "FAILED":
+            failed.append((experiment_id, experiment))
+        score = _score((experiment.get("eval") or {}).get("primary"))
+        if score is not None:
+            scored.append((float(score), experiment_id, experiment))
         else:
             unscored.append((experiment_id, experiment))
 
@@ -296,19 +293,16 @@ def build_optimization_report(
             f"- 泛化差：{_markdown_cell(validation.get('generalization_gap'))}",
         ]
     lines[4:4] = [
-        f"- Successful experiments: {len(successful)}",
+        f"- Successful experiments: {successful}",
         f"- Failed experiments: {len(failed)}",
     ]
     baseline = experiments.get("exp_baseline")
     sota = experiments.get(sota_id) if sota_id else None
-    baseline_metric = (baseline.get("eval") or {}).get("primary") if baseline else None
-    sota_metric = (sota.get("eval") or {}).get("primary") if sota else None
-    if (
-        isinstance(baseline_metric, (int, float))
-        and not isinstance(baseline_metric, bool)
-        and isinstance(sota_metric, (int, float))
-        and not isinstance(sota_metric, bool)
-    ):
+    baseline_metric = _score(
+        (baseline.get("eval") or {}).get("primary") if baseline else None
+    )
+    sota_metric = _score((sota.get("eval") or {}).get("primary") if sota else None)
+    if baseline_metric is not None and sota_metric is not None:
         improvement = (
             sota_metric - baseline_metric
             if direction == "maximize"
@@ -323,7 +317,7 @@ def build_optimization_report(
                 f"- Direction-aware improvement: `{improvement:+.6f}`",
             ]
         )
-        if improvement <= 0 and len(successful) > 1:
+        if improvement <= 0 and successful > 1:
             lines.append(
                 "Search has not beaten the baseline; prioritize new evidence-backed "
                 "hypotheses over extra tuning of the same model family."
@@ -334,12 +328,12 @@ def build_optimization_report(
                 "components before combining more interventions."
             )
 
-    gap = (
+    gap = _score(
         validation.get("generalization_gap")
         if validation and not validation_skipped
         else None
     )
-    if isinstance(gap, (int, float)) and not isinstance(gap, bool):
+    if gap is not None:
         lines.extend(["", f"Generalization gap: `{gap:.4f}`"])
         if gap > 0:
             lines.append(

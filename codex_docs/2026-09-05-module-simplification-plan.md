@@ -561,6 +561,12 @@ Read `baseline.py` completely and traced authority load/seal/attestation, mirror
 
 Introduce immutable `BaselineDesignRequest` and `BaselineRunRequest`, reducing both public execution functions from six inputs to three. Replace the separate three-input artifact verifier and five-input ideator-turn function with one four-resource `_BaselineResearchRun`; its `verify` and `turn` methods accept zero and one business input respectively. Cache the authority bundle during attestation instead of reconstructing it for each comparison. The file grows from 629 to 630 physical lines because the request contracts are explicit; this is an interface/state-flow simplification, not a line-count reduction. Baseline orchestration, composition, and research contracts passed 184 tests; four PhaseRunner/autonomous PREPARE integration and resume cases also passed. Ruff, Black, Python compilation, AST signature checks, and `git diff --check` passed. Closing the baseline row advances reviewed coverage to 345/602. Whole-repository acceptance remains pending.
 
+## Research report projection review
+
+Read `research/report.py` completely and traced both exported builders through the GUI, Supervisor, experiment-document projector, and their direct tests. Retain both entrypoints: `build_final_report` is the live GUI/Supervisor artifact, while `build_optimization_report` is the distinct direction-aware experiment trajectory. Their parameters describe real report inputs; wrapping them in another request object would only move the same concepts into attributes.
+
+Centralize numeric score recognition and the legacy primary-value display rule, then classify successful, failed, scored, and unscored experiments in one traversal instead of three. This preserves Markdown escaping, deterministic ordering, integer/float formatting, skipped-validation disclosure, direction-aware improvement, generalization guidance, and failure-specific actions. The module falls from 397 to 391 physical lines. The expanded report/projector selection passed 51 tests, two GUI generation and durable-recovery integration cases passed, and four representative tree/validation states across both optimization directions produced eight report pairs byte-identical to the baseline implementation. Ruff, Black, Python compilation, repository hooks, and `git diff --check` passed. Closing the report row advances reviewed coverage to 346/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1168,7 +1174,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/prepare/orchestrator.py` | 61 | Reviewed; retain authoritative PREPARE phase order |
 | `src/athena/research/prepare/repository_url.py` | 135 | Reviewed; retain shared trust-boundary normalizer and remove redundant export list |
 | `src/athena/research/prepare/source_verification.py` | 613 | Reviewed; use slotted verifier records and remove single-use helpers/export list |
-| `src/athena/research/report.py` | 397 | Pending |
+| `src/athena/research/report.py` | 397 | Reviewed; one-pass outcome projection and shared numeric formatting; byte-identical output |
 | `src/athena/research/runtime/__init__.py` | 5 | Pending |
 | `src/athena/research/runtime/bootstrap.py` | 438 | Pending |
 | `src/athena/research/runtime/clarification.py` | 149 | Pending |
