@@ -127,12 +127,13 @@ async def confirm_pending_task(runtime: Any) -> None:
     """Require or auto-confirm raw task text before lifecycle start."""
     if not runtime.task_text.strip() or runtime.state.task_understanding is not None:
         return
-    if runtime.config.auto_confirm:
+    task_config = runtime.config.task
+    if task_config.auto_confirm:
         await auto_confirm(runtime, runtime.task_text)
         return
     code = (
         "confirmation_required"
-        if runtime.config.task_confirmation_gate
+        if task_config.confirmation_gate
         else "confirmation_policy_required"
     )
     raise ClarificationError(
@@ -143,12 +144,13 @@ async def confirm_pending_task(runtime: Any) -> None:
 
 async def seed_unconfirmed_task(runtime: Any, task: str) -> None:
     """Seed raw task text only through the configured confirmation policy."""
-    if runtime.config.task_confirmation_gate:
+    task_config = runtime.config.task
+    if task_config.confirmation_gate:
         raise ClarificationError(
             "confirmation_required",
             "raw task start requires an explicitly confirmed clarification draft",
         )
-    if not runtime.config.auto_confirm:
+    if not task_config.auto_confirm:
         raise ClarificationError(
             "confirmation_policy_required",
             "raw task start requires auto_confirm=True",

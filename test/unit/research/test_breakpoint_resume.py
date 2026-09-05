@@ -7,7 +7,7 @@ the sandbox denies named pipes used by real ``git`` subprocess capture.
 import asyncio
 import contextlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +16,8 @@ import pytest
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
+from athena.research.config import DatasetConfig, TaskConfig
+from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.prepare import orchestrator
 from athena.research.prepare.authority import (
     BaselineAuthorityConflict,
@@ -34,13 +36,14 @@ from athena.research.prepare.baseline_research import (
     verification_bytes,
     write_verification,
 )
-from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime import ResearchRuntime
-from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.runtime.control import (
     _consume_lifecycle_result,
+)
+from athena.research.runtime.control import (
     start as start_lifecycle,
 )
+from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime.resume_contract import ResearchControlError
 from athena.research.supervisor.prepare import PrepareResult
 
@@ -155,7 +158,7 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
         design_sha256=design_sha256(artifacts.raw_design),
         selected_candidate_id=artifacts.selected.candidate_id,
         route="git",
-        verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        verified_at=datetime(2026, 9, 2, tzinfo=UTC),
         repository_url=str(artifacts.selected.repository_url),
         commit="a" * 40,
         attempts=[{"route": "git", "success": True, "diagnostic": "verified"}],
@@ -618,13 +621,10 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         state_path=tmp_path / ".athena" / "state.json",
         workspaces_root=tmp_path / "workspaces",
         config=SimpleNamespace(
-            dataset_path=None,
-            target_column=None,
-            split_seed=0,
-            task_confirmation_gate=False,
+            dataset=DatasetConfig(),
+            task=TaskConfig(),
             paths=SimpleNamespace(athena=tmp_path / ".athena"),
         ),
-        task_confirmation_gate=False,
         git=FakeGit(),
         store=FakeStore(),
         events=FakeBus(),

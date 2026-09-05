@@ -77,34 +77,34 @@ class DataContract:
 
 async def prepare_platform_split(runtime: Any) -> DataContract | None:
     """Materialize a deterministic CSV split and persist its agent contract."""
-    config = runtime.config
-    if config.dataset_path is None or config.target_column is None:
+    dataset = runtime.config.dataset
+    if dataset.path is None or dataset.target_column is None:
         return None
 
     # Materialize the exact train/search/final filenames consumed downstream.
     split_dir = runtime.workspaces_root / "data_split"
     materialize_csv_split(
-        config.dataset_path,
+        dataset.path,
         split_dir,
-        config.target_column,
+        dataset.target_column,
         SplitSpec(
             search_frac=0.2,
             final_frac=0.2,
-            seed=config.split_seed,
-            group_column=config.group_column,
+            seed=dataset.split_seed,
+            group_column=dataset.group_column,
         ),
     )
     contract = DataContract(
         train_csv=split_dir / "train.csv",
         predict_features_csv=split_dir / "search_features.csv",
-        dataset_path=config.dataset_path,
-        group_column=config.group_column,
+        dataset_path=dataset.path,
+        group_column=dataset.group_column,
     )
 
     # Persist before agents run because later SEARCH turns do not receive task text.
     runtime.state.data_contract = contract.contract_text()
     runtime.state.save(runtime.state_path)
-    grouping = f" grouped by {config.group_column}" if config.group_column else ""
+    grouping = f" grouped by {dataset.group_column}" if dataset.group_column else ""
     await runtime.publish_output(
         source="supervisor",
         channel="text",

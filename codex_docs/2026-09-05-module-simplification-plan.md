@@ -609,6 +609,14 @@ Full-file caller inventory found two redundant methods among the runtime facade'
 
 The facade row remains Pending and reviewed coverage stays at 353/602: its 36-keyword constructor still needs a separate grouped-configuration migration, and the remaining forwarding methods require protocol-wide caller decisions. This follow-up does not claim the full facade review complete.
 
+## Runtime configuration grouping follow-up
+
+Reopened the already-reviewed configuration boundary after full facade analysis showed that its 25 flat fields were the storage target for the 36-keyword runtime constructor. Replace those flat fields with six cohesive frozen groups: provider (2 fields), task/confirmation (5), research policy (5), dataset (4), execution (3), and provider-less adapters (3). Together with paths, session identity, search limits, and survey settings, `ResearchConfig` now has 10 fields; no configuration class has more than five. Production consumers bind the relevant group once instead of reading unrelated flat options.
+
+The explicit grouping grows `config.py` from 102 immediately before this slice to 137 physical lines and the facade's construction mapping from 710 to 729; the engineering gain is reduced attribute surface and separated responsibilities, not line count. Remove no compatibility properties for the old flat shape. Migrate direct config tests and stale `SimpleNamespace` fakes to the real grouped contracts. This also repairs four pre-existing phase-preflight failures and restores nine authoritative baseline-gate integration tests that previously crashed before PREPARE because their harness lacked the current state/config protocol. The complete research unit suite passed 1,253 tests, the CLI/TUI/runtime entry selection passed 37, and the authoritative baseline gate passed all 9 tests. Ruff, Black, Python compilation, hooks, and `git diff --check` passed.
+
+The configuration row remains Reviewed and coverage stays at 353/602. The facade remains Pending because its external constructor still exposes 36 keywords; the next slice must replace that call surface with grouped inputs rather than preserve it through aliases.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1114,7 +1122,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/persistence.py` | 149 | Reviewed; merge draft and journal stores, delete one class and make recovery zero-argument |
 | `src/athena/research/clarification/requirements.py` | 96 | Reviewed; share predictive field policy and use native whitespace normalization |
 | `src/athena/research/clarification/state.py` | 231 | Reviewed; retain cohesive pure transitions and centralized invariant revalidation |
-| `src/athena/research/config.py` | 83 | Reviewed; three stored roots replace nine independently supplied paths |
+| `src/athena/research/config.py` | 83 | Reviewed; three roots plus six cohesive groups reduce the main config from 25 fields to 10 |
 | `src/athena/research/contracts.py` | 88 | Reviewed; absorb all shared research payload models behind one explicit export surface |
 | `src/athena/research/data_models.py` | 46 | Reviewed; merged into contracts.py and deleted |
 | `src/athena/research/evaluation/__init__.py` | 5 | Reviewed; retain one three-symbol facade for trusted scoring and generalization policy |

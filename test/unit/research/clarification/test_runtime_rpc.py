@@ -29,7 +29,7 @@ from athena.research.clarification.llm_generator import (
     TASK_UNDERSTANDING_SCOPE,
     LLMClarificationGenerator,
 )
-from athena.research.config import ResearchConfig
+from athena.research.config import ProviderConfig, ResearchConfig
 from athena.research.runtime import facade as runtime_facade
 from athena.research.runtime.bootstrap import build_paths, build_services
 
@@ -166,7 +166,10 @@ async def test_real_runtime_exposes_clarification_rpc(tmp_path: Path) -> None:
 
 
 def test_configured_build_services_requires_explicit_provider(tmp_path: Path) -> None:
-    config = ResearchConfig(paths=build_paths(tmp_path, None), model="configured")
+    config = ResearchConfig(
+        paths=build_paths(tmp_path, None),
+        provider=ProviderConfig(model="configured"),
+    )
 
     with pytest.raises(ValueError, match="provider"):
         build_services(config, StubBroker(), provider=None)

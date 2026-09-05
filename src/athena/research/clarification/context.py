@@ -75,7 +75,7 @@ async def confirmed_task_context_block(runtime: Any) -> str:
         return await ConfirmedTaskContextProvider.from_runtime(runtime).load()
     except ConfirmedTaskContextError as error:
         if (
-            runtime.config.task_confirmation_gate
+            runtime.config.task.confirmation_gate
             or runtime.state.task_understanding is not None
         ):
             raise RuntimeError(

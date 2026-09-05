@@ -64,39 +64,74 @@ class SurveyConfig:
 
 
 @dataclass(frozen=True)
-class ResearchConfig:
-    """Everything ResearchRuntime needs to know that does not change per run."""
+class ProviderConfig:
+    """Optional model provider selection and client override."""
 
-    paths: ResearchPaths
-    session_id: str = "default"
     model: str | None = None
     client: Any = None
-    task: str = ""
-    auto_seed_task: bool = False
-    task_confirmation_gate: bool = False
+
+
+@dataclass(frozen=True)
+class TaskConfig:
+    """Task seeding, confirmation, and human-interaction policy."""
+
+    text: str = ""
+    auto_seed: bool = False
+    confirmation_gate: bool = False
     auto_confirm: bool = False
-    search: SearchLimits = field(default_factory=SearchLimits)
-    survey: SurveyConfig = field(default_factory=SurveyConfig)
+    ask_user: Any = None
+
+
+@dataclass(frozen=True)
+class ResearchPolicy:
+    """Initial search/validation policy copied into mutable session state."""
+
     auto_validate: bool = False
     skip_validate: bool = False
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
     ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration"
-    # Optional platform-owned local CSV dataset contract. When set, PREPARE
-    # materializes train/search/final splits instead of letting the evaluator
-    # agent create the split itself.
-    dataset_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class DatasetConfig:
+    """Optional platform-owned dataset split contract."""
+
+    path: Path | None = None
     target_column: str | None = None
     split_seed: int = 0
-    # Column whose value must not span two splits (active region, star, subject).
     group_column: str | None = None
-    # Compute resources / remote GPU execution.
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    """Local/remote execution roots, limits, and compute placement."""
+
     data_root: Path | None = None
     experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S
     compute: ComputeConfig | None = None
-    # Provider-less test adapter; registered production providers use the
-    # authoritative PREPARE orchestrator.
-    prepare_phase: Any = None
-    validation_phase: Any = None
-    plan_turn: Any = None
-    ask_user: Any = None
+
+
+@dataclass(frozen=True)
+class RuntimeAdapters:
+    """Provider-less test adapters for phase and Plan execution."""
+
+    prepare: Any = None
+    validation: Any = None
+    plan: Any = None
+
+
+@dataclass(frozen=True)
+class ResearchConfig:
+    """Everything ResearchRuntime needs to know that does not change per run."""
+
+    paths: ResearchPaths
+    session_id: str = "default"
+    provider: ProviderConfig = field(default_factory=ProviderConfig)
+    task: TaskConfig = field(default_factory=TaskConfig)
+    search: SearchLimits = field(default_factory=SearchLimits)
+    survey: SurveyConfig = field(default_factory=SurveyConfig)
+    policy: ResearchPolicy = field(default_factory=ResearchPolicy)
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    adapters: RuntimeAdapters = field(default_factory=RuntimeAdapters)

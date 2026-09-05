@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from athena.research.config import DatasetConfig
 from athena.research.prepare import orchestrator
 from athena.research.prepare.baseline import directory_candidate_task
 from athena.research.prepare.baseline_research import BaselineResearchError
@@ -21,7 +22,7 @@ async def _noop_publish(**_kwargs) -> None:
 async def test_prepare_data_skips_non_csv_contracts(tmp_path: Path) -> None:
     """Directory data must retain the evaluator-owned split path."""
     runtime = SimpleNamespace(
-        config=SimpleNamespace(dataset_path=None, target_column=None),
+        config=SimpleNamespace(dataset=DatasetConfig()),
         workspaces_root=tmp_path,
         publish_output=_noop_publish,
     )

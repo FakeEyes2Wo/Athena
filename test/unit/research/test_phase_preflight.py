@@ -5,8 +5,8 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from athena.research.clarification import context as task_context
-from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.prepare import orchestrator as prepare_phase
+from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.turns.runner import AgentTurnRunner
 
 
@@ -23,7 +23,7 @@ def test_task_prompt_prepends_context() -> None:
 async def test_ungated_legacy_context_may_be_absent(monkeypatch) -> None:
     runtime = SimpleNamespace(
         state=SimpleNamespace(task_understanding=None),
-        task_confirmation_gate=False,
+        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=False)),
     )
     monkeypatch.setattr(
         task_context.ConfirmedTaskContextProvider,
@@ -42,7 +42,10 @@ async def test_prepare_preflight_runs_before_custom_phase(monkeypatch) -> None:
         nonlocal called
         called = True
 
-    runtime = SimpleNamespace(prepare_phase=custom_phase, task_confirmation_gate=True)
+    runtime = SimpleNamespace(
+        prepare_phase=custom_phase,
+        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True)),
+    )
     monkeypatch.setattr(
         task_context.ConfirmedTaskContextProvider,
         "from_runtime",
@@ -92,7 +95,8 @@ async def test_validation_preflight_runs_before_custom_phase(monkeypatch) -> Non
         called = True
 
     runtime = SimpleNamespace(
-        validation_phase=custom_phase, task_confirmation_gate=True
+        validation_phase=custom_phase,
+        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True)),
     )
     monkeypatch.setattr(
         task_context.ConfirmedTaskContextProvider,
@@ -109,7 +113,10 @@ async def test_validation_preflight_runs_before_custom_phase(monkeypatch) -> Non
 @pytest.mark.asyncio
 async def test_ideator_preflight_runs_before_handoff(monkeypatch) -> None:
     handoff_started = False
-    runtime = SimpleNamespace(provider=object(), task_confirmation_gate=True)
+    runtime = SimpleNamespace(
+        provider=object(),
+        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True)),
+    )
     runner = AgentTurnRunner(runtime)
 
     async def collect_handoffs(self):

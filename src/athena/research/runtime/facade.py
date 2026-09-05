@@ -18,7 +18,17 @@ from athena.core.tool_types import AskUser
 from athena.execution.compute_config import ComputeConfig, load_compute_config
 from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.kaggle import KaggleStack
-from athena.research.config import ResearchConfig, SearchLimits, SurveyConfig
+from athena.research.config import (
+    DatasetConfig,
+    ExecutionConfig,
+    ProviderConfig,
+    ResearchConfig,
+    ResearchPolicy,
+    RuntimeAdapters,
+    SearchLimits,
+    SurveyConfig,
+    TaskConfig,
+)
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_rag.models import PaperSummary
@@ -184,31 +194,40 @@ class ResearchRuntime:
         )
         config = ResearchConfig(
             paths=paths,
+            session_id=session_id,
+            provider=ProviderConfig(model=model, client=client),
+            task=TaskConfig(
+                text=task,
+                auto_seed=auto_seed_task,
+                confirmation_gate=task_confirmation_gate,
+                auto_confirm=auto_confirm,
+                ask_user=ask_user,
+            ),
             search=search,
             survey=survey_config,
-            session_id=session_id,
-            model=model,
-            client=client,
-            task=task,
-            auto_seed_task=auto_seed_task,
-            task_confirmation_gate=task_confirmation_gate,
-            auto_confirm=auto_confirm,
-            auto_validate=auto_validate,
-            skip_validate=skip_validate,
-            direction=direction,
-            tolerance=tolerance,
-            ideation=ideation,
-            dataset_path=Path(dataset_path).resolve() if dataset_path else None,
-            target_column=target_column,
-            split_seed=split_seed,
-            group_column=group_column,
-            data_root=Path(data_root).resolve() if data_root else None,
-            experiment_timeout_s=experiment_timeout_s,
-            compute=compute if compute is not None else load_compute_config(),
-            prepare_phase=prepare_phase,
-            validation_phase=validation_phase,
-            plan_turn=plan_turn,
-            ask_user=ask_user,
+            policy=ResearchPolicy(
+                auto_validate=auto_validate,
+                skip_validate=skip_validate,
+                direction=direction,
+                tolerance=tolerance,
+                ideation=ideation,
+            ),
+            dataset=DatasetConfig(
+                path=Path(dataset_path).resolve() if dataset_path else None,
+                target_column=target_column,
+                split_seed=split_seed,
+                group_column=group_column,
+            ),
+            execution=ExecutionConfig(
+                data_root=Path(data_root).resolve() if data_root else None,
+                experiment_timeout_s=experiment_timeout_s,
+                compute=compute if compute is not None else load_compute_config(),
+            ),
+            adapters=RuntimeAdapters(
+                prepare=prepare_phase,
+                validation=validation_phase,
+                plan=plan_turn,
+            ),
         )
 
         provider = (
@@ -376,12 +395,12 @@ class ResearchRuntime:
     @property
     def model(self) -> str | None:
         """Return the configured model identifier."""
-        return self._config.model
+        return self._config.provider.model
 
     @property
     def client(self) -> Any:
         """Return the optional provider client override."""
-        return self._config.client
+        return self._config.provider.client
 
     @property
     def direction(self) -> Literal["maximize", "minimize"]:
@@ -396,12 +415,12 @@ class ResearchRuntime:
     @property
     def prepare_phase(self):
         """Return the optional PREPARE phase override."""
-        return self._config.prepare_phase
+        return self._config.adapters.prepare
 
     @property
     def validation_phase(self):
         """Return the optional VALIDATE phase override."""
-        return self._config.validation_phase
+        return self._config.adapters.validation
 
     @property
     def config(self):
@@ -421,7 +440,7 @@ class ResearchRuntime:
     @property
     def plan_turn(self):
         """Return the optional plan-turn override."""
-        return self._config.plan_turn
+        return self._config.adapters.plan
 
     def register_supervisor(self, *, provider: object) -> None:
         """Register the long-lived SupervisorAgent once."""

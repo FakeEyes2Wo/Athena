@@ -103,7 +103,7 @@ def build_services(
     provider: BaseProvider | None = None,
 ) -> tuple[ResearchServices, ResearchSession]:
     """Build durable infrastructure and transient process state."""
-    if config.model is not None and provider is None:
+    if config.provider.model is not None and provider is None:
         raise ValueError("a configured model requires an explicit provider")
 
     paths = config.paths
@@ -120,7 +120,7 @@ def build_services(
     execution = ExecutionRuntime(
         project_root=paths.root,
         environment_root=paths.root,
-        data_root=config.data_root,
+        data_root=config.execution.data_root,
         store=store,
     )
     scripts = DataScriptRunner(store=store, workdir=paths.athena / "runs")
@@ -193,22 +193,25 @@ def build_services(
 
     # Keep mutable, process-local values outside the composition root.
     session = ResearchSession(
-        lifecycle=LifecycleSession(task_text=config.task),
-        compute=ComputeSession(data_root=config.data_root, config=config.compute),
+        lifecycle=LifecycleSession(task_text=config.task.text),
+        compute=ComputeSession(
+            data_root=config.execution.data_root,
+            config=config.execution.compute,
+        ),
         options=RuntimeOptions(
-            ideation=config.ideation,
-            direction=config.direction,
-            tolerance=config.tolerance,
-            auto_validate=config.auto_validate,
-            skip_validate=config.skip_validate,
+            ideation=config.policy.ideation,
+            direction=config.policy.direction,
+            tolerance=config.policy.tolerance,
+            auto_validate=config.policy.auto_validate,
+            skip_validate=config.policy.skip_validate,
         ),
     )
-    if config.compute is not None and config.compute.remote:
+    if config.execution.compute is not None and config.execution.compute.remote:
         session.compute.pool = GpuPool(
-            list(config.compute.hosts),
-            placement=config.compute.placement,
+            list(config.execution.compute.hosts),
+            placement=config.execution.compute.placement,
             store=store,
-            dataset_root=config.data_root,
+            dataset_root=config.execution.data_root,
         )
     return services, session
 
@@ -251,14 +254,14 @@ def wire_workflow(runtime: Any) -> None:
             validation=phases.run_validation_phase,
             publish_agent_event=services.infrastructure.events.project_agent_event,
             on_plan_settled=runtime.release_lease,
-            auto_validate=config.auto_validate,
-            skip_validate=config.skip_validate,
+            auto_validate=config.policy.auto_validate,
+            skip_validate=config.policy.skip_validate,
         ),
         search=SearchServices(
             scheduler=Scheduler(),
             recovery=Recovery(),
-            direction=config.direction,
-            tolerance=config.tolerance,
+            direction=config.policy.direction,
+            tolerance=config.policy.tolerance,
         ),
     )
     supervisor = Supervisor(
@@ -284,8 +287,8 @@ def register_supervisor(runtime: Any, provider: object) -> None:
         artifacts=runtime.store,
     )
     ask_user_factory = (
-        (lambda _thread, _turn: runtime.config.ask_user)
-        if runtime.config.ask_user is not None
+        (lambda _thread, _turn: runtime.config.task.ask_user)
+        if runtime.config.task.ask_user is not None
         else None
     )
     register_supervisor_agent(
@@ -407,7 +410,7 @@ def _load_state(config: ResearchConfig) -> ResearchState:
             state.eda_dir = None
     if state.status == "FAILED":
         state.status = "IDLE"
-    state.experiment_timeout_s = config.experiment_timeout_s
-    if config.data_root is not None and state.data_root is None:
-        state.data_root = str(config.data_root)
+    state.experiment_timeout_s = config.execution.experiment_timeout_s
+    if config.execution.data_root is not None and state.data_root is None:
+        state.data_root = str(config.execution.data_root)
     return state

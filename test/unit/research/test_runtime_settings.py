@@ -21,7 +21,7 @@ def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
 
     services, _session = build_services(config, None)
 
-    assert config.skip_validate is False
+    assert config.policy.skip_validate is False
     assert services.durable.state.search_limit == 4
 
 
@@ -32,7 +32,7 @@ def test_skip_validate_defaults_to_false_in_runtime_options() -> None:
 def test_research_runtime_composes_skip_validate(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path, skip_validate=True)
 
-    assert runtime.config.skip_validate is True
+    assert runtime.config.policy.skip_validate is True
     assert runtime.session.options.skip_validate is True
     assert runtime.supervisor._deps.phases.skip_validate is True
     assert runtime.settings()["skip_validate"] is True
@@ -41,7 +41,7 @@ def test_research_runtime_composes_skip_validate(tmp_path) -> None:
 def test_skip_validate_defaults_off_and_projects_to_settings(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
 
-    assert runtime.config.skip_validate is False
+    assert runtime.config.policy.skip_validate is False
     assert runtime.session.options.skip_validate is False
     assert runtime.settings()["skip_validate"] is False
 

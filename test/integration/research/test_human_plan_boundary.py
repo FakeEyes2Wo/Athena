@@ -345,7 +345,10 @@ async def test_validate_running_recovery_ignores_new_skip_preference(runtime):
             validation_commit=commit,
         )
 
-    runtime._config = replace(runtime.config, validation_phase=validate)
+    runtime._config = replace(
+        runtime.config,
+        adapters=replace(runtime.config.adapters, validation=validate),
+    )
     runtime.supervisor.configure_options(skip_validate=True)
     runtime.state.phase = "VALIDATE"
     runtime.state.status = "RUNNING"

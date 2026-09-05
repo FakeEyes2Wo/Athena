@@ -12,6 +12,7 @@ import pytest_asyncio
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.tool import ToolRegistry
+from athena.research.config import ResearchConfig, ResearchPaths, TaskConfig
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_source.http import UrllibTransport
 from athena.research.literature.paper_source.openalex import OpenAlexWork
@@ -38,6 +39,7 @@ from athena.research.prepare.source_verification import (
 )
 from athena.research.runtime import ResearchRuntime
 from athena.research.runtime.phase_runner import PhaseRunner
+from athena.research.supervisor.state import ResearchState
 from test.integration.research.test_prepare_agent_contract import (
     _Harness as _PrepareHarness,
 )
@@ -403,10 +405,28 @@ class _GateHarness(_PrepareHarness):
         async def publish_output(**kwargs: Any) -> None:
             outputs.append(kwargs)
 
+        state = ResearchState(
+            status="RUNNING",
+            phase="PREPARE",
+            search_limit=10,
+            concurrency=1,
+        )
         runtime = SimpleNamespace(
             prepare_phase=None,
             provider=provider,
             task_text="inspect data and build a trusted baseline",
+            state=state,
+            state_path=root / ".athena" / "state.json",
+            root=root,
+            workspaces_root=root.parent,
+            config=ResearchConfig(
+                paths=ResearchPaths(
+                    root=root,
+                    athena=root / ".athena",
+                    workspaces=root.parent,
+                ),
+                task=TaskConfig(),
+            ),
             registry=self.registry,
             agents=self.agents,
             store=self.store,
@@ -416,7 +436,6 @@ class _GateHarness(_PrepareHarness):
             baseline_authority=self.authority,
             tree=SimpleNamespace(to_dict=lambda: {"experiments": []}),
             events=self.events,
-            task_confirmation_gate=False,
             baseline_ideator_tools=lambda: ToolRegistry(),
             kaggle_tools=lambda _kind: None,
             publish_output=publish_output,
