@@ -22,7 +22,7 @@ import { Outcome, type Outcome as OutcomeType } from "./policy.js"
 import { PlanInputSchema, PlanStateSchema, type PlanDecision, type PlanState } from "./plans.js"
 import type { PrepareResult } from "./prepare.js"
 import { reconcilePlans } from "./recovery.js"
-import { ScheduleKind, Scheduler, countSearchAttempts } from "./scheduler.js"
+import { Scheduler, countSearchAttempts } from "./scheduler.js"
 import { ResearchState, type ResearchStatus } from "./state.js"
 
 export type PlanTurn = (planId: string, state: PlanState) => Promise<PlanTurnResult>
@@ -511,18 +511,17 @@ export class FixedFlowSupervisor {
     })
     for (const action of actions) {
       if (this.stopped) return generated
-      if (action.kind === ScheduleKind.GENERATE) {
+      if (action.kind === "GENERATE") {
         const hypotheses = await this.workers.runIdeatorTurn(action.count)
         const registered = await this.registerHypotheses(hypotheses)
         generated = registered.hypothesis_ids.length > 0
         continue
       }
-      const planId = action.planId ?? action.hypothesisId
-      if (planId === null) continue
-      if (action.kind === ScheduleKind.START_NEW || action.kind === ScheduleKind.START_NEXT_HYPOTHESIS) {
+      const { planId } = action
+      if (action.kind !== "RESUME") {
         await this.startPlan(planId)
       }
-      if (action.kind === ScheduleKind.START_NEXT_HYPOTHESIS) {
+      if (action.kind === "START_NEXT_HYPOTHESIS") {
         this.nextHypothesisId = null
       }
       this.launchTurn(planId)
@@ -639,7 +638,7 @@ export class FixedFlowSupervisor {
         artifacts,
         commit: best.commit,
       })
-      hypothesis.priority = this.scheduler.settle(planInput.reference_priority, outcome)
+      hypothesis.priority = this.scheduler.policy.settle(planInput.reference_priority, outcome)
       this.tree.updateHypothesisStatus(planId, outcome === Outcome.WIN ? "SUPPORTED" : "REFUTED")
       if (primary !== null) {
         const sotaId = this.tree.bestExperimentId()
@@ -767,7 +766,7 @@ export class FixedFlowSupervisor {
     const hypothesis = HypothesisSchema.parse({
       ...payload,
       parent_id: parentId,
-      priority: this.scheduler.seed(parentHypothesis),
+      priority: this.scheduler.policy.seed(parentHypothesis),
     })
     const hypothesisId = this.tree.addHypothesis(hypothesis)
     this.tree.save(this.treePath)
@@ -777,7 +776,7 @@ export class FixedFlowSupervisor {
 
   async registerHypotheses(hypotheses: Hypothesis[]): Promise<{ hypothesis_ids: string[] }> {
     const { parentId, parentHypothesis } = this.sotaParent()
-    const priority = this.scheduler.seed(parentHypothesis)
+    const priority = this.scheduler.policy.seed(parentHypothesis)
     const ids: string[] = []
     for (const h of hypotheses) {
       const hypothesis = HypothesisSchema.parse({

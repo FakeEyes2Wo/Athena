@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { HypothesisSchema, ResearchTree } from "@athena/core"
-import { EloPolicy, Outcome, queueOrder } from "../../src/supervisor/policy.js"
+import { EloPolicy, Outcome } from "../../src/supervisor/policy.js"
 
 function hypothesis(priority: number, order = 0) {
   return HypothesisSchema.parse({
@@ -50,29 +50,4 @@ describe("policy", () => {
     }
   )
 
-  it.each([NaN, Infinity, -Infinity])(
-    "queue order rejects nonfinite priority (%j)",
-    (priority) => {
-      expect(() => queueOrder(priority, 0)).toThrow(/finite/)
-    }
-  )
-
-  it("queue order is priority descending then fifo order ascending", () => {
-    const hypotheses = [
-      hypothesis(1000.0, 2),
-      hypothesis(1016.0, 3),
-      hypothesis(1000.0, 1),
-    ]
-    const ordered = [...hypotheses].sort((a, b) => {
-      const [pa, oa] = queueOrder(a.priority, a.order)
-      const [pb, ob] = queueOrder(b.priority, b.order)
-      if (pa !== pb) return pa - pb
-      return oa - ob
-    })
-    expect(ordered.map((item) => [item.priority, item.order])).toEqual([
-      [1016.0, 3],
-      [1000.0, 1],
-      [1000.0, 2],
-    ])
-  })
 })

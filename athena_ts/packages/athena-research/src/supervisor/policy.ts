@@ -2,8 +2,7 @@
  * 可替换的假设调度策略边界（移植 ``research/supervisor/policy.py``）。
  */
 
-import type { Hypothesis } from "@athena/core"
-import type { ResearchTree } from "@athena/core"
+import type { Hypothesis, ResearchTree } from "@athena/core"
 
 /** 候选相对其冻结参照的可信结果。 */
 export const Outcome = {
@@ -29,13 +28,10 @@ export interface HypothesisPolicy {
 export class EloPolicy implements HypothesisPolicy {
   static readonly ROOT_PRIORITY = 1000.0
 
-  private k: number
-
-  constructor(k: number = 32.0) {
+  constructor(private readonly k: number = 32.0) {
     if (!Number.isFinite(k) || k <= 0) {
       throw new Error("Elo k must be a positive finite number")
     }
-    this.k = k
   }
 
   seed(parent: Hypothesis | null): number {
@@ -54,15 +50,4 @@ export class EloPolicy implements HypothesisPolicy {
       outcome === Outcome.WIN ? 1.0 : outcome === Outcome.DRAW ? 0.5 : 0.0
     return referencePriority + this.k * (score - 0.5)
   }
-}
-
-/** 优先级降序、FIFO order 升序的排序键。 */
-export function queueOrder(priority: number, order: number | null): [number, number] {
-  if (!Number.isFinite(priority)) {
-    throw new Error("hypothesis priority must be finite")
-  }
-  if (order === null) {
-    throw new Error("hypothesis order must be assigned before scheduling")
-  }
-  return [-priority, order]
 }

@@ -4,56 +4,22 @@
 
 import type { Hypothesis, ResearchTree } from "@athena/core"
 
-import { EloPolicy, type HypothesisPolicy, type Outcome } from "./policy.js"
+import { EloPolicy, type HypothesisPolicy } from "./policy.js"
 import { Selector } from "./ranker.js"
 import type { ResearchState } from "./state.js"
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"])
 
-/** 填充一个 SEARCH 槽位时发出的一种调度动作。 */
-export const ScheduleKind = {
-  RESUME: "RESUME",
-  START_NEW: "START_NEW",
-  START_NEXT_HYPOTHESIS: "START_NEXT_HYPOTHESIS",
-  GENERATE: "GENERATE",
-} as const
-export type ScheduleKind = (typeof ScheduleKind)[keyof typeof ScheduleKind]
-
-/** 一个确定性的槽位填充动作。 */
-export class ScheduleAction {
-  constructor(
-    public readonly kind: ScheduleKind,
-    public readonly planId: string | null = null,
-    public readonly hypothesisId: string | null = null,
-    public readonly count: number = 0
-  ) {}
-
-  static resume(planId: string): ScheduleAction {
-    return new ScheduleAction(ScheduleKind.RESUME, planId)
-  }
-
-  static startNew(hypothesisId: string): ScheduleAction {
-    return new ScheduleAction(ScheduleKind.START_NEW, null, hypothesisId)
-  }
-
-  static startNextHypothesis(hypothesisId: string): ScheduleAction {
-    return new ScheduleAction(ScheduleKind.START_NEXT_HYPOTHESIS, null, hypothesisId)
-  }
-
-  static generate(count: number): ScheduleAction {
-    return new ScheduleAction(ScheduleKind.GENERATE, null, null, count)
-  }
-}
+/** 每个动作仅携带实际需要的数据；SEARCH plan ID 就是假设 ID。 */
+export type ScheduleAction =
+  | { readonly kind: "RESUME" | "START_NEW" | "START_NEXT_HYPOTHESIS"; readonly planId: string }
+  | { readonly kind: "GENERATE"; readonly count: number }
 
 /** 已创建的 SEARCH 尝试数：终态搜索实验 + 活跃 SEARCH Plan。 */
 export function countSearchAttempts(state: ResearchState, tree: ResearchTree): number {
   const settled = tree.experiments("search").filter((experiment) => TERMINAL.has(experiment.status)).length
   const active = Object.values(state.plans).filter((plan) => plan.kind === "SEARCH").length
   return settled + active
-}
-
-function isReady(turnsUsed: number, turnLimit: number | null): boolean {
-  return turnLimit === null || turnsUsed < turnLimit
 }
 
 export interface NextActionsOptions {
@@ -63,20 +29,10 @@ export interface NextActionsOptions {
 
 /** 按固定确定性顺序填充 SEARCH 并发槽位。 */
 export class Scheduler {
-  private policy: HypothesisPolicy
-  private selector: Selector
+  private readonly selector: Selector
 
-  constructor(policy: HypothesisPolicy | null = null, selector: Selector | null = null) {
-    this.policy = policy ?? new EloPolicy()
-    this.selector = selector ?? new Selector(this.policy)
-  }
-
-  seed(parent: Hypothesis | null): number {
-    return this.policy.seed(parent)
-  }
-
-  settle(referencePriority: number, outcome: Outcome): number {
-    return this.policy.settle(referencePriority, outcome)
+  constructor(public readonly policy: HypothesisPolicy = new EloPolicy()) {
+    this.selector = new Selector(policy)
   }
 
   /** 投影槽位填充动作，不修改 state/tree/policy。 */
@@ -98,43 +54,38 @@ export class Scheduler {
       if (
         plan.kind === "SEARCH" &&
         !running.has(planId) &&
-        isReady(plan.turns_used, plan.turn_limit)
+        (plan.turn_limit === null || plan.turns_used < plan.turn_limit)
       ) {
-        actions.push(ScheduleAction.resume(planId))
+        actions.push({ kind: "RESUME", planId })
         freeSlots -= 1
       }
     }
 
     let createBudget = state.search_limit - countSearchAttempts(state, tree)
-    if (createBudget > 0 && freeSlots > 0) {
-      const humanNext = opts.humanNext ?? null
-      const manual = opts.manual ?? false
+    if (createBudget <= 0 || freeSlots === 0) return actions
+    const humanNext = opts.humanNext ?? null
 
-      // 2. 用户单次点名的下一个假设，绕过策略队列但不改优先级
-      if (humanNext !== null) {
-        actions.push(ScheduleAction.startNextHypothesis(humanNext))
+    // 2. 用户单次点名的下一个假设，绕过策略队列但不改优先级
+    if (humanNext !== null) {
+      actions.push({ kind: "START_NEXT_HYPOTHESIS", planId: humanNext })
+      freeSlots -= 1
+      createBudget -= 1
+    }
+
+    // 手动模式保留待选假设，只在队列为空时生成候选。
+    if (opts.manual && tree.pendingHypotheses().length > 0) return actions
+    if (!opts.manual) {
+      // 3. 按选择器评分排序，FIFO 打破同分；本轮近似假设去重。
+      for (const hypothesis of this.queued(tree, state, humanNext)) {
+        if (freeSlots === 0 || createBudget === 0) break
+        actions.push({ kind: "START_NEW", planId: hypothesis.id! })
         freeSlots -= 1
         createBudget -= 1
       }
-
-      if (manual) {
-        // 手动模式：跳过按优先级自动出队，仅当无待选假设时生成候选。
-        if (tree.pendingHypotheses().length === 0 && freeSlots > 0 && createBudget > 0) {
-          actions.push(ScheduleAction.generate(Math.min(freeSlots, createBudget)))
-        }
-      } else {
-        // 3. 策略优先级降序、FIFO 顺序升序的新假设队列
-        for (const hypothesis of this.queued(tree, state, humanNext)) {
-          if (freeSlots === 0 || createBudget === 0) break
-          actions.push(ScheduleAction.startNew(hypothesis.id!))
-          freeSlots -= 1
-          createBudget -= 1
-        }
-        // 4. 剩余空位全部请求生成新假设
-        if (freeSlots > 0 && createBudget > 0) {
-          actions.push(ScheduleAction.generate(Math.min(freeSlots, createBudget)))
-        }
-      }
+    }
+    // 4. 在剩余预算内为未填充槽位生成新假设。
+    if (freeSlots > 0 && createBudget > 0) {
+      actions.push({ kind: "GENERATE", count: Math.min(freeSlots, createBudget) })
     }
     return actions
   }

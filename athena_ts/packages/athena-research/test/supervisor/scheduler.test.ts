@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { ExperimentSchema, HypothesisSchema, ResearchTree, parseOrThrow } from "@athena/core"
 import { PlanStateSchema } from "../../src/supervisor/plans.js"
+import { EloPolicy } from "../../src/supervisor/policy.js"
 import { ResearchState } from "../../src/supervisor/state.js"
-import { ScheduleAction, Scheduler, countSearchAttempts } from "../../src/supervisor/scheduler.js"
+import { Scheduler, countSearchAttempts } from "../../src/supervisor/scheduler.js"
 
 const CONTEXT_REF = "sha256:" + "d".repeat(64)
 const BEST_REF = "sha256:" + "b".repeat(64)
@@ -12,9 +13,9 @@ function plan(opts: { turns?: number; limit?: number | null; best?: string | nul
     kind: "SEARCH",
     context_ref: CONTEXT_REF,
     turns_used: opts.turns ?? 0,
-    turn_limit: opts.limit ?? 12,
+    turn_limit: opts.limit === undefined ? 12 : opts.limit,
     patience: 4,
-    best_ref: opts.best ?? BEST_REF,
+    best_ref: opts.best === undefined ? BEST_REF : opts.best,
   })
 }
 
@@ -111,11 +112,61 @@ function treeWithFinal(hypothesisId: string, kind = "search"): ResearchTree {
 }
 
 describe("Scheduler", () => {
+  it("uses one injected policy for ranking, seeding and settlement", () => {
+    class ReversePriority extends EloPolicy {
+      override priority(hypothesis: ReturnType<typeof HypothesisSchema.parse>): number {
+        return -hypothesis.priority
+      }
+    }
+    const policy = new ReversePriority(64)
+    const scheduler = new Scheduler(policy)
+    const t = tree("h_high", "h_low")
+    t.getHypothesis("h_high").priority = 1200
+    expect(scheduler.policy).toBe(policy)
+    expect(scheduler.policy.seed(t.getHypothesis("h_high"))).toBe(1200)
+    expect(scheduler.policy.settle(1200, "WIN")).toBe(1232)
+    expect(scheduler.nextActions(state({}, { concurrency: 1 }), t, [])).toEqual([
+      { kind: "START_NEW", planId: "h_low" },
+    ])
+  })
+
+  it("resumes unlimited plans even when the creation budget is exhausted", () => {
+    const s = state({ h_old: plan({ turns: 100, limit: null, best: null }) }, { searchLimit: 1 })
+    expect(s.plans["h_old"]!.best_ref).toBeNull()
+    expect(new Scheduler().nextActions(s, tree("h_old", "h_new"), [])).toEqual([
+      { kind: "RESUME", planId: "h_old" },
+    ])
+  })
+
+  it("does not schedule outside SEARCH or beyond occupied capacity", () => {
+    const scheduler = new Scheduler()
+    const s = state({}, { concurrency: 1 })
+    expect(scheduler.nextActions(s, tree("h_new"), ["h_running"])).toEqual([])
+    s.phase = "PREPARE"
+    expect(scheduler.nextActions(s, tree("h_new"), [])).toEqual([])
+  })
+
+  it("deduplicates only this selection without mutating durable inputs", () => {
+    const t = tree("h_first", "h_duplicate")
+    t.getHypothesis("h_duplicate").statement = t.getHypothesis("h_first").statement
+    t.getHypothesis("h_duplicate").intervention = t.getHypothesis("h_first").intervention
+    const s = state({}, { concurrency: 2 })
+    const beforeTree = JSON.stringify(t.toDict())
+    const beforeState = s.toJSON()
+    expect(new Scheduler().nextActions(s, t, [])).toEqual([
+      { kind: "START_NEW", planId: "h_first" },
+      { kind: "GENERATE", count: 1 },
+    ])
+    expect(JSON.stringify(t.toDict())).toBe(beforeTree)
+    expect(s.toJSON()).toEqual(beforeState)
+    expect(t.pendingHypotheses()).toHaveLength(2)
+  })
+
   it("completed slot is refilled without batch barrier", () => {
     const s = state({ h1: plan(), h2: plan(), h3: plan() })
     const t = tree("h1", "h2", "h3", "h5")
     expect(new Scheduler().nextActions(s, t, ["h1", "h2", "h3"])).toEqual([
-      ScheduleAction.startNew("h5"),
+      { kind: "START_NEW", planId: "h5" },
     ])
   })
 
@@ -123,10 +174,10 @@ describe("Scheduler", () => {
     const s = state({ h_old: plan({ turns: 3, limit: 3, best: null }) }, { concurrency: 1 })
     const t = tree("h_old", "h_new")
 
-    expect(new Scheduler().nextActions(s, t, [])).toEqual([ScheduleAction.startNew("h_new")])
+    expect(new Scheduler().nextActions(s, t, [])).toEqual([{ kind: "START_NEW", planId: "h_new" }])
 
     s.plans["h_old"]!.turn_limit = 5
-    expect(new Scheduler().nextActions(s, t, [])).toEqual([ScheduleAction.resume("h_old")])
+    expect(new Scheduler().nextActions(s, t, [])).toEqual([{ kind: "RESUME", planId: "h_old" }])
   })
 
   it("policy priority and fifo order new hypotheses", () => {
@@ -135,9 +186,9 @@ describe("Scheduler", () => {
     const s = state({}, { concurrency: 3 })
 
     expect(new Scheduler().nextActions(s, t, [])).toEqual([
-      ScheduleAction.startNew("h_high"),
-      ScheduleAction.startNew("h_fifo_first"),
-      ScheduleAction.startNew("h_fifo_second"),
+      { kind: "START_NEW", planId: "h_high" },
+      { kind: "START_NEW", planId: "h_fifo_first" },
+      { kind: "START_NEW", planId: "h_fifo_second" },
     ])
   })
 
@@ -153,7 +204,7 @@ describe("Scheduler", () => {
       { humanNext: "h_requested" }
     )
 
-    expect(actions).toEqual([ScheduleAction.startNextHypothesis("h_requested")])
+    expect(actions).toEqual([{ kind: "START_NEXT_HYPOTHESIS", planId: "h_requested" }])
     expect(t.getHypothesis("h_requested").priority).toBe(requestedPriority)
   })
 
@@ -162,7 +213,7 @@ describe("Scheduler", () => {
     const t = tree("h_active")
 
     expect(new Scheduler().nextActions(s, t, ["h_active"])).toEqual([
-      ScheduleAction.generate(2),
+      { kind: "GENERATE", count: 2 },
     ])
   })
 
@@ -176,7 +227,7 @@ describe("Scheduler", () => {
   it("manual mode generates only when no pending hypotheses", () => {
     const s = state({}, { concurrency: 2 })
     expect(new Scheduler().nextActions(s, new ResearchTree(), [], { manual: true })).toEqual([
-      ScheduleAction.generate(2),
+      { kind: "GENERATE", count: 2 },
     ])
   })
 
@@ -185,12 +236,12 @@ describe("Scheduler", () => {
     const s = state({}, { concurrency: 2 })
     expect(
       new Scheduler().nextActions(s, t, [], { humanNext: "h2", manual: true })
-    ).toEqual([ScheduleAction.startNextHypothesis("h2")])
+    ).toEqual([{ kind: "START_NEXT_HYPOTHESIS", planId: "h2" }])
   })
 
   it("fresh search asks for all unfilled slots", () => {
     expect(new Scheduler().nextActions(state(), new ResearchTree(), [])).toEqual([
-      ScheduleAction.generate(4),
+      { kind: "GENERATE", count: 4 },
     ])
   })
 
@@ -204,7 +255,7 @@ describe("Scheduler", () => {
     const s = state({ prepare }, { concurrency: 2, searchLimit: 2 })
 
     expect(new Scheduler().nextActions(s, new ResearchTree(), [])).toEqual([
-      ScheduleAction.generate(2),
+      { kind: "GENERATE", count: 2 },
     ])
   })
 })
