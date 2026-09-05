@@ -17,6 +17,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Simplify TypeScript sampling task storage/dispatch and verify concurrency/result ordering.
 - [x] Consolidate TypeScript Agent factory and single-turn sampling configuration.
 - [x] Remove the unused TypeScript dual-signature Agent runner adapter.
+- [x] Remove unused TypeScript Agent state and replace data-only constructors with types.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -98,7 +99,13 @@ TypeScript adapter review: the complete runtime was reread and all tracked calle
 
 Adapter evidence: the pre-change Agent/Worker selection returned 142 passed. All five package builds passed after removal. The default full suite returned 440 passed and one 5-second timeout in the unchanged real-Git workspace test. A fresh full run with the command-only override `npm test -- --testTimeout=30000` returned 441 passed across 52 files; no test configuration or timeout was committed. This verifies functional assertions, not default-timeout reliability. Removed adapter references remain only in the negative public API assertion; git diff --check passed.
 
-Next module: agent/models.ts has been fully read. nextContextRef appears only in its declaration and one test assertion, and AgentContext.messages has no runtime reads in the Agent/research source search; confirm all construction and external consumers before removing these fields. Worker source is read but its broader structured-output/context construction decision also remains Pending. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+TypeScript model review: fully read models.ts and trace every tracked outcome, step, call and context construction. Remove AgentOutcome.nextContextRef: it was generated but never read in production, unlike the independently used Python contract. Remove AgentContext.messages and its unused import; context constructor/attributes shrink from nine to eight. Real mailbox consumption remains RunSession's responsibility, and conversation history remains in ContextManager. Correct the stale context comment: Agent creates memory when none is supplied.
+
+Replace three behavior-free classes (AgentOutcome, StepOutcome, ToolCall) with exported structural types, removing their positional constructors and runtime exports. AgentOutcome is now exactly resultRef; StepOutcome is a discriminated union whose continue branch has no empty text field. Runtime uses plain objects and tests reject the removed constructors. Retain AgentConfig/AgentContext defaulting behavior and the shared models module as the runtime/provider contract boundary. No compatibility classes or field aliases remain. Baseline reviewed coverage is now 65/602.
+
+Model evidence: focused Agent/Worker baseline returned 142 passed; after the new public-surface regression and stronger result/context shape assertions, 143 passed. All five package builds passed. Full TypeScript verification with `npm test -- --testTimeout=30000` returned 442 passed across 52 files; this command-only timeout override remains explicit because default-timeout reliability is unresolved. Tracked source searches find no removed field or constructor consumers, and git diff --check passed. Existing structured artifact/retry, tool sequencing, memory reuse, native cancellation and askUser tests remain in the passing selection.
+
+Next module: Worker source and its test are read, but their broader structured-output/context construction decision remains Pending. Review shared text/structured call setup and Worker configuration ownership next. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
@@ -560,7 +567,7 @@ Next module: agent/models.ts has been fully read. nextContextRef appears only in
 | `athena-rust/crates/athena-workspace/src/local.rs` | 421 | Pending |
 | `athena-rust/crates/athena-workspace/src/model.rs` | 10 | Pending |
 | `athena-rust/crates/athena-workspace/tests/local_git_workspace.rs` | 317 | Pending |
-| `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Pending |
+| `athena_ts/packages/athena-agent/src/agent/models.ts` | 69 | Reviewed; removed two unused fields and three data-only runtime classes |
 | `athena_ts/packages/athena-agent/src/agent/provider.ts` | 415 | Reviewed; absorb settings; remove provider subclasses and abstract runtime base; preserve stream/schema/DSML behavior; 435 tests pass |
 | `athena_ts/packages/athena-agent/src/agent/registry.ts` | 38 | Reviewed; factory arguments 2 to 1; independent binding and argument tests pass |
 | `athena_ts/packages/athena-agent/src/agent/runtime.ts` | 456 | Reviewed; simplified sampling/configuration and deleted unused dual-signature runner |

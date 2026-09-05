@@ -20,7 +20,7 @@ import {
 import { ContextManager } from "../memory/context-manager.js"
 import { BaseTool, ToolRegistry } from "../tool.js"
 import { ToolContext, ToolResult } from "../tool-types.js"
-import { AgentConfig, AgentContext, AgentOutcome, StepOutcome, ToolCall } from "./models.js"
+import { AgentConfig, AgentContext, type AgentOutcome, type StepOutcome, type ToolCall } from "./models.js"
 import type { StructuredOutputType } from "./models.js"
 import { BaseProvider, createProvider } from "./provider.js"
 import type { ChatClient } from "./provider.js"
@@ -128,9 +128,9 @@ export class Agent extends BaseAgent {
             this.artifacts !== null
               ? await this.artifacts.putText(jsonText)
               : `result://${ctx.turn.turn_id}`
-          return new AgentOutcome(ref, `context://${ctx.turn.turn_id}/next`)
+          return { resultRef: ref }
         }
-        return new AgentOutcome(`result://${ctx.turn.turn_id}`, `context://${ctx.turn.turn_id}/next`)
+        return { resultRef: `result://${ctx.turn.turn_id}` }
       }
       if (outcome.kind === "error") {
         throw new Error(outcome.text || "provider stream failed")
@@ -140,7 +140,7 @@ export class Agent extends BaseAgent {
     if (this.outputType !== null) {
       throw new Error("max turns exhausted without structured output")
     }
-    return new AgentOutcome(`result://${ctx.turn.turn_id}`, `context://${ctx.turn.turn_id}/next`)
+    return { resultRef: `result://${ctx.turn.turn_id}` }
   }
 }
 
@@ -203,11 +203,11 @@ async function sampleOnce(agent: Agent, ctx: AgentContext): Promise<[StepOutcome
         await ctx.emit("agent/text_delta", `event:${ctx.turn.turn_id}`, event.data)
       } else if (event.kind === "function_call") {
         hadCalls = true
-        const tc = new ToolCall(
-          String(event.data["call_id"] ?? ""),
-          String(event.data["name"] ?? ""),
-          (event.data["arguments"] as Record<string, unknown>) ?? {}
-        )
+        const tc: ToolCall = {
+          callId: String(event.data["call_id"] ?? ""),
+          name: String(event.data["name"] ?? ""),
+          args: (event.data["arguments"] as Record<string, unknown>) ?? {},
+        }
         await ctx.emit("agent/function_call", `event:${ctx.turn.turn_id}:${tc.callId}`, {
           name: tc.name,
           arguments: tc.args,
@@ -244,7 +244,7 @@ async function sampleOnce(agent: Agent, ctx: AgentContext): Promise<[StepOutcome
         await Promise.allSettled(toolTasks)
         const transient = !hadCalls && isTransientError(event.data["message"] ?? "")
         return [
-          new StepOutcome("error", String(event.data["message"] ?? "")),
+          { kind: "error", text: String(event.data["message"] ?? "") },
           transient,
         ]
       }
@@ -256,7 +256,7 @@ async function sampleOnce(agent: Agent, ctx: AgentContext): Promise<[StepOutcome
     }
     await Promise.allSettled(toolTasks)
     const transient = !hadCalls && isTransientError(exc)
-    return [new StepOutcome("error", `${errName(exc)}: ${errMessage(exc)}`), transient]
+    return [{ kind: "error", text: `${errName(exc)}: ${errMessage(exc)}` }, transient]
   }
 
   const outcome = await finalizeStep(mem, toolCalls, toolTasks, text)
@@ -290,9 +290,9 @@ async function finalizeStep(
     mem.append(modelRequest([toolReturnPart(tc.name, content, tc.callId)]))
   }
 
-  if (toolCalls.length) return new StepOutcome("continue")
+  if (toolCalls.length) return { kind: "continue" }
   if (text) mem.append(modelResponse([textPart(text)]))
-  return new StepOutcome("done", text)
+  return { kind: "done", text }
 }
 
 async function dispatchToolCall(

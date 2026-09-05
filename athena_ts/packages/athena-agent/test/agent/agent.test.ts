@@ -12,7 +12,7 @@ import {
   createAgent,
   type StructuredOutputType,
 } from "../../src/agent/runtime.js"
-import { AgentConfig, AgentContext, AgentOutcome } from "../../src/agent/models.js"
+import { AgentConfig, AgentContext, type AgentOutcome } from "../../src/agent/models.js"
 import {
   ResponsesProvider,
   StreamEvent,
@@ -56,7 +56,6 @@ function ctx(
     new AbortController().signal,
     opts.memory ?? null,
     null,
-    [],
     opts.askUser ?? null
   )
 }
@@ -240,16 +239,17 @@ describe("Agent", () => {
       description = "记录调用以供测试。"
       async run(c: AgentContext): Promise<AgentOutcome> {
         calls.push(c)
-        return new AgentOutcome("result://ok", "context://next")
+        return { resultRef: "result://ok" }
       }
     }
     const tools = new ToolRegistry()
     const context = ctx(tools)
     const outcome = await new SpyAgent().run(context)
     expect(outcome.resultRef).toBe("result://ok")
-    expect(outcome.nextContextRef).toBe("context://next")
+    expect(outcome).toEqual({ resultRef: "result://ok" })
     expect(calls.length).toBe(1)
     expect(calls[0]).toBe(context)
+    expect(context).not.toHaveProperty("messages")
     expect(calls[0]!.thread.thread_id).toBe("t1")
     expect(calls[0]!.turn.turn_id).toBe("t1.1")
     expect(calls[0]!.tools).toBe(tools)
@@ -262,7 +262,7 @@ describe("Agent", () => {
       description = "使用工具。"
       async run(c: AgentContext): Promise<AgentOutcome> {
         const r = await this.tool(c, "echo", { msg: "hello" })
-        return new AgentOutcome((r.data as { msg: string }).msg, c.thread.context_ref)
+        return { resultRef: (r.data as { msg: string }).msg }
       }
     }
     const tools = new ToolRegistry()
@@ -542,7 +542,7 @@ describe("structured output", () => {
     agent.model = new ValidProvider() as never
     const outcome = await agent.run(ctx(tools))
     expect(outcome.resultRef.startsWith("result://")).toBe(true)
-    expect(outcome.resultRef).toBe("result://t1.1")
+    expect(outcome).toEqual({ resultRef: "result://t1.1" })
   })
 })
 

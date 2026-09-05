@@ -4,9 +4,6 @@ import { Agent, BaseAgent, createAgent } from "../src/agent/runtime.js"
 import {
   AgentConfig,
   AgentContext,
-  AgentOutcome,
-  StepOutcome,
-  ToolCall,
 } from "../src/agent/models.js"
 import {
   ResponsesProvider,
@@ -15,6 +12,18 @@ import {
 } from "../src/agent/provider.js"
 
 describe("public surface", () => {
+  it("exposes data-only outcomes and calls as types, not constructors", () => {
+    for (const name of ["AgentOutcome", "StepOutcome", "ToolCall"]) {
+      expect(api).not.toHaveProperty(name)
+    }
+    const outcome: api.AgentOutcome = { resultRef: "result://ok" }
+    const step: api.StepOutcome = { kind: "continue" }
+    const call: api.ToolCall = { callId: "1", name: "echo", args: {} }
+    expect(Object.keys(outcome)).toEqual(["resultRef"])
+    expect(Object.keys(step)).toEqual(["kind"])
+    expect(call.name).toBe("echo")
+  })
+
   it("does not export removed provider wrappers or unused settings", () => {
     for (const name of ["BaseProvider", "OpenAIProvider", "DeepSeekProvider", "AnthropicProvider",
       "apiKey", "baseUrl", "modelName", "proModelName", "getClient", "providerKind", "createCodeAgent", "agentRunner"]) {
@@ -44,12 +53,9 @@ describe("public surface", () => {
       "Agent",
       "AgentConfig",
       "AgentContext",
-      "AgentOutcome",
       "BaseAgent",
       "ResponsesProvider",
-      "StepOutcome",
       "StreamEvent",
-      "ToolCall",
       "createAgent",
       "createProvider",
       "RequestUserInputTool",
@@ -66,12 +72,9 @@ describe("public surface", () => {
     expect(api.Agent).toBe(Agent)
     expect(api.AgentConfig).toBe(AgentConfig)
     expect(api.AgentContext).toBe(AgentContext)
-    expect(api.AgentOutcome).toBe(AgentOutcome)
     expect(api.BaseAgent).toBe(BaseAgent)
     expect(api.ResponsesProvider).toBe(ResponsesProvider)
-    expect(api.StepOutcome).toBe(StepOutcome)
     expect(api.StreamEvent).toBe(StreamEvent)
-    expect(api.ToolCall).toBe(ToolCall)
     expect(api.createAgent).toBe(createAgent)
     expect(api.createProvider).toBe(createProvider)
   })
