@@ -600,7 +600,7 @@ git commit -m "feat(research): resolve projected metric authority"
   `render_latest_manifest`, `render_final_report`, and
   `render_optimization_report`, all returning immutable values/bytes.
 
-- [ ] **Step 1: Write deterministic JSON and manifest tests**
+- [x] **Step 1: Write deterministic JSON and manifest tests**
 
 ```python
 import hashlib
@@ -637,7 +637,7 @@ def test_manifest_hashes_exact_effective_bytes_and_is_content_derived() -> None:
 Add a rebuild-manifest test proving `stage` and `run_id` are null and path order does
 not change `projection_id`.
 
-- [ ] **Step 2: Write report parity, sorting, and escaping tests**
+- [x] **Step 2: Write report parity, sorting, and escaping tests**
 
 Build a small tree with two scored experiments, one failed experiment, and one SOTA.
 Assert:
@@ -676,7 +676,7 @@ def test_optimization_report_escapes_dynamic_markdown_cells(tree) -> None:
 Also retain the unscored section, SOTA mark, six-decimal score formatting, VALIDATE
 fields, and terminal newline from the old renderer.
 
-- [ ] **Step 3: Run render tests and observe missing functions**
+- [x] **Step 3: Run render tests and observe missing functions**
 
 Run:
 
@@ -686,7 +686,7 @@ uv run pytest test/unit/research/experiment_documents/test_render.py -q
 
 Expected: collection fails because `render.py` does not exist.
 
-- [ ] **Step 4: Implement pure renderers**
+- [x] **Step 4: Implement pure renderers**
 
 Use deterministic JSON and digest construction:
 
@@ -742,7 +742,7 @@ optimization-report content without importing the old module. Escape
 backslashes first, then pipes, CR, and LF in dynamic Markdown text. Do not add a final
 newline to `FINAL_REPORT.md`; shared-builder byte parity is the contract.
 
-- [ ] **Step 5: Run render and shared-report tests**
+- [x] **Step 5: Run render and shared-report tests**
 
 Run:
 
@@ -752,7 +752,7 @@ uv run pytest test/unit/research/experiment_documents/test_render.py test/unit/r
 
 Expected: all tests pass.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```powershell
 git add -- src/athena/research/experiment_documents/render.py test/unit/research/experiment_documents/test_render.py
@@ -773,7 +773,7 @@ git commit -m "feat(research): render experiment document batches"
 - Produces: `RunDocumentConflict`, `RunCandidate`, `ProjectionBatch`, and
   `DocumentStore.commit(batch: ProjectionBatch) -> str`.
 
-- [ ] **Step 1: Write layout, idempotency, legacy, and conflict tests**
+- [x] **Step 1: Write layout, idempotency, legacy, and conflict tests**
 
 Use helpers that build one `StageRecord`, its rendered bytes, and this batch:
 
@@ -841,7 +841,7 @@ normalized only by the compatibility parser, unknown run files remain byte-ident
 absolute/`..`/backslash paths are rejected, aliases can reference only a run in the
 same batch, and reports accept exactly `FINAL_REPORT.md` and `OPTIMIZATION.md`.
 
-- [ ] **Step 2: Write failure-injection and temp cleanup tests**
+- [x] **Step 2: Write failure-injection and temp cleanup tests**
 
 Monkeypatch `athena.research.experiment_documents.store.os.replace` with a counted
 wrapper. Establish one successful old batch first, then fail:
@@ -857,7 +857,7 @@ failure, assert no target bytes changed. The test must not claim rollback of tar
 already replaced before a mid-batch failure; it instead proves their hashes do not
 match the still-authoritative old manifest.
 
-- [ ] **Step 3: Write the concurrent serialization test**
+- [x] **Step 3: Write the concurrent serialization test**
 
 Use two Python threads, a `Barrier`, and an instrumented `os.replace`. Block the first
 thread during its first replace, start the second, then release the first. Record each
@@ -877,7 +877,7 @@ with ThreadPoolExecutor(max_workers=2) as pool:
 assert json.loads((store.root / "latest.json").read_text())["projection_id"] == final_id
 ```
 
-- [ ] **Step 4: Run store tests and observe the missing module failure**
+- [x] **Step 4: Run store tests and observe the missing module failure**
 
 Run:
 
@@ -887,7 +887,7 @@ uv run pytest test/unit/research/experiment_documents/test_store.py -q
 
 Expected: collection fails because `store.py` does not exist.
 
-- [ ] **Step 5: Implement batch validation and legacy semantic comparison**
+- [x] **Step 5: Implement batch validation and legacy semantic comparison**
 
 Use frozen dataclasses for persistence inputs:
 
@@ -928,7 +928,7 @@ matching, needed by Task 6, compares run/stage/status, primary/secondary/artifac
 every non-null reconstructed metric reference/gap, and every non-null reconstructed
 provenance field; it intentionally ignores display name, direction, and reason.
 
-- [ ] **Step 6: Implement locked preflight, temp staging, and ordered replace**
+- [x] **Step 6: Implement locked preflight, temp staging, and ordered replace**
 
 ```python
 class DocumentStore:
@@ -979,7 +979,7 @@ Implementation requirements:
 - catch no exception in `DocumentStore`; the safe projector boundary owns logging and
   sanitized outcomes.
 
-- [ ] **Step 7: Run all storage-focused tests repeatedly**
+- [x] **Step 7: Run all storage-focused tests repeatedly**
 
 Run:
 
@@ -994,7 +994,7 @@ uv run pytest test/unit/research/experiment_documents/test_store.py -q
 Expected: all five runs pass with no intermittent concurrency failure. Do not add a
 repeat-test dependency.
 
-- [ ] **Step 8: Commit Task 4**
+- [x] **Step 8: Commit Task 4**
 
 ```powershell
 git add -- src/athena/research/experiment_documents/store.py test/unit/research/experiment_documents/test_store.py
@@ -1015,7 +1015,7 @@ git commit -m "feat(research): atomically commit experiment documents"
 - Produces: `DocumentProjector` protocol and
   `ExperimentDocumentProjector(document_root: Path, evaluator_roots: Iterable[Path])`.
 
-- [ ] **Step 1: Write normal projection and safe-failure tests**
+- [x] **Step 1: Write normal projection and safe-failure tests**
 
 ```python
 def test_project_stage_writes_archive_alias_reports_and_valid_manifest(
@@ -1066,7 +1066,7 @@ Also test a store conflict and injected `os.replace` failure return `.stale()` r
 than raising, frozen evaluator metadata wins, and the input tree/validation mappings
 are copied before rendering by mutating originals from an injected store callback.
 
-- [ ] **Step 2: Run the projector test and observe missing symbols**
+- [x] **Step 2: Run the projector test and observe missing symbols**
 
 Run:
 
@@ -1076,7 +1076,7 @@ uv run pytest test/unit/research/experiment_documents/test_projector.py -q
 
 Expected: collection fails because the projector symbols do not exist.
 
-- [ ] **Step 3: Implement the protocol and normal-stage facade**
+- [x] **Step 3: Implement the protocol and normal-stage facade**
 
 Use the approved signature verbatim:
 
@@ -1163,7 +1163,7 @@ def project_stage(
 temporarily; Task 6 replaces it before Supervisor integration. Do not expose the
 store, resolver, internal exception, or target paths in `ProjectionOutcome`.
 
-- [ ] **Step 4: Export only the narrow package API**
+- [x] **Step 4: Export only the narrow package API**
 
 `__init__.py` exports:
 
@@ -1182,7 +1182,7 @@ __all__ = [
 It must not export storage classes, render helpers, metric helpers, or any old free
 function name.
 
-- [ ] **Step 5: Run projector and all package tests**
+- [x] **Step 5: Run projector and all package tests**
 
 Run:
 
@@ -1193,7 +1193,7 @@ uv run pytest test/unit/research/experiment_documents -q
 Expected: all tests pass except no skipped or xfailed rebuild tests; rebuild-specific
 tests are added in Task 6 rather than pre-created as skips.
 
-- [ ] **Step 6: Commit Task 5**
+- [x] **Step 6: Commit Task 5**
 
 ```powershell
 git add -- src/athena/research/experiment_documents/__init__.py src/athena/research/experiment_documents/projector.py test/unit/research/experiment_documents/test_projector.py
