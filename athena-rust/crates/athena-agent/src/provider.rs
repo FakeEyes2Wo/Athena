@@ -1,4 +1,4 @@
-use athena_memory::{MessagePart, ModelMessage};
+use athena_memory::{MessagePart, MessageRole, ModelMessage};
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -108,8 +108,17 @@ pub fn to_api(messages: &[ModelMessage]) -> Vec<Value> {
                 MessagePart::SystemPrompt { content } => {
                     out.push(json!({"role": "system", "content": content}));
                 }
-                MessagePart::UserPrompt { content } | MessagePart::Text { content } => {
+                MessagePart::UserPrompt { content } => {
                     out.push(json!({"role": "user", "content": content}));
+                }
+                MessagePart::Text { content } => {
+                    let role = match msg.role {
+                        MessageRole::System => "system",
+                        MessageRole::User => "user",
+                        MessageRole::Assistant => "assistant",
+                        MessageRole::Tool => "tool",
+                    };
+                    out.push(json!({"role": role, "content": content}));
                 }
                 MessagePart::ToolReturn {
                     tool_call_id,

@@ -25,7 +25,7 @@ impl TurnRunner for AgentRunner {
     async fn run(&self, input: TurnInput) -> Result<TurnOutput, RunnerError> {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let token = input.cancel.clone();
-        tokio::spawn(async move {
+        let cancel_bridge = tokio::spawn(async move {
             token.cancelled().await;
             let _ = cancel_tx.send(true);
         });
@@ -38,11 +38,10 @@ impl TurnRunner for AgentRunner {
             memory: Arc::new(Mutex::new(ContextManager::new(self.context_limit))),
         };
 
-        match self.agent.run(ctx).await {
-            Ok(o) => Ok(TurnOutput {
-                result_ref: o.result_ref,
-                next_context_ref: o.next_context_ref,
-            }),
+        let result = self.agent.run(ctx).await;
+        cancel_bridge.abort();
+        match result {
+            Ok(output) => Ok(output),
             Err(AgentError::Cancelled) => Err(RunnerError("cancelled".into())),
             Err(e) => Err(RunnerError(e.to_string())),
         }

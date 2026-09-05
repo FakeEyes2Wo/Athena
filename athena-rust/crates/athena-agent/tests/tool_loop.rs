@@ -3,12 +3,12 @@
 
 mod common;
 
-use athena_agent::ProviderEvent;
+use athena_agent::{AgentError, ProviderEvent};
 use athena_memory::{MessagePart, MessageRole};
 use common::*;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 #[tokio::test]
 async fn text_only_response_completes() {
@@ -110,4 +110,16 @@ async fn provider_error_is_reported_not_success() {
 
     let result = agent.run(ctx).await;
     assert!(result.is_err(), "provider error must surface as an error");
+}
+
+#[tokio::test]
+async fn pre_cancelled_agent_returns_cancelled_error() {
+    let provider = FakeProvider::new(vec![]);
+    let agent = make_agent(provider, vec![]);
+    let (sink, _kinds) = RecordingSink::new();
+    let (mut ctx, _memory) = make_ctx(sink, "hi");
+    let (_cancel_tx, cancel_rx) = watch::channel(true);
+    ctx.cancel = cancel_rx;
+
+    assert!(matches!(agent.run(ctx).await, Err(AgentError::Cancelled)));
 }

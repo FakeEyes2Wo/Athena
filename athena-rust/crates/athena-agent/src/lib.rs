@@ -13,7 +13,7 @@ mod provider;
 mod runner;
 mod subagent;
 
-pub use agent::{Agent, AgentContext, AgentError, AgentOutcome};
+pub use agent::{Agent, AgentContext, AgentError};
 pub use input::{InputResolver, PlainInputResolver, RestrictedFileInputResolver};
 pub use openai_provider::OpenAiProvider;
 pub use provider::{AgentConfig, LlmProvider, ProviderEvent, to_api};

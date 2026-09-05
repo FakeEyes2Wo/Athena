@@ -125,7 +125,7 @@ async fn run_stream(
             };
             let data = data.trim();
             if data == "[DONE]" {
-                emit_calls(&finish, &mut calls, &tx);
+                emit_calls(&mut calls, &tx);
                 let _ = tx.unbounded_send(ProviderEvent::ResponseCompleted {
                     finish_reason: if finish.is_empty() {
                         "stop".into()
@@ -180,13 +180,13 @@ async fn run_stream(
                 }
             }
             if finish == "tool_calls" {
-                emit_calls(&finish, &mut calls, &tx);
+                emit_calls(&mut calls, &tx);
                 finish.clear();
             }
         }
     }
 
-    emit_calls(&finish, &mut calls, &tx);
+    emit_calls(&mut calls, &tx);
     let _ = tx.unbounded_send(ProviderEvent::ResponseCompleted {
         finish_reason: if finish.is_empty() {
             "stop".into()
@@ -197,7 +197,7 @@ async fn run_stream(
     });
 }
 
-fn emit_calls(_finish: &str, calls: &mut BTreeMap<u64, (String, String, String)>, tx: &EventTx) {
+fn emit_calls(calls: &mut BTreeMap<u64, (String, String, String)>, tx: &EventTx) {
     for (_, (id, name, args)) in std::mem::take(calls) {
         if id.is_empty() || name.is_empty() {
             continue;

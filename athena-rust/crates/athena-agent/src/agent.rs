@@ -1,7 +1,7 @@
 use crate::input::InputResolver;
 use crate::provider::{AgentConfig, LlmProvider, ProviderEvent};
 use athena_memory::{ContextManager, MessagePart, MessageRole, ModelMessage};
-use athena_runtime::{EventDraft, EventSink};
+use athena_runtime::{EventDraft, EventSink, TurnOutput};
 use athena_tools::{Tool, ToolContext, ToolError, ToolExecutor, ToolRegistry, ToolResult};
 use athena_types::{ArtifactRef, AthenaThread, AthenaTurn};
 use futures::StreamExt;
@@ -17,13 +17,6 @@ pub struct AgentContext {
     pub emit: Arc<dyn EventSink>,
     pub cancel: watch::Receiver<bool>,
     pub memory: Arc<Mutex<ContextManager>>,
-}
-
-/// The committed references of a finished agent run.
-#[derive(Debug, Clone)]
-pub struct AgentOutcome {
-    pub result_ref: ArtifactRef,
-    pub next_context_ref: ArtifactRef,
 }
 
 /// An error from an agent run.
@@ -56,7 +49,6 @@ struct ToolCall {
 enum Step {
     Done,
     Continue,
-    Error(String),
 }
 
 /// A streaming, tool-calling agent. One `run` executes a ReAct-style loop:
@@ -85,11 +77,7 @@ impl Agent {
         }
     }
 
-    pub fn tools(&self) -> &Arc<ToolRegistry> {
-        &self.tools
-    }
-
-    pub async fn run(&self, ctx: AgentContext) -> Result<AgentOutcome, AgentError> {
+    pub async fn run(&self, ctx: AgentContext) -> Result<TurnOutput, AgentError> {
         // Bridge synchronous tool lifecycle events to the async event sink.
         let (tool_tx, mut tool_rx) = mpsc::unbounded_channel::<(String, String, Option<Value>)>();
         let emit = ctx.emit.clone();
@@ -113,7 +101,7 @@ impl Agent {
         &self,
         ctx: &AgentContext,
         executor: &ToolExecutor,
-    ) -> Result<AgentOutcome, AgentError> {
+    ) -> Result<TurnOutput, AgentError> {
         let user = self.input.resolve(ctx.turn.request_ref.as_str()).await;
         {
             let mut mem = ctx.memory.lock().await;
@@ -135,20 +123,19 @@ impl Agent {
 
         for _ in 0..self.config.max_turns {
             if *ctx.cancel.borrow() {
-                break;
+                return Err(AgentError::Cancelled);
             }
             match self.sampling_step(ctx, executor).await? {
                 Step::Done => return Ok(self.outcome(ctx)),
-                Step::Error(msg) => return Err(AgentError::Provider(msg)),
                 Step::Continue => {}
             }
         }
         Ok(self.outcome(ctx))
     }
 
-    fn outcome(&self, ctx: &AgentContext) -> AgentOutcome {
+    fn outcome(&self, ctx: &AgentContext) -> TurnOutput {
         let tid = ctx.turn.turn_id.as_str();
-        AgentOutcome {
+        TurnOutput {
             result_ref: ArtifactRef::new(format!("result://{tid}"))
                 .unwrap_or_else(|_| ctx.thread.context_ref.clone()),
             next_context_ref: ArtifactRef::new(format!("context://{tid}/next"))
@@ -206,7 +193,7 @@ impl Agent {
                     });
                 }
                 ProviderEvent::ResponseCompleted { .. } => break,
-                ProviderEvent::Error { message } => return Ok(Step::Error(message)),
+                ProviderEvent::Error { message } => return Err(AgentError::Provider(message)),
             }
         }
 

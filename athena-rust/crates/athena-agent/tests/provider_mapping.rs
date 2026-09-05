@@ -52,3 +52,18 @@ fn maps_roles_and_tool_calls() {
     assert_eq!(api[3]["tool_call_id"], "call_1");
     assert_eq!(api[3]["content"], "result");
 }
+
+#[test]
+fn maps_plain_assistant_text_as_assistant() {
+    let api = to_api(&[ModelMessage {
+        role: MessageRole::Assistant,
+        parts: vec![MessagePart::Text {
+            content: "answer".into(),
+        }],
+    }]);
+
+    assert_eq!(
+        api,
+        vec![serde_json::json!({"role": "assistant", "content": "answer"})]
+    );
+}

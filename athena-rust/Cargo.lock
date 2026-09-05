@@ -33,12 +33,9 @@ dependencies = [
  "athena-types",
  "futures",
  "reqwest",
- "serde",
  "serde_json",
  "tokio",
  "tokio-util",
- "tracing",
- "uuid",
 ]
 
 [[package]]

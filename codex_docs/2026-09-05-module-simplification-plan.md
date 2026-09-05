@@ -45,6 +45,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the GUI gateway boundary modules and remove duplicated state/factory layers.
 - [x] Review the research turn dispatcher/shared support modules and narrow their internal interfaces.
 - [x] Review the web retrieval module and make its shared session the sole HTTP owner.
+- [x] Review the Rust agent module and reuse the runtime turn contract directly.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -101,6 +102,14 @@ All six `athena-tools` source files and both integration test files were read co
 Merge the eight-line `context.rs` data holder into the cohesive tool contract module and delete the file. Remove the unread `tool_name` field from `ToolContext`, the never-populated `artifacts` field from `ToolResult`, and three unused result constructors. Agent and test construction now use the single registry directly; no compatibility facade or replacement state was added. Tool execution, cancellation, lifecycle events, result truncation, error sanitization, lookup, sorting, and search behavior are unchanged.
 
 Fresh verification passed 22 tests across `athena-tools` and `athena-agent`, plus Clippy with `-D warnings`, Rust formatting, caller searches for every removed symbol, and `git diff --check`. Closing eight ledger rows advances reviewed coverage to 112/602. The touched `athena-agent` call sites remain Pending for their own full-file reviews, and whole-repository acceptance remains pending.
+
+## Rust agent review
+
+Read all seven `athena-agent` source files and all four integration-test files completely, then trace the public exports and runtime/tool consumers. Retain input resolution, provider mapping, OpenAI transport, runtime adaptation, and sub-agent control as separate cohesive boundaries. Their filesystem, wire-format, runtime, and lifecycle responsibilities should not be merged into the already-large ReAct loop. The provider's real-network status/SSE error hardening remains a distinct follow-up; this review does not claim external transport readiness.
+
+Delete the crate-local `AgentOutcome` duplicate and return `athena_runtime::TurnOutput` directly, removing the runner's field-by-field conversion. Delete the uncalled public `Agent::tools` getter, three unused direct dependencies, the redundant `Step::Error` state, and `emit_calls`' unread finish-reason parameter. Abort the per-turn cancellation bridge when the agent finishes instead of leaving one waiting task per successful turn. A pre-cancelled run now returns `AgentError::Cancelled` instead of a successful output, and plain assistant history keeps the assistant role when mapped to the provider API.
+
+Fresh verification passed all 10 `athena-agent` tests, including new cancellation and assistant-role regressions, and the complete Rust workspace passed 190 tests. Workspace Clippy with `-D warnings`, Rust formatting, removed-symbol/dependency searches, and `git diff --check` passed. Closing eleven ledger rows advances reviewed coverage to 142/602. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -764,17 +773,17 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/gui_gateway/human.py` | 279 | Reviewed; retain active legacy/scoped broker contracts; remove prohibited future import |
 | `src/gui_gateway/state_store.py` | 139 | Reviewed; inline zero-logic default-state wrapper |
 | `src/gui_gateway/transport.py` | 123 | Reviewed; retain session subscription, serialization, and send-lock boundary |
-| `athena-rust/crates/athena-agent/src/agent.rs` | 369 | Pending |
-| `athena-rust/crates/athena-agent/src/input.rs` | 47 | Pending |
-| `athena-rust/crates/athena-agent/src/lib.rs` | 21 | Pending |
-| `athena-rust/crates/athena-agent/src/openai_provider.rs` | 216 | Pending |
-| `athena-rust/crates/athena-agent/src/provider.rs` | 141 | Pending |
-| `athena-rust/crates/athena-agent/src/runner.rs` | 50 | Pending |
-| `athena-rust/crates/athena-agent/src/subagent.rs` | 229 | Pending |
-| `athena-rust/crates/athena-agent/tests/common/mod.rs` | 230 | Pending |
-| `athena-rust/crates/athena-agent/tests/provider_mapping.rs` | 54 | Pending |
-| `athena-rust/crates/athena-agent/tests/subagent.rs` | 51 | Pending |
-| `athena-rust/crates/athena-agent/tests/tool_loop.rs` | 113 | Pending |
+| `athena-rust/crates/athena-agent/src/agent.rs` | 369 | Reviewed; return runtime TurnOutput directly, delete getter/error wrapper, and make cancellation terminal |
+| `athena-rust/crates/athena-agent/src/input.rs` | 47 | Reviewed; retain plain and root-restricted input strategies |
+| `athena-rust/crates/athena-agent/src/lib.rs` | 21 | Reviewed; remove duplicate AgentOutcome export and retain canonical facade |
+| `athena-rust/crates/athena-agent/src/openai_provider.rs` | 216 | Reviewed; remove unread emitter parameter and retain isolated transport boundary |
+| `athena-rust/crates/athena-agent/src/provider.rs` | 141 | Reviewed; preserve message roles instead of forcing plain text to user |
+| `athena-rust/crates/athena-agent/src/runner.rs` | 50 | Reviewed; return TurnOutput directly and abort completed cancellation bridge |
+| `athena-rust/crates/athena-agent/src/subagent.rs` | 229 | Reviewed; retain concurrency, memory, event, and cancellation lifecycle owner |
+| `athena-rust/crates/athena-agent/tests/common/mod.rs` | 230 | Reviewed; retain shared deterministic provider/tool/context fixtures |
+| `athena-rust/crates/athena-agent/tests/provider_mapping.rs` | 54 | Reviewed; add plain assistant-role regression |
+| `athena-rust/crates/athena-agent/tests/subagent.rs` | 51 | Reviewed; retain completion, messaging, event, and cancellation coverage |
+| `athena-rust/crates/athena-agent/tests/tool_loop.rs` | 113 | Reviewed; retain ordering/barrier/error coverage and add pre-cancelled regression |
 | `athena-rust/crates/athena-memory/src/compaction.rs` | 308 | Pending |
 | `athena-rust/crates/athena-memory/src/context.rs` | 443 | Pending |
 | `athena-rust/crates/athena-memory/src/lib.rs` | 9 | Pending |
