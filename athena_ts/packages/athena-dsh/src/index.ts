@@ -85,7 +85,7 @@ function objectSchema(properties: Record<string, unknown>, required: string[]): 
 }
 
 /** 只读研究状态快照（phase/status/预算/manual_mode/Ideator 配置/SOTA/任务理解/验证）。 */
-export function researchStatus(ctx: Context): Record<string, unknown> {
+function researchStatus(ctx: Context): Record<string, unknown> {
   return {
     phase: ctx.researchState.phase,
     status: ctx.researchState.status,
@@ -217,7 +217,7 @@ function supervisorTool(ctx: Context, opts: SupervisorToolOptions): ToolDefiniti
 }
 
 /** 只读研究树快照：SOTA、实验列表与待选假设。 */
-export function researchTreeSnapshot(ctx: Context): Record<string, unknown> {
+function researchTreeSnapshot(ctx: Context): Record<string, unknown> {
   const data = ctx.researchTree.toDict()
   return {
     version: data.version,

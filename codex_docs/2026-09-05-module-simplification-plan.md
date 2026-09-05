@@ -43,6 +43,12 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
+## DSH composition-root review
+
+DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
+
+Caller tracing found `researchStatus` and `researchTreeSnapshot` were implementation projections accidentally exported from the package: the former had only same-file and direct-test callers, while the latter had only same-file callers. Both are now private; tests use live Context state and registered tools, and reject the removed runtime exports. `dshWorkers` and its named options remain the tested subagent adapter boundary. Focused DSH and cross-package headless verification passed five tests. All five TypeScript packages built, compiled ESM/declaration entries contain no exports for the removed projections, and the full workspace passed 537 tests across 53 files in 145.01 seconds with `--testTimeout=30000`; `git diff --check` passed. Closing the DSH source and test rows advances reviewed coverage to 95/602. Whole-repository acceptance, main integration/push, and temporary task branch/worktree cleanup remain unfinished.
+
 ## Scheduler runtime-input follow-up
 
 Scheduler full-file review follow-up: replace the separate running-ID argument and options object with one optional runtime record, reducing `nextActions` from four parameters to three. The record contains only ephemeral inputs (`running` and `humanNext`); durable manual mode now has one authority in `ResearchState.manual_mode` instead of being copied into every call. Inline the single-use runtime shape and keep action types private. Remove `countSearchAttempts` from the package barrel after caller tracing found only Supervisor and direct scheduler tests; it remains an internal module export for those consumers. Scheduling order, recovery priority, creation limits, manual selection, ranking, and selection-local deduplication are unchanged.
@@ -862,8 +868,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena_ts/packages/athena-core/test/services/persistence.test.ts` | 28 | Pending |
 | `athena_ts/packages/athena-core/test/services/retry.test.ts` | 36 | Pending |
 | `athena_ts/packages/athena-core/test/smoke.test.ts` | 7 | Pending |
-| `athena_ts/packages/athena-dsh/src/index.ts` | 929 | Pending |
-| `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Pending |
+| `athena_ts/packages/athena-dsh/src/index.ts` | 929 | Reviewed; retain cohesive composition root and Cordis services; privatize two internal projections |
+| `athena_ts/packages/athena-dsh/test/index.test.ts` | 154 | Reviewed; four service/tool/validation/PREPARE cases plus removed-export assertions |
 | `athena_ts/packages/athena-research/src/contracts.ts` | 46 | Reviewed; delete score envelope and five unused validation placeholders; retain bundle provenance |
 | `athena_ts/packages/athena-research/src/evaluation.ts` | 86 | Reviewed; canonical runner/options contracts, direct output and simplified numeric validation |
 | `athena_ts/packages/athena-research/src/execution.ts` | 94 | Reviewed; deleted context/root state, single run options and four-field result |

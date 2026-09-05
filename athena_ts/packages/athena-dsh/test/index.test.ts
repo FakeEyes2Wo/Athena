@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { Context } from "cordis"
 import { HypothesisSchema, LocalGitWorkspace, ResearchTree } from "@athena/core"
 import { DataScriptRunner, FixedFlowSupervisor, parseResearchState, Scheduler, TrustedEvaluator } from "@athena/research"
-import { dshWorkers, researchPlugin, researchStatus } from "../src/index.js"
+import * as api from "../src/index.js"
+import { dshWorkers, researchPlugin } from "../src/index.js"
 
 let tmp: string
 afterEach(() => {
@@ -28,7 +29,7 @@ describe("researchPlugin", () => {
     expect(ctx.researchSupervisor).toBeInstanceOf(FixedFlowSupervisor)
 
     // 只读状态快照可用。
-    expect(researchStatus(ctx).phase).toBe("PREPARE")
+    expect(ctx.researchState.phase).toBe("PREPARE")
 
     // 研究态可写、树可加假设——Service 是活的。
     ctx.researchTree.addHypothesis(
@@ -73,7 +74,8 @@ describe("researchPlugin", () => {
       "research_report",
       "research_run",
     ])
-    expect(researchStatus(ctx).phase).toBe("PREPARE")
+    expect(api).not.toHaveProperty("researchStatus")
+    expect(api).not.toHaveProperty("researchTreeSnapshot")
   })
 
   it("read tools execute against the live research services", async () => {
