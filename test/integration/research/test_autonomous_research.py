@@ -323,7 +323,7 @@ async def test_all_phases_share_one_durable_state(tmp_path: Path) -> None:
             phases.append(phase)
     assert phases == ["PREPARE", "SEARCH", "VALIDATE", "COMPLETED"]
     assert runtime.state.status == "COMPLETED"
-    assert runtime.state is runtime.services.durable.state
+    assert runtime.state is runtime.services.state
     assert runtime.supervisor.state is runtime.state
     assert {kind for kind, _payload in events} == {"output", "state"}
     exp_docs = tmp_path / ".athena" / "exp_docs"

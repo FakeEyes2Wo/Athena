@@ -16,7 +16,29 @@ from athena.research.config import (
 )
 from athena.research.runtime import ResearchRuntime
 from athena.research.runtime.bootstrap import build_services
-from athena.research.runtime.services import RuntimeOptions
+from athena.research.runtime.services import (
+    ComputeSession,
+    ExperimentServices,
+    LifecycleSession,
+    ResearchInfrastructure,
+    ResearchServices,
+    ResearchSession,
+    ResearchWorkflow,
+    RuntimeOptions,
+    SurveySession,
+)
+
+SERVICE_RECORDS = (
+    ResearchInfrastructure,
+    ExperimentServices,
+    ResearchWorkflow,
+    ResearchServices,
+    LifecycleSession,
+    SurveySession,
+    ComputeSession,
+    RuntimeOptions,
+    ResearchSession,
+)
 
 
 def test_runtime_configuration_surface_stays_grouped() -> None:
@@ -42,6 +64,11 @@ def test_runtime_configuration_surface_stays_grouped() -> None:
     assert not hasattr(ResearchOptions(), "__dict__")
 
 
+def test_runtime_service_records_stay_small_and_slotted() -> None:
+    assert max(len(fields(record)) for record in SERVICE_RECORDS) == 5
+    assert all("__slots__" in record.__dict__ for record in SERVICE_RECORDS)
+
+
 def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
     athena = tmp_path / ".athena"
     config = ResearchConfig(
@@ -56,7 +83,7 @@ def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
     services, _session = build_services(config, None)
 
     assert config.research.policy.skip_validate is False
-    assert services.durable.state.search_limit == 4
+    assert services.state.search_limit == 4
 
 
 def test_skip_validate_defaults_to_false_in_runtime_options() -> None:

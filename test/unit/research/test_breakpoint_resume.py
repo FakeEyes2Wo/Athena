@@ -285,7 +285,7 @@ def _stub_runtime(
             adapters=RuntimeAdapters(validation=validation_phase)
         ),
     )
-    runtime.session.lifecycle.provider = object()
+    runtime.services.workflow.provider = object()
     runtime.session.lifecycle.task_text = "predict titanic survival"
     runtime.state.phase = "PREPARE"
     runtime.state.status = "RUNNING"
@@ -304,7 +304,7 @@ def _stub_runtime(
         async def aclose(self):
             return None
 
-    runtime.services.infrastructure.git = FakeGit()
+    runtime.services.experiments.git = FakeGit()
     runtime.services.infrastructure.agents = FakeAgents()
     return runtime
 

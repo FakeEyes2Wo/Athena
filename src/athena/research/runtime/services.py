@@ -28,30 +28,28 @@ if TYPE_CHECKING:
     from athena.research.turns.runner import AgentTurnRunner
 
 
-@dataclass
+@dataclass(slots=True)
 class ResearchInfrastructure:
-    """Process-wide storage, execution, and Agent infrastructure."""
+    """Process-wide storage and Agent infrastructure."""
 
     store: LocalArtifactStore
     registry: AgentTypeRegistry
     agents: AgentRuntime
-    execution: ExecutionRuntime
-    git: LocalGitWorkspace
     events: RuntimeEvents
-    scripts: DataScriptRunner
-    evaluator: TrustedEvaluator
     baseline_authority: BaselineAuthorityStore | None = None
 
 
-@dataclass
-class DurableResearch:
-    """Durable research state and experiment history."""
+@dataclass(slots=True)
+class ExperimentServices:
+    """Execution, version-control, and trusted evaluation services."""
 
-    tree: ResearchTree
-    state: ResearchState
+    execution: ExecutionRuntime
+    git: LocalGitWorkspace
+    scripts: DataScriptRunner
+    evaluator: TrustedEvaluator
 
 
-@dataclass
+@dataclass(slots=True)
 class ResearchWorkflow:
     """Connected lifecycle coordinators and clarification boundary."""
 
@@ -59,30 +57,32 @@ class ResearchWorkflow:
     agent_turns: "AgentTurnRunner | None" = None
     phases: "PhaseRunner | None" = None
     clarification: object | None = None
+    provider: object | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ResearchServices:
     """Long-lived runtime dependencies grouped by responsibility."""
 
     infrastructure: ResearchInfrastructure
-    durable: DurableResearch
+    experiments: ExperimentServices
+    state: ResearchState
+    tree: ResearchTree
     workflow: ResearchWorkflow = field(default_factory=ResearchWorkflow)
 
 
-@dataclass
+@dataclass(slots=True)
 class LifecycleSession:
     """Mutable lifecycle values for one Runtime process."""
 
     task_text: str = ""
-    provider: object | None = None
     task: asyncio.Task | None = None
     started: bool = False
     confirmation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     resume_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-@dataclass
+@dataclass(slots=True)
 class SurveySession:
     """Caches owned by optional literature survey work."""
 
@@ -91,7 +91,7 @@ class SurveySession:
     corpus_sessions: list[RetrievalSession] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class ComputeSession:
     """Mutable compute placement and active remote leases."""
 
@@ -101,19 +101,18 @@ class ComputeSession:
     leases: dict[str, "Lease"] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class RuntimeOptions:
-    """Runtime-changeable research policy and lazy Kaggle cache."""
+    """Runtime-changeable research policy."""
 
     ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration"
     direction: Literal["maximize", "minimize"] = "maximize"
     tolerance: float = 0.0
     auto_validate: bool = False
     skip_validate: bool = False
-    kaggle: KaggleStack | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ResearchSession:
     """Transient values grouped by lifecycle, survey, compute, and policy."""
 
@@ -121,16 +120,4 @@ class ResearchSession:
     survey: SurveySession = field(default_factory=SurveySession)
     compute: ComputeSession = field(default_factory=ComputeSession)
     options: RuntimeOptions = field(default_factory=RuntimeOptions)
-
-
-__all__ = [
-    "ComputeSession",
-    "DurableResearch",
-    "LifecycleSession",
-    "ResearchInfrastructure",
-    "ResearchServices",
-    "ResearchSession",
-    "ResearchWorkflow",
-    "RuntimeOptions",
-    "SurveySession",
-]
+    kaggle: KaggleStack | None = None

@@ -643,6 +643,14 @@ Remove duplicated state instead. `ResumeCapability` now stores only its reason a
 
 The resume matrix, event projection, breakpoint/recovery control, gateway transport, and task-seeding selection passed 144 tests; the complete research unit suite passed 1,253. Ruff, Black, Python compilation, field-shape inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 355/602. Whole-repository acceptance remains pending.
 
+## Runtime service-state review
+
+Read `runtime/services.py` completely and trace every service/session field through bootstrap, the runtime facade, settings, lifecycle control, survey/corpus work, compute leasing, clarification, Supervisor wiring, and direct/integration tests. The former `ResearchInfrastructure` mixed nine unrelated Agent, execution, Git, script, evaluator, event, and authority fields; `LifecycleSession` and `RuntimeOptions` each retained six; `DurableResearch` added a container layer around only state and tree.
+
+Split execution/Git/script/evaluator ownership into the four-field `ExperimentServices`, leaving five fields in `ResearchInfrastructure`. Delete `DurableResearch` and place its two authoritative objects directly on `ResearchServices`. Move the long-lived provider from lifecycle state to the workflow group and the lazy Kaggle cache from policy options to `ResearchSession`. Make all nine records slotted and delete the redundant implementation export list. No compatibility properties or old attribute paths remain.
+
+Every service/session record now has at most five fields: the nine field counts are 5, 4, 5, 5, 5, 3, 4, 5, and 5. `services.py` falls from 136 baseline lines to 123, and production code falls by ten net lines after explicit composition migration. The focused service/runtime/integration selection passed 149 tests, the complete research unit suite passed 1,254, and the CLI/TUI/GUI entry selection passed 34. Ruff, Black, Python compilation, old-path searches, shape inspection, and `git diff --check` passed. Closing this row advances reviewed coverage to 356/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1261,7 +1269,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/facade.py` | 728 | Pending; grouped constructor retained and six survey forwarders removed; remaining surface still open |
 | `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
 | `src/athena/research/runtime/resume_contract.py` | 56 | Reviewed; derive availability from one slotted reason and use the typed durable state contract |
-| `src/athena/research/runtime/services.py` | 136 | Pending |
+| `src/athena/research/runtime/services.py` | 136 | Reviewed; cap all service/session records at five slotted fields and remove the durable wrapper |
 | `src/athena/research/runtime/settings.py` | 308 | Pending |
 | `src/athena/research/runtime/survey.py` | 165 | Reviewed; merge lifecycle into `corpus.py` and delete file |
 | `src/athena/research/script_runner.py` | 388 | Pending |

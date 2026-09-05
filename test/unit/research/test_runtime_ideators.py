@@ -46,7 +46,7 @@ def _runtime(
             )
         ),
     )
-    runtime.session.lifecycle.provider = object()
+    runtime.services.workflow.provider = object()
     runtime.state.eda_dir = eda_dir
     return runtime
 

@@ -85,7 +85,7 @@ def _runtime(
         ),
         dependencies=RuntimeDependencies(provider=ProviderConfig(model="m")),
     )
-    runtime.services.durable.state = state
+    runtime.services.state = state
     runtime.services.workflow.supervisor = SimpleNamespace(
         state=state, evaluator_ref=None, kaggle_enabled=False
     )

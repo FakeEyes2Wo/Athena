@@ -48,7 +48,7 @@ from athena.research.runtime.events import RuntimeEvents
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime.services import (
     ComputeSession,
-    DurableResearch,
+    ExperimentServices,
     LifecycleSession,
     ResearchInfrastructure,
     ResearchServices,
@@ -162,14 +162,17 @@ def build_services(
             store=store,
             registry=registry,
             agents=agents,
-            execution=execution,
-            git=git,
             events=events,
-            scripts=scripts,
-            evaluator=evaluator,
             baseline_authority=baseline_authority,
         ),
-        durable=DurableResearch(tree=tree, state=state),
+        experiments=ExperimentServices(
+            execution=execution,
+            git=git,
+            scripts=scripts,
+            evaluator=evaluator,
+        ),
+        state=state,
+        tree=tree,
     )
     if broker is not None:
         generator = (
@@ -233,7 +236,7 @@ def wire_workflow(runtime: Any) -> None:
         runtime=SupervisorRuntime(
             store=services.infrastructure.store,
             agents=services.infrastructure.agents,
-            workspaces=services.infrastructure.git,
+            workspaces=services.experiments.git,
             documents=ExperimentDocumentProjector(
                 document_root=config.paths.root / ".athena" / "exp_docs",
                 evaluator_roots=(
@@ -266,8 +269,8 @@ def wire_workflow(runtime: Any) -> None:
         ),
     )
     supervisor = Supervisor(
-        state=services.durable.state,
-        tree=services.durable.tree,
+        state=services.state,
+        tree=services.tree,
         deps=deps,
     )
     services.workflow.agent_turns = agent_turns
@@ -282,7 +285,7 @@ def register_supervisor(runtime: Any, provider: object) -> None:
         raise ValueError("SupervisorAgent provider is already registered")
 
     # Register the long-lived coordinator with its read-only competition context.
-    runtime.session.lifecycle.provider = provider
+    runtime.services.workflow.provider = provider
     supervisor_kaggle = build_kaggle_stack(
         download_root=runtime.root,
         artifacts=runtime.store,
@@ -319,13 +322,13 @@ def plan_tools(runtime: Any) -> ToolRegistry | None:
 
 def kaggle_stack(runtime: Any) -> KaggleStack:
     """Build and cache the Kaggle stack shared by research agents."""
-    if runtime.session.options.kaggle is None:
-        runtime.session.options.kaggle = build_kaggle_stack(
+    if runtime.session.kaggle is None:
+        runtime.session.kaggle = build_kaggle_stack(
             download_root=runtime.root,
             artifacts=runtime.store,
             download=runtime.supervisor.kaggle_download,
         )
-    return runtime.session.options.kaggle
+    return runtime.session.kaggle
 
 
 def kaggle_tools(runtime: Any, agent_type: str) -> ToolRegistry | None:

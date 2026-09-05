@@ -155,12 +155,12 @@ class ResearchRuntime:
     @property
     def state(self) -> ResearchState:
         """Return the Supervisor-owned durable state."""
-        return self._services.durable.state
+        return self._services.state
 
     @property
     def tree(self) -> ResearchTree:
         """Return the Supervisor-owned research history."""
-        return self._services.durable.tree
+        return self._services.tree
 
     @property
     def supervisor(self) -> Supervisor:
@@ -223,7 +223,7 @@ class ResearchRuntime:
     @property
     def execution(self) -> ExecutionRuntime:
         """Return the default local execution runtime."""
-        return self._services.infrastructure.execution
+        return self._services.experiments.execution
 
     async def execution_for(self, plan_id: str, workspace: Path) -> ExecutionRuntime:
         """给一个 Plan 拿到它该用的执行运行时（本地共享或远程租约）。"""
@@ -270,12 +270,12 @@ class ResearchRuntime:
     @property
     def scripts(self) -> DataScriptRunner:
         """Return the trusted data-script runner."""
-        return self._services.infrastructure.scripts
+        return self._services.experiments.scripts
 
     @property
     def evaluator(self) -> TrustedEvaluator:
         """Return the trusted metric evaluator."""
-        return self._services.infrastructure.evaluator
+        return self._services.experiments.evaluator
 
     @property
     def baseline_authority(self) -> BaselineAuthorityStore | None:
@@ -285,12 +285,12 @@ class ResearchRuntime:
     @property
     def git(self) -> LocalGitWorkspace:
         """Return the workspace version-control service."""
-        return self._services.infrastructure.git
+        return self._services.experiments.git
 
     @property
     def provider(self) -> object | None:
         """Return the registered model provider."""
-        return self._session.lifecycle.provider
+        return self._services.workflow.provider
 
     @property
     def task_text(self) -> str:
