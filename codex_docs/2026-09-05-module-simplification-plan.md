@@ -19,6 +19,7 @@ Inventory is not a completed semantic review. Each pending file requires content
 - [x] Remove the unused TypeScript dual-signature Agent runner adapter.
 - [x] Remove unused TypeScript Agent state and replace data-only constructors with types.
 - [x] Remove unused Worker text forwarding and consolidate provider ownership.
+- [x] Trace the standalone TypeScript composition root to actual entries and delete its unused adapter chain.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [ ] Merge into main, push, and remove this task's temporary branch/worktree.
 
@@ -112,10 +113,17 @@ Retain the structured Worker boundary: fresh thread/turn identities, literal inp
 
 Worker evidence: Agent/Worker baseline returned 143 passed. Final Worker tests returned four passed, and all five package builds passed. After correcting the new DeepSeek request expectation, the full TypeScript workspace returned 444 passed across 52 files with `npm test -- --testTimeout=30000`; no timeout configuration was committed. Tracked searches find no runText callers, and git diff --check passed.
 
-Next module: ResearchRuntime has now been read completely, but caller/test tracing and implementation decisions remain Pending. Review its construction-only attributes, repeated settings validation and mutation ordering, loose transport/output casts and orchestration adapters. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
+TypeScript entrypoint review supersedes the preceding Worker retention decision. Full runtime read plus repository-wide tracked caller tracing finds no TypeScript ResearchRuntime constructor/import consumer beyond its own package export. The live DSH plugin directly composes FixedFlowSupervisor and services; AutoResearchRuntime has its own plugin/scripts and headless integration. Python's identically named, actively used ResearchRuntime is separate and unchanged. Delete the unused TypeScript runtime.ts rather than polishing its 21 attributes, unconsumed settings/tree facades and duplicate orchestration adapters.
+
+Worker and shell are exclusively reachable through that unused root (apart from exports and Worker-only tests), so delete worker.ts, shell.ts and worker.test.ts together, removing all seven runtime exports and both option type exports. This intentionally removes an unused library surface, not just private implementation details. Earlier Worker refinements remain historical evidence, not a reason to preserve unreachable code. Remove nine explicitly scoped ignored JS/map/declaration build artifacts so stale modules cannot remain loadable. Deleted sources are recoverable from Git history. Keep @athena/agent dependency because execution/experiment still import its event type. Add a new public-surface regression checking removal and the canonical services still used by DSH.
+
+Deletion evidence: pre-change research/DSH/headless integration selection returned 192 passed. After deleting the four Worker-only cases and adding two public-surface cases, all five package builds passed and the full workspace returned 442 passed across 52 files with `npm test -- --testTimeout=30000`. The actual DSH service/tool tests and AutoResearch headless integration remain passing. Removed-module searches find only negative public API assertions; all nine stale compiled artifacts remain absent after rebuilding, and git diff --check passed. No claim of real external model execution or default-timeout reliability is made.
+
+The source/export deletion removes 532 production lines plus the 89-line Worker-only test; the replacement public-surface test has two cases. Baseline coverage is now 69/602 plus separately tracked new files. Next module: review the shared execution services and their active PlanRunner/DSH consumers; DSH was inspected at assembly sites only and is not a completed file review. Whole-repository verification, main merge/push, and task branch/worktree removal remain mandatory and unfinished.
 
 | File | Baseline lines | Review |
 | --- | ---: | --- |
+| `athena_ts/packages/athena-research/test/public-api.test.ts` | New | Reviewed; removed legacy root/adapter exports and retained canonical DSH services |
 | `athena-gui/src/components/__tests__/common-contracts.test.tsx` | New | Reviewed; verifies error boundary and persisted theme transitions |
 | `athena-gui/scripts/dev-backend.cjs` | 38 | Pending |
 | `athena-gui/scripts/dev-web.cjs` | 46 | Pending |
@@ -679,9 +687,9 @@ Next module: ResearchRuntime has now been read completely, but caller/test traci
 | `athena_ts/packages/athena-research/src/execution.ts` | 94 | Pending |
 | `athena_ts/packages/athena-research/src/index.ts` | 45 | Reviewed; retain canonical exports; replace static Recovery facade with reconcilePlans; all package builds pass |
 | `athena_ts/packages/athena-research/src/report.ts` | 78 | Pending |
-| `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Pending |
+| `athena_ts/packages/athena-research/src/runtime.ts` | 372 | Reviewed; deleted unused standalone composition root; live DSH/Python roots retained |
 | `athena_ts/packages/athena-research/src/script_runner.ts` | 231 | Pending |
-| `athena_ts/packages/athena-research/src/shell.ts` | 48 | Pending |
+| `athena_ts/packages/athena-research/src/shell.ts` | 48 | Reviewed; deleted adapter exclusively used by removed runtime |
 | `athena_ts/packages/athena-research/src/supervisor/events.ts` | 120 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/experiment.ts` | 418 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/plans.ts` | 122 | Pending |
@@ -694,7 +702,7 @@ Next module: ResearchRuntime has now been read completely, but caller/test traci
 | `athena_ts/packages/athena-research/src/supervisor/supervisor.ts` | 869 | Pending |
 | `athena_ts/packages/athena-research/src/supervisor/validation.ts` | 46 | Pending |
 | `athena_ts/packages/athena-research/src/validation.ts` | 54 | Pending |
-| `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; removed unused text forwarding, provider ownership 3 attributes to 2 |
+| `athena_ts/packages/athena-research/src/worker.ts` | 125 | Reviewed; deleted after full caller tracing proved standalone root unused |
 | `athena_ts/packages/athena-research/test/evaluation.test.ts` | 47 | Pending |
 | `athena_ts/packages/athena-research/test/report.test.ts` | 76 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/events.test.ts` | 53 | Pending |
@@ -710,7 +718,7 @@ Next module: ResearchRuntime has now been read completely, but caller/test traci
 | `athena_ts/packages/athena-research/test/supervisor/supervisor.test.ts` | 260 | Pending |
 | `athena_ts/packages/athena-research/test/supervisor/validation-plan.test.ts` | 33 | Pending |
 | `athena_ts/packages/athena-research/test/validation.test.ts` | 40 | Pending |
-| `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Reviewed; structured persistence/failure and provider/history/literal-input contracts |
+| `athena_ts/packages/athena-research/test/worker.test.ts` | 57 | Reviewed; deleted tests exclusive to removed Worker; replacement public-surface test tracked separately |
 | `athena_ts/vitest.workspace.ts` | 4 | Pending |
 | `scripts/build.cjs` | 62 | Pending |
 | `scripts/check_code_style.py` | 162 | Pending |
