@@ -77,7 +77,7 @@ class DataContract:
 
 async def prepare_platform_split(runtime: Any) -> DataContract | None:
     """Materialize a deterministic CSV split and persist its agent contract."""
-    dataset = runtime.config.dataset
+    dataset = runtime.config.research.dataset
     if dataset.path is None or dataset.target_column is None:
         return None
 

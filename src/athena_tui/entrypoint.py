@@ -7,6 +7,14 @@ from pathlib import Path
 
 from athena.core.agent import settings
 from athena.research import ResearchRuntime
+from athena.research.config import (
+    ProviderConfig,
+    ResearchOptions,
+    ResearchPolicy,
+    RuntimeDependencies,
+    SearchLimits,
+    TaskConfig,
+)
 from athena_tui.app import AthenaApp
 
 _AUTOMATION_HINT = (
@@ -38,12 +46,14 @@ def _is_interactive() -> bool:
 async def _run(args: argparse.Namespace) -> int:
     runtime = ResearchRuntime(
         project_root=Path(args.project),
-        model=settings.model_name(),
-        auto_seed_task=True,
-        search_limit=args.search_limit,
-        auto_validate=args.validate,
-        task_confirmation_gate=False,
-        auto_confirm=True,
+        research=ResearchOptions(
+            task=TaskConfig(auto_seed=True, auto_confirm=True),
+            search=SearchLimits(search_limit=args.search_limit),
+            policy=ResearchPolicy(auto_validate=args.validate),
+        ),
+        dependencies=RuntimeDependencies(
+            provider=ProviderConfig(model=settings.model_name())
+        ),
     )
     # Resume: a prior run with a trusted baseline/SOTA auto-recovers and
     # continues; otherwise the first Human message seeds the task.

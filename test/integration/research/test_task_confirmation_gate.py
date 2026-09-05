@@ -16,6 +16,22 @@ from athena.research import ResearchRuntime
 from athena.research.clarification.errors import ClarificationError
 from athena.research.clarification.models import ConfirmationJournal
 from athena.research.clarification.persistence import ClarificationStore
+from athena.research.config import (
+    ResearchOptions,
+    RuntimeAdapters,
+    RuntimeDependencies,
+    TaskConfig,
+)
+
+_DEFAULT_TASK = TaskConfig()
+
+
+def _runtime(root: Path, prepare, task: TaskConfig = _DEFAULT_TASK) -> ResearchRuntime:
+    return ResearchRuntime(
+        project_root=root,
+        research=ResearchOptions(task=task),
+        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(prepare=prepare)),
+    )
 
 
 async def _close(runtime: ResearchRuntime) -> None:
@@ -33,7 +49,7 @@ async def _prepare_noop() -> object:
 
 @pytest.mark.asyncio
 async def test_default_runtime_requires_explicit_policy(tmp_path: Path) -> None:
-    runtime = ResearchRuntime(project_root=tmp_path, prepare_phase=_prepare_noop)
+    runtime = _runtime(tmp_path, _prepare_noop)
     try:
         with pytest.raises(ClarificationError, match="confirmation_policy_required"):
             await runtime.start_task("predict churn")
@@ -45,12 +61,7 @@ async def test_default_runtime_requires_explicit_policy(tmp_path: Path) -> None:
 async def test_gated_runtime_rejects_raw_task_until_confirmed(
     tmp_path: Path,
 ) -> None:
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        prepare_phase=_prepare_noop,
-        task_confirmation_gate=True,
-        auto_confirm=False,
-    )
+    runtime = _runtime(tmp_path, _prepare_noop, TaskConfig(confirmation_gate=True))
     try:
         with pytest.raises(ClarificationError, match="confirmation_required"):
             await runtime.start_task("predict churn")
@@ -62,12 +73,7 @@ async def test_gated_runtime_rejects_raw_task_until_confirmed(
 async def test_explicit_auto_confirm_starts_and_commits_draft(
     tmp_path: Path,
 ) -> None:
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        prepare_phase=_prepare_noop,
-        task_confirmation_gate=False,
-        auto_confirm=True,
-    )
+    runtime = _runtime(tmp_path, _prepare_noop, TaskConfig(auto_confirm=True))
     try:
         status = await runtime.start_task("predict churn")
         assert status == "RUNNING"
@@ -91,12 +97,7 @@ async def test_failed_lifecycle_task_can_be_started_again(tmp_path: Path) -> Non
         restarted.set()
         await asyncio.Event().wait()
 
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        prepare_phase=prepare,
-        task_confirmation_gate=False,
-        auto_confirm=True,
-    )
+    runtime = _runtime(tmp_path, prepare, TaskConfig(auto_confirm=True))
     try:
         await runtime.start_task("predict churn")
         first = runtime.session.lifecycle.task
@@ -143,7 +144,7 @@ async def test_start_syncs_memory_after_confirmation_rollback(tmp_path: Path) ->
     async def prepare() -> object:
         await asyncio.Event().wait()
 
-    runtime = ResearchRuntime(project_root=tmp_path, prepare_phase=prepare)
+    runtime = _runtime(tmp_path, prepare)
     try:
         runtime.state.task_text = "original task"
         runtime.state.task_understanding = {"title": "original"}

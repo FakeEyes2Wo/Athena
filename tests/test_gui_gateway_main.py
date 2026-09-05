@@ -24,11 +24,12 @@ def test_make_runtime_enables_auto_validate_and_accepts_skip_validate(
     monkeypatch.setattr(main, "ResearchRuntime", FakeRuntime)
     main._make_runtime("/tmp/proj", skip_validate=True)
 
-    assert seen.get("auto_validate") is True
-    assert seen.get("skip_validate") is True
+    research = seen["research"]
+    assert research.policy.auto_validate is True
+    assert research.policy.skip_validate is True
     assert seen.get("project_root") == "/tmp/proj"
-    assert seen.get("task_confirmation_gate") is True
-    assert seen.get("auto_confirm") is False
+    assert research.task.confirmation_gate is True
+    assert research.task.auto_confirm is False
 
 
 @pytest.mark.asyncio

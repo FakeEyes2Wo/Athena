@@ -27,7 +27,7 @@ def test_a_failed_run_starts_again_as_idle(tmp_path: Path) -> None:
     project.mkdir()
     _failed_state(project)
 
-    runtime = ResearchRuntime(project_root=project, data_root=None)
+    runtime = ResearchRuntime(project_root=project)
 
     assert runtime.state.status == "IDLE"
     assert runtime.state.phase == "SEARCH", "阶段要保留，续跑才有意义"

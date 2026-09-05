@@ -93,7 +93,7 @@ async def message(runtime: Any, text: str) -> str:
     command_result = await _control_command(runtime, command)
     if command_result is not None:
         return command_result
-    if runtime.config.task.auto_seed and not runtime.session.lifecycle.started:
+    if runtime.config.research.task.auto_seed and not runtime.session.lifecycle.started:
         return await start_task(runtime, command)
     answer = await runtime.supervisor.message(text)
     if runtime.state.phase == "VALIDATE" and (

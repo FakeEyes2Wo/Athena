@@ -16,7 +16,15 @@ import pytest
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
-from athena.research.config import DatasetConfig, TaskConfig
+from athena.research.config import (
+    DatasetConfig,
+    ResearchOptions,
+    ResearchPolicy,
+    RuntimeAdapters,
+    RuntimeDependencies,
+    SearchLimits,
+    TaskConfig,
+)
 from athena.research.contracts import EvaluatorDescriptor, ValidationResult
 from athena.research.prepare import orchestrator
 from athena.research.prepare.authority import (
@@ -46,6 +54,13 @@ from athena.research.runtime.control import (
 from athena.research.runtime.phase_runner import PhaseRunner
 from athena.research.runtime.resume_contract import ResearchControlError
 from athena.research.supervisor.prepare import PrepareResult
+
+
+def _authority_runtime(root: Path, authority) -> ResearchRuntime:
+    return ResearchRuntime(
+        project_root=root,
+        dependencies=RuntimeDependencies(baseline_authority=authority),
+    )
 
 
 def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
@@ -262,10 +277,13 @@ def _stub_runtime(
 ) -> ResearchRuntime:
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        auto_confirm=True,
-        task_confirmation_gate=False,
-        skip_validate=skip_validate,
-        validation_phase=validation_phase,
+        research=ResearchOptions(
+            task=TaskConfig(auto_confirm=True),
+            policy=ResearchPolicy(skip_validate=skip_validate),
+        ),
+        dependencies=RuntimeDependencies(
+            adapters=RuntimeAdapters(validation=validation_phase)
+        ),
     )
     runtime.session.lifecycle.provider = object()
     runtime.session.lifecycle.task_text = "predict titanic survival"
@@ -369,9 +387,8 @@ async def _failed_prepare_runtime(
 
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        prepare_phase=prepare,
-        task_confirmation_gate=False,
-        auto_confirm=True,
+        research=ResearchOptions(task=TaskConfig(auto_confirm=True)),
+        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(prepare=prepare)),
     )
     await runtime.start_task("predict churn")
     first = runtime.session.lifecycle.task
@@ -621,8 +638,10 @@ async def test_run_prepare_phase_reuses_frozen_evaluator(
         state_path=tmp_path / ".athena" / "state.json",
         workspaces_root=tmp_path / "workspaces",
         config=SimpleNamespace(
-            dataset=DatasetConfig(),
-            task=TaskConfig(),
+            research=SimpleNamespace(
+                dataset=DatasetConfig(),
+                task=TaskConfig(),
+            ),
             paths=SimpleNamespace(athena=tmp_path / ".athena"),
         ),
         git=FakeGit(),
@@ -694,7 +713,7 @@ async def _seed_attested_prepare_checkpoint(
 ) -> tuple[str, str, str]:
     workspace_root = tmp_path / "workspaces" / "eda"
     verified = _write_verified_baseline_fixture(workspace_root)
-    runtime = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    runtime = _authority_runtime(tmp_path, authority)
     evaluator_ref = await runtime.store.put_text('{"frozen":true}')
     baseline_commit = "b" * 40
     evidence_ref = await runtime.store.put_text(
@@ -784,7 +803,7 @@ async def test_fresh_runtime_skips_prepare_for_exact_external_attestation(
 ) -> None:
     authority = _MemoryBaselineAuthorityStore()
     await _seed_attested_prepare_checkpoint(tmp_path, authority)
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
 
     await restarted.supervisor._phases._run_prepare()
 
@@ -803,14 +822,14 @@ async def test_attested_resume_restores_evaluator_used_by_search_plan(
     evaluator_ref, _evidence_ref, baseline_commit = (
         await _seed_attested_prepare_checkpoint(tmp_path, authority)
     )
-    checkpoint = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    checkpoint = _authority_runtime(tmp_path, authority)
     checkpoint.state.evaluator_ref = (
         await checkpoint.store.put_text('{"forged":true}')
         if state_ref_kind == "conflicting"
         else None
     )
     checkpoint.state.save(checkpoint.state_path)
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
 
     await restarted.supervisor._phases._run_prepare()
     assert restarted.state.evaluator_ref == evaluator_ref
@@ -865,7 +884,7 @@ async def test_fresh_runtime_rejects_attestation_mismatching_local_tree(
 ) -> None:
     authority = _MemoryBaselineAuthorityStore()
     await _seed_attested_prepare_checkpoint(tmp_path, authority)
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
     experiment = restarted.tree.get_experiment("exp_baseline")
     if difference == "commit":
         experiment.commit = "c" * 40
@@ -888,7 +907,7 @@ async def test_fresh_runtime_rejects_attestation_mismatching_local_tree(
 async def test_fresh_runtime_rejects_tampered_baseline_metric(tmp_path: Path) -> None:
     authority = _MemoryBaselineAuthorityStore()
     await _seed_attested_prepare_checkpoint(tmp_path, authority)
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
     experiment = restarted.tree.get_experiment("exp_baseline")
     assert experiment.eval is not None
     experiment.eval.primary = 0.99
@@ -942,7 +961,7 @@ async def test_fresh_runtime_rejects_invalid_attested_score_evidence(
     _evaluator_ref, _evidence_ref, baseline_commit = (
         await _seed_attested_prepare_checkpoint(tmp_path, authority)
     )
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
     if failure == "missing_artifact":
         evidence_ref = "sha256:" + "9" * 64
     elif failure == "invalid_json":
@@ -980,7 +999,7 @@ async def test_fresh_runtime_rejects_attested_score_content_mismatch(
     _evaluator_ref, _evidence_ref, baseline_commit = (
         await _seed_attested_prepare_checkpoint(tmp_path, authority)
     )
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
     evidence = {
         "plan": "prepare",
         "metric": 0.99 if difference == "metric" else 0.71,
@@ -1026,7 +1045,7 @@ async def test_fresh_runtime_rejects_missing_or_wrong_authority_state(
                 bundle=authority.sealed.bundle,
                 attestation=authority.sealed.attestation,
             )
-        restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+        restarted = _authority_runtime(tmp_path, authority)
 
     runner = PhaseRunner(restarted)
     if authority_state in {"missing_capability", "wrong_generation"}:
@@ -1049,7 +1068,7 @@ async def test_fresh_runtime_rejects_authority_outage(tmp_path: Path) -> None:
     authority = _MemoryBaselineAuthorityStore()
     await _seed_attested_prepare_checkpoint(tmp_path, authority)
     authority.load_error = OSError("authority offline")
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
 
     with pytest.raises(BaselineAuthorityError, match="load failed"):
         await PhaseRunner(restarted).baseline_resume_is_attested()
@@ -1068,7 +1087,7 @@ async def test_fresh_runtime_rejects_mutated_baseline_artifact(tmp_path: Path) -
         "Selected candidate: `resnet-transfer`\nTraining strategy: `classical`\n",
         encoding="utf-8",
     )
-    restarted = ResearchRuntime(project_root=tmp_path, baseline_authority=authority)
+    restarted = _authority_runtime(tmp_path, authority)
 
     with pytest.raises(BaselineResearchError, match="BASELINE_DESIGN.md"):
         await PhaseRunner(restarted).baseline_resume_is_attested()
@@ -1393,9 +1412,8 @@ async def test_reloaded_idle_prepare_checkpoint_starts_a_new_lifecycle(
 
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        prepare_phase=prepare,
-        task_confirmation_gate=False,
-        auto_confirm=True,
+        research=ResearchOptions(task=TaskConfig(auto_confirm=True)),
+        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(prepare=prepare)),
     )
     try:
         assert runtime.state.status == "IDLE"
@@ -1804,8 +1822,8 @@ async def test_authoritative_prepare_resume_reuses_attested_baseline(
     authority.load_error = OSError("authority offline")
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        baseline_authority=authority,
-        search_limit=0,
+        research=ResearchOptions(search=SearchLimits(search_limit=0)),
+        dependencies=RuntimeDependencies(baseline_authority=authority),
     )
     runtime.clarification_path.write_bytes(b"frozen confirmed clarification\n")
     original_task = runtime.state.task_text

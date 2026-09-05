@@ -8,7 +8,7 @@ from athena.execution.compute_config import ComputeConfig
 from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResearchPaths:
     """Filesystem layout derived from project/state roots."""
 
@@ -42,7 +42,7 @@ class ResearchPaths:
         return self.athena / "handoffs"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SearchLimits:
     """Search budget knobs owned by the durable ResearchState."""
 
@@ -52,7 +52,7 @@ class SearchLimits:
     hypotheses_per_ideator: int = 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SurveyConfig:
     """Optional background literature-survey knobs."""
 
@@ -63,7 +63,7 @@ class SurveyConfig:
     max_seconds: float = 0.0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProviderConfig:
     """Optional model provider selection and client override."""
 
@@ -71,7 +71,7 @@ class ProviderConfig:
     client: Any = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TaskConfig:
     """Task seeding, confirmation, and human-interaction policy."""
 
@@ -82,7 +82,7 @@ class TaskConfig:
     ask_user: Any = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResearchPolicy:
     """Initial search/validation policy copied into mutable session state."""
 
@@ -93,7 +93,7 @@ class ResearchPolicy:
     ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DatasetConfig:
     """Optional platform-owned dataset split contract."""
 
@@ -103,7 +103,7 @@ class DatasetConfig:
     group_column: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExecutionConfig:
     """Local/remote execution roots, limits, and compute placement."""
 
@@ -112,7 +112,7 @@ class ExecutionConfig:
     compute: ComputeConfig | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeAdapters:
     """Provider-less test adapters for phase and Plan execution."""
 
@@ -121,17 +121,41 @@ class RuntimeAdapters:
     plan: Any = None
 
 
-@dataclass(frozen=True)
-class ResearchConfig:
-    """Everything ResearchRuntime needs to know that does not change per run."""
+@dataclass(frozen=True, slots=True)
+class SessionConfig:
+    """State location and durable session identity."""
 
-    paths: ResearchPaths
+    state_root: str | Path | None = None
     session_id: str = "default"
-    provider: ProviderConfig = field(default_factory=ProviderConfig)
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchOptions:
+    """Research behavior selected for a runtime."""
+
     task: TaskConfig = field(default_factory=TaskConfig)
     search: SearchLimits = field(default_factory=SearchLimits)
     survey: SurveyConfig = field(default_factory=SurveyConfig)
     policy: ResearchPolicy = field(default_factory=ResearchPolicy)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDependencies:
+    """Provider, execution, adapters, and optional integration boundaries."""
+
+    provider: ProviderConfig = field(default_factory=ProviderConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     adapters: RuntimeAdapters = field(default_factory=RuntimeAdapters)
+    broker: Any = None
+    baseline_authority: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchConfig:
+    """Everything ResearchRuntime needs to know that does not change per run."""
+
+    paths: ResearchPaths
+    session_id: str = "default"
+    research: ResearchOptions = field(default_factory=ResearchOptions)
+    dependencies: RuntimeDependencies = field(default_factory=RuntimeDependencies)

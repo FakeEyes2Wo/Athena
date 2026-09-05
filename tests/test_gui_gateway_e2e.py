@@ -7,6 +7,12 @@ import websockets
 
 from athena.core.human_request import HumanOutcome
 from athena.research import ResearchRuntime
+from athena.research.config import (
+    ResearchOptions,
+    RuntimeDependencies,
+    SessionConfig,
+    TaskConfig,
+)
 from gui_gateway.__main__ import start_server
 from test.integration.research.test_continue_resume_surfaces import (
     assert_confirmed_contract_unchanged,
@@ -61,9 +67,9 @@ async def test_real_runtime_clarification_round_trip_preserves_stale_error(
 ) -> None:
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        session_id="e2e-session",
-        broker=_AnsweringBroker(),
-        task_confirmation_gate=True,
+        session=SessionConfig(session_id="e2e-session"),
+        research=ResearchOptions(task=TaskConfig(confirmation_gate=True)),
+        dependencies=RuntimeDependencies(broker=_AnsweringBroker()),
     )
     server, port = await start_server(test_mode=True, runtime=runtime, port=0)
     try:

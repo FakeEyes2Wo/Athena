@@ -12,6 +12,7 @@ from athena.core.agent.provider import StreamEvent
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
+from athena.research.config import RuntimeAdapters, RuntimeDependencies
 from athena.research.contracts import ValidationResult
 from athena.research.runtime import ResearchRuntime
 
@@ -123,7 +124,10 @@ async def runtime(tmp_path: Path, monkeypatch):
             validation_commit=_sota_commit,
         )
 
-    instance = ResearchRuntime(project_root=tmp_path, validation_phase=validate)
+    instance = ResearchRuntime(
+        project_root=tmp_path,
+        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(validation=validate)),
+    )
     instance.register_supervisor(provider=provider)
     await _persist_confirmed_task_context(instance)
     base_commit = await instance.git.init()
@@ -347,7 +351,10 @@ async def test_validate_running_recovery_ignores_new_skip_preference(runtime):
 
     runtime._config = replace(
         runtime.config,
-        adapters=replace(runtime.config.adapters, validation=validate),
+        dependencies=replace(
+            runtime.config.dependencies,
+            adapters=replace(runtime.config.dependencies.adapters, validation=validate),
+        ),
     )
     runtime.supervisor.configure_options(skip_validate=True)
     runtime.state.phase = "VALIDATE"

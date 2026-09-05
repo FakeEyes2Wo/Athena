@@ -12,6 +12,14 @@ from pathlib import Path
 
 from athena.core.agent import settings
 from athena.research import ResearchRuntime
+from athena.research.config import (
+    ProviderConfig,
+    ResearchOptions,
+    ResearchPolicy,
+    RuntimeDependencies,
+    SearchLimits,
+    TaskConfig,
+)
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -83,16 +91,20 @@ async def _run(args: argparse.Namespace) -> int:
         task_text = f"{task_text}\n数据集路径: {args.data}"
     runtime = ResearchRuntime(
         project_root=Path(args.project),
-        model=settings.model_name(),
-        task=task_text,
-        auto_validate=True,
-        search_limit=args.search_limit,
+        research=ResearchOptions(
+            task=TaskConfig(text=task_text),
+            search=SearchLimits(search_limit=args.search_limit),
+            policy=ResearchPolicy(auto_validate=True),
+        ),
+        dependencies=RuntimeDependencies(
+            provider=ProviderConfig(model=settings.model_name())
+        ),
     )
     _subscribe(runtime)
     try:
         supervisor_task = await runtime.start()
         await supervisor_task
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - process boundary reports all failures
         print(f"RUN FAILED: {type(exc).__name__}: {exc}", flush=True)
         traceback.print_exc()
         await runtime.aclose()

@@ -524,48 +524,31 @@ _next_steps(data)
 
 ---
 
-### 8.5 `RuntimeConfig` / `DatasetOptions`：收缩 `ResearchRuntime.__init__`
+### 8.5 分组运行配置：已收缩 `ResearchRuntime.__init__`
 
-当前 `ResearchRuntime.__init__` 是长参数列表，并新增：
-
-```python
-dataset_path
-target_column
-split_seed
-group_column
-data_root
-```
-
-建议：
+当前构造器只有 `project_root`、`session`、`research`、`dependencies` 四个输入。数据集划分由四字段 `DatasetConfig` 负责，执行数据根目录由三字段 `ExecutionConfig` 负责；两者不再混在一个长参数列表中。
 
 ```python
-@dataclass(frozen=True, slots=True)
-class DatasetOptions:
-    dataset_path: Path | None = None
-    target_column: str | None = None
-    group_column: str | None = None
-    split_seed: int = 0
-    data_root: Path | None = None
+runtime = ResearchRuntime(
+    project_root=project,
+    session=SessionConfig(session_id="default"),
+    research=ResearchOptions(
+        task=TaskConfig(text=task),
+        dataset=DatasetConfig(path=dataset),
+    ),
+    dependencies=RuntimeDependencies(
+        provider=ProviderConfig(model=model),
+    ),
+)
 ```
 
-```python
-@dataclass(frozen=True, slots=True)
-class ResearchOptions:
-    model: str | None = None
-    task: str = ""
-    search_limit: int | None = None
-    concurrency: int = 1
-    dataset: DatasetOptions = DatasetOptions()
-    ...
-```
-
-`ResearchRuntime(dataset=..., ...)` 或 `ResearchRuntime(config=ResearchOptions(...))`。
+`ResearchRuntime` 只接受项目根目录和三个职责分组，不再接受平铺的模型、任务、搜索、确认、数据集和执行关键字。
 
 好处：
 
-- 新增数据相关配置只改 `DatasetOptions`。
-- 构造 runtime 的调用者不再需要理解 30 个散参。
-- `GuiService` / `cli` / TUI 都只构造一个配置对象。
+- 新增数据集划分配置只改 `DatasetConfig`，执行环境配置只改 `ExecutionConfig`。
+- 构造 runtime 的调用者不再需要理解 30 多个散参。
+- GUI / CLI / TUI 只构造自己需要改变的职责分组。
 
 ---
 
@@ -665,26 +648,11 @@ class EvaluatorWorkspace:
 
 ---
 
-### 8.9 `CliRunConfig`：替代 `_runtime_options` 的 dict
+### 8.9 CLI 配置翻译：已删除字符串字典与 `CliRunConfig`
 
-当前 `_runtime_options` 返回约 18 个键的 dict，调用方只能通过字符串键访问，无法静态检查。
+`_runtime_options` 直接返回 `ResearchOptions` 与 `RuntimeDependencies`。CLI 不再先创建 18 字段中间类，再把它转换成字符串键字典。
 
-建议：
-
-```python
-@dataclass(frozen=True, slots=True)
-class CliRunConfig:
-    task: str
-    project: Path
-    data: Path
-    dataset: DatasetOptions
-    search_limit: int | None
-    ...
-```
-
-然后 `_runtime(config) -> ResearchRuntime` 直接消费 `CliRunConfig`。
-
-好处：
+结果：
 
 - 不再靠字符串键传递。
 - 新增参数有类型检查。
@@ -696,7 +664,7 @@ class CliRunConfig:
 
 - 将所有“Prompt 块”统一为 `PromptBlock`。
 - 将所有“执行请求”统一为 `CommandRequest`。
-- 将所有“运行配置”统一为 `ResearchOptions` / `CliRunConfig`。
+- 将所有“运行配置”统一为 `ResearchOptions` / `RuntimeDependencies`。
 - 将 `Supervisor` 的多个 `read_*` 查询合并为 `SnapshotService`。
 - 将 `PhaseMachine` 的控制动作收敛为 `ControlCommand` 协议。
 

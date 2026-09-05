@@ -5,9 +5,8 @@ import asyncio
 import json
 import sys
 import traceback
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 from athena.core.agent import settings
 from athena.core.project_lock import ProjectBusyError, project_lock
@@ -19,6 +18,17 @@ from athena.execution.compute_config import (
 )
 from athena.kaggle import KaggleRunRequest, build_kaggle_stack, run_kaggle
 from athena.research import ResearchRuntime
+from athena.research.config import (
+    DatasetConfig,
+    ExecutionConfig,
+    ProviderConfig,
+    ResearchOptions,
+    ResearchPolicy,
+    RuntimeDependencies,
+    SearchLimits,
+    SurveyConfig,
+    TaskConfig,
+)
 from athena.research.fork import ForkError, fork_project
 from athena.research.literature.bench import (
     DEFAULT_QUERY_SET,
@@ -44,8 +54,17 @@ from athena.research.literature.survey.report import print_check, print_report
 from athena.research.runtime import DEFAULT_SURVEY_PAPERS
 from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 
+_CLI_RESEARCH = ResearchOptions(
+    task=TaskConfig(confirmation_gate=False, auto_confirm=True)
+)
+_CLI_DEPENDENCIES = RuntimeDependencies()
 
-def _runtime(project_root: str, **options: Any) -> ResearchRuntime:
+
+def _runtime(
+    project_root: str,
+    research: ResearchOptions = _CLI_RESEARCH,
+    dependencies: RuntimeDependencies = _CLI_DEPENDENCIES,
+) -> ResearchRuntime:
     """Build the public research composition root for one project.
 
     CLI is the non-interactive headless path. It explicitly uses the legacy
@@ -54,10 +73,11 @@ def _runtime(project_root: str, **options: Any) -> ResearchRuntime:
     """
     return ResearchRuntime(
         project_root=Path(project_root),
-        model=settings.model_name(),
-        task_confirmation_gate=False,
-        auto_confirm=True,
-        **options,
+        research=research,
+        dependencies=replace(
+            dependencies,
+            provider=ProviderConfig(model=settings.model_name()),
+        ),
     )
 
 
@@ -124,58 +144,9 @@ def _dataset_path_for_prompt(data: str) -> str:
     return data
 
 
-@dataclass(frozen=True)
-class CliRunConfig:
-    """Typed translation of ``run`` CLI arguments passed to ``ResearchRuntime``.
-
-    The CLI intentionally keeps this type internal: test-facing
-    ``_runtime_options`` still returns the plain dict accepted by the runtime
-    constructor, while the mapping stays one-directional here.
-    """
-
-    task: str
-    search_limit: int | None
-    auto_validate: bool
-    direction: str
-    ideation: str
-    survey: bool
-    survey_query: str
-    survey_max_papers: int
-    survey_search_top_k: int
-    survey_max_seconds: float
-    experiment_timeout_s: int
-    compute: ComputeConfig
-    dataset_path: Path | None
-    target_column: str | None
-    group_column: str | None
-    split_seed: int
-    tolerance: float
-    data_root: str | None
-
-    def as_options(self) -> dict[str, object]:
-        return {
-            "task": self.task,
-            "search_limit": self.search_limit,
-            "auto_validate": self.auto_validate,
-            "direction": self.direction,
-            "ideation": self.ideation,
-            "survey": self.survey,
-            "survey_query": self.survey_query,
-            "survey_max_papers": self.survey_max_papers,
-            "survey_search_top_k": self.survey_search_top_k,
-            "survey_max_seconds": self.survey_max_seconds,
-            "experiment_timeout_s": self.experiment_timeout_s,
-            "compute": self.compute,
-            "dataset_path": self.dataset_path,
-            "target_column": self.target_column,
-            "group_column": self.group_column,
-            "split_seed": self.split_seed,
-            "tolerance": self.tolerance,
-            "data_root": self.data_root,
-        }
-
-
-def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
+def _runtime_options(
+    args: argparse.Namespace,
+) -> tuple[ResearchOptions, RuntimeDependencies]:
     """Translate run arguments into supported ``ResearchRuntime`` options."""
     task_lines = [
         args.task or "",
@@ -191,31 +162,52 @@ def _runtime_options(args: argparse.Namespace) -> dict[str, object]:
     )
     task_lines.extend(f"{label}: {value}" for label, value in optional_context if value)
     dataset_path = _platform_split_dataset(args)
-    return CliRunConfig(
-        task="\n".join(line for line in task_lines if line),
+    research = ResearchOptions(
+        task=TaskConfig(
+            text="\n".join(line for line in task_lines if line),
+            confirmation_gate=False,
+            auto_confirm=True,
+        ),
         # 传 None 而不是替换成默认值：运行时要能分辨"用户没给"和"用户给了 10"。
         # 给了就该覆盖持久化的旧值，没给就该沿用。
-        search_limit=args.max_search_experiments,
-        auto_validate=args.mode == "auto",
-        direction=args.direction or "maximize",
-        ideation=args.ideation,
-        survey=args.survey,
-        survey_query=args.survey_query or "",
-        survey_max_papers=args.survey_papers,
-        survey_search_top_k=args.survey_search_top_k,
-        survey_max_seconds=args.survey_max_seconds,
-        experiment_timeout_s=args.experiment_timeout,
-        compute=_compute_config(args),
+        search=SearchLimits(
+            search_limit=(
+                10
+                if args.max_search_experiments is None
+                else args.max_search_experiments
+            )
+        ),
+        survey=SurveyConfig(
+            enabled=args.survey,
+            query=args.survey_query or "",
+            max_papers=args.survey_papers,
+            search_top_k=args.survey_search_top_k,
+            max_seconds=args.survey_max_seconds,
+        ),
+        policy=ResearchPolicy(
+            auto_validate=args.mode == "auto",
+            direction=args.direction or "maximize",
+            tolerance=args.tolerance,
+            ideation=args.ideation,
+        ),
         # 这五项此前只被拼进任务提示词，从没传给运行时：平台数据划分因此永远
         # 不触发（``prepare_phase`` 要求 dataset_path 与 target_column 同时非空），
         # 判胜容差也永远是 0.0。
-        dataset_path=dataset_path,
-        target_column=args.target if dataset_path is not None else None,
-        group_column=args.group_column if dataset_path is not None else None,
-        split_seed=args.split_seed,
-        tolerance=args.tolerance,
-        data_root=args.data_root or None,
-    ).as_options()
+        dataset=DatasetConfig(
+            path=dataset_path,
+            target_column=args.target if dataset_path is not None else None,
+            group_column=args.group_column if dataset_path is not None else None,
+            split_seed=args.split_seed,
+        ),
+    )
+    dependencies = RuntimeDependencies(
+        execution=ExecutionConfig(
+            data_root=Path(args.data_root).resolve() if args.data_root else None,
+            experiment_timeout_s=args.experiment_timeout,
+            compute=_compute_config(args),
+        )
+    )
+    return research, dependencies
 
 
 def _compute_config(args: argparse.Namespace) -> ComputeConfig:
@@ -325,7 +317,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
 
 async def _run_locked(args: argparse.Namespace) -> int:
     """Run one research session; the caller holds the project lock."""
-    runtime = _runtime(args.project, **_runtime_options(args))
+    research, dependencies = _runtime_options(args)
+    runtime = _runtime(args.project, research=research, dependencies=dependencies)
     terminal = asyncio.Event()
     exit_code = 0
     renderer = _EventRenderer()

@@ -23,7 +23,9 @@ def test_task_prompt_prepends_context() -> None:
 async def test_ungated_legacy_context_may_be_absent(monkeypatch) -> None:
     runtime = SimpleNamespace(
         state=SimpleNamespace(task_understanding=None),
-        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=False)),
+        config=SimpleNamespace(
+            research=SimpleNamespace(task=SimpleNamespace(confirmation_gate=False))
+        ),
     )
     monkeypatch.setattr(
         task_context.ConfirmedTaskContextProvider,
@@ -44,7 +46,9 @@ async def test_prepare_preflight_runs_before_custom_phase(monkeypatch) -> None:
 
     runtime = SimpleNamespace(
         prepare_phase=custom_phase,
-        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True)),
+        config=SimpleNamespace(
+            research=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True))
+        ),
     )
     monkeypatch.setattr(
         task_context.ConfirmedTaskContextProvider,
@@ -96,7 +100,9 @@ async def test_validation_preflight_runs_before_custom_phase(monkeypatch) -> Non
 
     runtime = SimpleNamespace(
         validation_phase=custom_phase,
-        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True)),
+        config=SimpleNamespace(
+            research=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True))
+        ),
     )
     monkeypatch.setattr(
         task_context.ConfirmedTaskContextProvider,
@@ -115,7 +121,9 @@ async def test_ideator_preflight_runs_before_handoff(monkeypatch) -> None:
     handoff_started = False
     runtime = SimpleNamespace(
         provider=object(),
-        config=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True)),
+        config=SimpleNamespace(
+            research=SimpleNamespace(task=SimpleNamespace(confirmation_gate=True))
+        ),
     )
     runner = AgentTurnRunner(runtime)
 

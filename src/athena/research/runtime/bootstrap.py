@@ -103,7 +103,7 @@ def build_services(
     provider: BaseProvider | None = None,
 ) -> tuple[ResearchServices, ResearchSession]:
     """Build durable infrastructure and transient process state."""
-    if config.provider.model is not None and provider is None:
+    if config.dependencies.provider.model is not None and provider is None:
         raise ValueError("a configured model requires an explicit provider")
 
     paths = config.paths
@@ -120,7 +120,7 @@ def build_services(
     execution = ExecutionRuntime(
         project_root=paths.root,
         environment_root=paths.root,
-        data_root=config.execution.data_root,
+        data_root=config.dependencies.execution.data_root,
         store=store,
     )
     scripts = DataScriptRunner(store=store, workdir=paths.athena / "runs")
@@ -193,25 +193,26 @@ def build_services(
 
     # Keep mutable, process-local values outside the composition root.
     session = ResearchSession(
-        lifecycle=LifecycleSession(task_text=config.task.text),
+        lifecycle=LifecycleSession(task_text=config.research.task.text),
         compute=ComputeSession(
-            data_root=config.execution.data_root,
-            config=config.execution.compute,
+            data_root=config.dependencies.execution.data_root,
+            config=config.dependencies.execution.compute,
         ),
         options=RuntimeOptions(
-            ideation=config.policy.ideation,
-            direction=config.policy.direction,
-            tolerance=config.policy.tolerance,
-            auto_validate=config.policy.auto_validate,
-            skip_validate=config.policy.skip_validate,
+            ideation=config.research.policy.ideation,
+            direction=config.research.policy.direction,
+            tolerance=config.research.policy.tolerance,
+            auto_validate=config.research.policy.auto_validate,
+            skip_validate=config.research.policy.skip_validate,
         ),
     )
-    if config.execution.compute is not None and config.execution.compute.remote:
+    execution = config.dependencies.execution
+    if execution.compute is not None and execution.compute.remote:
         session.compute.pool = GpuPool(
-            list(config.execution.compute.hosts),
-            placement=config.execution.compute.placement,
+            list(execution.compute.hosts),
+            placement=execution.compute.placement,
             store=store,
-            dataset_root=config.execution.data_root,
+            dataset_root=execution.data_root,
         )
     return services, session
 
@@ -254,14 +255,14 @@ def wire_workflow(runtime: Any) -> None:
             validation=phases.run_validation_phase,
             publish_agent_event=services.infrastructure.events.project_agent_event,
             on_plan_settled=runtime.release_lease,
-            auto_validate=config.policy.auto_validate,
-            skip_validate=config.policy.skip_validate,
+            auto_validate=config.research.policy.auto_validate,
+            skip_validate=config.research.policy.skip_validate,
         ),
         search=SearchServices(
             scheduler=Scheduler(),
             recovery=Recovery(),
-            direction=config.policy.direction,
-            tolerance=config.policy.tolerance,
+            direction=config.research.policy.direction,
+            tolerance=config.research.policy.tolerance,
         ),
     )
     supervisor = Supervisor(
@@ -287,8 +288,8 @@ def register_supervisor(runtime: Any, provider: object) -> None:
         artifacts=runtime.store,
     )
     ask_user_factory = (
-        (lambda _thread, _turn: runtime.config.task.ask_user)
-        if runtime.config.task.ask_user is not None
+        (lambda _thread, _turn: runtime.config.research.task.ask_user)
+        if runtime.config.research.task.ask_user is not None
         else None
     )
     register_supervisor_agent(
@@ -387,20 +388,20 @@ def _load_state(config: ResearchConfig) -> ResearchState:
         else ResearchState(
             status="IDLE",
             phase="PREPARE",
-            search_limit=config.search.search_limit,
-            concurrency=config.search.concurrency,
-            ideator_count=config.search.ideator_count,
-            hypotheses_per_ideator=config.search.hypotheses_per_ideator,
+            search_limit=config.research.search.search_limit,
+            concurrency=config.research.search.concurrency,
+            ideator_count=config.research.search.ideator_count,
+            hypotheses_per_ideator=config.research.search.hypotheses_per_ideator,
         )
     )
     # ``ResearchRuntime`` uses the default value when no CLI option is given,
     # so preserve a persisted budget for that case.  A non-default value is an
     # explicit override and becomes the new durable budget for this project.
     if (
-        state.search_limit != config.search.search_limit
-        and config.search.search_limit != SearchLimits().search_limit
+        state.search_limit != config.research.search.search_limit
+        and config.research.search.search_limit != SearchLimits().search_limit
     ):
-        state.search_limit = config.search.search_limit
+        state.search_limit = config.research.search.search_limit
         state.save(paths.state)
     if state.eda_dir is not None:
         eda_path = Path(state.eda_dir)
@@ -410,7 +411,7 @@ def _load_state(config: ResearchConfig) -> ResearchState:
             state.eda_dir = None
     if state.status == "FAILED":
         state.status = "IDLE"
-    state.experiment_timeout_s = config.execution.experiment_timeout_s
-    if config.execution.data_root is not None and state.data_root is None:
-        state.data_root = str(config.execution.data_root)
+    state.experiment_timeout_s = config.dependencies.execution.experiment_timeout_s
+    if config.dependencies.execution.data_root is not None and state.data_root is None:
+        state.data_root = str(config.dependencies.execution.data_root)
     return state

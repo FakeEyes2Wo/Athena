@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from athena.research.config import RuntimeDependencies
 from athena.research.prepare.authority import (
     BaselineAuthorityConflict,
     BaselineAuthorityError,
@@ -22,6 +23,13 @@ from athena.research.prepare.baseline_research import (
     verification_bytes,
 )
 from athena.research.runtime import ResearchRuntime
+
+
+def _runtime(root: Path, authority: BaselineAuthorityStore) -> ResearchRuntime:
+    return ResearchRuntime(
+        project_root=root,
+        dependencies=RuntimeDependencies(baseline_authority=authority),
+    )
 
 
 class MemoryBaselineAuthorityStore:
@@ -126,13 +134,9 @@ async def test_one_external_capability_survives_two_fresh_runtimes(
     authority = MemoryBaselineAuthorityStore()
     assert isinstance(authority, BaselineAuthorityStore)
 
-    first = ResearchRuntime(
-        project_root=tmp_path / "workspace", baseline_authority=authority
-    )
+    first = _runtime(tmp_path / "workspace", authority)
     created = await first.baseline_authority.seal(_bundle(), expected_generation=None)
-    second = ResearchRuntime(
-        project_root=tmp_path / "workspace", baseline_authority=authority
-    )
+    second = _runtime(tmp_path / "workspace", authority)
 
     assert created.generation == 0
     assert second.baseline_authority is authority
@@ -156,9 +160,7 @@ async def test_sealed_verification_is_deeply_immutable_across_fresh_runtimes(
     error_type: type[Exception],
 ) -> None:
     authority = MemoryBaselineAuthorityStore()
-    first = ResearchRuntime(
-        project_root=tmp_path / "workspace", baseline_authority=authority
-    )
+    first = _runtime(tmp_path / "workspace", authority)
     await first.baseline_authority.seal(_bundle(), expected_generation=None)
     loaded = await first.baseline_authority.load()
     assert loaded is not None
@@ -167,9 +169,7 @@ async def test_sealed_verification_is_deeply_immutable_across_fresh_runtimes(
     with pytest.raises(error_type):
         mutate(loaded)
 
-    second = ResearchRuntime(
-        project_root=tmp_path / "workspace", baseline_authority=authority
-    )
+    second = _runtime(tmp_path / "workspace", authority)
     reloaded = await second.baseline_authority.load()
     assert reloaded is not None
     assert verification_bytes(reloaded.bundle.verification) == original

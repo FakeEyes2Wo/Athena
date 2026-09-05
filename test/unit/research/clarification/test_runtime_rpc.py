@@ -29,7 +29,14 @@ from athena.research.clarification.llm_generator import (
     TASK_UNDERSTANDING_SCOPE,
     LLMClarificationGenerator,
 )
-from athena.research.config import ProviderConfig, ResearchConfig
+from athena.research.config import (
+    ProviderConfig,
+    ResearchConfig,
+    ResearchOptions,
+    RuntimeDependencies,
+    SessionConfig,
+    TaskConfig,
+)
 from athena.research.runtime import facade as runtime_facade
 from athena.research.runtime.bootstrap import build_paths, build_services
 
@@ -135,15 +142,23 @@ def _install_provider(monkeypatch, provider: BaseProvider) -> ProviderFactory:
     return factory
 
 
+_NO_PROVIDER = ProviderConfig()
+
+
+def _runtime(
+    root: Path, broker: StubBroker, provider: ProviderConfig = _NO_PROVIDER
+) -> ResearchRuntime:
+    return ResearchRuntime(
+        project_root=root,
+        session=SessionConfig(session_id="s1"),
+        research=ResearchOptions(task=TaskConfig(confirmation_gate=True)),
+        dependencies=RuntimeDependencies(provider=provider, broker=broker),
+    )
+
+
 @pytest.mark.asyncio
 async def test_real_runtime_exposes_clarification_rpc(tmp_path: Path) -> None:
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        session_id="s1",
-        broker=StubBroker(),
-        task_confirmation_gate=True,
-        auto_confirm=False,
-    )
+    runtime = _runtime(tmp_path, StubBroker())
     try:
         draft = await runtime.task_clarification_start("predict churn")
         assert draft.status == "READY_FOR_CONFIRMATION"
@@ -168,7 +183,7 @@ async def test_real_runtime_exposes_clarification_rpc(tmp_path: Path) -> None:
 def test_configured_build_services_requires_explicit_provider(tmp_path: Path) -> None:
     config = ResearchConfig(
         paths=build_paths(tmp_path, None),
-        provider=ProviderConfig(model="configured"),
+        dependencies=RuntimeDependencies(provider=ProviderConfig(model="configured")),
     )
 
     with pytest.raises(ValueError, match="provider"):
@@ -182,13 +197,10 @@ async def test_configured_runtime_constructs_and_shares_one_provider(
     provider = ScriptedProvider(envelope=_final_envelope("ready"))
     factory = _install_provider(monkeypatch, provider)
     client = object()
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        session_id="s1",
-        model="fake-model",
-        client=client,
-        broker=StubBroker(),
-        task_confirmation_gate=True,
+    runtime = _runtime(
+        tmp_path,
+        StubBroker(),
+        ProviderConfig(model="fake-model", client=client),
     )
     try:
         controller = runtime.services.workflow.clarification
@@ -205,12 +217,7 @@ async def test_configured_runtime_constructs_and_shares_one_provider(
 async def test_providerless_draft_stays_schema_v1_and_is_readable_with_provider(
     tmp_path: Path, monkeypatch
 ) -> None:
-    providerless = ResearchRuntime(
-        project_root=tmp_path,
-        session_id="s1",
-        broker=StubBroker(),
-        task_confirmation_gate=True,
-    )
+    providerless = _runtime(tmp_path, StubBroker())
     try:
         controller = providerless.services.workflow.clarification
         assert controller is not None
@@ -221,13 +228,7 @@ async def test_providerless_draft_stays_schema_v1_and_is_readable_with_provider(
         await providerless.aclose()
 
     _install_provider(monkeypatch, ScriptedProvider(envelope=_final_envelope("unused")))
-    configured = ResearchRuntime(
-        project_root=tmp_path,
-        session_id="s1",
-        model="fake-model",
-        broker=StubBroker(),
-        task_confirmation_gate=True,
-    )
+    configured = _runtime(tmp_path, StubBroker(), ProviderConfig(model="fake-model"))
     try:
         restored = await configured.task_clarification_get(draft.draft_id)
         assert restored.schema_version == 1
@@ -245,13 +246,7 @@ async def test_llm_runtime_publishes_scoped_redacted_tool_then_committed_summary
         envelope=_final_envelope(f"Task synthesized; api_key={secret}")
     )
     _install_provider(monkeypatch, provider)
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        session_id="s1",
-        model="fake-model",
-        broker=StubBroker(),
-        task_confirmation_gate=True,
-    )
+    runtime = _runtime(tmp_path, StubBroker(), ProviderConfig(model="fake-model"))
     observed: list[tuple[dict[str, object], str]] = []
 
     def capture(kind: str, payload: dict[str, object]) -> None:
@@ -300,13 +295,7 @@ async def test_llm_runtime_failure_is_retryable_fixed_and_replayed_once(
     provider = ScriptedProvider(error=f"provider down api_key={secret}")
     _install_provider(monkeypatch, provider)
     broker = StubBroker()
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        session_id="s1",
-        model="fake-model",
-        broker=broker,
-        task_confirmation_gate=True,
-    )
+    runtime = _runtime(tmp_path, broker, ProviderConfig(model="fake-model"))
     outputs: list[dict[str, object]] = []
     runtime.subscribe(
         lambda kind, payload: outputs.append(payload) if kind == "output" else None

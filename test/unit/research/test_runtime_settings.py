@@ -1,11 +1,45 @@
 """Focused tests for GUI settings control over the Ideator mechanism."""
 
+from dataclasses import fields
+from inspect import signature
+
 import pytest
 
-from athena.research.config import ResearchConfig, ResearchPaths, SearchLimits
+from athena.research.config import (
+    ResearchConfig,
+    ResearchOptions,
+    ResearchPaths,
+    ResearchPolicy,
+    RuntimeDependencies,
+    SearchLimits,
+    SessionConfig,
+)
 from athena.research.runtime import ResearchRuntime
 from athena.research.runtime.bootstrap import build_services
 from athena.research.runtime.services import RuntimeOptions
+
+
+def test_runtime_configuration_surface_stays_grouped() -> None:
+    assert tuple(signature(ResearchRuntime).parameters) == (
+        "project_root",
+        "session",
+        "research",
+        "dependencies",
+    )
+    assert tuple(field.name for field in fields(ResearchConfig)) == (
+        "paths",
+        "session_id",
+        "research",
+        "dependencies",
+    )
+    assert (
+        max(
+            len(fields(group))
+            for group in (SessionConfig, ResearchOptions, RuntimeDependencies)
+        )
+        == 5
+    )
+    assert not hasattr(ResearchOptions(), "__dict__")
 
 
 def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
@@ -16,12 +50,12 @@ def test_build_services_reads_search_limit_from_config(tmp_path) -> None:
             athena=athena,
             workspaces=tmp_path / "workspaces",
         ),
-        search=SearchLimits(search_limit=4),
+        research=ResearchOptions(search=SearchLimits(search_limit=4)),
     )
 
     services, _session = build_services(config, None)
 
-    assert config.policy.skip_validate is False
+    assert config.research.policy.skip_validate is False
     assert services.durable.state.search_limit == 4
 
 
@@ -30,9 +64,12 @@ def test_skip_validate_defaults_to_false_in_runtime_options() -> None:
 
 
 def test_research_runtime_composes_skip_validate(tmp_path) -> None:
-    runtime = ResearchRuntime(project_root=tmp_path, skip_validate=True)
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        research=ResearchOptions(policy=ResearchPolicy(skip_validate=True)),
+    )
 
-    assert runtime.config.policy.skip_validate is True
+    assert runtime.config.research.policy.skip_validate is True
     assert runtime.session.options.skip_validate is True
     assert runtime.supervisor._deps.phases.skip_validate is True
     assert runtime.settings()["skip_validate"] is True
@@ -41,7 +78,7 @@ def test_research_runtime_composes_skip_validate(tmp_path) -> None:
 def test_skip_validate_defaults_off_and_projects_to_settings(tmp_path) -> None:
     runtime = ResearchRuntime(project_root=tmp_path)
 
-    assert runtime.config.policy.skip_validate is False
+    assert runtime.config.research.policy.skip_validate is False
     assert runtime.session.options.skip_validate is False
     assert runtime.settings()["skip_validate"] is False
 
@@ -51,7 +88,8 @@ async def test_apply_settings_updates_skip_validate_without_changing_auto_valida
     tmp_path,
 ) -> None:
     runtime = ResearchRuntime(
-        project_root=tmp_path, auto_validate=True, skip_validate=False
+        project_root=tmp_path,
+        research=ResearchOptions(policy=ResearchPolicy(auto_validate=True)),
     )
 
     snapshot = await runtime.apply_settings({"skip_validate": True})

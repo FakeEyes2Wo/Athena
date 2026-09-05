@@ -9,6 +9,13 @@ from pathlib import Path
 import pytest
 
 from athena.research import ResearchRuntime
+from athena.research.config import (
+    ProviderConfig,
+    ResearchOptions,
+    RuntimeAdapters,
+    RuntimeDependencies,
+    TaskConfig,
+)
 from athena.research.runtime.resume_contract import ResearchControlError
 
 
@@ -20,11 +27,20 @@ def _make_runtime(tmp_path: Path, *, auto_seed_task: bool = False) -> ResearchRu
     """
     return ResearchRuntime(
         project_root=tmp_path,
-        model="fake",
-        client=object(),
-        auto_seed_task=auto_seed_task,
-        task_confirmation_gate=False,
-        auto_confirm=True,
+        research=ResearchOptions(
+            task=TaskConfig(auto_seed=auto_seed_task, auto_confirm=True)
+        ),
+        dependencies=RuntimeDependencies(
+            provider=ProviderConfig(model="fake", client=object())
+        ),
+    )
+
+
+def _prepare_runtime(tmp_path: Path, prepare) -> ResearchRuntime:
+    return ResearchRuntime(
+        project_root=tmp_path,
+        research=ResearchOptions(task=TaskConfig(auto_confirm=True)),
+        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(prepare=prepare)),
     )
 
 
@@ -205,12 +221,7 @@ async def test_pause_cancels_running_prepare_and_resume_restarts(
         started.set()
         await asyncio.Event().wait()  # 一直等，直到被取消
 
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        prepare_phase=prepare_phase,
-        task_confirmation_gate=False,
-        auto_confirm=True,
-    )
+    runtime = _prepare_runtime(tmp_path, prepare_phase)
     try:
         await runtime.start_task("pause during prepare")
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -236,12 +247,7 @@ async def test_stop_cancels_running_prepare(tmp_path: Path) -> None:
         started.set()
         await asyncio.Event().wait()
 
-    runtime = ResearchRuntime(
-        project_root=tmp_path,
-        prepare_phase=prepare_phase,
-        task_confirmation_gate=False,
-        auto_confirm=True,
-    )
+    runtime = _prepare_runtime(tmp_path, prepare_phase)
     try:
         await runtime.start_task("stop during prepare")
         await asyncio.wait_for(started.wait(), timeout=1)

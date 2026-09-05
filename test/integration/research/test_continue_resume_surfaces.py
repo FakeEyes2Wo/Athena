@@ -16,6 +16,7 @@ from athena.core.workspace import GitWorkBranch
 from athena.gui.service import GuiService
 from athena.research import ResearchRuntime
 from athena.research.clarification.errors import ClarificationError
+from athena.research.config import ResearchOptions, RuntimeDependencies, TaskConfig
 from athena.research.runtime.clarification import auto_confirm
 
 Phase = Literal["PREPARE", "SEARCH", "VALIDATE"]
@@ -63,9 +64,8 @@ async def build_phase_failure_harness(
     """Create confirmed durable state without network or subprocess phase work."""
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        task_confirmation_gate=False,
-        auto_confirm=True,
-        broker=_LocalBroker(),
+        research=ResearchOptions(task=TaskConfig(auto_confirm=True)),
+        dependencies=RuntimeDependencies(broker=_LocalBroker()),
     )
 
     async def fake_git_init(*_args: object, **_kwargs: object) -> str:
@@ -99,7 +99,7 @@ async def build_phase_failure_harness(
             raise RuntimeError(f"second {phase} failed")
         await release_second.wait()
 
-    phase_machine = runtime.supervisor._phases  # noqa: SLF001 - phase test seam
+    phase_machine = runtime.supervisor._phases
     if phase == "PREPARE":
         monkeypatch.setattr(phase_machine, "_run_prepare", phase_entry)
     elif phase == "SEARCH":

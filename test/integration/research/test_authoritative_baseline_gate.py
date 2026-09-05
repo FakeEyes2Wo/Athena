@@ -12,7 +12,11 @@ import pytest_asyncio
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.registry import AgentTypeRegistry
 from athena.core.tool import ToolRegistry
-from athena.research.config import ResearchConfig, ResearchPaths, TaskConfig
+from athena.research.config import (
+    ResearchConfig,
+    ResearchPaths,
+    RuntimeDependencies,
+)
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_source.http import UrllibTransport
 from athena.research.literature.paper_source.openalex import OpenAlexWork
@@ -425,7 +429,6 @@ class _GateHarness(_PrepareHarness):
                     athena=root / ".athena",
                     workspaces=root.parent,
                 ),
-                task=TaskConfig(),
             ),
             registry=self.registry,
             agents=self.agents,
@@ -510,7 +513,7 @@ async def _assert_fresh_runtime_reuses_external_authority(
 ) -> None:
     fresh = ResearchRuntime(
         project_root=harness.tmp_path,
-        baseline_authority=harness.authority,
+        dependencies=RuntimeDependencies(baseline_authority=harness.authority),
     )
 
     async def forbidden_handoff(**_kwargs: Any) -> str:
@@ -567,7 +570,7 @@ async def _assert_fresh_runtime_rejects_forged_local_trio(
 
     fresh = ResearchRuntime(
         project_root=harness.tmp_path,
-        baseline_authority=harness.authority,
+        dependencies=RuntimeDependencies(baseline_authority=harness.authority),
     )
 
     async def forbidden_handoff(**_kwargs: Any) -> str:

@@ -6,6 +6,12 @@ from pathlib import Path
 import pytest
 
 from athena.core.agent.provider import StreamEvent
+from athena.research.config import (
+    ResearchOptions,
+    RuntimeAdapters,
+    RuntimeDependencies,
+    TaskConfig,
+)
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.events import OutputEvent
 from athena_tui.controller import TuiController
@@ -101,9 +107,8 @@ async def test_tui_continue_restarts_failed_prepare_without_clarification(
 
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        prepare_phase=prepare,
-        task_confirmation_gate=False,
-        auto_confirm=True,
+        research=ResearchOptions(task=TaskConfig(auto_confirm=True)),
+        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(prepare=prepare)),
     )
     emitted: list[object] = []
     controller = TuiController(runtime, emit=emitted.append)

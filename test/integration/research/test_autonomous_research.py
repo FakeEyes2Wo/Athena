@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,14 @@ from athena.core.research_tree import Experiment, ExperimentStatus
 from athena.core.workspace import GitWorkBranch
 from athena.execution.runtime import CommandResult
 from athena.gui.service import GuiService
+from athena.research.config import (
+    ResearchOptions,
+    ResearchPolicy,
+    RuntimeAdapters,
+    RuntimeDependencies,
+    SearchLimits,
+    TaskConfig,
+)
 from athena.research.contracts import (
     DataScriptBundle,
     EvaluatorDescriptor,
@@ -37,6 +45,12 @@ from athena.research.prepare.baseline_research import (
 )
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.prepare import PrepareResult
+
+
+def _phase_dependencies(prepare, validate) -> RuntimeDependencies:
+    return RuntimeDependencies(
+        adapters=RuntimeAdapters(prepare=prepare, validation=validate)
+    )
 
 
 def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
@@ -147,7 +161,7 @@ def _write_verified_baseline_fixture(root: Path) -> VerifiedBaseline:
         design_sha256=design_sha256(artifacts.raw_design),
         selected_candidate_id=artifacts.selected.candidate_id,
         route="git",
-        verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        verified_at=datetime(2026, 9, 2, tzinfo=UTC),
         repository_url=str(artifacts.selected.repository_url),
         commit="a" * 40,
         attempts=[{"route": "git", "success": True, "diagnostic": "verified"}],
@@ -285,11 +299,11 @@ async def test_all_phases_share_one_durable_state(tmp_path: Path) -> None:
 
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        search_limit=0,
-        concurrency=1,
-        auto_validate=True,
-        prepare_phase=prepare,
-        validation_phase=validate,
+        research=ResearchOptions(
+            search=SearchLimits(search_limit=0),
+            policy=ResearchPolicy(auto_validate=True),
+        ),
+        dependencies=_phase_dependencies(prepare, validate),
     )
     events: list[tuple[str, dict[str, object]]] = []
     runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
@@ -311,7 +325,7 @@ async def test_all_phases_share_one_durable_state(tmp_path: Path) -> None:
     assert runtime.state.status == "COMPLETED"
     assert runtime.state is runtime.services.durable.state
     assert runtime.supervisor.state is runtime.state
-    assert set(kind for kind, _payload in events) == {"output", "state"}
+    assert {kind for kind, _payload in events} == {"output", "state"}
     exp_docs = tmp_path / ".athena" / "exp_docs"
     assert (exp_docs / "runs" / "exp_baseline.json").is_file()
     assert (exp_docs / "runs" / "validation-key.json").is_file()
@@ -367,13 +381,12 @@ async def test_skip_validate_completes_from_search_without_calling_validation(
 
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        task="improve the trusted baseline",
-        search_limit=0,
-        auto_validate=True,
-        skip_validate=True,
-        auto_confirm=True,
-        prepare_phase=prepare,
-        validation_phase=validate,
+        research=ResearchOptions(
+            task=TaskConfig(text="improve the trusted baseline", auto_confirm=True),
+            search=SearchLimits(search_limit=0),
+            policy=ResearchPolicy(auto_validate=True, skip_validate=True),
+        ),
+        dependencies=_phase_dependencies(prepare, validate),
     )
     events: list[tuple[str, dict[str, object]]] = []
     runtime.subscribe(lambda kind, data: events.append((kind, data)))
@@ -433,13 +446,12 @@ async def test_completed_skip_report_uses_durable_marker_after_live_preference_c
 
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        task="improve the trusted baseline",
-        search_limit=0,
-        auto_validate=True,
-        skip_validate=True,
-        auto_confirm=True,
-        prepare_phase=prepare,
-        validation_phase=validate,
+        research=ResearchOptions(
+            task=TaskConfig(text="improve the trusted baseline", auto_confirm=True),
+            search=SearchLimits(search_limit=0),
+            policy=ResearchPolicy(auto_validate=True, skip_validate=True),
+        ),
+        dependencies=_phase_dependencies(prepare, validate),
     )
     lifecycle = await runtime.start()
     await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
@@ -452,8 +464,7 @@ async def test_completed_skip_report_uses_durable_marker_after_live_preference_c
 
     reopened = ResearchRuntime(
         project_root=tmp_path,
-        skip_validate=False,
-        validation_phase=validate,
+        dependencies=RuntimeDependencies(adapters=RuntimeAdapters(validation=validate)),
     )
     try:
         assert reopened.state.validation_skipped is True
@@ -489,12 +500,12 @@ async def test_projection_failure_does_not_block_skip_finalization(
     calls = 0
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        task="improve the trusted baseline",
-        search_limit=0,
-        auto_confirm=True,
-        skip_validate=True,
-        prepare_phase=prepare,
-        validation_phase=validate,
+        research=ResearchOptions(
+            task=TaskConfig(text="improve the trusted baseline", auto_confirm=True),
+            search=SearchLimits(search_limit=0),
+            policy=ResearchPolicy(skip_validate=True),
+        ),
+        dependencies=_phase_dependencies(prepare, validate),
     )
     events: list[tuple[str, dict[str, object]]] = []
     runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
@@ -597,8 +608,8 @@ async def test_default_prepare_adapter_uses_existing_phase_runner(
     authority = _MemoryBaselineAuthorityStore()
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        task="predict survival",
-        baseline_authority=authority,
+        research=ResearchOptions(task=TaskConfig(text="predict survival")),
+        dependencies=RuntimeDependencies(baseline_authority=authority),
     )
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
@@ -671,8 +682,8 @@ async def test_prepare_phase_reuses_frozen_evaluator_checkpoint(
     authority = _MemoryBaselineAuthorityStore()
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        task="predict survival",
-        baseline_authority=authority,
+        research=ResearchOptions(task=TaskConfig(text="predict survival")),
+        dependencies=RuntimeDependencies(baseline_authority=authority),
     )
     runtime.register_supervisor(provider=object())
     await runtime.git.init()
@@ -735,7 +746,10 @@ async def test_default_validation_adapter_uses_frozen_inputs_and_supervisor_chec
         run_validation_plan,
         raising=False,
     )
-    runtime = ResearchRuntime(project_root=tmp_path, direction="minimize")
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        research=ResearchOptions(policy=ResearchPolicy(direction="minimize")),
+    )
     runtime.register_supervisor(provider=object())
     base_commit = await runtime.git.init()
     runtime.agents.start()

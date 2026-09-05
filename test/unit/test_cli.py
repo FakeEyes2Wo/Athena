@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-import athena.cli as cli
+from athena import cli
 from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
 
 
@@ -96,22 +96,22 @@ def test_run_options_configure_runtime_constructor() -> None:
         ]
     )
 
-    options = cli._runtime_options(args)
-    assert options["task"] == (
+    research, dependencies = cli._runtime_options(args)
+    assert research.task.text == (
         "predict churn\nDataset path: dataset/train.csv\nTarget: churned"
     )
-    assert options["search_limit"] == 3
-    assert options["auto_validate"] is True
-    assert options["direction"] == "minimize"
+    assert research.search.search_limit == 3
+    assert research.policy.auto_validate is True
+    assert research.policy.direction == "minimize"
     # 消融开关默认走 idea generation 门禁；--ideation baseline 是对照组。
-    assert options["ideation"] == "ideageneration"
-    assert options["survey"] is False
-    assert options["survey_query"] == ""
-    assert options["survey_max_papers"] == 20
-    assert options["survey_search_top_k"] == 0
-    assert options["survey_max_seconds"] == 0.0
-    assert options["experiment_timeout_s"] == DEFAULT_EXPERIMENT_TIMEOUT_S
-    assert options["compute"] is not None
+    assert research.policy.ideation == "ideageneration"
+    assert research.survey.enabled is False
+    assert research.survey.query == ""
+    assert research.survey.max_papers == 20
+    assert research.survey.search_top_k == 0
+    assert research.survey.max_seconds == 0.0
+    assert dependencies.execution.experiment_timeout_s == DEFAULT_EXPERIMENT_TIMEOUT_S
+    assert dependencies.execution.compute is not None
 
 
 def test_the_data_contract_reaches_the_runtime_not_just_the_prompt(tmp_path) -> None:
@@ -124,7 +124,7 @@ def test_the_data_contract_reaches_the_runtime_not_just_the_prompt(tmp_path) -> 
     source = tmp_path / "windows.csv"
     source.write_text("TIC,feature,label\n1,2,0\n1,3,1\n2,4,0\n", encoding="utf-8")
 
-    options = cli._runtime_options(
+    research, _dependencies = cli._runtime_options(
         cli._build_parser().parse_args(
             [
                 "run",
@@ -144,12 +144,12 @@ def test_the_data_contract_reaches_the_runtime_not_just_the_prompt(tmp_path) -> 
         )
     )
 
-    assert options["dataset_path"] == source
-    assert options["target_column"] == "label"
-    assert options["group_column"] == "TIC"
-    assert options["split_seed"] == 62
-    assert options["tolerance"] == 0.005
-    assert "TIC" in options["task"]
+    assert research.dataset.path == source
+    assert research.dataset.target_column == "label"
+    assert research.dataset.group_column == "TIC"
+    assert research.dataset.split_seed == 62
+    assert research.policy.tolerance == 0.005
+    assert "TIC" in research.task.text
 
 
 def test_the_platform_split_stays_off_for_inputs_it_cannot_split(tmp_path) -> None:
@@ -161,9 +161,11 @@ def test_the_platform_split_stays_off_for_inputs_it_cannot_split(tmp_path) -> No
         ["run", "--project", "p", "--data", str(directory), "--target", "label"],
         ["run", "--project", "p", "--data", "https://kaggle.com/c/titanic"],
     ):
-        options = cli._runtime_options(cli._build_parser().parse_args(argv))
-        assert options["dataset_path"] is None
-        assert options["target_column"] is None
+        research, _dependencies = cli._runtime_options(
+            cli._build_parser().parse_args(argv)
+        )
+        assert research.dataset.path is None
+        assert research.dataset.target_column is None
 
 
 def test_the_dataset_path_in_the_prompt_is_absolute(tmp_path, monkeypatch) -> None:
@@ -177,14 +179,14 @@ def test_the_dataset_path_in_the_prompt_is_absolute(tmp_path, monkeypatch) -> No
     source.write_text("TIC,feature,label\n1,2,0\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
-    options = cli._runtime_options(
+    research, _dependencies = cli._runtime_options(
         cli._build_parser().parse_args(
             ["run", "--project", "p", "--data", "windows.csv", "--target", "label"]
         )
     )
 
-    assert f"Dataset path: {source.resolve()}" in options["task"]
-    assert options["dataset_path"] == source.resolve()
+    assert f"Dataset path: {source.resolve()}" in research.task.text
+    assert research.dataset.path == source.resolve()
 
 
 def test_a_non_path_dataset_argument_is_left_alone(tmp_path, monkeypatch) -> None:
@@ -192,11 +194,11 @@ def test_a_non_path_dataset_argument_is_left_alone(tmp_path, monkeypatch) -> Non
     monkeypatch.chdir(tmp_path)
     url = "https://www.kaggle.com/competitions/titanic"
 
-    options = cli._runtime_options(
+    research, _dependencies = cli._runtime_options(
         cli._build_parser().parse_args(["run", "--project", "p", "--data", url])
     )
 
-    assert f"Dataset path: {url}" in options["task"]
+    assert f"Dataset path: {url}" in research.task.text
 
 
 def test_tolerance_rejects_negative_values() -> None:
@@ -207,32 +209,19 @@ def test_tolerance_rejects_negative_values() -> None:
         )
 
 
-def test_the_literature_survey_stays_off_unless_it_is_asked_for() -> None:
-    """默认不跑：一次调研是十几分钟的模型往返，不能由默认值替用户决定花这笔钱。"""
-    base = ["run", "--project", "p", "--data", "d.csv"]
-    parser = cli._build_parser()
-
-    default = cli._runtime_options(parser.parse_args(base))
-    enabled = cli._runtime_options(
-        parser.parse_args([*base, "--survey", "--survey-papers", "4"])
-    )
-
-    assert default["survey"] is False
-    assert enabled["survey"] is True
-    assert enabled["survey_max_papers"] == 4
-
-
 def test_run_defaults_to_auto_validate_for_headless_cli() -> None:
     args = cli._build_parser().parse_args(["run", "--project", "p", "--data", "d"])
     assert args.mode == "auto"
-    assert cli._runtime_options(args)["auto_validate"] is True
+    research, _dependencies = cli._runtime_options(args)
+    assert research.policy.auto_validate is True
 
 
 def test_run_preserves_zero_search_limit() -> None:
     args = cli._build_parser().parse_args(
         ["run", "--project", "p", "--data", "d", "--max-search-experiments", "0"]
     )
-    assert cli._runtime_options(args)["search_limit"] == 0
+    research, _dependencies = cli._runtime_options(args)
+    assert research.search.search_limit == 0
 
 
 def test_run_rejects_negative_search_limit() -> None:
@@ -264,7 +253,8 @@ def test_ideation_ablation_flag_reaches_the_runtime_constructor() -> None:
     args = cli._build_parser().parse_args(
         ["run", "--project", "p", "--data", "d.csv", "--ideation", "baseline"]
     )
-    assert cli._runtime_options(args)["ideation"] == "baseline"
+    research, _dependencies = cli._runtime_options(args)
+    assert research.policy.ideation == "baseline"
 
 
 def test_ideation_debate_flag_reaches_the_runtime_constructor() -> None:
@@ -272,7 +262,8 @@ def test_ideation_debate_flag_reaches_the_runtime_constructor() -> None:
     args = cli._build_parser().parse_args(
         ["run", "--project", "p", "--data", "d.csv", "--ideation", "debate"]
     )
-    assert cli._runtime_options(args)["ideation"] == "debate"
+    research, _dependencies = cli._runtime_options(args)
+    assert research.policy.ideation == "debate"
 
 
 def test_the_literature_survey_stays_off_unless_it_is_asked_for() -> None:
@@ -280,14 +271,14 @@ def test_the_literature_survey_stays_off_unless_it_is_asked_for() -> None:
     base = ["run", "--project", "p", "--data", "d.csv"]
     parser = cli._build_parser()
 
-    default = cli._runtime_options(parser.parse_args(base))
-    enabled = cli._runtime_options(
+    default, _dependencies = cli._runtime_options(parser.parse_args(base))
+    enabled, _dependencies = cli._runtime_options(
         parser.parse_args([*base, "--survey", "--survey-papers", "4"])
     )
 
-    assert default["survey"] is False
-    assert enabled["survey"] is True
-    assert enabled["survey_max_papers"] == 4
+    assert default.survey.enabled is False
+    assert enabled.survey.enabled is True
+    assert enabled.survey.max_papers == 4
 
 
 @pytest.mark.asyncio
@@ -311,7 +302,7 @@ async def test_run_subscribes_before_start_and_waits_for_terminal_state(
     assert await cli._cmd_run(args) == 0
     assert runtime.calls[:2] == ["subscribe", "start"]
     assert runtime.closed is True
-    assert captured["task"] == f"task\nDataset path: {data}"
+    assert captured["research"].task.text == f"task\nDataset path: {data}"
     output = capsys.readouterr().out
     assert "agent> working" in output
     assert "phase=COMPLETED status=COMPLETED" in output

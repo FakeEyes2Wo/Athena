@@ -22,7 +22,7 @@ async def _noop_publish(**_kwargs) -> None:
 async def test_prepare_data_skips_non_csv_contracts(tmp_path: Path) -> None:
     """Directory data must retain the evaluator-owned split path."""
     runtime = SimpleNamespace(
-        config=SimpleNamespace(dataset=DatasetConfig()),
+        config=SimpleNamespace(research=SimpleNamespace(dataset=DatasetConfig())),
         workspaces_root=tmp_path,
         publish_output=_noop_publish,
     )

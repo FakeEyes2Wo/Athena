@@ -7,12 +7,18 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from athena.core.research_models import Hypothesis, HypothesisBatch
-from athena.research.turns.runner import AgentTurnRunner
+from athena.research.config import (
+    ProviderConfig,
+    ResearchOptions,
+    RuntimeDependencies,
+    SearchLimits,
+)
 from athena.research.idea_generation.idea_schemas import (
     IdeatorHypothesisBatch,
     IdeatorHypothesisDraft,
 )
 from athena.research.runtime import ResearchRuntime
+from athena.research.turns.runner import AgentTurnRunner
 
 
 def _hypothesis(label: str) -> Hypothesis:
@@ -33,8 +39,12 @@ def _runtime(
     """Build a real runtime and set only the state exercised by these tests."""
     runtime = ResearchRuntime(
         project_root=tmp_path,
-        ideator_count=ideator_count,
-        hypotheses_per_ideator=hypotheses_per_ideator,
+        research=ResearchOptions(
+            search=SearchLimits(
+                ideator_count=ideator_count,
+                hypotheses_per_ideator=hypotheses_per_ideator,
+            )
+        ),
     )
     runtime.session.lifecycle.provider = object()
     runtime.state.eda_dir = eda_dir
@@ -382,7 +392,10 @@ async def test_ideator_eda_request_dispatches_data_agent(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_gated_batch_preserves_eda_request(monkeypatch, tmp_path) -> None:
     """gated 模式的 IdeatorHypothesisBatch 也把 eda_request 传给动态 EDA。"""
-    runtime = ResearchRuntime(project_root=tmp_path, model="m")
+    runtime = ResearchRuntime(
+        project_root=tmp_path,
+        dependencies=RuntimeDependencies(provider=ProviderConfig(model="m")),
+    )
 
     async def fake_pipeline(drafts, **kwargs):
         return [_hypothesis("kept")]

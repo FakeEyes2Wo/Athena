@@ -8,6 +8,8 @@ Inventory is not a completed semantic review. Each pending file requires content
 
 Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScript checkpoint now and do not spend further simplification time in `athena_ts`. Remaining unreviewed TypeScript ledger entries are deferred, not counted as reviewed. Continue the repository-wide review on Python, GUI, gateway, Rust, and development scripts directly on `main`.
 
+Delivery rule: complete each reviewed slice on `main`, push it to `origin/main`, and remove any task-owned temporary branch or worktree before reporting delivery. Never treat user-owned untracked directories as task worktrees or delete them during cleanup.
+
 ## Tasks
 
 - [x] Enumerate tracked application source files and record baseline line counts.
@@ -409,7 +411,7 @@ Read `config.py` completely and traced every `ResearchConfig`, `SearchLimits`, `
 
 Reduce `ResearchPaths` from nine stored fields and constructor arguments to three: `root`, `athena`, and the session-sensitive `workspaces`. Preserve state, tree, sessions, clarification, and handoff access as read-only properties derived from the authoritative state root, and delete `clarification_confirmation` entirely. `build_paths` and the sole manual test construction now pass three fields. Confirmation recovery uses `ClarificationStore.journal_path`, keeping journal naming in its storage owner. This removes six independently supplied path values and makes inconsistent layouts unrepresentable.
 
-Expanded testing exposed a real earlier context regression: `confirmed_task_context_block` read a nonexistent `ResearchRuntime.task_confirmation_gate` convenience attribute. Read the canonical `runtime.config.task_confirmation_gate` instead and update the focused fake runtime to provide the same explicit contract; no defensive fallback was added. The four previously failing regressions pass. Final path/config/clarification/breakpoint/confirmation/continue testing passed 188 tests, and the alternate complete runtime-survey selection passed 156. Targeted pre-commit hooks, Black, Python compilation, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the config row advances reviewed baseline coverage to 250/602. Whole-repository acceptance remains pending.
+Expanded testing exposed a real earlier context regression: `confirmed_task_context_block` read a nonexistent `ResearchRuntime.task_confirmation_gate` convenience attribute. Read the canonical `runtime.config.research.task.confirmation_gate` instead and update the focused fake runtime to provide the same explicit contract; no defensive fallback was added. The four previously failing regressions pass. Final path/config/clarification/breakpoint/confirmation/continue testing passed 188 tests, and the alternate complete runtime-survey selection passed 156. Targeted pre-commit hooks, Black, Python compilation, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the config row advances reviewed baseline coverage to 250/602. Whole-repository acceptance remains pending.
 
 ## Research contract-module consolidation
 
@@ -616,6 +618,14 @@ Reopened the already-reviewed configuration boundary after full facade analysis 
 The explicit grouping grows `config.py` from 102 immediately before this slice to 137 physical lines and the facade's construction mapping from 710 to 729; the engineering gain is reduced attribute surface and separated responsibilities, not line count. Remove no compatibility properties for the old flat shape. Migrate direct config tests and stale `SimpleNamespace` fakes to the real grouped contracts. This also repairs four pre-existing phase-preflight failures and restores nine authoritative baseline-gate integration tests that previously crashed before PREPARE because their harness lacked the current state/config protocol. The complete research unit suite passed 1,253 tests, the CLI/TUI/runtime entry selection passed 37, and the authoritative baseline gate passed all 9 tests. Ruff, Black, Python compilation, hooks, and `git diff --check` passed.
 
 The configuration row remains Reviewed and coverage stays at 353/602. The facade remains Pending because its external constructor still exposes 36 keywords; the next slice must replace that call surface with grouped inputs rather than preserve it through aliases.
+
+## Runtime constructor grouping follow-up
+
+Replace the 36-keyword `ResearchRuntime` constructor with four named inputs: `project_root`, `session`, `research`, and `dependencies`. `SessionConfig` owns two location/identity values; `ResearchOptions` owns five cohesive research groups; `RuntimeDependencies` owns five provider/execution/integration boundaries. The resolved `ResearchConfig` consequently falls from ten top-level fields to four (`paths`, `session_id`, `research`, and `dependencies`), while no public input group exceeds five fields. Make all thirteen immutable configuration records slotted so instances cannot grow undeclared state. No legacy keyword collector, aliases, or flat compatibility properties remain. Repository AST inspection confirms every Python construction site uses only the four grouped inputs.
+
+Delete the CLI's duplicate 18-field `CliRunConfig` and dictionary-expansion protocol. CLI, TUI, GUI, headless, direct tests, and integration harnesses now construct only the groups they vary. Delete three constructor-only type aliases; the facade falls from 729 to 650 physical lines. Configuration grows from 137 to 161 lines because the three explicit composite records replace an implicit flat contract. Remove four early survey tests (three were shadowed by same-name definitions and one duplicated a stronger corpus boundary test) plus one shadowed CLI survey test; the retained survey suite collects and passes 21 tests.
+
+The complete research unit suite passes 1,253 tests; the migrated CLI/TUI/GUI entry selection passes 34; and the nine affected integration files pass 89. A direct contract test fixes the constructor at four parameters, `ResearchConfig` at four fields, and each external group at no more than five fields. The facade row remains Pending and reviewed coverage stays at 353/602 because its remaining forwarding methods still require full caller decisions. `runtime/survey.py` also remains Pending because this slice migrated its config read but did not perform its full-file review. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -1122,7 +1132,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/persistence.py` | 149 | Reviewed; merge draft and journal stores, delete one class and make recovery zero-argument |
 | `src/athena/research/clarification/requirements.py` | 96 | Reviewed; share predictive field policy and use native whitespace normalization |
 | `src/athena/research/clarification/state.py` | 231 | Reviewed; retain cohesive pure transitions and centralized invariant revalidation |
-| `src/athena/research/config.py` | 83 | Reviewed; three roots plus six cohesive groups reduce the main config from 25 fields to 10 |
+| `src/athena/research/config.py` | 83 | Reviewed; three public input groups and four resolved fields replace the 25-field flat config |
 | `src/athena/research/contracts.py` | 88 | Reviewed; absorb all shared research payload models behind one explicit export surface |
 | `src/athena/research/data_models.py` | 46 | Reviewed; merged into contracts.py and deleted |
 | `src/athena/research/evaluation/__init__.py` | 5 | Reviewed; retain one three-symbol facade for trusted scoring and generalization policy |
@@ -1232,7 +1242,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/runtime/corpus.py` | 90 | Reviewed; retain minimal one-runtime-argument corpus/read-ledger facade |
 | `src/athena/research/runtime/event_projection.py` | 89 | Reviewed; retain pure projection boundary and remove redundant implementation export list |
 | `src/athena/research/runtime/events.py` | 457 | Reviewed; merge subscriber readiness state and reduce Agent buffers from three fields to two |
-| `src/athena/research/runtime/facade.py` | 728 | Pending |
+| `src/athena/research/runtime/facade.py` | 728 | Pending; constructor reduced from 36 keywords to four grouped inputs, forwarding surface still open |
 | `src/athena/research/runtime/phase_runner.py` | 338 | Pending |
 | `src/athena/research/runtime/resume_contract.py` | 56 | Pending |
 | `src/athena/research/runtime/services.py` | 136 | Pending |

@@ -14,12 +14,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from athena.core.agent import settings
+from athena.research import ResearchRuntime
+from athena.research.config import (
+    ProviderConfig,
+    ResearchOptions,
+    ResearchPolicy,
+    RuntimeDependencies,
+    SessionConfig,
+    TaskConfig,
+)
 from gui_gateway.handler import GuiRequestHandler
 from gui_gateway.human import HumanRequestBroker
 from gui_gateway.state_store import GuiStateStore
 from gui_gateway.transport import WebSocketTransport
-from athena.core.agent import settings
-from athena.research import ResearchRuntime
 
 RuntimeFactory = Callable[..., ResearchRuntime]
 
@@ -41,15 +49,14 @@ def _make_runtime(
     """
     return ResearchRuntime(
         project_root=project_root,
-        state_root=state_root,
-        session_id=session_id,
-        model=settings.model_name(),
-        auto_validate=True,
-        skip_validate=skip_validate,
-        task_confirmation_gate=True,
-        auto_confirm=False,
-        ask_user=ask_user,
-        broker=broker,
+        session=SessionConfig(state_root=state_root, session_id=session_id),
+        research=ResearchOptions(
+            task=TaskConfig(confirmation_gate=True, ask_user=ask_user),
+            policy=ResearchPolicy(auto_validate=True, skip_validate=skip_validate),
+        ),
+        dependencies=RuntimeDependencies(
+            provider=ProviderConfig(model=settings.model_name()), broker=broker
+        ),
     )
 
 

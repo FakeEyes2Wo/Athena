@@ -15,15 +15,22 @@ import pytest
 from athena.core.artifact_store import LocalArtifactStore
 from athena.core.research_models import Hypothesis, HypothesisBatch
 from athena.core.tool import ToolRegistry, tool
-from athena.research.turns import ideator as atr_module
-from athena.research.runtime import survey as runtime_survey_module
-from athena.research.turns.runner import AgentTurnRunner
+from athena.research.config import (
+    ProviderConfig,
+    ResearchOptions,
+    ResearchPolicy,
+    RuntimeDependencies,
+    SurveyConfig,
+)
 from athena.research.literature.paper_rag.models import PaperSummary
 from athena.research.literature.paper_source.http import HostRateLimiter
-from athena.research.runtime import ResearchRuntime
-from athena.research.supervisor.state import ResearchState
 from athena.research.literature.survey import SurveyReport, SurveyStack
 from athena.research.literature.survey.wiring import build_survey_tools
+from athena.research.runtime import ResearchRuntime
+from athena.research.runtime import survey as runtime_survey_module
+from athena.research.supervisor.state import ResearchState
+from athena.research.turns import ideator as atr_module
+from athena.research.turns.runner import AgentTurnRunner
 
 READ_ONLY_TOOLS = {
     "paper_chunk_read",
@@ -72,11 +79,11 @@ def _runtime(
     """Build a real runtime with explicit survey collaborators."""
     runtime = ResearchRuntime(
         project_root=tempfile.mkdtemp(prefix="survey_runtime_"),
-        model="m",
-        survey=survey,
-        survey_query=survey_query,
-        survey_max_papers=10,
-        ideation=ideation,
+        research=ResearchOptions(
+            survey=SurveyConfig(enabled=survey, query=survey_query, max_papers=10),
+            policy=ResearchPolicy(ideation=ideation),
+        ),
+        dependencies=RuntimeDependencies(provider=ProviderConfig(model="m")),
     )
     runtime.services.durable.state = state
     runtime.services.workflow.supervisor = SimpleNamespace(
@@ -209,81 +216,8 @@ async def test_an_empty_corpus_is_reported_rather_than_recorded(monkeypatch) -> 
     assert published[-1]["channel"] == "error"
 
 
-@pytest.mark.asyncio
-async def test_ideation_runs_without_waiting_when_the_corpus_is_not_ready(
-    monkeypatch,
-) -> None:
-    requests: list[dict] = []
-    runtime = _runtime(_state())
-    runtime.services.infrastructure.agents = _AgentSpy(requests)
-    runner = AgentTurnRunner(runtime)
-
-    async def wait(_agents, _run_id, _publish, **_cursor):
-        return SimpleNamespace(error=None)
-
-    async def load(_summary, _store, _schema):
-        return SimpleNamespace(hypotheses=[])
-
-    async def finish(_batch, *, rejections=None):
-        return HypothesisBatch()
-
-    monkeypatch.setattr("athena.research.turns.common.wait_run_events", wait)
-    monkeypatch.setattr(atr_module, "load_agent_result", load)
-    monkeypatch.setattr(runner, "_finish_ideator_batch", finish)
-
-    await runner._run_ideator_lane("ideator-1-1", 2, _eda_dir())
-
-    assert runtime.survey_corpus_ref() is None
-    assert "corpus_ref" not in requests[0]["content"]
-
-
-@pytest.mark.asyncio
-async def test_a_ready_corpus_reaches_every_lane_with_a_citation_instruction(
-    monkeypatch,
-) -> None:
-    requests: list[dict] = []
-    runtime = _runtime(_state(corpus_ref="sha256:corpus"))
-    runtime.services.infrastructure.agents = _AgentSpy(requests)
-    runner = AgentTurnRunner(runtime)
-
-    async def wait(_agents, _run_id, _publish, **_cursor):
-        return SimpleNamespace(error=None)
-
-    async def load(_summary, _store, _schema):
-        return SimpleNamespace(hypotheses=[])
-
-    async def finish(_batch, *, rejections=None):
-        return HypothesisBatch()
-
-    monkeypatch.setattr("athena.research.turns.common.wait_run_events", wait)
-    monkeypatch.setattr(atr_module, "load_agent_result", load)
-    monkeypatch.setattr(runner, "_finish_ideator_batch", finish)
-
-    await runner._run_ideator_lane("ideator-1-1", 2, _eda_dir())
-
-    content = requests[0]["content"]
-    assert "sha256:corpus" in content
-    assert "sources" in content
-
-
-def test_the_ideator_gets_read_only_operators_and_no_producers() -> None:
-    runtime = _runtime(_state(corpus_ref="sha256:corpus"), survey_stack=_stack())
-    tools = runtime.ideator_tools()()
-
-    names = {spec.name for spec in tools.specs}
-    assert READ_ONLY_TOOLS <= names
-    assert not (PRODUCER_TOOLS & names)
-
-
-def test_no_paper_tools_are_attached_before_a_corpus_exists() -> None:
-    runtime = _runtime(_state(), survey_stack=_stack())
-    tools = runtime.ideator_tools()()
-
-    assert tools is None
-
-
 def test_survey_tools_merge_into_an_existing_registry() -> None:
-    from athena.core.tool import ToolRegistry, tool
+    from athena.core.tool import tool
 
     @tool
     async def read_file(path: str) -> dict:
@@ -307,7 +241,7 @@ async def test_debate_ideation_receives_corpus_instruction_and_read_only_tools(
     """--ideation debate 同样接入 survey：提示带 corpus_ref，agent 拿只读论文工具。"""
     runtime = _runtime(_state(corpus_ref="sha256:corpus"), survey_stack=_stack())
     runtime.services.workflow.supervisor.tree = SimpleNamespace(
-        best_experiment_id=lambda: None, to_dict=lambda: {}
+        best_experiment_id=lambda: None, to_dict=dict
     )
     runtime.publish_output = _recorder([])
     runner = AgentTurnRunner(runtime)

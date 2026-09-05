@@ -11,13 +11,15 @@ import logging
 import traceback
 from typing import Any
 
+from athena.core.agent.chat import single_turn_chat
 from athena.research.literature.survey import (
     SurveyRequest,
     SurveyStack,
     build_survey_stack,
+)
+from athena.research.literature.survey import (
     run_survey as run_survey_pipeline,
 )
-from athena.core.agent.chat import single_turn_chat
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,10 @@ SURVEY_QUERY_PROMPT = (
 
 def start_survey(runtime: Any) -> None:
     """Start the background survey once, unless a corpus already exists."""
-    if not runtime.config.survey.enabled or runtime.session.survey.task is not None:
+    if (
+        not runtime.config.research.survey.enabled
+        or runtime.session.survey.task is not None
+    ):
         return
     if runtime.state.corpus_ref is not None:
         return
@@ -44,8 +49,8 @@ def start_survey(runtime: Any) -> None:
 
 async def survey_topic(runtime: Any) -> str:
     """Choose the survey query: explicit setting first, task-derived otherwise."""
-    if runtime.config.survey.query.strip():
-        return runtime.config.survey.query.strip()
+    if runtime.config.research.survey.query.strip():
+        return runtime.config.research.survey.query.strip()
     task = runtime.task_text.strip()
     if not task or runtime.model is None:
         return task
@@ -85,12 +90,14 @@ async def run_survey(runtime: Any) -> None:
 
         report = await run_survey_pipeline(
             stack,
-            SurveyRequest(query=topic, max_papers=runtime.config.survey.max_papers),
+            SurveyRequest(
+                query=topic, max_papers=runtime.config.research.survey.max_papers
+            ),
             emit=emit,
         )
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - survey failure must not stop SEARCH
         await runtime.publish_output(
             source="tool",
             channel="error",

@@ -337,8 +337,7 @@ git commit -m "feat: make supervisor journal restart safe"
 
 **Interfaces:**
 
-- Produces: `ResearchRuntime(project_root, model=None, client=None)`, `dispatch(method, params)`, `subscribe(callback)`, `registered_worker_types`, `aclose()`。
-- Produces: stable `STATUS(execution_id=None)` shape from the design document。
+- Current interface: `ResearchRuntime(project_root=..., session=..., research=..., dependencies=...)`; lifecycle/control uses `start`, `start_task`, `message`, `subscribe`, `settings`, and `aclose`. This grouped interface supersedes the task-era flat constructor and `dispatch` proposal。
 
 - [x] **Step 1: 写 CLI/Runtime 失败测试**
 

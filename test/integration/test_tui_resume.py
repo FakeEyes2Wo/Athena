@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from athena.research.config import SessionConfig
 from athena.research.runtime import ResearchRuntime
 from athena_tui.app import AthenaApp
 from athena_tui.state import HistoryEntry
@@ -51,7 +52,8 @@ async def test_restart_replays_history_and_resumes_sequence(tmp_path: Path) -> N
 async def test_scoped_output_is_live_but_only_durable_output_replays(
     tmp_path: Path,
 ) -> None:
-    runtime = ResearchRuntime(project_root=tmp_path, session_id="session-1")
+    session = SessionConfig(session_id="session-1")
+    runtime = ResearchRuntime(project_root=tmp_path, session=session)
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
 
@@ -87,7 +89,7 @@ async def test_scoped_output_is_live_but_only_durable_output_replays(
     )
     await runtime.aclose()
 
-    restarted = ResearchRuntime(project_root=tmp_path, session_id="session-1")
+    restarted = ResearchRuntime(project_root=tmp_path, session=session)
     replayed = restarted.replay_output_events()
     assert [record["text"] for record in replayed] == ["durable summary"]
     assert (
@@ -114,7 +116,9 @@ async def test_scoped_output_is_live_but_only_durable_output_replays(
 async def test_scoped_output_persistence_failure_remains_live_only(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
-    runtime = ResearchRuntime(project_root=tmp_path, session_id="session-1")
+    runtime = ResearchRuntime(
+        project_root=tmp_path, session=SessionConfig(session_id="session-1")
+    )
     seen: list[tuple[str, dict]] = []
     runtime.subscribe(lambda kind, payload: seen.append((kind, payload)))
     log_path = runtime.events._log_path

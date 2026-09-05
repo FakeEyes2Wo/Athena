@@ -93,9 +93,10 @@ async def test_run_does_not_auto_start_and_enables_task_seeding(monkeypatch) -> 
 
     assert await entrypoint._run(args) == 7
     assert calls == ["app"]
-    assert seen.get("auto_seed_task") is True
-    assert seen.get("search_limit") == 3
-    assert seen.get("auto_validate") is False
+    research = seen["research"]
+    assert research.task.auto_seed is True
+    assert research.search.search_limit == 3
+    assert research.policy.auto_validate is False
 
 
 @pytest.mark.asyncio

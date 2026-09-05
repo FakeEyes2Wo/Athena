@@ -7,6 +7,7 @@
 
 from pathlib import Path
 
+from athena.research.config import ResearchOptions, SearchLimits
 from athena.research.runtime import ResearchRuntime
 from athena.research.supervisor.state import ResearchState
 
@@ -23,7 +24,10 @@ def _project(tmp_path: Path, limit: int) -> Path:
 def test_an_explicit_budget_replaces_the_persisted_one(tmp_path: Path) -> None:
     project = _project(tmp_path, 4)
 
-    runtime = ResearchRuntime(project_root=project, search_limit=16)
+    runtime = ResearchRuntime(
+        project_root=project,
+        research=ResearchOptions(search=SearchLimits(search_limit=16)),
+    )
 
     assert runtime.state.search_limit == 16
     assert ResearchState.load(project / ".athena" / "state.json").search_limit == 16

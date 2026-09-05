@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,22 +15,15 @@ from athena.core.contracts import ArtifactRef
 from athena.core.git_workspace import LocalGitWorkspace
 from athena.core.research_tree import ResearchTree
 from athena.core.tool import ToolRegistry
-from athena.core.tool_types import AskUser
-from athena.execution.compute_config import ComputeConfig, load_compute_config
+from athena.execution.compute_config import load_compute_config
 from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.kaggle import KaggleStack
 from athena.research.config import (
-    DatasetConfig,
-    ExecutionConfig,
-    ProviderConfig,
     ResearchConfig,
-    ResearchPolicy,
-    RuntimeAdapters,
-    SearchLimits,
-    SurveyConfig,
-    TaskConfig,
+    ResearchOptions,
+    RuntimeDependencies,
+    SessionConfig,
 )
-from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_rag.models import PaperSummary
 from athena.research.literature.survey import SurveyStack
@@ -117,20 +111,17 @@ from athena.research.runtime.survey import (
     survey_topic as survey_topic_impl,
 )
 from athena.research.script_runner import DataScriptRunner
-from athena.research.supervisor.experiment import PlanTurnResult
-from athena.research.supervisor.plans import DEFAULT_EXPERIMENT_TIMEOUT_S
-from athena.research.supervisor.prepare import PrepareResult
 from athena.research.supervisor.state import ResearchState
 from athena.research.supervisor.supervisor import Supervisor
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SURVEY_PAPERS = 20
+_DEFAULT_SESSION = SessionConfig()
+_DEFAULT_RESEARCH = ResearchOptions()
+_DEFAULT_DEPENDENCIES = RuntimeDependencies()
 
 EmitFn = Callable[[str, dict[str, object]], Awaitable[None] | None]
-PreparePhase = Callable[[], Awaitable[PrepareResult]]
-ValidationPhase = Callable[[str, float], Awaitable[ValidationResult]]
-PlanTurn = Callable[[str, ResearchState], Awaitable[PlanTurnResult]]
 
 
 class ResearchRuntime:
@@ -140,103 +131,33 @@ class ResearchRuntime:
         self,
         *,
         project_root: str | Path | None = None,
-        state_root: str | Path | None = None,
-        session_id: str = "default",
-        model: str | None = None,
-        client: Any = None,
-        task: str = "",
-        auto_seed_task: bool = False,
-        search_limit: int | None = None,
-        concurrency: int = 1,
-        ideator_count: int = 3,
-        hypotheses_per_ideator: int = 2,
-        auto_validate: bool = False,
-        skip_validate: bool = False,
-        task_confirmation_gate: bool = False,
-        auto_confirm: bool = False,
-        direction: Literal["maximize", "minimize"] = "maximize",
-        tolerance: float = 0.0,
-        ideation: Literal["ideageneration", "baseline", "debate"] = "ideageneration",
-        dataset_path: str | Path | None = None,
-        target_column: str | None = None,
-        split_seed: int = 0,
-        group_column: str | None = None,
-        data_root: str | Path | None = None,
-        experiment_timeout_s: int = DEFAULT_EXPERIMENT_TIMEOUT_S,
-        compute: ComputeConfig | None = None,
-        # Kept for provider-less test adapters; production providers must use
-        # the authoritative PREPARE orchestrator.
-        prepare_phase: PreparePhase | None = None,
-        validation_phase: ValidationPhase | None = None,
-        plan_turn: Callable[[str, Any], Awaitable[PlanTurnResult]] | None = None,
-        ask_user: AskUser | None = None,
-        broker: Any | None = None,
-        baseline_authority: BaselineAuthorityStore | None = None,
-        survey: bool = False,
-        survey_query: str = "",
-        survey_max_papers: int = DEFAULT_SURVEY_PAPERS,
-        survey_search_top_k: int = 0,
-        survey_max_seconds: float = 0.0,
+        session: SessionConfig = _DEFAULT_SESSION,
+        research: ResearchOptions = _DEFAULT_RESEARCH,
+        dependencies: RuntimeDependencies = _DEFAULT_DEPENDENCIES,
     ) -> None:
-        paths = build_paths(project_root, state_root)
-        search = SearchLimits(
-            search_limit=10 if search_limit is None else search_limit,
-            concurrency=concurrency,
-            ideator_count=ideator_count,
-            hypotheses_per_ideator=hypotheses_per_ideator,
-        )
-        survey_config = SurveyConfig(
-            enabled=survey,
-            query=survey_query,
-            max_papers=survey_max_papers,
-            search_top_k=survey_search_top_k,
-            max_seconds=survey_max_seconds,
-        )
+        execution = dependencies.execution
+        if execution.compute is None:
+            dependencies = replace(
+                dependencies,
+                execution=replace(execution, compute=load_compute_config()),
+            )
         config = ResearchConfig(
-            paths=paths,
-            session_id=session_id,
-            provider=ProviderConfig(model=model, client=client),
-            task=TaskConfig(
-                text=task,
-                auto_seed=auto_seed_task,
-                confirmation_gate=task_confirmation_gate,
-                auto_confirm=auto_confirm,
-                ask_user=ask_user,
-            ),
-            search=search,
-            survey=survey_config,
-            policy=ResearchPolicy(
-                auto_validate=auto_validate,
-                skip_validate=skip_validate,
-                direction=direction,
-                tolerance=tolerance,
-                ideation=ideation,
-            ),
-            dataset=DatasetConfig(
-                path=Path(dataset_path).resolve() if dataset_path else None,
-                target_column=target_column,
-                split_seed=split_seed,
-                group_column=group_column,
-            ),
-            execution=ExecutionConfig(
-                data_root=Path(data_root).resolve() if data_root else None,
-                experiment_timeout_s=experiment_timeout_s,
-                compute=compute if compute is not None else load_compute_config(),
-            ),
-            adapters=RuntimeAdapters(
-                prepare=prepare_phase,
-                validation=validation_phase,
-                plan=plan_turn,
-            ),
+            paths=build_paths(project_root, session.state_root),
+            session_id=session.session_id,
+            research=research,
+            dependencies=dependencies,
         )
 
+        provider_config = dependencies.provider
         provider = (
-            ResponsesProvider(model, client=client) if model is not None else None
+            ResponsesProvider(provider_config.model, client=provider_config.client)
+            if provider_config.model is not None
+            else None
         )
         services, session = build_services(
             config,
-            broker,
-            baseline_authority,
+            dependencies.broker,
+            dependencies.baseline_authority,
             provider=provider,
         )
         self._config = config
@@ -395,12 +316,12 @@ class ResearchRuntime:
     @property
     def model(self) -> str | None:
         """Return the configured model identifier."""
-        return self._config.provider.model
+        return self._config.dependencies.provider.model
 
     @property
     def client(self) -> Any:
         """Return the optional provider client override."""
-        return self._config.provider.client
+        return self._config.dependencies.provider.client
 
     @property
     def direction(self) -> Literal["maximize", "minimize"]:
@@ -415,12 +336,12 @@ class ResearchRuntime:
     @property
     def prepare_phase(self):
         """Return the optional PREPARE phase override."""
-        return self._config.adapters.prepare
+        return self._config.dependencies.adapters.prepare
 
     @property
     def validation_phase(self):
         """Return the optional VALIDATE phase override."""
-        return self._config.adapters.validation
+        return self._config.dependencies.adapters.validation
 
     @property
     def config(self):
@@ -440,7 +361,7 @@ class ResearchRuntime:
     @property
     def plan_turn(self):
         """Return the optional plan-turn override."""
-        return self._config.adapters.plan
+        return self._config.dependencies.adapters.plan
 
     def register_supervisor(self, *, provider: object) -> None:
         """Register the long-lived SupervisorAgent once."""

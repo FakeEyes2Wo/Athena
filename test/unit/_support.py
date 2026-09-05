@@ -9,6 +9,7 @@ from athena.agents.tools.generic_tools import generic_tool_registry
 from athena.core.agent import settings
 from athena.core.agent.provider import StreamEvent
 from athena.core.agent.runtime import Agent
+from athena.research.config import ProviderConfig, RuntimeDependencies
 from athena.research.runtime import ResearchRuntime
 
 # 固定格式 task-understanding 报告（init_agent.md prompt §格式）。
@@ -133,8 +134,11 @@ def make_project(tmp_path: Path) -> ResearchRuntime:
     """
     return ResearchRuntime(
         project_root=tmp_path,
-        model=settings.model_name(),
-        client=FakeStreamingClient(),
+        dependencies=RuntimeDependencies(
+            provider=ProviderConfig(
+                model=settings.model_name(), client=FakeStreamingClient()
+            )
+        ),
     )
 
 
