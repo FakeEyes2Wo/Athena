@@ -287,6 +287,14 @@ Delete the unread broker dependency and cached rollout path so `GuiService` cons
 
 The complete gateway-handler, GUI unit, continue/resume, durable-report, and skipped-validation report selection passed 78 tests after final formatting. Python compilation, Black, blocking Ruff, removed-interface searches, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the service row advances reviewed baseline coverage to 228/602. The already-reviewed handler and integration test rows receive only necessary caller migration and do not increase coverage. Whole-repository acceptance remains pending.
 
+## GUI trace review
+
+Read `traces.py` completely and traced its only two consumers through `GuiService` and gateway routes. Retain the module as the cohesive JSONL parsing, redaction, and PydanticAI-message normalization boundary; merging it into the service would reverse the service size reduction and mix filesystem parsing with RPC composition.
+
+Read each rollout file's stat once, replace the manual message counter with a generator, and remove the one-element candidate list used to locate an exact agent file. Make the unconsumed public `normalize_msg` private, remove `_part_to_message`'s impossible `None` result and caller branch, and consolidate six text-like part variants behind one output construction while preserving their role/kind differences. Black expands the previously unformatted long dictionary literals, so physical lines rise from 122 to 135 despite the reduced state and branching; no line-count reduction is claimed.
+
+The GUI unit and complete gateway-handler selection passed 59 tests, including a new real-JSONL summary, malformed-record, compaction, user-message, and tool-call regression. Python compilation, Black, blocking Ruff, and `git diff --check` passed; pytest reported one existing cache-permission warning. Closing the trace row advances reviewed baseline coverage to 229/602; the new regression file is tracked separately below. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -766,7 +774,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/gui/graph.py` | 309 | Reviewed; one algorithm registry, snapshot projection and deque traversals |
 | `test/unit/gui/test_graph.py` | New | Reviewed; snapshot, dispatch and cycle-path regressions |
 | `src/athena/gui/service.py` | 345 | Reviewed; one runtime attribute, one confirmation request, synchronous reads and no legacy task path |
-| `src/athena/gui/traces.py` | 122 | Pending |
+| `src/athena/gui/traces.py` | 122 | Reviewed; one stat per file, direct lookup and consolidated part normalization |
+| `test/unit/gui/test_traces.py` | New | Reviewed; real JSONL summary and normalized-message regression |
 | `src/athena/kaggle/__init__.py` | 59 | Pending |
 | `src/athena/kaggle/auth.py` | 72 | Pending |
 | `src/athena/kaggle/client.py` | 418 | Pending |

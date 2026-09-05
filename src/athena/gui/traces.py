@@ -19,38 +19,50 @@ def list_traces(rollout_dir: Path) -> list[dict[str, Any]]:
         return []
     traces: list[dict[str, Any]] = []
     for path in sorted(rollout_dir.glob("*.jsonl")):
-        agent_id = path.stem
-        messages = 0
         try:
+            stat = path.stat()
             with path.open("r", encoding="utf-8", errors="replace") as fd:
-                for line in fd:
-                    if line.strip() and '"msg"' in line:
-                        messages += 1
+                messages = sum(1 for line in fd if line.strip() and '"msg"' in line)
         except OSError:
             continue
         traces.append(
             {
-                "agent_id": agent_id,
+                "agent_id": path.stem,
                 "file": str(path),
-                "size_bytes": path.stat().st_size,
+                "size_bytes": stat.st_size,
                 "messages": messages,
-                "updated_at": path.stat().st_mtime,
+                "updated_at": stat.st_mtime,
             }
         )
     return traces
 
 
-def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any] | None:
+def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any]:
     """Normalize one PydanticAI message part into a display message."""
     kind = part.get("kind") or part.get("type") or "text"
-    if kind in ("text", "output_text"):
-        return {"role": role, "kind": "text", "content": redact(part.get("content", ""))}
-    if kind == "system-prompt":
-        return {"role": "system", "kind": "system", "content": redact(part.get("content", ""))}
-    if kind in ("user-prompt", "retry-prompt"):
-        return {"role": "user", "kind": "text", "content": redact(part.get("content", ""))}
-    if kind == "tool-return":
-        return {"role": "tool", "kind": "tool_return", "content": redact(str(part.get("content", "")))}
+    if kind in (
+        "text",
+        "output_text",
+        "system-prompt",
+        "user-prompt",
+        "retry-prompt",
+        "tool-return",
+    ):
+        display_role = role
+        display_kind = "text"
+        content = part.get("content", "")
+        if kind == "system-prompt":
+            display_role, display_kind = "system", "system"
+        elif kind in ("user-prompt", "retry-prompt"):
+            display_role = "user"
+        elif kind == "tool-return":
+            display_role, display_kind = "tool", "tool_return"
+            content = str(content)
+        return {
+            "role": display_role,
+            "kind": display_kind,
+            "content": redact(content),
+        }
     if kind == "tool-call":
         return {
             "role": "assistant",
@@ -60,10 +72,14 @@ def _part_to_message(role: str, part: dict[str, Any]) -> dict[str, Any] | None:
         }
     if kind == "image":
         return {"role": role, "kind": "image", "content": part.get("url", "")}
-    return {"role": role, "kind": "text", "content": redact(str(part.get("content", part)))}
+    return {
+        "role": role,
+        "kind": "text",
+        "content": redact(str(part.get("content", part))),
+    }
 
 
-def normalize_msg(msg: dict[str, Any]) -> list[dict[str, Any]]:
+def _normalize_msg(msg: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize one PydanticAI message dict into a list of display messages."""
     role = msg.get("role")
     parts = msg.get("parts", [])
@@ -74,17 +90,14 @@ def normalize_msg(msg: dict[str, Any]) -> list[dict[str, Any]]:
     for part in parts:
         if not isinstance(part, dict):
             continue
-        display = _part_to_message(base_role, part)
-        if display is not None:
-            normalized.append(display)
+        normalized.append(_part_to_message(base_role, part))
     return normalized
 
 
 def read_trace(rollout_dir: Path, agent_id: str) -> dict[str, Any]:
     """Read one agent rollout and return its normalized messages in order."""
-    candidates = [rollout_dir / f"{agent_id}.jsonl"]
-    path = next((p for p in candidates if p.is_file()), None)
-    if path is None:
+    path = rollout_dir / f"{agent_id}.jsonl"
+    if not path.is_file():
         raise KeyError(f"unknown agent trace: {agent_id}")
 
     messages: list[dict[str, Any]] = []
@@ -117,6 +130,6 @@ def read_trace(rollout_dir: Path, agent_id: str) -> dict[str, Any]:
             for msg in payload:
                 if not isinstance(msg, dict):
                     continue
-                for display in normalize_msg(msg):
+                for display in _normalize_msg(msg):
                     messages.append({"seq": seq, "ts": ts, **display})
     return {"agent_id": agent_id, "messages": messages}
