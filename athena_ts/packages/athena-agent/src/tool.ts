@@ -6,7 +6,7 @@
  * 表达，``name`` 缺省取 ``fn.name``，``inputSchema`` 缺省为空对象 schema。
  */
 
-import { CancelledError, CancellationToken } from "./cancel.js"
+import { CancelledError } from "./agent/types.js"
 import {
   TOOL_BEGIN,
   TOOL_END,
@@ -45,7 +45,7 @@ export abstract class BaseTool {
 
   /** 同步入口（TS 无 asyncio.run，退化为 async）：用独立取消令牌执行一次调用。 */
   invoke(input: Record<string, unknown> = {}): Promise<ToolResult> {
-    const ctx = new ToolContext("", "sync", noopEmit, new CancellationToken())
+    const ctx = new ToolContext("", "sync", noopEmit, new AbortController().signal)
     return this.ainvoke(ctx, input)
   }
 

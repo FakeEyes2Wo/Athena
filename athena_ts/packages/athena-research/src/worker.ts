@@ -8,7 +8,6 @@ import { z } from "zod"
 import {
   Agent,
   AgentContext,
-  CancellationToken,
   ContextManager,
   ResponsesProvider,
   ToolRegistry,
@@ -92,7 +91,7 @@ export class WorkerRunner {
       turn,
       async () => {},
       tools,
-      new CancellationToken(),
+      new AbortController().signal,
       memory,
       prompt
     )

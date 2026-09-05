@@ -17,6 +17,14 @@ import {
 } from "../src/agent/provider.js"
 
 describe("public surface", () => {
+  it("uses native abort signals instead of exporting a custom cancellation token", () => {
+    expect(api).not.toHaveProperty("CancellationToken")
+    const error = new api.CancelledError()
+    expect(error).toBeInstanceOf(Error)
+    expect(error.name).toBe("CancelledError")
+    expect(error.message).toBe("cancelled")
+  })
+
   it("does not export the removed memory facade", () => {
     expect(api).not.toHaveProperty("MemoryView")
   })

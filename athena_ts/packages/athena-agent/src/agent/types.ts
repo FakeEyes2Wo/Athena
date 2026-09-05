@@ -8,6 +8,14 @@ export type AgentPath = string[]
 export type AgentId = string
 export type RunId = string
 
+/** Cancellation remains distinct from a tool or sampling failure. */
+export class CancelledError extends Error {
+  constructor(message = "cancelled") {
+    super(message)
+    this.name = "CancelledError"
+  }
+}
+
 export const AgentStatus = {
   STARTING: "starting",
   IDLE: "idle",

@@ -3,9 +3,6 @@
 // 消息模型（pydantic_ai ModelMessage 移植）
 export * from "./messages.js"
 
-// 取消原语
-export { CancellationToken, CancelledError } from "./cancel.js"
-
 // 工具层
 export * from "./tool-types.js"
 export { BaseTool, ToolRegistry, tool } from "./tool.js"

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest"
-import { CancellationToken } from "../src/cancel.js"
 import { modelResponse, textPart } from "../src/messages.js"
 import { ContextManager } from "../src/memory/context-manager.js"
 import { singleTurnChat } from "../src/single-turn-chat.js"
@@ -160,11 +159,12 @@ describe("single_turn_chat", () => {
 
   it("rejects pre-cancelled call before model execution", async () => {
     const client = new ScriptedClient(["unused"])
-    const cancel = new CancellationToken()
-    cancel.set()
+    const controller = new AbortController()
+    controller.abort()
+    const cancel = controller.signal
     await expect(
       singleTurnChat("question", { model: "model", client, cancel })
-    ).rejects.toBeInstanceOf(Error)
+    ).rejects.toMatchObject({ name: "CancelledError", message: "cancelled" })
     expect(client.requests).toEqual([])
   })
 

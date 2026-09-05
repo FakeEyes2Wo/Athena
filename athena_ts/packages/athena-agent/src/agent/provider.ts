@@ -5,7 +5,6 @@
 import type { ModelMessage } from "../messages.js"
 import type { ToolRegistry } from "../tool.js"
 import { truncateText } from "../tool-types.js"
-import type { CancellationToken } from "../cancel.js"
 import type { AgentConfig, StructuredOutputType } from "./models.js"
 import * as settings from "./settings.js"
 import type { ChatClient, ProviderKind } from "./settings.js"
@@ -117,7 +116,7 @@ export abstract class BaseProvider {
     config: AgentConfig,
     tools: ToolRegistry,
     messages: ModelMessage[],
-    cancel: CancellationToken,
+    cancel: AbortSignal,
     opts?: { outputType?: StructuredOutputType | null }
   ): AsyncGenerator<StreamEvent>
 }
@@ -188,7 +187,7 @@ export class ResponsesProvider extends BaseProvider {
     config: AgentConfig,
     tools: ToolRegistry,
     messages: ModelMessage[],
-    cancel: CancellationToken,
+    cancel: AbortSignal,
     opts: { outputType?: StructuredOutputType | null } = {}
   ): AsyncGenerator<StreamEvent> {
     const outputType = opts.outputType ?? null
@@ -232,7 +231,7 @@ export class ResponsesProvider extends BaseProvider {
 
     try {
       for await (const chunk of stream) {
-        if (cancel.isSet()) {
+        if (cancel.aborted) {
           yield new StreamEvent("error", { message: "cancelled" })
           return
         }

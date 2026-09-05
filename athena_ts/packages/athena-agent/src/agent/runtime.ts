@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs"
 
 import { isTransientError, type ArtifactStore, type AthenaThread, type AthenaTurn } from "@athena/core"
 
-import { CancelledError, CancellationToken } from "../cancel.js"
+import { CancelledError } from "./types.js"
 import {
   modelRequest,
   modelResponse,
@@ -100,7 +100,7 @@ export class Agent extends BaseAgent {
 
     let retries = 0
     for (let i = 0; i < this.config.maxTurns; i++) {
-      if (ctx.cancel.isSet()) break
+      if (ctx.cancel.aborted) break
       const outcome = await samplingLoop(this, ctx)
       if (outcome.kind === "done") {
         if (this.outputType !== null) {
@@ -346,7 +346,7 @@ export type AgentRunnerFn = ((thread: AthenaThread, turn: AthenaTurn, emit: Emit
     turn: AthenaTurn,
     emit: EmitEvent,
     memory: ContextManager | null,
-    cancel: CancellationToken
+    cancel: AbortSignal
   ) => Promise<AgentOutcome>
 }
 
@@ -369,7 +369,7 @@ export function agentRunner(
       turn,
       emit,
       tools,
-      new CancellationToken(),
+      new AbortController().signal,
       null,
       null,
       [],
@@ -383,7 +383,7 @@ export function agentRunner(
     turn: AthenaTurn,
     emit: EmitEvent,
     memory: ContextManager | null,
-    cancel: CancellationToken
+    cancel: AbortSignal
   ): Promise<AgentOutcome> => {
     const ctx = new AgentContext(thread, turn, emit, tools, cancel, memory, null, [], bind(thread, turn))
     return agent.run(ctx)

@@ -3,7 +3,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { AthenaThreadSchema, AthenaTurnSchema, LocalArtifactStore, type AthenaThread, type AthenaTurn } from "@athena/core"
-import { CancellationToken } from "../../src/cancel.js"
 import { ContextManager } from "../../src/memory/context-manager.js"
 import { BaseTool, ToolRegistry } from "../../src/tool.js"
 import { ToolContext, ToolResult, ToolSpec, type AskUser, type EmitEvent } from "../../src/tool-types.js"
@@ -59,7 +58,7 @@ function ctx(
     turn(),
     opts.emit ?? noopEmit,
     tools,
-    new CancellationToken(),
+    new AbortController().signal,
     opts.memory ?? null,
     null,
     [],
@@ -169,7 +168,7 @@ describe("Agent", () => {
     expect(calls[0]!.thread.thread_id).toBe("t1")
     expect(calls[0]!.turn.turn_id).toBe("t1.1")
     expect(calls[0]!.tools).toBe(tools)
-    expect(calls[0]!.cancel).toBeInstanceOf(CancellationToken)
+    expect(calls[0]!.cancel).toBeInstanceOf(AbortSignal)
   })
 
   it("tool invoke", async () => {
@@ -315,7 +314,7 @@ describe("provider stream", () => {
     const client = new CaptureClient()
     const provider = new OpenAIProvider("model", { client: client as never })
     const events = []
-    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new CancellationToken(), { outputType: structuredOut })) {
+    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal, { outputType: structuredOut })) {
       events.push(e)
     }
     const rf = client.kwargs["response_format"] as Record<string, unknown>
@@ -328,7 +327,7 @@ describe("provider stream", () => {
     const client = new CaptureClient()
     const provider = new ResponsesProvider("model", { client: client as never })
     const events = []
-    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new CancellationToken())) {
+    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal)) {
       events.push(e)
     }
     expect("response_format" in client.kwargs).toBe(false)
@@ -339,7 +338,7 @@ describe("provider stream", () => {
     const client = new ResponseFormatFallbackClient("This response_format type is unavailable now")
     const provider = new OpenAIProvider("model", { client: client as never })
     const events = []
-    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new CancellationToken(), { outputType: structuredOut })) {
+    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal, { outputType: structuredOut })) {
       events.push(e)
     }
     expect(client.calls.length).toBe(2)
@@ -353,7 +352,7 @@ describe("provider stream", () => {
     const provider = new ResponsesProvider("model", { client: client as never })
     await expect(
       (async () => {
-        for await (const _e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new CancellationToken(), { outputType: structuredOut })) {
+        for await (const _e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal, { outputType: structuredOut })) {
           // drain
         }
       })()
@@ -364,7 +363,7 @@ describe("provider stream", () => {
   it("disables deepseek thinking", async () => {
     const client = new CaptureClient()
     const provider = new ResponsesProvider("model", { client: client as never })
-    const it = provider.stream(new AgentConfig(), new ToolRegistry(), [], new CancellationToken())
+    const it = provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal)
     await it.next()
     expect(client.kwargs["extra_body"]).toEqual({ thinking: { type: "disabled" } })
   })
@@ -374,7 +373,7 @@ describe("provider stream", () => {
     const provider = new ResponsesProvider("model", { client: client as never })
     const tools = new ToolRegistry()
     tools.register(new EchoTool())
-    const it = provider.stream(new AgentConfig(200, 4096, 0.1, "code-agent", "required"), tools, [], new CancellationToken())
+    const it = provider.stream(new AgentConfig(200, 4096, 0.1, "code-agent", "required"), tools, [], new AbortController().signal)
     await it.next()
     expect(client.kwargs["tool_choice"]).toBe("required")
   })
@@ -383,7 +382,7 @@ describe("provider stream", () => {
     const client = new CaptureClient()
     const provider = new DeepSeekProvider("model", { client: client as never })
     const events = []
-    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new CancellationToken(), { outputType: structuredOut })) {
+    for await (const e of provider.stream(new AgentConfig(), new ToolRegistry(), [], new AbortController().signal, { outputType: structuredOut })) {
       events.push(e)
     }
     expect(client.kwargs["response_format"]).toEqual({ type: "json_object" })

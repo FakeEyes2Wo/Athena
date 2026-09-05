@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { CancelledError, CancellationToken } from "../src/cancel.js"
+import { CancelledError } from "../src/agent/types.js"
 import { BaseTool, ToolRegistry, tool } from "../src/tool.js"
 import {
   TOOL_BEGIN,
@@ -59,7 +59,7 @@ async function collectEvents(
   const emit: EmitEvent = async (kind: string) => {
     events.push(kind)
   }
-  const ctx = new ToolContext(t.spec.name, "test-1", emit, new CancellationToken())
+  const ctx = new ToolContext(t.spec.name, "test-1", emit, new AbortController().signal)
   const result = await t.ainvoke(ctx, input)
   return { result, events }
 }
@@ -69,7 +69,7 @@ describe("BaseTool", () => {
     const events: string[] = []
     const ctx = new ToolContext("cancel_me", "cancel-1", (kind) => {
       events.push(kind)
-    }, new CancellationToken())
+    }, new AbortController().signal)
     await expect(new CancellingTool().ainvoke(ctx, {})).rejects.toBeInstanceOf(CancelledError)
     expect(events).toEqual([TOOL_BEGIN, TOOL_ERROR])
   })

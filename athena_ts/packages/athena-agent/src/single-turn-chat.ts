@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto"
 
 import { AthenaThreadSchema, AthenaTurnSchema } from "@athena/core"
 
-import { CancelledError, CancellationToken } from "./cancel.js"
+import { CancelledError } from "./agent/types.js"
 import { AgentContext } from "./agent/models.js"
 import { createAgent } from "./agent/runtime.js"
 import type { ChatClient } from "./agent/settings.js"
@@ -71,7 +71,7 @@ export interface SingleTurnChatOptions {
   maxTokens?: number
   temperature?: number
   emit?: EmitEvent | null
-  cancel?: CancellationToken | null
+  cancel?: AbortSignal | null
 }
 
 export async function singleTurnChat(prompt: string, opts: SingleTurnChatOptions): Promise<string> {
@@ -89,8 +89,8 @@ export async function singleTurnChat(prompt: string, opts: SingleTurnChatOptions
   } = opts
 
   validate(prompt, model, maxTurns, maxTokens, temperature)
-  const activeCancel = cancel ?? new CancellationToken()
-  if (activeCancel.isSet()) throw new CancelledError()
+  const activeCancel = cancel ?? new AbortController().signal
+  if (activeCancel.aborted) throw new CancelledError()
 
   const activeMemory = memory ?? new ContextManager()
   const activeTools = tools ?? new ToolRegistry()

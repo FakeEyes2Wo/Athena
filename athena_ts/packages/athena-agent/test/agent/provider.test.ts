@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest"
-import { CancellationToken } from "../../src/cancel.js"
 import { AgentConfig } from "../../src/agent/models.js"
 import { DeepSeekTextFilter, ResponsesProvider, StreamEvent } from "../../src/agent/provider.js"
 import { ToolRegistry } from "../../src/tool.js"
@@ -86,6 +85,25 @@ describe("DeepSeekTextFilter", () => {
 })
 
 describe("ResponsesProvider streaming", () => {
+  it("observes native cancellation between chunks without publishing later text", async () => {
+    const controller = new AbortController()
+    const provider = new ResponsesProvider("test-model", {
+      client: streamClient([chunk("first"), chunk("later"), chunk(null, null, "stop")]),
+      providerKind: "openai",
+    })
+    const stream = provider.stream(new AgentConfig(), new ToolRegistry(), [], controller.signal)
+    const first = await stream.next()
+    expect(first.value?.kind).toBe("text_delta")
+    expect(first.value?.data["delta"]).toBe("first")
+    controller.abort()
+    controller.abort()
+    const remaining: StreamEvent[] = []
+    for await (const event of stream) remaining.push(event)
+    expect(remaining.map((event) => [event.kind, event.data])).toEqual([
+      ["error", { message: "cancelled" }],
+    ])
+  })
+
   it("deepseek stream strips dsml from accumulated", async () => {
     const client = streamClient([
       chunk('{"decision":"submit",'),
@@ -101,7 +119,7 @@ describe("ResponsesProvider streaming", () => {
       new AgentConfig(200, 512, 0.0, "code-agent", "auto"),
       new ToolRegistry(),
       [],
-      new CancellationToken()
+      new AbortController().signal
     )) {
       events.push(event)
     }
@@ -129,7 +147,7 @@ describe("ResponsesProvider streaming", () => {
       new AgentConfig(200, 512, 0.0, "code-agent", "auto"),
       new ToolRegistry(),
       [],
-      new CancellationToken()
+      new AbortController().signal
     )) {
       events.push(event)
     }

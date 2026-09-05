@@ -2,7 +2,6 @@
  * 工具类型、常量和轻量级数据类（移植 ``core/tool_types.py``，零逻辑纯数据容器）。
  */
 
-import type { CancellationToken } from "./cancel.js"
 
 /** 事件发射器: ``(kind: string, artifact_ref: string, data: dict | null) -> None``。 */
 export type EmitEvent = (
@@ -67,7 +66,7 @@ export class ToolContext {
     public readonly toolName: string,
     public readonly callId: string,
     public readonly emit: EmitEvent,
-    public readonly cancel: CancellationToken,
+    public readonly cancel: AbortSignal,
     public readonly askUser: AskUser | null = null
   ) {}
 }

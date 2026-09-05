@@ -3,7 +3,6 @@
  */
 
 import type { AthenaThread, AthenaTurn } from "@athena/core"
-import type { CancellationToken } from "../cancel.js"
 import type { ContextManager } from "../memory/context-manager.js"
 import type { ToolRegistry } from "../tool.js"
 import type { AskUser, EmitEvent } from "../tool-types.js"
@@ -60,7 +59,7 @@ export class AgentContext {
     public turn: AthenaTurn,
     public emit: EmitEvent,
     public tools: ToolRegistry,
-    public cancel: CancellationToken,
+    public cancel: AbortSignal,
     public memory: ContextManager | null = null,
     public inputText: string | null = null,
     public messages: AgentMessage[] = [],
