@@ -9,7 +9,7 @@ are not yet wired into the production call path (see the migration plan).
 
 Dependency direction (no cycles): `athena-types` is the root; `athena-server`
 depends on protocol + runtime; `athena-agent` implements the runtime
-`TurnRunner`; `athena-research` builds on types + workspace.
+`TurnRunner`.
 
 | Crate | Responsibility | Source (`src/athena`) | Status |
 |---|---|---|---|
@@ -20,14 +20,13 @@ depends on protocol + runtime; `athena-agent` implements the runtime
 | `athena-runtime` | Event journal, per-thread actor, `TurnRunner`, `ThreadManager` | `app_server/{events,submissions,thread_runtime,thread_manager}.py` | ✅ done |
 | `athena-agent` | Provider stream, tool-call loop, sub-agents, `AgentRunner` | `core/agent/*` | ✅ done |
 | `athena-workspace` | `LocalGitWorkspace` (worktree/diff/commit) | `core/gitutils/workspace.py` | ✅ done |
-| `athena-research` | `ResearchTree`, experiment nodes, prompt aggregation | `core/research/research_tree.py` | ✅ done |
 | `athena-server` | Transport, message processor, execution, subscriptions, lifecycle | `app_server/{transport,server,execution,client,lifecycle}.py` | ✅ done |
 
 ## Build & test
 
 ```bash
 cargo check --workspace
-cargo test  --workspace          # 188 tests currently pass
+cargo test  --workspace
 
 # quality gates (must all pass)
 cargo fmt --all --check

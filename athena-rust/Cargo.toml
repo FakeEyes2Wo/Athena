@@ -9,7 +9,6 @@ members = [
     "crates/athena-agent",
     "crates/athena-server",
     "crates/athena-workspace",
-    "crates/athena-research",
 ]
 
 [workspace.package]
@@ -41,7 +40,6 @@ athena-runtime = { path = "crates/athena-runtime" }
 athena-agent = { path = "crates/athena-agent" }
 athena-server = { path = "crates/athena-server" }
 athena-workspace = { path = "crates/athena-workspace" }
-athena-research = { path = "crates/athena-research" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

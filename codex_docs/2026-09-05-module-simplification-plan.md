@@ -46,6 +46,7 @@ Scope update (2026-09-05): at the user's direction, merge the reviewed TypeScrip
 - [x] Review the research turn dispatcher/shared support modules and narrow their internal interfaces.
 - [x] Review the web retrieval module and make its shared session the sole HTTP owner.
 - [x] Review the Rust agent module and reuse the runtime turn contract directly.
+- [x] Remove the unconsumed Rust research prototype crate.
 - [ ] Verify the final integrated application, publish completion report, remove plan and pointer.
 - [x] Merge the reviewed TypeScript checkpoint into main, push, and remove this task's temporary branch/worktree.
 
@@ -110,6 +111,14 @@ Read all seven `athena-agent` source files and all four integration-test files c
 Delete the crate-local `AgentOutcome` duplicate and return `athena_runtime::TurnOutput` directly, removing the runner's field-by-field conversion. Delete the uncalled public `Agent::tools` getter, three unused direct dependencies, the redundant `Step::Error` state, and `emit_calls`' unread finish-reason parameter. Abort the per-turn cancellation bridge when the agent finishes instead of leaving one waiting task per successful turn. A pre-cancelled run now returns `AgentError::Cancelled` instead of a successful output, and plain assistant history keeps the assistant role when mapped to the provider API.
 
 Fresh verification passed all 10 `athena-agent` tests, including new cancellation and assistant-role regressions, and the complete Rust workspace passed 190 tests. Workspace Clippy with `-D warnings`, Rust formatting, removed-symbol/dependency searches, and `git diff --check` passed. Closing eleven ledger rows advances reviewed coverage to 142/602. Whole-repository acceptance remains pending.
+
+## Rust research prototype review
+
+Read all three `athena-research` source files and their six inline tests completely, then search every Rust manifest/source and repository documentation reference. No production code or other crate consumes `athena-research`; workspace membership was its only external edge. Its experiment/tree model is also substantially behind the authoritative Python `ResearchTree`, so retaining it as a self-testing third implementation creates drift without a runtime capability.
+
+Delete the entire crate rather than polishing an unused public API. Remove its workspace member and dependency declarations, regenerate the lockfile, and remove the completed-crate claim from the Rust README. The historical WIP inventory remains unchanged because it explicitly records baseline state rather than current architecture.
+
+After deletion, the complete remaining Rust workspace passed 184 tests. Workspace Clippy with `-D warnings`, Rust formatting, repository reference searches, and `git diff --check` passed. Closing the three deleted source rows advances reviewed coverage to 145/602 while removing 359 baseline production/test lines plus the crate manifest. Whole-repository acceptance remains pending.
 
 ## DSH composition-root review
 
@@ -798,9 +807,9 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `athena-rust/crates/athena-protocol/src/method.rs` | 19 | Pending |
 | `athena-rust/crates/athena-protocol/src/operations.rs` | 91 | Pending |
 | `athena-rust/crates/athena-protocol/tests/python_fixtures.rs` | 386 | Pending |
-| `athena-rust/crates/athena-research/src/experiment.rs` | 92 | Pending |
-| `athena-rust/crates/athena-research/src/lib.rs` | 166 | Pending |
-| `athena-rust/crates/athena-research/src/tree.rs` | 141 | Pending |
+| `athena-rust/crates/athena-research/src/experiment.rs` | 92 | Reviewed; delete with unconsumed prototype crate |
+| `athena-rust/crates/athena-research/src/lib.rs` | 166 | Reviewed; delete unused facade and inline-only tests with crate |
+| `athena-rust/crates/athena-research/src/tree.rs` | 141 | Reviewed; delete stale duplicate of authoritative Python ResearchTree |
 | `athena-rust/crates/athena-runtime/src/event.rs` | 303 | Pending |
 | `athena-rust/crates/athena-runtime/src/lib.rs` | 20 | Pending |
 | `athena-rust/crates/athena-runtime/src/runner.rs` | 57 | Pending |

@@ -61,18 +61,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "athena-research"
-version = "0.1.0"
-dependencies = [
- "athena-types",
- "athena-workspace",
- "serde",
- "serde_json",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "athena-runtime"
 version = "0.1.0"
 dependencies = [
