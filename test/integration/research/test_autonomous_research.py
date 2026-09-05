@@ -1,13 +1,13 @@
 """Autonomous ResearchRuntime phase integration."""
 
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-import athena.research.supervisor.phases as phases_module
 from athena.core.artifact_store import ArtifactNotFoundError
 from athena.core.research_models import EvalResult, ExperimentPlan, Hypothesis
 from athena.core.research_tree import Experiment, ExperimentStatus
@@ -317,11 +317,26 @@ async def test_all_phases_share_one_durable_state(tmp_path: Path) -> None:
     exp_docs = tmp_path / ".athena" / "exp_docs"
     assert (exp_docs / "runs" / "exp_baseline.json").is_file()
     assert (exp_docs / "runs" / "validation-key.json").is_file()
+    assert (exp_docs / "baseline.json").is_file()
+    assert (exp_docs / "final.json").is_file()
     assert json.loads((exp_docs / "final.json").read_text(encoding="utf-8"))["metric"][
         "primary"
     ] == pytest.approx(0.70)
     assert (exp_docs / "FINAL_REPORT.md").is_file()
     assert (exp_docs / "OPTIMIZATION.md").is_file()
+    latest = json.loads((exp_docs / "latest.json").read_text(encoding="utf-8"))
+    assert latest["kind"] == "stage"
+    assert latest["stage"] == "final"
+    assert latest["run_id"] == "validation-key"
+    for relative, digest in latest["files"].items():
+        content = (exp_docs / relative).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == digest
+    gui_report = await GuiService(runtime).generate_report()
+    assert gui_report["status"] == "ok"
+    assert (
+        gui_report["report"].encode("utf-8")
+        == (exp_docs / "FINAL_REPORT.md").read_bytes()
+    )
     final_report = (exp_docs / "FINAL_REPORT.md").read_text(encoding="utf-8")
     assert "final_test_score" not in final_report
     assert "generalization_gap" not in final_report
@@ -453,7 +468,7 @@ async def test_completed_skip_report_uses_durable_marker_after_live_preference_c
 
 
 @pytest.mark.asyncio
-async def test_skip_finalization_retries_after_report_failure_without_duplication(
+async def test_projection_failure_does_not_block_skip_finalization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     validation_calls: list[tuple[str, float]] = []
@@ -473,17 +488,7 @@ async def test_skip_finalization_retries_after_report_failure_without_duplicatio
         validation_calls.append((commit, metric))
         raise AssertionError("VALIDATE must not run")
 
-    original_writer = phases_module.write_reports
     calls = 0
-
-    def fail_once(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise OSError("final report unavailable")
-        return original_writer(*args, **kwargs)
-
-    monkeypatch.setattr(phases_module, "write_reports", fail_once)
     runtime = ResearchRuntime(
         project_root=tmp_path,
         task="improve the trusted baseline",
@@ -493,24 +498,55 @@ async def test_skip_finalization_retries_after_report_failure_without_duplicatio
         prepare_phase=prepare,
         validation_phase=validate,
     )
+    events: list[tuple[str, dict[str, object]]] = []
+    runtime.subscribe(lambda kind, payload: events.append((kind, payload)))
+    projector = runtime.supervisor._deps.runtime.documents
+    original_project_stage = projector.project_stage
+
+    def fail_once(event, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("final report unavailable")
+        return original_project_stage(event, **kwargs)
+
+    monkeypatch.setattr(projector, "project_stage", fail_once)
     lifecycle = await runtime.start()
     await asyncio.wait_for(asyncio.shield(lifecycle), timeout=5)
-    assert runtime.state.phase == "SEARCH"
-    assert runtime.state.status == "FAILED"
-    assert (
-        json.loads((tmp_path / ".athena" / "state.json").read_text())["status"]
-        == "FAILED"
-    )
-
-    monkeypatch.setattr(phases_module, "write_reports", original_writer)
-    await runtime.resume_current_task()
-    retry = runtime.session.lifecycle.task
-    assert retry is not None
-    await asyncio.wait_for(asyncio.shield(retry), timeout=5)
-
     assert runtime.state.phase == "COMPLETED"
     assert runtime.state.status == "COMPLETED"
+    assert (
+        json.loads((tmp_path / ".athena" / "state.json").read_text())["status"]
+        == "COMPLETED"
+    )
+
+    assert calls == 2
     assert validation_calls == []
+    assert any(
+        payload.get("channel") == "error"
+        and "documents" in str(payload.get("text", ""))
+        for kind, payload in events
+        if kind == "output"
+    )
+
+    monkeypatch.setattr(projector, "project_stage", original_project_stage)
+    warning_count = sum(
+        payload.get("channel") == "error"
+        and "documents" in str(payload.get("text", ""))
+        for kind, payload in events
+        if kind == "output"
+    )
+    await runtime.supervisor.recover()
+    assert warning_count == 1
+    assert (
+        sum(
+            payload.get("channel") == "error"
+            and "documents" in str(payload.get("text", ""))
+            for kind, payload in events
+            if kind == "output"
+        )
+        == warning_count
+    )
     assert (
         len(
             list(
