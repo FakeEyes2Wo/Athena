@@ -573,6 +573,12 @@ Read the runtime package marker and `bootstrap.py` completely, then traced every
 
 Delete the single-use four-parameter `build_config` forwarding function and construct `ResearchConfig` at its sole facade call site. Delete bootstrap's redundant implementation `__all__`; direct named imports remain unchanged. Bootstrap falls from 436 immediately before this slice to 413 physical lines (438 in the baseline ledger), while the affected facade falls from 728 baseline lines to 720 and remains Pending until its full review. The unchanged direct baseline and final selection passed 25 tests; public facade import checks, old-symbol searches, Ruff, Black, and expanded runtime/TUI-protocol verification also passed. Closing the package marker and bootstrap rows advances reviewed coverage to 348/602. Whole-repository acceptance remains pending.
 
+## Runtime clarification boundary review
+
+Read `runtime/clarification.py` completely and traced confirmation, automatic confirmation, task seeding, interrupted-transaction recovery, and legacy handoff restoration through the runtime facade, GUI, direct unit tests, and integration flows. Retain the six transaction/lifecycle functions: each owns a distinct live policy or ordering boundary, including commit-before-start retryability and durable state reloading after an interrupted journal.
+
+Privatize the clarification-store resolver, which had no caller outside its module, and delete the redundant implementation `__all__`. No confirmation error code, persistence path, transaction order, or public runtime method changes. The file falls from 171 immediately before this slice to 161 physical lines; it remains above the 149-line baseline because previously delivered confirmation transaction and retry behavior is retained. The unchanged baseline and final clarification/task-seeding selection both passed 128 tests; Ruff, Black, old-symbol searches, Python compilation, hooks, and `git diff --check` passed. Closing this row advances reviewed coverage to 349/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1183,7 +1189,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/report.py` | 397 | Reviewed; one-pass outcome projection and shared numeric formatting; byte-identical output |
 | `src/athena/research/runtime/__init__.py` | 5 | Reviewed; retain the two-symbol public runtime facade |
 | `src/athena/research/runtime/bootstrap.py` | 438 | Reviewed; delete single-use config forwarder and redundant implementation export list |
-| `src/athena/research/runtime/clarification.py` | 149 | Pending |
+| `src/athena/research/runtime/clarification.py` | 149 | Reviewed; privatize store resolver and remove redundant implementation exports |
 | `src/athena/research/runtime/control.py` | 214 | Pending |
 | `src/athena/research/runtime/corpus.py` | 90 | Pending |
 | `src/athena/research/runtime/event_projection.py` | 89 | Pending |

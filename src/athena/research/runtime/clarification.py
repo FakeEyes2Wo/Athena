@@ -20,7 +20,7 @@ from athena.research.clarification.requirements import (
 from athena.research.supervisor.state import ResearchState
 
 
-def clarification_store(runtime: Any) -> ClarificationStore:
+def _store(runtime: Any) -> ClarificationStore:
     """Return the clarification store rooted in the runtime state directory."""
     config = getattr(runtime, "config", None)
     state_root = config.paths.athena if config is not None else None
@@ -56,7 +56,7 @@ async def confirm_and_start(
 
 async def auto_confirm(runtime: Any, task: str) -> ClarificationDraft:
     """Create or reuse a deterministic draft and confirm it without starting."""
-    store = clarification_store(runtime)
+    store = _store(runtime)
     draft = store.load() if store.exists() else None
     if draft is not None and normalize_task(draft.original_task) != normalize_task(
         task
@@ -88,7 +88,7 @@ async def auto_confirm(runtime: Any, task: str) -> ClarificationDraft:
 
 async def recover_confirmation(runtime: Any) -> None:
     """Recover confirmation files and synchronize projected memory fields."""
-    interrupted = clarification_store(runtime).journal_path.is_file()
+    interrupted = _store(runtime).journal_path.is_file()
     await recover_confirmation_transaction(runtime)
     if interrupted:
         if runtime.state_path.is_file():
@@ -105,7 +105,7 @@ async def recover_confirmation(runtime: Any) -> None:
 
 async def _restore_legacy_named_handoff(runtime: Any) -> None:
     """Materialize the named file omitted by legacy confirmed checkpoints."""
-    store = clarification_store(runtime)
+    store = _store(runtime)
     if store.handoff_path.is_file() or not runtime.state.task_understanding:
         return
     handoff_ref = (runtime.state.handoff_refs or {}).get("task_clarification")
@@ -159,13 +159,3 @@ async def seed_unconfirmed_task(runtime: Any, task: str) -> None:
         runtime.state.save(runtime.state_path)
     runtime.session.lifecycle.task_text = effective_task
     await auto_confirm(runtime, effective_task)
-
-
-__all__ = [
-    "auto_confirm",
-    "clarification_store",
-    "confirm_and_start",
-    "confirm_pending_task",
-    "recover_confirmation",
-    "seed_unconfirmed_task",
-]
