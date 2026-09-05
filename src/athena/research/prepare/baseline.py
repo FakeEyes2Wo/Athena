@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,26 @@ HandoffFn = Callable[..., Awaitable[str]]
 _IDEATOR_REAP_TIMEOUT_SECONDS = 5.0
 _DIAGNOSTIC_LIMIT = 4000
 _PENDING_IDEATOR_REAPS: set[asyncio.Task[None]] = set()
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineDesignRequest:
+    """Inputs for independently researching and verifying one baseline."""
+
+    task: str
+    eda_ready: bool
+    handoff_agent: HandoffFn
+    verifier: BaselineSourceVerifier | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineRunRequest:
+    """Inputs for implementing and scoring one verified baseline."""
+
+    evaluator_ref: Any
+    task: str
+    predict_features: Path | None
+    verified: VerifiedBaseline
 
 
 def directory_candidate_task(task: str) -> str:
@@ -261,6 +282,7 @@ async def _attest_prepare_completion(
     current: SealedBaseline,
 ) -> None:
     """Attach exact trusted scoring evidence to the in-memory generation."""
+    bundle = _verified_bundle(verified)
     evidence = PrepareAttestation(
         research_sha256=verified.verification.research_sha256,
         design_sha256=verified.verification.design_sha256,
@@ -268,10 +290,7 @@ async def _attest_prepare_completion(
         evaluator_ref=result.evaluator_ref,
         evidence_ref=result.evidence_ref,
     )
-    if (
-        current.generation != verified.authority_generation
-        or current.bundle != _verified_bundle(verified)
-    ):
+    if current.generation != verified.authority_generation or current.bundle != bundle:
         raise BaselineAuthorityError(
             "external baseline authority changed during PREPARE"
         )
@@ -299,7 +318,7 @@ async def _attest_prepare_completion(
     if (
         type(sealed) is not SealedBaseline
         or sealed.generation != verified.authority_generation + 1
-        or sealed.bundle != _verified_bundle(verified)
+        or sealed.bundle != bundle
         or sealed.attestation != evidence
     ):
         raise BaselineAuthorityError(
@@ -307,77 +326,75 @@ async def _attest_prepare_completion(
         )
 
 
-async def _verify_current_artifacts(
-    root: Path,
-    verifier: BaselineSourceVerifier,
-    authority: BaselineAuthorityStore,
-) -> VerifiedBaseline:
-    artifacts = load_baseline_artifacts(root)
-    verification = await verifier.verify(artifacts)
-    current = load_baseline_artifacts(root)
-    if current.raw_research != artifacts.raw_research:
-        raise BaselineResearchError(
-            f"{RESEARCH_FILENAME} changed during source verification"
-        )
-    if current.raw_design != artifacts.raw_design:
-        raise BaselineResearchError(
-            f"{DESIGN_FILENAME} changed during source verification"
-        )
-    assert_verification_matches_artifacts(current, verification)
-    verified = VerifiedBaseline(
-        artifacts=current,
-        verification=verification,
-        verification_bytes=verification_bytes(verification),
-    )
-    sealed = await seal_verified_baseline(authority, verified)
-    try:
-        _write_verification_bytes(root, sealed.verification_bytes)
-    except OSError as error:
-        raise BaselineAuthorityError(
-            f"unable to write authoritative mirror {VERIFICATION_FILENAME}"
-        ) from error
-    return sealed
+@dataclass(slots=True)
+class _BaselineResearchRun:
+    """Resources shared by verification and both ideator attempts."""
 
+    root: Path
+    handoff_agent: HandoffFn
+    verifier: BaselineSourceVerifier
+    authority: BaselineAuthorityStore
 
-async def _run_ideator_turn(
-    *,
-    handoff_agent: HandoffFn,
-    root: Path,
-    content: str,
-    verifier: BaselineSourceVerifier,
-    authority: BaselineAuthorityStore,
-) -> VerifiedBaseline | BaselineResearchError:
-    """Run one logical-thread turn, then independently parse and verify its files."""
-    _remove_verification(root)
-    try:
-        await handoff_agent(
-            agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
-            agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
-            workspace=str(root),
-            output_file=DESIGN_FILENAME,
-            content=content,
-            reap_after=False,
-        )
-    except Exception as error:  # noqa: BLE001 - Agent response boundary
-        _remove_verification(root)
-        return BaselineResearchError(
-            "baseline ideator response failed", (_bounded_diagnostic(error),)
-        )
-    except BaseException:
-        try:
-            _remove_verification(root)
-        except Exception:
-            logger.warning(
-                "failed to remove baseline verification during interruption",
-                exc_info=True,
+    async def verify(self) -> VerifiedBaseline:
+        """Verify stable current artifacts, seal them, and write the audit mirror."""
+        artifacts = load_baseline_artifacts(self.root)
+        verification = await self.verifier.verify(artifacts)
+        current = load_baseline_artifacts(self.root)
+        if current.raw_research != artifacts.raw_research:
+            raise BaselineResearchError(
+                f"{RESEARCH_FILENAME} changed during source verification"
             )
-        raise
+        if current.raw_design != artifacts.raw_design:
+            raise BaselineResearchError(
+                f"{DESIGN_FILENAME} changed during source verification"
+            )
+        assert_verification_matches_artifacts(current, verification)
+        verified = VerifiedBaseline(
+            artifacts=current,
+            verification=verification,
+            verification_bytes=verification_bytes(verification),
+        )
+        sealed = await seal_verified_baseline(self.authority, verified)
+        try:
+            _write_verification_bytes(self.root, sealed.verification_bytes)
+        except OSError as error:
+            raise BaselineAuthorityError(
+                f"unable to write authoritative mirror {VERIFICATION_FILENAME}"
+            ) from error
+        return sealed
 
-    _remove_verification(root)
-    try:
-        return await _verify_current_artifacts(root, verifier, authority)
-    except BaselineResearchError as error:
-        return _repairable(error)
+    async def turn(self, content: str) -> VerifiedBaseline | BaselineResearchError:
+        """Run one logical-thread turn, then parse and verify its files."""
+        _remove_verification(self.root)
+        try:
+            await self.handoff_agent(
+                agent_id=BASELINE_IDEATOR_PROFILE.agent_type,
+                agent_type=BASELINE_IDEATOR_PROFILE.agent_type,
+                workspace=str(self.root),
+                output_file=DESIGN_FILENAME,
+                content=content,
+                reap_after=False,
+            )
+        except Exception as error:  # noqa: BLE001 - Agent response boundary
+            _remove_verification(self.root)
+            return BaselineResearchError(
+                "baseline ideator response failed", (_bounded_diagnostic(error),)
+            )
+        except BaseException:
+            try:
+                _remove_verification(self.root)
+            except Exception:
+                logger.warning(
+                    "failed to remove baseline verification during interruption",
+                    exc_info=True,
+                )
+            raise
+
+        _remove_verification(self.root)
+        try:
+            return await self.verify()
+        except BaselineResearchError as error:
+            return _repairable(error)
 
 
 def _observe_ideator_reap(task: asyncio.Task[None]) -> None:
@@ -445,11 +462,7 @@ async def _publish_terminal_research_error(
 async def prepare_baseline_design(
     runtime: Any,
     workspace: Any,
-    task: str,
-    eda_ready: bool,
-    handoff_agent: HandoffFn,
-    *,
-    verifier: BaselineSourceVerifier | None = None,
+    request: BaselineDesignRequest,
 ) -> VerifiedBaseline:
     """Return independently verified research, allowing at most one repair turn."""
     authority = getattr(runtime, "baseline_authority", None)
@@ -457,7 +470,7 @@ async def prepare_baseline_design(
         raise BaselineAuthorityError(
             "PREPARE requires an external baseline authority capability"
         )
-    if not eda_ready:
+    if not request.eda_ready:
         error = BaselineResearchError(
             "EDA is unavailable; baseline research cannot be verified"
         )
@@ -472,7 +485,10 @@ async def prepare_baseline_design(
         if cached is not None:
             return cached
 
-        source_verifier = verifier or build_default_source_verifier()
+        source_verifier = request.verifier or build_default_source_verifier()
+        research_run = _BaselineResearchRun(
+            root, request.handoff_agent, source_verifier, authority
+        )
         _remove_verification(root)
         complete_artifacts = all(
             (root / filename).is_file()
@@ -480,7 +496,7 @@ async def prepare_baseline_design(
         )
         if complete_artifacts:
             try:
-                return await _verify_current_artifacts(root, source_verifier, authority)
+                return await research_run.verify()
             except BaselineResearchError as error:
                 first_error = _repairable(error)
         else:
@@ -489,30 +505,18 @@ async def prepare_baseline_design(
         _register_ideator(runtime, root)
         ideator_active = True
         if complete_artifacts:
-            request = _repair_request(first_error)
+            prompt = _repair_request(first_error)
         else:
-            request = _initial_research_request(task)
+            prompt = _initial_research_request(request.task)
 
-        first_result = await _run_ideator_turn(
-            handoff_agent=handoff_agent,
-            root=root,
-            content=request,
-            verifier=source_verifier,
-            authority=authority,
-        )
+        first_result = await research_run.turn(prompt)
         if isinstance(first_result, VerifiedBaseline):
             return first_result
 
         if complete_artifacts:
             terminal_error = first_result
         else:
-            second_result = await _run_ideator_turn(
-                handoff_agent=handoff_agent,
-                root=root,
-                content=_repair_request(first_result),
-                verifier=source_verifier,
-                authority=authority,
-            )
+            second_result = await research_run.turn(_repair_request(first_result))
             if isinstance(second_result, VerifiedBaseline):
                 return second_result
             terminal_error = second_result
@@ -561,10 +565,7 @@ def verified_baseline_task(task: str, verified: VerifiedBaseline) -> str:
 async def run_baseline(
     runtime: Any,
     workspace: Any,
-    evaluator_ref: Any,
-    task: str,
-    predict_features: Path | None,
-    verified: VerifiedBaseline,
+    request: BaselineRunRequest,
 ) -> PrepareResult:
     """Implement and score the trusted baseline through the frozen evaluator."""
     root = Path(workspace.path)
@@ -587,10 +588,10 @@ async def run_baseline(
             )
         current, sealed = loaded
         if (
-            current.authority_generation != verified.authority_generation
-            or current.artifacts.raw_research != verified.artifacts.raw_research
-            or current.artifacts.raw_design != verified.artifacts.raw_design
-            or current.verification_bytes != verified.verification_bytes
+            current.authority_generation != request.verified.authority_generation
+            or current.artifacts.raw_research != request.verified.artifacts.raw_research
+            or current.artifacts.raw_design != request.verified.artifacts.raw_design
+            or current.verification_bytes != request.verified.verification_bytes
         ):
             raise BaselineAuthorityError(
                 "external baseline authority changed during PREPARE"
@@ -614,16 +615,16 @@ async def run_baseline(
         workspace=workspace,
         execution=runtime.execution,
         store=runtime.store,
-        evaluator_ref=evaluator_ref,
+        evaluator_ref=request.evaluator_ref,
         tree_ref=tree_ref,
-        task=verified_baseline_task(task, verified),
+        task=verified_baseline_task(request.task, request.verified),
         max_turns=MAX_PLAN_TURNS,
         publish=lambda kind, ref, data: runtime.events.project_agent_event(
             "prepare", kind, ref, data
         ),
-        predict_features=predict_features,
+        predict_features=request.predict_features,
         assert_baseline=assert_baseline,
     )
     current = await current_sealed_baseline()
-    await _attest_prepare_completion(authority, verified, result, current)
+    await _attest_prepare_completion(authority, request.verified, result, current)
     return result

@@ -3,21 +3,31 @@
 import asyncio
 import json
 import traceback
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
 from athena.research.prepare import baseline
-from athena.research.prepare.baseline import prepare_baseline_design, run_baseline
 from athena.research.prepare.authority import (
     BaselineAuthorityConflict,
     BaselineAuthorityError,
     PrepareAttestation,
     SealedBaseline,
     VerifiedBaselineBundle,
+)
+from athena.research.prepare.baseline import (
+    BaselineDesignRequest,
+    BaselineRunRequest,
+)
+from athena.research.prepare.baseline import (
+    prepare_baseline_design as _prepare_baseline_design,
+)
+from athena.research.prepare.baseline import (
+    run_baseline as _run_baseline,
 )
 from athena.research.prepare.baseline_research import (
     BaselineArtifacts,
@@ -32,6 +42,34 @@ from athena.research.prepare.baseline_research import (
     write_verification,
 )
 from athena.research.supervisor.prepare import PrepareResult
+
+
+async def prepare_baseline_design(
+    runtime,
+    workspace,
+    task,
+    eda_ready,
+    handoff_agent,
+    *,
+    verifier=None,
+):
+    """Keep scenario setup concise while exercising the request-based API."""
+    return await _prepare_baseline_design(
+        runtime,
+        workspace,
+        BaselineDesignRequest(task, eda_ready, handoff_agent, verifier),
+    )
+
+
+async def run_baseline(
+    runtime, workspace, evaluator_ref, task, predict_features, verified
+):
+    """Keep scenario setup concise while exercising the request-based API."""
+    return await _run_baseline(
+        runtime,
+        workspace,
+        BaselineRunRequest(evaluator_ref, task, predict_features, verified),
+    )
 
 
 def valid_payload() -> dict[str, Any]:
@@ -153,7 +191,7 @@ def valid_verification(artifacts: BaselineArtifacts) -> BaselineVerification:
         design_sha256=design_sha256(artifacts.raw_design),
         selected_candidate_id=artifacts.selected.candidate_id,
         route="git",
-        verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        verified_at=datetime(2026, 9, 2, tzinfo=UTC),
         repository_url=str(artifacts.selected.repository_url),
         commit="a" * 40,
         attempts=[{"route": "git", "success": True, "diagnostic": "verified"}],
@@ -1159,7 +1197,7 @@ def verified_fixture(root: Path, route: str = "git") -> VerifiedBaseline:
             design_sha256=design_sha256(artifacts.raw_design),
             selected_candidate_id=artifacts.selected.candidate_id,
             route="openalex",
-            verified_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+            verified_at=datetime(2026, 9, 2, tzinfo=UTC),
             paper_locator=artifacts.selected.paper_locator,
             openalex_id="W2741809807",
             title="Deep Residual Learning for Image Recognition",

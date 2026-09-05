@@ -1,7 +1,7 @@
 """End-to-end authoritative-research gate into trusted PREPARE scoring."""
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -206,8 +206,10 @@ class _BaselineIdeatorProvider:
             ),
             (
                 "BASELINE_DESIGN.md",
-                "# Baseline\n\nSelected candidate: `resnet-transfer`\n"
-                "Training strategy: `partial_finetune`\n",
+                (
+                    "# Baseline\n\nSelected candidate: `resnet-transfer`\n"
+                    "Training strategy: `partial_finetune`\n"
+                ),
             ),
             None,
         ]
@@ -391,7 +393,7 @@ class _GateHarness(_PrepareHarness):
         verifier = BaselineSourceVerifier(
             git=self.fake_git,
             openalex=self.fake_openalex,
-            now=lambda: datetime(2026, 9, 2, tzinfo=timezone.utc),
+            now=lambda: datetime(2026, 9, 2, tzinfo=UTC),
         )
         self.registry = _RecordingRegistry(root)
         self.agents = self._agent_runtime(self.registry)
@@ -503,10 +505,12 @@ async def _assert_fresh_runtime_reuses_external_authority(
         verified = await baseline.prepare_baseline_design(
             fresh,
             harness.branch,
-            "reuse the trusted baseline",
-            True,
-            forbidden_handoff,
-            verifier=ForbiddenVerifier(),
+            baseline.BaselineDesignRequest(
+                "reuse the trusted baseline",
+                True,
+                forbidden_handoff,
+                ForbiddenVerifier(),
+            ),
         )
         assert verified.authority_generation == 1
         assert (
@@ -555,9 +559,9 @@ async def _assert_fresh_runtime_rejects_forged_local_trio(
             await baseline.prepare_baseline_design(
                 fresh,
                 harness.branch,
-                "reject the forged local baseline",
-                True,
-                forbidden_handoff,
+                baseline.BaselineDesignRequest(
+                    "reject the forged local baseline", True, forbidden_handoff
+                ),
             )
     finally:
         await fresh.aclose()

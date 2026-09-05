@@ -107,8 +107,8 @@ async def test_prepare_phase_threads_verified_research_into_baseline(
     async def fake_prepare_baseline_design(*_args, **_kwargs):
         return verified
 
-    async def fake_run_baseline(*args):
-        captured["verified"] = args[-1]
+    async def fake_run_baseline(_runtime, _workspace, request):
+        captured["verified"] = request.verified
         return "prepared"
 
     monkeypatch.setattr(

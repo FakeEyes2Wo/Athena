@@ -221,11 +221,9 @@ def _install_verified_prepare_gate(monkeypatch: pytest.MonkeyPatch) -> None:
         assert (root / "EDA_HANDOFF.md").is_file()
         return True
 
-    async def verified_design(
-        runtime, workspace, _task, eda_ready, _handoff
-    ) -> VerifiedBaseline:
+    async def verified_design(runtime, workspace, request) -> VerifiedBaseline:
         root = Path(workspace.path)
-        assert eda_ready is True
+        assert request.eda_ready is True
         assert (root / "EDA_HANDOFF.md").is_file()
         verified = _write_verified_baseline_fixture(root)
         sealed = await runtime.baseline_authority.seal(
