@@ -18,7 +18,7 @@ from athena.core.tool_types import AskUser
 from athena.execution.compute_config import ComputeConfig, load_compute_config
 from athena.execution.runtime import CommandResult, ExecutionRuntime
 from athena.kaggle import KaggleStack
-from athena.research.config import SearchLimits, SurveyConfig
+from athena.research.config import ResearchConfig, SearchLimits, SurveyConfig
 from athena.research.contracts import ValidationResult
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.literature.paper_rag.models import PaperSummary
@@ -28,7 +28,6 @@ from athena.research.runtime.bootstrap import (
     baseline_ideator_tools as baseline_ideator_tools_impl,
 )
 from athena.research.runtime.bootstrap import (
-    build_config,
     build_paths,
     build_services,
     wire_workflow,
@@ -183,35 +182,33 @@ class ResearchRuntime:
             search_top_k=survey_search_top_k,
             max_seconds=survey_max_seconds,
         )
-        config = build_config(
-            paths,
-            search,
-            survey_config,
-            {
-                "session_id": session_id,
-                "model": model,
-                "client": client,
-                "task": task,
-                "auto_seed_task": auto_seed_task,
-                "task_confirmation_gate": task_confirmation_gate,
-                "auto_confirm": auto_confirm,
-                "auto_validate": auto_validate,
-                "skip_validate": skip_validate,
-                "direction": direction,
-                "tolerance": tolerance,
-                "ideation": ideation,
-                "dataset_path": Path(dataset_path).resolve() if dataset_path else None,
-                "target_column": target_column,
-                "split_seed": split_seed,
-                "group_column": group_column,
-                "data_root": Path(data_root).resolve() if data_root else None,
-                "experiment_timeout_s": experiment_timeout_s,
-                "compute": compute if compute is not None else load_compute_config(),
-                "prepare_phase": prepare_phase,
-                "validation_phase": validation_phase,
-                "plan_turn": plan_turn,
-                "ask_user": ask_user,
-            },
+        config = ResearchConfig(
+            paths=paths,
+            search=search,
+            survey=survey_config,
+            session_id=session_id,
+            model=model,
+            client=client,
+            task=task,
+            auto_seed_task=auto_seed_task,
+            task_confirmation_gate=task_confirmation_gate,
+            auto_confirm=auto_confirm,
+            auto_validate=auto_validate,
+            skip_validate=skip_validate,
+            direction=direction,
+            tolerance=tolerance,
+            ideation=ideation,
+            dataset_path=Path(dataset_path).resolve() if dataset_path else None,
+            target_column=target_column,
+            split_seed=split_seed,
+            group_column=group_column,
+            data_root=Path(data_root).resolve() if data_root else None,
+            experiment_timeout_s=experiment_timeout_s,
+            compute=compute if compute is not None else load_compute_config(),
+            prepare_phase=prepare_phase,
+            validation_phase=validation_phase,
+            plan_turn=plan_turn,
+            ask_user=ask_user,
         )
 
         provider = (

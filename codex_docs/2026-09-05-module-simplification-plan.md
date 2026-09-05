@@ -567,6 +567,12 @@ Read `research/report.py` completely and traced both exported builders through t
 
 Centralize numeric score recognition and the legacy primary-value display rule, then classify successful, failed, scored, and unscored experiments in one traversal instead of three. This preserves Markdown escaping, deterministic ordering, integer/float formatting, skipped-validation disclosure, direction-aware improvement, generalization guidance, and failure-specific actions. The module falls from 397 to 391 physical lines. The expanded report/projector selection passed 51 tests, two GUI generation and durable-recovery integration cases passed, and four representative tree/validation states across both optimization directions produced eight report pairs byte-identical to the baseline implementation. Ruff, Black, Python compilation, repository hooks, and `git diff --check` passed. Closing the report row advances reviewed coverage to 346/602. Whole-repository acceptance remains pending.
 
+## Runtime bootstrap boundary review
+
+Read the runtime package marker and `bootstrap.py` completely, then traced every builder, wiring function, agent registration path, lazy tool provider, and state loader through the facade, gateway, phase code, and direct tests. Retain the package's two-symbol public facade and the bootstrap module as the concrete infrastructure/workflow composition boundary. Its service, Supervisor, Kaggle, corpus, clarification, and durable-state responsibilities are all live; merging them into the already-large facade would increase coupling.
+
+Delete the single-use four-parameter `build_config` forwarding function and construct `ResearchConfig` at its sole facade call site. Delete bootstrap's redundant implementation `__all__`; direct named imports remain unchanged. Bootstrap falls from 436 immediately before this slice to 413 physical lines (438 in the baseline ledger), while the affected facade falls from 728 baseline lines to 720 and remains Pending until its full review. The unchanged direct baseline and final selection passed 25 tests; public facade import checks, old-symbol searches, Ruff, Black, and expanded runtime/TUI-protocol verification also passed. Closing the package marker and bootstrap rows advances reviewed coverage to 348/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1175,8 +1181,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/prepare/repository_url.py` | 135 | Reviewed; retain shared trust-boundary normalizer and remove redundant export list |
 | `src/athena/research/prepare/source_verification.py` | 613 | Reviewed; use slotted verifier records and remove single-use helpers/export list |
 | `src/athena/research/report.py` | 397 | Reviewed; one-pass outcome projection and shared numeric formatting; byte-identical output |
-| `src/athena/research/runtime/__init__.py` | 5 | Pending |
-| `src/athena/research/runtime/bootstrap.py` | 438 | Pending |
+| `src/athena/research/runtime/__init__.py` | 5 | Reviewed; retain the two-symbol public runtime facade |
+| `src/athena/research/runtime/bootstrap.py` | 438 | Reviewed; delete single-use config forwarder and redundant implementation export list |
 | `src/athena/research/runtime/clarification.py` | 149 | Pending |
 | `src/athena/research/runtime/control.py` | 214 | Pending |
 | `src/athena/research/runtime/corpus.py` | 90 | Pending |

@@ -40,7 +40,6 @@ from athena.research.config import (
     ResearchConfig,
     ResearchPaths,
     SearchLimits,
-    SurveyConfig,
 )
 from athena.research.evaluation import TrustedEvaluator
 from athena.research.experiment_documents import ExperimentDocumentProjector
@@ -94,16 +93,6 @@ def build_paths(
         athena=athena,
         workspaces=workspaces,
     )
-
-
-def build_config(
-    paths: ResearchPaths,
-    search: SearchLimits,
-    survey: SurveyConfig,
-    fields: dict[str, Any],
-) -> ResearchConfig:
-    """Assemble immutable runtime configuration from grouped options."""
-    return ResearchConfig(paths=paths, search=search, survey=survey, **fields)
 
 
 def build_services(
@@ -422,15 +411,3 @@ def _load_state(config: ResearchConfig) -> ResearchState:
     if config.data_root is not None and state.data_root is None:
         state.data_root = str(config.data_root)
     return state
-
-
-__all__ = [
-    "baseline_ideator_tools",
-    "build_services",
-    "ideator_tools",
-    "kaggle_stack",
-    "kaggle_tools",
-    "plan_tools",
-    "register_supervisor",
-    "wire_workflow",
-]
