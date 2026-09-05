@@ -397,6 +397,12 @@ Replace the four-entry critical-field mapping with one predictive-task set and t
 
 The requirements/models/controller/runtime-RPC baseline passed 38 tests and final verification passed 44. Targeted pre-commit hooks, Python compilation, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the requirements row advances reviewed baseline coverage to 248/602. Whole-repository acceptance remains pending.
 
+## Clarification state-transition review
+
+Read `state.py` completely and traced every public transition and both internal helpers through the controller, generator fixtures, runtime flows, and direct tests. Retain the module unchanged as the single pure state-machine boundary. All ten public operations are called; the short retry, cancel, and capped-final transitions still encode distinct domain actions and keep status mutation out of the async controller. `_apply_value` uniquely validates typed human outcomes before updating structured understanding, while `_updated` centralizes full Pydantic revalidation for every transition. Merging these operations into the controller would increase orchestration coupling without removing state or parameters.
+
+Fresh verification across the complete clarification unit directory plus confirmation-gate and continue/resume integrations passed 117 tests; pytest reported only the existing cache-permission warning. Closing the unchanged state row advances reviewed baseline coverage to 249/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -901,7 +907,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/clarification/models.py` | 144 | Reviewed; retain seven distinct durable schemas and active cross-field invariants |
 | `src/athena/research/clarification/persistence.py` | 149 | Reviewed; merge draft and journal stores, delete one class and make recovery zero-argument |
 | `src/athena/research/clarification/requirements.py` | 96 | Reviewed; share predictive field policy and use native whitespace normalization |
-| `src/athena/research/clarification/state.py` | 231 | Pending |
+| `src/athena/research/clarification/state.py` | 231 | Reviewed; retain cohesive pure transitions and centralized invariant revalidation |
 | `src/athena/research/config.py` | 83 | Pending |
 | `src/athena/research/contracts.py` | 88 | Pending |
 | `src/athena/research/data_models.py` | 46 | Pending |
