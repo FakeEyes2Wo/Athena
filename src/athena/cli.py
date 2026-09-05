@@ -288,12 +288,14 @@ def _apply_fork(args: argparse.Namespace) -> int:
     """
     if not args.fork_from:
         return 0
+    source = Path(args.fork_from).resolve()
+    target = Path(args.project).resolve()
     try:
-        result = fork_project(args.fork_from, args.project)
+        result = fork_project(source, target)
     except ForkError as error:
         print(f"分叉失败：{error}", file=sys.stderr)
         return 2
-    print(f"已从 {result.source} 分叉到 {result.target}")
+    print(f"已从 {source} 分叉到 {target}")
     print(f"  共用 evaluator: {result.evaluator_ref}")
     print(f"  共用基线实验: {result.baseline_experiment_id}")
     print(f"  复制目录: {', '.join(result.copied) or '（无）'}")
@@ -357,10 +359,10 @@ async def _run_locked(args: argparse.Namespace) -> int:
         # 无界等待在 CI/批处理下会卡死；--timeout 让运行时长可被限定。
         await asyncio.wait_for(terminal.wait(), timeout=args.timeout)
         return exit_code
-    except asyncio.TimeoutError:
+    except TimeoutError:
         print(f"run timed out after {args.timeout}s", file=sys.stderr)
         return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI converts run failures to exit codes.
         # 启动或执行失败（缺 API key、git 初始化失败、模型连接失败等）：
         # 打印完整 traceback，返回非零退出码供脚本判失败。
         print(f"RUN FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)

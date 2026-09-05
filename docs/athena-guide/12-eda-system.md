@@ -251,4 +251,4 @@ src/athena/agents/prompts/data_agent.md
 | 动态 EDA 请求聚合与 Data Agent | `src/athena/research/turns/ideator.py:217-365` |
 | 动态 EDA 追加写入边界 | `src/athena/agents/prompts/data_agent.md` |
 | EDA 路径校验 | `src/athena/research/turns/ideator.py:192-215` |
-| 分叉复制 EDA 工作区 | `src/athena/research/fork.py:126-159` |
+| 分叉复制 EDA 工作区 | `src/athena/research/fork.py::_carry_eda_workspace` |

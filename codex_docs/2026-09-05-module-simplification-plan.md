@@ -451,6 +451,14 @@ Delete the four-field `ProjectionOutcome` Pydantic model, its package export, an
 
 The focused pre-change contract passed 99 tests. Post-change experiment-document and Supervisor projection verification passed 98 tests, and the expanded autonomous-research, recovery, and rolling-search selection passed 131 tests. Targeted pre-commit hooks, Ruff across the complete touched Python boundary, Python compilation, CLI smoke, removed-symbol search, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing all four experiment-document rows advances reviewed baseline coverage to 261/602. Whole-repository acceptance remains pending.
 
+## Exploration-file and project-fork review
+
+Read `exploration_files.py` and `fork.py` completely and traced every function and result field through Ideator lanes, Plan execution, the CLI, current `ResearchTree` serialization, runtime recovery, unit tests, and real-runtime integration. Retain all four exploration-file functions unchanged: lane preparation and accepted-result persistence occur at different lifecycle points, while experiment-log append and optional exploration-note read have distinct formats. The module has no classes and no function takes more than two parameters.
+
+Reduce `ForkResult` from five fields to the three facts not derivable by the CLI: evaluator reference, baseline experiment ID, and copied paths. The CLI prints its already-resolved source and target inputs directly. Delete the single-use evaluator helper, inline two one-use policy constants, make the copied-directory constant private, and remove support for a noncanonical top-level experiment `kind` that existed only for old hand-written fixtures; current and historical real trees identify kind through `plan.kind`. Compress obsolete incident narration while retaining the isolation invariants. Also replace the aliased timeout exception and explicitly mark the intentional CLI-wide failure boundary for Ruff. Production code falls by 84 net lines.
+
+The focused pre-change fork, runtime, and exploration selection passed 26 tests. The complete CLI plus fork/runtime/exploration selection passed 49 tests. Targeted pre-commit hooks, Ruff across every touched Python file, Python compilation, CLI smoke, removed-symbol searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing both rows advances reviewed baseline coverage to 263/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -968,8 +976,8 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/experiment_documents/models.py` | 324 | Reviewed; retain strict persisted contracts and delete the four-field transient outcome model |
 | `src/athena/research/experiment_documents/projector.py` | 391 | Reviewed; return one success boolean and retain two-attribute projection ownership |
 | `src/athena/research/experiment_documents/store.py` | 301 | Reviewed; retain cohesive atomic batch, archive compatibility, and manifest boundary |
-| `src/athena/research/exploration_files.py` | 43 | Pending |
-| `src/athena/research/fork.py` | 215 | Pending |
+| `src/athena/research/exploration_files.py` | 43 | Reviewed; retain four distinct two-parameter-or-smaller exploration I/O boundaries |
+| `src/athena/research/fork.py` | 215 | Reviewed; three-field result and canonical-tree-only extraction replace redundant output and compatibility plumbing |
 | `src/athena/research/idea_generation/__init__.py` | 12 | Pending |
 | `src/athena/research/idea_generation/citation_support.py` | 89 | Pending |
 | `src/athena/research/idea_generation/gate.py` | 219 | Pending |

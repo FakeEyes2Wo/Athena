@@ -236,7 +236,7 @@ supervisor 脚本，双方用一行一条 JSON 的小协议对话：
 - 代价：要动 `LocalGitWorkspace` 与文件工具；每次 `read_file` 多一个 RTT。
 
 镜像时有一个具体的坑，仓库里刚踩过：worktree 根的 `.git` 是一个指回**源仓库**
-的纯文本指针（见 `research/fork.py` 的 `WORKTREE_LINK`，`047f379`）。原样推到
+的纯文本指针（见 `research/fork.py::_carry_eda_workspace`，`047f379`）。原样推到
 远端，那里的 git 会去解析一条不存在的宿主机路径。推之前必须剔除。
 
 ### 4.7 Windows 控制节点到 Linux GPU 机：不对称清单

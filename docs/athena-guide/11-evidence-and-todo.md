@@ -92,7 +92,7 @@
 | EDA orchestrator / worker 契约 | `src/athena/agents/prompts/prepare_eda_agent.md`、`src/athena/agents/prompts/eda_worker_agent.md` |
 | 动态 EDA | `src/athena/research/turns/ideator.py:217-365` |
 | 动态写入边界 | `src/athena/agents/prompts/data_agent.md` |
-| 分叉继承 EDA 工作区 | `src/athena/research/fork.py:126-159` |
+| 分叉继承 EDA 工作区 | `src/athena/research/fork.py::_carry_eda_workspace` |
 
 详细说明见 [12 EDA 系统设计](12-eda-system.md)。
 
