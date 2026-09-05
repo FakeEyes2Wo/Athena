@@ -27,14 +27,10 @@ class OutputFreshnessError(RuntimeError):
         )
 
 
-def _valid_version(version: str) -> None:
-    """Reject path traversal in the version segment."""
+def _history_root(workdir: Path, version: str) -> Path:
+    """Return a versioned archive root after rejecting path traversal."""
     if not version or Path(version).name != version or version in {".", ".."}:
         raise ValueError("version must be a single path segment")
-
-
-def _history_root(workdir: Path, version: str) -> Path:
-    _valid_version(version)
     # Keep the archive outside the Git worktree so it never enters experiment diffs.
     return workdir.parent / f"{workdir.name}-output-history" / version
 
@@ -68,27 +64,6 @@ def archive_output_roots(
             root.mkdir(parents=True, exist_ok=True)
 
 
-def restore_output_roots(
-    workdir: Path,
-    outputs: Mapping[str, str],
-    *,
-    version: str,
-) -> None:
-    """Restore one version's archived outputs to their original paths."""
-    history = _history_root(workdir, version)
-    for rel in outputs.values():
-        root = resolve_workspace_path(workdir, rel)
-        saved = history / rel
-        if saved.exists():
-            if root.exists():
-                if root.is_dir():
-                    shutil.rmtree(root)
-                else:
-                    root.unlink()
-            saved.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(saved), str(root))
-
-
 def assert_output_roots(
     workdir: Path,
     outputs: Mapping[str, str],
@@ -105,11 +80,3 @@ def assert_output_roots(
             populated = any(root.iterdir())
         if not populated:
             raise OutputFreshnessError(name, root)
-
-
-__all__ = [
-    "OutputFreshnessError",
-    "archive_output_roots",
-    "assert_output_roots",
-    "restore_output_roots",
-]

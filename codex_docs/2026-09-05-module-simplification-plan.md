@@ -525,6 +525,12 @@ Merge the four stage implementations into their lifecycle owner `pipeline.py` an
 
 The unchanged focused baseline and post-change selection both passed 116 survey pipeline, library, wiring, and research-runtime tests. Closing all eight baseline rows advances reviewed coverage to 334/602. Work remains directly on `main`; no temporary task branch or worktree exists to clean up. Whole-repository acceptance remains pending.
 
+## Output freshness boundary review
+
+Read `output_freshness.py` and its complete direct test file, then traced both production consumers through SEARCH experiment execution and frozen VALIDATE prediction runs. Preserve version path validation, archive placement outside the worktree, declared-output-only moves, empty directory recreation, required file/directory population checks, and the specialized failure message.
+
+Delete `restore_output_roots`: it had no production caller and existed only for one exclusive direct test. Fold its single-use version validator into the history-root constructor and remove the redundant implementation `__all__`; the active API now consists only of the error, archive operation, and freshness assertion. The module falls from 115 to 82 physical lines. The pre-change cross-consumer baseline passed 86 tests; the post-change selection passed 85 after removing only the deleted API's exclusive test. Ruff, Black, Python compilation, and `git diff --check` passed. Closing the source row advances reviewed coverage to 335/602. Whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -1121,7 +1127,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/literature/survey/stages.py` | 591 | Reviewed; merged into pipeline.py and deleted |
 | `src/athena/research/literature/survey/tool.py` | 110 | Reviewed; merged into wiring.py and deleted |
 | `src/athena/research/literature/survey/wiring.py` | 344 | Reviewed; composition root now owns the single survey Agent tool |
-| `src/athena/research/output_freshness.py` | 115 | Pending |
+| `src/athena/research/output_freshness.py` | 115 | Reviewed; delete test-only restore API and fold single-use version validation |
 | `src/athena/research/prepare/__init__.py` | 1 | Pending |
 | `src/athena/research/prepare/authority.py` | 171 | Pending |
 | `src/athena/research/prepare/baseline.py` | 629 | Pending |

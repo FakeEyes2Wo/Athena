@@ -8,7 +8,6 @@ from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
     assert_output_roots,
-    restore_output_roots,
 )
 
 
@@ -52,19 +51,6 @@ async def test_archive_leaves_file_output_absent_for_command_to_recreate(
     assert not (workdir / "report.md").exists()
     history = workdir.parent / "run-output-history" / "plan-1"
     assert (history / "report.md").read_text("utf-8") == "old report"
-
-
-@pytest.mark.asyncio
-async def test_restore_returns_archived_outputs(tmp_path: Path) -> None:
-    workdir = tmp_path / "run"
-    _write(workdir / "predictions" / "old.csv")
-    archive_output_roots(workdir, {"predictions": "predictions"}, version="v1")
-    _write(workdir / "predictions" / "new.csv")
-
-    restore_output_roots(workdir, {"predictions": "predictions"}, version="v1")
-
-    assert (workdir / "predictions" / "old.csv").is_file()
-    assert not (workdir / "predictions" / "new.csv").exists()
 
 
 @pytest.mark.asyncio
