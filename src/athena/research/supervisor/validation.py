@@ -23,8 +23,11 @@ from athena.execution.runtime import (
     ExecutionRuntime,
 )
 from athena.research.contracts import EvaluatorDescriptor, ValidationResult
-from athena.research.evaluation import TrustedEvaluator
-from athena.research.evaluation.validation import ValidationService
+from athena.research.evaluation import (
+    TrustedEvaluator,
+    generalization_gap,
+    generalization_warning,
+)
 from athena.research.output_freshness import (
     OutputFreshnessError,
     archive_output_roots,
@@ -471,14 +474,12 @@ async def _score_result(
         "metrics_ref": evaluation.metrics_ref,
         "evidence_ref": evidence_ref,
     }
-    service_result = ValidationService().build_result(
-        test_score=input.reference_metric,
-        final_test_score=evaluation.test_score,
-        direction=input.direction,
+    gap = generalization_gap(
+        input.reference_metric, evaluation.test_score, input.direction
     )
     update.update(
-        generalization_gap=service_result.generalization_gap,
-        generalization_warning=service_result.generalization_warning,
+        generalization_gap=gap,
+        generalization_warning=generalization_warning(gap),
     )
     return current.model_copy(update=update)
 

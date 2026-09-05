@@ -13,6 +13,27 @@ from athena.research.contracts import CandidateEvaluation
 from athena.research.evaluation.spec import load_evaluator_spec
 from athena.research.script_runner import DataScriptRunner
 
+_TIE_REL_TOL = 1e-9
+_TIE_ABS_TOL = 1e-12
+
+
+def generalization_gap(
+    test_score: float,
+    final_test_score: float,
+    direction: str,
+) -> float:
+    """Return positive degradation from test to final-test score."""
+    if direction == "minimize":
+        return final_test_score - test_score
+    return test_score - final_test_score
+
+
+def generalization_warning(gap: float) -> bool:
+    """Report degradation beyond floating-point tie tolerance."""
+    return gap > 0 and not math.isclose(
+        gap, 0.0, rel_tol=_TIE_REL_TOL, abs_tol=_TIE_ABS_TOL
+    )
+
 
 class TrustedEvaluator:
     """唯一可信 test/final-test evaluator：运行 README-only evaluator 目录。

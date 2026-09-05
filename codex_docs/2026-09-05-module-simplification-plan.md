@@ -419,6 +419,14 @@ Move `DataCard`, `MetricSpec`, and `TaskMetaData` into `research.contracts`, add
 
 The model-contract baseline and final selection passed three tests. A broader evaluator/prepare/experiment/validation selection passed 100 tests. The fixture exporter generated all four files in an automatically cleaned temporary directory, and the Rust `athena-types` Python-fixture suite passed six tests. Targeted pre-commit hooks, Python compilation, deleted-module searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing both contract rows advances reviewed baseline coverage to 252/602. Whole-repository acceptance remains pending.
 
+## Evaluation service consolidation
+
+Read the evaluation package facade, trusted evaluator, and validation calculation module completely and traced their symbols through runtime composition, PREPARE, Supervisor experiment/validation, direct tests, and integration contracts. Retain the package facade because nine production/test modules import `TrustedEvaluator` from it, and retain the evaluator class because it owns the injected script runner and trusted label boundary. The validation service has no state and is instantiated exactly once only to call one method.
+
+Move `generalization_gap` and `generalization_warning` into `evaluator.py` and export them beside `TrustedEvaluator`. Delete `ValidationService` and `validation.py` without a compatibility module. The sole Supervisor caller now calculates the gap once and updates its existing `ValidationResult` directly; the removed service's generated `result_id`, status, and duplicate scores were immediately discarded. Remove two tests exclusive to that wrapper while retaining direction and floating-point tolerance tests plus the real Supervisor result projection coverage. Production code falls by 44 net lines and one file.
+
+Final evaluator, spec, validation-plan, and validate-agent verification passed 57 tests. Targeted pre-commit hooks, Python compilation, removed-module/class searches, and `git diff --check` passed; pytest reported only the existing cache-permission warning. Closing the facade, evaluator, and deleted validation rows advances reviewed baseline coverage to 255/602. `spec.py` and `trust.py` remain Pending for complete reviews; whole-repository acceptance remains pending.
+
 ## DSH composition-root review
 
 DSH full-file decision: retain one composition root for Cordis service installation, 18 tool definitions, and subagent-backed Supervisor workers. Splitting these cohesive closures would add configuration, service, and worker interfaces without removing runtime state. Retain the boundary argument readers because DSH supplies `unknown` tool input, retain the declarative tool factory, and retain the eight isolated Cordis services because the preset, worker wiring, and autoresearch integration consume their independent identities. The default plugin entry and configurable factory serve distinct loader and test/composition signatures.
@@ -927,11 +935,11 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena/research/config.py` | 83 | Reviewed; three stored roots replace nine independently supplied paths |
 | `src/athena/research/contracts.py` | 88 | Reviewed; absorb all shared research payload models behind one explicit export surface |
 | `src/athena/research/data_models.py` | 46 | Reviewed; merged into contracts.py and deleted |
-| `src/athena/research/evaluation/__init__.py` | 5 | Pending |
-| `src/athena/research/evaluation/evaluator.py` | 115 | Pending |
+| `src/athena/research/evaluation/__init__.py` | 5 | Reviewed; retain one three-symbol facade for trusted scoring and generalization policy |
+| `src/athena/research/evaluation/evaluator.py` | 115 | Reviewed; absorb pure generalization calculations beside trusted scoring |
 | `src/athena/research/evaluation/spec.py` | 168 | Pending |
 | `src/athena/research/evaluation/trust.py` | 264 | Pending |
-| `src/athena/research/evaluation/validation.py` | 70 | Pending |
+| `src/athena/research/evaluation/validation.py` | 70 | Reviewed; delete stateless service and its discarded result construction |
 | `src/athena/research/experiment_documents/__init__.py` | 11 | Pending |
 | `src/athena/research/experiment_documents/models.py` | 324 | Pending |
 | `src/athena/research/experiment_documents/projector.py` | 391 | Pending |
