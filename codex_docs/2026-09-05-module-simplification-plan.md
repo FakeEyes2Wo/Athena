@@ -67,6 +67,8 @@ Remove the state store's zero-logic default-state wrapper and construct its data
 
 Fresh verification passed 104 gateway, state-store, protocol, clarification, and end-to-end tests; Python compilation, the code-style hard-rule gate, and `git diff --check` also passed. Pytest reported one existing Windows subprocess finalizer warning and one cache-permission warning after all tests passed. Closing five ledger rows advances reviewed coverage to 123/602. Whole-repository acceptance remains pending.
 
+Handler follow-up: read the complete request handler and all direct gateway/protocol tests. Retain its explicit dispatch structure because it is the Python/Rust/GUI protocol boundary and the contract test parses those routes; retain all seven state fields and the suspend, swap, resume, deletion, and persistence helpers because their distinct order and failure behavior are tested. Named-session deletion was the one duplicated calculation: remove `_session_workspace_root` and derive the external workspace once from the already-resolved state root. The full 104-test gateway selection, compilation, style hard rules, removed-symbol search, and `git diff --check` passed. Closing the handler row advances reviewed coverage to 129/602.
+
 ## Research turn boundary review
 
 Read the turn package boundary, shared wait helpers, General/Kaggle turn mixin, public dispatcher, and citation-support mixin completely, then trace their production and test callers. Retain these files as separate cohesive roles: the shared wait loop prevents circular imports, General owns optional Kaggle handoff policy, the dispatcher owns Supervisor/Data entrypoints, and support owns the two-stage citation policy. Their distinct failure and result contracts do not justify a generic turn-execution abstraction. The large Ideator lane module remains Pending for its own complete review.
@@ -749,7 +751,7 @@ Closing the event source/test reviews brings baseline coverage to 91/602. Next f
 | `src/athena_tui/state.py` | 166 | Reviewed; remove unread plans projection and forwarding status property |
 | `src/gui_gateway/__init__.py` | 1 | Reviewed; retain required package boundary |
 | `src/gui_gateway/__main__.py` | 149 | Reviewed; remove duplicate root validation and callable protocol; use one server-default path |
-| `src/gui_gateway/handler.py` | 617 | Pending |
+| `src/gui_gateway/handler.py` | 617 | Reviewed; retain explicit protocol/state lifecycle; remove duplicate session-path helper |
 | `src/gui_gateway/human.py` | 279 | Reviewed; retain active legacy/scoped broker contracts; remove prohibited future import |
 | `src/gui_gateway/state_store.py` | 139 | Reviewed; inline zero-logic default-state wrapper |
 | `src/gui_gateway/transport.py` | 123 | Reviewed; retain session subscription, serialization, and send-lock boundary |

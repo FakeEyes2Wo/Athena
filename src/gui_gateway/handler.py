@@ -137,18 +137,14 @@ def _session_state_root(project_root: Path, session_id: str) -> Path | None:
     return project_root / ".athena" / "conversations" / session_id
 
 
-def _session_workspace_root(project_root: Path, session_id: str) -> Path | None:
-    """Return the external agent-worktree root for one named session."""
-    state_root = _session_state_root(project_root, session_id)
-    if state_root is None:
-        return None
-    return build_paths(project_root, state_root).workspaces
-
-
 async def _delete_named_session_storage(project_root: Path, session_id: str) -> None:
     """Remove a named session's agent worktrees and protected runtime state."""
     state_root = _session_state_root(project_root, session_id)
-    workspace_root = _session_workspace_root(project_root, session_id)
+    workspace_root = (
+        build_paths(project_root, state_root).workspaces
+        if state_root is not None
+        else None
+    )
     # Delete the external worktree first.  If Windows still has a handle open,
     # retaining the state directory keeps the session visible and retryable.
     if workspace_root is not None and workspace_root.is_dir():
